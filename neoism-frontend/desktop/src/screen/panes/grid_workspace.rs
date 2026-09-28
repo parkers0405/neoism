@@ -994,6 +994,38 @@ impl Screen<'_> {
         true
     }
 
+    pub(crate) fn move_active_workspace_tab(&mut self, previous: bool) -> bool {
+        let from = self.context_manager.current_index();
+        let to = if previous {
+            from.checked_sub(1)
+        } else {
+            (from + 1 < self.context_manager.len()).then_some(from + 1)
+        };
+        let Some(to) = to else {
+            return false;
+        };
+        self.save_current_workspace_chrome();
+        self.context_manager.move_workspace(from, to);
+        let island_was_focused = self
+            .renderer
+            .island
+            .as_ref()
+            .is_some_and(|island| island.is_focused());
+        if let Some(island) = self.renderer.island.as_mut() {
+            island.swap_tab_state(from, to);
+        }
+        self.load_current_workspace_chrome();
+        self.reapply_chrome_layout();
+        if island_was_focused {
+            self.renderer.buffer_tabs.set_focused(false);
+            if let Some(island) = self.renderer.island.as_mut() {
+                island.set_focused(true, to, self.context_manager.len());
+            }
+        }
+        self.mark_dirty();
+        true
+    }
+
     pub(crate) fn select_top_level_workspace(&mut self, previous: bool) -> bool {
         if self.context_manager.len() <= 1 {
             return false;
@@ -1037,7 +1069,7 @@ impl Screen<'_> {
 
     pub(crate) fn select_top_level_workspace_at(&mut self, index: usize) {
         let len = self.context_manager.len();
-        if len == 0 || index >= len {
+        if len == 0 || index >= len || index == self.context_manager.current_index() {
             return;
         }
 
@@ -1073,7 +1105,10 @@ impl Screen<'_> {
             .context_manager
             .agent_server_override_for_current()
             .unwrap_or_else(crate::neoism::agent::neoism_agent_server);
-        self.set_agent_server_for_current_workspace(server);
+        self.set_agent_server_for_current_workspace(server.clone());
+        if self.renderer.conversations_visible {
+            self.renderer.conversations_pane.switch_server(server);
+        }
     }
 
     /// Make the active daemon follow the workspace tab, rather than letting a
@@ -1101,6 +1136,22 @@ impl Screen<'_> {
 
     pub(crate) fn sync_file_tree_root_for_current_workspace(&mut self) {
         self.sync_agent_server_for_current_workspace();
+        if self.renderer.conversations_visible {
+            let directory = self
+                .workspace_root_for_new_shell()
+                .map(|path| path.to_string_lossy().into_owned());
+            if self.renderer.conversations_directory != directory {
+                self.renderer.conversations_pane =
+                    crate::neoism::agent::NeoismAgentPane::with_directory(
+                        directory.clone(),
+                    );
+                self.renderer.conversations_directory = directory;
+                self.sync_agent_server_for_current_workspace();
+                self.renderer
+                    .conversations_pane
+                    .maybe_refresh_side_panel_sessions();
+            }
+        }
         // Selecting a workspace from parked server A queues an async switch
         // away from currently attached server B. Keep the workspace's
         // stashed tree/backend intact during that gap; rebuilding it through

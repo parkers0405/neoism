@@ -66,6 +66,9 @@ pub struct ChromeLayout {
     /// paint and hit-test code independently reconstructing a different width.
     #[serde(default)]
     pub notes_sidebar: Option<Rect>,
+    /// Workspace-level conversation catalog, independent of the active tab.
+    #[serde(default)]
+    pub conversations: Option<Rect>,
     pub buffer_tabs: Rect,
     #[serde(default)]
     pub breadcrumbs: Option<Rect>,

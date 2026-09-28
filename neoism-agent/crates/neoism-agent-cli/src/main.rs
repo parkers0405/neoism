@@ -38,7 +38,7 @@ pub(crate) const RESET: &str = "\x1b[0m";
 pub(crate) const BOLD: &str = "\x1b[1m";
 pub(crate) const DIM: &str = "\x1b[2m";
 pub(crate) const ITALIC: &str = "\x1b[3m";
-// OpenCode dark theme palette (truecolor)
+// Dark terminal palette (truecolor)
 pub(crate) const PURPLE: &str = "\x1b[38;2;157;124;216m"; // #9d7cd8 accent
 pub(crate) const RED: &str = "\x1b[38;2;224;108;117m"; // #e06c75 error
 pub(crate) const ORANGE: &str = "\x1b[38;2;245;167;66m"; // #f5a742 warning
@@ -385,6 +385,7 @@ async fn main() -> anyhow::Result<()> {
                 hostname: hostname.clone(),
                 port,
                 cors,
+                hosted_attestation: None,
             };
             if web {
                 let root = neoism_agent_server::gui::GuiRoot::discover()?;

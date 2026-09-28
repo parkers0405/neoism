@@ -70,7 +70,14 @@ pub(crate) fn app_with_cors(state: AppState, allowed_origins: &[String]) -> Rout
         )
         .route("/v2/events", get(v2_events))
         .route("/v2/session-catalog/events", get(v2_session_catalog_events))
-        .route("/v2/artifacts", get(artifact_list).post(artifact_create))
+        .route(
+            "/v2/artifacts",
+            get(artifact_list)
+                .post(artifact_create)
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    crate::artifact_routes::MAX_ARTIFACT_BYTES,
+                )),
+        )
         .route(
             "/v2/artifacts/:artifact_id",
             get(artifact_get).delete(artifact_delete),
@@ -91,7 +98,17 @@ pub(crate) fn app_with_cors(state: AppState, allowed_origins: &[String]) -> Rout
             post(question_reject),
         )
         .route("/v2/tools", get(tool_list))
+        .route("/v2/external/options/preview", get(crate::external_agent::options::preview)
+            .post(crate::external_agent::options::preview_selected))
         .route("/v2/sessions", get(v2_session_list).post(session_create))
+        .route(
+            "/v2/sessions/external/catalog",
+            get(crate::external_agent::external_catalog),
+        )
+        .route(
+            "/v2/sessions/external/import",
+            post(crate::external_agent::external_import),
+        )
         .route("/v2/sessions/status", get(session_status))
         .route("/v2/sessions/import", post(session_import))
         .route("/v2/sessions/export", post(sessions_export))
@@ -100,6 +117,11 @@ pub(crate) fn app_with_cors(state: AppState, allowed_origins: &[String]) -> Rout
             get(session_get)
                 .patch(session_update)
                 .delete(session_delete),
+        )
+        .route(
+            "/v2/sessions/:session_id/external/options",
+            get(crate::external_agent::external_options_get)
+                .post(crate::external_agent::external_options_set),
         )
         .route("/v2/sessions/:session_id/messages", get(v2_message_list))
         .route(
@@ -965,7 +987,13 @@ async fn authenticate_request(
                 );
             }
         }
+        let peer_provider_auth = workspace_peer_provider_auth(
+            &claims.tenant_id,
+            claims.workspace_id.as_deref(),
+            request.uri().path(),
+        );
         if claims.hosted
+            && !peer_provider_auth
             && matches!(
                 operation_class(&request),
                 OperationClass::HostedUnsupported
@@ -1322,7 +1350,7 @@ fn session_id_from_path(path: &str) -> Option<&str> {
         .collect::<Vec<_>>();
     if let Some(index) = parts.iter().position(|part| *part == "sessions") {
         let id = *parts.get(index + 1)?;
-        return (!matches!(id, "status" | "workspace" | "project")).then_some(id);
+        return (!matches!(id, "status" | "workspace" | "project" | "external")).then_some(id);
     }
     None
 }
@@ -1342,6 +1370,12 @@ fn allows_global_execution_observation(claims: &crate::caller::CallerClaims) -> 
     !claims.hosted
         && claims.workspace_id.is_none()
         && claims.directory_prefixes.is_empty()
+}
+
+fn workspace_peer_provider_auth(tenant_id: &str, workspace_id: Option<&str>, path: &str) -> bool {
+    workspace_id.is_some_and(|workspace_id| tenant_id == format!("workspace:{workspace_id}"))
+        && path.starts_with("/v2/providers/")
+        && hosted_restricted_path(path)
 }
 
 fn hosted_restricted_path(path: &str) -> bool {
@@ -1401,6 +1435,16 @@ fn requires_directory_scope(path: &str) -> bool {
 #[cfg(test)]
 mod hosted_plugin_authorization_tests {
     use super::*;
+
+    #[test]
+    fn only_workspace_daemon_peers_can_use_host_provider_auth() {
+        let path = "/v2/providers/openai/oauth/authorize";
+        assert!(workspace_peer_provider_auth("workspace:abc", Some("abc"), path));
+        assert!(workspace_peer_provider_auth("workspace:abc", Some("abc"), "/v2/providers/openai/auth"));
+        assert!(!workspace_peer_provider_auth("tenant-a", Some("abc"), path));
+        assert!(!workspace_peer_provider_auth("workspace:abc", None, path));
+        assert!(!workspace_peer_provider_auth("workspace:abc", Some("abc"), "/v2/config"));
+    }
 
     #[test]
     fn identity_is_global_read_only_and_not_a_hosted_account_identity() {
@@ -1586,6 +1630,8 @@ mod hosted_plugin_authorization_tests {
             session_id_from_path("/v2/sessions/ses_123/messages"),
             Some("ses_123")
         );
+        assert_eq!(session_id_from_path("/v2/sessions/external/catalog"), None);
+        assert_eq!(session_id_from_path("/v2/sessions/external/import"), None);
     }
 
     #[tokio::test]

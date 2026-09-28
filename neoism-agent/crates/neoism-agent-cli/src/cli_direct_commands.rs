@@ -115,6 +115,8 @@ pub(super) async fn run(
                     model: None,
                     permission: None,
                     workspace_id: None,
+                    external_provider: None,
+                    external_options: None,
                 },
             );
             if let Some(dir) = &dir {

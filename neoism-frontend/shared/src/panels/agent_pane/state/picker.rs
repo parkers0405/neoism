@@ -15,8 +15,13 @@ const CURSOR_ANIMATION_LENGTH: f32 = 0.10;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NeoismAgentPickerKind {
     Slash,
+    ConversationSource,
     Agent,
     Model,
+    /// Provider-advertised ACP root session config option (never Neoism model).
+    ExternalOption,
+    /// Overflow menu of provider-advertised options, in provider order.
+    ExternalOptionMenu,
     /// Workspace MCP servers and their connection/authentication state.
     Mcp,
     /// `/mcp` stage 2 - actions for one selected MCP server.
@@ -149,6 +154,20 @@ pub struct NeoismAgentPicker {
 }
 
 impl NeoismAgentPicker {
+    pub fn source_picker(source: super::side_panel::ConversationSource) -> Self {
+        let choices = super::side_panel::ConversationSource::CHOICES;
+        Self::new(
+            NeoismAgentPickerKind::ConversationSource,
+            "Starting agent",
+            choices.iter().map(|choice| {
+                let mut option = NeoismAgentPickerOption::new(choice.label(), "", "", choice.label());
+                option.is_current = *choice == source;
+                option
+            }).collect(),
+            choices.iter().position(|choice| *choice == source).unwrap_or(0),
+        )
+    }
+
     pub fn new(
         kind: NeoismAgentPickerKind,
         title: &str,

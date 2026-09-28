@@ -65,6 +65,39 @@ pub(crate) async fn session_create(
     claims: Option<Extension<crate::caller::CallerClaims>>,
     body: Option<Json<CreateSessionRequest>>,
 ) -> Result<Json<SessionInfo>, ApiError> {
+    session_create_inner(state, query, headers, claims, body, None).await
+}
+
+/// Internal-only pending root: preserve the normal claims/quota checks, but
+/// do not announce an empty transcript before the import is hydrated.
+pub(crate) async fn session_create_importing(
+    state: AppState,
+    query: InstanceQuery,
+    headers: HeaderMap,
+    claims: Option<Extension<crate::caller::CallerClaims>>,
+    request: CreateSessionRequest,
+    external_metadata: Value,
+) -> Result<SessionInfo, ApiError> {
+    Ok(session_create_inner(
+        state,
+        query,
+        headers,
+        claims,
+        Some(Json(request)),
+        Some(external_metadata),
+    )
+    .await?
+    .0)
+}
+
+async fn session_create_inner(
+    state: AppState,
+    query: InstanceQuery,
+    headers: HeaderMap,
+    claims: Option<Extension<crate::caller::CallerClaims>>,
+    body: Option<Json<CreateSessionRequest>>,
+    pending_import: Option<Value>,
+) -> Result<Json<SessionInfo>, ApiError> {
     let mut request = body.map(|Json(body)| body).unwrap_or(CreateSessionRequest {
         parent_id: None,
         title: None,
@@ -72,12 +105,14 @@ pub(crate) async fn session_create(
         model: None,
         permission: None,
         workspace_id: None,
+        external_provider: None,
+        external_options: None,
     });
     let directory = resolve_directory(query.directory, &headers);
     let mut extra = BTreeMap::new();
-    let creating_actor = claims.as_ref().map(|Extension(claims)| {
-        (claims.subject.clone(), claims.actor_type_label())
-    });
+    let creating_actor = claims
+        .as_ref()
+        .map(|Extension(claims)| (claims.subject.clone(), claims.actor_type_label()));
     if let Some(Extension(claims)) = claims {
         if !crate::caller::allows_directory(&claims, &directory) {
             return Err(ApiError::forbidden(
@@ -114,12 +149,14 @@ pub(crate) async fn session_create(
         );
         extra.insert(
             crate::caller::EXECUTION_POLICY_EXTRA_KEY.to_string(),
-            serde_json::to_value(if !state.services().hosted && claims.workspace_id.is_some() {
-                neoism_agent_service_api::ExecutionPolicy::NativeLocal
-            } else {
-                claims.execution_policy()
-            })
-                .map_err(|error| ApiError::internal(error.to_string()))?,
+            serde_json::to_value(
+                if !state.services().hosted && claims.workspace_id.is_some() {
+                    neoism_agent_service_api::ExecutionPolicy::NativeLocal
+                } else {
+                    claims.execution_policy()
+                },
+            )
+            .map_err(|error| ApiError::internal(error.to_string()))?,
         );
         extra.insert(
             crate::caller::CREATED_BY_EXTRA_KEY.to_string(),
@@ -144,8 +181,20 @@ pub(crate) async fn session_create(
             }
         }
         bind_authenticated_workspace(&mut request, &claims)?;
+        if request.external_provider.is_some()
+            && (claims.hosted || claims.tenant_id != "local" || claims.workspace_id.is_some())
+        {
+            return Err(ApiError::forbidden("Host-native ACP requires the local operator"));
+        }
     }
-    let info = create_session_in_directory(&state, &directory, request, extra).await?;
+    let info = create_session_in_directory_inner(
+        &state,
+        &directory,
+        request,
+        extra,
+        pending_import,
+    )
+    .await?;
     if let Some((subject, actor_type)) = creating_actor {
         state
             .inner
@@ -184,9 +233,64 @@ fn bind_authenticated_workspace(
 pub(crate) async fn create_session_in_directory(
     state: &AppState,
     directory: &str,
+    request: CreateSessionRequest,
+    extra: BTreeMap<String, Value>,
+) -> Result<SessionInfo, ApiError> {
+    create_session_in_directory_inner(state, directory, request, extra, None).await
+}
+
+async fn create_session_in_directory_inner(
+    state: &AppState,
+    directory: &str,
     mut request: CreateSessionRequest,
     mut extra: BTreeMap<String, Value>,
+    pending_import: Option<Value>,
 ) -> Result<SessionInfo, ApiError> {
+    if pending_import.is_some()
+        && (request.external_provider.is_none() || request.parent_id.is_some())
+    {
+        return Err(ApiError::bad_request("Import requires an external root"));
+    }
+    // Only explicit root creation may opt into an external runtime. Never infer
+    // it from the mutable `agent` or `model` fields on later turns.
+    let external = match request.external_provider.as_deref() {
+        Some("opencode") => Some(crate::external_agent::ExternalRuntime::OpenCode),
+        Some("claude") => Some(crate::external_agent::ExternalRuntime::Claude),
+        Some("codex") => Some(crate::external_agent::ExternalRuntime::Codex),
+        Some(_) => {
+            return Err(ApiError::bad_request(
+                "Invalid externalProvider; expected opencode, claude or codex",
+            ))
+        }
+        None => None,
+    };
+    if external.is_some() && state.services().hosted {
+        return Err(ApiError::forbidden(
+            "ACP chats use host-owned provider credentials and are unavailable in hosted workspaces",
+        ));
+    }
+    if external.is_some() && request.parent_id.is_some() {
+        return Err(ApiError::bad_request(
+            "externalProvider requires a root session",
+        ));
+    }
+    if request.external_options.is_some() && (external.is_none() || request.parent_id.is_some() || pending_import.is_some()) {
+        return Err(ApiError::bad_request("externalOptions requires a new external ACP root"));
+    }
+    if external.is_some() && (request.workspace_id.is_some()
+        || extra.get(crate::caller::TENANT_EXTRA_KEY).and_then(Value::as_str).is_some_and(|tenant| tenant != "local")) {
+        return Err(ApiError::forbidden("Host-native ACP requires the local operator"));
+    }
+    if let Some(runtime) = external {
+        extra.insert("externalAgent".into(), json!({
+            "provider": runtime.provider_id(), "runtime": "acp",
+            "agent": runtime.agent_name(), "status": "created", "externalSessionId": null,
+            "historyState": "neoism_only"
+        }));
+    }
+    if let Some(metadata) = pending_import.as_ref() {
+        extra.insert("externalAgent".into(), metadata.clone());
+    }
     let now = now_millis();
     let id = neoism_agent_core::new_session_id();
     let directory = crate::windows_process::canonicalize_path(FsPath::new(directory))
@@ -199,6 +303,15 @@ pub(crate) async fn create_session_in_directory(
         return Err(ApiError::bad_request(
             "workflow directory is not a directory",
         ));
+    }
+    if let (Some(runtime), Some(choices)) = (external, request.external_options.take()) {
+        let draft = crate::external_agent::options::validate_draft(
+            state, runtime, &directory.to_string_lossy(), choices,
+        ).await?;
+        let metadata = extra.get_mut("externalAgent").expect("external root metadata");
+        for key in ["selectedOptions", "configOptions", "modeFallback", "optionsValid"] {
+            metadata[key] = draft[key].clone();
+        }
     }
     let project_context = project::discover(state.services(), directory);
     let directory = project_context.directory.clone();
@@ -231,8 +344,14 @@ pub(crate) async fn create_session_in_directory(
                 crate::caller::TENANT_EXTRA_KEY.into(),
                 Value::String(parent_tenant.into()),
             );
-            if let Some(prefixes) = parent.extra.get(crate::caller::DIRECTORY_PREFIXES_EXTRA_KEY) {
-                extra.insert(crate::caller::DIRECTORY_PREFIXES_EXTRA_KEY.into(), prefixes.clone());
+            if let Some(prefixes) = parent
+                .extra
+                .get(crate::caller::DIRECTORY_PREFIXES_EXTRA_KEY)
+            {
+                extra.insert(
+                    crate::caller::DIRECTORY_PREFIXES_EXTRA_KEY.into(),
+                    prefixes.clone(),
+                );
             }
         }
         if let Some(tenant) = extra
@@ -275,15 +394,30 @@ pub(crate) async fn create_session_in_directory(
             .title
             .unwrap_or_else(|| neoism_agent_core::default_session_title(is_child, now)),
         agent: Some(
-            request
-                .agent
-                .unwrap_or_else(|| agents.default_agent().to_string()),
+            external
+                .map(|runtime| runtime.agent_name().to_string())
+                .unwrap_or_else(|| {
+                    request
+                        .agent
+                        .unwrap_or_else(|| agents.default_agent().to_string())
+                }),
         ),
-        model: request.model.or_else(|| {
-            loaded_config.model.as_deref().and_then(|model| {
-                model_ref_from_config_with_variant(model, loaded_config.variant.clone())
+        model: external
+            .map(|runtime| neoism_agent_core::ModelRef {
+                provider_id: "external".into(),
+                id: runtime.provider_id().into(),
+                connection_id: None,
+                variant: None,
             })
-        }),
+            .or(request.model)
+            .or_else(|| {
+                loaded_config.model.as_deref().and_then(|model| {
+                    model_ref_from_config_with_variant(
+                        model,
+                        loaded_config.variant.clone(),
+                    )
+                })
+            }),
         version: env!("CARGO_PKG_VERSION").to_string(),
         time: TimeInfo {
             created: now,
@@ -296,10 +430,12 @@ pub(crate) async fn create_session_in_directory(
     };
 
     state.inner.store.insert_session(&info).await?;
-    state.publish(EventPayload::new(
-        event_type::SESSION_CREATED,
-        json!({ "sessionID": id, "info": info }),
-    ));
+    if pending_import.is_none() {
+        state.publish(EventPayload::new(
+            event_type::SESSION_CREATED,
+            json!({ "sessionID": id, "info": info }),
+        ));
+    }
     Ok(info)
 }
 
@@ -666,7 +802,17 @@ pub(crate) async fn session_todo_list(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
 ) -> Result<Json<Vec<TodoInfo>>, ApiError> {
-    crate::ensure_session(&state, &session_id).await?;
+    let session = crate::ensure_session(&state, &session_id).await?;
+    // ACP snapshots live in session.extra, so a server restart or reconnect
+    // returns the last provider plan rather than an empty in-memory cache.
+    if let Some(todos) = session
+        .extra
+        .get("externalAgent")
+        .and_then(|external| external.get("planTodos"))
+        .and_then(|value| serde_json::from_value::<Vec<TodoInfo>>(value.clone()).ok())
+    {
+        return Ok(Json(todos));
+    }
     Ok(Json(
         state
             .inner
@@ -835,6 +981,146 @@ fn retarget_message(
 mod directory_tests {
     use super::*;
 
+    #[tokio::test]
+    async fn external_root_creation_persists_provider_and_rejects_invalid_requests() {
+        let root = std::env::temp_dir()
+            .join(format!("neoism-acp-root-{}", Id::ascending(IdKind::Event)));
+        std::fs::create_dir_all(&root).unwrap();
+        let db = root.join("agent.sqlite3");
+        let state = AppState::open_database(db).await.unwrap();
+        let request = |provider: &str| CreateSessionRequest {
+            parent_id: None,
+            title: Some("ACP chat".into()),
+            agent: None,
+            model: None,
+            permission: None,
+            workspace_id: None,
+            external_provider: Some(provider.into()),
+            external_options: None,
+        };
+        assert!(create_session_in_directory(
+            &state,
+            root.to_str().unwrap(),
+            request("unknown"),
+            BTreeMap::new()
+        )
+        .await
+        .is_err());
+        for provider in ["opencode", "claude", "codex"] {
+            let created = create_session_in_directory(
+                &state,
+                root.to_str().unwrap(),
+                request(provider),
+                BTreeMap::new(),
+            )
+            .await
+            .unwrap();
+            assert!(created.parent_id.is_none());
+            assert_eq!(created.extra["externalAgent"]["provider"], provider);
+            assert_eq!(created.extra["externalAgent"]["runtime"], "acp");
+            assert!(created.extra["externalAgent"]["externalSessionId"].is_null());
+            let loaded = state
+                .inner
+                .store
+                .get_session(created.id.as_str())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                crate::external_agent::root_runtime(&loaded)
+                    .unwrap()
+                    .provider_id(),
+                provider
+            );
+            let serialized = serde_json::to_value(loaded).unwrap();
+            assert_eq!(serialized["externalAgent"]["provider"], provider);
+            let turn_id = Id::ascending(IdKind::Message);
+            let request = neoism_agent_core::PromptRequest {
+                message_id: Some(turn_id.clone()),
+                model: Some(neoism_agent_core::UserModel {
+                    provider_id: "other".into(),
+                    model_id: "other".into(),
+                    connection_id: None,
+                    variant: None,
+                }),
+                agent: Some("plan".into()),
+                no_reply: true,
+                system: None,
+                tools: None,
+                author: Some("Guest".into()),
+                parts: vec![neoism_agent_core::PromptPart::Text {
+                    text: "hello".into(),
+                }],
+            };
+            let message =
+                crate::append_prompt(&state, created.id.as_str(), request.clone(), false)
+                    .await
+                    .unwrap();
+            let neoism_agent_core::MessageInfo::User(user) = message.info else {
+                panic!("expected user message")
+            };
+            assert_eq!(user.model.model_id, provider);
+            assert_eq!(user.author.as_deref(), Some("Guest"));
+            assert_eq!(
+                state
+                    .inner
+                    .store
+                    .list_messages(created.id.as_str())
+                    .await
+                    .unwrap()
+                    .len(),
+                1
+            );
+            // Idempotent replay cannot duplicate a turn, but an unfinished
+            // user-only turn must not be silently acknowledged as replied.
+            crate::append_prompt(&state, created.id.as_str(), request.clone(), false)
+                .await
+                .unwrap();
+            assert!(crate::append_prompt(
+                &state,
+                created.id.as_str(),
+                request.clone(),
+                true
+            )
+            .await
+            .is_err());
+            let mut changed_author = request.clone();
+            changed_author.author = Some("Another guest".into());
+            assert!(crate::append_prompt(
+                &state,
+                created.id.as_str(),
+                changed_author,
+                false
+            )
+            .await
+            .is_err());
+            let mut changed_content = request;
+            changed_content.parts = vec![neoism_agent_core::PromptPart::Text {
+                text: "different".into(),
+            }];
+            assert!(crate::append_prompt(
+                &state,
+                created.id.as_str(),
+                changed_content,
+                false
+            )
+            .await
+            .is_err());
+            assert_eq!(
+                state
+                    .inner
+                    .store
+                    .list_messages(created.id.as_str())
+                    .await
+                    .unwrap()
+                    .len(),
+                1
+            );
+        }
+        state.shutdown().await.unwrap();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[test]
     fn session_directory_resolves_relative_and_quoted_paths() {
         let root = std::env::temp_dir().join(format!(
@@ -896,6 +1182,8 @@ mod directory_tests {
             model: None,
             permission: None,
             workspace_id: None,
+            external_provider: None,
+            external_options: None,
         };
         bind_authenticated_workspace(&mut request, &claims).unwrap();
         assert_eq!(request.workspace_id.as_ref(), Some(&workspace_id));

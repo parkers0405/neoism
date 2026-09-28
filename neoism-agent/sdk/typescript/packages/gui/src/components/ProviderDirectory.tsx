@@ -29,7 +29,7 @@ const notes: Record<string, string> = {
     openrouter: "Models from multiple providers",
     vercel: "Vercel AI Gateway",
 };
-// Provider artwork from OpenCode at the pinned commit; see providers/LICENSE.opencode.
+// Bundled provider artwork from OpenCode; see providers/LICENSE.opencode.
 export function ProviderMark({
     id,
     large = false,

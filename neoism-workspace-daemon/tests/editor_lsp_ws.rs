@@ -113,9 +113,11 @@ async fn shared_editor_lsp_real_protocol_two_clients_actions_and_isolation() {
     let root = root.canonicalize().unwrap();
     let file = root.join("main 文件 %20.neolsptest");
     let other = root.join("other.neolsptest");
+    let lockfile = root.join("Cargo.lock");
     let source = "fn shared() { shared(); }\n";
     std::fs::write(&file, source).unwrap();
     std::fs::write(&other, source).unwrap();
+    std::fs::write(&lockfile, "# no language server route\n").unwrap();
     let binary = temp.path().join(format!(
         "editor-lsp-fixture{}",
         std::env::consts::EXE_SUFFIX
@@ -275,6 +277,24 @@ async fn shared_editor_lsp_real_protocol_two_clients_actions_and_isolation() {
             _ => panic!("wrong reply to {action:?}: {reply:?}"),
         }
     }
+    // A lockfile has no matching server. Its background occurrence probe
+    // settles as empty; an explicit unsupported operation still reports why.
+    send(
+        &mut a,
+        20,
+        &root,
+        query(&lockfile, 20, Action::DocumentHighlight),
+    )
+    .await;
+    let empty = recv(&mut a, 20).await;
+    assert!(
+        matches!(empty, Reply::LspQueryResult { ref highlights, .. } if highlights.is_empty()),
+        "{empty:?}"
+    );
+    send(&mut a, 21, &root, query(&lockfile, 21, Action::Definition)).await;
+    assert!(
+        matches!(recv(&mut a, 21).await, Reply::Error { ref message, .. } if message.contains("No workspace language server supports"))
+    );
     // Resolve and execute on the originating host server. Open-file edits are
     // typed wire results, unopened-file edits happen only beside the daemon.
     send(

@@ -39,6 +39,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                 top_bar: None,
                 file_tree: None,
                 notes_sidebar: None,
+                conversations: None,
                 buffer_tabs: Rect::new(0.0, 0.0, 0.0, 0.0),
                 breadcrumbs: None,
                 status_line: Rect::new(0.0, 0.0, 0.0, 0.0),
@@ -61,7 +62,6 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             bottom_content_inset: 0.0,
             mobile_web_agent_panel_enabled: false,
             mobile_agent_narrow: false,
-            desktop_agent_panel_open_before_narrow: None,
             animation_phase: 0.0,
             active_tab_index: 0,
             tab_content: None,
@@ -91,6 +91,9 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             git_diff: GitDiff::new(),
             git_diff_panel: GitDiffPanel::new(),
             notes_sidebar: NotesSidebar::default(),
+            conversations_visible: false,
+            pending_conversation_open: None,
+            pending_conversation_new: None,
             command_composer: CommandComposer::new(),
             terminal_cwd_label: None,
             pane_grid: PaneGrid::new(crate::session_layout::SessionLeafKind::Terminal, 0),
@@ -143,6 +146,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
     pub(crate) fn apply_top_bar_action(&mut self, action: TopBarAction) {
         match action {
             TopBarAction::TogglePanel => {
+                self.hide_conversations();
                 // Strict visibility toggle — click 1 opens, click 2
                 // closes, regardless of focus state. The chrome's
                 // pointer-down handler defocuses the tree whenever
@@ -161,13 +165,8 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             TopBarAction::OpenAgent => {
                 self.pending_top_bar_action = Some(TopBarAction::OpenAgent);
             }
-            TopBarAction::ToggleAgentSidePanel => {
-                if self.mobile_agent_narrow && self.is_neoism_agent_tab_active() {
-                    if let Some(pane) = self.agent_pane.as_mut() {
-                        pane.toggle_side_panel();
-                    }
-                    self.relayout();
-                }
+            TopBarAction::ToggleConversations | TopBarAction::ToggleAgentSidePanel => {
+                self.toggle_conversations();
             }
             TopBarAction::OpenThemes => {
                 // Open the SAME theme picker the user gets from Cmd+P →
@@ -195,6 +194,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                 self.pending_top_bar_action = Some(TopBarAction::ShareWithPhone);
             }
             TopBarAction::OpenNotes => {
+                self.hide_conversations();
                 // Strict visibility toggle, same contract as
                 // `TogglePanel` above: click 1 opens, click 2 closes.
                 // This used to be open-ONLY (`if !visible { toggle }`),
@@ -317,8 +317,51 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         self.file_tree = Some(tree);
     }
 
-    /// Install the shared Neoism Agent pane state. The pane paints into
-    /// the main terminal rect whenever a Neoism Agent buffer tab is active.
+    /// Drain a selected catalog thread for the web host to open in an Agent tab.
+    pub fn take_conversation_new(&mut self) -> Option<crate::panels::agent_pane::state::side_panel::ConversationSource> {
+        self.pending_conversation_new.take()
+    }
+
+    pub fn take_conversation_open(&mut self) -> Option<String> {
+        let id = self.pending_conversation_open.take()?;
+        if self.layout.terminal.w <= 0.0 {
+            self.hide_conversations();
+            self.relayout();
+        }
+        Some(id)
+    }
+
+    pub fn hide_conversations(&mut self) {
+        self.conversations_visible = false;
+        if let Some(pane) = self.agent_pane.as_mut() {
+            pane.side_panel_mut().set_focused(false);
+        }
+    }
+
+    pub fn toggle_conversations(&mut self) {
+        self.conversations_visible = !self.conversations_visible;
+        if self.conversations_visible {
+            if let Some(tree) = self.file_tree.as_mut() {
+                tree.set_focused(false);
+            }
+            self.notes_sidebar.set_focused(false);
+            self.blur(PanelKey::FileTree);
+        }
+        if let Some(pane) = self.agent_pane.as_mut() {
+            pane.side_panel_mut()
+                .set_focused(self.conversations_visible);
+            pane.side_panel_mut().set_user_hidden(false);
+            if self.conversations_visible {
+                pane.side_panel_mut().hide_catalog_controls();
+                pane.side_panel_mut().clear_session_query();
+                pane.maybe_refresh_side_panel_sessions();
+            }
+        }
+        self.relayout();
+    }
+
+    /// Install the pane used for the active chat and the workspace catalog;
+    /// the catalog is painted by Chrome even when another tab is selected.
     pub fn install_agent_pane(&mut self, pane: NeoismAgentPane) {
         self.agent_pane = Some(pane);
     }
@@ -327,15 +370,6 @@ impl<A: Send + Copy + 'static> Chrome<A> {
     /// calls this, even if its window happens to be phone-width.
     pub fn set_mobile_web_agent_panel_enabled(&mut self, enabled: bool) {
         self.mobile_web_agent_panel_enabled = enabled;
-        if !enabled {
-            if let Some(was_open) = self.desktop_agent_panel_open_before_narrow.take() {
-                if let Some(pane) = self.agent_pane.as_mut() {
-                    pane.side_panel_mut().set_user_hidden(!was_open);
-                }
-            }
-            self.mobile_agent_narrow = false;
-            self.top_bar.set_mobile_agent_panel_button_visible(false);
-        }
         self.relayout();
     }
 
@@ -423,6 +457,8 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             (true, false)
         };
         if focus_tree {
+            self.notes_sidebar.set_focused(false);
+            if let Some(pane) = self.agent_pane.as_mut() { pane.side_panel_mut().set_focused(false); }
             self.focus(PanelKey::FileTree);
         } else {
             self.blur(PanelKey::FileTree);

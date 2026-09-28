@@ -64,6 +64,8 @@ pub fn platform_key_bindings(
             "t", ModifiersState::SUPER; Action::TabCreateNew;
             Key::Named(Tab), ModifiersState::CONTROL; Action::SelectNextTab;
             Key::Named(Tab), ModifiersState::CONTROL | ModifiersState::SHIFT; Action::SelectPrevTab;
+            Key::Named(ArrowLeft), ModifiersState::CONTROL | ModifiersState::ALT | ModifiersState::SHIFT; Action::MoveWorkspaceTabToPrev;
+            Key::Named(ArrowRight), ModifiersState::CONTROL | ModifiersState::ALT | ModifiersState::SHIFT; Action::MoveWorkspaceTabToNext;
             "w", ModifiersState::SUPER; Action::CloseCurrentSplitOrTab;
             "[", ModifiersState::SUPER | ModifiersState::SHIFT; Action::SelectPrevTab;
             "]", ModifiersState::SUPER | ModifiersState::SHIFT; Action::SelectNextTab;

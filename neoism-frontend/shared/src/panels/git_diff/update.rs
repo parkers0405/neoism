@@ -161,10 +161,11 @@ impl GitDiffPanel {
             return;
         }
         let pos = leaves.iter().position(|&fi| fi == self.selected);
+        self.scroll_selected_into_view();
         match pos {
             Some(p) if p + 1 < leaves.len() => {
                 let next = leaves[p + 1];
-                let _ = self.select_file(next);
+                let _ = self.select_file_with_reveal(next, true);
             }
             Some(_) => {
                 // On the last visible file — let the diff card take the
@@ -175,7 +176,7 @@ impl GitDiffPanel {
                 // Selection is hidden under a collapsed folder — land on
                 // the first visible leaf.
                 let first = leaves[0];
-                let _ = self.select_file(first);
+                let _ = self.select_file_with_reveal(first, true);
             }
         }
     }
@@ -187,11 +188,12 @@ impl GitDiffPanel {
             return;
         }
         let pos = leaves.iter().position(|&fi| fi == self.selected);
+        self.scroll_selected_into_view();
         match pos {
             Some(0) | None => self.scroll_diff_rows(-2),
             Some(p) => {
                 let prev = leaves[p - 1];
-                let _ = self.select_file(prev);
+                let _ = self.select_file_with_reveal(prev, true);
             }
         }
     }
@@ -211,7 +213,7 @@ impl GitDiffPanel {
             .unwrap_or(0) as i32;
         let last = leaves.len() as i32 - 1;
         let target = (cur + delta).clamp(0, last) as usize;
-        let _ = self.select_file(leaves[target]);
+        let _ = self.select_file_with_reveal(leaves[target], true);
     }
 
     /// Vim `<count>j`: move the selection down `n` files (clamped).
@@ -251,7 +253,7 @@ impl GitDiffPanel {
         self.clear_pending();
         self.rebuild_visual_rows();
         if let Some(&fi) = self.visible_leaf_indices().first() {
-            let _ = self.select_file(fi);
+            let _ = self.select_file_with_reveal(fi, true);
         }
     }
 
@@ -260,7 +262,7 @@ impl GitDiffPanel {
         self.clear_pending();
         self.rebuild_visual_rows();
         if let Some(&fi) = self.visible_leaf_indices().last() {
-            let _ = self.select_file(fi);
+            let _ = self.select_file_with_reveal(fi, true);
         }
     }
 
@@ -275,7 +277,7 @@ impl GitDiffPanel {
         let ix = one_based
             .saturating_sub(1)
             .min(leaves.len().saturating_sub(1));
-        let _ = self.select_file(leaves[ix]);
+        let _ = self.select_file_with_reveal(leaves[ix], true);
     }
 
     /// Feed a typed digit into the pending vim count. A leading `0` with
@@ -367,7 +369,59 @@ impl GitDiffPanel {
         self.section = FocusSection::Files;
         self.checkbox_focused = false;
         self.rebuild_visual_rows();
-        self.scroll_selected_into_view();
+    }
+
+    pub fn toggle_folder_stage(&mut self, visual_ix: usize) {
+        let Some(VisualRow {
+            kind: VisualRowKind::Dir { path, .. },
+            ..
+        }) = self.visual_rows.get(visual_ix)
+        else {
+            return;
+        };
+        let prefix = format!("{path}/");
+        let path = path.clone();
+        let all_staged = self.data.lock().ok().is_some_and(|d| {
+            let mut children = d
+                .files
+                .iter()
+                .filter(|f| f.path.starts_with(&prefix))
+                .peekable();
+            children.peek().is_some() && children.all(|f| f.staged)
+        });
+        self.run_mutation(move |io, root| {
+            if all_staged {
+                io.unstage(root, &path)
+            } else {
+                io.stage(root, &path)
+            }
+        });
+    }
+
+    pub fn begin_divider_drag(&mut self, x: f32, y: f32) -> bool {
+        self.divider_dragging = self.visible && self.divider_rect.contains(x, y);
+        self.divider_dragging
+    }
+
+    pub fn drag_divider(&mut self, y: f32) -> bool {
+        if !self.divider_dragging {
+            return false;
+        }
+        // Store the Files body height unscaled so resizing the window or UI
+        // scale does not change the user's split preference.
+        self.files_height_override = Some(
+            ((y - self.files_card_rect.y) / self.scale - diff_card::HEADER_HEIGHT)
+                .max(FILE_ROW_HEIGHT * 2.0),
+        );
+        true
+    }
+
+    pub fn end_divider_drag(&mut self) -> bool {
+        std::mem::take(&mut self.divider_dragging)
+    }
+
+    pub fn is_hovering_divider(&self, x: f32, y: f32) -> bool {
+        self.visible && self.divider_rect.contains(x, y)
     }
 
     /// Returns the (path, repo_root) of the currently-selected file so
@@ -454,6 +508,7 @@ impl GitDiffPanel {
             return;
         }
         self.visible = false;
+        self.divider_dragging = false;
         self.focused = false;
         self.commit_focused = false;
         self.branch_menu_open = false;
@@ -1100,6 +1155,18 @@ impl GitDiffPanel {
         self.commit_focused = false;
     }
 
+    pub fn fetch(&mut self) {
+        self.run_mutation(|io, root| io.fetch(root));
+    }
+
+    pub fn pull(&mut self) {
+        self.run_mutation(|io, root| io.pull(root));
+    }
+
+    pub fn push(&mut self) {
+        self.run_mutation(|io, root| io.push(root));
+    }
+
     /// Run a mutating git op through the installed `GitDiffIo`
     /// provider, then refresh the file list (bypassing the refresh
     /// debounce) so the staged state + diff update.
@@ -1215,11 +1282,21 @@ impl GitDiffPanel {
         if self.stage_all_rect.contains(mx, my) {
             return PanelHit::StageAllButton;
         }
+        for (slot, rect) in self.remote_button_rects.iter().enumerate() {
+            if rect.contains(mx, my) {
+                return PanelHit::RemoteButton(slot);
+            }
+        }
         if self.commit_box_rect.contains(mx, my) {
             return PanelHit::CommitBox;
         }
         // Per-row checkbox before the row itself so a checkbox click
         // toggles staging instead of moving the selection.
+        for (idx, rect) in &self.folder_checkbox_rects {
+            if rect.contains(mx, my) {
+                return PanelHit::FolderCheckbox(*idx);
+            }
+        }
         for (idx, rect) in &self.file_checkbox_rects {
             if rect.contains(mx, my) {
                 return PanelHit::FileCheckbox(*idx);
@@ -1238,10 +1315,13 @@ impl GitDiffPanel {
         PanelHit::Inside
     }
 
-    /// Programmatic select-by-index. Used by `select_next/prev` and
-    /// click handlers; lazy-loads the file's diff and springs the
-    /// selected row into the file-list viewport.
+    /// Pointer/host selection loads the diff without changing the user's
+    /// file-list scroll. Keyboard navigation uses the reveal variant below.
     pub fn select_file(&mut self, idx: usize) -> bool {
+        self.select_file_with_reveal(idx, false)
+    }
+
+    fn select_file_with_reveal(&mut self, idx: usize, reveal: bool) -> bool {
         let (path, repo_root, needs_load) = {
             let data = match self.data.lock() {
                 Ok(g) => g,
@@ -1259,9 +1339,13 @@ impl GitDiffPanel {
         // Reset diff scroll so a freshly-selected file lands at the
         // top of its diff body — otherwise the bottom card would
         // start mid-diff for the new file.
-        self.diff_scroll = 0.0;
-        self.diff_scroll_spring.reset();
-        self.scroll_selected_into_view();
+        if changed {
+            self.diff_scroll = 0.0;
+            self.diff_scroll_spring.reset();
+        }
+        if reveal {
+            self.scroll_selected_into_view();
+        }
         if needs_load {
             if let Some(io) = self.io.as_ref().filter(|io| io.is_host_driven()) {
                 io.request_diff(&path);
@@ -1589,5 +1673,120 @@ impl GitDiffPanel {
         self.last_diff_scroll_frame = now;
         self.diff_scroll_spring.update(dt, SCROLL_ANIMATION_LENGTH);
         self.diff_scroll_spring.position
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::types::{FileStatus, Rect};
+    use super::*;
+
+    #[test]
+    fn folder_checkbox_stages_and_unstages_only_its_path() {
+        use std::path::Path;
+        use std::sync::Mutex;
+        struct Io(Mutex<Vec<String>>);
+        impl super::super::state::GitDiffIo for Io {
+            fn is_host_driven(&self) -> bool {
+                true
+            }
+            fn collect_files(&self, _: &Path) -> Vec<FileChange> {
+                vec![]
+            }
+            fn stage(&self, _: &Path, path: &str) -> Result<(), String> {
+                self.0.lock().unwrap().push(format!("stage {path}"));
+                Ok(())
+            }
+            fn unstage(&self, _: &Path, path: &str) -> Result<(), String> {
+                self.0.lock().unwrap().push(format!("unstage {path}"));
+                Ok(())
+            }
+            fn commit(&self, _: &Path, _: &str) -> Result<(), String> {
+                Ok(())
+            }
+            fn list_branches(&self, _: &Path) -> Vec<String> {
+                vec![]
+            }
+            fn checkout(&self, _: &Path, _: &str) -> Result<(), String> {
+                Ok(())
+            }
+            fn fetch(&self, _: &Path) -> Result<(), String> {
+                Ok(())
+            }
+            fn pull(&self, _: &Path) -> Result<(), String> {
+                Ok(())
+            }
+            fn push(&self, _: &Path) -> Result<(), String> {
+                Ok(())
+            }
+        }
+        let io = Arc::new(Io(Mutex::new(vec![])));
+        let mut panel = GitDiffPanel::new();
+        panel.set_io_provider(io.clone());
+        {
+            let mut data = panel.data.lock().unwrap();
+            data.repo_root = Some(PathBuf::from("/repo"));
+            data.files = ["src/a.rs", "src/nested/b.rs", "src-other/c.rs"]
+                .into_iter()
+                .map(|path| FileChange {
+                    path: path.into(),
+                    status: FileStatus::Modified,
+                    additions: 0,
+                    deletions: 0,
+                    staged: false,
+                })
+                .collect();
+        }
+        panel.rebuild_visual_rows();
+        let src_row = panel
+            .visual_rows
+            .iter()
+            .position(|row| {
+                matches!(&row.kind,
+            VisualRowKind::Dir { path, .. } if path == "src")
+            })
+            .unwrap();
+        panel.toggle_folder_stage(src_row);
+        {
+            let mut data = panel.data.lock().unwrap();
+            for file in &mut data.files {
+                if file.path.starts_with("src/") {
+                    file.staged = true;
+                }
+            }
+        }
+        panel.toggle_folder_stage(src_row);
+        assert_eq!(*io.0.lock().unwrap(), ["stage src", "unstage src"]);
+    }
+
+    #[test]
+    fn pointer_and_folder_actions_do_not_reveal_keyboard_selection() {
+        let mut panel = GitDiffPanel::new();
+        panel.data.lock().unwrap().files = (0..20)
+            .map(|i| FileChange {
+                path: format!("dir/file-{i:02}.rs"),
+                status: FileStatus::Modified,
+                additions: 1,
+                deletions: 0,
+                staged: false,
+            })
+            .collect();
+        panel.files_body_rect = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 200.0,
+            h: 96.0,
+        };
+        panel.rebuild_visual_rows();
+        panel.file_scroll = 300.0;
+        panel.select_file(0);
+        assert_eq!(panel.file_scroll, 300.0);
+        panel.toggle_folder(0);
+        assert_eq!(panel.file_scroll, 300.0);
+        panel.toggle_folder(0);
+        assert_eq!(panel.file_scroll, 300.0);
+        panel.select_next();
+        assert_eq!(panel.selected, 1);
+        assert_eq!(panel.file_scroll, 0.0);
     }
 }

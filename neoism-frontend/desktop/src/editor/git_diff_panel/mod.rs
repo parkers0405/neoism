@@ -54,6 +54,18 @@ impl GitDiffIo for NativeGitDiffIo {
     fn checkout(&self, repo_root: &Path, branch: &str) -> Result<(), String> {
         io::checkout(repo_root, branch)
     }
+
+    fn fetch(&self, repo_root: &Path) -> Result<(), String> {
+        io::fetch(repo_root)
+    }
+
+    fn pull(&self, repo_root: &Path) -> Result<(), String> {
+        io::pull(repo_root)
+    }
+
+    fn push(&self, repo_root: &Path) -> Result<(), String> {
+        io::push(repo_root)
+    }
 }
 
 /// Install the native IO provider on a freshly-constructed panel.

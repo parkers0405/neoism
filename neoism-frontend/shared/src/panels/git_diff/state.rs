@@ -49,6 +49,10 @@ pub trait GitDiffIo: Send + Sync {
     /// to `git checkout`). Called off-thread; `Err` carries git's
     /// stderr so the panel can surface a failed switch.
     fn checkout(&self, repo_root: &Path, branch: &str) -> Result<(), String>;
+
+    fn fetch(&self, repo_root: &Path) -> Result<(), String>;
+    fn pull(&self, repo_root: &Path) -> Result<(), String>;
+    fn push(&self, repo_root: &Path) -> Result<(), String>;
 }
 
 pub struct GitDiffPanel {
@@ -91,6 +95,10 @@ pub struct GitDiffPanel {
     /// populated by `render`. A click here toggles the file's staged
     /// state instead of moving the selection.
     pub(super) file_checkbox_rects: Vec<(usize, Rect)>,
+    pub(super) folder_checkbox_rects: Vec<(usize, Rect)>,
+    pub(super) files_height_override: Option<f32>,
+    pub(super) divider_dragging: bool,
+    pub(super) divider_rect: Rect,
     /// Files-card scrollbar thumb rect (window-logical). `Rect::ZERO`
     /// when the list fits without scrolling. Used for grab-and-drag.
     pub(super) files_scrollbar_thumb_rect: Rect,
@@ -117,6 +125,7 @@ pub struct GitDiffPanel {
     pub(super) commit_box_rect: Rect,
     pub(super) commit_button_rect: Rect,
     pub(super) stage_all_rect: Rect,
+    pub(super) remote_button_rects: [Rect; 3],
 
     // ── Tree file list ───────────────────────────────────────────────
     /// Collapsed directory nodes (repo-relative dir paths, no trailing
@@ -191,6 +200,10 @@ impl GitDiffPanel {
             diff_card_rect: Rect::ZERO,
             file_row_rects: Vec::new(),
             file_checkbox_rects: Vec::new(),
+            folder_checkbox_rects: Vec::new(),
+            files_height_override: None,
+            divider_dragging: false,
+            divider_rect: Rect::ZERO,
             files_scrollbar_thumb_rect: Rect::ZERO,
             diff_scrollbar_thumb_rect: Rect::ZERO,
             selected_cursor_rect: None,
@@ -200,6 +213,7 @@ impl GitDiffPanel {
             commit_box_rect: Rect::ZERO,
             commit_button_rect: Rect::ZERO,
             stage_all_rect: Rect::ZERO,
+            remote_button_rects: [Rect::ZERO; 3],
             collapsed_dirs: HashSet::new(),
             visual_rows: Vec::new(),
             folder_row_rects: Vec::new(),

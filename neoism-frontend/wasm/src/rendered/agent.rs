@@ -331,6 +331,20 @@ impl ChromeBridge {
         )
     }
 
+    pub fn agent_new_chat_from(&mut self, provider: &str) {
+        use neoism_ui::panels::agent_pane::state::side_panel::ConversationSource;
+        let source = match provider {
+            "opencode" => ConversationSource::OpenCode,
+            "claude" => ConversationSource::ClaudeCode,
+            "codex" => ConversationSource::Codex,
+            _ => ConversationSource::Neoism,
+        };
+        if let Some(pane) = self.chrome.agent_pane_mut() {
+            pane.start_new_chat_from(source);
+        }
+        let _ = self.drain_agent_outbound();
+    }
+
     pub(crate) fn create_agent_thread_with_defaults(&mut self) {
         use neoism_protocol::agent::AgentClientMessage;
 
@@ -345,13 +359,16 @@ impl ChromeBridge {
             .chrome
             .agent_pane()
             .and_then(|pane| pane.connection_id().map(str::to_string));
+        let external_provider = self.chrome.agent_pane().and_then(|pane| pane.new_chat_source().provider().map(str::to_string));
+        let external = external_provider.is_some();
         self.send_agent_envelope(&AgentClientMessage::CreateThread {
             title: None,
             directory: self.agent_state.default_directory.clone(),
-            agent: self.agent_state.default_agent.clone(),
-            model: self.agent_state.default_model.clone(),
-            connection_id,
-            thinking: self.agent_state.default_thinking.clone(),
+            agent: if external { None } else { self.agent_state.default_agent.clone() },
+            model: if external { None } else { self.agent_state.default_model.clone() },
+            connection_id: if external { None } else { connection_id },
+            thinking: if external { None } else { self.agent_state.default_thinking.clone() },
+            external_provider,
         });
     }
 
@@ -491,6 +508,25 @@ impl ChromeBridge {
                 return true;
             }
         }
+        if pane.detail_panel().is_focused()
+            && !mods.alt
+            && !mods.control
+            && !mods.super_key
+        {
+            match key {
+                "ArrowDown" => pane.detail_panel_mut().select_next(),
+                "ArrowUp" => pane.detail_panel_mut().select_prev(),
+                "Enter" => {
+                    let activated = pane.activate_detail_panel_subagent();
+                    if activated {
+                        pane.detail_panel_mut().set_focused(false);
+                    }
+                }
+                "Escape" => pane.detail_panel_mut().set_focused(false),
+                _ => return false,
+            }
+            return true;
+        }
         let ctx = AgentKeyContext {
             side_panel_focused: pane.side_panel().is_focused(),
             pending_permission: pane.pending_permission().is_some(),
@@ -595,22 +631,12 @@ impl ChromeBridge {
                     pane.scroll_timeline_half_page(true);
                 }
                 AgentKeyIntent::SidePanelActivateSelection => {
-                    if pane.side_panel().back_focused() {
-                        // Enter on "← Back" flips the home-override view
-                        // without touching the live conversation.
-                        pane.side_panel_mut().trigger_back_scramble();
-                        pane.side_panel_mut().toggle_home_override();
-                        pane.side_panel_mut().focus_back();
-                    } else {
-                        let showing_sessions = !pane.has_conversation()
-                            || pane.side_panel().show_home_override();
-                        let activated = pane.activate_side_panel_row(
-                            showing_sessions,
-                            dismiss_side_panel_after_navigation,
-                        );
-                        if activated && dismiss_side_panel_after_navigation {
-                            relayout_after_key = true;
-                        }
+                    let activated = pane.activate_side_panel_row(
+                        true,
+                        dismiss_side_panel_after_navigation,
+                    );
+                    if activated && dismiss_side_panel_after_navigation {
+                        relayout_after_key = true;
                     }
                 }
                 AgentKeyIntent::SidePanelBlur => {
@@ -707,9 +733,18 @@ impl ChromeBridge {
             terminal_rect.w,
             terminal_rect.h,
         ];
-        let main_rect = match side_panel::carve_panel_rect(pane, pane_rect, scale) {
-            Some((main, _panel)) => main,
-            None => pane_rect,
+        let main_rect = if pane.has_conversation()
+            && pane_rect[2] >= side_panel::state_detail_min_width(scale)
+        {
+            let detail_w = pane.side_panel().width() * scale;
+            [
+                pane_rect[0],
+                pane_rect[1],
+                pane_rect[2] - detail_w - 6.0 * scale,
+                pane_rect[3],
+            ]
+        } else {
+            pane_rect
         };
         let input = if pane.has_conversation() {
             agent_layout::chat_input_rect(pane, main_rect, scale)
@@ -1376,6 +1411,13 @@ impl ChromeBridge {
             map_outbound_command, AgentProtocolMapping, AgentProtocolMappingContext,
         };
 
+        if self
+            .chrome
+            .agent_pane_mut()
+            .is_some_and(|pane| pane.take_catalog_toggle_request())
+        {
+            self.chrome.toggle_conversations();
+        }
         let commands = match self.chrome.agent_pane_mut() {
             Some(pane) if pane.has_pending_outbound() => pane.drain_pending_outbound(),
             _ => return 0,
@@ -1518,7 +1560,9 @@ impl ChromeBridge {
                 relayout = true;
                 break 'chain;
             }
-            if pane.side_panel().usage_contains(x, y) {
+            if pane.detail_panel().usage_contains(x, y)
+                || pane.side_panel().usage_contains(x, y)
+            {
                 usage_menu_lines = Some(pane.usage_detail_lines());
                 result.handled = true;
                 break 'chain;
@@ -1529,23 +1573,29 @@ impl ChromeBridge {
                 result.handled = true;
                 break 'chain;
             }
+            if pane.detail_panel().contains_point(x, y) {
+                pane.side_panel_mut().set_focused(false);
+                pane.detail_panel_mut().set_focused(true);
+                if let Some(rect) = pane.detail_panel().last_panel_rect() {
+                    if let Some(row) = pane.detail_panel().hit_test_row(x, y, rect) {
+                        pane.detail_panel_mut().set_selected(row);
+                        let activated = pane.activate_detail_panel_subagent();
+                        if activated {
+                            pane.detail_panel_mut().set_focused(false);
+                        }
+                    }
+                }
+                result.handled = true;
+                break 'chain;
+            }
+            pane.detail_panel_mut().set_focused(false);
             if pane.side_panel().contains_point(x, y) {
                 pane.side_panel_mut().set_focused(true);
-                if pane.side_panel().back_button_contains(x, y) {
-                    // "← Back" flips the home-override view; the live
-                    // conversation stays open underneath.
-                    pane.side_panel_mut().trigger_back_scramble();
-                    pane.side_panel_mut().toggle_home_override();
-                    pane.side_panel_mut().focus_back();
-                } else if let Some(rect) = pane.side_panel().last_panel_rect() {
+                if let Some(rect) = pane.side_panel().last_panel_rect() {
                     if let Some(row) = pane.side_panel().hit_test_row(x, y, rect) {
                         pane.side_panel_mut().set_selected(row);
-                        // The sessions list shows when there's no
-                        // conversation OR the Back override is active.
-                        let showing_sessions = !pane.has_conversation()
-                            || pane.side_panel().show_home_override();
                         let activated = pane.activate_side_panel_row(
-                            showing_sessions,
+                            true,
                             dismiss_side_panel_after_navigation,
                         );
                         if activated && dismiss_side_panel_after_navigation {
@@ -1714,6 +1764,10 @@ impl ChromeBridge {
             pane.scroll_picker_pixels(delta_pixels);
             return true;
         }
+        if pane.detail_panel().contains_point(x, y) {
+            pane.detail_panel_mut().scroll_content_pixels(-delta_pixels);
+            return true;
+        }
         if pane.side_panel().contains_point(x, y) {
             let rows = pane.side_panel().last_panel_height_rows();
             pane.scroll_side_panel_pixels(delta_pixels, rows);
@@ -1774,6 +1828,10 @@ impl ChromeBridge {
         // Picker / side panel / diff cards keep their own routing.
         if pane.picker_contains_point(x, y) {
             pane.scroll_picker_pixels(wheel.pixels);
+            return true;
+        }
+        if pane.detail_panel().contains_point(x, y) {
+            pane.detail_panel_mut().scroll_content_pixels(-wheel.pixels);
             return true;
         }
         if pane.side_panel().contains_point(x, y) {
@@ -1864,6 +1922,10 @@ impl ChromeBridge {
         if owner != 2 {
             if pane.picker_contains_point(x, y) {
                 pane.scroll_picker_touch_pixels(dy_pixels);
+                return 1;
+            }
+            if pane.detail_panel().contains_point(x, y) {
+                pane.detail_panel_mut().scroll_content_pixels(-dy_pixels);
                 return 1;
             }
             if pane.side_panel().contains_point(x, y) {

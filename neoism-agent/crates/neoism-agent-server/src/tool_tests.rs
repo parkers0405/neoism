@@ -1217,7 +1217,7 @@ async fn v4a_patch_does_not_partially_apply_when_later_file_fails() {
 }
 
 #[tokio::test]
-async fn advertised_tools_use_opencode_patch_contract() {
+async fn advertised_tools_use_v4a_patch_contract() {
     let root = std::env::temp_dir().join(format!(
         "neoism-agent-tool-contract-{}",
         neoism_agent_core::Id::ascending(neoism_agent_core::IdKind::Event)

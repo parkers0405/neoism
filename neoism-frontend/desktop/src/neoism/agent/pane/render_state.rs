@@ -20,6 +20,8 @@ impl NeoismAgentPane {
             pane.sent_history = crate::neoism::agent::prompt_history::load();
         }
         pane.apply_config_defaults();
+        #[cfg(not(test))]
+        pane.set_default_chat_source(neoism_backend::config::Config::load().agent.default_chat_source);
         pane
     }
 
@@ -708,10 +710,11 @@ impl NeoismAgentPane {
     }
 
     pub fn clear_status_chip_rects(&mut self) {
-        self.status_chip_rects = [None; 3];
+        self.status_chip_rects.clear();
     }
 
     pub fn register_status_chip_rect(&mut self, index: usize, rect: [f32; 4]) {
+        if self.status_chip_rects.len() <= index { self.status_chip_rects.resize(index + 1, None); }
         if let Some(slot) = self.status_chip_rects.get_mut(index) {
             *slot = Some(rect);
         }
@@ -729,6 +732,66 @@ impl NeoismAgentPane {
     /// the chip whose picker is already up closes it instead (toggle);
     /// clicking a different chip switches to that chip's picker.
     pub fn open_status_chip_picker(&mut self, index: usize) {
+        let index = if !self.has_conversation() {
+            if index == 0 {
+                if self.picker.as_ref().is_some_and(|picker| picker.kind == NeoismAgentPickerKind::ConversationSource) {
+                    self.close_picker();
+                } else {
+                    self.picker = Some(NeoismAgentPicker::source_picker(self.new_chat_source));
+                }
+                return;
+            }
+            index - 1
+        } else {
+            index
+        };
+        if self.new_chat_source.provider().is_some() {
+            if index == 0 {
+                if self.external_options_error().is_some() {
+                    if self.session_id.is_none() {
+                        self.external_options_error = None;
+                        self.external_options_dirty = true;
+                        self.external_options_next_refresh = None;
+                        self.maybe_refresh_external_options();
+                    } else { self.retry_external_options(); }
+                }
+                return;
+            }
+            if self.external_options_pending.is_some() { return; }
+            if self.external_options().is_some_and(|snapshot| index == snapshot.options.len() + 1) {
+                if self.picker.as_ref().is_some_and(|picker| picker.kind == NeoismAgentPickerKind::ExternalOptionMenu) {
+                    self.close_picker();
+                    return;
+                }
+                let Some(snapshot) = self.external_options() else { return; };
+                let rows = snapshot.display_order().into_iter().map(|index| {
+                    let option = &snapshot.options[index];
+                    NeoismAgentPickerOption::new(&option.name, option.selected_label(), "", &option.id)
+                }).collect();
+                self.external_picker_option_id = None;
+                self.status_chip_activated = Some((index, Instant::now()));
+                self.picker = Some(NeoismAgentPicker::new(NeoismAgentPickerKind::ExternalOptionMenu, if self.session_id.is_none() { "Provider options" } else { "Session options" }, rows, 0));
+                return;
+            }
+            let Some(option) = self.external_options().and_then(|snapshot| snapshot.options.get(index - 1)).cloned() else { return; };
+            if self.picker.as_ref().is_some_and(|picker| picker.kind == NeoismAgentPickerKind::ExternalOption)
+                && self.external_picker_option_id.as_deref() == Some(option.id.as_str()) {
+                self.close_picker();
+                self.external_picker_option_id = None;
+                return;
+            }
+            let selected = option.choices.iter().position(|choice| choice.value == option.current_value).unwrap_or(0);
+            let choices = option.choices.iter().map(|choice| {
+                let mut row = NeoismAgentPickerOption::new(&choice.name, "", "", &choice.value);
+                row.section = choice.group.clone().unwrap_or_default();
+                row.is_current = choice.value == option.current_value;
+                row
+            }).collect();
+            self.external_picker_option_id = Some(option.id);
+            self.status_chip_activated = Some((index, Instant::now()));
+            self.picker = Some(NeoismAgentPicker::new(NeoismAgentPickerKind::ExternalOption, &option.name, choices, selected));
+            return;
+        }
         let kind = match index {
             0 => NeoismAgentPickerKind::Agent,
             1 => NeoismAgentPickerKind::Model,
@@ -1014,5 +1077,57 @@ impl NeoismAgentPane {
 
     pub fn link_hover_active(&self) -> bool {
         self.hover_link_target.is_some()
+    }
+}
+
+#[cfg(test)]
+mod source_picker_tests {
+    use super::*;
+    use neoism_backend::config::DefaultChatSource;
+    use neoism_ui::panels::agent_pane::state::side_panel::ConversationSource;
+
+    #[test]
+    fn source_picker_preserves_draft_and_shifts_home_chips() {
+        for (index, source) in ConversationSource::CHOICES.into_iter().enumerate() {
+            let mut pane = NeoismAgentPane::default();
+            pane.input = "draft question".into();
+            pane.cursor_byte = pane.input.len();
+            pane.register_status_chip_rect(0, [5.0, 5.0, 30.0, 20.0]);
+            pane.register_status_chip_rect(1, [40.0, 5.0, 30.0, 20.0]);
+            assert_eq!(pane.status_chip_at(10.0, 10.0), Some(0));
+            assert_eq!(pane.status_chip_at(45.0, 10.0), Some(1));
+            pane.open_status_chip_picker(0);
+            let picker = pane.picker.as_mut().unwrap();
+            assert_eq!(picker.kind, NeoismAgentPickerKind::ConversationSource);
+            assert_eq!(picker.options().len(), 4);
+            picker.selected = index;
+            assert!(pane.commit_picker());
+            assert_eq!(pane.new_chat_source, source);
+            assert_eq!(pane.input, "draft question");
+            assert_eq!(pane.cursor_byte, pane.input.len());
+            assert!(pane.session_id.is_none());
+            pane.open_status_chip_picker(1);
+            if source == ConversationSource::Neoism {
+                assert_eq!(pane.picker.as_ref().unwrap().kind, NeoismAgentPickerKind::Agent);
+            }
+        }
+    }
+
+    #[test]
+    fn reload_preserves_explicit_draft_and_existing_session() {
+        let mut pane = NeoismAgentPane::default();
+        pane.set_default_chat_source(DefaultChatSource::OpenCode);
+        assert_eq!(pane.new_chat_source, ConversationSource::OpenCode);
+        pane.select_draft_source(ConversationSource::ClaudeCode);
+        pane.set_default_chat_source(DefaultChatSource::Codex);
+        assert_eq!(pane.new_chat_source, ConversationSource::ClaudeCode);
+        pane.create_new_session();
+        assert_eq!(pane.new_chat_source, ConversationSource::Codex);
+        pane.session_id = Some("active".into());
+        pane.set_default_chat_source(DefaultChatSource::Neoism);
+        pane.select_draft_source(ConversationSource::Neoism);
+        assert_eq!(pane.new_chat_source, ConversationSource::Codex);
+        pane.create_new_session();
+        assert_eq!(pane.new_chat_source, ConversationSource::Neoism);
     }
 }

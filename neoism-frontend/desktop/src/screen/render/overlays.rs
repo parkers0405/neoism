@@ -71,12 +71,16 @@ impl Screen<'_> {
 
         let scale_factor = self.sugarloaf.scale_factor();
         let animation_dt_secs = animation_dt.as_secs_f32();
-        let agent_side_panel_focused = self
-            .context_manager
-            .current()
-            .neoism_agent
-            .as_ref()
-            .is_some_and(|agent| agent.side_panel().is_focused());
+        let agent_side_panel_focused = (self.renderer.conversations_visible
+            && self.renderer.conversations_pane.side_panel().is_focused())
+            || self
+                .context_manager
+                .current()
+                .neoism_agent
+                .as_ref()
+                .is_some_and(|agent| {
+                    agent.side_panel().is_focused() || agent.detail_panel().is_focused()
+                });
         // Focus cursor rect for the animated trail cursor. The workspace
         // strip wins, then any focused pane strip, then the top-level
         // Island strip — all three now expose `focused_cursor_rect()` in

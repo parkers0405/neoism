@@ -61,6 +61,8 @@ pub fn platform_key_bindings(
             Key::Named(ArrowRight), ModifiersState::CONTROL | ModifiersState::SHIFT; Action::SelectNextBufferTab;
             Key::Named(ArrowLeft), ModifiersState::ALT | ModifiersState::SHIFT; Action::MoveActiveBufferTabToPrev;
             Key::Named(ArrowRight), ModifiersState::ALT | ModifiersState::SHIFT; Action::MoveActiveBufferTabToNext;
+            Key::Named(ArrowLeft), ModifiersState::CONTROL | ModifiersState::ALT | ModifiersState::SHIFT; Action::MoveWorkspaceTabToPrev;
+            Key::Named(ArrowRight), ModifiersState::CONTROL | ModifiersState::ALT | ModifiersState::SHIFT; Action::MoveWorkspaceTabToNext;
             "w", ModifiersState::CONTROL | ModifiersState::SHIFT; Action::TabCreateNew;
             "[", ModifiersState::CONTROL | ModifiersState::SHIFT; Action::SelectPrevBufferTab;
             "]", ModifiersState::CONTROL | ModifiersState::SHIFT; Action::SelectNextBufferTab;
@@ -76,8 +78,6 @@ pub fn platform_key_bindings(
             "[", ModifiersState::CONTROL | ModifiersState::SHIFT, ~BindingMode::SEARCH, ~BindingMode::VI; Action::SelectPrevSplit;
             Key::Named(ArrowUp), ModifiersState::CONTROL | ModifiersState::SHIFT | ModifiersState::ALT, ~BindingMode::SEARCH, ~BindingMode::VI; Action::MoveDividerUp;
             Key::Named(ArrowDown), ModifiersState::CONTROL | ModifiersState::SHIFT | ModifiersState::ALT, ~BindingMode::SEARCH, ~BindingMode::VI; Action::MoveDividerDown;
-            Key::Named(ArrowLeft), ModifiersState::CONTROL | ModifiersState::SHIFT | ModifiersState::ALT, ~BindingMode::SEARCH, ~BindingMode::VI; Action::MoveDividerLeft;
-            Key::Named(ArrowRight), ModifiersState::CONTROL | ModifiersState::SHIFT | ModifiersState::ALT, ~BindingMode::SEARCH, ~BindingMode::VI; Action::MoveDividerRight;
         ));
     }
 

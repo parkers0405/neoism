@@ -851,7 +851,7 @@ mod tests {
     }
 
     #[test]
-    fn code_highlighting_uses_opencode_style_token_buckets() {
+    fn code_highlighting_uses_language_token_buckets() {
         let rendered = highlight_code_line(
             "typescript",
             "const HTTP_OK = client.fetch<User>(url, true) // TODO: verify",

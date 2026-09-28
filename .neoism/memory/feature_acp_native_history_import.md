@@ -1,0 +1,12 @@
+---
+name: "ACP native history catalog/import"
+description: "ACP catalog, text-only import and queued HTTP lifecycle integration for three providers"
+type: "feature"
+scope: "project"
+origin: "backend follow-ups"
+created: "2026-09-24"
+updated: "2026-09-24"
+---
+
+Backend ACP native-history API: `GET /v2/sessions/external/catalog?provider={opencode|codex|claude}&directory=...` negotiates ACP `session/list`, exact canonical cwd verification, local-operator-only claims, host/tenant-bound sourceKey; response `sessions[]` has preview `historyState` (`not_loaded`,`importing`,`text_only`), optional `neoismSessionId` (absent while importing), top-level `importSupported` from `loadSession` capability and optional `importUnavailableReason`. `POST /v2/sessions/external/import?directory=...` body `{provider,externalSessionId}` supports all three via ACP session/load replay. Bounded stable-ID text-only import, no fake empty chat, tools/non-text omitted with counters/flags; sourceHost blocks cross-host resume. Pending import root hidden from v2 session lists and external catalog root IDs, SESSION_CREATED delayed until hydration; compact root index contains sanitized externalAgent status without opaque provider ID and old sidecars hydrate before filtering. Codex live listing on developer machine requires existing login; no automatic login.
+2026 backend verification follow-up: `external_agent/tests_lifecycle.rs` Unix integration test `three_provider_roots_run_via_real_http_queue_and_reload`, registered in external_agent.rs. Hermetic /bin/sh fake ACP via FakeExecutableService for OpenCode, Codex, Claude; real AppState SQLite and Axum router HTTP root POST, queued prompt dispatch, session/new, session/request_permission → HTTP permission reply, streamed text/tool/plan events, durable user+assistant/tool/plan history, GET session/list/get/messages/todos, shutdown/reopen SQLite, session/load replay discarded (no duplicate history), second turn persists, third turn abort via HTTP and no successful partial assistant, verifies exactly one session/new and subsequent loads. No real provider CLI/account/network touched. `cargo test -p neoism-agent-server --lib external_agent::` 22 passed; repeated integration twice; `cargo check -p neoism-agent-server` and `git diff --check` passed. No release builds. Does NOT validate real provider authentication or adapter-specific live payloads/end-to-end GUI rendering.

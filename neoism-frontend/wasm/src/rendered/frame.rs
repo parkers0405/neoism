@@ -266,6 +266,10 @@ impl ChromeBridge {
             self.chrome.draw(s, services, time);
         }
 
+        // The workspace catalog can enqueue a refresh during Chrome paint,
+        // including while the active tab is a terminal/editor. Do not wait
+        // for another pointer event to transport that request.
+        let _ = self.drain_agent_outbound();
         // 3. Single present.
         self.rendered.present();
         Ok(())
@@ -405,7 +409,8 @@ impl ChromeBridge {
             neoism_ui::panels::TopBarAction::OpenNeoWorld => "open_neoworld",
             neoism_ui::panels::TopBarAction::TogglePanel => "toggle_panel",
             // Consumed inside shared Chrome; never duplicated in JS.
-            neoism_ui::panels::TopBarAction::ToggleAgentSidePanel => {
+            neoism_ui::panels::TopBarAction::ToggleAgentSidePanel
+            | neoism_ui::panels::TopBarAction::ToggleConversations => {
                 return None;
             }
             neoism_ui::panels::TopBarAction::OpenAgent => {
@@ -436,7 +441,11 @@ impl ChromeBridge {
             || self.chrome.command_palette.is_visible()
             || self.chrome.finder.is_visible()
             || self.chrome.git_diff.is_visible()
-            || self.chrome.git_diff_panel.is_focused()
+            || (self.chrome.conversations_visible
+                && self
+                    .chrome
+                    .agent_pane()
+                    .is_some_and(|pane| pane.side_panel().is_focused()))
             || (self.chrome.notes_sidebar.is_visible()
                 && self.chrome.notes_sidebar.is_focused())
             || self.chrome.focused() == Some(PanelKey::FileTree)

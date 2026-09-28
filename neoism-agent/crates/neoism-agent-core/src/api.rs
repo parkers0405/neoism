@@ -19,8 +19,7 @@ pub struct AgentConfigDocument {
     pub disabled_providers: Vec<String>,
     #[serde(default)]
     pub enabled_providers: Option<Vec<String>>,
-    /// OpenAI-compatible providers declared by the user. This intentionally
-    /// mirrors OpenCode's singular `provider` config key.
+    /// OpenAI-compatible providers declared by the user under `provider`.
     #[serde(default)]
     pub provider: BTreeMap<String, ProviderConfig>,
     #[serde(default)]
@@ -628,7 +627,7 @@ mod tests {
     }
 
     #[test]
-    fn local_provider_config_uses_opencode_compatible_shape() {
+    fn local_provider_config_accepts_singular_provider_key() {
         let config: AgentConfigDocument = serde_json::from_value(json!({
             "provider": {
                 "llama.cpp": {
@@ -744,7 +743,7 @@ mod tests {
     }
 
     #[test]
-    fn opencode_config_surface_keys_decode_as_typed_fields() {
+    fn agent_config_surface_keys_decode_as_typed_fields() {
         let config: AgentConfigDocument = serde_json::from_value(json!({
             "watcher": { "ignore": ["target/**"] },
             "share": "auto",

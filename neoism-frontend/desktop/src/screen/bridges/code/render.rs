@@ -71,12 +71,16 @@ impl Screen<'_> {
             }
         }
         let focused_route = self.context_manager.current().route_id;
-        let editor_focused = !self
-            .context_manager
-            .current()
-            .neoism_agent
-            .as_ref()
-            .is_some_and(|agent| agent.side_panel().is_focused())
+        let editor_focused = !(self.renderer.conversations_visible
+            && self.renderer.conversations_pane.side_panel().is_focused())
+            && !self
+                .context_manager
+                .current()
+                .neoism_agent
+                .as_ref()
+                .is_some_and(|agent| {
+                    agent.side_panel().is_focused() || agent.detail_panel().is_focused()
+                })
             && self.renderer.buffer_tabs.focused_cursor_rect().is_none()
             && self
                 .renderer

@@ -66,6 +66,7 @@ pub(crate) async fn run_event_stream(inner: Arc<AgentInner>, session_id: String)
         if connected_once {
             push_session_running_state(inner.clone(), session_id.clone()).await;
             push_runtime_snapshot(inner.clone(), session_id.clone()).await;
+            push_todo_snapshot(inner.clone(), session_id.clone()).await;
         }
         connected_once = true;
 
@@ -1319,7 +1320,7 @@ mod tests {
     }
 
     #[test]
-    fn live_usage_matches_opencode_normalized_bucket_sum() {
+    fn live_usage_sums_normalized_token_buckets() {
         let usage = usage_from_value(Some(&json!({
             "total": 99_999,
             "input": 2_789,

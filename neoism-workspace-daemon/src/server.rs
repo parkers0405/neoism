@@ -203,7 +203,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route(
             "/agent/workspaces/:workspace_id/*path",
-            any(agent_workspace_proxy),
+            any(agent_workspace_proxy).layer(axum::extract::DefaultBodyLimit::max(25 * 1024 * 1024)),
         )
         .route("/agent/*path", any(agent_proxy))
         .fallback(web_fallback)
@@ -338,6 +338,29 @@ async fn agent_proxy_inner(
             workspace.visibility
                 == neoism_protocol::workspace::WorkspaceVisibility::Shared
         });
+    // OAuth redirects are unauthenticated browser navigations. Only the exact
+    // GET callback with a code and state may bypass the daemon bearer gate;
+    // the Agent consumes the one-time state before exchanging any credentials.
+    if shared && method == axum::http::Method::GET && body.is_empty()
+        && mcp_oauth_callback_name(&path).is_some()
+    {
+        if let Some(callback) = mcp_oauth_callback_target(&path, query.as_deref()) {
+            crate::agent::ensure_agent_server_started(state.workspaces.clone());
+            let target = format!("{}{}", agent_handler::configured_agent_server(), callback);
+            return match reqwest::Client::new().get(target).send().await {
+                Ok(upstream) => {
+                    let status = StatusCode::from_u16(upstream.status().as_u16())
+                        .unwrap_or(StatusCode::BAD_GATEWAY);
+                    let mut response = Response::new(axum::body::Body::from_stream(upstream.bytes_stream()));
+                    *response.status_mut() = status;
+                    response.headers_mut().insert(header::CONTENT_TYPE, "text/html; charset=utf-8".parse().unwrap());
+                    response
+                }
+                Err(_) => StatusCode::BAD_GATEWAY.into_response(),
+            };
+        }
+        return StatusCode::BAD_REQUEST.into_response();
+    }
     let credential =
         match agent_proxy_credential(&state.auth, &headers, &workspace_id, &root, shared)
         {
@@ -360,7 +383,35 @@ async fn agent_proxy_inner(
         Ok(method) => method,
         Err(_) => return StatusCode::METHOD_NOT_ALLOWED.into_response(),
     };
-    let mut request = client.request(method, &target);
+    if method == reqwest::Method::POST && mcp_oauth_auth_name(&path).is_some() {
+        let Some(host) = headers.get(header::HOST).and_then(|value| value.to_str().ok()) else {
+            return (StatusCode::BAD_REQUEST, "missing OAuth callback host").into_response();
+        };
+        let scheme = if headers.get("x-forwarded-proto").and_then(|value| value.to_str().ok()) == Some("https") {
+            "https"
+        } else {
+            "http"
+        };
+        let Ok(mut url) = reqwest::Url::parse(&target) else {
+            return StatusCode::BAD_REQUEST.into_response();
+        };
+        let Ok(callback) = reqwest::Url::parse(&format!(
+            "{scheme}://{host}/agent/workspaces/{workspace_id}/{path}/callback"
+        )) else {
+            return StatusCode::BAD_REQUEST.into_response();
+        };
+        if callback.username() != "" || callback.password().is_some() || callback.query().is_some() || callback.fragment().is_some() {
+            return StatusCode::BAD_REQUEST.into_response();
+        }
+        let params: Vec<_> = url.query_pairs()
+            .filter(|(key, _)| key != "redirectUri")
+            .map(|(key, value)| (key.into_owned(), value.into_owned()))
+            .collect();
+        url.set_query(None);
+        url.query_pairs_mut().extend_pairs(params).append_pair("redirectUri", callback.as_str());
+        target = url.to_string();
+    }
+    let mut request = client.request(method.clone(), &target);
     // The inbound bearer and all caller-controlled scope headers terminate at
     // the daemon. Agent receives only the daemon-minted, short-lived identity.
     request = request.bearer_auth(credential);
@@ -376,6 +427,7 @@ async fn agent_proxy_inner(
             request = request.header(name.clone(), value.clone());
         }
     }
+    request = forward_agent_upload_headers(request, &path, &method, &headers);
     if !body.is_empty() {
         request = request.body(body);
     }
@@ -408,6 +460,46 @@ async fn agent_proxy_inner(
                 .into_response()
         }
     }
+}
+
+fn mcp_oauth_auth_name(path: &str) -> Option<&str> {
+    let name = path.strip_prefix("v2/plugins/dev.neoism.mcp/")?.strip_suffix("/auth")?;
+    (!name.is_empty() && !name.contains('/') && !name.contains('?')).then_some(name)
+}
+
+fn mcp_oauth_callback_name(path: &str) -> Option<&str> {
+    let name = path.strip_prefix("v2/plugins/dev.neoism.mcp/")?.strip_suffix("/auth/callback")?;
+    (!name.is_empty() && !name.contains('/') && !name.contains('?')).then_some(name)
+}
+
+fn mcp_oauth_callback_target(path: &str, query: Option<&str>) -> Option<String> {
+    mcp_oauth_callback_name(path)?;
+    let parsed = reqwest::Url::parse(&format!("http://localhost/{path}?{}", query?)).ok()?;
+    let code = parsed.query_pairs().find(|(key, _)| key == "code")?.1.into_owned();
+    let state = parsed.query_pairs().find(|(key, _)| key == "state")?.1.into_owned();
+    if code.is_empty() || state.is_empty() {
+        return None;
+    }
+    let mut target = reqwest::Url::parse(&format!("http://localhost/{path}")).ok()?;
+    target.query_pairs_mut().append_pair("code", &code).append_pair("state", &state);
+    Some(format!("{}?{}", target.path(), target.query()?))
+}
+
+fn forward_agent_upload_headers(
+    mut request: reqwest::RequestBuilder,
+    path: &str,
+    method: &reqwest::Method,
+    headers: &HeaderMap,
+) -> reqwest::RequestBuilder {
+    // Scope and authorization always come from the daemon-minted credential.
+    if path.trim_start_matches('/') == "v2/artifacts" && *method == reqwest::Method::POST {
+        for name in ["x-neoism-filename", "x-neoism-session-id"] {
+            if let Some(value) = headers.get(name) {
+                request = request.header(name, value.clone());
+            }
+        }
+    }
+    request
 }
 
 const AGENT_CREDENTIAL_LIFETIME_SECS: i64 = 60;
@@ -634,6 +726,20 @@ mod agent_proxy_auth_tests {
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+    #[test]
+    fn only_state_bearing_mcp_browser_callbacks_can_reach_agent_without_bearer() {
+        let path = "v2/plugins/dev.neoism.mcp/github/auth/callback";
+        assert_eq!(mcp_oauth_callback_name(path), Some("github"));
+        assert_eq!(
+            mcp_oauth_callback_target(path, Some("code=a%2Bb&state=nonce&directory=%2Fprivate")),
+            Some(format!("/{path}?code=a%2Bb&state=nonce")),
+        );
+        assert!(mcp_oauth_callback_target(path, Some("code=abc")).is_none());
+        assert!(mcp_oauth_callback_target(path, Some("code=abc&state=")).is_none());
+        assert!(mcp_oauth_callback_target("v2/plugins/dev.neoism.mcp/github/auth", Some("code=abc&state=nonce")).is_none());
+        assert!(mcp_oauth_callback_name("v2/plugins/dev.neoism.mcp/github/tools/auth/callback").is_none());
+    }
+
     struct DaemonTokenGuard(Option<String>);
 
     impl DaemonTokenGuard {
@@ -664,6 +770,32 @@ mod agent_proxy_auth_tests {
             pairing_tokens: PairingTokenStore::in_memory(),
             crdt: CrdtSyncHub::default(),
             paired_hosts: PairedHostStore::in_memory(),
+        }
+    }
+
+    #[test]
+    fn proxy_forwards_upload_metadata_only_for_artifact_posts() {
+        let client = reqwest::Client::new();
+        let mut headers = HeaderMap::new();
+        headers.insert("x-neoism-filename", "scan.pdf".parse().unwrap());
+        headers.insert("x-neoism-session-id", "session-123".parse().unwrap());
+        headers.insert("x-neoism-directory", "/private".parse().unwrap());
+        headers.insert(header::AUTHORIZATION, "Bearer phone".parse().unwrap());
+        for (path, method, expected) in [
+            ("v2/artifacts", reqwest::Method::POST, true),
+            ("v2/artifacts", reqwest::Method::GET, false),
+            ("v2/sessions", reqwest::Method::POST, false),
+        ] {
+            let request = forward_agent_upload_headers(
+                client.request(method.clone(), "http://127.0.0.1/v2/artifacts"),
+                path,
+                &method,
+                &headers,
+            ).build().unwrap();
+            assert_eq!(request.headers().contains_key("x-neoism-filename"), expected);
+            assert_eq!(request.headers().contains_key("x-neoism-session-id"), expected);
+            assert!(!request.headers().contains_key("x-neoism-directory"));
+            assert!(!request.headers().contains_key(header::AUTHORIZATION));
         }
     }
 

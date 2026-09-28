@@ -117,6 +117,8 @@ describe("native composer", () => {
     it("uses a real multiple file picker, shows size, removes files and submits attachments", async () => {
         const input = find(n => n.type === "input" && n.props.type === "file");
         expect(input.props.multiple).toBe(true);
+        expect(input.props.hidden).not.toBe(true);
+        expect(input.props.className).toBe("native-composer-file-input");
         const click = vi.fn(); input.props.ref.current = { click };
         button("Add attachments").props.onClick(); expect(click).toHaveBeenCalledOnce();
         const a = file("one.txt"), b = file("two.txt");

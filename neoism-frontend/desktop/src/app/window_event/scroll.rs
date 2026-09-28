@@ -70,6 +70,10 @@ impl Application<'_> {
         // If the wheel is over the file tree column, scroll
         // the tree's internal viewport instead of the
         // terminal/editor pane.
+        if route.window.screen.handle_conversations_wheel(&delta) {
+            route.request_redraw();
+            return;
+        }
         if route.window.screen.handle_file_tree_wheel(&delta) {
             route.request_redraw();
             return;

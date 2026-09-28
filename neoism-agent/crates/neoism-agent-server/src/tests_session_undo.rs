@@ -161,8 +161,7 @@ async fn session_undo_redo_step_without_request_body() {
     // Regression: the desktop/daemon clients POST `/undo` and `/redo` with no
     // JSON body, which the old `Json`-extractor handlers rejected with
     // `415 Unsupported Media Type`. The handlers must tolerate an empty body and
-    // compute the revert target server-side (opencode `/undo` `/redo`
-    // semantics).
+    // compute the revert target server-side so repeated undo/redo steps work.
     let root = std::env::temp_dir().join(format!(
         "neoism-agent-undo-nobody-{}",
         Id::ascending(IdKind::Event)

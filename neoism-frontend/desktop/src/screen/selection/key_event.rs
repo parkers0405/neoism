@@ -181,6 +181,11 @@ impl Screen<'_> {
             }
         }
 
+        if self.handle_conversations_key(key) {
+            self.mark_dirty();
+            return;
+        }
+
         if self.handle_neoism_agent_key(key, clipboard) {
             return;
         }

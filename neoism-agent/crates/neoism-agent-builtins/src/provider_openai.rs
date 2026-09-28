@@ -94,6 +94,13 @@ impl ProviderRuntime for OpenAiRuntime {
         }
         let provider_id = request.provider_id.clone();
         Box::pin(async_stream::try_stream! {
+            if request.messages.iter().flat_map(|message| &message.attachments)
+                .any(|attachment| attachment.mime == "application/pdf")
+            {
+                Err::<(), anyhow::Error>(anyhow::anyhow!(
+                    "PDF attachments require an OpenAI Responses model or an Anthropic model; this model uses Chat Completions"
+                ))?;
+            }
             // Refresh an expiring OAuth token (e.g. xAI Grok) before use so a
             // long-lived session doesn't start failing an hour after sign-in.
             let auth = crate::provider_auth::refresh_oauth_if_needed(
@@ -356,9 +363,8 @@ fn apply_chat_text_verbosity(
     configured: Option<neoism_agent_core::TextVerbosity>,
     body: &mut Value,
 ) {
-    // OpenCode excludes Azure because that API rejects the field. GPT-5.x
-    // models reached through Neoism's compatible chat path accept the same
-    // value as a top-level `verbosity` field.
+    // Azure rejects the field. GPT-5.x models reached through Neoism's
+    // compatible chat path accept it as a top-level `verbosity` field.
     if provider_id.eq_ignore_ascii_case("azure") {
         return;
     }
@@ -420,7 +426,7 @@ mod tests {
     }
 
     #[test]
-    fn chat_request_uses_opencode_gpt5_verbosity_rules() {
+    fn chat_request_uses_gpt5_verbosity_rules() {
         let mut body = json!({});
         apply_chat_text_verbosity("openai", "gpt-5.5", None, &mut body);
         assert_eq!(body["verbosity"], "low");

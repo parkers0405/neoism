@@ -167,6 +167,63 @@ impl NeoismAgentPane {
         })
     }
 
+    pub fn conversation_source(&self) -> neoism_ui::panels::agent_pane::state::side_panel::ConversationSource {
+        self.new_chat_source
+    }
+
+    pub fn set_default_chat_source(&mut self, default: neoism_backend::config::DefaultChatSource) {
+        use neoism_backend::config::DefaultChatSource;
+        use neoism_ui::panels::agent_pane::state::side_panel::ConversationSource;
+        let source = match default {
+            DefaultChatSource::Neoism => ConversationSource::Neoism,
+            DefaultChatSource::OpenCode => ConversationSource::OpenCode,
+            DefaultChatSource::ClaudeCode => ConversationSource::ClaudeCode,
+            DefaultChatSource::Codex => ConversationSource::Codex,
+        };
+        self.default_chat_source = source;
+        if !self.has_conversation() && !self.draft_source_explicit {
+            self.set_conversation_source(source);
+            self.draft_source_explicit = false;
+        }
+    }
+
+    pub fn select_draft_source(&mut self, source: neoism_ui::panels::agent_pane::state::side_panel::ConversationSource) {
+        if self.has_conversation() { return; }
+        self.set_conversation_source(source);
+        self.draft_source_explicit = true;
+    }
+
+    pub fn set_conversation_source(&mut self, source: neoism_ui::panels::agent_pane::state::side_panel::ConversationSource) {
+        if self.new_chat_source != source { self.reset_external_options(); }
+        self.new_chat_source = source;
+        if source.provider().is_some() { self.close_picker(); }
+        if let Some(id) = self.session_id.as_ref() {
+            self.session_sources.insert(id.clone(), source);
+        }
+        self.maybe_refresh_external_options();
+    }
+
+    pub fn swap_detail_panel(&mut self) {
+        std::mem::swap(&mut self.side_panel, &mut self.detail_panel);
+    }
+
+    pub fn prepare_detail_panel(&mut self) {
+        self.detail_panel
+            .sync_conversation_details_from(&self.side_panel);
+    }
+
+    pub fn take_catalog_toggle_request(&mut self) -> bool {
+        std::mem::take(&mut self.catalog_toggle_requested)
+    }
+
+    pub fn detail_panel(&self) -> &NeoismAgentSidePanel {
+        &self.detail_panel
+    }
+
+    pub fn detail_panel_mut(&mut self) -> &mut NeoismAgentSidePanel {
+        &mut self.detail_panel
+    }
+
     pub fn side_panel(&self) -> &NeoismAgentSidePanel {
         &self.side_panel
     }
@@ -176,12 +233,22 @@ impl NeoismAgentPane {
     }
 
     /// The viewed session's server-owned title, never an optimistic prompt label.
+    pub fn imported_history(&self) -> Option<&neoism_ui::panels::agent_pane::api_mapping::ImportedHistory> {
+        self.session_id.as_ref().and_then(|id| self.session_histories.get(id))
+    }
+
     pub fn session_title(&self) -> Option<&str> {
         self.session_title
             .as_deref()
             .map(str::trim)
             .filter(|title| !title.is_empty())
     }
+
+    pub fn conversation_root_id(&self) -> Option<&str> { self.session_tree_root_id.as_deref() }
+
+    pub fn server_address(&self) -> &str { &self.server }
+
+    pub fn session_directory(&self) -> Option<&str> { self.directory.as_deref() }
 
     pub fn session_id_str(&self) -> Option<&str> {
         self.session_id.as_deref()
@@ -231,7 +298,103 @@ impl NeoismAgentPane {
     /// git-status worker pattern: never blocks the frame; the worker
     /// pushes its result through `background_tx` and the next frame's
     /// `drain_background_updates` lifts it into `side_panel`.
+    pub fn enable_external_catalog(&mut self) {
+        self.external_catalog_enabled = true;
+        self.maybe_refresh_external_catalog();
+    }
+
+    fn maybe_refresh_external_catalog(&mut self) {
+        use neoism_ui::panels::agent_pane::state::side_panel::ConversationSource;
+        if !self.external_catalog_enabled { return; }
+        if self.external_catalog_remaining > 0 { return; }
+        if self.external_catalog_last_refresh.is_some_and(|at| at.elapsed() < Duration::from_secs(45)) { return; }
+        let Some(directory) = self.directory.clone() else { return; };
+        // A joined workspace has no authority to read the guest's local CLI files.
+        if self.server.trim_end_matches('/') != neoism_agent_server().trim_end_matches('/') || self.server.contains("/agent/workspaces/") {
+            for source in [ConversationSource::OpenCode, ConversationSource::ClaudeCode, ConversationSource::Codex] {
+                self.side_panel.set_external_provider_error(source, "Native histories are available only in local workspaces".into());
+            }
+            self.external_catalog_last_refresh = Some(Instant::now());
+            return;
+        }
+        self.external_catalog_last_refresh = Some(Instant::now());
+        self.external_catalog_generation = self.external_catalog_generation.wrapping_add(1);
+        let generation = self.external_catalog_generation;
+        self.side_panel.set_external_scanning(true);
+        for source in [ConversationSource::OpenCode, ConversationSource::ClaudeCode, ConversationSource::Codex] {
+            self.external_catalog_remaining += 1;
+            let (server, directory, tx) = (self.server.clone(), directory.clone(), self.background_tx.clone());
+            let wake = self.event_wake.clone();
+            if std::thread::Builder::new().name(format!("neoism-{}-history", source.label())).spawn(move || {
+                let result = crate::neoism::agent::api::fetch_external_catalog(&server, &directory, source);
+                let _ = tx.send(NeoismAgentBackgroundUpdate::ExternalCatalogRefreshed { server, directory: Some(directory), generation, source, result });
+                if let Some(wake) = wake { wake.wake(); }
+            }).is_err() {
+                self.external_catalog_remaining -= 1;
+                if self.external_catalog_remaining == 0 { self.side_panel.set_external_scanning(false); }
+                self.side_panel.set_external_provider_error(source, "Could not start history scan".into());
+            }
+        }
+    }
+
+    /// Activate a catalog row. Previews never fall through to an empty native chat.
+    pub fn activate_external_preview(&mut self, entry: &NeoismAgentSessionEntry) -> Option<(String, neoism_ui::panels::agent_pane::state::side_panel::ConversationSource)> {
+        let Some(preview) = entry.external_preview.as_ref() else { return Some((entry.id.clone(), entry.source)); };
+        if let Some(id) = preview.neoism_session_id.as_ref() { return Some((id.clone(), entry.source)); }
+        if preview.history_state == "importing" {
+            self.side_panel.set_external_notice(entry.source, format!("{} history is already importing; refresh to open it when ready", entry.source.label()));
+            return None;
+        }
+        if !preview.import_supported {
+            let reason = preview.import_unavailable_reason.as_deref().unwrap_or("replay/import is not available");
+            self.side_panel.set_external_notice(entry.source, format!("{} history is preview-only: {reason}", entry.source.label()));
+            return None;
+        }
+        if self.external_import_in_flight.is_some() { return None; }
+        let Some(directory) = self.directory.clone() else { return None; };
+        let Some(provider) = entry.source.provider() else { return None; };
+        let key = preview.source_key.clone();
+        let external_id = preview.external_session_id.clone();
+        let server = self.server.clone();
+        let tx = self.background_tx.clone();
+        let wake = self.event_wake.clone();
+        let key_for_thread = key.clone();
+        let source = entry.source;
+        if std::thread::Builder::new().name(format!("neoism-{provider}-import")).spawn(move || {
+            let result = crate::neoism::agent::api::import_external_session(&server, &directory, provider, &external_id);
+            let _ = tx.send(NeoismAgentBackgroundUpdate::ExternalImportCompleted { server, directory: Some(directory), source, source_key: key_for_thread, result });
+            if let Some(wake) = wake { wake.wake(); }
+        }).is_err() {
+            self.pending_external_error = Some(format!("Could not start {} history import", entry.source.label()));
+            self.side_panel.set_external_notice(entry.source, format!("Could not start {} import", entry.source.label()));
+            return None;
+        }
+        self.external_import_in_flight = Some(key.clone());
+        self.side_panel.set_external_importing(Some(key));
+        self.side_panel.set_external_notice(entry.source, format!("Importing {} history…", entry.source.label()));
+        None
+    }
+
+    pub fn external_import_pending(&self) -> bool { self.external_import_in_flight.is_some() }
+
+    pub fn take_external_error(&mut self) -> Option<String> {
+        self.pending_external_error.take()
+    }
+
+    pub fn take_external_open(&mut self) -> Option<(String, neoism_ui::panels::agent_pane::state::side_panel::ConversationSource)> {
+        self.pending_external_open.take()
+    }
+
+    /// A newly bound ACP root may now carry verified source identity. Re-read
+    /// both catalogs so its old external preview reconciles to the real tab.
+    pub(crate) fn refresh_bound_external_root(&mut self) {
+        self.external_catalog_last_refresh = None;
+        self.request_side_panel_session_page(None);
+        self.maybe_refresh_external_catalog();
+    }
+
     pub fn maybe_refresh_side_panel_sessions(&mut self) {
+        self.maybe_refresh_external_catalog();
         self.ensure_session_catalog_stream();
         if !self.side_panel.should_refresh_sessions() {
             return;
@@ -656,6 +819,19 @@ impl NeoismAgentPane {
     /// showing the Sub Agents list.
     pub fn activate_side_panel_subagent(&mut self) -> bool {
         let Some(entry) = self.side_panel.selected_row().cloned() else {
+            return false;
+        };
+        if Some(entry.id.as_str()) == self.session_id.as_deref() {
+            return self.pending_session_switch.take().is_some();
+        }
+        self.switch_session(entry.id);
+        true
+    }
+
+    /// Detail-rail branch navigation must keep the real catalog installed:
+    /// `switch_session` invalidates its requests and switches the pane owner.
+    pub fn activate_detail_panel_subagent(&mut self) -> bool {
+        let Some(entry) = self.detail_panel.selected_row().cloned() else {
             return false;
         };
         if Some(entry.id.as_str()) == self.session_id.as_deref() {
@@ -1699,5 +1875,54 @@ fn desktop_streaming_state(
         Shared::WaitingSubagents => NeoismAgentStreamingState::WaitingSubagents,
         Shared::BackgroundTasks => NeoismAgentStreamingState::BackgroundTasks,
         Shared::Retrying => NeoismAgentStreamingState::Retrying,
+    }
+}
+
+#[cfg(test)]
+mod external_preview_tests {
+    use super::*;
+    use neoism_ui::panels::agent_pane::state::side_panel::{ConversationSource, ExternalSessionPreview};
+
+    #[test]
+    fn bound_root_prunes_only_matching_catalog_identity() {
+        let mut pane = NeoismAgentPane::default();
+        let make_preview = |id: &str, key: &str| {
+            let mut row = NeoismAgentSessionEntry::new(id, "Same title", "").with_source(ConversationSource::ClaudeCode)
+                .with_source_key(Some(key.into()));
+            row.external_preview = Some(ExternalSessionPreview {
+                source_key: key.into(), external_session_id: id.into(), history_state: "not_loaded".into(),
+                import_supported: false, import_unavailable_reason: None, neoism_session_id: None,
+            });
+            row
+        };
+        pane.side_panel.set_external_provider_rows(ConversationSource::ClaudeCode,
+            vec![make_preview("preview:bound", "claude:bound"), make_preview("preview:other", "claude:other")]);
+        assert_eq!(pane.side_panel.sessions().iter().filter(|row| row.external_preview.is_some()).count(), 2);
+        pane.side_panel.set_sessions(vec![NeoismAgentSessionEntry::new("root", "Same title", "")
+            .with_source(ConversationSource::ClaudeCode).with_source_key(Some("claude:bound".into()))]);
+        assert_eq!(pane.side_panel.sessions().iter().filter(|row| row.external_preview.is_some()).count(), 1);
+        assert!(pane.side_panel.sessions().iter().any(|row| row.id == "preview:other"));
+        assert!(pane.side_panel.sessions().iter().any(|row| row.id == "root"));
+    }
+
+    #[test]
+    fn unavailable_provider_is_preview_only_but_imported_root_opens() {
+        for source in [ConversationSource::OpenCode, ConversationSource::ClaudeCode, ConversationSource::Codex] {
+            let mut pane = NeoismAgentPane::default();
+            let mut row = NeoismAgentSessionEntry::new("external:key", "History", "").with_source(source);
+            row.external_preview = Some(ExternalSessionPreview {
+                source_key: format!("{}:key", source.label()),
+                external_session_id: "opaque".into(),
+                history_state: "not_loaded".into(),
+                import_supported: false,
+                import_unavailable_reason: Some("Adapter offline".into()),
+                neoism_session_id: None,
+            });
+            assert!(pane.activate_external_preview(&row).is_none());
+            assert!(!pane.external_import_pending());
+            assert!(pane.side_panel.external_errors().iter().any(|(provider, reason)| *provider == source && reason.contains("Adapter offline")));
+            row.external_preview.as_mut().unwrap().neoism_session_id = Some("native-root".into());
+            assert_eq!(pane.activate_external_preview(&row), Some(("native-root".into(), source)));
+        }
     }
 }

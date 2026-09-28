@@ -57,6 +57,9 @@ impl Screen<'_> {
             config.editor.git_blame_hide_on_scroll;
         for grid in self.context_manager.all_grids_mut().iter_mut() {
             for item in grid.contexts_mut().values_mut() {
+                if let Some(agent) = item.context_mut().neoism_agent.as_mut() {
+                    agent.set_default_chat_source(config.agent.default_chat_source);
+                }
                 if let Some(code) = item.context_mut().code.as_mut() {
                     code.blame.configure(config.editor.git_blame);
                     code.blame.set_options(
@@ -615,6 +618,9 @@ impl Screen<'_> {
         }
         if self.renderer.notes_sidebar.is_visible() {
             offset += self.renderer.notes_sidebar.width();
+        }
+        if self.renderer.conversations_visible {
+            offset += self.renderer.conversations_pane.side_panel().width();
         }
         offset
     }

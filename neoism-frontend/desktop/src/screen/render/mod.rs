@@ -232,12 +232,36 @@ impl Screen<'_> {
             TrailCursorOverlayTarget::NotesSidebar => {
                 self.renderer.notes_sidebar.selected_cursor_rect()
             }
-            TrailCursorOverlayTarget::AgentSidePanel => self
-                .context_manager
-                .current()
-                .neoism_agent
-                .as_ref()
-                .and_then(|agent| agent.side_panel().selected_cursor_rect()),
+            TrailCursorOverlayTarget::AgentSidePanel => (self
+                .renderer
+                .conversations_visible
+                && self.renderer.conversations_pane.side_panel().is_focused())
+            .then(|| {
+                self.renderer
+                    .conversations_pane
+                    .side_panel()
+                    .selected_cursor_rect()
+            })
+            .flatten()
+            .or_else(|| {
+                self.context_manager
+                    .current()
+                    .neoism_agent
+                    .as_ref()
+                    .and_then(|agent| {
+                        agent
+                            .detail_panel()
+                            .selected_cursor_rect()
+                            .filter(|_| agent.detail_panel().is_focused())
+                            .or_else(|| {
+                                agent
+                                    .side_panel()
+                                    .is_focused()
+                                    .then(|| agent.side_panel().selected_cursor_rect())
+                                    .flatten()
+                            })
+                    })
+            }),
             TrailCursorOverlayTarget::Tabs => tab_cursor_rect,
             TrailCursorOverlayTarget::GitDiffPanel => {
                 self.renderer.git_diff_panel.selected_cursor_rect()

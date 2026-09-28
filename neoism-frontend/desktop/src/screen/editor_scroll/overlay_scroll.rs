@@ -182,6 +182,12 @@ impl Screen<'_> {
                 self.mark_dirty();
                 return true;
             }
+            if agent.detail_panel().contains_point(mouse_x, mouse_y) {
+                let pixels = Self::vertical_overlay_scroll_pixels(delta, 34.0);
+                agent.detail_panel_mut().scroll_content_pixels(-pixels);
+                self.mark_dirty();
+                return true;
+            }
             if agent.side_panel().contains_point(mouse_x, mouse_y) {
                 let row_h = agent.side_panel().row_height().max(1.0);
                 let pixels = Self::vertical_overlay_scroll_pixels(delta, row_h);

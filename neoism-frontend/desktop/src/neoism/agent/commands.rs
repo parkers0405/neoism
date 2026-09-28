@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -75,9 +75,7 @@ impl NeoismAgentPane {
                 self.toggle_input_help();
             }
             SlashCommandAction::ToggleSidebar => {
-                self.side_panel_mut().toggle_visibility();
-                let visible = !self.side_panel().user_hidden();
-                self.push_outbound(OutboundAgentCommand::SetSidebarVisible { visible });
+                self.catalog_toggle_requested = true;
             }
             SlashCommandAction::PissOnScreen => self.start_fx_easter_egg(
                 neoism_ui::panels::agent_pane::view::fx::AgentFxKind::Piss,
@@ -516,7 +514,7 @@ impl NeoismAgentPane {
         }
     }
 
-    pub(super) fn switch_session(&mut self, session_id: String) {
+    pub(crate) fn switch_session(&mut self, session_id: String) {
         if session_id.is_empty() {
             return;
         }
@@ -535,6 +533,13 @@ impl NeoismAgentPane {
             self.pending_session_switch = None;
             return;
         }
+        self.reset_external_options();
+        self.new_chat_source = self.side_panel.sessions().iter()
+            .find(|entry| entry.id == session_id && !entry.is_header)
+            .map(|entry| entry.source)
+            .or_else(|| self.session_sources.get(&session_id).copied())
+            .unwrap_or_default();
+        self.session_sources.insert(session_id.clone(), self.new_chat_source);
         if self
             .session_cache
             .get(&session_id)
@@ -717,6 +722,9 @@ impl NeoismAgentPane {
             thinking: self.thinking.clone(),
             parent_id: self.parent_session_id.clone(),
             directory: self.directory.clone(),
+            source: self.new_chat_source,
+            imported_history: self.session_id.as_ref().and_then(|id| self.session_histories.get(id)).cloned(),
+            plan_todos: self.current_plan_todos.as_deref().map(super::pane::plan_to_shared),
         };
         let cached_live = self
             .session_cache
@@ -806,6 +814,11 @@ impl NeoismAgentPane {
             .flatten();
         self.cache_current_session(stays_in_family);
         let state = cached.state;
+        self.current_plan_todos = state.plan_todos.as_deref().map(super::pane::plan_from_shared);
+        if cached.hydrated {
+            self.new_chat_source = state.source;
+            self.session_sources.insert(session_id.to_string(), state.source);
+        }
         let parent_id = state.parent_id.clone().or(roster_parent.clone());
         // Never carry a root from a previously viewed family. A nested child
         // may initially use its direct parent; the tree refresh promotes this
@@ -838,7 +851,6 @@ impl NeoismAgentPane {
         self.timeline_scroll_px = 0.0;
         self.timeline_follow_bottom = true;
         self.timeline_content_height_px = cached.timeline_content_height_px;
-        self.side_panel.set_show_home_override(false);
         if !stays_in_family {
             self.side_panel.invalidate_subagent_refresh();
             self.clear_pending_interactions();
@@ -924,6 +936,10 @@ impl NeoismAgentPane {
         if self.is_subagent_session() {
             return Err("subagent sessions are view-only".to_string());
         }
+        if self.session_id.is_some() && self.conversation_source().provider().is_some()
+            && self.external_option_pending() {
+            return Err("Wait for the provider to confirm your option before sending".to_string());
+        }
         let parts = self.prompt_parts_for(&prompt);
         let system = self.prompt_system_for(&prompt);
         self.push_outbound(OutboundAgentCommand::SendPrompt {
@@ -987,6 +1003,8 @@ impl NeoismAgentPane {
             .push_back(PendingPromptDispatch {
                 origin_session_id,
                 origin_draft_id,
+                source: self.new_chat_source,
+                draft_external_selections: if self.session_id.is_none() { self.draft_external_selections.clone() } else { HashMap::new() },
                 server: self.server.clone(),
                 directory: self.directory.clone(),
                 message_id,
@@ -1809,10 +1827,28 @@ impl NeoismAgentPane {
         self.note_timeline_prepend(prepended);
     }
 
-    pub(super) fn create_new_session(&mut self) {
+    pub(crate) fn create_new_chat_from(&mut self, source: neoism_ui::panels::agent_pane::state::side_panel::ConversationSource) {
+        self.create_new_session();
+        let source_changed = self.new_chat_source != source;
+        self.new_chat_source = source;
+        self.draft_source_explicit = true;
+        if source_changed {
+            self.reset_external_options();
+            self.maybe_refresh_external_options();
+        }
+        if source.provider().is_none() {
+            self.push_outbound(OutboundAgentCommand::EnsureSession);
+        }
+    }
+
+    pub(crate) fn create_new_session(&mut self) {
+        self.new_chat_source = self.default_chat_source;
+        self.draft_source_explicit = false;
+        self.reset_external_options();
         self.close_connect();
         self.prompt_draft_id = self.prompt_draft_id.wrapping_add(1);
         self.session_id = None;
+        self.current_plan_todos = None;
         self.session_title = None;
         self.parent_session_id = None;
         self.side_panel.set_viewed_session_id(None);
@@ -1829,6 +1865,7 @@ impl NeoismAgentPane {
         self.execution_timer_anchor = None;
         self.clear_composer();
         self.system_message("Session", "new draft");
+        self.maybe_refresh_external_options();
     }
 
     fn run_server_command(&mut self, command: &str, command_args: &str) {
@@ -1887,14 +1924,7 @@ impl NeoismAgentPane {
             .as_deref()
             .map(|dir| format!("/v2/sessions?directory={}", percent_encode(dir)))
             .unwrap_or_else(|| "/v2/sessions".to_string());
-        let body = json!({
-            "parentId": null,
-            "title": null,
-            "agent": self.agent.clone(),
-            "model": session_model_json(self.model.as_str(), self.thinking.as_deref(), self.connection_id.as_deref()),
-            "permission": null,
-            "workspaceId": null,
-        });
+        let body = root_session_create_body(self.agent.clone(), session_model_json(self.model.as_str(), self.thinking.as_deref(), self.connection_id.as_deref()), self.new_chat_source, &self.draft_external_selections);
         let response = api_request_json(&self.server, "POST", &path, Some(&body))?
             .ok_or_else(|| "server did not return session".to_string())?;
         let id = response
@@ -1904,6 +1934,7 @@ impl NeoismAgentPane {
             .ok_or_else(|| "server did not return session id".to_string())?
             .to_string();
         self.session_id = Some(id.clone());
+        self.session_sources.insert(id.clone(), self.new_chat_source);
         self.session_title =
             neoism_ui::panels::agent_pane::api_mapping::session_state_from_json(
                 &response,
@@ -1912,8 +1943,36 @@ impl NeoismAgentPane {
         self.parent_session_id = None;
         self.session_tree_root_id = Some(id.clone());
         self.side_panel.set_viewed_session_id(Some(id.clone()));
+        let pending_model = self.pending_external_model_picker;
+        self.reset_external_options();
+        self.pending_external_model_picker = pending_model;
+        self.sync_input_pickers();
+        self.maybe_refresh_external_options();
         Ok(id)
     }
+}
+
+fn root_session_create_body(
+    agent: Option<String>,
+    model: Option<Value>,
+    source: neoism_ui::panels::agent_pane::state::side_panel::ConversationSource,
+    selections: &HashMap<String, String>,
+) -> Value {
+    let mut body = json!({
+        "parentId": null,
+        "title": null,
+        "agent": if source.provider().is_some() { None } else { agent },
+        "model": if source.provider().is_some() { None } else { model },
+        "permission": null,
+        "workspaceId": null,
+    });
+    if let Some(provider) = source.provider() {
+        body["externalProvider"] = json!(provider);
+        if !selections.is_empty() {
+            body["externalOptions"] = json!(selections);
+        }
+    }
+    body
 }
 
 pub(super) fn native_prompt_author(local_presence_name: Option<&str>) -> String {
@@ -1926,7 +1985,51 @@ pub(super) fn native_prompt_author(local_presence_name: Option<&str>) -> String 
 
 #[cfg(test)]
 mod native_prompt_author_tests {
-    use super::native_prompt_author;
+    use super::{native_prompt_author, root_session_create_body};
+    use neoism_ui::panels::agent_pane::state::side_panel::ConversationSource;
+
+    #[test]
+    fn sidebar_new_external_chat_stays_draft_until_send() {
+        let mut pane = crate::neoism::agent::NeoismAgentPane::default();
+        pane.create_new_chat_from(ConversationSource::ClaudeCode);
+        assert_eq!(pane.conversation_source(), ConversationSource::ClaudeCode);
+        assert!(pane.session_id.is_none());
+        assert!(!pane.drain_pending_outbound().iter().any(|command| matches!(command, neoism_ui::panels::agent_pane::outbound::OutboundAgentCommand::EnsureSession)));
+    }
+
+    #[test]
+    fn queued_first_prompt_keeps_its_draft_provider_choices() {
+        let mut pane = crate::neoism::agent::NeoismAgentPane::default();
+        pane.new_chat_source = ConversationSource::OpenCode;
+        pane.draft_external_selections.insert("model".into(), "opencode/big-pickle".into());
+        pane.draft_external_selections.insert("effort".into(), "high".into());
+        pane.prompt_dispatch_in_flight = true;
+        pane.queue_send_prompt_command("msg".into(), "hello".into(), vec![], None, None,
+            String::new(), None, neoism_protocol::agent::PromptDelivery::Steer, true);
+        pane.draft_external_selections.clear();
+        let request = pane.pending_prompt_dispatches.front().unwrap();
+        assert!(request.origin_session_id.is_none());
+        assert_eq!(request.draft_external_selections.get("model").map(String::as_str), Some("opencode/big-pickle"));
+        assert_eq!(request.draft_external_selections.get("effort").map(String::as_str), Some("high"));
+        let body = root_session_create_body(request.agent.clone(), None, request.source, &request.draft_external_selections);
+        assert_eq!(body["externalOptions"]["model"], "opencode/big-pickle");
+        assert_eq!(body["externalOptions"]["effort"], "high");
+    }
+
+    #[test]
+    fn root_creation_carries_only_external_identity_for_acp() {
+        let selections = std::collections::HashMap::from([("model".into(), "selected-model".into()), ("effort".into(), "high".into())]);
+        let body = root_session_create_body(Some("build".into()), Some(serde_json::json!({"providerId":"openai", "modelId":"gpt"})), ConversationSource::Codex, &selections);
+        assert_eq!(body["externalProvider"], "codex");
+        assert_eq!(body["externalOptions"]["model"], "selected-model");
+        assert_eq!(body["externalOptions"]["effort"], "high");
+        assert!(body["agent"].is_null() && body["model"].is_null());
+        assert!(body["parentId"].is_null());
+        let native = root_session_create_body(Some("build".into()), None, ConversationSource::Neoism, &selections);
+        assert!(native.get("externalProvider").is_none());
+        assert!(native.get("externalOptions").is_none());
+        assert_eq!(native["agent"], "build");
+    }
 
     #[test]
     fn uses_published_presence_name() {
@@ -1963,8 +2066,8 @@ fn dispatch_prompt_request(
     };
     let body = json!({
         "messageId": request.message_id,
-        "model": prompt_model_json(request.model.as_str(), request.thinking.as_deref(), request.connection_id.as_deref()),
-        "agent": request.agent,
+        "model": if request.source.provider().is_some() { None } else { prompt_model_json(request.model.as_str(), request.thinking.as_deref(), request.connection_id.as_deref()) },
+        "agent": if request.source.provider().is_some() { None } else { request.agent },
         "noReply": false,
         "system": request.system,
         "tools": null,
@@ -1992,14 +2095,12 @@ fn create_prompt_session(
         .as_deref()
         .map(|directory| format!("/v2/sessions?directory={}", percent_encode(directory)))
         .unwrap_or_else(|| "/v2/sessions".to_string());
-    let body = json!({
-        "parentId": null,
-        "title": null,
-        "agent": request.agent.clone(),
-        "model": session_model_json(request.model.as_str(), request.thinking.as_deref(), request.connection_id.as_deref()),
-        "permission": null,
-        "workspaceId": null,
-    });
+    let body = root_session_create_body(
+        request.agent.clone(),
+        session_model_json(request.model.as_str(), request.thinking.as_deref(), request.connection_id.as_deref()),
+        request.source,
+        &request.draft_external_selections,
+    );
     let response = api_request_json(&request.server, "POST", &path, Some(&body))?
         .ok_or_else(|| "server did not return session".to_string())?;
     let session_id = response

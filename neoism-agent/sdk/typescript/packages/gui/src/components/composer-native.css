@@ -20,6 +20,8 @@
     display: inline-flex; align-items: center; justify-content: center; border: 0; box-shadow: none;
 }
 .native-composer .native-composer-add { left: 6.75px; background: transparent; color: var(--muted, #aaa); border-radius: 8px; }
+/* A direct native tap opens Photos/Files on iOS; the visible button remains keyboard-accessible. */
+.native-composer .native-composer-file-input { position: absolute; z-index: 1; left: 6.75px; bottom: 6.75px; width: 30px; height: 30px; opacity: 0; cursor: pointer; }
 .native-composer .native-composer-send { right: 6.75px; border-radius: 8px; background: var(--fg, #eee); color: var(--bg, #161616); }
 .native-composer .native-composer-send:disabled { opacity: .45; }
 .native-composer .native-composer-skirt {

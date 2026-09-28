@@ -594,6 +594,11 @@ impl NeoismAgentPane {
     }
 
     pub fn latest_usage(&self) -> Option<NeoismAgentUsage> {
+        if let Some((_, usage)) = self.session_id.as_deref().and_then(|id| self.live_usage_by_session.get(id)) {
+            let mut usage = usage.clone();
+            usage.context_limit = self.model_context_limit.or(usage.context_limit);
+            return Some(usage);
+        }
         let mut usage = self
             .messages
             .iter()

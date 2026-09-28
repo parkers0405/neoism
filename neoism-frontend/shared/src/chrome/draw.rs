@@ -730,12 +730,16 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         let tab_cursor_rect = self.buffer_tabs.focused_cursor_rect();
         let agent_tab_active = self.is_neoism_agent_tab_active();
         let agent_side_panel_takeover = self.agent_side_panel_takeover_active();
-        let agent_side_panel_focused = content_available
-            && agent_tab_active
+        let agent_side_panel_focused = (self.conversations_visible
             && self
                 .agent_pane
                 .as_ref()
-                .is_some_and(|pane| pane.side_panel().is_focused());
+                .is_some_and(|pane| pane.side_panel().is_focused()))
+            || (content_available
+                && agent_tab_active
+                && self.agent_pane.as_ref().is_some_and(|pane| {
+                    pane.side_panel().is_focused() || pane.detail_panel().is_focused()
+                }));
         let agent_input_cursor_available = content_available
             && agent_tab_active
             && !agent_side_panel_takeover
@@ -985,6 +989,26 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                 None,
                 0.0,
             );
+        }
+
+        if let (Some(rect), Some(pane)) = (layout.conversations, self.agent_pane.as_mut())
+        {
+            crate::panels::agent_pane::view::side_panel::render_side_panel_with_icons::<
+                _,
+                crate::panels::agent_pane::view::side_panel::SharedAgentSidePanelIcons,
+            >(
+                sugarloaf,
+                pane,
+                [rect.x, rect.y, rect.w, rect.h],
+                &self.ide_theme,
+                1.0,
+                self.last_draw_time
+                    .map_or(0.0, |t| t.as_secs_f32() % 10_000.0),
+                Some(self.last_pointer_pos),
+                &[],
+            );
+        } else if let Some(pane) = self.agent_pane.as_mut() {
+            pane.side_panel_mut().clear_last_panel_rect();
         }
 
         // Rich git side panel — right column scoped to the middle band,

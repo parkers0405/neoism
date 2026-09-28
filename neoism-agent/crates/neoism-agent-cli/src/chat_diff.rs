@@ -5,7 +5,7 @@ use serde_json::Value;
 use crate::chat_ui::{highlight_code_line, terminal_size, truncate_for_terminal};
 use crate::{DIM, RESET};
 
-// OpenCode/Codex-style dark diff palette: tinted success/error over a dark terminal.
+// Dark diff palette: tinted success/error over a dark terminal.
 const CODE_BG: &str = "\x1b[48;2;16;16;16m";
 const GREEN_BG: &str = "\x1b[48;2;16;43;25m";
 const RED_BG: &str = "\x1b[48;2;50;20;24m";

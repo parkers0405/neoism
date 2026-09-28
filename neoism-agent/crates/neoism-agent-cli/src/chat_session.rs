@@ -23,6 +23,8 @@ pub(crate) async fn create_cli_session(
             .transpose()?,
         permission: None,
         workspace_id: None,
+        external_provider: None,
+        external_options: None,
     };
     let mut builder = client.post(format!("{server}/v2/sessions")).json(&request);
     if let Some(dir) = dir {

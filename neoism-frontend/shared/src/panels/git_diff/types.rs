@@ -139,6 +139,8 @@ pub enum PanelHit {
     /// folder's collapsed state. The `usize` indexes the panel's cached
     /// `visual_rows` so the caller can resolve the directory path.
     FolderToggle(usize),
+    FolderCheckbox(usize),
+    RemoteButton(usize),
     /// Click landed on the top branch selector button — caller opens
     /// (or closes) the branch dropdown.
     BranchButton,

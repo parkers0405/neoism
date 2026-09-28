@@ -10,8 +10,12 @@ pub(crate) async fn handle_create_thread(
     model: Option<String>,
     connection_id: Option<String>,
     thinking: Option<String>,
+    external_provider: Option<String>,
 ) {
     let mut body = serde_json::Map::new();
+    if let Some(provider) = external_provider {
+        body.insert("externalProvider".into(), Value::String(provider));
+    }
     if let Some(title) = title.clone() {
         body.insert("title".to_string(), Value::String(title));
     }
@@ -251,12 +255,28 @@ pub(crate) fn thread_summary_from_session(session: &Value) -> Option<ThreadSumma
         .get("pinned")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    let external_provider = if session
+        .get("parentId")
+        .is_some_and(|value| !value.is_null())
+    {
+        None
+    } else {
+        session
+            .get("externalAgent")
+            .filter(|external| {
+                external.get("runtime").and_then(Value::as_str) == Some("acp")
+            })
+            .and_then(|external| external.get("provider").and_then(Value::as_str))
+            .filter(|provider| matches!(*provider, "opencode" | "claude" | "codex"))
+            .map(str::to_string)
+    };
     Some(ThreadSummary {
         session_id,
         title,
         directory,
         model,
         agent,
+        external_provider,
         updated_at,
         message_count: 0,
         busy: false,
@@ -1304,12 +1324,9 @@ pub(crate) async fn handle_mcp_oauth_authorize(
     inner: Arc<AgentInner>,
     name: String,
     directory: Option<String>,
+    redirect_uri: Option<String>,
 ) {
-    let query = directory
-        .as_deref()
-        .filter(|directory| !directory.is_empty())
-        .map(|directory| format!("?directory={}", percent_encode(directory)))
-        .unwrap_or_default();
+    let query = mcp_auth_query(directory.as_deref(), redirect_uri.as_deref());
     let path = format!(
         "/v2/plugins/dev.neoism.mcp/{}/auth{query}",
         percent_encode(&name)
@@ -1336,6 +1353,16 @@ pub(crate) async fn handle_mcp_oauth_authorize(
             });
         }
     }
+}
+
+fn mcp_auth_query(directory: Option<&str>, redirect_uri: Option<&str>) -> String {
+    let mut query = mcp_directory_query(directory);
+    if let Some(uri) = redirect_uri.filter(|uri| !uri.is_empty()) {
+        query.push(if query.is_empty() { '?' } else { '&' });
+        query.push_str("redirectUri=");
+        query.push_str(&percent_encode(uri));
+    }
+    query
 }
 
 fn mcp_directory_query(directory: Option<&str>) -> String {
@@ -1368,6 +1395,7 @@ pub(crate) async fn handle_mcp_simple_action(
     name: String,
     directory: Option<String>,
     action: &str,
+    redirect_uri: Option<String>,
 ) {
     let path = format!(
         "/v2/plugins/dev.neoism.mcp/{}/{action}{}",
@@ -1379,7 +1407,7 @@ pub(crate) async fn handle_mcp_simple_action(
         let auth_path = format!(
             "/v2/plugins/dev.neoism.mcp/{}/auth{}",
             percent_encode(&name),
-            mcp_directory_query(directory.as_deref())
+            mcp_auth_query(directory.as_deref(), redirect_uri.as_deref())
         );
         match http_post_json(&inner, &auth_path, &json!({})).await {
             Ok(value) => match value.get("authorizationUrl").and_then(Value::as_str) {
@@ -1525,6 +1553,32 @@ pub(crate) fn running_state_message(
             .or_else(|| status.get("started"))
             .and_then(Value::as_u64),
     })
+}
+
+fn todo_items_from_response(value: &Value) -> Vec<TodoItem> {
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|todo| {
+            Some(TodoItem {
+                status: todo.get("status")?.as_str()?.to_owned(),
+                content: todo.get("content")?.as_str()?.to_owned(),
+            })
+        })
+        .collect()
+}
+
+/// Restore persisted ACP/Neoism tasks on web attach or SSE reconnection.
+pub(crate) async fn push_todo_snapshot(inner: Arc<AgentInner>, session_id: String) {
+    let path = format!("/v2/sessions/{}/todos", percent_encode(&session_id));
+    let Ok(value) = http_get_json(&inner, &path).await else {
+        return;
+    };
+    let _ = inner.tx.send(AgentServerMessage::TodoUpdate {
+        session_id,
+        todos: todo_items_from_response(&value),
+    });
 }
 
 pub(crate) async fn push_runtime_snapshot(inner: Arc<AgentInner>, session_id: String) {

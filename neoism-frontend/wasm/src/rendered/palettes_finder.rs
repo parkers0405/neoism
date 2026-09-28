@@ -494,6 +494,18 @@ impl ChromeBridge {
         .unwrap_or(JsValue::NULL)
     }
 
+    pub fn conversations_visible(&self) -> bool {
+        self.chrome.conversations_visible
+    }
+
+    pub fn drain_conversation_new(&mut self) -> Option<String> {
+        self.chrome.take_conversation_new().map(|source| source.provider().unwrap_or("neoism").to_string())
+    }
+
+    pub fn drain_conversation_open(&mut self) -> Option<String> {
+        self.chrome.take_conversation_open()
+    }
+
     pub fn drain_agent_tab_opens(&mut self) -> u32 {
         let count = self.pending_agent_tab_opens;
         self.pending_agent_tab_opens = 0;

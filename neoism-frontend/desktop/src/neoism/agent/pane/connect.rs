@@ -1,6 +1,6 @@
 //! The `/connect` provider-auth flow for the agent GUI.
 //!
-//! Mirrors opencode's `auth login`, but as an in-GUI multi-stage picker:
+//! In-GUI multi-stage provider authentication picker:
 //!
 //! 1. **Connect a provider** — the catalog split into "Popular" + "Providers",
 //!    with a checkmark on providers that are already connected
@@ -978,6 +978,24 @@ impl NeoismAgentPane {
         provider: &ConnectProvider,
         method: &ConnectMethod,
     ) {
+        // Browser callback methods bind loopback on the host, which a joined
+        // laptop cannot reach. Use the corresponding device-code method;
+        // authorization opens here while polling stays on the host.
+        let method = if self.server.contains("/agent/workspaces/")
+            && ((provider.id == "openai" && method.label.to_ascii_lowercase().contains("browser"))
+                || (provider.id == "xai" && !method.is_api && !method.label.contains("Headless")))
+        {
+            self.connect.as_ref()
+                .and_then(|flow| flow.methods_by_provider.get(&provider.id))
+                .and_then(|methods| methods.iter().find(|candidate| candidate.label.to_ascii_lowercase().contains("headless")))
+                .cloned()
+                .unwrap_or_else(|| method.clone())
+        } else {
+            method.clone()
+        };
+        if let Some(flow) = self.connect.as_mut() {
+            flow.method = Some(method.clone());
+        }
         let body = json!({ "method": method.index, "inputs": {}, "label": self.connect.as_ref().and_then(|flow| flow.label.clone()), "connectionId": self.connect.as_ref().and_then(|flow| flow.connection.as_ref().map(|connection| connection.id.clone())) });
         self.connect_mutation(
             "POST",
@@ -985,7 +1003,7 @@ impl NeoismAgentPane {
             Some(body),
             ConnectEffect::Authorized {
                 provider: provider.clone(),
-                method: method.clone(),
+                method,
             },
         );
     }

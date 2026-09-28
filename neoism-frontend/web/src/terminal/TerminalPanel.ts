@@ -397,6 +397,7 @@ export interface TerminalPanelOptions {
   onWorkspaceSelected?: (workspaceId: string) => void;
   /** Alt+P `cd …` requested a new declared workspace root. */
   onWorkspaceRootRequested?: (path: string, workspaceId?: string | null) => void;
+  onMoveWorkspaceTab?: (delta: -1 | 1) => void;
   onWorkspaceIslandIntent?: (intent: {
     kind: "activate" | "context_menu" | "open_workspaces";
     workspace_id?: string | null;
@@ -1772,6 +1773,21 @@ export class TerminalPanel {
       // (`mirror_agent_event_to_bridge` -> `chrome.notifications`),
       // so we don't double-push from here. Plain forward and let the
       // bridge fan it out.
+      // OAuth runs on the daemon, but the authorization page belongs on the
+      // initiating device. Browsers may block an asynchronous popup; the
+      // agent timeline keeps the clickable URL as a fallback.
+      const authUrl = typeof payload === "object" && payload !== null
+        ? ("ConnectOauthUrl" in payload ? payload.ConnectOauthUrl.url
+          : "McpOauthUrl" in payload ? payload.McpOauthUrl.url : null)
+        : null;
+      if (typeof authUrl === "string") {
+        try {
+          const parsed = new URL(authUrl);
+          if (parsed.protocol === "https:" || parsed.protocol === "http:") {
+            window.open(parsed.href, "_blank", "noopener,noreferrer");
+          }
+        } catch { /* The timeline still shows the link or auth error. */ }
+      }
       this.wasmAdapter?.agentEvent?.(JSON.stringify(payload));
       // A CreateThread reply can arrive after the user has already opened a
       // second fresh tab. Keep the reply bound to its originating tab and
@@ -2191,6 +2207,18 @@ export class TerminalPanel {
         "CreateThread" in message
       ) {
         this.pendingAgentSessionRouteId = this.activeAgentRouteId();
+      }
+      const mcpAuth = message && typeof message === "object"
+        ? ("McpOauthAuthorize" in message ? message.McpOauthAuthorize
+          : "McpConnect" in message ? message.McpConnect : null)
+        : null;
+      if (mcpAuth && typeof mcpAuth === "object" && "name" in mcpAuth
+          && typeof mcpAuth.name === "string" && this.options.activeWorkspaceId) {
+        const callback = new URL(
+          `/agent/workspaces/${encodeURIComponent(this.options.activeWorkspaceId)}/v2/plugins/dev.neoism.mcp/${encodeURIComponent(mcpAuth.name)}/auth/callback`,
+          this.options.client.httpOrigin(),
+        );
+        (mcpAuth as { redirect_uri?: string }).redirect_uri = callback.href;
       }
       this.options.client.sendRaw(
         JSON.stringify({
@@ -2890,8 +2918,10 @@ export class TerminalPanel {
 
   private drainChromeIntents(): void {
     this.drainTopBarActions();
+    if (this.wasmAdapter?.conversationsVisible?.()) this.ensureNeoismAgentAttached();
     this.drainChromePageIntents();
     this.drainAgentTabOpens();
+    this.drainConversationOpens();
     this.drainFileTreeOpens();
     this.drainSidePanelOpens();
     this.drainBufferTabClicks();
@@ -5498,6 +5528,21 @@ export class TerminalPanel {
     this.setIdeTheme(names[next]);
   }
 
+  private drainConversationOpens(): void {
+    const provider = this.wasmAdapter?.drainConversationNew?.();
+    if (provider) {
+      this.openNeoismAgentTab();
+      this.wasmAdapter?.agentNewChatFrom?.(provider);
+      this.scheduleDraw();
+    }
+    const id = this.wasmAdapter?.drainConversationOpen?.();
+    if (!id) return;
+    this.openNeoismAgentTab();
+    this.wasmAdapter?.agentSwitchThread?.(id);
+    this.bindAgentSessionToRoute(this.activeAgentRouteId(), id);
+    this.scheduleDraw();
+  }
+
   private drainAgentTabOpens(): void {
     const count = this.wasmAdapter?.drainAgentTabOpens?.() ?? 0;
     for (let i = 0; i < count; i += 1) {
@@ -7200,6 +7245,14 @@ export class TerminalPanel {
     //
     // Panel toggles + global navigation.
     // ---------------------------------------------------------------
+    // Ctrl+Alt+Shift+Left/Right moves the active top-level workspace tab.
+    if (event.ctrlKey && event.altKey && event.shiftKey && !event.metaKey) {
+      if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+        this.options.onMoveWorkspaceTab?.(event.key === "ArrowLeft" ? -1 : 1);
+        return true;
+      }
+    }
+
     // Alt+Shift+ArrowLeft/Right → move active buffer tab to previous /
     // next slot. Mirrors MoveActiveBufferTabToPrev/Next.
     if (event.altKey && event.shiftKey && !event.ctrlKey && !event.metaKey) {
@@ -7577,10 +7630,10 @@ export class TerminalPanel {
         return true;
       }
     }
-    // Ctrl+Shift+Alt+Arrow* → resize active editor split. Desktop's
-    // Linux/Windows MoveDivider* binding lives here.
+    // Ctrl+Shift+Alt+Up/Down → resize active editor split. Horizontal
+    // arrows move top-level workspace tabs above.
     if (event.ctrlKey && event.shiftKey && event.altKey && !event.metaKey) {
-      if (isArrowKey(event.key)) {
+      if (event.key === "ArrowUp" || event.key === "ArrowDown") {
         this.moveEditorDivider(arrowKeyDirection(event.key));
         return true;
       }

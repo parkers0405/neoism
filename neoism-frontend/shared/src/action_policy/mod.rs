@@ -388,6 +388,12 @@ pub enum Action<H> {
     /// Move current buffer tab to next slot.
     MoveActiveBufferTabToNext,
 
+    /// Move the active top-level workspace tab to the previous slot.
+    MoveWorkspaceTabToPrev,
+
+    /// Move the active top-level workspace tab to the next slot.
+    MoveWorkspaceTabToNext,
+
     /// Switch to next top-level workspace tab.
     SelectNextTab,
 
@@ -537,6 +543,8 @@ pub fn parse_action_from_string<H>(action: String) -> Action<H> {
         "movecurrenttabtonext" => Some(Action::MoveCurrentTabToNext),
         "moveactivebuffertabtoprev" => Some(Action::MoveActiveBufferTabToPrev),
         "moveactivebuffertabtonext" => Some(Action::MoveActiveBufferTabToNext),
+        "moveworkspacetabtoprev" => Some(Action::MoveWorkspaceTabToPrev),
+        "moveworkspacetabtonext" => Some(Action::MoveWorkspaceTabToNext),
         "closetab" => Some(Action::TabCloseCurrent),
         "closesplitortab" => Some(Action::CloseCurrentSplitOrTab),
         "closeunfocusedtabs" => Some(Action::TabCloseUnfocused),

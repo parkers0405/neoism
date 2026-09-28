@@ -100,10 +100,9 @@ pub(crate) fn gpt5_text_verbosity(
     configured: Option<neoism_agent_core::TextVerbosity>,
 ) -> Option<&'static str> {
     let model_id = model_id.to_ascii_lowercase();
-    // Match OpenCode v2's provider transform exactly: low by default for
-    // non-chat, non-Codex GPT-5.x models. Other model families may reject the
-    // Responses API text-verbosity field, so a global config value is ignored
-    // for those models rather than poisoning their requests.
+    // Default to low for non-chat, non-Codex GPT-5.x models. Other model
+    // families may reject the Responses API text-verbosity field, so a global
+    // config value is ignored for those models rather than poisoning requests.
     if !model_id.contains("gpt-5.")
         || model_id.contains("codex")
         || model_id.contains("-chat")

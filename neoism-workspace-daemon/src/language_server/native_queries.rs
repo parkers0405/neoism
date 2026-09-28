@@ -66,6 +66,11 @@ pub(crate) fn query_at(
     // Sync-before-query jobs.
     super::live_sync::flush_document_sync(runtime, root, &file);
     let status = engine::status(runtime, root, Some(&file));
+    // Occurrence highlighting is an idle probe, not a user command. Files
+    // without an LSP route have no occurrences, rather than an error.
+    if status.is_empty() && action == EditorLspAction::DocumentHighlight {
+        return query_result(surface_id, seq, action, root, QueryResultBody::default());
+    }
     if !status.is_empty()
         && status
             .iter()

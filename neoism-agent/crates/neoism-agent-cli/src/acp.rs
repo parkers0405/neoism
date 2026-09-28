@@ -99,6 +99,7 @@ async fn ensure_server(
                 hostname,
                 port,
                 cors: Vec::new(),
+                hosted_attestation: None,
             },
             crate::standalone_services(),
         )
@@ -338,6 +339,8 @@ impl AcpBridge {
                 model: model_param(&params).map(model_ref_from_user_model),
                 permission: None,
                 workspace_id: None,
+                external_provider: None,
+                external_options: None,
             })
             .send()
             .await?

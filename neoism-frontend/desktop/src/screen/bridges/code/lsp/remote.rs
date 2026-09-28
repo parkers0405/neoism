@@ -88,6 +88,7 @@ struct Subscription {
     attempts: u8,
     due: Instant,
     pill: Option<Pill>,
+    reported_errors: std::collections::HashSet<String>,
 }
 #[derive(Default)]
 struct RemoteState {
@@ -153,6 +154,23 @@ fn interactive_matches(
 }
 fn owner_matches_link(document: &Document, endpoint: Option<&str>) -> bool {
     endpoint == Some(document.endpoint.as_str())
+}
+
+fn passive_lsp_request(kind: &Kind, action: Option<Action>) -> bool {
+    matches!(kind, Kind::Sync)
+        || matches!(
+            action,
+            Some(
+                Action::Hover
+                    | Action::Completion
+                    | Action::SignatureHelp
+                    | Action::DocumentHighlight
+            )
+        )
+}
+
+fn report_passive_error(sub: &mut Subscription, message: &str) -> bool {
+    sub.reported_errors.insert(message.to_owned())
 }
 
 impl Screen<'_> {
@@ -451,10 +469,26 @@ impl Screen<'_> {
         };
         // Only the link to this workspace's owner is allowed. A tab switch may
         // briefly leave a different active link: fail/retry, never misroute.
+        let action = match &request {
+            Request::LspQueryAt { action, .. } => Some(*action),
+            _ => None,
+        };
         if !owner_matches_link(&document, self.context_manager.daemon_endpoint()) {
-            self.remote_lsp_error(
-                "Workspace LSP connection is not attached; retry after reconnecting",
-            );
+            let message =
+                "Workspace LSP connection is not attached; retry after reconnecting";
+            let notify = if action == Some(Action::DocumentHighlight) {
+                false
+            } else if passive_lsp_request(&kind, action) {
+                lock()
+                    .subscriptions
+                    .get_mut(&(document.window, document.route))
+                    .is_none_or(|sub| report_passive_error(sub, message))
+            } else {
+                true
+            };
+            if notify {
+                self.remote_lsp_error(message);
+            }
             return Err(());
         }
         let Some((handle, runtime)) =
@@ -482,10 +516,6 @@ impl Screen<'_> {
         let key = (document.window, document.endpoint.clone(), request_id);
         let expects_reply = !matches!(request, Request::DidSave { .. });
         if expects_reply {
-            let action = match &request {
-                Request::LspQueryAt { action, .. } => Some(*action),
-                _ => None,
-            };
             let mut state = lock();
             if matches!(kind, Kind::Query) {
                 state.pending.retain(|_, p| {
@@ -923,16 +953,25 @@ impl Screen<'_> {
                     self.renderer.finder.set_symbol_rows(Vec::new());
                 }
             }
+            let mut notify = pending.action != Some(Action::DocumentHighlight);
             if matches!(pending.kind, Kind::Sync) {
                 if let Some(sub) = lock().subscriptions.get_mut(&(window, document.route))
                 {
                     sub.synced = None;
                     sub.pill = Some(error_pill(message));
                     sub.due = Instant::now() + Duration::from_secs(2);
+                    notify = report_passive_error(sub, message);
                 }
                 self.wake_remote_lsp_after(Duration::from_secs(2));
+            } else if notify && passive_lsp_request(&pending.kind, pending.action) {
+                if let Some(sub) = lock().subscriptions.get_mut(&(window, document.route))
+                {
+                    notify = report_passive_error(sub, message);
+                }
             }
-            self.remote_lsp_error(message);
+            if notify {
+                self.remote_lsp_error(message);
+            }
             if matches!(pending.kind, Kind::Format(_))
                 && self.remote_lsp_document().as_ref() == Some(document)
             {
@@ -1119,6 +1158,7 @@ fn subscription(document: Document, revision: u64) -> Subscription {
         attempts: 0,
         due: Instant::now(),
         pill: None,
+        reported_errors: Default::default(),
     }
 }
 fn snapshot_pill(servers: &[neoism_protocol::editor::LspSnapshotServer]) -> Pill {
@@ -1491,6 +1531,26 @@ mod tests {
             }
             assert!(!interactive_matches(&p, Some(&other), Some(4)));
         }
+    }
+    #[test]
+    fn passive_lsp_failures_are_reported_once_per_document() {
+        let mut sub = subscription(document(), 4);
+        assert!(passive_lsp_request(&Kind::Sync, None));
+        for action in [
+            Action::Hover,
+            Action::Completion,
+            Action::SignatureHelp,
+            Action::DocumentHighlight,
+        ] {
+            assert!(passive_lsp_request(&Kind::Query, Some(action)));
+        }
+        assert!(!passive_lsp_request(&Kind::Query, Some(Action::Definition)));
+        assert!(!passive_lsp_request(&Kind::Format(4), Some(Action::Format)));
+        assert!(report_passive_error(&mut sub, "taplo unavailable"));
+        assert!(!report_passive_error(&mut sub, "taplo unavailable"));
+        assert!(report_passive_error(&mut sub, "connection lost"));
+        let mut reopened = subscription(document(), 4);
+        assert!(report_passive_error(&mut reopened, "taplo unavailable"));
     }
     #[test]
     fn shared_lsp_snapshot_retry_is_bounded_and_not_marked_synced_before_ack() {

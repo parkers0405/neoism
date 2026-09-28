@@ -4,7 +4,7 @@
 //   node scripts/publish.mjs [--version X.Y.Z] [--dry-run]
 //
 // Without --version, the version comes from the repo's workspace Cargo.toml so
-// SDK releases track server releases (opencode-style version lock). Packages
+// SDK releases track server releases. Packages
 // already published at the target version are skipped, so re-runs are safe.
 
 import { execFileSync } from "node:child_process";

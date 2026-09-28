@@ -5,7 +5,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::state::side_panel::SessionGoal;
-use super::state::{NeoismAgentPendingPermission, NeoismAgentUsage};
+use super::state::{NeoismAgentPendingPermission, NeoismAgentTodo, NeoismAgentUsage};
 
 const BACKGROUND_TASK_COMPLETION_MESSAGE_PREFIX: &str = "msg_background_completion_";
 const BACKGROUND_TASK_COMPLETION_SYSTEM_MARKER: &str =
@@ -181,6 +181,9 @@ impl SessionEventUpdateState {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SessionEventUpdate {
+    TodosUpdated(Vec<NeoismAgentTodo>),
+    /// Server MESSAGE_UPDATED info snapshot emitted during ACP usage updates.
+    UsageUpdated { message_id: String, usage: NeoismAgentUsage },
     SessionIdle {
         refresh_messages: bool,
     },
@@ -375,6 +378,35 @@ pub fn classify_session_event(
     }
 
     match event_type {
+        event_type::MESSAGE_UPDATED if !is_child_event && source_session_id.as_deref().is_none_or(|source| source == session_id) => {
+            let info = properties.get("info").unwrap_or(properties);
+            let Some((message_id, tokens)) = info.get("id").and_then(Value::as_str)
+                .zip(info.get("tokens").and_then(Value::as_object)) else { return vec![]; };
+            if info.get("role").and_then(Value::as_str) != Some("assistant") { return vec![]; }
+            let number = |key: &str| tokens.get(key).and_then(Value::as_u64).unwrap_or(0);
+            let cache = tokens.get("cache");
+            let cache_read = cache.and_then(|cache| cache.get("read")).and_then(Value::as_u64).unwrap_or(0);
+            let cache_write = cache.and_then(|cache| cache.get("write")).and_then(Value::as_u64).unwrap_or(0);
+            let input = number("input");
+            let output = number("output");
+            let reasoning = number("reasoning");
+            let total = number("total").max(input.saturating_add(output).saturating_add(reasoning).saturating_add(cache_read).saturating_add(cache_write));
+            if total == 0 { return vec![]; }
+            let cost_micros = (info.get("cost").and_then(Value::as_f64).unwrap_or(0.0).max(0.0) * 1_000_000.0)
+                .round().clamp(0.0, u64::MAX as f64) as u64;
+            vec![SessionEventUpdate::UsageUpdated { message_id: message_id.to_string(), usage: NeoismAgentUsage {
+                input, output, reasoning, cache_read, cache_write, total,
+                cost_micros, context_limit: None,
+            } }]
+        }
+        event_type::TODO_UPDATED if !is_child_event && source_session_id.as_deref().is_none_or(|source| source == session_id) => vec![SessionEventUpdate::TodosUpdated(
+            properties.get("todos").and_then(Value::as_array).into_iter().flatten()
+                .filter_map(|todo| Some(NeoismAgentTodo {
+                    status: todo.get("status")?.as_str()?.to_string(),
+                    content: todo.get("content")?.as_str()?.to_string(),
+                }))
+                .collect(),
+        )],
         event_type::SESSION_MOVED if !is_child_event => properties
             .get("directory")
             .and_then(Value::as_str)
@@ -1364,6 +1396,31 @@ fn find_crlf(bytes: &[u8]) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn acp_message_updated_projects_live_usage_without_waiting_for_idle() {
+        let updates = classify_session_event(
+            json!({"type":"message.updated","properties":{"sessionID":"root","info":{"id":"assistant-1","role":"assistant","time":{"created":1,"completed":null},"tokens":{"total":4200,"input":3000,"output":1200,"reasoning":0,"cache":{"read":0,"write":0}}}}}),
+            "root", &mut SessionEventUpdateState::default(),
+        );
+        assert!(matches!(&updates[..], [SessionEventUpdate::UsageUpdated { message_id, usage }] if message_id == "assistant-1" && usage.total == 4200));
+    }
+
+    #[test]
+    fn acp_todo_event_updates_native_root_without_claiming_child_source() {
+        use super::*;
+        let updates = classify_session_event(
+            json!({"type":"todo.updated","properties":{"sessionID":"root","todos":[{"status":"pending","content":"Check"}]}}),
+            "root",
+            &mut SessionEventUpdateState::default(),
+        );
+        assert!(matches!(&updates[..], [SessionEventUpdate::TodosUpdated(todos)] if todos[0].content == "Check"));
+        let child = classify_session_event(
+            json!({"type":"todo.updated","properties":{"sessionID":"child","todos":[{"status":"pending","content":"Child task"}]}}),
+            "root", &mut SessionEventUpdateState::default(),
+        );
+        assert!(!child.iter().any(|event| matches!(event, SessionEventUpdate::TodosUpdated(_))));
+    }
+
     use std::collections::HashSet;
 
     use serde_json::json;

@@ -1,3 +1,9 @@
+pub fn selection_line_key(line: &SelectableLine) -> (i64, i64) {
+    // Content coordinates stay fixed as the viewport scrolls. Round to pixel
+    // precision so redraws at fractional scroll offsets replace the same row.
+    (line.content_y.round() as i64, line.rect[0].round() as i64)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SelectableCaretStop {
     pub byte_offset: usize,

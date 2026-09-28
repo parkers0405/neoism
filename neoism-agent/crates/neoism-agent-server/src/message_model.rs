@@ -8,8 +8,8 @@ const SUBTASK_COMPLETION_NOTIFICATION_KIND: &str =
     "runtime notification: background subagent completion.";
 const BACKGROUND_TASK_COMPLETION_NOTIFICATION_KIND: &str =
     "runtime notification: background shell task completion.";
-// Matches opencode's TOOL_OUTPUT_MAX_CHARS for compaction requests. The
-// request that triggers compaction is already near the context limit, so tool
+// Truncate tool outputs for compaction requests. The request that triggers
+// compaction is already near the context limit, so tool
 // outputs must be aggressively truncated or the summarize request itself
 // overflows the very model that is supposed to shrink the session.
 const COMPACTION_TOOL_OUTPUT_MAX_CHARS: usize = 2_000;

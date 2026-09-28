@@ -292,3 +292,23 @@
 - [Compaction estimator vs provider usage](bug_compaction_estimator_vs_provider_usage.md) - Premature auto-compaction at UI 53% caused by whole-request estimate overriding authoritative provider usage; fixed with OpenCode v2 usage-first trigger.
 - [Rust agent sidebar missing new chats — FIXED](bug_rust_agent_sidebar_missing_new_chats.md) - Rust GUI sidebar catalogue stayed Ready and active-family SSE excluded new root chats; fixed with authorized directory-scoped catalogue SSE and in-place deltas
 - [Joined ls spinner: adoption skips CreatePty](bug_join_adoption_skips_pty_create.md) - Actual UI join silently skipped CreatePty because adoption checked outgoing grid ownership; reproduced and fixed with direct known-owner creation
+- [Edit succeeds but reports plugin-generation error](bug_edit_lsp_generation_false_error.md) - Edit mutation succeeds then tool reports error
+- [Streaming Edit preview collapse](bug_agent_edit_diff_transient_collapse.md) - Streaming Edit diff previews briefly collapse due to optimistic live-trace rebase and stale layout
+- [External permission retry and tenant scope](bug_external_permission_tenant_scope.md) - External permissions and hosted tenant scope
+- [Local Bash lease must use approved workdir](bug_bash_external_workdir_local_lease.md) - External Bash workdir rejected by local lease after permission approval
+- [Password-free joined Agent proxy](bug_password_free_joined_agent_proxy.md) - Password-free joined Agent proxy authentication mismatch and readiness gate
+- [Skill generation lease refresh](bug_skill_generation_lease_refresh.md) - Skill generation re-lease on retired snapshot fixed and live-verified; release published
+- [Multi-agent conversation sidebar](feature_multi_agent_conversation_sidebar.md) - Native Rust four-provider chat and ACP history integration
+- [ACP native history catalog/import](feature_acp_native_history_import.md) - ACP catalog, text-only import and queued HTTP lifecycle integration for three providers
+- [ACP provider session options and echo triage](feature_acp_provider_session_controls.md) - ACP provider controls contract, persistence, serialization and narrow prompt-echo handling
+- [ACP native panel and commands](feature_acp_native_panel_commands.md) - Native ACP options pending/error and immediate catalog reconciliation
+- [ACP reconcile panic and composer dedup](bug_acp_reconcile_composer_duplicates.md) - Embedded ACP panic, Claude options and sidebar duplicates
+- [ACP sidebar reorder and picker lag](bug_acp_sidebar_reorder_picker_lag.md) - ACP sidebar timestamps, cached options, native picker UX
+- [ACP queued user role and model picker](bug_acp_queued_prompt_role_and_model_picker.md) - ACP queued prompt duplicate and /model collision
+- [ACP conditional options replay failure](bug_acp_conditional_options_replay.md) - OpenCode conditional effort replay and unavailable saved model; live debug app not restarted
+- [ACP answer model and slash surfaces](feature_acp_answer_model_and_slash.md) - ACP model attribution and OpenCode command catalog distinction
+- [Joined workspace LSP toast loop](bug_joined_workspace_lsp_toast_loop.md) - Joined workspace LSP Cargo.lock probe and Taplo repeated toasts
+- [Agent OpenCode attribution boundaries](feedback_agent_opencode_attribution.md) - Keep agent/docs language Neoism-owned while preserving real ACP integration and provenance.
+- [Pre-chat provider selectors](feature_prechat_acp_selectors.md) - T3-style draft provider selectors and disk-cached ACP preflight
+- [ACP draft send and phantom OpenCode history](bug_acp_draft_send_phantom_history.md) - Draft ACP model lost on first send and empty OpenCode previews shown as chats
+- [Joined workspace OAuth handoff](feature_joined_workspace_auth.md) - Joined workspace provider/MCP auth host credentials, guest browser, host callback routing

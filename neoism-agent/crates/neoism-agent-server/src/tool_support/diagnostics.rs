@@ -12,12 +12,11 @@ const DIAGNOSTICS_PROJECT_FILE_LIMIT: usize = 8;
 /// assembling post-mutation metadata, so a noisy workspace can't balloon the
 /// tool result.
 const DIAGNOSTICS_PROJECT_SCAN_LIMIT: usize = 200;
-/// Matches opencode's per-file cap in the "please fix" report block.
+/// Maximum errors reported per touched file.
 const MAX_REPORTED_ERRORS_PER_FILE: usize = 20;
 
 /// Synchronize changed disk contents with didOpen/didChange, not didSave.
-/// Released OpenCode's touchFile likewise does not synthesize a save (it also
-/// sends watched-file notifications; Neoism does not add that behavior here).
+/// This does not send watched-file notifications.
 ///
 /// NOTE: this performs blocking LSP I/O (initialization and optional pull).
 /// Callers MUST invoke it off the async executor — see [`attach_lsp_diagnostics`].
@@ -39,7 +38,7 @@ pub(super) fn touch_paths(
 
 /// Gather LSP diagnostics for the freshly mutated files (plus a bounded slice of
 /// the rest of the project's cached diagnostics), attach them to `metadata`, and
-/// return an opencode-style "please fix" block for any *errors* in the touched
+/// return a "please fix" block for any *errors* in the touched
 /// files so the model is prompted to repair regressions it just introduced.
 ///
 /// This is a pure cache read after [`touch_paths`] synchronizes the document
@@ -72,9 +71,8 @@ pub(super) fn attach_lsp_diagnostics(
     }
 
     // Bounded scan of the rest of the project's *cached* diagnostics so the
-    // model also sees regressions its edit caused in other open files. opencode
-    // returns the full diagnostics record; we cap files/diagnostics to stay
-    // cheap and never spawn a server here.
+    // model also sees regressions its edit caused in other open files. Cap
+    // files/diagnostics to stay cheap and never spawn a server here.
     let mut project_files = 0usize;
     for (path, diagnostics) in lsp::cached_project_diagnostics(runtime, cwd) {
         if touched_keys.contains(&path) || diagnostics.is_empty() {
@@ -138,8 +136,7 @@ fn diagnostic_entry(
     })
 }
 
-/// opencode `LSP.Diagnostic.report`: errors only, capped per file, wrapped in a
-/// `<diagnostics file="...">` block.
+/// Error diagnostics, capped per file, wrapped in a `<diagnostics file="...">` block.
 fn error_report(display: &str, diagnostics: &[LspDiagnostic]) -> Option<String> {
     let errors = diagnostics
         .iter()
@@ -165,8 +162,7 @@ fn error_report(display: &str, diagnostics: &[LspDiagnostic]) -> Option<String> 
     ))
 }
 
-/// opencode `LSP.Diagnostic.pretty`: `SEVERITY [line:col] message` with 1-based
-/// coordinates.
+/// Format diagnostics as `SEVERITY [line:col] message` with 1-based coordinates.
 fn pretty(diagnostic: &LspDiagnostic) -> String {
     let (line, col) = diagnostic
         .range

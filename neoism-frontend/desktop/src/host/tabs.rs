@@ -13,6 +13,9 @@ impl Renderer {
         if self.notes_sidebar.is_visible() {
             edge += self.notes_sidebar.width();
         }
+        if self.conversations_visible {
+            edge += self.conversations_pane.side_panel().width();
+        }
         edge
     }
 
@@ -37,7 +40,12 @@ impl Renderer {
             x += width;
         }
         if self.notes_sidebar.is_visible() {
-            rects.push([x, top, self.notes_sidebar.width(), height]);
+            let width = self.notes_sidebar.width();
+            rects.push([x, top, width, height]);
+            x += width;
+        }
+        if self.conversations_visible {
+            rects.push([x, top, self.conversations_pane.side_panel().width(), height]);
         }
     }
 

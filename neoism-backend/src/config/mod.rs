@@ -344,11 +344,34 @@ impl Default for Developer {
     }
 }
 
+/// Preferred source for a new chat, independent of the agent-server persona
+/// selected by `agent.default-agent`.
+#[derive(Debug, Default, Serialize, Deserialize, PartialEq, Eq, Clone, Copy)]
+#[serde(rename_all = "kebab-case")]
+pub enum DefaultChatSource {
+    #[default]
+    Neoism,
+    #[serde(rename = "opencode")]
+    OpenCode,
+    ClaudeCode,
+    Codex,
+}
+
+/// Backend-owned preference within the agent server's shared config block.
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Default)]
+pub struct AgentPreferences {
+    #[serde(default = "default_chat_source", rename = "default-chat-source")]
+    pub default_chat_source: DefaultChatSource,
+    /// Keep server-owned keys intact when the application config is serialized.
+    #[serde(flatten)]
+    pub server_settings: serde_json::Map<String, serde_json::Value>,
+}
+
 /// The golden grouped `config.json`. Every domain is its own block —
 /// `appearance`, `editor`, `terminal`, `ui`, `presence`, `keybinds` —
 /// plus the standalone `platform`, `renderer`, and `developer` domains.
-/// The agent reads its own `agent` block from the same file (ignored
-/// here as an unknown key).
+/// The agent server reads its own settings from the shared `agent` block;
+/// this backend types only the chat-source preference.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Config {
     #[serde(default)]
@@ -361,6 +384,8 @@ pub struct Config {
     pub ui: UiConfig,
     #[serde(default)]
     pub presence: Presence,
+    #[serde(default)]
+    pub agent: AgentPreferences,
     #[serde(default = "Bindings::default")]
     pub keybinds: bindings::Bindings,
     #[serde(default = "Platform::default")]
@@ -1144,6 +1169,7 @@ impl Default for Config {
             terminal: TerminalConfig::default(),
             ui: UiConfig::default(),
             presence: Presence::default(),
+            agent: AgentPreferences::default(),
             keybinds: Bindings::default(),
             platform: Platform::default(),
             renderer: Renderer::default(),
@@ -1168,6 +1194,39 @@ mod tests {
 
     fn parse(json: &str) -> Config {
         deserialize_config(json).expect("config should parse")
+    }
+
+    #[test]
+    fn default_chat_source_defaults_to_neoism() {
+        assert_eq!(parse("{}").agent.default_chat_source, DefaultChatSource::Neoism);
+        assert_eq!(parse(r#"{"agent":{}}"#).agent.default_chat_source, DefaultChatSource::Neoism);
+    }
+
+    #[test]
+    fn default_chat_source_accepts_only_the_four_grouped_values() {
+        for (name, expected) in [
+            ("neoism", DefaultChatSource::Neoism),
+            ("opencode", DefaultChatSource::OpenCode),
+            ("claude-code", DefaultChatSource::ClaudeCode),
+            ("codex", DefaultChatSource::Codex),
+        ] {
+            let text = format!(r#"{{"agent":{{"default-chat-source":"{name}","default-agent":"plan"}}}}"#);
+            let config = parse(&text);
+            assert_eq!(config.agent.default_chat_source, expected);
+            let serialized = serde_json::to_value(config).unwrap();
+            assert_eq!(serialized["agent"]["default-chat-source"], name);
+            assert_eq!(serialized["agent"]["default-agent"], "plan");
+            validate_config_document(&text).unwrap();
+        }
+    }
+
+    #[test]
+    fn default_chat_source_rejects_unknown_and_wrong_types() {
+        for value in [r#""unknown""#, r#""build""#, r#""Claude-Code""#, "null", "42"] {
+            let text = format!(r#"{{"agent":{{"default-chat-source":{value}}}}}"#);
+            assert!(deserialize_config(&text).is_err(), "{text}");
+            assert!(validate_config_document(&text).is_err(), "{text}");
+        }
     }
 
     #[test]

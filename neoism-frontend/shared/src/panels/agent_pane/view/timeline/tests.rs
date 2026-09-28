@@ -634,6 +634,24 @@ fn prepend_rejects_estimated_edit_rows_in_reused_cache() {
 }
 
 #[test]
+fn streaming_tail_patch_cannot_strand_estimated_edit_rows() {
+    let mut rows = (0..5)
+        .map(|index| layout_row(index, index as f32 * 60.0, 48.0))
+        .collect::<Vec<_>>();
+    rows[2].is_edit_tool = true;
+    rows[3].is_edit_tool = true;
+    let cache = lazy_cache(rows, 0, 2);
+
+    // Only the first two rows were measured. Streaming at the tail must not
+    // patch row 4 exactly while leaving short Edit rows 2 and 3 in the middle.
+    assert_eq!(super::layout::patch_start_row(&cache, 4), None);
+    assert!(!super::layout::prepend_cache_is_exact(&cache));
+    // Starting at the first estimated row removes the entire estimated suffix.
+    assert_eq!(super::layout::patch_start_row(&cache, 2), Some(2));
+    assert_eq!(super::layout::patch_start_row(&cache, 1), Some(1));
+}
+
+#[test]
 fn lazy_cache_covers_a_mid_history_exact_window() {
     let rows = vec![
         layout_row(0, 0.0, 100.0),

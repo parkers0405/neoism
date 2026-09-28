@@ -171,14 +171,42 @@ impl Screen<'_> {
             && !mods.super_key()
             && matches!(key.logical_key.as_ref(), Key::Character(ch) if ch.eq_ignore_ascii_case("h"))
         {
+            self.toggle_conversations_sidebar();
+            return true;
+        }
+
+        // The detail rail has its own branch cursor; keep it separate from
+        // catalog search/selection while reusing the branch activation path.
+        if self
+            .context_manager
+            .current()
+            .neoism_agent
+            .as_ref()
+            .is_some_and(|a| a.detail_panel().is_focused())
+            && !mods.alt_key()
+            && !mods.control_key()
+            && !mods.super_key()
+        {
             let agent = self
                 .context_manager
                 .current_mut()
                 .neoism_agent
                 .as_mut()
-                .expect("Neoism agent pane exists");
-            agent.side_panel_mut().toggle_visibility();
-            self.reapply_chrome_layout();
+                .unwrap();
+            match key.logical_key.as_ref() {
+                Key::Named(NamedKey::ArrowDown) => agent.detail_panel_mut().select_next(),
+                Key::Named(NamedKey::ArrowUp) => agent.detail_panel_mut().select_prev(),
+                Key::Named(NamedKey::Enter) => {
+                    let selected = agent.activate_detail_panel_subagent();
+                    if selected {
+                        agent.detail_panel_mut().set_focused(false);
+                    }
+                }
+                Key::Named(NamedKey::Escape) => {
+                    agent.detail_panel_mut().set_focused(false)
+                }
+                _ => return false,
+            }
             self.mark_dirty();
             return true;
         }
@@ -217,35 +245,9 @@ impl Screen<'_> {
                     return true;
                 }
                 Key::Named(NamedKey::Enter) => {
-                    if agent.side_panel().back_focused() {
-                        // Enter on "← Back" flips the home-override view
-                        // without touching the live conversation; keep the
-                        // cursor on the affordance so it's reversible.
-                        agent.side_panel_mut().trigger_back_scramble();
-                        agent.side_panel_mut().toggle_home_override();
-                        agent.side_panel_mut().focus_back();
-                    } else {
-                        // The sessions list shows when there's no
-                        // conversation OR the Back override is active.
-                        let showing_sessions = !agent.has_conversation()
-                            || agent.side_panel().show_home_override();
-                        let mut activated = if showing_sessions {
-                            agent.activate_side_panel_selection()
-                        } else {
-                            agent.activate_side_panel_subagent()
-                        };
-                        // Choosing the already-open session from the recent
-                        // list just returns to its live conversation.
-                        if !activated
-                            && agent.side_panel().show_home_override()
-                            && agent.selected_side_panel_session_is_current()
-                        {
-                            activated = true;
-                        }
-                        if activated {
-                            agent.side_panel_mut().set_show_home_override(false);
-                            agent.side_panel_mut().set_focused(false);
-                        }
+                    let activated = agent.activate_side_panel_selection();
+                    if activated || agent.selected_side_panel_session_is_current() {
+                        agent.side_panel_mut().set_focused(false);
                     }
                     self.mark_dirty();
                     return true;
@@ -416,7 +418,7 @@ impl Screen<'_> {
                 if agent.picker().is_some() {
                     let delta = if mods.shift_key() { -1 } else { 1 };
                     agent.move_picker_selection(delta);
-                } else {
+                } else if agent.conversation_source().provider().is_none() {
                     agent.toggle_mode();
                 }
                 self.mark_dirty();
@@ -593,6 +595,15 @@ impl Screen<'_> {
     }
 
     pub(crate) fn render_neoism_agent_panels(&mut self) {
+        let toggle_catalog = self
+            .context_manager
+            .current_mut()
+            .neoism_agent
+            .as_mut()
+            .is_some_and(|pane| pane.take_catalog_toggle_request());
+        if toggle_catalog {
+            self.toggle_conversations_sidebar();
+        }
         crate::neoism::view::clear_overlays(&mut self.sugarloaf);
 
         let scale = self.sugarloaf.scale_factor();
@@ -666,10 +677,27 @@ impl Screen<'_> {
         let mut agent_animating_reason = None;
         let mut agent_ui_events = Vec::new();
         let mut agent_tab_titles = Vec::new();
+        let mut external_root_bound = false;
         let agent_event_wake = crate::neoism::agent::AgentEventWake::new(
             self.context_manager.event_proxy(),
             self.context_manager.window_id(),
         );
+        if self.renderer.conversations_visible || self.renderer.conversations_pane.external_import_pending() {
+            if self.renderer.conversations_visible { self.renderer.conversations_pane.enable_external_catalog(); }
+            self.renderer
+                .conversations_pane
+                .set_event_wake(agent_event_wake.clone());
+            agent_animating |= self.renderer.conversations_pane.drain_live_session_updates();
+            if let Some(message) = self.renderer.conversations_pane.take_external_error() {
+                self.renderer.notifications.push(
+                    message,
+                    neoism_ui::panels::notifications::NotificationLevel::Warn,
+                );
+            }
+            if let Some((id, source)) = self.renderer.conversations_pane.take_external_open() {
+                self.focus_or_open_conversation(id, source);
+            }
+        }
         let current_grid_index = self.context_manager.current_index();
         for (grid_index, grid) in
             self.context_manager.all_grids_mut().iter_mut().enumerate()
@@ -711,6 +739,8 @@ impl Screen<'_> {
             } else {
                 agent.drain_live_session_updates()
             };
+            agent.maybe_refresh_external_options();
+            external_root_bound |= agent.take_external_root_bound_refresh();
             if agent_changed {
                 agent_animating = true;
             }
@@ -722,7 +752,8 @@ impl Screen<'_> {
             );
             agent_tab_titles.push((
                 route_id,
-                agent.session_title().unwrap_or_default().to_string(),
+                agent.conversation_source().tab_title(agent.session_title()),
+                agent.conversation_source(),
             ));
             // Conversation stores stay live independently of which split/tab
             // is painted. This prevents a hidden pane from accumulating an
@@ -790,7 +821,25 @@ impl Screen<'_> {
         }
         // Synchronize by agent route, not the active tab index or strip owner:
         // a hidden agent can share a strip with an active editor/terminal tab.
-        for (route_id, title) in agent_tab_titles {
+        if external_root_bound {
+            self.renderer.conversations_pane.refresh_bound_external_root();
+            agent_animating = true;
+        }
+        for (route_id, title, source) in agent_tab_titles {
+            use neoism_ui::panels::agent_pane::state::side_panel::ConversationSource;
+            let kind = match source {
+                ConversationSource::Neoism => crate::neoism::icon::AgentKind::Neoism,
+                ConversationSource::OpenCode => crate::neoism::icon::AgentKind::OpenCode,
+                ConversationSource::ClaudeCode => crate::neoism::icon::AgentKind::Claude,
+                ConversationSource::Codex => crate::neoism::icon::AgentKind::Codex,
+            };
+            agent_animating |= self.renderer.buffer_tabs.set_neoism_agent_kind(route_id, Some(kind));
+            for tabs in self.renderer.pane_tabs.values_mut() {
+                agent_animating |= tabs.set_neoism_agent_kind(route_id, Some(kind));
+            }
+            for tabs in self.workspace_buffer_tabs.values_mut() {
+                agent_animating |= tabs.set_neoism_agent_kind(route_id, Some(kind));
+            }
             agent_animating |= self
                 .renderer
                 .buffer_tabs
@@ -1265,11 +1314,32 @@ impl Screen<'_> {
             .current()
             .neoism_agent
             .as_ref()
-            .is_some_and(|agent| agent.side_panel().usage_contains(mx, my));
+            .is_some_and(|agent| {
+                agent.side_panel().usage_contains(mx, my)
+                    || agent.detail_panel().usage_contains(mx, my)
+            });
         if side_panel_usage_hit {
             self.open_neoism_agent_usage_menu(mx, my);
             self.mark_dirty();
             return true;
+        }
+        if let Some(agent) = self.context_manager.current_mut().neoism_agent.as_mut() {
+            if agent.detail_panel().contains_point(mx, my) {
+                agent.side_panel_mut().set_focused(false);
+                agent.detail_panel_mut().set_focused(true);
+                if let Some(rect) = agent.detail_panel().last_panel_rect() {
+                    if let Some(row) = agent.detail_panel().hit_test_row(mx, my, rect) {
+                        agent.detail_panel_mut().set_selected(row);
+                        let activated = agent.activate_detail_panel_subagent();
+                        if activated {
+                            agent.detail_panel_mut().set_focused(false);
+                        }
+                    }
+                }
+                self.mark_dirty();
+                return true;
+            }
+            agent.detail_panel_mut().set_focused(false);
         }
         // Side-panel hit test: focus on a body click, and if the click
         // landed on a row in home mode, resume that session. Has to win
@@ -1280,37 +1350,11 @@ impl Screen<'_> {
         {
             if agent.side_panel().contains_point(mx, my) {
                 agent.side_panel_mut().set_focused(true);
-                if agent.side_panel().back_button_contains(mx, my) {
-                    // "← Back" flips the home-override view; the live
-                    // conversation stays open underneath.
-                    agent.side_panel_mut().trigger_back_scramble();
-                    agent.side_panel_mut().toggle_home_override();
-                    agent.side_panel_mut().focus_back();
-                } else if let Some(rect) = agent.side_panel().last_panel_rect() {
+                if let Some(rect) = agent.side_panel().last_panel_rect() {
                     if let Some(row) = agent.side_panel().hit_test_row(mx, my, rect) {
                         agent.side_panel_mut().set_selected(row);
-                        // The sessions list shows when there's no
-                        // conversation OR the Back override is active.
-                        let showing_sessions = !agent.has_conversation()
-                            || agent.side_panel().show_home_override();
-                        let mut activated = if showing_sessions {
-                            agent.activate_side_panel_selection()
-                        } else {
-                            agent.activate_side_panel_subagent()
-                        };
-                        // Clicking the already-open session from the recent
-                        // list just returns to its live conversation.
-                        if !activated
-                            && agent.side_panel().show_home_override()
-                            && agent.selected_side_panel_session_is_current()
-                        {
-                            activated = true;
-                        }
-                        if activated {
-                            // Hand keyboard focus back to the input bar
-                            // — the user just picked a session, they
-                            // want to type, not keep navigating rows.
-                            agent.side_panel_mut().set_show_home_override(false);
+                        let activated = agent.activate_side_panel_selection();
+                        if activated || agent.selected_side_panel_session_is_current() {
                             agent.side_panel_mut().set_focused(false);
                         }
                     }

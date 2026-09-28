@@ -1,6 +1,22 @@
 use super::*;
 
 #[test]
+fn selection_copies_rows_from_previous_render_windows() {
+    let mut pane = NeoismAgentPane::default();
+    pane.set_timeline_metrics([0.0, 0.0, 400.0, 40.0], 120.0, 40.0);
+    pane.timeline_scroll_px = 80.0;
+    pane.register_selectable_line("first", [0.0, 10.0, 50.0, 18.0]);
+    pane.register_selectable_line("middle", [0.0, 30.0, 60.0, 18.0]);
+    assert!(pane.begin_selection_at(0.0, 10.0));
+    pane.timeline_scroll_px = 40.0;
+    pane.selectable_lines_len = 0;
+    pane.register_selectable_line("last", [0.0, 10.0, 40.0, 18.0]);
+    assert!(pane.drag_selection_to(40.0, 10.0));
+    assert_eq!(pane.end_selection().as_deref(), Some("first\nmiddle\nlast"));
+    assert!(pane.selection_history.is_empty());
+}
+
+#[test]
 fn live_baseline_replaces_cached_text_before_following_deltas() {
     let mut pane = NeoismAgentPane::default();
     pane.messages
@@ -1180,17 +1196,12 @@ fn hints_command_toggles_row_and_reclaims_chat_space() {
 }
 
 #[test]
-fn sidebar_command_toggles_visibility_and_persists_default() {
+fn sidebar_command_requests_workspace_chrome_toggle() {
     let mut pane = NeoismAgentPane::default();
-    assert!(!pane.side_panel().user_hidden());
-
     pane.execute_slash_text("/sidebar");
-
-    assert!(pane.side_panel().user_hidden());
-    assert_eq!(
-        pane.drain_pending_outbound(),
-        vec![OutboundAgentCommand::SetSidebarVisible { visible: false }]
-    );
+    assert!(pane.take_catalog_toggle_request());
+    assert!(!pane.take_catalog_toggle_request());
+    assert!(!pane.side_panel().user_hidden());
 }
 
 #[test]
@@ -1759,6 +1770,35 @@ fn slash_goal_surfaces_wire_gap_instead_of_inventing_protocol() {
 }
 
 #[test]
+fn external_composer_does_not_advertise_native_picker_or_accept_file_bytes() {
+    use super::side_panel::ConversationSource;
+    let mut pane = NeoismAgentPane::default();
+    pane.start_new_chat_from(ConversationSource::Codex);
+    pane.insert_text("/model");
+    assert!(pane.picker().is_none());
+    assert!(!pane.attach_file_bytes("sample.png", "image/png", b"PNG"));
+    pane.open_model_picker();
+    pane.open_agent_picker();
+    assert!(pane.picker().is_none());
+    pane.toggle_mode();
+    assert_eq!(pane.new_chat_source(), ConversationSource::Codex);
+}
+
+#[test]
+fn external_new_chat_keeps_provider_until_session_ack_and_does_not_inherit_on_new() {
+    use super::side_panel::ConversationSource;
+    let mut pane = NeoismAgentPane::default();
+    pane.start_new_chat_from(ConversationSource::OpenCode);
+    assert_eq!(pane.new_chat_source().provider(), Some("opencode"));
+    assert!(pane.drain_pending_outbound().iter().any(|command| matches!(command, OutboundAgentCommand::EnsureSession)));
+    pane.set_session_id(Some("external-1".into()));
+    pane.start_new_conversation();
+    assert_eq!(pane.new_chat_source(), ConversationSource::Neoism);
+    pane.switch_session("external-1".into());
+    assert_eq!(pane.new_chat_source(), ConversationSource::OpenCode);
+}
+
+#[test]
 fn switch_session_queues_switch_session_command() {
     let mut pane = NeoismAgentPane::default();
     pane.switch_session("sess-77".to_string());
@@ -1773,7 +1813,7 @@ fn switch_session_queues_switch_session_command() {
 }
 
 #[test]
-fn mobile_side_panel_session_navigation_switches_and_dismisses_takeover() {
+fn session_navigation_leaves_workspace_catalog_visibility_to_chrome() {
     let mut pane = NeoismAgentPane::default();
     pane.set_session_id(Some("current".to_string()));
     pane.side_panel_mut().set_user_hidden(false);
@@ -1787,7 +1827,7 @@ fn mobile_side_panel_session_navigation_switches_and_dismisses_takeover() {
 
     assert!(pane.activate_side_panel_row(true, true));
     assert_eq!(pane.session_id_str(), Some("target"));
-    assert!(pane.side_panel().user_hidden());
+    assert!(!pane.side_panel().user_hidden());
     assert!(pane.drain_pending_outbound().iter().any(|command| matches!(
         command,
         OutboundAgentCommand::SwitchSession { session_id } if session_id == "target"

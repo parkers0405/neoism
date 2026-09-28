@@ -1654,6 +1654,135 @@ fn apply_authoritative_contract(document: &mut Value) {
         ),
     );
 
+    let preview_response = json!({
+        "type": "object",
+        "required": ["provider", "configOptions", "modeFallback", "selectedOptions", "externalSessionId", "availableCommands"],
+        "properties": {
+            "provider": { "type": "string", "enum": ["opencode", "claude", "codex"] },
+            "configOptions": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
+            "modeFallback": { "type": "boolean" },
+            "selectedOptions": { "type": "object", "additionalProperties": { "type": "string" } },
+            "externalSessionId": { "type": "null", "description": "Preview sessions are ephemeral and their IDs are never returned." },
+            "availableCommands": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
+            "catalogStale": { "type": "boolean", "description": "Present and true when an expired last-good snapshot is returned during background refresh." }
+        }
+    });
+    let preview_parameters = || json!([
+        query("provider", true, json!({ "type": "string", "enum": ["opencode", "claude", "codex"] })),
+        directory()
+    ]);
+    add(
+        "/v2/external/options/preview",
+        "get",
+        op(
+            "v2.external.options.preview",
+            "catalog",
+            preview_parameters(),
+            None,
+            success("200", "Cached or freshly confirmed ACP options", preview_response.clone()),
+        ),
+    );
+    add(
+        "/v2/external/options/preview",
+        "post",
+        op(
+            "v2.external.options.previewSelected",
+            "catalog",
+            preview_parameters(),
+            Some(json_request(true, json!({
+                "type": "object", "additionalProperties": false, "required": ["selectedOptions"],
+                "properties": { "selectedOptions": { "type": "object", "additionalProperties": { "type": "string" } } }
+            }))),
+            success("200", "ACP options after applying selected values", preview_response.clone()),
+        ),
+    );
+    add(
+        "/v2/execution-activity",
+        "get",
+        op(
+            "v2.executionActivity.list", "events", json!([]), None,
+            success("200", "Execution summaries", json!({
+                "type": "array", "items": { "type": "object", "additionalProperties": false,
+                    "required": ["rootSessionId", "executionId", "revision", "finished"],
+                    "properties": {
+                        "rootSessionId": { "type": "string" }, "executionId": { "type": "string" },
+                        "revision": { "type": "integer", "minimum": 0 }, "finished": { "type": "boolean" }
+                    }
+                }
+            })),
+        ),
+    );
+    add(
+        "/v2/execution-activity/events",
+        "get",
+        op(
+            "v2.executionActivity.events", "events", json!([]), None,
+            json!({ "200": { "description": "Execution snapshot SSE stream", "content": { "text/event-stream": {
+                "schema": { "type": "string" }
+            } } } }),
+        ),
+    );
+    add(
+        "/v2/sessions/external/catalog",
+        "get",
+        op(
+            "v2.sessions.external.catalog", "sessions", preview_parameters(), None,
+            success("200", "Provider-native session catalog preview", json!({
+                "type": "object", "required": ["provider", "cwd", "sessions", "importSupported"],
+                "properties": {
+                    "provider": { "type": "string" }, "cwd": { "type": "string" },
+                    "sessions": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
+                    "importSupported": { "type": "boolean" }, "importUnavailableReason": { "type": "string" }
+                }
+            })),
+        ),
+    );
+    add(
+        "/v2/sessions/external/import",
+        "post",
+        op(
+            "v2.sessions.external.import", "sessions", json!([directory()]),
+            Some(json_request(true, json!({
+                "type": "object", "additionalProperties": false, "required": ["provider", "externalSessionId"],
+                "properties": {
+                    "provider": { "type": "string", "enum": ["opencode", "claude", "codex"] },
+                    "externalSessionId": { "type": "string" }
+                }
+            }))),
+            success("200", "Imported external session", r("Session")),
+        ),
+    );
+    add(
+        "/v2/sessions/{session_id}/external/options",
+        "get",
+        op(
+            "v2.sessions.external.options.get", "sessions", json!([path("session_id")]), None,
+            success("200", "Active ACP session options", json!({
+                "type": "object", "required": ["provider", "configOptions", "modeFallback", "selectedOptions", "externalSessionId", "availableCommands"],
+                "properties": {
+                    "provider": { "type": "string" },
+                    "configOptions": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
+                    "modeFallback": { "type": "boolean" },
+                    "selectedOptions": { "type": "object", "additionalProperties": { "type": "string" } },
+                    "externalSessionId": { "type": ["string", "null"] },
+                    "availableCommands": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
+                    "replayError": { "type": "string" }
+                }
+            })),
+        ),
+    );
+    add(
+        "/v2/sessions/{session_id}/external/options",
+        "post",
+        op(
+            "v2.sessions.external.options.set", "sessions", json!([path("session_id")]),
+            Some(json_request(true, json!({
+                "type": "object", "additionalProperties": false, "required": ["configId", "value"],
+                "properties": { "configId": { "type": "string" }, "value": { "type": "string" } }
+            }))),
+            success("200", "Updated ACP session options", json!({ "type": "object", "additionalProperties": true, "description": "Current ACP configOptions and selectedOptions, with the active externalSessionId." })),
+        ),
+    );
     let session_id = || path("session_id");
     add(
         "/v2/sessions",
@@ -3037,7 +3166,7 @@ fn canonical_schemas() -> Value {
         "SessionParticipant": { "type": "object", "additionalProperties": false, "required": ["subject", "actorType", "firstSeenAt", "lastSeenAt"], "properties": {
             "subject": { "type": "string" }, "actorType": { "type": "string", "enum": ["human", "service-account"] }, "firstSeenAt": { "type": "integer", "minimum": 0 }, "lastSeenAt": { "type": "integer", "minimum": 0 }
         }},
-        "CreateSessionRequest": { "type": "object", "additionalProperties": false, "properties": { "parentId": { "type": "string" }, "title": { "type": "string" }, "agent": { "type": "string" }, "model": { "$ref": "#/components/schemas/ModelRef" }, "permission": { "type": "array", "items": { "$ref": "#/components/schemas/PermissionRule" } }, "workspaceId": { "type": "string" } } },
+        "CreateSessionRequest": { "type": "object", "additionalProperties": false, "properties": { "parentId": { "type": "string" }, "title": { "type": "string" }, "agent": { "type": "string" }, "model": { "$ref": "#/components/schemas/ModelRef" }, "permission": { "type": "array", "items": { "$ref": "#/components/schemas/PermissionRule" } }, "workspaceId": { "type": "string" }, "externalProvider": { "type": "string", "enum": ["opencode", "claude", "codex"] }, "externalOptions": { "type": "object", "additionalProperties": { "type": "string" } } } },
         "UpdateSessionRequest": { "type": "object", "additionalProperties": false, "properties": { "title": { "type": "string" }, "agent": { "type": "string" }, "model": { "$ref": "#/components/schemas/ModelRef" }, "directory": { "type": "string" }, "permission": { "type": "array", "items": { "$ref": "#/components/schemas/PermissionRule" } }, "time": { "type": "object", "properties": { "archived": { "type": "integer" } } } } },
         "PageCursor": { "type": "object", "additionalProperties": false, "properties": { "previous": { "type": "string" }, "next": { "type": "string" } } },
         "SessionPage": { "type": "object", "additionalProperties": false, "required": ["items", "cursor"], "properties": { "items": { "type": "array", "items": { "$ref": "#/components/schemas/Session" } }, "cursor": { "$ref": "#/components/schemas/PageCursor" } } },

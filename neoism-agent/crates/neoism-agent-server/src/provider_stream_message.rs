@@ -380,8 +380,8 @@ pub(crate) async fn finish_provider_stream_with_error(
             };
             assistant.finish = Some("error".to_string());
         }
-        // OpenCode cleanup(): every fatal/abort path settles leftover
-        // running tools and open reasoning. User abort already did this;
+        // Every fatal/abort path settles leftover running tools and open
+        // reasoning. User abort already did this;
         // stream timeout / provider error left the chat frozen mid-tool.
         interrupted_parts = mark_interrupted_tool_parts(&mut assistant_message.parts);
         interrupted_parts

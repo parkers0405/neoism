@@ -19,10 +19,9 @@
 //! network step on the [`OutboundAgentCommand`] queue for the host to
 //! execute, and the host feeds results back through the `apply_connect_*` /
 //! `note_connect_*` setters. Browser navigation for OAuth uses the timeline's
-//! existing clickable-link path (the auth URL is surfaced in a system
-//! message; a click routes to the host, which opens it) — there is no
-//! localhost callback listener on the web, so "auto" flows ask the host to
-//! await the server-side callback and everything else falls back to the
+//! existing clickable-link path; the web host also attempts to open the URL
+//! on the initiating device. There is no localhost callback listener in the
+//! web pane, so "auto" flows ask the daemon to await the server-side callback and everything else falls back to the
 //! paste-a-code path.
 //!
 //! Mirrored server endpoints (same as desktop): `GET /provider`,
@@ -708,6 +707,23 @@ impl NeoismAgentPane {
         provider: &ConnectProvider,
         method: &ConnectMethod,
     ) {
+        // A browser running on a different device cannot return to the
+        // Agent's loopback callback. The web pane uses device-code methods
+        // even when the browser-based option was selected.
+        let method = if (provider.id == "openai" && method.label.to_ascii_lowercase().contains("browser"))
+            || (provider.id == "xai" && !method.is_api && !method.label.contains("Headless"))
+        {
+            self.connect.as_ref()
+                .and_then(|flow| flow.methods_by_provider.get(&provider.id))
+                .and_then(|methods| methods.iter().find(|candidate| candidate.label.to_ascii_lowercase().contains("headless")))
+                .cloned()
+                .unwrap_or_else(|| method.clone())
+        } else {
+            method.clone()
+        };
+        if let Some(flow) = self.connect.as_mut() {
+            flow.method = Some(method.clone());
+        }
         self.push_outbound(OutboundAgentCommand::ConnectOauthAuthorize {
             provider_id: provider.id.clone(),
             method_index: method.index,
@@ -725,7 +741,7 @@ impl NeoismAgentPane {
     }
 
     /// Apply an OAuth authorize response fetched by the host:
-    /// - surface the auth URL as a clickable link (the host opens it),
+    /// - surface the auth URL as a clickable link (the web host may open it),
     /// - `auto` flows (OpenAI, GitHub Copilot) ask the host to await the
     ///   server-side callback — there is nothing for the user to paste,
     /// - everything else opens the paste-a-token secret field.

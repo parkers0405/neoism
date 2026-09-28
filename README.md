@@ -52,31 +52,9 @@ Notes are ordinary Markdown vaults with graphs, backlinks, tags, and tasks (`Alt
 
 ## Install
 
-Prebuilt releases support Linux x86_64, Apple Silicon macOS, and Windows x86_64.
+Every release includes Linux, macOS, and Windows builds. Download the latest from [GitHub Releases](https://github.com/parkers0405/neoism/releases/latest).
 
-### Linux
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/parkers0405/neoism/main/scripts/install.sh | bash
-```
-
-### macOS
-
-Download the latest DMG from [GitHub Releases](https://github.com/parkers0405/neoism/releases/latest), or use the shell installer above.
-
-### Windows
-
-Download [`Neoism-x86_64.msi`](https://github.com/parkers0405/neoism/releases/latest/download/Neoism-x86_64.msi), or from PowerShell:
-
-```powershell
-irm https://raw.githubusercontent.com/parkers0405/neoism/main/install.ps1 | iex
-```
-
-The per-user installer requires no administrator rights. Releases include `neoism`, `neoism-workspace-daemon`, and `neoism-agent`. `ripgrep` is recommended for workspace text search.
-
-```sh
-neoism update
-```
+Cross-play is supported: people on different platforms can join the same workspace.
 
 ## Build from source
 
@@ -94,7 +72,6 @@ Documentation ships inside Neoism. Open **Neoism Notes** with `Alt+N` for the ed
 A first tour: open a project, `Alt+E` for the file tree, `Ctrl+Shift+T` for a terminal, `Alt+A` for an agent, `Alt+P` when you do not know the command.
 
 ## Architecture
-
 | Path | Role |
 |---|---|
 | `neoism-frontend/desktop` | Native `neoism` app, window host, and desktop integration |
@@ -108,3 +85,5 @@ A first tour: open a project, `Alt+E` for the file tree, `Ctrl+Shift+T` for a te
 | `neoism-protocol` | Wire types shared by clients and the daemon |
 
 Neoism is open source under the [MIT License](LICENSE). See [NOTICE](NOTICE) for third-party attribution.
+
+Join the [Neoism Discord](https://discord.gg/FF2KUFMRd).

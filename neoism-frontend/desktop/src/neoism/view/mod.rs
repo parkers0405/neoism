@@ -12,7 +12,7 @@ mod layout;
 pub(crate) mod markdown;
 mod message_card;
 mod picker;
-mod side_panel;
+pub(crate) mod side_panel;
 mod timeline;
 mod user_input;
 

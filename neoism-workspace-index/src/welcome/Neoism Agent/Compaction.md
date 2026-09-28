@@ -10,7 +10,7 @@ The summary is stored in the session. It is not only transient text shown in the
 
 ## Automatic compaction
 
-Automatic compaction is enabled by default at **65% of the effective model context window**. Before every provider step (including steps inside tool loops), Neoism estimates the complete upcoming request: system instructions, conversation, attachments, tool calls/results, and tool definitions. This follows OpenCode v2's proactive request check rather than waiting for usage from the previous response.
+Automatic compaction is enabled by default at **65% of the effective model context window**. Before every provider step (including steps inside tool loops), Neoism estimates the complete upcoming request: system instructions, conversation, attachments, tool calls/results, and tool definitions. It checks the upcoming request proactively instead of waiting for usage from the previous response.
 
 Images are budgeted as image input, not as the text length of their base64 transport encoding. The current conservative estimate reserves 4,096 tokens per image; actual provider image accounting varies. Trigger checks and retained-history budgeting use the same estimator, so larger PNG/JPEG encodings do not by themselves force repeated compaction.
 

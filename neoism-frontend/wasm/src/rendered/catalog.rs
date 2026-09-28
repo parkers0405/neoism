@@ -279,9 +279,13 @@ pub(crate) fn apply_agent_event_to_pane(
                     current_session_id.as_deref(),
                 ));
             }
+            let entries = session_entries_from_catalog(&threads);
+            for entry in &entries {
+                pane.remember_session_source(&entry.id, entry.source);
+            }
             if requested_cursor == expected_cursor {
                 pane.side_panel_mut().set_session_page(
-                    session_entries_from_catalog(&threads),
+                    entries,
                     requested_cursor.as_deref(),
                     next_cursor,
                 );
@@ -1404,6 +1408,12 @@ pub(crate) fn session_entries_from_catalog(
                 },
                 "",
             )
+            .with_source(match thread.external_provider.as_deref() {
+                Some("opencode") => neoism_ui::panels::agent_pane::state::side_panel::ConversationSource::OpenCode,
+                Some("claude") => neoism_ui::panels::agent_pane::state::side_panel::ConversationSource::ClaudeCode,
+                Some("codex") => neoism_ui::panels::agent_pane::state::side_panel::ConversationSource::Codex,
+                _ => neoism_ui::panels::agent_pane::state::side_panel::ConversationSource::Neoism,
+            })
             .with_updated_ms(thread.updated_at)
             .with_pinned(thread.pinned)
             .with_runtime_status(thread.busy.then(|| "running".to_string()))

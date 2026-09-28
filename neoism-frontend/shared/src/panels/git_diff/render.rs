@@ -37,11 +37,14 @@ impl GitDiffPanel {
             self.diff_card_rect = Rect::ZERO;
             self.file_row_rects.clear();
             self.file_checkbox_rects.clear();
+            self.folder_checkbox_rects.clear();
             self.folder_row_rects.clear();
             self.selected_cursor_rect = None;
             self.commit_box_rect = Rect::ZERO;
             self.commit_button_rect = Rect::ZERO;
             self.stage_all_rect = Rect::ZERO;
+            self.remote_button_rects = [Rect::ZERO; 3];
+            self.divider_rect = Rect::ZERO;
             self.branch_button_rect = Rect::ZERO;
             self.branch_menu_rect = Rect::ZERO;
             self.branch_filter_rect = Rect::ZERO;
@@ -347,97 +350,8 @@ impl GitDiffPanel {
 
         // Empty / error / loading branches.
         let body_top = cursor_y + (1.0 * s).max(1.0) + CARD_GAP_TOP * s;
-        let body_h = (content_bottom - frame_stroke - body_top).max(0.0);
-        if loading && files.is_empty() {
-            let opts = DrawOpts {
-                font_size: STATS_FONT_SIZE * s,
-                color: theme.u8(theme.muted),
-                clip_rect: Some([content_x, body_top, content_w, body_h]),
-                ..DrawOpts::default()
-            };
-            sugarloaf
-                .text_mut()
-                .draw(inner_x, body_top + 12.0 * s, "Loading…", &opts);
-            self.files_card_rect = Rect::ZERO;
-            self.files_body_rect = Rect::ZERO;
-            self.diff_card_rect = Rect::ZERO;
-            self.file_row_rects.clear();
-            self.file_checkbox_rects.clear();
-            self.folder_row_rects.clear();
-            self.selected_cursor_rect = None;
-            self.commit_box_rect = Rect::ZERO;
-            self.commit_button_rect = Rect::ZERO;
-            self.stage_all_rect = Rect::ZERO;
-            self.draw_branch_menu(
-                sugarloaf,
-                s,
-                content_x,
-                content_bottom,
-                frame_stroke,
-                theme,
-            );
-            return;
-        }
-        if let Some(err) = error.as_ref() {
-            let opts = DrawOpts {
-                font_size: STATS_FONT_SIZE * s,
-                color: theme.u8(theme.red),
-                clip_rect: Some([content_x, body_top, content_w, body_h]),
-                ..DrawOpts::default()
-            };
-            sugarloaf
-                .text_mut()
-                .draw(inner_x, body_top + 12.0 * s, err.as_str(), &opts);
-            self.files_card_rect = Rect::ZERO;
-            self.files_body_rect = Rect::ZERO;
-            self.diff_card_rect = Rect::ZERO;
-            self.file_row_rects.clear();
-            self.file_checkbox_rects.clear();
-            self.folder_row_rects.clear();
-            self.selected_cursor_rect = None;
-            self.commit_box_rect = Rect::ZERO;
-            self.commit_button_rect = Rect::ZERO;
-            self.stage_all_rect = Rect::ZERO;
-            self.draw_branch_menu(
-                sugarloaf,
-                s,
-                content_x,
-                content_bottom,
-                frame_stroke,
-                theme,
-            );
-            return;
-        }
-        if files.is_empty() {
-            let opts = DrawOpts {
-                font_size: STATS_FONT_SIZE * s,
-                color: theme.u8(theme.muted),
-                clip_rect: Some([content_x, body_top, content_w, body_h]),
-                ..DrawOpts::default()
-            };
-            sugarloaf
-                .text_mut()
-                .draw(inner_x, body_top + 12.0 * s, "No changes", &opts);
-            self.files_card_rect = Rect::ZERO;
-            self.files_body_rect = Rect::ZERO;
-            self.diff_card_rect = Rect::ZERO;
-            self.file_row_rects.clear();
-            self.file_checkbox_rects.clear();
-            self.folder_row_rects.clear();
-            self.selected_cursor_rect = None;
-            self.commit_box_rect = Rect::ZERO;
-            self.commit_button_rect = Rect::ZERO;
-            self.stage_all_rect = Rect::ZERO;
-            self.draw_branch_menu(
-                sugarloaf,
-                s,
-                content_x,
-                content_bottom,
-                frame_stroke,
-                theme,
-            );
-            return;
-        }
+        // Keep the action footer available even for a clean worktree or a
+        // failed remote operation; the cards below show the empty/error state.
 
         // ── Files card sizing ────────────────────────────────────────
         let card_x = content_x + CARD_PAD_X * s;
@@ -449,11 +363,9 @@ impl GitDiffPanel {
             .clamp(FILES_CARD_MIN_VISIBLE_ROWS, FILES_CARD_MAX_VISIBLE_ROWS);
         // Files card body: enough rows for `max_files_visible`, plus
         // its header. Diff card gets everything left over.
-        let files_body_h = max_files_visible as f32 * row_h
+        let default_files_body_h = max_files_visible as f32 * row_h
             + (diff_card::BODY_TOP_PAD + diff_card::BODY_BOTTOM_PAD) * s;
-        let files_card_h = files_header_h + files_body_h;
         let files_card_y = body_top;
-        let diff_card_y = files_card_y + files_card_h + CARD_VGAP * s;
         // Reserve the bottom band for the commit region (branch line +
         // message box + Commit / Stage All). The message box grows with
         // the number of lines in the commit message (Shift+Enter inserts
@@ -475,10 +387,37 @@ impl GitDiffPanel {
             + 6.0 * s
             + commit_box_h
             + 8.0 * s
-            + COMMIT_BUTTON_HEIGHT * s;
-        let commit_area_y =
-            (content_bottom - frame_stroke - commit_area_h).max(diff_card_y);
+            + COMMIT_BUTTON_HEIGHT * s * 2.0
+            + 6.0 * s;
+        let commit_area_y = (content_bottom - frame_stroke - commit_area_h).max(body_top);
+        let min_files_h = files_header_h + row_h * 2.0;
+        let max_files_h =
+            (commit_area_y - body_top - 2.0 * CARD_VGAP * s - 72.0 * s).max(min_files_h);
+        let files_body_h = self
+            .files_height_override
+            .map(|h| h * s)
+            .unwrap_or(default_files_body_h)
+            .clamp(row_h * 2.0, (max_files_h - files_header_h).max(row_h * 2.0));
+        let files_card_h = files_header_h + files_body_h;
+        let diff_card_y = files_card_y + files_card_h + CARD_VGAP * s;
         let diff_card_h = (commit_area_y - CARD_VGAP * s - diff_card_y).max(0.0);
+        self.divider_rect = Rect {
+            x: card_x,
+            y: files_card_y + files_card_h - 3.0 * s,
+            w: card_w,
+            h: (CARD_VGAP + 6.0) * s,
+        };
+        sugarloaf.rounded_rect(
+            None,
+            card_x + card_w * 0.5 - 16.0 * s,
+            files_card_y + files_card_h + CARD_VGAP * s * 0.5 - 1.0 * s,
+            32.0 * s,
+            2.0 * s,
+            theme.f32(theme.muted),
+            DEPTH,
+            1.0 * s,
+            ORDER_SCROLL,
+        );
 
         self.files_card_rect = Rect {
             x: card_x,
@@ -577,6 +516,31 @@ impl GitDiffPanel {
             w: card_w,
             h: files_body_h,
         };
+        if let Some(message) = error.as_deref().or_else(|| {
+            if files.is_empty() {
+                Some(if loading { "Loading..." } else { "No changes" })
+            } else {
+                None
+            }
+        }) {
+            let opts = DrawOpts {
+                font_size: STATS_FONT_SIZE * s,
+                color: theme.u8(if error.is_some() {
+                    theme.red
+                } else {
+                    theme.muted
+                }),
+                clip_rect: Some([card_x, files_body_y, card_w, files_body_h]),
+                ..DrawOpts::default()
+            };
+            let text = truncate_to_fit(message, card_w - 20.0 * s, sugarloaf, &opts);
+            sugarloaf.text_mut().draw(
+                card_x + 10.0 * s,
+                files_body_y + 10.0 * s,
+                &text,
+                &opts,
+            );
+        }
         // Rebuild the flattened tree (folders + file leaves) from the
         // current file list + collapsed-set. Cached on `self` so
         // hit-testing and keyboard navigation see the same order.
@@ -585,7 +549,7 @@ impl GitDiffPanel {
         let total_rows = visual_rows.len();
 
         let files_body_inner_y = files_body_y + diff_card::BODY_TOP_PAD * s;
-        let visible_rows = max_files_visible;
+        let visible_rows = ((files_body_h / row_h).floor() as usize).max(1);
         let max_top = total_rows.saturating_sub(visible_rows);
         let max_scroll = max_top as f32 * row_h;
         if self.file_scroll > max_scroll {
@@ -596,6 +560,7 @@ impl GitDiffPanel {
 
         self.file_row_rects.clear();
         self.file_checkbox_rects.clear();
+        self.folder_checkbox_rects.clear();
         self.folder_row_rects.clear();
         self.selected_cursor_rect = None;
 
@@ -764,6 +729,82 @@ impl GitDiffPanel {
                         dir_fit.as_str(),
                         &dir_name_opts,
                     );
+                    let prefix = format!("{path}/");
+                    let children: Vec<_> = files
+                        .iter()
+                        .filter(|f| f.path.starts_with(&prefix))
+                        .collect();
+                    let all_staged =
+                        !children.is_empty() && children.iter().all(|f| f.staged);
+                    let some_staged = children.iter().any(|f| f.staged);
+                    let cb_y = row_y + (row_h - checkbox_size) / 2.0;
+                    if cb_y >= row_clip_top && cb_y + checkbox_size <= row_clip_bot {
+                        let radius = 4.0 * s;
+                        sugarloaf.rounded_rect(
+                            None,
+                            checkbox_x,
+                            cb_y,
+                            checkbox_size,
+                            checkbox_size,
+                            theme.f32(if all_staged {
+                                theme.accent
+                            } else {
+                                theme.muted
+                            }),
+                            DEPTH,
+                            radius,
+                            ORDER_SCROLL,
+                        );
+                        if !all_staged {
+                            let inset = (1.5 * s).max(1.0);
+                            sugarloaf.rounded_rect(
+                                None,
+                                checkbox_x + inset,
+                                cb_y + inset,
+                                checkbox_size - 2.0 * inset,
+                                checkbox_size - 2.0 * inset,
+                                theme.f32(theme.bg),
+                                DEPTH,
+                                (radius - inset).max(0.0),
+                                ORDER_SCROLL,
+                            );
+                        }
+                        if all_staged || some_staged {
+                            let glyph = if all_staged { check_glyph() } else { "-" };
+                            let opts = DrawOpts {
+                                font_size: checkbox_size * 0.72,
+                                color: theme.u8(if all_staged {
+                                    theme.bg
+                                } else {
+                                    theme.fg
+                                }),
+                                bold: true,
+                                clip_rect: Some([
+                                    checkbox_x,
+                                    cb_y,
+                                    checkbox_size,
+                                    checkbox_size,
+                                ]),
+                                ..DrawOpts::default()
+                            };
+                            let w = sugarloaf.text_mut().measure(glyph, &opts);
+                            sugarloaf.text_mut().draw(
+                                checkbox_x + (checkbox_size - w) / 2.0,
+                                cb_y + (checkbox_size - checkbox_size * 0.72) / 2.0,
+                                glyph,
+                                &opts,
+                            );
+                        }
+                        self.folder_checkbox_rects.push((
+                            absolute_ix,
+                            Rect {
+                                x: checkbox_x,
+                                y: cb_y,
+                                w: checkbox_size,
+                                h: checkbox_size,
+                            },
+                        ));
+                    }
                 }
                 VisualRowKind::File { file_index } => {
                     let file_index = *file_index;
@@ -1187,7 +1228,11 @@ impl GitDiffPanel {
         };
         let branch_text_opts = DrawOpts {
             font_size: STATS_FONT_SIZE * s,
-            color: theme.u8(theme.muted),
+            color: theme.u8(if error.is_some() {
+                theme.red
+            } else {
+                theme.muted
+            }),
             clip_rect: Some(branch_clip),
             ..DrawOpts::default()
         };
@@ -1200,7 +1245,9 @@ impl GitDiffPanel {
             &branch_icon_opts,
         );
         bx += 6.0 * s;
-        let branch_line = if branch_label.is_empty() {
+        let branch_line = if let Some(err) = error.as_ref() {
+            format!("Git: {err}")
+        } else if branch_label.is_empty() {
             "detached".to_string()
         } else {
             format!("on {branch_label}")
@@ -1437,6 +1484,44 @@ impl GitDiffPanel {
             w: stage_btn_w,
             h: btn_h,
         };
+
+        // Remote operations stay visible even when there are no local changes.
+        let remote_y = btn_y + btn_h + 6.0 * s;
+        let remote_w = (box_w - btn_gap * 2.0) / 3.0;
+        for (slot, label) in ["Fetch", "Pull", "Push"].iter().enumerate() {
+            let x = box_x + slot as f32 * (remote_w + btn_gap);
+            sugarloaf.rounded_rect(
+                None,
+                x,
+                remote_y,
+                remote_w,
+                btn_h,
+                theme.f32(theme.surface),
+                DEPTH,
+                btn_radius,
+                ORDER_ROW_BG + 1,
+            );
+            let opts = DrawOpts {
+                font_size: COMMIT_FONT_SIZE * s,
+                color: theme.u8(theme.dim),
+                bold: true,
+                clip_rect: Some([x, remote_y, remote_w, btn_h]),
+                ..DrawOpts::default()
+            };
+            let text_w = sugarloaf.text_mut().measure(label, &opts);
+            sugarloaf.text_mut().draw(
+                x + (remote_w - text_w) / 2.0,
+                remote_y + (btn_h - COMMIT_FONT_SIZE * s) / 2.0,
+                label,
+                &opts,
+            );
+            self.remote_button_rects[slot] = Rect {
+                x,
+                y: remote_y,
+                w: remote_w,
+                h: btn_h,
+            };
+        }
 
         // Branch dropdown overlays everything else when open.
         self.draw_branch_menu(

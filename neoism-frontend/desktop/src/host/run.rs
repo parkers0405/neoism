@@ -890,6 +890,41 @@ impl Renderer {
                     self.notes_sidebar_mouse,
                     wordmark_now,
                 );
+                side_x += self.notes_sidebar.width();
+            }
+
+            if self.conversations_visible {
+                // The workspace catalog owns its own pane, so it cannot infer
+                // which Agent tab is currently shown from its session_id.
+                let active_id = context_manager
+                    .current()
+                    .neoism_agent
+                    .as_ref()
+                    .and_then(|agent| agent.session_id_str())
+                    .map(str::to_owned);
+                let panel = &mut self.conversations_pane;
+                if panel.side_panel().viewed_session_id() != active_id.as_deref() {
+                    panel.side_panel_mut().set_viewed_session_id(active_id);
+                }
+                panel.drain_server_updates();
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| {
+                        neoism_ui::render_policy::animation_phase_from_unix_secs(
+                            d.as_secs(),
+                            d.subsec_nanos(),
+                        )
+                    })
+                    .unwrap_or(0.0);
+                let panel_width = panel.side_panel().width();
+                neoism_ui::panels::agent_pane::view::side_panel::render_side_panel_with_icons::<
+                    _, crate::neoism::view::side_panel::DesktopSidePanelIcons,
+                >(
+                    sugarloaf, panel,
+                    [side_x, tree_top, panel_width, tree_height],
+                    &self.theme, 1.0, now, self.notes_sidebar_mouse,
+                    &tree_text_occlusions,
+                );
             }
 
             // Workspace strip clamps to the primary editor pane's

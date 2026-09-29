@@ -208,7 +208,9 @@ async fn resolve_artifact(
         .inner
         .store
         .get_artifact(
-            crate::state::TenantQueryScope::Tenant(crate::caller::session_tenant(&session)),
+            crate::state::TenantQueryScope::Tenant(crate::caller::session_tenant(
+                &session,
+            )),
             id,
         )
         .await?

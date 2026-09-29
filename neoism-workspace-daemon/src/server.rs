@@ -203,7 +203,8 @@ pub fn router(state: AppState) -> Router {
         )
         .route(
             "/agent/workspaces/:workspace_id/*path",
-            any(agent_workspace_proxy).layer(axum::extract::DefaultBodyLimit::max(25 * 1024 * 1024)),
+            any(agent_workspace_proxy)
+                .layer(axum::extract::DefaultBodyLimit::max(25 * 1024 * 1024)),
         )
         .route("/agent/*path", any(agent_proxy))
         .fallback(web_fallback)
@@ -341,19 +342,27 @@ async fn agent_proxy_inner(
     // OAuth redirects are unauthenticated browser navigations. Only the exact
     // GET callback with a code and state may bypass the daemon bearer gate;
     // the Agent consumes the one-time state before exchanging any credentials.
-    if shared && method == axum::http::Method::GET && body.is_empty()
+    if shared
+        && method == axum::http::Method::GET
+        && body.is_empty()
         && mcp_oauth_callback_name(&path).is_some()
     {
         if let Some(callback) = mcp_oauth_callback_target(&path, query.as_deref()) {
             crate::agent::ensure_agent_server_started(state.workspaces.clone());
-            let target = format!("{}{}", agent_handler::configured_agent_server(), callback);
+            let target =
+                format!("{}{}", agent_handler::configured_agent_server(), callback);
             return match reqwest::Client::new().get(target).send().await {
                 Ok(upstream) => {
                     let status = StatusCode::from_u16(upstream.status().as_u16())
                         .unwrap_or(StatusCode::BAD_GATEWAY);
-                    let mut response = Response::new(axum::body::Body::from_stream(upstream.bytes_stream()));
+                    let mut response = Response::new(axum::body::Body::from_stream(
+                        upstream.bytes_stream(),
+                    ));
                     *response.status_mut() = status;
-                    response.headers_mut().insert(header::CONTENT_TYPE, "text/html; charset=utf-8".parse().unwrap());
+                    response.headers_mut().insert(
+                        header::CONTENT_TYPE,
+                        "text/html; charset=utf-8".parse().unwrap(),
+                    );
                     response
                 }
                 Err(_) => StatusCode::BAD_GATEWAY.into_response(),
@@ -384,10 +393,18 @@ async fn agent_proxy_inner(
         Err(_) => return StatusCode::METHOD_NOT_ALLOWED.into_response(),
     };
     if method == reqwest::Method::POST && mcp_oauth_auth_name(&path).is_some() {
-        let Some(host) = headers.get(header::HOST).and_then(|value| value.to_str().ok()) else {
-            return (StatusCode::BAD_REQUEST, "missing OAuth callback host").into_response();
+        let Some(host) = headers
+            .get(header::HOST)
+            .and_then(|value| value.to_str().ok())
+        else {
+            return (StatusCode::BAD_REQUEST, "missing OAuth callback host")
+                .into_response();
         };
-        let scheme = if headers.get("x-forwarded-proto").and_then(|value| value.to_str().ok()) == Some("https") {
+        let scheme = if headers
+            .get("x-forwarded-proto")
+            .and_then(|value| value.to_str().ok())
+            == Some("https")
+        {
             "https"
         } else {
             "http"
@@ -400,15 +417,22 @@ async fn agent_proxy_inner(
         )) else {
             return StatusCode::BAD_REQUEST.into_response();
         };
-        if callback.username() != "" || callback.password().is_some() || callback.query().is_some() || callback.fragment().is_some() {
+        if callback.username() != ""
+            || callback.password().is_some()
+            || callback.query().is_some()
+            || callback.fragment().is_some()
+        {
             return StatusCode::BAD_REQUEST.into_response();
         }
-        let params: Vec<_> = url.query_pairs()
+        let params: Vec<_> = url
+            .query_pairs()
             .filter(|(key, _)| key != "redirectUri")
             .map(|(key, value)| (key.into_owned(), value.into_owned()))
             .collect();
         url.set_query(None);
-        url.query_pairs_mut().extend_pairs(params).append_pair("redirectUri", callback.as_str());
+        url.query_pairs_mut()
+            .extend_pairs(params)
+            .append_pair("redirectUri", callback.as_str());
         target = url.to_string();
     }
     let mut request = client.request(method.clone(), &target);
@@ -463,25 +487,41 @@ async fn agent_proxy_inner(
 }
 
 fn mcp_oauth_auth_name(path: &str) -> Option<&str> {
-    let name = path.strip_prefix("v2/plugins/dev.neoism.mcp/")?.strip_suffix("/auth")?;
+    let name = path
+        .strip_prefix("v2/plugins/dev.neoism.mcp/")?
+        .strip_suffix("/auth")?;
     (!name.is_empty() && !name.contains('/') && !name.contains('?')).then_some(name)
 }
 
 fn mcp_oauth_callback_name(path: &str) -> Option<&str> {
-    let name = path.strip_prefix("v2/plugins/dev.neoism.mcp/")?.strip_suffix("/auth/callback")?;
+    let name = path
+        .strip_prefix("v2/plugins/dev.neoism.mcp/")?
+        .strip_suffix("/auth/callback")?;
     (!name.is_empty() && !name.contains('/') && !name.contains('?')).then_some(name)
 }
 
 fn mcp_oauth_callback_target(path: &str, query: Option<&str>) -> Option<String> {
     mcp_oauth_callback_name(path)?;
-    let parsed = reqwest::Url::parse(&format!("http://localhost/{path}?{}", query?)).ok()?;
-    let code = parsed.query_pairs().find(|(key, _)| key == "code")?.1.into_owned();
-    let state = parsed.query_pairs().find(|(key, _)| key == "state")?.1.into_owned();
+    let parsed =
+        reqwest::Url::parse(&format!("http://localhost/{path}?{}", query?)).ok()?;
+    let code = parsed
+        .query_pairs()
+        .find(|(key, _)| key == "code")?
+        .1
+        .into_owned();
+    let state = parsed
+        .query_pairs()
+        .find(|(key, _)| key == "state")?
+        .1
+        .into_owned();
     if code.is_empty() || state.is_empty() {
         return None;
     }
     let mut target = reqwest::Url::parse(&format!("http://localhost/{path}")).ok()?;
-    target.query_pairs_mut().append_pair("code", &code).append_pair("state", &state);
+    target
+        .query_pairs_mut()
+        .append_pair("code", &code)
+        .append_pair("state", &state);
     Some(format!("{}?{}", target.path(), target.query()?))
 }
 
@@ -492,7 +532,8 @@ fn forward_agent_upload_headers(
     headers: &HeaderMap,
 ) -> reqwest::RequestBuilder {
     // Scope and authorization always come from the daemon-minted credential.
-    if path.trim_start_matches('/') == "v2/artifacts" && *method == reqwest::Method::POST {
+    if path.trim_start_matches('/') == "v2/artifacts" && *method == reqwest::Method::POST
+    {
         for name in ["x-neoism-filename", "x-neoism-session-id"] {
             if let Some(value) = headers.get(name) {
                 request = request.header(name, value.clone());
@@ -731,13 +772,23 @@ mod agent_proxy_auth_tests {
         let path = "v2/plugins/dev.neoism.mcp/github/auth/callback";
         assert_eq!(mcp_oauth_callback_name(path), Some("github"));
         assert_eq!(
-            mcp_oauth_callback_target(path, Some("code=a%2Bb&state=nonce&directory=%2Fprivate")),
+            mcp_oauth_callback_target(
+                path,
+                Some("code=a%2Bb&state=nonce&directory=%2Fprivate")
+            ),
             Some(format!("/{path}?code=a%2Bb&state=nonce")),
         );
         assert!(mcp_oauth_callback_target(path, Some("code=abc")).is_none());
         assert!(mcp_oauth_callback_target(path, Some("code=abc&state=")).is_none());
-        assert!(mcp_oauth_callback_target("v2/plugins/dev.neoism.mcp/github/auth", Some("code=abc&state=nonce")).is_none());
-        assert!(mcp_oauth_callback_name("v2/plugins/dev.neoism.mcp/github/tools/auth/callback").is_none());
+        assert!(mcp_oauth_callback_target(
+            "v2/plugins/dev.neoism.mcp/github/auth",
+            Some("code=abc&state=nonce")
+        )
+        .is_none());
+        assert!(mcp_oauth_callback_name(
+            "v2/plugins/dev.neoism.mcp/github/tools/auth/callback"
+        )
+        .is_none());
     }
 
     struct DaemonTokenGuard(Option<String>);
@@ -791,9 +842,17 @@ mod agent_proxy_auth_tests {
                 path,
                 &method,
                 &headers,
-            ).build().unwrap();
-            assert_eq!(request.headers().contains_key("x-neoism-filename"), expected);
-            assert_eq!(request.headers().contains_key("x-neoism-session-id"), expected);
+            )
+            .build()
+            .unwrap();
+            assert_eq!(
+                request.headers().contains_key("x-neoism-filename"),
+                expected
+            );
+            assert_eq!(
+                request.headers().contains_key("x-neoism-session-id"),
+                expected
+            );
             assert!(!request.headers().contains_key("x-neoism-directory"));
             assert!(!request.headers().contains_key(header::AUTHORIZATION));
         }
@@ -807,12 +866,18 @@ mod agent_proxy_auth_tests {
         let auth = AuthService::bootstrap(temp.path()).unwrap();
         let headers = HeaderMap::new();
         assert_eq!(
-            agent_proxy_principal(&auth, &headers, Some(("joined-workspace", false))).unwrap(),
+            agent_proxy_principal(&auth, &headers, Some(("joined-workspace", false)))
+                .unwrap(),
             "trust-local"
         );
         let mut invalid = HeaderMap::new();
         invalid.insert(header::AUTHORIZATION, "Bearer invalid".parse().unwrap());
-        assert!(agent_proxy_principal(&auth, &invalid, Some(("joined-workspace", false))).is_err());
+        assert!(agent_proxy_principal(
+            &auth,
+            &invalid,
+            Some(("joined-workspace", false))
+        )
+        .is_err());
     }
 
     #[tokio::test]

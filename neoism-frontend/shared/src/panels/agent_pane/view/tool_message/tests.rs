@@ -47,6 +47,33 @@ fn running_apply_patch_skips_live_diff_parse() {
 }
 
 #[test]
+fn completed_acp_edit_uses_explicit_diff_content() {
+    let detail = serde_json::json!({
+        "neoismToolDetail": "edit", "tool": "edit", "input": {},
+        "metadata": {"acpDiffs": [{"path": "src/lib.rs", "oldText": "old\n", "newText": "new\n"}]}
+    }).to_string();
+    let mut message = apply_patch_message("completed", &detail);
+    message.tool = "edit".to_string();
+    let sections = cached_edit_diff_sections(&message).expect("ACP diff should render");
+    assert_eq!(
+        sections[0]
+            .lines
+            .iter()
+            .filter(|row| row.kind == DiffLineKind::Add)
+            .count(),
+        1
+    );
+    assert_eq!(
+        sections[0]
+            .lines
+            .iter()
+            .filter(|row| row.kind == DiffLineKind::Remove)
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn completed_apply_patch_parses_diff_card() {
     let detail = r#"{"neoismToolDetail":"edit","tool":"apply_patch","input":{"patchText":"*** Begin Patch\n*** Update File: src/lib.rs\n@@\n-old\n+new\n*** End Patch\n"},"metadata":null}"#;
     let sections = cached_edit_diff_sections(&apply_patch_message("completed", detail))

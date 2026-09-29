@@ -1790,7 +1790,10 @@ fn external_new_chat_keeps_provider_until_session_ack_and_does_not_inherit_on_ne
     let mut pane = NeoismAgentPane::default();
     pane.start_new_chat_from(ConversationSource::OpenCode);
     assert_eq!(pane.new_chat_source().provider(), Some("opencode"));
-    assert!(pane.drain_pending_outbound().iter().any(|command| matches!(command, OutboundAgentCommand::EnsureSession)));
+    assert!(pane
+        .drain_pending_outbound()
+        .iter()
+        .any(|command| matches!(command, OutboundAgentCommand::EnsureSession)));
     pane.set_session_id(Some("external-1".into()));
     pane.start_new_conversation();
     assert_eq!(pane.new_chat_source(), ConversationSource::Neoism);

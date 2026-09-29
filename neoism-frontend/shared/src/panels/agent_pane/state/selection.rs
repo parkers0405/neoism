@@ -83,7 +83,9 @@ impl NeoismAgentPane {
                 .cloned()
                 .map(|line| {
                     (
-                        crate::panels::agent_pane::selection_model::selection_line_key(&line),
+                        crate::panels::agent_pane::selection_model::selection_line_key(
+                            &line,
+                        ),
                         line,
                     )
                 }),

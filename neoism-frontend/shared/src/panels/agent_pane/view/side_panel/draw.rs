@@ -286,7 +286,8 @@ pub(crate) fn render_sessions_list(
         pane.side_panel().session_catalog_state(),
         crate::panels::agent_pane::state::side_panel::SessionCatalogState::Initial
             | crate::panels::agent_pane::state::side_panel::SessionCatalogState::Loading
-    ) && pane.side_panel().sessions().is_empty() {
+    ) && pane.side_panel().sessions().is_empty()
+    {
         draw_session_loading_skeleton(
             sugarloaf,
             list_rect,
@@ -304,23 +305,22 @@ pub(crate) fn render_sessions_list(
     ) = pane.side_panel().session_catalog_state()
     {
         if pane.side_panel().sessions().is_empty() {
-        let opts = DrawOpts {
-            font_size: FONT_SIZE * s,
-            color: theme.u8(theme.dim),
-            clip_rect: Some(clip),
-            ..DrawOpts::default()
-        };
-        draw_text_with_occlusion(
-            sugarloaf,
-            text_x,
-            list_top + 12.0 * s,
-            message,
-            &opts,
-            occlusion_rects,
-        );
-        return;
-    }
-
+            let opts = DrawOpts {
+                font_size: FONT_SIZE * s,
+                color: theme.u8(theme.dim),
+                clip_rect: Some(clip),
+                ..DrawOpts::default()
+            };
+            draw_text_with_occlusion(
+                sugarloaf,
+                text_x,
+                list_top + 12.0 * s,
+                message,
+                &opts,
+                occlusion_rects,
+            );
+            return;
+        }
     }
     if pane.side_panel().sessions().is_empty() {
         // A semantic search may still surface matches for this query — show
@@ -447,14 +447,11 @@ pub(crate) fn render_sessions_list(
         clip_rect: Some(list_rect),
         ..DrawOpts::default()
     };
-    // Cyan date-group / "Pinned" header rows, matching the /sessions modal —
-    // drawn in the bundled "Press Start 2P" pixel face like the section
-    // headers above (falls back to the default font when it can't resolve).
-    // Size is unchanged: ~12px pixel-face date labels still fit the panel.
+    // Date groups share the model chip's subdued blue accent across themes.
     let pixel_font = crate::primitives::pixel_font_id(sugarloaf);
     let header_opts = DrawOpts {
         font_size: FONT_SIZE * s * 0.92,
-        color: theme.u8(theme.readable_accent(theme.cyan)),
+        color: theme.u8(theme.readable_accent(theme.blue)),
         bold: true,
         extrude: true,
         font_id: pixel_font,

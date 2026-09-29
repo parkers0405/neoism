@@ -497,7 +497,9 @@ impl Screen<'_> {
                             .as_ref()
                             .filter(|markdown| markdown.is_active_tab_path(path))
                         {
-                            if let Some(binding) = markdown.documentation_notebook.as_ref() {
+                            if let Some(binding) =
+                                markdown.documentation_notebook.as_ref()
+                            {
                                 documentation_outline = binding
                                     .session
                                     .lock()
@@ -562,7 +564,9 @@ impl Screen<'_> {
                     self.renderer
                         .file_tree
                         .set_active_path(crumb_path.clone().or(active_path.clone()));
-                } else if let Some(p) = documentation_page_path.or_else(|| crumb_path.clone()) {
+                } else if let Some(p) =
+                    documentation_page_path.or_else(|| crumb_path.clone())
+                {
                     self.renderer
                         .breadcrumbs
                         .set_from_path(&p, active_cwd.as_deref());

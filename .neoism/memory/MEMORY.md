@@ -312,3 +312,4 @@
 - [Pre-chat provider selectors](feature_prechat_acp_selectors.md) - T3-style draft provider selectors and disk-cached ACP preflight
 - [ACP draft send and phantom OpenCode history](bug_acp_draft_send_phantom_history.md) - Draft ACP model lost on first send and empty OpenCode previews shown as chats
 - [Joined workspace OAuth handoff](feature_joined_workspace_auth.md) - Joined workspace provider/MCP auth host credentials, guest browser, host callback routing
+- [ACP provider parity and sidebar](feature_acp_provider_parity_2026_09.md) - ACP provider parity and sidebar fixes

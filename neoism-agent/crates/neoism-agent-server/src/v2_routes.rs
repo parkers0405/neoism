@@ -76,9 +76,10 @@ pub(crate) async fn v2_capabilities(
         id: "neoism.providers.manage".into(),
         version: "1.0.0".into(),
         enabled: !claims.as_ref().is_some_and(|Extension(c)| {
-            c.hosted && !c.workspace_id.as_deref().is_some_and(|workspace_id| {
-                c.tenant_id == format!("workspace:{workspace_id}")
-            })
+            c.hosted
+                && !c.workspace_id.as_deref().is_some_and(|workspace_id| {
+                    c.tenant_id == format!("workspace:{workspace_id}")
+                })
         }),
         disableable: false,
         source: "server".into(),
@@ -114,7 +115,10 @@ pub(crate) async fn v2_capabilities(
     capabilities.push(CapabilityInfo {
         id: "neoism.execution.native".into(),
         version: "1.0.0".into(),
-        enabled: matches!(execution, neoism_agent_service_api::ExecutionPolicy::NativeLocal),
+        enabled: matches!(
+            execution,
+            neoism_agent_service_api::ExecutionPolicy::NativeLocal
+        ),
         disableable: false,
         source: execution_backend.clone(),
         plugin_id: None,
@@ -124,13 +128,17 @@ pub(crate) async fn v2_capabilities(
     capabilities.push(CapabilityInfo {
         id: "neoism.execution.sandbox".into(),
         version: "1.0.0".into(),
-        enabled: matches!(execution, neoism_agent_service_api::ExecutionPolicy::Sandboxed { .. })
-            && state.services().execution.available(),
+        enabled: matches!(
+            execution,
+            neoism_agent_service_api::ExecutionPolicy::Sandboxed { .. }
+        ) && state.services().execution.available(),
         disableable: false,
         source: execution_backend,
         plugin_id: None,
         api_prefix: None,
-        reason: Some("Sandbox leases are acquired lazily on the first process operation".into()),
+        reason: Some(
+            "Sandbox leases are acquired lazily on the first process operation".into(),
+        ),
     });
     capabilities.push(CapabilityInfo {
         id: "neoism.sessions.control".into(),
@@ -140,7 +148,9 @@ pub(crate) async fn v2_capabilities(
         source: "server".into(),
         plugin_id: None,
         api_prefix: Some("/v2/sessions/{session_id}/control".into()),
-        reason: Some("Tenant-owned sessions support revision-guarded actor control leases".into()),
+        reason: Some(
+            "Tenant-owned sessions support revision-guarded actor control leases".into(),
+        ),
     });
     let shared_artifacts = state
         .services()
@@ -161,7 +171,9 @@ pub(crate) async fn v2_capabilities(
             .into(),
         plugin_id: None,
         api_prefix: Some("/v2/artifacts".into()),
-        reason: Some("Hosted control planes require artifact bytes shared by every replica".into()),
+        reason: Some(
+            "Hosted control planes require artifact bytes shared by every replica".into(),
+        ),
     });
     capabilities.push(CapabilityInfo {
         id: "neoism.workflows.hosted".into(),
@@ -782,20 +794,58 @@ pub(crate) async fn v2_session_list(
         // those native roots so a stranded pre-upgrade import cannot leak as
         // an apparently complete empty chat.
         for session in &mut page.items {
-            if session.model.as_ref().is_some_and(|model| model.provider_id == "external")
+            if session
+                .model
+                .as_ref()
+                .is_some_and(|model| model.provider_id == "external")
                 && !session.extra.contains_key("externalAgent")
             {
-                if let Some(full) = state.inner.store.get_session(session.id.as_str()).await? {
+                if let Some(full) =
+                    state.inner.store.get_session(session.id.as_str()).await?
+                {
                     *session = full;
                 }
             }
         }
         if let Some(Extension(claims)) = claims {
-            page.items.retain(|session| {
-                crate::caller::allows_session(&claims, session)
-            });
+            page.items
+                .retain(|session| crate::caller::allows_session(&claims, session));
         }
-        page.items.retain(|session| !crate::external_agent::catalog::is_importing(session));
+        page.items
+            .retain(|session| !crate::external_agent::catalog::is_importing(session));
+        for session in &mut page.items {
+            if !crate::session_context::is_default_session_title(&session.title) {
+                continue;
+            }
+            let Some(mut full) =
+                state.inner.store.get_session(session.id.as_str()).await?
+            else {
+                continue;
+            };
+            if !crate::session_context::is_default_session_title(&full.title)
+                || (!full.extra.contains_key("externalAgent")
+                    && !full
+                        .model
+                        .as_ref()
+                        .is_some_and(|model| model.provider_id == "external"))
+            {
+                continue;
+            }
+            let messages = state.inner.store.list_messages(full.id.as_str()).await?;
+            if let Some(title) = messages
+                .iter()
+                .find(|message| {
+                    matches!(&message.info, neoism_agent_core::MessageInfo::User(_))
+                })
+                .and_then(|message| {
+                    crate::session_context::title_from_parts(&message.parts)
+                })
+            {
+                full.title = title;
+                state.inner.store.update_session(&full).await?;
+                *session = full;
+            }
+        }
         return Ok(Json(Page {
             items: page.items,
             cursor: PageCursor {

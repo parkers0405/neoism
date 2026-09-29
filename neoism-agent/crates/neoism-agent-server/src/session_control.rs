@@ -138,10 +138,11 @@ async fn tenant_for_session(
     } else {
         state.inner.store.get_session(session_id).await?
     }
-        .ok_or_else(|| ApiError::not_found("Session not found"))?;
+    .ok_or_else(|| ApiError::not_found("Session not found"))?;
     let tenant = crate::caller::session_tenant(&session);
     if let Some(Extension(claims)) = claims {
-        if claims.tenant_id != tenant && !(claims.tenant_id == "local" && !claims.hosted) {
+        if claims.tenant_id != tenant && !(claims.tenant_id == "local" && !claims.hosted)
+        {
             return Err(ApiError::forbidden("Session belongs to another tenant"));
         }
     }

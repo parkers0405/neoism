@@ -566,6 +566,90 @@ impl Screen<'_> {
             ModalAction::FileTreeRename { path, name, notes } => {
                 self.rename_file_tree_path(PathBuf::from(path), name, notes);
             }
+            ModalAction::AgentRenameSession {
+                session_id,
+                server,
+                directory,
+                name,
+            } => {
+                if !self.conversation_context_scope_matches(&server, directory.as_deref())
+                {
+                    self.renderer.modal.close();
+                    return;
+                }
+                let name = name.trim();
+                if name.is_empty() {
+                    self.renderer.notifications.push(
+                        "Name required",
+                        neoism_ui::panels::notifications::NotificationLevel::Warn,
+                    );
+                    return;
+                }
+                match crate::neoism::agent::rename_session(&server, &session_id, name) {
+                    Ok(()) => {
+                        self.renderer.modal.close();
+                        self.renderer
+                            .conversations_pane
+                            .refresh_sessions_after_mutation();
+                        for grid in self.context_manager.contexts_mut() {
+                            for item in grid.contexts_mut().values_mut() {
+                                if let Some(agent) =
+                                    item.val.neoism_agent.as_mut().filter(|agent| {
+                                        agent.server_address() == server
+                                            && agent.session_directory()
+                                                == directory.as_deref()
+                                    })
+                                {
+                                    agent.refresh_sessions_after_mutation();
+                                }
+                            }
+                        }
+                    }
+                    Err(error) => self.renderer.notifications.push(
+                        error,
+                        neoism_ui::panels::notifications::NotificationLevel::Warn,
+                    ),
+                }
+            }
+            ModalAction::AgentDeleteSession {
+                session_id,
+                server,
+                directory,
+            } => {
+                if !self.conversation_context_scope_matches(&server, directory.as_deref())
+                {
+                    self.renderer.modal.close();
+                    return;
+                }
+                match crate::neoism::agent::delete_session(&server, &session_id) {
+                    Ok(()) => {
+                        self.renderer.modal.close();
+                        self.renderer
+                            .conversations_pane
+                            .refresh_sessions_after_mutation();
+                        for grid in self.context_manager.contexts_mut() {
+                            for item in grid.contexts_mut().values_mut() {
+                                if let Some(agent) =
+                                    item.val.neoism_agent.as_mut().filter(|agent| {
+                                        agent.server_address() == server
+                                            && agent.session_directory()
+                                                == directory.as_deref()
+                                    })
+                                {
+                                    if agent.session_id_str() == Some(&session_id) {
+                                        agent.create_new_session();
+                                    }
+                                    agent.refresh_sessions_after_mutation();
+                                }
+                            }
+                        }
+                    }
+                    Err(error) => self.renderer.notifications.push(
+                        error,
+                        neoism_ui::panels::notifications::NotificationLevel::Warn,
+                    ),
+                }
+            }
             ModalAction::RenameTab {
                 index,
                 agent_session_id,

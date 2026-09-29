@@ -2172,15 +2172,21 @@ mod tests {
     #[tokio::test]
     async fn hosted_config_failure_never_installs_default_plugins() {
         use neoism_agent_service_api::{
-            ConfigSnapshot, ConfigSnapshotRequest, ConfigSourceService, ConfigUpdateRequest,
-            ServiceError, ServiceFuture,
+            ConfigSnapshot, ConfigSnapshotRequest, ConfigSourceService,
+            ConfigUpdateRequest, ServiceError, ServiceFuture,
         };
         struct DeniedConfig;
         impl ConfigSourceService for DeniedConfig {
-            fn snapshot(&self, _: &ConfigSnapshotRequest) -> Result<ConfigSnapshot, ServiceError> {
+            fn snapshot(
+                &self,
+                _: &ConfigSnapshotRequest,
+            ) -> Result<ConfigSnapshot, ServiceError> {
                 Err(ServiceError::new("hosted profile unavailable"))
             }
-            fn update<'a>(&'a self, _: &'a ConfigUpdateRequest) -> ServiceFuture<'a, Result<ConfigSnapshot, ServiceError>> {
+            fn update<'a>(
+                &'a self,
+                _: &'a ConfigUpdateRequest,
+            ) -> ServiceFuture<'a, Result<ConfigSnapshot, ServiceError>> {
                 Box::pin(async { Err(ServiceError::new("hosted profile unavailable")) })
             }
         }
@@ -2193,10 +2199,16 @@ mod tests {
             .with_config(Arc::new(DeniedConfig))
             .for_hosted_control_plane();
         let state = crate::state::AppState::open_database_with_services(
-            root.join("state.sqlite3"), services,
-        ).await.unwrap();
+            root.join("state.sqlite3"),
+            services,
+        )
+        .await
+        .unwrap();
         let registry = WorkspaceRuntimeRegistry::default();
-        assert!(registry.acquire_for_tenant("tenant-a", &root.to_string_lossy(), &state).await.is_err());
+        assert!(registry
+            .acquire_for_tenant("tenant-a", &root.to_string_lossy(), &state)
+            .await
+            .is_err());
         assert!(registry.runtimes().await.is_empty());
         let _ = std::fs::remove_dir_all(root);
     }
@@ -2346,7 +2358,10 @@ mod tests {
                 .workspace_plugin_generations
                 .lock()
                 .await
-                .get(&TenantRuntimeKey::new("local", root.to_string_lossy().as_ref()))
+                .get(&TenantRuntimeKey::new(
+                    "local",
+                    root.to_string_lossy().as_ref()
+                ))
                 .map(|(generation, _)| *generation),
             Some(published_generation),
         );
@@ -2355,7 +2370,10 @@ mod tests {
             .entries
             .lock()
             .await
-            .get_mut(&TenantRuntimeKey::new("local", root.to_string_lossy().as_ref()))
+            .get_mut(&TenantRuntimeKey::new(
+                "local",
+                root.to_string_lossy().as_ref(),
+            ))
             .unwrap()
             .last_used = Instant::now() - IDLE_TTL - Duration::from_secs(1);
 

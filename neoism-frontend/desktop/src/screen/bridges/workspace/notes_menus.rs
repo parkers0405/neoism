@@ -187,14 +187,15 @@ impl Screen<'_> {
         use neoism_ui::panels::context_menu::{ContextMenuAction, ContextMenuItem};
         use neoism_ui::widgets::modal::ModalAction;
 
-        let target_dir = if self.renderer.notes_sidebar.path_is_dir(&target) || target.is_dir() {
-            target.clone()
-        } else {
-            target
-                .parent()
-                .map(Path::to_path_buf)
-                .unwrap_or_else(|| target.clone())
-        };
+        let target_dir =
+            if self.renderer.notes_sidebar.path_is_dir(&target) || target.is_dir() {
+                target.clone()
+            } else {
+                target
+                    .parent()
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| target.clone())
+            };
         let target_string = target.display().to_string();
         let target_dir_string = target_dir.display().to_string();
         let vaults_dir = neo_workspace::notes_vaults_dir();

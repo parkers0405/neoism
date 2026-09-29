@@ -359,15 +359,30 @@ impl ChromeBridge {
             .chrome
             .agent_pane()
             .and_then(|pane| pane.connection_id().map(str::to_string));
-        let external_provider = self.chrome.agent_pane().and_then(|pane| pane.new_chat_source().provider().map(str::to_string));
+        let external_provider = self
+            .chrome
+            .agent_pane()
+            .and_then(|pane| pane.new_chat_source().provider().map(str::to_string));
         let external = external_provider.is_some();
         self.send_agent_envelope(&AgentClientMessage::CreateThread {
             title: None,
             directory: self.agent_state.default_directory.clone(),
-            agent: if external { None } else { self.agent_state.default_agent.clone() },
-            model: if external { None } else { self.agent_state.default_model.clone() },
+            agent: if external {
+                None
+            } else {
+                self.agent_state.default_agent.clone()
+            },
+            model: if external {
+                None
+            } else {
+                self.agent_state.default_model.clone()
+            },
             connection_id: if external { None } else { connection_id },
-            thinking: if external { None } else { self.agent_state.default_thinking.clone() },
+            thinking: if external {
+                None
+            } else {
+                self.agent_state.default_thinking.clone()
+            },
             external_provider,
         });
     }

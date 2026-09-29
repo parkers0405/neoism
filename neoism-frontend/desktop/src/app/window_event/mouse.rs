@@ -190,6 +190,10 @@ impl Application<'_> {
                         route.request_redraw();
                         return;
                     }
+                    if route.window.screen.handle_conversations_context_click() {
+                        route.request_redraw();
+                        return;
+                    }
                     if route.window.screen.handle_file_tree_context_click() {
                         route.request_redraw();
                         return;

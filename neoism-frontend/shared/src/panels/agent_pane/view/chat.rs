@@ -9,7 +9,11 @@ use crate::panels::agent_pane::input_controller::InputWrapRow;
 use crate::primitives::ide_theme::IdeTheme;
 
 pub trait AgentChatPane: AgentTimelinePane + AgentUserInputPane {
-    fn imported_history(&self) -> Option<&crate::panels::agent_pane::api_mapping::ImportedHistory> { None }
+    fn imported_history(
+        &self,
+    ) -> Option<&crate::panels::agent_pane::api_mapping::ImportedHistory> {
+        None
+    }
     fn has_conversation(&self) -> bool;
     fn maybe_refresh_side_panel_subagents(&mut self);
     fn is_subagent_session(&self) -> bool;
@@ -19,7 +23,9 @@ pub trait AgentChatPane: AgentTimelinePane + AgentUserInputPane {
 macro_rules! neoism_ui_impl_agent_chat_pane {
     ($pane:ty) => {
         impl $crate::panels::agent_pane::view::chat::AgentChatPane for $pane {
-            fn imported_history(&self) -> Option<&$crate::panels::agent_pane::api_mapping::ImportedHistory> {
+            fn imported_history(
+                &self,
+            ) -> Option<&$crate::panels::agent_pane::api_mapping::ImportedHistory> {
                 <$pane>::imported_history(self)
             }
 

@@ -244,7 +244,7 @@ fn apply_v4a_patch_metadata(
     for (path, before) in mutation.before_states {
         match crate::snapshot::file_change(&context.cwd, &path, before) {
             Ok(Some(snapshot)) => snapshots.push(snapshot),
-            Ok(None) => {},
+            Ok(None) => {}
             Err(error) => {
                 metadata["snapshotError"] = json!(error.to_string());
             }

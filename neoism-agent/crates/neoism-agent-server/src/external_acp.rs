@@ -411,6 +411,11 @@ fn spawn_reader(
                         update,
                     });
                 }
+                (None, Some("_auth/status_update")) => {
+                    // Claude advertises this extension and sends auth state as
+                    // a notification, not an RPC failure.
+                    tracing::debug!(server_id, "ACP auth status updated");
+                }
                 (None, Some(method)) => {
                     let _ = event_tx.send(AcpEvent::Error {
                         server_id: server_id.clone(),

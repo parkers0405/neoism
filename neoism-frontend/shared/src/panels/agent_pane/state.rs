@@ -1302,7 +1302,10 @@ impl NeoismAgentPane {
             self.terminal_subagent_revisions.clear();
         }
         if let Some(id) = session_id.as_ref() {
-            self.new_chat_source = *self.session_sources.entry(id.clone()).or_insert(self.new_chat_source);
+            self.new_chat_source = *self
+                .session_sources
+                .entry(id.clone())
+                .or_insert(self.new_chat_source);
         }
         self.session_id = session_id;
     }

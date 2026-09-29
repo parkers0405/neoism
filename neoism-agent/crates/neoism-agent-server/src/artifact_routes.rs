@@ -142,18 +142,23 @@ pub(crate) async fn hydrate_provider_attachments(
             if id.is_empty() || id.contains('/') || id.contains('?') || id.contains('#') {
                 return Err(ApiError::bad_request("Invalid artifact reference"));
             }
-            let tenant = state
-                .inner
-                .store
-                .artifact_tenant(id)
-                .await?
-                .ok_or_else(|| ApiError::bad_request("Attached artifact no longer exists"))?;
+            let tenant =
+                state
+                    .inner
+                    .store
+                    .artifact_tenant(id)
+                    .await?
+                    .ok_or_else(|| {
+                        ApiError::bad_request("Attached artifact no longer exists")
+                    })?;
             let artifact = state
                 .inner
                 .store
                 .get_artifact(crate::state::TenantQueryScope::Tenant(&tenant), id)
                 .await?
-                .ok_or_else(|| ApiError::bad_request("Attached artifact no longer exists"))?;
+                .ok_or_else(|| {
+                    ApiError::bad_request("Attached artifact no longer exists")
+                })?;
             if artifact.session_id.as_deref() != Some(session_id)
                 || artifact.media_type != attachment.mime
                 || artifact.size > MAX_ARTIFACT_BYTES as u64
@@ -166,26 +171,38 @@ pub(crate) async fn hydrate_provider_attachments(
                 .get_artifact_blob(&tenant, id)
                 .await
                 .map_err(|error| ApiError::internal(error.to_string()))?
-                .ok_or_else(|| ApiError::bad_request("Attached artifact content is missing"))?;
+                .ok_or_else(|| {
+                    ApiError::bad_request("Attached artifact content is missing")
+                })?;
             if bytes.is_empty()
                 || bytes.len() > MAX_ARTIFACT_BYTES
                 || bytes.len() as u64 != artifact.size
             {
-                return Err(ApiError::bad_request("Attached artifact has invalid content"));
+                return Err(ApiError::bad_request(
+                    "Attached artifact has invalid content",
+                ));
             }
             let valid = match artifact.media_type.as_str() {
                 "image/png" => bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
                 "image/jpeg" => bytes.starts_with(b"\xff\xd8\xff"),
-                "image/gif" => bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a"),
-                "image/webp" => bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP"),
+                "image/gif" => {
+                    bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a")
+                }
+                "image/webp" => {
+                    bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP")
+                }
                 "application/pdf" => bytes.starts_with(b"%PDF-"),
-                _ => return Err(ApiError::bad_request(format!(
-                    "Unsupported attachment type: {}",
-                    artifact.media_type
-                ))),
+                _ => {
+                    return Err(ApiError::bad_request(format!(
+                        "Unsupported attachment type: {}",
+                        artifact.media_type
+                    )))
+                }
             };
             if !valid {
-                return Err(ApiError::bad_request("Attached file does not match its media type"));
+                return Err(ApiError::bad_request(
+                    "Attached file does not match its media type",
+                ));
             }
             attachment.filename = Some(artifact.filename);
             attachment.url = format!(
@@ -230,12 +247,9 @@ pub(crate) async fn artifact_get(
     Path(id): Path<String>,
     claims: Option<Extension<crate::caller::CallerClaims>>,
 ) -> Result<Json<ArtifactInfo>, ApiError> {
-    let tenant_id = authorize_artifact(
-        &state,
-        &id,
-        claims.as_ref().map(|Extension(claims)| claims),
-    )
-    .await?;
+    let tenant_id =
+        authorize_artifact(&state, &id, claims.as_ref().map(|Extension(claims)| claims))
+            .await?;
     let mut artifact = state
         .inner
         .store
@@ -251,12 +265,9 @@ pub(crate) async fn artifact_content(
     Path(id): Path<String>,
     claims: Option<Extension<crate::caller::CallerClaims>>,
 ) -> Result<Response, ApiError> {
-    let tenant_id = authorize_artifact(
-        &state,
-        &id,
-        claims.as_ref().map(|Extension(claims)| claims),
-    )
-    .await?;
+    let tenant_id =
+        authorize_artifact(&state, &id, claims.as_ref().map(|Extension(claims)| claims))
+            .await?;
     let artifact = state
         .inner
         .store
@@ -292,12 +303,9 @@ pub(crate) async fn artifact_delete(
     Path(id): Path<String>,
     claims: Option<Extension<crate::caller::CallerClaims>>,
 ) -> Result<StatusCode, ApiError> {
-    let tenant_id = authorize_artifact(
-        &state,
-        &id,
-        claims.as_ref().map(|Extension(claims)| claims),
-    )
-    .await?;
+    let tenant_id =
+        authorize_artifact(&state, &id, claims.as_ref().map(|Extension(claims)| claims))
+            .await?;
     if state
         .inner
         .store

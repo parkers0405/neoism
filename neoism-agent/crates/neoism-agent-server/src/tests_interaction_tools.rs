@@ -120,8 +120,13 @@ async fn pinned_session_tools_survive_plugin_generation_refresh() {
     )
     .await
     .unwrap();
-    assert!(!edited.output.contains("tool plugin generation was not provided"));
-    assert_eq!(std::fs::read_to_string(root.join("target.txt")).unwrap(), "after\n");
+    assert!(!edited
+        .output
+        .contains("tool plugin generation was not provided"));
+    assert_eq!(
+        std::fs::read_to_string(root.join("target.txt")).unwrap(),
+        "after\n"
+    );
     state.shutdown().await.unwrap();
     let _ = std::fs::remove_dir_all(root);
 }
@@ -633,7 +638,10 @@ async fn hosted_session_and_subagent_keep_host_directory_scope() {
         .await
         .unwrap();
     assert!(execution.provider.is_none());
-    assert_eq!(execution.workspace.local_path.as_deref(), Some(root.as_path()));
+    assert_eq!(
+        execution.workspace.local_path.as_deref(),
+        Some(root.as_path())
+    );
     assert!(crate::caller::allows_session_path(true, &parent, &allowed));
     assert!(!crate::caller::allows_session_path(true, &parent, &outside));
     let child = crate::session_actions::create_subtask_session(
@@ -650,7 +658,9 @@ async fn hosted_session_and_subagent_keep_host_directory_scope() {
     assert!(!crate::caller::allows_session_path(true, &child, &outside));
     assert_eq!(
         child.extra.get(crate::caller::DIRECTORY_PREFIXES_EXTRA_KEY),
-        parent.extra.get(crate::caller::DIRECTORY_PREFIXES_EXTRA_KEY)
+        parent
+            .extra
+            .get(crate::caller::DIRECTORY_PREFIXES_EXTRA_KEY)
     );
     assert_eq!(
         child.extra.get(crate::caller::EXECUTION_POLICY_EXTRA_KEY),
@@ -714,7 +724,15 @@ async fn background_task_external_directory_asks_then_resumes() {
     });
     let permission = tokio::time::timeout(Duration::from_secs(2), async {
         loop {
-            if let Some(request) = state.inner.permissions.read().await.values().next().cloned() {
+            if let Some(request) = state
+                .inner
+                .permissions
+                .read()
+                .await
+                .values()
+                .next()
+                .cloned()
+            {
                 break request;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -892,7 +910,12 @@ async fn skip_permissions_allows_move_chat_to_external_project() {
         crate::caller::TENANT_EXTRA_KEY.to_string(),
         json!("workspace:tenant-fixture"),
     );
-    state.inner.store.update_session(&tenant_session).await.unwrap();
+    state
+        .inner
+        .store
+        .update_session(&tenant_session)
+        .await
+        .unwrap();
     let scoped_read = execute_tool_call_with_permission_wait(
         &state,
         &session.id,
@@ -927,7 +950,10 @@ async fn skip_permissions_allows_move_chat_to_external_project() {
     .await
     .unwrap();
     assert!(scoped_write.output.contains("created.txt"));
-    assert_eq!(std::fs::read_to_string(allowed.join("created.txt")).unwrap(), "tenant file");
+    assert_eq!(
+        std::fs::read_to_string(allowed.join("created.txt")).unwrap(),
+        "tenant file"
+    );
     let tenant_runtime = state
         .workspace_runtime_for_tenant("workspace:tenant-fixture", &session.directory)
         .await
@@ -939,16 +965,23 @@ async fn skip_permissions_allows_move_chat_to_external_project() {
     let tenant_snapshot = tenant_runtime.snapshot();
     let local_snapshot = local_runtime.snapshot();
     assert_eq!(tenant_snapshot.generation, local_snapshot.generation);
-    let tenant_context = crate::workspace_runtime::scope_generation(local_snapshot.clone(), async {
-        crate::tool::ToolContext::new(&session.directory)
-            .with_state(Some(state.clone()))
-            .with_session_id(Some(session.id.to_string()))
-            .with_generation(Some(tenant_snapshot.generation))
-            .await
-    })
-    .await;
-    assert!(tenant_context.plugin_snapshot().unwrap().ptr_eq(&tenant_snapshot));
-    assert!(!tenant_context.plugin_snapshot().unwrap().ptr_eq(&local_snapshot));
+    let tenant_context =
+        crate::workspace_runtime::scope_generation(local_snapshot.clone(), async {
+            crate::tool::ToolContext::new(&session.directory)
+                .with_state(Some(state.clone()))
+                .with_session_id(Some(session.id.to_string()))
+                .with_generation(Some(tenant_snapshot.generation))
+                .await
+        })
+        .await;
+    assert!(tenant_context
+        .plugin_snapshot()
+        .unwrap()
+        .ptr_eq(&tenant_snapshot));
+    assert!(!tenant_context
+        .plugin_snapshot()
+        .unwrap()
+        .ptr_eq(&local_snapshot));
     let scoped_edit = crate::tool_runtime::execute_tool_call_in_generation(
         &state,
         &session.id,
@@ -978,10 +1011,16 @@ async fn skip_permissions_allows_move_chat_to_external_project() {
     .await
     .unwrap();
     assert!(scoped_edit.output.contains("Replaced 1 occurrence"));
-    assert_eq!(std::fs::read_to_string(allowed.join("created.txt")).unwrap(), "tenant edit");
+    assert_eq!(
+        std::fs::read_to_string(allowed.join("created.txt")).unwrap(),
+        "tenant edit"
+    );
     let edit_metadata = scoped_edit.metadata.unwrap();
     assert!(edit_metadata.get("lspTouch").is_some());
-    assert!(edit_metadata.get("lspUnavailable").is_none(), "{edit_metadata}");
+    assert!(
+        edit_metadata.get("lspUnavailable").is_none(),
+        "{edit_metadata}"
+    );
     let scoped_move = execute_tool_call_with_permission_wait(
         &state,
         &session.id,
@@ -1075,7 +1114,9 @@ async fn skip_permissions_allows_move_chat_to_external_project() {
     )
     .await
     .unwrap();
-    assert!(external_bash.output.contains(&external.to_string_lossy().to_string()));
+    assert!(external_bash
+        .output
+        .contains(&external.to_string_lossy().to_string()));
     let denied_external_bash = execute_tool_call_with_permission_wait(
         &state,
         &session.id,

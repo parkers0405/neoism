@@ -982,12 +982,20 @@ impl NeoismAgentPane {
         // laptop cannot reach. Use the corresponding device-code method;
         // authorization opens here while polling stays on the host.
         let method = if self.server.contains("/agent/workspaces/")
-            && ((provider.id == "openai" && method.label.to_ascii_lowercase().contains("browser"))
-                || (provider.id == "xai" && !method.is_api && !method.label.contains("Headless")))
+            && ((provider.id == "openai"
+                && method.label.to_ascii_lowercase().contains("browser"))
+                || (provider.id == "xai"
+                    && !method.is_api
+                    && !method.label.contains("Headless")))
         {
-            self.connect.as_ref()
+            self.connect
+                .as_ref()
                 .and_then(|flow| flow.methods_by_provider.get(&provider.id))
-                .and_then(|methods| methods.iter().find(|candidate| candidate.label.to_ascii_lowercase().contains("headless")))
+                .and_then(|methods| {
+                    methods.iter().find(|candidate| {
+                        candidate.label.to_ascii_lowercase().contains("headless")
+                    })
+                })
                 .cloned()
                 .unwrap_or_else(|| method.clone())
         } else {

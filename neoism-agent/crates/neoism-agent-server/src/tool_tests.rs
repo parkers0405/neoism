@@ -762,9 +762,9 @@ async fn file_mutations_report_success_when_lsp_generation_is_unavailable() {
         neoism_agent_core::Id::ascending(neoism_agent_core::IdKind::Event)
     ));
     std::fs::create_dir_all(&root).unwrap();
-    let context = ToolContext::new(&root).with_permission_rules(permission_rules(BTreeMap::from([
-        ("*".to_string(), json!("allow")),
-    ])));
+    let context = ToolContext::new(&root).with_permission_rules(permission_rules(
+        BTreeMap::from([("*".to_string(), json!("allow"))]),
+    ));
     let written = super::file::write_tool(
         context.clone(),
         json!({ "filePath": "notes.txt", "content": "hello world" }),
@@ -791,7 +791,10 @@ async fn file_mutations_report_success_when_lsp_generation_is_unavailable() {
     .unwrap();
     assert!(patched.output.contains("Applied patch to"));
     assert!(patched.metadata.unwrap().get("lspUnavailable").is_some());
-    assert_eq!(std::fs::read_to_string(root.join("notes.txt")).unwrap(), "hello again");
+    assert_eq!(
+        std::fs::read_to_string(root.join("notes.txt")).unwrap(),
+        "hello again"
+    );
     let _ = std::fs::remove_dir_all(root);
 }
 

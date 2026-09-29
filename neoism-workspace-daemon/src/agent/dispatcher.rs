@@ -293,7 +293,11 @@ pub fn dispatch(session: &AgentSession, msg: AgentClientMessage) {
                 handle_list_mcp(inner, directory).await;
             });
         }
-        AgentClientMessage::McpOauthAuthorize { name, directory, redirect_uri } => {
+        AgentClientMessage::McpOauthAuthorize {
+            name,
+            directory,
+            redirect_uri,
+        } => {
             tokio::spawn(async move {
                 handle_mcp_oauth_authorize(inner, name, directory, redirect_uri).await;
             });
@@ -307,14 +311,20 @@ pub fn dispatch(session: &AgentSession, msg: AgentClientMessage) {
                 handle_mcp_set_enabled(inner, name, enabled, directory).await;
             });
         }
-        AgentClientMessage::McpConnect { name, directory, redirect_uri } => {
+        AgentClientMessage::McpConnect {
+            name,
+            directory,
+            redirect_uri,
+        } => {
             tokio::spawn(async move {
-                handle_mcp_simple_action(inner, name, directory, "connect", redirect_uri).await;
+                handle_mcp_simple_action(inner, name, directory, "connect", redirect_uri)
+                    .await;
             });
         }
         AgentClientMessage::McpDisconnect { name, directory } => {
             tokio::spawn(async move {
-                handle_mcp_simple_action(inner, name, directory, "disconnect", None).await;
+                handle_mcp_simple_action(inner, name, directory, "disconnect", None)
+                    .await;
             });
         }
         AgentClientMessage::McpRemoveAuth { name, directory } => {

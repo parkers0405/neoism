@@ -457,7 +457,10 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         let Some(binding) = context.remote_pty.as_ref() else {
             return;
         };
-        self.daemon.cache.remote_routes.insert(context.route_id, binding.clone());
+        self.daemon
+            .cache
+            .remote_routes
+            .insert(context.route_id, binding.clone());
         let Some(link) = self.daemon.link.as_ref() else {
             return;
         };
@@ -951,10 +954,11 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         };
         match root_session.as_deref() {
             Some(session_id) => self.register_adopted_context(&root_context, session_id),
-            None if terminal_uses_remote_pty => self.create_remote_context_on_attached_daemon(
-                &root_context,
-                cloned_config.working_dir.clone(),
-            ),
+            None if terminal_uses_remote_pty => self
+                .create_remote_context_on_attached_daemon(
+                    &root_context,
+                    cloned_config.working_dir.clone(),
+                ),
             None => {}
         }
 

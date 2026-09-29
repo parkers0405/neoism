@@ -58,7 +58,9 @@ pub trait AgentSidePanelPane {
     fn maybe_refresh_side_panel_sessions(&mut self);
     fn maybe_refresh_side_panel_subagents(&mut self);
     fn directory_label(&self) -> String;
-    fn conversation_source(&self) -> crate::panels::agent_pane::state::side_panel::ConversationSource;
+    fn conversation_source(
+        &self,
+    ) -> crate::panels::agent_pane::state::side_panel::ConversationSource;
     fn agent_label(&self) -> &str;
     fn model(&self) -> &str;
     fn thinking_label(&self) -> &str;
@@ -164,7 +166,9 @@ macro_rules! neoism_ui_impl_agent_side_panel {
                 <$pane>::directory_label(self)
             }
 
-            fn conversation_source(&self) -> $crate::panels::agent_pane::state::side_panel::ConversationSource {
+            fn conversation_source(
+                &self,
+            ) -> $crate::panels::agent_pane::state::side_panel::ConversationSource {
                 <$pane>::conversation_source(self)
             }
 
@@ -271,7 +275,9 @@ impl AgentSidePanelPane for NeoismAgentPane {
         NeoismAgentPane::directory_label(self)
     }
 
-    fn conversation_source(&self) -> crate::panels::agent_pane::state::side_panel::ConversationSource {
+    fn conversation_source(
+        &self,
+    ) -> crate::panels::agent_pane::state::side_panel::ConversationSource {
         self.new_chat_source()
     }
 
@@ -315,7 +321,9 @@ pub fn state_detail_min_width(s: f32) -> f32 {
 }
 
 pub fn detail_rail_width(available_width: f32, preferred_width: f32, s: f32) -> f32 {
-    preferred_width.min((available_width / s - DETAIL_MIN_CHAT_WIDTH - DETAIL_GAP).max(0.0)) * s
+    preferred_width
+        .min((available_width / s - DETAIL_MIN_CHAT_WIDTH - DETAIL_GAP).max(0.0))
+        * s
 }
 
 /// Web/mobile responsive variant. In narrow takeover mode the panel owns the

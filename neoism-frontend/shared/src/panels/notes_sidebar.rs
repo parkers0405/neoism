@@ -1434,7 +1434,8 @@ impl NotesSidebar {
                 let cursor_x = content_x + (row_pad_x - cursor_w).max(0.0);
                 let cursor_h = (row_h - 6.0 * self.scale).max(font_size).min(row_h);
                 let cursor_y = back_rect[1] + (row_h - cursor_h) / 2.0;
-                self.selected_cursor_rect = Some([cursor_x, cursor_y, cursor_w, cursor_h]);
+                self.selected_cursor_rect =
+                    Some([cursor_x, cursor_y, cursor_w, cursor_h]);
             }
             let back_opts = DrawOpts {
                 font_size: icon_size,
@@ -2023,9 +2024,12 @@ impl NotesSidebar {
                     0.0
                 };
                 let budget =
-                    (content_x + content_w - cursor_x - row_pad_x - trailing_budget).max(0.0);
-                let display_label = note_display_label(&entry.path, entry.is_dir, &entry.label);
-                let label = truncate_label(&display_label, budget, sugarloaf, &label_opts);
+                    (content_x + content_w - cursor_x - row_pad_x - trailing_budget)
+                        .max(0.0);
+                let display_label =
+                    note_display_label(&entry.path, entry.is_dir, &entry.label);
+                let label =
+                    truncate_label(&display_label, budget, sugarloaf, &label_opts);
                 draw_text_with_occlusion(
                     sugarloaf,
                     cursor_x,
@@ -2590,7 +2594,10 @@ fn note_display_label(path: &Path, is_dir: bool, fallback: &str) -> String {
             .extension()
             .and_then(|extension| extension.to_str())
             .is_some_and(|extension| {
-                matches!(extension.to_ascii_lowercase().as_str(), "md" | "markdown" | "mdx")
+                matches!(
+                    extension.to_ascii_lowercase().as_str(),
+                    "md" | "markdown" | "mdx"
+                )
             })
     {
         return path

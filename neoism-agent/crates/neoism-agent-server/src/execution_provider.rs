@@ -3,8 +3,8 @@ use std::process::Stdio;
 use std::sync::Arc;
 
 use neoism_agent_service_api::{
-    ExecResult, ExecutionLease, ExecutionProcess, ExecutionProvider, ExecutionRequest, ProcessSpec,
-    ServiceError, ServiceFuture, WorkspaceCommit,
+    ExecResult, ExecutionLease, ExecutionProcess, ExecutionProvider, ExecutionRequest,
+    ProcessSpec, ServiceError, ServiceFuture, WorkspaceCommit,
 };
 use tokio::process::Command;
 
@@ -82,9 +82,9 @@ impl ExecutionLease for LocalExecutionLease {
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
             crate::tool::process::set_new_process_group(&mut command);
-            let mut child = command
-                .spawn()
-                .map_err(|error| ServiceError::new(format!("failed to spawn process: {error}")))?;
+            let mut child = command.spawn().map_err(|error| {
+                ServiceError::new(format!("failed to spawn process: {error}"))
+            })?;
             if let Some(stdin) = spec.stdin {
                 use tokio::io::AsyncWriteExt;
                 if let Some(mut pipe) = child.stdin.take() {
@@ -110,9 +110,12 @@ impl ExecutionLease for LocalExecutionLease {
                     )
                     .await
                     {
-                        Ok(status) => status.map_err(|error| ServiceError::new(error.to_string())),
+                        Ok(status) => {
+                            status.map_err(|error| ServiceError::new(error.to_string()))
+                        }
                         Err(_) => {
-                            crate::tool::process::terminate_child(&mut child, child_id).await;
+                            crate::tool::process::terminate_child(&mut child, child_id)
+                                .await;
                             Err(ServiceError::new(format!(
                                 "process timed out after {timeout_ms}ms"
                             )))
@@ -147,7 +150,11 @@ impl ExecutionLease for LocalExecutionLease {
         _spec: ProcessSpec,
         _pty: bool,
     ) -> ServiceFuture<'a, Result<Arc<dyn ExecutionProcess>, ServiceError>> {
-        Box::pin(async { Err(ServiceError::new("streaming local execution is not migrated yet")) })
+        Box::pin(async {
+            Err(ServiceError::new(
+                "streaming local execution is not migrated yet",
+            ))
+        })
     }
 
     fn commit_workspace<'a>(
@@ -183,7 +190,8 @@ fn ensure_within_root(root: &Path, cwd: &Path) -> Result<(), ServiceError> {
 mod tests {
     use super::*;
     use neoism_agent_service_api::{
-        ExecutionScope, NetworkPolicy, ProcessClass, ResourceLimits, WorkspaceMaterialization,
+        ExecutionScope, NetworkPolicy, ProcessClass, ResourceLimits,
+        WorkspaceMaterialization,
     };
 
     #[test]

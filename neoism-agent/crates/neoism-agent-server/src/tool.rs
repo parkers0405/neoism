@@ -43,10 +43,10 @@ mod paths;
 pub(crate) mod process;
 #[path = "tool_registry.rs"]
 mod registry;
-#[path = "tool_support/shell_scan.rs"]
-pub(crate) mod shell_scan;
 #[path = "tool_support/sandbox.rs"]
 mod sandbox;
+#[path = "tool_support/shell_scan.rs"]
+pub(crate) mod shell_scan;
 #[path = "tool_support/truncate.rs"]
 pub(crate) mod truncate;
 #[path = "tool_support/web.rs"]
@@ -145,23 +145,35 @@ impl ToolContext {
         if let (Some(state), Some(generation)) = (self.state.as_ref(), generation) {
             let directory = self.cwd.to_string_lossy();
             if let Some(session_id) = self.session_id.as_deref() {
-                if let Some(session) = state.inner.store.get_session(session_id).await.ok().flatten() {
+                if let Some(session) = state
+                    .inner
+                    .store
+                    .get_session(session_id)
+                    .await
+                    .ok()
+                    .flatten()
+                {
                     self.plugin_snapshot = state
                         .inner
                         .workspace_runtimes
-                        .loaded_for_tenant(crate::caller::session_tenant(&session), &directory)
+                        .loaded_for_tenant(
+                            crate::caller::session_tenant(&session),
+                            &directory,
+                        )
                         .await
                         .and_then(|runtime| {
                             crate::workspace_runtime::active_generation(&directory)
                                 .filter(|active| {
-                                    active.generation == generation && runtime.owns_generation(active)
+                                    active.generation == generation
+                                        && runtime.owns_generation(active)
                                 })
                                 .or_else(|| runtime.lease_generation(generation))
                         });
                 }
             } else {
-                self.plugin_snapshot = crate::workspace_runtime::active_generation(&directory)
-                    .filter(|active| active.generation == generation);
+                self.plugin_snapshot =
+                    crate::workspace_runtime::active_generation(&directory)
+                        .filter(|active| active.generation == generation);
             }
         }
         self
@@ -181,8 +193,14 @@ impl ToolContext {
                 .await?
                 .ok_or_else(|| anyhow::anyhow!("session {session_id} not found"))?;
             let cwd = crate::windows_process::canonicalize_path(&self.cwd)?;
-            if !crate::caller::allows_session_path(state.services().hosted, &session, &cwd) {
-                anyhow::bail!("session directory is outside this tenant's authorized directories");
+            if !crate::caller::allows_session_path(
+                state.services().hosted,
+                &session,
+                &cwd,
+            ) {
+                anyhow::bail!(
+                    "session directory is outside this tenant's authorized directories"
+                );
             }
             self.session_scope = Some(session);
         }
@@ -193,7 +211,10 @@ impl ToolContext {
         if self.session_scope.as_ref().is_some_and(|session| {
             !crate::caller::allows_session_path(self.services().hosted, session, path)
         }) {
-            anyhow::bail!("path {} is outside this tenant's authorized directories", path.display());
+            anyhow::bail!(
+                "path {} is outside this tenant's authorized directories",
+                path.display()
+            );
         }
         Ok(())
     }
@@ -235,14 +256,17 @@ impl ToolContext {
         timeout_ms: Option<u64>,
     ) -> anyhow::Result<neoism_agent_service_api::ExecutionRequest> {
         let (tenant_id, subject, root_id, session_id, policy) =
-            if let (Some(state), Some(session_id)) = (self.state.as_ref(), self.session_id.as_ref()) {
+            if let (Some(state), Some(session_id)) =
+                (self.state.as_ref(), self.session_id.as_ref())
+            {
                 let session = state
                     .inner
                     .store
                     .get_session(session_id)
                     .await?
                     .ok_or_else(|| anyhow::anyhow!("session not found"))?;
-                let root_id = crate::execution_activity::root_session_id(state, &session).await;
+                let root_id =
+                    crate::execution_activity::root_session_id(state, &session).await;
                 (
                     crate::caller::session_tenant(&session).to_string(),
                     session
@@ -253,7 +277,10 @@ impl ToolContext {
                         .to_string(),
                     root_id,
                     session_id.clone(),
-                    crate::caller::session_execution_policy(state.services().hosted, &session),
+                    crate::caller::session_execution_policy(
+                        state.services().hosted,
+                        &session,
+                    ),
                 )
             } else {
                 (
@@ -276,7 +303,11 @@ impl ToolContext {
                         .workspace_revision(&tenant_id, &root_id)
                         .await?
                 } else {
-                    state.inner.store.workspace_revision(&tenant_id, &root_id).await?
+                    state
+                        .inner
+                        .store
+                        .workspace_revision(&tenant_id, &root_id)
+                        .await?
                 }
             } else {
                 None
@@ -284,37 +315,38 @@ impl ToolContext {
         } else {
             None
         };
-        let (provider, workspace, idle_ttl_seconds, max_lifetime_seconds, network) = match policy {
-            neoism_agent_service_api::ExecutionPolicy::Disabled => {
-                anyhow::bail!("execution is disabled for this session")
-            }
-            neoism_agent_service_api::ExecutionPolicy::NativeLocal => (
-                None,
-                neoism_agent_service_api::WorkspaceMaterialization {
-                    revision: None,
-                    local_path: Some(self.cwd.clone()),
-                    remote_locator: None,
-                },
-                0,
-                0,
-                neoism_agent_service_api::NetworkPolicy::Allow,
-            ),
-            neoism_agent_service_api::ExecutionPolicy::Sandboxed {
-                provider,
-                idle_ttl_seconds,
-                max_lifetime_seconds,
-            } => (
-                Some(provider),
-                neoism_agent_service_api::WorkspaceMaterialization {
-                    revision: workspace_revision,
-                    local_path: None,
-                    remote_locator: Some(root_id.clone()),
-                },
-                idle_ttl_seconds,
-                max_lifetime_seconds,
-                neoism_agent_service_api::NetworkPolicy::Deny,
-            ),
-        };
+        let (provider, workspace, idle_ttl_seconds, max_lifetime_seconds, network) =
+            match policy {
+                neoism_agent_service_api::ExecutionPolicy::Disabled => {
+                    anyhow::bail!("execution is disabled for this session")
+                }
+                neoism_agent_service_api::ExecutionPolicy::NativeLocal => (
+                    None,
+                    neoism_agent_service_api::WorkspaceMaterialization {
+                        revision: None,
+                        local_path: Some(self.cwd.clone()),
+                        remote_locator: None,
+                    },
+                    0,
+                    0,
+                    neoism_agent_service_api::NetworkPolicy::Allow,
+                ),
+                neoism_agent_service_api::ExecutionPolicy::Sandboxed {
+                    provider,
+                    idle_ttl_seconds,
+                    max_lifetime_seconds,
+                } => (
+                    Some(provider),
+                    neoism_agent_service_api::WorkspaceMaterialization {
+                        revision: workspace_revision,
+                        local_path: None,
+                        remote_locator: Some(root_id.clone()),
+                    },
+                    idle_ttl_seconds,
+                    max_lifetime_seconds,
+                    neoism_agent_service_api::NetworkPolicy::Deny,
+                ),
+            };
         Ok(neoism_agent_service_api::ExecutionRequest {
             scope: neoism_agent_service_api::ExecutionScope {
                 tenant_id,
@@ -493,7 +525,9 @@ impl neoism_agent_plugin_api::RuntimeTool for BuiltinTool {
                 .with_formatter(invocation.formatter)
                 .with_session_scope()
                 .await
-                .map_err(|error| neoism_agent_plugin_api::PluginRuntimeError::new(error.to_string()))?;
+                .map_err(|error| {
+                    neoism_agent_plugin_api::PluginRuntimeError::new(error.to_string())
+                })?;
             self.execute_builtin(context, invocation.arguments)
                 .await
                 .map(|result| neoism_agent_plugin_api::PluginToolResult {

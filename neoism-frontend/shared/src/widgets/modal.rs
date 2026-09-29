@@ -209,11 +209,19 @@ pub enum ModalAction {
         name: String,
         notes: bool,
     },
-    /// Rename the buffer tab at `index` to `name` (filled from the modal
-    /// input box via [`ModalAction::with_input`]). When
-    /// `agent_session_id` is `Some`, the host ALSO publishes the new
-    /// title at the daemon level for that agent session (mirrors the
-    /// agent `SetTitle` path); otherwise the rename is a local tab label.
+    /// Rename the buffer tab at `index` to `name` (filled from the modal input).
+    /// This does not rename the persisted conversation.
+    AgentRenameSession {
+        session_id: String,
+        server: String,
+        directory: Option<String>,
+        name: String,
+    },
+    AgentDeleteSession {
+        session_id: String,
+        server: String,
+        directory: Option<String>,
+    },
     RenameTab {
         index: usize,
         agent_session_id: Option<String>,
@@ -288,6 +296,17 @@ impl ModalAction {
                     notes,
                 }
             }
+            ModalAction::AgentRenameSession {
+                session_id,
+                server,
+                directory,
+                ..
+            } => ModalAction::AgentRenameSession {
+                session_id,
+                server,
+                directory,
+                name: value,
+            },
             ModalAction::RenameTab {
                 index,
                 agent_session_id,
@@ -1072,7 +1091,9 @@ impl UniversalModal {
 
     pub fn pointer_kind(&self) -> ModalPointerKind {
         match self.hovered_target {
-            Some(ModalHoverTarget::Input | ModalHoverTarget::Field(_)) => ModalPointerKind::Text,
+            Some(ModalHoverTarget::Input | ModalHoverTarget::Field(_)) => {
+                ModalPointerKind::Text
+            }
             Some(
                 ModalHoverTarget::Close
                 | ModalHoverTarget::Tab(_)
@@ -1090,7 +1111,10 @@ impl UniversalModal {
         scale_factor: f32,
     ) -> Option<ModalHoverTarget> {
         let contains = |rect: [f32; 4]| {
-            x >= rect[0] && x <= rect[0] + rect[2] && y >= rect[1] && y <= rect[1] + rect[3]
+            x >= rect[0]
+                && x <= rect[0] + rect[2]
+                && y >= rect[1]
+                && y <= rect[1] + rect[3]
         };
         if self.close_rect.is_some_and(contains) {
             return Some(ModalHoverTarget::Close);
@@ -1105,11 +1129,14 @@ impl UniversalModal {
         {
             return Some(ModalHoverTarget::Field(*index));
         }
-        if self.form.is_none() && self.input_hit_rects.iter().any(|rect| contains(*rect)) {
+        if self.form.is_none() && self.input_hit_rects.iter().any(|rect| contains(*rect))
+        {
             return Some(ModalHoverTarget::Input);
         }
         match self.hit_test(x, y, window_width, scale_factor) {
-            Ok(Some(index)) if index < self.buttons.len() => Some(ModalHoverTarget::Action(index)),
+            Ok(Some(index)) if index < self.buttons.len() => {
+                Some(ModalHoverTarget::Action(index))
+            }
             _ => None,
         }
     }
@@ -1717,12 +1744,14 @@ impl UniversalModal {
             return Err(());
         }
         if !self.form_field_hit_rects.is_empty() {
-            if let Some((index, _)) = self.form_field_hit_rects.iter().find(|(_, rect)| {
-                mouse_x >= rect[0]
-                    && mouse_x <= rect[0] + rect[2]
-                    && mouse_y >= rect[1]
-                    && mouse_y <= rect[1] + rect[3]
-            }) {
+            if let Some((index, _)) =
+                self.form_field_hit_rects.iter().find(|(_, rect)| {
+                    mouse_x >= rect[0]
+                        && mouse_x <= rect[0] + rect[2]
+                        && mouse_y >= rect[1]
+                        && mouse_y <= rect[1] + rect[3]
+                })
+            {
                 return Ok(Some(self.buttons.len() + index));
             }
         } else if let Some(form) = self.form.as_ref() {
@@ -2940,6 +2969,22 @@ mod tests {
         assert_eq!(lines[0].kind, BodyLineKind::Mermaid);
         assert!(lines[0].mermaid.is_some());
         assert!(lines[0].row_span > 1);
+    }
+
+    #[test]
+    fn session_rename_modal_keeps_clicked_identity_when_input_changes() {
+        let action = ModalAction::AgentRenameSession {
+            session_id: "session-a".into(),
+            server: "http://localhost".into(),
+            directory: Some("/workspace".into()),
+            name: String::new(),
+        }
+        .with_input("Updated title".into());
+        assert!(
+            matches!(action, ModalAction::AgentRenameSession { session_id, server, directory, name }
+            if session_id == "session-a" && server == "http://localhost"
+                && directory.as_deref() == Some("/workspace") && name == "Updated title")
+        );
     }
 
     #[test]

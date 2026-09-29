@@ -202,7 +202,10 @@ impl Screen<'_> {
                 self.renderer.notes_sidebar.toggle_focus_or_visibility();
             if self.renderer.notes_sidebar.is_visible() {
                 self.renderer.file_tree.set_focused(false);
-            self.renderer.conversations_pane.side_panel_mut().set_focused(false);
+                self.renderer
+                    .conversations_pane
+                    .side_panel_mut()
+                    .set_focused(false);
             }
             if visibility_changed {
                 self.reapply_chrome_layout();
@@ -215,7 +218,10 @@ impl Screen<'_> {
                 self.renderer.notes_sidebar.toggle_focus_or_visibility();
             if self.renderer.notes_sidebar.is_visible() {
                 self.renderer.file_tree.set_focused(false);
-            self.renderer.conversations_pane.side_panel_mut().set_focused(false);
+                self.renderer
+                    .conversations_pane
+                    .side_panel_mut()
+                    .set_focused(false);
             }
             if visibility_changed {
                 self.reapply_chrome_layout();
@@ -265,7 +271,10 @@ impl Screen<'_> {
         }
         if self.renderer.notes_sidebar.is_visible() {
             self.renderer.file_tree.set_focused(false);
-            self.renderer.conversations_pane.side_panel_mut().set_focused(false);
+            self.renderer
+                .conversations_pane
+                .side_panel_mut()
+                .set_focused(false);
         }
         if visibility_changed {
             self.reapply_chrome_layout();

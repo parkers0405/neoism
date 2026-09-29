@@ -1198,8 +1198,14 @@ mod tests {
 
     #[test]
     fn default_chat_source_defaults_to_neoism() {
-        assert_eq!(parse("{}").agent.default_chat_source, DefaultChatSource::Neoism);
-        assert_eq!(parse(r#"{"agent":{}}"#).agent.default_chat_source, DefaultChatSource::Neoism);
+        assert_eq!(
+            parse("{}").agent.default_chat_source,
+            DefaultChatSource::Neoism
+        );
+        assert_eq!(
+            parse(r#"{"agent":{}}"#).agent.default_chat_source,
+            DefaultChatSource::Neoism
+        );
     }
 
     #[test]
@@ -1210,7 +1216,9 @@ mod tests {
             ("claude-code", DefaultChatSource::ClaudeCode),
             ("codex", DefaultChatSource::Codex),
         ] {
-            let text = format!(r#"{{"agent":{{"default-chat-source":"{name}","default-agent":"plan"}}}}"#);
+            let text = format!(
+                r#"{{"agent":{{"default-chat-source":"{name}","default-agent":"plan"}}}}"#
+            );
             let config = parse(&text);
             assert_eq!(config.agent.default_chat_source, expected);
             let serialized = serde_json::to_value(config).unwrap();
@@ -1222,7 +1230,13 @@ mod tests {
 
     #[test]
     fn default_chat_source_rejects_unknown_and_wrong_types() {
-        for value in [r#""unknown""#, r#""build""#, r#""Claude-Code""#, "null", "42"] {
+        for value in [
+            r#""unknown""#,
+            r#""build""#,
+            r#""Claude-Code""#,
+            "null",
+            "42",
+        ] {
             let text = format!(r#"{{"agent":{{"default-chat-source":{value}}}}}"#);
             assert!(deserialize_config(&text).is_err(), "{text}");
             assert!(validate_config_document(&text).is_err(), "{text}");

@@ -2,7 +2,9 @@ use super::*;
 
 impl NeoismAgentPane {
     pub fn open_agent_picker(&mut self) {
-        if self.new_chat_source.provider().is_some() { return; }
+        if self.new_chat_source.provider().is_some() {
+            return;
+        }
         self.status_chip_activated = Some((0, Instant::now()));
         self.push_outbound(OutboundAgentCommand::RefreshAgents {
             directory: self.directory.clone(),
@@ -21,7 +23,9 @@ impl NeoismAgentPane {
     }
 
     pub fn open_model_picker(&mut self) {
-        if self.new_chat_source.provider().is_some() { return; }
+        if self.new_chat_source.provider().is_some() {
+            return;
+        }
         self.status_chip_activated = Some((1, Instant::now()));
         self.push_outbound(OutboundAgentCommand::RefreshModels);
         let options = self.model_picker_options();
@@ -108,7 +112,9 @@ impl NeoismAgentPane {
     }
 
     pub fn open_thinking_picker(&mut self) {
-        if self.new_chat_source.provider().is_some() { return; }
+        if self.new_chat_source.provider().is_some() {
+            return;
+        }
         self.status_chip_activated = Some((2, Instant::now()));
         let mut options = vec![
             NeoismAgentPickerOption::new(

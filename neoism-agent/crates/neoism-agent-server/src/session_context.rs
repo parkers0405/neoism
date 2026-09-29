@@ -397,6 +397,10 @@ pub(crate) fn title_from_parts(parts: &[Part]) -> Option<String> {
         Part::Subtask(part) if !part.prompt.trim().is_empty() => Some(part.prompt.trim()),
         _ => None,
     })?;
+    title_from_text(text)
+}
+
+pub(crate) fn title_from_text(text: &str) -> Option<String> {
     let single_line = text.lines().next().unwrap_or(text).trim();
     if single_line.is_empty() {
         return None;
@@ -490,7 +494,10 @@ async fn generate_model_compaction_summary(
     let mut provider_messages = message_model::compaction_provider_messages(&head);
     provider_messages.push(ProviderMessage::text(ProviderRole::User, prompt));
     let Ok(runtime) = state
-        .workspace_runtime_for_tenant(crate::caller::session_tenant(info), &info.directory)
+        .workspace_runtime_for_tenant(
+            crate::caller::session_tenant(info),
+            &info.directory,
+        )
         .await
     else {
         return None;

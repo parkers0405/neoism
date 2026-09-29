@@ -952,7 +952,8 @@ async fn session_control_takeover_is_tenant_scoped_and_revision_guarded() {
     ));
     cleanup_sqlite_files(&path);
     let store = SessionStore::open(path.clone()).await.unwrap();
-    let mut session = store_test_session(&neoism_agent_core::new_session_id(), now_millis());
+    let mut session =
+        store_test_session(&neoism_agent_core::new_session_id(), now_millis());
     session
         .extra
         .insert(crate::caller::TENANT_EXTRA_KEY.into(), json!("company-a"));
@@ -1424,7 +1425,15 @@ async fn session_list_index_pages_equal_timestamps_and_tracks_mutations() {
     }
 
     let first = store
-        .list_root_sessions_page(TenantQueryScope::LocalAll, Some("/indexed"), None, None, None, None, Some(2))
+        .list_root_sessions_page(
+            TenantQueryScope::LocalAll,
+            Some("/indexed"),
+            None,
+            None,
+            None,
+            None,
+            Some(2),
+        )
         .await
         .unwrap();
     assert_eq!(first.items.len(), 2);
@@ -1463,7 +1472,15 @@ async fn session_list_index_pages_equal_timestamps_and_tracks_mutations() {
     store.update_session(&moved).await.unwrap();
     assert_eq!(
         store
-            .list_root_sessions_page(TenantQueryScope::LocalAll, Some("/moved"), None, None, None, None, Some(10))
+            .list_root_sessions_page(
+                TenantQueryScope::LocalAll,
+                Some("/moved"),
+                None,
+                None,
+                None,
+                None,
+                Some(10)
+            )
             .await
             .unwrap()
             .items
@@ -1472,7 +1489,15 @@ async fn session_list_index_pages_equal_timestamps_and_tracks_mutations() {
     );
     assert!(store.delete_session(ids[0].as_str()).await.unwrap());
     assert!(store
-            .list_root_sessions_page(TenantQueryScope::LocalAll, Some("/moved"), None, None, None, None, Some(10))
+        .list_root_sessions_page(
+            TenantQueryScope::LocalAll,
+            Some("/moved"),
+            None,
+            None,
+            None,
+            None,
+            Some(10)
+        )
         .await
         .unwrap()
         .items
@@ -1544,7 +1569,13 @@ async fn semantic_store_ranks_by_vector_distance_on_turso() {
 
     // Query vector close to the first embedding: it must rank first.
     let hits = store
-        .semantic_search(TenantQueryScope::LocalAll, "[0.9,0.1,0]", "test-model", None, 10)
+        .semantic_search(
+            TenantQueryScope::LocalAll,
+            "[0.9,0.1,0]",
+            "test-model",
+            None,
+            10,
+        )
         .await
         .unwrap();
     assert_eq!(hits.len(), 2);
@@ -1555,7 +1586,13 @@ async fn semantic_store_ranks_by_vector_distance_on_turso() {
     // A different model's vectors are invisible, and tombstones drop rows
     // out of the missing set without becoming searchable.
     assert!(store
-        .semantic_search(TenantQueryScope::LocalAll, "[0.9,0.1,0]", "other-model", None, 10)
+        .semantic_search(
+            TenantQueryScope::LocalAll,
+            "[0.9,0.1,0]",
+            "other-model",
+            None,
+            10
+        )
         .await
         .unwrap()
         .is_empty());
@@ -1564,7 +1601,13 @@ async fn semantic_store_ranks_by_vector_distance_on_turso() {
         .await
         .unwrap();
     let hits = store
-        .semantic_search(TenantQueryScope::LocalAll, "[0.9,0.1,0]", "test-model", None, 10)
+        .semantic_search(
+            TenantQueryScope::LocalAll,
+            "[0.9,0.1,0]",
+            "test-model",
+            None,
+            10,
+        )
         .await
         .unwrap();
     assert_eq!(hits.len(), 1);
@@ -2733,7 +2776,12 @@ async fn turso_transactions_retry_while_another_store_is_writing() {
     }
 
     let events = event_store
-        .list_events_after(TenantQueryScope::LocalAll, 0, writes, Some(session_id.as_str()))
+        .list_events_after(
+            TenantQueryScope::LocalAll,
+            0,
+            writes,
+            Some(session_id.as_str()),
+        )
         .await
         .unwrap();
     assert_eq!(events.len(), writes);
@@ -4708,8 +4756,8 @@ async fn v2_openapi_describes_the_sdk_discovery_surface() {
     assert!(document["paths"]["/v2/sessions/{session_id}/participants"].is_object());
     assert!(document["components"]["schemas"]["SessionControl"].is_object());
     assert!(document["components"]["schemas"]["SessionParticipant"].is_object());
-    let deleted = &document["components"]["schemas"]["EventSessionDeleted"]["properties"]
-        ["data"];
+    let deleted =
+        &document["components"]["schemas"]["EventSessionDeleted"]["properties"]["data"];
     assert_eq!(deleted["properties"]["tenantID"]["type"], "string");
     assert_eq!(
         deleted["properties"]["info"]["$ref"],
@@ -4824,21 +4872,40 @@ async fn session_artifacts_reach_provider_as_media_bytes() {
     let router = app(state.clone());
 
     for (mime, filename, bytes) in [
-        ("image/png", "phone.png", [b"\x89PNG\r\n\x1a\n".as_slice(), &vec![7; 3 * 1024 * 1024]].concat()),
-        ("application/pdf", "scan.pdf", b"%PDF-1.7\nphone document".to_vec()),
+        (
+            "image/png",
+            "phone.png",
+            [b"\x89PNG\r\n\x1a\n".as_slice(), &vec![7; 3 * 1024 * 1024]].concat(),
+        ),
+        (
+            "application/pdf",
+            "scan.pdf",
+            b"%PDF-1.7\nphone document".to_vec(),
+        ),
     ] {
-        let response = router.clone().oneshot(
-            Request::post("/v2/artifacts")
-                .header("content-type", mime)
-                .header("x-neoism-filename", filename)
-                .header("x-neoism-session-id", session.id.to_string())
-                .body(Body::from(bytes.clone())).unwrap(),
-        ).await.unwrap();
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post("/v2/artifacts")
+                    .header("content-type", mime)
+                    .header("x-neoism-filename", filename)
+                    .header("x-neoism-session-id", session.id.to_string())
+                    .body(Body::from(bytes.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(response.status(), StatusCode::CREATED);
         let artifact: neoism_agent_core::ArtifactInfo = serde_json::from_slice(
-            &axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap(),
-        ).unwrap();
-        assert_eq!(artifact.session_id.as_deref(), Some(session.id.to_string().as_str()));
+            &axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            artifact.session_id.as_deref(),
+            Some(session.id.to_string().as_str())
+        );
         assert_eq!(artifact.filename, filename);
         let mut messages = vec![ProviderMessage::text(ProviderRole::User, "inspect")];
         messages[0].attachments.push(ProviderAttachment {
@@ -4846,13 +4913,37 @@ async fn session_artifacts_reach_provider_as_media_bytes() {
             url: artifact.download_url.clone(),
             filename: Some(filename.to_string()),
         });
-        crate::artifact_routes::hydrate_provider_attachments(&state, &session.id.to_string(), &mut messages).await.unwrap();
-        let encoded = messages[0].attachments[0].url.strip_prefix(&format!("data:{mime};base64,")).unwrap();
-        assert_eq!(base64::engine::general_purpose::STANDARD.decode(encoded).unwrap(), bytes);
-        assert!(crate::artifact_routes::hydrate_provider_attachments(&state, "other-session", &mut [ProviderMessage {
-            attachments: vec![ProviderAttachment { mime: mime.to_string(), url: artifact.download_url, filename: None }],
-            ..ProviderMessage::text(ProviderRole::User, "inspect")
-        }]).await.is_err());
+        crate::artifact_routes::hydrate_provider_attachments(
+            &state,
+            &session.id.to_string(),
+            &mut messages,
+        )
+        .await
+        .unwrap();
+        let encoded = messages[0].attachments[0]
+            .url
+            .strip_prefix(&format!("data:{mime};base64,"))
+            .unwrap();
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .unwrap(),
+            bytes
+        );
+        assert!(crate::artifact_routes::hydrate_provider_attachments(
+            &state,
+            "other-session",
+            &mut [ProviderMessage {
+                attachments: vec![ProviderAttachment {
+                    mime: mime.to_string(),
+                    url: artifact.download_url,
+                    filename: None
+                }],
+                ..ProviderMessage::text(ProviderRole::User, "inspect")
+            }]
+        )
+        .await
+        .is_err());
     }
 
     cleanup_sqlite_files(&db_path);

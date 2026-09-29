@@ -166,9 +166,9 @@ async fn execute_tool_call_with_env_and_cancel(
                     .and_then(Value::as_str)
                     .map(str::to_string)
             }),
-            workspace_id: session
-                .as_ref()
-                .and_then(|session| session.workspace_id.as_ref().map(ToString::to_string)),
+            workspace_id: session.as_ref().and_then(|session| {
+                session.workspace_id.as_ref().map(ToString::to_string)
+            }),
             execution_mode: match execution {
                 neoism_agent_service_api::ExecutionPolicy::Disabled => {
                     neoism_agent_plugin_api::PluginExecutionMode::Disabled
@@ -229,7 +229,8 @@ async fn ensure_native_process_tool(
             "native process tool {tool_name} is unavailable for tenant-scoped sessions; use sandbox_exec"
         ));
     }
-    let policy = crate::caller::session_execution_policy(state.services().hosted, &session);
+    let policy =
+        crate::caller::session_execution_policy(state.services().hosted, &session);
     if crate::caller::native_execution_allowed(&policy) {
         return Ok(());
     }
@@ -354,7 +355,9 @@ async fn execute_stateful_tool_call(
                     let ancestor = candidate
                         .ancestors()
                         .find(|path| path.exists())
-                        .ok_or_else(|| "new project has no accessible ancestor".to_string())?;
+                        .ok_or_else(|| {
+                            "new project has no accessible ancestor".to_string()
+                        })?;
                     let ancestor = crate::windows_process::canonicalize_path(ancestor)
                         .map_err(|error| error.to_string())?;
                     if !ancestor.starts_with(std::path::Path::new(&info.directory)) {
@@ -372,7 +375,11 @@ async fn execute_stateful_tool_call(
                 Err(error) => return Err(error.to_string()),
             };
             let destination = project_context.directory;
-            if !crate::caller::allows_session_path(state.services().hosted, &info, std::path::Path::new(&destination)) {
+            if !crate::caller::allows_session_path(
+                state.services().hosted,
+                &info,
+                std::path::Path::new(&destination),
+            ) {
                 return Err("move_chat destination is outside this tenant's authorized directories".to_string());
             }
             if !std::path::Path::new(&destination)

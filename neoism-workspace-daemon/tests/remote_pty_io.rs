@@ -491,53 +491,100 @@ async fn multiplayer_ls_reconnect_replays_only_missing_output() {
     std::fs::write(directory.path().join(filename), b"fixture").unwrap();
     let daemon = Daemon::spawn().await;
     let mut host = connect_client(daemon.addr).await;
-    send_pty(&mut host, &PtyClientMessage::CreatePty {
-        cwd: Some(directory.path().to_string_lossy().into_owned()),
-        cols: 100,
-        rows: 24,
-        shell: Some("/bin/sh".into()),
-    }).await;
-    let session_id = recv_pty_created(&mut host, Duration::from_secs(5)).await.unwrap();
+    send_pty(
+        &mut host,
+        &PtyClientMessage::CreatePty {
+            cwd: Some(directory.path().to_string_lossy().into_owned()),
+            cols: 100,
+            rows: 24,
+            shell: Some("/bin/sh".into()),
+        },
+    )
+    .await;
+    let session_id = recv_pty_created(&mut host, Duration::from_secs(5))
+        .await
+        .unwrap();
     let mut guest = connect_client(daemon.addr).await;
-    send_pty(&mut guest, &PtyClientMessage::AttachPty {
-        session_id: session_id.clone(), cursor: None,
-    }).await;
+    send_pty(
+        &mut guest,
+        &PtyClientMessage::AttachPty {
+            session_id: session_id.clone(),
+            cursor: None,
+        },
+    )
+    .await;
     // Neither the filename nor the literal OSC completion appears in input.
-    send_pty(&mut host, &PtyClientMessage::PtyInput {
-        session_id: session_id.clone(),
-        bytes: b"stty -echo; ls; printf '\\033]133;D;0\\007'\n".to_vec(),
-    }).await;
+    send_pty(
+        &mut host,
+        &PtyClientMessage::PtyInput {
+            session_id: session_id.clone(),
+            bytes: b"stty -echo; ls; printf '\\033]133;D;0\\007'\n".to_vec(),
+        },
+    )
+    .await;
     let host_output = recv_marker_for_session(
-        &mut host, &session_id, b"\x1b]133;D;0\x07", Duration::from_secs(8),
-    ).await.expect("host receives command completion");
-    assert!(host_output.windows(filename.len()).any(|w| w == filename.as_bytes()));
+        &mut host,
+        &session_id,
+        b"\x1b]133;D;0\x07",
+        Duration::from_secs(8),
+    )
+    .await
+    .expect("host receives command completion");
+    assert!(host_output
+        .windows(filename.len())
+        .any(|w| w == filename.as_bytes()));
     let mut cursor = 0;
     let mut guest_output = Vec::new();
     tokio::time::timeout(Duration::from_secs(8), async {
         loop {
-            if let Some(PtyServerMessage::PtyOutput { session_id: received, bytes, offset }) =
-                recv_pty_timeout(&mut guest, Duration::from_secs(5)).await
+            if let Some(PtyServerMessage::PtyOutput {
+                session_id: received,
+                bytes,
+                offset,
+            }) = recv_pty_timeout(&mut guest, Duration::from_secs(5)).await
             {
                 assert_eq!(received, session_id);
                 let offset = offset.expect("new daemon supplies output cursor");
                 cursor = offset + bytes.len() as u64;
                 guest_output.extend(bytes);
-                if guest_output.windows(10).any(|w| w == b"\x1b]133;D;0\x07") { break; }
+                if guest_output.windows(10).any(|w| w == b"\x1b]133;D;0\x07") {
+                    break;
+                }
             }
         }
-    }).await.expect("guest receives same execution completion");
-    assert!(guest_output.windows(filename.len()).any(|w| w == filename.as_bytes()));
+    })
+    .await
+    .expect("guest receives same execution completion");
+    assert!(guest_output
+        .windows(filename.len())
+        .any(|w| w == filename.as_bytes()));
     close(guest).await;
-    send_pty(&mut host, &PtyClientMessage::PtyInput {
-        session_id: session_id.clone(),
-        bytes: b"printf x >> execution-count; ls; printf '\\033]133;D;0\\007'\n".to_vec(),
-    }).await;
-    recv_marker_for_session(&mut host, &session_id, b"\x1b]133;D;0\x07", Duration::from_secs(8))
-        .await.expect("host continues while guest disconnected");
+    send_pty(
+        &mut host,
+        &PtyClientMessage::PtyInput {
+            session_id: session_id.clone(),
+            bytes: b"printf x >> execution-count; ls; printf '\\033]133;D;0\\007'\n"
+                .to_vec(),
+        },
+    )
+    .await;
+    recv_marker_for_session(
+        &mut host,
+        &session_id,
+        b"\x1b]133;D;0\x07",
+        Duration::from_secs(8),
+    )
+    .await
+    .expect("host continues while guest disconnected");
     let mut guest = connect_client(daemon.addr).await;
-    send_pty(&mut guest, &PtyClientMessage::AttachPty {
-        session_id: session_id.clone(), cursor: Some(cursor),
-    }).await;
+    send_pty(
+        &mut guest,
+        &PtyClientMessage::AttachPty {
+            session_id: session_id.clone(),
+            cursor: Some(cursor),
+        },
+    )
+    .await;
     let replay = tokio::time::timeout(Duration::from_secs(8), async {
         loop {
             if let Some(PtyServerMessage::PtyOutput { bytes, offset, .. }) =
@@ -547,9 +594,16 @@ async fn multiplayer_ls_reconnect_replays_only_missing_output() {
                 break bytes;
             }
         }
-    }).await.expect("guest receives missing suffix");
-    assert!(replay.windows(filename.len()).any(|w| w == filename.as_bytes()));
-    assert_eq!(std::fs::read(directory.path().join("execution-count")).unwrap(), b"x");
+    })
+    .await
+    .expect("guest receives missing suffix");
+    assert!(replay
+        .windows(filename.len())
+        .any(|w| w == filename.as_bytes()));
+    assert_eq!(
+        std::fs::read(directory.path().join("execution-count")).unwrap(),
+        b"x"
+    );
     send_pty(&mut host, &PtyClientMessage::ClosePty { session_id }).await;
     close(host).await;
     close(guest).await;

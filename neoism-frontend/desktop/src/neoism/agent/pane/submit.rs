@@ -1,7 +1,10 @@
 use super::*;
 
 pub(super) fn provider_slash_draft(draft: &str, name: &str) -> String {
-    let args = draft.find(char::is_whitespace).map(|index| &draft[index..]).unwrap_or(" ");
+    let args = draft
+        .find(char::is_whitespace)
+        .map(|index| &draft[index..])
+        .unwrap_or(" ");
     format!("/{name}{args}")
 }
 
@@ -72,7 +75,10 @@ impl NeoismAgentPane {
                     self.pending_external_model_picker = true;
                     self.retry_external_options();
                 } else {
-                    self.push_notice("Provider does not advertise a model selector", NeoismAgentNoticeLevel::Warn);
+                    self.push_notice(
+                        "Provider does not advertise a model selector",
+                        NeoismAgentNoticeLevel::Warn,
+                    );
                 }
             }
             return true;
@@ -82,22 +88,60 @@ impl NeoismAgentPane {
                 if self.new_chat_source.provider().is_some() {
                     if option.value == "__retry_external_options" {
                         self.retry_external_options();
-                    } else if option.value == "model" && (self.external_options().is_none() || self.external_options().is_some_and(|snapshot| snapshot.options.iter().any(|item| item.category == "model"))) {
+                    } else if option.value == "model"
+                        && (self.external_options().is_none()
+                            || self.external_options().is_some_and(|snapshot| {
+                                snapshot
+                                    .options
+                                    .iter()
+                                    .any(|item| item.category == "model")
+                            }))
+                    {
                         if !self.open_external_model_picker_from_slash() {
                             self.pending_external_model_picker = true;
                             self.retry_external_options();
                         }
-                    } else if option.value == "__provider_external_model" {
-                        self.input = provider_slash_draft(&self.input, "model");
+                    } else if option.value == "__external_think" {
+                        if let Some(index) =
+                            self.external_options().and_then(|snapshot| {
+                                snapshot
+                                    .options
+                                    .iter()
+                                    .position(|item| item.category == "thought_level")
+                            })
+                        {
+                            self.input.clear();
+                            self.cursor_byte = 0;
+                            self.open_status_chip_picker(
+                                index + 1 + usize::from(!self.has_conversation()),
+                            );
+                        }
+                    } else if option.value == "__external_options" {
+                        self.input.clear();
+                        self.cursor_byte = 0;
+                        self.open_external_options_menu();
+                    } else if let Some(command) =
+                        option.value.strip_prefix("__provider_external_").filter(
+                            |command| matches!(*command, "model" | "think" | "options"),
+                        )
+                    {
+                        self.input = provider_slash_draft(&self.input, command);
                         self.cursor_byte = self.input.len();
-                    } else if option.value == "__opencode_compact" && self.new_chat_source.provider() == Some("opencode") {
+                    } else if option.value == "__opencode_compact"
+                        && self.new_chat_source.provider() == Some("opencode")
+                    {
                         self.input = provider_slash_draft(&self.input, "compact");
                         self.cursor_byte = self.input.len();
                     } else if option.value == "__local_external_skill" {
                         self.input.clear();
                         self.cursor_byte = 0;
                         self.open_skill_picker();
-                    } else if self.external_options().is_some_and(|snapshot| snapshot.available_commands.iter().any(|command| command.name == option.value)) {
+                    } else if self.external_options().is_some_and(|snapshot| {
+                        snapshot
+                            .available_commands
+                            .iter()
+                            .any(|command| command.name == option.value)
+                    }) {
                         self.input = provider_slash_draft(&self.input, &option.value);
                         self.cursor_byte = self.input.len();
                     }
@@ -136,8 +180,15 @@ impl NeoismAgentPane {
                 );
             }
             NeoismAgentPickerKind::ExternalOptionMenu => {
-                if let Some(index) = self.external_options().and_then(|snapshot| snapshot.options.iter().position(|item| item.id == option.value)) {
-                    self.open_status_chip_picker(index + 1 + usize::from(!self.has_conversation()));
+                if let Some(index) = self.external_options().and_then(|snapshot| {
+                    snapshot
+                        .options
+                        .iter()
+                        .position(|item| item.id == option.value)
+                }) {
+                    self.open_status_chip_picker(
+                        index + 1 + usize::from(!self.has_conversation()),
+                    );
                 }
             }
             NeoismAgentPickerKind::ExternalOption => {
@@ -193,9 +244,14 @@ impl NeoismAgentPane {
         if text.is_empty() {
             return false;
         }
-        if self.session_id.is_some() && self.conversation_source().provider().is_some()
-            && self.external_option_pending() {
-            self.push_notice("Wait for the provider to confirm your option before sending", NeoismAgentNoticeLevel::Warn);
+        if self.session_id.is_some()
+            && self.conversation_source().provider().is_some()
+            && self.external_option_pending()
+        {
+            self.push_notice(
+                "Wait for the provider to confirm your option before sending",
+                NeoismAgentNoticeLevel::Warn,
+            );
             return true;
         }
         self.input.clear();
@@ -382,36 +438,127 @@ impl NeoismAgentPane {
         let options = if provider {
             let mut rows = Vec::new();
             if let Some(snapshot) = self.external_options() {
-                if snapshot.options.iter().any(|option| option.category == "model") {
-                    rows.push(NeoismAgentPickerOption::new("/model", "Select provider model", "", "model"));
+                if snapshot
+                    .options
+                    .iter()
+                    .any(|option| option.category == "model")
+                {
+                    rows.push(NeoismAgentPickerOption::new(
+                        "/model",
+                        "Select provider model",
+                        "",
+                        "model",
+                    ));
+                }
+                if snapshot
+                    .options
+                    .iter()
+                    .any(|option| option.category == "thought_level")
+                {
+                    rows.push(NeoismAgentPickerOption::new(
+                        "/think",
+                        "Select provider thinking level",
+                        "",
+                        "__external_think",
+                    ));
+                }
+                if !snapshot.options.is_empty() {
+                    rows.push(NeoismAgentPickerOption::new(
+                        "/options",
+                        "Provider settings, including Fast mode",
+                        "",
+                        "__external_options",
+                    ));
                 }
                 rows.extend(snapshot.available_commands.iter().map(|command| {
-                    let collision = command.name == "model" && snapshot.options.iter().any(|option| option.category == "model");
+                    let collision = match command.name.as_str() {
+                        "model"
+                            if snapshot
+                                .options
+                                .iter()
+                                .any(|option| option.category == "model") =>
+                        {
+                            Some("__provider_external_model")
+                        }
+                        "think"
+                            if snapshot
+                                .options
+                                .iter()
+                                .any(|option| option.category == "thought_level") =>
+                        {
+                            Some("__provider_external_think")
+                        }
+                        "options" if !snapshot.options.is_empty() => {
+                            Some("__provider_external_options")
+                        }
+                        _ => None,
+                    };
                     let title = format!("/{}", command.name);
+                    let label = if collision.is_some() {
+                        format!("Provider {title}")
+                    } else {
+                        title
+                    };
                     NeoismAgentPickerOption::new(
-                        if collision { "Provider /model" } else { &title },
+                        &label,
                         &command.description,
                         command.input_hint.as_deref().unwrap_or(""),
-                        if collision { "__provider_external_model" } else { &command.name },
+                        collision.unwrap_or(&command.name),
                     )
                 }));
-                if !snapshot.available_commands.iter().any(|command| command.name == "skill") {
-                    rows.push(NeoismAgentPickerOption::new("/skill", "Insert local skill reference", "local", "__local_external_skill"));
+                if !snapshot
+                    .available_commands
+                    .iter()
+                    .any(|command| command.name == "skill")
+                {
+                    rows.push(NeoismAgentPickerOption::new(
+                        "/skill",
+                        "Insert local skill reference",
+                        "local",
+                        "__local_external_skill",
+                    ));
                 }
             } else {
                 if let Some(error) = self.external_options_error() {
-                    rows.push(NeoismAgentPickerOption::new("Retry provider options", error, "retry", "__retry_external_options"));
+                    rows.push(NeoismAgentPickerOption::new(
+                        "Retry provider options",
+                        error,
+                        "retry",
+                        "__retry_external_options",
+                    ));
                 }
-                rows.push(NeoismAgentPickerOption::new("/model", "Select provider model", "", "model"));
-                rows.push(NeoismAgentPickerOption::new("/skill", "Insert local skill reference", "local", "__local_external_skill"));
+                rows.push(NeoismAgentPickerOption::new(
+                    "/model",
+                    "Select provider model",
+                    "",
+                    "model",
+                ));
+                rows.push(NeoismAgentPickerOption::new(
+                    "/skill",
+                    "Insert local skill reference",
+                    "local",
+                    "__local_external_skill",
+                ));
             }
             if self.new_chat_source.provider() == Some("opencode")
-                && !self.external_options().is_some_and(|snapshot| snapshot.available_commands.iter().any(|command| command.name == "compact"))
+                && !self.external_options().is_some_and(|snapshot| {
+                    snapshot
+                        .available_commands
+                        .iter()
+                        .any(|command| command.name == "compact")
+                })
             {
-                rows.push(NeoismAgentPickerOption::new("/compact", "Summarize OpenCode conversation via ACP", "OpenCode ACP", "__opencode_compact"));
+                rows.push(NeoismAgentPickerOption::new(
+                    "/compact",
+                    "Summarize OpenCode conversation via ACP",
+                    "OpenCode ACP",
+                    "__opencode_compact",
+                ));
             }
             rows
-        } else { slash_options() };
+        } else {
+            slash_options()
+        };
         if self
             .picker
             .as_ref()

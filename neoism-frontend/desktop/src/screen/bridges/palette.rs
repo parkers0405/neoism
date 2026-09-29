@@ -1641,10 +1641,7 @@ impl Screen<'_> {
             .collect();
 
         let peers = self.context_manager.tailnet_peers();
-        peer_hosts.extend(tailnet_peer_palette_hosts(
-            &peers,
-            &existing_urls,
-        ));
+        peer_hosts.extend(tailnet_peer_palette_hosts(&peers, &existing_urls));
 
         (entries, peer_hosts)
     }

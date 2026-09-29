@@ -389,8 +389,12 @@ pub(crate) async fn run_acp_prompt(
         &initialize,
         &setup,
         None,
-    ).await {
-        if let Err(invalid) = super::options::invalidate_replay(state, child.id.as_str()).await {
+    )
+    .await
+    {
+        if let Err(invalid) =
+            super::options::invalidate_replay(state, child.id.as_str()).await
+        {
             tracing::warn!(session_id = %child.id, error = %invalid, "failed to mark ACP options replay invalid");
         }
         return Err(error);
@@ -487,13 +491,25 @@ pub(crate) async fn run_acp_prompt(
     .await
     .map_err(|error| error.to_string())?;
 
-    let confirmed_model = state.inner.store.get_session(child.id.as_str()).await
+    let confirmed_model = state
+        .inner
+        .store
+        .get_session(child.id.as_str())
+        .await
         .map_err(|error| error.to_string())?
-        .and_then(|session| session.extra["externalAgent"]["configOptions"].as_array().and_then(|options| {
-            options.iter().find(|option| option["category"] == "model" && option["type"] == "select")
-                .and_then(|option| option["currentValue"].as_str())
-                .map(str::to_owned)
-        }))
+        .and_then(|session| {
+            session.extra["externalAgent"]["configOptions"]
+                .as_array()
+                .and_then(|options| {
+                    options
+                        .iter()
+                        .find(|option| {
+                            option["category"] == "model" && option["type"] == "select"
+                        })
+                        .and_then(|option| option["currentValue"].as_str())
+                        .map(str::to_owned)
+                })
+        })
         .unwrap_or_default();
     let collector = collector.lock().await;
     if let Some(error) = &collector.config_error {

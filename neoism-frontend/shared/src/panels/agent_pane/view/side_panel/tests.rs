@@ -21,14 +21,29 @@ fn provider_chooser_and_persisted_root_sources() {
     assert_eq!(panel.choose_provider(1), Some(ConversationSource::OpenCode));
     assert!(!panel.provider_menu_open());
     assert_eq!(ConversationSource::Neoism.provider(), None);
-    assert_eq!(ConversationSource::Neoism.tab_title(Some("Fix tests")), "Fix tests");
-    assert_eq!(ConversationSource::Codex.tab_title(Some("Fix tests")), "Codex · Fix tests");
-    assert_eq!(ConversationSource::ClaudeCode.tab_title(None), "Claude Code");
+    assert_eq!(
+        ConversationSource::Neoism.tab_title(Some("Fix tests")),
+        "Fix tests"
+    );
+    assert_eq!(
+        ConversationSource::Codex.tab_title(Some("Fix tests")),
+        "Fix tests"
+    );
+    assert_eq!(
+        ConversationSource::ClaudeCode.tab_title(None),
+        "Claude Code"
+    );
     assert_eq!(ConversationSource::ClaudeCode.provider(), Some("claude"));
     let root = serde_json::json!({"extra": {"externalAgent": {"provider": "codex"}}});
-    assert_eq!(ConversationSource::from_session_json(&root), ConversationSource::Codex);
+    assert_eq!(
+        ConversationSource::from_session_json(&root),
+        ConversationSource::Codex
+    );
     let child = serde_json::json!({"parentID": "root", "extra": {"externalAgent": {"provider": "codex"}}});
-    assert_eq!(ConversationSource::from_session_json(&child), ConversationSource::Neoism);
+    assert_eq!(
+        ConversationSource::from_session_json(&child),
+        ConversationSource::Neoism
+    );
 }
 
 #[test]
@@ -91,7 +106,9 @@ impl AgentSidePanelPane for TestPane {
         String::new()
     }
 
-    fn conversation_source(&self) -> crate::panels::agent_pane::state::side_panel::ConversationSource {
+    fn conversation_source(
+        &self,
+    ) -> crate::panels::agent_pane::state::side_panel::ConversationSource {
         crate::panels::agent_pane::state::side_panel::ConversationSource::Neoism
     }
 
@@ -973,7 +990,11 @@ fn catalog_touch_scroll_keeps_mixed_row_hit_stride() {
 #[test]
 fn catalog_only_mode_clears_invisible_controls_and_arrow_navigation_skips_search() {
     let mut panel = NeoismAgentSidePanel::default();
-    panel.set_session_page(vec![NeoismAgentSessionEntry::new("one", "One", "")], None, None);
+    panel.set_session_page(
+        vec![NeoismAgentSessionEntry::new("one", "One", "")],
+        None,
+        None,
+    );
     panel.set_new_chat_rect([0.0, 0.0, 200.0, 32.0]);
     panel.set_session_search_rect([0.0, 32.0, 200.0, 32.0]);
     panel.focus_search();
@@ -985,43 +1006,121 @@ fn catalog_only_mode_clears_invisible_controls_and_arrow_navigation_skips_search
     assert!(!panel.search_focused());
     panel.select_prev();
     assert!(!panel.search_focused());
-    assert_eq!(panel.selected_session().map(|row| row.id.as_str()), Some("one"));
+    assert_eq!(
+        panel.selected_session().map(|row| row.id.as_str()),
+        Some("one")
+    );
 }
 
 #[test]
 fn external_catalog_merges_by_native_id_and_source_key_across_pages() {
-    use crate::panels::agent_pane::state::side_panel::{ConversationSource, ExternalSessionPreview};
+    use crate::panels::agent_pane::state::side_panel::{
+        ConversationSource, ExternalSessionPreview,
+    };
     fn preview(key: &str, imported: Option<&str>) -> NeoismAgentSessionEntry {
         let mut row = NeoismAgentSessionEntry::new(
-            imported.map(str::to_owned).unwrap_or_else(|| format!("external:{key}")),
-            "Claude preview", "Preview · import to read",
-        ).with_source(ConversationSource::ClaudeCode).with_source_key(Some(key.into())).with_updated_ms(1_800_000_000_000);
+            imported
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("external:{key}")),
+            "Claude preview",
+            "Preview · import to read",
+        )
+        .with_source(ConversationSource::ClaudeCode)
+        .with_source_key(Some(key.into()))
+        .with_updated_ms(1_800_000_000_000);
         row.external_preview = Some(ExternalSessionPreview {
-            source_key: key.into(), external_session_id: key.into(),
-            history_state: "not_loaded".into(), import_supported: true,
+            source_key: key.into(),
+            external_session_id: key.into(),
+            history_state: "not_loaded".into(),
+            import_supported: true,
             import_unavailable_reason: None,
             neoism_session_id: imported.map(str::to_owned),
         });
         row
     }
     let mut panel = NeoismAgentSidePanel::default();
-    panel.set_session_page(vec![NeoismAgentSessionEntry::new("native", "Native", "")], None, Some("page2".into()));
-    panel.set_external_provider_rows(ConversationSource::ClaudeCode, vec![preview("one", Some("native")), preview("two", None), preview("three", None)]);
-    assert_eq!(panel.sessions().iter().filter(|row| row.id == "native").count(), 1);
-    assert_eq!(panel.sessions().iter().filter(|row| row.id == "external:two").count(), 1);
-    let index = panel.sessions().iter().position(|row| row.id == "external:three").unwrap();
+    panel.set_session_page(
+        vec![NeoismAgentSessionEntry::new("native", "Native", "")],
+        None,
+        Some("page2".into()),
+    );
+    panel.set_external_provider_rows(
+        ConversationSource::ClaudeCode,
+        vec![
+            preview("one", Some("native")),
+            preview("two", None),
+            preview("three", None),
+        ],
+    );
+    assert_eq!(
+        panel
+            .sessions()
+            .iter()
+            .filter(|row| row.id == "native")
+            .count(),
+        1
+    );
+    assert_eq!(
+        panel
+            .sessions()
+            .iter()
+            .filter(|row| row.id == "external:two")
+            .count(),
+        1
+    );
+    let index = panel
+        .sessions()
+        .iter()
+        .position(|row| row.id == "external:three")
+        .unwrap();
     panel.set_selected(index);
-    panel.set_session_page(vec![NeoismAgentSessionEntry::new("later", "Later", "").with_source(ConversationSource::ClaudeCode).with_source_key(Some("two".into()))], Some("page2"), None);
-    assert_eq!(panel.selected_session().map(|row| row.id.as_str()), Some("external:three"));
-    assert_eq!(panel.sessions().iter().filter(|row| row.source_key.as_deref() == Some("two")).count(), 1);
-    assert_eq!(panel.sessions().iter().find(|row| row.source_key.as_deref() == Some("two")).map(|row| row.source), Some(ConversationSource::ClaudeCode));
+    panel.set_session_page(
+        vec![NeoismAgentSessionEntry::new("later", "Later", "")
+            .with_source(ConversationSource::ClaudeCode)
+            .with_source_key(Some("two".into()))],
+        Some("page2"),
+        None,
+    );
+    assert_eq!(
+        panel.selected_session().map(|row| row.id.as_str()),
+        Some("external:three")
+    );
+    assert_eq!(
+        panel
+            .sessions()
+            .iter()
+            .filter(|row| row.source_key.as_deref() == Some("two"))
+            .count(),
+        1
+    );
+    assert_eq!(
+        panel
+            .sessions()
+            .iter()
+            .find(|row| row.source_key.as_deref() == Some("two"))
+            .map(|row| row.source),
+        Some(ConversationSource::ClaudeCode)
+    );
     panel.set_session_query("claude".into());
-    assert!(panel.sessions().iter().any(|row| row.title == "Claude preview"));
+    assert!(panel
+        .sessions()
+        .iter()
+        .any(|row| row.title == "Claude preview"));
     panel.set_session_query(String::new());
-    panel.set_external_provider_error(ConversationSource::Codex, "adapter unavailable".into());
+    panel.set_external_provider_error(
+        ConversationSource::Codex,
+        "adapter unavailable".into(),
+    );
     assert!(panel.sessions().iter().any(|row| row.id == "native"));
-    assert!(panel.external_errors().iter().any(|(source, _)| *source == ConversationSource::Codex));
-    panel.set_session_page(vec![NeoismAgentSessionEntry::new("native", "Native", "")], None, None);
+    assert!(panel
+        .external_errors()
+        .iter()
+        .any(|(source, _)| *source == ConversationSource::Codex));
+    panel.set_session_page(
+        vec![NeoismAgentSessionEntry::new("native", "Native", "")],
+        None,
+        None,
+    );
     assert!(panel.sessions().iter().any(|row| row.id == "external:two"));
     panel.set_external_importing(Some("two".into()));
     assert!(!panel.sessions().iter().any(|row| row.id == "external:two"));
@@ -1030,6 +1129,17 @@ fn external_catalog_merges_by_native_id_and_source_key_across_pages() {
     assert!(panel.sessions().iter().any(|row| row.id == "external:two"));
     panel.mark_external_imported("two", "imported");
     assert!(panel.sessions().iter().any(|row| row.id == "imported"));
-    panel.set_session_page(vec![NeoismAgentSessionEntry::new("imported", "Imported", "")], None, None);
-    assert_eq!(panel.sessions().iter().filter(|row| row.id == "imported").count(), 1);
+    panel.set_session_page(
+        vec![NeoismAgentSessionEntry::new("imported", "Imported", "")],
+        None,
+        None,
+    );
+    assert_eq!(
+        panel
+            .sessions()
+            .iter()
+            .filter(|row| row.id == "imported")
+            .count(),
+        1
+    );
 }

@@ -54,7 +54,9 @@ impl NeoismAgentPane {
             NeoismAgentPickerKind::ConversationSource => {
                 if !self.has_conversation() {
                     if let Some(source) = super::side_panel::ConversationSource::CHOICES
-                        .into_iter().find(|source| source.label() == option.value) {
+                        .into_iter()
+                        .find(|source| source.label() == option.value)
+                    {
                         self.new_chat_source = source;
                     }
                 }
@@ -610,7 +612,11 @@ impl NeoismAgentPane {
         trimmed
     }
 
-    pub fn remember_session_source(&mut self, id: &str, source: super::side_panel::ConversationSource) {
+    pub fn remember_session_source(
+        &mut self,
+        id: &str,
+        source: super::side_panel::ConversationSource,
+    ) {
         self.session_sources.insert(id.to_string(), source);
         if self.session_id.as_deref() == Some(id) {
             self.new_chat_source = source;
@@ -682,12 +688,16 @@ impl NeoismAgentPane {
         if self.session_id.as_deref() == Some(trimmed.as_str()) {
             return;
         }
-        self.new_chat_source = self.side_panel.sessions().iter()
+        self.new_chat_source = self
+            .side_panel
+            .sessions()
+            .iter()
             .find(|entry| entry.id == trimmed && !entry.is_header)
             .map(|entry| entry.source)
             .or_else(|| self.session_sources.get(&trimmed).copied())
             .unwrap_or_default();
-        self.session_sources.insert(trimmed.clone(), self.new_chat_source);
+        self.session_sources
+            .insert(trimmed.clone(), self.new_chat_source);
         if self.activate_cached_session(&trimmed) {
             // Instant restore from the session cache. The outbound
             // SwitchSession below still runs: the host re-binds the

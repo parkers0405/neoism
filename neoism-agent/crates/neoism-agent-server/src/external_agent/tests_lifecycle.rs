@@ -79,16 +79,23 @@ fn mock_adapter(
     let script = root.join(format!("adapter-{provider}"));
     let log = root.join(format!("requests-{provider}.log"));
     let init = json!({"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"sessionCapabilities":{"resume":{},"list":{}}}}}).to_string();
-    let model_options = if provider == "codex" { vec![] } else { vec![json!({
-        "id":"model", "name":"Model", "category":"model", "type":"select",
-        "currentValue":format!("{provider}/default"),
-        "options":[{"value":format!("{provider}/default"),"name":"Default"}]
-    })] };
+    let model_options = if provider == "codex" {
+        vec![]
+    } else {
+        vec![json!({
+            "id":"model", "name":"Model", "category":"model", "type":"select",
+            "currentValue":format!("{provider}/default"),
+            "options":[{"value":format!("{provider}/default"),"name":"Default"}]
+        })]
+    };
     let new = json!({"jsonrpc":"2.0","id":2,"result":{"sessionId":format!("native-{provider}"),"configOptions":model_options}}).to_string();
-    let load = json!({"jsonrpc":"2.0","id":2,"result":{"configOptions":model_options}}).to_string();
+    let load = json!({"jsonrpc":"2.0","id":2,"result":{"configOptions":model_options}})
+        .to_string();
     let replay = json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":format!("native-{provider}"),"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"DO NOT REPLAY TO LIVE TURN"}}}}).to_string();
     let plan = json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":format!("native-{provider}"),"update":{"sessionUpdate":"plan","entries":[{"content":"check history","status":"in_progress","priority":"high"}]}}}).to_string();
     let tool = json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":format!("native-{provider}"),"update":{"sessionUpdate":"tool_call","toolCallId":"native-tool-1","title":"Inspect workspace","kind":"read","status":"in_progress","rawInput":{"path":"README.md"}}}}).to_string();
+    let edit = json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":format!("native-{provider}"),"update":{"sessionUpdate":"tool_call","toolCallId":"edit-1","title":"Update README","kind":"edit","status":"in_progress","rawInput":{"path":"README.md"},"content":[{"type":"diff","path":"README.md","oldText":"old\n","newText":"new\n"}]}}}).to_string();
+    let edit_done = json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":format!("native-{provider}"),"update":{"sessionUpdate":"tool_call_update","toolCallId":"edit-1","status":"completed"}}}).to_string();
     let tool_done = json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":format!("native-{provider}"),"update":{"sessionUpdate":"tool_call_update","toolCallId":"native-tool-1","status":"completed","rawOutput":{"text":"inspected"}}}}).to_string();
     let first = json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":format!("native-{provider}"),"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"First "}}}}).to_string();
     let second = json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":format!("native-{provider}"),"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"answer"}}}}).to_string();
@@ -99,7 +106,19 @@ fn mock_adapter(
     let done = json!({"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn","usage":{"totalTokens":12,"inputTokens":5,"outputTokens":7}}}).to_string();
     let commands = json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":format!("native-{provider}"),"update":{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"review","description":"Review files","input":null},{"name":"test","description":"Run tests","input":{"hint":"path"}}]}}}).to_string();
     let cleared = json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":format!("native-{provider}"),"update":{"sessionUpdate":"available_commands_update","availableCommands":[]}}}).to_string();
-    let nested = json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":format!("native-{provider}"),"update":{"sessionUpdate":"tool_call","toolCallId":"task-1","title":"Task","status":"in_progress","rawInput":{"prompt":"Review code","subagent_type":"general"}}}}).to_string();
+    let nested_input = if provider == "codex" {
+        json!({"message":"Review code"})
+    } else {
+        json!({"prompt":"Review code","subagent_type":"general"})
+    };
+    let nested_title = if provider == "codex" {
+        "spawn_agent"
+    } else {
+        "Task"
+    };
+    let nested = json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":format!("native-{provider}"),"update":{"sessionUpdate":"tool_call","toolCallId":"task-1","title":nested_title,"status":"in_progress"}}}).to_string();
+    let nested_input_update = json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":format!("native-{provider}"),"update":{"sessionUpdate":"tool_call_update","toolCallId":"task-1","status":"in_progress","rawInput":nested_input}}}).to_string();
+    let nested_progress = json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":format!("native-{provider}"),"update":{"sessionUpdate":"tool_call_update","toolCallId":"task-1","status":"in_progress","content":[{"type":"content","content":{"type":"text","text":"Review underway"}}]}}}).to_string();
     let nested_done = json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":format!("native-{provider}"),"update":{"sessionUpdate":"tool_call_update","toolCallId":"task-1","status":"completed","rawOutput":{"text":"Reviewed"}}}}).to_string();
     let usage = json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":format!("native-{provider}"),"update":{"sessionUpdate":"usage_update","usage":{"totalTokens":8,"inputTokens":5,"outputTokens":3}}}}).to_string();
     let source = format!(
@@ -121,11 +140,11 @@ while IFS= read -r line; do
           done
           ;;
         *'first turn'*)
-          printf '%s\n' '{tool}' '{nested}' '{plan}' '{usage}' '{first}' '{permission}'
+          printf '%s\n' '{tool}' '{edit}' '{nested}' '{nested_input_update}' '{nested_progress}' '{plan}' '{usage}' '{first}' '{permission}'
           IFS= read -r reply || exit 1
           printf '%s\n' "$reply" >> '{log}'
           case "$reply" in *'"optionId":"allow"'*) ;; *) exit 2 ;; esac
-          printf '%s\n' '{tool_done}' '{nested_done}' '{second}' '{done}'
+          printf '%s\n' '{tool_done}' '{edit_done}' '{nested_done}' '{second}' '{done}'
           ;;
         *) printf '%s\n' '{cleared}' '{user_echo}' '{mislabeled_echo}' '{continued}' '{done}' ;;
       esac
@@ -139,7 +158,9 @@ done
         load = load,
         replay = replay,
         tool = tool,
+        edit = edit,
         tool_done = tool_done,
+        edit_done = edit_done,
         plan = plan,
         first = first,
         second = second,
@@ -152,6 +173,8 @@ done
         cleared = cleared,
         usage = usage,
         nested = nested,
+        nested_input_update = nested_input_update,
+        nested_progress = nested_progress,
         nested_done = nested_done
     );
     std::fs::write(&script, source).unwrap();
@@ -237,6 +260,18 @@ async fn three_provider_roots_run_via_real_http_queue_and_reload() {
                     }
                     event_type::PERMISSION_ASKED => {
                         saw_permission = true;
+                        let children: Vec<_> = state.inner.store.list_sessions().await.unwrap().into_iter()
+                            .filter(|info| info.parent_id.as_ref() == Some(&session.id)
+                                && info.extra["externalAgent"]["parentToolCallId"] == "task-1").collect();
+                        assert_eq!(children.len(), 1, "task must exist before completion");
+                        assert_eq!(children[0].extra["externalAgent"]["status"], "running");
+                        let child_messages = state.inner.store.list_messages(children[0].id.as_str()).await.unwrap();
+                        assert_eq!(text_of(&child_messages[0]), "Review code");
+                        assert_eq!(text_of(&child_messages[1]), "Review underway");
+                        let MessageInfo::Assistant(live_child) = &child_messages[1].info else { panic!("child assistant expected") };
+                        assert!(live_child.time.completed.is_none());
+                        let live_id = live_child.id.clone();
+                        let live_part_id = match &child_messages[1].parts[0] { Part::Text(part) => part.id.clone(), _ => panic!("text expected") };
                         let id = event.properties["id"]
                             .as_str()
                             .or_else(|| event.properties["requestID"].as_str())
@@ -253,6 +288,12 @@ async fn three_provider_roots_run_via_real_http_queue_and_reload() {
                         )
                         .await;
                         assert!(reply);
+                        let finished_child = wait_for_messages(&app, &children[0].id, 2).await;
+                        assert_eq!(finished_child.len(), 2);
+                        assert_eq!(text_of(&finished_child[1]), "{\"text\":\"Reviewed\"}");
+                        let MessageInfo::Assistant(done_child) = &finished_child[1].info else { panic!("child assistant expected") };
+                        assert_eq!(done_child.id, live_id);
+                        assert_eq!(match &finished_child[1].parts[0] { Part::Text(part) => &part.id, _ => panic!("text expected") }, &live_part_id);
                     }
                     _ => {}
                 }
@@ -292,9 +333,44 @@ async fn three_provider_roots_run_via_real_http_queue_and_reload() {
             panic!("assistant expected")
         };
         assert_eq!(first_assistant.tokens.total, Some(12));
-        assert_eq!(first_assistant.model_id, if provider == "codex" { String::new() } else { format!("{provider}/default") });
+        assert_eq!(
+            first_assistant.model_id,
+            if provider == "codex" {
+                String::new()
+            } else {
+                format!("{provider}/default")
+            }
+        );
         assert!(first[1].parts.iter().any(|part| matches!(part, Part::Tool(tool)
-            if tool.call_id == "native-tool-1" && matches!(tool.state, neoism_agent_core::ToolState::Completed { .. }))));
+            if tool.call_id == "native-tool-1" && tool.tool == "read"
+                && matches!(&tool.state, neoism_agent_core::ToolState::Completed { input, title, .. }
+                    if input["path"] == "README.md" && title == "Inspect workspace"))));
+        assert!(first[1].parts.iter().any(|part| matches!(part, Part::Tool(tool)
+            if tool.call_id == "edit-1" && tool.tool == "edit"
+                && matches!(&tool.state, neoism_agent_core::ToolState::Completed { metadata, .. }
+                    if metadata["acpDiffs"][0]["newText"] == "new\n"))));
+        let mut old_root = state
+            .inner
+            .store
+            .get_session(session.id.as_str())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(old_root.title, "first turn");
+        old_root.title = "New session - 1790000000".into();
+        state.inner.store.update_session(&old_root).await.unwrap();
+        let listing: Value = json_response(
+            app.clone()
+                .oneshot(http(
+                    Method::GET,
+                    &format!("/v2/sessions?roots=true&directory={}", root.display()),
+                    None,
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(listing["items"][0]["title"], "first turn");
         let persisted: SessionInfo = json_response(
             app.clone()
                 .oneshot(http(
@@ -306,6 +382,7 @@ async fn three_provider_roots_run_via_real_http_queue_and_reload() {
                 .unwrap(),
         )
         .await;
+        assert_eq!(persisted.title, "first turn");
         assert_eq!(
             persisted.extra["externalAgent"]["externalSessionId"],
             format!("native-{provider}")
@@ -341,16 +418,6 @@ async fn three_provider_roots_run_via_real_http_queue_and_reload() {
         super::options::apply_commands(&state, session.id.as_str(), "foreign-id", &bogus)
             .await
             .unwrap();
-        assert!(super::options::apply_commands(
-            &state,
-            session.id.as_str(),
-            &format!("native-{provider}"),
-            &json!({"availableCommands":[{"name":"invalid name","description":"bad"}]})
-        )
-        .await
-        .is_err());
-        assert!(super::options::apply_commands(&state, session.id.as_str(), &format!("native-{provider}"),
-            &json!({"availableCommands":[{"name":"same","description":"one"},{"name":"same","description":"two"}]})).await.is_err());
         assert_eq!(
             state
                 .inner
@@ -361,6 +428,21 @@ async fn three_provider_roots_run_via_real_http_queue_and_reload() {
                 .unwrap()
                 .extra["externalAgent"]["availableCommands"],
             snapshot.extra["externalAgent"]["availableCommands"]
+        );
+        super::options::apply_commands(
+            &state, session.id.as_str(), &format!("native-{provider}"),
+            &json!({"availableCommands":[{"name":"invalid name","description":"bad"},{"name":"/same","description":"one"},{"name":"same","description":"two"}]})
+        ).await.unwrap();
+        assert_eq!(
+            state
+                .inner
+                .store
+                .get_session(session.id.as_str())
+                .await
+                .unwrap()
+                .unwrap()
+                .extra["externalAgent"]["availableCommands"],
+            json!([{"name":"same","description":"one"}])
         );
         super::options::clear_commands(
             &state,

@@ -1,9 +1,20 @@
 use super::*;
 
-pub(super) fn update_todos_message(messages: &mut Vec<NeoismAgentMessage>, todos: Vec<NeoismAgentTodo>) {
+pub(super) fn update_todos_message(
+    messages: &mut Vec<NeoismAgentMessage>,
+    todos: Vec<NeoismAgentTodo>,
+) {
     const ID: &str = "todos-snapshot";
     messages.retain(|message| message.id != ID);
-    let mut row = NeoismAgentMessage::tool("Todos", "", "running", "todowrite", NeoismAgentOutputKind::Todos, "", todos);
+    let mut row = NeoismAgentMessage::tool(
+        "Todos",
+        "",
+        "running",
+        "todowrite",
+        NeoismAgentOutputKind::Todos,
+        "",
+        todos,
+    );
     // The authoritative marker belongs to the right panel, not the chat
     // timeline. System rows without a location notice are timeline-hidden.
     row.kind = NeoismAgentMessageKind::System;
@@ -11,7 +22,11 @@ pub(super) fn update_todos_message(messages: &mut Vec<NeoismAgentMessage>, todos
     messages.push(row);
 }
 
-pub(super) fn apply_authoritative_plan(messages: &mut Vec<NeoismAgentMessage>, plan: Option<&Vec<NeoismAgentTodo>>, external: bool) {
+pub(super) fn apply_authoritative_plan(
+    messages: &mut Vec<NeoismAgentMessage>,
+    plan: Option<&Vec<NeoismAgentTodo>>,
+    external: bool,
+) {
     if let Some(todos) = plan {
         update_todos_message(messages, todos.clone());
     } else if external {
@@ -72,13 +87,16 @@ impl NeoismAgentPane {
             drained_updates += 1;
             match update {
                 AgentSessionUpdate::TodosUpdated(todos) => {
-                    self.plan_todo_events.insert(stream_session_id.clone(), todos.clone());
+                    self.plan_todo_events
+                        .insert(stream_session_id.clone(), todos.clone());
                     if stream_is_active {
                         self.current_plan_todos = Some(todos.clone());
                         update_todos_message(&mut self.messages, todos);
                         self.invalidate_timeline_layout();
                     } else {
-                        let cached = self.session_cache.entry(stream_session_id.clone())
+                        let cached = self
+                            .session_cache
+                            .entry(stream_session_id.clone())
                             .or_insert_with(CachedAgentSession::live_only);
                         cached.state.plan_todos = Some(plan_to_shared(&todos));
                         update_todos_message(&mut cached.messages, todos);
@@ -87,14 +105,27 @@ impl NeoismAgentPane {
                     changed = true;
                 }
                 AgentSessionUpdate::UsageUpdated { message_id, usage } => {
-                    self.live_usage_by_session.insert(stream_session_id.clone(), (message_id.clone(), usage.clone()));
+                    self.live_usage_by_session.insert(
+                        stream_session_id.clone(),
+                        (message_id.clone(), usage.clone()),
+                    );
                     if stream_is_active {
-                        if let Some(message) = self.messages.iter_mut().find(|message| message.id == message_id) {
+                        if let Some(message) = self
+                            .messages
+                            .iter_mut()
+                            .find(|message| message.id == message_id)
+                        {
                             message.usage = Some(usage);
                             self.invalidate_timeline_layout();
                         }
-                    } else if let Some(cached) = self.session_cache.get_mut(&stream_session_id) {
-                        if let Some(message) = cached.messages.iter_mut().find(|message| message.id == message_id) {
+                    } else if let Some(cached) =
+                        self.session_cache.get_mut(&stream_session_id)
+                    {
+                        if let Some(message) = cached
+                            .messages
+                            .iter_mut()
+                            .find(|message| message.id == message_id)
+                        {
                             message.usage = Some(usage);
                             cached.invalidate_timeline_layout();
                         }
@@ -119,8 +150,18 @@ impl NeoismAgentPane {
                         );
                         cached.messages =
                             merge_session_snapshot(messages, live, cached.hydrated);
-                        let plan = self.plan_todo_events.get(&stream_session_id).cloned().or_else(|| cached.state.plan_todos.as_deref().map(plan_from_shared));
-                        apply_authoritative_plan(&mut cached.messages, plan.as_ref(), cached.state.source.provider().is_some());
+                        let plan = self
+                            .plan_todo_events
+                            .get(&stream_session_id)
+                            .cloned()
+                            .or_else(|| {
+                                cached.state.plan_todos.as_deref().map(plan_from_shared)
+                            });
+                        apply_authoritative_plan(
+                            &mut cached.messages,
+                            plan.as_ref(),
+                            cached.state.source.provider().is_some(),
+                        );
                         cached.timeline_history.oldest_loaded_cursor = oldest_cursor;
                         cached.hydrated = true;
                         cached.invalidate_timeline_layout();
@@ -137,11 +178,24 @@ impl NeoismAgentPane {
                     // Landed background-task completion cards survive the
                     // snapshot replacement (runs last so the dedupe check
                     // sees the final candidate list).
-                    let mut messages = self.preserve_background_completion_cards(messages);
-                    if self.live_usage_by_session.get(&stream_session_id).is_some_and(|(id, _)| messages.iter().any(|message| message.id == *id && message.usage.is_some())) {
+                    let mut messages =
+                        self.preserve_background_completion_cards(messages);
+                    if self
+                        .live_usage_by_session
+                        .get(&stream_session_id)
+                        .is_some_and(|(id, _)| {
+                            messages.iter().any(|message| {
+                                message.id == *id && message.usage.is_some()
+                            })
+                        })
+                    {
                         self.live_usage_by_session.remove(&stream_session_id);
                     }
-                    apply_authoritative_plan(&mut messages, self.current_plan_todos.as_ref(), self.new_chat_source.provider().is_some());
+                    apply_authoritative_plan(
+                        &mut messages,
+                        self.current_plan_todos.as_ref(),
+                        self.new_chat_source.provider().is_some(),
+                    );
                     // These full-transcript snapshots arrive repeatedly around
                     // each turn. `invalidate_timeline_layout()` here dropped the
                     // WHOLE layout cache, so the next frame re-measured and
@@ -264,7 +318,11 @@ impl NeoismAgentPane {
                             std::mem::take(&mut self.messages),
                             self.timeline_history.oldest_loaded_cursor.is_some(),
                         );
-                        apply_authoritative_plan(&mut self.messages, self.current_plan_todos.as_ref(), self.new_chat_source.provider().is_some());
+                        apply_authoritative_plan(
+                            &mut self.messages,
+                            self.current_plan_todos.as_ref(),
+                            self.new_chat_source.provider().is_some(),
+                        );
                         if self.timeline_history.oldest_loaded_cursor.is_none() {
                             self.timeline_history.oldest_loaded_cursor = oldest_cursor;
                         }
@@ -284,8 +342,18 @@ impl NeoismAgentPane {
                         );
                         cached.messages =
                             merge_session_snapshot(messages, live, cached.hydrated);
-                        let plan = self.plan_todo_events.get(&session_id).cloned().or_else(|| cached.state.plan_todos.as_deref().map(plan_from_shared));
-                        apply_authoritative_plan(&mut cached.messages, plan.as_ref(), cached.state.source.provider().is_some());
+                        let plan = self
+                            .plan_todo_events
+                            .get(&session_id)
+                            .cloned()
+                            .or_else(|| {
+                                cached.state.plan_todos.as_deref().map(plan_from_shared)
+                            });
+                        apply_authoritative_plan(
+                            &mut cached.messages,
+                            plan.as_ref(),
+                            cached.state.source.provider().is_some(),
+                        );
                         cached.timeline_history.oldest_loaded_cursor = oldest_cursor;
                         cached.hydrated = true;
                         cached.invalidate_timeline_layout();
@@ -1101,7 +1169,10 @@ impl NeoismAgentPane {
                 }
                 OutboundAgentCommand::EnsureSession => {
                     if let Err(error) = self.execute_ensure_session_command() {
-                        if self.conversation_source().provider().is_some() { self.external_options_error = Some(error.clone()); self.sync_input_pickers(); }
+                        if self.conversation_source().provider().is_some() {
+                            self.external_options_error = Some(error.clone());
+                            self.sync_input_pickers();
+                        }
                         self.system_message("Session failed", error);
                     }
                     changed = true;
@@ -1692,24 +1763,68 @@ impl NeoismAgentPane {
                         changed = true;
                     }
                 }
-                Ok(NeoismAgentBackgroundUpdate::ExternalOptionsFetched { server, session_id, generation, result }) => {
-                    changed |= self.apply_external_options_update(server, session_id, generation, result, false);
+                Ok(NeoismAgentBackgroundUpdate::ExternalOptionsFetched {
+                    server,
+                    session_id,
+                    generation,
+                    result,
+                }) => {
+                    changed |= self.apply_external_options_update(
+                        server, session_id, generation, result, false,
+                    );
                 }
-                Ok(NeoismAgentBackgroundUpdate::ExternalOptionSet { server, session_id, generation, result }) => {
-                    changed |= self.apply_external_options_update(server, session_id, generation, result, true);
+                Ok(NeoismAgentBackgroundUpdate::ExternalOptionSet {
+                    server,
+                    session_id,
+                    generation,
+                    result,
+                }) => {
+                    changed |= self.apply_external_options_update(
+                        server, session_id, generation, result, true,
+                    );
                 }
-                Ok(NeoismAgentBackgroundUpdate::ExternalCatalogRefreshed { server, directory, generation, source, result }) => {
-                    if server != self.server || directory != self.directory || generation != self.external_catalog_generation { continue; }
-                    self.external_catalog_remaining = self.external_catalog_remaining.saturating_sub(1);
-                    if self.external_catalog_remaining == 0 { self.side_panel.set_external_scanning(false); }
+                Ok(NeoismAgentBackgroundUpdate::ExternalCatalogRefreshed {
+                    server,
+                    directory,
+                    generation,
+                    source,
+                    result,
+                }) => {
+                    if server != self.server
+                        || directory != self.directory
+                        || generation != self.external_catalog_generation
+                    {
+                        continue;
+                    }
+                    self.external_catalog_remaining =
+                        self.external_catalog_remaining.saturating_sub(1);
+                    if self.external_catalog_remaining == 0 {
+                        self.side_panel.set_external_scanning(false);
+                    }
                     match result {
-                        Ok(rows) => self.side_panel.set_external_provider_rows(source, rows),
-                        Err(error) => self.side_panel.set_external_provider_error(source, error),
+                        Ok(rows) => {
+                            self.side_panel.set_external_provider_rows(source, rows)
+                        }
+                        Err(error) => {
+                            self.side_panel.set_external_provider_error(source, error)
+                        }
                     }
                     changed = true;
                 }
-                Ok(NeoismAgentBackgroundUpdate::ExternalImportCompleted { server, directory, source, source_key, result }) => {
-                    if server != self.server || directory != self.directory || self.external_import_in_flight.as_deref() != Some(source_key.as_str()) { continue; }
+                Ok(NeoismAgentBackgroundUpdate::ExternalImportCompleted {
+                    server,
+                    directory,
+                    source,
+                    source_key,
+                    result,
+                }) => {
+                    if server != self.server
+                        || directory != self.directory
+                        || self.external_import_in_flight.as_deref()
+                            != Some(source_key.as_str())
+                    {
+                        continue;
+                    }
                     self.external_import_in_flight = None;
                     self.external_catalog_last_refresh = None;
                     self.side_panel.set_external_importing(None);
@@ -1717,13 +1832,22 @@ impl NeoismAgentPane {
                         Ok(id) => {
                             self.side_panel.mark_external_imported(&source_key, &id);
                             self.pending_external_open = Some((id, source));
-                            self.side_panel.set_external_notice(source, format!("{} history imported", source.label()));
+                            self.side_panel.set_external_notice(
+                                source,
+                                format!("{} history imported", source.label()),
+                            );
                             self.request_side_panel_session_page(None);
                         }
                         Err(error) => {
-                            self.pending_external_error = Some(format!("{} history import failed: {error}", source.label()));
-                            self.side_panel.set_external_notice(source, format!("Import failed: {error}"));
-                        },
+                            self.pending_external_error = Some(format!(
+                                "{} history import failed: {error}",
+                                source.label()
+                            ));
+                            self.side_panel.set_external_notice(
+                                source,
+                                format!("Import failed: {error}"),
+                            );
+                        }
                     }
                     changed = true;
                 }
@@ -1863,14 +1987,18 @@ impl NeoismAgentPane {
                     let force_again =
                         self.session_preloads_force_pending.remove(&session_id);
                     let active = self.session_id.as_deref() == Some(session_id.as_str());
-                    self.session_sources.insert(session_id.clone(), state.source);
+                    self.session_sources
+                        .insert(session_id.clone(), state.source);
                     if let Some(history) = state.imported_history.as_ref() {
-                        self.session_histories.insert(session_id.clone(), history.clone());
+                        self.session_histories
+                            .insert(session_id.clone(), history.clone());
                     } else {
                         self.session_histories.remove(&session_id);
                     }
                     if active {
-                        if self.new_chat_source != state.source { self.reset_external_options(); }
+                        if self.new_chat_source != state.source {
+                            self.reset_external_options();
+                        }
                         self.new_chat_source = state.source;
                     }
                     let mut cached = self
@@ -1899,20 +2027,38 @@ impl NeoismAgentPane {
                     } else {
                         cached_live
                     };
-                    let mut merged = merge_session_snapshot(messages, live, cached.hydrated);
-                    if self.live_usage_by_session.get(&session_id).is_some_and(|(id, _)| merged.iter().any(|message| message.id == *id && message.usage.is_some())) {
+                    let mut merged =
+                        merge_session_snapshot(messages, live, cached.hydrated);
+                    if self.live_usage_by_session.get(&session_id).is_some_and(
+                        |(id, _)| {
+                            merged.iter().any(|message| {
+                                message.id == *id && message.usage.is_some()
+                            })
+                        },
+                    ) {
                         self.live_usage_by_session.remove(&session_id);
                     }
                     // Explicit persisted clear (or no provider plan) must not
                     // resurrect an older live TodoWrite when a root reloads.
                     if state.plan_todos.as_ref().is_some_and(Vec::is_empty)
-                        || (state.source.provider().is_some() && state.plan_todos.is_none()) {
+                        || (state.source.provider().is_some()
+                            && state.plan_todos.is_none())
+                    {
                         self.plan_todo_events.remove(&session_id);
                     }
-                    let plan = self.plan_todo_events.get(&session_id).cloned().or_else(|| state.plan_todos.as_deref().map(plan_from_shared));
+                    let plan =
+                        self.plan_todo_events.get(&session_id).cloned().or_else(|| {
+                            state.plan_todos.as_deref().map(plan_from_shared)
+                        });
                     let effective_plan = plan.clone();
-                    apply_authoritative_plan(&mut merged, plan.as_ref(), state.source.provider().is_some());
-                    if active { self.current_plan_todos = effective_plan.clone(); }
+                    apply_authoritative_plan(
+                        &mut merged,
+                        plan.as_ref(),
+                        state.source.provider().is_some(),
+                    );
+                    if active {
+                        self.current_plan_todos = effective_plan.clone();
+                    }
                     let mut timeline_history =
                         std::mem::take(&mut cached.timeline_history);
                     timeline_history.oldest_loaded_cursor = oldest_cursor;
@@ -1937,7 +2083,8 @@ impl NeoismAgentPane {
                         self.invalidate_timeline_layout();
                     } else {
                         cached.state = state;
-                        cached.state.plan_todos = effective_plan.as_deref().map(plan_to_shared);
+                        cached.state.plan_todos =
+                            effective_plan.as_deref().map(plan_to_shared);
                         cached.messages = merged;
                         cached.timeline_history = timeline_history;
                         cached.hydrated = true;

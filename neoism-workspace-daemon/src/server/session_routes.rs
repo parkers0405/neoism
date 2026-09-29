@@ -276,17 +276,27 @@ pub(crate) async fn hosted_server_ports() -> Response {
     use neoism_agent_service_api::server_registry::{registry_directory, ServerRegistry};
     let ports = tokio::task::spawn_blocking(|| {
         ServerRegistry::load(registry_directory())
-            .map(|registry| registry.servers().iter()
-                .filter_map(|server| server.hosted.as_ref().map(|spec| spec.port))
-                .collect::<std::collections::BTreeSet<_>>())
+            .map(|registry| {
+                registry
+                    .servers()
+                    .iter()
+                    .filter_map(|server| server.hosted.as_ref().map(|spec| spec.port))
+                    .collect::<std::collections::BTreeSet<_>>()
+            })
             .unwrap_or_default()
-    }).await.unwrap_or_default();
+    })
+    .await
+    .unwrap_or_default();
     let mut live = Vec::new();
     for port in ports {
-        if matches!(tokio::time::timeout(
-            std::time::Duration::from_millis(200),
-            tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)),
-        ).await, Ok(Ok(_))) {
+        if matches!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(200),
+                tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)),
+            )
+            .await,
+            Ok(Ok(_))
+        ) {
             live.push(port);
         }
     }

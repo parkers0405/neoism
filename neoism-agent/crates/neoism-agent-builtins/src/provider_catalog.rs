@@ -1319,7 +1319,13 @@ mod tests {
             model.name = id.into();
             openai.models.insert(id.into(), model);
         }
-        for id in ["gpt-5.6-sol", "gpt-6", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna"] {
+        for id in [
+            "gpt-5.6-sol",
+            "gpt-6",
+            "gpt-6-astra",
+            "gpt-6-sol",
+            "gpt-6-luna",
+        ] {
             for oauth in [true, false] {
                 let model = UserModel {
                     provider_id: "openai".into(),

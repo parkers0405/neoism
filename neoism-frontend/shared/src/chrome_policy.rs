@@ -653,6 +653,8 @@ pub enum ModalActionTag {
     NotesSetIcon,
     FileTreeNewFolder,
     FileTreeRename,
+    AgentRenameSession,
+    AgentDeleteSession,
     RenameTab,
     NotesVaultPromptAdd,
     ServerFormSubmit,
@@ -698,6 +700,7 @@ pub fn modal_action_dispatch(tag: ModalActionTag) -> ModalActionDispatch {
         | T::FileTreeCopy
         | T::FileTreePaste
         | T::FileTreeDelete
+        | T::AgentDeleteSession
         | T::FileTreeNewFile
         | T::NotesNewFile
         | T::NotesNewDrawing
@@ -715,7 +718,9 @@ pub fn modal_action_dispatch(tag: ModalActionTag) -> ModalActionDispatch {
         | T::NotesVaultLinkProject
         | T::NotesVaultConvert
         | T::NotesVaultShareWithRemarkable => D::CloseBeforeAction,
-        T::RunEditorCommandWithInput | T::RenameTab => D::CloseAfterValidatedInput,
+        T::RunEditorCommandWithInput | T::RenameTab | T::AgentRenameSession => {
+            D::CloseAfterValidatedInput
+        }
         T::FileTreePromptDelete
         | T::FileTreePromptNewFile
         | T::NotesPromptNewFile

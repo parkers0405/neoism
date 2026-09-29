@@ -43,7 +43,7 @@ const CHROME_PEER_CAP: usize = 4;
 
 const HAMBURGER_GLYPH: &str = "\u{f0c9}"; // FA bars
 const SEARCH_GLYPH: &str = "\u{f002}"; // FA magnifying-glass — opens the finder
-const CONVERSATIONS_GLYPH: &str = "\u{f0e6}"; // conversations
+const CONVERSATIONS_GLYPH: &str = "\u{f0674}"; // Nerd Font Material creation sparkle
 const NOTES_GLYPH: &str = "\u{f15c}"; // Same glyph as Markdown files in the tree
 const NEOISM_AGENT_GLYPH: &str = "n"; // Same mark used by Agent buffer tabs.
 const AGENT_PANEL_GLYPH: &str = "\u{eb56}"; // codicon split-horizontal / side panel
@@ -917,7 +917,19 @@ impl ChromeTopBar {
             );
         }
         let icon_size = ICON_FONT_SIZE * self.scale;
+        let icon_font = if glyph == CONVERSATIONS_GLYPH {
+            sugarloaf
+                .font_id_for_family("Symbols Nerd Font Mono")
+                .or_else(|| {
+                    sugarloaf.ensure_static_font(
+                        sugarloaf::font::constants::FONT_SYMBOLS_NERD_FONT_MONO,
+                    )
+                })
+        } else {
+            None
+        };
         let opts = DrawOpts {
+            font_id: icon_font,
             font_size: icon_size,
             color: if hovered {
                 theme.u8(theme.fg)
@@ -948,6 +960,7 @@ impl ChromeTopBar {
             let clip_x = rect.x;
             let clip_w = center - rect.x;
             let accent_opts = DrawOpts {
+                font_id: icon_font,
                 font_size: icon_size,
                 color: theme.u8(theme.accent),
                 clip_rect: Some([clip_x, rect.y, clip_w.max(0.0), rect.h]),

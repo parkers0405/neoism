@@ -15,7 +15,8 @@ pub(super) async fn sandbox_tool(
     arguments: Value,
 ) -> anyhow::Result<ToolExecutionResult> {
     let command = required_string(&arguments, "command")?.to_string();
-    let description = optional_string(&arguments, "description").unwrap_or_else(|| command.clone());
+    let description =
+        optional_string(&arguments, "description").unwrap_or_else(|| command.clone());
     let timeout_ms = usize_arg(&arguments, "timeout")
         .unwrap_or(120_000)
         .clamp(1, 1_800_000) as u64;
@@ -64,9 +65,9 @@ pub(super) async fn sandbox_tool(
     }
     if !services.execution.external_workspace_revisions() {
         if let Some(revision) = commit.revision.as_deref() {
-            let state = context
-                .state()
-                .ok_or_else(|| anyhow::anyhow!("sandbox execution requires session state"))?;
+            let state = context.state().ok_or_else(|| {
+                anyhow::anyhow!("sandbox execution requires session state")
+            })?;
             if !state
                 .inner
                 .store
@@ -78,7 +79,9 @@ pub(super) async fn sandbox_tool(
                 )
                 .await?
             {
-                anyhow::bail!("sandbox workspace revision conflict; retry from the latest revision");
+                anyhow::bail!(
+                    "sandbox workspace revision conflict; retry from the latest revision"
+                );
             }
         }
     }
@@ -93,10 +96,7 @@ pub(super) async fn sandbox_tool(
         output.extend_from_slice(b"(no output)");
     }
     let artifact = if output.len() > INLINE_OUTPUT_BYTES {
-        Some(
-            persist_output_artifact(&context, &tenant_id, &session_id, &output)
-                .await?,
-        )
+        Some(persist_output_artifact(&context, &tenant_id, &session_id, &output).await?)
     } else {
         None
     };
@@ -110,7 +110,11 @@ pub(super) async fn sandbox_tool(
         String::from_utf8_lossy(&output).into_owned()
     };
     if result.status != 0 {
-        anyhow::bail!("sandbox command failed with status {}\n{}", result.status, rendered);
+        anyhow::bail!(
+            "sandbox command failed with status {}\n{}",
+            result.status,
+            rendered
+        );
     }
     Ok(ToolExecutionResult {
         title: description,
@@ -135,9 +139,12 @@ pub(super) async fn sandbox_tool(
 fn sandbox_relative_path(path: &str) -> anyhow::Result<PathBuf> {
     let path = Path::new(path);
     if path.is_absolute()
-        || path
-            .components()
-            .any(|component| matches!(component, Component::ParentDir | Component::RootDir | Component::Prefix(_)))
+        || path.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
     {
         anyhow::bail!("sandbox workdir must be a relative path within the workspace");
     }
@@ -199,7 +206,12 @@ async fn persist_output_artifact(
         session_id: Some(session_id.to_string()),
         download_url: format!("/v2/artifacts/{id}/content"),
     };
-    if let Err(error) = state.inner.store.insert_artifact(&artifact, tenant_id).await {
+    if let Err(error) = state
+        .inner
+        .store
+        .insert_artifact(&artifact, tenant_id)
+        .await
+    {
         let _ = state.delete_artifact_blob(tenant_id, &id).await;
         return Err(error);
     }

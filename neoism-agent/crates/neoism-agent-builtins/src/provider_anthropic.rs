@@ -218,7 +218,9 @@ fn anthropic_user_content(message: &ProviderMessage) -> Value {
     }
     for attachment in &message.attachments {
         if attachment.mime == "application/pdf" {
-            if let Some(data) = attachment.url.strip_prefix("data:application/pdf;base64,") {
+            if let Some(data) =
+                attachment.url.strip_prefix("data:application/pdf;base64,")
+            {
                 blocks.push(json!({
                     "type": "document",
                     "source": { "type": "base64", "media_type": "application/pdf", "data": data },

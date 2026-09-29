@@ -85,7 +85,7 @@ async fn ephemeral(
                     config_options = updated;
                 }
                 Some("available_commands_update") => {
-                    available_commands = validate_commands(&update)?
+                    available_commands = validate_commands(&update).unwrap_or_default();
                 }
                 _ => {}
             },
@@ -401,44 +401,46 @@ fn validate_commands(update: &Value) -> Result<Vec<Value>, ApiError> {
         ));
     }
     let mut names = BTreeSet::new();
+    let mut commands = Vec::new();
     for item in items {
-        let name = item
-            .get("name")
-            .and_then(Value::as_str)
-            .ok_or_else(|| ApiError::bad_request("ACP command has no name"))?;
+        let Some(raw_name) = item.get("name").and_then(Value::as_str) else {
+            continue;
+        };
+        let name = raw_name.strip_prefix('/').unwrap_or(raw_name);
         if name.is_empty()
             || name.len() > 128
-            || name.starts_with('/')
-            || !name.bytes().all(|byte| {
-                byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':')
-            })
-            || !names.insert(name)
+            || name
+                .chars()
+                .any(|ch| ch.is_whitespace() || ch.is_control() || ch == '\\')
         {
-            return Err(ApiError::bad_request(
-                "ACP command name is invalid or duplicated",
-            ));
+            continue;
         }
-        let description = item
-            .get("description")
-            .and_then(Value::as_str)
-            .ok_or_else(|| ApiError::bad_request("ACP command has no description"))?;
+        let Some(description) = item.get("description").and_then(Value::as_str) else {
+            continue;
+        };
         if description.len() > 2048
             || description
                 .chars()
                 .any(|ch| ch.is_control() && !matches!(ch, '\n' | '\r' | '\t'))
         {
-            return Err(ApiError::bad_request("ACP command description is invalid"));
+            continue;
         }
         if let Some(input) = item.get("input").filter(|input| !input.is_null()) {
-            let hint = input.get("hint").and_then(Value::as_str).ok_or_else(|| {
-                ApiError::bad_request("ACP command input hint is invalid")
-            })?;
+            let Some(hint) = input.get("hint").and_then(Value::as_str) else {
+                continue;
+            };
             if hint.len() > 512 || hint.chars().any(char::is_control) {
-                return Err(ApiError::bad_request("ACP command input hint is invalid"));
+                continue;
             }
         }
+        if !names.insert(name.to_owned()) {
+            continue;
+        }
+        let mut command = item.clone();
+        command["name"] = json!(name);
+        commands.push(command);
     }
-    Ok(items.clone())
+    Ok(commands)
 }
 
 pub(super) async fn apply_commands(
@@ -456,7 +458,9 @@ pub(super) async fn apply_commands(
     if external["externalSessionId"].as_str() != Some(acp_id) {
         return Ok(());
     }
-    let commands = validate_commands(update)?;
+    let Ok(commands) = validate_commands(update) else {
+        return Ok(());
+    };
     if external["availableCommands"] == json!(commands) {
         return Ok(());
     }

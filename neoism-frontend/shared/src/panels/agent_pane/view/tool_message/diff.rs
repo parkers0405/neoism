@@ -22,6 +22,20 @@ fn edit_diff_sections(message: &impl AgentToolMessage) -> Option<Vec<ToolDiffSec
             let metadata = value.get("metadata").unwrap_or(&Value::Null);
             sections = metadata_file_diff_sections(metadata);
             if sections.is_empty() {
+                sections = metadata
+                    .get("acpDiffs")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|diff| {
+                        let path = diff.get("path")?.as_str()?;
+                        let old = diff.get("oldText")?.as_str()?;
+                        let new = diff.get("newText")?.as_str()?;
+                        Some(snapshot_section_from_text(path.to_owned(), old, new))
+                    })
+                    .collect();
+            }
+            if sections.is_empty() {
                 sections = snapshot_diff_sections(metadata);
             }
             if sections.is_empty() {

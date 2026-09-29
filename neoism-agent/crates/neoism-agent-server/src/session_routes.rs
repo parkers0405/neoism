@@ -182,9 +182,13 @@ async fn session_create_inner(
         }
         bind_authenticated_workspace(&mut request, &claims)?;
         if request.external_provider.is_some()
-            && (claims.hosted || claims.tenant_id != "local" || claims.workspace_id.is_some())
+            && (claims.hosted
+                || claims.tenant_id != "local"
+                || claims.workspace_id.is_some())
         {
-            return Err(ApiError::forbidden("Host-native ACP requires the local operator"));
+            return Err(ApiError::forbidden(
+                "Host-native ACP requires the local operator",
+            ));
         }
     }
     let info = create_session_in_directory_inner(
@@ -274,12 +278,23 @@ async fn create_session_in_directory_inner(
             "externalProvider requires a root session",
         ));
     }
-    if request.external_options.is_some() && (external.is_none() || request.parent_id.is_some() || pending_import.is_some()) {
-        return Err(ApiError::bad_request("externalOptions requires a new external ACP root"));
+    if request.external_options.is_some()
+        && (external.is_none() || request.parent_id.is_some() || pending_import.is_some())
+    {
+        return Err(ApiError::bad_request(
+            "externalOptions requires a new external ACP root",
+        ));
     }
-    if external.is_some() && (request.workspace_id.is_some()
-        || extra.get(crate::caller::TENANT_EXTRA_KEY).and_then(Value::as_str).is_some_and(|tenant| tenant != "local")) {
-        return Err(ApiError::forbidden("Host-native ACP requires the local operator"));
+    if external.is_some()
+        && (request.workspace_id.is_some()
+            || extra
+                .get(crate::caller::TENANT_EXTRA_KEY)
+                .and_then(Value::as_str)
+                .is_some_and(|tenant| tenant != "local"))
+    {
+        return Err(ApiError::forbidden(
+            "Host-native ACP requires the local operator",
+        ));
     }
     if let Some(runtime) = external {
         extra.insert("externalAgent".into(), json!({
@@ -306,10 +321,21 @@ async fn create_session_in_directory_inner(
     }
     if let (Some(runtime), Some(choices)) = (external, request.external_options.take()) {
         let draft = crate::external_agent::options::validate_draft(
-            state, runtime, &directory.to_string_lossy(), choices,
-        ).await?;
-        let metadata = extra.get_mut("externalAgent").expect("external root metadata");
-        for key in ["selectedOptions", "configOptions", "modeFallback", "optionsValid"] {
+            state,
+            runtime,
+            &directory.to_string_lossy(),
+            choices,
+        )
+        .await?;
+        let metadata = extra
+            .get_mut("externalAgent")
+            .expect("external root metadata");
+        for key in [
+            "selectedOptions",
+            "configOptions",
+            "modeFallback",
+            "optionsValid",
+        ] {
             metadata[key] = draft[key].clone();
         }
     }

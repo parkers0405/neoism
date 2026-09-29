@@ -14,19 +14,19 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-pub mod background_process;
 pub mod artifacts;
+pub mod background_process;
 pub mod daemon_credential;
 pub mod execution;
 pub mod mcp_credentials;
 pub mod provider_credentials;
 pub mod tenant;
-pub use execution::{
-    DisabledExecutionProvider, ExecResult, ExecutionLease, ExecutionProcess, ExecutionProvider,
-    ExecutionRequest, ExecutionScope, NetworkPolicy, ProcessChunk, ProcessClass, ProcessSpec,
-    ResourceLimits, WorkspaceCommit, WorkspaceMaterialization,
-};
 pub use artifacts::ArtifactBlobStore;
+pub use execution::{
+    DisabledExecutionProvider, ExecResult, ExecutionLease, ExecutionProcess,
+    ExecutionProvider, ExecutionRequest, ExecutionScope, NetworkPolicy, ProcessChunk,
+    ProcessClass, ProcessSpec, ResourceLimits, WorkspaceCommit, WorkspaceMaterialization,
+};
 pub use mcp_credentials::{
     LocalMcpCredentialStore, McpConnectionRef, McpCredential, McpCredentialStore,
     McpOAuthAttempt, McpOAuthClientRegistration, McpOAuthTokens,
@@ -905,7 +905,10 @@ impl AgentServices {
         self
     }
 
-    pub fn with_tenant_resolver(mut self, tenant_resolver: Arc<dyn TenantResolver>) -> Self {
+    pub fn with_tenant_resolver(
+        mut self,
+        tenant_resolver: Arc<dyn TenantResolver>,
+    ) -> Self {
         self.tenant_resolver = Some(tenant_resolver);
         self
     }
@@ -947,7 +950,9 @@ impl AgentServices {
             ));
         }
         if self.execution.backend_name() == "local-native"
-            || (!self.execution.available() && self.execution.backend_name() != "disabled") {
+            || (!self.execution.available()
+                && self.execution.backend_name() != "disabled")
+        {
             return Err(ServiceError::new(
                 "hosted control planes require a non-native execution provider or explicitly disabled execution",
             ));

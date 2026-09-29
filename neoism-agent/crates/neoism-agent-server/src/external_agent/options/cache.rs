@@ -128,8 +128,10 @@ pub(super) fn sanitized(
                     groups
                         .iter()
                         .map(|group| {
-                            let mut entry =
-                                public_fields(group, &["value", "name", "label", "description"]);
+                            let mut entry = public_fields(
+                                group,
+                                &["value", "name", "label", "description"],
+                            );
                             if let Some(children) =
                                 group.get("options").and_then(Value::as_array)
                             {

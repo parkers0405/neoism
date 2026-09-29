@@ -682,19 +682,29 @@ impl Screen<'_> {
             self.context_manager.event_proxy(),
             self.context_manager.window_id(),
         );
-        if self.renderer.conversations_visible || self.renderer.conversations_pane.external_import_pending() {
-            if self.renderer.conversations_visible { self.renderer.conversations_pane.enable_external_catalog(); }
+        if self.renderer.conversations_visible
+            || self.renderer.conversations_pane.external_import_pending()
+        {
+            if self.renderer.conversations_visible {
+                self.renderer.conversations_pane.enable_external_catalog();
+            }
             self.renderer
                 .conversations_pane
                 .set_event_wake(agent_event_wake.clone());
-            agent_animating |= self.renderer.conversations_pane.drain_live_session_updates();
-            if let Some(message) = self.renderer.conversations_pane.take_external_error() {
+            agent_animating |= self
+                .renderer
+                .conversations_pane
+                .drain_live_session_updates();
+            if let Some(message) = self.renderer.conversations_pane.take_external_error()
+            {
                 self.renderer.notifications.push(
                     message,
                     neoism_ui::panels::notifications::NotificationLevel::Warn,
                 );
             }
-            if let Some((id, source)) = self.renderer.conversations_pane.take_external_open() {
+            if let Some((id, source)) =
+                self.renderer.conversations_pane.take_external_open()
+            {
                 self.focus_or_open_conversation(id, source);
             }
         }
@@ -822,7 +832,9 @@ impl Screen<'_> {
         // Synchronize by agent route, not the active tab index or strip owner:
         // a hidden agent can share a strip with an active editor/terminal tab.
         if external_root_bound {
-            self.renderer.conversations_pane.refresh_bound_external_root();
+            self.renderer
+                .conversations_pane
+                .refresh_bound_external_root();
             agent_animating = true;
         }
         for (route_id, title, source) in agent_tab_titles {
@@ -833,7 +845,10 @@ impl Screen<'_> {
                 ConversationSource::ClaudeCode => crate::neoism::icon::AgentKind::Claude,
                 ConversationSource::Codex => crate::neoism::icon::AgentKind::Codex,
             };
-            agent_animating |= self.renderer.buffer_tabs.set_neoism_agent_kind(route_id, Some(kind));
+            agent_animating |= self
+                .renderer
+                .buffer_tabs
+                .set_neoism_agent_kind(route_id, Some(kind));
             for tabs in self.renderer.pane_tabs.values_mut() {
                 agent_animating |= tabs.set_neoism_agent_kind(route_id, Some(kind));
             }

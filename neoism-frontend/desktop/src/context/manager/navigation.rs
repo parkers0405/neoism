@@ -242,16 +242,19 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
                 // A joined terminal may lack OSC 7 or still show its initial
                 // home prompt. Prefer the known declared root to that placeholder.
                 if tab_content.is_empty() || tab_content == "~" {
-                    if let Some(root) = context
-                        .workspace_route_id()
-                        .and_then(|route| self.adopted_workspaces.get(&route))
-                        .and_then(|binding| {
-                            self.daemon.cache.daemon_host_workspaces.iter()
-                                .find(|workspace| workspace.id == binding.workspace_id)
-                        })
-                        .and_then(|workspace| workspace.root_dir.as_ref())
+                    if let Some(root) =
+                        context
+                            .workspace_route_id()
+                            .and_then(|route| self.adopted_workspaces.get(&route))
+                            .and_then(|binding| {
+                                self.daemon.cache.daemon_host_workspaces.iter().find(
+                                    |workspace| workspace.id == binding.workspace_id,
+                                )
+                            })
+                            .and_then(|workspace| workspace.root_dir.as_ref())
                     {
-                        tab_content = root.file_name()
+                        tab_content = root
+                            .file_name()
                             .unwrap_or(root.as_os_str())
                             .to_string_lossy()
                             .into_owned();

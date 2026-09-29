@@ -604,8 +604,9 @@ pub(crate) async fn append_external_user_message(
         synthetic: None,
         time: None,
     });
-    let mut broadcast_part = serde_json::to_value(&part)
-        .map_err(|error| ApiError::internal(format!("ACP prompt part serialization failed: {error}")))?;
+    let mut broadcast_part = serde_json::to_value(&part).map_err(|error| {
+        ApiError::internal(format!("ACP prompt part serialization failed: {error}"))
+    })?;
     broadcast_part["role"] = json!("user");
     if let Some(name) = &author {
         broadcast_part["author"] = json!(name);
@@ -630,6 +631,20 @@ pub(crate) async fn append_external_user_message(
         .store
         .append_message(child.id.as_str(), &message)
         .await?;
+    if let Some(mut current) = state.inner.store.get_session(child.id.as_str()).await? {
+        if current.parent_id.is_none()
+            && crate::session_context::is_default_session_title(&current.title)
+        {
+            if let Some(title) = crate::session_context::title_from_text(prompt) {
+                current.title = title;
+                state.inner.store.update_session(&current).await?;
+                state.publish(EventPayload::new(
+                    event_type::SESSION_UPDATED,
+                    json!({ "sessionID": current.id, "info": current }),
+                ));
+            }
+        }
+    }
     state.publish(EventPayload::new(
         event_type::MESSAGE_UPDATED,
         json!({ "sessionID": child.id, "info": message.info }),

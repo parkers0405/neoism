@@ -26,28 +26,49 @@ pub(crate) async fn handle_acp_request(
         }
         "terminal/create" => {
             ensure_terminal_create_permission(ctx, &params).await?;
-            blocking_terminal_call(
+            let result = blocking_terminal_call(
                 ctx.terminal_manager.clone(),
-                params,
+                params.clone(),
                 |manager, params| manager.create(&params),
             )
-            .await
+            .await?;
+            if let Some(id) = result.get("terminalId").and_then(Value::as_str) {
+                let input = json!({"command":params["command"], "args":params["args"], "cwd":params["cwd"]});
+                let update = json!({"sessionUpdate":"tool_call", "toolCallId":format!("terminal:{id}"),
+                    "title":"Terminal", "kind":"execute", "status":"in_progress", "rawInput":input});
+                if let Err(error) = update_external_tool_part(ctx, update).await {
+                    tracing::warn!(%error, "failed to project ACP terminal into chat");
+                }
+            }
+            Ok(result)
         }
         "terminal/output" => {
-            blocking_terminal_call(
+            let result = blocking_terminal_call(
                 ctx.terminal_manager.clone(),
-                params,
+                params.clone(),
+                |manager, params| manager.output(&params),
+            )
+            .await?;
+            project_terminal_snapshot(ctx, &params, &result, false).await;
+            Ok(result)
+        }
+        "terminal/wait_for_exit" => {
+            let result = blocking_terminal_call(
+                ctx.terminal_manager.clone(),
+                params.clone(),
+                |manager, params| manager.wait_for_exit(&params),
+            )
+            .await?;
+            if let Ok(output) = blocking_terminal_call(
+                ctx.terminal_manager.clone(),
+                params.clone(),
                 |manager, params| manager.output(&params),
             )
             .await
-        }
-        "terminal/wait_for_exit" => {
-            blocking_terminal_call(
-                ctx.terminal_manager.clone(),
-                params,
-                |manager, params| manager.wait_for_exit(&params),
-            )
-            .await
+            {
+                project_terminal_snapshot(ctx, &params, &output, true).await;
+            }
+            Ok(result)
         }
         "terminal/kill" => {
             blocking_terminal_call(
@@ -58,17 +79,56 @@ pub(crate) async fn handle_acp_request(
             .await
         }
         "terminal/release" => {
-            blocking_terminal_call(
+            let output = blocking_terminal_call(
                 ctx.terminal_manager.clone(),
-                params,
-                |manager, params| manager.release(&params),
+                params.clone(),
+                |manager, params| manager.output(&params),
             )
             .await
+            .ok();
+            let result = blocking_terminal_call(
+                ctx.terminal_manager.clone(),
+                params.clone(),
+                |manager, params| manager.release(&params),
+            )
+            .await?;
+            if let Some(output) = output {
+                project_terminal_snapshot(ctx, &params, &output, true).await;
+            }
+            Ok(result)
         }
         _ => Err(AcpRpcError {
             code: -32601,
             message: format!("Unsupported ACP client method `{method}`"),
         }),
+    }
+}
+
+async fn project_terminal_snapshot(
+    ctx: &AcpEventContext,
+    params: &Value,
+    result: &Value,
+    final_snapshot: bool,
+) {
+    let Some(id) = params.get("terminalId").and_then(Value::as_str) else {
+        return;
+    };
+    let output = result.get("output").and_then(Value::as_str).unwrap_or("");
+    let start = output.len().saturating_sub(65_536);
+    let start = output
+        .char_indices()
+        .find(|(index, _)| *index >= start)
+        .map(|(index, _)| index)
+        .unwrap_or(output.len());
+    let status = if final_snapshot || !result["exitStatus"].is_null() {
+        "completed"
+    } else {
+        "in_progress"
+    };
+    let update = json!({"sessionUpdate":"tool_call_update", "toolCallId":format!("terminal:{id}"),
+        "status":status, "rawOutput":&output[start..], "_meta":{"terminalId":id,"truncated":result["truncated"]}});
+    if let Err(error) = update_external_tool_part(ctx, update).await {
+        tracing::warn!(%error, "failed to project ACP terminal output into chat");
     }
 }
 

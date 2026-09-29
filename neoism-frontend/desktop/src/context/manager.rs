@@ -296,17 +296,13 @@ impl ContextManagerDaemonLink {
             // a workspace. Probe before publishing to the modal.
             let peers =
                 crate::daemon_client::tailnet_peers::probe_daemon_peers(peers).await;
-            let trees = futures::future::join_all(
-                peers
-                    .iter()
-                    .flat_map(|peer| {
-                        peer.daemon_urls.iter().map(move |endpoint| {
-                            crate::daemon_client::tailnet_peers::fetch_peer_workspace_tree(
-                                peer, endpoint,
-                            )
-                        })
-                    }),
-            )
+            let trees = futures::future::join_all(peers.iter().flat_map(|peer| {
+                peer.daemon_urls.iter().map(move |endpoint| {
+                    crate::daemon_client::tailnet_peers::fetch_peer_workspace_tree(
+                        peer, endpoint,
+                    )
+                })
+            }))
             .await;
             let mut merged = PeerWorkspaceTree::default();
             for tree in trees.into_iter().flatten() {

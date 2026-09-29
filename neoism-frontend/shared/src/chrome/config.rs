@@ -318,7 +318,9 @@ impl<A: Send + Copy + 'static> Chrome<A> {
     }
 
     /// Drain a selected catalog thread for the web host to open in an Agent tab.
-    pub fn take_conversation_new(&mut self) -> Option<crate::panels::agent_pane::state::side_panel::ConversationSource> {
+    pub fn take_conversation_new(
+        &mut self,
+    ) -> Option<crate::panels::agent_pane::state::side_panel::ConversationSource> {
         self.pending_conversation_new.take()
     }
 
@@ -458,7 +460,9 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         };
         if focus_tree {
             self.notes_sidebar.set_focused(false);
-            if let Some(pane) = self.agent_pane.as_mut() { pane.side_panel_mut().set_focused(false); }
+            if let Some(pane) = self.agent_pane.as_mut() {
+                pane.side_panel_mut().set_focused(false);
+            }
             self.focus(PanelKey::FileTree);
         } else {
             self.blur(PanelKey::FileTree);

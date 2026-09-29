@@ -76,8 +76,8 @@ mod semantic;
 mod server_util;
 mod session_actions;
 mod session_context;
-mod session_coordinator;
 mod session_control;
+mod session_coordinator;
 mod session_export_route;
 mod session_helpers;
 mod session_import_route;
@@ -281,7 +281,14 @@ impl neoism_agent_service_api::WorkspaceSearchService for UnavailableWorkspaceSe
 #[derive(Clone)]
 pub struct HostedAttestation {
     pub controller_secret: String,
-    pub sign: std::sync::Arc<dyn Fn(Vec<u8>) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, ()>> + Send>> + Send + Sync>,
+    pub sign: std::sync::Arc<
+        dyn Fn(
+                Vec<u8>,
+            ) -> std::pin::Pin<
+                Box<dyn std::future::Future<Output = Result<String, ()>> + Send>,
+            > + Send
+            + Sync,
+    >,
 }
 
 #[derive(Clone)]
@@ -327,10 +334,16 @@ pub async fn listen_with_gui(
     gui: Option<gui::GuiRoot>,
 ) -> anyhow::Result<SocketAddr> {
     let services = ensure_local_execution(services);
-    if options.hosted_attestation.is_some() && (!services.hosted || options.hostname != "127.0.0.1" || gui.is_some()) {
+    if options.hosted_attestation.is_some()
+        && (!services.hosted || options.hostname != "127.0.0.1" || gui.is_some())
+    {
         anyhow::bail!("native attestation requires the hosted loopback listener without standalone GUI");
     }
-    if options.hosted_attestation.as_ref().is_some_and(|route| route.controller_secret.len() < 32) {
+    if options
+        .hosted_attestation
+        .as_ref()
+        .is_some_and(|route| route.controller_secret.len() < 32)
+    {
         anyhow::bail!("native attestation requires a controller secret");
     }
     services
@@ -389,24 +402,50 @@ pub async fn listen_with_gui(
     // Register after the customer-authenticated router was layered. This exact route
     // has its own controller-only auth, not an exemption in Neoism's caller policy.
     let api = if let Some(attestation) = options.hosted_attestation {
-        api.route("/v1/hosted/attest", axum::routing::post(move |headers: axum::http::HeaderMap, body: axum::body::Body| {
-            let attestation = attestation.clone();
-            async move {
-                use axum::{http::StatusCode, response::IntoResponse};
-                let denied = || StatusCode::UNAUTHORIZED.into_response();
-                let expected = format!("Bearer {}", attestation.controller_secret);
-                let supplied = headers.get(axum::http::header::AUTHORIZATION).map(|v| v.as_bytes()).unwrap_or_default();
-                if supplied.len() != expected.len() || supplied.iter().zip(expected.as_bytes()).fold(0u8, |d, (a,b)| d | (a ^ b)) != 0 {
-                    return denied();
-                }
-                let bytes = match axum::body::to_bytes(body, 4096).await { Ok(bytes) => bytes, Err(_) => return StatusCode::PAYLOAD_TOO_LARGE.into_response() };
-                match (attestation.sign)(bytes.to_vec()).await {
-                    Ok(signature) => (StatusCode::OK, axum::Json(serde_json::json!({"signature":signature}))).into_response(),
-                    Err(()) => StatusCode::FORBIDDEN.into_response(),
-                }
-            }
-        }))
-    } else { api };
+        api.route(
+            "/v1/hosted/attest",
+            axum::routing::post(
+                move |headers: axum::http::HeaderMap, body: axum::body::Body| {
+                    let attestation = attestation.clone();
+                    async move {
+                        use axum::{http::StatusCode, response::IntoResponse};
+                        let denied = || StatusCode::UNAUTHORIZED.into_response();
+                        let expected =
+                            format!("Bearer {}", attestation.controller_secret);
+                        let supplied = headers
+                            .get(axum::http::header::AUTHORIZATION)
+                            .map(|v| v.as_bytes())
+                            .unwrap_or_default();
+                        if supplied.len() != expected.len()
+                            || supplied
+                                .iter()
+                                .zip(expected.as_bytes())
+                                .fold(0u8, |d, (a, b)| d | (a ^ b))
+                                != 0
+                        {
+                            return denied();
+                        }
+                        let bytes = match axum::body::to_bytes(body, 4096).await {
+                            Ok(bytes) => bytes,
+                            Err(_) => {
+                                return StatusCode::PAYLOAD_TOO_LARGE.into_response()
+                            }
+                        };
+                        match (attestation.sign)(bytes.to_vec()).await {
+                            Ok(signature) => (
+                                StatusCode::OK,
+                                axum::Json(serde_json::json!({"signature":signature})),
+                            )
+                                .into_response(),
+                            Err(()) => StatusCode::FORBIDDEN.into_response(),
+                        }
+                    }
+                },
+            ),
+        )
+    } else {
+        api
+    };
     let app = match gui {
         Some(root) => gui::with_gui(api, root.for_listener(actual)),
         None => api,

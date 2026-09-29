@@ -259,10 +259,25 @@ mod detail_rail_tests {
         let scale = 1.0;
         let minimum = super::side_panel::state_detail_min_width(scale);
         assert!(detail_rail_allowed(true, false, false, minimum, scale));
-        assert!(!detail_rail_allowed(true, false, false, minimum - 1.0, scale));
-        assert_eq!(super::side_panel::detail_rail_width(minimum, 260.0, scale), 200.0);
-        assert_eq!(super::side_panel::detail_rail_width(800.0, 260.0, scale), 260.0);
-        assert_eq!(super::side_panel::detail_rail_width(2.0 * minimum, 260.0, 2.0), 400.0);
+        assert!(!detail_rail_allowed(
+            true,
+            false,
+            false,
+            minimum - 1.0,
+            scale
+        ));
+        assert_eq!(
+            super::side_panel::detail_rail_width(minimum, 260.0, scale),
+            200.0
+        );
+        assert_eq!(
+            super::side_panel::detail_rail_width(800.0, 260.0, scale),
+            260.0
+        );
+        assert_eq!(
+            super::side_panel::detail_rail_width(2.0 * minimum, 260.0, 2.0),
+            400.0
+        );
     }
 }
 

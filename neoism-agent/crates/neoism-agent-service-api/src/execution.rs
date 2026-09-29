@@ -125,8 +125,13 @@ pub struct ProcessChunk {
 }
 
 pub trait ExecutionProcess: Send + Sync {
-    fn write<'a>(&'a self, bytes: &'a [u8]) -> ServiceFuture<'a, Result<(), ServiceError>>;
-    fn read<'a>(&'a self) -> ServiceFuture<'a, Result<Option<ProcessChunk>, ServiceError>>;
+    fn write<'a>(
+        &'a self,
+        bytes: &'a [u8],
+    ) -> ServiceFuture<'a, Result<(), ServiceError>>;
+    fn read<'a>(
+        &'a self,
+    ) -> ServiceFuture<'a, Result<Option<ProcessChunk>, ServiceError>>;
     fn resize<'a>(
         &'a self,
         _cols: u16,

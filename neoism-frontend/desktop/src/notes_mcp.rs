@@ -267,13 +267,8 @@ fn call_notes_tool(
         .unwrap_or(100)
         .max(1) as usize;
     match name {
-        "notebookList"
-        | "notebookRead"
-        | "notebookCreate"
-        | "notebookAddPage"
-        | "notebookMovePage" => {
-            notebooks::call(notes, name, arguments)
-        }
+        "notebookList" | "notebookRead" | "notebookCreate" | "notebookAddPage"
+        | "notebookMovePage" => notebooks::call(notes, name, arguments),
         "list" => Ok(notes.files(limit)?.join("\n")),
         "search" => {
             let query = required_string(&arguments, "query")?.to_lowercase();

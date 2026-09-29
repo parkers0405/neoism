@@ -181,13 +181,15 @@ impl HttpJsonRpcClient {
         notifications: Option<NotificationHandler>,
     ) -> anyhow::Result<Self> {
         let mut builder = reqwest::Client::builder().timeout(request_timeout);
-        if std::env::var("NEOISM_AGENT_HOSTED_GATEWAY_URLS").ok()
+        if std::env::var("NEOISM_AGENT_HOSTED_GATEWAY_URLS")
+            .ok()
             .is_some_and(|urls| urls.split(',').any(|allowed| allowed == url))
         {
             let path = std::env::var("NEOISM_AGENT_HOSTED_GATEWAY_CA_PEM")
                 .context("hosted gateway CA is required")?;
             let certificate = reqwest::Certificate::from_pem(&std::fs::read(path)?)?;
-            builder = builder.tls_built_in_root_certs(false)
+            builder = builder
+                .tls_built_in_root_certs(false)
                 .add_root_certificate(certificate)
                 .redirect(reqwest::redirect::Policy::none());
         }

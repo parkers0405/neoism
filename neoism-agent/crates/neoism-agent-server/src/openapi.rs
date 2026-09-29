@@ -1667,10 +1667,16 @@ fn apply_authoritative_contract(document: &mut Value) {
             "catalogStale": { "type": "boolean", "description": "Present and true when an expired last-good snapshot is returned during background refresh." }
         }
     });
-    let preview_parameters = || json!([
-        query("provider", true, json!({ "type": "string", "enum": ["opencode", "claude", "codex"] })),
-        directory()
-    ]);
+    let preview_parameters = || {
+        json!([
+            query(
+                "provider",
+                true,
+                json!({ "type": "string", "enum": ["opencode", "claude", "codex"] })
+            ),
+            directory()
+        ])
+    };
     add(
         "/v2/external/options/preview",
         "get",
@@ -1679,7 +1685,11 @@ fn apply_authoritative_contract(document: &mut Value) {
             "catalog",
             preview_parameters(),
             None,
-            success("200", "Cached or freshly confirmed ACP options", preview_response.clone()),
+            success(
+                "200",
+                "Cached or freshly confirmed ACP options",
+                preview_response.clone(),
+            ),
         ),
     );
     add(
@@ -1689,34 +1699,51 @@ fn apply_authoritative_contract(document: &mut Value) {
             "v2.external.options.previewSelected",
             "catalog",
             preview_parameters(),
-            Some(json_request(true, json!({
-                "type": "object", "additionalProperties": false, "required": ["selectedOptions"],
-                "properties": { "selectedOptions": { "type": "object", "additionalProperties": { "type": "string" } } }
-            }))),
-            success("200", "ACP options after applying selected values", preview_response.clone()),
+            Some(json_request(
+                true,
+                json!({
+                    "type": "object", "additionalProperties": false, "required": ["selectedOptions"],
+                    "properties": { "selectedOptions": { "type": "object", "additionalProperties": { "type": "string" } } }
+                }),
+            )),
+            success(
+                "200",
+                "ACP options after applying selected values",
+                preview_response.clone(),
+            ),
         ),
     );
     add(
         "/v2/execution-activity",
         "get",
         op(
-            "v2.executionActivity.list", "events", json!([]), None,
-            success("200", "Execution summaries", json!({
-                "type": "array", "items": { "type": "object", "additionalProperties": false,
-                    "required": ["rootSessionId", "executionId", "revision", "finished"],
-                    "properties": {
-                        "rootSessionId": { "type": "string" }, "executionId": { "type": "string" },
-                        "revision": { "type": "integer", "minimum": 0 }, "finished": { "type": "boolean" }
+            "v2.executionActivity.list",
+            "events",
+            json!([]),
+            None,
+            success(
+                "200",
+                "Execution summaries",
+                json!({
+                    "type": "array", "items": { "type": "object", "additionalProperties": false,
+                        "required": ["rootSessionId", "executionId", "revision", "finished"],
+                        "properties": {
+                            "rootSessionId": { "type": "string" }, "executionId": { "type": "string" },
+                            "revision": { "type": "integer", "minimum": 0 }, "finished": { "type": "boolean" }
+                        }
                     }
-                }
-            })),
+                }),
+            ),
         ),
     );
     add(
         "/v2/execution-activity/events",
         "get",
         op(
-            "v2.executionActivity.events", "events", json!([]), None,
+            "v2.executionActivity.events",
+            "events",
+            json!([]),
+            None,
             json!({ "200": { "description": "Execution snapshot SSE stream", "content": { "text/event-stream": {
                 "schema": { "type": "string" }
             } } } }),
@@ -1726,29 +1753,41 @@ fn apply_authoritative_contract(document: &mut Value) {
         "/v2/sessions/external/catalog",
         "get",
         op(
-            "v2.sessions.external.catalog", "sessions", preview_parameters(), None,
-            success("200", "Provider-native session catalog preview", json!({
-                "type": "object", "required": ["provider", "cwd", "sessions", "importSupported"],
-                "properties": {
-                    "provider": { "type": "string" }, "cwd": { "type": "string" },
-                    "sessions": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
-                    "importSupported": { "type": "boolean" }, "importUnavailableReason": { "type": "string" }
-                }
-            })),
+            "v2.sessions.external.catalog",
+            "sessions",
+            preview_parameters(),
+            None,
+            success(
+                "200",
+                "Provider-native session catalog preview",
+                json!({
+                    "type": "object", "required": ["provider", "cwd", "sessions", "importSupported"],
+                    "properties": {
+                        "provider": { "type": "string" }, "cwd": { "type": "string" },
+                        "sessions": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
+                        "importSupported": { "type": "boolean" }, "importUnavailableReason": { "type": "string" }
+                    }
+                }),
+            ),
         ),
     );
     add(
         "/v2/sessions/external/import",
         "post",
         op(
-            "v2.sessions.external.import", "sessions", json!([directory()]),
-            Some(json_request(true, json!({
-                "type": "object", "additionalProperties": false, "required": ["provider", "externalSessionId"],
-                "properties": {
-                    "provider": { "type": "string", "enum": ["opencode", "claude", "codex"] },
-                    "externalSessionId": { "type": "string" }
-                }
-            }))),
+            "v2.sessions.external.import",
+            "sessions",
+            json!([directory()]),
+            Some(json_request(
+                true,
+                json!({
+                    "type": "object", "additionalProperties": false, "required": ["provider", "externalSessionId"],
+                    "properties": {
+                        "provider": { "type": "string", "enum": ["opencode", "claude", "codex"] },
+                        "externalSessionId": { "type": "string" }
+                    }
+                }),
+            )),
             success("200", "Imported external session", r("Session")),
         ),
     );
@@ -1756,31 +1795,47 @@ fn apply_authoritative_contract(document: &mut Value) {
         "/v2/sessions/{session_id}/external/options",
         "get",
         op(
-            "v2.sessions.external.options.get", "sessions", json!([path("session_id")]), None,
-            success("200", "Active ACP session options", json!({
-                "type": "object", "required": ["provider", "configOptions", "modeFallback", "selectedOptions", "externalSessionId", "availableCommands"],
-                "properties": {
-                    "provider": { "type": "string" },
-                    "configOptions": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
-                    "modeFallback": { "type": "boolean" },
-                    "selectedOptions": { "type": "object", "additionalProperties": { "type": "string" } },
-                    "externalSessionId": { "type": ["string", "null"] },
-                    "availableCommands": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
-                    "replayError": { "type": "string" }
-                }
-            })),
+            "v2.sessions.external.options.get",
+            "sessions",
+            json!([path("session_id")]),
+            None,
+            success(
+                "200",
+                "Active ACP session options",
+                json!({
+                    "type": "object", "required": ["provider", "configOptions", "modeFallback", "selectedOptions", "externalSessionId", "availableCommands"],
+                    "properties": {
+                        "provider": { "type": "string" },
+                        "configOptions": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
+                        "modeFallback": { "type": "boolean" },
+                        "selectedOptions": { "type": "object", "additionalProperties": { "type": "string" } },
+                        "externalSessionId": { "type": ["string", "null"] },
+                        "availableCommands": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
+                        "replayError": { "type": "string" }
+                    }
+                }),
+            ),
         ),
     );
     add(
         "/v2/sessions/{session_id}/external/options",
         "post",
         op(
-            "v2.sessions.external.options.set", "sessions", json!([path("session_id")]),
-            Some(json_request(true, json!({
-                "type": "object", "additionalProperties": false, "required": ["configId", "value"],
-                "properties": { "configId": { "type": "string" }, "value": { "type": "string" } }
-            }))),
-            success("200", "Updated ACP session options", json!({ "type": "object", "additionalProperties": true, "description": "Current ACP configOptions and selectedOptions, with the active externalSessionId." })),
+            "v2.sessions.external.options.set",
+            "sessions",
+            json!([path("session_id")]),
+            Some(json_request(
+                true,
+                json!({
+                    "type": "object", "additionalProperties": false, "required": ["configId", "value"],
+                    "properties": { "configId": { "type": "string" }, "value": { "type": "string" } }
+                }),
+            )),
+            success(
+                "200",
+                "Updated ACP session options",
+                json!({ "type": "object", "additionalProperties": true, "description": "Current ACP configOptions and selectedOptions, with the active externalSessionId." }),
+            ),
         ),
     );
     let session_id = || path("session_id");
@@ -1918,10 +1973,18 @@ fn apply_authoritative_contract(document: &mut Value) {
             "sessions",
             json!([
                 session_id(),
-                query("expectedRevision", false, json!({ "type": "integer", "minimum": 0 }))
+                query(
+                    "expectedRevision",
+                    false,
+                    json!({ "type": "integer", "minimum": 0 })
+                )
             ]),
             None,
-            success("200", "Session control released", json!({ "type": "boolean" })),
+            success(
+                "200",
+                "Session control released",
+                json!({ "type": "boolean" }),
+            ),
         ),
     );
     add(

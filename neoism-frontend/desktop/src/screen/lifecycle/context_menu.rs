@@ -228,6 +228,31 @@ impl Screen<'_> {
                             );
                         }
                     }
+                    neoism_ui::panels::context_menu::AgentContextAction::RenameSession { session_id, title, server, directory } => {
+                        if !self.conversation_context_scope_matches(&server, directory.as_deref()) { return; }
+                        use neoism_ui::widgets::modal::{ModalAction, ModalButton, ModalInputSpec, ModalSpec};
+                        self.renderer.modal.open(ModalSpec {
+                            title: "Rename Chat".into(), body: format!("Rename `{title}`."),
+                            meta: "Changes the conversation title everywhere.".into(),
+                            input: Some(ModalInputSpec { value: title, placeholder: "new title".into() }),
+                            buttons: vec![
+                                ModalButton::new("Rename", "Enter", ModalAction::AgentRenameSession { session_id, server, directory, name: String::new() }),
+                                ModalButton::new("Cancel", "Esc", ModalAction::Close),
+                            ], busy: false, blocking: true,
+                        });
+                    }
+                    neoism_ui::panels::context_menu::AgentContextAction::DeleteSession { session_id, title, server, directory } => {
+                        if !self.conversation_context_scope_matches(&server, directory.as_deref()) { return; }
+                        use neoism_ui::widgets::modal::{ModalAction, ModalButton, ModalSpec};
+                        self.renderer.modal.open(ModalSpec {
+                            title: "Delete Chat?".into(), body: format!("Delete `{title}` and its conversation history?"),
+                            meta: "This cannot be undone.".into(), input: None,
+                            buttons: vec![
+                                ModalButton::new("Delete", "d", ModalAction::AgentDeleteSession { session_id, server, directory }),
+                                ModalButton::new("Cancel", "Esc", ModalAction::Close),
+                            ], busy: false, blocking: true,
+                        });
+                    }
                 }
             }
             neoism_ui::panels::context_menu::ContextMenuAction::Lsp(action) => {

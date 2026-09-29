@@ -930,23 +930,50 @@ fn transport_loss_gates_input_without_killing_session_identity() {
 fn delayed_local_rejection_does_not_gate_validated_attach() {
     use crate::context::remote_pty;
     use crate::daemon_client::{PtyFailureClass, PtyFailureOperation};
-    let mut manager = ContextManager::start_with_capacity(
-        5, VoidListener {}, WindowId::from(0),
-    ).unwrap();
+    let mut manager =
+        ContextManager::start_with_capacity(5, VoidListener {}, WindowId::from(0))
+            .unwrap();
     let runtime = attach_unconnected_daemon(&mut manager);
-    let (handle, _) = manager.daemon.link.as_ref().unwrap()
-        .handle_and_runtime().unwrap();
+    let (handle, _) = manager
+        .daemon
+        .link
+        .as_ref()
+        .unwrap()
+        .handle_and_runtime()
+        .unwrap();
     let prepared = remote_pty::prepare(handle.clone(), runtime.handle().clone());
     let (_pty, feed) = neoism_terminal_pty::PtySession::remote(prepared.sink);
-    let binding = remote_pty::RemotePtyBinding { feed, shared: prepared.shared };
-    remote_pty::bind_session(&binding, "validated-shell", handle, runtime.handle().clone());
-    manager.daemon.cache.remote_routes.insert(42, binding.clone());
-    manager.daemon.cache.route_sessions.insert(42, "validated-shell".into());
-    manager.daemon.cache.session_routes.insert("validated-shell".into(), 42);
+    let binding = remote_pty::RemotePtyBinding {
+        feed,
+        shared: prepared.shared,
+    };
+    remote_pty::bind_session(
+        &binding,
+        "validated-shell",
+        handle,
+        runtime.handle().clone(),
+    );
+    manager
+        .daemon
+        .cache
+        .remote_routes
+        .insert(42, binding.clone());
+    manager
+        .daemon
+        .cache
+        .route_sessions
+        .insert(42, "validated-shell".into());
+    manager
+        .daemon
+        .cache
+        .session_routes
+        .insert("validated-shell".into(), 42);
     manager.apply_remote_pty_failure(
-        7, Some("validated-shell"),
+        7,
+        Some("validated-shell"),
         "not delivered: remote session is awaiting attach validation",
-        PtyFailureClass::NotDelivered, PtyFailureOperation::CommandInput,
+        PtyFailureClass::NotDelivered,
+        PtyFailureOperation::CommandInput,
     );
     let shared = binding.shared.lock().unwrap();
     assert_eq!(shared.session_id.as_deref(), Some("validated-shell"));

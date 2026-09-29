@@ -393,7 +393,8 @@ pub struct Chrome<A: Send + Copy + 'static = ()> {
     /// state and reappear unchanged when another sidebar is selected.
     pub conversations_visible: bool,
     pending_conversation_open: Option<String>,
-    pending_conversation_new: Option<crate::panels::agent_pane::state::side_panel::ConversationSource>,
+    pending_conversation_new:
+        Option<crate::panels::agent_pane::state::side_panel::ConversationSource>,
     pub command_composer: CommandComposer,
     /// Cwd of the terminal owning the visible composer. This remains
     /// terminal-local even though the status-line cwd is workspace-global.

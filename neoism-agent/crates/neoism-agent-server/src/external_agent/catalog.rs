@@ -79,7 +79,11 @@ pub(super) fn source_key_for(
         hasher.update((segment.len() as u64).to_be_bytes());
         hasher.update(segment.as_bytes());
     }
-    Some(format!("acp:{}:{:x}", runtime.provider_id(), hasher.finalize()))
+    Some(format!(
+        "acp:{}:{:x}",
+        runtime.provider_id(),
+        hasher.finalize()
+    ))
 }
 
 fn verified_catalog_entry(
@@ -185,13 +189,19 @@ async fn fetch_catalog_entries(
 // ACP session/list includes sessions created by options previews. OpenCode's
 // local message store is the only positive evidence that a listed row is a
 // conversation; an unreadable or missing row is unknown, not empty.
-async fn hide_empty_opencode_sessions(sessions: &mut Vec<ExternalCatalogEntry>, cwd: &str, db_path: &Path) {
+async fn hide_empty_opencode_sessions(
+    sessions: &mut Vec<ExternalCatalogEntry>,
+    cwd: &str,
+    db_path: &Path,
+) {
     let options = sqlx::sqlite::SqliteConnectOptions::new()
         .filename(db_path)
         .read_only(true);
-    let Ok(mut db) = sqlx::SqliteConnection::connect_with(&options).await else { return; };
+    let Ok(mut db) = sqlx::SqliteConnection::connect_with(&options).await else {
+        return;
+    };
     let mut visible = Vec::with_capacity(sessions.len());
-    for entry in sessions.drain(..) {
+    for mut entry in sessions.drain(..) {
         if entry.neoism_session_id.is_some() {
             visible.push(entry);
             continue;
@@ -204,6 +214,22 @@ async fn hide_empty_opencode_sessions(sessions: &mut Vec<ExternalCatalogEntry>, 
         .fetch_optional(&mut db)
         .await;
         if !matches!(user_turn, Ok(Some(0))) {
+            if entry
+                .title
+                .as_deref()
+                .is_none_or(crate::session_context::is_default_session_title)
+            {
+                let first_text = sqlx::query_scalar::<_, String>(
+                    "SELECT json_extract(part.data, '$.text') FROM part JOIN message ON part.message_id = message.id JOIN session ON message.session_id = session.id WHERE session.id = ? AND session.directory = ? AND json_extract(message.data, '$.role') = 'user' AND json_extract(part.data, '$.type') = 'text' AND json_extract(part.data, '$.text') != '' ORDER BY message.time_created, part.time_created LIMIT 1",
+                )
+                .bind(&entry.external_session_id)
+                .bind(cwd)
+                .fetch_optional(&mut db)
+                .await;
+                if let Ok(Some(text)) = first_text {
+                    entry.title = crate::session_context::title_from_text(&text);
+                }
+            }
             visible.push(entry);
         }
     }
@@ -338,29 +364,52 @@ mod tests {
 
     #[tokio::test]
     async fn opencode_catalog_hides_only_known_empty_unimported_sessions() {
-        let root = std::env::temp_dir().join(format!("opencode-catalog-{}", Id::ascending(IdKind::Event)));
+        let root = std::env::temp_dir()
+            .join(format!("opencode-catalog-{}", Id::ascending(IdKind::Event)));
         std::fs::create_dir_all(&root).unwrap();
         let cwd = std::fs::canonicalize(&root).unwrap();
         let db_path = root.join("opencode.db");
         let mut db = sqlx::SqliteConnection::connect_with(
-            &sqlx::sqlite::SqliteConnectOptions::new().filename(&db_path).create_if_missing(true)
-        ).await.unwrap();
-        sqlx::query("CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT NOT NULL)").execute(&mut db).await.unwrap();
-        sqlx::query("CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, data TEXT NOT NULL)").execute(&mut db).await.unwrap();
+            &sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(&db_path)
+                .create_if_missing(true),
+        )
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT NOT NULL)",
+        )
+        .execute(&mut db)
+        .await
+        .unwrap();
+        sqlx::query("CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, time_created INTEGER NOT NULL, data TEXT NOT NULL)").execute(&mut db).await.unwrap();
+        sqlx::query("CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT NOT NULL, time_created INTEGER NOT NULL, data TEXT NOT NULL)").execute(&mut db).await.unwrap();
         let directory = cwd.to_str().unwrap();
         for id in ["preview", "real-new-title", "imported"] {
-            sqlx::query("INSERT INTO session (id, directory) VALUES (?, ?)").bind(id).bind(directory).execute(&mut db).await.unwrap();
+            sqlx::query("INSERT INTO session (id, directory) VALUES (?, ?)")
+                .bind(id)
+                .bind(directory)
+                .execute(&mut db)
+                .await
+                .unwrap();
         }
-        sqlx::query("INSERT INTO message (id, session_id, data) VALUES ('msg', 'real-new-title', '{\"role\":\"user\"}')").execute(&mut db).await.unwrap();
+        sqlx::query("INSERT INTO message (id, session_id, time_created, data) VALUES ('msg', 'real-new-title', 1, '{\"role\":\"user\"}')").execute(&mut db).await.unwrap();
+        sqlx::query("INSERT INTO part (id, message_id, time_created, data) VALUES ('part', 'msg', 1, '{\"type\":\"text\",\"text\":\"Fix the sidebar\\nMore detail\"}')").execute(&mut db).await.unwrap();
         drop(db);
         let mut entries = ["preview", "real-new-title", "imported", "unknown"].into_iter().map(|id| {
             verified_catalog_entry(ExternalRuntime::OpenCode, "local", &cwd,
-                &json!({"sessionId":id,"cwd":directory,"title":"New session"})).unwrap()
+                &json!({"sessionId":id,"cwd":directory,"title":"New session - 1790000000"})).unwrap()
         }).collect::<Vec<_>>();
         entries[2].neoism_session_id = Some("root".into());
         hide_empty_opencode_sessions(&mut entries, directory, &db_path).await;
-        assert_eq!(entries.iter().map(|entry| entry.external_session_id.as_str()).collect::<Vec<_>>(),
-            vec!["real-new-title", "imported", "unknown"]);
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.external_session_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["real-new-title", "imported", "unknown"]
+        );
+        assert_eq!(entries[0].title.as_deref(), Some("Fix the sidebar"));
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -776,6 +825,17 @@ pub(crate) async fn external_import(
     {
         return Err(ApiError::bad_request("Neoism session root differs from provider cwd; refusing cross-workspace import"));
     }
+    let replay_title = replay
+        .turns
+        .iter()
+        .find(|turn| turn.role == "user" && !turn.text.trim().is_empty())
+        .and_then(|turn| crate::session_context::title_from_text(&turn.text));
+    let import_title = entry
+        .title
+        .as_deref()
+        .filter(|title| !crate::session_context::is_default_session_title(title))
+        .map(str::to_owned)
+        .or(replay_title);
     let external = json!({
         "provider": runtime.provider_id(), "runtime": "acp", "agent": runtime.agent_name(),
         "status": "imported", "externalSessionId": entry.external_session_id,
@@ -792,7 +852,7 @@ pub(crate) async fn external_import(
         claims,
         neoism_agent_core::CreateSessionRequest {
             parent_id: None,
-            title: entry.title.clone(),
+            title: import_title,
             agent: None,
             model: None,
             permission: None,

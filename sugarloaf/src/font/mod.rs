@@ -2085,7 +2085,14 @@ mod bundled_icon_tests {
         let data = constants::FONT_SYMBOLS_NERD_FONT_MONO;
         let font = swash::FontRef::from_index(data, 0).expect("bundled Nerd Font parses");
         let cmap = font.charmap();
-        for ch in ['\u{eb56}', '\u{f07b}', '\u{f0c9}', '\u{f002}', '\u{f15c}'] {
+        for ch in [
+            '\u{eb56}',
+            '\u{f07b}',
+            '\u{f0c9}',
+            '\u{f002}',
+            '\u{f15c}',
+            '\u{f0674}',
+        ] {
             assert_ne!(
                 cmap.map(ch),
                 0,

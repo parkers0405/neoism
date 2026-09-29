@@ -76,6 +76,8 @@ fn modal_action_policy_tag(
         A::NotesSetIcon { .. } => Tag::NotesSetIcon,
         A::FileTreeNewFolder { .. } => Tag::FileTreeNewFolder,
         A::FileTreeRename { .. } => Tag::FileTreeRename,
+        A::AgentRenameSession { .. } => Tag::AgentRenameSession,
+        A::AgentDeleteSession { .. } => Tag::AgentDeleteSession,
         A::RenameTab { .. } => Tag::RenameTab,
         A::NotesVaultPromptAdd => Tag::NotesVaultPromptAdd,
         A::ServerFormSubmit => Tag::ServerFormSubmit,

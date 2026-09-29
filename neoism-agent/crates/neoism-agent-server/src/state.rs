@@ -750,10 +750,15 @@ impl AppState {
             ));
         let caller_policy = if services.hosted {
             crate::caller::CallerPolicy::for_hosted(
-                services.tenant_resolver.clone().expect("validated hosted resolver"),
+                services
+                    .tenant_resolver
+                    .clone()
+                    .expect("validated hosted resolver"),
             )
         } else {
-            crate::caller::CallerPolicy::from_env_with_resolver(services.tenant_resolver.clone())
+            crate::caller::CallerPolicy::from_env_with_resolver(
+                services.tenant_resolver.clone(),
+            )
         };
         let utilities = crate::utility_runtime::UtilityRuntime::new(&services);
         let recovery_started = crate::perf::now();
@@ -939,7 +944,9 @@ impl AppState {
         let resume_started = crate::perf::now();
         let phase_started = crate::perf::now();
         crate::session_queue::resume_prompt_queues(state.clone()).await?;
-        if let Err(error) = crate::external_agent::reconcile_interrupted_nested_sessions(&state).await {
+        if let Err(error) =
+            crate::external_agent::reconcile_interrupted_nested_sessions(&state).await
+        {
             tracing::warn!(%error, "failed to reconcile interrupted ACP nested tasks");
         }
         tracing::info!(
@@ -1066,14 +1073,16 @@ impl AppState {
         tenant_id: &str,
         directory: &str,
     ) -> Result<Arc<crate::workspace_runtime::WorkspaceRuntime>, String> {
-        self.try_workspace_runtime_for_tenant(tenant_id, directory).await
+        self.try_workspace_runtime_for_tenant(tenant_id, directory)
+            .await
     }
 
     pub(crate) async fn try_workspace_runtime(
         &self,
         directory: &str,
     ) -> Result<Arc<crate::workspace_runtime::WorkspaceRuntime>, String> {
-        self.try_workspace_runtime_for_tenant("local", directory).await
+        self.try_workspace_runtime_for_tenant("local", directory)
+            .await
     }
 
     pub(crate) async fn try_workspace_runtime_for_tenant(
@@ -1087,14 +1096,12 @@ impl AppState {
             .acquire_for_tenant(tenant_id, directory, self)
             .await?;
         for stale in evicted {
-            self.inner
-                .workspace_plugin_generations
-                .lock()
-                .await
-                .remove(&crate::workspace_runtime::TenantRuntimeKey {
+            self.inner.workspace_plugin_generations.lock().await.remove(
+                &crate::workspace_runtime::TenantRuntimeKey {
                     tenant_id: stale.tenant_id.clone(),
                     root: stale.root.clone(),
-                });
+                },
+            );
         }
         self.reconcile_semantic_service().await;
         let snapshot = runtime.published_snapshot();
@@ -2047,7 +2054,10 @@ impl SessionStore {
                 Vec::new(),
             )
             .await?;
-        if !self.table_has_column("permission_approvals", "tenant_id").await? {
+        if !self
+            .table_has_column("permission_approvals", "tenant_id")
+            .await?
+        {
             self.db
                 .execute_transaction(vec![
                     (
@@ -4540,8 +4550,12 @@ impl SessionStore {
         self.append_event_with_owner(event, None).await
     }
 
-    pub(crate) async fn tenant_for_event(&self, event: &EventPayload) -> anyhow::Result<String> {
-        if let Some(tenant_id) = event.properties.get("tenantID").and_then(Value::as_str) {
+    pub(crate) async fn tenant_for_event(
+        &self,
+        event: &EventPayload,
+    ) -> anyhow::Result<String> {
+        if let Some(tenant_id) = event.properties.get("tenantID").and_then(Value::as_str)
+        {
             return Ok(tenant_id.to_string());
         }
         let Some(session_id) = stored_event_session_id(event) else {
@@ -4821,11 +4835,11 @@ impl SessionStore {
                 "DELETE FROM artifacts WHERE tenant_id = ? AND id = ?",
                 vec![text(tenant_id), text(id)],
             ),
-            TenantQueryScope::LocalAll => ("DELETE FROM artifacts WHERE id = ?", vec![text(id)]),
+            TenantQueryScope::LocalAll => {
+                ("DELETE FROM artifacts WHERE id = ?", vec![text(id)])
+            }
         };
-        self.db
-            .execute(sql, params)
-            .await?;
+        self.db.execute(sql, params).await?;
         Ok(())
     }
 

@@ -3,8 +3,8 @@ use serde_json::{json, Value};
 use super::{
     apply_patch_handler, artifact_read_handler, artifact_search_handler, bash_handler,
     documentation_handler, edit_handler, glob_handler, grep_handler, lsp_handler,
-    memory_handler, read_handler, sandbox_handler, skill_handler, stateful_handler, webfetch_handler,
-    write_handler, BuiltinTool, ToolHandler,
+    memory_handler, read_handler, sandbox_handler, skill_handler, stateful_handler,
+    webfetch_handler, write_handler, BuiltinTool, ToolHandler,
 };
 
 #[derive(Clone, Copy, Eq, PartialEq)]

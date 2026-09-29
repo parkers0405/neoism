@@ -96,6 +96,17 @@ fn maps_neoism_permission_replies_to_acp_options() {
 }
 
 #[test]
+fn only_explicit_acp_diff_content_becomes_patch_metadata() {
+    assert_eq!(super::events::acp_diff_content(&json!({
+        "content": [{"type":"diff", "path":"src/lib.rs", "oldText":"old\n", "newText":"new\n"}]
+    })).unwrap()[0]["path"], "src/lib.rs");
+    assert!(super::events::acp_diff_content(&json!({
+        "title":"Edited src/lib.rs", "content":[{"type":"text", "text":"done"}]
+    }))
+    .is_none());
+}
+
+#[test]
 fn detects_provider_owned_nested_agent_tools() {
     assert!(!is_external_nested_agent_tool(
         &json!({ "kind": "think", "title": "Review code" }),
@@ -104,6 +115,26 @@ fn detects_provider_owned_nested_agent_tools() {
     assert!(is_external_nested_agent_tool(
         &json!({ "title": "Task" }),
         &json!({ "prompt": "inspect", "subagent_type": "general" })
+    ));
+    assert!(is_external_nested_agent_tool(
+        &json!({ "title": "Task", "toolCallId": "task-1" }),
+        &json!({})
+    ));
+    assert!(is_external_nested_agent_tool(
+        &json!({ "kind": "other", "title": "Task", "toolCallId": "task-1" }),
+        &json!({})
+    ));
+    assert!(is_external_nested_agent_tool(
+        &json!({ "title": "spawn_agent", "toolCallId": "task-2" }),
+        &json!({})
+    ));
+    assert!(!is_external_nested_agent_tool(
+        &json!({ "title": "Review code", "toolCallId": "task-3" }),
+        &json!({ "prompt": "inspect", "subagent_type": "general" })
+    ));
+    assert!(!is_external_nested_agent_tool(
+        &json!({ "sessionUpdate": "plan", "title": "Task" }),
+        &json!({})
     ));
     assert!(!is_external_nested_agent_tool(
         &json!({ "kind": "execute", "title": "cargo test" }),
@@ -455,20 +486,42 @@ async fn newly_bound_root_matches_its_provider_catalog_identity() {
         .unwrap()
         .unwrap();
     let cwd = std::fs::canonicalize(&root).unwrap();
-    let matching = catalog::source_key_for(ExternalRuntime::Claude, "local", &cwd, "opaque-claude-id").unwrap();
-    assert_eq!(bound.extra["externalAgent"]["sourceHost"], catalog::native_host_id());
+    let matching = catalog::source_key_for(
+        ExternalRuntime::Claude,
+        "local",
+        &cwd,
+        "opaque-claude-id",
+    )
+    .unwrap();
+    assert_eq!(
+        bound.extra["externalAgent"]["sourceHost"],
+        catalog::native_host_id()
+    );
     assert_eq!(bound.extra["externalAgent"]["sourceKey"], matching);
     assert_ne!(
         matching,
-        catalog::source_key_for(ExternalRuntime::Claude, "local", &cwd, "different-id").unwrap()
+        catalog::source_key_for(ExternalRuntime::Claude, "local", &cwd, "different-id")
+            .unwrap()
     );
     assert_ne!(
         matching,
-        catalog::source_key_for(ExternalRuntime::Claude, "another-tenant", &cwd, "opaque-claude-id").unwrap()
+        catalog::source_key_for(
+            ExternalRuntime::Claude,
+            "another-tenant",
+            &cwd,
+            "opaque-claude-id"
+        )
+        .unwrap()
     );
     assert_ne!(
         matching,
-        catalog::source_key_for(ExternalRuntime::Codex, "local", &cwd, "opaque-claude-id").unwrap()
+        catalog::source_key_for(
+            ExternalRuntime::Codex,
+            "local",
+            &cwd,
+            "opaque-claude-id"
+        )
+        .unwrap()
     );
     state.shutdown().await.unwrap();
     let _ = std::fs::remove_dir_all(root);
@@ -501,7 +554,9 @@ async fn nested_reconciliation_skips_ordinary_sessions_on_restart() {
     .await
     .unwrap();
     assert!(!normal.extra.contains_key("externalAgent"));
-    events::reconcile_interrupted_nested_sessions(&state).await.unwrap();
+    events::reconcile_interrupted_nested_sessions(&state)
+        .await
+        .unwrap();
     state.shutdown().await.unwrap();
     drop(state);
 

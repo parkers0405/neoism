@@ -516,7 +516,11 @@ impl Application<'_> {
                                 );
                                 continue;
                             }
-                            if matches!(class, PtyFailureClass::Transport | PtyFailureClass::NotDelivered) {
+                            if matches!(
+                                class,
+                                PtyFailureClass::Transport
+                                    | PtyFailureClass::NotDelivered
+                            ) {
                                 let interrupted = route
                                     .window
                                     .screen

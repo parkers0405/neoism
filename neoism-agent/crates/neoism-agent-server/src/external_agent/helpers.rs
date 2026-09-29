@@ -24,8 +24,12 @@ pub(crate) async fn update_external_session_metadata(
         && external["sourceHost"].is_null()
         && external["sourceKey"].is_null()
     {
-        let cwd = crate::windows_process::canonicalize_path(std::path::Path::new(&child.directory))
-            .map_err(|error| ApiError::bad_request(format!("ACP workspace path is unavailable: {error}")))?;
+        let cwd = crate::windows_process::canonicalize_path(std::path::Path::new(
+            &child.directory,
+        ))
+        .map_err(|error| {
+            ApiError::bad_request(format!("ACP workspace path is unavailable: {error}"))
+        })?;
         let key = super::catalog::source_key_for(
             runtime,
             crate::caller::session_tenant(&child),

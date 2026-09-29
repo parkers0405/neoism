@@ -364,18 +364,33 @@ pub fn config_defaults_from_json(value: &Value) -> ConfigDefaults {
 
 pub fn imported_history_from_json(value: &Value) -> Option<ImportedHistory> {
     use crate::panels::agent_pane::state::side_panel::ConversationSource;
-    if value.get("parentId").or_else(|| value.get("parentID")).and_then(Value::as_str).is_some() {
+    if value
+        .get("parentId")
+        .or_else(|| value.get("parentID"))
+        .and_then(Value::as_str)
+        .is_some()
+    {
         return None;
     }
-    let external = value.get("externalAgent").or_else(|| value.pointer("/extra/externalAgent"))?;
+    let external = value
+        .get("externalAgent")
+        .or_else(|| value.pointer("/extra/externalAgent"))?;
     if external.get("historyState").and_then(Value::as_str) != Some("text_only")
-        || ConversationSource::from_session_json(value).provider().is_none()
+        || ConversationSource::from_session_json(value)
+            .provider()
+            .is_none()
     {
         return None;
     }
     Some(ImportedHistory {
-        tool_events: external.get("historyToolEvents").and_then(Value::as_u64).unwrap_or(0),
-        incomplete_content: external.get("historyIncompleteContent").and_then(Value::as_bool).unwrap_or(false),
+        tool_events: external
+            .get("historyToolEvents")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        incomplete_content: external
+            .get("historyIncompleteContent")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
     })
 }
 
@@ -882,12 +897,20 @@ fn assistant_response_footer(
     let placeholder = assistant.provider_id == "external"
         && (assistant.model_id.eq_ignore_ascii_case(&assistant.agent)
             || assistant.model_id.eq_ignore_ascii_case(&assistant.mode));
-    let model = if placeholder { String::new() } else { display_model_name(&assistant.model_id) };
+    let model = if placeholder {
+        String::new()
+    } else {
+        display_model_name(&assistant.model_id)
+    };
     let duration = display_response_duration(completed.saturating_sub(created));
     let throughput = tokens_per_second
         .map(|value| format!(" · {value:.1} tok/s"))
         .unwrap_or_default();
-    let model_segment = if model.is_empty() { String::new() } else { format!(" · {model}") };
+    let model_segment = if model.is_empty() {
+        String::new()
+    } else {
+        format!(" · {model}")
+    };
     Some(format!("{agent}{model_segment} · {duration}{throughput}"))
 }
 
@@ -1043,6 +1066,15 @@ fn is_compaction_summary_message(parts: &[Value]) -> bool {
 mod tests {
     use super::*;
 
+    #[test]
+    fn running_acp_terminal_exposes_bounded_output_in_chat() {
+        let part = json!({"type":"tool", "tool":"bash", "state":{"status":"running", "input":{"command":"sleep 2"}},
+            "metadata":{"terminalOutput":"building...\n"}});
+        let message = tool_block(&part);
+        assert!(message.detail.contains("building..."));
+        assert!(message.title.contains("sleep 2"));
+    }
+
     /// Canonical `info` envelopes: `message_info` parses the exact serde the
     /// server emits, so fixtures must carry every required field — a lean
     /// blob silently downgraded a message to a system row before this.
@@ -1107,9 +1139,13 @@ mod tests {
 
     #[test]
     fn total_tokens_only_is_real_usage_without_double_counting() {
-        let only_total = usage_from_step_finish(&json!({"tokens":{"totalTokens":4200}})).unwrap();
+        let only_total =
+            usage_from_step_finish(&json!({"tokens":{"totalTokens":4200}})).unwrap();
         assert_eq!(only_total.total, 4200);
-        let buckets_and_total = usage_from_step_finish(&json!({"tokens":{"input":100,"output":25,"totalTokens":125}})).unwrap();
+        let buckets_and_total = usage_from_step_finish(
+            &json!({"tokens":{"input":100,"output":25,"totalTokens":125}}),
+        )
+        .unwrap();
         assert_eq!(buckets_and_total.total, 125);
     }
 
@@ -1359,20 +1395,38 @@ mod tests {
     fn session_metadata_restores_root_source_but_not_child_source() {
         use crate::panels::agent_pane::state::side_panel::ConversationSource;
         let root = serde_json::json!({"id":"root","externalAgent":{"provider":"claude","runtime":"acp"}});
-        assert_eq!(session_state_from_json(&root).source, ConversationSource::ClaudeCode);
+        assert_eq!(
+            session_state_from_json(&root).source,
+            ConversationSource::ClaudeCode
+        );
         let with_plan = serde_json::json!({"externalAgent":{"provider":"codex","planTodos":[{"status":"in_progress","content":"Review"}]}});
-        assert_eq!(session_state_from_json(&with_plan).plan_todos.as_ref().unwrap()[0].content, "Review");
+        assert_eq!(
+            session_state_from_json(&with_plan)
+                .plan_todos
+                .as_ref()
+                .unwrap()[0]
+                .content,
+            "Review"
+        );
         assert_eq!(session_state_from_json(&root).plan_todos, None);
-        let cleared = serde_json::json!({"externalAgent":{"provider":"codex","planTodos":[]}});
+        let cleared =
+            serde_json::json!({"externalAgent":{"provider":"codex","planTodos":[]}});
         assert_eq!(session_state_from_json(&cleared).plan_todos, Some(vec![]));
         let child = serde_json::json!({"id":"child","parentID":"root","externalAgent":{"provider":"claude"}});
-        assert_eq!(session_state_from_json(&child).source, ConversationSource::Neoism);
+        assert_eq!(
+            session_state_from_json(&child).source,
+            ConversationSource::Neoism
+        );
     }
 
     #[test]
     fn imported_text_only_history_is_root_only_and_keeps_source_and_title() {
         use crate::panels::agent_pane::state::side_panel::ConversationSource;
-        for (provider, expected) in [("claude", ConversationSource::ClaudeCode), ("codex", ConversationSource::Codex), ("opencode", ConversationSource::OpenCode)] {
+        for (provider, expected) in [
+            ("claude", ConversationSource::ClaudeCode),
+            ("codex", ConversationSource::Codex),
+            ("opencode", ConversationSource::OpenCode),
+        ] {
             let root = json!({"id":"root", "title":"Provider's original title", "extra":{"externalAgent": {
                 "provider":provider, "historyState":"text_only", "historyToolEvents":3, "historyIncompleteContent":true
             }}});
@@ -1388,7 +1442,9 @@ mod tests {
             assert!(session_state_from_json(&child).imported_history.is_none());
             let mut new_chat = root.clone();
             new_chat["extra"]["externalAgent"]["historyState"] = json!("not_loaded");
-            assert!(session_state_from_json(&new_chat).imported_history.is_none());
+            assert!(session_state_from_json(&new_chat)
+                .imported_history
+                .is_none());
             let mut neoism = root;
             neoism["extra"]["externalAgent"]["provider"] = json!("unknown");
             assert!(session_state_from_json(&neoism).imported_history.is_none());
@@ -1471,14 +1527,22 @@ mod tests {
         for (model_id, expected) in [
             ("opencode", "Opencode · 6.0s"),
             ("", "Opencode · 6.0s"),
-            ("openrouter/openai/gpt-5.6-sol", "Opencode · GPT-5.6 Sol · 6.0s"),
+            (
+                "openrouter/openai/gpt-5.6-sol",
+                "Opencode · GPT-5.6 Sol · 6.0s",
+            ),
         ] {
             let info: MessageInfo = serde_json::from_value(canonical_assistant_info(json!({
                 "agent":"opencode", "mode":"opencode", "providerId":"external", "modelId":model_id,
                 "time":{"created":1000,"completed":7000}
             }))).unwrap();
-            let MessageInfo::Assistant(assistant) = info else { panic!("assistant expected") };
-            assert_eq!(assistant_response_footer(&assistant, None, None).as_deref(), Some(expected));
+            let MessageInfo::Assistant(assistant) = info else {
+                panic!("assistant expected")
+            };
+            assert_eq!(
+                assistant_response_footer(&assistant, None, None).as_deref(),
+                Some(expected)
+            );
         }
     }
 
@@ -2150,7 +2214,17 @@ fn tool_block(part: &Value) -> NeoismAgentMessage {
     } else {
         Vec::new()
     };
-    let raw_detail = if tool == "task" {
+    let terminal_output = (status == "running")
+        .then(|| {
+            part.get("metadata")
+                .and_then(|metadata| metadata.get("terminalOutput"))
+                .and_then(Value::as_str)
+                .filter(|output| !output.is_empty())
+        })
+        .flatten();
+    let raw_detail = if let Some(terminal_output) = terminal_output {
+        terminal_output.to_owned()
+    } else if tool == "task" {
         state
             .get("output")
             .and_then(Value::as_str)

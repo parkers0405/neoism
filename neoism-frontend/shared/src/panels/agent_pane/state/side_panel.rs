@@ -67,7 +67,8 @@ pub enum ConversationSource {
 }
 
 impl ConversationSource {
-    pub const CHOICES: [Self; 4] = [Self::Neoism, Self::OpenCode, Self::ClaudeCode, Self::Codex];
+    pub const CHOICES: [Self; 4] =
+        [Self::Neoism, Self::OpenCode, Self::ClaudeCode, Self::Codex];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -79,13 +80,17 @@ impl ConversationSource {
     }
 
     pub fn tab_title(self, title: Option<&str>) -> String {
-        let title = title.map(str::trim).filter(|title| !title.is_empty());
-        match (self.provider(), title) {
-            (None, Some(title)) => title.to_owned(),
-            (None, None) => "Neoism".to_owned(),
-            (Some(_), Some(title)) if title != self.label() => format!("{} · {title}", self.label()),
-            (Some(_), _) => self.label().to_owned(),
-        }
+        title
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .unwrap_or_else(|| {
+                if self == Self::Neoism {
+                    "Neoism"
+                } else {
+                    self.label()
+                }
+            })
+            .to_owned()
     }
 
     pub fn provider(self) -> Option<&'static str> {
@@ -100,17 +105,35 @@ impl ConversationSource {
     pub fn from_session_json(session: &serde_json::Value) -> Self {
         // Catalogues are root-only. Do not infer a child's identity from a
         // task's externalAgent status or a model provider.
-        if session.get("parentID").and_then(serde_json::Value::as_str).is_some()
-            || session.get("parentId").and_then(serde_json::Value::as_str).is_some()
+        if session
+            .get("parentID")
+            .and_then(serde_json::Value::as_str)
+            .is_some()
+            || session
+                .get("parentId")
+                .and_then(serde_json::Value::as_str)
+                .is_some()
         {
             return Self::Neoism;
         }
-        match session.pointer("/extra/externalAgent/provider")
+        match session
+            .pointer("/extra/externalAgent/provider")
             .and_then(serde_json::Value::as_str)
-            .or_else(|| session.pointer("/externalAgent/provider").and_then(serde_json::Value::as_str))
-            .or_else(|| session.get("external_provider").and_then(serde_json::Value::as_str))
-            .or_else(|| session.get("externalProvider").and_then(serde_json::Value::as_str))
-        {
+            .or_else(|| {
+                session
+                    .pointer("/externalAgent/provider")
+                    .and_then(serde_json::Value::as_str)
+            })
+            .or_else(|| {
+                session
+                    .get("external_provider")
+                    .and_then(serde_json::Value::as_str)
+            })
+            .or_else(|| {
+                session
+                    .get("externalProvider")
+                    .and_then(serde_json::Value::as_str)
+            }) {
             Some("opencode") => Self::OpenCode,
             Some("claude") => Self::ClaudeCode,
             Some("codex") => Self::Codex,
@@ -472,7 +495,8 @@ impl BranchStatus {
                 Some(Self::WaitingPermission)
             }
             "completed" | "complete" | "idle" | "done" => Some(Self::Completed),
-            "failed" | "error" | "errored" | "stopped" | "aborted" | "interrupted" | "cancelled" | "canceled" => Some(Self::Stopped),
+            "failed" | "error" | "errored" | "stopped" | "aborted" | "interrupted"
+            | "cancelled" | "canceled" => Some(Self::Stopped),
             _ => None,
         }
     }
@@ -572,6 +596,7 @@ impl BranchActivity {
 /// A respawn (status back to active) clears the timer and the row
 /// returns immediately.
 pub const SUBAGENT_HIDE_AFTER: Duration = Duration::from_secs(7);
+const FAILED_SUBAGENT_HIDE_AFTER: Duration = Duration::from_secs(60);
 
 /// How long the composer's status label survives a *transient* idle
 /// reading. Between events the raw derivation can pass through Idle for
@@ -957,7 +982,9 @@ impl NeoismAgentSidePanel {
         self.search_focused = false;
     }
 
-    pub fn provider_menu_open(&self) -> bool { self.provider_menu_open }
+    pub fn provider_menu_open(&self) -> bool {
+        self.provider_menu_open
+    }
 
     pub fn toggle_provider_menu(&mut self) {
         self.provider_menu_open = !self.provider_menu_open;
@@ -965,15 +992,20 @@ impl NeoismAgentSidePanel {
         self.search_focused = false;
     }
 
-    pub fn close_provider_menu(&mut self) { self.provider_menu_open = false; }
+    pub fn close_provider_menu(&mut self) {
+        self.provider_menu_open = false;
+    }
 
-    pub fn provider_selection(&self) -> usize { self.provider_selection }
+    pub fn provider_selection(&self) -> usize {
+        self.provider_selection
+    }
 
     pub fn move_provider_selection(&mut self, down: bool) {
         self.provider_selection = if down {
             (self.provider_selection + 1) % ConversationSource::CHOICES.len()
         } else {
-            (self.provider_selection + ConversationSource::CHOICES.len() - 1) % ConversationSource::CHOICES.len()
+            (self.provider_selection + ConversationSource::CHOICES.len() - 1)
+                % ConversationSource::CHOICES.len()
         };
     }
 
@@ -983,12 +1015,18 @@ impl NeoismAgentSidePanel {
         Some(source)
     }
 
-    pub fn set_new_chat_rect(&mut self, rect: [f32; 4]) { self.new_chat_rect = Some(rect); }
+    pub fn set_new_chat_rect(&mut self, rect: [f32; 4]) {
+        self.new_chat_rect = Some(rect);
+    }
 
     pub fn new_chat_hit(&self, x: f32, y: f32) -> Option<Option<usize>> {
         let [rx, ry, rw, rh] = self.new_chat_rect?;
-        if x < rx || x > rx + rw || y < ry { return None; }
-        if y <= ry + rh { return Some(None); }
+        if x < rx || x > rx + rw || y < ry {
+            return None;
+        }
+        if y <= ry + rh {
+            return Some(None);
+        }
         if self.provider_menu_open && y <= ry + rh * 5.0 {
             return Some(Some(((y - ry - rh) / rh) as usize));
         }
@@ -1432,9 +1470,9 @@ impl NeoismAgentSidePanel {
     }
 
     /// Whether `entry` (a non-main branch) should be hidden from the
-    /// sidebar because it finished more than [`SUBAGENT_HIDE_AFTER`]
-    /// ago and isn't currently running again. The main session (index
-    /// 0) is never hidden — it's the user's anchor back to the parent.
+    /// sidebar because it finished more than the completion grace ago
+    /// (failed children linger longer for inspection) and isn't running again.
+    /// The main session (index 0) is never hidden.
     /// A respawned sub-agent reports `Active`/`WaitingPermission`
     /// (which clears `completed_at`) so it stays visible.
     fn subagent_hidden(&self, entry: &NeoismAgentSessionEntry) -> bool {
@@ -1471,7 +1509,12 @@ impl NeoismAgentSidePanel {
             // A live completion stamped the window — show it until it
             // elapses, then hide.
             Some(at) => {
-                Instant::now().saturating_duration_since(at) >= SUBAGENT_HIDE_AFTER
+                let grace = if activity.status == BranchStatus::Stopped {
+                    FAILED_SUBAGENT_HIDE_AFTER
+                } else {
+                    SUBAGENT_HIDE_AFTER
+                };
+                Instant::now().saturating_duration_since(at) >= grace
             }
             // Terminal but no window: finished before we were watching (or
             // a re-listed old completion). Hide it immediately.
@@ -1744,9 +1787,15 @@ impl NeoismAgentSidePanel {
         }
     }
 
-    pub fn external_errors(&self) -> &[(ConversationSource, String)] { &self.external_errors }
-    pub fn external_scanning(&self) -> bool { self.external_scanning }
-    pub fn set_external_scanning(&mut self, scanning: bool) { self.external_scanning = scanning; }
+    pub fn external_errors(&self) -> &[(ConversationSource, String)] {
+        &self.external_errors
+    }
+    pub fn external_scanning(&self) -> bool {
+        self.external_scanning
+    }
+    pub fn set_external_scanning(&mut self, scanning: bool) {
+        self.external_scanning = scanning;
+    }
 
     pub fn set_external_importing(&mut self, key: Option<String>) {
         self.external_importing_key = key;
@@ -1754,12 +1803,18 @@ impl NeoismAgentSidePanel {
     }
 
     pub fn set_external_notice(&mut self, source: ConversationSource, message: String) {
-        self.external_errors.retain(|(provider, _)| *provider != source);
+        self.external_errors
+            .retain(|(provider, _)| *provider != source);
         self.external_errors.push((source, message));
     }
 
-    pub fn set_external_provider_error(&mut self, source: ConversationSource, error: String) {
-        self.external_errors.retain(|(provider, _)| *provider != source);
+    pub fn set_external_provider_error(
+        &mut self,
+        source: ConversationSource,
+        error: String,
+    ) {
+        self.external_errors
+            .retain(|(provider, _)| *provider != source);
         self.external_errors.push((source, error));
         // Retain the last good previews when a refresh or adapter fails.
         // Server/directory switches create a fresh pane rather than reusing these rows.
@@ -1767,17 +1822,30 @@ impl NeoismAgentSidePanel {
 
     /// Provider previews are independent of the paged Neoism catalog. A
     /// first-page refresh must never discard them or reset the scroll.
-    pub fn set_external_provider_rows(&mut self, source: ConversationSource, rows: Vec<NeoismAgentSessionEntry>) {
+    pub fn set_external_provider_rows(
+        &mut self,
+        source: ConversationSource,
+        rows: Vec<NeoismAgentSessionEntry>,
+    ) {
         let selected_id = self.selected_session().map(|entry| entry.id.clone());
-        self.external_errors.retain(|(provider, _)| *provider != source);
-        self.external_sessions.retain(|entry| entry.source != source);
-        self.external_sessions.extend(rows.into_iter().filter(|entry| entry.external_preview.is_some()));
+        self.external_errors
+            .retain(|(provider, _)| *provider != source);
+        self.external_sessions
+            .retain(|entry| entry.source != source);
+        self.external_sessions.extend(
+            rows.into_iter()
+                .filter(|entry| entry.external_preview.is_some()),
+        );
         self.rebuild_session_display();
         self.restore_selected_session(selected_id.as_deref());
     }
 
     pub fn mark_external_imported(&mut self, source_key: &str, id: &str) {
-        if let Some(entry) = self.external_sessions.iter_mut().find(|entry| entry.source_key.as_deref() == Some(source_key)) {
+        if let Some(entry) = self
+            .external_sessions
+            .iter_mut()
+            .find(|entry| entry.source_key.as_deref() == Some(source_key))
+        {
             entry.id = id.to_string();
             if let Some(preview) = entry.external_preview.as_mut() {
                 preview.neoism_session_id = Some(id.to_string());
@@ -1797,7 +1865,9 @@ impl NeoismAgentSidePanel {
     ) {
         let was_home = matches!(self.mode, SidePanelMode::Sessions);
         let selected_id = self.selected_session().map(|entry| entry.id.clone());
-        let selected_preview = self.selected_session().is_some_and(|entry| entry.external_preview.is_some());
+        let selected_preview = self
+            .selected_session()
+            .is_some_and(|entry| entry.external_preview.is_some());
         if requested_cursor.is_some() {
             let mut known = self
                 .all_sessions
@@ -2007,16 +2077,26 @@ impl NeoismAgentSidePanel {
             .all_sessions
             .iter()
             .chain(self.external_sessions.iter().filter(|entry| {
-                if entry.source_key == self.external_importing_key && self.external_importing_key.is_some() { return false; }
+                if entry.source_key == self.external_importing_key
+                    && self.external_importing_key.is_some()
+                {
+                    return false;
+                }
                 !self.all_sessions.iter().any(|stored| {
-                    entry.external_preview.as_ref().and_then(|preview| preview.neoism_session_id.as_deref()) == Some(stored.id.as_str())
-                        || (entry.source_key.is_some() && entry.source_key == stored.source_key)
+                    entry
+                        .external_preview
+                        .as_ref()
+                        .and_then(|preview| preview.neoism_session_id.as_deref())
+                        == Some(stored.id.as_str())
+                        || (entry.source_key.is_some()
+                            && entry.source_key == stored.source_key)
                 })
             }))
             .filter(|entry| {
                 needle.is_empty()
                     || entry.title.to_lowercase().contains(&needle)
-                    || (entry.external_preview.is_some() && entry.source.label().to_lowercase().contains(&needle))
+                    || (entry.external_preview.is_some()
+                        && entry.source.label().to_lowercase().contains(&needle))
                     || semantic.contains_key(entry.id.as_str())
             })
             .cloned()
@@ -2781,7 +2861,11 @@ impl NeoismAgentSidePanel {
         }
         match self.step_selectable(self.selected, false) {
             Some(prev) => self.move_selection_to(prev),
-            None if matches!(self.mode, SidePanelMode::Sessions) && self.session_search_rect.is_some() => self.focus_search(),
+            None if matches!(self.mode, SidePanelMode::Sessions)
+                && self.session_search_rect.is_some() =>
+            {
+                self.focus_search()
+            }
             None => {}
         }
     }
@@ -3036,5 +3120,38 @@ impl NeoismAgentSidePanel {
             return None;
         }
         Some(row)
+    }
+}
+
+#[cfg(test)]
+mod failed_child_visibility_tests {
+    use super::*;
+
+    #[test]
+    fn failed_child_remains_inspectable_after_completed_child_grace() {
+        let mut panel = NeoismAgentSidePanel::default();
+        panel.set_subagents(vec![
+            NeoismAgentSessionEntry::new("main", "main", ""),
+            NeoismAgentSessionEntry::new("child", "failed task", "claude")
+                .with_runtime_status(Some("running".into())),
+        ]);
+        panel.set_branch_activity_status("child", BranchStatus::Stopped);
+        panel
+            .branch_activities
+            .get_mut("child")
+            .unwrap()
+            .completed_at =
+            Some(Instant::now() - SUBAGENT_HIDE_AFTER - Duration::from_secs(1));
+        assert!(!panel.prune_expired_completed_subagents());
+        assert_eq!(panel.subagents().len(), 2);
+
+        panel
+            .branch_activities
+            .get_mut("child")
+            .unwrap()
+            .completed_at =
+            Some(Instant::now() - FAILED_SUBAGENT_HIDE_AFTER - Duration::from_secs(1));
+        assert!(panel.prune_expired_completed_subagents());
+        assert_eq!(panel.subagents().len(), 1);
     }
 }

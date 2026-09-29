@@ -102,83 +102,237 @@ pub(crate) fn register_agent_server_credential(server: &str, credential: Option<
     }
 }
 
-pub(super) fn fetch_external_options_preview(server: &str, directory: Option<&str>, provider: &str, selections: &HashMap<String, String>) -> Result<neoism_ui::panels::agent_pane::state::external_options::ExternalOptions, String> {
-    let mut path = format!("/v2/external/options/preview?provider={}", percent_encode(provider));
+pub(super) fn fetch_external_options_preview(
+    server: &str,
+    directory: Option<&str>,
+    provider: &str,
+    selections: &HashMap<String, String>,
+) -> Result<neoism_ui::panels::agent_pane::state::external_options::ExternalOptions, String>
+{
+    let mut path = format!(
+        "/v2/external/options/preview?provider={}",
+        percent_encode(provider)
+    );
     if let Some(directory) = directory.filter(|directory| !directory.is_empty()) {
         path.push_str("&directory=");
         path.push_str(&percent_encode(directory));
     }
-    let (method, body) = if selections.is_empty() { ("GET", None) } else { ("POST", Some(serde_json::json!({"selectedOptions": selections}))) };
-    let response = api_request_json_with_read_timeout(server, method, &path, body.as_ref(), Duration::from_secs(60))?
-        .ok_or_else(|| "Provider returned an empty model catalog".to_string())?;
-    neoism_ui::panels::agent_pane::state::external_options::ExternalOptions::parse(&response, provider)
+    let (method, body) = if selections.is_empty() {
+        ("GET", None)
+    } else {
+        (
+            "POST",
+            Some(serde_json::json!({"selectedOptions": selections})),
+        )
+    };
+    let response = api_request_json_with_read_timeout(
+        server,
+        method,
+        &path,
+        body.as_ref(),
+        Duration::from_secs(60),
+    )?
+    .ok_or_else(|| "Provider returned an empty model catalog".to_string())?;
+    neoism_ui::panels::agent_pane::state::external_options::ExternalOptions::parse(
+        &response, provider,
+    )
 }
 
-pub(super) fn fetch_external_options(server: &str, session_id: &str, provider: &str) -> Result<neoism_ui::panels::agent_pane::state::external_options::ExternalOptions, String> {
-    let path = format!("/v2/sessions/{}/external/options", percent_encode(session_id));
-    let response = api_request_json_with_read_timeout(server, "GET", &path, None, Duration::from_secs(600))?
-        .ok_or_else(|| "Provider returned empty session options".to_string())?;
-    neoism_ui::panels::agent_pane::state::external_options::ExternalOptions::parse(&response, provider)
+pub(super) fn fetch_external_options(
+    server: &str,
+    session_id: &str,
+    provider: &str,
+) -> Result<neoism_ui::panels::agent_pane::state::external_options::ExternalOptions, String>
+{
+    let path = format!(
+        "/v2/sessions/{}/external/options",
+        percent_encode(session_id)
+    );
+    let response = api_request_json_with_read_timeout(
+        server,
+        "GET",
+        &path,
+        None,
+        Duration::from_secs(600),
+    )?
+    .ok_or_else(|| "Provider returned empty session options".to_string())?;
+    neoism_ui::panels::agent_pane::state::external_options::ExternalOptions::parse(
+        &response, provider,
+    )
 }
 
 fn external_option_payload(config_id: &str, value: &str) -> Value {
     serde_json::json!({"configId":config_id,"value":value})
 }
 
-pub(super) fn set_external_option(server: &str, session_id: &str, provider: &str, config_id: &str, value: &str) -> Result<neoism_ui::panels::agent_pane::state::external_options::ExternalOptions, String> {
-    let path = format!("/v2/sessions/{}/external/options", percent_encode(session_id));
+pub(super) fn set_external_option(
+    server: &str,
+    session_id: &str,
+    provider: &str,
+    config_id: &str,
+    value: &str,
+) -> Result<neoism_ui::panels::agent_pane::state::external_options::ExternalOptions, String>
+{
+    let path = format!(
+        "/v2/sessions/{}/external/options",
+        percent_encode(session_id)
+    );
     let payload = external_option_payload(config_id, value);
-    let response = api_request_json_with_read_timeout(server, "POST", &path, Some(&payload), Duration::from_secs(600))?
-        .ok_or_else(|| "Provider did not confirm option selection".to_string())?;
-    neoism_ui::panels::agent_pane::state::external_options::ExternalOptions::parse(&response, provider)
+    let response = api_request_json_with_read_timeout(
+        server,
+        "POST",
+        &path,
+        Some(&payload),
+        Duration::from_secs(600),
+    )?
+    .ok_or_else(|| "Provider did not confirm option selection".to_string())?;
+    neoism_ui::panels::agent_pane::state::external_options::ExternalOptions::parse(
+        &response, provider,
+    )
 }
 
 /// Fetch native history without claiming that a preview contains an imported transcript.
-pub(super) fn fetch_external_catalog(server: &str, directory: &str, source: neoism_ui::panels::agent_pane::state::side_panel::ConversationSource) -> Result<Vec<NeoismAgentSessionEntry>, String> {
-    let provider = source.provider().ok_or("Neoism does not have a native history adapter")?;
-    let path = format!("/v2/sessions/external/catalog?provider={provider}&directory={}", percent_encode(directory));
-    let response = api_request_json_with_read_timeout(server, "GET", &path, None, Duration::from_secs(12))?
-        .ok_or_else(|| format!("{} returned an empty catalog", source.label()))?;
+pub(super) fn fetch_external_catalog(
+    server: &str,
+    directory: &str,
+    source: neoism_ui::panels::agent_pane::state::side_panel::ConversationSource,
+) -> Result<Vec<NeoismAgentSessionEntry>, String> {
+    let provider = source
+        .provider()
+        .ok_or("Neoism does not have a native history adapter")?;
+    let path = format!(
+        "/v2/sessions/external/catalog?provider={provider}&directory={}",
+        percent_encode(directory)
+    );
+    let response = api_request_json_with_read_timeout(
+        server,
+        "GET",
+        &path,
+        None,
+        Duration::from_secs(12),
+    )?
+    .ok_or_else(|| format!("{} returned an empty catalog", source.label()))?;
     parse_external_catalog(&response, source)
 }
 
-fn parse_external_catalog(response: &Value, source: neoism_ui::panels::agent_pane::state::side_panel::ConversationSource) -> Result<Vec<NeoismAgentSessionEntry>, String> {
+fn parse_external_catalog(
+    response: &Value,
+    source: neoism_ui::panels::agent_pane::state::side_panel::ConversationSource,
+) -> Result<Vec<NeoismAgentSessionEntry>, String> {
     use neoism_ui::panels::agent_pane::state::side_panel::ExternalSessionPreview;
-    let provider = source.provider().ok_or("Neoism does not have a native history adapter")?;
-    if response.get("provider").and_then(Value::as_str) != Some(provider) { return Err(format!("{} returned an invalid catalog", source.label())); }
-    let import_supported = response.get("importSupported").and_then(Value::as_bool).unwrap_or(false);
-    let import_unavailable_reason = response.get("importUnavailableReason").and_then(Value::as_str).filter(|s| !s.trim().is_empty()).map(str::to_owned);
-    let sessions = response.get("sessions").and_then(Value::as_array).ok_or_else(|| format!("{} returned malformed history rows", source.label()))?;
-    let cwd = response.get("cwd").and_then(Value::as_str).ok_or_else(|| format!("{} returned a catalog without a directory", source.label()))?;
-    Ok(sessions.iter().filter_map(|row| {
-        if row.get("provider").and_then(Value::as_str) != Some(provider) || row.get("cwd").and_then(Value::as_str) != Some(cwd) { return None; }
-        let key = row.get("sourceKey")?.as_str()?.trim();
-        let external_id = row.get("externalSessionId")?.as_str()?.trim();
-        if key.is_empty() || external_id.is_empty() { return None; }
-        let imported_id = row.get("neoismSessionId").and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_owned);
-        if row.get("historyState").and_then(Value::as_str) == Some("importing") { return None; }
-        let date = row.get("updatedAt").and_then(Value::as_str).unwrap_or("");
-        let title = row.get("title").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).unwrap_or(source.label());
-        let footer = if imported_id.is_some() { "Imported".to_string() } else if import_supported { "Preview · import to read".to_string() } else { format!("Preview · {}", import_unavailable_reason.as_deref().unwrap_or("replay unavailable")) };
-        let footer = if let Some(day) = date.get(..10) { format!("{footer} · {day}") } else { footer };
-        let mut entry = NeoismAgentSessionEntry::new(imported_id.clone().unwrap_or_else(|| format!("external:{key}")), title, footer)
-            .with_source(source).with_source_key(Some(key.to_owned())).with_updated_ms(external_updated_ms(date));
-        entry.external_preview = Some(ExternalSessionPreview {
-            source_key: key.to_owned(), external_session_id: external_id.to_owned(),
-            history_state: row.get("historyState").and_then(Value::as_str).unwrap_or("not_loaded").to_owned(),
-            import_supported,
-            import_unavailable_reason: import_unavailable_reason.clone(),
-            neoism_session_id: imported_id,
-        });
-        Some(entry)
-    }).collect())
+    let provider = source
+        .provider()
+        .ok_or("Neoism does not have a native history adapter")?;
+    if response.get("provider").and_then(Value::as_str) != Some(provider) {
+        return Err(format!("{} returned an invalid catalog", source.label()));
+    }
+    let import_supported = response
+        .get("importSupported")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let import_unavailable_reason = response
+        .get("importUnavailableReason")
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+        .map(str::to_owned);
+    let sessions = response
+        .get("sessions")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("{} returned malformed history rows", source.label()))?;
+    let cwd = response.get("cwd").and_then(Value::as_str).ok_or_else(|| {
+        format!("{} returned a catalog without a directory", source.label())
+    })?;
+    Ok(sessions
+        .iter()
+        .filter_map(|row| {
+            if row.get("provider").and_then(Value::as_str) != Some(provider)
+                || row.get("cwd").and_then(Value::as_str) != Some(cwd)
+            {
+                return None;
+            }
+            let key = row.get("sourceKey")?.as_str()?.trim();
+            let external_id = row.get("externalSessionId")?.as_str()?.trim();
+            if key.is_empty() || external_id.is_empty() {
+                return None;
+            }
+            let imported_id = row
+                .get("neoismSessionId")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned);
+            if row.get("historyState").and_then(Value::as_str) == Some("importing") {
+                return None;
+            }
+            let date = row.get("updatedAt").and_then(Value::as_str).unwrap_or("");
+            let title = row
+                .get("title")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or(source.label());
+            let footer = if imported_id.is_some() {
+                "Imported".to_string()
+            } else if import_supported {
+                "Preview · import to read".to_string()
+            } else {
+                format!(
+                    "Preview · {}",
+                    import_unavailable_reason
+                        .as_deref()
+                        .unwrap_or("replay unavailable")
+                )
+            };
+            let footer = if let Some(day) = date.get(..10) {
+                format!("{footer} · {day}")
+            } else {
+                footer
+            };
+            let mut entry = NeoismAgentSessionEntry::new(
+                imported_id
+                    .clone()
+                    .unwrap_or_else(|| format!("external:{key}")),
+                title,
+                footer,
+            )
+            .with_source(source)
+            .with_source_key(Some(key.to_owned()))
+            .with_updated_ms(external_updated_ms(date));
+            entry.external_preview = Some(ExternalSessionPreview {
+                source_key: key.to_owned(),
+                external_session_id: external_id.to_owned(),
+                history_state: row
+                    .get("historyState")
+                    .and_then(Value::as_str)
+                    .unwrap_or("not_loaded")
+                    .to_owned(),
+                import_supported,
+                import_unavailable_reason: import_unavailable_reason.clone(),
+                neoism_session_id: imported_id,
+            });
+            Some(entry)
+        })
+        .collect())
 }
 
-pub(super) fn import_external_session(server: &str, directory: &str, provider: &str, external_id: &str) -> Result<String, String> {
-    let path = format!("/v2/sessions/external/import?directory={}", percent_encode(directory));
+pub(super) fn import_external_session(
+    server: &str,
+    directory: &str,
+    provider: &str,
+    external_id: &str,
+) -> Result<String, String> {
+    let path = format!(
+        "/v2/sessions/external/import?directory={}",
+        percent_encode(directory)
+    );
     let body = external_import_payload(provider, external_id);
-    let response = api_request_json_with_read_timeout(server, "POST", &path, Some(&body), Duration::from_secs(120))?
-        .ok_or_else(|| format!("{provider} import returned an empty response"))?;
+    let response = api_request_json_with_read_timeout(
+        server,
+        "POST",
+        &path,
+        Some(&body),
+        Duration::from_secs(120),
+    )?
+    .ok_or_else(|| format!("{provider} import returned an empty response"))?;
     parse_external_import_id(&response, provider)
 }
 
@@ -187,28 +341,80 @@ fn external_import_payload(provider: &str, external_id: &str) -> Value {
 }
 
 fn parse_external_import_id(response: &Value, provider: &str) -> Result<String, String> {
-    response.get("id").and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_owned)
+    response
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
         .ok_or_else(|| format!("{provider} import did not return a root session id"))
 }
 
 fn external_updated_ms(raw: &str) -> u64 {
-    if let Ok(ms) = raw.parse::<u64>() { return ms; }
-    let Some((date, time)) = raw.split_once('T') else { return 0; };
+    if let Ok(ms) = raw.parse::<u64>() {
+        return ms;
+    }
+    let Some((date, time)) = raw.split_once('T') else {
+        return 0;
+    };
     let parse = |part: Option<&str>| part.and_then(|part| part.parse::<i64>().ok());
-    let (Some(mut year), Some(month), Some(day), Some(hour), Some(minute), Some(second)) = (parse(date.get(..4)), parse(date.get(5..7)), parse(date.get(8..10)), parse(time.get(..2)), parse(time.get(3..5)), parse(time.get(6..8))) else { return 0; };
-    if !(1..=12).contains(&month) || !(1..=31).contains(&day) || hour > 23 || minute > 59 || second > 60 { return 0; }
-    let fraction: String = time.get(8..).and_then(|rest| rest.strip_prefix('.')).unwrap_or("").chars().take_while(|c| c.is_ascii_digit()).take(3).collect();
-    let millis = format!("{fraction:0<3}").get(..3).and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
-    let offset = time.find(['+', '-']).and_then(|index| time.get(index..)).and_then(|zone| {
-        let h = parse(zone.get(1..3))?; let m = parse(zone.get(4..6))?;
-        if h > 23 || m > 59 { return None; }
-        Some(if zone.starts_with('-') { -(h * 3600 + m * 60) } else { h * 3600 + m * 60 })
-    }).unwrap_or(0);
+    let (Some(mut year), Some(month), Some(day), Some(hour), Some(minute), Some(second)) = (
+        parse(date.get(..4)),
+        parse(date.get(5..7)),
+        parse(date.get(8..10)),
+        parse(time.get(..2)),
+        parse(time.get(3..5)),
+        parse(time.get(6..8)),
+    ) else {
+        return 0;
+    };
+    if !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+        || hour > 23
+        || minute > 59
+        || second > 60
+    {
+        return 0;
+    }
+    let fraction: String = time
+        .get(8..)
+        .and_then(|rest| rest.strip_prefix('.'))
+        .unwrap_or("")
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .take(3)
+        .collect();
+    let millis = format!("{fraction:0<3}")
+        .get(..3)
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(0);
+    let offset = time
+        .find(['+', '-'])
+        .and_then(|index| time.get(index..))
+        .and_then(|zone| {
+            let h = parse(zone.get(1..3))?;
+            let m = parse(zone.get(4..6))?;
+            if h > 23 || m > 59 {
+                return None;
+            }
+            Some(if zone.starts_with('-') {
+                -(h * 3600 + m * 60)
+            } else {
+                h * 3600 + m * 60
+            })
+        })
+        .unwrap_or(0);
     year -= i64::from(month <= 2);
-    let era = year.div_euclid(400); let yoe = year - era * 400;
+    let era = year.div_euclid(400);
+    let yoe = year - era * 400;
     let month = month + if month > 2 { -3 } else { 9 };
-    let days = era * 146097 + yoe * 365 + yoe / 4 - yoe / 100 + (153 * month + 2) / 5 + day - 1 - 719468;
-    (days * 86_400 + hour * 3600 + minute * 60 + second - offset).saturating_mul(1000).saturating_add(millis).max(0) as u64
+    let days =
+        era * 146097 + yoe * 365 + yoe / 4 - yoe / 100 + (153 * month + 2) / 5 + day
+            - 1
+            - 719468;
+    (days * 86_400 + hour * 3600 + minute * 60 + second - offset)
+        .saturating_mul(1000)
+        .saturating_add(millis)
+        .max(0) as u64
 }
 
 #[cfg(test)]
@@ -230,22 +436,44 @@ mod external_catalog_tests {
         assert_eq!(rows[0].updated_ms, 1_784_550_896_123);
         assert!(rows[0].external_preview.as_ref().unwrap().import_supported);
         assert_eq!(rows[1].id, "native-id");
-        assert_eq!(rows[1].external_preview.as_ref().unwrap().history_state, "text_only");
+        assert_eq!(
+            rows[1].external_preview.as_ref().unwrap().history_state,
+            "text_only"
+        );
         assert!(parse_external_catalog(&data, ConversationSource::Codex).is_err());
         let codex = serde_json::json!({"provider":"codex","cwd":"/project","importSupported":true,"sessions":[{"provider":"codex","cwd":"/project","sourceKey":"codex:k","externalSessionId":"a"}]});
-        assert!(parse_external_catalog(&codex, ConversationSource::Codex).unwrap()[0].external_preview.as_ref().unwrap().import_supported);
+        assert!(
+            parse_external_catalog(&codex, ConversationSource::Codex).unwrap()[0]
+                .external_preview
+                .as_ref()
+                .unwrap()
+                .import_supported
+        );
         let unavailable = serde_json::json!({"provider":"opencode","cwd":"/project","importSupported":false,"importUnavailableReason":"Adapter cannot replay this history","sessions":[{"provider":"opencode","cwd":"/project","sourceKey":"opencode:k","externalSessionId":"a"}]});
-        let rows = parse_external_catalog(&unavailable, ConversationSource::OpenCode).unwrap();
+        let rows =
+            parse_external_catalog(&unavailable, ConversationSource::OpenCode).unwrap();
         assert!(!rows[0].external_preview.as_ref().unwrap().import_supported);
-        assert!(rows[0].time_label.contains("Adapter cannot replay this history"));
+        assert!(rows[0]
+            .time_label
+            .contains("Adapter cannot replay this history"));
     }
 
     #[test]
     fn import_payload_and_root_id_for_each_provider() {
         for provider in ["opencode", "codex", "claude"] {
-            assert_eq!(external_import_payload(provider, "opaque"), serde_json::json!({"provider":provider,"externalSessionId":"opaque"}));
-            assert_eq!(parse_external_import_id(&serde_json::json!({"id":"root-id"}), provider).unwrap(), "root-id");
-            assert!(parse_external_import_id(&serde_json::json!({"id":""}), provider).is_err());
+            assert_eq!(
+                external_import_payload(provider, "opaque"),
+                serde_json::json!({"provider":provider,"externalSessionId":"opaque"})
+            );
+            assert_eq!(
+                parse_external_import_id(&serde_json::json!({"id":"root-id"}), provider)
+                    .unwrap(),
+                "root-id"
+            );
+            assert!(
+                parse_external_import_id(&serde_json::json!({"id":""}), provider)
+                    .is_err()
+            );
         }
     }
 
@@ -630,7 +858,11 @@ fn apply_subagent_runtime_snapshot(
             statuses
                 .get(&entry.id)
                 .and_then(|status| normalize_explicit_runtime_status(&status.kind))
-                .or_else(|| entry.runtime_status.as_deref().filter(|status| matches!(*status, "completed" | "error" | "interrupted")))
+                .or_else(|| {
+                    entry.runtime_status.as_deref().filter(|status| {
+                        matches!(*status, "completed" | "error" | "interrupted")
+                    })
+                })
                 .unwrap_or("interrupted")
                 .to_string(),
         );
@@ -806,7 +1038,10 @@ mod subagent_runtime_snapshot_tests {
         assert!(error.contains("Codex ACP authentication required"));
         assert!(error.contains("Sign in with the provider's CLI"));
         assert!(!error.contains("\"details\""));
-        assert_eq!(http_error(409, "Conflict", "busy"), "Neoism Agent HTTP 409 Conflict: busy");
+        assert_eq!(
+            http_error(409, "Conflict", "busy"),
+            "Neoism Agent HTTP 409 Conflict: busy"
+        );
     }
 
     #[test]
@@ -1001,9 +1236,11 @@ mod subagent_runtime_snapshot_tests {
 
     #[test]
     fn cancelled_child_remains_stopped_after_runtime_reload() {
-        let child = serde_json::json!({"id":"child", "externalAgent":{"status":"cancelled"}});
+        let child =
+            serde_json::json!({"id":"child", "externalAgent":{"status":"cancelled"}});
         let entry = subagent_entry_from_session(&child, &HashMap::new(), 1).unwrap();
-        let mut entries = vec![NeoismAgentSessionEntry::new("root", "root", "root"), entry];
+        let mut entries =
+            vec![NeoismAgentSessionEntry::new("root", "root", "root"), entry];
         apply_subagent_runtime_snapshot(&mut entries, &HashMap::new());
         assert_eq!(entries[1].runtime_status.as_deref(), Some("interrupted"));
     }
@@ -2034,11 +2271,21 @@ fn http_request(
 }
 
 pub(super) fn http_error(status: u16, reason: &str, body: &str) -> String {
-    let message = serde_json::from_str::<Value>(body).ok()
-        .and_then(|value| value.get("message").and_then(Value::as_str).map(str::to_owned))
+    let message = serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("message")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
         .filter(|message| !message.trim().is_empty());
     let detail = message.as_deref().unwrap_or(body.trim());
-    let suffix = if detail.is_empty() { String::new() } else { format!(": {detail}") };
+    let suffix = if detail.is_empty() {
+        String::new()
+    } else {
+        format!(": {detail}")
+    };
     format!("Neoism Agent HTTP {status} {reason}{suffix}")
 }
 
@@ -2206,7 +2453,7 @@ pub(super) fn set_session_pinned(
 }
 
 /// `DELETE /session/:id` — permanently delete a session.
-pub(super) fn delete_session(server: &str, session_id: &str) -> Result<(), String> {
+pub(crate) fn delete_session(server: &str, session_id: &str) -> Result<(), String> {
     api_request_json(
         server,
         "DELETE",
@@ -2217,7 +2464,7 @@ pub(super) fn delete_session(server: &str, session_id: &str) -> Result<(), Strin
 }
 
 /// `PATCH /session/:id` with `{ title }` — rename a session.
-pub(super) fn rename_session(
+pub(crate) fn rename_session(
     server: &str,
     session_id: &str,
     title: &str,

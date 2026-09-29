@@ -710,12 +710,20 @@ impl NeoismAgentPane {
         // A browser running on a different device cannot return to the
         // Agent's loopback callback. The web pane uses device-code methods
         // even when the browser-based option was selected.
-        let method = if (provider.id == "openai" && method.label.to_ascii_lowercase().contains("browser"))
-            || (provider.id == "xai" && !method.is_api && !method.label.contains("Headless"))
+        let method = if (provider.id == "openai"
+            && method.label.to_ascii_lowercase().contains("browser"))
+            || (provider.id == "xai"
+                && !method.is_api
+                && !method.label.contains("Headless"))
         {
-            self.connect.as_ref()
+            self.connect
+                .as_ref()
                 .and_then(|flow| flow.methods_by_provider.get(&provider.id))
-                .and_then(|methods| methods.iter().find(|candidate| candidate.label.to_ascii_lowercase().contains("headless")))
+                .and_then(|methods| {
+                    methods.iter().find(|candidate| {
+                        candidate.label.to_ascii_lowercase().contains("headless")
+                    })
+                })
                 .cloned()
                 .unwrap_or_else(|| method.clone())
         } else {

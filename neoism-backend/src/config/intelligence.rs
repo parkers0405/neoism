@@ -1279,9 +1279,15 @@ mod tests {
     #[test]
     fn default_chat_source_descriptor_is_closed_enum() {
         let rows = config_descriptors();
-        let row = rows.iter().find(|row| row.path == "agent.default-chat-source").unwrap();
+        let row = rows
+            .iter()
+            .find(|row| row.path == "agent.default-chat-source")
+            .unwrap();
         assert_eq!(row.default, json!("neoism"));
-        assert_eq!(row.static_suggestions, ["neoism", "opencode", "claude-code", "codex"]);
+        assert_eq!(
+            row.static_suggestions,
+            ["neoism", "opencode", "claude-code", "codex"]
+        );
         assert!(!row.extensible);
         assert_eq!(row.control, Control::Select);
     }

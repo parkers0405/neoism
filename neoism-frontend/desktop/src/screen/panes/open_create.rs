@@ -601,6 +601,7 @@ impl Screen<'_> {
         self.workspace_file_trees.remove(workspace_id);
         self.workspace_notes_sidebars.remove(workspace_id);
         self.workspace_notes_vaults.remove(workspace_id);
+        self.workspace_conversations_visibility.remove(workspace_id);
     }
 
     fn retire_replaced_workspace(&mut self, workspace_id: &str) {

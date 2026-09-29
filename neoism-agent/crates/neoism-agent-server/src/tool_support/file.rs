@@ -372,8 +372,10 @@ fn write_tool_metadata(
         metadata["lspUnavailable"] = json!(error.to_string());
     }
     match crate::snapshot::file_change(&context.cwd, &path, mutation.snapshot_before) {
-        Ok(Some(snapshot)) => crate::snapshot::add_metadata_snapshots(&mut metadata, vec![snapshot]),
-        Ok(None) => {},
+        Ok(Some(snapshot)) => {
+            crate::snapshot::add_metadata_snapshots(&mut metadata, vec![snapshot])
+        }
+        Ok(None) => {}
         Err(error) => metadata["snapshotError"] = json!(error.to_string()),
     }
     format::attach_formatted(&mut metadata, &formatted);
@@ -510,8 +512,10 @@ fn edit_tool_metadata(
         metadata["lspUnavailable"] = json!(error.to_string());
     }
     match crate::snapshot::file_change(&context.cwd, &path, mutation.snapshot_before) {
-        Ok(Some(snapshot)) => crate::snapshot::add_metadata_snapshots(&mut metadata, vec![snapshot]),
-        Ok(None) => {},
+        Ok(Some(snapshot)) => {
+            crate::snapshot::add_metadata_snapshots(&mut metadata, vec![snapshot])
+        }
+        Ok(None) => {}
         Err(error) => metadata["snapshotError"] = json!(error.to_string()),
     }
     format::attach_formatted(&mut metadata, &formatted);

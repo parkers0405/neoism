@@ -226,7 +226,9 @@ impl NeoismAgentPane {
     }
 
     pub fn register_status_chip_rect(&mut self, index: usize, rect: [f32; 4]) {
-        if self.status_chip_rects.len() <= index { self.status_chip_rects.resize(index + 1, None); }
+        if self.status_chip_rects.len() <= index {
+            self.status_chip_rects.resize(index + 1, None);
+        }
         if let Some(slot) = self.status_chip_rects.get_mut(index) {
             *slot = Some(rect);
         }
@@ -246,10 +248,13 @@ impl NeoismAgentPane {
     pub fn open_status_chip_picker(&mut self, index: usize) {
         let index = if !self.has_conversation() {
             if index == 0 {
-                if self.picker.as_ref().is_some_and(|picker| picker.kind == NeoismAgentPickerKind::ConversationSource) {
+                if self.picker.as_ref().is_some_and(|picker| {
+                    picker.kind == NeoismAgentPickerKind::ConversationSource
+                }) {
                     self.close_picker();
                 } else {
-                    self.picker = Some(NeoismAgentPicker::source_picker(self.new_chat_source));
+                    self.picker =
+                        Some(NeoismAgentPicker::source_picker(self.new_chat_source));
                 }
                 return;
             }
@@ -257,7 +262,9 @@ impl NeoismAgentPane {
         } else {
             index
         };
-        if self.new_chat_source.provider().is_some() { return; }
+        if self.new_chat_source.provider().is_some() {
+            return;
+        }
         let kind = match index {
             0 => NeoismAgentPickerKind::Agent,
             1 => NeoismAgentPickerKind::Model,
@@ -536,10 +543,16 @@ mod source_picker_tests {
         assert_eq!(pane.status_chip_at(5.0, 5.0), Some(0));
         assert_eq!(pane.status_chip_at(35.0, 5.0), Some(1));
         pane.open_status_chip_picker(0);
-        assert_eq!(pane.picker.as_ref().unwrap().kind, NeoismAgentPickerKind::ConversationSource);
+        assert_eq!(
+            pane.picker.as_ref().unwrap().kind,
+            NeoismAgentPickerKind::ConversationSource
+        );
         pane.picker.as_mut().unwrap().selected = 2;
         assert!(pane.commit_picker());
-        assert_eq!(pane.new_chat_source, side_panel::ConversationSource::ClaudeCode);
+        assert_eq!(
+            pane.new_chat_source,
+            side_panel::ConversationSource::ClaudeCode
+        );
         assert_eq!(pane.input, "unfinished");
         assert!(pane.session_id.is_none());
     }

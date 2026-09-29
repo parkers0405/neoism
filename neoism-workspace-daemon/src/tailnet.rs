@@ -188,24 +188,42 @@ pub async fn discover_hosted_endpoints(response: &mut TailnetPeersResponse) {
         .timeout(std::time::Duration::from_secs(2))
         .redirect(reqwest::redirect::Policy::none())
         .no_proxy()
-        .build() else { return; };
-    futures::future::join_all(response.peers.iter_mut().filter(|peer| peer.online).map(|peer| {
-        let client = &client;
-        async move {
-            let Ok(ip) = peer.ip.parse::<std::net::IpAddr>() else { return; };
-            let contact = std::net::SocketAddr::new(ip, 7878);
-            let Ok(reply) = client.get(format!("http://{contact}/hosted-server-ports"))
-                .send().await else { return; };
-            if !reply.status().is_success() { return; }
-            let Ok(ports) = reply.json::<Vec<u16>>().await else { return; };
-            for port in ports.into_iter().filter(|port| *port != 0).take(128) {
-                let endpoint = format!("ws://{}/session", std::net::SocketAddr::new(ip, port));
-                if !peer.daemon_urls.contains(&endpoint) {
-                    peer.daemon_urls.push(endpoint);
+        .build()
+    else {
+        return;
+    };
+    futures::future::join_all(response.peers.iter_mut().filter(|peer| peer.online).map(
+        |peer| {
+            let client = &client;
+            async move {
+                let Ok(ip) = peer.ip.parse::<std::net::IpAddr>() else {
+                    return;
+                };
+                let contact = std::net::SocketAddr::new(ip, 7878);
+                let Ok(reply) = client
+                    .get(format!("http://{contact}/hosted-server-ports"))
+                    .send()
+                    .await
+                else {
+                    return;
+                };
+                if !reply.status().is_success() {
+                    return;
+                }
+                let Ok(ports) = reply.json::<Vec<u16>>().await else {
+                    return;
+                };
+                for port in ports.into_iter().filter(|port| *port != 0).take(128) {
+                    let endpoint =
+                        format!("ws://{}/session", std::net::SocketAddr::new(ip, port));
+                    if !peer.daemon_urls.contains(&endpoint) {
+                        peer.daemon_urls.push(endpoint);
+                    }
                 }
             }
-        }
-    })).await;
+        },
+    ))
+    .await;
 }
 
 /// Attach daemon endpoints from the authoritative host registry to matching

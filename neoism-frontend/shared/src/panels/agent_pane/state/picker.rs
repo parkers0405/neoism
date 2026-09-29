@@ -159,12 +159,23 @@ impl NeoismAgentPicker {
         Self::new(
             NeoismAgentPickerKind::ConversationSource,
             "Starting agent",
-            choices.iter().map(|choice| {
-                let mut option = NeoismAgentPickerOption::new(choice.label(), "", "", choice.label());
-                option.is_current = *choice == source;
-                option
-            }).collect(),
-            choices.iter().position(|choice| *choice == source).unwrap_or(0),
+            choices
+                .iter()
+                .map(|choice| {
+                    let mut option = NeoismAgentPickerOption::new(
+                        choice.label(),
+                        "",
+                        "",
+                        choice.label(),
+                    );
+                    option.is_current = *choice == source;
+                    option
+                })
+                .collect(),
+            choices
+                .iter()
+                .position(|choice| *choice == source)
+                .unwrap_or(0),
         )
     }
 

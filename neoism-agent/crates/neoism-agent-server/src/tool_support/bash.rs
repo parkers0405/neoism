@@ -175,7 +175,11 @@ pub(super) async fn bash_tool(
     };
     let mut env = std::collections::BTreeMap::new();
     #[cfg(not(windows))]
-    env.extend(login_env.iter().map(|(key, value)| (key.clone(), value.clone())));
+    env.extend(
+        login_env
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone())),
+    );
     env.extend(context.env.clone());
     env.insert("TERM".into(), "xterm-256color".into());
     env.insert("NEOISM_TERMINAL".into(), "1".into());

@@ -72,11 +72,11 @@ pub(crate) fn app_with_cors(state: AppState, allowed_origins: &[String]) -> Rout
         .route("/v2/session-catalog/events", get(v2_session_catalog_events))
         .route(
             "/v2/artifacts",
-            get(artifact_list)
-                .post(artifact_create)
-                .layer(axum::extract::DefaultBodyLimit::max(
+            get(artifact_list).post(artifact_create).layer(
+                axum::extract::DefaultBodyLimit::max(
                     crate::artifact_routes::MAX_ARTIFACT_BYTES,
-                )),
+                ),
+            ),
         )
         .route(
             "/v2/artifacts/:artifact_id",
@@ -98,8 +98,11 @@ pub(crate) fn app_with_cors(state: AppState, allowed_origins: &[String]) -> Rout
             post(question_reject),
         )
         .route("/v2/tools", get(tool_list))
-        .route("/v2/external/options/preview", get(crate::external_agent::options::preview)
-            .post(crate::external_agent::options::preview_selected))
+        .route(
+            "/v2/external/options/preview",
+            get(crate::external_agent::options::preview)
+                .post(crate::external_agent::options::preview_selected),
+        )
         .route("/v2/sessions", get(v2_session_list).post(session_create))
         .route(
             "/v2/sessions/external/catalog",
@@ -1147,7 +1150,10 @@ async fn authenticate_request(
         }
         if claims.hosted
             && authorized_session
-            && !matches!(*request.method(), Method::GET | Method::HEAD | Method::OPTIONS)
+            && !matches!(
+                *request.method(),
+                Method::GET | Method::HEAD | Method::OPTIONS
+            )
         {
             if let Some(session_id) = owned_session.as_deref() {
                 if let Err(error) = state
@@ -1204,7 +1210,10 @@ async fn authenticate_request(
 }
 
 fn mutation_requires_session_control(request: &Request<Body>) -> bool {
-    if matches!(*request.method(), Method::GET | Method::HEAD | Method::OPTIONS) {
+    if matches!(
+        *request.method(),
+        Method::GET | Method::HEAD | Method::OPTIONS
+    ) {
         return false;
     }
     let path = request.uri().path();
@@ -1350,7 +1359,8 @@ fn session_id_from_path(path: &str) -> Option<&str> {
         .collect::<Vec<_>>();
     if let Some(index) = parts.iter().position(|part| *part == "sessions") {
         let id = *parts.get(index + 1)?;
-        return (!matches!(id, "status" | "workspace" | "project" | "external")).then_some(id);
+        return (!matches!(id, "status" | "workspace" | "project" | "external"))
+            .then_some(id);
     }
     None
 }
@@ -1372,8 +1382,13 @@ fn allows_global_execution_observation(claims: &crate::caller::CallerClaims) -> 
         && claims.directory_prefixes.is_empty()
 }
 
-fn workspace_peer_provider_auth(tenant_id: &str, workspace_id: Option<&str>, path: &str) -> bool {
-    workspace_id.is_some_and(|workspace_id| tenant_id == format!("workspace:{workspace_id}"))
+fn workspace_peer_provider_auth(
+    tenant_id: &str,
+    workspace_id: Option<&str>,
+    path: &str,
+) -> bool {
+    workspace_id
+        .is_some_and(|workspace_id| tenant_id == format!("workspace:{workspace_id}"))
         && path.starts_with("/v2/providers/")
         && hosted_restricted_path(path)
 }
@@ -1439,11 +1454,23 @@ mod hosted_plugin_authorization_tests {
     #[test]
     fn only_workspace_daemon_peers_can_use_host_provider_auth() {
         let path = "/v2/providers/openai/oauth/authorize";
-        assert!(workspace_peer_provider_auth("workspace:abc", Some("abc"), path));
-        assert!(workspace_peer_provider_auth("workspace:abc", Some("abc"), "/v2/providers/openai/auth"));
+        assert!(workspace_peer_provider_auth(
+            "workspace:abc",
+            Some("abc"),
+            path
+        ));
+        assert!(workspace_peer_provider_auth(
+            "workspace:abc",
+            Some("abc"),
+            "/v2/providers/openai/auth"
+        ));
         assert!(!workspace_peer_provider_auth("tenant-a", Some("abc"), path));
         assert!(!workspace_peer_provider_auth("workspace:abc", None, path));
-        assert!(!workspace_peer_provider_auth("workspace:abc", Some("abc"), "/v2/config"));
+        assert!(!workspace_peer_provider_auth(
+            "workspace:abc",
+            Some("abc"),
+            "/v2/config"
+        ));
     }
 
     #[test]

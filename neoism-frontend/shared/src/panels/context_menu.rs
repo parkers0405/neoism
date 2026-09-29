@@ -97,7 +97,22 @@ pub enum ContextMenuAction {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AgentContextAction {
-    StopBackgroundTask { session_id: String, job_id: String },
+    StopBackgroundTask {
+        session_id: String,
+        job_id: String,
+    },
+    RenameSession {
+        session_id: String,
+        title: String,
+        server: String,
+        directory: Option<String>,
+    },
+    DeleteSession {
+        session_id: String,
+        title: String,
+        server: String,
+        directory: Option<String>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -319,6 +319,8 @@ async fn preview_and_draft_are_ephemeral_and_replay_on_first_prompt() {
         .await;
         assert_eq!(preview["provider"], provider);
         assert_eq!(preview["configOptions"][0]["currentValue"], "base");
+        assert_eq!(preview["availableCommands"].as_array().unwrap().len(), 1);
+        assert_eq!(preview["availableCommands"][0]["name"], "review");
         assert_eq!(preview["selectedOptions"], json!({}));
         assert!(preview["externalSessionId"].is_null());
         assert!(state.inner.store.list_sessions().await.unwrap().is_empty());
@@ -553,11 +555,27 @@ fn claude_commands_without_arguments_accept_null_input() {
     assert!(validate_commands(&json!({"availableCommands": [
         {"name": "broken", "description": "No hint", "input": {}}
     ]}))
-    .is_err());
+    .unwrap()
+    .is_empty());
     assert!(validate_commands(&json!({"availableCommands": [
         {"name": "broken", "description": "bad\u{0000}control"}
     ]}))
-    .is_err());
+    .unwrap()
+    .is_empty());
+}
+
+#[test]
+fn codex_command_snapshot_cannot_block_valid_options() {
+    let commands = validate_commands(&json!({"availableCommands": [
+        {"name": "/review", "description": "Review changes"},
+        {"name": "review", "description": "Duplicate"},
+        {"name": "agent:explain", "description": "Explain code"},
+        {"name": "invalid name", "description": "Not a slash command"}
+    ]}))
+    .unwrap();
+    assert_eq!(commands.len(), 2);
+    assert_eq!(commands[0]["name"], "review");
+    assert_eq!(commands[1]["name"], "agent:explain");
 }
 
 fn request(method: Method, uri: &str, body: Option<Value>) -> Request<Body> {
@@ -601,7 +619,7 @@ fn fake(root: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
     let mut notified: Value = serde_json::from_str(&fast).unwrap();
     notified[2]["currentValue"] = json!("code");
     let update = json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"provider-session","update":{"sessionUpdate":"config_option_update","configOptions":notified}}}).to_string();
-    let commands = json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"provider-session","update":{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"review","description":"Review changes\nInclude context:\tfiles and links","input":null}]}}}).to_string();
+    let commands = json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"provider-session","update":{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"/review","description":"Review changes\nInclude context:\tfiles and links","input":null},{"name":"review","description":"Duplicate"},{"name":"invalid name","description":"Invalid"}]}}}).to_string();
     let source = format!(
         r#"#!/bin/sh
 while IFS= read -r line; do

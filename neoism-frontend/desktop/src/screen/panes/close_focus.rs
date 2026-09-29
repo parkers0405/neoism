@@ -148,6 +148,7 @@ impl Screen<'_> {
                 self.workspace_buffer_tabs.remove(&id);
                 self.workspace_buf_enter_targets.remove(&id);
                 self.workspace_editor_active_paths.remove(&id);
+                self.workspace_conversations_visibility.remove(&id);
             }
             if let Some(island) = self.renderer.island.as_mut() {
                 island.remove_tab_state(closing_index);
@@ -749,8 +750,13 @@ impl Screen<'_> {
             return true;
         }
 
-        if self.renderer.conversations_visible && self.renderer.conversations_pane.side_panel().is_focused() {
-            self.renderer.conversations_pane.side_panel_mut().set_focused(false);
+        if self.renderer.conversations_visible
+            && self.renderer.conversations_pane.side_panel().is_focused()
+        {
+            self.renderer
+                .conversations_pane
+                .side_panel_mut()
+                .set_focused(false);
             if !right {
                 if self.renderer.notes_sidebar.is_visible() {
                     self.renderer.notes_sidebar.set_focused(true);
@@ -765,20 +771,44 @@ impl Screen<'_> {
             self.mark_dirty();
             return true;
         }
-        if right && self.renderer.conversations_visible
+        if right
+            && self.renderer.conversations_visible
             && (self.renderer.notes_sidebar.is_focused()
-                || (self.renderer.file_tree.is_focused() && !self.renderer.notes_sidebar.is_visible())) {
+                || (self.renderer.file_tree.is_focused()
+                    && !self.renderer.notes_sidebar.is_visible()))
+        {
             self.renderer.file_tree.set_focused(false);
             self.renderer.notes_sidebar.set_focused(false);
-            self.renderer.conversations_pane.side_panel_mut().set_focused(true);
+            self.renderer
+                .conversations_pane
+                .side_panel_mut()
+                .set_focused(true);
             self.mark_dirty();
             return true;
         }
-        if !right && self.renderer.conversations_visible
-            && !self.renderer.file_tree.is_focused() && !self.renderer.notes_sidebar.is_focused()
-            && self.renderer.conversations_pane.side_panel().last_panel_rect().is_some()
-            && !self.context_manager.current().neoism_agent.as_ref().is_some_and(|agent| agent.detail_panel().is_focused() || agent.side_panel().is_focused()) {
-            self.renderer.conversations_pane.side_panel_mut().set_focused(true);
+        if !right
+            && self.renderer.conversations_visible
+            && !self.renderer.file_tree.is_focused()
+            && !self.renderer.notes_sidebar.is_focused()
+            && self
+                .renderer
+                .conversations_pane
+                .side_panel()
+                .last_panel_rect()
+                .is_some()
+            && !self
+                .context_manager
+                .current()
+                .neoism_agent
+                .as_ref()
+                .is_some_and(|agent| {
+                    agent.detail_panel().is_focused() || agent.side_panel().is_focused()
+                })
+        {
+            self.renderer
+                .conversations_pane
+                .side_panel_mut()
+                .set_focused(true);
             self.mark_dirty();
             return true;
         }

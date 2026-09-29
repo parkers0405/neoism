@@ -383,7 +383,7 @@ pub(crate) async fn project_external_plan(
     Ok(())
 }
 
-async fn update_external_tool_part(
+pub(super) async fn update_external_tool_part(
     ctx: &AcpEventContext,
     update: Value,
 ) -> Result<(), ApiError> {
@@ -393,16 +393,102 @@ async fn update_external_tool_part(
         .and_then(Value::as_str)
         .unwrap_or("external-tool")
         .to_string();
+    let previous = {
+        let message = ctx.live_message.lock().await;
+        message.parts.iter().find_map(|part| match part {
+            Part::Tool(tool) if tool.call_id == tool_call_id => Some(tool.clone()),
+            _ => None,
+        })
+    };
     let tool_title = update
         .get("title")
         .and_then(Value::as_str)
-        .unwrap_or("External tool")
-        .to_string();
-    let input = update.get("rawInput").cloned().unwrap_or_else(|| json!({}));
+        .filter(|title| !title.is_empty())
+        .map(str::to_owned)
+        .or_else(|| {
+            previous.as_ref().map(|tool| {
+                tool.metadata
+                    .as_ref()
+                    .and_then(|meta| meta.get("acpTitle"))
+                    .and_then(Value::as_str)
+                    .or_else(|| match &tool.state {
+                        neoism_agent_core::ToolState::Completed { title, .. } => {
+                            Some(title.as_str())
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or(&tool.tool)
+                    .to_owned()
+            })
+        })
+        .unwrap_or_else(|| "External tool".into());
+    let tool_name = update
+        .get("kind")
+        .and_then(Value::as_str)
+        .map(|kind| {
+            match kind {
+                "edit" => "edit",
+                "execute" => "bash",
+                "read" => "read",
+                "search" => "grep",
+                _ => kind,
+            }
+            .to_owned()
+        })
+        .or_else(|| previous.as_ref().map(|tool| tool.tool.clone()))
+        .unwrap_or_else(|| tool_title.clone());
+    let mut input = update
+        .get("rawInput")
+        .cloned()
+        .or_else(|| {
+            previous.as_ref().map(|tool| match &tool.state {
+                neoism_agent_core::ToolState::Pending { input, .. }
+                | neoism_agent_core::ToolState::Running { input, .. }
+                | neoism_agent_core::ToolState::Completed { input, .. }
+                | neoism_agent_core::ToolState::Error { input, .. } => input.clone(),
+            })
+        })
+        .unwrap_or_else(|| json!({}));
+    if matches!(ctx.runtime, ExternalRuntime::Codex)
+        && matches!(
+            tool_title.to_ascii_lowercase().replace(' ', "_").as_str(),
+            "spawn_agent"
+        )
+        && input.get("prompt").is_none()
+    {
+        if let Some(prompt) = input
+            .get("message")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+        {
+            input["prompt"] = json!(prompt);
+            input["subagent_type"] = json!("codex");
+        }
+    }
+    let terminal_output = update
+        .pointer("/_meta/terminalId")
+        .and_then(Value::as_str)
+        .and_then(|_| update.get("rawOutput").and_then(Value::as_str))
+        .map(str::to_owned)
+        .or_else(|| {
+            previous
+                .as_ref()
+                .and_then(|tool| tool.metadata.as_ref())
+                .and_then(|metadata| metadata.get("terminalOutput"))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        });
     let status = update
         .get("status")
         .and_then(Value::as_str)
         .unwrap_or("in_progress");
+    let acp_diffs = acp_diff_content(&update).or_else(|| {
+        previous
+            .as_ref()
+            .and_then(|tool| tool.metadata.as_ref())
+            .and_then(|metadata| metadata.get("acpDiffs"))
+            .cloned()
+    });
     let durable = update
         .get("sessionUpdate")
         .and_then(Value::as_str)
@@ -417,7 +503,8 @@ async fn update_external_tool_part(
         .nested_sessions
         .get(&tool_call_id)
         .cloned();
-    let nested_session_id = if existing_nested_session_id.is_some() {
+    let had_nested_session = existing_nested_session_id.is_some();
+    let nested_session_id = if had_nested_session {
         existing_nested_session_id
     } else if update
         .get("toolCallId")
@@ -433,6 +520,11 @@ async fn update_external_tool_part(
     } else {
         None
     };
+    if had_nested_session && update.get("rawInput").is_some() {
+        if let Some(nested_id) = nested_session_id.as_deref() {
+            enrich_nested_prompt(&ctx.state, nested_id, &input).await?;
+        }
+    }
     let mut finished_nested = None;
     let part = {
         let mut collector = ctx.collector.lock().await;
@@ -461,7 +553,7 @@ async fn update_external_tool_part(
             output.clone()
         };
         let mut message = ctx.live_message.lock().await;
-        let part = match status {
+        let mut part = match status {
             "completed" => {
                 if let Some(nested_id) = nested_session_id.clone() {
                     finished_nested = Some((
@@ -478,7 +570,9 @@ async fn update_external_tool_part(
                     json!({
                         "runtime": "acp",
                         "provider": ctx.runtime.provider_id(),
-                        "update": update,
+                        "update": update.clone(),
+                        "acpTitle": tool_title.clone(),
+                        "acpDiffs": acp_diffs.clone(),
                     }),
                 )
                 .unwrap_or_else(|| {
@@ -488,7 +582,7 @@ async fn update_external_tool_part(
                         &session_id,
                         &ctx.assistant_id,
                         tool_call_id.clone(),
-                        tool_title.clone(),
+                        tool_name.clone(),
                         input.clone(),
                     );
                     set_tool_completed(
@@ -499,7 +593,9 @@ async fn update_external_tool_part(
                         json!({
                             "runtime": "acp",
                             "provider": ctx.runtime.provider_id(),
-                            "update": update,
+                            "update": update.clone(),
+                            "acpTitle": tool_title.clone(),
+                            "acpDiffs": acp_diffs.clone(),
                         }),
                     )
                     .expect("tool part inserted before completion")
@@ -519,7 +615,7 @@ async fn update_external_tool_part(
                             &session_id,
                             &ctx.assistant_id,
                             tool_call_id.clone(),
-                            tool_title.clone(),
+                            tool_name.clone(),
                             input.clone(),
                         );
                         set_tool_error(
@@ -536,10 +632,21 @@ async fn update_external_tool_part(
                 &session_id,
                 &ctx.assistant_id,
                 tool_call_id,
-                tool_title,
+                tool_name,
                 input,
             ),
         };
+        if let Part::Tool(tool) = &mut part {
+            let acp_metadata = json!({"acpTitle": tool_title, "acpDiffs": acp_diffs, "terminalOutput": terminal_output});
+            tool.metadata = Some(acp_metadata.clone());
+            if let Some(Part::Tool(stored)) = message
+                .parts
+                .iter_mut()
+                .find(|part| matches!(part, Part::Tool(item) if item.id == tool.id))
+            {
+                stored.metadata = Some(acp_metadata);
+            }
+        }
         if durable {
             ctx.state
                 .inner
@@ -558,6 +665,21 @@ async fn update_external_tool_part(
     } else {
         ctx.state.publish_live(event);
     }
+    if let Some(nested_id) = nested_session_id.as_deref() {
+        if !matches!(status, "completed" | "failed" | "error") {
+            let output = external_tool_output(&update);
+            if !output.is_empty() {
+                project_nested_output(
+                    &ctx.state,
+                    ctx.runtime,
+                    nested_id,
+                    &output,
+                    is_terminal_output_update(&update),
+                )
+                .await?;
+            }
+        }
+    }
     if let Some((nested_id, status, output)) = finished_nested {
         finish_nested_external_session(
             &ctx.state,
@@ -571,15 +693,73 @@ async fn update_external_tool_part(
     Ok(())
 }
 
-pub(crate) fn is_external_nested_agent_tool(update: &Value, input: &Value) -> bool {
-    // A thought/plan or a tool's free-form title is not evidence of a
-    // separate agent. Only explicit task-tool input may create a child.
-    let _ = update;
-    input.get("prompt").and_then(Value::as_str).is_some()
-        && input
-            .get("subagent_type")
+pub(crate) fn is_external_nested_agent_tool(update: &Value, _input: &Value) -> bool {
+    // A stable call ID plus the provider's explicit task tool is enough for
+    // early, input-less ACP tool_call notifications. Never infer from prose.
+    if !matches!(
+        update.get("sessionUpdate").and_then(Value::as_str),
+        None | Some("tool_call" | "tool_call_update")
+    ) {
+        return false;
+    }
+    ["kind", "title"].iter().any(|key| {
+        update
+            .get(*key)
             .and_then(Value::as_str)
-            .is_some_and(|value| !value.is_empty())
+            .is_some_and(|name| {
+                matches!(
+                    name.to_ascii_lowercase().replace(' ', "_").as_str(),
+                    "task" | "spawn_agent"
+                )
+            })
+    })
+}
+
+async fn enrich_nested_prompt(
+    state: &AppState,
+    nested_id: &str,
+    input: &Value,
+) -> Result<(), ApiError> {
+    let Some(prompt) = input
+        .get("prompt")
+        .or_else(|| input.get("message"))
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+    else {
+        return Ok(());
+    };
+    let Some(mut message) = state
+        .inner
+        .store
+        .list_messages(nested_id)
+        .await?
+        .into_iter()
+        .find(|message| matches!(message.info, MessageInfo::User(_)))
+    else {
+        return Ok(());
+    };
+    let Some(Part::Text(part)) = message
+        .parts
+        .iter_mut()
+        .find(|part| matches!(part, Part::Text(_)))
+    else {
+        return Ok(());
+    };
+    if part.text == prompt {
+        return Ok(());
+    }
+    part.text = prompt.to_owned();
+    let part = part.clone();
+    state
+        .inner
+        .store
+        .update_message(nested_id, &message)
+        .await?;
+    state.publish(EventPayload::new(
+        event_type::MESSAGE_PART_UPDATED,
+        json!({ "sessionID": nested_id, "part": part, "time": now_millis() }),
+    ));
+    Ok(())
 }
 
 async fn ensure_nested_external_session(
@@ -674,36 +854,63 @@ async fn ensure_nested_external_session(
     Ok(child_id.to_string())
 }
 
-pub(crate) async fn finish_nested_external_session(
+// ACP task tool output is the only text we can attribute to this child. It is
+// a snapshot (except terminal chunks), not the parent's assistant stream.
+async fn project_nested_output(
     state: &AppState,
     runtime: ExternalRuntime,
     nested_id: &str,
-    status: &str,
     output: &str,
+    terminal_chunk: bool,
 ) -> Result<(), ApiError> {
-    let Some(mut child) = state.inner.store.get_session(nested_id).await? else {
+    let Some(child) = state.inner.store.get_session(nested_id).await? else {
         return Ok(());
     };
     let messages = state.inner.store.list_messages(nested_id).await?;
-    if child.extra["externalAgent"]["status"]
-        .as_str()
-        .is_some_and(|value| value != "running")
-    {
-        return Ok(());
-    }
     let now = now_millis();
-    if !messages
-        .iter()
-        .any(|message| matches!(message.info, MessageInfo::Assistant(_)))
+    if let Some(mut message) = messages
+        .into_iter()
+        .find(|message| matches!(message.info, MessageInfo::Assistant(_)))
     {
-        let parent_id = messages
+        let Some(Part::Text(part)) = message
+            .parts
+            .iter_mut()
+            .find(|part| matches!(part, Part::Text(_)))
+        else {
+            return Ok(());
+        };
+        let next = if terminal_chunk {
+            format!("{}{output}", part.text)
+        } else {
+            output.to_owned()
+        };
+        if part.text == next {
+            return Ok(());
+        }
+        part.text = next;
+        let part = part.clone();
+        state
+            .inner
+            .store
+            .update_message(nested_id, &message)
+            .await?;
+        state.publish(EventPayload::new(
+            event_type::MESSAGE_PART_UPDATED,
+            json!({ "sessionID": nested_id, "part": part, "time": now }),
+        ));
+    } else {
+        let Some(parent_id) = state
+            .inner
+            .store
+            .list_messages(nested_id)
+            .await?
             .iter()
             .rev()
             .find_map(|message| match &message.info {
                 MessageInfo::User(user) => Some(user.id.clone()),
-                MessageInfo::Assistant(_) => None,
-            });
-        let Some(parent_id) = parent_id else {
+                _ => None,
+            })
+        else {
             return Ok(());
         };
         let message_id = Id::ascending(IdKind::Message);
@@ -711,24 +918,21 @@ pub(crate) async fn finish_nested_external_session(
             id: Id::ascending(IdKind::Part),
             session_id: child.id.clone(),
             message_id: message_id.clone(),
-            text: output.to_string(),
+            text: output.to_owned(),
             synthetic: None,
             time: None,
         });
-        let error = (status != "completed").then(
-            || json!({ "message": output, "interrupted": status == "interrupted" }),
-        );
         let message = MessageWithParts {
             info: MessageInfo::Assistant(AssistantMessage {
-                id: message_id.clone(),
+                id: message_id,
                 session_id: child.id.clone(),
                 time: CompletedTime {
                     created: now,
                     streamed: Some(now),
-                    completed: Some(now),
+                    completed: None,
                 },
                 parent_id,
-                mode: "build".to_string(),
+                mode: "build".into(),
                 agent: child
                     .agent
                     .clone()
@@ -739,26 +943,84 @@ pub(crate) async fn finish_nested_external_session(
                 },
                 cost: 0.0,
                 tokens: TokenUsage::default(),
-                model_id: runtime.provider_id().to_string(),
-                provider_id: "external".to_string(),
-                finish: Some(status.to_string()),
-                error,
+                model_id: runtime.provider_id().into(),
+                provider_id: "external".into(),
+                finish: None,
+                error: None,
             }),
             parts: vec![part.clone()],
         };
         state
             .inner
             .store
-            .append_message(child.id.as_str(), &message)
+            .append_message(nested_id, &message)
             .await?;
         state.publish(EventPayload::new(
             event_type::MESSAGE_UPDATED,
-            json!({ "sessionID": child.id, "info": message.info }),
+            json!({ "sessionID": nested_id, "info": message.info }),
         ));
         state.publish(EventPayload::new(
             event_type::MESSAGE_PART_UPDATED,
-            json!({ "sessionID": child.id, "part": part, "time": now }),
+            json!({ "sessionID": nested_id, "part": part, "time": now }),
         ));
+    }
+    Ok(())
+}
+
+pub(crate) async fn finish_nested_external_session(
+    state: &AppState,
+    runtime: ExternalRuntime,
+    nested_id: &str,
+    status: &str,
+    output: &str,
+) -> Result<(), ApiError> {
+    let Some(mut child) = state.inner.store.get_session(nested_id).await? else {
+        return Ok(());
+    };
+    if child.extra["externalAgent"]["status"]
+        .as_str()
+        .is_some_and(|value| value != "running")
+    {
+        return Ok(());
+    }
+    let existing = state.inner.store.list_messages(nested_id).await?;
+    if !existing
+        .iter()
+        .any(|message| matches!(message.info, MessageInfo::Assistant(_)))
+        || !output.is_empty()
+    {
+        project_nested_output(state, runtime, nested_id, output, false).await?;
+    }
+    let Some(mut message) = state
+        .inner
+        .store
+        .list_messages(nested_id)
+        .await?
+        .into_iter()
+        .find(|message| matches!(message.info, MessageInfo::Assistant(_)))
+    else {
+        return Ok(());
+    };
+    let now = now_millis();
+    if let MessageInfo::Assistant(info) = &mut message.info {
+        if info.time.completed.is_none() {
+            info.time.completed = Some(now);
+            info.finish = Some(status.to_owned());
+            info.error = (status != "completed").then(|| {
+                json!({
+                    "message": output, "interrupted": status == "interrupted"
+                })
+            });
+            state
+                .inner
+                .store
+                .update_message(nested_id, &message)
+                .await?;
+            state.publish(EventPayload::new(
+                event_type::MESSAGE_UPDATED,
+                json!({ "sessionID": nested_id, "info": message.info }),
+            ));
+        }
     }
     child.time.updated = now;
     if let Some(external) = child.extra.get_mut("externalAgent") {
@@ -824,6 +1086,23 @@ pub(crate) async fn reconcile_interrupted_nested_sessions(
         .await?;
     }
     Ok(())
+}
+
+pub(super) fn acp_diff_content(update: &Value) -> Option<Value> {
+    let diffs = update.get("content").and_then(Value::as_array)?;
+    let diffs = diffs
+        .iter()
+        .filter(|item| item["type"] == "diff")
+        .filter_map(|item| {
+            let path = item.get("path")?.as_str()?;
+            let old = item.get("oldText").and_then(Value::as_str).unwrap_or("");
+            let new = item.get("newText")?.as_str()?;
+            (path.len() <= 4096 && old.len() + new.len() <= 1_048_576)
+                .then(|| json!({"path": path, "oldText": old, "newText": new}))
+        })
+        .take(32)
+        .collect::<Vec<_>>();
+    (!diffs.is_empty()).then(|| json!(diffs))
 }
 
 fn external_tool_output(update: &Value) -> String {

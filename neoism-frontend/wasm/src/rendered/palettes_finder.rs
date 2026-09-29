@@ -499,7 +499,9 @@ impl ChromeBridge {
     }
 
     pub fn drain_conversation_new(&mut self) -> Option<String> {
-        self.chrome.take_conversation_new().map(|source| source.provider().unwrap_or("neoism").to_string())
+        self.chrome
+            .take_conversation_new()
+            .map(|source| source.provider().unwrap_or("neoism").to_string())
     }
 
     pub fn drain_conversation_open(&mut self) -> Option<String> {

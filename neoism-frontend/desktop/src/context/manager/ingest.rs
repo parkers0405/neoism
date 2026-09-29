@@ -263,9 +263,13 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             let Some(route_id) = session_id
                 .and_then(|id| self.daemon.cache.session_routes.get(id).copied())
                 .filter(|route| self.route_uses_attached_daemon(*route))
-            else { return false; };
+            else {
+                return false;
+            };
             return self.get_by_route_id(route_id).is_some_and(|item| {
-                item.context_mut().terminal_input.interrupt_running_command()
+                item.context_mut()
+                    .terminal_input
+                    .interrupt_running_command()
             });
         }
         if class == crate::daemon_client::PtyFailureClass::Transport {

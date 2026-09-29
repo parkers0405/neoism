@@ -456,6 +456,8 @@ impl Screen<'_> {
         // defaults.
         claim_live_panel_owner(&mut self.file_tree_workspace, &id);
         claim_live_panel_owner(&mut self.notes_sidebar_workspace, &id);
+        self.workspace_conversations_visibility
+            .insert(id.clone(), self.renderer.conversations_visible);
         let next_tabs_empty = self.renderer.buffer_tabs.tabs().is_empty();
         let saved_tabs_non_empty = self
             .workspace_buffer_tabs
@@ -482,6 +484,15 @@ impl Screen<'_> {
         let Some(id) = self.current_workspace_id() else {
             return;
         };
+        self.renderer.conversations_visible = self
+            .workspace_conversations_visibility
+            .get(&id)
+            .copied()
+            .unwrap_or(false);
+        self.renderer
+            .conversations_pane
+            .side_panel_mut()
+            .set_focused(false);
         // The agent runtime is workspace-owned just like the tree and notes
         // panel. A local grid uses this machine's loopback agent; a joined
         // grid uses the host daemon's `/agent` reverse proxy so tools execute
@@ -597,6 +608,9 @@ impl Screen<'_> {
         self.active_workspace_root = None;
         self.active_workspace_root =
             saved_root.or_else(|| self.active_pane_workspace_root());
+        if self.renderer.conversations_visible {
+            self.sync_file_tree_root_for_current_workspace();
+        }
         if self.renderer.file_tree.is_visible() {
             if let Some(root) = self.active_workspace_root.clone() {
                 if self.renderer.file_tree.root() != Some(root.as_path()) {

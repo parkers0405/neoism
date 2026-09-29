@@ -371,7 +371,10 @@ pub(crate) async fn semantic_search_route(
     let scope = claims
         .as_ref()
         .map(|axum::Extension(claims)| {
-            if !claims.hosted && claims.workspace_id.is_none() && claims.tenant_id == "local" {
+            if !claims.hosted
+                && claims.workspace_id.is_none()
+                && claims.tenant_id == "local"
+            {
                 crate::state::TenantQueryScope::LocalAll
             } else {
                 crate::state::TenantQueryScope::Tenant(claims.tenant_id.as_str())
@@ -397,7 +400,8 @@ pub(crate) async fn semantic_search_with_scope(
     let limit = query.limit.unwrap_or(20);
     // Exact matches first: they carry distance 0.0 so a literal hit always
     // outranks a fuzzy-semantic one, and they work with zero configuration.
-    let mut hits = keyword_hits(store, scope, needle, query.session_id.as_deref(), limit).await;
+    let mut hits =
+        keyword_hits(store, scope, needle, query.session_id.as_deref(), limit).await;
 
     let auth = if let Some(provider_id) = EmbeddingsClient::configured_provider_id() {
         state

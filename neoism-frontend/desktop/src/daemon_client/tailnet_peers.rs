@@ -113,7 +113,9 @@ pub fn tailnet_peer_palette_hosts(
                 }
                 let label = url::Url::parse(daemon_url)
                     .ok()
-                    .and_then(|url| url.port().map(|port| format!("{} :{port}", peer.hostname)))
+                    .and_then(|url| {
+                        url.port().map(|port| format!("{} :{port}", peer.hostname))
+                    })
                     .unwrap_or_else(|| peer.hostname.clone());
                 Some(PaletteHostEntry {
                     // Include the endpoint: one machine can host multiple servers.
@@ -168,16 +170,20 @@ pub async fn probe_daemon_peers(peers: Vec<TailnetPeer>) -> Vec<TailnetPeer> {
         if !peer.online {
             return None;
         }
-        let endpoint_probes = peer.daemon_urls.clone().into_iter().map(|endpoint| async move {
-            let url = url::Url::parse(&endpoint).ok()?;
-            let host = url.host_str()?.to_string();
-            let port = url.port_or_known_default()?;
-            let connect = TcpStream::connect((host.as_str(), port));
-            match tokio::time::timeout(DAEMON_PROBE_TIMEOUT, connect).await {
-                Ok(Ok(_stream)) => Some(endpoint),
-                _ => None,
-            }
-        });
+        let endpoint_probes =
+            peer.daemon_urls
+                .clone()
+                .into_iter()
+                .map(|endpoint| async move {
+                    let url = url::Url::parse(&endpoint).ok()?;
+                    let host = url.host_str()?.to_string();
+                    let port = url.port_or_known_default()?;
+                    let connect = TcpStream::connect((host.as_str(), port));
+                    match tokio::time::timeout(DAEMON_PROBE_TIMEOUT, connect).await {
+                        Ok(Ok(_stream)) => Some(endpoint),
+                        _ => None,
+                    }
+                });
         let mut peer = peer;
         peer.daemon_urls = futures::future::join_all(endpoint_probes)
             .await
@@ -456,10 +462,7 @@ mod tests {
         ];
         let mut nas = peer("nas", "100.64.0.9", false);
         nas.daemon_urls = vec!["ws://100.64.0.9:9910/session".into()];
-        let hosts = tailnet_peer_palette_hosts(
-            &[pi, nas],
-            &HashSet::new(),
-        );
+        let hosts = tailnet_peer_palette_hosts(&[pi, nas], &HashSet::new());
         assert_eq!(hosts.len(), 3);
         assert_eq!(hosts[0].label, "pi :7878");
         assert_eq!(hosts[0].kind, HostKind::Remote);
@@ -468,7 +471,10 @@ mod tests {
             Some("ws://100.64.0.7:7878/session")
         );
         assert!(hosts[0].online);
-        assert_eq!(hosts[1].daemon_url.as_deref(), Some("ws://100.64.0.7:9879/session"));
+        assert_eq!(
+            hosts[1].daemon_url.as_deref(),
+            Some("ws://100.64.0.7:9879/session")
+        );
         // Offline advertised endpoints stay listed (dimmed downstream).
         assert!(!hosts[2].online);
     }
@@ -485,7 +491,10 @@ mod tests {
             .collect();
         let hosts = tailnet_peer_palette_hosts(&[pi], &existing);
         assert_eq!(hosts.len(), 1);
-        assert_eq!(hosts[0].daemon_url.as_deref(), Some("ws://100.64.0.7:9879/session"));
+        assert_eq!(
+            hosts[0].daemon_url.as_deref(),
+            Some("ws://100.64.0.7:9879/session")
+        );
     }
 
     #[test]
@@ -522,7 +531,10 @@ mod tests {
         assert_eq!(parsed.peers[0].hostname, "pi");
         assert_eq!(parsed.peers[0].ip, "100.64.0.7");
         assert!(parsed.peers[0].online);
-        assert_eq!(parsed.peers[0].daemon_urls, ["ws://100.64.0.7:9879/session"]);
+        assert_eq!(
+            parsed.peers[0].daemon_urls,
+            ["ws://100.64.0.7:9879/session"]
+        );
     }
 
     /// End-to-end over a real unix socket: spin up the embedded daemon

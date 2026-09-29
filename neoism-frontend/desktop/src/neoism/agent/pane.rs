@@ -87,12 +87,30 @@ pub struct NeoismAgentTodo {
     pub content: String,
 }
 
-pub(super) fn plan_from_shared(todos: &[neoism_ui::panels::agent_pane::state::NeoismAgentTodo]) -> Vec<NeoismAgentTodo> {
-    todos.iter().map(|todo| NeoismAgentTodo { status: todo.status.clone(), content: todo.content.clone() }).collect()
+pub(super) fn plan_from_shared(
+    todos: &[neoism_ui::panels::agent_pane::state::NeoismAgentTodo],
+) -> Vec<NeoismAgentTodo> {
+    todos
+        .iter()
+        .map(|todo| NeoismAgentTodo {
+            status: todo.status.clone(),
+            content: todo.content.clone(),
+        })
+        .collect()
 }
 
-pub(super) fn plan_to_shared(todos: &[NeoismAgentTodo]) -> Vec<neoism_ui::panels::agent_pane::state::NeoismAgentTodo> {
-    todos.iter().map(|todo| neoism_ui::panels::agent_pane::state::NeoismAgentTodo { status: todo.status.clone(), content: todo.content.clone() }).collect()
+pub(super) fn plan_to_shared(
+    todos: &[NeoismAgentTodo],
+) -> Vec<neoism_ui::panels::agent_pane::state::NeoismAgentTodo> {
+    todos
+        .iter()
+        .map(
+            |todo| neoism_ui::panels::agent_pane::state::NeoismAgentTodo {
+                status: todo.status.clone(),
+                content: todo.content.clone(),
+            },
+        )
+        .collect()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -619,13 +637,19 @@ pub(crate) enum NeoismAgentBackgroundUpdate {
         server: String,
         session_id: String,
         generation: u64,
-        result: Result<neoism_ui::panels::agent_pane::state::external_options::ExternalOptions, String>,
+        result: Result<
+            neoism_ui::panels::agent_pane::state::external_options::ExternalOptions,
+            String,
+        >,
     },
     ExternalOptionSet {
         server: String,
         session_id: String,
         generation: u64,
-        result: Result<neoism_ui::panels::agent_pane::state::external_options::ExternalOptions, String>,
+        result: Result<
+            neoism_ui::panels::agent_pane::state::external_options::ExternalOptions,
+            String,
+        >,
     },
     ExternalCatalogRefreshed {
         server: String,
@@ -778,7 +802,8 @@ impl AgentBackgroundSender {
 pub(crate) struct PendingPromptDispatch {
     pub(crate) origin_session_id: Option<String>,
     pub(crate) origin_draft_id: u64,
-    pub(crate) source: neoism_ui::panels::agent_pane::state::side_panel::ConversationSource,
+    pub(crate) source:
+        neoism_ui::panels::agent_pane::state::side_panel::ConversationSource,
     pub(crate) draft_external_selections: HashMap<String, String>,
     pub(crate) server: String,
     pub(crate) directory: Option<String>,
@@ -852,16 +877,23 @@ pub struct NeoismAgentPane {
     pub(super) pending_account_model: Option<String>,
     pub(super) thinking: Option<String>,
     pub(super) session_id: Option<String>,
-    pub(super) new_chat_source: neoism_ui::panels::agent_pane::state::side_panel::ConversationSource,
-    pub(super) default_chat_source: neoism_ui::panels::agent_pane::state::side_panel::ConversationSource,
+    pub(super) new_chat_source:
+        neoism_ui::panels::agent_pane::state::side_panel::ConversationSource,
+    pub(super) default_chat_source:
+        neoism_ui::panels::agent_pane::state::side_panel::ConversationSource,
     pub(super) draft_source_explicit: bool,
-    pub(super) session_sources: HashMap<String, neoism_ui::panels::agent_pane::state::side_panel::ConversationSource>,
-    pub(super) session_histories: HashMap<String, neoism_ui::panels::agent_pane::api_mapping::ImportedHistory>,
+    pub(super) session_sources: HashMap<
+        String,
+        neoism_ui::panels::agent_pane::state::side_panel::ConversationSource,
+    >,
+    pub(super) session_histories:
+        HashMap<String, neoism_ui::panels::agent_pane::api_mapping::ImportedHistory>,
     /// Live todo events override possibly older HTTP preload snapshots, keyed by session.
     plan_todo_events: HashMap<String, Vec<NeoismAgentTodo>>,
     pub(super) current_plan_todos: Option<Vec<NeoismAgentTodo>>,
     live_usage_by_session: HashMap<String, (String, NeoismAgentUsage)>,
-    external_options: Option<neoism_ui::panels::agent_pane::state::external_options::ExternalOptions>,
+    external_options:
+        Option<neoism_ui::panels::agent_pane::state::external_options::ExternalOptions>,
     pub(super) draft_external_selections: HashMap<String, String>,
     external_options_generation: u64,
     external_options_request: Option<u64>,
@@ -904,7 +936,10 @@ pub struct NeoismAgentPane {
     external_catalog_last_refresh: Option<Instant>,
     external_catalog_remaining: usize,
     external_import_in_flight: Option<String>,
-    pending_external_open: Option<(String, neoism_ui::panels::agent_pane::state::side_panel::ConversationSource)>,
+    pending_external_open: Option<(
+        String,
+        neoism_ui::panels::agent_pane::state::side_panel::ConversationSource,
+    )>,
     pending_external_error: Option<String>,
     event_wake: Option<AgentEventWake>,
     /// When the most recent update was drained from the event stream.

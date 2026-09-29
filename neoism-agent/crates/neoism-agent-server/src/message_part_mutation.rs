@@ -175,14 +175,12 @@ pub(crate) fn set_tool_running(
     for part in parts.iter_mut() {
         if let Part::Tool(tool) = part {
             if tool.id.as_str() == part_id_text {
+                let start = tool_state_start(&tool.state).unwrap_or_else(now_millis);
                 tool.tool = name;
                 tool.call_id = call_id;
                 tool.state = ToolState::Running {
                     input,
-                    time: PartTime {
-                        start: now_millis(),
-                        end: None,
-                    },
+                    time: PartTime { start, end: None },
                 };
                 return Part::Tool(tool.clone());
             }

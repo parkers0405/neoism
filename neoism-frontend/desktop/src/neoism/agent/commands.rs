@@ -534,12 +534,16 @@ impl NeoismAgentPane {
             return;
         }
         self.reset_external_options();
-        self.new_chat_source = self.side_panel.sessions().iter()
+        self.new_chat_source = self
+            .side_panel
+            .sessions()
+            .iter()
             .find(|entry| entry.id == session_id && !entry.is_header)
             .map(|entry| entry.source)
             .or_else(|| self.session_sources.get(&session_id).copied())
             .unwrap_or_default();
-        self.session_sources.insert(session_id.clone(), self.new_chat_source);
+        self.session_sources
+            .insert(session_id.clone(), self.new_chat_source);
         if self
             .session_cache
             .get(&session_id)
@@ -723,8 +727,15 @@ impl NeoismAgentPane {
             parent_id: self.parent_session_id.clone(),
             directory: self.directory.clone(),
             source: self.new_chat_source,
-            imported_history: self.session_id.as_ref().and_then(|id| self.session_histories.get(id)).cloned(),
-            plan_todos: self.current_plan_todos.as_deref().map(super::pane::plan_to_shared),
+            imported_history: self
+                .session_id
+                .as_ref()
+                .and_then(|id| self.session_histories.get(id))
+                .cloned(),
+            plan_todos: self
+                .current_plan_todos
+                .as_deref()
+                .map(super::pane::plan_to_shared),
         };
         let cached_live = self
             .session_cache
@@ -814,10 +825,14 @@ impl NeoismAgentPane {
             .flatten();
         self.cache_current_session(stays_in_family);
         let state = cached.state;
-        self.current_plan_todos = state.plan_todos.as_deref().map(super::pane::plan_from_shared);
+        self.current_plan_todos = state
+            .plan_todos
+            .as_deref()
+            .map(super::pane::plan_from_shared);
         if cached.hydrated {
             self.new_chat_source = state.source;
-            self.session_sources.insert(session_id.to_string(), state.source);
+            self.session_sources
+                .insert(session_id.to_string(), state.source);
         }
         let parent_id = state.parent_id.clone().or(roster_parent.clone());
         // Never carry a root from a previously viewed family. A nested child
@@ -936,9 +951,13 @@ impl NeoismAgentPane {
         if self.is_subagent_session() {
             return Err("subagent sessions are view-only".to_string());
         }
-        if self.session_id.is_some() && self.conversation_source().provider().is_some()
-            && self.external_option_pending() {
-            return Err("Wait for the provider to confirm your option before sending".to_string());
+        if self.session_id.is_some()
+            && self.conversation_source().provider().is_some()
+            && self.external_option_pending()
+        {
+            return Err(
+                "Wait for the provider to confirm your option before sending".to_string(),
+            );
         }
         let parts = self.prompt_parts_for(&prompt);
         let system = self.prompt_system_for(&prompt);
@@ -1004,7 +1023,11 @@ impl NeoismAgentPane {
                 origin_session_id,
                 origin_draft_id,
                 source: self.new_chat_source,
-                draft_external_selections: if self.session_id.is_none() { self.draft_external_selections.clone() } else { HashMap::new() },
+                draft_external_selections: if self.session_id.is_none() {
+                    self.draft_external_selections.clone()
+                } else {
+                    HashMap::new()
+                },
                 server: self.server.clone(),
                 directory: self.directory.clone(),
                 message_id,
@@ -1827,7 +1850,10 @@ impl NeoismAgentPane {
         self.note_timeline_prepend(prepended);
     }
 
-    pub(crate) fn create_new_chat_from(&mut self, source: neoism_ui::panels::agent_pane::state::side_panel::ConversationSource) {
+    pub(crate) fn create_new_chat_from(
+        &mut self,
+        source: neoism_ui::panels::agent_pane::state::side_panel::ConversationSource,
+    ) {
         self.create_new_session();
         let source_changed = self.new_chat_source != source;
         self.new_chat_source = source;
@@ -1924,7 +1950,16 @@ impl NeoismAgentPane {
             .as_deref()
             .map(|dir| format!("/v2/sessions?directory={}", percent_encode(dir)))
             .unwrap_or_else(|| "/v2/sessions".to_string());
-        let body = root_session_create_body(self.agent.clone(), session_model_json(self.model.as_str(), self.thinking.as_deref(), self.connection_id.as_deref()), self.new_chat_source, &self.draft_external_selections);
+        let body = root_session_create_body(
+            self.agent.clone(),
+            session_model_json(
+                self.model.as_str(),
+                self.thinking.as_deref(),
+                self.connection_id.as_deref(),
+            ),
+            self.new_chat_source,
+            &self.draft_external_selections,
+        );
         let response = api_request_json(&self.server, "POST", &path, Some(&body))?
             .ok_or_else(|| "server did not return session".to_string())?;
         let id = response
@@ -1934,7 +1969,8 @@ impl NeoismAgentPane {
             .ok_or_else(|| "server did not return session id".to_string())?
             .to_string();
         self.session_id = Some(id.clone());
-        self.session_sources.insert(id.clone(), self.new_chat_source);
+        self.session_sources
+            .insert(id.clone(), self.new_chat_source);
         self.session_title =
             neoism_ui::panels::agent_pane::api_mapping::session_state_from_json(
                 &response,
@@ -2001,31 +2037,72 @@ mod native_prompt_author_tests {
     fn queued_first_prompt_keeps_its_draft_provider_choices() {
         let mut pane = crate::neoism::agent::NeoismAgentPane::default();
         pane.new_chat_source = ConversationSource::OpenCode;
-        pane.draft_external_selections.insert("model".into(), "opencode/big-pickle".into());
-        pane.draft_external_selections.insert("effort".into(), "high".into());
+        pane.draft_external_selections
+            .insert("model".into(), "opencode/big-pickle".into());
+        pane.draft_external_selections
+            .insert("effort".into(), "high".into());
         pane.prompt_dispatch_in_flight = true;
-        pane.queue_send_prompt_command("msg".into(), "hello".into(), vec![], None, None,
-            String::new(), None, neoism_protocol::agent::PromptDelivery::Steer, true);
+        pane.queue_send_prompt_command(
+            "msg".into(),
+            "hello".into(),
+            vec![],
+            None,
+            None,
+            String::new(),
+            None,
+            neoism_protocol::agent::PromptDelivery::Steer,
+            true,
+        );
         pane.draft_external_selections.clear();
         let request = pane.pending_prompt_dispatches.front().unwrap();
         assert!(request.origin_session_id.is_none());
-        assert_eq!(request.draft_external_selections.get("model").map(String::as_str), Some("opencode/big-pickle"));
-        assert_eq!(request.draft_external_selections.get("effort").map(String::as_str), Some("high"));
-        let body = root_session_create_body(request.agent.clone(), None, request.source, &request.draft_external_selections);
+        assert_eq!(
+            request
+                .draft_external_selections
+                .get("model")
+                .map(String::as_str),
+            Some("opencode/big-pickle")
+        );
+        assert_eq!(
+            request
+                .draft_external_selections
+                .get("effort")
+                .map(String::as_str),
+            Some("high")
+        );
+        let body = root_session_create_body(
+            request.agent.clone(),
+            None,
+            request.source,
+            &request.draft_external_selections,
+        );
         assert_eq!(body["externalOptions"]["model"], "opencode/big-pickle");
         assert_eq!(body["externalOptions"]["effort"], "high");
     }
 
     #[test]
     fn root_creation_carries_only_external_identity_for_acp() {
-        let selections = std::collections::HashMap::from([("model".into(), "selected-model".into()), ("effort".into(), "high".into())]);
-        let body = root_session_create_body(Some("build".into()), Some(serde_json::json!({"providerId":"openai", "modelId":"gpt"})), ConversationSource::Codex, &selections);
+        let selections = std::collections::HashMap::from([
+            ("model".into(), "selected-model".into()),
+            ("effort".into(), "high".into()),
+        ]);
+        let body = root_session_create_body(
+            Some("build".into()),
+            Some(serde_json::json!({"providerId":"openai", "modelId":"gpt"})),
+            ConversationSource::Codex,
+            &selections,
+        );
         assert_eq!(body["externalProvider"], "codex");
         assert_eq!(body["externalOptions"]["model"], "selected-model");
         assert_eq!(body["externalOptions"]["effort"], "high");
         assert!(body["agent"].is_null() && body["model"].is_null());
         assert!(body["parentId"].is_null());
-        let native = root_session_create_body(Some("build".into()), None, ConversationSource::Neoism, &selections);
+        let native = root_session_create_body(
+            Some("build".into()),
+            None,
+            ConversationSource::Neoism,
+            &selections,
+        );
         assert!(native.get("externalProvider").is_none());
         assert!(native.get("externalOptions").is_none());
         assert_eq!(native["agent"], "build");
@@ -2097,7 +2174,11 @@ fn create_prompt_session(
         .unwrap_or_else(|| "/v2/sessions".to_string());
     let body = root_session_create_body(
         request.agent.clone(),
-        session_model_json(request.model.as_str(), request.thinking.as_deref(), request.connection_id.as_deref()),
+        session_model_json(
+            request.model.as_str(),
+            request.thinking.as_deref(),
+            request.connection_id.as_deref(),
+        ),
         request.source,
         &request.draft_external_selections,
     );

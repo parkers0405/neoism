@@ -4,7 +4,10 @@ use std::path::{Path, PathBuf};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ConversationTabLocation {
     Workspace(usize),
-    Pane { owner_route: usize, tab_index: usize },
+    Pane {
+        owner_route: usize,
+        tab_index: usize,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -24,46 +27,130 @@ fn matching_conversation_tab(
     directory: Option<&str>,
     active_route: usize,
 ) -> Option<ConversationTabLocation> {
-    candidates.iter()
-        .filter(|candidate| (candidate.session_id == session_id || candidate.root_id.as_deref() == Some(session_id))
-            && candidate.server.trim_end_matches('/') == server.trim_end_matches('/')
-            && candidate.directory.as_deref() == directory)
+    candidates
+        .iter()
+        .filter(|candidate| {
+            (candidate.session_id == session_id
+                || candidate.root_id.as_deref() == Some(session_id))
+                && candidate.server.trim_end_matches('/') == server.trim_end_matches('/')
+                && candidate.directory.as_deref() == directory
+        })
         .min_by_key(|candidate| (candidate.route_id != active_route, candidate.route_id))
         .map(|candidate| candidate.location)
 }
 
 #[cfg(test)]
 mod conversation_tab_tests {
-    use super::{matching_conversation_tab, ConversationTabCandidate, ConversationTabLocation};
+    use super::{
+        matching_conversation_tab, ConversationTabCandidate, ConversationTabLocation,
+    };
 
     #[test]
     fn reuse_matches_session_server_and_directory_including_secondary_pane() {
-        let candidate = |route_id, server: &str, directory: &str, location| ConversationTabCandidate {
-            route_id,
-            session_id: "same-id".into(),
-            root_id: None,
-            server: server.into(),
-            directory: Some(directory.into()),
-            location,
+        let candidate = |route_id, server: &str, directory: &str, location| {
+            ConversationTabCandidate {
+                route_id,
+                session_id: "same-id".into(),
+                root_id: None,
+                server: server.into(),
+                directory: Some(directory.into()),
+                location,
+            }
         };
         let tabs = vec![
-            candidate(10, "http://host-a", "/other", ConversationTabLocation::Workspace(1)),
-            candidate(11, "http://host-b", "/project", ConversationTabLocation::Workspace(2)),
-            candidate(12, "http://host-a/", "/project", ConversationTabLocation::Pane { owner_route: 99, tab_index: 3 }),
+            candidate(
+                10,
+                "http://host-a",
+                "/other",
+                ConversationTabLocation::Workspace(1),
+            ),
+            candidate(
+                11,
+                "http://host-b",
+                "/project",
+                ConversationTabLocation::Workspace(2),
+            ),
+            candidate(
+                12,
+                "http://host-a/",
+                "/project",
+                ConversationTabLocation::Pane {
+                    owner_route: 99,
+                    tab_index: 3,
+                },
+            ),
         ];
-        assert_eq!(matching_conversation_tab(&tabs, "same-id", "http://host-a", Some("/project"), 9),
-            Some(ConversationTabLocation::Pane { owner_route: 99, tab_index: 3 }));
-        assert_eq!(matching_conversation_tab(&tabs, "same-id", "http://host-a", Some("/missing"), 9), None);
-        assert_eq!(matching_conversation_tab(&tabs, "same-id", "http://host-a", None, 9), None);
-        assert_eq!(matching_conversation_tab(&tabs, "another-id", "http://host-a", Some("/project"), 9), None);
+        assert_eq!(
+            matching_conversation_tab(
+                &tabs,
+                "same-id",
+                "http://host-a",
+                Some("/project"),
+                9
+            ),
+            Some(ConversationTabLocation::Pane {
+                owner_route: 99,
+                tab_index: 3
+            })
+        );
+        assert_eq!(
+            matching_conversation_tab(
+                &tabs,
+                "same-id",
+                "http://host-a",
+                Some("/missing"),
+                9
+            ),
+            None
+        );
+        assert_eq!(
+            matching_conversation_tab(&tabs, "same-id", "http://host-a", None, 9),
+            None
+        );
+        assert_eq!(
+            matching_conversation_tab(
+                &tabs,
+                "another-id",
+                "http://host-a",
+                Some("/project"),
+                9
+            ),
+            None
+        );
         let mut tabs = tabs;
-        tabs.push(candidate(13, "http://host-a", "/project", ConversationTabLocation::Workspace(4)));
-        assert_eq!(matching_conversation_tab(&tabs, "same-id", "http://host-a", Some("/project"), 13),
-            Some(ConversationTabLocation::Workspace(4)), "prefer the currently active route");
+        tabs.push(candidate(
+            13,
+            "http://host-a",
+            "/project",
+            ConversationTabLocation::Workspace(4),
+        ));
+        assert_eq!(
+            matching_conversation_tab(
+                &tabs,
+                "same-id",
+                "http://host-a",
+                Some("/project"),
+                13
+            ),
+            Some(ConversationTabLocation::Workspace(4)),
+            "prefer the currently active route"
+        );
         tabs[2].session_id = "child-id".into();
         tabs[2].root_id = Some("same-id".into());
-        assert_eq!(matching_conversation_tab(&tabs[..3], "same-id", "http://host-a", Some("/project"), 9),
-            Some(ConversationTabLocation::Pane { owner_route: 99, tab_index: 3 }), "a child view reuses its root tab");
+        assert_eq!(
+            matching_conversation_tab(
+                &tabs[..3],
+                "same-id",
+                "http://host-a",
+                Some("/project"),
+                9
+            ),
+            Some(ConversationTabLocation::Pane {
+                owner_route: 99,
+                tab_index: 3
+            }),
+            "a child view reuses its root tab"
+        );
     }
 }
 
@@ -110,14 +197,30 @@ impl Screen<'_> {
         true
     }
 
-    fn activate_catalog_entry(&mut self, entry: neoism_ui::panels::agent_pane::state::side_panel::NeoismAgentSessionEntry) {
-        let opened = self.renderer.conversations_pane.activate_external_preview(&entry);
+    fn activate_catalog_entry(
+        &mut self,
+        entry: neoism_ui::panels::agent_pane::state::side_panel::NeoismAgentSessionEntry,
+    ) {
+        let opened = self
+            .renderer
+            .conversations_pane
+            .activate_external_preview(&entry);
         if let Some((id, source)) = opened {
             self.focus_or_open_conversation(id, source);
-        } else if let Some(preview) = entry.external_preview.as_ref().filter(|preview| !preview.import_supported) {
-            let message = preview.import_unavailable_reason.as_deref().unwrap_or("History import is unavailable");
+        } else if let Some(preview) = entry
+            .external_preview
+            .as_ref()
+            .filter(|preview| !preview.import_supported)
+        {
+            let message = preview
+                .import_unavailable_reason
+                .as_deref()
+                .unwrap_or("History import is unavailable");
             self.renderer.notifications.push(
-                format!("{} history is preview-only: {message}", entry.source.label()),
+                format!(
+                    "{} history is preview-only: {message}",
+                    entry.source.label()
+                ),
                 neoism_ui::panels::notifications::NotificationLevel::Warn,
             );
         }
@@ -130,11 +233,22 @@ impl Screen<'_> {
         id: String,
         source: neoism_ui::panels::agent_pane::state::side_panel::ConversationSource,
     ) {
-        let server = self.renderer.conversations_pane.server_address().to_string();
-        let directory = self.renderer.conversations_pane.session_directory().map(str::to_owned);
-        let expected_server = self.context_manager.agent_server_override_for_current()
+        let server = self
+            .renderer
+            .conversations_pane
+            .server_address()
+            .to_string();
+        let directory = self
+            .renderer
+            .conversations_pane
+            .session_directory()
+            .map(str::to_owned);
+        let expected_server = self
+            .context_manager
+            .agent_server_override_for_current()
             .unwrap_or_else(crate::neoism::agent::neoism_agent_server);
-        let expected_directory = self.workspace_root_for_new_shell()
+        let expected_directory = self
+            .workspace_root_for_new_shell()
             .map(|root| root.to_string_lossy().into_owned());
         if server.trim_end_matches('/') != expected_server.trim_end_matches('/')
             || directory != expected_directory
@@ -145,18 +259,36 @@ impl Screen<'_> {
             );
             return;
         }
-        let candidates: Vec<_> = self.context_manager.current_grid().contexts().values()
+        let candidates: Vec<_> = self
+            .context_manager
+            .current_grid()
+            .contexts()
+            .values()
             .filter_map(|item| {
                 let agent = item.val.neoism_agent.as_ref()?;
                 let route_id = item.val.route_id;
-                let location = self.renderer.buffer_tabs.tabs().iter()
-                    .position(|tab| tab.neoism_agent_route_id == Some(route_id))
-                    .map(ConversationTabLocation::Workspace)
-                    .or_else(|| self.renderer.pane_tabs.iter().find_map(|(owner_route, tabs)| {
-                        tabs.tabs().iter()
-                            .position(|tab| tab.neoism_agent_route_id == Some(route_id))
-                            .map(|tab_index| ConversationTabLocation::Pane { owner_route: *owner_route, tab_index })
-                    }))?;
+                let location =
+                    self.renderer
+                        .buffer_tabs
+                        .tabs()
+                        .iter()
+                        .position(|tab| tab.neoism_agent_route_id == Some(route_id))
+                        .map(ConversationTabLocation::Workspace)
+                        .or_else(|| {
+                            self.renderer.pane_tabs.iter().find_map(
+                                |(owner_route, tabs)| {
+                                    tabs.tabs()
+                                        .iter()
+                                        .position(|tab| {
+                                            tab.neoism_agent_route_id == Some(route_id)
+                                        })
+                                        .map(|tab_index| ConversationTabLocation::Pane {
+                                            owner_route: *owner_route,
+                                            tab_index,
+                                        })
+                                },
+                            )
+                        })?;
                 Some(ConversationTabCandidate {
                     route_id,
                     session_id: agent.session_id_str()?.to_owned(),
@@ -165,41 +297,63 @@ impl Screen<'_> {
                     directory: agent.session_directory().map(str::to_owned),
                     location,
                 })
-            }).collect();
+            })
+            .collect();
         if let Some(location) = matching_conversation_tab(
-            &candidates, &id, &server, directory.as_deref(), self.context_manager.current_route(),
+            &candidates,
+            &id,
+            &server,
+            directory.as_deref(),
+            self.context_manager.current_route(),
         ) {
-            let expected_route = candidates.iter().find(|candidate| candidate.location == location).map(|candidate| candidate.route_id);
+            let expected_route = candidates
+                .iter()
+                .find(|candidate| candidate.location == location)
+                .map(|candidate| candidate.route_id);
             let activated = match location {
-                ConversationTabLocation::Workspace(index) => self.activate_workspace_buffer_tab(index),
-                ConversationTabLocation::Pane { owner_route, tab_index } => {
+                ConversationTabLocation::Workspace(index) => {
+                    self.activate_workspace_buffer_tab(index)
+                }
+                ConversationTabLocation::Pane {
+                    owner_route,
+                    tab_index,
+                } => {
                     self.pane_tab_activate(owner_route, tab_index);
                     expected_route == Some(self.context_manager.current_route())
                 }
             };
-            if !activated || expected_route != Some(self.context_manager.current_route()) {
+            if !activated || expected_route != Some(self.context_manager.current_route())
+            {
                 self.renderer.notifications.push(
                     "Could not focus the existing Agent tab",
                     neoism_ui::panels::notifications::NotificationLevel::Warn,
                 );
                 return;
             }
-            if let Some(agent) = self.context_manager.current_mut().neoism_agent.as_mut() {
+            if let Some(agent) = self.context_manager.current_mut().neoism_agent.as_mut()
+            {
                 if agent.session_id_str() != Some(id.as_str()) {
                     agent.switch_session(id);
                     agent.set_conversation_source(source);
                 }
             }
-            self.renderer.conversations_pane.side_panel_mut().set_focused(false);
+            self.renderer
+                .conversations_pane
+                .side_panel_mut()
+                .set_focused(false);
             self.mark_dirty();
             return;
         }
         if self.open_neoism_agent_tab().is_some() {
-            if let Some(agent) = self.context_manager.current_mut().neoism_agent.as_mut() {
+            if let Some(agent) = self.context_manager.current_mut().neoism_agent.as_mut()
+            {
                 agent.switch_session(id);
                 agent.set_conversation_source(source);
             }
-            self.renderer.conversations_pane.side_panel_mut().set_focused(false);
+            self.renderer
+                .conversations_pane
+                .side_panel_mut()
+                .set_focused(false);
         }
     }
 
@@ -230,8 +384,14 @@ impl Screen<'_> {
                 .conversations_pane
                 .side_panel_mut()
                 .set_user_hidden(false);
-            self.renderer.conversations_pane.side_panel_mut().hide_catalog_controls();
-            self.renderer.conversations_pane.side_panel_mut().clear_session_query();
+            self.renderer
+                .conversations_pane
+                .side_panel_mut()
+                .hide_catalog_controls();
+            self.renderer
+                .conversations_pane
+                .side_panel_mut()
+                .clear_session_query();
             self.renderer
                 .conversations_pane
                 .side_panel_mut()
@@ -244,14 +404,117 @@ impl Screen<'_> {
             self.renderer.file_tree.set_focused(false);
             self.renderer.notes_sidebar.set_focused(false);
         }
+        if let Some(id) = self.current_workspace_id() {
+            self.workspace_conversations_visibility
+                .insert(id, self.renderer.conversations_visible);
+        }
         self.reapply_chrome_layout();
         self.mark_dirty();
     }
 
     pub(crate) fn conversations_sidebar_left(&self) -> f32 {
-        let files = if self.renderer.file_tree.is_visible() { self.renderer.file_tree.width() } else { 0.0 };
-        let notes = if self.renderer.notes_sidebar.is_visible() { self.renderer.notes_sidebar.width() } else { 0.0 };
+        let files = if self.renderer.file_tree.is_visible() {
+            self.renderer.file_tree.width()
+        } else {
+            0.0
+        };
+        let notes = if self.renderer.notes_sidebar.is_visible() {
+            self.renderer.notes_sidebar.width()
+        } else {
+            0.0
+        };
         files + notes
+    }
+
+    pub(crate) fn conversation_context_scope_matches(
+        &mut self,
+        server: &str,
+        directory: Option<&str>,
+    ) -> bool {
+        let expected_server = self
+            .context_manager
+            .agent_server_override_for_current()
+            .unwrap_or_else(crate::neoism::agent::neoism_agent_server);
+        let expected_directory = self
+            .workspace_root_for_new_shell()
+            .map(|root| root.to_string_lossy().into_owned());
+        self.renderer
+            .conversations_pane
+            .server_address()
+            .trim_end_matches('/')
+            == server.trim_end_matches('/')
+            && self.renderer.conversations_pane.session_directory() == directory
+            && server.trim_end_matches('/') == expected_server.trim_end_matches('/')
+            && directory == expected_directory.as_deref()
+    }
+
+    pub(crate) fn handle_conversations_context_click(&mut self) -> bool {
+        use neoism_ui::panels::context_menu::{
+            AgentContextAction, ContextMenuAction, ContextMenuItem,
+        };
+        if !self.renderer.conversations_visible {
+            return false;
+        }
+        let (x, y) = self.mouse_logical_for_hit_test();
+        let (top, bottom) = self.side_panel_band();
+        let left = self.conversations_sidebar_left();
+        let panel = &mut self.renderer.conversations_pane;
+        if y < top || y > bottom || x < left || x >= left + panel.side_panel().width() {
+            return false;
+        }
+        let Some((row, entry)) = panel
+            .side_panel()
+            .last_panel_rect()
+            .and_then(|rect| panel.side_panel().hit_test_row(x, y, rect))
+            .and_then(|row| {
+                let entry = panel.side_panel().sessions().get(row)?;
+                (!entry.is_header
+                    && !entry.is_excerpt
+                    && !entry.id.starts_with("external:"))
+                .then_some((row, entry.clone()))
+            })
+        else {
+            return true;
+        };
+        panel.side_panel_mut().set_focused(true);
+        panel.side_panel_mut().set_selected(row);
+        let server = panel.server_address().to_owned();
+        let directory = panel.session_directory().map(str::to_owned);
+        let items = vec![
+            ContextMenuItem::new(
+                "Rename Chat",
+                "r",
+                ContextMenuAction::Agent(AgentContextAction::RenameSession {
+                    session_id: entry.id.clone(),
+                    title: entry.title.clone(),
+                    server: server.clone(),
+                    directory: directory.clone(),
+                }),
+            ),
+            ContextMenuItem::new(
+                "Delete Chat",
+                "d",
+                ContextMenuAction::Agent(AgentContextAction::DeleteSession {
+                    session_id: entry.id,
+                    title: entry.title.clone(),
+                    server,
+                    directory,
+                }),
+            ),
+        ];
+        let size = self.sugarloaf.window_size();
+        let scale = self.sugarloaf.scale_factor();
+        let height = self.context_menu_logical_height();
+        self.renderer.context_menu.open(
+            String::new(),
+            items,
+            x,
+            y,
+            size.width as f32 / scale,
+            height,
+        );
+        self.mark_dirty();
+        true
     }
 
     pub(crate) fn handle_conversations_click(&mut self) -> bool {
@@ -262,7 +525,11 @@ impl Screen<'_> {
         let (top, bottom) = self.side_panel_band();
         let panel_left = self.conversations_sidebar_left();
         let panel = &mut self.renderer.conversations_pane;
-        if y < top || y > bottom || x < panel_left || x >= panel_left + panel.side_panel().width() {
+        if y < top
+            || y > bottom
+            || x < panel_left
+            || x >= panel_left + panel.side_panel().width()
+        {
             panel.side_panel_mut().set_focused(false);
             return false;
         }
@@ -277,7 +544,9 @@ impl Screen<'_> {
                 {
                     panel.side_panel_mut().set_selected(row);
                     let selected = panel.side_panel().selected_session().cloned();
-                    if let Some(entry) = selected { self.activate_catalog_entry(entry); }
+                    if let Some(entry) = selected {
+                        self.activate_catalog_entry(entry);
+                    }
                 }
             }
         }
@@ -296,7 +565,11 @@ impl Screen<'_> {
         let (top, bottom) = self.side_panel_band();
         let panel_left = self.conversations_sidebar_left();
         let panel = &mut self.renderer.conversations_pane;
-        if y < top || y > bottom || x < panel_left || x >= panel_left + panel.side_panel().width() {
+        if y < top
+            || y > bottom
+            || x < panel_left
+            || x >= panel_left + panel.side_panel().width()
+        {
             return false;
         }
         let row_h = panel.side_panel().row_height().max(1.0);

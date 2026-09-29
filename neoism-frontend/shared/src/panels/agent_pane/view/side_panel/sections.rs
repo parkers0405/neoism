@@ -334,8 +334,16 @@ pub(crate) fn render_session_info<I: AgentSidePanelIconHost>(
     );
     if pane.conversation_source().provider().is_some() {
         y = render_kv_row(
-            sugarloaf, "Source", pane.conversation_source().label(),
-            text_x, y, text_w, theme, s, clip, occlusion_rects,
+            sugarloaf,
+            "Source",
+            pane.conversation_source().label(),
+            text_x,
+            y,
+            text_w,
+            theme,
+            s,
+            clip,
+            occlusion_rects,
         );
     } else {
         y = render_kv_row(
@@ -472,7 +480,12 @@ pub(crate) fn render_session_info<I: AgentSidePanelIconHost>(
                 occlusion_rects,
             );
         }
-        let usage_rect = [text_x, meter_y, text_w, (y - meter_y).max(FONT_SIZE * s * 1.5)];
+        let usage_rect = [
+            text_x,
+            meter_y,
+            text_w,
+            (y - meter_y).max(FONT_SIZE * s * 1.5),
+        ];
         if let Some(visible_rect) = intersect_rect(usage_rect, clip) {
             pane.side_panel_mut().set_usage_rect(visible_rect);
         }
@@ -578,17 +591,28 @@ pub(crate) fn render_session_info<I: AgentSidePanelIconHost>(
 mod authoritative_todo_tests {
     use super::*;
 
-    struct Row { todos: Vec<crate::panels::agent_pane::state::NeoismAgentTodo> }
+    struct Row {
+        todos: Vec<crate::panels::agent_pane::state::NeoismAgentTodo>,
+    }
     impl AgentSidePanelMessage for Row {
         type Todo = crate::panels::agent_pane::state::NeoismAgentTodo;
-        fn is_todos_output(&self) -> bool { true }
-        fn todos(&self) -> &[Self::Todo] { &self.todos }
+        fn is_todos_output(&self) -> bool {
+            true
+        }
+        fn todos(&self) -> &[Self::Todo] {
+            &self.todos
+        }
     }
 
     #[test]
     fn explicit_empty_snapshot_masks_older_todowrite() {
         let rows = [
-            Row { todos: vec![crate::panels::agent_pane::state::NeoismAgentTodo { status: "pending".into(), content: "Old".into() }] },
+            Row {
+                todos: vec![crate::panels::agent_pane::state::NeoismAgentTodo {
+                    status: "pending".into(),
+                    content: "Old".into(),
+                }],
+            },
             Row { todos: vec![] },
         ];
         assert!(latest_todos(&rows).is_empty());

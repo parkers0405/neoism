@@ -413,13 +413,8 @@ impl Breadcrumbs {
         let icon_y = y_top + (row_h - icon_size) / 2.0;
 
         let mut cursor_x = x_left + padding_x;
-        let max_x = self.render_documentation_controls(
-            sugarloaf,
-            x_left,
-            y_top,
-            width,
-            theme,
-        );
+        let max_x =
+            self.render_documentation_controls(sugarloaf, x_left, y_top, width, theme);
         for (ix, seg) in self.segments.iter().enumerate() {
             let is_leaf = ix == last_ix;
 
@@ -548,7 +543,10 @@ impl Breadcrumbs {
         let hovered = *self.documentation_hovered.borrow();
         let radius = 6.0 * self.scale;
         for (rect, active) in [
-            (search_rect, hovered == Some(DocumentationBreadcrumbAction::Search)),
+            (
+                search_rect,
+                hovered == Some(DocumentationBreadcrumbAction::Search),
+            ),
             (
                 outline_rect,
                 outline_open
@@ -603,10 +601,7 @@ impl Breadcrumbs {
         );
         *self.documentation_hits.borrow_mut() = vec![
             (search_rect, DocumentationBreadcrumbAction::Search),
-            (
-                outline_rect,
-                DocumentationBreadcrumbAction::ToggleOutline,
-            ),
+            (outline_rect, DocumentationBreadcrumbAction::ToggleOutline),
         ];
         search_rect[0] - gap
     }

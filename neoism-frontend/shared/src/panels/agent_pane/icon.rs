@@ -193,8 +193,12 @@ pub fn draw_neoism_tab_icon(
 // (those functions have the same names but live on the desktop side
 // of the tree, parallel to these stubs).
 
-/// Stub: the desktop fork owns the actual clear.
-pub fn clear_side_panel_icon_overlays(_sugarloaf: &mut Sugarloaf) {}
+/// Side-panel overlays are immediate-mode on every host. Sugarloaf retains
+/// the vectors between frames, so failing to clear here grows one image per
+/// visible conversation on every repaint.
+pub fn clear_side_panel_icon_overlays(sugarloaf: &mut Sugarloaf) {
+    sugarloaf.clear_image_overlays_for(SIDE_PANEL_ICON_PANEL_ID);
+}
 
 /// Stub: the desktop fork owns the actual overlay push.
 pub fn push_icon_overlay_to_panel(

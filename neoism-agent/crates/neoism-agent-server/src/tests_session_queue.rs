@@ -72,7 +72,7 @@ async fn root_prompt_with_skill_system_starts_model_generation() {
 }
 
 #[tokio::test]
-async fn session_abort_cancels_active_run() {
+async fn session_abort_requests_cancellation_without_releasing_active_run() {
     let path = std::env::temp_dir().join(format!(
         "neoism-agent-abort-{}.sqlite3",
         Id::ascending(IdKind::Event)
@@ -116,13 +116,27 @@ async fn session_abort_cancels_active_run() {
 
     assert!(cancelled);
     assert!(cancellation.load(Ordering::SeqCst));
-    assert!(!state
+    assert!(state
         .inner
         .session_coordinator
         .active_run(&session_id)
         .await
         .is_some());
-    assert!(!state.inner.statuses.read().await.contains_key(&session_id));
+    assert!(state.inner.statuses.read().await.contains_key(&session_id));
+
+    // Key repeat or multiple attached clients may send abort more than once.
+    // Cancellation remains idempotent while teardown still owns the run slot.
+    let cancelled_again: bool = response_json(
+        app.oneshot(request(
+            Method::POST,
+            &format!("/v2/sessions/{session_id}/abort"),
+            None,
+        ))
+        .await
+        .unwrap(),
+    )
+    .await;
+    assert!(cancelled_again);
     cleanup_sqlite_files(&path);
 }
 
@@ -177,7 +191,18 @@ async fn session_abort_cancels_running_bash_tool() {
     cleanup_sqlite_files(&db_path);
     let state = AppState::open_database(db_path.clone()).await.unwrap();
     let app = app(state.clone());
-    let session_id = neoism_agent_core::new_session_id();
+    let session: SessionInfo = response_json(
+        app.clone()
+            .oneshot(request(
+                Method::POST,
+                &format!("/v2/sessions?directory={}", root.to_string_lossy()),
+                None,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let session_id = session.id;
     let cancellation = Arc::new(AtomicBool::new(false));
     state
         .inner

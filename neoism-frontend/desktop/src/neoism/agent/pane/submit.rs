@@ -101,13 +101,15 @@ impl NeoismAgentPane {
                             self.pending_external_model_picker = true;
                             self.retry_external_options();
                         }
-                    } else if option.value == "__external_think" {
+                    } else if let Some(option_id) =
+                        option.value.strip_prefix("__external_config:")
+                    {
                         if let Some(index) =
                             self.external_options().and_then(|snapshot| {
                                 snapshot
                                     .options
                                     .iter()
-                                    .position(|item| item.category == "thought_level")
+                                    .position(|item| item.id == option_id)
                             })
                         {
                             self.input.clear();
@@ -116,14 +118,10 @@ impl NeoismAgentPane {
                                 index + 1 + usize::from(!self.has_conversation()),
                             );
                         }
-                    } else if option.value == "__external_options" {
-                        self.input.clear();
-                        self.cursor_byte = 0;
-                        self.open_external_options_menu();
-                    } else if let Some(command) =
-                        option.value.strip_prefix("__provider_external_").filter(
-                            |command| matches!(*command, "model" | "think" | "options"),
-                        )
+                    } else if let Some(command) = option
+                        .value
+                        .strip_prefix("__provider_external_")
+                        .filter(|command| matches!(*command, "model" | "think" | "mode"))
                     {
                         self.input = provider_slash_draft(&self.input, command);
                         self.cursor_byte = self.input.len();
@@ -178,18 +176,6 @@ impl NeoismAgentPane {
                 self.execute_mcp_action(
                     &serde_json::from_str(&option.value).unwrap_or_default(),
                 );
-            }
-            NeoismAgentPickerKind::ExternalOptionMenu => {
-                if let Some(index) = self.external_options().and_then(|snapshot| {
-                    snapshot
-                        .options
-                        .iter()
-                        .position(|item| item.id == option.value)
-                }) {
-                    self.open_status_chip_picker(
-                        index + 1 + usize::from(!self.has_conversation()),
-                    );
-                }
             }
             NeoismAgentPickerKind::ExternalOption => {
                 if let Some(config_id) = self.external_picker_option_id.take() {
@@ -438,36 +424,19 @@ impl NeoismAgentPane {
         let options = if provider {
             let mut rows = Vec::new();
             if let Some(snapshot) = self.external_options() {
-                if snapshot
-                    .options
-                    .iter()
-                    .any(|option| option.category == "model")
-                {
+                for index in snapshot.display_order() {
+                    let option = &snapshot.options[index];
+                    let command = match option.category.as_str() {
+                        "mode" => "mode",
+                        "model" => "model",
+                        "thought_level" => "think",
+                        _ => option.id.as_str(),
+                    };
                     rows.push(NeoismAgentPickerOption::new(
-                        "/model",
-                        "Select provider model",
-                        "",
-                        "model",
-                    ));
-                }
-                if snapshot
-                    .options
-                    .iter()
-                    .any(|option| option.category == "thought_level")
-                {
-                    rows.push(NeoismAgentPickerOption::new(
-                        "/think",
-                        "Select provider thinking level",
-                        "",
-                        "__external_think",
-                    ));
-                }
-                if !snapshot.options.is_empty() {
-                    rows.push(NeoismAgentPickerOption::new(
-                        "/options",
-                        "Provider settings, including Fast mode",
-                        "",
-                        "__external_options",
+                        &format!("/{command}"),
+                        &option.name,
+                        option.selected_label(),
+                        &format!("__external_config:{}", option.id),
                     ));
                 }
                 rows.extend(snapshot.available_commands.iter().map(|command| {
@@ -488,8 +457,13 @@ impl NeoismAgentPane {
                         {
                             Some("__provider_external_think")
                         }
-                        "options" if !snapshot.options.is_empty() => {
-                            Some("__provider_external_options")
+                        "mode"
+                            if snapshot
+                                .options
+                                .iter()
+                                .any(|option| option.category == "mode") =>
+                        {
+                            Some("__provider_external_mode")
                         }
                         _ => None,
                     };

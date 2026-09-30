@@ -74,8 +74,6 @@ pub fn render(
     }
     let font_scale = font_scale.clamp(0.5, 3.0);
 
-    sugarloaf.rect(None, x, y, w, h, theme.f32(theme.bg), DEPTH, ORDER_BG);
-
     let font_size = CODE_FONT_SIZE * font_scale;
     let row_h_base = (font_size * ROW_HEIGHT_FACTOR).round();
     // Golden row fit: stretch line spacing a hair so whole rows fill

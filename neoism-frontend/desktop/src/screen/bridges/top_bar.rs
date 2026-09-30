@@ -25,10 +25,12 @@ impl Screen<'_> {
                 self.toggle_file_tree();
                 true
             }
-            Some(
-                TopBarAction::ToggleConversations | TopBarAction::ToggleAgentSidePanel,
-            ) => {
+            Some(TopBarAction::ToggleConversations) => {
                 self.toggle_conversations_sidebar();
+                true
+            }
+            Some(TopBarAction::ToggleAgentSidePanel) => {
+                self.toggle_agent_details_panel();
                 true
             }
             Some(TopBarAction::OpenAgent) => {

@@ -156,7 +156,6 @@ impl NeoismAgentPane {
             }
             // Handled above (no selectable row).
             NeoismAgentPickerKind::ExternalOption
-            | NeoismAgentPickerKind::ExternalOptionMenu
             | NeoismAgentPickerKind::ConnectSecret
             | NeoismAgentPickerKind::ConnectLabel => {}
         }

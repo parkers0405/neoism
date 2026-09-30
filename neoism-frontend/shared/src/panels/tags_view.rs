@@ -23,7 +23,6 @@ use crate::primitives::{draw_text_with_occlusion, truncate_to_fit};
 
 const REFRESH_AFTER: Duration = Duration::from_secs(2);
 const DEPTH: f32 = 0.0;
-const ORDER_BG: u8 = 17;
 const ORDER_ROW: u8 = 18;
 
 #[derive(Debug, Clone)]
@@ -161,8 +160,6 @@ impl NeoismTagsPane {
         self.row_hits.clear();
         let s = chrome_scale.clamp(0.75, 2.0);
         let clip = Some(rect);
-        sugarloaf.rect(None, x, y, w, h, theme.f32(theme.bg), DEPTH, ORDER_BG);
-
         let title_opts = DrawOpts {
             font_size: 22.0 * s,
             color: theme.u8(theme.fg),

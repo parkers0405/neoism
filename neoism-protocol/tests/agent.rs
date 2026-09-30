@@ -104,6 +104,12 @@ fn server_content_delta_roundtrip() {
     });
     roundtrip_server(&AgentServerMessage::ContentDelta {
         session_id: "sess_01".into(),
+        message_id: "msg_compaction".into(),
+        kind: ContentKind::Compaction,
+        text: "Summary".into(),
+    });
+    roundtrip_server(&AgentServerMessage::ContentDelta {
+        session_id: "sess_01".into(),
         message_id: "msg_01".into(),
         kind: ContentKind::Tool {
             name: "read_file".into(),

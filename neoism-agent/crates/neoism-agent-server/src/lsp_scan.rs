@@ -401,6 +401,10 @@ fn server_status_at(
     scan: &WorkspaceScan,
     adapter: &LanguageAdapter,
 ) -> LspStatus {
+    let project =
+        runtime
+            .service
+            .typescript_project_config(workspace_root, project_root, adapter);
     let (command, command_source, endpoint_available) = match &adapter.transport {
         ResolvedLspTransport::Stdio { command, .. } => {
             let (command, source) =
@@ -434,7 +438,11 @@ fn server_status_at(
             None => runtime.service.broken_reason(workspace_root, adapter),
         })
         .flatten();
-    let message = adapter.configuration_error.clone().or(broken_reason).or_else(|| {
+    let error_message = adapter
+        .configuration_error
+        .clone()
+        .or(broken_reason)
+        .or_else(|| {
         (!endpoint_available).then(|| {
             let endpoint = command
                 .first()
@@ -471,7 +479,7 @@ fn server_status_at(
     LspStatus {
         id: adapter.id.clone(),
         name: adapter.name.clone(),
-        status: if usable && message.is_none() {
+        status: if usable && error_message.is_none() {
             if runtime
                 .service
                 .client_connected_at(workspace_root, project_root, adapter)
@@ -509,8 +517,9 @@ fn server_status_at(
             markers: matching_markers(adapter, scan),
             extensions: detected_extensions,
             command_available: usable,
-            message,
+            message: error_message.or(project.warning),
         },
+        runtime: project.runtime,
     }
 }
 

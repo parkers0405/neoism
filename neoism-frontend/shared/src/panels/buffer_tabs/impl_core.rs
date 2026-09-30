@@ -625,13 +625,7 @@ impl<A> BufferTabs<A> {
         distance: f32,
         scale: f32,
     ) -> Option<f32> {
-        if elapsed < 0.6 || distance <= 0.0 {
-            return None;
-        }
-        let duration = (distance / (35.0 * scale)).max(2.0);
-        let phase = ((elapsed - 0.6) / duration) % 2.0;
-        let progress = if phase <= 1.0 { phase } else { 2.0 - phase };
-        Some(distance * ((progress - 0.15) / 0.7).clamp(0.0, 1.0))
+        crate::primitives::hover_title_offset(elapsed, distance, scale)
     }
 
     fn estimated_widths(&self) -> Vec<f32> {

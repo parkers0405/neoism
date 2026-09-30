@@ -1072,6 +1072,12 @@ pub struct LspSnapshotServer {
     pub message: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub level: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_version: Option<String>,
 }
 
 #[cfg(test)]
@@ -1092,6 +1098,27 @@ mod tests {
             serde_json::from_str(&json).expect("deserialize server message");
         let json_back = serde_json::to_string(&back).expect("reserialize server message");
         assert_eq!(json, json_back, "roundtrip mismatch: {json}");
+    }
+
+    #[test]
+    fn lsp_snapshot_runtime_details_roundtrip() {
+        roundtrip_server(&EditorServerMessage::LspSnapshot {
+            surface_id: Some("surface".into()),
+            file_path: Some("src/index.ts".into()),
+            filetype: "typescript".into(),
+            servers: vec![LspSnapshotServer {
+                name: "TypeScript".into(),
+                binary: "typescript-language-server".into(),
+                filetype: "typescript".into(),
+                state: "connected".into(),
+                source: Some("managed".into()),
+                message: None,
+                level: None,
+                runtime_source: Some("yarn_sdk".into()),
+                runtime_path: Some("/workspace/.yarn/sdks/typescript/lib".into()),
+                runtime_version: Some("5.8.2-sdk".into()),
+            }],
+        });
     }
 
     #[test]

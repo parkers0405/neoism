@@ -864,6 +864,7 @@ impl Screen<'_> {
                 cursor_blink_visible,
                 cursor_preedit,
                 cursor_color,
+                has_non_terminal_surface: ctx.has_non_terminal_surface(),
                 is_active,
                 damage,
                 selection,

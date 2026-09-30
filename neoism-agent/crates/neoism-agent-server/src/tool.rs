@@ -33,6 +33,8 @@ mod format;
 pub(crate) mod locks;
 #[path = "tool_support/memory.rs"]
 mod memory;
+#[path = "tool_support/media.rs"]
+mod media;
 #[path = "tool_support/patch.rs"]
 mod patch;
 #[path = "tool_support/patch_tool.rs"]
@@ -616,6 +618,14 @@ fn artifact_read_handler(context: ToolContext, arguments: Value) -> ToolFuture {
 
 fn artifact_search_handler(context: ToolContext, arguments: Value) -> ToolFuture {
     Box::pin(artifact::search_tool(context, arguments))
+}
+
+fn generate_image_handler(context: ToolContext, arguments: Value) -> ToolFuture {
+    Box::pin(media::generate_image_tool(context, arguments))
+}
+
+fn generate_video_handler(context: ToolContext, arguments: Value) -> ToolFuture {
+    Box::pin(media::generate_video_tool(context, arguments))
 }
 
 fn webfetch_handler(context: ToolContext, arguments: Value) -> ToolFuture {

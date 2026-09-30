@@ -12,6 +12,7 @@ use crate::error::ApiError;
 use crate::state::AppState;
 
 pub(crate) const MAX_ARTIFACT_BYTES: usize = 25 * 1024 * 1024;
+pub(crate) const MAX_GENERATED_VIDEO_BYTES: usize = 250 * 1024 * 1024;
 
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -86,17 +87,73 @@ pub(crate) async fn artifact_create(
         }
         tenant_id = crate::caller::session_tenant(&session).to_string();
     }
+    let artifact = store_artifact(
+        &state,
+        &tenant_id,
+        session_id,
+        filename,
+        media_type,
+        body.as_ref(),
+        MAX_ARTIFACT_BYTES,
+    )
+    .await?;
+    Ok((StatusCode::CREATED, Json(artifact)))
+}
+
+pub(crate) async fn store_generated_artifact(
+    state: &AppState,
+    tenant_id: &str,
+    session_id: &str,
+    filename: String,
+    media_type: String,
+    bytes: &[u8],
+    max_bytes: usize,
+) -> Result<ArtifactInfo, ApiError> {
+    store_artifact(
+        state,
+        tenant_id,
+        Some(session_id.to_string()),
+        safe_filename(filename),
+        media_type,
+        bytes,
+        max_bytes,
+    )
+    .await
+}
+
+async fn store_artifact(
+    state: &AppState,
+    tenant_id: &str,
+    session_id: Option<String>,
+    filename: String,
+    media_type: String,
+    bytes: &[u8],
+    max_bytes: usize,
+) -> Result<ArtifactInfo, ApiError> {
+    if bytes.is_empty() {
+        return Err(ApiError::bad_request("artifact content is empty"));
+    }
+    if bytes.len() > max_bytes {
+        return Err(ApiError::bad_request(format!(
+            "artifact exceeds the {max_bytes} byte limit"
+        )));
+    }
+    let filename = if filename.is_empty() {
+        "attachment".to_string()
+    } else {
+        filename
+    };
     let id = Id::ascending(IdKind::Artifact).to_string();
-    let sha256 = format_hash(Sha256::digest(&body));
+    let sha256 = format_hash(Sha256::digest(bytes));
     let temporary = state.inner.artifact_root.join(format!(".{id}.upload"));
-    tokio::fs::write(&temporary, &body)
+    tokio::fs::write(&temporary, bytes)
         .await
         .map_err(|error| ApiError::internal(error.to_string()))?;
     if let Err(error) = scan_artifact(state.services(), &temporary).await {
         let _ = tokio::fs::remove_file(&temporary).await;
         return Err(error);
     }
-    if let Err(error) = state.put_artifact_blob(&tenant_id, &id, &body).await {
+    if let Err(error) = state.put_artifact_blob(tenant_id, &id, bytes).await {
         let _ = tokio::fs::remove_file(&temporary).await;
         return Err(ApiError::internal(error.to_string()));
     }
@@ -105,7 +162,7 @@ pub(crate) async fn artifact_create(
         id: id.clone(),
         filename,
         media_type,
-        size: body.len() as u64,
+        size: bytes.len() as u64,
         sha256,
         created: crate::now_millis(),
         session_id,
@@ -114,13 +171,13 @@ pub(crate) async fn artifact_create(
     if let Err(error) = state
         .inner
         .store
-        .insert_artifact(&artifact, &tenant_id)
+        .insert_artifact(&artifact, tenant_id)
         .await
     {
-        let _ = state.delete_artifact_blob(&tenant_id, &id).await;
+        let _ = state.delete_artifact_blob(tenant_id, &id).await;
         return Err(error.into());
     }
-    Ok((StatusCode::CREATED, Json(artifact)))
+    Ok(artifact)
 }
 
 /// Resolve only our own session-bound uploads before a model request. Persisted

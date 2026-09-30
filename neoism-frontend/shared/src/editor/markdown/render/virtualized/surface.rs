@@ -13,9 +13,6 @@ pub(super) fn render_virtual(
         return true;
     }
 
-    let bg = theme.f32(theme.bg);
-    sugarloaf.rect(None, x, y, w, h, bg, DEPTH, ORDER_BG);
-
     // Obsidian-style inline title: the frontmatter `title:` when set (edit
     // it right in the metadata rows), otherwise the file name.
     let title_text: String = if pane.embedded {

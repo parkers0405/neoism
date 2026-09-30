@@ -260,6 +260,7 @@ impl Screen<'_> {
                     self.workspace_buffer_tabs.remove(&id);
                     self.workspace_buf_enter_targets.remove(&id);
                     self.workspace_editor_active_paths.remove(&id);
+                    self.workspace_conversations_visibility.remove(&id);
                     if let (Some(island), Some(index)) =
                         (self.renderer.island.as_mut(), closing_workspace_index)
                     {
@@ -269,6 +270,7 @@ impl Screen<'_> {
                     // Evict AFTER the load — see close_tab: the swap
                     // stashes the dead workspace's tree during load.
                     self.workspace_file_trees.remove(&id);
+                    self.workspace_conversations_panes.remove(&id);
                     self.reapply_chrome_layout();
                 }
             } else if let Some(id) = closing_workspace_id

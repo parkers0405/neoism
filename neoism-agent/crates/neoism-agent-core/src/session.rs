@@ -174,6 +174,13 @@ pub struct AssistantPath {
 pub struct TokenUsage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total: Option<u64>,
+    #[serde(
+        default,
+        rename = "contextLimit",
+        alias = "context_limit",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub context_limit: Option<u64>,
     pub input: u64,
     pub output: u64,
     pub reasoning: u64,
@@ -184,6 +191,7 @@ impl Default for TokenUsage {
     fn default() -> Self {
         Self {
             total: None,
+            context_limit: None,
             input: 0,
             output: 0,
             reasoning: 0,

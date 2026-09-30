@@ -93,13 +93,28 @@ fn package_acp_config(
     package: &'static str,
     cwd: &str,
 ) -> Result<AcpServerConfig, String> {
-    Ok(AcpServerConfig::new(
-        id,
-        name,
-        resolve_runtime(services, "npx")?,
-        PathBuf::from(cwd),
-    )
-    .args(["--yes", package]))
+    let npx = resolve_runtime(services, "npx")?;
+    let mut config = AcpServerConfig::new(id, name, npx.clone(), PathBuf::from(cwd))
+        .args(["--yes", package]);
+    config.env.push((
+        "npm_config_cache".to_string(),
+        neoism_agent_builtins::default_cache_dir()
+            .join("npm-acp")
+            .to_string_lossy()
+            .into_owned(),
+    ));
+    if let Some(bin_dir) = Path::new(&npx).parent() {
+        let mut paths = vec![bin_dir.to_path_buf()];
+        if let Some(existing) = std::env::var_os("PATH") {
+            paths.extend(std::env::split_paths(&existing));
+        }
+        if let Ok(path) = std::env::join_paths(paths) {
+            config
+                .env
+                .push(("PATH".to_string(), path.to_string_lossy().into_owned()));
+        }
+    }
+    Ok(config)
 }
 
 fn resolve_runtime(
@@ -142,5 +157,50 @@ pub(crate) fn root_runtime(session: &SessionInfo) -> Option<ExternalRuntime> {
         "claude" => Some(ExternalRuntime::Claude),
         "codex" => Some(ExternalRuntime::Codex),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn package_adapter_uses_resolved_npx_and_prepends_its_node_bin() {
+        let mut services = crate::standard_services();
+        let managed_npx = if cfg!(windows) {
+            r"C:\neoism\node\v22.11.0\npx.cmd"
+        } else {
+            "/neoism/node/v22.11.0/bin/npx"
+        };
+        services.executables = Arc::new(
+            crate::executable::test_support::FakeExecutableService::with(
+                "npx",
+                managed_npx,
+            ),
+        );
+
+        let config = package_acp_config(
+            &services,
+            "claude",
+            "Claude",
+            "@agentclientprotocol/claude-agent-acp@0.81.1",
+            ".",
+        )
+        .unwrap();
+        assert_eq!(config.command, managed_npx);
+        assert!(config.env.iter().any(|(name, value)| {
+            name == "npm_config_cache"
+                && Path::new(value).file_name().and_then(|name| name.to_str())
+                    == Some("npm-acp")
+        }));
+        let path = config
+            .env
+            .iter()
+            .find_map(|(name, value)| (name == "PATH").then_some(value))
+            .expect("managed Node PATH");
+        assert_eq!(
+            std::env::split_paths(path).next().as_deref(),
+            Path::new(managed_npx).parent()
+        );
     }
 }

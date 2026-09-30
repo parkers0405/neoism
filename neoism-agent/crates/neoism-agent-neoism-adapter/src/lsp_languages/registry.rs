@@ -64,7 +64,7 @@ pub(in crate::lsp) const LANGUAGE_SPECS: &[LanguageSpec] = &[
             route!("javascript", "javascript", ["js", "mjs", "cjs"], []),
             route!("javascript", "javascriptreact", ["jsx"], []),
         ],
-        markers: &["tsconfig.json", "jsconfig.json", "package.json"],
+        markers: &["tsconfig.json", "jsconfig.json", "package.json", ".pnp.cjs"],
         root_strategy: WorkspaceRootStrategySpec::NearestMarker,
         workspace_symbols: true,
         completion: true,

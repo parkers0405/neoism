@@ -3866,7 +3866,8 @@ fn authoritative_schemas() -> Value {
         "LspRange": { "type": "object", "additionalProperties": false, "required": ["start", "end"], "properties": { "start": r("LspPosition"), "end": r("LspPosition") } },
         "LspLocation": { "type": "object", "additionalProperties": false, "required": ["path"], "properties": { "path": { "type": "string" }, "range": { "anyOf": [r("LspRange"), { "type": "null" }] }, "language": { "type": ["string", "null"] } } },
         "LspHover": { "type": "object", "additionalProperties": false, "required": ["path", "contents"], "properties": { "path": { "type": "string" }, "contents": { "type": "string" }, "kind": { "type": ["string", "null"] }, "range": { "anyOf": [r("LspRange"), { "type": "null" }] }, "language": { "type": ["string", "null"] } } },
-        "LspStatus": { "type": "object", "additionalProperties": true, "required": ["id", "name", "status", "language", "command", "command_source", "workspace", "capabilities", "detected"], "properties": { "id": { "type": "string" }, "name": { "type": "string" }, "status": { "type": "string", "enum": ["available", "connected", "error"] }, "language": { "type": "string" }, "command": { "type": "array", "items": { "type": "string" } }, "command_source": { "type": "string" } } },
+        "LspRuntimeInfo": { "type": "object", "additionalProperties": false, "required": ["source", "path", "version"], "properties": { "source": { "type": "string", "enum": ["yarn_sdk", "configured", "language_server_default", "missing_yarn_sdk"] }, "path": { "type": ["string", "null"] }, "version": { "type": ["string", "null"] } } },
+        "LspStatus": { "type": "object", "additionalProperties": true, "required": ["id", "name", "status", "language", "command", "command_source", "workspace", "capabilities", "detected"], "properties": { "id": { "type": "string" }, "name": { "type": "string" }, "status": { "type": "string", "enum": ["available", "connected", "error"] }, "language": { "type": "string" }, "command": { "type": "array", "items": { "type": "string" } }, "command_source": { "type": "string" }, "runtime": { "anyOf": [r("LspRuntimeInfo"), { "type": "null" }] } } },
         "LspSignatureHelp": { "type": "object", "additionalProperties": true, "required": ["path", "signatures"], "properties": { "path": { "type": "string" }, "signatures": { "type": "array", "items": { "type": "object", "additionalProperties": true } } } },
         "LspInlayHint": { "type": "object", "additionalProperties": false, "required": ["path", "line", "character", "label", "padding_left", "padding_right"], "properties": { "path": { "type": "string" }, "line": { "type": "integer" }, "character": { "type": "integer" }, "label": { "type": "string" }, "kind": { "type": ["string", "null"] }, "padding_left": { "type": "boolean" }, "padding_right": { "type": "boolean" }, "language": { "type": ["string", "null"] } } },
         "LspDocumentHighlight": { "type": "object", "additionalProperties": false, "required": ["path"], "properties": { "path": { "type": "string" }, "range": { "anyOf": [r("LspRange"), { "type": "null" }] }, "kind": { "type": ["string", "null"] }, "language": { "type": ["string", "null"] } } },
@@ -3914,6 +3915,26 @@ mod tests {
     use super::*;
 
     const ROUTER_SOURCE: &str = include_str!("app_router.rs");
+
+    #[test]
+    fn lsp_status_schema_exposes_typescript_runtime() {
+        let document = canonical_openapi();
+        assert_eq!(
+            document["components"]["schemas"]["LspStatus"]["properties"]["runtime"]
+                ["anyOf"][0]["$ref"],
+            "#/components/schemas/LspRuntimeInfo"
+        );
+        assert_eq!(
+            document["components"]["schemas"]["LspRuntimeInfo"]["properties"]["source"]
+                ["enum"],
+            json!([
+                "yarn_sdk",
+                "configured",
+                "language_server_default",
+                "missing_yarn_sdk"
+            ])
+        );
+    }
 
     #[test]
     fn every_central_v2_router_method_is_in_openapi_and_vice_versa() {
@@ -4109,6 +4130,7 @@ mod tests {
                 reason: "stop".into(),
                 tokens: TokenUsage {
                     total: Some(3),
+                    context_limit: None,
                     input: 1,
                     output: 1,
                     reasoning: 1,

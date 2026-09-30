@@ -498,6 +498,10 @@ impl ChromeBridge {
         self.chrome.conversations_visible
     }
 
+    pub fn show_conversations_for_agent(&mut self) {
+        self.chrome.show_conversations(false);
+    }
+
     pub fn drain_conversation_new(&mut self) -> Option<String> {
         self.chrome
             .take_conversation_new()

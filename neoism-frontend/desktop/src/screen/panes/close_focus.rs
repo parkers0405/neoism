@@ -161,6 +161,7 @@ impl Screen<'_> {
         if new_len < old_len {
             if let Some(id) = closing_workspace_id {
                 self.workspace_file_trees.remove(&id);
+                self.workspace_conversations_panes.remove(&id);
             }
         }
 

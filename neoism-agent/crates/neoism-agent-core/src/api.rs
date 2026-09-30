@@ -32,6 +32,12 @@ pub struct AgentConfigDocument {
     pub text_verbosity: Option<TextVerbosity>,
     #[serde(default)]
     pub small_model: Option<String>,
+    /// Provider/model used by the built-in image generation tool.
+    #[serde(default)]
+    pub image_model: Option<String>,
+    /// Provider/model used by the built-in video generation tool.
+    #[serde(default)]
+    pub video_model: Option<String>,
     #[serde(default)]
     pub default_agent: Option<String>,
     #[serde(default)]

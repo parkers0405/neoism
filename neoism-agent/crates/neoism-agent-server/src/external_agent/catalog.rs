@@ -54,6 +54,12 @@ pub(crate) fn is_importing(session: &SessionInfo) -> bool {
         .is_some_and(|external| external["historyState"] == "importing")
 }
 
+pub(crate) fn is_neoism_owned_root(session: &SessionInfo) -> bool {
+    session.extra.get("externalAgent").is_none_or(|external| {
+        external.get("historyState").and_then(Value::as_str) == Some("neoism_only")
+    })
+}
+
 pub(super) fn native_host_id() -> String {
     std::env::var("NEOISM_HOST_ID")
         .ok()
@@ -1085,6 +1091,23 @@ mod provider_import_tests {
             .unwrap()
             .0;
             assert_eq!(imported.id, second.id);
+            assert!(!is_neoism_owned_root(&imported));
+            let mut provider_preview = imported.clone();
+            provider_preview.extra.get_mut("externalAgent").unwrap()["historyState"] =
+                json!("not_loaded");
+            assert!(!is_neoism_owned_root(&provider_preview));
+            provider_preview
+                .extra
+                .get_mut("externalAgent")
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .remove("historyState");
+            assert!(!is_neoism_owned_root(&provider_preview));
+            let mut neoism_owned = imported.clone();
+            neoism_owned.extra.get_mut("externalAgent").unwrap()["historyState"] =
+                json!("neoism_only");
+            assert!(is_neoism_owned_root(&neoism_owned));
             let messages = state
                 .inner
                 .store
@@ -1151,15 +1174,43 @@ mod provider_import_tests {
             .await
             .unwrap()
             .0;
-            assert_eq!(ready.items.len(), 1);
-            assert_eq!(ready.items[0].extra["externalAgent"]["provider"], provider);
-            assert_eq!(
-                ready.items[0].extra["externalAgent"]["historyState"],
-                "text_only"
+            assert!(
+                ready.items.is_empty(),
+                "provider history import leaked into Neoism-owned roots for {provider}"
             );
-            assert!(ready.items[0].extra["externalAgent"]
-                .get("externalSessionId")
-                .is_none());
+            let mut older_neoism_owned = imported.clone();
+            older_neoism_owned.id = neoism_agent_core::new_session_id();
+            older_neoism_owned.time.updated = imported.time.updated.saturating_sub(1);
+            older_neoism_owned.extra.get_mut("externalAgent").unwrap()["historyState"] =
+                json!("neoism_only");
+            state
+                .inner
+                .store
+                .insert_session(&older_neoism_owned)
+                .await
+                .unwrap();
+            let owned_page = crate::v2_routes::v2_session_list(
+                State(state.clone()),
+                Query(
+                    serde_json::from_value(json!({
+                        "roots":"true", "directory":cwd, "limit":1
+                    }))
+                    .unwrap(),
+                ),
+                None,
+            )
+            .await
+            .unwrap()
+            .0;
+            assert_eq!(
+                owned_page
+                    .items
+                    .iter()
+                    .map(|session| &session.id)
+                    .collect::<Vec<_>>(),
+                [&older_neoism_owned.id],
+                "hidden provider history consumed the paginated Neoism-owned slot"
+            );
             state.shutdown().await.unwrap();
             let _ = std::fs::remove_dir_all(root);
         }

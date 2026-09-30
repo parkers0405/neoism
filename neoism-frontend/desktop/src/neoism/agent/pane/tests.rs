@@ -1019,6 +1019,8 @@ fn main_agent_verb_wins_while_it_streams_over_running_subagents() {
         NeoismAgentStreamingState::Generating
     );
     assert_eq!(pane.streaming_label(), "Crafting");
+    pane.note_streaming(NeoismAgentStreamingState::Working, None);
+    assert_eq!(pane.streaming_label(), "Sub-agents working");
 
     // The main agent stops while the same child keeps running: only now
     // does "Sub-agents working" take over — and on the SAME waiting
@@ -4468,7 +4470,7 @@ fn persisted_compaction_is_only_compaction_message_source() {
     pane.apply_part_delta(
         Some("assistant-compaction".to_string()),
         Some("text-part".to_string()),
-        Some("text".to_string()),
+        Some("compaction".to_string()),
         "real summary",
     );
     pane.apply_compaction_delta("event delta tail");
@@ -4485,6 +4487,29 @@ fn persisted_compaction_is_only_compaction_message_source() {
     assert_eq!(compactions.len(), 1);
     assert_eq!(compactions[0].id, "assistant-compaction");
     assert_eq!(compactions[0].text, "real summary");
+}
+
+#[test]
+fn stale_history_preserves_streamed_compaction_text_and_slot() {
+    let mut pane = NeoismAgentPane::default();
+    pane.messages = vec![
+        NeoismAgentMessage::user("before").with_id("user-before"),
+        NeoismAgentMessage::compaction("partial summary", "summary")
+            .with_id("assistant-compaction"),
+        NeoismAgentMessage::assistant("after").with_id("assistant-after"),
+    ];
+
+    let refreshed = pane.preserve_streamed_response_text(vec![
+        NeoismAgentMessage::user("before").with_id("user-before"),
+        NeoismAgentMessage::compaction("", "summary").with_id("assistant-compaction"),
+        NeoismAgentMessage::assistant("after").with_id("assistant-after"),
+    ]);
+
+    assert_eq!(refreshed.len(), 3);
+    assert_eq!(refreshed[1].id, "assistant-compaction");
+    assert_eq!(refreshed[1].kind, NeoismAgentMessageKind::Compaction);
+    assert_eq!(refreshed[1].text, "partial summary");
+    assert_eq!(refreshed[2].id, "assistant-after");
 }
 
 #[test]

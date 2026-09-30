@@ -53,11 +53,9 @@ impl ExternalOptions {
         self.display_order()
             .into_iter()
             .filter(|&index| {
-                !matches!(self.provider.as_str(), "codex" | "claude")
-                    || matches!(
-                        self.options[index].category.as_str(),
-                        "model" | "thought_level"
-                    )
+                let category = self.options[index].category.as_str();
+                matches!(category, "model" | "thought_level")
+                    || self.provider == "opencode" && category == "mode"
             })
             .collect()
     }
@@ -193,35 +191,6 @@ impl ExternalOptions {
     }
 }
 
-/// Number of leading provider chips that fit, reserving a clickable menu for
-/// every remaining advertised option. The menu lists *all* options in provider
-/// order, so even a single oversized first chip cannot block later controls.
-pub fn visible_chip_count(
-    widths: &[f32],
-    available: f32,
-    overflow_width: f32,
-    gap: f32,
-    force_menu: bool,
-) -> (usize, bool) {
-    let fits = |limit: f32| {
-        let mut used = 0.0;
-        let mut count = 0;
-        for &width in widths {
-            if used + width > limit {
-                break;
-            }
-            count += 1;
-            used += width + gap;
-        }
-        count
-    };
-    if !force_menu && fits(available) == widths.len() {
-        (widths.len(), false)
-    } else {
-        (fits((available - overflow_width - gap).max(0.0)), true)
-    }
-}
-
 fn push_choice(choices: &mut Vec<ExternalChoice>, item: &Value, group: Option<&str>) {
     let Some(value) = item.get("value").and_then(Value::as_str) else {
         return;
@@ -314,7 +283,14 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["mode", "model", "thinking", "cache", "fast"]
         );
-        assert_eq!(opencode.footer_order(), opencode.display_order());
+        assert_eq!(
+            opencode
+                .footer_order()
+                .iter()
+                .map(|&index| opencode.options[index].id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["mode", "model", "thinking"]
+        );
         assert_eq!(snapshot.options[0].id, "cache");
         let mut stale = serde_json::json!({"provider":"claude","externalSessionId":"id","modeFallback":false,"selectedOptions":{},"configOptions":[],"replayError":"model unavailable"});
         assert_eq!(
@@ -361,30 +337,6 @@ mod tests {
         let mut invalid = base.clone();
         invalid.as_object_mut().unwrap().remove("externalSessionId");
         assert!(ExternalOptions::parse(&invalid, "claude").is_err());
-    }
-
-    #[test]
-    fn oversized_first_option_still_exposes_every_option_via_overflow() {
-        assert_eq!(
-            visible_chip_count(&[500.0, 50.0, 50.0, 60.0], 180.0, 75.0, 4.0, false),
-            (0, true)
-        );
-        assert_eq!(
-            visible_chip_count(&[60.0, 50.0, 50.0], 160.0, 75.0, 4.0, false),
-            (1, true)
-        );
-        assert_eq!(
-            visible_chip_count(&[60.0, 50.0, 50.0], 180.0, 75.0, 4.0, false),
-            (3, false)
-        );
-        assert_eq!(
-            visible_chip_count(&[60.0, 50.0], 180.0, 75.0, 4.0, false),
-            (2, false)
-        );
-        assert_eq!(
-            visible_chip_count(&[60.0, 50.0], 180.0, 75.0, 4.0, true),
-            (1, true)
-        );
     }
 
     #[test]

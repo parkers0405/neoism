@@ -128,18 +128,19 @@ async fn abort_session_run_impl(
     session_id: &str,
     reconcile_completion: bool,
 ) -> bool {
-    let cancelled = state.inner.session_coordinator.abort_run(session_id).await;
+    let cancelled = state
+        .inner
+        .session_coordinator
+        .request_abort(session_id)
+        .await;
     if let Some(cancelled) = cancelled.as_ref() {
         cancelled.cancel.store(true, Ordering::SeqCst);
     }
-    let was_busy = state
-        .inner
-        .statuses
-        .write()
-        .await
-        .remove(session_id)
-        .is_some();
-    publish_idle_if_no_run(state, session_id).await;
+    let was_busy = state.inner.statuses.read().await.contains_key(session_id);
+    if cancelled.is_none() {
+        state.inner.statuses.write().await.remove(session_id);
+        publish_idle_if_no_run(state, session_id).await;
+    }
 
     let permission_ids = {
         let permissions = state.inner.permissions.read().await;

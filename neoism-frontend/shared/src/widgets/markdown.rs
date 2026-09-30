@@ -422,23 +422,76 @@ pub fn is_divider_line(line: &str) -> bool {
     matches!(marker, '-' | '*' | '_') && line.len() >= 3 && chars.all(|c| c == marker)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FenceDelimiter {
+    marker: u8,
+    len: usize,
+}
+
+impl FenceDelimiter {
+    /// A closing fence must use the opening marker, be at least as long, and
+    /// contain no info string. Shorter fences remain literal code content.
+    pub fn closes(self, line: &str) -> bool {
+        let Some(content) = fence_line_content(line) else {
+            return false;
+        };
+        let run_len = content
+            .as_bytes()
+            .iter()
+            .take_while(|byte| **byte == self.marker)
+            .count();
+        run_len >= self.len
+            && content[run_len..]
+                .bytes()
+                .all(|byte| matches!(byte, b' ' | b'\t' | b'\r' | b'\n'))
+    }
+}
+
+fn fence_line_content(line: &str) -> Option<&str> {
+    let indent = line.bytes().take_while(|byte| *byte == b' ').count();
+    (indent <= 3).then(|| &line[indent..])
+}
+
+/// Parse a CommonMark fenced-code opener and return its delimiter plus the
+/// trimmed info string. Up to three leading spaces are allowed.
+pub fn fence_open(line: &str) -> Option<(FenceDelimiter, &str)> {
+    let content = fence_line_content(line)?;
+    let marker = *content.as_bytes().first()?;
+    if !matches!(marker, b'`' | b'~') {
+        return None;
+    }
+    let len = content
+        .as_bytes()
+        .iter()
+        .take_while(|byte| **byte == marker)
+        .count();
+    if len < 3 {
+        return None;
+    }
+    let info = &content[len..];
+    if marker == b'`' && info.as_bytes().contains(&b'`') {
+        return None;
+    }
+    Some((FenceDelimiter { marker, len }, info.trim()))
+}
+
 /// Walk forward from `start` (assumed to be a code fence) and return the
-/// index of the closing fence (or `lines.len()` if the block is unclosed).
+/// index of the matching closing fence (or `lines.len()` if unclosed).
 pub fn code_block_end(lines: &[String], start: usize) -> usize {
-    for ix in start + 1..lines.len() {
-        if lines[ix].trim_start().starts_with("```") {
+    let Some((fence, _)) = lines.get(start).and_then(|line| fence_open(line)) else {
+        return lines.len();
+    };
+    for (ix, line) in lines.iter().enumerate().skip(start + 1) {
+        if fence.closes(line) {
             return ix;
         }
     }
     lines.len()
 }
 
-/// Extract the language hint from a fenced code line. Supports both
-/// ` ``` ` and `~~~` fences; returns the trimmed info-string.
+/// Extract the language hint from a valid fenced-code opener.
 pub fn fence_info(line: &str) -> Option<&str> {
-    line.strip_prefix("```")
-        .or_else(|| line.strip_prefix("~~~"))
-        .map(str::trim)
+    fence_open(line).map(|(_, info)| info)
 }
 
 // ---------------------------------------------------------------------------
@@ -1194,7 +1247,31 @@ mod tests {
     fn fence_info_recognises_both_styles() {
         assert_eq!(fence_info("```rust"), Some("rust"));
         assert_eq!(fence_info("~~~ ts"), Some("ts"));
+        assert_eq!(fence_info("   ````markdown"), Some("markdown"));
+        assert_eq!(fence_info("    ```rust"), None);
+        assert_eq!(fence_info("```ru`st"), None);
         assert_eq!(fence_info("hello"), None);
+    }
+
+    #[test]
+    fn fence_closer_matches_marker_and_opening_length() {
+        let (backticks, _) = fence_open("````markdown").unwrap();
+        assert!(!backticks.closes("```"));
+        assert!(!backticks.closes("~~~~"));
+        assert!(backticks.closes("````"));
+        assert!(backticks.closes("`````   "));
+        assert!(!backticks.closes("````not-a-close"));
+
+        let (tildes, _) = fence_open("~~~text").unwrap();
+        assert!(tildes.closes("~~~"));
+        assert!(!tildes.closes("```"));
+    }
+
+    #[test]
+    fn code_block_end_ignores_shorter_nested_fences() {
+        let lines = ["````markdown", "```rust", "fn main() {}", "```", "````"]
+            .map(str::to_string);
+        assert_eq!(code_block_end(&lines, 0), 4);
     }
 
     #[test]

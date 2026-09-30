@@ -651,20 +651,6 @@ pub(crate) enum NeoismAgentBackgroundUpdate {
             String,
         >,
     },
-    ExternalCatalogRefreshed {
-        server: String,
-        directory: Option<String>,
-        generation: u64,
-        source: neoism_ui::panels::agent_pane::state::side_panel::ConversationSource,
-        result: Result<Vec<NeoismAgentSessionEntry>, String>,
-    },
-    ExternalImportCompleted {
-        server: String,
-        directory: Option<String>,
-        source: neoism_ui::panels::agent_pane::state::side_panel::ConversationSource,
-        source_key: String,
-        result: Result<String, String>,
-    },
     SidePanelSessionsRefreshed {
         generation: u64,
         requested_cursor: Option<String>,
@@ -931,16 +917,6 @@ pub struct NeoismAgentPane {
     >,
     event_stream: Option<AgentSessionEventStream>,
     session_catalog_stream: Option<AgentSessionCatalogStream>,
-    external_catalog_enabled: bool,
-    external_catalog_generation: u64,
-    external_catalog_last_refresh: Option<Instant>,
-    external_catalog_remaining: usize,
-    external_import_in_flight: Option<String>,
-    pending_external_open: Option<(
-        String,
-        neoism_ui::panels::agent_pane::state::side_panel::ConversationSource,
-    )>,
-    pending_external_error: Option<String>,
     event_wake: Option<AgentEventWake>,
     /// When the most recent update was drained from the event stream.
     /// Feeds the liveness watchdog: a session that claims active work but
@@ -1272,13 +1248,6 @@ impl Default for NeoismAgentPane {
             file_mention_root_pin: Mutex::new(None),
             event_stream: None,
             session_catalog_stream: None,
-            external_catalog_enabled: false,
-            external_catalog_generation: 0,
-            external_catalog_last_refresh: None,
-            external_catalog_remaining: 0,
-            external_import_in_flight: None,
-            pending_external_open: None,
-            pending_external_error: None,
             event_wake: None,
             last_stream_update_at: None,
             last_stream_resubscribe_at: None,
@@ -1618,7 +1587,9 @@ fn merge_stream_part_message(
     // unordered REST reconciliation may preserve a longer local prefix.
     if matches!(
         incoming.kind,
-        NeoismAgentMessageKind::Assistant | NeoismAgentMessageKind::Reasoning
+        NeoismAgentMessageKind::Assistant
+            | NeoismAgentMessageKind::Reasoning
+            | NeoismAgentMessageKind::Compaction
     ) {
         existing.text.clear();
     }
@@ -1658,10 +1629,14 @@ fn merge_part_message(
     }
     if matches!(
         incoming.kind,
-        NeoismAgentMessageKind::Assistant | NeoismAgentMessageKind::Reasoning
+        NeoismAgentMessageKind::Assistant
+            | NeoismAgentMessageKind::Reasoning
+            | NeoismAgentMessageKind::Compaction
     ) && matches!(
         existing.kind,
-        NeoismAgentMessageKind::Assistant | NeoismAgentMessageKind::Reasoning
+        NeoismAgentMessageKind::Assistant
+            | NeoismAgentMessageKind::Reasoning
+            | NeoismAgentMessageKind::Compaction
     ) {
         if incoming.text.is_empty() || existing.text.starts_with(&incoming.text) {
             incoming.text = existing.text.clone();
@@ -2045,12 +2020,14 @@ fn is_streamed_live_part(message: &NeoismAgentMessage) -> bool {
             | NeoismAgentMessageKind::Reasoning
             | NeoismAgentMessageKind::Tool
             | NeoismAgentMessageKind::Subtask
+            | NeoismAgentMessageKind::Compaction
     )
 }
 
 fn part_delta_message_kind(kind: Option<&str>) -> NeoismAgentMessageKind {
     match kind {
         Some("reasoning" | "thinking") => NeoismAgentMessageKind::Reasoning,
+        Some("compaction") => NeoismAgentMessageKind::Compaction,
         _ => NeoismAgentMessageKind::Assistant,
     }
 }

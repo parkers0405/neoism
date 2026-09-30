@@ -2,11 +2,12 @@ use std::path::Path;
 
 pub use crate::lsp::{
     language_server_adapters, language_server_adapters_for, DiagnosticsEvent,
-    LspAdapterMetadata, LspAdapterOrigin, LspAdapterTransport, LspCatalogPackageMetadata,
-    LspCommandSource, LspCompletionItem, LspDiagnostic, LspDocumentHighlight,
-    LspDocumentSymbol, LspHover, LspInlayHint, LspLanguageRouteMetadata, LspLocation,
-    LspParameterInfo, LspPosition, LspRange, LspRuntime, LspServerState,
-    LspSignatureHelp, LspSignatureInfo, LspStatus, WorkspaceSymbol,
+    LspAdapterMetadata, LspAdapterOrigin, LspAdapterTransport, LspCapabilities,
+    LspCatalogPackageMetadata, LspCommandSource, LspCompletionItem, LspDetection,
+    LspDiagnostic, LspDocumentHighlight, LspDocumentSymbol, LspHover, LspInlayHint,
+    LspLanguageRouteMetadata, LspLocation, LspParameterInfo, LspPosition, LspRange,
+    LspRuntime, LspRuntimeInfo, LspRuntimeSource, LspServerState, LspSignatureHelp,
+    LspSignatureInfo, LspStatus, LspWorkspace, WorkspaceSymbol,
 };
 
 /// Subscribe to real-time `publishDiagnostics` pushes (event-driven — the

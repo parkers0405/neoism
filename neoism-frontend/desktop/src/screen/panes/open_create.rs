@@ -328,6 +328,7 @@ impl Screen<'_> {
             self.workspace_file_trees.remove(&new_id);
             self.workspace_notes_sidebars.remove(&new_id);
             self.workspace_notes_vaults.remove(&new_id);
+            self.workspace_conversations_panes.remove(&new_id);
         }
         self.context_manager.switch_context_visibility(
             &mut self.sugarloaf,
@@ -602,6 +603,7 @@ impl Screen<'_> {
         self.workspace_notes_sidebars.remove(workspace_id);
         self.workspace_notes_vaults.remove(workspace_id);
         self.workspace_conversations_visibility.remove(workspace_id);
+        self.workspace_conversations_panes.remove(workspace_id);
     }
 
     fn retire_replaced_workspace(&mut self, workspace_id: &str) {

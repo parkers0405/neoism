@@ -234,9 +234,9 @@ fn provider_catalog_entries(value: &Value) -> &[Value] {
         .unwrap_or(&[])
 }
 
-/// Resolve the catalog's concrete default model. Connected providers win over
-/// the always-available OpenCode free fallback; otherwise provider order is
-/// preserved. This is used only when workspace config has no explicit model.
+/// Resolve the catalog's concrete default model. Connected non-OpenCode
+/// providers win over OpenCode; otherwise provider order is preserved. This is
+/// used only when workspace config has no explicit model.
 pub fn default_model_from_providers_json(value: &Value) -> Option<String> {
     let defaults = value.get("default").and_then(Value::as_object)?;
     let providers = provider_catalog_entries(value);
@@ -832,6 +832,17 @@ fn message_blocks_with_start(
             .filter_map(|part| part.get("text").and_then(Value::as_str))
             .collect::<Vec<_>>()
             .join("\n");
+        if text.is_empty() {
+            if let Some(error) = info
+                .and_then(|info| match info {
+                    MessageInfo::Assistant(assistant) => assistant.error.as_ref(),
+                    MessageInfo::User(_) => None,
+                })
+                .and_then(assistant_error_message)
+            {
+                return vec![agent_message_system("Agent error", error)];
+            }
+        }
         let mut block = NeoismAgentMessage::compaction(text, "summary");
         block.id = match info {
             Some(MessageInfo::Assistant(assistant)) => assistant.id.to_string(),
@@ -1300,7 +1311,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_default_resolves_connected_model_before_public_fallback() {
+    fn provider_default_resolves_non_opencode_model_first() {
         let configured = json!({
             "providers": [
                 { "id": "opencode", "models": { "free": { "id": "free" } } },
@@ -1975,6 +1986,59 @@ mod tests {
     }
 
     #[test]
+    fn live_compaction_marker_and_summary_share_one_identity_and_kind() {
+        let marker = part_block(&json!({
+            "id": "prt-marker",
+            "type": "compaction",
+            "messageID": "msg-summary",
+            "summary": true,
+            "reason": "summary"
+        }))
+        .expect("compaction marker");
+        let text = part_block(&json!({
+            "id": "prt-text",
+            "type": "text",
+            "messageID": "msg-summary",
+            "compactionSummary": true,
+            "text": "streamed summary"
+        }))
+        .expect("compaction summary text");
+
+        assert_eq!(marker.kind, NeoismAgentMessageKind::Compaction);
+        assert_eq!(text.kind, NeoismAgentMessageKind::Compaction);
+        assert_eq!(marker.id, "msg-summary");
+        assert_eq!(text.id, marker.id);
+        assert_eq!(text.text, "streamed summary");
+    }
+
+    #[test]
+    fn failed_empty_compaction_renders_error_without_empty_card() {
+        let message = json!({
+            "info": canonical_assistant_info(json!({
+                "id": "msg-summary",
+                "error": { "message": "compaction failed" }
+            })),
+            "parts": [
+                {
+                    "id": "prt-marker",
+                    "type": "compaction",
+                    "messageID": "msg-summary",
+                    "summary": true,
+                    "reason": "summary"
+                },
+                { "id": "prt-text", "type": "text", "text": "" }
+            ]
+        });
+
+        let blocks = message_blocks(&message);
+
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].kind, NeoismAgentMessageKind::System);
+        assert_eq!(blocks[0].title, "Agent error");
+        assert_eq!(blocks[0].text, "compaction failed");
+    }
+
+    #[test]
     fn live_user_part_uses_parent_message_identity() {
         let message = part_block(&json!({
             "id": "part-user-1",
@@ -2076,6 +2140,16 @@ pub fn part_block(part: &Value) -> Option<NeoismAgentMessage> {
                 }
             })
         }
+        "text"
+            if part
+                .get("compactionSummary")
+                .and_then(Value::as_bool)
+                .unwrap_or(false) =>
+        {
+            part.get("text")
+                .and_then(Value::as_str)
+                .map(|text| NeoismAgentMessage::compaction(text.to_string(), "summary"))
+        }
         "text" => part
             .get("text")
             .and_then(Value::as_str)
@@ -2123,7 +2197,12 @@ pub fn part_block(part: &Value) -> Option<NeoismAgentMessage> {
         "step-finish" => step_finish_block(part),
         _ => None,
     }?;
-    if kind == "compaction" {
+    if kind == "compaction"
+        || part
+            .get("compactionSummary")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    {
         if let Some(message_id) = part
             .get("messageID")
             .or_else(|| part.get("messageId"))
@@ -2357,7 +2436,10 @@ fn usage_from_step_finish(part: &Value) -> Option<NeoismAgentUsage> {
         cache_write,
         total,
         cost_micros: (cost * 1_000_000.0).round().clamp(0.0, u64::MAX as f64) as u64,
-        context_limit: None,
+        context_limit: {
+            let limit = token_field(tokens, &["contextLimit", "context_limit"]);
+            (limit > 0).then_some(limit)
+        },
     })
 }
 

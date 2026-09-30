@@ -588,17 +588,20 @@ fn semantic_markdown_lines(text: &str) -> Vec<String> {
 
     let mut lines = Vec::new();
     let mut paragraph = String::new();
-    let mut in_fence = false;
+    let mut fence: Option<md::FenceDelimiter> = None;
     for raw in text.lines() {
         let trimmed = raw.trim();
-        if md::fence_info(trimmed).is_some() {
-            flush_paragraph(&mut lines, &mut paragraph);
+        if let Some(active) = fence {
             lines.push(raw.to_string());
-            in_fence = !in_fence;
+            if active.closes(raw) {
+                fence = None;
+            }
             continue;
         }
-        if in_fence {
+        if let Some((opening, _)) = md::fence_open(raw) {
+            flush_paragraph(&mut lines, &mut paragraph);
             lines.push(raw.to_string());
+            fence = Some(opening);
             continue;
         }
         if trimmed.is_empty() {
@@ -1171,43 +1174,42 @@ pub fn layout_assistant_markdown(
         ..DrawOpts::default()
     };
     let mut blocks = Vec::new();
-    let mut code: Option<(String, Vec<String>)> = None;
+    let mut code: Option<(md::FenceDelimiter, String, Vec<String>)> = None;
     let mut table_rows: Vec<Vec<String>> = Vec::new();
     let mut pending_table_header: Option<(String, Vec<String>)> = None;
 
     for raw in semantic_markdown_lines(text) {
         let raw = raw.as_str();
-        let trimmed = raw.trim();
-        if let Some(info) = md::fence_info(trimmed) {
-            if let Some((lang, lines)) = code.take() {
-                blocks.push(markdown_code_or_stock_block_laid_out(
-                    sugarloaf, lang, lines, s,
-                ));
-            } else {
-                flush_pending_table_header(
-                    sugarloaf,
-                    &mut blocks,
-                    &mut pending_table_header,
-                    width,
-                    s,
-                    &paragraph_opts,
-                    &heading_opts,
-                );
-                flush_layout_table(
-                    sugarloaf,
-                    &mut blocks,
-                    &mut table_rows,
-                    width,
-                    s,
-                    &paragraph_opts,
-                );
-                code = Some((info.to_string(), Vec::new()));
-            }
+        if code.as_ref().is_some_and(|(fence, _, _)| fence.closes(raw)) {
+            let (_, lang, lines) = code.take().expect("matching fence has open code");
+            blocks.push(markdown_code_or_stock_block_laid_out(
+                sugarloaf, lang, lines, s,
+            ));
             continue;
         }
-
-        if let Some((_, lines)) = code.as_mut() {
+        if let Some((_, _, lines)) = code.as_mut() {
             lines.push(raw.to_string());
+            continue;
+        }
+        if let Some((fence, info)) = md::fence_open(raw) {
+            flush_pending_table_header(
+                sugarloaf,
+                &mut blocks,
+                &mut pending_table_header,
+                width,
+                s,
+                &paragraph_opts,
+                &heading_opts,
+            );
+            flush_layout_table(
+                sugarloaf,
+                &mut blocks,
+                &mut table_rows,
+                width,
+                s,
+                &paragraph_opts,
+            );
+            code = Some((fence, info.to_string(), Vec::new()));
             continue;
         }
 
@@ -1300,7 +1302,7 @@ pub fn layout_assistant_markdown(
         }
     }
 
-    if let Some((lang, lines)) = code.take() {
+    if let Some((_, lang, lines)) = code.take() {
         blocks.push(markdown_code_or_stock_block_laid_out(
             sugarloaf, lang, lines, s,
         ));
@@ -1340,18 +1342,19 @@ fn normalize_multiline_markdown_links(markdown: &str) -> Cow<'_, str> {
 
     let mut output = String::with_capacity(markdown.len());
     let mut prose = String::new();
-    let mut in_fence = false;
+    let mut fence: Option<md::FenceDelimiter> = None;
     let mut changed = false;
     for line in markdown.split_inclusive('\n') {
-        let trimmed = line.trim_start();
-        let fence = trimmed.starts_with("```") || trimmed.starts_with("~~~");
-        if fence {
+        if let Some(active) = fence {
+            output.push_str(line);
+            if active.closes(line) {
+                fence = None;
+            }
+        } else if let Some((opening, _)) = md::fence_open(line) {
             changed |= collapse_multiline_links_in_prose(&prose, &mut output);
             prose.clear();
             output.push_str(line);
-            in_fence = !in_fence;
-        } else if in_fence {
-            output.push_str(line);
+            fence = Some(opening);
         } else {
             prose.push_str(line);
         }

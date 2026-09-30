@@ -203,6 +203,7 @@ pub(crate) fn apply_agent_event_to_pane(
             let delta_kind = match kind {
                 ContentKind::Text => Some("text".to_string()),
                 ContentKind::Reasoning => Some("reasoning".to_string()),
+                ContentKind::Compaction => Some("compaction".to_string()),
                 ContentKind::Tool { name } => Some(name),
             };
             pane.ingest_live_part_delta(None, Some(message_id), delta_kind, &text);
@@ -919,6 +920,7 @@ pub(crate) fn apply_agent_event_to_cache(
             let delta_kind = match kind {
                 ContentKind::Text => "text".to_string(),
                 ContentKind::Reasoning => "reasoning".to_string(),
+                ContentKind::Compaction => "compaction".to_string(),
                 ContentKind::Tool { name } => name,
             };
             pane.cache_apply_part_delta(

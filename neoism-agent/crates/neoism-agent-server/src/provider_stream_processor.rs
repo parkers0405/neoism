@@ -429,6 +429,7 @@ pub(crate) async fn run_provider_stream_step(
         ctx.model,
         stream_state.provider_response,
         stream_state.reasoning_parts,
+        false,
     )
     .await
     .map_err(|error| ProviderStreamStepError::unfinalized(error.to_string(), false));
@@ -982,8 +983,8 @@ async fn flush_pending_tool_calls(
     }
     let mut updated_parts = Vec::new();
     while let Some(result) = pending.next().await {
-        let part = apply_queued_tool_result(ctx, result).await;
-        if let Some(part) = part {
+        let parts = apply_queued_tool_result(ctx, result).await;
+        for part in parts {
             // Do not make a fast tool wait behind the slowest parallel call
             // before the UI can show its result. The authoritative message is
             // still persisted once below after the whole batch settles.
@@ -1040,17 +1041,50 @@ fn spawn_tool_call(
 async fn apply_queued_tool_result(
     ctx: &ProviderStreamEventContext<'_>,
     result: QueuedToolResult,
-) -> Option<Part> {
+) -> Vec<Part> {
     let mut message = ctx.live_message.lock().await;
     match result.result {
-        Ok(tool_result) => crate::message_part_mutation::set_tool_execution_result(
-            &mut message.parts,
-            result.call.part_id.as_str(),
-            tool_result,
-        ),
-        Err(error) => {
-            set_tool_error(&mut message.parts, result.call.part_id.as_str(), error)
+        Ok(tool_result) => {
+            let generated_files = tool_result
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("generatedFiles"))
+                .and_then(serde_json::Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let mut updated = crate::message_part_mutation::set_tool_execution_result(
+                &mut message.parts,
+                result.call.part_id.as_str(),
+                tool_result,
+            )
+            .into_iter()
+            .collect::<Vec<_>>();
+            for file in generated_files {
+                let (Some(mime), Some(url)) = (
+                    file.get("mime").and_then(serde_json::Value::as_str),
+                    file.get("url").and_then(serde_json::Value::as_str),
+                ) else {
+                    continue;
+                };
+                let part = Part::File(neoism_agent_core::FilePart {
+                    id: Id::ascending(IdKind::Part),
+                    session_id: ctx.session_id.clone(),
+                    message_id: ctx.assistant_id.clone(),
+                    mime: mime.to_string(),
+                    url: url.to_string(),
+                    filename: file
+                        .get("filename")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string),
+                });
+                message.parts.push(part.clone());
+                updated.push(part);
+            }
+            updated
         }
+        Err(error) => set_tool_error(&mut message.parts, result.call.part_id.as_str(), error)
+            .into_iter()
+            .collect(),
     }
 }
 

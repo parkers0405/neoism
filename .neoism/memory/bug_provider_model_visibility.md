@@ -1,0 +1,19 @@
+---
+name: "Provider model visibility by auth path — FIXED"
+description: "Codex OAuth models now account-authoritative; disconnected Zen no longer advertises or uses anonymous free models"
+type: "bug"
+scope: "project"
+origin: "session"
+created: "2026-08-01"
+updated: "2026-08-01"
+---
+
+2026-08-01: Fixed provider model visibility so listings follow the actual auth path.
+
+OpenAI ChatGPT/Codex OAuth no longer receives the full models.dev OpenAI API catalog with subscription pricing pasted over it. `ProviderRegistry::openai_model_access` now fetches the authenticated `https://chatgpt.com/backend-api/codex/models` catalog (Bearer + ChatGPT-Account-Id), refreshes OAuth through the same shared helper used by streaming, retains only `visibility: "list"` slugs, intersects those IDs with models.dev metadata, and then applies Codex limits/zero cost. API-key auth still gets the full platform API catalog and API limits/prices. The account catalog has a 5-minute identity-scoped success cache, 5-second request timeout, 2 MiB response cap, and 15-second fail-closed error cache. Override endpoint: `NEOISM_AGENT_OPENAI_CODEX_MODELS_URL`.
+
+OpenCode Zen remains in `/connect`, but while disconnected its `/v2/providers` row has no models/default and `/v2/providers/configured` omits it. Removed both prior anonymous paths: `usable_provider_catalog`'s zero-cost model exception and `ProviderRegistry::provider_auth`'s synthetic API key `public`. Connected Zen still lists free and paid active models.
+
+Direct `neoism-agent models` and the interactive CLI provider-model list now consume `/v2/providers/configured`, matching desktop/shared pickers.
+
+Primary code: `neoism-agent-builtins/src/provider_openai.rs`, `provider.rs`, `provider_catalog.rs`, `provider_service.rs`; CLI in `cli_direct_commands.rs` and `chat_session.rs`. Verification: all 90 `neoism-agent-builtins` lib tests pass; `cargo check -p neoism-agent` passes (existing unrelated server warnings only); scoped rustfmt and diff checks pass.

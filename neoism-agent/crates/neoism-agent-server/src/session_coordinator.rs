@@ -63,6 +63,7 @@ impl SessionCoordinator {
         true
     }
 
+    #[cfg(test)]
     pub(crate) async fn abort_run(&self, session_id: &str) -> Option<SessionRun> {
         let mut entries = self.entries.lock().await;
         let entry = entries.get_mut(session_id)?;
@@ -72,6 +73,17 @@ impl SessionCoordinator {
             entries.remove(session_id);
         }
         run
+    }
+
+    /// Request cancellation without releasing the execution slot. The owning
+    /// run releases it after durable teardown, preventing a follow-up prompt
+    /// from racing the still-running store row left by the cancelled run.
+    pub(crate) async fn request_abort(&self, session_id: &str) -> Option<SessionRun> {
+        self.entries
+            .lock()
+            .await
+            .get(session_id)
+            .and_then(|entry| entry.run.clone())
     }
 
     /// Coalesce any number of wakes into the existing worker. The durable

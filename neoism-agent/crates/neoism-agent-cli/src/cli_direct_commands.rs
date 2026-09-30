@@ -45,13 +45,13 @@ pub(super) async fn models(
     let server = normalize_server(&server);
     let value = response_json(
         reqwest::Client::new()
-            .get(format!("{server}/v2/providers"))
+            .get(format!("{server}/v2/providers/configured"))
             .send()
             .await?,
     )
     .await?;
     let all = value
-        .get("all")
+        .get("providers")
         .and_then(Value::as_array)
         .context("server did not return provider list")?;
     let mut providers = all.iter().collect::<Vec<_>>();

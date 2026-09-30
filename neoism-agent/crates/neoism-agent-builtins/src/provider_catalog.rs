@@ -35,6 +35,19 @@ pub struct GenerationMetadata {
     pub headers: BTreeMap<String, String>,
 }
 
+#[derive(Clone, Debug, Default)]
+pub enum OpenAiModelAccess {
+    #[default]
+    Api,
+    Codex(BTreeSet<String>),
+}
+
+impl OpenAiModelAccess {
+    pub fn uses_codex(&self) -> bool {
+        matches!(self, Self::Codex(_))
+    }
+}
+
 #[derive(Clone)]
 pub struct ProviderCatalog {
     source: String,
@@ -796,13 +809,18 @@ pub fn default_model_ids(providers: &[ProviderInfo]) -> BTreeMap<String, String>
 
 pub fn effective_provider_catalog(
     providers: &[ProviderInfo],
-    codex_oauth: bool,
+    openai_access: &OpenAiModelAccess,
 ) -> Vec<ProviderInfo> {
     let mut output = providers.to_vec();
     let snapshot = output.clone();
     for provider in &mut output {
         if provider.id != "openai" {
             continue;
+        }
+        if let OpenAiModelAccess::Codex(model_ids) = openai_access {
+            provider.models.retain(|id, model| {
+                model_ids.contains(id) || model_ids.contains(model.id.as_str())
+            });
         }
         for model in provider.models.values_mut() {
             apply_codex_openai_effective_metadata(
@@ -811,7 +829,7 @@ pub fn effective_provider_catalog(
                 model.id.as_str(),
                 &mut model.limit,
                 &mut model.cost,
-                codex_oauth,
+                openai_access.uses_codex(),
             );
         }
     }
@@ -821,32 +839,47 @@ pub fn effective_provider_catalog(
 pub fn usable_provider_catalog(
     providers: &[ProviderInfo],
     connected_ids: &[String],
-    codex_oauth: bool,
+    openai_access: &OpenAiModelAccess,
 ) -> Vec<ProviderInfo> {
     let connected = connected_ids
         .iter()
         .map(String::as_str)
         .collect::<BTreeSet<_>>();
-    let mut output = effective_provider_catalog(providers, codex_oauth);
+    let mut output = effective_provider_catalog(providers, openai_access);
     for provider in &mut output {
         let provider_connected = connected.contains(provider.id.as_str());
         let provider_id = provider.id.clone();
         provider.models.retain(|_, model| {
             model_available_in_picker(model)
                 && model_supported_in_picker(&provider_id, model)
-                // `claude-code` (routed through the Meridian proxy) is no longer
-                // shown unconditionally — like every other provider it must be
-                // connected first (via `/connect` → "Connect Meridian", which
-                // writes an auth-store marker). `opencode` still exposes its
-                // free models before connecting.
-                && if provider_id == "opencode" && !provider_connected {
-                    public_free_model(model)
-                } else {
-                    provider_connected
-                }
+                && provider_connected
         });
     }
     output.retain(|provider| !provider.models.is_empty());
+    output
+}
+
+pub fn connect_provider_catalog(
+    providers: &[ProviderInfo],
+    connected_ids: &[String],
+    openai_access: &OpenAiModelAccess,
+) -> Vec<ProviderInfo> {
+    let connectable = providers
+        .iter()
+        .filter(|provider| provider_connectable(provider))
+        .map(|provider| provider.id.as_str())
+        .collect::<BTreeSet<_>>();
+    let connected = connected_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let mut output = effective_provider_catalog(providers, openai_access);
+    output.retain(|provider| connectable.contains(provider.id.as_str()));
+    for provider in &mut output {
+        if provider.id == "opencode" && !connected.contains(provider.id.as_str()) {
+            provider.models.clear();
+        }
+    }
     output
 }
 
@@ -867,10 +900,6 @@ pub fn provider_connectable(provider: &ProviderInfo) -> bool {
         .models
         .values()
         .any(|model| model_supported_in_picker(&provider.id, model))
-}
-
-fn public_free_model(model: &ModelInfo) -> bool {
-    model.cost.input == 0.0 && model.cost.output == 0.0
 }
 
 pub fn generation_metadata(
@@ -1274,7 +1303,8 @@ mod tests {
 
     #[test]
     fn effective_provider_catalog_uses_copilot_codex_limits_for_ui_models() {
-        let providers = effective_provider_catalog(&parse_codex_limit_fixture(), true);
+        let fixture = parse_codex_limit_fixture();
+        let providers = effective_provider_catalog(&fixture, &codex_access(&fixture));
         let openai = providers
             .iter()
             .find(|provider| provider.id == "openai")
@@ -1290,7 +1320,8 @@ mod tests {
 
     #[test]
     fn effective_provider_catalog_treats_gpt_5_6_family_as_codex_subscription_models() {
-        let providers = effective_provider_catalog(&parse_codex_limit_fixture(), true);
+        let fixture = parse_codex_limit_fixture();
+        let providers = effective_provider_catalog(&fixture, &codex_access(&fixture));
         let openai = providers
             .iter()
             .find(|provider| provider.id == "openai")
@@ -1335,7 +1366,12 @@ mod tests {
                 };
                 let metadata = generation_metadata(&providers, &model, oauth);
                 let limit = metadata.limit.unwrap();
-                let visible = effective_provider_catalog(&providers, oauth);
+                let access = if oauth {
+                    codex_access(&providers)
+                } else {
+                    OpenAiModelAccess::Api
+                };
+                let visible = effective_provider_catalog(&providers, &access);
                 let visible = &visible
                     .iter()
                     .find(|provider| provider.id == "openai")
@@ -1358,7 +1394,10 @@ mod tests {
 
     #[test]
     fn effective_provider_catalog_keeps_api_limits_without_codex_oauth() {
-        let providers = effective_provider_catalog(&parse_codex_limit_fixture(), false);
+        let providers = effective_provider_catalog(
+            &parse_codex_limit_fixture(),
+            &OpenAiModelAccess::Api,
+        );
         let openai = providers
             .iter()
             .find(|provider| provider.id == "openai")
@@ -1375,7 +1414,7 @@ mod tests {
     }
 
     #[test]
-    fn usable_provider_catalog_shows_free_opencode_and_connected_supported_models() {
+    fn usable_provider_catalog_requires_opencode_connection() {
         let providers = parse_models(
             r#"{
               "opencode": {
@@ -1460,17 +1499,10 @@ mod tests {
         let usable = usable_provider_catalog(
             &providers,
             &["openai".to_string(), "google".to_string()],
-            false,
+            &OpenAiModelAccess::Api,
         );
 
-        let opencode = usable
-            .iter()
-            .find(|provider| provider.id == "opencode")
-            .expect("opencode free provider");
-        assert_eq!(
-            opencode.models.keys().cloned().collect::<Vec<_>>(),
-            vec!["free".to_string()]
-        );
+        assert!(usable.iter().all(|provider| provider.id != "opencode"));
         let openai = usable
             .iter()
             .find(|provider| provider.id == "openai")
@@ -1478,6 +1510,93 @@ mod tests {
         assert!(openai.models.contains_key("gpt"));
         assert!(usable.iter().all(|provider| provider.id != "anthropic"));
         assert!(usable.iter().all(|provider| provider.id != "google"));
+
+        let connected = usable_provider_catalog(
+            &providers,
+            &["opencode".to_string()],
+            &OpenAiModelAccess::Api,
+        );
+        let opencode = connected
+            .iter()
+            .find(|provider| provider.id == "opencode")
+            .expect("connected opencode provider");
+        assert_eq!(
+            opencode.models.keys().cloned().collect::<Vec<_>>(),
+            vec!["free".to_string(), "paid".to_string()]
+        );
+    }
+
+    #[test]
+    fn codex_catalog_is_restricted_to_account_model_ids() {
+        let providers = parse_codex_limit_fixture();
+        let visible = effective_provider_catalog(
+            &providers,
+            &OpenAiModelAccess::Codex(BTreeSet::from(["gpt-5.6-sol".to_string()])),
+        );
+        let openai = visible
+            .iter()
+            .find(|provider| provider.id == "openai")
+            .expect("openai provider");
+
+        assert_eq!(
+            openai.models.keys().cloned().collect::<Vec<_>>(),
+            vec!["gpt-5.6-sol".to_string()]
+        );
+        assert_eq!(openai.models["gpt-5.6-sol"].cost.input, 0.0);
+    }
+
+    #[test]
+    fn connect_catalog_keeps_disconnected_opencode_without_models() {
+        let providers = parse_models(
+            r#"{
+              "opencode": {
+                "id": "opencode",
+                "name": "OpenCode Zen",
+                "env": ["OPENCODE_API_KEY"],
+                "npm": "@ai-sdk/openai-compatible",
+                "api": "https://opencode.ai/zen/v1",
+                "models": {
+                  "free": {
+                    "id": "free",
+                    "name": "Free",
+                    "release_date": "2026-01-01",
+                    "limit": { "context": 200000, "output": 32000 },
+                    "cost": { "input": 0, "output": 0 }
+                  }
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+
+        let disconnected =
+            connect_provider_catalog(&providers, &[], &OpenAiModelAccess::Api);
+        let opencode = disconnected
+            .iter()
+            .find(|provider| provider.id == "opencode")
+            .expect("opencode remains connectable");
+        assert!(opencode.models.is_empty());
+        assert!(!default_model_ids(&disconnected).contains_key("opencode"));
+
+        let connected = connect_provider_catalog(
+            &providers,
+            &["opencode".to_string()],
+            &OpenAiModelAccess::Api,
+        );
+        assert!(connected
+            .iter()
+            .find(|provider| provider.id == "opencode")
+            .is_some_and(|provider| provider.models.contains_key("free")));
+    }
+
+    fn codex_access(providers: &[ProviderInfo]) -> OpenAiModelAccess {
+        let model_ids = providers
+            .iter()
+            .find(|provider| provider.id == "openai")
+            .into_iter()
+            .flat_map(|provider| provider.models.keys().cloned())
+            .collect();
+        OpenAiModelAccess::Codex(model_ids)
     }
 
     fn parse_codex_limit_fixture() -> Vec<ProviderInfo> {

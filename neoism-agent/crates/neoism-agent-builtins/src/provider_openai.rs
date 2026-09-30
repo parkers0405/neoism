@@ -1,4 +1,6 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use neoism_agent_core::{
@@ -23,6 +25,10 @@ use super::provider_openai_stream::{
 use super::{ProviderEventStream, ProviderRuntime};
 
 const CODEX_RESPONSES_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/responses";
+const CODEX_MODELS_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/models";
+const CODEX_MODELS_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
+const CODEX_MODELS_FAILURE_TTL: Duration = Duration::from_secs(15);
+const CODEX_MODELS_RESPONSE_LIMIT: usize = 2 * 1024 * 1024;
 const OPENAI_OAUTH_ISSUER: &str = "https://auth.openai.com";
 const OPENAI_OAUTH_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const OAUTH_REFRESH_MARGIN_MS: u64 = 60_000;
@@ -31,6 +37,14 @@ const OAUTH_REFRESH_MARGIN_MS: u64 = 60_000;
 pub(super) struct OpenAiClient {
     client: reqwest::Client,
     base_url: String,
+    codex_models: Arc<tokio::sync::Mutex<Option<CodexModelsCache>>>,
+}
+
+struct CodexModelsCache {
+    identity: String,
+    fetched_at: Instant,
+    ttl: Duration,
+    model_ids: BTreeSet<String>,
 }
 
 #[derive(Clone)]
@@ -51,6 +65,7 @@ impl OpenAiClient {
         Self {
             client: reqwest::Client::new(),
             base_url: base_url.trim_end_matches('/').to_string(),
+            codex_models: Arc::new(tokio::sync::Mutex::new(None)),
         }
     }
 
@@ -72,8 +87,103 @@ impl OpenAiClient {
         Ok(Self {
             client: builder.build()?,
             base_url,
+            codex_models: Arc::new(tokio::sync::Mutex::new(None)),
         })
     }
+
+    pub(super) async fn codex_model_ids(
+        &self,
+        auth_store: &AuthStore,
+        auth: AuthInfo,
+    ) -> anyhow::Result<BTreeSet<String>> {
+        let (access, account_id) =
+            openai_oauth_credentials(&self.client, auth_store, auth).await?;
+        let identity = account_id
+            .as_ref()
+            .map(|id| format!("account:{id}"))
+            .unwrap_or_else(|| format!("token:{access}"));
+        let mut cache = self.codex_models.lock().await;
+        if let Some(cached) = cache.as_ref().filter(|cached| {
+            cached.identity == identity && cached.fetched_at.elapsed() < cached.ttl
+        }) {
+            return Ok(cached.model_ids.clone());
+        }
+
+        let fetched = async {
+            let endpoint = std::env::var("NEOISM_AGENT_OPENAI_CODEX_MODELS_URL")
+                .unwrap_or_else(|_| CODEX_MODELS_ENDPOINT.to_string());
+            let mut request = self
+                .client
+                .get(endpoint)
+                .query(&[("client_version", env!("CARGO_PKG_VERSION"))])
+                .bearer_auth(access)
+                .header("accept", "application/json")
+                .header("originator", "neoism")
+                .header("user-agent", neoism_user_agent())
+                .timeout(Duration::from_secs(5));
+            if let Some(account_id) = account_id {
+                request = request.header("ChatGPT-Account-Id", account_id);
+            }
+            let mut response = request
+                .send()
+                .await
+                .context("failed to load OpenAI Codex models")?;
+            if !response.status().is_success() {
+                anyhow::bail!("OpenAI Codex models returned {}", response.status());
+            }
+            let mut body = Vec::new();
+            while let Some(chunk) = response.chunk().await? {
+                if body.len().saturating_add(chunk.len()) > CODEX_MODELS_RESPONSE_LIMIT {
+                    anyhow::bail!("OpenAI Codex models response exceeded size limit");
+                }
+                body.extend_from_slice(&chunk);
+            }
+            listed_codex_model_ids(&body)
+        }
+        .await;
+        let (model_ids, ttl) = match fetched {
+            Ok(model_ids) => (model_ids, CODEX_MODELS_CACHE_TTL),
+            Err(error) => {
+                *cache = Some(CodexModelsCache {
+                    identity,
+                    fetched_at: Instant::now(),
+                    ttl: CODEX_MODELS_FAILURE_TTL,
+                    model_ids: BTreeSet::new(),
+                });
+                return Err(error);
+            }
+        };
+        *cache = Some(CodexModelsCache {
+            identity,
+            fetched_at: Instant::now(),
+            ttl,
+            model_ids: model_ids.clone(),
+        });
+        Ok(model_ids)
+    }
+}
+
+#[derive(Deserialize)]
+struct CodexModelsResponse {
+    models: Vec<CodexModelEntry>,
+}
+
+#[derive(Deserialize)]
+struct CodexModelEntry {
+    slug: String,
+    #[serde(default)]
+    visibility: String,
+}
+
+fn listed_codex_model_ids(body: &[u8]) -> anyhow::Result<BTreeSet<String>> {
+    let response: CodexModelsResponse = serde_json::from_slice(body)
+        .context("failed to decode OpenAI Codex models response")?;
+    Ok(response
+        .models
+        .into_iter()
+        .filter(|model| model.visibility == "list")
+        .map(|model| model.slug)
+        .collect())
 }
 
 impl ProviderRuntime for OpenAiRuntime {
@@ -406,6 +516,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn codex_model_catalog_only_lists_visible_slugs() {
+        let ids = listed_codex_model_ids(
+            br#"{"models":[
+                {"slug":"gpt-codex","visibility":"list"},
+                {"slug":"gpt-hidden","visibility":"hide"},
+                {"slug":"gpt-internal"}
+            ]}"#,
+        )
+        .unwrap();
+
+        assert_eq!(ids, BTreeSet::from(["gpt-codex".to_string()]));
+    }
+
+    #[test]
     fn provider_options_merge_without_overriding_structural_fields() {
         let mut body = json!({
             "model": "gpt-test",
@@ -538,30 +662,10 @@ fn openai_oauth_responses_stream(
     request: ProviderGenerationRequest,
 ) -> ProviderEventStream {
     Box::pin(async_stream::try_stream! {
-        let (access, account_id) = match auth {
-            Some(AuthInfo::OAuth {
-                refresh,
-                access,
-                expires,
-                account_id,
-                enterprise_url,
-                ..
-            }) => {
-                if should_refresh_oauth(expires) {
-                    let refreshed = refresh_openai_oauth(&client.client, &refresh, account_id.clone(), enterprise_url.clone()).await?;
-                    auth_store.set("openai", refreshed.clone()).await?;
-                    match refreshed {
-                        AuthInfo::OAuth { access, account_id, .. } => (access, account_id),
-                        _ => unreachable!("refresh_openai_oauth returns OAuth auth"),
-                    }
-                } else {
-                    (access, account_id)
-                }
-            }
-            _ => Err(anyhow::anyhow!(
-                "OpenAI OAuth Responses stream requested without OAuth credentials"
-            ))?,
-        };
+        let auth = auth.ok_or_else(|| anyhow::anyhow!(
+            "OpenAI OAuth Responses stream requested without OAuth credentials"
+        ))?;
+        let (access, account_id) = openai_oauth_credentials(&client.client, &auth_store, auth).await?;
 
         yield ProviderStreamEvent::Start;
         yield ProviderStreamEvent::StartStep;
@@ -632,6 +736,36 @@ fn openai_oauth_responses_stream(
             }
         }
     })
+}
+
+pub(super) async fn openai_oauth_credentials(
+    client: &reqwest::Client,
+    auth_store: &AuthStore,
+    auth: AuthInfo,
+) -> anyhow::Result<(String, Option<String>)> {
+    let AuthInfo::OAuth {
+        refresh,
+        access,
+        expires,
+        account_id,
+        enterprise_url,
+    } = auth
+    else {
+        anyhow::bail!("OpenAI OAuth credentials are required")
+    };
+    if !should_refresh_oauth(expires) {
+        return Ok((access, account_id));
+    }
+    let refreshed =
+        refresh_openai_oauth(client, &refresh, account_id, enterprise_url).await?;
+    auth_store.set("openai", refreshed.clone()).await?;
+    let AuthInfo::OAuth {
+        access, account_id, ..
+    } = refreshed
+    else {
+        unreachable!("refresh_openai_oauth returns OAuth auth")
+    };
+    Ok((access, account_id))
 }
 
 #[derive(Debug, Deserialize)]

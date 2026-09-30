@@ -230,6 +230,7 @@ async fn run_compaction(
         json!({ "sessionID": session_id, "info": assistant_message.info }),
     ));
     for part in &assistant_message.parts {
+        let part = compaction_event_part(part);
         state.publish(EventPayload::new(
             event_type::MESSAGE_PART_UPDATED,
             json!({ "sessionID": session_id, "part": part, "time": started }),
@@ -322,6 +323,7 @@ async fn run_compaction(
         json!({ "sessionID": session_id, "info": assistant_message.info }),
     ));
     for part in &assistant_message.parts {
+        let part = compaction_event_part(part);
         state.publish(EventPayload::new(
             event_type::MESSAGE_PART_UPDATED,
             json!({ "sessionID": session_id, "part": part, "time": now }),
@@ -946,7 +948,7 @@ fn publish_compaction_text_delta(
             "sessionID": session_id,
             "messageID": assistant_message_id,
             "partID": assistant_text_part_id,
-            "partType": "text",
+            "partType": "compaction",
             "field": "text",
             "delta": delta,
         }),
@@ -962,6 +964,14 @@ fn text_part_id(message: &MessageWithParts) -> Option<String> {
         Part::Text(text) => Some(text.id.to_string()),
         _ => None,
     })
+}
+
+fn compaction_event_part(part: &Part) -> Value {
+    let mut value = json!(part);
+    if matches!(part, Part::Text(_)) {
+        value["compactionSummary"] = Value::Bool(true);
+    }
+    value
 }
 
 fn finish_compaction_assistant_message(
@@ -1389,6 +1399,25 @@ fn plugin_run_system_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compaction_text_event_is_explicitly_marked() {
+        let session_id = neoism_agent_core::new_session_id();
+        let message_id = Id::ascending(IdKind::Message);
+        let part = Part::Text(TextPart {
+            id: Id::ascending(IdKind::Part),
+            session_id,
+            message_id,
+            text: String::new(),
+            synthetic: Some(true),
+            time: None,
+        });
+
+        let event_part = compaction_event_part(&part);
+
+        assert_eq!(event_part["type"], "text");
+        assert_eq!(event_part["compactionSummary"], true);
+    }
 
     fn system_prompt_snapshot(
     ) -> std::sync::Arc<neoism_agent_plugin_api::RegistrySnapshot> {

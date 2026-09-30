@@ -1093,16 +1093,21 @@ impl NeoismAgentPane {
                     self.note_session_runtime_event(&session_id);
                     if self.session_id.as_deref() != Some(session_id.as_str()) {
                         let _ = (summary, kind);
-                        self.session_cache
+                        let runtime = &mut self
+                            .session_cache
                             .entry(session_id)
                             .or_insert_with(CachedAgentSession::live_only)
-                            .runtime
-                            .note_streaming(NeoismAgentStreamingState::Idle, None);
+                            .runtime;
+                        if runtime.streaming_state
+                            == NeoismAgentStreamingState::Compacting
+                        {
+                            runtime.note_streaming(NeoismAgentStreamingState::Idle, None);
+                        }
                         changed = true;
                         continue;
                     }
                     self.finish_compaction_message(&summary, &kind);
-                    if self.is_streaming() {
+                    if self.streaming_state == NeoismAgentStreamingState::Compacting {
                         self.note_streaming(NeoismAgentStreamingState::Idle, None);
                     }
                     changed = true;
@@ -1782,74 +1787,6 @@ impl NeoismAgentPane {
                     changed |= self.apply_external_options_update(
                         server, session_id, generation, result, true,
                     );
-                }
-                Ok(NeoismAgentBackgroundUpdate::ExternalCatalogRefreshed {
-                    server,
-                    directory,
-                    generation,
-                    source,
-                    result,
-                }) => {
-                    if server != self.server
-                        || directory != self.directory
-                        || generation != self.external_catalog_generation
-                    {
-                        continue;
-                    }
-                    self.external_catalog_remaining =
-                        self.external_catalog_remaining.saturating_sub(1);
-                    if self.external_catalog_remaining == 0 {
-                        self.side_panel.set_external_scanning(false);
-                    }
-                    match result {
-                        Ok(rows) => {
-                            self.side_panel.set_external_provider_rows(source, rows)
-                        }
-                        Err(error) => {
-                            self.side_panel.set_external_provider_error(source, error)
-                        }
-                    }
-                    changed = true;
-                }
-                Ok(NeoismAgentBackgroundUpdate::ExternalImportCompleted {
-                    server,
-                    directory,
-                    source,
-                    source_key,
-                    result,
-                }) => {
-                    if server != self.server
-                        || directory != self.directory
-                        || self.external_import_in_flight.as_deref()
-                            != Some(source_key.as_str())
-                    {
-                        continue;
-                    }
-                    self.external_import_in_flight = None;
-                    self.external_catalog_last_refresh = None;
-                    self.side_panel.set_external_importing(None);
-                    match result {
-                        Ok(id) => {
-                            self.side_panel.mark_external_imported(&source_key, &id);
-                            self.pending_external_open = Some((id, source));
-                            self.side_panel.set_external_notice(
-                                source,
-                                format!("{} history imported", source.label()),
-                            );
-                            self.request_side_panel_session_page(None);
-                        }
-                        Err(error) => {
-                            self.pending_external_error = Some(format!(
-                                "{} history import failed: {error}",
-                                source.label()
-                            ));
-                            self.side_panel.set_external_notice(
-                                source,
-                                format!("Import failed: {error}"),
-                            );
-                        }
-                    }
-                    changed = true;
                 }
                 Ok(NeoismAgentBackgroundUpdate::SidePanelSessionsRefreshed {
                     generation,
@@ -3034,6 +2971,13 @@ impl NeoismAgentPane {
                 }
                 return;
             }
+            if kind.as_deref() == Some("compaction") {
+                self.upsert_part_message(
+                    NeoismAgentMessage::compaction(delta.to_string(), "summary")
+                        .with_id(message_id.to_string()),
+                );
+                return;
+            }
         }
         if let Some(part_id) = part_id.as_deref().filter(|id| !id.is_empty()) {
             if let Some(index) = self
@@ -3051,6 +2995,10 @@ impl NeoismAgentPane {
             let message = match kind.as_deref() {
                 Some("reasoning" | "thinking") => {
                     NeoismAgentMessage::reasoning(delta).with_id(part_id.to_string())
+                }
+                Some("compaction") => {
+                    NeoismAgentMessage::compaction(delta.to_string(), "summary")
+                        .with_id(part_id.to_string())
                 }
                 _ => NeoismAgentMessage::assistant(delta).with_id(part_id.to_string()),
             };
@@ -3071,6 +3019,9 @@ impl NeoismAgentPane {
 
         self.messages.push(match message_kind {
             NeoismAgentMessageKind::Reasoning => NeoismAgentMessage::reasoning(delta),
+            NeoismAgentMessageKind::Compaction => {
+                NeoismAgentMessage::compaction(delta.to_string(), "summary")
+            }
             _ => NeoismAgentMessage::assistant(delta),
         });
         self.mark_timeline_message_dirty_at(self.messages.len().saturating_sub(1));

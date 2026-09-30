@@ -296,8 +296,12 @@ pub fn default_config_file_content() -> String {
     // ── [agent] — the coding agent (its own block, same file) ─────
     // "agent": {
     //     "default-chat-source": "neoism", // neoism | opencode | claude-code | codex; new chat source, not agent persona
+    //     "conversations-panel-enabled": true, // allow and auto-open the left panel with Alt+A
+    //     "details-panel-enabled": true,       // allow the in-chat right panel and Alt+H
     //     "model": "anthropic/claude-opus-5",
     //     "smallModel": "anthropic/claude-haiku-4-5",
+    //     "imageModel": "openai/gpt-image-2", // enables the generate_image tool
+    //     "videoModel": "xai/grok-imagine-video-1.5", // enables generate_video
     //     "variant": "high",       // low | medium | high | xhigh | max
     //     "textVerbosity": "low",  // low | medium | high
     //     "compaction": { "auto": true, "threshold-percent": 65 }, // auto: false bypasses automatic compaction

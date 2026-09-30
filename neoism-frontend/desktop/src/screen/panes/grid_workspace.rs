@@ -456,6 +456,7 @@ impl Screen<'_> {
         // defaults.
         claim_live_panel_owner(&mut self.file_tree_workspace, &id);
         claim_live_panel_owner(&mut self.notes_sidebar_workspace, &id);
+        claim_live_panel_owner(&mut self.conversations_pane_workspace, &id);
         self.workspace_conversations_visibility
             .insert(id.clone(), self.renderer.conversations_visible);
         let next_tabs_empty = self.renderer.buffer_tabs.tabs().is_empty();
@@ -484,23 +485,16 @@ impl Screen<'_> {
         let Some(id) = self.current_workspace_id() else {
             return;
         };
-        self.renderer.conversations_visible = self
-            .workspace_conversations_visibility
-            .get(&id)
-            .copied()
-            .unwrap_or(false);
+        self.renderer.conversations_visible = self.conversations_panel_enabled
+            && self
+                .workspace_conversations_visibility
+                .get(&id)
+                .copied()
+                .unwrap_or(false);
         self.renderer
             .conversations_pane
             .side_panel_mut()
             .set_focused(false);
-        // The agent runtime is workspace-owned just like the tree and notes
-        // panel. A local grid uses this machine's loopback agent; a joined
-        // grid uses the host daemon's `/agent` reverse proxy so tools execute
-        // where the host files actually live. Keeping this in the canonical
-        // chrome-load path covers keyboard, mouse, close, create, and
-        // daemon-adoption navigation uniformly.
-        self.sync_agent_server_for_current_workspace();
-        self.ensure_server_for_current_workspace();
         // TREE SWAP: the tree is per-workspace STATE, not window
         // chrome. Stash the outgoing workspace's tree whole (root,
         // entries, open dirs, selection, scroll, remote wiring) and
@@ -608,6 +602,44 @@ impl Screen<'_> {
         self.active_workspace_root = None;
         self.active_workspace_root =
             saved_root.or_else(|| self.active_pane_workspace_root());
+        let mut fresh_conversations_pane = false;
+        if self.conversations_pane_workspace.as_ref() != Some(&id) {
+            let had_workspace = self.conversations_pane_workspace.is_some();
+            if let Some(old_id) = self.conversations_pane_workspace.take() {
+                let outgoing = std::mem::take(&mut self.renderer.conversations_pane);
+                self.workspace_conversations_panes.insert(old_id, outgoing);
+            }
+            let directory = self
+                .workspace_root_for_new_shell()
+                .map(|path| path.to_string_lossy().into_owned());
+            let mut incoming = if let Some(cached) =
+                self.workspace_conversations_panes.remove(&id)
+            {
+                cached
+            } else if had_workspace {
+                fresh_conversations_pane = true;
+                crate::neoism::agent::NeoismAgentPane::with_directory(directory.clone())
+            } else {
+                std::mem::take(&mut self.renderer.conversations_pane)
+            };
+            incoming
+                .side_panel_mut()
+                .set_width(self.conversations_sidebar_width);
+            self.renderer.conversations_pane = incoming;
+            self.renderer.conversations_directory = directory;
+            self.conversations_pane_workspace = Some(id.clone());
+        }
+        // The agent runtime is workspace-owned just like the tree and notes
+        // panel. A local grid uses this machine's loopback agent; a joined
+        // grid uses the host daemon's `/agent` reverse proxy so tools execute
+        // where the host files actually live.
+        self.sync_agent_server_for_current_workspace();
+        self.ensure_server_for_current_workspace();
+        if fresh_conversations_pane && self.renderer.conversations_visible {
+            self.renderer
+                .conversations_pane
+                .maybe_refresh_side_panel_sessions();
+        }
         if self.renderer.conversations_visible {
             self.sync_file_tree_root_for_current_workspace();
         }
@@ -1159,6 +1191,10 @@ impl Screen<'_> {
                     crate::neoism::agent::NeoismAgentPane::with_directory(
                         directory.clone(),
                     );
+                self.renderer
+                    .conversations_pane
+                    .side_panel_mut()
+                    .set_width(self.conversations_sidebar_width);
                 self.renderer.conversations_directory = directory;
                 self.sync_agent_server_for_current_workspace();
                 self.renderer

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::Read;
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
@@ -17,6 +17,7 @@ const JSONRPC: &str = "2.0";
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(45);
 pub(crate) const PROMPT_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 const DEFAULT_TERMINAL_OUTPUT_LIMIT: usize = 1024 * 1024;
+const STDERR_TAIL_LIMIT: usize = 8 * 1024;
 
 #[derive(Clone, Debug)]
 pub(crate) struct AcpServerConfig {
@@ -156,6 +157,11 @@ impl AcpClient {
         let (write_tx, write_rx) = mpsc::unbounded_channel();
         let pending = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let stderr_tail = Arc::new(Mutex::new(VecDeque::new()));
+        let command_label = std::iter::once(config.command.as_str())
+            .chain(config.args.iter().map(String::as_str))
+            .collect::<Vec<_>>()
+            .join(" ");
         let client = Self {
             server_id: config.id.clone(),
             write_tx,
@@ -172,8 +178,22 @@ impl AcpClient {
         });
         spawn_writer(config.id.clone(), stdin, write_rx, event_tx.clone());
         spawn_reader(config.id.clone(), stdout, pending.clone(), event_tx.clone());
-        spawn_stderr(config.id.clone(), stderr, event_tx.clone());
-        spawn_waiter(config.id, child, pending, event_tx, shutdown_rx);
+        let stderr_done = spawn_stderr(
+            config.id.clone(),
+            stderr,
+            event_tx.clone(),
+            stderr_tail.clone(),
+        );
+        spawn_waiter(
+            config.id,
+            child,
+            pending,
+            event_tx,
+            shutdown_rx,
+            stderr_tail,
+            stderr_done,
+            command_label,
+        );
 
         Ok((client, event_rx))
     }
@@ -440,16 +460,26 @@ fn spawn_stderr(
     server_id: String,
     stderr: tokio::process::ChildStderr,
     event_tx: mpsc::UnboundedSender<AcpEvent>,
-) {
+    tail: Arc<Mutex<VecDeque<String>>>,
+) -> oneshot::Receiver<()> {
+    let (done_tx, done_rx) = oneshot::channel();
     tokio::spawn(async move {
         let mut lines = BufReader::new(stderr).lines();
         while let Ok(Some(line)) = lines.next_line().await {
+            if let Ok(mut tail) = tail.lock() {
+                tail.push_back(line.clone());
+                while tail.iter().map(String::len).sum::<usize>() > STDERR_TAIL_LIMIT {
+                    tail.pop_front();
+                }
+            }
             let _ = event_tx.send(AcpEvent::Stderr {
                 server_id: server_id.clone(),
                 line,
             });
         }
+        let _ = done_tx.send(());
     });
+    done_rx
 }
 
 fn spawn_waiter(
@@ -458,6 +488,9 @@ fn spawn_waiter(
     pending: PendingMap,
     event_tx: mpsc::UnboundedSender<AcpEvent>,
     shutdown: oneshot::Receiver<()>,
+    stderr_tail: Arc<Mutex<VecDeque<String>>>,
+    stderr_done: oneshot::Receiver<()>,
+    command_label: String,
 ) {
     tokio::spawn(async move {
         let status = tokio::select! {
@@ -468,11 +501,24 @@ fn spawn_waiter(
                 child.wait().await.ok().and_then(|status| status.code())
             }
         };
+        let _ = tokio::time::timeout(Duration::from_millis(100), stderr_done).await;
+        let stderr = stderr_tail
+            .lock()
+            .ok()
+            .map(|tail| tail.iter().cloned().collect::<Vec<_>>().join("\n"))
+            .unwrap_or_default();
+        let detail = if stderr.trim().is_empty() {
+            String::new()
+        } else {
+            format!("; stderr: {}", stderr.trim())
+        };
         let mut pending = pending.lock().await;
         for (_, tx) in pending.drain() {
             let _ = tx.send(Err(AcpRpcError {
                 code: -32000,
-                message: format!("ACP server exited (status {status:?}); check adapter installation and runtime requirements"),
+                message: format!(
+                    "ACP server `{command_label}` exited (status {status:?}){detail}"
+                ),
             }));
         }
         drop(pending);
@@ -1024,5 +1070,20 @@ mod lifetime_tests {
         .await
         .expect("client drop must stop process");
         assert_ne!(unsafe { libc::kill(pid as libc::pid_t, 0) }, 0);
+    }
+
+    #[tokio::test]
+    async fn process_exit_error_includes_bounded_stderr() {
+        let config =
+            AcpServerConfig::new("test", "Test", "/bin/sh", std::env::temp_dir())
+                .args(["-c", "read line; echo 'requires Node 22' >&2; exit 254"]);
+        let (client, _events) = AcpClient::spawn(config).unwrap();
+        let error = client
+            .request("initialize", json!({}), Duration::from_secs(3))
+            .await
+            .unwrap_err();
+        assert!(error.message.contains("status Some(254)"));
+        assert!(error.message.contains("requires Node 22"));
+        assert!(error.message.contains("/bin/sh"));
     }
 }

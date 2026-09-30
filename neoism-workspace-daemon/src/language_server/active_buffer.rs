@@ -103,37 +103,8 @@ pub(crate) fn buffer_snapshot_message(
     let filetype =
         language_server::language_id_for_path_in(runtime, workspace_root, file)
             .unwrap_or_default();
-    let servers: Vec<neoism_protocol::editor::LspSnapshotServer> = statuses
-        .into_iter()
-        .map(|status| {
-            use neoism_agent_server::language_server::{
-                LspCommandSource, LspServerState,
-            };
-            neoism_protocol::editor::LspSnapshotServer {
-                name: status.name,
-                binary: status.command.first().cloned().unwrap_or_default(),
-                filetype: status.language,
-                state: match status.status {
-                    LspServerState::Connected => "connected",
-                    LspServerState::Available => "available",
-                    LspServerState::Error => "error",
-                }
-                .to_string(),
-                source: Some(
-                    match status.command_source {
-                        LspCommandSource::BuiltIn => "built-in",
-                        LspCommandSource::Extension => "managed",
-                        LspCommandSource::Config => "config",
-                        LspCommandSource::Path => "path",
-                        LspCommandSource::Missing => "missing",
-                    }
-                    .to_string(),
-                ),
-                message: status.detected.message,
-                level: None,
-            }
-        })
-        .collect();
+    let servers: Vec<neoism_protocol::editor::LspSnapshotServer> =
+        statuses.into_iter().map(snapshot_server).collect();
     cache.lock().unwrap_or_else(|p| p.into_inner()).insert(
         key,
         (std::time::Instant::now(), filetype.clone(), servers.clone()),
@@ -144,6 +115,52 @@ pub(crate) fn buffer_snapshot_message(
         filetype,
         servers,
     })
+}
+
+fn snapshot_server(
+    status: neoism_agent_server::language_server::LspStatus,
+) -> neoism_protocol::editor::LspSnapshotServer {
+    use neoism_agent_server::language_server::{LspCommandSource, LspServerState};
+    let degraded = status.runtime.as_ref().is_some_and(|runtime| {
+        runtime.source
+            == neoism_agent_server::language_server::LspRuntimeSource::MissingYarnSdk
+    });
+    let (runtime_source, runtime_path, runtime_version) = status
+        .runtime
+        .map(|runtime| {
+            (
+                Some(runtime.source.as_str().to_string()),
+                runtime.path,
+                runtime.version,
+            )
+        })
+        .unwrap_or_default();
+    neoism_protocol::editor::LspSnapshotServer {
+        name: status.name,
+        binary: status.command.first().cloned().unwrap_or_default(),
+        filetype: status.language,
+        state: match status.status {
+            LspServerState::Connected => "connected",
+            LspServerState::Available => "available",
+            LspServerState::Error => "error",
+        }
+        .to_string(),
+        source: Some(
+            match status.command_source {
+                LspCommandSource::BuiltIn => "built-in",
+                LspCommandSource::Extension => "managed",
+                LspCommandSource::Config => "config",
+                LspCommandSource::Path => "path",
+                LspCommandSource::Missing => "missing",
+            }
+            .to_string(),
+        ),
+        message: status.detected.message,
+        level: degraded.then(|| "warn".to_string()),
+        runtime_source,
+        runtime_path,
+        runtime_version,
+    }
 }
 
 // The active-buffer snapshot poll (`poll`/`read_active_file_buffer`) was fed
@@ -367,5 +384,54 @@ mod tests {
         assert_eq!((error, warn, info, hint), (0, 0, 0, 0));
         assert_eq!(file_path.as_deref(), Some(file));
         assert!(items.is_empty());
+    }
+
+    #[test]
+    fn typescript_runtime_projects_into_remote_snapshot() {
+        let server = snapshot_server(language_server::LspStatus {
+            id: "typescript".into(),
+            name: "TypeScript".into(),
+            status: language_server::LspServerState::Available,
+            language: "typescript".into(),
+            command: vec!["typescript-language-server".into()],
+            command_source: language_server::LspCommandSource::Extension,
+            workspace: language_server::LspWorkspace {
+                root: "/workspace".into(),
+                root_uri: "file:///workspace".into(),
+            },
+            capabilities: language_server::LspCapabilities {
+                workspace_symbols: true,
+                completion: true,
+                hover: true,
+                definition: true,
+                references: true,
+                implementation: true,
+                call_hierarchy: true,
+                diagnostics: true,
+                document_symbols: true,
+                formatting: true,
+                code_actions: true,
+                rename: true,
+            },
+            detected: language_server::LspDetection {
+                files: 1,
+                markers: vec![".pnp.cjs".into()],
+                extensions: std::collections::BTreeMap::new(),
+                command_available: true,
+                message: Some("degraded".into()),
+            },
+            runtime: Some(language_server::LspRuntimeInfo {
+                source: language_server::LspRuntimeSource::MissingYarnSdk,
+                path: Some("/workspace/.yarn/sdks/typescript/lib".into()),
+                version: None,
+            }),
+        });
+
+        assert_eq!(server.runtime_source.as_deref(), Some("missing_yarn_sdk"));
+        assert_eq!(server.level.as_deref(), Some("warn"));
+        assert_eq!(
+            server.runtime_path.as_deref(),
+            Some("/workspace/.yarn/sdks/typescript/lib")
+        );
     }
 }

@@ -295,6 +295,10 @@ pub struct Text {
     /// resolution for a run.
     font_resolve: FxHashMap<(char, u8), (u32, bool)>,
 
+    /// `(preferred_font_id, char) → covered`. Explicit UI fonts previously
+    /// re-locked and reparsed the face for every character on every frame.
+    font_coverage: FxHashMap<(u32, char), bool>,
+
     /// `font_id → (should_embolden, should_italicize)` from
     /// `FontData` load-time synthesis flags (parallel to the rich-text
     /// rasterizer's use of the same fields).
@@ -343,6 +347,7 @@ impl Text {
             scale_factor: 1.0,
             font_library: font_library.clone(),
             font_resolve: FxHashMap::default(),
+            font_coverage: FxHashMap::default(),
             synthesis_cache: FxHashMap::default(),
             baseline_cache: FxHashMap::default(),
             shape_cache: FxHashMap::default(),
@@ -704,11 +709,17 @@ impl Text {
         font_id
     }
 
-    fn font_covers_char(&self, font_id: u32, ch: char) -> bool {
-        self.font_library
+    fn font_covers_char(&mut self, font_id: u32, ch: char) -> bool {
+        if let Some(covers) = self.font_coverage.get(&(font_id, ch)) {
+            return *covers;
+        }
+        let covers = self
+            .font_library
             .inner
             .read()
-            .font_covers_char(font_id as usize, ch)
+            .font_covers_char(font_id as usize, ch);
+        self.font_coverage.insert((font_id, ch), covers);
+        covers
     }
 
     fn resolve_font_id_for_char_with_preferred(
@@ -2762,6 +2773,16 @@ mod tests {
             mixed.len() >= 2,
             "pinned markdown fonts must still split missing glyphs onto fallback faces"
         );
+        let cached_coverage = text.font_coverage.len();
+        text.shape_for(
+            "\u{f07b} Neoism 🦀",
+            &DrawOpts {
+                font_id: Some(preferred),
+                ..DrawOpts::default()
+            },
+        )
+        .expect("reshape mixed markdown with preferred font");
+        assert_eq!(text.font_coverage.len(), cached_coverage);
     }
 
     #[test]

@@ -740,14 +740,6 @@ impl NeoismAgentPane {
     pub fn open_status_chip_picker(&mut self, index: usize) {
         let index = if !self.has_conversation() {
             if index == 0 {
-                if self.picker.as_ref().is_some_and(|picker| {
-                    picker.kind == NeoismAgentPickerKind::ConversationSource
-                }) {
-                    self.close_picker();
-                } else {
-                    self.picker =
-                        Some(NeoismAgentPicker::source_picker(self.new_chat_source));
-                }
                 return;
             }
             index - 1
@@ -769,13 +761,6 @@ impl NeoismAgentPane {
                 return;
             }
             if self.external_options_pending.is_some() {
-                return;
-            }
-            if self
-                .external_options()
-                .is_some_and(|snapshot| index == snapshot.options.len() + 1)
-            {
-                self.open_external_options_menu();
                 return;
             }
             let Some(option) = self
@@ -1114,33 +1099,24 @@ mod source_picker_tests {
     use neoism_ui::panels::agent_pane::state::side_panel::ConversationSource;
 
     #[test]
-    fn source_picker_preserves_draft_and_shifts_home_chips() {
-        for (index, source) in ConversationSource::CHOICES.into_iter().enumerate() {
-            let mut pane = NeoismAgentPane::default();
-            pane.input = "draft question".into();
-            pane.cursor_byte = pane.input.len();
-            pane.register_status_chip_rect(0, [5.0, 5.0, 30.0, 20.0]);
-            pane.register_status_chip_rect(1, [40.0, 5.0, 30.0, 20.0]);
-            assert_eq!(pane.status_chip_at(10.0, 10.0), Some(0));
-            assert_eq!(pane.status_chip_at(45.0, 10.0), Some(1));
-            pane.open_status_chip_picker(0);
-            let picker = pane.picker.as_mut().unwrap();
-            assert_eq!(picker.kind, NeoismAgentPickerKind::ConversationSource);
-            assert_eq!(picker.options().len(), 4);
-            picker.selected = index;
-            assert!(pane.commit_picker());
-            assert_eq!(pane.new_chat_source, source);
-            assert_eq!(pane.input, "draft question");
-            assert_eq!(pane.cursor_byte, pane.input.len());
-            assert!(pane.session_id.is_none());
-            pane.open_status_chip_picker(1);
-            if source == ConversationSource::Neoism {
-                assert_eq!(
-                    pane.picker.as_ref().unwrap().kind,
-                    NeoismAgentPickerKind::Agent
-                );
-            }
-        }
+    fn source_chip_is_disabled_and_home_agent_chip_still_opens() {
+        let mut pane = NeoismAgentPane::default();
+        pane.input = "draft question".into();
+        pane.cursor_byte = pane.input.len();
+        pane.register_status_chip_rect(0, [5.0, 5.0, 30.0, 20.0]);
+        pane.register_status_chip_rect(1, [40.0, 5.0, 30.0, 20.0]);
+        assert_eq!(pane.status_chip_at(10.0, 10.0), Some(0));
+        assert_eq!(pane.status_chip_at(45.0, 10.0), Some(1));
+        pane.open_status_chip_picker(0);
+        assert!(pane.picker.is_none());
+        pane.open_status_chip_picker(1);
+        assert_eq!(
+            pane.picker.as_ref().unwrap().kind,
+            NeoismAgentPickerKind::Agent
+        );
+        assert_eq!(pane.input, "draft question");
+        assert_eq!(pane.cursor_byte, pane.input.len());
+        assert!(pane.session_id.is_none());
     }
 
     #[test]

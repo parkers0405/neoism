@@ -125,6 +125,7 @@ pub fn is_streamed_live_part(kind: AgentMessageKindPolicy) -> bool {
             | AgentMessageKindPolicy::Reasoning
             | AgentMessageKindPolicy::Tool
             | AgentMessageKindPolicy::Subtask
+            | AgentMessageKindPolicy::Compaction
     )
 }
 
@@ -147,10 +148,14 @@ pub fn preserve_streamed_text(
 ) -> bool {
     matches!(
         incoming_kind,
-        AgentMessageKindPolicy::Assistant | AgentMessageKindPolicy::Reasoning
+        AgentMessageKindPolicy::Assistant
+            | AgentMessageKindPolicy::Reasoning
+            | AgentMessageKindPolicy::Compaction
     ) && matches!(
         existing_kind,
-        AgentMessageKindPolicy::Assistant | AgentMessageKindPolicy::Reasoning
+        AgentMessageKindPolicy::Assistant
+            | AgentMessageKindPolicy::Reasoning
+            | AgentMessageKindPolicy::Compaction
     ) && (incoming_text.is_empty() || existing_text.starts_with(incoming_text))
 }
 

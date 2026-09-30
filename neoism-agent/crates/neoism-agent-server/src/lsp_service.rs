@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, HashMap},
     fs,
+    hash::{Hash, Hasher},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -31,6 +32,8 @@ pub(super) struct LspService {
     pub(super) adapter_cache: super::lsp_adapters::AdapterCache,
     pub(super) generation_config: Option<Arc<neoism_agent_core::AgentConfigDocument>>,
     pub(super) cargo_roots: Mutex<super::lsp_scan::CargoRootCache>,
+    typescript_projects:
+        Mutex<HashMap<TypeScriptProjectCacheKey, TypeScriptProjectCacheEntry>>,
     self_weak: std::sync::Weak<LspService>,
     clients: Mutex<HashMap<LspClientKey, Arc<Mutex<PersistentLspClient>>>>,
     /// Per-client initialization gates. Spawning and initializing happens
@@ -71,6 +74,7 @@ impl LspService {
             adapter_cache: Default::default(),
             generation_config,
             cargo_roots: Default::default(),
+            typescript_projects: Default::default(),
             self_weak,
             clients: Mutex::new(HashMap::new()),
             initialization_gates: Mutex::new(HashMap::new()),
@@ -123,7 +127,12 @@ struct LspClientKey {
     adapter_id: String,
     endpoint: LspEndpointKey,
     initialization_options: Option<String>,
+    configured_initialization_options: Option<String>,
     settings: Option<String>,
+    /// Identity of a project runtime loaded by the server (currently the
+    /// TypeScript SDK). A generated SDK can change in place without changing
+    /// its path or user configuration, and must replace the existing client.
+    runtime_identity: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -159,7 +168,26 @@ struct LspLaunchConfig {
     routes: Vec<ResolvedLanguageRoute>,
     endpoint: LspEndpoint,
     initialization_options: Option<Value>,
+    configured_initialization_options: Option<String>,
     settings: Option<Value>,
+    runtime_identity: Option<String>,
+    degraded_missing_sdk: bool,
+}
+
+const TYPESCRIPT_PROJECT_CACHE_TTL: Duration = Duration::from_secs(2);
+const MAX_TYPESCRIPT_PROJECT_CACHE_ENTRIES: usize = 128;
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct TypeScriptProjectCacheKey {
+    workspace_root: PathBuf,
+    project_root: PathBuf,
+    initialization_options: Option<String>,
+}
+
+#[derive(Clone)]
+struct TypeScriptProjectCacheEntry {
+    checked_at: Instant,
+    config: TypeScriptProjectConfig,
 }
 
 #[derive(Clone, Debug)]
@@ -263,28 +291,46 @@ impl LspService {
         project_root: &Path,
         spec: &LanguageAdapter,
     ) -> bool {
-        let launch = launch_config(&self.runtime(), spec);
+        let launch = launch_config(&self.runtime(), workspace_root, project_root, spec);
         let key = LspClientKey::new(workspace_root, project_root, &launch);
-        let client = self
+        let exact = self
             .clients
             .lock()
             .expect("lsp client map lock poisoned")
             .get(&key)
             .cloned();
-        let Some(client) = client else {
-            return false;
+        let (active_key, client) = match exact {
+            Some(client) => (key.clone(), client),
+            None if launch.degraded_missing_sdk => {
+                let Some(existing) = self.existing_client_for_scope(&key) else {
+                    return false;
+                };
+                existing
+            }
+            None => return false,
         };
-        let reason = client
+        let Some(reason) = client
             .lock()
             .ok()
-            .and_then(|mut client| client.client.exit_reason());
-        if let Some(reason) = reason {
-            self.record_broken(&key, reason);
-            self.evict_client(&key);
-            false
-        } else {
-            true
-        }
+            .and_then(|mut client| client.client.exit_reason())
+        else {
+            return true;
+        };
+        self.record_broken(&active_key, reason);
+        self.evict_client(&active_key);
+        false
+    }
+
+    fn existing_client_for_scope(
+        &self,
+        replacement: &LspClientKey,
+    ) -> Option<(LspClientKey, Arc<Mutex<PersistentLspClient>>)> {
+        self.clients
+            .lock()
+            .expect("lsp client map lock poisoned")
+            .iter()
+            .find(|(key, _)| can_reuse_for_degraded_sdk(key, replacement))
+            .map(|(key, client)| (key.clone(), Arc::clone(client)))
     }
 
     fn broken_reason_at(
@@ -293,7 +339,7 @@ impl LspService {
         project_root: &Path,
         spec: &LanguageAdapter,
     ) -> Option<String> {
-        let launch = launch_config(&self.runtime(), spec);
+        let launch = launch_config(&self.runtime(), workspace_root, project_root, spec);
         let key = LspClientKey::new(workspace_root, project_root, &launch);
         let client = self
             .clients
@@ -1164,6 +1210,10 @@ impl LspService {
                 let _ = client.client.shutdown();
             }
         }
+        self.typescript_projects
+            .lock()
+            .expect("TypeScript project cache lock poisoned")
+            .clear();
     }
 
     pub(super) fn shutdown_root(&self, root: &Path) {
@@ -1204,6 +1254,10 @@ impl LspService {
             .lock()
             .expect("lsp broken map lock poisoned")
             .retain(|key, _| key.root != root);
+        self.typescript_projects
+            .lock()
+            .expect("TypeScript project cache lock poisoned")
+            .retain(|key, _| key.workspace_root != root);
         *self
             .cargo_roots
             .lock()
@@ -1262,7 +1316,7 @@ impl LspService {
         spec: &LanguageAdapter,
         operation: impl FnOnce(&mut PersistentLspClient) -> anyhow::Result<T>,
     ) -> anyhow::Result<T> {
-        let launch = launch_config(&self.runtime(), spec);
+        let launch = launch_config(&self.runtime(), workspace_root, project_root, spec);
         let key = LspClientKey::new(workspace_root, project_root, &launch);
         // `client()` records only real connect/spawn/initialize failures. Do
         // not record its backoff sentinel here: resetting `retry_after` on
@@ -1296,6 +1350,14 @@ impl LspService {
         key: &LspClientKey,
         launch: &LspLaunchConfig,
     ) -> anyhow::Result<Arc<Mutex<PersistentLspClient>>> {
+        // A running tsserver has already loaded its SDK. If that SDK is
+        // temporarily absent during Yarn regeneration, keep the useful client
+        // instead of tearing it down merely to start a degraded fallback.
+        if launch.degraded_missing_sdk {
+            if let Some((_, client)) = self.existing_client_for_scope(key) {
+                return Ok(client);
+            }
+        }
         // Endpoint, environment, initializationOptions, and settings are part
         // of the key. If configuration changes any of them, retire the old
         // transport for this workspace+project+adapter before creating its
@@ -1515,6 +1577,20 @@ impl LspService {
             .expect("lsp diagnostic-version lock poisoned")
             .retain(|key, _| key.root != root || key.server_id != server_id);
     }
+}
+
+fn can_reuse_for_degraded_sdk(
+    existing: &LspClientKey,
+    replacement: &LspClientKey,
+) -> bool {
+    existing.root == replacement.root
+        && existing.project_root == replacement.project_root
+        && existing.id == replacement.id
+        && existing.adapter_id == replacement.adapter_id
+        && existing.endpoint == replacement.endpoint
+        && existing.configured_initialization_options
+            == replacement.configured_initialization_options
+        && existing.settings == replacement.settings
 }
 
 /// Servers normally echo the full CompletionItem from `completionItem/resolve`,
@@ -1996,7 +2072,7 @@ mod diagnostic_cache_tests {
         let service = runtime.service.as_ref();
         let root = Path::new("/tmp/neoism-broken-lsp-status");
         let spec = LanguageAdapter::from_capability(&capability);
-        let launch = launch_config(&runtime, &spec);
+        let launch = launch_config(&runtime, root, root, &spec);
         let key = LspClientKey::new(root, root, &launch);
         service.record_broken(&key, "server exited during initialize".to_string());
 
@@ -2165,13 +2241,19 @@ impl LspClientKey {
                 .initialization_options
                 .as_ref()
                 .map(|value| value.to_string()),
+            configured_initialization_options: launch
+                .configured_initialization_options
+                .clone(),
             settings: launch.settings.as_ref().map(Value::to_string),
+            runtime_identity: launch.runtime_identity.clone(),
         }
     }
 }
 
 fn launch_config(
     runtime: &super::LspRuntime,
+    workspace_root: &Path,
+    project_root: &Path,
     adapter: &LanguageAdapter,
 ) -> LspLaunchConfig {
     let endpoint = match &adapter.transport {
@@ -2207,13 +2289,641 @@ fn launch_config(
             env: BTreeMap::new(),
         },
     };
+    let project =
+        runtime
+            .service
+            .typescript_project_config(workspace_root, project_root, adapter);
+    if std::env::var_os("NEOISM_LSP_LOG").is_some() {
+        if let Some(info) = &project.runtime {
+            eprintln!(
+                "neoism::lsp runtime[{}]: source={:?} path={} version={}",
+                adapter.id,
+                info.source,
+                info.path.as_deref().unwrap_or("<server default>"),
+                info.version.as_deref().unwrap_or("unknown"),
+            );
+        }
+    }
     LspLaunchConfig {
         id: adapter.id.clone(),
         adapter_id: adapter.id.clone(),
         routes: adapter.routes.clone(),
         endpoint,
-        initialization_options: adapter.initialization_options.clone(),
+        initialization_options: project.initialization_options,
+        configured_initialization_options: adapter
+            .initialization_options
+            .as_ref()
+            .map(Value::to_string),
         settings: adapter.settings.clone(),
+        runtime_identity: project.identity,
+        degraded_missing_sdk: project.degraded_missing_sdk,
+    }
+}
+
+#[derive(Clone, Default)]
+pub(super) struct TypeScriptProjectConfig {
+    initialization_options: Option<Value>,
+    identity: Option<String>,
+    pub(super) runtime: Option<super::LspRuntimeInfo>,
+    pub(super) warning: Option<String>,
+    degraded_missing_sdk: bool,
+}
+
+impl LspService {
+    pub(super) fn typescript_project_config(
+        &self,
+        workspace_root: &Path,
+        project_root: &Path,
+        adapter: &LanguageAdapter,
+    ) -> TypeScriptProjectConfig {
+        if adapter.id != "typescript" {
+            return uncached_typescript_project_config(
+                workspace_root,
+                project_root,
+                adapter,
+            );
+        }
+        let key = TypeScriptProjectCacheKey {
+            workspace_root: workspace_root.to_path_buf(),
+            project_root: project_root.to_path_buf(),
+            initialization_options: adapter
+                .initialization_options
+                .as_ref()
+                .map(Value::to_string),
+        };
+        if let Some(config) = self
+            .typescript_projects
+            .lock()
+            .expect("TypeScript project cache lock poisoned")
+            .get(&key)
+            .filter(|entry| entry.checked_at.elapsed() < TYPESCRIPT_PROJECT_CACHE_TTL)
+            .map(|entry| entry.config.clone())
+        {
+            return config;
+        }
+
+        // Filesystem probing and SDK package parsing happen only on this
+        // bounded refresh path, never on each document operation. SDK changes
+        // become visible within the short TTL or on runtime recreation.
+        let config =
+            uncached_typescript_project_config(workspace_root, project_root, adapter);
+        let mut cache = self
+            .typescript_projects
+            .lock()
+            .expect("TypeScript project cache lock poisoned");
+        if cache.len() >= MAX_TYPESCRIPT_PROJECT_CACHE_ENTRIES
+            && !cache.contains_key(&key)
+        {
+            if let Some(oldest) = cache
+                .iter()
+                .min_by_key(|(_, entry)| entry.checked_at)
+                .map(|(key, _)| key.clone())
+            {
+                cache.remove(&oldest);
+            }
+        }
+        cache.insert(
+            key,
+            TypeScriptProjectCacheEntry {
+                checked_at: Instant::now(),
+                config: config.clone(),
+            },
+        );
+        config
+    }
+}
+
+fn uncached_typescript_project_config(
+    workspace_root: &Path,
+    project_root: &Path,
+    adapter: &LanguageAdapter,
+) -> TypeScriptProjectConfig {
+    let mut result = TypeScriptProjectConfig {
+        initialization_options: adapter.initialization_options.clone(),
+        ..TypeScriptProjectConfig::default()
+    };
+    if adapter.id != "typescript" {
+        return result;
+    }
+
+    if let Some(configured) = configured_typescript_sdk(&result.initialization_options) {
+        let path = absolute_sdk_path(project_root, Path::new(configured));
+        result.identity = sdk_identity(&path);
+        result.runtime = Some(typescript_runtime_info(
+            super::LspRuntimeSource::Configured,
+            &path,
+        ));
+        return result;
+    }
+
+    let mut pnp_root = None;
+    for directory in bounded_project_ancestors(workspace_root, project_root) {
+        let sdk = directory.join(".yarn/sdks/typescript/lib");
+        if let Some(probe) = probe_sdk(&sdk) {
+            if merge_typescript_sdk_path(&mut result.initialization_options, &sdk) {
+                result.identity = Some(probe.identity);
+                result.runtime = Some(super::LspRuntimeInfo {
+                    source: super::LspRuntimeSource::YarnSdk,
+                    path: Some(sdk.display().to_string()),
+                    version: probe.version,
+                });
+                return result;
+            }
+            result.warning = Some("Yarn Plug'n'Play TypeScript SDK was found, but the configured `initializationOptions.tsserver` value prevents Neoism from selecting it. Use an object with a valid string `path`, or remove `path` to enable automatic selection.".to_string());
+            break;
+        }
+        if directory.join(".pnp.cjs").is_file() {
+            pnp_root = Some(directory.to_path_buf());
+            break;
+        }
+    }
+
+    if let Some(pnp_root) = pnp_root {
+        let sdk = pnp_root.join(".yarn/sdks/typescript/lib");
+        result.runtime = Some(super::LspRuntimeInfo {
+            source: super::LspRuntimeSource::MissingYarnSdk,
+            path: Some(sdk.display().to_string()),
+            version: None,
+        });
+        result.warning = Some(format!(
+            "Yarn Plug'n'Play was detected at {}, but the patched TypeScript SDK is missing. TypeScript is using its normal fallback; run `corepack yarn dlx @yarnpkg/sdks base` once at that project root for complete PnP resolution.",
+            pnp_root.display()
+        ));
+        result.degraded_missing_sdk = true;
+    } else {
+        result.runtime = Some(super::LspRuntimeInfo {
+            source: super::LspRuntimeSource::LanguageServerDefault,
+            path: None,
+            version: None,
+        });
+    }
+    result
+}
+
+fn bounded_project_ancestors<'a>(
+    workspace_root: &'a Path,
+    project_root: &'a Path,
+) -> impl Iterator<Item = &'a Path> {
+    let bounded = project_root.starts_with(workspace_root);
+    project_root.ancestors().take_while(move |directory| {
+        if bounded {
+            directory.starts_with(workspace_root)
+        } else {
+            *directory == project_root
+        }
+    })
+}
+
+fn configured_typescript_sdk(options: &Option<Value>) -> Option<&str> {
+    options
+        .as_ref()?
+        .get("tsserver")?
+        .get("path")?
+        .as_str()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+}
+
+fn merge_typescript_sdk_path(options: &mut Option<Value>, sdk: &Path) -> bool {
+    if options.is_none() {
+        *options = Some(json!({ "tsserver": { "path": sdk.display().to_string() } }));
+        return true;
+    }
+    let Some(object) = options.as_mut().and_then(Value::as_object_mut) else {
+        return false;
+    };
+    let tsserver = object
+        .entry("tsserver")
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    let Some(tsserver) = tsserver.as_object_mut() else {
+        return false;
+    };
+    match tsserver.entry("path") {
+        serde_json::map::Entry::Vacant(entry) => {
+            entry.insert(Value::String(sdk.display().to_string()));
+            true
+        }
+        // A valid configured string was handled before automatic selection.
+        // Preserve every other user value rather than silently replacing it.
+        serde_json::map::Entry::Occupied(_) => false,
+    }
+}
+
+fn absolute_sdk_path(project_root: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        project_root.join(path)
+    }
+}
+
+fn typescript_runtime_info(
+    source: super::LspRuntimeSource,
+    sdk: &Path,
+) -> super::LspRuntimeInfo {
+    let version = sdk
+        .parent()
+        .and_then(|typescript| {
+            std::fs::read_to_string(typescript.join("package.json")).ok()
+        })
+        .and_then(|contents| serde_json::from_str::<Value>(&contents).ok())
+        .and_then(|package| {
+            package
+                .get("version")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        });
+    super::LspRuntimeInfo {
+        source,
+        path: Some(sdk.display().to_string()),
+        version,
+    }
+}
+
+struct SdkProbe {
+    identity: String,
+    version: Option<String>,
+}
+
+fn probe_sdk(sdk: &Path) -> Option<SdkProbe> {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    sdk.hash(&mut hasher);
+    let typescript = fs::read(sdk.join("typescript.js")).ok()?;
+    let tsserver = fs::read(sdk.join("tsserver.js")).ok()?;
+    typescript.hash(&mut hasher);
+    tsserver.hash(&mut hasher);
+    let package = sdk
+        .parent()
+        .and_then(|typescript| fs::read(typescript.join("package.json")).ok());
+    package.hash(&mut hasher);
+    let version = package
+        .as_deref()
+        .and_then(|contents| serde_json::from_slice::<Value>(contents).ok())
+        .and_then(|package| {
+            package
+                .get("version")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        });
+    Some(SdkProbe {
+        identity: format!("{:016x}", hasher.finish()),
+        version,
+    })
+}
+
+fn sdk_identity(sdk: &Path) -> Option<String> {
+    probe_sdk(sdk).map(|probe| probe.identity)
+}
+
+#[cfg(test)]
+mod typescript_project_tests {
+    use std::{
+        fs,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use neoism_agent_service_api::{
+        LanguageRootPolicy, LanguageRouteCapability, LanguageServerCapability,
+        LanguageServerOperations, LanguageServerTransport,
+    };
+    use serde_json::json;
+
+    use super::*;
+
+    struct Project {
+        root: PathBuf,
+    }
+
+    impl Project {
+        fn new(name: &str) -> Self {
+            let nonce = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!(
+                "neoism-typescript-project-{name}-{}-{nonce}",
+                std::process::id()
+            ));
+            fs::create_dir_all(&root).expect("create project");
+            Self { root }
+        }
+
+        fn add_pnp(&self) {
+            fs::write(self.root.join(".pnp.cjs"), "module.exports = {};")
+                .expect("write PnP marker");
+        }
+
+        fn add_yarn_sdk(&self, version: &str) -> PathBuf {
+            let typescript = self.root.join(".yarn/sdks/typescript");
+            let lib = typescript.join("lib");
+            fs::create_dir_all(&lib).expect("create SDK");
+            fs::write(lib.join("typescript.js"), "typescript wrapper")
+                .expect("write typescript wrapper");
+            fs::write(lib.join("tsserver.js"), "tsserver wrapper")
+                .expect("write tsserver wrapper");
+            fs::write(
+                typescript.join("package.json"),
+                json!({ "name": "typescript", "version": version }).to_string(),
+            )
+            .expect("write SDK package");
+            lib
+        }
+    }
+
+    impl Drop for Project {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn adapter(options: Option<Value>) -> LanguageAdapter {
+        let mut adapter = LanguageAdapter::from_capability(&LanguageServerCapability {
+            id: "typescript".to_string(),
+            name: "TypeScript".to_string(),
+            catalog_packages: Vec::new(),
+            transport: LanguageServerTransport::Stdio {
+                command: vec![
+                    "typescript-language-server".to_string(),
+                    "--stdio".to_string(),
+                ],
+            },
+            routes: vec![LanguageRouteCapability {
+                id: "typescript".to_string(),
+                document_language_id: "typescript".to_string(),
+                extensions: vec!["ts".to_string()],
+                filename_patterns: Vec::new(),
+            }],
+            markers: vec!["package.json".to_string(), ".pnp.cjs".to_string()],
+            root_policy: LanguageRootPolicy::NearestMarker,
+            capabilities: LanguageServerOperations {
+                workspace_symbols: true,
+                completion: true,
+                hover: true,
+                definition: true,
+                references: true,
+                implementation: true,
+                call_hierarchy: true,
+                diagnostics: true,
+                document_symbols: true,
+                formatting: true,
+                code_actions: true,
+                rename: true,
+            },
+        });
+        adapter.initialization_options = options;
+        adapter
+    }
+
+    #[test]
+    fn yarn_pnp_sdk_is_selected_and_merged_with_user_options() {
+        let project = Project::new("sdk-merge");
+        project.add_pnp();
+        let sdk = project.add_yarn_sdk("5.7.3-sdk");
+        let adapter = adapter(Some(json!({
+            "provideFormatter": false,
+            "tsserver": { "maxTsServerMemory": 4096 }
+        })));
+
+        let config =
+            uncached_typescript_project_config(&project.root, &project.root, &adapter);
+
+        assert_eq!(config.warning, None);
+        assert_eq!(
+            config
+                .initialization_options
+                .as_ref()
+                .and_then(|value| value.pointer("/tsserver/path"))
+                .and_then(Value::as_str),
+            Some(sdk.to_str().expect("UTF-8 path"))
+        );
+        assert_eq!(
+            config
+                .initialization_options
+                .as_ref()
+                .and_then(|value| value.pointer("/tsserver/maxTsServerMemory")),
+            Some(&json!(4096))
+        );
+        assert_eq!(
+            config
+                .initialization_options
+                .as_ref()
+                .and_then(|value| value.get("provideFormatter")),
+            Some(&json!(false))
+        );
+        let runtime = config.runtime.expect("runtime info");
+        assert_eq!(runtime.source, super::super::LspRuntimeSource::YarnSdk);
+        assert_eq!(runtime.version.as_deref(), Some("5.7.3-sdk"));
+        assert!(config.identity.is_some());
+    }
+
+    #[test]
+    fn yarn_pnp_without_sdk_has_actionable_non_mutating_warning() {
+        let project = Project::new("missing-sdk");
+        project.add_pnp();
+
+        let config = uncached_typescript_project_config(
+            &project.root,
+            &project.root,
+            &adapter(None),
+        );
+
+        assert!(config.warning.as_deref().is_some_and(|message| {
+            message.contains("corepack yarn dlx @yarnpkg/sdks base")
+                && message.contains("normal fallback")
+                && message.contains(project.root.to_str().expect("UTF-8 path"))
+        }));
+        assert_eq!(
+            config.runtime.expect("runtime info").source,
+            super::super::LspRuntimeSource::MissingYarnSdk
+        );
+        assert!(!project.root.join(".yarn").exists());
+    }
+
+    #[test]
+    fn explicit_user_sdk_path_takes_precedence_over_generated_sdk() {
+        let project = Project::new("explicit-sdk");
+        project.add_pnp();
+        project.add_yarn_sdk("5.7.3-sdk");
+        let explicit = project.root.join("custom/typescript/lib");
+        fs::create_dir_all(&explicit).expect("create explicit SDK");
+        fs::write(explicit.join("typescript.js"), "custom").expect("write explicit SDK");
+        let adapter = adapter(Some(json!({
+            "tsserver": { "path": "custom/typescript/lib", "logVerbosity": "verbose" },
+            "locale": "en"
+        })));
+
+        let config =
+            uncached_typescript_project_config(&project.root, &project.root, &adapter);
+
+        assert_eq!(config.warning, None);
+        assert_eq!(
+            config.initialization_options,
+            adapter.initialization_options
+        );
+        let runtime = config.runtime.expect("runtime info");
+        assert_eq!(runtime.source, super::super::LspRuntimeSource::Configured);
+        assert_eq!(
+            runtime.path.as_deref(),
+            Some(explicit.to_str().expect("UTF-8 path"))
+        );
+    }
+
+    #[test]
+    fn sdk_appearance_and_change_update_lsp_client_key_identity() {
+        let project = Project::new("restart-identity");
+        project.add_pnp();
+        let adapter = adapter(None);
+        let runtime = super::super::LspRuntime::new(crate::standard_services());
+        let first = launch_config(&runtime, &project.root, &project.root, &adapter);
+        let first_key = LspClientKey::new(&project.root, &project.root, &first);
+
+        let sdk = project.add_yarn_sdk("5.7.3-sdk");
+        runtime
+            .service
+            .typescript_projects
+            .lock()
+            .expect("cache lock")
+            .clear();
+        let second = launch_config(&runtime, &project.root, &project.root, &adapter);
+        let second_key = LspClientKey::new(&project.root, &project.root, &second);
+        assert_ne!(
+            first_key, second_key,
+            "SDK appearance must replace the client"
+        );
+
+        assert_eq!("tsserver wrapper".len(), "changed! wrapper".len());
+        fs::write(sdk.join("tsserver.js"), "changed! wrapper")
+            .expect("same-size SDK replacement");
+        runtime
+            .service
+            .typescript_projects
+            .lock()
+            .expect("cache lock")
+            .clear();
+        let third = launch_config(&runtime, &project.root, &project.root, &adapter);
+        let third_key = LspClientKey::new(&project.root, &project.root, &third);
+
+        assert_ne!(
+            second_key, third_key,
+            "SDK replacement must restart the client"
+        );
+
+        fs::remove_file(sdk.join("tsserver.js")).expect("remove SDK wrapper");
+        let deleted =
+            uncached_typescript_project_config(&project.root, &project.root, &adapter);
+        assert_eq!(
+            deleted.runtime.expect("fallback runtime").source,
+            super::super::LspRuntimeSource::MissingYarnSdk
+        );
+        runtime
+            .service
+            .typescript_projects
+            .lock()
+            .expect("cache lock")
+            .clear();
+        let fallback = launch_config(&runtime, &project.root, &project.root, &adapter);
+        let fallback_key = LspClientKey::new(&project.root, &project.root, &fallback);
+        assert_ne!(third_key, fallback_key);
+        assert!(can_reuse_for_degraded_sdk(&third_key, &fallback_key));
+    }
+
+    #[test]
+    fn nested_package_discovers_workspace_root_pnp_sdk() {
+        let project = Project::new("nested-monorepo");
+        project.add_pnp();
+        let sdk = project.add_yarn_sdk("5.8.2-sdk");
+        let nested = project.root.join("packages/app");
+        fs::create_dir_all(nested.join("src")).expect("create nested package");
+        fs::write(nested.join("package.json"), "{}").expect("write nested package");
+        fs::write(nested.join("src/index.ts"), "export {};").expect("write source");
+
+        let config =
+            uncached_typescript_project_config(&project.root, &nested, &adapter(None));
+
+        assert_eq!(
+            config
+                .initialization_options
+                .as_ref()
+                .and_then(|value| value.pointer("/tsserver/path"))
+                .and_then(Value::as_str),
+            Some(sdk.to_str().expect("UTF-8 path"))
+        );
+        assert_eq!(
+            config.runtime.expect("runtime").source,
+            super::super::LspRuntimeSource::YarnSdk
+        );
+    }
+
+    #[test]
+    fn pnp_discovery_never_escapes_opened_workspace() {
+        let project = Project::new("bounded-monorepo");
+        project.add_pnp();
+        project.add_yarn_sdk("5.8.2-sdk");
+        let opened_workspace = project.root.join("packages/app");
+        fs::create_dir_all(&opened_workspace).expect("create opened workspace");
+        fs::write(opened_workspace.join("package.json"), "{}").expect("write package");
+
+        let config = uncached_typescript_project_config(
+            &opened_workspace,
+            &opened_workspace,
+            &adapter(None),
+        );
+
+        assert_eq!(
+            config.runtime.expect("runtime").source,
+            super::super::LspRuntimeSource::LanguageServerDefault
+        );
+        assert_eq!(config.initialization_options, None);
+    }
+
+    #[test]
+    fn malformed_tsserver_options_are_preserved_and_warn() {
+        let project = Project::new("malformed-options");
+        project.add_pnp();
+        project.add_yarn_sdk("5.8.2-sdk");
+        for options in [
+            json!({ "tsserver": "invalid" }),
+            json!({ "tsserver": { "path": 42, "maxTsServerMemory": 1024 } }),
+        ] {
+            let adapter = adapter(Some(options.clone()));
+            let config = uncached_typescript_project_config(
+                &project.root,
+                &project.root,
+                &adapter,
+            );
+            assert_eq!(config.initialization_options, Some(options));
+            assert!(config.warning.as_deref().is_some_and(|warning| {
+                warning.contains("initializationOptions.tsserver")
+            }));
+            assert_eq!(
+                config.runtime.expect("fallback runtime").source,
+                super::super::LspRuntimeSource::LanguageServerDefault
+            );
+        }
+    }
+
+    #[test]
+    fn project_probe_is_cached_between_document_operations() {
+        let project = Project::new("cache");
+        project.add_yarn_sdk("5.8.2-sdk");
+        let runtime = super::super::LspRuntime::new(crate::standard_services());
+        let adapter = adapter(None);
+        let first = runtime.service.typescript_project_config(
+            &project.root,
+            &project.root,
+            &adapter,
+        );
+        fs::remove_dir_all(project.root.join(".yarn")).expect("remove SDK");
+        let cached = runtime.service.typescript_project_config(
+            &project.root,
+            &project.root,
+            &adapter,
+        );
+        assert_eq!(first.identity, cached.identity);
+        assert_eq!(
+            cached.runtime.expect("cached runtime").source,
+            super::super::LspRuntimeSource::YarnSdk
+        );
     }
 }
 

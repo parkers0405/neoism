@@ -105,6 +105,17 @@ impl ChromeBridge {
     pub fn set_settings_values(&mut self, config_json: &str) -> Result<(), JsValue> {
         let values: serde_json::Value = serde_json::from_str(config_json)
             .map_err(|e| JsValue::from_str(&format!("config parse: {e}")))?;
+        let agent = values.get("agent");
+        let conversations_enabled = agent
+            .and_then(|agent| agent.get("conversations-panel-enabled"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true);
+        let details_enabled = agent
+            .and_then(|agent| agent.get("details-panel-enabled"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true);
+        self.chrome
+            .set_agent_panel_preferences(conversations_enabled, details_enabled);
         self.chrome.set_settings_values(values);
         Ok(())
     }

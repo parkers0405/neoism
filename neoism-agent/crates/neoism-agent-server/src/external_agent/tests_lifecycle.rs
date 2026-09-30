@@ -120,7 +120,7 @@ fn mock_adapter(
     let nested_input_update = json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":format!("native-{provider}"),"update":{"sessionUpdate":"tool_call_update","toolCallId":"task-1","status":"in_progress","rawInput":nested_input}}}).to_string();
     let nested_progress = json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":format!("native-{provider}"),"update":{"sessionUpdate":"tool_call_update","toolCallId":"task-1","status":"in_progress","content":[{"type":"content","content":{"type":"text","text":"Review underway"}}]}}}).to_string();
     let nested_done = json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":format!("native-{provider}"),"update":{"sessionUpdate":"tool_call_update","toolCallId":"task-1","status":"completed","rawOutput":{"text":"Reviewed"}}}}).to_string();
-    let usage = json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":format!("native-{provider}"),"update":{"sessionUpdate":"usage_update","usage":{"totalTokens":8,"inputTokens":5,"outputTokens":3}}}}).to_string();
+    let usage = json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":format!("native-{provider}"),"update":{"sessionUpdate":"usage_update","usage":{"totalTokens":8,"inputTokens":5,"outputTokens":3,"contextWindow":200000}}}}).to_string();
     let source = format!(
         r#"#!/bin/sh
 while IFS= read -r line; do
@@ -144,7 +144,9 @@ while IFS= read -r line; do
           IFS= read -r reply || exit 1
           printf '%s\n' "$reply" >> '{log}'
           case "$reply" in *'"optionId":"allow"'*) ;; *) exit 2 ;; esac
-          printf '%s\n' '{tool_done}' '{edit_done}' '{nested_done}' '{second}' '{done}'
+           printf '%s\n' '{tool_done}' '{edit_done}' '{nested_done}'
+           sleep 0.2
+           printf '%s\n' '{second}' '{done}'
           ;;
         *) printf '%s\n' '{cleared}' '{user_echo}' '{mislabeled_echo}' '{continued}' '{done}' ;;
       esac
@@ -239,8 +241,10 @@ async fn three_provider_roots_run_via_real_http_queue_and_reload() {
         let mut saw_tool = false;
         let mut saw_permission = false;
         let mut saw_live_usage = false;
+        let mut saw_terminal_task_still_running = false;
+        let mut saw_nested_completed = false;
         tokio::time::timeout(Duration::from_secs(8), async {
-            while !(saw_delta && saw_user && saw_todo && saw_tool && saw_permission && saw_live_usage) {
+            while !(saw_delta && saw_user && saw_todo && saw_tool && saw_permission && saw_live_usage && saw_terminal_task_still_running) {
                 let event = events.recv().await.unwrap();
                 match event.kind.as_str() {
                     event_type::MESSAGE_PART_DELTA => saw_delta = true,
@@ -250,12 +254,25 @@ async fn three_provider_roots_run_via_real_http_queue_and_reload() {
                              assert_eq!(event.properties["part"]["role"], "user");
                              saw_user = true;
                          }
-                         if event.properties["part"]["type"] == "tool" {
-                            saw_tool = true;
-                        }
+                          if event.properties["part"]["type"] == "tool" {
+                             saw_tool = true;
+                              if event.properties["part"]["callId"] == "task-1"
+                                  && event.properties["part"]["state"]["status"] == "completed"
+                              {
+                                  assert!(!saw_nested_completed);
+                                  saw_terminal_task_still_running = true;
+                              }
+                          }
+                     }
+                    event_type::SESSION_UPDATED
+                        if event.properties["info"]["externalAgent"]["parentToolCallId"] == "task-1"
+                            && event.properties["info"]["externalAgent"]["status"] == "completed" =>
+                    {
+                        saw_nested_completed = true;
                     }
                     event_type::MESSAGE_UPDATED if event.properties["info"]["tokens"]["total"] == 8 => {
                         assert!(event.properties["info"]["time"]["completed"].is_null());
+                        assert_eq!(event.properties["info"]["tokens"]["contextLimit"], 200_000);
                         saw_live_usage = true;
                     }
                     event_type::PERMISSION_ASKED => {
@@ -300,7 +317,7 @@ async fn three_provider_roots_run_via_real_http_queue_and_reload() {
             }
         })
         .await
-        .unwrap_or_else(|_| panic!("{provider}: missing GUI events: delta={saw_delta} todo={saw_todo} tool={saw_tool} permission={saw_permission}"));
+        .unwrap_or_else(|_| panic!("{provider}: missing GUI events: delta={saw_delta} todo={saw_todo} tool={saw_tool} permission={saw_permission} task_running={saw_terminal_task_still_running}"));
         let first = wait_for_messages(&app, &session.id, 2).await;
         assert_eq!(first.len(), 2);
         let nested_child = state
@@ -333,6 +350,7 @@ async fn three_provider_roots_run_via_real_http_queue_and_reload() {
             panic!("assistant expected")
         };
         assert_eq!(first_assistant.tokens.total, Some(12));
+        assert_eq!(first_assistant.tokens.context_limit, Some(200_000));
         assert_eq!(
             first_assistant.model_id,
             if provider == "codex" {
@@ -349,6 +367,22 @@ async fn three_provider_roots_run_via_real_http_queue_and_reload() {
             if tool.call_id == "edit-1" && tool.tool == "edit"
                 && matches!(&tool.state, neoism_agent_core::ToolState::Completed { metadata, .. }
                     if metadata["acpDiffs"][0]["newText"] == "new\n"))));
+        let task_index = first[1]
+            .parts
+            .iter()
+            .position(|part| matches!(part, Part::Tool(tool) if tool.call_id == "task-1"))
+            .expect("task tool part");
+        let answer_index = first[1]
+            .parts
+            .iter()
+            .position(
+                |part| matches!(part, Part::Text(text) if text.text == "First answer"),
+            )
+            .expect("assistant answer part");
+        assert!(
+            task_index < answer_index,
+            "ACP tool must retain stream order before the final answer"
+        );
         let mut old_root = state
             .inner
             .store

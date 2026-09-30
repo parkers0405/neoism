@@ -698,6 +698,41 @@ fn configured_stdio_adapter_adds_a_genuinely_new_language_route() {
 }
 
 #[test]
+fn yarn_pnp_missing_sdk_is_a_visible_degraded_status_not_a_blocker() {
+    let workspace = TempWorkspace::new("yarn-pnp-missing-sdk-status");
+    workspace.touch("package.json");
+    workspace.touch(".pnp.cjs");
+    workspace.touch("src/index.ts");
+    fs::write(
+        workspace.path.join(".agent/agent.json"),
+        r#"{ "lsp": { "typescript": { "command": ["/bin/sh"] } } }"#,
+    )
+    .expect("write TypeScript command override");
+    let file = workspace.path.join("src/index.ts");
+
+    let status = status_for_file(&workspace.runtime, &workspace.path, &file)
+        .into_iter()
+        .find(|status| status.id == "typescript")
+        .expect("TypeScript status");
+
+    assert_eq!(status.status, LspServerState::Available);
+    assert!(status.capabilities.hover);
+    assert!(status.detected.command_available);
+    assert!(status.detected.message.as_deref().is_some_and(|message| {
+        message.contains("corepack yarn dlx @yarnpkg/sdks base")
+    }));
+    let serialized = serde_json::to_value(&status).expect("serialize LSP status");
+    assert_eq!(serialized["runtime"]["source"], "missing_yarn_sdk");
+    assert!(serialized["runtime"]["path"]
+        .as_str()
+        .is_some_and(|path| path.ends_with(".yarn/sdks/typescript/lib")));
+    assert_eq!(
+        status.runtime.expect("runtime info").source,
+        LspRuntimeSource::MissingYarnSdk
+    );
+}
+
+#[test]
 fn document_lifecycle_is_not_gated_by_diagnostics_capability() {
     let workspace = TempWorkspace::new("completion-only-lifecycle");
     workspace.touch("src/example.liveonly");

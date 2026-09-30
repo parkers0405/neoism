@@ -191,30 +191,7 @@ pub(super) fn set_external_option(
     )
 }
 
-/// Fetch native history without claiming that a preview contains an imported transcript.
-pub(super) fn fetch_external_catalog(
-    server: &str,
-    directory: &str,
-    source: neoism_ui::panels::agent_pane::state::side_panel::ConversationSource,
-) -> Result<Vec<NeoismAgentSessionEntry>, String> {
-    let provider = source
-        .provider()
-        .ok_or("Neoism does not have a native history adapter")?;
-    let path = format!(
-        "/v2/sessions/external/catalog?provider={provider}&directory={}",
-        percent_encode(directory)
-    );
-    let response = api_request_json_with_read_timeout(
-        server,
-        "GET",
-        &path,
-        None,
-        Duration::from_secs(12),
-    )?
-    .ok_or_else(|| format!("{} returned an empty catalog", source.label()))?;
-    parse_external_catalog(&response, source)
-}
-
+#[cfg(test)]
 fn parse_external_catalog(
     response: &Value,
     source: neoism_ui::panels::agent_pane::state::side_panel::ConversationSource,
@@ -314,32 +291,12 @@ fn parse_external_catalog(
         .collect())
 }
 
-pub(super) fn import_external_session(
-    server: &str,
-    directory: &str,
-    provider: &str,
-    external_id: &str,
-) -> Result<String, String> {
-    let path = format!(
-        "/v2/sessions/external/import?directory={}",
-        percent_encode(directory)
-    );
-    let body = external_import_payload(provider, external_id);
-    let response = api_request_json_with_read_timeout(
-        server,
-        "POST",
-        &path,
-        Some(&body),
-        Duration::from_secs(120),
-    )?
-    .ok_or_else(|| format!("{provider} import returned an empty response"))?;
-    parse_external_import_id(&response, provider)
-}
-
+#[cfg(test)]
 fn external_import_payload(provider: &str, external_id: &str) -> Value {
     serde_json::json!({"provider":provider, "externalSessionId":external_id})
 }
 
+#[cfg(test)]
 fn parse_external_import_id(response: &Value, provider: &str) -> Result<String, String> {
     response
         .get("id")
@@ -349,6 +306,7 @@ fn parse_external_import_id(response: &Value, provider: &str) -> Result<String, 
         .ok_or_else(|| format!("{provider} import did not return a root session id"))
 }
 
+#[cfg(test)]
 fn external_updated_ms(raw: &str) -> u64 {
     if let Ok(ms) = raw.parse::<u64>() {
         return ms;
@@ -1075,6 +1033,46 @@ mod subagent_runtime_snapshot_tests {
         assert_eq!(
             session_explicit_runtime_status(&session, &HashMap::new()).as_deref(),
             Some("completed")
+        );
+    }
+
+    #[test]
+    fn sidebar_lists_neoism_acp_roots_but_not_provider_history_imports() {
+        let imported = serde_json::json!({
+            "id": "imported",
+            "title": "Old Codex history",
+            "extra": {"externalAgent": {"provider": "codex", "historyState": "text_only"}}
+        });
+        let provider_preview = serde_json::json!({
+            "id": "preview",
+            "title": "Unclaimed Codex history",
+            "extra": {"externalAgent": {"provider": "codex", "historyState": "not_loaded"}}
+        });
+        let unmarked_external = serde_json::json!({
+            "id": "unmarked",
+            "title": "Legacy external history",
+            "extra": {"externalAgent": {"provider": "codex"}}
+        });
+        let native = serde_json::json!({
+            "id": "native",
+            "title": "Neoism Codex chat",
+            "extra": {"externalAgent": {"provider": "codex", "historyState": "neoism_only"}}
+        });
+        let internal = serde_json::json!({
+            "id": "internal",
+            "title": "Neoism chat"
+        });
+
+        assert!(session_entry(&imported, &HashMap::new()).is_none());
+        assert!(session_entry(&provider_preview, &HashMap::new()).is_none());
+        assert!(session_entry(&unmarked_external, &HashMap::new()).is_none());
+        assert_eq!(
+            session_entry(&native, &HashMap::new()).map(|entry| entry.id),
+            Some("native".into())
+        );
+        assert_eq!(
+            session_entry(&internal, &HashMap::new()).map(|entry| entry.id),
+            Some("internal".into())
         );
     }
 
@@ -2386,6 +2384,14 @@ pub(super) fn session_entry(
     session: &Value,
     statuses: &HashMap<String, SessionStatusSnapshot>,
 ) -> Option<NeoismAgentSessionEntry> {
+    let external = session
+        .get("externalAgent")
+        .or_else(|| session.pointer("/extra/externalAgent"));
+    if external.is_some_and(|external| {
+        external.get("historyState").and_then(Value::as_str) != Some("neoism_only")
+    }) {
+        return None;
+    }
     let id = session.get("id").and_then(Value::as_str)?.to_string();
     let title = session
         .get("title")

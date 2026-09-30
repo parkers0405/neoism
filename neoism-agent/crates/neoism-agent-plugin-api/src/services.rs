@@ -11,6 +11,7 @@ use neoism_agent_core::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::sync::atomic::AtomicBool;
 
 use crate::PluginFuture;
 
@@ -74,6 +75,33 @@ pub struct ProviderStream {
     pub events: ProviderEventStream,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MediaKind {
+    Image,
+    Video,
+}
+
+#[derive(Clone, Debug)]
+pub struct MediaGenerationRequest {
+    pub kind: MediaKind,
+    pub provider_id: String,
+    pub model_id: String,
+    pub connection_id: Option<String>,
+    pub tenant_id: String,
+    pub workspace_id: Option<String>,
+    pub prompt: String,
+    pub options: BTreeMap<String, Value>,
+    pub cancel: Option<Arc<AtomicBool>>,
+}
+
+#[derive(Clone, Debug)]
+pub struct GeneratedMedia {
+    pub bytes: Vec<u8>,
+    pub mime: String,
+    pub filename: String,
+    pub revised_prompt: Option<String>,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderModelMetadata {
@@ -132,6 +160,17 @@ pub trait ProviderService: Send + Sync + 'static {
         _model: &'a UserModel,
     ) -> PluginFuture<'a, ProviderModelMetadata> {
         Box::pin(async { Ok(ProviderModelMetadata::default()) })
+    }
+
+    fn generate_media<'a>(
+        &'a self,
+        _request: MediaGenerationRequest,
+    ) -> PluginFuture<'a, GeneratedMedia> {
+        Box::pin(async {
+            Err(crate::PluginRuntimeError::new(
+                "provider does not support media generation",
+            ))
+        })
     }
 
     fn auth<'a>(&'a self, _provider_id: &'a str) -> PluginFuture<'a, Option<AuthInfo>> {

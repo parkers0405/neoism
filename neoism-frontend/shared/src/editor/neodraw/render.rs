@@ -22,13 +22,12 @@ use super::pane::{Camera, DrawPane};
 use super::scene::{ArrowHead, Scene, ShapeId, ShapeKind, Style, Vec2};
 
 const DEPTH: f32 = 0.0;
-const ORDER_CANVAS: u8 = 2;
 const ORDER_SCENE: u8 = 4;
 const ORDER_OVERLAY: u8 = 200;
 
-/// Draw a whole `DrawPane` into `rect` (logical pixels): canvas
-/// background, the scene, any in-progress draft, and the selection
-/// overlay. This is the desktop/web entry point — the per-shape
+/// Draw a whole `DrawPane` into `rect` (logical pixels): the scene, any
+/// in-progress draft, and the selection overlay. The window clear or
+/// wallpaper supplies the canvas background. This is the desktop/web entry point — the per-shape
 /// [`render_scene`] is reused read-only by the markdown embed.
 pub fn render_pane(
     sugarloaf: &mut Sugarloaf,
@@ -42,16 +41,6 @@ pub fn render_pane(
     // Live note-graph view: step the simulation and draw it instead of a
     // static scene (no toolbar — it's a viewer).
     if pane.graph.is_some() {
-        sugarloaf.rect(
-            None,
-            rect[0],
-            rect[1],
-            rect[2],
-            rect[3],
-            theme.f32(theme.bg),
-            DEPTH,
-            ORDER_CANVAS,
-        );
         if pane.graph_needs_center {
             center_graph(pane, rect);
             pane.graph_needs_center = false;
@@ -95,18 +84,6 @@ pub fn render_pane(
         pane.fit_pending = false;
     }
     let cam = pane.placed_camera(rect);
-
-    // Canvas background fill.
-    sugarloaf.rect(
-        None,
-        rect[0],
-        rect[1],
-        rect[2],
-        rect[3],
-        theme.f32(theme.bg),
-        DEPTH,
-        ORDER_CANVAS,
-    );
 
     render_scene_dimmed(
         sugarloaf,

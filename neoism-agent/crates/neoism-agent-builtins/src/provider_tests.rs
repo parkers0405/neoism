@@ -5,6 +5,45 @@ use std::collections::BTreeMap;
 
 use neoism_agent_core::{AuthInfo, ProviderStreamEvent};
 
+#[tokio::test]
+async fn opencode_requires_real_credentials() {
+    let path = std::env::temp_dir().join(format!(
+        "neoism-agent-opencode-auth-{}-{}.json",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let auth_store = crate::auth_store::AuthStore::new(path.clone());
+    let registry = super::ProviderRegistry::from_env(auth_store.clone());
+
+    assert!(registry
+        .provider_auth(&auth_store, "opencode", &[])
+        .await
+        .unwrap()
+        .is_none());
+
+    auth_store
+        .set(
+            "opencode",
+            AuthInfo::Api {
+                key: "zen-key".to_string(),
+                metadata: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        registry
+            .provider_auth(&auth_store, "opencode", &[])
+            .await
+            .unwrap(),
+        Some(AuthInfo::Api { key, .. }) if key == "zen-key"
+    ));
+    let _ = std::fs::remove_file(path);
+}
+
 #[test]
 fn local_store_uses_host_credentials_for_matching_workspace_delegation() {
     let scope = super::generation_credential_scope(

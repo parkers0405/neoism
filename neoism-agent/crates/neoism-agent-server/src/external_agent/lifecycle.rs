@@ -510,6 +510,7 @@ async fn run_external_subtask_prompt_with_cancel(
             runtime.agent_name().to_string(),
             model.model_id.clone(),
             model.provider_id.clone(),
+            false,
         )
         .await?;
 
@@ -532,6 +533,7 @@ async fn run_external_subtask_prompt_with_cancel(
                     &model,
                     result.provider_response,
                     Default::default(),
+                    true,
                 )
                 .await?;
                 if let Err(error) = update_external_session_status(

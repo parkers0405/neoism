@@ -147,6 +147,8 @@ async fn available_tools_for_snapshot(
     for tool in snapshot.runtime_tools.values() {
         let definition = tool.definition();
         match definition.id.as_str() {
+            "generate_image" if snapshot.config().image_model.is_none() => continue,
+            "generate_video" if snapshot.config().video_model.is_none() => continue,
             "bash" | "background_task"
                 if !crate::caller::native_execution_allowed(execution) =>
             {

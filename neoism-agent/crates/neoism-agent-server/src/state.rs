@@ -270,6 +270,8 @@ fn session_list_index_statement(
             "provider",
             "runtime",
             "agent",
+            "sourceHost",
+            "sourceKey",
             "status",
             "historyState",
             "historyToolEvents",
@@ -2790,7 +2792,10 @@ impl SessionStore {
         limit: Option<usize>,
     ) -> anyhow::Result<SessionListPage> {
         let limit = limit.unwrap_or(50).clamp(1, 200);
-        let mut clauses = vec!["i.parent_id IS NULL".to_string()];
+        let mut clauses = vec![
+            "i.parent_id IS NULL".to_string(),
+            "((json_extract(i.summary_json, '$.externalAgent') IS NULL AND json_extract(i.summary_json, '$.extra.externalAgent') IS NULL) OR COALESCE(json_extract(i.summary_json, '$.externalAgent.historyState'), json_extract(i.summary_json, '$.extra.externalAgent.historyState')) = 'neoism_only')".to_string(),
+        ];
         let mut params = Vec::new();
         if let TenantQueryScope::Tenant(tenant) = scope {
             clauses.push("i.tenant_id = ?".to_string());

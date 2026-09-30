@@ -201,29 +201,7 @@ impl Screen<'_> {
         &mut self,
         entry: neoism_ui::panels::agent_pane::state::side_panel::NeoismAgentSessionEntry,
     ) {
-        let opened = self
-            .renderer
-            .conversations_pane
-            .activate_external_preview(&entry);
-        if let Some((id, source)) = opened {
-            self.focus_or_open_conversation(id, source);
-        } else if let Some(preview) = entry
-            .external_preview
-            .as_ref()
-            .filter(|preview| !preview.import_supported)
-        {
-            let message = preview
-                .import_unavailable_reason
-                .as_deref()
-                .unwrap_or("History import is unavailable");
-            self.renderer.notifications.push(
-                format!(
-                    "{} history is preview-only: {message}",
-                    entry.source.label()
-                ),
-                neoism_ui::panels::notifications::NotificationLevel::Warn,
-            );
-        }
+        self.focus_or_open_conversation(entry.id, entry.source);
     }
 
     /// Focus the already-open conversation in this grid, including secondary
@@ -359,51 +337,71 @@ impl Screen<'_> {
 
     pub(crate) fn toggle_conversations_sidebar(&mut self) {
         if self.renderer.conversations_visible {
-            self.renderer.conversations_visible = false;
-            self.renderer
-                .conversations_pane
-                .side_panel_mut()
-                .set_focused(false);
+            self.hide_conversations_sidebar();
         } else {
-            let directory = self
-                .workspace_root_for_new_shell()
-                .map(|path| path.to_string_lossy().into_owned());
-            if self.renderer.conversations_directory != directory {
-                self.renderer.conversations_pane =
-                    crate::neoism::agent::NeoismAgentPane::with_directory(
-                        directory.clone(),
-                    );
-                self.renderer.conversations_directory = directory;
-            }
-            let server = self
-                .context_manager
-                .agent_server_override_for_current()
-                .unwrap_or_else(crate::neoism::agent::neoism_agent_server);
-            self.renderer.conversations_pane.switch_server(server);
+            self.show_conversations_sidebar(true);
+        }
+    }
+
+    pub(crate) fn show_conversations_sidebar(&mut self, focus: bool) {
+        if !self.conversations_panel_enabled {
+            self.hide_conversations_sidebar();
+            return;
+        }
+        let directory = self
+            .workspace_root_for_new_shell()
+            .map(|path| path.to_string_lossy().into_owned());
+        if self.renderer.conversations_directory != directory {
+            self.renderer.conversations_pane =
+                crate::neoism::agent::NeoismAgentPane::with_directory(directory.clone());
             self.renderer
                 .conversations_pane
                 .side_panel_mut()
-                .set_user_hidden(false);
-            self.renderer
-                .conversations_pane
-                .side_panel_mut()
-                .hide_catalog_controls();
-            self.renderer
-                .conversations_pane
-                .side_panel_mut()
-                .clear_session_query();
-            self.renderer
-                .conversations_pane
-                .side_panel_mut()
-                .set_focused(true);
-            self.renderer.conversations_pane.enable_external_catalog();
-            self.renderer
-                .conversations_pane
-                .maybe_refresh_side_panel_sessions();
-            self.renderer.conversations_visible = true;
+                .set_width(self.conversations_sidebar_width);
+            self.renderer.conversations_directory = directory;
+        }
+        let server = self
+            .context_manager
+            .agent_server_override_for_current()
+            .unwrap_or_else(crate::neoism::agent::neoism_agent_server);
+        self.renderer.conversations_pane.switch_server(server);
+        self.renderer
+            .conversations_pane
+            .side_panel_mut()
+            .set_user_hidden(false);
+        self.renderer
+            .conversations_pane
+            .side_panel_mut()
+            .hide_catalog_controls();
+        self.renderer
+            .conversations_pane
+            .side_panel_mut()
+            .clear_session_query();
+        self.renderer
+            .conversations_pane
+            .side_panel_mut()
+            .set_focused(focus);
+        self.renderer
+            .conversations_pane
+            .maybe_refresh_side_panel_sessions();
+        self.renderer.conversations_visible = true;
+        if focus {
             self.renderer.file_tree.set_focused(false);
             self.renderer.notes_sidebar.set_focused(false);
         }
+        self.finish_conversations_sidebar_visibility_change();
+    }
+
+    fn hide_conversations_sidebar(&mut self) {
+        self.renderer.conversations_visible = false;
+        self.renderer
+            .conversations_pane
+            .side_panel_mut()
+            .set_focused(false);
+        self.finish_conversations_sidebar_visibility_change();
+    }
+
+    fn finish_conversations_sidebar_visibility_change(&mut self) {
         if let Some(id) = self.current_workspace_id() {
             self.workspace_conversations_visibility
                 .insert(id, self.renderer.conversations_visible);
@@ -424,6 +422,70 @@ impl Screen<'_> {
             0.0
         };
         files + notes
+    }
+
+    pub(crate) fn conversations_sidebar_bounds(&self) -> Option<(f32, f32, f32, f32)> {
+        if !self.renderer.conversations_visible {
+            return None;
+        }
+        let (top, bottom) = self.side_panel_band();
+        Some((
+            self.conversations_sidebar_left(),
+            top,
+            (bottom - top).max(0.0),
+            self.renderer.conversations_pane.side_panel().width(),
+        ))
+    }
+
+    pub(crate) fn is_hovering_conversations_sidebar_resize_edge(&self) -> bool {
+        let Some((left, top, height, width)) = self.conversations_sidebar_bounds() else {
+            return false;
+        };
+        let (mouse_x, mouse_y) = self.mouse_logical_for_hit_test();
+        let edge_x = left + width;
+        mouse_y >= top && mouse_y <= top + height && (mouse_x - edge_x).abs() <= 5.0
+    }
+
+    pub(crate) fn begin_conversations_sidebar_resize(&mut self) -> bool {
+        if !self.is_hovering_conversations_sidebar_resize_edge() {
+            return false;
+        }
+        let scale_factor = self.sugarloaf.scale_factor();
+        self.conversations_sidebar_resize_state = Some(ConversationsSidebarResizeState {
+            start_x: self.mouse.x as f32 / scale_factor,
+            original_width: self.renderer.conversations_pane.side_panel().width(),
+        });
+        true
+    }
+
+    pub(crate) fn conversations_sidebar_resize_active(&self) -> bool {
+        self.conversations_sidebar_resize_state.is_some()
+    }
+
+    pub(crate) fn drag_conversations_sidebar_resize(&mut self) {
+        let Some(state) = self.conversations_sidebar_resize_state else {
+            return;
+        };
+        let scale_factor = self.sugarloaf.scale_factor();
+        let mouse_x = self.mouse.x as f32 / scale_factor;
+        let width = state.original_width + mouse_x - state.start_x;
+        self.renderer
+            .conversations_pane
+            .side_panel_mut()
+            .set_width(width);
+        self.conversations_sidebar_width =
+            self.renderer.conversations_pane.side_panel().width();
+        self.reapply_chrome_layout();
+        self.mark_dirty();
+    }
+
+    pub(crate) fn end_conversations_sidebar_resize(&mut self) -> bool {
+        let was_active = self.conversations_sidebar_resize_state.take().is_some();
+        if was_active {
+            self.reapply_chrome_layout();
+            self.mark_dirty();
+        }
+        was_active
     }
 
     pub(crate) fn conversation_context_scope_matches(

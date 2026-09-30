@@ -20,8 +20,6 @@ pub enum NeoismAgentPickerKind {
     Model,
     /// Provider-advertised ACP root session config option (never Neoism model).
     ExternalOption,
-    /// Overflow menu of provider-advertised options, in provider order.
-    ExternalOptionMenu,
     /// Workspace MCP servers and their connection/authentication state.
     Mcp,
     /// `/mcp` stage 2 - actions for one selected MCP server.

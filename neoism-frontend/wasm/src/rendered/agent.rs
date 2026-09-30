@@ -491,6 +491,7 @@ impl ChromeBridge {
         };
         let dismiss_side_panel_after_navigation =
             self.chrome.agent_side_panel_takeover_active();
+        let details_panel_enabled = self.chrome.details_panel_enabled();
         let mut relayout_after_key = false;
         let Some(pane) = self.chrome.agent_pane_mut() else {
             return false;
@@ -671,8 +672,11 @@ impl ChromeBridge {
                     let _ = pane.submit_pending_permission();
                 }
                 AgentKeyIntent::ToggleMode => pane.toggle_mode(),
-                AgentKeyIntent::ToggleSidePanel => {
-                    pane.toggle_side_panel();
+                AgentKeyIntent::ToggleDetailsPanel => {
+                    if details_panel_enabled {
+                        pane.side_panel_mut().toggle_visibility();
+                        relayout_after_key = true;
+                    }
                 }
                 // Unreachable — a Paste decision returns `false` above
                 // so the browser's ClipboardEvent can deliver the

@@ -101,6 +101,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         // (it doesn't go through `Chrome`, so this clear is web-only).
         sugarloaf
             .clear_image_overlays_for(crate::panels::agent_pane::icon::ICON_PANEL_ID);
+        crate::panels::agent_pane::icon::clear_side_panel_icon_overlays(sugarloaf);
         // Splash images are retained by Sugarloaf, unlike frame-local quads
         // and text. Clear the previous frame before any eligibility branch so
         // a full-page Tree/Notes takeover cannot leave the old wordmark alive.
@@ -247,27 +248,12 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                     );
                 }
             } else {
-                // File-viewer tab — paint the cached text content over
-                // a solid theme-bg rect. Clears the splash overlays so
-                // the wordmark doesn't bleed through.
+                // File-viewer tab. Clear image overlays, but leave the pane
+                // body material-free so the window wallpaper can show through.
                 SplashOverlay::clear_image_overlays(sugarloaf);
                 agent_pane_view::clear_overlays(sugarloaf);
                 self.splash_overlay.reset();
                 let theme = self.ide_theme;
-                // Backdrop for the ACTIVE surface only. While split the
-                // fill stays inside the focused pane's content rect —
-                // a full-rect fill at this order would paint over the
-                // secondary pane terminals' cell backgrounds.
-                sugarloaf.rect(
-                    None,
-                    content_rect.x,
-                    content_rect.y,
-                    content_rect.w,
-                    content_rect.h,
-                    theme.f32(theme.bg),
-                    0.0,
-                    1,
-                );
                 // Tick the rubber-band spring forward BEFORE borrowing
                 // `tab_content` so the spring write doesn't fight the
                 // text borrow. `dt` is a fixed-ish frame budget — we
@@ -1001,7 +987,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                 pane,
                 [rect.x, rect.y, rect.w, rect.h],
                 &self.ide_theme,
-                1.0,
+                self.chrome_scale,
                 self.last_draw_time
                     .map_or(0.0, |t| t.as_secs_f32() % 10_000.0),
                 Some(self.last_pointer_pos),
@@ -1066,6 +1052,10 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                 .as_ref()
                 .is_some_and(|p| !p.side_panel().user_hidden());
             self.top_bar.set_panel_open(tree_open);
+            self.top_bar.set_notes_open(self.notes_sidebar.is_visible());
+            self.top_bar
+                .set_conversations_open(self.conversations_visible);
+            self.top_bar.set_search_open(self.finder.is_visible());
             self.top_bar.set_right_panel_open(agent_panel_open);
             // The top bar spans the full viewport width and sits above
             // every side panel (the agent side panel now docks in the
@@ -1143,8 +1133,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
     /// slot when the focused pane doesn't claim it. Panes the host
     /// painted itself (live terminal grids, listed via
     /// [`Chrome::set_host_drawn_panes`]) are skipped. Anything else
-    /// gets a theme-bg fill with a title label so the split never
-    /// shows another pane's bleed-through.
+    /// gets a title label over the window clear or wallpaper.
     fn draw_unfocused_pane_surfaces(&mut self, sugarloaf: &mut Sugarloaf) {
         if !self.pane_grid.is_split()
             || self.chrome_overlay_active()
@@ -1155,14 +1144,14 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         let theme = self.ide_theme;
         let chrome_scale = self.chrome_scale;
         let animation_phase = self.animation_phase;
-        let panes: Vec<(u64, crate::layout::Rect, crate::layout::Rect)> = self
+        let panes: Vec<(u64, crate::layout::Rect)> = self
             .pane_grid
             .panes()
             .iter()
             .filter(|p| !p.focused)
             .filter_map(|p| {
                 p.external_id
-                    .map(|id| (id, p.rect, self.pane_content_rect(id).unwrap_or(p.rect)))
+                    .map(|id| (id, self.pane_content_rect(id).unwrap_or(p.rect)))
             })
             .collect();
         if panes.is_empty() {
@@ -1172,7 +1161,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         // live editor slots — if not (the focused pane is a terminal),
         // an unfocused pane may borrow the live slot for rendering.
         let focused_claims_live_slots = !self.is_terminal_tab_active();
-        for (id, rect, content) in panes {
+        for (id, content) in panes {
             if self.host_drawn_panes.contains(&id) {
                 continue;
             }
@@ -1181,17 +1170,6 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                 .iter()
                 .find(|s| s.external_id == id)
                 .cloned();
-            // Base fill so the previous surface can't bleed through.
-            sugarloaf.rect(
-                None,
-                rect.x,
-                rect.y,
-                rect.w,
-                rect.h,
-                theme.f32(theme.bg),
-                0.0,
-                1,
-            );
             let rect_arr = [content.x, content.y, content.w, content.h];
             let mut rendered = false;
             let mut animating = false;

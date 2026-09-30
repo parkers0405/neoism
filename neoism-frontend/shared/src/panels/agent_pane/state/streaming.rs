@@ -235,6 +235,11 @@ impl NeoismAgentPane {
     /// "main" one for the label (`active_subagent_count` is already 0
     /// for subagent sessions).
     fn raw_streaming_status(&self) -> NeoismAgentStreamingState {
+        if self.active_subagent_count() > 0
+            && self.streaming_state == NeoismAgentStreamingState::Working
+        {
+            return NeoismAgentStreamingState::WaitingSubagents;
+        }
         if self.is_streaming() {
             return self.streaming_state;
         }

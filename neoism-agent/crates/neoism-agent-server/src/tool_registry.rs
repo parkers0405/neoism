@@ -4,7 +4,8 @@ use super::{
     apply_patch_handler, artifact_read_handler, artifact_search_handler, bash_handler,
     documentation_handler, edit_handler, glob_handler, grep_handler, lsp_handler,
     memory_handler, read_handler, sandbox_handler, skill_handler, stateful_handler,
-    webfetch_handler, write_handler, BuiltinTool, ToolHandler,
+    generate_image_handler, generate_video_handler, webfetch_handler, write_handler,
+    BuiltinTool, ToolHandler,
 };
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -335,6 +336,40 @@ pub(super) fn definitions(owner: ToolOwner) -> Vec<BuiltinTool> {
                 "required": ["artifact", "query"]
             }),
             artifact_search_handler,
+        ),
+        tool(
+            ToolOwner::Artifacts, owner,
+            "generate_image",
+            "Generate an image with the configured agent.imageModel and attach the durable result to the assistant response.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "prompt": { "type": "string", "description": "A detailed description of the image to generate." },
+                    "size": { "type": "string" },
+                    "quality": { "type": "string" },
+                    "background": { "type": "string" },
+                    "aspect_ratio": { "type": "string" },
+                    "resolution": { "type": "string" }
+                },
+                "required": ["prompt"]
+            }),
+            generate_image_handler,
+        ),
+        tool(
+            ToolOwner::Artifacts, owner,
+            "generate_video",
+            "Generate a video with the configured agent.videoModel and attach the durable result to the assistant response.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "prompt": { "type": "string", "description": "A detailed description of the video to generate." },
+                    "duration": { "type": "integer", "minimum": 1 },
+                    "aspect_ratio": { "type": "string" },
+                    "resolution": { "type": "string" }
+                },
+                "required": ["prompt"]
+            }),
+            generate_video_handler,
         ),
         tool(
             ToolOwner::Workspace, owner,

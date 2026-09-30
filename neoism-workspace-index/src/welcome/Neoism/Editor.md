@@ -34,6 +34,18 @@ Install servers from **hamburger menu → Extensions → Language Servers**. The
 
 Live server state appears in the editor status area. A buffer may attach to multiple servers, such as a linter plus a type checker.
 
+### Yarn Plug'n'Play and TypeScript
+
+Neoism searches from the resolved TypeScript package root up to the opened workspace boundary for Yarn's canonical `.pnp.cjs` marker and patched `.yarn/sdks/typescript/lib` SDK. This supports monorepos where a nested package has its own `package.json` but the PnP loader and SDK live at the repository root. Neoism never searches above the opened workspace. It reports the selected SDK source/version/path in LSP status and the desktop Server Details popup.
+
+Yarn does not generate editor SDKs for every PnP project by default. If status reports a missing SDK, run this once from that project root (Neoism never runs it or changes the workspace automatically):
+
+```sh
+corepack yarn dlx @yarnpkg/sdks base
+```
+
+Until the SDK exists, Neoism keeps TypeScript/JavaScript language service available through the language server's normal fallback and shows a degraded warning; PnP dependency resolution may be incomplete. After generating the SDK, reopen or touch the TypeScript file. Discovery is cached for two seconds to keep filesystem work off document operations, so an in-place SDK change can take up to that long to trigger a client restart. A manually configured `initializationOptions.tsserver.path` takes precedence over automatic selection.
+
 ## Diagnostics and actions
 
 Diagnostics appear in the editor and status UI. Open a diagnostic to inspect its message; use code actions where the server provides them. Agent tools can query the same server state, but edits still pass through normal file and permission paths.
@@ -60,3 +72,4 @@ Most users should use Extensions. Custom server routes can be defined under the 
 - Stale diagnostics: save or touch the document so the server receives current content.
 - Dirty close refused: save, or use the explicit bang form only when discarding is intended.
 - A server that repeatedly exits should be inspected from Extensions/status and its process logs.
+- Yarn PnP reports a missing TypeScript SDK: run `corepack yarn dlx @yarnpkg/sdks base` once at the reported project root.

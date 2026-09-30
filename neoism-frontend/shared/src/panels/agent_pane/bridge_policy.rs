@@ -140,7 +140,7 @@ pub enum AgentKeyIntent {
     /// Ctrl+F on the `/sessions` picker — pin/unpin the selected
     /// session.
     ToggleSelectedSessionPin,
-    ToggleSidePanel,
+    ToggleDetailsPanel,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -232,7 +232,7 @@ pub fn agent_key_decision(
         && !mods.super_key
         && character_eq_ignore_ascii_case(&event.logical_key, "h")
     {
-        return AgentKeyDecision::dirty_relayout(AgentKeyIntent::ToggleSidePanel);
+        return AgentKeyDecision::dirty_relayout(AgentKeyIntent::ToggleDetailsPanel);
     }
 
     if ctx.side_panel_focused {
@@ -1111,6 +1111,41 @@ mod tests {
     fn agent_tear_out_failure_uses_title() {
         let msg = agent_tear_out_failure_message("Codex");
         assert!(msg.contains("Codex"));
+    }
+
+    #[test]
+    fn alt_h_requests_details_even_when_an_agent_subsurface_is_focused() {
+        let event = AgentBridgeKeyEvent {
+            state: AgentBridgeElementState::Pressed,
+            logical_key: AgentBridgeKey::Character("h".into()),
+            key_without_modifiers: AgentBridgeKey::Character("h".into()),
+            physical_key: None,
+            text: "h".into(),
+        };
+        let modifiers = AgentBridgeModifiers {
+            alt: true,
+            ..AgentBridgeModifiers::default()
+        };
+        for context in [
+            AgentKeyContext::default(),
+            AgentKeyContext {
+                side_panel_focused: true,
+                ..AgentKeyContext::default()
+            },
+            AgentKeyContext {
+                pending_permission: true,
+                ..AgentKeyContext::default()
+            },
+            AgentKeyContext {
+                pending_question: true,
+                ..AgentKeyContext::default()
+            },
+        ] {
+            let decision = agent_key_decision(&event, modifiers, context);
+            assert!(decision.handled);
+            assert!(decision.reapply_chrome_layout);
+            assert_eq!(decision.intents, vec![AgentKeyIntent::ToggleDetailsPanel]);
+        }
     }
 }
 

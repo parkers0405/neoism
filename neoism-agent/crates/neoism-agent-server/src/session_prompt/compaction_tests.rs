@@ -313,6 +313,7 @@ fn provider_usage_wins_over_request_estimate_for_compaction() {
             cost: 0.0,
             tokens: TokenUsage {
                 total: Some(211_038),
+                context_limit: None,
                 input: 210_018,
                 output: 54,
                 reasoning: 966,

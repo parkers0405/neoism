@@ -31,9 +31,11 @@ use crate::animation::CriticallyDampedSpring;
 use crate::panels::agent_pane::icon::AgentKind;
 use crate::widgets::scroll::Scroll;
 
-/// Default width when the panel is shown. Smaller than the file tree
-/// because the agent pane is usually narrower than the full window.
-pub const SIDE_PANEL_WIDTH: f32 = 260.0;
+/// Default width of the workspace Conversations panel. The in-chat details
+/// rail has its own fixed width and must not inherit this resizable value.
+pub const SIDE_PANEL_WIDTH: f32 = 340.0;
+pub const SIDE_PANEL_MIN_WIDTH: f32 = 180.0;
+pub const SIDE_PANEL_MAX_WIDTH: f32 = 700.0;
 
 /// Minimum agent-pane width below which the panel hides itself —
 /// otherwise a narrow split would shove the chat content into nothing.
@@ -196,6 +198,10 @@ pub struct NeoismAgentSemanticMatch {
 }
 
 impl NeoismAgentSessionEntry {
+    pub fn stable_identity(&self) -> &str {
+        self.source_key.as_deref().unwrap_or(&self.id)
+    }
+
     pub fn new(
         id: impl Into<String>,
         title: impl Into<String>,
@@ -514,7 +520,7 @@ impl BranchStatus {
 /// Per-branch (per-session) snapshot the side panel renders under each
 /// row: the most recent tool the branch was using (truncated to fit)
 /// and the derived run status.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BranchActivity {
     pub status: BranchStatus,
     pub current_tool: Option<String>,
@@ -884,8 +890,11 @@ pub struct NeoismAgentSidePanel {
     provider_menu_open: bool,
     provider_selection: usize,
     hovered_session: Option<usize>,
+    hovered_session_identity: Option<String>,
     session_hover_target: bool,
     session_hover_scale: f32,
+    session_title_hover_started: Option<Instant>,
+    session_title_hover_overflow: bool,
     last_hover_frame: Instant,
     /// Hit target spanning the compact Usage meter and numeric label.
     usage_rect: Option<[f32; 4]>,
@@ -960,8 +969,11 @@ impl Default for NeoismAgentSidePanel {
             provider_menu_open: false,
             provider_selection: 0,
             hovered_session: None,
+            hovered_session_identity: None,
             session_hover_target: false,
             session_hover_scale: 0.0,
+            session_title_hover_started: None,
+            session_title_hover_overflow: false,
             last_hover_frame: Instant::now(),
             usage_rect: None,
             usage_snapshot: None,
@@ -1034,25 +1046,44 @@ impl NeoismAgentSidePanel {
     }
 
     pub fn sync_conversation_details_from(&mut self, catalog: &Self) {
-        if self.viewed_session_id != catalog.viewed_session_id {
+        let conversation_changed = self.viewed_session_id != catalog.viewed_session_id;
+        if conversation_changed {
             self.subagents.clear();
             self.branch_activities.clear();
             self.retained_viewed_subagent_id = None;
             self.content_scroll_px = 0.0;
             self.selected = 0;
+            self.viewed_session_id
+                .clone_from(&catalog.viewed_session_id);
         }
-        self.viewed_session_id
-            .clone_from(&catalog.viewed_session_id);
-        self.set_subagents(catalog.subagents.clone());
-        self.branch_activities
-            .clone_from(&catalog.branch_activities);
-        self.session_goal.clone_from(&catalog.session_goal);
-        self.goal_loaded = catalog.goal_loaded;
-        self.goal_version = catalog.goal_version;
+        if conversation_changed || self.subagents != catalog.subagents {
+            self.set_subagents(catalog.subagents.clone());
+        }
+        if self.branch_activities != catalog.branch_activities {
+            self.branch_activities
+                .clone_from(&catalog.branch_activities);
+        }
+        if self.session_goal != catalog.session_goal {
+            self.session_goal.clone_from(&catalog.session_goal);
+        }
+        if self.goal_loaded != catalog.goal_loaded {
+            self.goal_loaded = catalog.goal_loaded;
+        }
+        if self.goal_version != catalog.goal_version {
+            self.goal_version = catalog.goal_version;
+        }
     }
 
     pub fn width(&self) -> f32 {
         self.width
+    }
+
+    pub fn set_width(&mut self, width: f32) {
+        self.width = width.clamp(SIDE_PANEL_MIN_WIDTH, SIDE_PANEL_MAX_WIDTH);
+    }
+
+    pub fn resize(&mut self, delta: f32) {
+        self.set_width(self.width + delta);
     }
 
     pub fn is_focused(&self) -> bool {
@@ -1066,7 +1097,11 @@ impl NeoismAgentSidePanel {
         }
     }
 
-    pub fn tick_pointer_animations(&mut self, hovered_session: Option<usize>) {
+    pub fn tick_pointer_animations(
+        &mut self,
+        hovered_session: Option<usize>,
+        hovered_identity: Option<&str>,
+    ) {
         let now = Instant::now();
         let dt = now
             .saturating_duration_since(self.last_hover_frame)
@@ -1075,10 +1110,19 @@ impl NeoismAgentSidePanel {
         self.last_hover_frame = now;
 
         if let Some(hovered) = hovered_session {
-            if Some(hovered) != self.hovered_session {
+            let identity_changed =
+                self.hovered_session_identity.as_deref() != hovered_identity;
+            if Some(hovered) != self.hovered_session || identity_changed {
                 self.hovered_session = Some(hovered);
+                self.hovered_session_identity = hovered_identity.map(str::to_owned);
                 self.session_hover_scale = 0.0;
+                self.session_title_hover_started = Some(now);
+                self.session_title_hover_overflow = false;
             }
+        } else {
+            self.hovered_session_identity = None;
+            self.session_title_hover_started = None;
+            self.session_title_hover_overflow = false;
         }
         self.session_hover_target = hovered_session.is_some();
         if self.hovered_session.is_none() {
@@ -1101,6 +1145,15 @@ impl NeoismAgentSidePanel {
 
     pub fn session_hover_scale(&self) -> f32 {
         self.session_hover_scale
+    }
+
+    pub fn session_title_hover_elapsed(&self) -> Option<f32> {
+        self.session_title_hover_started
+            .map(|started| started.elapsed().as_secs_f32())
+    }
+
+    pub fn set_session_title_hover_overflow(&mut self, overflow: bool) {
+        self.session_title_hover_overflow = overflow;
     }
 
     pub fn update_usage_meter(&mut self, used: u64, context_limit: Option<u64>) {
@@ -1740,7 +1793,10 @@ impl NeoismAgentSidePanel {
         sessions: Vec<NeoismAgentSessionEntry>,
         next_cursor: Option<String>,
     ) {
-        let selected_id = self.selected_session().map(|entry| entry.id.clone());
+        let selected_id = self
+            .selected_session()
+            .map(|entry| entry.stable_identity().to_owned());
+        let viewport_anchor = self.session_viewport_anchor();
         for session in sessions {
             if let Some(existing) = self
                 .all_sessions
@@ -1760,6 +1816,7 @@ impl NeoismAgentSidePanel {
         self.session_catalog_state = SessionCatalogState::Ready;
         self.rebuild_session_display();
         self.restore_selected_session(selected_id.as_deref());
+        self.restore_session_viewport_anchor(viewport_anchor);
     }
 
     pub fn remove_session(&mut self, session_id: &str) {
@@ -1774,17 +1831,50 @@ impl NeoismAgentSidePanel {
         self.restore_selected_session(selected_id.as_deref());
     }
 
-    fn restore_selected_session(&mut self, session_id: Option<&str>) {
-        let Some(session_id) = session_id else {
+    fn restore_selected_session(&mut self, session_identity: Option<&str>) {
+        let Some(session_identity) = session_identity else {
             return;
         };
-        if let Some(index) = self
-            .sessions
-            .iter()
-            .position(|entry| !entry.is_header && entry.id == session_id)
-        {
+        if let Some(index) = self.sessions.iter().position(|entry| {
+            !entry.is_header
+                && (entry.id == session_identity
+                    || entry.stable_identity() == session_identity)
+        }) {
             self.selected = index;
         }
+    }
+
+    fn session_viewport_anchor(&self) -> Option<(String, f32)> {
+        let row_height = self.row_height().max(1.0);
+        let top = (self.scroll_px / row_height).floor() as usize;
+        self.sessions
+            .iter()
+            .enumerate()
+            .skip(top)
+            .find(|(_, entry)| !entry.is_header && !entry.is_excerpt)
+            .map(|(index, entry)| {
+                (
+                    entry.stable_identity().to_owned(),
+                    self.scroll_px - index as f32 * row_height,
+                )
+            })
+    }
+
+    fn restore_session_viewport_anchor(&mut self, anchor: Option<(String, f32)>) {
+        let Some((identity, offset)) = anchor else {
+            return;
+        };
+        let Some(index) = self.sessions.iter().position(|entry| {
+            !entry.is_header && !entry.is_excerpt && entry.stable_identity() == identity
+        }) else {
+            return;
+        };
+        let row_height = self.row_height().max(1.0);
+        let position = (index as f32 * row_height + offset)
+            .clamp(0.0, self.max_scroll_px(self.last_panel_height_rows));
+        self.scroll_px = position;
+        self.scroll_top = (position / row_height).floor() as usize;
+        self.scroll.set_target_immediate(position);
     }
 
     pub fn external_errors(&self) -> &[(ConversationSource, String)] {
@@ -1827,7 +1917,10 @@ impl NeoismAgentSidePanel {
         source: ConversationSource,
         rows: Vec<NeoismAgentSessionEntry>,
     ) {
-        let selected_id = self.selected_session().map(|entry| entry.id.clone());
+        let selected_id = self
+            .selected_session()
+            .map(|entry| entry.stable_identity().to_owned());
+        let viewport_anchor = self.session_viewport_anchor();
         self.external_errors
             .retain(|(provider, _)| *provider != source);
         self.external_sessions
@@ -1838,9 +1931,11 @@ impl NeoismAgentSidePanel {
         );
         self.rebuild_session_display();
         self.restore_selected_session(selected_id.as_deref());
+        self.restore_session_viewport_anchor(viewport_anchor);
     }
 
     pub fn mark_external_imported(&mut self, source_key: &str, id: &str) {
+        let viewport_anchor = self.session_viewport_anchor();
         if let Some(entry) = self
             .external_sessions
             .iter_mut()
@@ -1853,6 +1948,8 @@ impl NeoismAgentSidePanel {
             }
         }
         self.rebuild_session_display();
+        self.restore_selected_session(Some(source_key));
+        self.restore_session_viewport_anchor(viewport_anchor);
     }
 
     /// Apply a catalogue page. First pages replace and reset the home list;
@@ -1864,10 +1961,12 @@ impl NeoismAgentSidePanel {
         next_cursor: Option<String>,
     ) {
         let was_home = matches!(self.mode, SidePanelMode::Sessions);
-        let selected_id = self.selected_session().map(|entry| entry.id.clone());
-        let selected_preview = self
+        let catalog_was_empty =
+            self.all_sessions.is_empty() && self.external_sessions.is_empty();
+        let selected_id = self
             .selected_session()
-            .is_some_and(|entry| entry.external_preview.is_some());
+            .map(|entry| entry.stable_identity().to_owned());
+        let viewport_anchor = self.session_viewport_anchor();
         if requested_cursor.is_some() {
             let mut known = self
                 .all_sessions
@@ -1889,10 +1988,12 @@ impl NeoismAgentSidePanel {
         self.session_catalog_state = SessionCatalogState::Ready;
         self.rebuild_session_display();
         self.restore_selected_session(selected_id.as_deref());
-        if was_home && requested_cursor.is_none() && !selected_preview {
+        if was_home && requested_cursor.is_none() && catalog_was_empty {
             self.scroll_px = 0.0;
             self.scroll.reset();
             self.cursor_spring.reset();
+        } else {
+            self.restore_session_viewport_anchor(viewport_anchor);
         }
     }
 
@@ -3075,9 +3176,24 @@ impl NeoismAgentSidePanel {
                 // keep redrawing — otherwise the spinner freezes on whatever
                 // frame the last event happened to land on.
                 || self.has_active_subagents()
+                || (self.session_hover_target && self.session_title_hover_overflow)
                 || (self.session_hover_target && self.session_hover_scale < 0.998)
                 || (!self.session_hover_target && self.session_hover_scale > 0.002)
                         || self.usage_scramble_elapsed_ms().is_some()
+    }
+
+    pub fn catalog_is_animating(&self) -> bool {
+        let sessions_loading = !self.user_hidden
+            && self.sessions_loading_elapsed() < 1.5
+            && (matches!(self.session_catalog_state, SessionCatalogState::Loading)
+                || self.session_page_loading);
+        matches!(self.mode, SidePanelMode::Sessions)
+            && (self.scroll.is_animating()
+                || self.cursor_spring.position != 0.0
+                || sessions_loading
+                || (self.session_hover_target && self.session_hover_scale < 0.998)
+                || (!self.session_hover_target && self.session_hover_scale > 0.002)
+                || (self.session_hover_target && self.session_title_hover_overflow))
     }
 
     /// Map a window-space click to a row index. Returns `None` when

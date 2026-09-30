@@ -26,7 +26,6 @@ const DEPTH: f32 = 0.0;
 // All paint orders kept BELOW `panels::status_line::ORDER_BG` (16) so the
 // status bar's own background covers anything our panel emits beneath it
 // — same convention the markdown pane follows (its orders sit in 3–8).
-const ORDER_BG: u8 = 3;
 const ORDER_CARD: u8 = 4;
 const ORDER_CHIP: u8 = 5;
 const ORDER_BUTTON: u8 = 5;
@@ -73,8 +72,6 @@ pub(crate) fn render(
 
     let s = scale.clamp(0.75, 2.0);
     let clip = Some(rect);
-
-    sugarloaf.rect(None, x, y, w, h, theme.f32(theme.bg), DEPTH, ORDER_BG);
 
     let pad_x = HORIZONTAL_PAD * s;
     let content_x = x + pad_x;

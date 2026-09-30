@@ -2068,6 +2068,8 @@ fn main_agent_verb_wins_while_it_streams_over_running_subagents() {
     assert_eq!(pane.streaming_label(), "Crafting");
     pane.note_streaming(NeoismAgentStreamingState::Thinking, None);
     assert_eq!(pane.streaming_label(), "Pondering");
+    pane.note_streaming(NeoismAgentStreamingState::Working, None);
+    assert_eq!(pane.streaming_label(), "Sub-agents working");
 
     // The main agent stops while the same child keeps running: only now
     // does "Sub-agents working" take over — and on the SAME waiting
@@ -3058,6 +3060,26 @@ fn compaction_lifecycle_events_do_not_create_messages() {
 }
 
 #[test]
+fn duplicate_compaction_end_does_not_idle_a_new_response() {
+    let mut pane = NeoismAgentPane::default();
+    pane.note_compaction(CompactionPhase::Started, None, Some("auto".to_string()));
+    pane.note_compaction(
+        CompactionPhase::Ended,
+        Some("summary".to_string()),
+        Some("model".to_string()),
+    );
+    pane.note_streaming(NeoismAgentStreamingState::Generating, None);
+
+    pane.note_compaction(
+        CompactionPhase::Ended,
+        Some("summary".to_string()),
+        Some("model".to_string()),
+    );
+
+    assert_eq!(pane.streaming_state, NeoismAgentStreamingState::Generating);
+}
+
+#[test]
 fn persisted_compaction_is_only_compaction_message_source() {
     let mut pane = NeoismAgentPane::default();
 
@@ -3075,7 +3097,7 @@ fn persisted_compaction_is_only_compaction_message_source() {
     pane.apply_part_delta(
         Some("assistant-compaction".to_string()),
         Some("text-part".to_string()),
-        Some("text".to_string()),
+        Some("compaction".to_string()),
         "real summary",
     );
     pane.note_compaction(
@@ -3097,6 +3119,67 @@ fn persisted_compaction_is_only_compaction_message_source() {
     assert_eq!(compactions.len(), 1);
     assert_eq!(compactions[0].id, "assistant-compaction");
     assert_eq!(compactions[0].text, "real summary");
+}
+
+#[test]
+fn live_compaction_marker_and_text_snapshot_upsert_one_row() {
+    let mut pane = NeoismAgentPane::default();
+    pane.ingest_live_part_message(
+        NeoismAgentMessage::user("before").with_id("user-before"),
+    );
+    for part in [
+        serde_json::json!({
+            "id": "marker-part",
+            "messageID": "assistant-compaction",
+            "type": "compaction",
+            "summary": true,
+            "reason": "summary"
+        }),
+        serde_json::json!({
+            "id": "text-part",
+            "messageID": "assistant-compaction",
+            "type": "text",
+            "compactionSummary": true,
+            "text": "streamed summary"
+        }),
+    ] {
+        let message = crate::panels::agent_pane::api_mapping::part_block(&part)
+            .expect("live compaction part");
+        pane.ingest_live_part_message(message);
+    }
+    pane.ingest_live_part_message(
+        NeoismAgentMessage::assistant("after").with_id("assistant-after"),
+    );
+
+    assert_eq!(pane.messages.len(), 3);
+    assert_eq!(pane.messages[0].id, "user-before");
+    assert_eq!(pane.messages[1].id, "assistant-compaction");
+    assert_eq!(pane.messages[1].kind, NeoismAgentMessageKind::Compaction);
+    assert_eq!(pane.messages[1].text, "streamed summary");
+    assert_eq!(pane.messages[2].id, "assistant-after");
+}
+
+#[test]
+fn stale_history_preserves_streamed_compaction_text_and_slot() {
+    let mut pane = NeoismAgentPane::default();
+    pane.messages = vec![
+        NeoismAgentMessage::user("before").with_id("user-before"),
+        NeoismAgentMessage::compaction("partial summary", "summary")
+            .with_id("assistant-compaction"),
+        NeoismAgentMessage::assistant("after").with_id("assistant-after"),
+    ];
+
+    let refreshed = pane.preserve_streamed_response_text(vec![
+        NeoismAgentMessage::user("before").with_id("user-before"),
+        NeoismAgentMessage::compaction("", "summary").with_id("assistant-compaction"),
+        NeoismAgentMessage::assistant("after").with_id("assistant-after"),
+    ]);
+
+    assert_eq!(refreshed.len(), 3);
+    assert_eq!(refreshed[1].id, "assistant-compaction");
+    assert_eq!(refreshed[1].kind, NeoismAgentMessageKind::Compaction);
+    assert_eq!(refreshed[1].text, "partial summary");
+    assert_eq!(refreshed[2].id, "assistant-after");
 }
 
 #[test]

@@ -161,8 +161,7 @@ impl Screen<'_> {
             }
         }
 
-        // Alt+H toggles the side panel open/closed — same intent as the
-        // bottom-right icon, just keyboard-driven. Fires regardless of
+        // Alt+H toggles the in-chat detail rail. Fires regardless of
         // which sub-element currently owns focus so the user can pop
         // the panel from anywhere inside the agent tab.
         if mods.alt_key()
@@ -171,7 +170,7 @@ impl Screen<'_> {
             && !mods.super_key()
             && matches!(key.logical_key.as_ref(), Key::Character(ch) if ch.eq_ignore_ascii_case("h"))
         {
-            self.toggle_conversations_sidebar();
+            self.toggle_agent_details_panel();
             return true;
         }
 
@@ -682,12 +681,7 @@ impl Screen<'_> {
             self.context_manager.event_proxy(),
             self.context_manager.window_id(),
         );
-        if self.renderer.conversations_visible
-            || self.renderer.conversations_pane.external_import_pending()
-        {
-            if self.renderer.conversations_visible {
-                self.renderer.conversations_pane.enable_external_catalog();
-            }
+        if self.renderer.conversations_visible {
             self.renderer
                 .conversations_pane
                 .set_event_wake(agent_event_wake.clone());
@@ -695,18 +689,7 @@ impl Screen<'_> {
                 .renderer
                 .conversations_pane
                 .drain_live_session_updates();
-            if let Some(message) = self.renderer.conversations_pane.take_external_error()
-            {
-                self.renderer.notifications.push(
-                    message,
-                    neoism_ui::panels::notifications::NotificationLevel::Warn,
-                );
-            }
-            if let Some((id, source)) =
-                self.renderer.conversations_pane.take_external_open()
-            {
-                self.focus_or_open_conversation(id, source);
-            }
+            agent_animating |= self.renderer.conversations_pane.catalog_is_animating();
         }
         let current_grid_index = self.context_manager.current_index();
         for (grid_index, grid) in
@@ -1000,6 +983,9 @@ impl Screen<'_> {
         .1;
         if let Some(agent) = self.context_manager.current_mut().neoism_agent.as_mut() {
             agent.set_local_presence_name(Some(local_presence_name));
+            if !self.details_panel_enabled {
+                agent.side_panel_mut().set_user_hidden(true);
+            }
         }
         self.renderer.buffer_tabs.open_neoism_agent(route_id);
         // A freshly-created agent pane defaults to the LOCAL agent server.
@@ -1011,10 +997,23 @@ impl Screen<'_> {
         self.sync_agent_server_for_current_workspace();
         self.renderer.file_tree.set_focused(false);
         self.renderer.file_tree.set_active_path(None);
+        self.show_conversations_sidebar(false);
         self.reapply_chrome_layout();
         self.renderer.trail_cursor.reset();
         self.mark_dirty();
         Some(route_id)
+    }
+
+    pub(crate) fn toggle_agent_details_panel(&mut self) {
+        if !self.details_panel_enabled {
+            return;
+        }
+        let Some(agent) = self.context_manager.current_mut().neoism_agent.as_mut() else {
+            return;
+        };
+        agent.side_panel_mut().toggle_visibility();
+        self.reapply_chrome_layout();
+        self.mark_dirty();
     }
 
     fn close_neoism_agent_route(&mut self, route_id: usize) -> bool {

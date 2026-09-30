@@ -1865,7 +1865,7 @@ impl NeoismAgentPane {
                 let summary = text.unwrap_or_default();
                 let kind = reason.unwrap_or_else(|| "done".to_string());
                 self.finish_compaction_message(&summary, &kind);
-                if self.is_streaming() {
+                if self.streaming_state == NeoismAgentStreamingState::Compacting {
                     self.note_streaming(NeoismAgentStreamingState::Idle, None);
                 }
             }
@@ -2160,7 +2160,9 @@ fn merge_stream_part_message(
     // unordered REST reconciliation may preserve a longer local prefix.
     if matches!(
         incoming.kind,
-        NeoismAgentMessageKind::Assistant | NeoismAgentMessageKind::Reasoning
+        NeoismAgentMessageKind::Assistant
+            | NeoismAgentMessageKind::Reasoning
+            | NeoismAgentMessageKind::Compaction
     ) {
         existing.text.clear();
     }
@@ -2200,10 +2202,14 @@ fn merge_part_message(
     }
     if matches!(
         incoming.kind,
-        NeoismAgentMessageKind::Assistant | NeoismAgentMessageKind::Reasoning
+        NeoismAgentMessageKind::Assistant
+            | NeoismAgentMessageKind::Reasoning
+            | NeoismAgentMessageKind::Compaction
     ) && matches!(
         existing.kind,
-        NeoismAgentMessageKind::Assistant | NeoismAgentMessageKind::Reasoning
+        NeoismAgentMessageKind::Assistant
+            | NeoismAgentMessageKind::Reasoning
+            | NeoismAgentMessageKind::Compaction
     ) {
         if incoming.text.is_empty() || existing.text.starts_with(&incoming.text) {
             incoming.text = existing.text.clone();
@@ -2314,12 +2320,14 @@ fn is_streamed_live_part(message: &NeoismAgentMessage) -> bool {
             | NeoismAgentMessageKind::Reasoning
             | NeoismAgentMessageKind::Tool
             | NeoismAgentMessageKind::Subtask
+            | NeoismAgentMessageKind::Compaction
     )
 }
 
 fn part_delta_message_kind(kind: Option<&str>) -> NeoismAgentMessageKind {
     match kind {
         Some("reasoning" | "thinking") => NeoismAgentMessageKind::Reasoning,
+        Some("compaction") => NeoismAgentMessageKind::Compaction,
         _ => NeoismAgentMessageKind::Assistant,
     }
 }

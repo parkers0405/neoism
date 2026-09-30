@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use neoism_agent_core::{
     event_type, AssistantMessage, AssistantPath, CompletedTime, CreatedTime,
-    EventPayload, Id, IdKind, MessageId, MessageInfo, MessageWithParts, Part,
+    EventPayload, Id, IdKind, MessageId, MessageInfo, MessageWithParts, Part, PartTime,
     PermissionAction, PermissionRequestInfo, PermissionRule, ProviderGenerationResponse,
     SessionInfo, TextPart, TimeInfo, TokenUsage, UserMessage, UserModel,
 };
@@ -18,7 +18,7 @@ use crate::external_acp::{
     AcpTerminalManager, PROMPT_TIMEOUT,
 };
 use crate::message_part_mutation::{
-    append_text_delta, set_tool_completed, set_tool_error, set_tool_running,
+    set_tool_completed, set_tool_error, set_tool_running,
 };
 use crate::provider_stream_message::{
     finish_provider_stream_success, finish_provider_stream_with_error,

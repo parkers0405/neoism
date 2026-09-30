@@ -92,6 +92,9 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             git_diff_panel: GitDiffPanel::new(),
             notes_sidebar: NotesSidebar::default(),
             conversations_visible: false,
+            conversations_panel_enabled: true,
+            details_panel_enabled: true,
+            conversations_resize: None,
             pending_conversation_open: None,
             pending_conversation_new: None,
             command_composer: CommandComposer::new(),
@@ -165,9 +168,10 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             TopBarAction::OpenAgent => {
                 self.pending_top_bar_action = Some(TopBarAction::OpenAgent);
             }
-            TopBarAction::ToggleConversations | TopBarAction::ToggleAgentSidePanel => {
+            TopBarAction::ToggleConversations => {
                 self.toggle_conversations();
             }
+            TopBarAction::ToggleAgentSidePanel => self.toggle_agent_details_panel(),
             TopBarAction::OpenThemes => {
                 // Open the SAME theme picker the user gets from Cmd+P →
                 // Themes, hosted entirely in shared chrome so it works on
@@ -341,6 +345,11 @@ impl<A: Send + Copy + 'static> Chrome<A> {
     }
 
     pub fn toggle_conversations(&mut self) {
+        if !self.conversations_panel_enabled {
+            self.hide_conversations();
+            self.relayout();
+            return;
+        }
         self.conversations_visible = !self.conversations_visible;
         if self.conversations_visible {
             if let Some(tree) = self.file_tree.as_mut() {
@@ -352,7 +361,6 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         if let Some(pane) = self.agent_pane.as_mut() {
             pane.side_panel_mut()
                 .set_focused(self.conversations_visible);
-            pane.side_panel_mut().set_user_hidden(false);
             if self.conversations_visible {
                 pane.side_panel_mut().hide_catalog_controls();
                 pane.side_panel_mut().clear_session_query();
@@ -362,9 +370,66 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         self.relayout();
     }
 
+    pub fn show_conversations(&mut self, focus: bool) {
+        if !self.conversations_panel_enabled {
+            return;
+        }
+        self.conversations_visible = true;
+        if let Some(pane) = self.agent_pane.as_mut() {
+            pane.side_panel_mut().set_focused(focus);
+            pane.side_panel_mut().hide_catalog_controls();
+            pane.side_panel_mut().clear_session_query();
+            pane.maybe_refresh_side_panel_sessions();
+        }
+        if focus {
+            if let Some(tree) = self.file_tree.as_mut() {
+                tree.set_focused(false);
+            }
+            self.notes_sidebar.set_focused(false);
+            self.blur(PanelKey::FileTree);
+        }
+        self.relayout();
+    }
+
+    pub fn toggle_agent_details_panel(&mut self) {
+        if !self.details_panel_enabled {
+            return;
+        }
+        if let Some(pane) = self.agent_pane.as_mut() {
+            pane.side_panel_mut().toggle_visibility();
+            self.relayout();
+        }
+    }
+
+    pub fn details_panel_enabled(&self) -> bool {
+        self.details_panel_enabled
+    }
+
+    pub fn set_agent_panel_preferences(
+        &mut self,
+        conversations_enabled: bool,
+        details_enabled: bool,
+    ) {
+        self.conversations_panel_enabled = conversations_enabled;
+        self.details_panel_enabled = details_enabled;
+        if !conversations_enabled {
+            self.hide_conversations();
+        }
+        if !details_enabled {
+            if let Some(pane) = self.agent_pane.as_mut() {
+                pane.side_panel_mut().set_user_hidden(true);
+            }
+        }
+        self.relayout();
+    }
+
     /// Install the pane used for the active chat and the workspace catalog;
     /// the catalog is painted by Chrome even when another tab is selected.
     pub fn install_agent_pane(&mut self, pane: NeoismAgentPane) {
+        let mut pane = pane;
+        if !self.details_panel_enabled {
+            pane.side_panel_mut().set_user_hidden(true);
+        }
         self.agent_pane = Some(pane);
     }
 

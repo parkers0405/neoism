@@ -173,20 +173,55 @@ async fn handle_acp_session_update(
                 }
                 collector.text.push_str(delta);
             }
-            let mut message = ctx.live_message.lock().await;
-            append_text_delta(&mut message.parts, ctx.text_part_id.as_str(), delta);
-            drop(message);
-            ctx.state.publish_live(EventPayload::new(
-                event_type::MESSAGE_PART_DELTA,
-                json!({
-                    "sessionID": ctx.child_id,
-                    "messageID": ctx.assistant_id,
-                    "partID": ctx.text_part_id,
-                    "partType": "text",
-                    "field": "text",
-                    "delta": delta,
-                }),
-            ));
+            let (part_id, inserted) = {
+                let mut message = ctx.live_message.lock().await;
+                if let Some(Part::Text(text)) = message.parts.last_mut() {
+                    text.text.push_str(delta);
+                    (text.id.clone(), None)
+                } else {
+                    let id = if message
+                        .parts
+                        .iter()
+                        .any(|part| matches!(part, Part::Text(_)))
+                    {
+                        Id::ascending(IdKind::Part)
+                    } else {
+                        ctx.text_part_id.clone()
+                    };
+                    let part = Part::Text(TextPart {
+                        id: id.clone(),
+                        session_id: Id::parse(IdKind::Session, ctx.child_id.clone())
+                            .map_err(|error| ApiError::internal(error.to_string()))?,
+                        message_id: ctx.assistant_id.clone(),
+                        text: delta.to_string(),
+                        synthetic: None,
+                        time: Some(PartTime {
+                            start: now_millis(),
+                            end: None,
+                        }),
+                    });
+                    message.parts.push(part.clone());
+                    (id, Some(part))
+                }
+            };
+            if let Some(part) = inserted {
+                ctx.state.publish_live(EventPayload::new(
+                    event_type::MESSAGE_PART_UPDATED,
+                    json!({ "sessionID": ctx.child_id, "part": part, "time": now_millis() }),
+                ));
+            } else {
+                ctx.state.publish_live(EventPayload::new(
+                    event_type::MESSAGE_PART_DELTA,
+                    json!({
+                        "sessionID": ctx.child_id,
+                        "messageID": ctx.assistant_id,
+                        "partID": part_id,
+                        "partType": "text",
+                        "field": "text",
+                        "delta": delta,
+                    }),
+                ));
+            }
         }
         "tool_call" | "tool_call_update" => {
             update_external_tool_part(ctx, update.clone()).await?;
@@ -201,8 +236,14 @@ async fn handle_acp_session_update(
                     collector.usage_seen = true;
                     collector.usage.tokens()
                 };
-                project_acp_usage(&ctx.state, &ctx.child_id, &ctx.live_message, tokens)
-                    .await?;
+                project_acp_usage(
+                    &ctx.state,
+                    &ctx.child_id,
+                    ctx.runtime,
+                    &ctx.live_message,
+                    tokens,
+                )
+                .await?;
             }
             update_external_activity(&ctx.state, &ctx.child_id, ctx.runtime, update)
                 .await?;
@@ -247,9 +288,14 @@ async fn handle_acp_session_update(
 pub(crate) async fn project_acp_usage(
     state: &AppState,
     session_id: &str,
+    runtime: ExternalRuntime,
     live_message: &Arc<tokio::sync::Mutex<MessageWithParts>>,
-    tokens: TokenUsage,
+    mut tokens: TokenUsage,
 ) -> Result<(), ApiError> {
+    if tokens.context_limit.is_none() {
+        tokens.context_limit =
+            external_model_context_limit(state, session_id, runtime).await;
+    }
     let mut message = live_message.lock().await;
     if let MessageInfo::Assistant(info) = &mut message.info {
         info.tokens = tokens;
@@ -264,6 +310,78 @@ pub(crate) async fn project_acp_usage(
         json!({ "sessionID": session_id, "info": message.info }),
     ));
     Ok(())
+}
+
+async fn external_model_context_limit(
+    state: &AppState,
+    session_id: &str,
+    runtime: ExternalRuntime,
+) -> Option<u64> {
+    let session = state.inner.store.get_session(session_id).await.ok()??;
+    let model_option = session.extra["externalAgent"]["configOptions"]
+        .as_array()?
+        .iter()
+        .find(|option| option["category"] == "model" && option["type"] == "select")?;
+    let selected = model_option.get("currentValue")?.as_str()?;
+    if let Some(limit) = model_option_context_limit(model_option, selected) {
+        return Some(limit);
+    }
+    let (provider_id, model_id) = selected.split_once('/').unwrap_or_else(|| {
+        let provider = match runtime {
+            ExternalRuntime::Claude => "anthropic",
+            ExternalRuntime::Codex => "openai",
+            ExternalRuntime::OpenCode => "",
+        };
+        (provider, selected)
+    });
+    if provider_id.is_empty() {
+        return None;
+    }
+    state
+        .inner
+        .provider_service
+        .model_metadata(&UserModel {
+            provider_id: provider_id.to_string(),
+            model_id: model_id.to_string(),
+            connection_id: None,
+            variant: None,
+        })
+        .await
+        .ok()
+        .and_then(|model| model.limit.map(|limit| limit.context))
+        .filter(|limit| *limit > 0)
+}
+
+fn model_option_context_limit(option: &Value, selected: &str) -> Option<u64> {
+    fn direct(value: &Value) -> Option<u64> {
+        value
+            .get("contextLimit")
+            .or_else(|| value.get("contextWindow"))
+            .or_else(|| value.pointer("/limit/context"))
+            .and_then(Value::as_u64)
+            .filter(|limit| *limit > 0)
+    }
+    if let Some(limit) = direct(option) {
+        return Some(limit);
+    }
+    option
+        .get("options")?
+        .as_array()?
+        .iter()
+        .find_map(|choice| {
+            if choice.get("value").and_then(Value::as_str) == Some(selected) {
+                return direct(choice);
+            }
+            choice
+                .get("options")?
+                .as_array()?
+                .iter()
+                .find_map(|nested| {
+                    (nested.get("value").and_then(Value::as_str) == Some(selected))
+                        .then(|| direct(nested))
+                        .flatten()
+                })
+        })
 }
 
 fn echo_of_user_chunk(
@@ -525,7 +643,7 @@ pub(super) async fn update_external_tool_part(
             enrich_nested_prompt(&ctx.state, nested_id, &input).await?;
         }
     }
-    let mut finished_nested = None;
+    let mut failed_nested = None;
     let part = {
         let mut collector = ctx.collector.lock().await;
         let part_id = collector
@@ -554,18 +672,33 @@ pub(super) async fn update_external_tool_part(
         };
         let mut message = ctx.live_message.lock().await;
         let mut part = match status {
-            "completed" => {
-                if let Some(nested_id) = nested_session_id.clone() {
-                    finished_nested = Some((
-                        nested_id,
-                        "completed".to_string(),
-                        completion_output.clone(),
-                    ));
-                }
+            "completed" => set_tool_completed(
+                &mut message.parts,
+                part_id.as_str(),
+                completion_output.clone(),
+                tool_title.clone(),
+                json!({
+                    "runtime": "acp",
+                    "provider": ctx.runtime.provider_id(),
+                    "update": update.clone(),
+                    "acpTitle": tool_title.clone(),
+                    "acpDiffs": acp_diffs.clone(),
+                }),
+            )
+            .unwrap_or_else(|| {
+                set_tool_running(
+                    &mut message.parts,
+                    part_id.clone(),
+                    &session_id,
+                    &ctx.assistant_id,
+                    tool_call_id.clone(),
+                    tool_name.clone(),
+                    input.clone(),
+                );
                 set_tool_completed(
                     &mut message.parts,
                     part_id.as_str(),
-                    completion_output.clone(),
+                    completion_output,
                     tool_title.clone(),
                     json!({
                         "runtime": "acp",
@@ -575,35 +708,11 @@ pub(super) async fn update_external_tool_part(
                         "acpDiffs": acp_diffs.clone(),
                     }),
                 )
-                .unwrap_or_else(|| {
-                    set_tool_running(
-                        &mut message.parts,
-                        part_id.clone(),
-                        &session_id,
-                        &ctx.assistant_id,
-                        tool_call_id.clone(),
-                        tool_name.clone(),
-                        input.clone(),
-                    );
-                    set_tool_completed(
-                        &mut message.parts,
-                        part_id.as_str(),
-                        completion_output,
-                        tool_title.clone(),
-                        json!({
-                            "runtime": "acp",
-                            "provider": ctx.runtime.provider_id(),
-                            "update": update.clone(),
-                            "acpTitle": tool_title.clone(),
-                            "acpDiffs": acp_diffs.clone(),
-                        }),
-                    )
-                    .expect("tool part inserted before completion")
-                })
-            }
+                .expect("tool part inserted before completion")
+            }),
             "failed" | "error" => {
                 if let Some(nested_id) = nested_session_id.clone() {
-                    finished_nested =
+                    failed_nested =
                         Some((nested_id, "error".to_string(), completion_output.clone()));
                 }
                 let error = completion_output.clone();
@@ -666,21 +775,19 @@ pub(super) async fn update_external_tool_part(
         ctx.state.publish_live(event);
     }
     if let Some(nested_id) = nested_session_id.as_deref() {
-        if !matches!(status, "completed" | "failed" | "error") {
-            let output = external_tool_output(&update);
-            if !output.is_empty() {
-                project_nested_output(
-                    &ctx.state,
-                    ctx.runtime,
-                    nested_id,
-                    &output,
-                    is_terminal_output_update(&update),
-                )
-                .await?;
-            }
+        let output = external_tool_output(&update);
+        if !output.is_empty() && !matches!(status, "failed" | "error") {
+            project_nested_output(
+                &ctx.state,
+                ctx.runtime,
+                nested_id,
+                &output,
+                is_terminal_output_update(&update),
+            )
+            .await?;
         }
     }
-    if let Some((nested_id, status, output)) = finished_nested {
+    if let Some((nested_id, status, output)) = failed_nested {
         finish_nested_external_session(
             &ctx.state,
             ctx.runtime,

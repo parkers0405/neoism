@@ -2080,6 +2080,7 @@ mod tests {
     fn overflow_token_count_uses_normalized_buckets_without_total() {
         let without_total = TokenUsage {
             total: None,
+            context_limit: None,
             input: 100,
             output: 20,
             reasoning: 80,
@@ -2577,6 +2578,7 @@ async fn run_assistant_step(
             agent_info.name.clone(),
             reply_model.model_id.clone(),
             reply_model.provider_id.clone(),
+            true,
         )
         .await?;
         let assistant_id = started.assistant_id;

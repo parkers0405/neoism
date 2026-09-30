@@ -51,6 +51,18 @@ impl Screen<'_> {
         font_library: &neoism_backend::sugarloaf::font::FontLibrary,
         should_update_font_library: bool,
     ) {
+        self.conversations_panel_enabled = config.agent.conversations_panel_enabled;
+        self.details_panel_enabled = config.agent.details_panel_enabled;
+        if !self.conversations_panel_enabled {
+            self.renderer.conversations_visible = false;
+            self.renderer
+                .conversations_pane
+                .side_panel_mut()
+                .set_focused(false);
+            self.workspace_conversations_visibility
+                .values_mut()
+                .for_each(|visible| *visible = false);
+        }
         self.renderer.code_git_blame = config.editor.git_blame;
         self.renderer.code_git_blame_delay_ms = config.editor.git_blame_delay_ms;
         self.renderer.code_git_blame_hide_on_scroll =
@@ -59,6 +71,9 @@ impl Screen<'_> {
             for item in grid.contexts_mut().values_mut() {
                 if let Some(agent) = item.context_mut().neoism_agent.as_mut() {
                     agent.set_default_chat_source(config.agent.default_chat_source);
+                    if !self.details_panel_enabled {
+                        agent.side_panel_mut().set_user_hidden(true);
+                    }
                 }
                 if let Some(code) = item.context_mut().code.as_mut() {
                     code.blame.configure(config.editor.git_blame);

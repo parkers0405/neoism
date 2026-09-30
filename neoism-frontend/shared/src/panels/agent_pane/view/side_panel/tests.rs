@@ -1143,3 +1143,87 @@ fn external_catalog_merges_by_native_id_and_source_key_across_pages() {
         1
     );
 }
+
+#[test]
+fn codex_preview_and_imported_root_share_one_stable_row() {
+    use crate::panels::agent_pane::state::side_panel::{
+        ConversationSource, ExternalSessionPreview,
+    };
+
+    let source_key = "acp:codex:stable";
+    let native = NeoismAgentSessionEntry::new("native-codex", "Codex chat", "")
+        .with_source(ConversationSource::Codex)
+        .with_source_key(Some(source_key.into()))
+        .with_updated_ms(20);
+    let mut preview = NeoismAgentSessionEntry::new(
+        format!("external:{source_key}"),
+        "Codex chat",
+        "Preview · import to read",
+    )
+    .with_source(ConversationSource::Codex)
+    .with_source_key(Some(source_key.into()))
+    .with_updated_ms(20);
+    preview.external_preview = Some(ExternalSessionPreview {
+        source_key: source_key.into(),
+        external_session_id: "provider-thread".into(),
+        history_state: "not_loaded".into(),
+        import_supported: true,
+        import_unavailable_reason: None,
+        neoism_session_id: None,
+    });
+
+    let mut panel = NeoismAgentSidePanel::default();
+    panel.set_external_provider_rows(ConversationSource::Codex, vec![preview]);
+    panel.set_session_page(vec![native], None, None);
+
+    let rows = panel
+        .sessions()
+        .iter()
+        .filter(|row| row.source_key.as_deref() == Some(source_key))
+        .collect::<Vec<_>>();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, "native-codex");
+    assert!(rows[0].external_preview.is_none());
+}
+
+#[test]
+fn cursorless_refresh_preserves_older_session_viewport() {
+    let rows = (0..20)
+        .map(|index| {
+            NeoismAgentSessionEntry::new(
+                format!("session-{index}"),
+                format!("Session {index}"),
+                "",
+            )
+            .with_updated_ms(20 - index)
+        })
+        .collect::<Vec<_>>();
+    let mut panel = NeoismAgentSidePanel::default();
+    panel.set_session_page(rows.clone(), None, None);
+    panel.set_last_panel_height_rows(5);
+    panel.scroll_by(8, 5);
+    let old_top = panel.scroll_top();
+    assert!(old_top > 0);
+
+    let mut refreshed =
+        vec![NeoismAgentSessionEntry::new("newest", "Newest", "").with_updated_ms(30)];
+    refreshed.extend(rows);
+    panel.set_session_page(refreshed, None, None);
+
+    assert!(panel.scroll_top() >= old_top);
+    assert_ne!(panel.scroll_top(), 0);
+}
+
+#[test]
+fn conversations_width_clamps_to_supported_drag_range() {
+    use crate::panels::agent_pane::state::side_panel::{
+        SIDE_PANEL_MAX_WIDTH, SIDE_PANEL_MIN_WIDTH,
+    };
+
+    let mut panel = NeoismAgentSidePanel::default();
+    assert_eq!(panel.width(), 340.0);
+    panel.set_width(0.0);
+    assert_eq!(panel.width(), SIDE_PANEL_MIN_WIDTH);
+    panel.resize(10_000.0);
+    assert_eq!(panel.width(), SIDE_PANEL_MAX_WIDTH);
+}

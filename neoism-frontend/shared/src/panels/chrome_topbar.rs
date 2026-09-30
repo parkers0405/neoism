@@ -33,7 +33,7 @@ use crate::editor::crdt::PresenceAvatarPeer;
 use crate::event::{PointerButton, UiEvent};
 use crate::layout::{PanelLayout, Rect};
 use crate::panels::{Panel, PanelContext};
-use crate::primitives::{draw_overlay_icon_centered, IdeTheme};
+use crate::primitives::{draw_overlay_icon_centered, snap_to_device_px, IdeTheme};
 
 pub const CHROME_TOPBAR_HEIGHT: f32 = 30.0;
 
@@ -47,12 +47,6 @@ const CONVERSATIONS_GLYPH: &str = "\u{f0674}"; // Nerd Font Material creation sp
 const NOTES_GLYPH: &str = "\u{f15c}"; // Same glyph as Markdown files in the tree
 const NEOISM_AGENT_GLYPH: &str = "n"; // Same mark used by Agent buffer tabs.
 const AGENT_PANEL_GLYPH: &str = "\u{eb56}"; // codicon split-horizontal / side panel
-
-/// Which half of an icon paints in the accent color while active.
-#[derive(Clone, Copy)]
-enum ActiveHalf {
-    Left,
-}
 
 const ICON_FONT_SIZE: f32 = 13.0;
 const MENU_FONT_SIZE: f32 = 12.5;
@@ -212,11 +206,12 @@ pub struct ChromeTopBar {
     /// whether the right-edge button is painted + hit-tested.
     right_button_visible: bool,
     mobile_agent_panel_button_visible: bool,
-    /// Open/closed state of the panels the two toggle buttons drive
-    /// (left = file tree, right = agent side panel). When `true` the
-    /// button paints in the active accent style so the user can see at
-    /// a glance which panels are open. Hosts push these every frame.
+    /// Open/closed state for chrome actions. Active icons paint their entire
+    /// glyph in the accent color. Hosts push these every frame.
     panel_open: bool,
+    notes_open: bool,
+    conversations_open: bool,
+    search_open: bool,
     right_panel_open: bool,
     agent_icon_overlay: bool,
     /// Web hosts set this to surface the "Share with Phone" row.
@@ -267,6 +262,9 @@ impl ChromeTopBar {
             right_button_visible: false,
             mobile_agent_panel_button_visible: false,
             panel_open: false,
+            notes_open: false,
+            conversations_open: false,
+            search_open: false,
             right_panel_open: false,
             agent_icon_overlay: false,
             share_with_phone_enabled: false,
@@ -360,6 +358,18 @@ impl ChromeTopBar {
     /// file tree) so the button can paint in its active accent style.
     pub fn set_panel_open(&mut self, open: bool) {
         self.panel_open = open;
+    }
+
+    pub fn set_notes_open(&mut self, open: bool) {
+        self.notes_open = open;
+    }
+
+    pub fn set_conversations_open(&mut self, open: bool) {
+        self.conversations_open = open;
+    }
+
+    pub fn set_search_open(&mut self, open: bool) {
+        self.search_open = open;
     }
 
     /// Push the open/closed state of the right toggle target (the agent
@@ -471,26 +481,39 @@ impl ChromeTopBar {
         Rect::new(menu_x, menu_y, menu_w, menu_h)
     }
 
-    fn refresh_rects(&mut self, strip: Rect) {
+    fn refresh_rects(&mut self, strip: Rect, device_scale: f32) {
         let scale = self.scale;
         let btn = BTN_SIZE * scale;
         let edge = EDGE_PAD_X * scale;
         let gap = BTN_GAP * scale;
         let cy = strip.y + (strip.h - btn) * 0.5;
         let left_x = strip.x + edge + self.left_safe_inset * scale;
-        self.menu_btn_rect = Rect::new(left_x, cy, btn, btn);
-        self.panel_btn_rect = Rect::new(left_x + btn + gap, cy, btn, btn);
-        self.notes_btn_rect = Rect::new(left_x + (btn + gap) * 2.0, cy, btn, btn);
-        self.conversations_btn_rect = Rect::new(left_x + (btn + gap) * 3.0, cy, btn, btn);
-        self.search_btn_rect = Rect::new(left_x + (btn + gap) * 4.0, cy, btn, btn);
-        self.server_btn_rect = Rect::new(
+        let snap_square = |rect: Rect| {
+            let x = snap_to_device_px(rect.x, device_scale);
+            let y = snap_to_device_px(rect.y, device_scale);
+            let size = snap_to_device_px(rect.w, device_scale);
+            Rect::new(x, y, size, size)
+        };
+        self.menu_btn_rect = snap_square(Rect::new(left_x, cy, btn, btn));
+        self.panel_btn_rect = snap_square(Rect::new(left_x + btn + gap, cy, btn, btn));
+        self.notes_btn_rect = snap_square(Rect::new(left_x + (btn + gap) * 2.0, cy, btn, btn));
+        self.conversations_btn_rect =
+            snap_square(Rect::new(left_x + (btn + gap) * 3.0, cy, btn, btn));
+        self.search_btn_rect =
+            snap_square(Rect::new(left_x + (btn + gap) * 4.0, cy, btn, btn));
+        self.server_btn_rect = snap_square(Rect::new(
             strip.x + strip.w - edge - self.right_safe_inset * scale - btn,
             cy,
             btn,
             btn,
-        );
+        ));
         self.right_btn_rect = if self.right_button_visible {
-            Rect::new(self.server_btn_rect.x - gap - btn, cy, btn, btn)
+            snap_square(Rect::new(
+                self.server_btn_rect.x - gap - btn,
+                cy,
+                btn,
+                btn,
+            ))
         } else {
             Rect::new(0.0, 0.0, 0.0, 0.0)
         };
@@ -505,9 +528,14 @@ impl ChromeTopBar {
             // Keep the visual compact and wholly inside top chrome. The hit
             // target extends down into the content band when the top bar is
             // shorter than 44px, matching iOS touch-target guidance.
-            self.mobile_agent_panel_hit_rect = Rect::new(hit_x, strip.y, hit, hit);
-            self.mobile_agent_panel_btn_rect =
-                Rect::new(hit_x + (hit - btn) * 0.5, cy, btn, btn);
+            self.mobile_agent_panel_hit_rect =
+                snap_square(Rect::new(hit_x, strip.y, hit, hit));
+            self.mobile_agent_panel_btn_rect = snap_square(Rect::new(
+                hit_x + (hit - btn) * 0.5,
+                cy,
+                btn,
+                btn,
+            ));
         } else {
             self.mobile_agent_panel_hit_rect = Rect::new(0.0, 0.0, 0.0, 0.0);
             self.mobile_agent_panel_btn_rect = Rect::new(0.0, 0.0, 0.0, 0.0);
@@ -604,6 +632,19 @@ impl ChromeTopBar {
         self.hover_peer = self.peer_rects.iter().position(|r| r.contains(x, y));
     }
 
+    fn clear_hover_state(&mut self) {
+        self.hover_panel_btn = false;
+        self.hover_menu_btn = false;
+        self.hover_search_btn = false;
+        self.hover_notes_btn = false;
+        self.hover_conversations_btn = false;
+        self.hover_server_btn = false;
+        self.hover_right_btn = false;
+        self.hover_mobile_agent_panel_btn = false;
+        self.hover_menu_item = None;
+        self.hover_peer = None;
+    }
+
     fn handle_pointer_down(&mut self, x: f32, y: f32) -> bool {
         if self.panel_btn_rect.contains(x, y) {
             self.pending_action = Some(TopBarAction::TogglePanel);
@@ -620,7 +661,7 @@ impl ChromeTopBar {
             return true;
         }
         if self.conversations_btn_rect.contains(x, y) {
-            self.pending_action = Some(TopBarAction::ToggleConversations);
+            self.pending_action = Some(TopBarAction::OpenAgent);
             self.menu_open = false;
             return true;
         }
@@ -677,7 +718,7 @@ impl ChromeTopBar {
             return;
         }
         let strip = Rect::new(x_left, y_top, width, self.height());
-        self.refresh_rects(strip);
+        self.refresh_rects(strip, sugarloaf.scale_factor());
 
         let row_h = strip.h;
 
@@ -712,7 +753,7 @@ impl ChromeTopBar {
             self.menu_btn_rect,
             HAMBURGER_GLYPH,
             self.hover_menu_btn || self.menu_open,
-            None,
+            self.menu_open,
             theme,
         );
         // Explorer sits immediately beside it and keeps its open-state accent.
@@ -721,7 +762,7 @@ impl ChromeTopBar {
             self.panel_btn_rect,
             crate::panels::file_tree::icons::workspace_tab_icon().0,
             self.hover_panel_btn,
-            self.panel_open.then_some(ActiveHalf::Left),
+            self.panel_open,
             theme,
         );
         self.draw_icon_button(
@@ -729,7 +770,7 @@ impl ChromeTopBar {
             self.notes_btn_rect,
             NOTES_GLYPH,
             self.hover_notes_btn,
-            None,
+            self.notes_open,
             theme,
         );
         self.draw_icon_button(
@@ -737,7 +778,7 @@ impl ChromeTopBar {
             self.conversations_btn_rect,
             CONVERSATIONS_GLYPH,
             self.hover_conversations_btn,
-            None,
+            self.conversations_open,
             theme,
         );
         // Search button — opens the finder (project-wide search).
@@ -746,7 +787,7 @@ impl ChromeTopBar {
             self.search_btn_rect,
             SEARCH_GLYPH,
             self.hover_search_btn,
-            None,
+            self.search_open,
             theme,
         );
         // Standalone server selector at the far-right edge.
@@ -767,7 +808,7 @@ impl ChromeTopBar {
                 self.mobile_agent_panel_btn_rect,
                 AGENT_PANEL_GLYPH,
                 self.hover_mobile_agent_panel_btn,
-                self.right_panel_open.then_some(ActiveHalf::Left),
+                self.right_panel_open,
                 theme,
             );
         }
@@ -901,7 +942,7 @@ impl ChromeTopBar {
         rect: Rect,
         glyph: &str,
         hovered: bool,
-        active_half: Option<ActiveHalf>,
+        active: bool,
         theme: &IdeTheme,
     ) {
         if hovered {
@@ -931,7 +972,9 @@ impl ChromeTopBar {
         let opts = DrawOpts {
             font_id: icon_font,
             font_size: icon_size,
-            color: if hovered {
+            color: if active {
+                theme.u8(theme.accent)
+            } else if hovered {
                 theme.u8(theme.fg)
             } else {
                 theme.u8(theme.dim)
@@ -941,33 +984,14 @@ impl ChromeTopBar {
         let glyph_w = sugarloaf.text_mut().measure(glyph, &opts);
         let gx = rect.x + (rect.w - glyph_w) * 0.5;
         let gy = rect.y + (rect.h - icon_size) * 0.5;
-        // Base glyph in the neutral color.
+        let first_instance = sugarloaf.text_mut().instances().len();
         sugarloaf.text_mut().draw(gx, gy, glyph, &opts);
-        // When the panel is open, repaint the matching half of the
-        // glyph itself in the accent color (clipped down the vertical
-        // centre) — the icon's own left/right pane fills in, no extra
-        // chrome behind it.
-        if let Some(ActiveHalf::Left) = active_half {
-            // Split at the glyph's horizontal centre, then extend the accent
-            // clip all the way to the button edge on the active side. Using a
-            // fixed `half_w`-wide window (half the *measured advance*) left the
-            // codicon's ink — which is drawn WIDER than its advance — only
-            // partly filled, so the accent stopped short of the right edge and
-            // read as a strip down the MIDDLE of the icon. Extending to the
-            // edge fills the entire right (or left) pane regardless of the
-            // ink-vs-advance mismatch.
-            let center = gx + glyph_w * 0.5;
-            let clip_x = rect.x;
-            let clip_w = center - rect.x;
-            let accent_opts = DrawOpts {
-                font_id: icon_font,
-                font_size: icon_size,
-                color: theme.u8(theme.accent),
-                clip_rect: Some([clip_x, rect.y, clip_w.max(0.0), rect.h]),
-                ..DrawOpts::default()
-            };
-            sugarloaf.text_mut().draw(gx, gy, glyph, &accent_opts);
-        }
+        sugarloaf.text_mut().center_instances_in_rect(
+            first_instance,
+            [rect.x, rect.y, rect.w, rect.h],
+            true,
+            true,
+        );
         let _ = ORDER_ICON;
     }
 
@@ -1255,9 +1279,7 @@ impl Panel for ChromeTopBar {
                 let _ = self.handle_pointer_down(*x, *y);
             }
             UiEvent::PointerLeave => {
-                self.hover_panel_btn = false;
-                self.hover_menu_btn = false;
-                self.hover_menu_item = None;
+                self.clear_hover_state();
             }
             _ => {}
         }
@@ -1287,7 +1309,7 @@ mod tests {
     fn paint_strip(bar: &mut ChromeTopBar, strip: Rect) {
         // Skip sugarloaf — only refresh hit rects, which is the part
         // the tests exercise.
-        bar.refresh_rects(strip);
+        bar.refresh_rects(strip, 1.0);
     }
 
     #[test]
@@ -1302,7 +1324,7 @@ mod tests {
     }
 
     #[test]
-    fn notes_button_sits_left_of_search_and_queues_open() {
+    fn notes_and_conversations_buttons_queue_their_open_actions() {
         let mut bar = ChromeTopBar::new();
         let strip = Rect::new(0.0, 0.0, 800.0, CHROME_TOPBAR_HEIGHT);
         paint_strip(&mut bar, strip);
@@ -1319,7 +1341,7 @@ mod tests {
             conversations.x + conversations.w * 0.5,
             conversations.y + conversations.h * 0.5,
         );
-        assert_eq!(bar.take_action(), Some(TopBarAction::ToggleConversations));
+        assert_eq!(bar.take_action(), Some(TopBarAction::OpenAgent));
         let btn = bar.notes_btn_rect;
         bar.handle_pointer_down(btn.x + btn.w * 0.5, btn.y + btn.h * 0.5);
         assert_eq!(bar.take_action(), Some(TopBarAction::OpenNotes));
@@ -1332,6 +1354,59 @@ mod tests {
         let btn = bar.search_btn_rect;
         assert!(bar.pointer_down(btn.x + btn.w * 0.5, btn.y + btn.h * 0.5));
         assert_eq!(bar.take_action(), Some(TopBarAction::OpenSearch));
+    }
+
+    #[test]
+    fn button_quads_are_square_and_device_pixel_aligned() {
+        let mut bar = ChromeTopBar::new();
+        let device_scale = 1.25;
+        bar.refresh_rects(
+            Rect::new(0.3, 0.2, 800.0, CHROME_TOPBAR_HEIGHT),
+            device_scale,
+        );
+
+        for rect in [
+            bar.menu_btn_rect,
+            bar.panel_btn_rect,
+            bar.notes_btn_rect,
+            bar.conversations_btn_rect,
+            bar.search_btn_rect,
+            bar.server_btn_rect,
+        ] {
+            assert_eq!(rect.w, rect.h);
+            for edge in [rect.x, rect.y, rect.x + rect.w, rect.y + rect.h] {
+                let physical_edge = edge * device_scale;
+                assert!((physical_edge - physical_edge.round()).abs() < 0.0001);
+            }
+        }
+    }
+
+    #[test]
+    fn pointer_leave_clears_every_hover_target() {
+        let mut bar = ChromeTopBar::new();
+        bar.hover_panel_btn = true;
+        bar.hover_menu_btn = true;
+        bar.hover_notes_btn = true;
+        bar.hover_conversations_btn = true;
+        bar.hover_search_btn = true;
+        bar.hover_server_btn = true;
+        bar.hover_right_btn = true;
+        bar.hover_mobile_agent_panel_btn = true;
+        bar.hover_menu_item = Some(0);
+        bar.hover_peer = Some(0);
+
+        bar.clear_hover_state();
+
+        assert!(!bar.hover_panel_btn);
+        assert!(!bar.hover_menu_btn);
+        assert!(!bar.hover_notes_btn);
+        assert!(!bar.hover_conversations_btn);
+        assert!(!bar.hover_search_btn);
+        assert!(!bar.hover_server_btn);
+        assert!(!bar.hover_right_btn);
+        assert!(!bar.hover_mobile_agent_panel_btn);
+        assert_eq!(bar.hover_menu_item, None);
+        assert_eq!(bar.hover_peer, None);
     }
 
     #[test]

@@ -34,6 +34,8 @@ The Extensions page also contains **MCP Servers**, built-in **Syntax Parsers**, 
 
 Neoism resolves an LSP executable from its managed extensions, an explicit configured command, or the host environment as supported by the adapter. Live server state appears in the editor status area; multi-server files can report more than one attached server.
 
+For Yarn Plug'n'Play TypeScript projects, Neoism searches from a nested TypeScript package up to the opened workspace boundary for Yarn's canonical `.pnp.cjs`, then explicitly loads the matching `.yarn/sdks/typescript/lib` into the managed `typescript-language-server`. LSP status and remote editor snapshots expose whether TypeScript came from that Yarn SDK, an explicit `initializationOptions.tsserver.path`, or the language server's normal fallback, including SDK path/version when available. If the patched SDK is missing, Neoism keeps normal TypeScript/JavaScript fallback service running and reports a degraded warning with the one-time command `corepack yarn dlx @yarnpkg/sdks base`; it never executes that networked command or mutates the project itself. Project SDK probes are cached for two seconds, after which appearance or replacement changes client identity and restarts on the next operation.
+
 ## Advanced language-server configuration
 
 Most users should install servers through **Extensions**. The `lsp` block is for disabling an adapter, overriding one, or defining a custom server that is not in the catalog.

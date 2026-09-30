@@ -357,21 +357,36 @@ pub enum DefaultChatSource {
     Codex,
 }
 
-/// Backend-owned preference within the agent server's shared config block.
-#[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Default)]
+/// Application-owned preferences within the agent server's shared config block.
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
 pub struct AgentPreferences {
     #[serde(default = "default_chat_source", rename = "default-chat-source")]
     pub default_chat_source: DefaultChatSource,
+    #[serde(default = "default_bool_true", rename = "conversations-panel-enabled")]
+    pub conversations_panel_enabled: bool,
+    #[serde(default = "default_bool_true", rename = "details-panel-enabled")]
+    pub details_panel_enabled: bool,
     /// Keep server-owned keys intact when the application config is serialized.
     #[serde(flatten)]
     pub server_settings: serde_json::Map<String, serde_json::Value>,
+}
+
+impl Default for AgentPreferences {
+    fn default() -> Self {
+        Self {
+            default_chat_source: default_chat_source(),
+            conversations_panel_enabled: true,
+            details_panel_enabled: true,
+            server_settings: serde_json::Map::new(),
+        }
+    }
 }
 
 /// The golden grouped `config.json`. Every domain is its own block —
 /// `appearance`, `editor`, `terminal`, `ui`, `presence`, `keybinds` —
 /// plus the standalone `platform`, `renderer`, and `developer` domains.
 /// The agent server reads its own settings from the shared `agent` block;
-/// this backend types only the chat-source preference.
+/// this backend types only application-owned preferences.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Config {
     #[serde(default)]
@@ -1206,6 +1221,24 @@ mod tests {
             parse(r#"{"agent":{}}"#).agent.default_chat_source,
             DefaultChatSource::Neoism
         );
+    }
+
+    #[test]
+    fn agent_panels_are_grouped_enabled_by_default_and_can_be_disabled() {
+        let defaults = parse("{}");
+        assert!(defaults.agent.conversations_panel_enabled);
+        assert!(defaults.agent.details_panel_enabled);
+
+        let config = parse(
+            r#"{"agent":{"conversations-panel-enabled":false,"details-panel-enabled":false}}"#,
+        );
+        assert!(!config.agent.conversations_panel_enabled);
+        assert!(!config.agent.details_panel_enabled);
+        let serialized = serde_json::to_value(config).unwrap();
+        assert_eq!(serialized["agent"]["conversations-panel-enabled"], false);
+        assert_eq!(serialized["agent"]["details-panel-enabled"], false);
+        assert!(serialized.get("conversations-panel-enabled").is_none());
+        assert!(serialized.get("details-panel-enabled").is_none());
     }
 
     #[test]

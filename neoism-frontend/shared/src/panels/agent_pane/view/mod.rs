@@ -266,16 +266,11 @@ mod detail_rail_tests {
             minimum - 1.0,
             scale
         ));
+        assert_eq!(super::side_panel::detail_rail_width(minimum, scale), 200.0);
+        assert_eq!(super::side_panel::detail_rail_width(800.0, scale), 260.0);
+        assert_eq!(super::side_panel::detail_rail_width(2_000.0, scale), 260.0);
         assert_eq!(
-            super::side_panel::detail_rail_width(minimum, 260.0, scale),
-            200.0
-        );
-        assert_eq!(
-            super::side_panel::detail_rail_width(800.0, 260.0, scale),
-            260.0
-        );
-        assert_eq!(
-            super::side_panel::detail_rail_width(2.0 * minimum, 260.0, 2.0),
+            super::side_panel::detail_rail_width(2.0 * minimum, 2.0),
             400.0
         );
     }
@@ -319,11 +314,7 @@ fn render_agent_pane_with_responsive<P, D, I>(
         main_rect[2],
         chrome_scale,
     ) {
-        let detail_w = side_panel::detail_rail_width(
-            main_rect[2],
-            side_panel::AgentSidePanelPane::side_panel(pane).width(),
-            chrome_scale,
-        );
+        let detail_w = side_panel::detail_rail_width(main_rect[2], chrome_scale);
         let gap = 6.0 * chrome_scale;
         (
             [

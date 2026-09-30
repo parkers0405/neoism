@@ -1331,6 +1331,9 @@ impl ChromeBridge {
                         level: server.level.clone(),
                         diagnostics: Default::default(),
                         source: server.source.clone(),
+                        runtime_source: server.runtime_source.clone(),
+                        runtime_path: server.runtime_path.clone(),
+                        runtime_version: server.runtime_version.clone(),
                     })
                     .collect::<Vec<_>>();
                 let connected = servers

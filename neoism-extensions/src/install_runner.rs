@@ -16,7 +16,7 @@ use crate::paths;
 
 mod ecosystems;
 mod managed;
-mod managed_node;
+pub(crate) mod managed_node;
 mod process;
 mod release;
 mod resolution;

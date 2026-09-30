@@ -549,6 +549,12 @@ struct NotesSidebarResizeState {
     original_width: f32,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct ConversationsSidebarResizeState {
+    start_x: f32,
+    original_width: f32,
+}
+
 /// Live drag state for resizing the git diff panel via its leading
 /// edge. Symmetric with `FileTreeResizeState`; `start_x` is the mouse
 /// x where the drag began so deltas land on the original width.
@@ -735,6 +741,10 @@ pub struct Screen<'screen> {
     pub resize_state: Option<crate::layout::ResizeState>,
     file_tree_resize_state: Option<FileTreeResizeState>,
     notes_sidebar_resize_state: Option<NotesSidebarResizeState>,
+    conversations_sidebar_resize_state: Option<ConversationsSidebarResizeState>,
+    conversations_sidebar_width: f32,
+    conversations_panel_enabled: bool,
+    details_panel_enabled: bool,
     git_diff_panel_resize_state: Option<GitDiffPanelResizeState>,
     git_diff_panel_scrollbar_drag: Option<GitDiffPanelScrollbarDragState>,
     // (constant lives just above the field's first use; declared as a
@@ -870,6 +880,9 @@ pub struct Screen<'screen> {
     workspace_notes_vaults: HashMap<WorkspaceKey, PathBuf>,
     notes_sidebar_workspace: Option<WorkspaceKey>,
     workspace_conversations_visibility: HashMap<WorkspaceKey, bool>,
+    workspace_conversations_panes:
+        HashMap<WorkspaceKey, crate::neoism::agent::NeoismAgentPane>,
+    conversations_pane_workspace: Option<WorkspaceKey>,
     workspace_editor_active_paths: HashMap<WorkspaceKey, PathBuf>,
     file_tree_clipboard: Option<PathBuf>,
     file_tree_fs_watch_root: Option<PathBuf>,
@@ -1790,6 +1803,11 @@ impl Screen<'_> {
             resize_state: None,
             file_tree_resize_state: None,
             notes_sidebar_resize_state: None,
+            conversations_sidebar_resize_state: None,
+            conversations_sidebar_width:
+                neoism_ui::panels::agent_pane::state::side_panel::SIDE_PANEL_WIDTH,
+            conversations_panel_enabled: config.agent.conversations_panel_enabled,
+            details_panel_enabled: config.agent.details_panel_enabled,
             git_diff_panel_resize_state: None,
             git_diff_panel_scrollbar_drag: None,
             grids: rustc_hash::FxHashMap::default(),
@@ -1836,6 +1854,8 @@ impl Screen<'_> {
             workspace_notes_vaults: HashMap::new(),
             notes_sidebar_workspace: None,
             workspace_conversations_visibility: HashMap::new(),
+            workspace_conversations_panes: HashMap::new(),
+            conversations_pane_workspace: None,
             workspace_file_trees: HashMap::new(),
             file_tree_workspace: None,
             workspace_buf_enter_targets: HashMap::new(),

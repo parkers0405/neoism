@@ -80,15 +80,10 @@ pub(crate) fn render_section_header(
     occlusion_rects: &[[f32; 4]],
 ) -> f32 {
     // Styled like a Markdown H3 heading: the mirrored H3 size, bold, drawn in
-    // the whitest theme token (`theme.fg` == 0xe8e8e8 on pastel_dark; the
-    // `theme.white` token is a bluish grey there) rather than the old muted
-    // header grey.
+    // the whitest theme token rather than the old muted header grey.
     let header_size = section_header_font_size(s);
-    // Headings render in the bundled "Press Start 2P" arcade pixel face when
-    // it resolves. The pixel face draws much wider per point than the default
-    // font, so only the DRAWN size drops by 3px (`s`-scaled) — every layout
-    // advance below still uses `header_size`, keeping section heights (and
-    // `tasks_section_height`'s mirror of them) unchanged.
+    // Press Start 2P draws much wider per point than the default font, so its
+    // drawn size drops by 3px while layout continues to use `header_size`.
     let pixel_font = crate::primitives::pixel_font_id(sugarloaf);
     let drawn_size = if pixel_font.is_some() {
         header_size - 3.0 * s
@@ -105,12 +100,8 @@ pub(crate) fn render_section_header(
         ..DrawOpts::default()
     };
 
-    // Illuminated drop-cap: the first letter scaled up from the header size
-    // and drawn white; the rest of the label in the bold header font on the
-    // same baseline. With the pixel face loaded the whole heading (cap
-    // included) shapes in Press Start 2P so it reads as one face; the
-    // UnifrakturMaguntia blackletter cap remains the fallback look, and a
-    // plain header the fallback to that.
+    // Preserve the original illuminated drop-cap treatment. When the pixel
+    // face resolves the cap uses it too; blackletter remains the fallback.
     let mut chars = label.chars();
     if let Some(first) = chars.next() {
         let rest: String = chars.collect();
@@ -127,9 +118,6 @@ pub(crate) fn render_section_header(
             clip_rect: Some(clip),
         };
         let first_str = first.to_string();
-        // Align the two actual font-size boxes on Sugarloaf's shared
-        // primary-font baseline. This remains correct when the configured
-        // family has a different ascent/descent ratio.
         let rest_baseline = sugarloaf.text_mut().baseline_offset(&rest_opts);
         let cap_baseline = sugarloaf.text_mut().baseline_offset(&cap_opts);
         let cap_y = y + rest_baseline - cap_baseline;
@@ -153,8 +141,6 @@ pub(crate) fn render_section_header(
             );
         }
     }
-    // Advance past the taller H3 title with breathing room so the value line
-    // below never rides up into its descenders or the raised drop-cap.
     y + header_size * 1.5
 }
 
@@ -178,7 +164,7 @@ pub(crate) fn render_text_line(
         clip_rect: Some(clip),
         ..DrawOpts::default()
     };
-    let truncated = truncate_to_fit(line, width, sugarloaf, &opts);
+    let truncated = truncate_sidebar_text(line, width, sugarloaf, &opts);
     draw_text_with_occlusion(sugarloaf, x, y, &truncated, &opts, occlusion_rects);
     y + FONT_SIZE * s * 1.5
 }
@@ -253,7 +239,7 @@ fn render_kv_row(
     let label_w = sugarloaf.text_mut().measure(label, &label_opts);
     let value_x = x + label_w + 8.0 * s;
     let value_budget = (width - (value_x - x) - 4.0 * s).max(0.0);
-    let value_str = truncate_to_fit(value, value_budget, sugarloaf, &value_opts);
+    let value_str = truncate_sidebar_text(value, value_budget, sugarloaf, &value_opts);
     draw_text_with_occlusion(
         sugarloaf,
         value_x,
@@ -835,8 +821,7 @@ fn render_subagent_rows<I: AgentSidePanelIconHost>(
     let icons_ready = I::register_agent_icons(sugarloaf);
 
     pane.side_panel_mut().clear_selected_cursor_rect();
-    let rows = pane.side_panel().subagents().to_vec();
-    let rows_len = rows.len();
+    let rows_len = pane.side_panel().subagents().len();
     if rows_len == 0 {
         return;
     }
@@ -920,6 +905,7 @@ fn render_subagent_rows<I: AgentSidePanelIconHost>(
         ..DrawOpts::default()
     };
     let current_id = pane.session_id_str().map(str::to_string);
+    let rows = pane.side_panel().subagents();
 
     // Blinking white dot opacity for Active state — sin sweep keeps
     // the dot lively without wandering off into invisible.
@@ -1053,8 +1039,12 @@ fn render_subagent_rows<I: AgentSidePanelIconHost>(
             }
             let title_right = list_rect[0] + list_rect[2] - pad_x;
             let title_budget = (title_right - title_x).max(0.0);
-            let title_text =
-                truncate_to_fit(&entry.title, title_budget, sugarloaf, &title_opts_row);
+            let title_text = truncate_sidebar_text(
+                &entry.title,
+                title_budget,
+                sugarloaf,
+                &title_opts_row,
+            );
             draw_text_with_occlusion(
                 sugarloaf,
                 title_x,
@@ -1103,7 +1093,7 @@ fn render_subagent_rows<I: AgentSidePanelIconHost>(
                     BranchStatus::Completed.label().to_string()
                 }
             });
-        let truncated_activity = truncate_to_fit(
+        let truncated_activity = truncate_sidebar_text(
             &activity_text,
             activity_budget,
             sugarloaf,

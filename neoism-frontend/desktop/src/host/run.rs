@@ -894,6 +894,7 @@ impl Renderer {
             }
 
             if self.conversations_visible {
+                let chrome_scale = self.chrome_scale();
                 // The workspace catalog owns its own pane, so it cannot infer
                 // which Agent tab is currently shown from its session_id.
                 let active_id = context_manager
@@ -922,7 +923,7 @@ impl Renderer {
                 >(
                     sugarloaf, panel,
                     [side_x, tree_top, panel_width, tree_height],
-                    &self.theme, 1.0, now, self.notes_sidebar_mouse,
+                    &self.theme, chrome_scale, now, self.notes_sidebar_mouse,
                     &tree_text_occlusions,
                 );
             }

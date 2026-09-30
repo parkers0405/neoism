@@ -355,6 +355,8 @@ pub(crate) fn validate_loaded(info: &AgentConfigDocument) -> ConfigValidation {
     }
     validate_model_ref("model", info.model.as_deref(), &mut diagnostics);
     validate_model_ref("smallModel", info.small_model.as_deref(), &mut diagnostics);
+    validate_model_ref("imageModel", info.image_model.as_deref(), &mut diagnostics);
+    validate_model_ref("videoModel", info.video_model.as_deref(), &mut diagnostics);
 
     for (provider_id, provider) in &info.provider {
         let path = format!("provider.{provider_id}");

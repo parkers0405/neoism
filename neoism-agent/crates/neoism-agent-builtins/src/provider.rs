@@ -8,6 +8,7 @@ use neoism_agent_core::{
 use neoism_agent_service_api::CredentialScope;
 
 use crate::auth_store::AuthStore;
+use crate::provider_catalog::OpenAiModelAccess;
 
 #[path = "provider_anthropic.rs"]
 mod provider_anthropic;
@@ -17,12 +18,15 @@ mod provider_chat_completion;
 mod provider_openai;
 #[path = "provider_openai_stream.rs"]
 mod provider_openai_stream;
+#[path = "provider_media.rs"]
+mod provider_media;
 #[path = "provider_stub.rs"]
 mod provider_stub;
 use provider_anthropic::{AnthropicClient, AnthropicRuntime};
 pub(crate) use provider_chat_completion::reasoning_effort;
 use provider_openai::{OpenAiClient, OpenAiRuntime};
 pub use provider_openai_stream::estimate_tokens;
+pub(crate) use provider_media::generate_media;
 use provider_stub::StubRuntime;
 
 pub type ProviderEventStream =
@@ -83,6 +87,22 @@ impl ProviderRegistry {
         connected.sort();
         connected.dedup();
         Ok(connected)
+    }
+
+    pub async fn openai_model_access(
+        &self,
+        auth_store: &AuthStore,
+    ) -> anyhow::Result<OpenAiModelAccess> {
+        let Some(auth @ AuthInfo::OAuth { .. }) = auth_store.get("openai").await? else {
+            return Ok(OpenAiModelAccess::Api);
+        };
+        match self.openai.codex_model_ids(auth_store, auth).await {
+            Ok(ids) => Ok(OpenAiModelAccess::Codex(ids)),
+            Err(error) => {
+                tracing::warn!(%error, "failed to load account-specific Codex model catalog");
+                Ok(OpenAiModelAccess::Codex(Default::default()))
+            }
+        }
     }
 
     pub async fn stream(
@@ -213,12 +233,6 @@ impl ProviderRegistry {
                     }));
                 }
             }
-        }
-        if provider_id == "opencode" {
-            return Ok(Some(AuthInfo::Api {
-                key: "public".to_string(),
-                metadata: None,
-            }));
         }
         Ok(None)
     }

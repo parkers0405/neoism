@@ -920,6 +920,7 @@ pub enum Role {
 pub enum ContentKind {
     Text,
     Reasoning,
+    Compaction,
     Tool { name: String },
 }
 

@@ -50,7 +50,34 @@ pub fn managed_bin_map() -> Result<BTreeMap<String, String>, InstallError> {
         }
         manifests
     });
-    managed_bin_map_from_manifests(&paths::installed_record_path(), manifests)
+    let mut managed =
+        managed_bin_map_from_manifests(&paths::installed_record_path(), manifests)?;
+    managed.extend(managed_node_bins());
+    Ok(managed)
+}
+
+fn managed_node_bins() -> BTreeMap<String, String> {
+    let root = paths::node_dir().join(format!(
+        "v{}",
+        crate::install_runner::managed_node::NODE_VERSION
+    ));
+    #[cfg(windows)]
+    let candidates = [
+        ("node", root.join("node.exe")),
+        ("npm", root.join("npm.cmd")),
+        ("npx", root.join("npx.cmd")),
+    ];
+    #[cfg(not(windows))]
+    let candidates = [
+        ("node", root.join("bin/node")),
+        ("npm", root.join("bin/npm")),
+        ("npx", root.join("bin/npx")),
+    ];
+    candidates
+        .into_iter()
+        .filter(|(_, path)| path.is_file())
+        .map(|(name, path)| (name.to_string(), path.to_string_lossy().into_owned()))
+        .collect()
 }
 
 /// Path-explicit variant for tests. Keeps the production path

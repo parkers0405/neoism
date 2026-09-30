@@ -26,6 +26,9 @@ impl NeoismAgentPane {
             Some("reasoning" | "thinking") => {
                 self.note_streaming(NeoismAgentStreamingState::Thinking, None);
             }
+            Some("compaction") => {
+                self.note_streaming(NeoismAgentStreamingState::Compacting, None);
+            }
             Some("text") | None => {
                 self.note_streaming(NeoismAgentStreamingState::Generating, None);
             }
@@ -216,6 +219,13 @@ impl NeoismAgentPane {
                 self.mark_timeline_message_dirty_at(index);
                 return;
             }
+            if kind.as_deref() == Some("compaction") {
+                self.upsert_part_message(
+                    NeoismAgentMessage::compaction(delta.to_string(), "summary")
+                        .with_id(message_id.to_string()),
+                );
+                return;
+            }
         }
         if let Some(part_id) = part_id.as_deref().filter(|id| !id.is_empty()) {
             if let Some(index) = self
@@ -230,6 +240,10 @@ impl NeoismAgentPane {
             let message = match kind.as_deref() {
                 Some("reasoning" | "thinking") => {
                     NeoismAgentMessage::reasoning(delta).with_id(part_id.to_string())
+                }
+                Some("compaction") => {
+                    NeoismAgentMessage::compaction(delta.to_string(), "summary")
+                        .with_id(part_id.to_string())
                 }
                 _ => NeoismAgentMessage::assistant(delta).with_id(part_id.to_string()),
             };
@@ -250,6 +264,9 @@ impl NeoismAgentPane {
 
         self.messages.push(match message_kind {
             NeoismAgentMessageKind::Reasoning => NeoismAgentMessage::reasoning(delta),
+            NeoismAgentMessageKind::Compaction => {
+                NeoismAgentMessage::compaction(delta.to_string(), "summary")
+            }
             _ => NeoismAgentMessage::assistant(delta),
         });
         self.mark_timeline_message_dirty_at(self.messages.len().saturating_sub(1));

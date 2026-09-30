@@ -222,6 +222,12 @@ impl Application<'_> {
                         return;
                     }
 
+                    if route.window.screen.begin_conversations_sidebar_resize() {
+                        route.window.winit_window.set_cursor(CursorIcon::ColResize);
+                        route.request_redraw();
+                        return;
+                    }
+
                     if route.window.screen.begin_git_diff_panel_resize() {
                         route.window.winit_window.set_cursor(CursorIcon::ColResize);
                         route.request_redraw();
@@ -547,6 +553,14 @@ impl Application<'_> {
                 }
 
                 if button == MouseButton::Left
+                    && route.window.screen.end_conversations_sidebar_resize()
+                {
+                    route.window.set_cursor(CursorIcon::Default);
+                    route.request_redraw();
+                    return;
+                }
+
+                if button == MouseButton::Left
                     && route.window.screen.end_git_diff_panel_resize()
                 {
                     route.window.set_cursor(CursorIcon::Default);
@@ -786,6 +800,13 @@ impl Application<'_> {
 
         if route.window.screen.notes_sidebar_resize_active() {
             route.window.screen.drag_notes_sidebar_resize();
+            route.window.set_cursor(CursorIcon::ColResize);
+            route.request_redraw();
+            return;
+        }
+
+        if route.window.screen.conversations_sidebar_resize_active() {
+            route.window.screen.drag_conversations_sidebar_resize();
             route.window.set_cursor(CursorIcon::ColResize);
             route.request_redraw();
             return;
@@ -1282,6 +1303,16 @@ impl Application<'_> {
         }
 
         if route.window.screen.is_hovering_notes_sidebar_resize_edge() {
+            route.window.set_cursor(CursorIcon::ColResize);
+            route.window.screen.mouse.on_border = true;
+            return;
+        }
+
+        if route
+            .window
+            .screen
+            .is_hovering_conversations_sidebar_resize_edge()
+        {
             route.window.set_cursor(CursorIcon::ColResize);
             route.window.screen.mouse.on_border = true;
             return;

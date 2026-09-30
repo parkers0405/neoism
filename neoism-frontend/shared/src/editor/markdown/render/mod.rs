@@ -97,9 +97,7 @@ pub fn render(
         return;
     }
 
-    let bg = theme.f32(theme.bg);
     let surface = theme.f32(theme.surface);
-    sugarloaf.rect(None, x, y, w, h, bg, DEPTH, ORDER_BG);
 
     let pad_x = 48.0;
     let pad_top = 38.0;

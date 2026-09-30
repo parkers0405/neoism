@@ -298,7 +298,6 @@
 - [Local Bash lease must use approved workdir](bug_bash_external_workdir_local_lease.md) - External Bash workdir rejected by local lease after permission approval
 - [Password-free joined Agent proxy](bug_password_free_joined_agent_proxy.md) - Password-free joined Agent proxy authentication mismatch and readiness gate
 - [Skill generation lease refresh](bug_skill_generation_lease_refresh.md) - Skill generation re-lease on retired snapshot fixed and live-verified; release published
-- [Multi-agent conversation sidebar](feature_multi_agent_conversation_sidebar.md) - Native Rust four-provider chat and ACP history integration
 - [ACP native history catalog/import](feature_acp_native_history_import.md) - ACP catalog, text-only import and queued HTTP lifecycle integration for three providers
 - [ACP provider session options and echo triage](feature_acp_provider_session_controls.md) - ACP provider controls contract, persistence, serialization and narrow prompt-echo handling
 - [ACP native panel and commands](feature_acp_native_panel_commands.md) - Native ACP options pending/error and immediate catalog reconciliation
@@ -313,3 +312,10 @@
 - [ACP draft send and phantom OpenCode history](bug_acp_draft_send_phantom_history.md) - Draft ACP model lost on first send and empty OpenCode previews shown as chats
 - [Joined workspace OAuth handoff](feature_joined_workspace_auth.md) - Joined workspace provider/MCP auth host credentials, guest browser, host callback routing
 - [ACP provider parity and sidebar](feature_acp_provider_parity_2026_09.md) - ACP provider parity and sidebar fixes
+- [Yarn PnP TypeScript SDK support](feature_yarn_pnp_typescript_sdk.md) - Automatic bounded Yarn PnP detection, cached patched TS SDK selection, degraded fallback, protocol/UI observability, and content identity.
+- [Compaction timeline identity — FIXED](bug_compaction_timeline_identity.md) - Compaction marker/text/deltas share assistant identity and kind across live, WASM, and hydration timelines
+- [Nightly FPS regression: preferred-font coverage](perf_nightly_font_coverage_fps.md) - Nightly explicit-font shaping locked and parsed coverage per character per frame; cached by font and character
+- [Multi-agent conversation sidebar](feature_multi_agent_conversation_sidebar.md) - Neoism-owned ACP conversations sidebar, preserved pixel UI, resize/marquee/state/performance overhaul
+- [Provider model visibility by auth path — FIXED](bug_provider_model_visibility.md) - Codex OAuth models now account-authoritative; disconnected Zen no longer advertises or uses anonymous free models
+- [Agent nested code fences — FIXED](bug_agent_nested_code_fences.md) - Rare empty agent code cards caused by unconditional fence toggling; fixed with marker/length-aware CommonMark fence tracking.
+- [Mashup wallpaper pane occlusion — FIXED](bug_mashup_wallpaper_occluded.md) - Mashup wallpaper only top/bottom due pane bg fills; fixed all central surfaces + parked PTY suppression

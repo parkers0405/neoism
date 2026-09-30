@@ -99,10 +99,15 @@ pub(crate) async fn print_provider_model_list(
     provider: &str,
     current_model: Option<&str>,
 ) -> anyhow::Result<()> {
-    let value =
-        response_json(client.get(format!("{server}/v2/providers")).send().await?).await?;
+    let value = response_json(
+        client
+            .get(format!("{server}/v2/providers/configured"))
+            .send()
+            .await?,
+    )
+    .await?;
     let providers = value
-        .get("all")
+        .get("providers")
         .and_then(Value::as_array)
         .context("server did not return provider list")?;
     let provider = providers

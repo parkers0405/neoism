@@ -113,6 +113,61 @@ mod tests {
                 provider: "neoism-extensions".to_string()
             }
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn lsp_ignores_unrelated_managed_id_and_prefers_requested_binary() {
+        let root = std::env::temp_dir().join(format!(
+            "neoism-agent-adapter-lsp-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let kernel = root.join("python");
+        let server = root.join("pyright-langserver");
+        for path in [&kernel, &server] {
+            fs::write(path, b"test").unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+        let request = ExecutableRequest::new(
+            "pyright-langserver",
+            ExecutablePurpose::LanguageServer,
+        )
+        .with_preferred_id("python")
+        .with_search_paths([root.clone()]);
+        let service = NeoismExecutableService::from_managed(BTreeMap::from([(
+            "python".to_string(),
+            kernel.display().to_string(),
+        )]));
+        let result = service.resolve(&request).unwrap();
+        assert_eq!(result.path, server);
+        assert_eq!(result.source, ExecutableSource::ProvidedPath);
+
+        let service = NeoismExecutableService::from_managed(BTreeMap::from([
+            ("python".to_string(), kernel.display().to_string()),
+            (
+                "pyright-langserver".to_string(),
+                server.display().to_string(),
+            ),
+        ]));
+        let result = service.resolve(&request).unwrap();
+        assert_eq!(result.path, server);
+        assert!(matches!(result.source, ExecutableSource::Managed { .. }));
+
+        let explicit = ExecutableRequest::new(&server, ExecutablePurpose::LanguageServer)
+            .with_preferred_id("python");
+        let result = service.resolve(&explicit).unwrap();
+        assert_eq!(result.path, server);
+        assert_eq!(result.source, ExecutableSource::ExplicitPath);
+        fs::remove_dir_all(root).unwrap();
     }
 }
 
@@ -127,19 +182,40 @@ impl ExecutableService for NeoismExecutableService {
         &self,
         request: &ExecutableRequest,
     ) -> Result<ExecutableResult, ExecutableError> {
-        let program_key = Path::new(&request.program)
-            .file_name()
-            .and_then(|name| name.to_str());
-        let managed = request
-            .preferred_ids
-            .iter()
-            .filter_map(|id| self.managed.get(id))
-            .chain(
-                program_key
-                    .into_iter()
-                    .filter_map(|name| self.managed.get(name)),
-            )
-            .next();
+        use neoism_agent_service_api::ExecutablePurpose;
+
+        let program = Path::new(&request.program);
+        if program.is_absolute() || program.components().count() > 1 {
+            return self.standard.resolve(request);
+        }
+        let program_key = program.file_name().and_then(|name| name.to_str());
+        let managed = if request.purpose == ExecutablePurpose::LanguageServer {
+            // Package IDs can name unrelated tools (e.g. "python" is a notebook
+            // kernel). An LSP must resolve to the executable it requested.
+            program_key
+                .and_then(|name| self.managed.get(name))
+                .or_else(|| {
+                    request
+                        .preferred_ids
+                        .iter()
+                        .filter_map(|id| self.managed.get(id))
+                        .find(|path| {
+                            Path::new(path).file_name().and_then(|name| name.to_str())
+                                == program_key
+                        })
+                })
+        } else {
+            request
+                .preferred_ids
+                .iter()
+                .filter_map(|id| self.managed.get(id))
+                .chain(
+                    program_key
+                        .into_iter()
+                        .filter_map(|name| self.managed.get(name)),
+                )
+                .next()
+        };
         if let Some(path) = managed {
             let managed_request = ExecutableRequest::new(path, request.purpose.clone());
             if let Ok(mut result) = self.standard.resolve(&managed_request) {

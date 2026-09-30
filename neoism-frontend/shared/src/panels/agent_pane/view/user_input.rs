@@ -2201,15 +2201,8 @@ pub fn render_status_chips(
             extrude: true,
             ..DrawOpts::default()
         };
-        let caret = "\u{f078}";
-        let caret_opts = DrawOpts {
-            font_size: font_size * 0.66,
-            color: theme.u8(theme.muted),
-            ..DrawOpts::default()
-        };
         let label_w = sugarloaf.text_mut().measure(label, &opts);
-        let caret_w = sugarloaf.text_mut().measure(caret, &caret_opts);
-        let width = (label_w + caret_w + 19.0 * s).min(max_w);
+        let width = (label_w + 8.0 * s).min(max_w);
         let clip_rect = Some([x, y - 5.0 * s, width, STATUS_CHIP_HIT_H * s]);
         draw_text_clipped(
             sugarloaf,
@@ -2219,36 +2212,20 @@ pub fn render_status_chips(
             &DrawOpts { clip_rect, ..opts },
             occlusion_rects,
         );
-        if width >= label_w + caret_w + 10.0 * s {
-            draw_text_clipped(
-                sugarloaf,
-                x + label_w + 6.0 * s,
-                y + 3.5 * s,
-                caret,
-                &caret_opts,
-                occlusion_rects,
-            );
-        }
-        pane.register_status_chip_rect(0, [x, y - 5.0 * s, width, STATUS_CHIP_HIT_H * s]);
         x += width + 5.0 * s;
         remaining_w = (max_w - width - 5.0 * s).max(0.0);
     }
-    // External controls are offered only from a provider-confirmed snapshot.
-    // Web/shared panes without one retain the recognizable read-only source.
+    // External providers use the same compact mode/model/thinking footer as
+    // Neoism. Provider-specific settings live in the normal slash picker.
     let source = pane.conversation_source();
     if source.provider().is_some() {
         let font_size = status_chip_font_size(max_w, s);
-        let mut start_x = x;
-        let order = pane
+        let Some((order, options)) = pane
             .external_options()
-            .map(|snapshot| snapshot.footer_order())
-            .unwrap_or_default();
-        let hidden_options = pane
-            .external_options()
-            .is_some_and(|snapshot| snapshot.display_order().len() > order.len());
-        let options = pane
-            .external_options()
-            .map(|snapshot| snapshot.options.clone());
+            .map(|snapshot| (snapshot.footer_order(), snapshot.options.clone()))
+        else {
+            return;
+        };
         let caret = "\u{f078}";
         let caret_opts = DrawOpts {
             font_size: font_size * 0.66,
@@ -2256,151 +2233,18 @@ pub fn render_status_chips(
             ..DrawOpts::default()
         };
         let caret_w = sugarloaf.text_mut().measure(caret, &caret_opts);
-        let retry_label = if pane.external_options_error().is_some_and(
-            crate::panels::agent_pane::state::external_options::auth_required,
-        ) {
-            if source.provider() == Some("codex") {
-                "codex login / Retry".to_string()
-            } else {
-                format!("{} sign-in / Retry", source.label())
-            }
-        } else {
-            "Retry options".to_string()
-        };
-        if options.is_none() {
-            let (label, enabled) = if pane.external_options_error().is_some() {
-                (retry_label.as_str(), true)
-            } else {
-                ("Loading models", false)
-            };
-            let opts = DrawOpts {
-                font_size,
-                color: theme.u8(if enabled {
-                    theme.readable_accent(theme.cyan)
-                } else {
-                    theme.muted
-                }),
-                bold: enabled,
-                ..DrawOpts::default()
-            };
-            let width = sugarloaf.text_mut().measure(label, &opts).min(remaining_w);
-            let opts = DrawOpts {
-                clip_rect: Some([x, y - 5.0 * s, width, STATUS_CHIP_HIT_H * s]),
-                ..opts
-            };
-            draw_text_clipped(sugarloaf, x, y, label, &opts, occlusion_rects);
-            if enabled && width > 0.0 {
-                pane.register_status_chip_rect(
-                    offset,
-                    [x, y - 5.0 * s, width, STATUS_CHIP_HIT_H * s],
-                );
-            }
-            return;
-        }
-        if pane.external_options_error().is_some() {
-            let label = retry_label.as_str();
-            let opts = DrawOpts {
-                font_size,
-                color: theme.u8(theme.readable_accent(theme.cyan)),
-                bold: true,
-                ..DrawOpts::default()
-            };
-            let width = sugarloaf.text_mut().measure(label, &opts).min(remaining_w);
-            let opts = DrawOpts {
-                clip_rect: Some([x, y - 5.0 * s, width, STATUS_CHIP_HIT_H * s]),
-                ..opts
-            };
-            draw_text_clipped(sugarloaf, x, y, label, &opts, occlusion_rects);
-            if width > 0.0 {
-                pane.register_status_chip_rect(
-                    offset,
-                    [x, y - 5.0 * s, width, STATUS_CHIP_HIT_H * s],
-                );
-            }
-            x += width + 5.0 * s;
-            remaining_w = (remaining_w - width - 5.0 * s).max(0.0);
-            start_x = x;
-        }
-        let replay_failed = pane
-            .external_options()
-            .is_some_and(|snapshot| snapshot.replay_error.is_some());
-        let overflow_opts = DrawOpts {
-            font_size,
-            color: theme.u8(theme.readable_accent(if replay_failed {
-                theme.yellow
-            } else {
-                theme.cyan
-            })),
-            bold: true,
-            ..DrawOpts::default()
-        };
-        let overflow_name = if replay_failed {
-            "Review options"
-        } else {
-            "Options"
-        };
-        let overflow_label =
-            if sugarloaf.text_mut().measure(overflow_name, &overflow_opts)
-                + caret_w
-                + 22.0 * s
-                > remaining_w
-            {
-                "\u{2026}"
-            } else {
-                overflow_name
-            };
-        let overflow_w = sugarloaf.text_mut().measure(overflow_label, &overflow_opts)
-            + caret_w
-            + 22.0 * s;
         let gap = 4.0 * s;
-        let option_label = |option: &crate::panels::agent_pane::state::external_options::ExternalOption| {
-            if replay_failed {
-                return if option.category == "model" { "Choose model".to_string() } else { format!("Review {}", option.name) };
-            }
-            match option.category.as_str() {
-                "mode" | "thought_level" => option.selected_label().to_string(),
-                "model" => model_chip_label(option.selected_label(), narrow).to_string(),
-                _ => format!("{}: {}", option.name, option.selected_label()),
-            }
-        };
-        let options = options.unwrap();
-        if options.is_empty() {
-            let label = "No model options";
-            let opts = DrawOpts {
-                font_size,
-                color: theme.u8(theme.muted),
-                ..DrawOpts::default()
-            };
-            draw_text_clipped(sugarloaf, x, y, label, &opts, occlusion_rects);
-            return;
-        }
-        let widths: Vec<f32> = order
-            .iter()
-            .map(|&index| {
-                let label = option_label(&options[index]);
-                sugarloaf.text_mut().measure(&label, &overflow_opts) + caret_w + 22.0 * s
-            })
-            .collect();
-        let (visible, overflow) =
-            crate::panels::agent_pane::state::external_options::visible_chip_count(
-                &widths,
-                remaining_w,
-                overflow_w,
-                gap,
-                hidden_options,
-            );
-        for (display_index, &option_index) in order.iter().take(visible).enumerate() {
+        for option_index in order {
             let option = &options[option_index];
-            let label = option_label(option);
-            let color = if replay_failed {
-                theme.yellow
-            } else {
-                match option.category.as_str() {
-                    "mode" => theme.yellow,
-                    "model" => theme.blue,
-                    "thought_level" => theme.magenta,
-                    _ => theme.cyan,
-                }
+            let label = match option.category.as_str() {
+                "model" => model_chip_label(option.selected_label(), narrow),
+                _ => option.selected_label(),
+            };
+            let color = match option.category.as_str() {
+                "mode" => theme.yellow,
+                "model" => theme.blue,
+                "thought_level" => theme.magenta,
+                _ => continue,
             };
             let opts = DrawOpts {
                 font_size,
@@ -2409,8 +2253,11 @@ pub fn render_status_chips(
                 extrude: true,
                 ..DrawOpts::default()
             };
-            let width = widths[display_index];
-            draw_text_clipped(sugarloaf, x, y, &label, &opts, occlusion_rects);
+            let width = sugarloaf.text_mut().measure(label, &opts) + caret_w + 22.0 * s;
+            if width > remaining_w {
+                break;
+            }
+            draw_text_clipped(sugarloaf, x, y, label, &opts, occlusion_rects);
             draw_text_clipped(
                 sugarloaf,
                 x + width - caret_w - 13.0 * s,
@@ -2424,38 +2271,7 @@ pub fn render_status_chips(
                 [x - 3.0 * s, y - 5.0 * s, width, STATUS_CHIP_HIT_H * s],
             );
             x += width + gap;
-        }
-        if overflow {
-            let hit_w = overflow_w.min((start_x + remaining_w - x).max(0.0));
-            let clip_rect = Some([x, y - 5.0 * s, hit_w, STATUS_CHIP_HIT_H * s]);
-            draw_text_clipped(
-                sugarloaf,
-                x,
-                y,
-                overflow_label,
-                &DrawOpts {
-                    clip_rect,
-                    ..overflow_opts
-                },
-                occlusion_rects,
-            );
-            draw_text_clipped(
-                sugarloaf,
-                x + overflow_w - caret_w - 13.0 * s,
-                y + 2.0 * s,
-                caret,
-                &DrawOpts {
-                    clip_rect,
-                    ..caret_opts
-                },
-                occlusion_rects,
-            );
-            if hit_w > 0.0 {
-                pane.register_status_chip_rect(
-                    options.len() + 1 + offset,
-                    [x - 3.0 * s, y - 5.0 * s, hit_w, STATUS_CHIP_HIT_H * s],
-                );
-            }
+            remaining_w = (remaining_w - width - gap).max(0.0);
         }
         return;
     }

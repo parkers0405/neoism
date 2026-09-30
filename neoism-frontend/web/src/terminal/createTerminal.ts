@@ -82,6 +82,7 @@ export interface TerminalAdapter {
     agentNewChatFrom?(provider: string): void;
     drainConversationOpen?(): string | null;
     conversationsVisible?(): boolean;
+    showConversationsForAgent?(): void;
     /** Drain pending finder "open this hit" intents queued when the
      *  user activates a finder row (Enter / click). Each entry is a
      *  `FinderOpenIntent`; the host turns it into a buffer-tab append
@@ -1368,6 +1369,7 @@ interface ChromeBridgeInstance {
     agent_new_chat_from?(provider: string): void;
     drain_conversation_open?(): string | undefined;
     conversations_visible?(): boolean;
+    show_conversations_for_agent?(): void;
     drain_finder_open_intents(): unknown;
     drain_palette_intents(): unknown;
     set_buffer_tabs(titlesJson: string, active: number): void;
@@ -2444,6 +2446,9 @@ class ChromeAdapter implements TerminalAdapter {
     }
     conversationsVisible(): boolean {
         return this.inner.conversations_visible?.() === true;
+    }
+    showConversationsForAgent(): void {
+        this.inner.show_conversations_for_agent?.();
     }
     drainConversationNew(): string | null {
         return this.inner.drain_conversation_new?.() ?? null;

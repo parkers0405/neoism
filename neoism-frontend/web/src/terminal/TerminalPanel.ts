@@ -5668,6 +5668,7 @@ export class TerminalPanel {
     this.activeTabIndex = this.bufferTabs.length - 1;
     this.assignActiveTabToFocusedEditorPane();
     this.replayBufferTabs();
+    this.wasmAdapter?.showConversationsForAgent?.();
     const directory = this.wasmAdapter?.fileTreeWorkspaceRoot?.() ?? null;
     this.wasmAdapter?.agentNewThread?.(directory);
     this.ensureNeoismAgentAttached();

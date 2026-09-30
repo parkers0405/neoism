@@ -29,7 +29,6 @@ impl NeoismAgentPane {
         self.external_picker_option_id = None;
         if self.picker.as_ref().is_some_and(|picker| {
             picker.kind == NeoismAgentPickerKind::ExternalOption
-                || picker.kind == NeoismAgentPickerKind::ExternalOptionMenu
                 || picker.kind == NeoismAgentPickerKind::Slash
         }) {
             self.picker = None;
@@ -463,46 +462,6 @@ impl NeoismAgentPane {
         true
     }
 
-    pub(crate) fn open_external_options_menu(&mut self) {
-        if self.external_options_pending.is_some() {
-            return;
-        }
-        if self.picker.as_ref().is_some_and(|picker| {
-            picker.kind == NeoismAgentPickerKind::ExternalOptionMenu
-        }) {
-            self.close_picker();
-            return;
-        }
-        let Some(snapshot) = self.external_options() else {
-            return;
-        };
-        let rows = snapshot
-            .display_order()
-            .into_iter()
-            .map(|index| {
-                let option = &snapshot.options[index];
-                NeoismAgentPickerOption::new(
-                    &option.name,
-                    option.selected_label(),
-                    "",
-                    &option.id,
-                )
-            })
-            .collect();
-        self.status_chip_activated = Some((snapshot.options.len() + 1, Instant::now()));
-        self.external_picker_option_id = None;
-        self.picker = Some(NeoismAgentPicker::new(
-            NeoismAgentPickerKind::ExternalOptionMenu,
-            if self.session_id.is_none() {
-                "Provider options"
-            } else {
-                "Session options"
-            },
-            rows,
-            0,
-        ));
-    }
-
     pub(crate) fn open_external_model_picker_from_slash(&mut self) -> bool {
         if self.external_options_pending.is_some() {
             self.pending_external_model_picker = true;
@@ -551,6 +510,54 @@ mod tests {
             {"id":"provider-model","name":"Model","category":"model","type":"select","currentValue":value,
              "options":[{"value":"a","name":"A"},{"value":"b","name":"B"}]}
         ]}), "claude").unwrap()
+    }
+
+    #[test]
+    fn slash_picker_lists_provider_settings_directly() {
+        let mut pane = NeoismAgentPane::default();
+        pane.new_chat_source = ConversationSource::Codex;
+        pane.external_options = Some(ExternalOptions::parse(&serde_json::json!({
+            "provider":"codex","externalSessionId":null,"modeFallback":false,"selectedOptions":{},
+            "configOptions":[
+                {"id":"model","name":"Model","category":"model","type":"select","currentValue":"o3","options":[{"value":"o3","name":"o3"}]},
+                {"id":"effort","name":"Thinking","category":"thought_level","type":"select","currentValue":"high","options":[{"value":"high","name":"High"}]},
+                {"id":"fast","name":"Fast mode","category":"model_config","type":"select","currentValue":"off","options":[{"value":"off","name":"Off"},{"value":"on","name":"On"}]}
+            ]
+        }), "codex").unwrap());
+        pane.input = "/".into();
+        pane.cursor_byte = pane.input.len();
+        pane.sync_slash_picker();
+        let values = pane
+            .picker
+            .as_ref()
+            .unwrap()
+            .options()
+            .iter()
+            .map(|option| option.value.as_str())
+            .collect::<Vec<_>>();
+        assert!(values.contains(&"__external_config:model"));
+        assert!(values.contains(&"__external_config:effort"));
+        assert!(values.contains(&"__external_config:fast"));
+        assert!(!values.contains(&"__external_options"));
+
+        pane.input = "/fast".into();
+        pane.cursor_byte = pane.input.len();
+        pane.sync_slash_picker();
+        assert_eq!(
+            pane.picker
+                .as_ref()
+                .unwrap()
+                .selected_option()
+                .unwrap()
+                .value,
+            "__external_config:fast"
+        );
+        assert!(pane.commit_picker());
+        assert_eq!(
+            pane.picker.as_ref().unwrap().kind,
+            NeoismAgentPickerKind::ExternalOption
+        );
+        assert_eq!(pane.external_picker_option_id.as_deref(), Some("fast"));
     }
 
     #[test]
@@ -903,56 +910,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_slash_options_reach_hidden_fast_and_thinking_controls() {
-        use neoism_ui::panels::agent_pane::state::external_options::{
-            ExternalChoice, ExternalOption,
-        };
-        let mut pane = NeoismAgentPane::default();
-        pane.new_chat_source = ConversationSource::Codex;
-        let mut options = snapshot("a");
-        options.provider = "codex".into();
-        for (id, category) in [("thought", "thought_level"), ("fast", "model_config")] {
-            options.options.push(ExternalOption {
-                id: id.into(),
-                name: id.into(),
-                category: category.into(),
-                current_value: "off".into(),
-                choices: vec![ExternalChoice {
-                    value: "off".into(),
-                    name: "Off".into(),
-                    group: None,
-                }],
-            });
-        }
-        pane.external_options = Some(options);
-        pane.input = "/options".into();
-        pane.sync_slash_picker();
-        assert_eq!(
-            pane.picker
-                .as_ref()
-                .unwrap()
-                .selected_option()
-                .unwrap()
-                .value,
-            "__external_options"
-        );
-        assert!(pane.commit_picker());
-        assert_eq!(
-            pane.picker.as_ref().unwrap().kind,
-            NeoismAgentPickerKind::ExternalOptionMenu
-        );
-        pane.picker.as_mut().unwrap().move_selection(2);
-        assert!(pane.commit_picker());
-        assert_eq!(pane.external_picker_option_id.as_deref(), Some("fast"));
-        pane.picker = None;
-        pane.input = "/think".into();
-        pane.sync_slash_picker();
-        assert!(pane.commit_picker());
-        assert_eq!(pane.external_picker_option_id.as_deref(), Some("thought"));
-    }
-
-    #[test]
-    fn reordered_footer_and_overflow_target_original_provider_option_ids() {
+    fn reordered_footer_targets_original_provider_option_ids() {
         use neoism_ui::panels::agent_pane::state::external_options::{
             ExternalChoice, ExternalOption,
         };
@@ -986,70 +944,6 @@ mod tests {
         pane.external_options = Some(options);
         pane.open_status_chip_picker(3); // visually first mode, original index 2
         assert_eq!(pane.external_picker_option_id.as_deref(), Some("mode"));
-        pane.open_status_chip_picker(4); // overflow menu
-        assert_eq!(
-            pane.picker
-                .as_ref()
-                .unwrap()
-                .selected_option()
-                .unwrap()
-                .value,
-            "mode"
-        );
-        pane.picker.as_mut().unwrap().move_selection(1);
-        assert!(pane.commit_picker());
-        assert_eq!(
-            pane.external_picker_option_id.as_deref(),
-            Some("provider-model")
-        );
-    }
-
-    #[test]
-    fn overflow_menu_reaches_later_provider_choices_without_touching_draft() {
-        let mut pane = NeoismAgentPane::default();
-        pane.new_chat_source = ConversationSource::ClaudeCode;
-        pane.session_id = Some("root".into());
-        pane.input = "unfinished prompt".into();
-        let mut options = snapshot("a");
-        options.options[0].name = "A very long model label".into();
-        options.options.push(neoism_ui::panels::agent_pane::state::external_options::ExternalOption {
-            id: "thought".into(), name: "Thinking".into(), category: "".into(), current_value: "low".into(),
-            choices: vec![neoism_ui::panels::agent_pane::state::external_options::ExternalChoice { value: "low".into(), name: "Low".into(), group: None }],
-        });
-        pane.external_options = Some(options);
-        pane.register_status_chip_rect(3, [10.0, 10.0, 32.0, 20.0]);
-        let hit = pane.status_chip_at(15.0, 15.0).unwrap();
-        pane.open_status_chip_picker(hit); // two provider options + overflow
-        assert_eq!(
-            pane.picker.as_ref().unwrap().kind,
-            NeoismAgentPickerKind::ExternalOptionMenu
-        );
-        assert_eq!(
-            pane.picker
-                .as_ref()
-                .unwrap()
-                .selected_option()
-                .unwrap()
-                .value,
-            "provider-model"
-        );
-        pane.picker.as_mut().unwrap().move_selection(1);
-        assert!(pane.commit_picker());
-        assert_eq!(
-            pane.picker.as_ref().unwrap().kind,
-            NeoismAgentPickerKind::ExternalOption
-        );
-        assert_eq!(pane.external_picker_option_id.as_deref(), Some("thought"));
-        assert_eq!(
-            pane.picker
-                .as_ref()
-                .unwrap()
-                .selected_option()
-                .unwrap()
-                .title,
-            "Low"
-        );
-        assert_eq!(pane.input, "unfinished prompt");
     }
 
     #[test]

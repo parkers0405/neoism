@@ -416,6 +416,48 @@ fn hard_wrapped_file_link_is_joined_without_touching_fenced_code() {
 }
 
 #[test]
+fn longer_outer_fence_keeps_inner_code_examples_together() {
+    let source = "Before.\n\n````markdown\n```rust\nfn main() {}\n```\n\n```python\nprint('safe')\n```\n````\n\nAfter.";
+    assert_eq!(
+        semantic_markdown_lines(source),
+        vec![
+            "Before.",
+            "",
+            "````markdown",
+            "```rust",
+            "fn main() {}",
+            "```",
+            "",
+            "```python",
+            "print('safe')",
+            "```",
+            "````",
+            "",
+            "After.",
+        ]
+    );
+}
+
+#[test]
+fn link_normalization_does_not_enter_a_nested_shorter_fence() {
+    let source = "[outside\nlink](https://example.com/a\nb)\n````markdown\n```md\n[inside\nlink](https://example.com/c\nd)\n```\n````";
+    let normalized = normalize_multiline_markdown_links(source);
+    assert!(normalized.starts_with("[outside link](https://example.com/ab)"));
+    assert!(normalized.contains(
+        "````markdown\n```md\n[inside\nlink](https://example.com/c\nd)\n```\n````"
+    ));
+}
+
+#[test]
+fn mixed_fence_marker_inside_code_is_literal_content() {
+    let source = "~~~markdown\n```rust\nlet safe = true;\n```\n~~~";
+    assert_eq!(
+        semantic_markdown_lines(source),
+        vec!["~~~markdown", "```rust", "let safe = true;", "```", "~~~",]
+    );
+}
+
+#[test]
 fn hard_wrapped_ordered_list_web_link_remains_clickable() {
     let source = "5. **[Sira — Founding\nEngineer](https://www.ycombinator.com/companies/sira/jobs/NwjdNxG-founding-en\ngineer)**";
     let normalized = normalize_multiline_markdown_links(source);

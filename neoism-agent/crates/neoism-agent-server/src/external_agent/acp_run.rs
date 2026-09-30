@@ -20,6 +20,7 @@ pub(crate) struct AcpRunCollector {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct AcpUsage {
     total_tokens: Option<u64>,
+    context_limit: Option<u64>,
     input_tokens: u64,
     output_tokens: u64,
     reasoning_tokens: u64,
@@ -31,6 +32,7 @@ impl AcpUsage {
     pub(crate) fn tokens(&self) -> TokenUsage {
         TokenUsage {
             total: self.total_tokens,
+            context_limit: self.context_limit,
             input: self.input_tokens.saturating_sub(
                 self.cache_read_tokens
                     .saturating_add(self.cache_write_tokens),
@@ -46,6 +48,7 @@ impl AcpUsage {
 
     pub(crate) fn observed(&self) -> bool {
         self.total_tokens.is_some()
+            || self.context_limit.is_some()
             || self.input_tokens != 0
             || self.output_tokens != 0
             || self.reasoning_tokens != 0
@@ -61,6 +64,17 @@ impl AcpUsage {
     }
 
     pub(super) fn merge_usage(&mut self, usage: &Value) {
+        self.context_limit = [
+            "contextLimit",
+            "context_limit",
+            "contextWindow",
+            "context_window",
+            "size",
+        ]
+        .into_iter()
+        .find_map(|key| usage.get(key).and_then(Value::as_u64))
+        .filter(|limit| *limit > 0)
+        .or(self.context_limit);
         self.total_tokens = usage
             .get("totalTokens")
             .or_else(|| usage.get("total_tokens"))
@@ -106,6 +120,7 @@ mod usage_tests {
         let mut usage = AcpUsage::default();
         usage.merge_usage(&json!({
             "totalTokens": 42,
+            "contextWindow": 200000,
             "inputTokens": 30,
             "outputTokens": 7,
             "thoughtTokens": 3,
@@ -114,6 +129,7 @@ mod usage_tests {
         }));
 
         assert_eq!(usage.total_tokens, Some(42));
+        assert_eq!(usage.context_limit, Some(200_000));
         assert_eq!(usage.input_tokens, 30);
         assert_eq!(usage.output_tokens, 7);
         assert_eq!(usage.reasoning_tokens, 3);
@@ -122,6 +138,7 @@ mod usage_tests {
         let mut total_only = AcpUsage::default();
         total_only.merge_usage(&json!({"totalTokens": 19}));
         assert_eq!(total_only.tokens().total, Some(19));
+        assert_eq!(total_only.tokens().context_limit, None);
         assert_eq!(total_only.tokens().input, 0);
         assert_eq!(total_only.tokens().output, 0);
         assert!(total_only.observed());
@@ -295,6 +312,7 @@ async fn settle_acp_run(
         if let Err(error) = super::events::project_acp_usage(
             state,
             child_id,
+            runtime,
             &step.live_message,
             snapshot.usage.tokens(),
         )
@@ -304,12 +322,13 @@ async fn settle_acp_run(
         }
     }
     for nested_id in snapshot.nested_sessions.values() {
+        let output = if status == "completed" {
+            ""
+        } else {
+            "ACP task ended without a terminal tool update"
+        };
         if let Err(error) = super::events::finish_nested_external_session(
-            state,
-            runtime,
-            nested_id,
-            status,
-            "ACP task ended without a terminal tool update",
+            state, runtime, nested_id, status, output,
         )
         .await
         {
@@ -474,7 +493,15 @@ pub(crate) async fn run_acp_prompt(
         ));
     }
     event_task.abort();
-    settle_acp_run(state, runtime, child.id.as_str(), step, &collector, "error").await;
+    settle_acp_run(
+        state,
+        runtime,
+        child.id.as_str(),
+        step,
+        &collector,
+        "completed",
+    )
+    .await;
     if prompt_response.get("stopReason").and_then(Value::as_str) == Some("cancelled") {
         return Err(format!(
             "{} ACP adapter cancelled the turn",

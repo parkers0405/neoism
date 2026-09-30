@@ -439,7 +439,11 @@ pub fn classify_session_event(
                     cache_write,
                     total,
                     cost_micros,
-                    context_limit: None,
+                    context_limit: tokens
+                        .get("contextLimit")
+                        .or_else(|| tokens.get("context_limit"))
+                        .and_then(Value::as_u64)
+                        .filter(|limit| *limit > 0),
                 },
             }]
         }
@@ -726,7 +730,9 @@ pub fn classify_session_event(
                     .clone()
                     .unwrap_or_else(|| session_id.to_string()),
                 id: event
-                    .get("id")
+                    .get("properties")
+                    .and_then(|properties| properties.get("messageID"))
+                    .or_else(|| event.get("id"))
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_string(),

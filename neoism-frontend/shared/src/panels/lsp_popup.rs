@@ -91,6 +91,11 @@ pub struct LspServerRow {
     pub level: Option<String>,
     /// Runtime source: "managed", "path", "missing", or "unknown".
     pub source: Option<String>,
+    /// Runtime loaded behind the server executable (for example TypeScript's
+    /// Yarn SDK), kept separate from the executable source above.
+    pub runtime_source: Option<String>,
+    pub runtime_path: Option<String>,
+    pub runtime_version: Option<String>,
     /// Diagnostics attributed to this server for the active buffer.
     pub diagnostics: DiagnosticCounts,
 }
@@ -716,6 +721,19 @@ impl LspPopup {
             &value_opts,
         );
         row_y += 18.0 * s;
+        let runtime = runtime_label(&server);
+        draw_label_value(
+            sugarloaf,
+            x + 10.0 * s,
+            value_x,
+            row_y,
+            value_w,
+            "Runtime",
+            &runtime,
+            &label_opts,
+            &value_opts,
+        );
+        row_y += 18.0 * s;
         draw_label_value(
             sugarloaf,
             x + 10.0 * s,
@@ -1007,6 +1025,46 @@ impl LspPopup {
         let x = (self.anchor.x + self.anchor.w - w).max(8.0 * s);
         let y = (self.anchor.y - h - gap).max(8.0 * s);
         [x, y, w, h]
+    }
+}
+
+fn runtime_label(server: &LspServerRow) -> String {
+    let source = match server.runtime_source.as_deref() {
+        Some("yarn_sdk") => "Yarn TypeScript SDK",
+        Some("configured") => "Configured TypeScript SDK",
+        Some("language_server_default") => "Language-server default",
+        Some("missing_yarn_sdk") => "Yarn SDK missing; using fallback",
+        Some(source) => source,
+        None => return "not reported".to_string(),
+    };
+    let mut label = source.to_string();
+    if let Some(version) = server.runtime_version.as_deref() {
+        label.push_str(" · ");
+        label.push_str(version);
+    }
+    if let Some(path) = server.runtime_path.as_deref() {
+        label.push_str(" · ");
+        label.push_str(path);
+    }
+    label
+}
+
+#[cfg(test)]
+mod runtime_tests {
+    use super::*;
+
+    #[test]
+    fn yarn_runtime_label_reaches_server_details() {
+        let server = LspServerRow {
+            runtime_source: Some("yarn_sdk".into()),
+            runtime_path: Some("/workspace/.yarn/sdks/typescript/lib".into()),
+            runtime_version: Some("5.8.2-sdk".into()),
+            ..LspServerRow::default()
+        };
+        assert_eq!(
+            runtime_label(&server),
+            "Yarn TypeScript SDK · 5.8.2-sdk · /workspace/.yarn/sdks/typescript/lib"
+        );
     }
 }
 

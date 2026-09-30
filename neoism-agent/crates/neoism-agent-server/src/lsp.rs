@@ -177,6 +177,38 @@ pub struct LspStatus {
     pub workspace: LspWorkspace,
     pub capabilities: LspCapabilities,
     pub detected: LspDetection,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<LspRuntimeInfo>,
+}
+
+/// Project runtime selected behind a language server. This is separate from
+/// the server executable: typescript-language-server can run from Neoism's
+/// managed install while loading TypeScript itself from a project SDK.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LspRuntimeInfo {
+    pub source: LspRuntimeSource,
+    pub path: Option<String>,
+    pub version: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LspRuntimeSource {
+    YarnSdk,
+    Configured,
+    LanguageServerDefault,
+    MissingYarnSdk,
+}
+
+impl LspRuntimeSource {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::YarnSdk => "yarn_sdk",
+            Self::Configured => "configured",
+            Self::LanguageServerDefault => "language_server_default",
+            Self::MissingYarnSdk => "missing_yarn_sdk",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

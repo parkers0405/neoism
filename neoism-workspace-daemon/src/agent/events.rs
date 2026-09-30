@@ -272,7 +272,16 @@ pub(crate) fn forward_agent_server_event(
         "message.part.delta" => {
             if properties.get("field").and_then(Value::as_str) == Some("text") {
                 if let Some(delta) = properties.get("delta").and_then(Value::as_str) {
-                    let message_id =
+                    let part_kind =
+                        neoism_ui::panels::agent_pane::stream_events::event_part_kind(
+                            &properties,
+                        );
+                    let message_id = if part_kind == Some("compaction") {
+                        properties
+                            .get("messageID")
+                            .or_else(|| properties.get("messageId"))
+                            .and_then(Value::as_str)
+                    } else {
                         neoism_ui::panels::agent_pane::stream_events::event_part_id(
                             &properties,
                         )
@@ -282,14 +291,12 @@ pub(crate) fn forward_agent_server_event(
                                 .or_else(|| properties.get("messageId"))
                                 .and_then(Value::as_str)
                         })
-                        .unwrap_or_default()
-                        .to_string();
-                    let part_kind =
-                        neoism_ui::panels::agent_pane::stream_events::event_part_kind(
-                            &properties,
-                        );
+                    }
+                    .unwrap_or_default()
+                    .to_string();
                     let kind = match part_kind {
                         Some("reasoning" | "thinking") => ContentKind::Reasoning,
+                        Some("compaction") => ContentKind::Compaction,
                         Some("tool") => ContentKind::Tool {
                             name: properties
                                 .get("tool")
@@ -1098,6 +1105,36 @@ mod tests {
             assert_eq!(message.kind, expected_kind);
         }
         assert!(rx.try_recv().is_err(), "generic busy emitted extra state");
+    }
+
+    #[test]
+    fn compaction_delta_uses_assistant_message_identity() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        forward_agent_server_event(
+            &tx,
+            "root",
+            json!({
+                "type": "message.part.delta",
+                "properties": {
+                    "sessionID": "root",
+                    "messageID": "assistant-compaction",
+                    "partID": "synthetic-text-part",
+                    "partType": "compaction",
+                    "field": "text",
+                    "delta": "summary"
+                }
+            }),
+        );
+
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            AgentServerMessage::ContentDelta {
+                message_id,
+                kind: ContentKind::Compaction,
+                text,
+                ..
+            } if message_id == "assistant-compaction" && text == "summary"
+        ));
     }
 
     #[test]

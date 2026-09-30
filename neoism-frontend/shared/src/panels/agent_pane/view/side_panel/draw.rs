@@ -491,7 +491,11 @@ pub(crate) fn render_sessions_list(
         .duration_since(web_time::UNIX_EPOCH)
         .map(|time| time.as_millis() as u64)
         .unwrap_or(0);
-    let sessions = pane.side_panel().sessions().to_vec();
+    let hovered_session = pane.side_panel().hovered_session();
+    let session_hover_scale = pane.side_panel().session_hover_scale();
+    let title_hover_elapsed = pane.side_panel().session_title_hover_elapsed();
+    let mut title_hover_overflow = false;
+    let sessions = pane.side_panel().sessions();
     for absolute_ix in start..end {
         let entry = &sessions[absolute_ix];
         let row_ix = absolute_ix as isize - render_top as isize;
@@ -507,7 +511,8 @@ pub(crate) fn render_sessions_list(
 
         // Date-group / "Pinned" header row.
         if entry.is_header {
-            let label = truncate_to_fit(&entry.title, text_w, sugarloaf, &header_opts);
+            let label =
+                truncate_sidebar_text(&entry.title, text_w, sugarloaf, &header_opts);
             draw_text_with_occlusion(
                 sugarloaf,
                 text_x,
@@ -525,8 +530,8 @@ pub(crate) fn render_sessions_list(
         // treatment below still applies.
         if entry.is_excerpt {
             let first_of_run = absolute_ix == 0 || !sessions[absolute_ix - 1].is_excerpt;
-            let hover = if pane.side_panel().hovered_session() == Some(absolute_ix) {
-                pane.side_panel().session_hover_scale()
+            let hover = if hovered_session == Some(absolute_ix) {
+                session_hover_scale
             } else {
                 0.0
             };
@@ -569,7 +574,7 @@ pub(crate) fn render_sessions_list(
             let excerpt_x = title_x + 10.0 * s;
             let excerpt_w = text_w - dot_gutter - 10.0 * s;
             let label =
-                truncate_to_fit(&entry.title, excerpt_w, sugarloaf, &excerpt_opts);
+                truncate_sidebar_text(&entry.title, excerpt_w, sugarloaf, &excerpt_opts);
             // Matched search terms render as bright segments over a soft
             // accent wash — the excerpt reads like a real search result.
             // Lines are pre-wrapped to the measured budget, so truncation
@@ -637,8 +642,8 @@ pub(crate) fn render_sessions_list(
 
         let is_current = current_id.as_deref() == Some(entry.id.as_str());
         let running = session_entry_is_running(entry);
-        let hover = if pane.side_panel().hovered_session() == Some(absolute_ix) {
-            pane.side_panel().session_hover_scale()
+        let hover = if hovered_session == Some(absolute_ix) {
+            session_hover_scale
         } else {
             0.0
         };
@@ -730,17 +735,40 @@ pub(crate) fn render_sessions_list(
         let title_budget = (text_w - dot_gutter - pin_reserve).max(0.0);
         let mut hovered_title_opts = title_opts;
         hovered_title_opts.font_size *= hover_scale;
+        hovered_title_opts.clip_rect =
+            Some([title_x, visible_y, title_budget, visible_h]);
         let display_title = if focused && absolute_ix == selected {
             rename_buffer.as_deref().unwrap_or(&entry.title)
         } else {
             &entry.title
         };
-        let title_text =
-            truncate_to_fit(display_title, title_budget, sugarloaf, &hovered_title_opts);
+        let title_hovered = hovered_session == Some(absolute_ix);
+        let full_title_width =
+            measure_text_cached(sugarloaf, display_title, &hovered_title_opts);
+        let overflow_distance = (full_title_width - title_budget).max(0.0);
+        if title_hovered {
+            title_hover_overflow = overflow_distance > 0.5;
+        }
+        let title_offset = title_hovered
+            .then_some((title_hover_elapsed, overflow_distance))
+            .and_then(|(elapsed, distance)| elapsed.map(|elapsed| (elapsed, distance)))
+            .and_then(|(elapsed, distance)| {
+                crate::primitives::hover_title_offset(elapsed, distance, s)
+            });
+        let title_text = if title_offset.is_some() {
+            display_title.to_owned()
+        } else {
+            truncate_sidebar_text(
+                display_title,
+                title_budget,
+                sugarloaf,
+                &hovered_title_opts,
+            )
+        };
         let scaled_text_y = row_y + 5.0 * s;
         draw_text_with_occlusion(
             sugarloaf,
-            title_x - 1.5 * s * hover,
+            title_x - title_offset.unwrap_or(0.0),
             scaled_text_y,
             &title_text,
             &hovered_title_opts,
@@ -758,7 +786,8 @@ pub(crate) fn render_sessions_list(
                 clip_rect: Some(list_rect),
                 ..DrawOpts::default()
             };
-            let label = truncate_to_fit(&context, title_budget, sugarloaf, &context_opts);
+            let label =
+                truncate_sidebar_text(&context, title_budget, sugarloaf, &context_opts);
             draw_text_with_occlusion(
                 sugarloaf,
                 title_x,
@@ -769,6 +798,8 @@ pub(crate) fn render_sessions_list(
             );
         }
     }
+    pane.side_panel_mut()
+        .set_session_title_hover_overflow(title_hover_overflow);
 
     if pane.side_panel().session_page_loading() {
         let badge = 24.0 * s;

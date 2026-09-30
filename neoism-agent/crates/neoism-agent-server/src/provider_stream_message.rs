@@ -91,6 +91,7 @@ pub(crate) async fn start_assistant_step(
     agent: String,
     model_id: String,
     provider_id: String,
+    eager_text_part: bool,
 ) -> Result<StartedAssistantStep, ApiError> {
     let assistant_id: MessageId = Id::ascending(IdKind::Message);
     let text_part_id = Id::ascending(IdKind::Part);
@@ -133,9 +134,13 @@ pub(crate) async fn start_assistant_step(
         finish: None,
         error: None,
     };
+    let mut parts = vec![step_start.clone()];
+    if eager_text_part {
+        parts.push(text_part.clone());
+    }
     let assistant_message = MessageWithParts {
         info: MessageInfo::Assistant(assistant),
-        parts: vec![step_start.clone(), text_part.clone()],
+        parts,
     };
     state
         .append_message_with_event(
@@ -147,7 +152,11 @@ pub(crate) async fn start_assistant_step(
             ),
         )
         .await?;
-    for part in [step_start, text_part] {
+    let mut published_parts = vec![step_start];
+    if eager_text_part {
+        published_parts.push(text_part);
+    }
+    for part in published_parts {
         state.publish(EventPayload::new(
             event_type::MESSAGE_PART_UPDATED,
             json!({ "sessionID": session_id, "part": part, "time": now_millis() }),
@@ -243,6 +252,7 @@ pub(crate) async fn finish_provider_stream_success(
     model: &UserModel,
     provider_response: ProviderGenerationResponse,
     reasoning_parts: HashMap<String, Id>,
+    preserve_streamed_text_segments: bool,
 ) -> Result<MessageWithParts, ApiError> {
     if !reasoning_parts.is_empty() {
         let open_reasoning = reasoning_parts.into_values().collect::<Vec<_>>();
@@ -271,8 +281,16 @@ pub(crate) async fn finish_provider_stream_success(
         }
     }
 
+    let context_limit = {
+        let message = live_message.lock().await;
+        match &message.info {
+            MessageInfo::Assistant(assistant) => assistant.tokens.context_limit,
+            MessageInfo::User(_) => None,
+        }
+    };
     let tokens = TokenUsage {
         total: provider_response.total_tokens,
+        context_limit,
         input: provider_response.input_tokens.saturating_sub(
             provider_response
                 .cache_read_tokens
@@ -303,7 +321,7 @@ pub(crate) async fn finish_provider_stream_success(
         cost,
         snapshot: None,
     });
-    let (assistant_message, final_text_part) = {
+    let (assistant_message, final_text_parts) = {
         let mut assistant_message = live_message.lock().await;
         if let MessageInfo::Assistant(assistant) = &mut assistant_message.info {
             let streamed = now_millis();
@@ -315,16 +333,39 @@ pub(crate) async fn finish_provider_stream_success(
             assistant.provider_id = provider_response.provider_id;
             assistant.finish = provider_response.finish;
         }
-        let final_text_part = finish_text_part(
-            &mut assistant_message.parts,
-            text_part_id.as_str(),
-            Some(provider_response.text),
-        );
+        let final_text_parts = if preserve_streamed_text_segments {
+            let open_text_ids = assistant_message
+                .parts
+                .iter()
+                .filter_map(|part| match part {
+                    Part::Text(text)
+                        if text.time.as_ref().is_some_and(|time| time.end.is_none()) =>
+                    {
+                        Some(text.id.clone())
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            open_text_ids
+                .into_iter()
+                .filter_map(|id| {
+                    finish_text_part(&mut assistant_message.parts, id.as_str(), None)
+                })
+                .collect::<Vec<_>>()
+        } else {
+            finish_text_part(
+                &mut assistant_message.parts,
+                text_part_id.as_str(),
+                Some(provider_response.text),
+            )
+            .into_iter()
+            .collect()
+        };
         assistant_message.parts.retain(|part| {
             !matches!(part, Part::Text(text) if text.id == *text_part_id && text.text.is_empty())
         });
         assistant_message.parts.push(step_finish.clone());
-        (assistant_message.clone(), final_text_part)
+        (assistant_message.clone(), final_text_parts)
     };
     state
         .update_message_with_event(
@@ -336,7 +377,7 @@ pub(crate) async fn finish_provider_stream_success(
             ),
         )
         .await?;
-    if let Some(part) = final_text_part {
+    for part in final_text_parts {
         state.publish(EventPayload::new(
             event_type::MESSAGE_PART_UPDATED,
             json!({ "sessionID": session_id, "part": part, "time": now_millis() }),
@@ -474,6 +515,7 @@ mod tests {
         };
         let tokens = TokenUsage {
             total: Some(1_375),
+            context_limit: None,
             input: 1_000,
             output: 200,
             reasoning: 100,
@@ -503,6 +545,7 @@ mod tests {
         };
         let tokens = TokenUsage {
             total: None,
+            context_limit: None,
             input: 199_999,
             output: 1,
             reasoning: 1,

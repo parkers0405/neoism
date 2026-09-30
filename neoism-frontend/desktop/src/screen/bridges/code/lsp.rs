@@ -462,6 +462,9 @@ fn refresh_lsp_pill(runtime: &engine::LspRuntime, root: &Path, file: &Path) {
         .iter()
         .map(|s| {
             use neoism_ui::panels::lsp_popup::LspServerState as RowState;
+            let degraded = s.runtime.as_ref().is_some_and(|runtime| {
+                runtime.source == engine::LspRuntimeSource::MissingYarnSdk
+            });
             neoism_ui::panels::lsp_popup::LspServerRow {
                 name: s.name.clone(),
                 binary: s.command.first().cloned(),
@@ -472,7 +475,7 @@ fn refresh_lsp_pill(runtime: &engine::LspRuntime, root: &Path, file: &Path) {
                     engine::LspServerState::Error => RowState::Errored,
                 },
                 message: s.detected.message.clone(),
-                level: None,
+                level: degraded.then(|| "warn".to_string()),
                 diagnostics: Default::default(),
                 source: Some(
                     match s.command_source {
@@ -484,6 +487,15 @@ fn refresh_lsp_pill(runtime: &engine::LspRuntime, root: &Path, file: &Path) {
                     }
                     .to_string(),
                 ),
+                runtime_source: s
+                    .runtime
+                    .as_ref()
+                    .map(|runtime| runtime.source.as_str().to_string()),
+                runtime_path: s.runtime.as_ref().and_then(|runtime| runtime.path.clone()),
+                runtime_version: s
+                    .runtime
+                    .as_ref()
+                    .and_then(|runtime| runtime.version.clone()),
             }
         })
         .collect();

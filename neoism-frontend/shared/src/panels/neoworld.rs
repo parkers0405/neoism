@@ -174,7 +174,6 @@ impl NeoWorldPane {
         self.display_scale = display_scale;
         let clip = Some(self.room_rect);
 
-        sugarloaf.rect(None, x, y, w, h, theme.f32(theme.bg), DEPTH, ORDER_ROOM);
         sugarloaf.rounded_rect(
             None,
             display_x - 8.0 * display_scale,

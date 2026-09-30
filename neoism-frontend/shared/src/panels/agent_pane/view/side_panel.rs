@@ -2,6 +2,9 @@
 //! active Agent chat's optional right-hand detail rail. The catalog is
 //! hosted by Chrome/Renderer and never carved from an Agent tab.
 
+use std::cell::RefCell;
+use std::collections::{HashMap, VecDeque};
+
 use sugarloaf::text::DrawOpts;
 use sugarloaf::Sugarloaf;
 
@@ -30,6 +33,65 @@ use super::draw::{
 };
 use super::tool_message::{draw_checkbox, TodoVisualState, TODO_ROW_HEIGHT};
 use super::{DEPTH, ORDER_PANEL};
+
+const TRUNCATION_CACHE_LIMIT: usize = 4096;
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct TruncationKey {
+    text: String,
+    available_width_bits: u32,
+    font_size_bits: u32,
+    bold: bool,
+    italic: bool,
+    font_id: Option<usize>,
+    scale_factor_bits: u32,
+}
+
+#[derive(Default)]
+struct TruncationCache {
+    values: HashMap<TruncationKey, String>,
+    order: VecDeque<TruncationKey>,
+}
+
+thread_local! {
+    static TRUNCATION_CACHE: RefCell<TruncationCache> = RefCell::new(TruncationCache::default());
+}
+
+fn truncate_sidebar_text(
+    text: &str,
+    available_width: f32,
+    sugarloaf: &mut Sugarloaf,
+    opts: &DrawOpts,
+) -> String {
+    let key = TruncationKey {
+        text: text.to_owned(),
+        available_width_bits: available_width.to_bits(),
+        font_size_bits: opts.font_size.to_bits(),
+        bold: opts.bold,
+        italic: opts.italic,
+        font_id: opts.font_id,
+        scale_factor_bits: sugarloaf.scale_factor().to_bits(),
+    };
+    if let Some(value) =
+        TRUNCATION_CACHE.with(|cache| cache.borrow().values.get(&key).cloned())
+    {
+        return value;
+    }
+
+    let value = truncate_to_fit(text, available_width, sugarloaf, opts);
+    TRUNCATION_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if cache.values.insert(key.clone(), value.clone()).is_none() {
+            cache.order.push_back(key);
+        }
+        while cache.order.len() > TRUNCATION_CACHE_LIMIT {
+            if let Some(oldest) = cache.order.pop_front() {
+                cache.values.remove(&oldest);
+            }
+        }
+    });
+    value
+}
 
 pub trait AgentSidePanelTodo {
     fn status(&self) -> &str;
@@ -314,14 +376,15 @@ impl AgentSidePanelPane for NeoismAgentPane {
 /// Leave room for a readable chat and a usable detail rail after workspace chrome is laid out.
 const DETAIL_MIN_CHAT_WIDTH: f32 = 520.0;
 const DETAIL_MIN_RAIL_WIDTH: f32 = 200.0;
+const DETAIL_RAIL_WIDTH: f32 = 260.0;
 const DETAIL_GAP: f32 = 6.0;
 
 pub fn state_detail_min_width(s: f32) -> f32 {
     (DETAIL_MIN_CHAT_WIDTH + DETAIL_MIN_RAIL_WIDTH + DETAIL_GAP) * s
 }
 
-pub fn detail_rail_width(available_width: f32, preferred_width: f32, s: f32) -> f32 {
-    preferred_width
+pub fn detail_rail_width(available_width: f32, s: f32) -> f32 {
+    DETAIL_RAIL_WIDTH
         .min((available_width / s - DETAIL_MIN_CHAT_WIDTH - DETAIL_GAP).max(0.0))
         * s
 }
@@ -412,8 +475,12 @@ pub fn render_side_panel_with_icons<P, I>(
         .set_mode(crate::panels::agent_pane::state::side_panel::SidePanelMode::Sessions);
     let hovered_session =
         mouse.and_then(|(mx, my)| pane.side_panel().hit_test_row(mx, my, panel_rect));
+    let hovered_identity = hovered_session
+        .and_then(|index| pane.side_panel().sessions().get(index))
+        .filter(|entry| !entry.is_header && !entry.is_excerpt)
+        .map(|entry| entry.stable_identity().to_owned());
     pane.side_panel_mut()
-        .tick_pointer_animations(hovered_session);
+        .tick_pointer_animations(hovered_session, hovered_identity.as_deref());
 
     render_sessions_list(
         sugarloaf,

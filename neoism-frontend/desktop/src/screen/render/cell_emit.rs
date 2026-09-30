@@ -62,6 +62,13 @@ impl Screen<'_> {
                 continue;
             };
 
+            // Non-terminal surfaces paint their own content but deliberately
+            // have no pane-sized material, allowing the window wallpaper to
+            // show through. Do not submit the parked PTY underneath them.
+            if p.has_non_terminal_surface {
+                continue;
+            }
+
             // A visible/dismissing splash is transparent chrome over the
             // window background. Omit its resident terminal grid from this
             // frame instead of covering shell output with an opaque pane-sized
@@ -588,7 +595,21 @@ impl Screen<'_> {
             self.renderer.top_bar.set_panel_open(tree_open);
             self.renderer
                 .top_bar
-                .set_right_panel_open(self.renderer.conversations_visible);
+                .set_notes_open(self.renderer.notes_sidebar.is_visible());
+            self.renderer
+                .top_bar
+                .set_conversations_open(self.renderer.conversations_visible);
+            self.renderer
+                .top_bar
+                .set_search_open(self.renderer.finder.is_visible());
+            let details_open = self.details_panel_enabled
+                && self
+                    .context_manager
+                    .current()
+                    .neoism_agent
+                    .as_ref()
+                    .is_some_and(|agent| !agent.side_panel().user_hidden());
+            self.renderer.top_bar.set_right_panel_open(details_open);
             // Connected-peer presence orbs beside the server selector — ONLY
             // for a shared workspace (`in_shared_workspace`, computed above).
             // The presence store is global to the window and is NOT cleared on

@@ -7,9 +7,9 @@ use neoism_agent_core::{
     ProviderGenerationRequest, ProviderListResult, UserModel,
 };
 use neoism_agent_plugin_api::{
-    PluginFuture, PluginRuntimeError, ProviderDescriptor, ProviderModelMetadata,
-    ProviderRouteAction, ProviderRouteRequest, ProviderService, ProviderStream,
-    RouteResponse,
+    GeneratedMedia, MediaGenerationRequest, PluginFuture, PluginRuntimeError,
+    ProviderDescriptor, ProviderModelMetadata, ProviderRouteAction, ProviderRouteRequest,
+    ProviderService, ProviderStream, RouteResponse,
 };
 use neoism_agent_service_api::{CredentialScope, ProviderConnectionRef};
 use rand::{distributions::Alphanumeric, Rng};
@@ -20,8 +20,8 @@ use tokio::sync::RwLock;
 use crate::auth_store::AuthStore;
 use crate::provider::ProviderRegistry;
 use crate::provider_catalog::{
-    default_model_ids, effective_provider_catalog, generation_metadata,
-    openai_codex_oauth, provider_connectable, usable_provider_catalog, ProviderCatalog,
+    connect_provider_catalog, default_model_ids, generation_metadata, openai_codex_oauth,
+    usable_provider_catalog, ProviderCatalog,
 };
 use crate::ProviderOAuthPending;
 
@@ -82,9 +82,8 @@ impl ProviderPlatform {
             ProviderRouteAction::List => {
                 let raw = self.catalog.providers().await?;
                 let connected = self.registry.connected_ids(&raw).await?;
-                let mut all =
-                    effective_provider_catalog(&raw, openai_codex_oauth(&auth).await);
-                all.retain(provider_connectable);
+                let openai_access = self.registry.openai_model_access(&auth).await?;
+                let all = connect_provider_catalog(&raw, &connected, &openai_access);
                 Ok(serde_json::to_value(ProviderListResult {
                     default: default_model_ids(&all),
                     connected,
@@ -94,11 +93,8 @@ impl ProviderPlatform {
             ProviderRouteAction::Configured => {
                 let raw = self.catalog.providers().await?;
                 let connected = self.registry.connected_ids(&raw).await?;
-                let providers = usable_provider_catalog(
-                    &raw,
-                    &connected,
-                    openai_codex_oauth(&auth).await,
-                );
+                let openai_access = self.registry.openai_model_access(&auth).await?;
+                let providers = usable_provider_catalog(&raw, &connected, &openai_access);
                 Ok(serde_json::to_value(ConfigProvidersResult {
                     default: default_model_ids(&providers),
                     providers,
@@ -353,6 +349,35 @@ impl ProviderService for ProviderPlatform {
                 options: metadata.options,
                 headers: metadata.headers,
             })
+        })
+    }
+
+    fn generate_media<'a>(
+        &'a self,
+        request: MediaGenerationRequest,
+    ) -> PluginFuture<'a, GeneratedMedia> {
+        Box::pin(async move {
+            let providers = self.catalog.providers().await.map_err(runtime_error)?;
+            let api = providers
+                .iter()
+                .find(|provider| provider.id == request.provider_id)
+                .and_then(|provider| {
+                    provider
+                        .models
+                        .iter()
+                        .find(|(_, model)| model.id == request.model_id)
+                })
+                .map(|(_, model)| model.api.clone());
+            let auth = self.auth.scoped(
+                CredentialScope {
+                    tenant_id: request.tenant_id.clone(),
+                    workspace_id: request.workspace_id.clone(),
+                },
+                request.connection_id.clone(),
+            );
+            crate::provider::generate_media(&auth, api.as_ref(), request)
+                .await
+                .map_err(runtime_error)
         })
     }
 

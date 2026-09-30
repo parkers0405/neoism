@@ -1183,6 +1183,9 @@ fn snapshot_pill(servers: &[neoism_protocol::editor::LspSnapshotServer]) -> Pill
             level: s.level.clone(),
             diagnostics: Default::default(),
             source: s.source.clone(),
+            runtime_source: s.runtime_source.clone(),
+            runtime_path: s.runtime_path.clone(),
+            runtime_version: s.runtime_version.clone(),
         })
         .collect();
     let active = servers
@@ -1229,6 +1232,9 @@ fn error_pill(message: &str) -> Pill {
         source: None,
         message: Some(message.into()),
         level: Some("error".into()),
+        runtime_source: None,
+        runtime_path: None,
+        runtime_version: None,
     }])
 }
 fn raw_edits(

@@ -1140,6 +1140,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             tree.set_focused(false);
         }
         self.blur(PanelKey::FileTree);
+        self.show_conversations(false);
         idx
     }
 
@@ -1424,6 +1425,43 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         wheel_px: f32,
         wheel_py: f32,
     ) -> bool {
+        match event {
+            UiEvent::PointerMove { x, .. } => {
+                if let Some((start_x, original_width)) = self.conversations_resize {
+                    if let Some(pane) = self.agent_pane.as_mut() {
+                        pane.side_panel_mut()
+                            .set_width(original_width + *x - start_x);
+                    }
+                    if let Some(viewport) = self.last_viewport {
+                        self.set_layout(viewport);
+                    }
+                    return true;
+                }
+            }
+            UiEvent::PointerUp { .. } | UiEvent::PointerLeave
+                if self.conversations_resize.take().is_some() =>
+            {
+                return true;
+            }
+            UiEvent::PointerDown {
+                x,
+                y,
+                button: crate::event::PointerButton::Left,
+                ..
+            } => {
+                if let Some(rect) = self.layout.conversations {
+                    let edge = rect.x + rect.w;
+                    if *y >= rect.y && *y <= rect.y + rect.h && (*x - edge).abs() <= 5.0 {
+                        if let Some(pane) = self.agent_pane.as_ref() {
+                            self.conversations_resize =
+                                Some((*x, pane.side_panel().width()));
+                            return true;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
         match event {
             UiEvent::PointerMove { y, .. } if self.git_diff_panel.drag_divider(*y) => {
                 return true
@@ -2070,6 +2108,28 @@ mod tests {
     }
 
     #[test]
+    fn agent_panel_preferences_gate_catalog_and_details_independently() {
+        let mut chrome = chrome_with_active_agent();
+        chrome.set_layout(Rect::new(0.0, 0.0, 1200.0, 800.0));
+
+        chrome.set_agent_panel_preferences(false, false);
+        chrome.toggle_conversations();
+        chrome.toggle_agent_details_panel();
+        assert!(!chrome.conversations_visible);
+        assert!(chrome.agent_pane().unwrap().side_panel().user_hidden());
+
+        chrome.set_agent_panel_preferences(true, true);
+        chrome.open_neoism_agent_tab(42);
+        assert!(chrome.conversations_visible);
+        assert!(!chrome.agent_pane().unwrap().side_panel().is_focused());
+        assert!(chrome.agent_pane().unwrap().side_panel().user_hidden());
+
+        chrome.toggle_agent_details_panel();
+        assert!(!chrome.agent_pane().unwrap().side_panel().user_hidden());
+        assert!(chrome.conversations_visible);
+    }
+
+    #[test]
     fn hidden_provider_chooser_cannot_queue_new_chat_from_terminal_tab() {
         let mut chrome = chrome_with_active_agent();
         let mut tabs = chrome.buffer_tabs.tabs().to_vec();
@@ -2284,7 +2344,8 @@ mod tests {
         assert!(chrome.content_surface_available());
 
         chrome.apply_top_bar_action(TopBarAction::ToggleAgentSidePanel);
-        assert!(chrome.layout.conversations.is_some());
+        assert!(chrome.agent_pane().unwrap().side_panel().user_hidden());
+        assert!(chrome.layout.conversations.is_none());
         assert!(!chrome.agent_side_panel_takeover_active());
         assert!(chrome.content_surface_available());
         assert!(chrome.layout.terminal.w > 0.0);
@@ -2292,6 +2353,7 @@ mod tests {
         assert!(chrome.layout.status_line.h > 0.0);
 
         chrome.apply_top_bar_action(TopBarAction::ToggleAgentSidePanel);
+        assert!(!chrome.agent_pane().unwrap().side_panel().user_hidden());
         assert!(!chrome.agent_side_panel_takeover_active());
         assert!(chrome.content_surface_available());
     }
@@ -2313,11 +2375,12 @@ mod tests {
         assert!(!web.agent_pane().unwrap().side_panel().user_hidden());
         web.apply_top_bar_action(TopBarAction::ToggleAgentSidePanel);
         assert!(!web.agent_side_panel_takeover_active());
-        assert!(web.layout.conversations.is_some());
+        assert!(web.agent_pane().unwrap().side_panel().user_hidden());
+        assert!(web.layout.conversations.is_none());
         web.set_layout(desktop);
         assert!(!web.top_bar.is_mobile_agent_panel_button_visible());
         assert!(!web.agent_side_panel_takeover_active());
-        assert!(!web.agent_pane().unwrap().side_panel().user_hidden());
+        assert!(web.agent_pane().unwrap().side_panel().user_hidden());
         assert!(web.content_surface_available());
     }
 

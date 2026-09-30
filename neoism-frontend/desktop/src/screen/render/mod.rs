@@ -122,6 +122,9 @@ pub(crate) struct PanelFrame {
     /// resolution. Per-panel
     /// because each terminal can issue its own OSC 12.
     cursor_color: neoism_backend::config::colors::ColorArray,
+    /// The pane's document/page renderer owns this route instead of the
+    /// resident PTY. Keep that grid parked so wallpaper can show through.
+    has_non_terminal_surface: bool,
     is_active: bool,
     damage: neoism_terminal_core::damage::TerminalDamage,
     /// Selection is per-context (`renderable_content`), not
@@ -435,6 +438,11 @@ impl Screen<'_> {
         );
         frame_ctx.window_update = window_update;
         frame_ctx.any_panel_dirty = any_panel_dirty;
+        if self.renderer.conversations_visible
+            && self.renderer.conversations_pane.catalog_is_animating()
+        {
+            self.mark_dirty();
+        }
 
         self.draw_overlays(&mut frame_ctx, animation_dt);
         frame_ctx.has_animation |=

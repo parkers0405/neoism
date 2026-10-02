@@ -47,7 +47,7 @@ mod tests;
 /// Default width when the user hasn't resized. Real width lives on
 /// the `FileTree` instance so `Alt+Left` / `Alt+Right` can grow or
 /// shrink the panel without rebuilding the renderer.
-pub const FILE_TREE_WIDTH: f32 = 280.0;
+pub const FILE_TREE_WIDTH: f32 = 360.0;
 pub const FILE_TREE_MIN_WIDTH: f32 = 140.0;
 pub const FILE_TREE_MAX_WIDTH: f32 = 700.0;
 pub const FILE_TREE_RESIZE_STEP: f32 = 24.0;
@@ -127,7 +127,7 @@ impl crate::panels::Panel for FileTree {
         let _ = self.handle_ui_event(event, ctx, None);
     }
 
-    fn draw(&self, sugarloaf: &mut Sugarloaf, layout: &PanelLayout, _ctx: &PanelContext) {
+    fn draw(&self, sugarloaf: &mut Sugarloaf, layout: &PanelLayout, ctx: &PanelContext) {
         // Slim Panel::draw is `&self`; the native `FileTree::render`
         // is `&mut self` because it ticks the scroll/cursor springs
         // and writes back `last_panel_height_rows` / the truncation
@@ -148,6 +148,7 @@ impl crate::panels::Panel for FileTree {
             let this = self as *const FileTree as *mut FileTree;
             (*this).render(
                 sugarloaf, bounds.x, bounds.y, bounds.w, bounds.h, &theme, &occlusion,
+                ctx.plugins,
             );
         }
     }

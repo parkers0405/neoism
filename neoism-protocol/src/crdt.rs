@@ -36,6 +36,17 @@ pub enum CrdtBufferEdit {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CrdtEditTransaction {
+    pub buffer_id: CrdtBufferId,
+    pub plugin_id: String,
+    pub invocation_id: String,
+    pub idempotency_key: String,
+    #[serde(default)]
+    pub expected_state_vector_v1: Vec<u8>,
+    pub edits: Vec<CrdtBufferEdit>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CrdtBufferUpdate {
     pub buffer_id: CrdtBufferId,
     pub origin_client_id: CrdtClientId,
@@ -175,6 +186,11 @@ pub enum CrdtClientMessage {
     },
     ApplySync {
         envelope: CrdtSyncEnvelope,
+    },
+    /// One daemon-authoritative plugin/model edit. The daemon deduplicates the
+    /// invocation and applies every operation in one Yrs transaction.
+    ApplyEdits {
+        transaction: CrdtEditTransaction,
     },
     PublishPresence {
         presence: CrdtPeerPresence,

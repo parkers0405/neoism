@@ -11,58 +11,20 @@
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use neoism_backend::event::{EventProxy, RioEvent, RioEventType, WindowId};
-use neoism_backend::sugarloaf::{
-    ColorType, GraphicData, GraphicDataEntry, GraphicId, GraphicOverlay, Sugarloaf,
-};
+use neoism_backend::sugarloaf::{GraphicOverlay, Sugarloaf};
 
 // Re-export the POD pieces so existing call sites
 // (`crate::neoism::icon::AgentKind`, `ICON_PANEL_ID`, ...) keep
 // resolving without any change.
 pub use neoism_ui::panels::agent_pane::icon::{
-    AgentKind, CLAUDE_IMAGE_ID, CODEX_IMAGE_ID, ICON_PANEL_ID, NEOISM_IMAGE_ID,
-    OPENCODE_IMAGE_ID, SIDE_PANEL_ICON_PANEL_ID,
+    AgentKind, ICON_PANEL_ID, SIDE_PANEL_ICON_PANEL_ID,
 };
-
-const CLAUDE_PNG: &[u8] = include_bytes!("../../assets/icons/claude.png");
-const CODEX_PNG: &[u8] = include_bytes!("../../assets/icons/codex.png");
-const OPENCODE_PNG: &[u8] = include_bytes!("../../assets/icons/opencode.png");
-const NEOISM_PNG: &[u8] = include_bytes!("../../assets/icons/neoism.png");
 
 /// Decode the embedded PNGs and upload them to sugarloaf's image
 /// store. Returns `true` once all icons are registered. Idempotent —
 /// safe to call every frame; subsequent calls return immediately.
 pub fn register_agent_icons(sugarloaf: &mut Sugarloaf) -> bool {
-    let entries: [(u32, &[u8]); 4] = [
-        (CLAUDE_IMAGE_ID, CLAUDE_PNG),
-        (CODEX_IMAGE_ID, CODEX_PNG),
-        (OPENCODE_IMAGE_ID, OPENCODE_PNG),
-        (NEOISM_IMAGE_ID, NEOISM_PNG),
-    ];
-    for (id, bytes) in entries {
-        if sugarloaf.image_data.contains_key(&id) {
-            continue;
-        }
-        let img = match image_rs::load_from_memory(bytes) {
-            Ok(i) => i.to_rgba8(),
-            Err(_) => return false,
-        };
-        let (w, h) = img.dimensions();
-        let pixels = img.into_raw();
-        let entry = GraphicDataEntry::from_graphic_data(GraphicData {
-            id: GraphicId::new(id as u64),
-            width: w as usize,
-            height: h as usize,
-            color_type: ColorType::Rgba,
-            pixels,
-            is_opaque: false,
-            resize: None,
-            display_width: None,
-            display_height: None,
-            transmit_time: std::time::Instant::now(),
-        });
-        sugarloaf.image_data.insert(id, entry);
-    }
-    true
+    neoism_ui::panels::agent_pane::icon::register_agent_icons(sugarloaf)
 }
 
 pub fn push_cropped_icon_overlay(

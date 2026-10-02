@@ -43,7 +43,7 @@ pub(crate) async fn acquire_workspace_plugin_snapshot_for_tenant(
         .workspace_runtimes
         .acquire_for_tenant(tenant_id, directory, state)
         .await
-        .map_err(ApiError::gone)?;
+        .map_err(ApiError::internal)?;
     for stale in evicted {
         let _ = stale.teardown(state).await;
         state
@@ -57,8 +57,14 @@ pub(crate) async fn acquire_workspace_plugin_snapshot_for_tenant(
             });
     }
     let directory = runtime.root.to_string_lossy().into_owned();
-    let snapshot = runtime.snapshot();
-    state.reconcile_workspace_plugins(&runtime, &snapshot).await;
+    let workspace_snapshot = runtime.snapshot();
+    state
+        .reconcile_workspace_plugins(&runtime, &workspace_snapshot)
+        .await;
+    let snapshot = state
+        .try_plugin_snapshot_for_tenant(tenant_id, &directory)
+        .await
+        .map_err(ApiError::internal)?;
     Ok(WorkspacePluginSnapshot {
         directory,
         #[cfg(test)]
@@ -147,8 +153,24 @@ async fn available_tools_for_snapshot(
     for tool in snapshot.runtime_tools.values() {
         let definition = tool.definition();
         match definition.id.as_str() {
-            "generate_image" if snapshot.config().image_model.is_none() => continue,
-            "generate_video" if snapshot.config().video_model.is_none() => continue,
+            "generate_image"
+                if !snapshot
+                    .config()
+                    .image_model
+                    .as_deref()
+                    .is_some_and(|model| !model.trim().is_empty()) =>
+            {
+                continue
+            }
+            "generate_video"
+                if !snapshot
+                    .config()
+                    .video_model
+                    .as_deref()
+                    .is_some_and(|model| !model.trim().is_empty()) =>
+            {
+                continue
+            }
             "bash" | "background_task"
                 if !crate::caller::native_execution_allowed(execution) =>
             {

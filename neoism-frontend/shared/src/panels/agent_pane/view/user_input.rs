@@ -9,13 +9,14 @@ use crate::panels::agent_pane::state::{
 
 use super::draw::{
     draw_rect_clipped, draw_rounded_rect_clipped, draw_text_clipped, opts_with_clip,
-    wrap_text,
+    push_image_overlay_clipped, wrap_text,
 };
 use super::markdown::AgentMarkdownPane;
 use super::wordmark::format_elapsed;
 use super::{
-    DEPTH, INPUT_HELP_STRIP_H, INPUT_LINE_H, MAX_INPUT_LINES, ORDER_CARET, ORDER_PANEL,
-    ORDER_TEXT, STREAMING_STATUS_LINE_H, USER_MESSAGE_MAX_LINES,
+    AgentCheckoutContext, DEPTH, INPUT_HELP_STRIP_H, INPUT_LINE_H, MAX_INPUT_LINES,
+    ORDER_CARET, ORDER_PANEL, ORDER_TEXT, OVERLAY_PANEL_ID, STREAMING_STATUS_LINE_H,
+    USER_MESSAGE_MAX_LINES,
 };
 use crate::panels::file_tree::FRAME_STROKE;
 use crate::primitives::ide_theme::IdeTheme;
@@ -35,6 +36,10 @@ const COMPOSER_CONTROL_RADIUS: f32 = 8.0;
 const COMPOSER_STOP_SIDE_RATIO: f32 = 0.28;
 const COMPOSER_SEND_FONT_RATIO: f32 = 0.62;
 const COMPOSER_ATTACH_FONT_RATIO: f32 = 0.72;
+const MODEL_LOGO_SIDE: f32 = 17.0;
+const THINKING_ICON_SIDE: f32 = 17.0;
+const THINKING_ICON_GLYPH: &str = "\u{f0e7}";
+const MODEL_LOGO_GAP: f32 = 5.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ComposerActionDrawPolicy {
@@ -235,7 +240,7 @@ fn streaming_status_accent(theme: &IdeTheme, state: AgentStreamingStatus) -> u32
 
 fn agent_chip_accent(theme: &IdeTheme, label: &str) -> u32 {
     if label.eq_ignore_ascii_case("build") {
-        theme.cyan
+        theme.red
     } else if label.eq_ignore_ascii_case("plan") {
         theme.yellow
     } else {
@@ -319,7 +324,7 @@ mod streaming_status_theme_tests {
     #[test]
     fn build_and_plan_chips_use_distinct_theme_roles() {
         let theme = IdeTheme::pastel_dark();
-        assert_eq!(agent_chip_accent(&theme, "Build"), theme.cyan);
+        assert_eq!(agent_chip_accent(&theme, "Build"), theme.red);
         assert_eq!(agent_chip_accent(&theme, "Plan"), theme.yellow);
         assert_ne!(
             agent_chip_accent(&theme, "Build"),
@@ -1035,9 +1040,8 @@ pub fn render_user_message<P: AgentMarkdownPane>(
     viewport_clip: [f32; 4],
     occlusion_rects: &[[f32; 4]],
 ) -> f32 {
-    // The grey bubble spans the FULL row now; the orb lives INSIDE it at
-    // the top-left (avatar-left chat layout) with the text indented past
-    // it — it used to float in a transparent left gutter outside the card.
+    // The grey bubble spans the full row, with text on the left and the
+    // sender orb inside the right edge.
     let bubble_x = x;
     let bubble_w = w.max(160.0 * s);
     draw_rect_clipped(
@@ -1047,7 +1051,7 @@ pub fn render_user_message<P: AgentMarkdownPane>(
         ORDER_PANEL,
         viewport_clip,
     );
-    // Sender presence orb INSIDE the bubble, aligned to the first text line.
+    // Sender presence orb inside the bubble, aligned to the first text line.
     // Deterministic in `orb_seed` (a display name), so the same author
     // always wears the same round pixel-plasma orb — the very generator the
     // editor carets / top-chrome face-pile use. MUST feed the dedicated
@@ -1058,7 +1062,7 @@ pub fn render_user_message<P: AgentMarkdownPane>(
     // repaint continuously.
     let orb = USER_ORB_SIZE * s;
     let pad_x = 14.0 * s;
-    let orb_x = bubble_x + pad_x;
+    let orb_x = bubble_x + bubble_w - pad_x - orb;
     let orb_y = y + 12.0 * s;
     crate::editor::markdown::render::draw::draw_presence_orb_clipped(
         sugarloaf,
@@ -1081,9 +1085,8 @@ pub fn render_user_message<P: AgentMarkdownPane>(
     ) else {
         return h;
     };
-    // Text sits to the RIGHT of the orb, inside the same grey bubble.
-    let text_x = orb_x + orb + 10.0 * s;
-    let text_w = (bubble_x + bubble_w - text_x - pad_x).max(80.0 * s);
+    let text_x = bubble_x + pad_x;
+    let text_w = (orb_x - text_x - 10.0 * s).max(80.0 * s);
     let mut line_y = y + 12.0 * s;
     if !images.is_empty() {
         super::image_preview::render_image_strip(
@@ -1222,6 +1225,7 @@ pub fn render_input(
     now_seconds: f32,
     occlusion_rects: &[[f32; 4]],
     prepared_wrap_rows: Option<&[InputWrapRow]>,
+    checkout_context: Option<&AgentCheckoutContext>,
 ) {
     let [x, y, w, h] = rect;
     pane.set_cursor_rect(None);
@@ -1561,7 +1565,7 @@ pub fn render_input(
         );
     }
 
-    if pane.input_help_visible() {
+    if pane.input_help_visible() || checkout_context.is_some() {
         render_input_help_strip(
             sugarloaf,
             pane,
@@ -1576,6 +1580,7 @@ pub fn render_input(
             s,
             now_seconds,
             occlusion_rects,
+            checkout_context,
         );
     }
 }
@@ -1592,6 +1597,7 @@ fn render_input_help_strip(
     s: f32,
     now_seconds: f32,
     occlusion_rects: &[[f32; 4]],
+    checkout_context: Option<&AgentCheckoutContext>,
 ) {
     let [x, y, w, h] = rect;
     if w <= 0.0 || h <= 0.0 {
@@ -1614,11 +1620,25 @@ fn render_input_help_strip(
     };
     let baseline_y = y + (h - key_opts.font_size) * 0.5;
 
-    let mut activity_guard = x;
+    let mut activity_guard = checkout_context.map_or(x, |context| {
+        render_checkout_context(
+            sugarloaf,
+            context,
+            rect,
+            baseline_y,
+            &key_opts,
+            &label_opts,
+            s,
+            occlusion_rects,
+        )
+    });
+    if !pane.input_help_visible() {
+        return;
+    }
     if policy.show_activity {
         let activity_w = draw_opencode_activity_scanner(
             sugarloaf,
-            x,
+            activity_guard,
             baseline_y,
             12.5 * s,
             now_seconds,
@@ -1627,7 +1647,7 @@ fn render_input_help_strip(
             clip,
             occlusion_rects,
         );
-        activity_guard = x + activity_w + 10.0 * s;
+        activity_guard += activity_w + 10.0 * s;
         if policy.show_interrupt_hint {
             let esc_x = activity_guard;
             draw_text_clipped(
@@ -1717,6 +1737,78 @@ fn render_input_help_strip(
         &label_opts,
         occlusion_rects,
     );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_checkout_context(
+    sugarloaf: &mut Sugarloaf,
+    context: &AgentCheckoutContext,
+    rect: [f32; 4],
+    baseline_y: f32,
+    value_opts: &DrawOpts,
+    icon_opts: &DrawOpts,
+    s: f32,
+    occlusion_rects: &[[f32; 4]],
+) -> f32 {
+    let [x, y, w, h] = rect;
+    let max_w = w * 0.58;
+    if max_w <= 0.0 {
+        return x;
+    }
+    let clip = [x, y, max_w, h];
+    let mut value_opts = value_opts.clone();
+    value_opts.clip_rect = Some(clip);
+    let mut icon_opts = icon_opts.clone();
+    icon_opts.clip_rect = Some(clip);
+    let inner_gap = 6.0 * s;
+    let group_gap = 18.0 * s;
+    let mut cursor_x = x;
+
+    if let Some(cwd) = context.cwd.as_deref() {
+        let glyph = crate::primitives::look::themed_glyph("status.folder", "\u{f07b}");
+        draw_text_clipped(
+            sugarloaf,
+            cursor_x,
+            baseline_y,
+            glyph,
+            &icon_opts,
+            occlusion_rects,
+        );
+        cursor_x += sugarloaf.text_mut().measure(glyph, &icon_opts) + inner_gap;
+        draw_text_clipped(
+            sugarloaf,
+            cursor_x,
+            baseline_y,
+            cwd,
+            &value_opts,
+            occlusion_rects,
+        );
+        cursor_x += sugarloaf.text_mut().measure(cwd, &value_opts) + group_gap;
+    }
+
+    if let Some(branch) = context.branch.as_deref() {
+        let glyph = crate::primitives::look::themed_glyph("status.branch", "\u{e725}");
+        draw_text_clipped(
+            sugarloaf,
+            cursor_x,
+            baseline_y,
+            glyph,
+            &icon_opts,
+            occlusion_rects,
+        );
+        cursor_x += sugarloaf.text_mut().measure(glyph, &icon_opts) + inner_gap;
+        draw_text_clipped(
+            sugarloaf,
+            cursor_x,
+            baseline_y,
+            branch,
+            &value_opts,
+            occlusion_rects,
+        );
+        cursor_x += sugarloaf.text_mut().measure(branch, &value_opts);
+    }
+
+    cursor_x.min(x + max_w) + 12.0 * s
 }
 
 /// Paint the eight-cell activity scanner with font-independent rectangles.
@@ -2187,18 +2279,16 @@ pub fn render_status_chips(
 ) {
     let mut remaining_w = max_w;
     let offset = usize::from(home_source);
-    if home_source {
+    if home_source
+        && pane.conversation_source()
+            != crate::panels::agent_pane::state::side_panel::ConversationSource::Neoism
+    {
         let font_size = status_chip_font_size(max_w, s);
-        let label = if narrow && pane.conversation_source() == crate::panels::agent_pane::state::side_panel::ConversationSource::Neoism {
-            "Neoism"
-        } else {
-            pane.conversation_source().label()
-        };
+        let label = pane.conversation_source().label();
         let opts = DrawOpts {
             font_size,
             color: theme.u8(theme.readable_accent(theme.cyan)),
             bold: true,
-            extrude: true,
             ..DrawOpts::default()
         };
         let label_w = sugarloaf.text_mut().measure(label, &opts);
@@ -2220,10 +2310,13 @@ pub fn render_status_chips(
     let source = pane.conversation_source();
     if source.provider().is_some() {
         let font_size = status_chip_font_size(max_w, s);
-        let Some((order, options)) = pane
-            .external_options()
-            .map(|snapshot| (snapshot.footer_order(), snapshot.options.clone()))
-        else {
+        let Some((provider, order, options)) = pane.external_options().map(|snapshot| {
+            (
+                snapshot.provider.clone(),
+                snapshot.footer_order(),
+                snapshot.options.clone(),
+            )
+        }) else {
             return;
         };
         let caret = "\u{f078}";
@@ -2250,14 +2343,49 @@ pub fn render_status_chips(
                 font_size,
                 color: theme.u8(theme.readable_accent(color)),
                 bold: true,
-                extrude: true,
                 ..DrawOpts::default()
             };
-            let width = sugarloaf.text_mut().measure(label, &opts) + caret_w + 22.0 * s;
+            let model_kind = (option.category == "model")
+                .then(|| {
+                    crate::panels::agent_pane::icon::ProviderLogo::from_model(
+                        &option.current_value,
+                    )
+                    .or_else(|| {
+                        crate::panels::agent_pane::icon::ProviderLogo::from_provider_id(
+                            &provider,
+                        )
+                    })
+                    .or_else(|| model_kind_for_source(source))
+                })
+                .flatten();
+            let thinking_icon = option.category == "thought_level";
+            let logo_advance = status_chip_icon_advance(model_kind, thinking_icon, s);
+            let width = logo_advance
+                + sugarloaf.text_mut().measure(label, &opts)
+                + caret_w
+                + 22.0 * s;
             if width > remaining_w {
                 break;
             }
-            draw_text_clipped(sugarloaf, x, y, label, &opts, occlusion_rects);
+            draw_model_logo(sugarloaf, model_kind, x, y, opts.color, s, occlusion_rects);
+            draw_thinking_icon(
+                sugarloaf,
+                thinking_icon,
+                x,
+                y,
+                opts.color,
+                s,
+                None,
+                occlusion_rects,
+            );
+            draw_text_clipped(
+                sugarloaf,
+                x + logo_advance,
+                y,
+                label,
+                &opts,
+                occlusion_rects,
+            );
             draw_text_clipped(
                 sugarloaf,
                 x + width - caret_w - 13.0 * s,
@@ -2282,13 +2410,21 @@ pub fn render_status_chips(
     let agent_label = pane.agent_label().to_string();
     let agent_transition = pane.agent_label_changed_elapsed_ms();
     let agent_color = agent_chip_accent(theme, &agent_label);
-    let chips: [(String, u32); 3] = [
-        (agent_label, agent_color),
+    let chips: [(
+        String,
+        u32,
+        Option<crate::panels::agent_pane::icon::ProviderLogo>,
+        bool,
+    ); 3] = [
+        (agent_label, agent_color, None, false),
         (
             model_chip_label(pane.model(), narrow).to_string(),
             theme.blue,
+            crate::panels::agent_pane::icon::ProviderLogo::from_model(pane.model())
+                .or_else(|| model_kind_for_source(pane.conversation_source())),
+            false,
         ),
-        (pane.thinking_label().to_string(), theme.magenta),
+        (pane.thinking_label().to_string(), theme.magenta, None, true),
     ];
     let font_size = status_chip_font_size(max_w, s);
     let caret = "\u{f078}";
@@ -2299,7 +2435,9 @@ pub fn render_status_chips(
     };
     let caret_w = sugarloaf.text_mut().measure(caret, &caret_opts);
     let start_x = x;
-    for (index, (label, color)) in chips.into_iter().enumerate() {
+    for (index, (label, color, model_kind, thinking_icon)) in
+        chips.into_iter().enumerate()
+    {
         if label.is_empty() {
             continue;
         }
@@ -2307,11 +2445,11 @@ pub fn render_status_chips(
             font_size,
             color: theme.u8(theme.readable_accent(color)),
             bold: true,
-            extrude: true,
             ..DrawOpts::default()
         };
         let label_w = sugarloaf.text_mut().measure(&label, &opts);
-        let chip_w = label_w + 6.0 * s + caret_w + 18.0 * s;
+        let logo_advance = status_chip_icon_advance(model_kind, thinking_icon, s);
+        let chip_w = logo_advance + label_w + 6.0 * s + caret_w + 18.0 * s;
         if x + chip_w > start_x + remaining_w {
             break;
         }
@@ -2320,25 +2458,59 @@ pub fn render_status_chips(
             let progress = (ms / 280.0).clamp(0.0, 1.0);
             -2.5 * s * (1.0 - progress).powi(2)
         });
+        draw_model_logo(
+            sugarloaf,
+            model_kind,
+            x,
+            y + lift,
+            opts.color,
+            s,
+            occlusion_rects,
+        );
+        draw_thinking_icon(
+            sugarloaf,
+            thinking_icon,
+            x,
+            y + lift,
+            opts.color,
+            s,
+            activation,
+            occlusion_rects,
+        );
+        let label_x = x + logo_advance;
         if index == 0 {
             if let Some(elapsed_ms) = agent_transition {
                 super::side_panel::draw::render_scramble_text(
                     sugarloaf,
-                    x,
+                    label_x,
                     y + lift,
                     &label,
                     &opts,
                     elapsed_ms,
                 );
             } else {
-                draw_text_clipped(sugarloaf, x, y + lift, &label, &opts, occlusion_rects);
+                draw_text_clipped(
+                    sugarloaf,
+                    label_x,
+                    y + lift,
+                    &label,
+                    &opts,
+                    occlusion_rects,
+                );
             }
         } else {
-            draw_text_clipped(sugarloaf, x, y + lift, &label, &opts, occlusion_rects);
+            draw_text_clipped(
+                sugarloaf,
+                label_x,
+                y + lift,
+                &label,
+                &opts,
+                occlusion_rects,
+            );
         }
         draw_text_clipped(
             sugarloaf,
-            x + label_w + 6.0 * s,
+            label_x + label_w + 6.0 * s,
             y + 3.5 * s + lift,
             caret,
             &caret_opts,
@@ -2347,7 +2519,7 @@ pub fn render_status_chips(
         if let Some(ms) = activation {
             let fade = 1.0 - ms / 280.0;
             let accent = theme.u8(theme.readable_accent(color));
-            let width = label_w * (1.0 - fade.powi(3));
+            let width = (logo_advance + label_w) * (1.0 - fade.powi(3));
             let line = [x, y + 17.0 * s, width, 1.5 * s];
             if !occlusion_rects
                 .iter()
@@ -2378,6 +2550,147 @@ pub fn render_status_chips(
         );
         x += chip_w;
     }
+}
+
+fn model_kind_for_source(
+    source: crate::panels::agent_pane::state::side_panel::ConversationSource,
+) -> Option<crate::panels::agent_pane::icon::ProviderLogo> {
+    use crate::panels::agent_pane::icon::ProviderLogo;
+    use crate::panels::agent_pane::state::side_panel::ConversationSource;
+    match source {
+        ConversationSource::Neoism => None,
+        ConversationSource::OpenCode => Some(ProviderLogo::OpenCode),
+        ConversationSource::ClaudeCode => Some(ProviderLogo::Anthropic),
+        ConversationSource::Codex => Some(ProviderLogo::OpenAi),
+    }
+}
+
+fn model_logo_advance(
+    kind: Option<crate::panels::agent_pane::icon::ProviderLogo>,
+    s: f32,
+) -> f32 {
+    if kind.is_some() {
+        (MODEL_LOGO_SIDE + MODEL_LOGO_GAP) * s
+    } else {
+        0.0
+    }
+}
+
+fn status_chip_icon_advance(
+    model_kind: Option<crate::panels::agent_pane::icon::ProviderLogo>,
+    thinking_icon: bool,
+    s: f32,
+) -> f32 {
+    if thinking_icon {
+        (THINKING_ICON_SIDE + MODEL_LOGO_GAP) * s
+    } else {
+        model_logo_advance(model_kind, s)
+    }
+}
+
+fn status_chip_icon_rect(x: f32, text_y: f32, side: f32, s: f32) -> [f32; 4] {
+    let side = side * s;
+    let hit_top = text_y - 5.0 * s;
+    [
+        x,
+        hit_top + (STATUS_CHIP_HIT_H * s - side) * 0.5,
+        side,
+        side,
+    ]
+}
+
+fn draw_model_logo(
+    sugarloaf: &mut Sugarloaf,
+    kind: Option<crate::panels::agent_pane::icon::ProviderLogo>,
+    x: f32,
+    y: f32,
+    color: [u8; 4],
+    s: f32,
+    occlusion_rects: &[[f32; 4]],
+) {
+    let Some(kind) = kind else {
+        return;
+    };
+    let Some(image_id) =
+        crate::panels::agent_pane::icon::register_provider_logo_atlas(sugarloaf, color)
+    else {
+        return;
+    };
+    let scale = sugarloaf.scale_factor();
+    push_image_overlay_clipped(
+        sugarloaf,
+        OVERLAY_PANEL_ID,
+        image_id,
+        status_chip_icon_rect(x, y, MODEL_LOGO_SIDE, s),
+        kind.source_rect(),
+        2,
+        scale,
+        occlusion_rects,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_thinking_icon(
+    sugarloaf: &mut Sugarloaf,
+    visible: bool,
+    x: f32,
+    y: f32,
+    color: [u8; 4],
+    s: f32,
+    activation_ms: Option<f32>,
+    occlusion_rects: &[[f32; 4]],
+) {
+    if !visible {
+        return;
+    }
+    let side = THINKING_ICON_SIDE * s;
+    let strength = activation_ms.map_or(0.0, |ms| 1.0 - (ms / 280.0).clamp(0.0, 1.0));
+    let phase = activation_ms.unwrap_or(0.0) * 0.12;
+    let jitter_x = phase.sin() * 1.25 * s * strength;
+    let jitter_y = (phase * 1.7).cos() * 0.65 * s * strength;
+    let mut icon_rect = status_chip_icon_rect(x, y, THINKING_ICON_SIDE, s);
+    icon_rect[0] += jitter_x;
+    icon_rect[1] += jitter_y;
+    let icon_opts = DrawOpts {
+        font_size: side,
+        color,
+        bold: true,
+        ..DrawOpts::default()
+    };
+
+    if strength > 0.0 {
+        for (direction, alpha) in [(-1.0_f32, 0.24_f32), (1.0, 0.18)] {
+            let mut echo_color = color;
+            echo_color[3] = ((color[3] as f32) * alpha * strength).round() as u8;
+            let echo_rect = [
+                icon_rect[0] + direction * 3.0 * s * strength,
+                icon_rect[1] - direction * 1.25 * s * strength,
+                icon_rect[2],
+                icon_rect[3],
+            ];
+            draw_icon_centered_with_occlusion(
+                sugarloaf,
+                echo_rect[0],
+                echo_rect,
+                THINKING_ICON_GLYPH,
+                &DrawOpts {
+                    color: echo_color,
+                    ..icon_opts.clone()
+                },
+                occlusion_rects,
+                true,
+            );
+        }
+    }
+    draw_icon_centered_with_occlusion(
+        sugarloaf,
+        icon_rect[0],
+        icon_rect,
+        THINKING_ICON_GLYPH,
+        &icon_opts,
+        occlusion_rects,
+        true,
+    );
 }
 
 #[cfg(test)]
@@ -2464,6 +2777,18 @@ mod composer_visual_policy_tests {
         assert_eq!(compact, STATUS_CHIP_COMPACT_FONT);
         assert_eq!(desktop, STATUS_CHIP_DESKTOP_FONT);
         assert!(STATUS_CHIP_HIT_H > desktop);
+    }
+
+    #[test]
+    fn status_chip_symbols_share_the_hit_row_center() {
+        let text_y = 100.0;
+        for side in [MODEL_LOGO_SIDE, THINKING_ICON_SIDE] {
+            let rect = status_chip_icon_rect(20.0, text_y, side, 1.0);
+            assert_eq!(
+                rect[1] + rect[3] * 0.5,
+                text_y - 5.0 + STATUS_CHIP_HIT_H * 0.5
+            );
+        }
     }
 
     #[test]

@@ -89,12 +89,13 @@ fn main() {
             r#"{{"changes":{{{uri}:[{{"range":{range},"newText":"renamed"}}],{other}:[{{"range":{range},"newText":"renamed"}}]}}}}"#
         );
         let result = match method {
-            "initialize" => r#"{"capabilities":{"textDocumentSync":{"openClose":true,"change":1,"save":true},"completionProvider":{"triggerCharacters":[".",":"]},"hoverProvider":true,"definitionProvider":true,"referencesProvider":true,"signatureHelpProvider":{"triggerCharacters":["(",","]},"documentSymbolProvider":true,"documentHighlightProvider":true,"codeActionProvider":{"resolveProvider":true},"renameProvider":true,"documentFormattingProvider":true,"executeCommandProvider":{"commands":["fixture.finish"]}}}"#.into(),
+            "initialize" => r#"{"capabilities":{"textDocumentSync":{"openClose":true,"change":1,"save":true},"completionProvider":{"triggerCharacters":[".",":"]},"hoverProvider":true,"definitionProvider":true,"referencesProvider":true,"signatureHelpProvider":{"triggerCharacters":["(",","]},"documentSymbolProvider":true,"workspaceSymbolProvider":true,"documentHighlightProvider":true,"codeActionProvider":{"resolveProvider":true},"renameProvider":true,"documentFormattingProvider":true,"executeCommandProvider":{"commands":["fixture.finish"]}}}"#.into(),
             "textDocument/completion" => r#"[{"label":"host_completion","kind":3,"insertText":"host_completion()"}]"#.into(),
             "textDocument/hover" => format!(r#"{{"contents":{{"kind":"markdown","value":"{}"}}}}"#, if live { "unsaved-host hover" } else { "stale disk hover" }),
             "textDocument/definition" | "textDocument/references" => format!(r#"[{{"uri":{uri},"range":{range}}}]"#),
             "textDocument/signatureHelp" => r#"{"signatures":[{"label":"shared(value)","parameters":[{"label":"value"}]}],"activeSignature":0,"activeParameter":0}"#.into(),
             "textDocument/documentSymbol" => format!(r#"[{{"name":"shared","kind":12,"range":{range},"selectionRange":{range}}}]"#),
+            "workspace/symbol" => format!(r#"[{{"name":"shared workspace","kind":12,"location":{{"uri":{uri},"range":{range}}}}}]"#),
             "textDocument/documentHighlight" => format!(r#"[{{"range":{range},"kind":1}}]"#),
             "textDocument/codeAction" => r#"[{"title":"Host fix","kind":"quickfix","isPreferred":true,"data":{"fix":1}}]"#.into(),
             "codeAction/resolve" => format!(r#"{{"title":"Host fix","edit":{edit},"command":{{"title":"Finish","command":"fixture.finish"}}}}"#),

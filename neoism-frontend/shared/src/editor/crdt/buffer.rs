@@ -129,23 +129,60 @@ impl CrdtTextBuffer {
         &self,
         edit: CrdtTextEdit,
     ) -> Result<CrdtTextUpdate, CrdtTextBufferError> {
-        let before = self.state_vector_v1();
-        match edit {
-            CrdtTextEdit::Insert { index, content } => {
-                self.insert(index, &content)?;
+        self.apply_local_edits([edit])
+    }
+
+    pub fn apply_local_edits(
+        &self,
+        edits: impl IntoIterator<Item = CrdtTextEdit>,
+    ) -> Result<CrdtTextUpdate, CrdtTextBufferError> {
+        let edits = edits.into_iter().collect::<Vec<_>>();
+        let mut text_len = self.len();
+        for edit in &edits {
+            let (index, delete_len, insert_len) = match edit {
+                CrdtTextEdit::Insert { index, content } => {
+                    (*index, 0, content.encode_utf16().count() as CrdtTextOffset)
+                }
+                CrdtTextEdit::Delete { index, len } => (*index, *len, 0),
+                CrdtTextEdit::Replace { index, len, content } => {
+                    (*index, *len, content.encode_utf16().count() as CrdtTextOffset)
+                }
+            };
+            let end = index
+                .checked_add(delete_len)
+                .ok_or(CrdtTextBufferError::OffsetOutOfBounds { index, len: text_len })?;
+            if index > text_len || end > text_len {
+                return Err(CrdtTextBufferError::RangeOutOfBounds {
+                    index,
+                    delete_len,
+                    len: text_len,
+                });
             }
-            CrdtTextEdit::Delete { index, len } => {
-                self.delete(index, len)?;
-            }
-            CrdtTextEdit::Replace {
-                index,
-                len,
-                content,
-            } => {
-                self.replace(index, len, &content)?;
-            }
+            text_len = text_len - delete_len + insert_len;
         }
 
+        let before = self.state_vector_v1();
+        {
+            let mut txn = self.doc.transact_mut_with(LOCAL_EDIT_ORIGIN);
+            for edit in edits {
+                match edit {
+                    CrdtTextEdit::Insert { index, content } => {
+                        self.text.insert(&mut txn, index, &content);
+                    }
+                    CrdtTextEdit::Delete { index, len } => {
+                        self.text.remove_range(&mut txn, index, len);
+                    }
+                    CrdtTextEdit::Replace { index, len, content } => {
+                        if len > 0 {
+                            self.text.remove_range(&mut txn, index, len);
+                        }
+                        if !content.is_empty() {
+                            self.text.insert(&mut txn, index, &content);
+                        }
+                    }
+                }
+            }
+        }
         Ok(CrdtTextUpdate {
             origin_client_id: self.client_id(),
             update_v1: self.encode_diff_v1(&before)?,

@@ -1,10 +1,10 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use neoism_protocol::crdt::{
     CrdtBufferEdit, CrdtBufferId, CrdtBufferUpdate, CrdtClientId, CrdtClientMessage,
     CrdtCompactionStatus, CrdtPeerPresence, CrdtPresencePeerId, CrdtPresenceUpdate,
-    CrdtServerMessage, CrdtSyncEnvelope,
+    CrdtEditTransaction, CrdtServerMessage, CrdtSyncEnvelope,
 };
 use parking_lot::Mutex;
 
@@ -28,6 +28,7 @@ pub struct CrdtSyncHub {
     peer_state_vectors:
         Arc<Mutex<HashMap<CrdtBufferId, BTreeMap<CrdtPresencePeerId, Vec<u8>>>>>,
     compaction: Arc<Mutex<HashMap<CrdtBufferId, CrdtCompactionRecord>>>,
+    plugin_invocations: Arc<Mutex<HashSet<String>>>,
     tx: Arc<tokio::sync::broadcast::Sender<CrdtServerMessage>>,
 }
 
@@ -52,6 +53,7 @@ impl CrdtSyncHub {
             presence: Arc::new(Mutex::new(HashMap::new())),
             peer_state_vectors: Arc::new(Mutex::new(HashMap::new())),
             compaction: Arc::new(Mutex::new(HashMap::new())),
+            plugin_invocations: Arc::new(Mutex::new(HashSet::new())),
             tx: Arc::new(tx),
         }
     }
@@ -159,6 +161,15 @@ impl CrdtSyncHub {
                     "[crdt-fold] client ApplyUpdate"
                 );
             }
+            CrdtClientMessage::ApplyEdits { transaction } => {
+                tracing::info!(
+                    target: "neoism::crdt_fold",
+                    buffer_id = %transaction.buffer_id,
+                    plugin_id = %transaction.plugin_id,
+                    edits = transaction.edits.len(),
+                    "[crdt-fold] plugin ApplyEdits"
+                );
+            }
             CrdtClientMessage::SaveBuffer { buffer_id } => {
                 tracing::info!(
                     target: "neoism::crdt_fold",
@@ -182,6 +193,10 @@ impl CrdtSyncHub {
             }
             CrdtClientMessage::ApplySync { envelope } => self
                 .apply_update(CrdtBufferUpdate::from(envelope))
+                .into_iter()
+                .collect(),
+            CrdtClientMessage::ApplyEdits { transaction } => self
+                .apply_edit_transaction(transaction)
                 .into_iter()
                 .collect(),
             // Presence is broadcast-only: the publisher already knows its
@@ -224,6 +239,37 @@ impl CrdtSyncHub {
             CrdtClientMessage::SaveBuffer { buffer_id } => {
                 vec![self.save_buffer(&buffer_id)]
             }
+        }
+    }
+
+    fn apply_edit_transaction(
+        &self,
+        transaction: CrdtEditTransaction,
+    ) -> Option<CrdtServerMessage> {
+        let dedupe = format!(
+            "{}:{}:{}",
+            transaction.plugin_id, transaction.invocation_id, transaction.idempotency_key
+        );
+        {
+            let mut invocations = self.plugin_invocations.lock();
+            if !invocations.insert(dedupe) {
+                return None;
+            }
+            if invocations.len() > 4096 {
+                invocations.clear();
+            }
+        }
+        let buffer_id = transaction.buffer_id.clone();
+        match self.buffers.apply_daemon_edits(
+            &transaction.buffer_id,
+            &transaction.expected_state_vector_v1,
+            transaction.edits,
+        ) {
+            Ok(accepted) => Some(self.broadcast_accepted(accepted)),
+            Err(error) => Some(CrdtServerMessage::Error {
+                buffer_id: Some(buffer_id),
+                message: error.to_string(),
+            }),
         }
     }
 

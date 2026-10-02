@@ -5,7 +5,8 @@
 use super::*;
 use neoism_protocol::editor::{
     EditorClientMessage as Request, EditorLspAction as Action,
-    EditorServerMessage as Reply,
+    EditorLspActionCapability, EditorLspBufferSnapshot, EditorLspEditOperation,
+    EditorLspMutationPlan, EditorLspOpenBuffer, EditorServerMessage as Reply,
 };
 use std::time::{Duration, Instant};
 
@@ -23,6 +24,22 @@ struct Document {
     root: PathBuf,
     route: usize,
     file: PathBuf,
+}
+
+#[derive(Clone)]
+pub(crate) struct RemoteLuaLspCodeAction {
+    pub(super) target: neoism_lua::LuaLspTarget,
+    document: Document,
+    capability: EditorLspActionCapability,
+    open_revisions: Vec<(usize, PathBuf, u64)>,
+}
+
+pub(crate) struct RemoteLuaLspPreparedMutation {
+    pub(crate) target: neoism_lua::LuaLspTarget,
+    document: Document,
+    operation: neoism_lua::LuaLspOperation,
+    plan: EditorLspMutationPlan,
+    open_revisions: Vec<(usize, PathBuf, u64)>,
 }
 
 impl Document {
@@ -64,6 +81,32 @@ enum Kind {
     Query,
     Apply,
     Format(u64),
+    LuaRead {
+        owner: neoism_lua::PluginOwner,
+        id: String,
+        operation: neoism_lua::LuaLspOperation,
+        target: neoism_lua::LuaLspTarget,
+    },
+    LuaEditPrepare {
+        owner: neoism_lua::PluginOwner,
+        id: String,
+        operation: neoism_lua::LuaLspOperation,
+        target: neoism_lua::LuaLspTarget,
+    },
+    LuaEditCommit {
+        owner: neoism_lua::PluginOwner,
+        id: String,
+        operation: neoism_lua::LuaLspOperation,
+        target: neoism_lua::LuaLspTarget,
+        plan: EditorLspMutationPlan,
+    },
+    LuaEditFinalize {
+        owner: neoism_lua::PluginOwner,
+        id: String,
+        operation: neoism_lua::LuaLspOperation,
+        target: neoism_lua::LuaLspTarget,
+        mutation: neoism_lua::LuaLspMutation,
+    },
 }
 #[derive(Clone)]
 struct Pending {
@@ -103,6 +146,41 @@ fn state() -> &'static Mutex<RemoteState> {
 }
 fn lock() -> std::sync::MutexGuard<'static, RemoteState> {
     state().lock().unwrap_or_else(|p| p.into_inner())
+}
+
+pub(crate) fn cancel_remote_lua_lsp_request(
+    owner: &neoism_lua::PluginOwner,
+    id: &str,
+) -> bool {
+    let mut removed = false;
+    lock().pending.retain(|_, pending| {
+        let matches = match &pending.kind {
+            Kind::LuaRead {
+                owner: pending_owner,
+                id: pending_id,
+                ..
+            }
+            | Kind::LuaEditPrepare {
+                owner: pending_owner,
+                id: pending_id,
+                ..
+            }
+            | Kind::LuaEditCommit {
+                owner: pending_owner,
+                id: pending_id,
+                ..
+            }
+            | Kind::LuaEditFinalize {
+                owner: pending_owner,
+                id: pending_id,
+                ..
+            } => pending_owner == owner && pending_id == id,
+            _ => false,
+        };
+        removed |= matches;
+        !matches
+    });
+    removed
 }
 
 impl Drop for Subscription {
@@ -174,6 +252,390 @@ fn report_passive_error(sub: &mut Subscription, message: &str) -> bool {
 }
 
 impl Screen<'_> {
+    fn remote_lua_open_buffers(
+        &self,
+        document: &Document,
+    ) -> Result<(Vec<EditorLspOpenBuffer>, Vec<(usize, PathBuf, u64)>), String> {
+        let root = neoism_protocol::host_path::HostPath::new(
+            document.root.to_string_lossy().into_owned(),
+        );
+        let mut snapshots = Vec::new();
+        let mut unique = std::collections::BTreeMap::new();
+        for item in self
+            .context_manager
+            .all_grids()
+            .iter()
+            .flat_map(|grid| grid.contexts().values())
+        {
+            let route = item.context().route_id;
+            if self
+                .context_manager
+                .adopted_workspace_identity_for_route(route)
+                != Some((document.endpoint.as_str(), document.workspace.as_str()))
+            {
+                continue;
+            }
+            let Some(code) = item.context().code.as_ref().filter(|code| code_uses_host_lsp(code))
+            else {
+                continue;
+            };
+            let path = code.path.to_string_lossy().into_owned();
+            if root.relative(&path).is_none() {
+                continue;
+            }
+            if unique.insert(path.clone(), code.buffer.revision).is_some_and(|revision| {
+                revision != code.buffer.revision
+            }) {
+                return Err("remote LSP buffer has conflicting open revisions".into());
+            }
+            snapshots.push((route, code.path.clone(), code.buffer.revision));
+        }
+        snapshots.sort_by(|a, b| (a.0, &a.1, a.2).cmp(&(b.0, &b.1, b.2)));
+        Ok((
+            unique
+                .into_iter()
+                .map(|(path, revision)| EditorLspOpenBuffer { path, revision })
+                .collect(),
+            snapshots,
+        ))
+    }
+
+    fn remote_lua_buffer_snapshots(
+        &mut self,
+        document: &Document,
+    ) -> Result<(Vec<EditorLspBufferSnapshot>, Vec<(usize, PathBuf, u64)>), String> {
+        let (_, revisions) = self.remote_lua_open_buffers(document)?;
+        let mut unique = std::collections::BTreeMap::new();
+        for (route, path, revision) in &revisions {
+            let code = self
+                .context_manager
+                .get_by_route_id(*route)
+                .and_then(|item| item.context().code.as_ref())
+                .ok_or_else(|| "remote LSP buffer disappeared during synchronization".to_string())?;
+            let identity = path.to_string_lossy().into_owned();
+            let snapshot = EditorLspBufferSnapshot {
+                path: identity.clone(),
+                revision: *revision,
+                text: code.buffer.text(),
+            };
+            if unique.insert(identity, snapshot.clone()).is_some_and(|prior| {
+                prior.revision != snapshot.revision || prior.text != snapshot.text
+            }) {
+                return Err("remote LSP buffer has conflicting live content".into());
+            }
+        }
+        Ok((unique.into_values().collect(), revisions))
+    }
+
+    fn send_remote_lua_lsp_request(
+        &mut self,
+        document: Document,
+        request_id: u64,
+        surface: String,
+        revision: u64,
+        kind: Kind,
+        open_revisions: Vec<(usize, PathBuf, u64)>,
+        request: Request,
+    ) -> Result<(), String> {
+        let Some((handle, runtime)) = self.context_manager.daemon_link_handle_and_runtime() else {
+            return Err("workspace LSP connection is unavailable".into());
+        };
+        let key = (document.window, document.endpoint.clone(), request_id);
+        lock().pending.insert(
+            key.clone(),
+            Pending {
+                document: document.clone(),
+                surface,
+                revision,
+                seq: request_id,
+                kind,
+                action: None,
+                open_revisions,
+                since: Instant::now(),
+            },
+        );
+        let proxy = self.context_manager.event_proxy_clone();
+        runtime.spawn(async move {
+            if let Err(error) = handle
+                .send_editor_with_request_id(request_id, request, Some(document.root))
+                .await
+            {
+                let mut state = lock();
+                if state.pending.contains_key(&key) {
+                    state
+                        .failures
+                        .push((key.0, key.1, key.2, error.to_string()));
+                }
+            }
+            proxy.send_event(RioEventType::Rio(RioEvent::Render), document.window);
+            tokio::time::sleep(Duration::from_secs(21)).await;
+            proxy.send_event(RioEventType::Rio(RioEvent::Render), document.window);
+        });
+        Ok(())
+    }
+
+    pub(super) fn dispatch_remote_lua_lsp_request(
+        &mut self,
+        owner: neoism_lua::PluginOwner,
+        id: String,
+        operation: neoism_lua::LuaLspOperation,
+        arguments: &serde_json::Value,
+    ) -> Result<neoism_lua::LuaLspTarget, String> {
+        let read_operation = lua_read_operation(operation);
+        let edit_operation = lua_edit_operation(operation);
+        if read_operation.is_none() && edit_operation.is_none() {
+            return Err(format!(
+                "structured {operation:?} requests are not implemented remotely yet"
+            ));
+        }
+        let document = self
+            .remote_lsp_document()
+            .ok_or_else(|| "there is no focused remote code buffer".to_string())?;
+        if !owner_matches_link(&document, self.context_manager.daemon_endpoint()) {
+            return Err(
+                "workspace LSP connection is not attached; retry after reconnecting"
+                    .into(),
+            );
+        }
+        let (cursor_line, cursor_col, revision, focused_text) = self
+            .context_manager
+            .current()
+            .code
+            .as_ref()
+            .map(|code| {
+                (
+                    code.buffer.cursor_line,
+                    code.buffer.cursor_col,
+                    code.buffer.revision,
+                    code.buffer.text(),
+                )
+            })
+            .ok_or_else(|| "there is no focused remote code buffer".to_string())?;
+        let host_root = neoism_protocol::host_path::HostPath::new(
+            document.root.to_string_lossy().into_owned(),
+        );
+        if let Some(requested_root) = super::lua::argument_str(arguments, "root")? {
+            if requested_root != host_root.as_str() {
+                return Err(
+                    "structured LSP requests cannot leave the focused workspace root"
+                        .into(),
+                );
+            }
+        }
+        let requested_path = super::lua::argument_str(arguments, "path")?;
+        let host_file = match requested_path {
+            Some(path) => resolve_remote_lua_target_path(&host_root, path)?,
+            None => neoism_protocol::host_path::HostPath::new(
+                document.file.to_string_lossy().into_owned(),
+            ),
+        };
+        let line =
+            super::lua::argument_u32(arguments, &["line"], cursor_line)?;
+        let character = super::lua::argument_u32(
+            arguments,
+            &["character", "column"],
+            cursor_col,
+        )?;
+        let focused = host_path_eq(&PathBuf::from(host_file.as_str()), &document.file);
+        let mut target = neoism_lua::LuaLspTarget {
+            root: host_root.as_str().to_owned(),
+            path: host_file.as_str().to_owned(),
+            line,
+            character,
+            buffer_revision: focused.then_some(revision),
+            pane_id: document.route as u64,
+        };
+        let (open_buffers, open_revisions) = self.remote_lua_open_buffers(&document)?;
+        if let Some((route, _, open_revision)) = open_revisions
+            .iter()
+            .find(|(_, path, _)| host_path_eq(path, &PathBuf::from(host_file.as_str())))
+        {
+            target.pane_id = *route as u64;
+            target.buffer_revision = Some(*open_revision);
+        }
+        if operation == neoism_lua::LuaLspOperation::Format
+            && target.buffer_revision.is_none()
+        {
+            return Err("structured format requires an open target buffer".into());
+        }
+        let request_id = (1u64 << 63) | QUERY_SEQ.fetch_add(1, Ordering::SeqCst);
+        let surface = format!("lua-lsp:{}:{request_id}", document.route);
+        let (kind, request) = if let Some(wire_operation) = read_operation {
+            (
+                Kind::LuaRead {
+                    owner,
+                    id,
+                    operation,
+                    target: target.clone(),
+                },
+                Request::LspRead {
+                    operation: wire_operation,
+                    path: host_file.as_str().to_owned(),
+                    line,
+                    character,
+                    query: super::lua::argument_str(arguments, "query")?
+                        .unwrap_or_default()
+                        .to_owned(),
+                    buffer_text: focused.then_some(focused_text),
+                    surface_id: Some(surface.clone()),
+                },
+            )
+        } else {
+            let wire_operation = edit_operation.expect("checked structured edit operation");
+            let argument = match operation {
+                neoism_lua::LuaLspOperation::Rename => {
+                    let value = super::lua::argument_str(arguments, "newName")?
+                        .filter(|value| !value.trim().is_empty())
+                        .ok_or_else(|| "rename requires a non-empty newName".to_string())?;
+                    Some(value.to_owned())
+                }
+                _ => None,
+            };
+            (
+                Kind::LuaEditPrepare {
+                    owner,
+                    id,
+                    operation,
+                    target: target.clone(),
+                },
+                Request::LspEditPrepare {
+                    operation: wire_operation,
+                    path: host_file.as_str().to_owned(),
+                    line,
+                    character,
+                    argument,
+                    action: None,
+                    buffer_text: focused.then_some(focused_text),
+                    open_buffers,
+                    surface_id: Some(surface.clone()),
+                },
+            )
+        };
+        self.send_remote_lua_lsp_request(
+            document,
+            request_id,
+            surface,
+            revision,
+            kind,
+            open_revisions,
+            request,
+        )?;
+        Ok(target)
+    }
+
+    pub(crate) fn dispatch_remote_lua_code_action(
+        &mut self,
+        owner: neoism_lua::PluginOwner,
+        id: String,
+        action: RemoteLuaLspCodeAction,
+    ) -> Result<neoism_lua::LuaLspTarget, String> {
+        if !owner_matches_link(&action.document, self.context_manager.daemon_endpoint()) {
+            return Err("workspace LSP connection is no longer attached".into());
+        }
+        let (open_buffers, open_revisions) = self.remote_lua_open_buffers(&action.document)?;
+        if open_revisions != action.open_revisions {
+            return Err("an open remote buffer changed before action selection".into());
+        }
+        if action.target.buffer_revision.is_some_and(|revision| {
+            self.context_manager
+                .get_by_route_id(action.document.route)
+                .and_then(|item| item.context().code.as_ref())
+                .is_none_or(|code| {
+                    !code_uses_host_lsp(code)
+                        || !host_path_eq(&code.path, &PathBuf::from(&action.target.path))
+                        || code.buffer.revision != revision
+                })
+        }) {
+            return Err("remote LSP target changed before action selection".into());
+        }
+        let buffer_text = action.target.buffer_revision.and_then(|_| {
+            self.context_manager
+                .get_by_route_id(action.document.route)
+                .and_then(|item| item.context().code.as_ref())
+                .map(|code| code.buffer.text())
+        });
+        let request_id = (1u64 << 63) | QUERY_SEQ.fetch_add(1, Ordering::SeqCst);
+        let surface = format!("lua-lsp:{}:{request_id}", action.document.route);
+        let request = Request::LspEditPrepare {
+            operation: EditorLspEditOperation::ApplyCodeAction,
+            path: action.target.path.clone(),
+            line: action.target.line,
+            character: action.target.character,
+            argument: None,
+            action: Some(action.capability),
+            buffer_text,
+            open_buffers,
+            surface_id: Some(surface.clone()),
+        };
+        let target = action.target;
+        self.send_remote_lua_lsp_request(
+            action.document,
+            request_id,
+            surface,
+            target.buffer_revision.unwrap_or_default(),
+            Kind::LuaEditPrepare {
+                owner,
+                id,
+                operation: neoism_lua::LuaLspOperation::ApplyCodeAction,
+                target: target.clone(),
+            },
+            open_revisions,
+            request,
+        )?;
+        Ok(target)
+    }
+
+    pub(crate) fn dispatch_remote_lua_mutation(
+        &mut self,
+        owner: neoism_lua::PluginOwner,
+        id: String,
+        prepared: RemoteLuaLspPreparedMutation,
+    ) -> Result<neoism_lua::LuaLspTarget, String> {
+        if !owner_matches_link(&prepared.document, self.context_manager.daemon_endpoint()) {
+            return Err("workspace LSP connection is no longer attached".into());
+        }
+        let (open_buffers, current) = self.remote_lua_open_buffers(&prepared.document)?;
+        if current != prepared.open_revisions {
+            return Err("remote buffer state changed before mutation commit".into());
+        }
+        if prepared.target.buffer_revision.is_some_and(|revision| {
+            self.context_manager
+                .get_by_route_id(prepared.document.route)
+                .and_then(|item| item.context().code.as_ref())
+                .is_none_or(|code| {
+                    !code_uses_host_lsp(code)
+                        || !host_path_eq(&code.path, &PathBuf::from(&prepared.target.path))
+                        || code.buffer.revision != revision
+                })
+        }) {
+            return Err("remote LSP target changed before mutation commit".into());
+        }
+        let request_id = (1u64 << 63) | QUERY_SEQ.fetch_add(1, Ordering::SeqCst);
+        let surface = format!("lua-lsp:{}:{request_id}", prepared.document.route);
+        let request = Request::LspEditCommit {
+            plan_id: prepared.plan.plan_id.clone(),
+            open_buffers,
+            surface_id: Some(surface.clone()),
+        };
+        let target = prepared.target;
+        self.send_remote_lua_lsp_request(
+            prepared.document,
+            request_id,
+            surface,
+            target.buffer_revision.unwrap_or_default(),
+            Kind::LuaEditCommit {
+                owner,
+                id,
+                operation: prepared.operation,
+                target: target.clone(),
+                plan: prepared.plan,
+            },
+            current,
+            request,
+        )?;
+        Ok(target)
+    }
+
     /// Menu acceptance can arrive before the next paint after a pane switch.
     /// Do not apply a previously visible host's completion/action to the new
     /// pane merely because both buffers have the same raw path.
@@ -191,10 +653,22 @@ impl Screen<'_> {
     pub(crate) fn clear_remote_code_lsp(&self) {
         let window = self.context_manager.window_id();
         let mut state = lock();
-        state.pending.retain(|(w, _, _), _| *w != window);
+        let removed = state
+            .pending
+            .extract_if(|(w, _, _), _| *w == window)
+            .map(|(_, pending)| pending)
+            .collect::<Vec<_>>();
         state.subscriptions.retain(|(w, _), _| *w != window);
         state.failures.retain(|(w, _, _, _)| *w != window);
         state.focus.remove(&window);
+        drop(state);
+        for pending in removed {
+            enqueue_remote_lua_error(
+                &pending,
+                "stale_target",
+                "remote LSP target was closed before the reply arrived",
+            );
+        }
     }
 
     fn remote_lsp_document(&self) -> Option<Document> {
@@ -684,7 +1158,15 @@ impl Screen<'_> {
                 .subscriptions
                 .retain(|(w, r), _| *w != window || routes.contains(r));
             state.pending.retain(|(w, _, _), p| {
-                *w != window || routes.contains(&p.document.route)
+                *w != window
+                    || routes.contains(&p.document.route)
+                    || matches!(
+                        p.kind,
+                        Kind::LuaRead { .. }
+                            | Kind::LuaEditPrepare { .. }
+                            | Kind::LuaEditCommit { .. }
+                            | Kind::LuaEditFinalize { .. }
+                    )
             });
             let mut failures = Vec::new();
             state.failures.retain(|(w, endpoint, id, message)| {
@@ -893,6 +1375,10 @@ impl Screen<'_> {
         let surface = match message {
             Reply::LspSnapshot { surface_id, .. }
             | Reply::LspQueryResult { surface_id, .. }
+            | Reply::LspReadResult { surface_id, .. }
+            | Reply::LspEditPrepared { surface_id, .. }
+            | Reply::LspEditCommitted { surface_id, .. }
+            | Reply::LspEditFinalized { surface_id, .. }
             | Reply::LspHoverResult { surface_id, .. }
             | Reply::LspCompletions { surface_id, .. }
             | Reply::Error { surface_id, .. } => surface_id.as_deref(),
@@ -912,17 +1398,542 @@ impl Screen<'_> {
             return false;
         };
         let document = &pending.document;
-        let valid = lock()
+        let subscription_valid = lock()
             .subscriptions
             .get(&(window, document.route))
             .is_some_and(|s| s.document == *document);
-        if !valid
-            || self
-                .context_manager
-                .adopted_workspace_identity_for_route(document.route)
-                != Some((document.endpoint.as_str(), document.workspace.as_str()))
-        {
+        let route_valid = self
+            .context_manager
+            .adopted_workspace_identity_for_route(document.route)
+            == Some((document.endpoint.as_str(), document.workspace.as_str()));
+        let lua_request = matches!(
+            pending.kind,
+            Kind::LuaRead { .. }
+                | Kind::LuaEditPrepare { .. }
+                | Kind::LuaEditCommit { .. }
+                | Kind::LuaEditFinalize { .. }
+        );
+        if !route_valid || (!lua_request && !subscription_valid) {
+            if lua_request {
+                enqueue_remote_lua_error(
+                    &pending,
+                    "stale_target",
+                    "remote LSP target is no longer active",
+                );
+                return true;
+            }
             return false;
+        }
+        if let Kind::LuaEditPrepare {
+            owner,
+            id,
+            operation,
+            target,
+        } = &pending.kind
+        {
+            let stale = target.buffer_revision.is_some_and(|revision| {
+                self.context_manager
+                    .get_by_route_id(document.route)
+                    .and_then(|item| item.context().code.as_ref())
+                    .is_none_or(|code| {
+                        !code_uses_host_lsp(code)
+                            || !host_path_eq(&code.path, &PathBuf::from(&target.path))
+                            || code.buffer.revision != revision
+                    })
+            }) || self
+                .remote_lua_open_buffers(document)
+                .map_or(true, |(_, current)| current != pending.open_revisions);
+            if stale {
+                enqueue_remote_lua_error(
+                    &pending,
+                    "stale_buffer",
+                    "remote buffer state changed before edit preparation completed",
+                );
+                return true;
+            }
+            let Reply::LspEditPrepared {
+                operation: got,
+                actions,
+                plan,
+                ..
+            } = message
+            else {
+                let message = match message {
+                    Reply::Error { message, .. } => message.as_str(),
+                    _ => "daemon returned an unexpected structured edit reply",
+                };
+                enqueue_remote_lua_error(&pending, "remote_error", message);
+                return true;
+            };
+            if lua_edit_operation(*operation) != Some(*got) {
+                enqueue_remote_lua_error(
+                    &pending,
+                    "mismatched_operation",
+                    "daemon returned a different structured edit operation",
+                );
+                return true;
+            }
+            if *operation == neoism_lua::LuaLspOperation::CodeActions {
+                if plan.is_some() {
+                    enqueue_remote_lua_error(
+                        &pending,
+                        "invalid_remote_result",
+                        "code action listing unexpectedly returned a mutation plan",
+                    );
+                    return true;
+                }
+                let public = actions
+                    .iter()
+                    .map(|action| neoism_lua::LuaLspCodeAction {
+                        id: action.action_id.clone(),
+                        request_id: id.clone(),
+                        title: action.title.clone(),
+                        kind: action.kind.clone(),
+                        preferred: action.preferred,
+                    })
+                    .collect::<Vec<_>>();
+                let private = actions
+                    .iter()
+                    .cloned()
+                    .map(|action| {
+                        (
+                            action.action_id.clone(),
+                            super::lua::LuaLspRetainedCodeAction::Remote(
+                                RemoteLuaLspCodeAction {
+                                    target: target.clone(),
+                                    document: pending.document.clone(),
+                                    capability: action,
+                                    open_revisions: pending.open_revisions.clone(),
+                                },
+                            ),
+                        )
+                    })
+                    .collect();
+                super::lua::enqueue_lua_lsp_private_completion(
+                    owner.clone(),
+                    neoism_lua::LuaLspCompletion::success(
+                        id.clone(),
+                        *operation,
+                        target.clone(),
+                        neoism_lua::LuaLspOutcome::CodeActions(public),
+                    ),
+                    window,
+                    super::lua::LuaLspPrivateResult::CodeActions(private),
+                );
+                return true;
+            }
+            if !actions.is_empty() {
+                enqueue_remote_lua_error(
+                    &pending,
+                    "invalid_remote_result",
+                    "structured mutation preparation unexpectedly returned code actions",
+                );
+                return true;
+            }
+            let Some(plan) = plan.clone() else {
+                enqueue_remote_lua_error(
+                    &pending,
+                    "invalid_remote_result",
+                    "structured mutation preparation did not return a plan",
+                );
+                return true;
+            };
+            let host_root = neoism_protocol::host_path::HostPath::new(
+                document.root.to_string_lossy().into_owned(),
+            );
+            let open_paths = pending
+                .open_revisions
+                .iter()
+                .map(|(_, path, _)| path.to_string_lossy().into_owned())
+                .collect::<std::collections::HashSet<_>>();
+            let mut plan_paths = std::collections::HashSet::new();
+            if plan.files.iter().any(|file| {
+                host_root.relative(&file.path).is_none()
+                    || !plan_paths.insert(file.path.clone())
+                    || file.open != open_paths.contains(&file.path)
+            }) {
+                enqueue_remote_lua_error(
+                    &pending,
+                    "invalid_remote_result",
+                    "structured mutation plan contains invalid file ownership or paths",
+                );
+                return true;
+            }
+            super::lua::enqueue_lua_lsp_private_completion(
+                owner.clone(),
+                neoism_lua::LuaLspCompletion::success(
+                    id.clone(),
+                    *operation,
+                    target.clone(),
+                    match operation {
+                        neoism_lua::LuaLspOperation::ApplyCodeAction => {
+                            neoism_lua::LuaLspOutcome::ApplyCodeAction(
+                                neoism_lua::LuaLspMutation {
+                                    title: plan.title.clone(),
+                                    changed_files: Vec::new(),
+                                    ran_command: false,
+                                },
+                            )
+                        }
+                        neoism_lua::LuaLspOperation::Rename => {
+                            neoism_lua::LuaLspOutcome::Rename(neoism_lua::LuaLspMutation {
+                                title: plan.title.clone(),
+                                changed_files: Vec::new(),
+                                ran_command: false,
+                            })
+                        }
+                        neoism_lua::LuaLspOperation::Format => {
+                            neoism_lua::LuaLspOutcome::Format(neoism_lua::LuaLspMutation {
+                                title: plan.title.clone(),
+                                changed_files: Vec::new(),
+                                ran_command: false,
+                            })
+                        }
+                        _ => unreachable!("only remote mutations produce plans"),
+                    },
+                ),
+                window,
+                super::lua::LuaLspPrivateResult::RemoteMutation(
+                    RemoteLuaLspPreparedMutation {
+                        target: target.clone(),
+                        document: pending.document.clone(),
+                        operation: *operation,
+                        plan,
+                        open_revisions: pending.open_revisions.clone(),
+                    },
+                ),
+            );
+            return true;
+        }
+        if let Kind::LuaEditCommit {
+            owner,
+            id,
+            operation,
+            target,
+            plan,
+        } = &pending.kind
+        {
+            let stale = target.buffer_revision.is_some_and(|revision| {
+                self.context_manager
+                    .get_by_route_id(document.route)
+                    .and_then(|item| item.context().code.as_ref())
+                    .is_none_or(|code| {
+                        !code_uses_host_lsp(code)
+                            || !host_path_eq(&code.path, &PathBuf::from(&target.path))
+                            || code.buffer.revision != revision
+                    })
+            }) || self
+                .remote_lua_open_buffers(document)
+                .map_or(true, |(_, current)| current != pending.open_revisions);
+            if stale {
+                enqueue_remote_lua_error(
+                    &pending,
+                    "stale_buffer",
+                    "remote buffer state changed before mutation commit completed",
+                );
+                return true;
+            }
+            let Reply::LspEditCommitted {
+                title,
+                edits,
+                applied_files,
+                ran_command,
+                command_id,
+                ..
+            } = message
+            else {
+                let message = match message {
+                    Reply::Error { message, .. } => message.as_str(),
+                    _ => "daemon returned an unexpected structured commit reply",
+                };
+                enqueue_remote_lua_error(&pending, "remote_error", message);
+                return true;
+            };
+            let host_root = neoism_protocol::host_path::HostPath::new(
+                document.root.to_string_lossy().into_owned(),
+            );
+            let expected_open = plan
+                .files
+                .iter()
+                .filter(|file| file.open)
+                .map(|file| (file.path.as_str(), file.edit_count))
+                .collect::<std::collections::HashMap<_, _>>();
+            let expected_closed = plan
+                .files
+                .iter()
+                .filter(|file| !file.open)
+                .map(|file| file.path.as_str())
+                .collect::<std::collections::HashSet<_>>();
+            let applied = applied_files.iter().map(String::as_str).collect::<std::collections::HashSet<_>>();
+            let mut returned = std::collections::HashSet::new();
+            if *ran_command
+                || (command_id.is_some()
+                    && *operation != neoism_lua::LuaLspOperation::ApplyCodeAction)
+                || applied.len() != applied_files.len()
+                || applied != expected_closed
+                || edits.iter().any(|file| {
+                    host_root.relative(&file.path).is_none()
+                        || !returned.insert(file.path.as_str())
+                        || expected_open.get(file.path.as_str()).copied()
+                            != Some(file.edits.len())
+                })
+                || returned.len() != expected_open.len()
+            {
+                enqueue_remote_lua_error(
+                    &pending,
+                    "invalid_remote_result",
+                    "daemon commit result did not match its prepared mutation plan",
+                );
+                return true;
+            }
+            let mut applications = Vec::new();
+            for file in edits {
+                let typed = file
+                    .edits
+                    .iter()
+                    .map(|edit| CodeTextEdit {
+                        start_line: edit.start_line as usize,
+                        start_col: edit.start_col as usize,
+                        end_line: edit.end_line as usize,
+                        end_col: edit.end_col as usize,
+                        text: edit.new_text.clone(),
+                    })
+                    .collect::<Vec<_>>();
+                let routes = pending
+                    .open_revisions
+                    .iter()
+                    .filter(|(_, path, _)| host_path_eq(path, &PathBuf::from(&file.path)))
+                    .map(|(route, _, _)| *route)
+                    .collect::<Vec<_>>();
+                if routes.is_empty() {
+                    enqueue_remote_lua_error(
+                        &pending,
+                        "invalid_remote_result",
+                        "daemon returned edits for a buffer not owned by this frontend",
+                    );
+                    return true;
+                }
+                for route in routes {
+                    let Some(code) = self
+                        .context_manager
+                        .get_by_route_id(route)
+                        .and_then(|item| item.context().code.as_ref())
+                    else {
+                        enqueue_remote_lua_error(
+                            &pending,
+                            "stale_buffer",
+                            "remote edit buffer disappeared before mutation",
+                        );
+                        return true;
+                    };
+                    if let Err(message) = code.buffer.validate_text_edits(&typed) {
+                        enqueue_remote_lua_error(&pending, "invalid_remote_result", &message);
+                        return true;
+                    }
+                    applications.push((route, file.path.clone(), typed.clone()));
+                }
+            }
+            let mut changed_files = plan
+                .files
+                .iter()
+                .map(|file| neoism_lua::LuaLspChangedFile {
+                    path: file.path.clone(),
+                    edit_count: file.edit_count,
+                    applied_by: if file.open {
+                        neoism_lua::LuaLspMutationOwner::Frontend
+                    } else {
+                        neoism_lua::LuaLspMutationOwner::Daemon
+                    },
+                })
+                .collect::<Vec<_>>();
+            changed_files.sort_by(|a, b| a.path.cmp(&b.path));
+            for (route, _, edits) in applications {
+                let Some(code) = self
+                    .context_manager
+                    .get_by_route_id(route)
+                    .and_then(|item| item.context_mut().code.as_mut())
+                else {
+                    enqueue_remote_lua_error(
+                        &pending,
+                        "stale_buffer",
+                        "remote edit buffer disappeared during mutation",
+                    );
+                    return true;
+                };
+                code.buffer.apply_text_edits(&edits);
+                code.buffer.follow_cursor = true;
+            }
+            self.sync_active_code_modified();
+            self.mark_dirty();
+            let mutation = neoism_lua::LuaLspMutation {
+                title: title.clone(),
+                changed_files,
+                ran_command: false,
+            };
+            if let Some(command_id) = command_id {
+                let Ok((buffers, current)) = self.remote_lua_buffer_snapshots(document) else {
+                    enqueue_remote_lua_error(
+                        &pending,
+                        "command_failed",
+                        "failed to capture edited remote buffers before command execution",
+                    );
+                    return true;
+                };
+                let finalize_id =
+                    (1u64 << 63) | QUERY_SEQ.fetch_add(1, Ordering::SeqCst);
+                let surface = format!("lua-lsp:{}:{finalize_id}", document.route);
+                let request = Request::LspEditFinalize {
+                    command_id: command_id.clone(),
+                    buffers,
+                    surface_id: Some(surface.clone()),
+                };
+                if let Err(message) = self.send_remote_lua_lsp_request(
+                    pending.document.clone(),
+                    finalize_id,
+                    surface,
+                    pending.revision,
+                    Kind::LuaEditFinalize {
+                        owner: owner.clone(),
+                        id: id.clone(),
+                        operation: *operation,
+                        target: target.clone(),
+                        mutation,
+                    },
+                    current,
+                    request,
+                ) {
+                    enqueue_remote_lua_error(&pending, "command_failed", &message);
+                }
+                return true;
+            }
+            let outcome = match operation {
+                neoism_lua::LuaLspOperation::ApplyCodeAction => {
+                    neoism_lua::LuaLspOutcome::ApplyCodeAction(mutation)
+                }
+                neoism_lua::LuaLspOperation::Rename => {
+                    neoism_lua::LuaLspOutcome::Rename(mutation)
+                }
+                neoism_lua::LuaLspOperation::Format => {
+                    neoism_lua::LuaLspOutcome::Format(mutation)
+                }
+                _ => unreachable!("only remote mutation operations commit plans"),
+            };
+            super::lua::enqueue_lua_lsp_completion(
+                owner.clone(),
+                neoism_lua::LuaLspCompletion::success(
+                    id.clone(),
+                    *operation,
+                    target.clone(),
+                    outcome,
+                ),
+                window,
+            );
+            return true;
+        }
+        if let Kind::LuaEditFinalize {
+            owner,
+            id,
+            operation,
+            target,
+            mutation,
+        } = &pending.kind
+        {
+            let Reply::LspEditFinalized {
+                ran_command: true,
+                ..
+            } = message
+            else {
+                let message = match message {
+                    Reply::Error { message, .. } => message.as_str(),
+                    _ => "daemon returned an unexpected structured command reply",
+                };
+                enqueue_remote_lua_error(&pending, "command_failed", message);
+                return true;
+            };
+            let mut mutation = mutation.clone();
+            mutation.ran_command = true;
+            super::lua::enqueue_lua_lsp_completion(
+                owner.clone(),
+                neoism_lua::LuaLspCompletion::success(
+                    id.clone(),
+                    *operation,
+                    target.clone(),
+                    neoism_lua::LuaLspOutcome::ApplyCodeAction(mutation),
+                ),
+                window,
+            );
+            return true;
+        }
+        if let Kind::LuaRead {
+            owner,
+            id,
+            operation,
+            target,
+        } = &pending.kind
+        {
+            if target.buffer_revision.is_some_and(|revision| {
+                self.context_manager
+                    .get_by_route_id(document.route)
+                    .and_then(|item| item.context().code.as_ref())
+                    .is_none_or(|code| {
+                        !code_uses_host_lsp(code)
+                            || !host_path_eq(&code.path, &PathBuf::from(&target.path))
+                            || code.buffer.revision != revision
+                    })
+            }) {
+                enqueue_remote_lua_error(
+                    &pending,
+                    "stale_buffer",
+                    "remote buffer changed before the LSP reply arrived",
+                );
+                return true;
+            }
+            let completion = match message {
+                Reply::LspReadResult {
+                    operation: got,
+                    outcome,
+                    ..
+                } if lua_read_operation(*operation) == Some(*got) => {
+                    match lua_read_outcome(outcome.clone()) {
+                        Ok(outcome) => neoism_lua::LuaLspCompletion::success(
+                            id.clone(),
+                            *operation,
+                            target.clone(),
+                            outcome,
+                        ),
+                        Err(error) => neoism_lua::LuaLspCompletion::failed(
+                            id.clone(),
+                            *operation,
+                            Some(target.clone()),
+                            "invalid_remote_result",
+                            error.to_string(),
+                        ),
+                    }
+                }
+                Reply::LspReadResult { .. } => neoism_lua::LuaLspCompletion::failed(
+                    id.clone(),
+                    *operation,
+                    Some(target.clone()),
+                    "mismatched_operation",
+                    "daemon returned a different structured LSP operation",
+                ),
+                Reply::Error { message, .. } => neoism_lua::LuaLspCompletion::failed(
+                    id.clone(),
+                    *operation,
+                    Some(target.clone()),
+                    "remote_error",
+                    message.clone(),
+                ),
+                _ => neoism_lua::LuaLspCompletion::failed(
+                    id.clone(),
+                    *operation,
+                    Some(target.clone()),
+                    "invalid_remote_result",
+                    "daemon returned an unexpected structured LSP reply",
+                ),
+            };
+            super::lua::enqueue_lua_lsp_completion(owner.clone(), completion, window);
+            return true;
         }
         if let Reply::Error { message, .. } = message {
             if self.remote_lsp_document().as_ref() == Some(document) {
@@ -1142,6 +2153,130 @@ impl Screen<'_> {
             });
         }
     }
+}
+
+fn lua_read_operation(
+    operation: neoism_lua::LuaLspOperation,
+) -> Option<neoism_protocol::editor::EditorLspReadOperation> {
+    use neoism_lua::LuaLspOperation as Lua;
+    use neoism_protocol::editor::EditorLspReadOperation as Wire;
+    Some(match operation {
+        Lua::Hover => Wire::Hover,
+        Lua::SignatureHelp => Wire::SignatureHelp,
+        Lua::Definition => Wire::Definition,
+        Lua::References => Wire::References,
+        Lua::DocumentSymbols => Wire::DocumentSymbols,
+        Lua::WorkspaceSymbols => Wire::WorkspaceSymbols,
+        Lua::Diagnostics => Wire::Diagnostics,
+        Lua::Clients => Wire::Clients,
+        _ => return None,
+    })
+}
+
+fn lua_edit_operation(
+    operation: neoism_lua::LuaLspOperation,
+) -> Option<EditorLspEditOperation> {
+    Some(match operation {
+        neoism_lua::LuaLspOperation::CodeActions => EditorLspEditOperation::CodeActions,
+        neoism_lua::LuaLspOperation::ApplyCodeAction => {
+            EditorLspEditOperation::ApplyCodeAction
+        }
+        neoism_lua::LuaLspOperation::Rename => EditorLspEditOperation::Rename,
+        neoism_lua::LuaLspOperation::Format => EditorLspEditOperation::Format,
+        _ => return None,
+    })
+}
+
+fn lua_read_outcome(
+    outcome: neoism_protocol::editor::EditorLspReadOutcome,
+) -> Result<neoism_lua::LuaLspOutcome, serde_json::Error> {
+    serde_json::to_value(outcome).and_then(serde_json::from_value)
+}
+
+fn host_path_is_absolute(
+    root: &neoism_protocol::host_path::HostPath,
+    path: &str,
+) -> bool {
+    if root.is_windows() {
+        neoism_protocol::host_path::HostPath::new(path).is_windows()
+    } else {
+        path.starts_with('/')
+    }
+}
+
+fn resolve_remote_lua_target_path(
+    root: &neoism_protocol::host_path::HostPath,
+    path: &str,
+) -> Result<neoism_protocol::host_path::HostPath, String> {
+    if invalid_host_relative_path(root, path) {
+        return Err("structured LSP request path is not a safe host path".into());
+    }
+    if host_path_is_absolute(root, path) {
+        root.relative(path).ok_or_else(|| {
+            "structured LSP requests cannot leave the focused workspace root".to_string()
+        })?;
+        Ok(neoism_protocol::host_path::HostPath::new(path))
+    } else {
+        Ok(root.join(path))
+    }
+}
+
+fn invalid_host_relative_path(
+    root: &neoism_protocol::host_path::HostPath,
+    path: &str,
+) -> bool {
+    if path.is_empty() || path.contains('\0') {
+        return true;
+    }
+    let has_parent = if root.is_windows() {
+        path.split(['/', '\\']).any(|part| part == "..")
+    } else {
+        path.split('/').any(|part| part == "..")
+    };
+    has_parent
+}
+
+fn enqueue_remote_lua_error(pending: &Pending, code: &str, message: &str) {
+    let (owner, id, operation, target) = match &pending.kind {
+        Kind::LuaRead {
+            owner,
+            id,
+            operation,
+            target,
+        }
+        | Kind::LuaEditPrepare {
+            owner,
+            id,
+            operation,
+            target,
+        }
+        | Kind::LuaEditCommit {
+            owner,
+            id,
+            operation,
+            target,
+            ..
+        }
+        | Kind::LuaEditFinalize {
+            owner,
+            id,
+            operation,
+            target,
+            ..
+        } => (owner, id, operation, target),
+        _ => return,
+    };
+    super::lua::enqueue_lua_lsp_completion(
+        owner.clone(),
+        neoism_lua::LuaLspCompletion::failed(
+            id.clone(),
+            *operation,
+            Some(target.clone()),
+            code,
+            message,
+        ),
+        pending.document.window,
+    );
 }
 
 fn subscription(document: Document, revision: u64) -> Subscription {
@@ -1444,6 +2579,48 @@ mod tests {
             since: Instant::now(),
         }
     }
+
+    #[test]
+    fn remote_lua_cancellation_is_exact_owner_and_request_scoped() {
+        let owner = neoism_lua::PluginOwner {
+            plugin_id: "dev.neoism.remote-cancel-test".into(),
+            revision: neoism_lua::PluginRevision("one".into()),
+        };
+        let mut item = pending();
+        item.kind = Kind::LuaEditPrepare {
+            owner: owner.clone(),
+            id: "lua-cancel-test".into(),
+            operation: neoism_lua::LuaLspOperation::Rename,
+            target: neoism_lua::LuaLspTarget {
+                root: "/host/workspace".into(),
+                path: "/host/workspace/main.rs".into(),
+                line: 0,
+                character: 0,
+                buffer_revision: Some(4),
+                pane_id: 7,
+            },
+        };
+        let key = (
+            item.document.window,
+            "remote-cancel-test-endpoint".to_string(),
+            u64::MAX - 17,
+        );
+        lock().pending.insert(key.clone(), item);
+        let other_owner = neoism_lua::PluginOwner {
+            plugin_id: owner.plugin_id.clone(),
+            revision: neoism_lua::PluginRevision("two".into()),
+        };
+        assert!(!cancel_remote_lua_lsp_request(
+            &other_owner,
+            "lua-cancel-test"
+        ));
+        assert!(lock().pending.contains_key(&key));
+        assert!(cancel_remote_lua_lsp_request(
+            &owner,
+            "lua-cancel-test"
+        ));
+        assert!(!lock().pending.contains_key(&key));
+    }
     #[test]
     fn shared_lsp_local_vault_source_never_uses_joined_host_root() {
         let local_path = std::env::temp_dir().join("vault").join("note.rs");
@@ -1604,5 +2781,80 @@ mod tests {
         stale.seq = 9;
         stale.action = Some(Action::Definition);
         assert!(parse_reply(&stale, &reply).is_none());
+    }
+
+    #[test]
+    fn remote_lua_targets_keep_host_path_spelling_and_reject_escapes() {
+        for (root, requested, expected) in [
+            (r"C:\Work\项目", r"src\main.rs", r"C:\Work\项目\src\main.rs"),
+            (
+                r"\\Server\Share\项目",
+                r"lib\dep.rs",
+                r"\\Server\Share\项目\lib\dep.rs",
+            ),
+            ("/srv/项目", "src/main.rs", "/srv/项目/src/main.rs"),
+        ] {
+            let root = neoism_protocol::host_path::HostPath::new(root);
+            assert_eq!(
+                resolve_remote_lua_target_path(&root, requested)
+                    .unwrap()
+                    .as_str(),
+                expected
+            );
+        }
+
+        for (root, requested) in [
+            (r"C:\Work", r"..\secret.rs"),
+            (r"\\Server\Share", r"..\secret.rs"),
+            ("/srv/work", "../secret.rs"),
+            ("/srv/work", "/srv/other/secret.rs"),
+        ] {
+            let root = neoism_protocol::host_path::HostPath::new(root);
+            assert!(resolve_remote_lua_target_path(&root, requested).is_err());
+        }
+    }
+
+    #[test]
+    fn remote_lua_outcome_conversion_preserves_recursive_data() {
+        use neoism_protocol::editor::{
+            EditorLspReadDiagnostic, EditorLspReadOutcome, EditorLspReadPosition,
+            EditorLspReadRange, EditorLspReadRelatedInformation,
+        };
+        let outcome = EditorLspReadOutcome::Diagnostics(vec![EditorLspReadDiagnostic {
+            path: r"\\Server\Share\项目\main.rs".into(),
+            range: Some(EditorLspReadRange {
+                start: EditorLspReadPosition {
+                    line: 2,
+                    character: 4,
+                },
+                end: EditorLspReadPosition {
+                    line: 2,
+                    character: 9,
+                },
+            }),
+            severity: "error".into(),
+            code: Some("E1".into()),
+            code_description: Some("https://example.test/E1".into()),
+            source: Some("fixture".into()),
+            message: "broken".into(),
+            tags: vec!["deprecated".into()],
+            related_information: vec![EditorLspReadRelatedInformation {
+                path: r"C:\Work\dep.rs".into(),
+                range: None,
+                message: "related".into(),
+            }],
+            data: Some(serde_json::json!({"fix": {"id": 7}})),
+            language: Some("rust".into()),
+        }]);
+
+        let neoism_lua::LuaLspOutcome::Diagnostics(items) =
+            lua_read_outcome(outcome).unwrap()
+        else {
+            panic!("diagnostic outcome changed kind");
+        };
+        assert_eq!(items[0].path, r"\\Server\Share\项目\main.rs");
+        assert_eq!(items[0].range.as_ref().unwrap().start.line, 2);
+        assert_eq!(items[0].related_information[0].path, r"C:\Work\dep.rs");
+        assert_eq!(items[0].data, Some(serde_json::json!({"fix": {"id": 7}})));
     }
 }

@@ -711,6 +711,8 @@ pub struct StatusLine {
     /// the host can pop a per-buffer LSP overview when clicked. Reset
     /// to default each frame; populated only when the pill is painted.
     lsp_pill_rect: PillRect,
+    custom_slot_left: f32,
+    custom_slot_right: f32,
 }
 
 impl StatusLine {
@@ -736,6 +738,8 @@ impl StatusLine {
             split_toggle_enabled: false,
             split_toggle_hidden: false,
             lsp_pill_rect: PillRect::default(),
+            custom_slot_left: 0.0,
+            custom_slot_right: 0.0,
         }
     }
 
@@ -753,6 +757,12 @@ impl StatusLine {
 
     pub fn scaled_height(&self) -> f32 {
         STATUS_LINE_HEIGHT * self.scale
+    }
+
+    /// Horizontal space left between the native status clusters during the
+    /// last render. Plugin contributions are confined to this interval.
+    pub fn custom_slot_bounds(&self) -> (f32, f32) {
+        (self.custom_slot_left, self.custom_slot_right)
     }
 
     /// Read-only access to the current `StatusInfo` snapshot. Used by
@@ -1015,6 +1025,8 @@ impl StatusLine {
 
         let x_left = content_x;
         let width = content_width;
+        self.custom_slot_left = x_left;
+        self.custom_slot_right = x_left + width;
         let mut x = x_left;
 
         let mut mode_label_text = mode_label(self.info.mode).to_string();
@@ -1279,6 +1291,7 @@ impl StatusLine {
         } else {
             mode_x + mode_pill_w
         };
+        self.custom_slot_left = left_end_x;
 
         self.error_pill_rect = PillRect::default();
         self.warn_pill_rect = PillRect::default();
@@ -1664,6 +1677,7 @@ impl StatusLine {
                 + diag_visible_total
                 + diag_section_pad
                 + pills_visible_total;
+            self.custom_slot_right = x_left + width - visible_total;
             let mut rx = x_left + width - visible_total;
 
             if let Some((opts, _icon_w, w)) = split_toggle.as_ref() {

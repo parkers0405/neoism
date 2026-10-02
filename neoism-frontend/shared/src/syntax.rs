@@ -24,6 +24,51 @@ use tree_sitter::StreamingIterator as _;
 #[cfg(not(target_arch = "wasm32"))]
 use tree_sitter_highlight::{HighlightConfiguration, HighlightEvent, Highlighter};
 
+/// Execute a plugin-supplied query against a compiled-in grammar. Parser and
+/// query work is called from a host worker; this function never enters Lua and
+/// returns portable UTF-8 byte coordinates only.
+pub fn plugin_query(language: &str, source: &str, query: &str) -> Result<Vec<neoism_lua::PluginSyntaxCapture>, String> {
+    if source.len() > 16 * 1024 * 1024 || query.len() > 4 * 1024 * 1024 { return Err("syntax query input exceeds limits".into()); }
+    let lang = match language.to_ascii_lowercase().as_str() {
+        "rust" => Some(Lang::Rust), "javascript" | "js" => Some(Lang::Javascript), "jsx" => Some(Lang::Jsx),
+        "typescript" | "ts" => Some(Lang::Typescript), "tsx" => Some(Lang::Tsx), "python" | "py" => Some(Lang::Python),
+        "go" => Some(Lang::Go), "lua" => Some(Lang::Lua), "bash" | "sh" => Some(Lang::Bash), "c" => Some(Lang::C),
+        "cpp" | "c++" => Some(Lang::Cpp), "json" => Some(Lang::Json), "yaml" | "yml" => Some(Lang::Yaml),
+        "html" => Some(Lang::Html), "css" => Some(Lang::Css), "toml" => Some(Lang::Toml), "nix" => Some(Lang::Nix),
+        "make" | "makefile" => Some(Lang::Make), _ => None,
+    }.ok_or_else(|| format!("no compiled-in parser for `{language}`"))?;
+    let language = language_for_plugin_query(lang).ok_or_else(|| format!("no compiled-in parser for `{language}`"))?;
+    let mut parser = tree_sitter::Parser::new(); parser.set_language(&language).map_err(|error| error.to_string())?;
+    let tree = parser.parse(source, None).ok_or("parser returned no syntax tree")?;
+    let query = tree_sitter::Query::new(&language, query).map_err(|error| error.to_string())?;
+    let names = query.capture_names(); let mut cursor = tree_sitter::QueryCursor::new();
+    let mut captures = cursor.captures(&query, tree.root_node(), source.as_bytes());
+    let mut output = Vec::new();
+    while let Some((capture_match, index)) = captures.next() {
+        if output.len() >= 100_000 { return Err("syntax query capture limit reached".into()); }
+        let capture = capture_match.captures[*index]; let node = capture.node;
+        output.push(neoism_lua::PluginSyntaxCapture {
+            name: names.get(capture.index as usize).map(|value| value.to_string()).unwrap_or_default(),
+            start: neoism_lua::TextPosition { line: node.start_position().row as u32, character: node.start_position().column as u32 },
+            end: neoism_lua::TextPosition { line: node.end_position().row as u32, character: node.end_position().column as u32 },
+            text: source.get(node.byte_range()).unwrap_or_default().to_owned(),
+        });
+    }
+    Ok(output)
+}
+
+fn language_for_plugin_query(lang: Lang) -> Option<tree_sitter::Language> {
+    Some(match lang {
+        Lang::Rust => tree_sitter_rust::LANGUAGE.into(), Lang::Javascript | Lang::Jsx => tree_sitter_javascript::LANGUAGE.into(),
+        Lang::Typescript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(), Lang::Tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
+        Lang::Python => tree_sitter_python::LANGUAGE.into(), Lang::Go => tree_sitter_go::LANGUAGE.into(), Lang::Lua => tree_sitter_lua::LANGUAGE.into(),
+        Lang::Bash => tree_sitter_bash::LANGUAGE.into(), Lang::C => tree_sitter_c::LANGUAGE.into(), Lang::Cpp => tree_sitter_cpp::LANGUAGE.into(),
+        Lang::Json => tree_sitter_json::LANGUAGE.into(), Lang::Yaml => tree_sitter_yaml::LANGUAGE.into(), Lang::Html => tree_sitter_html::LANGUAGE.into(),
+        Lang::Css => tree_sitter_css::LANGUAGE.into(), Lang::Toml => tree_sitter_toml_ng::LANGUAGE.into(), Lang::Nix => tree_sitter_nix::LANGUAGE.into(),
+        Lang::Make => tree_sitter_make::LANGUAGE.into(), _ => return None,
+    })
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 const TREE_SITTER_LINE_CACHE_LIMIT: usize = 4096;
 

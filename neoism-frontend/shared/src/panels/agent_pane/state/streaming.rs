@@ -277,6 +277,22 @@ impl NeoismAgentPane {
 
     pub fn streaming_label(&self) -> String {
         let state = self.streaming_state();
+        if let Some(label) = self.messages.iter().rev().find_map(|message| {
+            if message.kind != NeoismAgentMessageKind::Tool
+                || !matches!(message.status.as_str(), "pending" | "running")
+            {
+                return None;
+            }
+            if message.tool.ends_with("generate_image") {
+                Some("Image generating...")
+            } else if message.tool.ends_with("generate_video") {
+                Some("Video generating...")
+            } else {
+                None
+            }
+        }) {
+            return label.to_string();
+        }
         if state == NeoismAgentStreamingState::Retrying {
             if let Some(reason) = self
                 .streaming_tool_label

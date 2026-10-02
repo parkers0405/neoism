@@ -208,7 +208,45 @@ pub(crate) async fn v2_plugins(
 ) -> Json<Vec<PluginManifestInfo>> {
     let directory = resolve_directory(query.directory, &headers);
     let snapshot = state.plugin_snapshot(&directory).await;
-    Json(crate::plugins::manifests(snapshot.as_ref()))
+    Json(crate::plugins::manifests_with_packages(state.services(), &directory, snapshot.as_ref()))
+}
+
+pub(crate) async fn v2_plugin_lifecycle(
+    State(state): State<AppState>,
+    Query(query): Query<InstanceQuery>,
+    headers: HeaderMap,
+) -> Json<Vec<neoism_agent_plugin_api::PackageLifecycleInfo>> {
+    let directory = resolve_directory(query.directory, &headers);
+    let snapshot = state.plugin_snapshot(&directory).await;
+    let mut lifecycle = crate::plugins::manifests_with_packages(
+        state.services(),
+        &directory,
+        snapshot.as_ref(),
+    )
+    .into_iter()
+    .filter_map(|manifest| {
+        manifest
+            .config
+            .get("agentLifecycleInfo")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok())
+    })
+    .collect::<Vec<neoism_agent_plugin_api::PackageLifecycleInfo>>();
+    let active_ids = state
+        .scoped_plugin_snapshots(&directory)
+        .await
+        .into_iter()
+        .flat_map(|snapshot| snapshot.manifests.clone())
+        .filter(|manifest| manifest.active)
+        .map(|manifest| manifest.id)
+        .collect::<std::collections::BTreeSet<_>>();
+    for package in &mut lifecycle {
+        if active_ids.contains(&package.package_id) {
+            package.state = neoism_agent_plugin_api::PackageLifecycleState::Active;
+            package.lease_active = true;
+        }
+    }
+    Json(lifecycle)
 }
 
 pub(crate) async fn v2_plugin(
@@ -219,7 +257,7 @@ pub(crate) async fn v2_plugin(
 ) -> Result<Json<PluginManifestInfo>, ApiError> {
     let directory = resolve_directory(query.directory, &headers);
     let snapshot = state.plugin_snapshot(&directory).await;
-    let manifests = crate::plugins::manifests(snapshot.as_ref());
+    let manifests = crate::plugins::manifests_with_packages(state.services(), &directory, snapshot.as_ref());
     manifests
         .into_iter()
         .find(|plugin| plugin.id == plugin_id)

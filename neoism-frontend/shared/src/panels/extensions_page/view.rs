@@ -11,8 +11,8 @@ use crate::primitives::ide_theme::IdeTheme;
 use crate::primitives::{draw_text_with_occlusion, truncate_to_fit};
 
 use super::state::{
-    ExtensionFilter, ExtensionStatus, ExtensionTab, NeoismExtensionsPane, RowAction,
-    RowHit,
+    ExtensionFilter, ExtensionStatus, ExtensionTab, LuaPluginAction, LuaPluginLifecycle,
+    NeoismExtensionsPane, RowAction, RowHit,
 };
 
 pub(crate) const HEADER_HEIGHT: f32 = 56.0;
@@ -43,6 +43,7 @@ const BUTTON_H: f32 = 32.0;
 // themes, snippets, etc. that we don't actually install through this
 // pipeline.
 const TAB_ORDER: &[(ExtensionTab, &str)] = &[
+    (ExtensionTab::All, "All"),
     (ExtensionTab::McpServers, "MCP Servers"),
     (ExtensionTab::LanguageServers, "Language Servers"),
     (ExtensionTab::TreeSitterParsers, "Syntax Parsers"),
@@ -1053,7 +1054,10 @@ fn draw_card_body(
 ) {
     let pad = 14.0 * s;
     let inner_x = x + pad;
-    let button_w = BUTTON_W * s;
+    let lua_action_count = entry.lua_plugin.as_ref().map_or(0, |plugin| {
+        usize::from(plugin.primary_action.is_some()) + plugin.secondary_actions.len()
+    });
+    let button_w = if lua_action_count > 1 { 196.0 * s } else { BUTTON_W * s };
     let button_h = BUTTON_H * s;
     let button_x = x + w - pad - button_w;
     let button_y = y + (h - button_h) * 0.5;
@@ -1213,30 +1217,33 @@ fn draw_card_body(
 
     // Install / Uninstall / Installing button.
     let button_rect = [button_x, button_y, button_w, button_h];
-    let button_hovered = mouse.is_some_and(|(mx, my)| point_in_rect(mx, my, button_rect));
-    paint_install_button(
-        sugarloaf,
-        button_rect,
-        &entry.status,
-        theme,
-        s,
-        button_hovered,
-        clip,
-        occlusion_rects,
-    );
     // Hit-rect for 1.3's click dispatch. Pushed after the row Focus
     // entry so click-resolution can prefer the button before falling
     // back to row-level focus. Informational states have no action.
-    if !matches!(
-        entry.status,
-        ExtensionStatus::BuiltIn
-            | ExtensionStatus::Detected
-            | ExtensionStatus::Unavailable
-    ) {
+    if let Some(plugin) = entry.lua_plugin.as_ref() {
+        let actions = plugin.primary_action.iter().chain(plugin.secondary_actions.iter()).collect::<Vec<_>>();
+        if actions.is_empty() {
+            paint_install_button(sugarloaf, button_rect, &entry.status, theme, s, false, clip, occlusion_rects, Some(lua_button_label(plugin)));
+        } else {
+            let gap = 4.0 * s;
+            let width = (button_w - gap * (actions.len().saturating_sub(1) as f32)) / actions.len() as f32;
+            for (index, action) in actions.into_iter().enumerate() {
+                let rect = [button_x + index as f32 * (width + gap), button_y, width, button_h];
+                let hovered = mouse.is_some_and(|(mx, my)| point_in_rect(mx, my, rect));
+                paint_install_button(sugarloaf, rect, &entry.status, theme, s, hovered, clip, occlusion_rects, Some(lua_action_label(action)));
+                row_hits.push(RowHit { rect, action: RowAction::LuaPlugin(entry.id.clone(), action.clone()) });
+            }
+        }
+    } else if entry.lua_plugin.is_none() && !matches!(entry.status, ExtensionStatus::BuiltIn | ExtensionStatus::Detected | ExtensionStatus::Unavailable) {
+        let button_hovered = mouse.is_some_and(|(mx, my)| point_in_rect(mx, my, button_rect));
+        paint_install_button(sugarloaf, button_rect, &entry.status, theme, s, button_hovered, clip, occlusion_rects, None);
         row_hits.push(RowHit {
             rect: button_rect,
             action: RowAction::ToggleInstall(entry.id.clone()),
         });
+    } else {
+        let button_hovered = mouse.is_some_and(|(mx, my)| point_in_rect(mx, my, button_rect));
+        paint_install_button(sugarloaf, button_rect, &entry.status, theme, s, button_hovered, clip, occlusion_rects, None);
     }
 
     let _ = idx;
@@ -1252,6 +1259,7 @@ fn paint_install_button(
     hovered: bool,
     clip: Option<[f32; 4]>,
     occlusion_rects: &[[f32; 4]],
+    label_override: Option<&str>,
 ) {
     let [bx, by, bw, bh] = rect;
 
@@ -1272,7 +1280,7 @@ fn paint_install_button(
                 btn_clip,
             );
             paint_outline_clipped(sugarloaf, rect, theme.f32(theme.border), s, btn_clip);
-            let label = install_button_label(status);
+            let label = label_override.unwrap_or_else(|| install_button_label(status));
             let opts = DrawOpts {
                 font_size: 11.0 * s,
                 color: theme.u8(theme.dim),
@@ -1310,7 +1318,7 @@ fn paint_install_button(
                 btn_clip,
             );
             paint_outline_clipped(sugarloaf, rect, theme.f32(theme.border), s, btn_clip);
-            let label = install_button_label(status);
+            let label = label_override.unwrap_or_else(|| install_button_label(status));
             let opts = DrawOpts {
                 font_size: 12.0 * s,
                 color: theme.u8(theme.fg),
@@ -1344,7 +1352,7 @@ fn paint_install_button(
                 btn_clip,
             );
             paint_outline_clipped(sugarloaf, rect, theme.f32(theme.border), s, btn_clip);
-            let label = install_button_label(status);
+            let label = label_override.unwrap_or_else(|| install_button_label(status));
             let opts = DrawOpts {
                 font_size: 12.0 * s,
                 color: theme.u8(theme.fg),
@@ -1418,7 +1426,9 @@ fn paint_install_button(
                     seg_clip,
                 );
             }
-            let label = installing_label(*percent, status_text);
+            let label = label_override
+                .map(str::to_string)
+                .unwrap_or_else(|| installing_label(*percent, status_text));
             let opts = DrawOpts {
                 font_size: 11.0 * s,
                 color: theme.u8(theme.fg),
@@ -1447,7 +1457,7 @@ fn paint_install_button(
                 btn_clip,
             );
             paint_outline_clipped(sugarloaf, rect, theme.f32(theme.red), s, btn_clip);
-            let label = if hovered { "Retry" } else { "Failed" };
+            let label = label_override.unwrap_or(if hovered { "Retry" } else { "Failed" });
             let opts = DrawOpts {
                 font_size: 11.0 * s,
                 color: theme.u8(theme.red),
@@ -1477,7 +1487,7 @@ fn paint_install_button(
                 btn_clip,
             );
             paint_outline_clipped(sugarloaf, rect, theme.f32(theme.border), s, btn_clip);
-            let label = install_button_label(status);
+            let label = label_override.unwrap_or_else(|| install_button_label(status));
             let opts = DrawOpts {
                 font_size: 11.0 * s,
                 color: theme.u8(theme.dim),
@@ -1494,6 +1504,54 @@ fn paint_install_button(
                 occlusion_rects,
             );
         }
+    }
+}
+
+fn lua_button_label(plugin: &super::state::LuaPluginPresentation) -> &'static str {
+    if let Some(action) = &plugin.primary_action {
+        return match action {
+            LuaPluginAction::Install => "+ Install",
+            LuaPluginAction::Update => "Update",
+            LuaPluginAction::Remove => "Remove",
+            LuaPluginAction::Restore => "Restore",
+            LuaPluginAction::Enable => "Enable",
+            LuaPluginAction::Disable => "Disable",
+            LuaPluginAction::GrantAll => "Review access",
+            LuaPluginAction::RevokeAll => "Revoke access",
+            LuaPluginAction::Retry => "Retry",
+        };
+    }
+    match plugin.lifecycle {
+        LuaPluginLifecycle::Lazy => "Lazy",
+        LuaPluginLifecycle::Loaded => "Loaded",
+        LuaPluginLifecycle::Disabled => "Disabled",
+        LuaPluginLifecycle::PermissionRequired => "Access needed",
+        LuaPluginLifecycle::Approved => "Approved",
+        LuaPluginLifecycle::Revoked => "Revoked",
+        LuaPluginLifecycle::Incompatible => "Incompatible",
+        LuaPluginLifecycle::Blocked => "Blocked",
+        LuaPluginLifecycle::Failed => "Failed",
+        LuaPluginLifecycle::Installing => "Installing...",
+        LuaPluginLifecycle::Updating => "Updating...",
+        LuaPluginLifecycle::Restoring => "Restoring...",
+        LuaPluginLifecycle::Removing => "Removing...",
+        LuaPluginLifecycle::RestoreRequired => "Restore needed",
+        LuaPluginLifecycle::Discovered => "Discovered",
+        LuaPluginLifecycle::UpdateAvailable => "Update available",
+    }
+}
+
+fn lua_action_label(action: &LuaPluginAction) -> &'static str {
+    match action {
+        LuaPluginAction::Install => "Install",
+        LuaPluginAction::Update => "Update",
+        LuaPluginAction::Remove => "Remove",
+        LuaPluginAction::Restore => "Restore",
+        LuaPluginAction::Enable => "Enable",
+        LuaPluginAction::Disable => "Disable",
+        LuaPluginAction::GrantAll => "Grant",
+        LuaPluginAction::RevokeAll => "Revoke",
+        LuaPluginAction::Retry => "Retry",
     }
 }
 
@@ -1685,6 +1743,7 @@ mod tests {
 
     fn entry(id: &str, status: ExtensionStatus) -> ExtensionEntry {
         ExtensionEntry {
+            kind: super::super::state::ExtensionKind::ManagedPackage,
             id: id.to_string(),
             name: format!("Extension {id}"),
             version: "1.2.3".into(),
@@ -1696,6 +1755,7 @@ mod tests {
             status,
             repository_url: Some("https://example.com/repo".into()),
             lsp_source: None,
+            lua_plugin: None,
         }
     }
 

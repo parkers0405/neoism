@@ -349,6 +349,8 @@ export interface TerminalAdapter {
     splashWordmarkClick?(x: number, y: number): void;
     chromeLayout?(): ChromeLayout | null;
     drainTopBarAction?(): string | null;
+    setPluginSnapshot?(snapshotJson: string): void;
+    drainPluginCommands?(): string[];
     chromeKeyboardCaptureActive?(): boolean;
     editorInputModalActive?(): boolean;
     focusEditorInput?(): void;
@@ -1353,6 +1355,8 @@ interface ChromeBridgeInstance {
     drain_buffer_tab_intents(): unknown;
     buffer_tab_hit_test?(x: number, y: number): number;
     drain_top_bar_action?(): string | undefined;
+    set_plugin_snapshot?(snapshotJson: string): void;
+    drain_plugin_commands?(): unknown;
     open_settings_page?(configJson?: string | null): void;
     set_settings_values?(configJson: string): void;
     set_settings_descriptors?(descriptorsJson: string): void;
@@ -2988,6 +2992,15 @@ class ChromeAdapter implements TerminalAdapter {
     drainTopBarAction(): string | null {
         const action = this.inner.drain_top_bar_action?.();
         return typeof action === "string" ? action : null;
+    }
+    setPluginSnapshot(snapshotJson: string): void {
+        this.inner.set_plugin_snapshot?.(snapshotJson);
+    }
+    drainPluginCommands(): string[] {
+        const commands = this.inner.drain_plugin_commands?.();
+        return Array.isArray(commands)
+            ? commands.filter((command): command is string => typeof command === "string")
+            : [];
     }
     openSettingsPage(configJson?: string | null) {
         this.inner.open_settings_page?.(configJson ?? undefined);

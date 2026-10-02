@@ -67,6 +67,23 @@ impl Renderer {
     ) -> (Option<crate::context::renderable::WindowUpdate>, bool) {
         let mut any_panel_dirty = false;
         self.terminal_splash_animating = false;
+        let terminal_theme = self.styled_theme(neoism_lua::selector::TERMINAL);
+        let top_theme = self.styled_theme(neoism_lua::selector::CHROME_TOP);
+        let file_tree_theme = self.styled_theme(neoism_lua::selector::FILE_TREE);
+        let notes_theme = self.styled_theme(neoism_lua::selector::NOTES_TREE);
+        let agent_sidebar_theme = self.styled_theme(neoism_lua::selector::AGENT_SIDEBAR);
+        let tabs_theme = self.styled_theme(neoism_lua::selector::BUFFER_TABS);
+        let breadcrumbs_theme = self.styled_theme(neoism_lua::selector::BREADCRUMBS);
+        let status_theme = self.styled_theme(neoism_lua::selector::STATUS);
+        let composer_theme = self.styled_theme(neoism_lua::selector::COMPOSER);
+        let palette_theme = self.styled_theme(neoism_lua::selector::PALETTE);
+        let finder_theme = self.styled_theme(neoism_lua::selector::FINDER);
+        let editor_theme = self.styled_theme(neoism_lua::selector::EDITOR);
+        let settings_theme = self.styled_theme(neoism_lua::selector::SETTINGS);
+        let modal_theme = self.styled_theme(neoism_lua::selector::MODAL);
+        let git_theme = self.styled_theme(neoism_lua::selector::GIT);
+        let notification_theme = self.styled_theme(neoism_lua::selector::NOTIFICATION);
+        let custom_theme = self.styled_theme(neoism_lua::selector::APP);
         let grid = context_manager.current_grid_mut();
         let active_key = grid.current;
         let visible_nodes: Vec<_> = grid
@@ -746,7 +763,7 @@ impl Renderer {
                         (pane_w, pane_h),
                         cell_w,
                         cell_h,
-                        &self.theme,
+                        &terminal_theme,
                         self.chrome_scale,
                         wants_visible,
                         &splash_occlusion,
@@ -762,13 +779,12 @@ impl Renderer {
         }
 
         let logical_width = window_size.width as f32 / scale_factor;
-        let island_width =
-            self.right_chrome_edge(context_manager, logical_width) * scale_factor;
+        let island_width = self.surface_layout.content.w * scale_factor;
         // Workspace tabs span the full window width, directly under the
         // hamburger chrome bar (`top_offset`). The side panels sit in
         // the band below this strip, so the tabs are no longer inset
         // right of them.
-        let island_left_offset = 0.0;
+        let island_left_offset = self.surface_layout.content.x;
         let island_top_offset = self.top_bar_strip_height();
         if let Some(island) = &mut self.island {
             island.set_top_offset(island_top_offset);
@@ -777,7 +793,7 @@ impl Renderer {
                 sugarloaf,
                 (island_width, window_size.height, scale_factor),
                 context_manager,
-                &self.theme,
+                &top_theme,
             );
         }
 
@@ -855,77 +871,75 @@ impl Renderer {
             // breadcrumbs are inset to the content column on its right.
             // MUST match `side_panel_band()` used by the hit-test paths.
             let tree_top = chrome_top;
+            let frame = self.surface_layout.content;
             let band_bottom =
-                (logical_height - self.status_line.scaled_height()).max(tree_top);
+                (frame.y + frame.h - self.status_line.scaled_height()).max(tree_top);
             let tree_height = (band_bottom - tree_top).max(0.0);
-            let mut side_x = 0.0;
-            if self.file_tree.is_visible() {
-                self.file_tree.render(
-                    sugarloaf,
-                    tree_top,
-                    tree_height,
-                    &self.theme,
-                    &tree_text_occlusions,
-                );
-                side_x += self.file_tree.width();
-            }
-            if self.notes_sidebar.is_visible() {
-                let wordmark_now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|duration| {
-                        neoism_ui::render_policy::animation_phase_from_unix_secs(
-                            duration.as_secs(),
-                            duration.subsec_nanos(),
-                        )
-                    })
-                    .unwrap_or(0.0);
-                self.notes_sidebar.render(
-                    sugarloaf,
-                    side_x,
-                    tree_top,
-                    self.notes_sidebar.width(),
-                    tree_height,
-                    &self.theme,
-                    &tree_text_occlusions,
-                    self.notes_sidebar_mouse,
-                    wordmark_now,
-                );
-                side_x += self.notes_sidebar.width();
-            }
-
-            if self.conversations_visible {
-                let chrome_scale = self.chrome_scale();
-                // The workspace catalog owns its own pane, so it cannot infer
-                // which Agent tab is currently shown from its session_id.
-                let active_id = context_manager
-                    .current()
-                    .neoism_agent
-                    .as_ref()
-                    .and_then(|agent| agent.session_id_str())
-                    .map(str::to_owned);
-                let panel = &mut self.conversations_pane;
-                if panel.side_panel().viewed_session_id() != active_id.as_deref() {
-                    panel.side_panel_mut().set_viewed_session_id(active_id);
+            let sidebar_views = self.resolved_left_sidebar_views();
+            let wordmark_now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| {
+                    neoism_ui::render_policy::animation_phase_from_unix_secs(
+                        duration.as_secs(),
+                        duration.subsec_nanos(),
+                    )
+                })
+                .unwrap_or(0.0);
+            let active_agent_id = context_manager
+                .current()
+                .neoism_agent
+                .as_ref()
+                .and_then(|agent| agent.session_id_str())
+                .map(str::to_owned);
+            let chrome_scale = self.chrome_scale();
+            let mut side_x = frame.x;
+            for view in sidebar_views {
+                use neoism_ui::panels::left_sidebar_host::LeftSidebarView;
+                let panel_width = self.left_sidebar_view_width(view);
+                match view {
+                    LeftSidebarView::Files => self.file_tree.render(
+                        sugarloaf,
+                        side_x,
+                        tree_top,
+                        panel_width,
+                        tree_height,
+                        &file_tree_theme,
+                        &tree_text_occlusions,
+                        Some(&self.plugins),
+                    ),
+                    LeftSidebarView::Notes => self.notes_sidebar.render(
+                        sugarloaf,
+                        side_x,
+                        tree_top,
+                        panel_width,
+                        tree_height,
+                        &notes_theme,
+                        &tree_text_occlusions,
+                        self.notes_sidebar_mouse,
+                        wordmark_now,
+                        Some(&self.plugins),
+                    ),
+                    LeftSidebarView::Conversations => {
+                        let panel = &mut self.conversations_pane;
+                        if panel.side_panel().viewed_session_id() != active_agent_id.as_deref() {
+                            panel.side_panel_mut().set_viewed_session_id(active_agent_id.clone());
+                        }
+                        panel.drain_server_updates();
+                        neoism_ui::panels::agent_pane::view::side_panel::render_side_panel_with_icons::<
+                            _, crate::neoism::view::side_panel::DesktopSidePanelIcons,
+                        >(
+                            sugarloaf,
+                            panel,
+                            [side_x, tree_top, panel_width, tree_height],
+                            &agent_sidebar_theme,
+                            chrome_scale,
+                            wordmark_now,
+                            self.notes_sidebar_mouse,
+                            &tree_text_occlusions,
+                        );
+                    }
                 }
-                panel.drain_server_updates();
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| {
-                        neoism_ui::render_policy::animation_phase_from_unix_secs(
-                            d.as_secs(),
-                            d.subsec_nanos(),
-                        )
-                    })
-                    .unwrap_or(0.0);
-                let panel_width = panel.side_panel().width();
-                neoism_ui::panels::agent_pane::view::side_panel::render_side_panel_with_icons::<
-                    _, crate::neoism::view::side_panel::DesktopSidePanelIcons,
-                >(
-                    sugarloaf, panel,
-                    [side_x, tree_top, panel_width, tree_height],
-                    &self.theme, chrome_scale, now, self.notes_sidebar_mouse,
-                    &tree_text_occlusions,
-                );
+                side_x += panel_width;
             }
 
             // Workspace strip clamps to the primary editor pane's
@@ -1061,7 +1075,7 @@ impl Renderer {
                     strip_left,
                     chrome_top,
                     strip_width,
-                    &self.theme,
+                    &tabs_theme,
                     self.last_agent,
                     Some(&icon_provider),
                     &strip_occlusions,
@@ -1080,7 +1094,7 @@ impl Renderer {
                     strip_left,
                     crumbs_y,
                     strip_width,
-                    &self.theme,
+                    &breadcrumbs_theme,
                     !input_overlay_active,
                 );
             }
@@ -1129,9 +1143,10 @@ impl Renderer {
             // its labels and pills. It sits underneath the file tree/Notes;
             // sidebars stop at `status_y` rather than pushing status content
             // inward to the editor column.
-            let status_y = (logical_height - self.status_line.scaled_height()).max(0.0);
-            let status_left = 0.0;
-            let status_width = logical_width.max(0.0);
+            let frame = self.surface_layout.content;
+            let status_y = (frame.y + frame.h - self.status_line.scaled_height()).max(frame.y);
+            let status_left = frame.x;
+            let status_width = frame.w.max(0.0);
             self.status_line.set_split_toggle(false, false);
             self.status_line.render_with_ide_theme_in_content_bounds(
                 sugarloaf,
@@ -1140,14 +1155,14 @@ impl Renderer {
                 status_width,
                 status_left,
                 status_width,
-                &self.theme,
+                &status_theme,
             );
             if !input_overlay_active {
                 self.command_composer.render_status_join(
                     sugarloaf,
                     status_y,
                     self.status_line.scaled_height(),
-                    &self.theme,
+                    &composer_theme,
                 );
             }
             // Painted after the status_line so its anchor rect (set
@@ -1155,7 +1170,7 @@ impl Renderer {
             // Sugarloaf overlay primitives so editor text underneath
             // cannot show through the panel.
             self.lsp_popup
-                .render(sugarloaf, &self.theme, self.chrome_scale);
+                .render(sugarloaf, &editor_theme, self.chrome_scale);
         }
 
         self.assistant.render(
@@ -1171,7 +1186,7 @@ impl Renderer {
         self.command_palette.render(
             sugarloaf,
             (window_size.width, window_size.height, scale_factor),
-            &self.theme,
+            &palette_theme,
         );
 
         // Finder overlay (`<leader>f f` / `<leader>f w`) — text clips
@@ -1183,7 +1198,7 @@ impl Renderer {
         self.finder.render(
             sugarloaf,
             (window_size.width, window_size.height, scale_factor),
-            &self.theme,
+            &finder_theme,
             &self.finder_search,
             &finder_files,
         );
@@ -1195,7 +1210,7 @@ impl Renderer {
         self.context_menu.render(
             sugarloaf,
             (window_size.width, context_menu_height, scale_factor),
-            &self.theme,
+            &modal_theme,
         );
         sugarloaf.set_late_overlay_mode(false);
 
@@ -1339,7 +1354,7 @@ impl Renderer {
             &completion_anchor,
             (window_size.width, window_size.height, scale_factor),
             input_overlay_active,
-            &self.theme,
+            &editor_theme,
         );
 
         // Inline lenses stay terse; their hover/pinned card is the complete,
@@ -1357,7 +1372,7 @@ impl Renderer {
                 window_size.width as f32 * inv,
                 window_size.height as f32 * inv,
                 self.chrome_scale,
-                &self.theme,
+                &editor_theme,
             );
         }
 
@@ -1423,7 +1438,7 @@ impl Renderer {
                         window_h: window_size.height as f32 * inv,
                         scale: self.chrome_scale,
                     },
-                    &self.theme,
+                    &editor_theme,
                 );
             }
         }
@@ -1439,7 +1454,7 @@ impl Renderer {
             sugarloaf,
             window_size.width as f32 / scale_factor,
             window_size.height as f32 / scale_factor,
-            &self.theme,
+            &settings_theme,
             self.chrome_scale,
             None,
         );
@@ -1459,7 +1474,7 @@ impl Renderer {
         self.modal.render(
             sugarloaf,
             (window_size.width, window_size.height, scale_factor),
-            &self.theme,
+            &modal_theme,
         );
         if modal_late_overlay {
             sugarloaf.set_late_overlay_mode(false);
@@ -1486,14 +1501,54 @@ impl Renderer {
         // edge, spanning the middle band like the file tree: below the
         // full-width top chrome and above the full-width status bar.
         let panel_top = chrome_top;
+        let frame = self.surface_layout.content;
         let panel_bottom =
-            (logical_height - self.status_line.scaled_height()).max(panel_top);
+            (frame.y + frame.h - self.status_line.scaled_height()).max(panel_top);
         self.git_diff_panel.render(
             sugarloaf,
-            logical_width,
+            frame.x + frame.w,
             panel_top,
             panel_bottom,
-            &self.theme,
+            &git_theme,
+        );
+
+        let (status_slot_left, status_slot_right) = self.status_line.custom_slot_bounds();
+        let status_slot_gap = 8.0 * self.chrome_scale();
+        let status_slot_left = status_slot_left + status_slot_gap;
+        let status_slot_right = (status_slot_right - status_slot_gap).max(status_slot_left);
+        self.plugin_hitboxes = neoism_ui::panels::custom_ui::render(
+            sugarloaf,
+            &self.plugins,
+            neoism_ui::panels::custom_ui::CustomUiLayout {
+                window: [0.0, 0.0, logical_width, logical_height],
+                top: self
+                    .surface_layout
+                    .surfaces
+                    .get(neoism_ui::surface_layout::CHROME_ACTIONS_SURFACE)
+                    .and_then(|surface| surface.bounds)
+                    .map_or([frame.x, frame.y, frame.w, 0.0], |rect| {
+                        [rect.x, rect.y, rect.w, rect.h]
+                    }),
+                bottom: [
+                    status_slot_left,
+                    (frame.y + frame.h - self.status_line.scaled_height()).max(frame.y),
+                    (status_slot_right - status_slot_left).max(0.0),
+                    self.status_line.scaled_height(),
+                ],
+                left: [
+                    frame.x,
+                    chrome_top,
+                    self.left_sidebar_total_width(),
+                    (frame.y + frame.h - chrome_top).max(0.0),
+                ],
+                right: [
+                    frame.x,
+                    chrome_top,
+                    frame.w,
+                    (frame.y + frame.h - chrome_top).max(0.0),
+                ],
+            },
+            &custom_theme,
         );
 
         // Diagnostics popup — anchored to a status line pill, drawn
@@ -1503,7 +1558,7 @@ impl Renderer {
             sugarloaf,
             (window_size.width as f32) / scale_factor,
             scale_factor,
-            &self.theme,
+            &status_theme,
         );
 
         // Toast notifications surface — Rust-owned replacement for
@@ -1514,7 +1569,7 @@ impl Renderer {
             sugarloaf,
             (window_size.width, window_size.height, scale_factor),
             notifications_top,
-            &self.theme,
+            &notification_theme,
         );
 
         // Render scrollbars for each panel

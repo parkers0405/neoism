@@ -24,6 +24,7 @@ members = [
     "neoism-agent/crates/neoism-agent-plugin-api",
     "neoism-agent/crates/neoism-agent-builtins",
     "neoism-agent/crates/neoism-agent-server",
+    "neoism-agent/crates/neoism-agent-lua-runner",
     "neoism-agent/crates/neoism-agent-cli",
     "neoism-frontend/desktop",
     "neoism-extensions",
@@ -32,6 +33,7 @@ members = [
     "neoism-remarkable",
     "neoism-neoworld-core",
     "neoism-neoworld",
+    "neoism-lua",
 ]
 resolver = "2"
 
@@ -75,6 +77,7 @@ neoism-sync = { path = "neoism-sync", version = "0.7.111" }
 neoism-remarkable = { path = "neoism-remarkable", version = "0.7.111" }
 neoism-neoworld-core = { path = "neoism-neoworld-core", version = "0.7.111" }
 neoism-neoworld = { path = "neoism-neoworld", version = "0.7.111" }
+neoism-lua = { path = "neoism-lua", version = "0.7.111" }
 
 # Own dependencies
 anyhow = "1.0"

@@ -12,6 +12,7 @@ use neoism_window::event_loop::ActiveEventLoop;
 use neoism_window::platform::macos::WindowExtMacOS;
 use neoism_window::window::WindowId;
 use rustc_hash::FxHashMap;
+use std::sync::Arc;
 
 // 𜱭𜱭 unicode is not available yet for all OS
 // https://www.unicode.org/charts/PDF/Unicode-16.0/U160-1CC00.pdf
@@ -31,12 +32,14 @@ pub struct Router<'a> {
     pub config_route: Option<WindowId>,
     pub clipboard: Clipboard,
     current_tab_id: u64,
+    plugin_snapshot: Arc<neoism_lua::PluginSnapshot>,
 }
 
 impl Router<'_> {
     pub fn new<'b>(
         fonts: neoism_backend::sugarloaf::font::SugarloafFonts,
         clipboard: Clipboard,
+        plugin_snapshot: Arc<neoism_lua::PluginSnapshot>,
     ) -> Router<'b> {
         let (font_library, fonts_not_found) =
             neoism_backend::sugarloaf::font::FontLibrary::new(fonts);
@@ -59,6 +62,15 @@ impl Router<'_> {
             font_library: Box::new(font_library),
             clipboard,
             current_tab_id: 0,
+            plugin_snapshot,
+        }
+    }
+
+    pub fn set_plugin_snapshot(&mut self, snapshot: Arc<neoism_lua::PluginSnapshot>) {
+        self.plugin_snapshot = snapshot.clone();
+        for route in self.routes.values_mut() {
+            route.window.screen.set_plugin_snapshot(snapshot.clone());
+            route.request_redraw();
         }
     }
 
@@ -240,7 +252,7 @@ impl Router<'_> {
             args,
         };
 
-        let window = RouteWindow::from_target(
+        let mut window = RouteWindow::from_target(
             event_loop,
             event_proxy,
             &new_config,
@@ -250,6 +262,9 @@ impl Router<'_> {
             None,
             None,
         );
+        window
+            .screen
+            .set_plugin_snapshot(self.plugin_snapshot.clone());
         let id = window.winit_window.id();
         let route = Route::new(Assistant::new(), RoutePath::Terminal, window);
         self.routes.insert(id, route);
@@ -301,7 +316,7 @@ impl Router<'_> {
             None
         };
 
-        let window = RouteWindow::from_target(
+        let mut window = RouteWindow::from_target(
             event_loop,
             event_proxy,
             config,
@@ -311,6 +326,9 @@ impl Router<'_> {
             open_url,
             app_id,
         );
+        window
+            .screen
+            .set_plugin_snapshot(self.plugin_snapshot.clone());
         let id = window.winit_window.id();
 
         let mut route = Route::new(Assistant::new(), RoutePath::Terminal, window);
@@ -334,7 +352,7 @@ impl Router<'_> {
         tab_id: Option<&str>,
         open_url: Option<String>,
     ) -> WindowId {
-        let window = RouteWindow::from_target(
+        let mut window = RouteWindow::from_target(
             event_loop,
             event_proxy,
             config,
@@ -344,6 +362,9 @@ impl Router<'_> {
             open_url,
             None,
         );
+        window
+            .screen
+            .set_plugin_snapshot(self.plugin_snapshot.clone());
         let id = window.winit_window.id();
         self.routes.insert(
             id,

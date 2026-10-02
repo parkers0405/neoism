@@ -720,6 +720,35 @@ impl CommandPalette {
                         ))
                     })
                     .collect();
+                rows.extend(self.plugin_commands.iter().filter_map(|command| {
+                    if command.id.starts_with("lua.keymap.") {
+                        return None;
+                    }
+                    let title = if command.title.is_empty() {
+                        command.id.as_str()
+                    } else {
+                        command.title.as_str()
+                    };
+                    let title_score = fuzzy_score(&self.query, title);
+                    let id_score = fuzzy_score(&self.query, &command.id);
+                    let score = match (title_score, id_score) {
+                        (Some(a), Some(b)) => a.max(b.saturating_sub(4)),
+                        (Some(a), None) => a,
+                        (None, Some(b)) => b.saturating_sub(4),
+                        (None, None) => return None,
+                    };
+                    Some((
+                        score,
+                        PaletteRow::Command {
+                            service: "lua",
+                            title,
+                            shortcut: "",
+                            action: PaletteAction::Plugin {
+                                id: command.id.clone(),
+                            },
+                        },
+                    ))
+                }));
                 if !self.query.trim().is_empty() {
                     rows.extend(EX_COMMANDS.iter().filter_map(|(name, hint)| {
                         let score = fuzzy_score(&self.query, name)?;

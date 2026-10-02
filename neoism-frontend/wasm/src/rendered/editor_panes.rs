@@ -1608,6 +1608,12 @@ impl ChromeBridge {
                     false
                 }
             }
+            // Structured Lua LSP ownership currently lives in the desktop
+            // plugin host. Browser editor UI must not consume its result.
+            Msg::LspReadResult { .. }
+            | Msg::LspEditPrepared { .. }
+            | Msg::LspEditCommitted { .. }
+            | Msg::LspEditFinalized { .. } => false,
             _ => false,
         }
     }

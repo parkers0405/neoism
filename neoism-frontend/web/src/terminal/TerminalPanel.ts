@@ -398,6 +398,8 @@ export interface TerminalPanelOptions {
   /** Alt+P `cd …` requested a new declared workspace root. */
   onWorkspaceRootRequested?: (path: string, workspaceId?: string | null) => void;
   onMoveWorkspaceTab?: (delta: -1 | 1) => void;
+  /** Execute a command emitted by a declarative plugin contribution. */
+  onPluginCommand?: (id: string) => void;
   onWorkspaceIslandIntent?: (intent: {
     kind: "activate" | "context_menu" | "open_workspaces";
     workspace_id?: string | null;
@@ -2918,6 +2920,9 @@ export class TerminalPanel {
 
   private drainChromeIntents(): void {
     this.drainTopBarActions();
+    for (const command of this.wasmAdapter?.drainPluginCommands?.() ?? []) {
+      this.options.onPluginCommand?.(command);
+    }
     if (this.wasmAdapter?.conversationsVisible?.()) this.ensureNeoismAgentAttached();
     this.drainChromePageIntents();
     this.drainAgentTabOpens();

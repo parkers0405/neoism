@@ -116,6 +116,21 @@ impl ChromeBridge {
             .unwrap_or(true);
         self.chrome
             .set_agent_panel_preferences(conversations_enabled, details_enabled);
+        let sidebar = values
+            .get("ui")
+            .and_then(|ui| ui.get("left-sidebar"));
+        let placement = |key: &str| match sidebar
+            .and_then(|sidebar| sidebar.get(key))
+            .and_then(serde_json::Value::as_str)
+        {
+            Some("independent") => neoism_ui::panels::left_sidebar_host::SidebarPlacement::Independent,
+            _ => neoism_ui::panels::left_sidebar_host::SidebarPlacement::Unified,
+        };
+        self.chrome.set_left_sidebar_placements(
+            placement("file-tree"),
+            placement("notes"),
+            placement("conversations"),
+        );
         self.chrome.set_settings_values(values);
         Ok(())
     }
@@ -223,6 +238,19 @@ impl ChromeBridge {
                     self.set_font_scale((size as f32 / 14.0).clamp(0.5, 3.0));
                 }
             }
+            "ui.left-sidebar.file-tree" | "ui.left-sidebar.notes" | "ui.left-sidebar.conversations" => {
+                let Some(value) = value.as_str() else { return };
+                let placement = match value {
+                    "independent" => neoism_ui::panels::left_sidebar_host::SidebarPlacement::Independent,
+                    _ => neoism_ui::panels::left_sidebar_host::SidebarPlacement::Unified,
+                };
+                let view = match key {
+                    "ui.left-sidebar.file-tree" => neoism_ui::panels::left_sidebar_host::LeftSidebarView::Files,
+                    "ui.left-sidebar.notes" => neoism_ui::panels::left_sidebar_host::LeftSidebarView::Notes,
+                    _ => neoism_ui::panels::left_sidebar_host::LeftSidebarView::Conversations,
+                };
+                self.chrome.set_left_sidebar_placement(view, placement);
+            }
             _ => {}
         }
     }
@@ -251,6 +279,7 @@ impl ChromeBridge {
         let entries: Vec<ExtensionEntry> = summaries
             .into_iter()
             .map(|summary| ExtensionEntry {
+                kind: neoism_ui::panels::extensions_page::ExtensionKind::ManagedPackage,
                 id: summary.id,
                 name: summary.name,
                 version: summary.version,
@@ -272,6 +301,7 @@ impl ChromeBridge {
                 },
                 repository_url: summary.repository_url,
                 lsp_source: summary.lsp_source,
+                lua_plugin: None,
             })
             .collect();
         self.chrome.extensions_page.set_entries(entries);
@@ -299,6 +329,7 @@ impl ChromeBridge {
                     "url": url,
                 })),
                 PaneAction::InstallToggleRequested { .. } => None,
+                PaneAction::LuaPluginActionRequested { .. } => None,
             })
             .collect();
         JsValue::from_str(

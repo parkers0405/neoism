@@ -296,6 +296,10 @@ pub(crate) async fn handle_socket(
         (std::path::PathBuf, std::path::PathBuf, Option<String>),
         (),
     > = Default::default();
+    // Opaque LSP action and mutation capabilities die with this websocket.
+    let structured_edit_vault = std::sync::Arc::new(std::sync::Mutex::new(
+        crate::language_server::StructuredEditVault::default(),
+    ));
 
     // Per-socket Claude API proxy. Spawned eagerly so the chrome
     // sees an immediate `Disabled` event when `NEOISM_AGENT_API_KEY`
@@ -329,6 +333,9 @@ pub(crate) async fn handle_socket(
     // Workspace dispatch: per-connection cwd / session pointer. The
     // cross-connection registry lives on `workspace_manager`.
     let mut connection_workspace = ConnectionWorkspace::default();
+    // Connection-local by construction: opaque resource capabilities cannot
+    // be replayed on another websocket and Drop tears down every process.
+    let mut plugin_resources = crate::plugin_resources::PluginResourceBroker::default();
 
     // F3: subscribe this websocket to per-workplace preferences updates
     // so a `SetWorkplacePreferences` from any client (this socket
@@ -977,9 +984,16 @@ pub(crate) async fn handle_socket(
                     message,
                 } => {
                     let surface_id = message.surface_id().map(str::to_owned);
-                    let required: &[Permission] = if matches!(
+                    let plugin_resource_writes = matches!(
+                        &message,
+                        EditorClientMessage::PluginResource { request: neoism_protocol::plugin_resource::PluginResourceRequest::Invoke { operation, .. } }
+                            if operation == "write"
+                    );
+                    let required: &[Permission] = if plugin_resource_writes || matches!(
                         &message,
                         EditorClientMessage::ApplyLspCodeActionAt { .. }
+                            | EditorClientMessage::LspEditCommit { .. }
+                            | EditorClientMessage::LspEditFinalize { .. }
                             | EditorClientMessage::LspQueryAt {
                                 action: neoism_protocol::editor::EditorLspAction::Rename,
                                 ..
@@ -1041,6 +1055,9 @@ pub(crate) async fn handle_socket(
                     // input messages get the standard error reply until the
                     // native editor's daemon path lands and rewires them.
                     let reply = match message {
+                        EditorClientMessage::PluginResource { request } => {
+                            EditorServerMessage::PluginResource { reply: plugin_resources.handle(&root, connection_workspace.active_workspace.as_deref(), request) }
+                        }
                         EditorClientMessage::OpenBuffer {
                             path,
                             text,
@@ -1249,6 +1266,187 @@ pub(crate) async fn handle_socket(
                                 *target = surface_id;
                             }
                             reply
+                        }
+                        EditorClientMessage::LspRead {
+                            operation,
+                            path,
+                            line,
+                            character,
+                            query,
+                            buffer_text,
+                            surface_id,
+                        } => {
+                            let path = match crate::language_server::native_lsp_file(
+                                &root,
+                                std::path::Path::new(&path),
+                            ) {
+                                Ok(file) => file,
+                                Err(message) => {
+                                    let _ = send_json(
+                                        &mut sink,
+                                        &ServiceServerMessage::EditorReply {
+                                            request_id,
+                                            message: EditorServerMessage::Error {
+                                                surface_id,
+                                                message,
+                                            },
+                                        },
+                                    )
+                                    .await;
+                                    continue;
+                                }
+                            };
+                            if let Some(text) = buffer_text {
+                                crate::language_server::queue_buffer_sync(
+                                    &lsp_runtime,
+                                    &root,
+                                    &path,
+                                    text,
+                                );
+                            }
+                            let root = root.clone();
+                            let tx = editor_query_tx.clone();
+                            let lsp_runtime = lsp_runtime.clone();
+                            tokio::task::spawn_blocking(move || {
+                                let message = crate::language_server::read_query(
+                                    &lsp_runtime,
+                                    &root,
+                                    operation,
+                                    &path,
+                                    line,
+                                    character,
+                                    &query,
+                                    surface_id,
+                                );
+                                let _ = tx.send(ServiceServerMessage::EditorReply {
+                                    request_id,
+                                    message,
+                                });
+                            });
+                            continue;
+                        }
+                        EditorClientMessage::LspEditPrepare {
+                            operation,
+                            path,
+                            line,
+                            character,
+                            argument,
+                            action,
+                            buffer_text,
+                            open_buffers,
+                            surface_id,
+                        } => {
+                            let path = match crate::language_server::native_lsp_file(
+                                &root,
+                                std::path::Path::new(&path),
+                            ) {
+                                Ok(file) => file,
+                                Err(message) => {
+                                    let _ = send_json(
+                                        &mut sink,
+                                        &ServiceServerMessage::EditorReply {
+                                            request_id,
+                                            message: EditorServerMessage::Error {
+                                                surface_id,
+                                                message,
+                                            },
+                                        },
+                                    )
+                                    .await;
+                                    continue;
+                                }
+                            };
+                            if let Some(text) = buffer_text {
+                                crate::language_server::queue_buffer_sync(
+                                    &lsp_runtime,
+                                    &root,
+                                    &path,
+                                    text,
+                                );
+                            }
+                            let root = root.clone();
+                            let tx = editor_query_tx.clone();
+                            let lsp_runtime = lsp_runtime.clone();
+                            let vault = structured_edit_vault.clone();
+                            tokio::task::spawn_blocking(move || {
+                                let message =
+                                    crate::language_server::prepare_structured_edit(
+                                        &lsp_runtime,
+                                        &vault,
+                                        &root,
+                                        request_id,
+                                        operation,
+                                        &path,
+                                        line,
+                                        character,
+                                        argument.as_deref(),
+                                        action,
+                                        &open_buffers,
+                                        surface_id,
+                                    );
+                                let _ = tx.send(ServiceServerMessage::EditorReply {
+                                    request_id,
+                                    message,
+                                });
+                            });
+                            continue;
+                        }
+                        EditorClientMessage::LspEditCommit {
+                            plan_id,
+                            open_buffers,
+                            surface_id,
+                        } => {
+                            let daemon_open_files = editor_documents
+                                .keys()
+                                .filter(|(document_root, _, _)| document_root == &root)
+                                .map(|(_, file, _)| file.clone())
+                                .collect();
+                            let root = root.clone();
+                            let tx = editor_query_tx.clone();
+                            let lsp_runtime = lsp_runtime.clone();
+                            let vault = structured_edit_vault.clone();
+                            tokio::task::spawn_blocking(move || {
+                                let message =
+                                    crate::language_server::commit_structured_edit(
+                                        &lsp_runtime,
+                                        &vault,
+                                        &root,
+                                        &plan_id,
+                                        &open_buffers,
+                                        &daemon_open_files,
+                                        surface_id,
+                                    );
+                                let _ = tx.send(ServiceServerMessage::EditorReply {
+                                    request_id,
+                                    message,
+                                });
+                            });
+                            continue;
+                        }
+                        EditorClientMessage::LspEditFinalize {
+                            command_id,
+                            buffers,
+                            surface_id,
+                        } => {
+                            let root = root.clone();
+                            let tx = editor_query_tx.clone();
+                            let lsp_runtime = lsp_runtime.clone();
+                            let vault = structured_edit_vault.clone();
+                            tokio::task::spawn_blocking(move || {
+                                let message = crate::language_server::finalize_structured_edit(
+                                    &lsp_runtime,
+                                    &vault,
+                                    &root,
+                                    &command_id,
+                                    &buffers,
+                                    surface_id,
+                                );
+                                let _ = tx.send(ServiceServerMessage::EditorReply {
+                                    request_id,
+                                    message,
+                                });
+                            });
+                            continue;
                         }
                         // Native-editor position-explicit queries: served
                         // from the workspace-owned language servers on a

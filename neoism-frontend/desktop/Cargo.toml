@@ -94,12 +94,17 @@ neoism-notifier = { workspace = true }
 roxmltree = "0.20.0"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 sha2 = { workspace = true }
+keyring = { version = "3", default-features = false, features = ["apple-native", "windows-native", "sync-secret-service"] }
+libloading = "0.8"
+tree-sitter = "0.26"
+tree-sitter-language = "0.1"
 # Embedded-daemon mode (G8): when the desktop binary launches and
 # no external daemon is reachable, we spawn a `WorkspaceManager` +
 # axum router inside our own process and bind it to a per-user unix
 # socket. Pulling the daemon crate in as a library here is the
 # whole point of `lib.rs` existing alongside `main.rs` in that crate.
 neoism-workspace-daemon = { workspace = true }
+neoism-lua = { workspace = true, features = ["runtime"] }
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["server", "tokio", "http1", "service"] }
 tokio-tungstenite = { version = "0.24", features = ["connect", "rustls-tls-webpki-roots"] }

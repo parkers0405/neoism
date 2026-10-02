@@ -571,11 +571,12 @@ impl NeoismAgentPane {
 
     pub(crate) fn execute_refresh_model_context_limit_command(&mut self) {
         let server = self.server.clone();
+        let directory = self.directory.clone();
         let model = self.model.clone();
         let tx = self.background_tx.clone();
         std::thread::Builder::new()
             .name("neoism-agent-model-limit".into())
-            .spawn(move || match fetch_model_context_limit(&server, &model) {
+            .spawn(move || match fetch_model_context_limit(&server, directory.as_deref(), &model) {
                 Ok(limit) => {
                     let _ = tx.send(
                         NeoismAgentBackgroundUpdate::ModelContextLimitRefreshed {

@@ -1,10 +1,10 @@
 use anyhow::Context;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
-use neoism_agent_core::{AgentConfigDocument, FormatterConfig, McpConfig};
+use neoism_agent_core::{AgentConfigDocument, FormatterConfig, McpConfig, PluginConfig};
 use neoism_agent_service_api::{
-    AgentServices, ConfigSnapshot, ConfigSnapshotRequest, ConfigUpdate,
+    AgentServices, ConfigDiscoveryScope, ConfigSnapshot, ConfigSnapshotRequest, ConfigUpdate,
     ConfigUpdateRequest,
 };
 use serde::Serialize;
@@ -57,6 +57,33 @@ pub(crate) fn load(
 pub(crate) fn load_snapshot(snapshot: &ConfigSnapshot) -> anyhow::Result<LoadedConfig> {
     let (info, _) = neoism_agent_builtins::plugin::config::load_snapshot(snapshot)?;
     Ok(LoadedConfig { info })
+}
+
+pub(crate) fn installation_plugin_inputs(
+    snapshot: &ConfigSnapshot,
+    effective: &AgentConfigDocument,
+) -> (BTreeMap<String, PluginConfig>, Vec<PathBuf>) {
+    let plugins = effective
+        .plugins
+        .iter()
+        .filter(|(id, _)| {
+            snapshot.layers.iter().rev().find_map(|layer| {
+                layer
+                    .document
+                    .get("plugins")
+                    .and_then(|plugins| plugins.get(id.as_str()))
+                    .map(|_| layer.scope == ConfigDiscoveryScope::Installation)
+            }) == Some(true)
+        })
+        .map(|(id, plugin)| (id.clone(), plugin.clone()))
+        .collect();
+    let roots = snapshot
+        .discovery_roots
+        .iter()
+        .filter(|root| root.scope == ConfigDiscoveryScope::Installation)
+        .map(|root| root.path.clone())
+        .collect();
+    (plugins, roots)
 }
 
 #[cfg(test)]
@@ -284,6 +311,69 @@ mod service_boundary_tests {
             .unwrap()
             .get("terminal")
             .is_none());
+    }
+
+    #[test]
+    fn executable_plugin_inputs_exclude_workspace_owned_config_and_roots() {
+        use neoism_agent_service_api::{
+            ConfigDiscoveryRoot, ConfigLayer, ConfigWritableTarget,
+        };
+
+        let snapshot = ConfigSnapshot {
+            identity: "test".into(),
+            workspace: PathBuf::from("/workspace"),
+            layers: vec![
+                ConfigLayer {
+                    source_id: "user".into(),
+                    scope: ConfigDiscoveryScope::Installation,
+                    document: serde_json::json!({
+                        "plugins": {
+                            "user.safe": {"enabled": true},
+                            "workspace.override": {"enabled": true}
+                        }
+                    }),
+                    writable: true,
+                },
+                ConfigLayer {
+                    source_id: "workspace".into(),
+                    scope: ConfigDiscoveryScope::Workspace,
+                    document: serde_json::json!({
+                        "plugins": {
+                            "workspace.owned": {"enabled": true},
+                            "workspace.override": {"enabled": true}
+                        }
+                    }),
+                    writable: false,
+                },
+            ],
+            discovery_roots: vec![
+                ConfigDiscoveryRoot {
+                    scope: ConfigDiscoveryScope::Installation,
+                    source_id: "user".into(),
+                    path: PathBuf::from("/user"),
+                },
+                ConfigDiscoveryRoot {
+                    scope: ConfigDiscoveryScope::Workspace,
+                    source_id: "workspace".into(),
+                    path: PathBuf::from("/workspace/.neoism"),
+                },
+            ],
+            writable_target: ConfigWritableTarget {
+                source_id: "user".into(),
+                label: "User".into(),
+            },
+        };
+        let effective: AgentConfigDocument = serde_json::from_value(serde_json::json!({
+            "plugins": {
+                "user.safe": {"enabled": true},
+                "workspace.owned": {"enabled": true},
+                "workspace.override": {"enabled": true}
+            }
+        }))
+        .unwrap();
+        let (plugins, roots) = installation_plugin_inputs(&snapshot, &effective);
+        assert_eq!(plugins.keys().cloned().collect::<Vec<_>>(), vec!["user.safe"]);
+        assert_eq!(roots, vec![PathBuf::from("/user")]);
     }
 }
 

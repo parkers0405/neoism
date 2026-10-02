@@ -2950,6 +2950,41 @@ async fn public_api_is_v2_only() {
 }
 
 #[tokio::test]
+async fn first_catalog_requests_publish_an_active_workspace_generation() {
+    let _guard = env_lock();
+    std::env::set_var("NEOISM_AGENT_DISABLE_MODELS_FETCH", "true");
+    let root = std::env::temp_dir().join(format!(
+        "neoism-agent-fresh-catalog-{}",
+        Id::ascending(IdKind::Event)
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let db_path = root.join("agent.sqlite3");
+    let state = AppState::open_database(db_path.clone()).await.unwrap();
+    let app = app(state.clone());
+    let directory = root.to_string_lossy();
+
+    for route in ["/v2/agents", "/v2/providers/configured"] {
+        let response = app
+            .clone()
+            .oneshot(request(
+                Method::GET,
+                &format!("{route}?directory={directory}"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{route}");
+    }
+    assert!(state.plugin_snapshot(&directory).await.is_active());
+
+    drop(app);
+    drop(state);
+    std::env::remove_var("NEOISM_AGENT_DISABLE_MODELS_FETCH");
+    cleanup_sqlite_files(&db_path);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
 async fn provider_auth_routes_persist_api_credentials() {
     let _guard = env_lock();
     let root = std::env::temp_dir().join(format!(

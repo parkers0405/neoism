@@ -56,6 +56,7 @@ pub(super) struct WorkspaceDrag {
 
 /// Command palette UI component (Raycast-style)
 pub struct CommandPalette {
+    pub(super) plugin_commands: Vec<neoism_lua::CommandContribution>,
     pub(super) enabled: bool,
     pub query: String,
     pub selected_index: usize,
@@ -165,6 +166,7 @@ pub(super) const WORKSPACE_MOVE_RESULT_TTL: web_time::Duration =
 impl Default for CommandPalette {
     fn default() -> Self {
         Self {
+            plugin_commands: Vec::new(),
             enabled: false,
             query: String::new(),
             selected_index: 0,
@@ -208,6 +210,11 @@ impl Default for CommandPalette {
 }
 
 impl CommandPalette {
+    pub fn set_plugin_commands(&mut self, commands: Vec<neoism_lua::CommandContribution>) {
+        self.plugin_commands = commands;
+        self.selected_index = 0;
+        self.scroll_offset = 0;
+    }
     pub fn new() -> Self {
         Self::default()
     }

@@ -201,6 +201,10 @@ impl Application<'_> {
                 }
 
                 if let MouseButton::Left = button {
+                    if route.window.screen.handle_plugin_ui_click() {
+                        route.request_redraw();
+                        return;
+                    }
                     if route
                         .window
                         .screen
@@ -734,6 +738,8 @@ impl Application<'_> {
                 route.request_redraw();
             }
         }
+
+        route.window.screen.mouse.inside_window = true;
 
         if route.path != RoutePath::Terminal {
             route.window.set_cursor(CursorIcon::Default);
@@ -1528,6 +1534,10 @@ impl Application<'_> {
             Some(window) => window,
             None => return,
         };
+
+        route.window.screen.mouse.inside_window = false;
+        route.window.screen.renderer.notes_sidebar_mouse = None;
+        route.request_redraw();
 
         if route.window.screen.clear_status_line_hover() {
             route.request_redraw();

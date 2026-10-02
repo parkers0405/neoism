@@ -1177,7 +1177,11 @@ fn draw_markdown_line(
                 } else { (x, &source[..col]) };
                 let cell_w = cursor_cell_width(&cursor_opts).max(1.0);
                 let cursor_x = (base_x + sugarloaf.text_mut().measure(prefix, &cursor_opts)).min(x + width - cell_w);
-                pane.set_cursor_rect(Some([cursor_x, property_y, cell_w, line_h]));
+                set_cursor_rect_clipped(
+                    pane,
+                    [cursor_x, property_y, cell_w, line_h],
+                    Some(clip),
+                );
             }
             if text_y > clip_bottom + line_h * 2.0 {
                 break;

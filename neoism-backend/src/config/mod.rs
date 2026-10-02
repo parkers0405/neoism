@@ -278,6 +278,22 @@ impl Default for TerminalConfig {
 
 /// `[ui]` — the window chrome: OS window, tab navigation, title, side
 /// panels, and status line.
+#[derive(Debug, Default, Serialize, Deserialize, PartialEq, Eq, Clone, Copy)]
+#[serde(rename_all = "kebab-case")]
+pub enum SidebarPlacementPreference {
+    #[default]
+    Unified,
+    Independent,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize, PartialEq, Eq, Clone)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct LeftSidebarConfig {
+    pub file_tree: SidebarPlacementPreference,
+    pub notes: SidebarPlacementPreference,
+    pub conversations: SidebarPlacementPreference,
+}
+
 #[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
 pub struct UiConfig {
     #[serde(default = "Window::default")]
@@ -288,6 +304,8 @@ pub struct UiConfig {
     pub title: Title,
     #[serde(default = "Panel::default")]
     pub panel: Panel,
+    #[serde(default, rename = "left-sidebar")]
+    pub left_sidebar: LeftSidebarConfig,
     #[serde(default = "default_margin")]
     pub margin: Margin,
     /// FPS pill on the status line's right cluster. On by default.
@@ -307,6 +325,7 @@ impl Default for UiConfig {
             navigation: Navigation::default(),
             title: Title::default(),
             panel: Panel::default(),
+            left_sidebar: LeftSidebarConfig::default(),
             margin: default_margin(),
             status_fps: true,
             confirm_before_quit: false,
@@ -382,8 +401,26 @@ impl Default for AgentPreferences {
     }
 }
 
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PluginUpdatePolicy {
+    #[default]
+    Manual,
+    Notify,
+    Automatic,
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct PluginPreferences {
+    pub disabled: Vec<String>,
+    pub grants: std::collections::BTreeMap<String, Vec<String>>,
+    pub update_policy: PluginUpdatePolicy,
+    pub trusted_sources: Vec<String>,
+}
+
 /// The golden grouped `config.json`. Every domain is its own block —
-/// `appearance`, `editor`, `terminal`, `ui`, `presence`, `keybinds` —
+/// `appearance`, `editor`, `terminal`, `ui`, `presence`, `plugins`, `keybinds` —
 /// plus the standalone `platform`, `renderer`, and `developer` domains.
 /// The agent server reads its own settings from the shared `agent` block;
 /// this backend types only application-owned preferences.
@@ -401,6 +438,8 @@ pub struct Config {
     pub presence: Presence,
     #[serde(default)]
     pub agent: AgentPreferences,
+    #[serde(default)]
+    pub plugins: PluginPreferences,
     #[serde(default = "Bindings::default")]
     pub keybinds: bindings::Bindings,
     #[serde(default = "Platform::default")]
@@ -896,6 +935,39 @@ pub fn write_fonts_family(family: &str) -> std::io::Result<()> {
 }
 
 impl Config {
+    /// Apply a complete typed patch produced by another configuration source
+    /// (currently Lua). Missing fields retain their existing values; unknown or
+    /// invalid values reject the whole candidate so callers can keep the last
+    /// known-good configuration.
+    pub fn apply_json_patch(&mut self, patch: &serde_json::Value) -> Result<(), String> {
+        if patch.is_null() {
+            return Ok(());
+        }
+        if !patch.is_object() {
+            return Err("configuration patch root must be an object".into());
+        }
+        let old_appearance = self.appearance.clone();
+        let mut value = serde_json::to_value(&*self).map_err(|error| error.to_string())?;
+        merge_json_patch(&mut value, patch);
+        let mut candidate: Config = serde_json::from_value(value).map_err(|error| error.to_string())?;
+
+        if candidate.appearance.palette == old_appearance.palette {
+            candidate.appearance.colors = old_appearance.colors;
+        } else if !candidate.appearance.palette.is_empty() {
+            let path = config_dir_path()
+                .join("themes")
+                .join(&candidate.appearance.palette)
+                .with_extension("json");
+            candidate.appearance.colors = Self::load_theme(&path)?.colors;
+        }
+        if candidate.appearance.adaptive_theme.is_none() {
+            candidate.appearance.adaptive_theme = old_appearance.adaptive_theme;
+            candidate.appearance.adaptive_colors = old_appearance.adaptive_colors;
+        }
+        *self = candidate;
+        Ok(())
+    }
+
     fn load_theme(path: &PathBuf) -> Result<Theme, String> {
         if path.exists() {
             let content = std::fs::read_to_string(path).unwrap();
@@ -1176,6 +1248,17 @@ impl Config {
     }
 }
 
+fn merge_json_patch(target: &mut serde_json::Value, patch: &serde_json::Value) {
+    match (target, patch) {
+        (serde_json::Value::Object(target), serde_json::Value::Object(patch)) => {
+            for (key, value) in patch {
+                merge_json_patch(target.entry(key.clone()).or_insert(serde_json::Value::Null), value);
+            }
+        }
+        (target, patch) => *target = patch.clone(),
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Config {
@@ -1185,6 +1268,7 @@ impl Default for Config {
             ui: UiConfig::default(),
             presence: Presence::default(),
             agent: AgentPreferences::default(),
+            plugins: PluginPreferences::default(),
             keybinds: Bindings::default(),
             platform: Platform::default(),
             renderer: Renderer::default(),
@@ -1395,6 +1479,48 @@ mod tests {
         // A key placed at the wrong level (bare root) is ignored, not honored.
         let misplaced = parse(r#"{ "display-name": "parker" }"#);
         assert_eq!(misplaced.presence.display_name, None);
+    }
+
+    #[test]
+    fn plugin_policy_is_grouped_and_typed() {
+        let config = parse(
+            r#"{
+                "plugins": {
+                    "disabled": ["dev.neoism.off"],
+                    "grants": { "dev.neoism.git": ["git.read", "git.write"] },
+                    "update-policy": "notify",
+                    "trusted-sources": ["https://github.com/neoism/"]
+                }
+            }"#,
+        );
+        assert_eq!(config.plugins.disabled, ["dev.neoism.off"]);
+        assert_eq!(
+            config.plugins.grants["dev.neoism.git"],
+            ["git.read", "git.write"]
+        );
+        assert_eq!(config.plugins.update_policy, PluginUpdatePolicy::Notify);
+        assert_eq!(
+            config.plugins.trusted_sources,
+            ["https://github.com/neoism/"]
+        );
+    }
+
+    #[test]
+    fn left_sidebar_placement_is_grouped_and_typed() {
+        let config = parse(
+            r#"{
+                "ui": {
+                    "left-sidebar": {
+                        "file-tree": "unified",
+                        "notes": "independent",
+                        "conversations": "unified"
+                    }
+                }
+            }"#,
+        );
+        assert_eq!(config.ui.left_sidebar.file_tree, SidebarPlacementPreference::Unified);
+        assert_eq!(config.ui.left_sidebar.notes, SidebarPlacementPreference::Independent);
+        assert_eq!(config.ui.left_sidebar.conversations, SidebarPlacementPreference::Unified);
     }
 
     #[test]

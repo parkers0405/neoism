@@ -79,6 +79,7 @@ pub(crate) fn palette_action_name(
 ) -> &'static str {
     use neoism_ui::panels::command_palette::PaletteAction as A;
     match action {
+        A::Plugin { .. } => "Plugin",
         // Server-manager actions are desktop-only today; the web host
         // has no server picker, so these names are inert labels.
         A::ShowServers => "ShowServers",

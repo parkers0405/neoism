@@ -740,6 +740,10 @@ impl ChromeBridge {
             // Server rows must keep their payload; everything else is
             // identified by name alone.
             match &action {
+                PaletteAction::Plugin { id } => {
+                    self.chrome.queue_plugin_command(id.clone());
+                    return true;
+                }
                 PaletteAction::SelectServer { id }
                 | PaletteAction::EditServer { id }
                 | PaletteAction::RemoveServer { id } => {

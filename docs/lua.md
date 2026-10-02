@@ -61,6 +61,10 @@ Surface fields are `visible`, `dock` (`top`, `bottom`, `left`, or `right`), `thi
 
 `neoism.autocmd(event, callback, { pattern, once, scope })` receives `Startup`, `ConfigReloaded`, `LspResult`, and the `BufferChanged`, `WorkspaceChanged`, `TabChanged`, `PanelChanged`, `FileTreeChanged`, `NotesChanged`, `AgentChanged`, `TerminalChanged`, `GitChanged`, `ThemeChanged`, `PluginsChanged`, and `ConfigChanged` state events. `pattern` supports `*` wildcard matching against payload paths.
 
+On desktop, `AgentChanged.payload` includes `composerRevision`, `composerLength`, and `composerEmpty`. The revision advances immediately when the focused Agent composer changes, including typing, deletion, paste, history recall, clearing, and submission. Draft text is intentionally not exposed. Event-driven panel `render(event)` callbacks may use these fields to update retained UI without running Lua on the input or render thread.
+
+`neoism.effect.emit({ kind = "particles", ... })` queues one bounded local vector-particle burst over the active Agent timeline. The plugin supplies normalized sprite polygons, per-vertex flap weights, theme color tokens, a deterministic seed, duration, angle and speed ranges, gravity, wobble, origin spread, size range, and flap motion. Rust validates strict complexity and motion caps, then owns the animation clock, trajectories, drawing, redraw lifetime, and automatic retirement. It requires the `effect.emit` capability and does not create hit regions or expose draft text.
+
 Scopes are `local`, `workspace`, `shared-buffer`, and `presence`.
 
 ## Native objects
@@ -203,6 +207,52 @@ Declarative specs live in `~/.config/neoism/lua/plugins/*.lua`. A spec can selec
 Lua packages appear alongside other packages in the Extensions page's `All` view. Rows expose discovered, lazy, loaded, disabled, permission-required, incompatible, blocked, failed, update, restore, and active-job states. Install, update, restore, and remove run on a serialized background worker with stage progress; enable/disable and capability grants update the grouped `plugins` policy. If the full activation candidate rejects an acquired revision, Neoism restores the exact prior lock entry and keeps the last-known-good runtime live.
 
 Capabilities must be both declared by the manifest and granted under `plugins.grants` in `config.json`. `plugins.disabled` disables package IDs, `plugins.trusted-sources` optionally allow-lists Git URL prefixes, and `plugins.update-policy` is `manual`, `notify`, or `automatic`. Personal `init.lua` remains trusted and overlays package defaults after all active plugin snapshots are combined.
+
+### Mash Up Pack editor plugin selection
+
+A Mash Up Pack may select desktop editor Lua packages with a top-level `editor-plugins` object in `packs/<id>/pack.json`:
+
+```jsonc
+{
+  "pack": {
+    "name": "Focused Writing",
+    "theme": "focused-writing"
+  },
+  "editor-plugins": {
+    "mode": "only",
+    "enabled": ["dev.example.prose", "dev.example.spellcheck"],
+    "disabled": ["dev.example.code-minimap"]
+  }
+}
+```
+
+`overlay` starts with the ordinary globally eligible editor package set and subtracts `disabled`. `only` treats `enabled` as roots and admits those packages plus their dependency closure. IDs are trimmed, blank IDs are dropped, and lists are sorted and deduplicated. An ID present in both effective lists rejects the candidate deterministically. A disabled or missing dependency produces the normal plugin graph failure; a missing `only` root also rejects the candidate. Missing IDs in an `overlay` declaration have no effect.
+
+Users can replace individual declaration fields for one pack under the grouped `plugins.mashup-overrides` map. Omitted fields inherit from the pack, while an explicit empty array clears that field:
+
+```jsonc
+{
+  "appearance": {
+    "mashup-pack": "focused-writing"
+  },
+  "plugins": {
+    "disabled": ["dev.example.untrusted"],
+    "mashup-overrides": {
+      "focused-writing": {
+        "mode": "overlay",
+        "enabled": [],
+        "disabled": []
+      }
+    }
+  }
+}
+```
+
+Precedence is global policy first as a security boundary, then the resolved pack declaration with user field replacements. `plugins.disabled` is always a hard veto; a pack cannot grant capabilities, approve native artifacts, bypass `plugins.trusted-sources`, or re-enable a globally disabled package. Replacing a pack's `disabled` list can make that pack-controlled package eligible again, but it does not alter the global disabled list. The feature applies only to the native desktop editor Lua manager; Agent and daemon plugins are unchanged. With no active pack, an unknown active pack, or no declaration/override, plugin behavior is byte-for-byte the normal global selection path.
+
+Pack picker and modal input only queue an intent. The application-owned pump resolves that exact pack manifest once, derives the candidate configuration and effective plugin selection, builds the complete editor Lua candidate, and preserves the current configuration, visuals, manager, and snapshot if resolution or discovery fails. It then persists the active pack, pack theme, and pack font in one backend write before atomically committing the accepted Lua generation and resolved visual slots in the same application operation. Deactivation uses the same path with no pack selection, restoring the normal global editor-plugin set. The watcher event caused by persistence rebuilds the same policy and is idempotent.
+
+Fallible wallpaper decoding and shader setup occur before infallible theme, filter, font, and look publication. A synchronous visual asset failure restores the prior wallpaper where necessary, rolls the config fields back in one write, and leaves the prior Lua generation active. A failure in the best-effort rollback itself is logged; a graphics backend failure that occurs only after Sugarloaf has accepted a deferred GPU upload cannot provide a synchronous rollback signal. Lua never runs in Screen, render, layout, hit testing, or input handling.
 
 Triggerless and `Startup` packages load eagerly. Command, event, key, filetype, and surface triggers load dependencies first and activate the package only when needed. A lazy key is intercepted by Rust, the candidate runtime is activated off the input path, the immutable snapshot is republished, and the newly registered mapping is replayed exactly once.
 

@@ -658,9 +658,18 @@ impl ChromeBridge {
                 AgentKeyIntent::SidePanelBlur => {
                     pane.side_panel_mut().set_focused(false);
                 }
+                AgentKeyIntent::SidePanelSelectNextByHalfPage => {
+                    let rows = pane.side_panel().last_panel_height_rows();
+                    pane.side_panel_mut().select_next_by((rows / 2).max(1));
+                    pane.maybe_request_side_panel_session_page();
+                }
                 AgentKeyIntent::SidePanelSelectNext => {
                     pane.side_panel_mut().select_next();
                     pane.maybe_request_side_panel_session_page();
+                }
+                AgentKeyIntent::SidePanelSelectPrevByHalfPage => {
+                    let rows = pane.side_panel().last_panel_height_rows();
+                    pane.side_panel_mut().select_prev_by((rows / 2).max(1));
                 }
                 AgentKeyIntent::SidePanelSelectPrev => {
                     pane.side_panel_mut().select_prev();
@@ -1597,8 +1606,7 @@ impl ChromeBridge {
                 pane.detail_panel_mut().set_focused(true);
                 if let Some(rect) = pane.detail_panel().last_panel_rect() {
                     if let Some(row) = pane.detail_panel().hit_test_row(x, y, rect) {
-                        pane.detail_panel_mut().set_selected(row);
-                        let activated = pane.activate_detail_panel_subagent();
+                        let activated = pane.activate_clicked_detail_panel_subagent(row);
                         if activated {
                             pane.detail_panel_mut().set_focused(false);
                         }

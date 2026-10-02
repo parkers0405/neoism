@@ -112,6 +112,13 @@ pub trait AgentPaneView:
     }
     fn set_fx_started(&mut self, _at: Option<(fx::AgentFxKind, f32)>) {}
     fn fire_fx_prompt(&mut self) {}
+    fn take_particle_burst_requests(&mut self) -> Vec<fx::ParticleEffectSpec> {
+        Vec::new()
+    }
+    fn particle_bursts(&self) -> &[(fx::ParticleEffectSpec, f32)] {
+        &[]
+    }
+    fn set_particle_bursts(&mut self, _bursts: Vec<(fx::ParticleEffectSpec, f32)>) {}
 
     #[allow(clippy::too_many_arguments)]
     fn log_render_perf(
@@ -456,6 +463,7 @@ fn render_agent_pane_with_responsive<P, D, I>(
             &local_occlusions,
             plugins,
             Some(&prompt_wrap_rows),
+            checkout_context.has_content().then_some(checkout_context),
         );
     } else {
         home::render_home_with(
@@ -533,6 +541,24 @@ fn render_agent_pane_with_responsive<P, D, I>(
             pane.set_fx_started(None);
         }
     }
+    let mut particle_bursts = pane.particle_bursts().to_vec();
+    for spec in pane.take_particle_burst_requests() {
+        if particle_bursts.len() == fx::MAX_PARTICLE_BURSTS {
+            particle_bursts.remove(0);
+        }
+        particle_bursts.push((spec, now_seconds));
+    }
+    let particle_scene = fx::scene_rect(main_rect, input_rect, chrome_scale);
+    particle_bursts.retain(|(spec, started)| {
+        let elapsed = now_seconds - *started;
+        if (0.0..=spec.duration_seconds).contains(&elapsed) {
+            fx::render_particle(sugarloaf, particle_scene, elapsed, spec, chrome_scale, theme);
+            true
+        } else {
+            false
+        }
+    });
+    pane.set_particle_bursts(particle_bursts);
     pane.log_render_perf(
         render_started.elapsed().as_micros(),
         rect,

@@ -178,8 +178,18 @@ impl Screen<'_> {
         {
             return false;
         }
+        let ctrl_page = mods.control_key() && !mods.alt_key() && !mods.super_key();
         let panel = &mut self.renderer.conversations_pane;
         match key.logical_key.as_ref() {
+            Key::Character(c) if ctrl_page && c.eq_ignore_ascii_case("d") => {
+                let rows = panel.side_panel().last_panel_height_rows();
+                panel.side_panel_mut().select_next_by((rows / 2).max(1));
+                panel.maybe_request_side_panel_session_page();
+            }
+            Key::Character(c) if ctrl_page && c.eq_ignore_ascii_case("u") => {
+                let rows = panel.side_panel().last_panel_height_rows();
+                panel.side_panel_mut().select_prev_by((rows / 2).max(1));
+            }
             Key::Named(NamedKey::ArrowDown) => {
                 panel.side_panel_mut().select_next();
                 panel.maybe_request_side_panel_session_page();
@@ -187,8 +197,9 @@ impl Screen<'_> {
             Key::Named(NamedKey::ArrowUp) => panel.side_panel_mut().select_prev(),
             Key::Named(NamedKey::Escape) => panel.side_panel_mut().set_focused(false),
             Key::Named(NamedKey::Enter) => {
-                let selected = panel.side_panel().selected_session().cloned();
-                if let Some(entry) = selected {
+                if panel.side_panel().new_chat_selected() {
+                    self.open_neoism_agent_tab();
+                } else if let Some(entry) = panel.side_panel().selected_session().cloned() {
                     self.activate_catalog_entry(entry);
                 }
             }
@@ -371,20 +382,8 @@ impl Screen<'_> {
         let directory = self
             .workspace_root_for_new_shell()
             .map(|path| path.to_string_lossy().into_owned());
-        if self.renderer.conversations_directory != directory {
-            self.renderer.conversations_pane =
-                crate::neoism::agent::NeoismAgentPane::with_directory(directory.clone());
-            self.renderer
-                .conversations_pane
-                .side_panel_mut()
-                .set_width(self.conversations_sidebar_width);
-            self.renderer.conversations_directory = directory;
-        }
-        let server = self
-            .context_manager
-            .agent_server_override_for_current()
-            .unwrap_or_else(crate::neoism::agent::neoism_agent_server);
-        self.renderer.conversations_pane.switch_server(server);
+        self.reconcile_conversations_directory(directory);
+        self.sync_agent_server_for_current_workspace();
         self.renderer
             .conversations_pane
             .side_panel_mut()
@@ -569,6 +568,16 @@ impl Screen<'_> {
         let directory = panel.session_directory().map(str::to_owned);
         let items = vec![
             ContextMenuItem::new(
+                if entry.pinned { "Unpin Chat" } else { "Pin Chat" },
+                "p",
+                ContextMenuAction::Agent(AgentContextAction::SetSessionPinned {
+                    session_id: entry.id.clone(),
+                    pinned: !entry.pinned,
+                    server: server.clone(),
+                    directory: directory.clone(),
+                }),
+            ),
+            ContextMenuItem::new(
                 "Rename Chat",
                 "r",
                 ContextMenuAction::Agent(AgentContextAction::RenameSession {
@@ -619,6 +628,11 @@ impl Screen<'_> {
             return false;
         }
         panel.side_panel_mut().set_focused(true);
+        if matches!(panel.side_panel().new_chat_hit(x, y), Some(None)) {
+            panel.side_panel_mut().select_new_chat();
+            self.open_neoism_agent_tab();
+            return true;
+        }
         if let Some(rect) = panel.side_panel().last_panel_rect() {
             if let Some(row) = panel.side_panel().hit_test_row(x, y, rect) {
                 if !panel

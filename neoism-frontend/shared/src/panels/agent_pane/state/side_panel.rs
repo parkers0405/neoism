@@ -887,6 +887,7 @@ pub struct NeoismAgentSidePanel {
     content_scroll_px: f32,
     content_scroll_max: f32,
     new_chat_rect: Option<[f32; 4]>,
+    new_chat_selected: bool,
     provider_menu_open: bool,
     provider_selection: usize,
     hovered_session: Option<usize>,
@@ -966,6 +967,7 @@ impl Default for NeoismAgentSidePanel {
             content_scroll_px: 0.0,
             content_scroll_max: 0.0,
             new_chat_rect: None,
+            new_chat_selected: false,
             provider_menu_open: false,
             provider_selection: 0,
             hovered_session: None,
@@ -989,6 +991,7 @@ impl NeoismAgentSidePanel {
     /// even when an old render frame left hit rectangles or focus behind.
     pub fn hide_catalog_controls(&mut self) {
         self.new_chat_rect = None;
+        self.new_chat_selected = false;
         self.session_search_rect = None;
         self.provider_menu_open = false;
         self.search_focused = false;
@@ -1029,6 +1032,22 @@ impl NeoismAgentSidePanel {
 
     pub fn set_new_chat_rect(&mut self, rect: [f32; 4]) {
         self.new_chat_rect = Some(rect);
+    }
+
+    pub fn new_chat_selected(&self) -> bool {
+        self.new_chat_selected && matches!(self.mode, SidePanelMode::Sessions)
+    }
+
+    pub fn select_new_chat(&mut self) {
+        if matches!(self.mode, SidePanelMode::Sessions) {
+            self.search_focused = false;
+            self.new_chat_selected = true;
+            self.cursor_spring.reset();
+        }
+    }
+
+    pub fn clear_new_chat_rect(&mut self) {
+        self.new_chat_rect = None;
     }
 
     pub fn new_chat_hit(&self, x: f32, y: f32) -> Option<Option<usize>> {
@@ -1243,6 +1262,7 @@ impl NeoismAgentSidePanel {
             return;
         }
         self.mode = mode;
+        self.new_chat_selected = false;
         self.selected = 0;
         self.scroll_top = 0;
         self.scroll_px = 0.0;
@@ -1644,7 +1664,7 @@ impl NeoismAgentSidePanel {
             return false;
         }
         match self.mode {
-            SidePanelMode::Sessions => !self.sessions.is_empty(),
+            SidePanelMode::Sessions => self.new_chat_rect.is_some() || !self.sessions.is_empty(),
             SidePanelMode::Subagents => self.subagents.len() > 1,
         }
     }
@@ -1750,7 +1770,7 @@ impl NeoismAgentSidePanel {
     /// Kept for the home-mode click path that always wants a session
     /// (not a subagent). Subagent click uses `selected_row()` instead.
     pub fn selected_session(&self) -> Option<&NeoismAgentSessionEntry> {
-        if self.search_focused() {
+        if self.search_focused() || self.new_chat_selected() {
             return None;
         }
         self.sessions.get(self.selected).filter(|e| !e.is_header)
@@ -2950,6 +2970,13 @@ impl NeoismAgentSidePanel {
 
     pub fn select_next(&mut self) {
         let len = self.active_len();
+        if self.new_chat_selected() {
+            self.new_chat_selected = false;
+            if let Some(first) = self.nearest_selectable(0) {
+                self.move_selection_to(first);
+            }
+            return;
+        }
         if len == 0 {
             return;
         }
@@ -2966,17 +2993,64 @@ impl NeoismAgentSidePanel {
     }
 
     pub fn select_prev(&mut self) {
-        if self.search_focused() || self.active_len() == 0 {
+        if self.new_chat_selected() || self.search_focused() {
+            return;
+        }
+        if self.active_len() == 0 {
+            if matches!(self.mode, SidePanelMode::Sessions) && self.new_chat_rect.is_some() {
+                self.select_new_chat();
+            }
             return;
         }
         match self.step_selectable(self.selected, false) {
             Some(prev) => self.move_selection_to(prev),
+            None if matches!(self.mode, SidePanelMode::Sessions)
+                && self.new_chat_rect.is_some() =>
+            {
+                self.select_new_chat()
+            }
             None if matches!(self.mode, SidePanelMode::Sessions)
                 && self.session_search_rect.is_some() =>
             {
                 self.focus_search()
             }
             None => {}
+        }
+    }
+
+    pub fn select_next_by(&mut self, rows: usize) {
+        let len = self.active_len();
+        if len == 0 {
+            return;
+        }
+        if self.search_focused() {
+            self.clear_search_focus();
+        }
+        let target = self.selected.saturating_add(rows.max(1)).min(len - 1);
+        let target = if self.active_rows()[target].is_header {
+            self.step_selectable(target, true)
+                .or_else(|| self.step_selectable(target, false))
+        } else {
+            Some(target)
+        };
+        if let Some(target) = target {
+            self.move_selection_to(target);
+        }
+    }
+
+    pub fn select_prev_by(&mut self, rows: usize) {
+        if self.search_focused() || self.active_len() == 0 {
+            return;
+        }
+        let target = self.selected.saturating_sub(rows.max(1));
+        let target = if self.active_rows()[target].is_header {
+            self.step_selectable(target, false)
+                .or_else(|| self.step_selectable(target, true))
+        } else {
+            Some(target)
+        };
+        if let Some(target) = target {
+            self.move_selection_to(target);
         }
     }
 
@@ -2988,6 +3062,7 @@ impl NeoismAgentSidePanel {
         // A click selects a real row, so it also leaves the search field and
         // the Back affordance.
         self.search_focused = false;
+        self.new_chat_selected = false;
         // A click may land on a header row; snap to the nearest session.
         let row = self.nearest_selectable(row.min(len - 1)).unwrap_or(0);
         self.move_selection_to(row);

@@ -43,6 +43,47 @@ use crate::panels::agent_pane::permission_policy::{self, PermissionReplyStart};
 use crate::panels::agent_pane::selection_model::SelectableLine;
 use crate::panels::agent_pane::status_policy;
 use crate::panels::agent_pane::timeline_scroll_policy::ctrl_u_d_scroll_delta;
+
+const CONFIG_CHIP_SETTLE_MS: f32 = 320.0;
+const CONFIG_CHIP_LOADING_TIMEOUT_MS: f32 = 15_000.0;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ConfigChipTransition {
+    Loading { elapsed_ms: f32 },
+    Settling { elapsed_ms: f32 },
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ConfigChipHydration {
+    requested_at: Option<Instant>,
+    settled_at: Option<Instant>,
+}
+
+impl ConfigChipHydration {
+    pub fn begin(&mut self) {
+        if self.requested_at.is_none() || self.settled_at.is_some() {
+            self.requested_at = Some(Instant::now());
+            self.settled_at = None;
+        }
+    }
+
+    pub fn complete(&mut self) {
+        if self.requested_at.is_some() && self.settled_at.is_none() {
+            self.settled_at = Some(Instant::now());
+        }
+    }
+
+    pub fn transition(&self) -> Option<ConfigChipTransition> {
+        if let Some(settled_at) = self.settled_at {
+            let elapsed_ms = settled_at.elapsed().as_secs_f32() * 1000.0;
+            return (elapsed_ms < CONFIG_CHIP_SETTLE_MS)
+                .then_some(ConfigChipTransition::Settling { elapsed_ms });
+        }
+        let elapsed_ms = self.requested_at?.elapsed().as_secs_f32() * 1000.0;
+        (elapsed_ms < CONFIG_CHIP_LOADING_TIMEOUT_MS)
+            .then_some(ConfigChipTransition::Loading { elapsed_ms })
+    }
+}
 use crate::panels::agent_pane::usage_policy::{
     usage_detail_lines, usage_summary_label, UsageSnapshot,
 };
@@ -541,6 +582,7 @@ pub struct NeoismAgentPane {
     /// Rearms the footer chip's rainbow/scramble transition when the user
     /// switches agents (including Build/Plan via Tab).
     agent_label_changed_at: Option<Instant>,
+    config_chip_hydration: ConfigChipHydration,
     pub(super) model: String,
     pub(super) connection_id: Option<String>,
     /// Pane-level credential choice keyed by provider. This deliberately
@@ -949,6 +991,7 @@ impl Default for NeoismAgentPane {
             mode: NeoismAgentMode::Build,
             agent: Some(DEFAULT_AGENT.to_string()),
             agent_label_changed_at: None,
+            config_chip_hydration: ConfigChipHydration::default(),
             model: DEFAULT_MODEL.to_string(),
             connection_id: None,
             provider_connection_preferences: HashMap::new(),
@@ -1618,6 +1661,7 @@ impl NeoismAgentPane {
         agent: Option<String>,
         thinking: Option<String>,
     ) {
+        self.config_chip_hydration.complete();
         if self.session_id.is_some() {
             return;
         }
@@ -1636,6 +1680,10 @@ impl NeoismAgentPane {
                 self.set_thinking_local(thinking);
             }
         }
+    }
+
+    pub fn finish_config_defaults_loading(&mut self) {
+        self.config_chip_hydration.complete();
     }
 
     /// Record a session-idle transition. Mirrors `SessionIdle`.

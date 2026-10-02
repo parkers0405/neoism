@@ -316,6 +316,7 @@ pub enum HostOperation {
     GitCommit,
     GitRefresh,
     ConfigSet,
+    EffectEmit,
     GenericRegisteredAction,
 }
 
@@ -554,6 +555,7 @@ pub fn action_contract(action: &HostAction) -> Result<HostContract, String> {
         ("git", "refresh") => (GitRefresh, "write", ExecutionScope::Local, TargetKind::Workspace, CancellationPolicy::NotCancellable, "QueuedMutation"),
         ("git", "open" | "toggle") => (GenericRegisteredAction, "write", ExecutionScope::Local, TargetKind::Workspace, CancellationPolicy::NotCancellable, "QueuedMutation"),
         ("config" | "theme", "set" | "apply") => (ConfigSet, "write", ExecutionScope::Local, TargetKind::None, CancellationPolicy::NotCancellable, "QueuedMutation"),
+        ("effect", "emit") => (EffectEmit, "emit", ExecutionScope::Local, TargetKind::ActiveView, CancellationPolicy::NotCancellable, "QueuedMutation"),
         _ => return Err(format!("unregistered Lua host action `{ns}.{name}`")),
     };
     if action.scope != scope {
@@ -625,7 +627,7 @@ pub fn registered_host_operations() -> Vec<String> {
         "workspace.open", "workspace.focus", "workspace.split", "tab.create", "tab.open", "tab.close",
         "tab.focus", "tab.select", "tab.move", "agent.send", "agent.open", "agent.create", "terminal.send",
         "terminal.run", "git.stage", "git.unstage", "git.commit", "git.refresh", "git.open", "git.toggle",
-        "config.set", "config.apply", "theme.set", "theme.apply",
+        "config.set", "config.apply", "theme.set", "theme.apply", "effect.emit",
     ].into_iter().map(str::to_owned).collect()
 }
 
@@ -637,7 +639,7 @@ pub(crate) const RUNTIME_HOST_NAMESPACES: &[&str] = &[
     "config", "theme", "plugins", "lsp", "namespace", "anchor", "decoration", "diagnostic", "state", "scheduler",
     "register", "clipboard", "mark", "jumplist", "changelist", "macro", "async", "job", "notification",
     "progress", "prompt", "result_list", "watcher", "network", "credential", "completion", "snippet", "syntax",
-    "tree_sitter", "task", "test", "debug", "pty", "virtual_document", "extension_host",
+    "tree_sitter", "task", "test", "debug", "pty", "virtual_document", "extension_host", "effect",
 ];
 
 pub(crate) const RUNTIME_QUERY_METHODS: &[&str] = &[
@@ -652,7 +654,7 @@ pub(crate) const RUNTIME_ACTION_METHODS: &[&str] = &[
     "replace", "read", "query", "watch", "request", "set_selections", "move_cursor", "reload", "clear",
     "publish", "update", "after", "every", "cancel", "definition", "references", "format", "hover",
     "code_actions", "signature_help", "document_symbols", "workspace_symbols", "diagnostics", "clients",
-    "register_server", "unregister_server", "apply_code_action",
+    "register_server", "unregister_server", "apply_code_action", "emit",
 ];
 
 /// Deterministic Lua-language-server annotations generated from the same typed

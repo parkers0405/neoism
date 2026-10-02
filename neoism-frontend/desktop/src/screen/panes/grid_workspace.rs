@@ -6,7 +6,33 @@ fn claim_live_panel_owner(owner: &mut Option<WorkspaceKey>, workspace: &Workspac
     }
 }
 
+fn conversations_directory_changed(
+    pane_directory: Option<&str>,
+    authoritative_directory: Option<&str>,
+) -> bool {
+    pane_directory != authoritative_directory
+}
+
 impl Screen<'_> {
+    pub(crate) fn reconcile_conversations_directory(
+        &mut self,
+        directory: Option<String>,
+    ) -> bool {
+        let changed = conversations_directory_changed(
+            self.renderer.conversations_pane.session_directory(),
+            directory.as_deref(),
+        );
+        if changed {
+            self.renderer.conversations_pane =
+                crate::neoism::agent::NeoismAgentPane::with_directory(directory);
+        }
+        self.renderer
+            .conversations_pane
+            .side_panel_mut()
+            .set_width(self.conversations_sidebar_width);
+        changed
+    }
+
     pub(crate) fn initial_process_workspace_root() -> Option<PathBuf> {
         let cwd = std::env::current_dir().ok()?;
         #[cfg(windows)]
@@ -627,7 +653,7 @@ impl Screen<'_> {
             let directory = self
                 .workspace_root_for_new_shell()
                 .map(|path| path.to_string_lossy().into_owned());
-            let mut incoming = if let Some(cached) =
+            let incoming = if let Some(cached) =
                 self.workspace_conversations_panes.remove(&id)
             {
                 cached
@@ -637,11 +663,8 @@ impl Screen<'_> {
             } else {
                 std::mem::take(&mut self.renderer.conversations_pane)
             };
-            incoming
-                .side_panel_mut()
-                .set_width(self.conversations_sidebar_width);
             self.renderer.conversations_pane = incoming;
-            self.renderer.conversations_directory = directory;
+            fresh_conversations_pane |= self.reconcile_conversations_directory(directory);
             self.conversations_pane_workspace = Some(id.clone());
         }
         if let Some(view) = self.workspace_active_left_sidebar.get(&id).copied() {
@@ -1174,8 +1197,21 @@ impl Screen<'_> {
             .agent_server_override_for_current()
             .unwrap_or_else(crate::neoism::agent::neoism_agent_server);
         self.set_agent_server_for_current_workspace(server.clone());
-        if self.renderer.conversations_visible {
-            self.renderer.conversations_pane.switch_server(server);
+        let server_changed = self
+            .renderer
+            .conversations_pane
+            .server_address()
+            .trim_end_matches('/')
+            != server.trim_end_matches('/');
+        self.renderer.conversations_pane.switch_server(server);
+        self.renderer
+            .conversations_pane
+            .side_panel_mut()
+            .set_width(self.conversations_sidebar_width);
+        if server_changed && self.renderer.conversations_visible {
+            self.renderer
+                .conversations_pane
+                .maybe_refresh_side_panel_sessions();
         }
     }
 
@@ -1208,16 +1244,7 @@ impl Screen<'_> {
             let directory = self
                 .workspace_root_for_new_shell()
                 .map(|path| path.to_string_lossy().into_owned());
-            if self.renderer.conversations_directory != directory {
-                self.renderer.conversations_pane =
-                    crate::neoism::agent::NeoismAgentPane::with_directory(
-                        directory.clone(),
-                    );
-                self.renderer
-                    .conversations_pane
-                    .side_panel_mut()
-                    .set_width(self.conversations_sidebar_width);
-                self.renderer.conversations_directory = directory;
+            if self.reconcile_conversations_directory(directory) {
                 self.sync_agent_server_for_current_workspace();
                 self.renderer
                     .conversations_pane
@@ -1254,7 +1281,7 @@ impl Screen<'_> {
 
 #[cfg(test)]
 mod workspace_panel_owner_tests {
-    use super::claim_live_panel_owner;
+    use super::{claim_live_panel_owner, conversations_directory_changed};
 
     #[test]
     fn initial_live_panel_is_claimed_by_current_workspace() {
@@ -1272,5 +1299,17 @@ mod workspace_panel_owner_tests {
         claim_live_panel_owner(&mut owner, &"workspace-b".to_string());
 
         assert_eq!(owner.as_deref(), Some("workspace-a"));
+    }
+
+    #[test]
+    fn restored_catalog_uses_its_actual_directory_not_expected_shadow_state() {
+        assert!(conversations_directory_changed(
+            Some("/old/root"),
+            Some("/new/root")
+        ));
+        assert!(!conversations_directory_changed(
+            Some("/new/root"),
+            Some("/new/root")
+        ));
     }
 }

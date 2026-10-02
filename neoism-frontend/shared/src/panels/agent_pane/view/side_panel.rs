@@ -434,6 +434,7 @@ pub fn render_side_panel_with_icons<P, I>(
     // one only while usage is present.
     pane.side_panel_mut().clear_usage_rect();
     pane.side_panel_mut().clear_session_search_rect();
+    pane.side_panel_mut().clear_new_chat_rect();
     let [px, py, pw, ph] = panel_rect;
     if pw <= 8.0 || ph <= 8.0 {
         return;

@@ -13,6 +13,29 @@ pub(crate) fn render_scramble_text(
     opts: &DrawOpts,
     elapsed_ms: f32,
 ) {
+    render_scramble_text_inner(sugarloaf, x, y, text, opts, elapsed_ms, true);
+}
+
+pub(crate) fn render_loading_scramble_text(
+    sugarloaf: &mut Sugarloaf,
+    x: f32,
+    y: f32,
+    text: &str,
+    opts: &DrawOpts,
+    elapsed_ms: f32,
+) {
+    render_scramble_text_inner(sugarloaf, x, y, text, opts, elapsed_ms, false);
+}
+
+fn render_scramble_text_inner(
+    sugarloaf: &mut Sugarloaf,
+    x: f32,
+    y: f32,
+    text: &str,
+    opts: &DrawOpts,
+    elapsed_ms: f32,
+    settle: bool,
+) {
     let colors = [
         [255, 82, 82, 255],
         [255, 184, 77, 255],
@@ -27,7 +50,7 @@ pub(crate) fn render_scramble_text(
     let mut draw_x = x;
     for (index, target) in chars.iter().copied().enumerate() {
         let settle_at = 0.35 + 0.65 * (index as f32 + 1.0) / chars.len().max(1) as f32;
-        let settled = progress >= settle_at || target.is_whitespace();
+        let settled = (settle && progress >= settle_at) || target.is_whitespace();
         let tick = (elapsed_ms / 34.0).floor() as usize;
         let glyph = if settled {
             target
@@ -225,7 +248,7 @@ pub(crate) fn render_sessions_list(
     theme: &IdeTheme,
     s: f32,
     now_seconds: f32,
-    _mouse: Option<(f32, f32)>,
+    mouse: Option<(f32, f32)>,
     occlusion_rects: &[[f32; 4]],
     inner_radius: f32,
 ) {
@@ -238,9 +261,11 @@ pub(crate) fn render_sessions_list(
     let text_x = cx + pad_x;
     let text_w = (cw - pad_x * 2.0).max(0.0);
     let clip = [cx, cy, cw, ch];
+    pane.side_panel_mut().clear_selected_cursor_rect();
 
     // Catalog is always the left rail, whether a chat is open or not.
     let mut y = cy + 14.0 * s;
+    pane.side_panel_mut().close_provider_menu();
     y = render_directory_section(
         sugarloaf,
         pane,
@@ -264,10 +289,89 @@ pub(crate) fn render_sessions_list(
         occlusion_rects,
     );
 
-    // Conversations is a catalog only. Search, New Chat and provider controls
-    // live in the top bar and command palette; clear stale sidebar hit geometry.
-    pane.side_panel_mut().hide_catalog_controls();
-    y += 6.0 * s;
+    let button_h = 34.0 * s;
+    let button_rect = [text_x, y + 5.0 * s, text_w, button_h];
+    pane.side_panel_mut().set_new_chat_rect(button_rect);
+    let button_hovered = mouse.is_some_and(|(mx, my)| {
+        mx >= button_rect[0]
+            && mx <= button_rect[0] + button_rect[2]
+            && my >= button_rect[1]
+            && my <= button_rect[1] + button_rect[3]
+    });
+    let button_selected = pane.side_panel().new_chat_selected()
+        && pane.side_panel().is_focused();
+    let radius = 7.0 * s;
+    if button_hovered || button_selected {
+        sugarloaf.rounded_rect(
+            None,
+            button_rect[0],
+            button_rect[1],
+            button_rect[2],
+            button_rect[3],
+            theme.f32_alpha(theme.surface, if button_hovered { 0.78 } else { 0.55 }),
+            DEPTH,
+            radius,
+            ORDER_PANEL + 2,
+        );
+    }
+    let icon_side = 20.0 * s;
+    let icon_x = button_rect[0] + 7.0 * s;
+    let icon_y = button_rect[1] + (button_h - icon_side) / 2.0;
+    if button_hovered || button_selected {
+        sugarloaf.rounded_rect(
+            None,
+            icon_x,
+            icon_y,
+            icon_side,
+            icon_side,
+            theme.f32_alpha(theme.accent, if button_hovered { 0.24 } else { 0.16 }),
+            DEPTH,
+            5.0 * s,
+            ORDER_PANEL + 3,
+        );
+    }
+    let plus_opts = DrawOpts {
+        font_size: 12.0 * s,
+        color: theme.u8(theme.readable_accent(theme.accent)),
+        bold: true,
+        clip_rect: Some(clip),
+        ..DrawOpts::default()
+    };
+    draw_text_with_occlusion(
+        sugarloaf,
+        icon_x + 5.0 * s,
+        icon_y + 4.0 * s,
+        "+",
+        &plus_opts,
+        occlusion_rects,
+    );
+    let label_opts = DrawOpts {
+        font_size: FONT_SIZE * s * 0.95,
+        color: theme.u8(theme.fg),
+        bold: button_hovered || button_selected,
+        clip_rect: Some(clip),
+        ..DrawOpts::default()
+    };
+    draw_text_with_occlusion(
+        sugarloaf,
+        icon_x + icon_side + 9.0 * s,
+        button_rect[1] + (button_h - FONT_SIZE * s * 0.95) / 2.0,
+        "New chat",
+        &label_opts,
+        occlusion_rects,
+    );
+    if button_selected {
+        let cursor_w = (FONT_SIZE * s * 0.6).max(2.0);
+        let cursor_h = (button_h - 8.0 * s).max(FONT_SIZE * s).min(button_h);
+        pane.side_panel_mut().set_selected_cursor_rect([
+            button_rect[0] + 1.0 * s,
+            button_rect[1] + (button_h - cursor_h) / 2.0,
+            cursor_w,
+            cursor_h,
+        ]);
+    }
+
+    y = button_rect[1] + button_rect[3] + 8.0 * s;
     let list_top = y;
     let list_h = (cy + ch - list_top).max(0.0);
     let list_rect = [cx, list_top, cw, list_h];
@@ -391,9 +495,8 @@ pub(crate) fn render_sessions_list(
     let focused = pane.side_panel().is_focused();
     let list_bottom = list_rect[1] + list_rect[3];
 
-    pane.side_panel_mut().clear_selected_cursor_rect();
     let sessions_len = pane.side_panel().sessions().len();
-    if selected < sessions_len {
+    if selected < sessions_len && !pane.side_panel().new_chat_selected() {
         let row_ix = selected as isize - render_top as isize;
         let row_y = list_rect[1] + row_ix as f32 * row_h - frac + cursor_offset;
         let row_bottom = row_y + row_h;
@@ -463,7 +566,6 @@ pub(crate) fn render_sessions_list(
     // left a large empty column on scaled displays.
     let dot_gutter = 18.0 * s;
     let dot_diameter = 7.0 * s;
-    let pin_d = 6.0 * s;
     let title_x = text_x + dot_gutter;
     let current_id = pane
         .session_id_str()
@@ -704,26 +806,7 @@ pub(crate) fn render_sessions_list(
             occlusion_rects,
         );
 
-        // Pinned marker — a small cyan dot in the row's right padding.
-        let pin_reserve = if entry.pinned { pin_d + 8.0 * s } else { 0.0 };
-        if entry.pinned {
-            let scaled_pin = pin_d * hover_scale;
-            let pin_x = text_x + text_w - scaled_pin;
-            let pin_y = row_y + (row_h - scaled_pin) / 2.0;
-            sugarloaf.rounded_rect(
-                None,
-                pin_x,
-                pin_y,
-                scaled_pin,
-                scaled_pin,
-                theme.f32(theme.cyan),
-                DEPTH,
-                scaled_pin / 2.0,
-                ORDER_PANEL + 3,
-            );
-        }
-
-        let title_budget = (text_w - dot_gutter - pin_reserve).max(0.0);
+        let title_budget = (text_w - dot_gutter).max(0.0);
         let context = if entry.time_label.trim().is_empty() {
             relative_session_time(entry.updated_ms, now_ms)
         } else {
@@ -755,7 +838,7 @@ pub(crate) fn render_sessions_list(
                     source_icon.display_name(),
                     &identity_opts,
                 );
-            let context_right = text_x + text_w - pin_reserve;
+            let context_right = text_x + text_w;
             let context_budget = (context_right - identity_end - 10.0 * s).max(0.0);
             let label =
                 truncate_sidebar_text(&context, context_budget, sugarloaf, &context_opts);

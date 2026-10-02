@@ -1121,24 +1121,30 @@ impl Screen<'_> {
     }
 
     pub(crate) fn apply_shader_overlay(&mut self, path: Option<String>) {
-        let config = match path.clone() {
-            Some(path) => neoism_backend::sugarloaf::ShaderOverlayConfig::new([path]),
-            None => neoism_backend::sugarloaf::ShaderOverlayConfig::default(),
-        };
-        if let Err(err) = self.sugarloaf.set_shader_overlay(config) {
+        if let Err(err) = self.try_apply_shader_overlay(path) {
             self.renderer.notifications.push(
                 format!("Failed to load shader overlay: {err}"),
                 neoism_ui::panels::notifications::NotificationLevel::Error,
             );
             tracing::warn!("failed to load shader overlay: {err}");
-            return;
         }
+    }
+
+    fn try_apply_shader_overlay(&mut self, path: Option<String>) -> Result<(), String> {
+        let config = match path.clone() {
+            Some(path) => neoism_backend::sugarloaf::ShaderOverlayConfig::new([path]),
+            None => neoism_backend::sugarloaf::ShaderOverlayConfig::default(),
+        };
+        self.sugarloaf
+            .set_shader_overlay(config)
+            .map_err(|error| error.to_string())?;
 
         self.active_shader_overlay = path;
         self.renderer.shader_overlay_active = self.active_shader_overlay.is_some();
 
         self.renderer.modal.close();
         self.mark_dirty();
+        Ok(())
     }
 
     pub fn get_mode(&self) -> Mode {
@@ -1161,18 +1167,20 @@ impl Screen<'_> {
     }
 
     pub(crate) fn apply_unified_theme(&mut self, name: &str) {
+        self.apply_unified_theme_visual(name);
+        let theme_name = self.renderer.theme.name.as_str();
+        if let Err(err) = neoism_backend::config::write_manual_theme_selection(theme_name) {
+            tracing::warn!(target: "neoism::config", "failed to persist theme: {err}");
+        }
+    }
+
+    fn apply_unified_theme_visual(&mut self, name: &str) {
         let theme = neoism_ui::primitives::ide_theme::IdeTheme::by_name(name);
         let theme_name = theme.name.as_str();
         self.context_manager.config.ide_theme = theme_name.to_string();
         self.renderer.set_ide_theme(theme);
         self.sugarloaf
             .set_background_color(Some(self.renderer.dynamic_background.1));
-
-        if let Err(err) =
-            neoism_backend::config::write_neoism_preferences(Some(theme_name), None, None)
-        {
-            tracing::warn!(target: "neoism::config", "failed to persist theme: {err}");
-        }
 
         // `set_ide_theme` refreshed `renderer.colors` in place; mirror
         // it into the context-manager seed (new panes) and re-seed the
@@ -1207,111 +1215,79 @@ impl Screen<'_> {
         self.mark_dirty();
     }
 
-    /// Apply a Mash Up Pack: every slot the pack ships (theme, shader
-    /// overlay, filters, font family) lands together as one look.
-    /// Slots the pack omits keep the user's current setup — except the
-    /// shader overlay, which is always set to the pack's value so a
-    /// previous pack's glass doesn't linger. `None` deactivates the
-    /// current pack (theme stays; individual pickers still work).
-    pub(crate) fn apply_mashup_pack(&mut self, id: Option<String>) {
-        let Some(id) = id else {
-            self.apply_shader_overlay(None);
-            if let Err(err) =
-                neoism_backend::config::write_neoism_preferences(None, None, Some(""))
-            {
-                tracing::warn!(target: "neoism::config", "failed to persist pack: {err}");
-            }
-            let fresh_config = neoism_backend::config::Config::load();
-            crate::mashup::publish_active_look(&fresh_config.appearance.look, None);
-            if let Some(image) = fresh_config.ui.window.background_image.as_ref() {
-                let _ = self.sugarloaf.set_background_image(image);
-            } else {
-                self.sugarloaf.clear_background_image();
-            }
-            self.renderer.notifications.push(
-                "Mash Up Pack deactivated",
-                neoism_ui::panels::notifications::NotificationLevel::Info,
-            );
-            self.renderer.modal.close();
-            self.mark_dirty();
-            return;
-        };
+    /// Queue pack intent only. Input paths never resolve packages, build Lua,
+    /// persist config, or mutate visual state.
+    pub(crate) fn request_mashup_pack(&mut self, id: Option<String>) {
+        self.pending_mashup_pack_request = Some(id);
+    }
 
-        crate::mashup::sync_custom_ide_themes();
-        let Some(pack) = neoism_backend::config::mashup::find_mashup_pack(&id) else {
-            self.renderer.notifications.push(
-                format!("Mash Up Pack not found: {id}"),
-                neoism_ui::panels::notifications::NotificationLevel::Error,
-            );
-            self.renderer.modal.close();
-            self.mark_dirty();
-            return;
-        };
+    pub(crate) fn take_mashup_pack_request(&mut self) -> Option<Option<String>> {
+        self.pending_mashup_pack_request.take()
+    }
 
-        if let Some(theme) = pack.theme.as_deref() {
-            // Applies live everywhere and persists `[neoism] theme`,
-            // which is also what startup reads — the pack only re-applies
-            // its shader/filters on launch, never the theme, so a later
-            // individual theme change sticks.
-            self.apply_unified_theme(theme);
-        }
-
-        self.apply_shader_overlay(pack.shader_overlay.clone());
-
-        #[cfg(feature = "wgpu")]
-        if !pack.filters.is_empty() {
-            self.sugarloaf.update_filters(&pack.filters);
-        }
-
-        if let Some(family) = pack.font_family.as_deref() {
-            // Written to config so the file watcher rebuilds the font
-            // library — same path a manual `[fonts]` edit takes.
-            if let Err(err) = neoism_backend::config::write_fonts_family(family) {
-                tracing::warn!(
-                    target: "neoism::config",
-                    "failed to persist pack font family: {err}"
-                );
-            }
-        }
-
-        if let Err(err) =
-            neoism_backend::config::write_neoism_preferences(None, None, Some(&id))
-        {
-            tracing::warn!(target: "neoism::config", "failed to persist pack: {err}");
-        }
-
-        // Publish the pack's look slots immediately (the config-write
-        // hot-reload would get there too, but only after the watcher
-        // debounce). Fresh-load the config so `[look.*]` overrides win.
-        let fresh_config = neoism_backend::config::Config::load();
-        crate::mashup::publish_active_look(&fresh_config.appearance.look, Some(&id));
-
-        // Wallpaper slot — the pack's value unless the user pinned an
-        // explicit `[window] background-image`; a pack without a
-        // wallpaper clears a previous pack's.
-        if let Some(image) = fresh_config
-            .ui
-            .window
-            .background_image
-            .as_ref()
-            .or(pack.wallpaper.as_ref())
-        {
-            if let Err(message) = self.sugarloaf.set_background_image(image) {
-                tracing::warn!(
-                    target: "neoism::mashup",
-                    "failed to load pack wallpaper: {message}"
-                );
-            }
-        } else {
-            self.sugarloaf.clear_background_image();
-        }
-
+    pub(crate) fn report_mashup_pack_error(&mut self, message: String) {
         self.renderer.notifications.push(
-            format!("Applied Mash Up Pack: {}", pack.name),
+            message,
+            neoism_ui::panels::notifications::NotificationLevel::Error,
+        );
+        self.renderer.modal.close();
+        self.mark_dirty();
+    }
+
+    /// Commit visuals from the exact manifest already validated by the
+    /// application. Fallible wallpaper/shader changes run first; a shader
+    /// failure attempts to restore the prior wallpaper before returning.
+    pub(crate) fn apply_resolved_mashup_pack(
+        &mut self,
+        pack: Option<&neoism_backend::config::mashup::MashupPack>,
+        config: &neoism_backend::config::Config,
+        font_library: Option<&neoism_backend::sugarloaf::font::FontLibrary>,
+    ) -> Result<(), String> {
+        let wallpaper = config.ui.window.background_image.as_ref().or_else(|| pack.and_then(|pack| pack.wallpaper.as_ref()));
+        let previous_wallpaper = self.sugarloaf.background_image().cloned();
+        match wallpaper {
+            Some(image) => self.sugarloaf.set_background_image(image)?,
+            None => self.sugarloaf.clear_background_image(),
+        }
+        let shader = pack.and_then(|pack| pack.shader_overlay.clone());
+        if let Err(error) = self.try_apply_shader_overlay(shader) {
+            let rollback = match previous_wallpaper.as_ref() {
+                Some(image) => self.sugarloaf.set_background_image(image),
+                None => { self.sugarloaf.clear_background_image(); Ok(()) }
+            };
+            if let Err(rollback_error) = rollback {
+                tracing::error!(target: "neoism::mashup", %rollback_error, "failed to restore prior wallpaper after rejected pack visual commit");
+            }
+            return Err(error);
+        }
+
+        // The resolver has already selected either the requested pack slot or
+        // the original baseline. Always apply it, including deactivation and
+        // packs that intentionally omit a theme.
+        self.apply_unified_theme_visual(&config.appearance.theme);
+        #[cfg(feature = "wgpu")]
+        self.sugarloaf.update_filters(
+            pack.map(|pack| pack.filters.as_slice())
+                .filter(|filters| !filters.is_empty())
+                .unwrap_or(config.renderer.filters.as_slice()),
+        );
+        if let Some(font_library) = font_library {
+            self.sugarloaf.update_font(font_library);
+            self.grid_rasterizer = crate::terminal::grid_emit::GridGlyphRasterizer::new();
+            for grid in self.grids.values_mut() {
+                grid.clear_glyph_atlas();
+            }
+            self.resize_all_contexts();
+        }
+        crate::mashup::publish_resolved_look(&config.appearance.look, pack);
+        self.renderer.notifications.push(
+            pack.map(|pack| format!("Applied Mash Up Pack: {}", pack.name))
+                .unwrap_or_else(|| "Mash Up Pack deactivated".into()),
             neoism_ui::panels::notifications::NotificationLevel::Info,
         );
         self.renderer.modal.close();
         self.mark_dirty();
+        Ok(())
     }
 }
 

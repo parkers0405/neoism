@@ -114,6 +114,13 @@ mod lua_timer_tests {
         assert!(!lua_autocmd_needs_state_poll("Command"));
         assert!(!lua_autocmd_needs_state_poll("AsyncResult"));
     }
+
+    #[test]
+    fn composer_changes_publish_immediately_only_for_agent_subscribers() {
+        assert!(lua_autocmd_needs_urgent_composer_publish("AgentChanged"));
+        assert!(lua_autocmd_needs_urgent_composer_publish("*"));
+        assert!(!lua_autocmd_needs_urgent_composer_publish("DocumentChanged"));
+    }
 }
 
 #[derive(Clone)]
@@ -167,6 +174,13 @@ fn ssh_server_id(workspace_id: &str) -> String {
 const NOTEBOOK_STATUS_TICK_MS: u64 = 500;
 const FRAME_WATCHDOG_NOTE_INTERVAL: Duration = Duration::from_secs(1);
 const LUA_STATE_PUBLISH_INTERVAL: Duration = Duration::from_millis(100);
+
+fn commit_validated_mashup_candidate<T, E>(
+    candidate: Result<T, E>,
+    commit: impl FnOnce(T) -> Result<(), E>,
+) -> Result<(), E> {
+    commit(candidate?)
+}
 const LUA_LSP_PENDING_PER_OWNER: usize = 64;
 const LUA_LSP_PENDING_GLOBAL: usize = 512;
 const LUA_LSP_ACTIONS_PER_OWNER: usize = 256;
@@ -197,6 +211,10 @@ fn lua_autocmd_needs_state_poll(event: &str) -> bool {
             | "PaneFocused"
             | "PaneChanged"
     )
+}
+
+fn lua_autocmd_needs_urgent_composer_publish(event: &str) -> bool {
+    matches!(event, "*" | "AgentChanged")
 }
 
 #[cfg(target_os = "linux")]
@@ -284,6 +302,8 @@ pub struct Application<'a> {
     lua_result_lists: Option<HashMap<String, LuaResultList>>,
     lua_watchers: Option<crate::lua_watchers::LuaWatchers>,
     lua_state_publish_deadline: Instant,
+    lua_composer_text: String,
+    lua_composer_revision: u64,
 }
 
 impl Application<'_> {
@@ -306,11 +326,26 @@ impl Application<'_> {
             unsafe { Clipboard::new(event_loop.display_handle().unwrap().as_raw()) };
 
         let config_dir = neoism_backend::config::config_dir_path();
-        let (mut lua_plugins, lua_plugin_error) = crate::plugin_manager::LuaPluginManager::discover_for_startup(
-            &config_dir,
-            lua_host.clone(),
-            &config.plugins,
+        crate::mashup::seed_first_party_plugins();
+        // Eager plugins may make capability-checked read-only decisions during
+        // initialization. Seed the same typed config snapshot that the normal
+        // state publisher will subsequently maintain.
+        lua_host.publish(
+            "config",
+            serde_json::to_value(&config).unwrap_or(serde_json::Value::Null),
         );
+        let (mut lua_plugins, lua_plugin_error) = match crate::plugin_manager::resolve_mashup_selection(&config) {
+            Ok(selection) => crate::plugin_manager::LuaPluginManager::discover_for_startup(
+                &config_dir,
+                lua_host.clone(),
+                &config.plugins,
+                selection.as_ref(),
+            ),
+            Err(error) => (
+                crate::plugin_manager::LuaPluginManager::empty(&config_dir, lua_host.clone()),
+                Some(error),
+            ),
+        };
         if let Some(error) = lua_plugin_error {
             tracing::warn!(%error, "Lua plugin activation failed; retaining plugin diagnostics and user init");
         }
@@ -461,6 +496,8 @@ impl Application<'_> {
             lua_result_lists: None,
             lua_watchers: None,
             lua_state_publish_deadline: Instant::now(),
+            lua_composer_text: String::new(),
+            lua_composer_revision: 0,
         }
     }
 
@@ -852,6 +889,7 @@ impl Application<'_> {
     }
 
     fn pump_lua(&mut self) {
+        self.pump_mashup_pack_requests();
         self.drain_lua_lsp_completions();
         self.drain_lua_command_completions();
         let mut plugin_actions = Vec::new();
@@ -869,11 +907,14 @@ impl Application<'_> {
         if !completions.is_empty() {
             for completion in completions {
                 if completion.success {
-                    match crate::plugin_manager::LuaPluginManager::discover(
-                        &neoism_backend::config::config_dir_path(),
-                        self.lua_host.clone(),
-                        &self.config.plugins,
-                    ) {
+                    let candidate = crate::plugin_manager::resolve_mashup_selection(&self.config)
+                        .and_then(|selection| crate::plugin_manager::LuaPluginManager::discover(
+                            &neoism_backend::config::config_dir_path(),
+                            self.lua_host.clone(),
+                            &self.config.plugins,
+                            selection.as_ref(),
+                        ));
+                    match candidate {
                         Ok(manager) => self.lua_plugins = manager,
                         Err(error) => {
                             let message = format!("Installed package could not be activated: {error}");
@@ -910,14 +951,38 @@ impl Application<'_> {
         let now = Instant::now();
         self.poll_lua_timers(now);
         let mut state_published = false;
-        let needs_state_poll = self
+        let mut needs_state_poll = false;
+        let mut needs_urgent_composer_publish = false;
+        for autocmd in self
             .lua_runtime
             .as_ref()
             .into_iter()
             .flat_map(|runtime| &runtime.snapshot().autocmds)
             .chain(self.lua_plugins.snapshot().autocmds.iter())
-            .any(|autocmd| lua_autocmd_needs_state_poll(&autocmd.event));
+        {
+            needs_state_poll |= lua_autocmd_needs_state_poll(&autocmd.event);
+            needs_urgent_composer_publish |=
+                lua_autocmd_needs_urgent_composer_publish(&autocmd.event);
+        }
+        let composer_changed = needs_urgent_composer_publish
+            && self
+                .router
+                .get_focused_route()
+                .and_then(|window_id| self.router.routes.get(&window_id))
+                .and_then(|route| {
+                    route
+                        .window
+                        .screen
+                        .context_manager
+                        .current()
+                        .neoism_agent
+                        .as_ref()
+                        .map(|agent| agent.input().to_string())
+                })
+                .unwrap_or_default()
+                != self.lua_composer_text;
         if self.lua_published.is_empty()
+            || composer_changed
             || (needs_state_poll && now >= self.lua_state_publish_deadline)
         {
             self.publish_lua_state();
@@ -1094,6 +1159,136 @@ impl Application<'_> {
             self.apply_lua_action(window_id, action);
         }
         self.flush_lua_persistent_state();
+    }
+
+    fn pump_mashup_pack_requests(&mut self) {
+        let requests = self.router.routes.iter_mut().filter_map(|(window_id, route)| {
+            route.window.screen.take_mashup_pack_request().map(|id| (*window_id, id))
+        }).collect::<Vec<_>>();
+        for (window_id, requested_id) in requests {
+            if let Err(error) = self.apply_mashup_pack_transaction(window_id, requested_id) {
+                tracing::warn!(target: "neoism::mashup", %error, "Mash Up Pack transaction rejected");
+                if let Some(route) = self.router.routes.get_mut(&window_id) {
+                    route.window.screen.report_mashup_pack_error(error);
+                    route.request_redraw();
+                }
+            }
+        }
+    }
+
+    fn apply_mashup_pack_transaction(
+        &mut self,
+        window_id: WindowId,
+        requested_id: Option<String>,
+    ) -> Result<(), String> {
+        crate::mashup::sync_custom_ide_themes();
+        let packs = neoism_backend::config::mashup::load_mashup_packs();
+        // Theme picker writes are application-visible through the config file
+        // before the watcher necessarily updates `self.config`; resolve and
+        // rollback against the latest persisted four-field appearance state.
+        let previous_appearance = neoism_backend::config::Config::load().appearance;
+        let transition = neoism_backend::config::mashup::resolve_appearance_transition(
+            previous_appearance.mashup_pack.as_deref(),
+            previous_appearance.mashup_baseline.as_ref(),
+            &previous_appearance.theme,
+            previous_appearance.fonts.family.as_deref(),
+            requested_id.as_deref(),
+            &packs,
+        ).map_err(|error| error.to_string())?;
+        let requested_pack = transition
+            .mashup_pack
+            .as_deref()
+            .and_then(|id| packs.iter().find(|pack| pack.id == id))
+            .cloned();
+        let mut candidate_config = self.config.clone();
+        candidate_config.appearance.mashup_pack = transition.mashup_pack;
+        candidate_config.appearance.mashup_baseline = transition.mashup_baseline;
+        candidate_config.appearance.theme = neoism_ui::primitives::ide_theme::IdeTheme::by_name(&transition.theme)
+            .name
+            .as_str()
+            .to_string();
+        candidate_config.appearance.fonts.family = transition.font_family;
+        let selection_packs = requested_pack.as_ref().map(std::slice::from_ref).unwrap_or(&[]);
+        let selection = neoism_backend::config::mashup::resolve_editor_plugin_selection(
+            candidate_config.appearance.mashup_pack.as_deref(),
+            selection_packs,
+            &candidate_config.plugins.mashup_overrides,
+        ).map_err(|error| error.to_string())?;
+
+        let candidate_host = Arc::new(self.lua_host.fork_candidate());
+        candidate_host.publish(
+            "config",
+            serde_json::to_value(&candidate_config).unwrap_or(serde_json::Value::Null),
+        );
+        let candidate_runtime = if neoism_backend::config::config_dir_path().join("init.lua").is_file() {
+            Some(neoism_lua::LuaRuntime::load(
+                neoism_backend::config::config_dir_path(),
+                candidate_host.clone(),
+            ).map_err(|error| format!("init.lua: {error}"))?)
+        } else {
+            None
+        };
+        let candidate_manager = crate::plugin_manager::LuaPluginManager::discover(
+            neoism_backend::config::config_dir_path(),
+            candidate_host.clone(),
+            &candidate_config.plugins,
+            selection.as_ref(),
+        ).map_err(|error| error.to_string());
+
+        let font_changed = candidate_config.appearance.fonts != self.config.appearance.fonts;
+        let candidate_font_library = font_changed.then(|| {
+            neoism_backend::sugarloaf::font::FontLibrary::new(
+                crate::mashup::fonts_with_markdown_family(
+                    candidate_config.appearance.fonts.clone(),
+                    candidate_config.appearance.look.markdown.font_family.as_deref(),
+                ),
+            ).0
+        });
+
+        commit_validated_mashup_candidate(candidate_manager, |candidate_manager| {
+            if !self.router.routes.contains_key(&window_id) {
+                return Err("requesting window closed before Mash Up Pack commit".to_string());
+            }
+            neoism_backend::config::write_mashup_pack_settings(
+                candidate_config.appearance.mashup_pack.as_deref(),
+                candidate_config.appearance.mashup_baseline.as_ref(),
+                &candidate_config.appearance.theme,
+                candidate_config.appearance.fonts.family.as_deref(),
+            ).map_err(|error| format!("failed to persist Mash Up Pack transaction: {error}"))?;
+
+            let visual_result = self.router.routes.get_mut(&window_id)
+                .expect("requesting route checked immediately before persistence")
+                .window.screen.apply_resolved_mashup_pack(
+                    requested_pack.as_ref(),
+                    &candidate_config,
+                    candidate_font_library.as_ref(),
+                );
+            if let Err(error) = visual_result {
+                if let Err(rollback_error) = neoism_backend::config::write_mashup_pack_settings(
+                    previous_appearance.mashup_pack.as_deref(),
+                    previous_appearance.mashup_baseline.as_ref(),
+                    &previous_appearance.theme,
+                    previous_appearance.fonts.family.as_deref(),
+                ) {
+                    tracing::error!(target: "neoism::mashup", %rollback_error, "failed to roll back rejected Mash Up Pack config write");
+                }
+                return Err(format!("failed to apply Mash Up Pack visuals: {error}"));
+            }
+
+            if let Some(font_library) = candidate_font_library {
+                *self.router.font_library = font_library;
+            }
+            self.config = candidate_config;
+            self.lua_host = candidate_host;
+            self.lua_runtime = candidate_runtime;
+            self.lua_plugins = candidate_manager;
+            self.lua_published.clear();
+            self.sync_lua_snapshot(Some(window_id));
+            if let Some(route) = self.router.routes.get_mut(&window_id) {
+                route.request_redraw();
+            }
+            Ok(())
+        })
     }
 
     fn flush_lua_persistent_state(&self) {
@@ -1434,6 +1629,27 @@ impl Application<'_> {
         let Some(window_id) = self.router.get_focused_route() else {
             return;
         };
+        let composer_text = self
+            .router
+            .routes
+            .get(&window_id)
+            .and_then(|route| {
+                route
+                    .window
+                    .screen
+                    .context_manager
+                    .current()
+                    .neoism_agent
+                    .as_ref()
+                    .map(|agent| agent.input().to_string())
+            })
+            .unwrap_or_default();
+        if composer_text != self.lua_composer_text {
+            self.lua_composer_text = composer_text;
+            self.lua_composer_revision = self.lua_composer_revision.wrapping_add(1);
+        }
+        let composer_length = self.lua_composer_text.chars().count();
+        let composer_revision = self.lua_composer_revision;
         let Some(route) = self.router.routes.get(&window_id) else {
             return;
         };
@@ -1729,10 +1945,20 @@ impl Application<'_> {
                 "entries": notes_entries,
             })),
             ("agent", current.neoism_agent.as_ref().map_or_else(
-                || serde_json::json!({ "active": false, "sidebarVisible": screen.renderer.conversations_visible, "sessions": [] }),
+                || serde_json::json!({
+                    "active": false,
+                    "sidebarVisible": screen.renderer.conversations_visible,
+                    "composerRevision": composer_revision,
+                    "composerLength": composer_length,
+                    "composerEmpty": composer_length == 0,
+                    "sessions": [],
+                }),
                 |agent| serde_json::json!({
                     "active": true,
                     "sidebarVisible": screen.renderer.conversations_visible,
+                    "composerRevision": composer_revision,
+                    "composerLength": composer_length,
+                    "composerEmpty": composer_length == 0,
                     "sessionId": agent.session_id_str(),
                     "title": agent.session_title(),
                     "directory": agent.session_directory(),
@@ -2266,6 +2492,7 @@ impl Application<'_> {
                 ManagerLifecycle::Lazy => UiLifecycle::Lazy,
                 ManagerLifecycle::Loaded => UiLifecycle::Loaded,
                 ManagerLifecycle::Disabled => UiLifecycle::Disabled,
+                ManagerLifecycle::MashupExcluded => UiLifecycle::Disabled,
                 ManagerLifecycle::UpdateAvailable => UiLifecycle::UpdateAvailable,
                 ManagerLifecycle::PermissionRequired => UiLifecycle::PermissionRequired,
                 ManagerLifecycle::Approved => UiLifecycle::Approved,
@@ -2293,7 +2520,7 @@ impl Application<'_> {
             let primary_action = match lifecycle {
                 UiLifecycle::Discovered if managed => Some(LuaPluginAction::Install),
                 UiLifecycle::Lazy | UiLifecycle::Loaded => Some(LuaPluginAction::Disable),
-                UiLifecycle::Disabled => Some(LuaPluginAction::Enable),
+                UiLifecycle::Disabled if !row.mashup_controlled => Some(LuaPluginAction::Enable),
                 UiLifecycle::UpdateAvailable => Some(LuaPluginAction::Update),
                 UiLifecycle::PermissionRequired => Some(LuaPluginAction::GrantAll),
                 UiLifecycle::Approved => Some(LuaPluginAction::Disable),
@@ -2390,9 +2617,12 @@ impl Application<'_> {
             }
             LuaPluginAction::Retry => {
                 if !self.lua_plugin_jobs.retry(window_id, &plugin_id) {
-                    match crate::plugin_manager::LuaPluginManager::discover(
-                        &neoism_backend::config::config_dir_path(), self.lua_host.clone(), &self.config.plugins,
-                    ) {
+                    let candidate = crate::plugin_manager::resolve_mashup_selection(&self.config)
+                        .and_then(|selection| crate::plugin_manager::LuaPluginManager::discover(
+                            &neoism_backend::config::config_dir_path(), self.lua_host.clone(), &self.config.plugins,
+                            selection.as_ref(),
+                        ));
+                    match candidate {
                         Ok(manager) => {
                             self.lua_plugins = manager;
                             self.sync_lua_snapshot(Some(window_id));
@@ -2468,9 +2698,13 @@ impl Application<'_> {
         policy: neoism_backend::config::PluginPreferences,
         key: &str,
     ) {
-        let candidate = match crate::plugin_manager::LuaPluginManager::discover(
-            &neoism_backend::config::config_dir_path(), self.lua_host.clone(), &policy,
-        ) {
+        let mut candidate_config = self.config.clone();
+        candidate_config.plugins = policy.clone();
+        let candidate = match crate::plugin_manager::resolve_mashup_selection(&candidate_config)
+            .and_then(|selection| crate::plugin_manager::LuaPluginManager::discover(
+                &neoism_backend::config::config_dir_path(), self.lua_host.clone(), &policy,
+                selection.as_ref(),
+            )) {
             Ok(candidate) => candidate,
             Err(error) => {
                 tracing::warn!(%error, "Lua plugin policy change rejected");
@@ -2547,6 +2781,44 @@ impl Application<'_> {
         // mutate host state; rejected/retired generations are inert.
         if !self.lua_lsp_owner_is_active(owner) {
             tracing::debug!(plugin = %owner.plugin_id, revision = %owner.revision.0, "discarded stale Lua host action");
+            return;
+        }
+        if contract.operation == neoism_lua::HostOperation::EffectEmit {
+            let kind = action
+                .arguments
+                .get("kind")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            if kind != "particles" {
+                tracing::warn!(plugin = %owner.plugin_id, %kind, "rejected unknown Lua visual effect");
+                return;
+            }
+            let spec = match serde_json::from_value::<
+                neoism_ui::panels::agent_pane::view::fx::ParticleEffectSpec,
+            >(action.arguments.clone()) {
+                Ok(spec) => spec,
+                Err(error) => {
+                    tracing::warn!(plugin = %owner.plugin_id, %error, "rejected malformed Lua particle effect");
+                    return;
+                }
+            };
+            if let Err(error) = spec.validate() {
+                tracing::warn!(plugin = %owner.plugin_id, %error, "rejected unsafe Lua particle effect");
+                return;
+            }
+            if let Some(route) = self.router.routes.get_mut(&window_id) {
+                if let Some(agent) = route
+                    .window
+                    .screen
+                    .context_manager
+                    .current_mut()
+                    .neoism_agent
+                    .as_mut()
+                {
+                    agent.queue_plugin_particle(spec);
+                    route.request_redraw();
+                }
+            }
             return;
         }
         if contract.operation == neoism_lua::HostOperation::AsyncCancel {
@@ -7278,4 +7550,23 @@ fn lua_palette_action(id: &str) -> Option<neoism_ui::panels::command_palette::Pa
         "app.quit" => Quit,
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod mashup_transaction_tests {
+    use super::commit_validated_mashup_candidate;
+
+    #[test]
+    fn rejected_candidate_never_enters_visual_commit() {
+        let mut visual_commit_called = false;
+        let result = commit_validated_mashup_candidate::<(), _>(
+            Err("plugin graph rejected"),
+            |_| {
+                visual_commit_called = true;
+                Ok(())
+            },
+        );
+        assert_eq!(result, Err("plugin graph rejected"));
+        assert!(!visual_commit_called);
+    }
 }

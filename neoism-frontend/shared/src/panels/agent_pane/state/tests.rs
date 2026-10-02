@@ -1959,6 +1959,11 @@ fn mobile_child_and_root_navigation_both_dismiss_takeover() {
 #[test]
 fn with_directory_queues_apply_config_defaults() {
     let mut pane = NeoismAgentPane::with_directory(Some("/tmp/wd".to_string()));
+    assert!(matches!(
+        pane.config_chip_transition(),
+        Some(ConfigChipTransition::Loading { .. })
+    ));
+    assert_eq!(pane.animation_reason(), Some("config_chip_hydration"));
     let drained = pane.drain_pending_outbound();
     assert!(
         drained
@@ -1966,6 +1971,12 @@ fn with_directory_queues_apply_config_defaults() {
             .any(|cmd| matches!(cmd, OutboundAgentCommand::ApplyConfigDefaults)),
         "expected ApplyConfigDefaults from with_directory: {drained:?}",
     );
+
+    pane.apply_config_defaults_if_unset(None, None, None);
+    assert!(matches!(
+        pane.config_chip_transition(),
+        Some(ConfigChipTransition::Settling { .. })
+    ));
 }
 
 #[test]
@@ -4101,6 +4112,21 @@ fn roster_survives_cached_switch_into_subagent() {
         .map(|entry| entry.id.as_str())
         .collect();
     assert_eq!(roster, vec!["parent", "child-1"]);
+}
+
+#[test]
+fn clicking_the_active_detail_child_returns_to_main() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("child".to_string());
+    pane.parent_session_id = Some("parent".to_string());
+    pane.detail_panel.set_subagents(vec![
+        NeoismAgentSessionEntry::new("parent", "main session", "return"),
+        NeoismAgentSessionEntry::new("child", "Worker", "general"),
+    ]);
+
+    assert!(pane.activate_clicked_detail_panel_subagent(1));
+    assert_eq!(pane.session_id.as_deref(), Some("parent"));
+    assert_eq!(pane.detail_panel.selected_index(), 0);
 }
 
 /// Clicking a Task card raises/expands it (that's also the navigation

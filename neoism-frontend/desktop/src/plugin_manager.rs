@@ -35,6 +35,8 @@ pub(crate) enum PluginManagerError {
     InvalidContribution { plugin: String, message: String },
     #[error(transparent)]
     Acquisition(#[from] neoism_extensions::lua_plugins::AcquisitionError),
+    #[error("invalid Mash Up Pack editor plugin selection: {0}")]
+    MashupSelection(String),
 }
 
 #[derive(Clone, Debug)]
@@ -49,6 +51,7 @@ pub(crate) enum LuaPluginLifecycle {
     Lazy,
     Loaded,
     Disabled,
+    MashupExcluded,
     UpdateAvailable,
     PermissionRequired,
     Approved,
@@ -73,6 +76,7 @@ pub(crate) struct LuaPluginInventoryEntry {
     pub requested_ref: Option<String>,
     pub installed_commit: Option<String>,
     pub root: Option<PathBuf>,
+    pub mashup_controlled: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -89,6 +93,7 @@ pub(crate) struct LuaPluginManager {
     active: BTreeMap<String, PluginRuntime>,
     grants: BTreeMap<String, Vec<String>>,
     disabled: BTreeSet<String>,
+    mashup_excluded: BTreeSet<String>,
     revision: u64,
     snapshot: PluginSnapshot,
     failures: BTreeMap<String, PluginFailure>,
@@ -100,8 +105,9 @@ impl LuaPluginManager {
         config_dir: impl Into<PathBuf>,
         host: Arc<dyn PluginHost>,
         policy: &neoism_backend::config::PluginPreferences,
+        selection: Option<&neoism_backend::config::mashup::EditorPluginSelection>,
     ) -> Result<Self, PluginManagerError> {
-        let mut manager = Self::discover_inactive(config_dir.into(), host, policy)?;
+        let mut manager = Self::discover_inactive(config_dir.into(), host, policy, selection)?;
         manager.activate_eager()?;
         manager.add_lazy_placeholders();
         Ok(manager)
@@ -111,9 +117,10 @@ impl LuaPluginManager {
         config_dir: impl Into<PathBuf>,
         host: Arc<dyn PluginHost>,
         policy: &neoism_backend::config::PluginPreferences,
+        selection: Option<&neoism_backend::config::mashup::EditorPluginSelection>,
     ) -> (Self, Option<PluginManagerError>) {
         let config_dir = config_dir.into();
-        let mut manager = match Self::discover_inactive(config_dir.clone(), host.clone(), policy) {
+        let mut manager = match Self::discover_inactive(config_dir.clone(), host.clone(), policy, selection) {
             Ok(manager) => manager,
             Err(error) => return (Self::empty(config_dir, host), Some(error)),
         };
@@ -126,12 +133,11 @@ impl LuaPluginManager {
         config_dir: PathBuf,
         host: Arc<dyn PluginHost>,
         policy: &neoism_backend::config::PluginPreferences,
+        selection: Option<&neoism_backend::config::mashup::EditorPluginSelection>,
     ) -> Result<Self, PluginManagerError> {
-        let disabled = policy.disabled.iter().collect::<BTreeSet<_>>();
-        let manifests = discover_manifests(&config_dir, &policy.trusted_sources)?
-            .into_iter()
-            .filter(|plugin| !disabled.contains(&plugin.manifest.id))
-            .collect::<Vec<_>>();
+        let disabled = policy.disabled.iter().cloned().collect::<BTreeSet<_>>();
+        let manifests = discover_manifests(&config_dir, &policy.trusted_sources)?;
+        let (manifests, mashup_excluded) = select_manifests(manifests, &disabled, selection)?;
         let graph = build_plugin_graph(
             &manifests
                 .iter()
@@ -150,6 +156,7 @@ impl LuaPluginManager {
             active: BTreeMap::new(),
             grants: policy.grants.clone(),
             disabled: policy.disabled.iter().cloned().collect(),
+            mashup_excluded,
             revision: 0,
             snapshot: PluginSnapshot::empty(),
             failures: BTreeMap::new(),
@@ -166,6 +173,7 @@ impl LuaPluginManager {
             active: BTreeMap::new(),
             grants: BTreeMap::new(),
             disabled: BTreeSet::new(),
+            mashup_excluded: BTreeSet::new(),
             revision: 0,
             snapshot: PluginSnapshot::empty(),
             failures: BTreeMap::new(),
@@ -233,6 +241,15 @@ impl LuaPluginManager {
                 "grants": self.grants.get(id).cloned().unwrap_or_default(),
             })
         }));
+        rows.extend(self.mashup_excluded.iter().filter(|id| !self.disabled.contains(*id)).map(|id| {
+            serde_json::json!({
+                "id": id,
+                "name": id,
+                "status": "mashup-excluded",
+                "capabilities": [],
+                "grants": self.grants.get(id).cloned().unwrap_or_default(),
+            })
+        }));
         rows.sort_by(|left, right| {
             left.get("id")
                 .and_then(serde_json::Value::as_str)
@@ -249,7 +266,7 @@ impl LuaPluginManager {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.discovered.is_empty() && self.disabled.is_empty()
+        self.discovered.is_empty() && self.disabled.is_empty() && self.mashup_excluded.is_empty()
     }
 
     pub fn activate_trigger(&mut self, trigger: &str) -> Result<bool, PluginManagerError> {
@@ -648,6 +665,8 @@ fn scan_plugin_inventory(
                         let id = plugin.manifest.id.clone();
                         let lifecycle = if policy.disabled.iter().any(|disabled| disabled == &id) {
                             LuaPluginLifecycle::Disabled
+                        } else if manager.mashup_excluded.contains(&id) {
+                            LuaPluginLifecycle::MashupExcluded
                         } else if validation.is_err() {
                             LuaPluginLifecycle::Incompatible
                         } else if manager.active.contains_key(&id) {
@@ -665,6 +684,7 @@ fn scan_plugin_inventory(
                     }
                     Err(error) => {
                         let id = root.file_name().and_then(|name| name.to_str()).unwrap_or("invalid-local-plugin").to_string();
+                        let mashup_controlled = manager.mashup_excluded.contains(&id);
                         inventory.entries.entry(id.clone()).or_insert(LuaPluginInventoryEntry {
                             id: id.clone(),
                             name: id,
@@ -678,6 +698,7 @@ fn scan_plugin_inventory(
                             requested_ref: None,
                             installed_commit: None,
                             root: Some(root),
+                            mashup_controlled,
                         });
                     }
                 }
@@ -701,6 +722,8 @@ fn scan_plugin_inventory(
                             (LuaPluginLifecycle::Blocked, format!("Git source `{url}` is not trusted"))
                         } else if !spec.enabled || policy.disabled.iter().any(|id| id == &spec.id) {
                             (LuaPluginLifecycle::Disabled, "Disabled".into())
+                        } else if manager.mashup_excluded.contains(&spec.id) {
+                            (LuaPluginLifecycle::MashupExcluded, "Excluded by active Mash Up Pack".into())
                         } else if existing_lock.is_none() {
                             (LuaPluginLifecycle::Discovered, "Available to install".into())
                         } else if existing_lock.is_some_and(|entry| {
@@ -729,6 +752,7 @@ fn scan_plugin_inventory(
                             requested_ref: Some(rev.clone().unwrap_or_else(|| "HEAD".into())),
                             installed_commit: existing_lock.map(|entry| entry.resolved_commit.clone()),
                             root: existing_lock.and_then(|entry| store.installed_path(entry).ok()),
+                            mashup_controlled: manager.mashup_excluded.contains(&spec.id),
                         });
                         row.repository_url = Some(url.clone());
                         row.requested_ref = Some(rev.clone().unwrap_or_else(|| "HEAD".into()));
@@ -739,11 +763,13 @@ fn scan_plugin_inventory(
                         }
                     }
                     PluginSource::Registry { .. } => {
+                        let mashup_controlled = manager.mashup_excluded.contains(&spec.id);
                         inventory.entries.entry(spec.id.clone()).or_insert(LuaPluginInventoryEntry {
                             id: spec.id.clone(), name: spec.id, version: String::new(), lifecycle: LuaPluginLifecycle::Blocked,
                             status_text: "Registry plugin acquisition is not implemented".into(), capabilities: Vec::new(),
                             grants: Vec::new(), missing_permissions: Vec::new(), repository_url: None, requested_ref: None,
                             installed_commit: None, root: None,
+                            mashup_controlled,
                         });
                     }
                     PluginSource::Local { .. } => {}
@@ -763,6 +789,7 @@ fn scan_plugin_inventory(
             capabilities: Vec::new(), grants: policy.grants.get(id).cloned().unwrap_or_default(), missing_permissions: Vec::new(),
             repository_url: Some(entry.repository_url.clone()), requested_ref: Some(entry.requested_ref.clone()),
             installed_commit: Some(entry.resolved_commit.clone()), root: root.clone(),
+            mashup_controlled: manager.mashup_excluded.contains(id),
         });
         row.repository_url.get_or_insert_with(|| entry.repository_url.clone());
         row.requested_ref.get_or_insert_with(|| entry.requested_ref.clone());
@@ -799,9 +826,21 @@ fn scan_plugin_inventory(
             id: id.clone(), name: id.clone(), version: String::new(), lifecycle: LuaPluginLifecycle::Disabled,
             status_text: "Disabled".into(), capabilities: Vec::new(), grants: policy.grants.get(id).cloned().unwrap_or_default(),
             missing_permissions: Vec::new(), repository_url: None, requested_ref: None, installed_commit: None, root: None,
+            mashup_controlled: false,
         });
         row.lifecycle = LuaPluginLifecycle::Disabled;
         row.status_text = "Disabled".into();
+        row.mashup_controlled = false;
+    }
+    for id in &manager.mashup_excluded {
+        if policy.disabled.contains(id) {
+            continue;
+        }
+        if let Some(row) = inventory.entries.get_mut(id) {
+            row.lifecycle = LuaPluginLifecycle::MashupExcluded;
+            row.status_text = "Excluded by active Mash Up Pack".into();
+            row.mashup_controlled = true;
+        }
     }
     for row in inventory.entries.values_mut() {
         row.capabilities.sort();
@@ -840,6 +879,7 @@ fn inventory_entry(
         requested_ref: None,
         installed_commit: None,
         root,
+        mashup_controlled: false,
     }
 }
 
@@ -849,6 +889,7 @@ fn lifecycle_label(lifecycle: LuaPluginLifecycle) -> &'static str {
         LuaPluginLifecycle::Lazy => "Waiting for a lazy-loading trigger",
         LuaPluginLifecycle::Loaded => "Loaded",
         LuaPluginLifecycle::Disabled => "Disabled",
+        LuaPluginLifecycle::MashupExcluded => "Excluded by active Mash Up Pack",
         LuaPluginLifecycle::UpdateAvailable => "Update available",
         LuaPluginLifecycle::PermissionRequired => "Permission required",
         LuaPluginLifecycle::Approved => "Approved",
@@ -971,6 +1012,88 @@ fn discover_manifests(
         manifests.insert(id.clone(), manifest);
     }
     Ok(manifests.into_values().collect())
+}
+
+pub(crate) fn resolve_mashup_selection(
+    config: &neoism_backend::config::Config,
+) -> Result<Option<neoism_backend::config::mashup::EditorPluginSelection>, PluginManagerError> {
+    neoism_backend::config::mashup::resolve_editor_plugin_selection(
+        config.appearance.mashup_pack.as_deref(),
+        &neoism_backend::config::mashup::load_mashup_packs(),
+        &config.plugins.mashup_overrides,
+    )
+    .map_err(|error| PluginManagerError::MashupSelection(error.to_string()))
+}
+
+fn select_manifests(
+    manifests: Vec<DiscoveredManifest>,
+    globally_disabled: &BTreeSet<String>,
+    selection: Option<&neoism_backend::config::mashup::EditorPluginSelection>,
+) -> Result<(Vec<DiscoveredManifest>, BTreeSet<String>), PluginManagerError> {
+    use neoism_backend::config::mashup::EditorPluginMode;
+
+    let Some(selection) = selection else {
+        return Ok((
+            manifests
+                .into_iter()
+                .filter(|plugin| !globally_disabled.contains(&plugin.manifest.id))
+                .collect(),
+            BTreeSet::new(),
+        ));
+    };
+    let by_id = manifests
+        .into_iter()
+        .map(|plugin| (plugin.manifest.id.clone(), plugin))
+        .collect::<BTreeMap<_, _>>();
+    let pack_disabled = selection.disabled.iter().cloned().collect::<BTreeSet<_>>();
+    let mut keep = BTreeSet::new();
+    match selection.mode {
+        EditorPluginMode::Overlay => {
+            keep.extend(by_id.keys().filter(|id| {
+                !globally_disabled.contains(*id) && !pack_disabled.contains(*id)
+            }).cloned());
+        }
+        EditorPluginMode::Only => {
+            fn collect(
+                id: &str,
+                by_id: &BTreeMap<String, DiscoveredManifest>,
+                vetoed: &BTreeSet<String>,
+                keep: &mut BTreeSet<String>,
+            ) {
+                if vetoed.contains(id) || !keep.insert(id.to_string()) {
+                    return;
+                }
+                let Some(plugin) = by_id.get(id) else { return };
+                for dependency in &plugin.manifest.dependencies {
+                    collect(dependency, by_id, vetoed, keep);
+                }
+            }
+            let vetoed = globally_disabled.union(&pack_disabled).cloned().collect::<BTreeSet<_>>();
+            for root in &selection.enabled {
+                if vetoed.contains(root) {
+                    continue;
+                }
+                if !by_id.contains_key(root) {
+                    return Err(PluginManagerError::MashupSelection(format!(
+                        "enabled plugin `{root}` is not installed"
+                    )));
+                }
+                collect(root, &by_id, &vetoed, &mut keep);
+            }
+        }
+    }
+    let mashup_excluded = by_id
+        .keys()
+        .filter(|id| !keep.contains(*id) && !globally_disabled.contains(*id))
+        .cloned()
+        .collect();
+    Ok((
+        by_id
+            .into_iter()
+            .filter_map(|(id, plugin)| keep.contains(&id).then_some(plugin))
+            .collect(),
+        mashup_excluded,
+    ))
 }
 
 pub(crate) fn overlay_snapshot(
@@ -1202,6 +1325,7 @@ mod tests {
             &root,
             Arc::new(neoism_lua::QueuedHost::default()),
             &policy,
+            None,
         );
         assert!(error.is_some());
         assert_eq!(manager.failures().count(), 1);
@@ -1209,6 +1333,73 @@ mod tests {
         let row = &inventory.entries["dev.neoism.startup-failure"];
         assert_eq!(row.lifecycle, LuaPluginLifecycle::Failed);
         assert!(row.status_text.contains("expected startup failure"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn write_test_plugin(root: &Path, id: &str, dependencies: &[&str]) {
+        let plugin_root = root.join("plugins").join(id);
+        std::fs::create_dir_all(&plugin_root).unwrap();
+        std::fs::write(
+            plugin_root.join("neoism-plugin.json"),
+            serde_json::json!({
+                "id": id,
+                "name": id,
+                "version": "1.0.0",
+                "apiVersion": 1,
+                "editor": { "entrypoint": "init.lua" },
+                "dependencies": dependencies,
+                "triggers": []
+            }).to_string(),
+        ).unwrap();
+        std::fs::write(plugin_root.join("init.lua"), "").unwrap();
+    }
+
+    #[test]
+    fn only_selection_activates_roots_and_dependency_closure() {
+        let root = std::env::temp_dir().join(format!("neoism-desktop-mashup-only-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        write_test_plugin(&root, "dev.neoism.root", &["dev.neoism.dep"]);
+        write_test_plugin(&root, "dev.neoism.dep", &[]);
+        write_test_plugin(&root, "dev.neoism.unrelated", &[]);
+        let selection = neoism_backend::config::mashup::EditorPluginSelection {
+            mode: neoism_backend::config::mashup::EditorPluginMode::Only,
+            enabled: vec!["dev.neoism.root".into()],
+            disabled: Vec::new(),
+        };
+        let manager = LuaPluginManager::discover(
+            &root,
+            Arc::new(neoism_lua::QueuedHost::default()),
+            &Default::default(),
+            Some(&selection),
+        ).unwrap();
+        assert_eq!(manager.active_ids().collect::<Vec<_>>(), ["dev.neoism.dep", "dev.neoism.root"]);
+        assert!(manager.mashup_excluded.contains("dev.neoism.unrelated"));
+        assert!(!manager.snapshot().commands.iter().any(|command| command.id.contains("unrelated")));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn global_disabled_dependency_is_a_hard_veto_and_graph_error() {
+        let root = std::env::temp_dir().join(format!("neoism-desktop-mashup-veto-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        write_test_plugin(&root, "dev.neoism.root", &["dev.neoism.dep"]);
+        write_test_plugin(&root, "dev.neoism.dep", &[]);
+        let selection = neoism_backend::config::mashup::EditorPluginSelection {
+            mode: neoism_backend::config::mashup::EditorPluginMode::Only,
+            enabled: vec!["dev.neoism.root".into()],
+            disabled: Vec::new(),
+        };
+        let policy = neoism_backend::config::PluginPreferences {
+            disabled: vec!["dev.neoism.dep".into()],
+            ..Default::default()
+        };
+        let result = LuaPluginManager::discover(
+            &root,
+            Arc::new(neoism_lua::QueuedHost::default()),
+            &policy,
+            Some(&selection),
+        );
+        assert!(result.is_err());
         std::fs::remove_dir_all(root).unwrap();
     }
 }

@@ -221,22 +221,22 @@ fn collect_mashup_entries() -> Vec<MashupPackSummary> {
 }
 
 fn apply_mashup_pack(id: Option<String>) -> Result<(), String> {
-    let Some(id) = id else {
-        return neoism_backend::config::write_neoism_preferences(None, None, Some(""))
-            .map_err(|error| format!("deactivate Mash Up Pack: {error}"));
-    };
-    let pack = neoism_backend::config::mashup::find_mashup_pack(&id)
-        .ok_or_else(|| format!("Mash Up Pack not found: {id}"))?;
-    if let Some(theme) = pack.theme.as_deref() {
-        neoism_backend::config::write_neoism_preferences(Some(theme), None, None)
-            .map_err(|error| format!("persist pack theme: {error}"))?;
-    }
-    if let Some(family) = pack.font_family.as_deref() {
-        neoism_backend::config::write_fonts_family(family)
-            .map_err(|error| format!("persist pack font: {error}"))?;
-    }
-    neoism_backend::config::write_neoism_preferences(None, None, Some(&id))
-        .map_err(|error| format!("persist Mash Up Pack: {error}"))
+    let config = neoism_backend::config::Config::load();
+    let packs = neoism_backend::config::mashup::load_mashup_packs();
+    let transition = neoism_backend::config::mashup::resolve_appearance_transition(
+        config.appearance.mashup_pack.as_deref(),
+        config.appearance.mashup_baseline.as_ref(),
+        &config.appearance.theme,
+        config.appearance.fonts.family.as_deref(),
+        id.as_deref(),
+        &packs,
+    ).map_err(|error| error.to_string())?;
+    neoism_backend::config::write_mashup_pack_settings(
+        transition.mashup_pack.as_deref(),
+        transition.mashup_baseline.as_ref(),
+        &transition.theme,
+        transition.font_family.as_deref(),
+    ).map_err(|error| format!("persist Mash Up Pack transition: {error}"))
 }
 
 fn document_result(
@@ -681,5 +681,25 @@ mod tests {
         assert_eq!(document.revision, "1234");
         assert_eq!(document.display_path, "/host/config.json");
         assert!(document.writable);
+    }
+
+    #[test]
+    fn daemon_pack_policy_restores_typed_baseline_on_deactivation() {
+        let baseline = neoism_backend::config::mashup::MashupBaseline {
+            theme: "global-theme".into(),
+            font_family: None,
+        };
+        let transition = neoism_backend::config::mashup::resolve_appearance_transition(
+            Some("lucid-blocks"),
+            Some(&baseline),
+            "lucid_blocks",
+            Some("pack-font"),
+            None,
+            &[],
+        ).unwrap();
+        assert_eq!(transition.mashup_pack, None);
+        assert_eq!(transition.mashup_baseline, None);
+        assert_eq!(transition.theme, "global-theme");
+        assert_eq!(transition.font_family, None);
     }
 }

@@ -1025,6 +1025,40 @@ fn catalog_only_mode_clears_invisible_controls_and_arrow_navigation_skips_search
 }
 
 #[test]
+fn new_chat_button_does_not_overlap_the_session_list() {
+    use crate::panels::agent_pane::state::side_panel::ROW_HEIGHT;
+    let mut panel = NeoismAgentSidePanel::default();
+    panel.set_sessions(vec![NeoismAgentSessionEntry::new("one", "One", "")]);
+    panel.set_new_chat_rect([12.0, 40.0, 176.0, ROW_HEIGHT]);
+    let list = [0.0, 40.0 + ROW_HEIGHT + 6.0, 200.0, ROW_HEIGHT];
+    panel.set_row_hit_rect(list, ROW_HEIGHT);
+
+    assert_eq!(panel.new_chat_hit(20.0, 40.0 + ROW_HEIGHT / 2.0), Some(None));
+    assert_eq!(panel.hit_test_row(20.0, 40.0 + ROW_HEIGHT / 2.0, list), None);
+    assert_eq!(panel.new_chat_hit(20.0, list[1] + ROW_HEIGHT / 2.0), None);
+    assert_eq!(panel.hit_test_row(20.0, list[1] + ROW_HEIGHT / 2.0, list), Some(0));
+}
+
+#[test]
+fn new_chat_is_the_keyboard_row_before_the_first_conversation() {
+    use crate::panels::agent_pane::state::side_panel::ROW_HEIGHT;
+    let mut panel = NeoismAgentSidePanel::default();
+    panel.set_sessions(vec![NeoismAgentSessionEntry::new("one", "One", "")]);
+    panel.set_new_chat_rect([12.0, 40.0, 176.0, ROW_HEIGHT]);
+
+    panel.select_prev();
+    assert!(panel.new_chat_selected());
+    assert!(panel.selected_session().is_none());
+
+    panel.select_next();
+    assert!(!panel.new_chat_selected());
+    assert_eq!(
+        panel.selected_session().map(|entry| entry.id.as_str()),
+        Some("one")
+    );
+}
+
+#[test]
 fn external_catalog_merges_by_native_id_and_source_key_across_pages() {
     use crate::panels::agent_pane::state::side_panel::{
         ConversationSource, ExternalSessionPreview,
@@ -1224,6 +1258,29 @@ fn cursorless_refresh_preserves_older_session_viewport() {
 
     assert!(panel.scroll_top() >= old_top);
     assert_ne!(panel.scroll_top(), 0);
+}
+
+#[test]
+fn half_page_selection_matches_the_rendered_conversations_viewport() {
+    let rows = (0..20)
+        .map(|index| {
+            NeoismAgentSessionEntry::new(
+                format!("session-{index}"),
+                format!("Session {index}"),
+                "",
+            )
+            .with_updated_ms(20 - index)
+        })
+        .collect();
+    let mut panel = NeoismAgentSidePanel::default();
+    panel.set_session_page(rows, None, None);
+    panel.set_last_panel_height_rows(8);
+    let start = panel.selected_index();
+
+    panel.select_next_by(4);
+    assert_eq!(panel.selected_index(), start + 4);
+    panel.select_prev_by(4);
+    assert_eq!(panel.selected_index(), start);
 }
 
 #[test]

@@ -355,11 +355,14 @@ impl Application<'_> {
             Err(error) => (self.config.clone(), Some(error)),
         };
         if config_error.is_none() {
-            match crate::plugin_manager::LuaPluginManager::discover(
-                neoism_backend::config::config_dir_path(),
-                candidate_host.clone(),
-                &config.plugins,
-            ) {
+            let candidate = crate::plugin_manager::resolve_mashup_selection(&config)
+                .and_then(|selection| crate::plugin_manager::LuaPluginManager::discover(
+                    neoism_backend::config::config_dir_path(),
+                    candidate_host.clone(),
+                    &config.plugins,
+                    selection.as_ref(),
+                ));
+            match candidate {
                 Ok(candidate) => plugin_candidate = Some(candidate),
                 Err(error) => {
                     config = self.config.clone();

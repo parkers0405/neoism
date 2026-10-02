@@ -51,6 +51,18 @@ impl AgentPaneView for NeoismAgentPane {
         NeoismAgentPane::fire_fx_prompt(self);
     }
 
+    fn take_particle_burst_requests(&mut self) -> Vec<fx::ParticleEffectSpec> {
+        NeoismAgentPane::take_particle_burst_requests(self)
+    }
+
+    fn particle_bursts(&self) -> &[(fx::ParticleEffectSpec, f32)] {
+        NeoismAgentPane::particle_bursts(self)
+    }
+
+    fn set_particle_bursts(&mut self, bursts: Vec<(fx::ParticleEffectSpec, f32)>) {
+        NeoismAgentPane::set_particle_bursts(self, bursts);
+    }
+
     fn log_render_perf(
         &mut self,
         elapsed_us: u128,

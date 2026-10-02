@@ -444,6 +444,11 @@ impl Screen<'_> {
                 }
                 self.context_manager
                     .switch_daemon_host_workspace(workspace_id);
+                // Rebinding the current adopted workspace can change its
+                // reverse-proxy endpoint without switching tabs. Retarget the
+                // workspace-owned Agent surfaces immediately, even while the
+                // Conversations catalog is hidden.
+                self.sync_agent_server_for_current_workspace();
                 return;
             }
             // else: false-positive current-grid match — fall through to adopt.

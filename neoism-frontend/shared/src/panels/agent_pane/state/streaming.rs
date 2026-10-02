@@ -137,6 +137,22 @@ impl NeoismAgentPane {
         true
     }
 
+    /// Pointer clicks on the active child act as a compact return-to-main
+    /// toggle. Keyboard activation remains explicit: select `main session`
+    /// and press Enter.
+    pub fn activate_clicked_detail_panel_subagent(&mut self, row: usize) -> bool {
+        self.detail_panel.set_selected(row);
+        let clicked_active_child = row > 0
+            && self
+                .detail_panel
+                .selected_row()
+                .is_some_and(|entry| Some(entry.id.as_str()) == self.session_id.as_deref());
+        if clicked_active_child {
+            self.detail_panel.set_selected(0);
+        }
+        self.activate_detail_panel_subagent()
+    }
+
     /// Activate the selected session/subagent through the normal authoritative
     /// switch path, then optionally dismiss the side panel as part of the same
     /// navigation outcome. Narrow mobile takeover passes `true`; desktop and

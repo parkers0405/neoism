@@ -27,6 +27,7 @@ use tree_sitter_highlight::{HighlightConfiguration, HighlightEvent, Highlighter}
 /// Execute a plugin-supplied query against a compiled-in grammar. Parser and
 /// query work is called from a host worker; this function never enters Lua and
 /// returns portable UTF-8 byte coordinates only.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn plugin_query(language: &str, source: &str, query: &str) -> Result<Vec<neoism_lua::PluginSyntaxCapture>, String> {
     if source.len() > 16 * 1024 * 1024 || query.len() > 4 * 1024 * 1024 { return Err("syntax query input exceeds limits".into()); }
     let lang = match language.to_ascii_lowercase().as_str() {
@@ -57,6 +58,12 @@ pub fn plugin_query(language: &str, source: &str, query: &str) -> Result<Vec<neo
     Ok(output)
 }
 
+#[cfg(target_arch = "wasm32")]
+pub fn plugin_query(_language: &str, _source: &str, _query: &str) -> Result<Vec<neoism_lua::PluginSyntaxCapture>, String> {
+    Err("plugin Tree-sitter queries are unavailable in the web runtime".into())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn language_for_plugin_query(lang: Lang) -> Option<tree_sitter::Language> {
     Some(match lang {
         Lang::Rust => tree_sitter_rust::LANGUAGE.into(), Lang::Javascript | Lang::Jsx => tree_sitter_javascript::LANGUAGE.into(),

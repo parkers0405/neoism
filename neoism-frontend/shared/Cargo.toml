@@ -14,6 +14,7 @@ neoism-terminal-core = { workspace = true }
 neoism-protocol = { workspace = true }
 neoism-agent-core = { workspace = true }
 neoism-neoworld-core = { workspace = true }
+neoism-lua = { workspace = true }
 sugarloaf = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

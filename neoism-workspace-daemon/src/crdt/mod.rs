@@ -190,6 +190,36 @@ impl CrdtBufferRegistry {
         })
     }
 
+    pub fn apply_daemon_edits(
+        &self,
+        buffer_id: &str,
+        expected_state_vector_v1: &[u8],
+        edits: Vec<CrdtBufferEdit>,
+    ) -> Result<CrdtBufferUpdate, CrdtDaemonError> {
+        let mut inner = self.inner.lock();
+        let buffer = inner
+            .get_mut(buffer_id)
+            .ok_or_else(|| CrdtDaemonError::UnknownBuffer {
+                buffer_id: buffer_id.to_string(),
+            })?;
+        if !expected_state_vector_v1.is_empty()
+            && buffer.replica.state_vector_v1() != expected_state_vector_v1
+        {
+            return Err(CrdtDaemonError::StaleTransaction {
+                buffer_id: buffer_id.to_string(),
+            });
+        }
+        let update = buffer
+            .replica
+            .apply_local_edits(edits.into_iter().map(to_text_edit))?;
+        Ok(CrdtBufferUpdate {
+            buffer_id: buffer.id.clone(),
+            origin_client_id: update.origin_client_id,
+            update_v1: update.update_v1,
+            state_vector_v1: update.state_vector_v1,
+        })
+    }
+
     pub fn snapshot_message(
         &self,
         buffer_id: &str,
@@ -249,6 +279,8 @@ fn to_text_edit(edit: CrdtBufferEdit) -> CrdtTextEdit {
 pub enum CrdtDaemonError {
     #[error("unknown CRDT buffer: {buffer_id}")]
     UnknownBuffer { buffer_id: String },
+    #[error("stale CRDT plugin transaction for buffer: {buffer_id}")]
+    StaleTransaction { buffer_id: String },
     #[error(transparent)]
     Buffer(#[from] CrdtTextBufferError),
 }

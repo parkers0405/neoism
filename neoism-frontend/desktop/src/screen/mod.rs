@@ -717,6 +717,7 @@ pub struct Screen<'screen> {
     /// `(tab_index, target_window_u64, target_workspace_index)`. The app
     /// loop (which can borrow both windows' routes) completes it.
     pending_cross_window_tab_move: Option<(usize, u64, usize)>,
+    pending_lua_plugin_actions: Vec<(String, neoism_ui::panels::extensions_page::LuaPluginAction)>,
     pub daemon_pane_layout: daemon_layout::ScreenPaneLayoutCache,
     /// Wave 7A multiplayer presence: remote peer cursors per buffer id,
     /// fed from daemon `CrdtReply` pushes. Renderer reads it per frame
@@ -807,6 +808,12 @@ pub struct Screen<'screen> {
     pending_server_edit_submit: Option<(String, String, Option<String>, Option<String>)>,
     pending_server_remove: Option<String>,
     pending_workspace_subscription: Option<String>,
+    pending_plugin_commands: Vec<String>,
+    pending_plugin_actions: Vec<neoism_lua::HostAction>,
+    pending_lua_prompt_replies: Vec<(String, String, bool)>,
+    pending_plugin_keys: Vec<String>,
+    plugin_key_sequence: Vec<String>,
+    plugin_key_sequence_deadline: Option<Instant>,
     /// Joined workspaces explicitly closed by this window. Kept as a queue so
     /// closing means unsubscribe, not "remove the grid until the next daemon
     /// tree push restores it."
@@ -880,6 +887,8 @@ pub struct Screen<'screen> {
     workspace_notes_vaults: HashMap<WorkspaceKey, PathBuf>,
     notes_sidebar_workspace: Option<WorkspaceKey>,
     workspace_conversations_visibility: HashMap<WorkspaceKey, bool>,
+    workspace_active_left_sidebar:
+        HashMap<WorkspaceKey, neoism_ui::panels::left_sidebar_host::LeftSidebarView>,
     workspace_conversations_panes:
         HashMap<WorkspaceKey, crate::neoism::agent::NeoismAgentPane>,
     conversations_pane_workspace: Option<WorkspaceKey>,
@@ -1778,6 +1787,7 @@ impl Screen<'_> {
             context_manager,
             pending_detached_workspace: None,
             pending_cross_window_tab_move: None,
+            pending_lua_plugin_actions: Vec::new(),
             daemon_pane_layout: daemon_layout::ScreenPaneLayoutCache::default(),
             remote_presence: neoism_ui::editor::crdt::RemotePresenceStore::new(),
             presence_publisher: None,
@@ -1837,6 +1847,12 @@ impl Screen<'_> {
             pending_server_edit_submit: None,
             pending_server_remove: None,
             pending_workspace_subscription: None,
+            pending_plugin_commands: Vec::new(),
+            pending_plugin_actions: Vec::new(),
+            pending_lua_prompt_replies: Vec::new(),
+            pending_plugin_keys: Vec::new(),
+            plugin_key_sequence: Vec::new(),
+            plugin_key_sequence_deadline: None,
             pending_workspace_unsubscriptions: Vec::new(),
             pending_remote_file_ops: std::collections::HashSet::new(),
             pending_remote_terminal_completions: HashMap::new(),
@@ -1854,6 +1870,7 @@ impl Screen<'_> {
             workspace_notes_vaults: HashMap::new(),
             notes_sidebar_workspace: None,
             workspace_conversations_visibility: HashMap::new(),
+            workspace_active_left_sidebar: HashMap::new(),
             workspace_conversations_panes: HashMap::new(),
             conversations_pane_workspace: None,
             workspace_file_trees: HashMap::new(),

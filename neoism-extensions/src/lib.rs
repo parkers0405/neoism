@@ -4,7 +4,9 @@ pub mod installed;
 pub mod managed_bin;
 pub mod manifest;
 pub mod mason;
+pub mod lua_plugins;
 pub mod paths;
+pub mod trust;
 #[cfg(windows)]
 pub(crate) mod windows_process;
 

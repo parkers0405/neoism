@@ -598,24 +598,62 @@ pub struct WrapIndex {
     segments_by_line: Vec<Vec<WrapSegment>>,
     /// Text columns the index was built for; 0 = NoWrap (identity).
     cols: usize,
+    row_to_line: Vec<VisualRow>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VisualRow {
+    Source { line: usize, segment: usize },
+    Synthetic { line: usize, index: usize },
 }
 
 impl WrapIndex {
     pub fn build(lines: &[String], cols: usize, tab: usize) -> Self {
+        Self::build_with_hidden(lines, cols, tab, &std::collections::BTreeSet::new())
+    }
+
+    pub fn build_with_hidden(
+        lines: &[String],
+        cols: usize,
+        tab: usize,
+        hidden_lines: &std::collections::BTreeSet<usize>,
+    ) -> Self {
+        Self::build_with_projection(lines, cols, tab, hidden_lines, &std::collections::BTreeMap::new())
+    }
+
+    pub fn build_with_projection(
+        lines: &[String],
+        cols: usize,
+        tab: usize,
+        hidden_lines: &std::collections::BTreeSet<usize>,
+        virtual_rows_after: &std::collections::BTreeMap<usize, usize>,
+    ) -> Self {
         let mut row_of_line = Vec::with_capacity(lines.len() + 1);
         let mut segments_by_line = Vec::with_capacity(lines.len());
+        let mut row_to_line = Vec::new();
         let mut acc = 0u32;
-        for line in lines {
+        for (line_ix, line) in lines.iter().enumerate() {
             row_of_line.push(acc);
-            let segments = wrap_segments(line, cols, tab);
+            let segments = if hidden_lines.contains(&line_ix) {
+                Vec::new()
+            } else {
+                wrap_segments(line, cols, tab)
+            };
+            row_to_line.extend((0..segments.len()).map(|segment| VisualRow::Source { line: line_ix, segment }));
             acc += segments.len() as u32;
             segments_by_line.push(segments);
+            if !hidden_lines.contains(&line_ix) {
+                let virtual_count = virtual_rows_after.get(&line_ix).copied().unwrap_or(0);
+                row_to_line.extend((0..virtual_count).map(|index| VisualRow::Synthetic { line: line_ix, index }));
+                acc = acc.saturating_add(virtual_count as u32);
+            }
         }
         row_of_line.push(acc);
         Self {
             row_of_line,
             segments_by_line,
             cols,
+            row_to_line,
         }
     }
 
@@ -651,7 +689,7 @@ impl WrapIndex {
     /// Visual rows `line` occupies.
     pub fn rows_of_line(&self, line: usize) -> usize {
         match (self.row_of_line.get(line), self.row_of_line.get(line + 1)) {
-            (Some(first), Some(next)) => (*next - *first).max(1) as usize,
+            (Some(first), Some(next)) => (*next - *first) as usize,
             _ => 1,
         }
     }
@@ -674,6 +712,9 @@ impl WrapIndex {
         let Some(segments) = self.segments_of_line(line_ix) else {
             return wrap_visual_position(line, byte, self.cols, tab);
         };
+        if segments.is_empty() {
+            return (0, 0);
+        }
         let byte = byte.min(line.len());
         let source_col = display_col_for_byte(line, byte, tab);
         let segment = segments
@@ -691,13 +732,15 @@ impl WrapIndex {
         if !self.is_valid_for(line_count) {
             return (vrow.min(line_count - 1), 0);
         }
-        let total = *self.row_of_line.last().unwrap_or(&0) as usize;
-        let vrow = vrow.min(total.saturating_sub(1)) as u32;
-        let line = self
-            .row_of_line
-            .partition_point(|row| *row <= vrow)
-            .saturating_sub(1)
-            .min(line_count - 1);
-        (line, (vrow - self.row_of_line[line]) as usize)
+        let row = self.row_to_line.get(vrow.min(self.row_to_line.len().saturating_sub(1))).copied();
+        match row {
+            Some(VisualRow::Source { line, segment }) => (line, segment),
+            Some(VisualRow::Synthetic { line, .. }) => (line, usize::MAX),
+            None => (0, 0),
+        }
+    }
+
+    pub fn row_kind(&self, vrow: usize) -> Option<VisualRow> {
+        self.row_to_line.get(vrow).copied()
     }
 }

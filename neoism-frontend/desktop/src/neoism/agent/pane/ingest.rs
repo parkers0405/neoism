@@ -2009,8 +2009,18 @@ impl NeoismAgentPane {
                         if let Some(agent) = state.agent {
                             self.agent = Some(agent);
                         }
+                        let model_changed = state
+                            .model
+                            .as_ref()
+                            .is_some_and(|model| self.model != *model);
                         if let Some(model) = state.model {
                             self.model = model;
+                        }
+                        if model_changed {
+                            self.model_context_limit = None;
+                        }
+                        if model_changed || self.model_context_limit.is_none() {
+                            self.execute_refresh_model_context_limit_command();
                         }
                         self.connection_id = state.connection_id;
                         self.thinking = state.thinking;

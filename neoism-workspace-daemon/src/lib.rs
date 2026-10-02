@@ -25,6 +25,7 @@ pub mod language_server;
 pub mod pairing;
 mod path;
 pub mod permissions;
+mod plugin_resources;
 pub mod persistence;
 mod process;
 pub mod search;

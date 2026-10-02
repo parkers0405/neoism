@@ -1,6 +1,6 @@
 # SDK
 
-`@neoism/sdk` is the typed TypeScript client for the Neoism Agent API. It is generated from the same OpenAPI contract the server serves, version-locked to the server release, and used by Neoism's own plugin tooling - the types cannot drift from the running server.
+`@neoism/sdk` is the typed TypeScript client for the Neoism Agent HTTP API. It is generated from the same OpenAPI contract the server serves and version-locked to the server release, so its HTTP request and response types cannot drift from the running server. The separate `@neoism/plugin` author API and `neoism-plugin/2` stdio protocol are hand-authored versioned contracts with their own conformance tests; they are not generated from OpenAPI. See [[Plugins]] before choosing either surface.
 
 ## Packages
 

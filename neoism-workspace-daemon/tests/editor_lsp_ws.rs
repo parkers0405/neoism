@@ -2,8 +2,9 @@
 //! One integration test owns its process environment and restores it on drop.
 use futures::{SinkExt, StreamExt};
 use neoism_protocol::editor::{
-    EditorClientMessage as Request, EditorLspAction as Action,
-    EditorServerMessage as Reply,
+    EditorClientMessage as Request, EditorLspAction as Action, EditorLspBufferSnapshot,
+    EditorLspEditOperation, EditorLspOpenBuffer, EditorLspReadOperation as ReadOperation,
+    EditorLspReadOutcome as ReadOutcome, EditorServerMessage as Reply,
 };
 use neoism_workspace_daemon::{
     auth::AuthService,
@@ -89,6 +90,22 @@ fn query(file: &Path, seq: u64, action: Action) -> Request {
         buffer_text: Some("fn shared() { shared(); } // unsaved-host\n".into()),
         open_paths: vec![file.into()],
         surface_id: Some("pane-a".into()),
+    }
+}
+
+fn structured_read(file: &Path, operation: ReadOperation) -> Request {
+    Request::LspRead {
+        operation,
+        path: file.to_string_lossy().into_owned(),
+        line: 0,
+        character: 4,
+        query: if operation == ReadOperation::WorkspaceSymbols {
+            "shared".into()
+        } else {
+            String::new()
+        },
+        buffer_text: Some("fn shared() { shared(); } // unsaved-host\n".into()),
+        surface_id: Some("lua-lsp:test".into()),
     }
 }
 
@@ -194,6 +211,44 @@ async fn shared_editor_lsp_real_protocol_two_clients_actions_and_isolation() {
     assert!(
         matches!(recv(&mut reader,100).await, Reply::Error {ref message,..} if message.contains("WriteFiles"))
     );
+    send(
+        &mut reader,
+        101,
+        &root,
+        Request::LspEditCommit {
+            plan_id: "not-a-real-plan".into(),
+            open_buffers: Vec::new(),
+            surface_id: Some("readonly-commit".into()),
+        },
+    )
+    .await;
+    assert!(
+        matches!(recv(&mut reader,101).await, Reply::Error {ref message,..} if message.contains("WriteFiles"))
+    );
+    send(
+        &mut reader,
+        102,
+        &root,
+        Request::LspEditPrepare {
+            operation: EditorLspEditOperation::CodeActions,
+            path: file.to_string_lossy().into_owned(),
+            line: 0,
+            character: 4,
+            argument: None,
+            action: None,
+            buffer_text: Some("fn shared() { shared(); } // unsaved-host\n".into()),
+            open_buffers: vec![EditorLspOpenBuffer {
+                path: file.to_string_lossy().into_owned(),
+                revision: 1,
+            }],
+            surface_id: Some("readonly-prepare".into()),
+        },
+    )
+    .await;
+    assert!(matches!(
+        recv(&mut reader, 102).await,
+        Reply::LspEditPrepared { .. }
+    ));
     reader.close(None).await.unwrap();
 
     // No process-global throttle may suppress B's initial snapshot. IDs may
@@ -277,6 +332,414 @@ async fn shared_editor_lsp_real_protocol_two_clients_actions_and_isolation() {
             _ => panic!("wrong reply to {action:?}: {reply:?}"),
         }
     }
+
+    let reads = [
+        ReadOperation::Hover,
+        ReadOperation::SignatureHelp,
+        ReadOperation::Definition,
+        ReadOperation::References,
+        ReadOperation::DocumentSymbols,
+        ReadOperation::WorkspaceSymbols,
+        ReadOperation::Diagnostics,
+        ReadOperation::Clients,
+    ];
+    for (offset, operation) in reads.into_iter().enumerate() {
+        let id = 60 + offset as u64;
+        send(&mut a, id, &root, structured_read(&file, operation)).await;
+        let reply = recv(&mut a, id).await;
+        let Reply::LspReadResult {
+            surface_id,
+            operation: replied_operation,
+            outcome,
+        } = reply
+        else {
+            panic!("wrong structured reply to {operation:?}: {reply:?}");
+        };
+        assert_eq!(surface_id.as_deref(), Some("lua-lsp:test"));
+        assert_eq!(replied_operation, operation);
+        match (operation, outcome) {
+            (ReadOperation::Hover, ReadOutcome::Hover(items)) => {
+                assert!(items[0].contents.contains("unsaved-host"));
+            }
+            (ReadOperation::SignatureHelp, ReadOutcome::SignatureHelp(items)) => {
+                assert_eq!(items[0].signatures[0].label, "shared(value)");
+            }
+            (ReadOperation::Definition, ReadOutcome::Definition(items))
+            | (ReadOperation::References, ReadOutcome::References(items)) => {
+                assert_eq!(items[0].path, file.to_string_lossy());
+                assert_eq!(items[0].range.as_ref().unwrap().start.line, 0);
+                assert_eq!(items[0].range.as_ref().unwrap().start.character, 3);
+            }
+            (ReadOperation::DocumentSymbols, ReadOutcome::DocumentSymbols(items)) => {
+                assert_eq!(items[0].name, "shared");
+                assert_eq!(items[0].path, file.to_string_lossy());
+            }
+            (ReadOperation::WorkspaceSymbols, ReadOutcome::WorkspaceSymbols(items)) => {
+                assert_eq!(items[0].name, "shared workspace");
+                assert_eq!(items[0].path, file.to_string_lossy());
+                assert_eq!(items[0].line, Some(0));
+            }
+            (ReadOperation::Diagnostics, ReadOutcome::Diagnostics(items)) => {
+                assert!(items.iter().any(|item| {
+                    item.path == file.to_string_lossy()
+                        && item.message == "host diagnostic"
+                }));
+            }
+            (ReadOperation::Clients, ReadOutcome::Clients(items)) => {
+                assert!(items.iter().any(|item| {
+                    item.language == "editor-fixture" && item.status == "connected"
+                }));
+            }
+            (_, outcome) => panic!("wrong structured outcome: {outcome:?}"),
+        }
+    }
+
+    // Structured edits are a two-stage transaction. Preparation exposes only
+    // random capabilities and does not touch either open or closed files.
+    let open_buffers = vec![EditorLspOpenBuffer {
+        path: file.to_string_lossy().into_owned(),
+        revision: 77,
+    }];
+    send(
+        &mut a,
+        70,
+        &root,
+        Request::LspEditPrepare {
+            operation: EditorLspEditOperation::CodeActions,
+            path: file.to_string_lossy().into_owned(),
+            line: 0,
+            character: 4,
+            argument: None,
+            action: None,
+            buffer_text: Some("fn shared() { shared(); } // unsaved-host\n".into()),
+            open_buffers: open_buffers.clone(),
+            surface_id: Some("structured-edit".into()),
+        },
+    )
+    .await;
+    let action = match recv(&mut a, 70).await {
+        Reply::LspEditPrepared {
+            actions,
+            plan: None,
+            ..
+        } => {
+            assert_eq!(actions.len(), 1);
+            assert_eq!(actions[0].request_id, 70);
+            actions[0].clone()
+        }
+        reply => panic!("wrong code-action preparation reply: {reply:?}"),
+    };
+    // Action capabilities are connection-local. Trying the capability on B
+    // must not consume or otherwise affect A's retained action.
+    send(
+        &mut b,
+        701,
+        &root,
+        Request::LspEditPrepare {
+            operation: EditorLspEditOperation::ApplyCodeAction,
+            path: file.to_string_lossy().into_owned(),
+            line: 0,
+            character: 4,
+            argument: None,
+            action: Some(action.clone()),
+            buffer_text: None,
+            open_buffers: open_buffers.clone(),
+            surface_id: Some("structured-edit-cross-socket".into()),
+        },
+    )
+    .await;
+    assert!(
+        matches!(recv(&mut b,701).await, Reply::Error {ref message,..} if message.contains("stale, unknown, or already consumed"))
+    );
+    send(
+        &mut a,
+        71,
+        &root,
+        Request::LspEditPrepare {
+            operation: EditorLspEditOperation::ApplyCodeAction,
+            path: file.to_string_lossy().into_owned(),
+            line: 0,
+            character: 4,
+            argument: None,
+            action: Some(action.clone()),
+            buffer_text: None,
+            open_buffers: open_buffers.clone(),
+            surface_id: Some("structured-edit".into()),
+        },
+    )
+    .await;
+    let plan_id = match recv(&mut a, 71).await {
+        Reply::LspEditPrepared {
+            actions,
+            plan: Some(plan),
+            ..
+        } => {
+            assert!(actions.is_empty());
+            assert_eq!(plan.files.len(), 2);
+            assert!(plan
+                .files
+                .iter()
+                .any(|item| item.open && item.path == file.to_string_lossy()));
+            assert!(plan
+                .files
+                .iter()
+                .any(|item| !item.open && item.path == other.to_string_lossy()));
+            plan.plan_id
+        }
+        reply => panic!("wrong mutation preparation reply: {reply:?}"),
+    };
+    assert_eq!(std::fs::read_to_string(&other).unwrap(), source);
+    // Action capabilities are one-shot even if replayed under a fresh request.
+    send(
+        &mut a,
+        72,
+        &root,
+        Request::LspEditPrepare {
+            operation: EditorLspEditOperation::ApplyCodeAction,
+            path: file.to_string_lossy().into_owned(),
+            line: 0,
+            character: 4,
+            argument: None,
+            action: Some(action),
+            buffer_text: None,
+            open_buffers: open_buffers.clone(),
+            surface_id: Some("structured-edit".into()),
+        },
+    )
+    .await;
+    assert!(
+        matches!(recv(&mut a,72).await, Reply::Error {ref message,..} if message.contains("already consumed"))
+    );
+    send(
+        &mut a,
+        73,
+        &root,
+        Request::LspEditCommit {
+            plan_id,
+            open_buffers,
+            surface_id: Some("structured-edit".into()),
+        },
+    )
+    .await;
+    let committed = recv(&mut a, 73).await;
+    let command_id = match committed {
+        Reply::LspEditCommitted {
+            edits,
+            applied_files,
+            ran_command: false,
+            command_id: Some(command_id),
+            ..
+        } => {
+            assert_eq!(edits.len(), 1);
+            assert_eq!(applied_files, vec![other.to_string_lossy().into_owned()]);
+            command_id
+        }
+        reply => panic!("wrong structured edit commit reply: {reply:?}"),
+    };
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), source);
+    assert!(std::fs::read_to_string(&other).unwrap().contains("renamed"));
+    send(
+        &mut a,
+        731,
+        &root,
+        Request::LspEditFinalize {
+            command_id: command_id.clone(),
+            buffers: vec![EditorLspBufferSnapshot {
+                path: file.to_string_lossy().into_owned(),
+                revision: 10,
+                text: "fn shared() { renamed(); } // unsaved-host\n".into(),
+            }],
+            surface_id: Some("structured-edit".into()),
+        },
+    )
+    .await;
+    assert!(matches!(
+        recv(&mut a, 731).await,
+        Reply::LspEditFinalized {
+            ran_command: true,
+            ..
+        }
+    ));
+    send(
+        &mut a,
+        732,
+        &root,
+        Request::LspEditFinalize {
+            command_id,
+            buffers: vec![EditorLspBufferSnapshot {
+                path: file.to_string_lossy().into_owned(),
+                revision: 10,
+                text: "fn shared() { renamed(); } // unsaved-host\n".into(),
+            }],
+            surface_id: Some("structured-edit".into()),
+        },
+    )
+    .await;
+    assert!(
+        matches!(recv(&mut a,732).await, Reply::Error {ref message,..} if message.contains("already consumed"))
+    );
+    std::fs::write(&other, source).unwrap();
+
+    // Structured formatting is open-buffer-only and must not fall back to
+    // patching the host file when the frontend omits the target snapshot.
+    send(
+        &mut a,
+        739,
+        &root,
+        Request::LspEditPrepare {
+            operation: EditorLspEditOperation::Format,
+            path: file.to_string_lossy().into_owned(),
+            line: 0,
+            character: 4,
+            argument: None,
+            action: None,
+            buffer_text: None,
+            open_buffers: Vec::new(),
+            surface_id: Some("structured-format".into()),
+        },
+    )
+    .await;
+    assert!(
+        matches!(recv(&mut a,739).await, Reply::Error {ref message,..} if message.contains("open target buffer"))
+    );
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), source);
+
+    // A changed frontend revision invalidates a format plan. The consumed
+    // plan cannot be replayed, and format preparation/commit never saves.
+    send(
+        &mut a,
+        74,
+        &root,
+        Request::LspEditPrepare {
+            operation: EditorLspEditOperation::Format,
+            path: file.to_string_lossy().into_owned(),
+            line: 0,
+            character: 4,
+            argument: None,
+            action: None,
+            buffer_text: None,
+            open_buffers: vec![EditorLspOpenBuffer {
+                path: file.to_string_lossy().into_owned(),
+                revision: 77,
+            }],
+            surface_id: Some("structured-format".into()),
+        },
+    )
+    .await;
+    let format_plan = match recv(&mut a, 74).await {
+        Reply::LspEditPrepared {
+            plan: Some(plan), ..
+        } => plan.plan_id,
+        reply => panic!("wrong format preparation reply: {reply:?}"),
+    };
+    send(
+        &mut a,
+        75,
+        &root,
+        Request::LspEditCommit {
+            plan_id: format_plan.clone(),
+            open_buffers: vec![EditorLspOpenBuffer {
+                path: file.to_string_lossy().into_owned(),
+                revision: 78,
+            }],
+            surface_id: Some("structured-format".into()),
+        },
+    )
+    .await;
+    assert!(
+        matches!(recv(&mut a,75).await, Reply::Error {ref message,..} if message.contains("revisions changed"))
+    );
+    send(
+        &mut a,
+        76,
+        &root,
+        Request::LspEditCommit {
+            plan_id: format_plan,
+            open_buffers: Vec::new(),
+            surface_id: Some("structured-format".into()),
+        },
+    )
+    .await;
+    assert!(
+        matches!(recv(&mut a,76).await, Reply::Error {ref message,..} if message.contains("already consumed"))
+    );
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), source);
+
+    // Closed-file digests are part of the prepared transaction. A host-side
+    // change after preparation aborts before any planned edit is applied.
+    send(
+        &mut a,
+        77,
+        &root,
+        Request::LspEditPrepare {
+            operation: EditorLspEditOperation::CodeActions,
+            path: file.to_string_lossy().into_owned(),
+            line: 0,
+            character: 4,
+            argument: None,
+            action: None,
+            buffer_text: Some("fn shared() { shared(); } // unsaved-host\n".into()),
+            open_buffers: vec![EditorLspOpenBuffer {
+                path: file.to_string_lossy().into_owned(),
+                revision: 77,
+            }],
+            surface_id: Some("structured-digest".into()),
+        },
+    )
+    .await;
+    let digest_action = match recv(&mut a, 77).await {
+        Reply::LspEditPrepared { actions, .. } => actions.into_iter().next().unwrap(),
+        reply => panic!("wrong digest action reply: {reply:?}"),
+    };
+    send(
+        &mut a,
+        78,
+        &root,
+        Request::LspEditPrepare {
+            operation: EditorLspEditOperation::ApplyCodeAction,
+            path: file.to_string_lossy().into_owned(),
+            line: 0,
+            character: 4,
+            argument: None,
+            action: Some(digest_action),
+            buffer_text: None,
+            open_buffers: vec![EditorLspOpenBuffer {
+                path: file.to_string_lossy().into_owned(),
+                revision: 77,
+            }],
+            surface_id: Some("structured-digest".into()),
+        },
+    )
+    .await;
+    let digest_plan = match recv(&mut a, 78).await {
+        Reply::LspEditPrepared {
+            plan: Some(plan), ..
+        } => plan.plan_id,
+        reply => panic!("wrong digest plan reply: {reply:?}"),
+    };
+    let externally_changed = "fn externally_changed() {}\n";
+    std::fs::write(&other, externally_changed).unwrap();
+    send(
+        &mut a,
+        79,
+        &root,
+        Request::LspEditCommit {
+            plan_id: digest_plan,
+            open_buffers: vec![EditorLspOpenBuffer {
+                path: file.to_string_lossy().into_owned(),
+                revision: 77,
+            }],
+            surface_id: Some("structured-digest".into()),
+        },
+    )
+    .await;
+    assert!(
+        matches!(recv(&mut a,79).await, Reply::Error {ref message,..} if message.contains("changed after preparation"))
+    );
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), source);
+    assert_eq!(std::fs::read_to_string(&other).unwrap(), externally_changed);
+    std::fs::write(&other, source).unwrap();
+
     // A lockfile has no matching server. Its background occurrence probe
     // settles as empty; an explicit unsupported operation still reports why.
     send(
@@ -467,6 +930,10 @@ async fn shared_editor_lsp_real_protocol_two_clients_actions_and_isolation() {
         assert!(logged.contains(method), "missing real LSP call {method}");
     }
     assert!(logged.contains("unsaved-host"));
+    assert!(
+        !logged.contains("textDocument/didSave"),
+        "structured formatting must not synthesize didSave"
+    );
     assert!(
         logged.find("completion-accepted").unwrap()
             < logged.rfind("workspace/executeCommand").unwrap()

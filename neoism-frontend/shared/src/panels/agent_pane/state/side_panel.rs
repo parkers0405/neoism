@@ -33,7 +33,7 @@ use crate::widgets::scroll::Scroll;
 
 /// Default width of the workspace Conversations panel. The in-chat details
 /// rail has its own fixed width and must not inherit this resizable value.
-pub const SIDE_PANEL_WIDTH: f32 = 340.0;
+pub const SIDE_PANEL_WIDTH: f32 = 360.0;
 pub const SIDE_PANEL_MIN_WIDTH: f32 = 180.0;
 pub const SIDE_PANEL_MAX_WIDTH: f32 = 700.0;
 
@@ -41,7 +41,7 @@ pub const SIDE_PANEL_MAX_WIDTH: f32 = 700.0;
 /// otherwise a narrow split would shove the chat content into nothing.
 pub const SIDE_PANEL_MIN_PANE_WIDTH: f32 = 640.0;
 
-/// Session rows carry a title and a subdued relative-time line. Headers and
+/// Session rows carry an identity/time line above the title. Headers and
 /// transcript excerpts share this stride so scrolling, hit-testing and search
 /// results remain aligned even when the list mixes row kinds.
 pub const ROW_HEIGHT: f32 = 42.0;
@@ -1120,14 +1120,13 @@ impl NeoismAgentSidePanel {
                 self.session_title_hover_overflow = false;
             }
         } else {
+            self.hovered_session = None;
             self.hovered_session_identity = None;
+            self.session_hover_scale = 0.0;
             self.session_title_hover_started = None;
             self.session_title_hover_overflow = false;
         }
         self.session_hover_target = hovered_session.is_some();
-        if self.hovered_session.is_none() {
-            self.session_hover_scale = 0.0;
-        }
         let target = if self.session_hover_target { 1.0 } else { 0.0 };
         let blend = 1.0 - (-dt * 18.0).exp();
         self.session_hover_scale += (target - self.session_hover_scale) * blend;
@@ -2492,6 +2491,16 @@ impl NeoismAgentSidePanel {
             })
     }
 
+    fn has_running_sessions(&self) -> bool {
+        self.sessions.iter().any(|entry| {
+            entry
+                .runtime_status
+                .as_deref()
+                .and_then(BranchStatus::from_runtime_status)
+                .is_some_and(|status| matches!(status, BranchStatus::Active))
+        })
+    }
+
     /// Claim the next branch-tree refresh. Returns a generation token that
     /// must accompany the result; `None` means another worker already owns
     /// the refresh or the debounce has not elapsed.
@@ -3171,11 +3180,10 @@ impl NeoismAgentSidePanel {
                 || self.cursor_spring.position != 0.0
                 || sessions_loading
                 || (self.semantic_searching && self.semantic_search_elapsed() < 1.5)
-                // A running sub-agent paints the rainbow loader spinner (and
-                // the blinking status dot), both of which need the host to
-                // keep redrawing — otherwise the spinner freezes on whatever
-                // frame the last event happened to land on.
+                // Running sub-agents and conversation rows paint the rainbow
+                // loader spinner, so they must keep the host redrawing.
                 || self.has_active_subagents()
+                || self.has_running_sessions()
                 || (self.session_hover_target && self.session_title_hover_overflow)
                 || (self.session_hover_target && self.session_hover_scale < 0.998)
                 || (!self.session_hover_target && self.session_hover_scale > 0.002)
@@ -3191,6 +3199,7 @@ impl NeoismAgentSidePanel {
             && (self.scroll.is_animating()
                 || self.cursor_spring.position != 0.0
                 || sessions_loading
+                || self.has_running_sessions()
                 || (self.session_hover_target && self.session_hover_scale < 0.998)
                 || (!self.session_hover_target && self.session_hover_scale > 0.002)
                 || (self.session_hover_target && self.session_title_hover_overflow))

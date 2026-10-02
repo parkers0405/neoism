@@ -1,6 +1,18 @@
 use super::*;
 
 #[test]
+fn side_panel_hover_clears_immediately_without_a_pointer_target() {
+    let mut panel = NeoismAgentSidePanel::default();
+    panel.tick_pointer_animations(Some(3), Some("session-3"));
+    assert_eq!(panel.hovered_session(), Some(3));
+
+    panel.tick_pointer_animations(None, None);
+
+    assert_eq!(panel.hovered_session(), None);
+    assert_eq!(panel.session_hover_scale(), 0.0);
+}
+
+#[test]
 fn selection_copies_rows_from_previous_render_windows() {
     let mut pane = NeoismAgentPane::default();
     pane.set_timeline_metrics([0.0, 0.0, 400.0, 40.0], 120.0, 40.0);

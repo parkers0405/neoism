@@ -459,10 +459,9 @@ pub(crate) fn render_sessions_list(
         ..DrawOpts::default()
     };
 
-    // A small left gutter so the active session can show a colored status
-    // dot (mirroring the branch rows). Titles start past the gutter on every
-    // row so the list stays aligned whether or not a row carries a dot.
-    let dot_gutter = 34.0 * s;
+    // Reserve only the activity mark plus a normal gap. The old 34px gutter
+    // left a large empty column on scaled displays.
+    let dot_gutter = 18.0 * s;
     let dot_diameter = 7.0 * s;
     let pin_d = 6.0 * s;
     let title_x = text_x + dot_gutter;
@@ -662,53 +661,45 @@ pub(crate) fn render_sessions_list(
             );
         }
 
-        // Green status dot in the left gutter: an actively-running session
-        // (green + a brighter halo to read as "live") or the session
-        // currently open (green, softer halo). Both are clear live-status
-        // signals; running takes the stronger halo.
-        if running || is_current {
+        // Running conversations share the same pastel orbit as active agents
+        // in the details rail. The current-but-idle conversation keeps the
+        // quieter green dot so "open" never reads as "working".
+        if running {
+            let spinner = 10.0 * s * hover_scale;
+            draw_subagent_spinner(
+                sugarloaf,
+                text_x - (spinner - dot_diameter) * 0.5,
+                row_y + (row_h - spinner) * 0.5,
+                spinner,
+                now_seconds,
+                list_rect,
+                s,
+                ORDER_PANEL + 2,
+            );
+        } else if is_current {
             let scaled_dot = dot_diameter * hover_scale;
             let dot_y = row_y + (row_h - scaled_dot) / 2.0;
-            let halo_alpha = if running { 0.5 } else { 0.35 };
             draw_status_dot_text(
                 sugarloaf,
                 text_x - (scaled_dot - dot_diameter) * 0.5,
                 dot_y,
                 scaled_dot,
                 theme.u8(theme.green),
-                Some((theme.u8(theme.green), halo_alpha)),
+                Some((theme.u8(theme.green), 0.35)),
                 list_rect,
                 occlusion_rects,
                 s,
             );
         }
 
-        // Identity belongs to the conversation source, never to the
-        // in-thread Build/Plan/subagent kind.
-        let source_icon = match entry.source {
-            super::super::super::state::side_panel::ConversationSource::Neoism => {
-                agent_icon::AgentKind::Neoism
-            }
-            super::super::super::state::side_panel::ConversationSource::OpenCode => {
-                agent_icon::AgentKind::OpenCode
-            }
-            super::super::super::state::side_panel::ConversationSource::ClaudeCode => {
-                agent_icon::AgentKind::Claude
-            }
-            super::super::super::state::side_panel::ConversationSource::Codex => {
-                agent_icon::AgentKind::Codex
-            }
-        };
-        let icon_size = 16.0 * s;
+        // Conversation cards lead with the product identity, matching the
+        // compact app/title/time hierarchy used by the rest of the sidebar.
+        let source_icon = agent_icon::AgentKind::Neoism;
+        let icon_size = 13.0 * s;
         push_provider_icon_clipped(
             sugarloaf,
             source_icon,
-            [
-                text_x + 12.0 * s,
-                row_y + (row_h - icon_size) / 2.0,
-                icon_size,
-                icon_size,
-            ],
+            [title_x, row_y + 4.0 * s, icon_size, icon_size],
             list_rect,
             occlusion_rects,
         );
@@ -733,6 +724,51 @@ pub(crate) fn render_sessions_list(
         }
 
         let title_budget = (text_w - dot_gutter - pin_reserve).max(0.0);
+        let context = if entry.time_label.trim().is_empty() {
+            relative_session_time(entry.updated_ms, now_ms)
+        } else {
+            entry.time_label.clone()
+        };
+        let identity_opts = DrawOpts {
+            font_size: FONT_SIZE * s * 0.82,
+            color: theme.u8_alpha(theme.fg, 0.72),
+            clip_rect: Some(list_rect),
+            ..DrawOpts::default()
+        };
+        let identity_x = title_x + icon_size + 6.0 * s;
+        draw_text_with_occlusion(
+            sugarloaf,
+            identity_x,
+            row_y + 4.0 * s,
+            source_icon.display_name(),
+            &identity_opts,
+            occlusion_rects,
+        );
+        if !context.is_empty() {
+            let context_opts = DrawOpts {
+                color: theme.u8(theme.muted),
+                ..identity_opts.clone()
+            };
+            let identity_end = identity_x
+                + measure_text_cached(
+                    sugarloaf,
+                    source_icon.display_name(),
+                    &identity_opts,
+                );
+            let context_right = text_x + text_w - pin_reserve;
+            let context_budget = (context_right - identity_end - 10.0 * s).max(0.0);
+            let label =
+                truncate_sidebar_text(&context, context_budget, sugarloaf, &context_opts);
+            let context_w = measure_text_cached(sugarloaf, &label, &context_opts);
+            draw_text_with_occlusion(
+                sugarloaf,
+                context_right - context_w,
+                row_y + 4.0 * s,
+                &label,
+                &context_opts,
+                occlusion_rects,
+            );
+        }
         let mut hovered_title_opts = title_opts;
         hovered_title_opts.font_size *= hover_scale;
         hovered_title_opts.clip_rect =
@@ -765,7 +801,7 @@ pub(crate) fn render_sessions_list(
                 &hovered_title_opts,
             )
         };
-        let scaled_text_y = row_y + 5.0 * s;
+        let scaled_text_y = row_y + 23.0 * s;
         draw_text_with_occlusion(
             sugarloaf,
             title_x - title_offset.unwrap_or(0.0),
@@ -774,29 +810,6 @@ pub(crate) fn render_sessions_list(
             &hovered_title_opts,
             occlusion_rects,
         );
-        let context = if entry.time_label.trim().is_empty() {
-            relative_session_time(entry.updated_ms, now_ms)
-        } else {
-            entry.time_label.clone()
-        };
-        if !context.is_empty() {
-            let context_opts = DrawOpts {
-                font_size: FONT_SIZE * s * 0.82,
-                color: theme.u8(theme.muted),
-                clip_rect: Some(list_rect),
-                ..DrawOpts::default()
-            };
-            let label =
-                truncate_sidebar_text(&context, title_budget, sugarloaf, &context_opts);
-            draw_text_with_occlusion(
-                sugarloaf,
-                title_x,
-                row_y + 23.0 * s,
-                &label,
-                &context_opts,
-                occlusion_rects,
-            );
-        }
     }
     pane.side_panel_mut()
         .set_session_title_hover_overflow(title_hover_overflow);

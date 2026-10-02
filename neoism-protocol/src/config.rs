@@ -267,6 +267,10 @@ pub enum ExtensionStatusSummary {
     Installed,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TrustedExtensionLifecycle { PermissionRequired, Approved, Revoked, Failed }
+
 /// One extension catalog row. Field-for-field mirror of the shared
 /// extensions panel's `ExtensionEntry` (which is not serializable and
 /// lives in the UI crate) so hosts can map without loss.
@@ -294,6 +298,9 @@ pub struct ExtensionSummary {
     /// `"config"`, `"missing"`). `None` for non-LSP rows.
     #[serde(default)]
     pub lsp_source: Option<String>,
+    /// Executable-artifact trust is independent from package installation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trust_lifecycle: Option<TrustedExtensionLifecycle>,
 }
 
 #[cfg(test)]
@@ -394,6 +401,7 @@ mod tests {
                 installed_version: Some("1.0.0".into()),
                 repository_url: None,
                 lsp_source: Some("connected".into()),
+                trust_lifecycle: None,
             }],
         };
         let json = serde_json::to_string(&reply).unwrap();

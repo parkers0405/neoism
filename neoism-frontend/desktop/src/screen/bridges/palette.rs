@@ -1055,6 +1055,7 @@ impl Screen<'_> {
     ) {
         use neoism_ui::panels::command_palette::PaletteAction;
         match action {
+            PaletteAction::Plugin { id } => self.pending_plugin_commands.push(id),
             PaletteAction::TabCreate => {
                 self.create_workspace_terminal_tab();
                 self.cancel_search(clipboard);

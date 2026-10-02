@@ -596,7 +596,7 @@ pub struct CodePane {
     /// Cached wrap layout, rebuilt by the painter only when
     /// `wrap_index_key` (buffer revision, text cols) moves.
     pub(super) wrap_index: std::sync::Arc<super::layout::WrapIndex>,
-    pub(super) wrap_index_key: Option<(u64, usize)>,
+    pub(super) wrap_index_key: Option<(u64, usize, u64)>,
     /// Sticky goal column for VISUAL-row vertical motion (wrap-aware
     /// j/k): (expected line, expected col, goal display col within
     /// segment). Invalidated automatically when the cursor moved by
@@ -655,6 +655,12 @@ pub struct CodePane {
     /// One entry per diagnostic (unlike the per-line projection above, a
     /// multiline range appears only once). Used by status counts/popups.
     pub diagnostic_summaries: Vec<super::feed::CodeDiagnosticSummary>,
+    /// Host-published immutable plugin decoration projection. `None` keeps the
+    /// no-plugin path allocation-free and render-time Lua-free.
+    pub plugin_decorations: Option<std::sync::Arc<super::feed::CodePluginRenderSnapshot>>,
+    /// Frame-local retained interaction geometry derived entirely from the
+    /// immutable plugin snapshot. Pointer dispatch reads this after paint.
+    pub plugin_hit_regions: Vec<super::feed::CodePluginHitRegion>,
     /// Diagnostics pinned into the CRDT doc with sticky anchors (only
     /// while the pane is doc-bound). The host resolves these after editor/
     /// CRDT service turns, outside paint, for char-precise edit tracking.
@@ -756,6 +762,8 @@ impl CodePane {
             highlight: super::highlight::CodeHighlightCache::default(),
             diagnostics: std::collections::HashMap::new(),
             diagnostic_summaries: Vec::new(),
+            plugin_decorations: None,
+            plugin_hit_regions: Vec::new(),
             diag_anchors: Vec::new(),
             diagnostics_resolved_revision: None,
             lsp_synced_revision: None,

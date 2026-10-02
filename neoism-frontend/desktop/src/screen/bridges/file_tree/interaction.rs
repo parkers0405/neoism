@@ -2,27 +2,31 @@ use super::*;
 use std::path::{Path, PathBuf};
 
 impl Screen<'_> {
-    pub(crate) fn file_tree_bounds(&self) -> Option<(f32, f32, f32)> {
-        if !self.renderer.file_tree.is_visible() {
-            return None;
-        }
+    pub(crate) fn file_tree_bounds(&self) -> Option<(f32, f32, f32, f32)> {
+        use neoism_ui::panels::left_sidebar_host::LeftSidebarView;
+        let left = self.renderer.left_sidebar_view_left(LeftSidebarView::Files)?;
         // Tree occupies the middle band: below the full-width top
         // chrome (top bar + workspace strip), above the full-width
         // status bar.
         let (tree_top, tree_bottom) = self.side_panel_band();
         let tree_height = (tree_bottom - tree_top).max(0.0);
-        Some((tree_top, tree_height, self.renderer.file_tree.width()))
+        Some((
+            left,
+            tree_top,
+            tree_height,
+            self.renderer.left_sidebar_view_width(LeftSidebarView::Files),
+        ))
     }
 
     pub fn is_hovering_file_tree_resize_edge(&self) -> bool {
-        let Some((tree_top, tree_height, width)) = self.file_tree_bounds() else {
+        let Some((left, tree_top, tree_height, width)) = self.file_tree_bounds() else {
             return false;
         };
         let (mouse_x, mouse_y) = self.mouse_logical_for_hit_test();
         let hit_half = 5.0;
         mouse_y >= tree_top
             && mouse_y <= tree_top + tree_height
-            && (mouse_x - width).abs() <= hit_half
+            && (mouse_x - (left + width)).abs() <= hit_half
     }
 
     pub fn begin_file_tree_resize(&mut self) -> bool {
@@ -32,7 +36,9 @@ impl Screen<'_> {
         let scale_factor = self.sugarloaf.scale_factor();
         self.file_tree_resize_state = Some(FileTreeResizeState {
             start_x: self.mouse.x as f32 / scale_factor,
-            original_width: self.renderer.file_tree.width(),
+            original_width: self.renderer.left_sidebar_view_width(
+                neoism_ui::panels::left_sidebar_host::LeftSidebarView::Files,
+            ),
         });
         self.renderer.file_tree.set_focused(true);
         true
@@ -49,8 +55,15 @@ impl Screen<'_> {
         let scale_factor = self.sugarloaf.scale_factor();
         let mouse_x = self.mouse.x as f32 / scale_factor;
         let target_width = state.original_width + (mouse_x - state.start_x);
-        let current_width = self.renderer.file_tree.width();
-        self.renderer.file_tree.resize(target_width - current_width);
+        use neoism_ui::panels::left_sidebar_host::{LeftSidebarView, SidebarPlacement};
+        if self.renderer.left_sidebar_host.placement(LeftSidebarView::Files)
+            == SidebarPlacement::Unified
+        {
+            self.renderer.left_sidebar_host.set_unified_width(target_width);
+        } else {
+            let current_width = self.renderer.file_tree.width();
+            self.renderer.file_tree.resize(target_width - current_width);
+        }
         self.reapply_chrome_layout();
         self.mark_dirty();
         true
@@ -71,25 +84,38 @@ impl Screen<'_> {
             focused = self.renderer.file_tree.is_focused(),
             "toggle_file_tree ENTER"
         );
-        let decision = neoism_ui::panels::file_tree::toggle_visibility_policy(
-            neoism_ui::panels::file_tree::FileTreeBridgeState {
-                visible: self.renderer.file_tree.is_visible(),
-                focused: self.renderer.file_tree.is_focused(),
-            },
+        use neoism_ui::panels::left_sidebar_host::{LeftSidebarView, SidebarTransition};
+        self.renderer.reconcile_left_sidebar_host();
+        let was_visible = self.renderer.file_tree.is_visible();
+        let transition = self.renderer.left_sidebar_host.toggle(
+            LeftSidebarView::Files,
+            self.renderer.file_tree.is_focused(),
         );
-        {
-            let tree = &mut self.renderer.file_tree;
-            tree.set_visible(decision.visible);
-            tree.set_focused(decision.focused);
-        }
-        if decision.focused {
-            self.renderer
-                .conversations_pane
-                .side_panel_mut()
-                .set_focused(false);
+        let (visible, focused, refresh_workspace_root) = match transition {
+            SidebarTransition::Show => {
+                self.renderer.hide_other_unified_sidebars(LeftSidebarView::Files);
+                (true, true, !was_visible)
+            }
+            SidebarTransition::Focus => (true, true, false),
+            SidebarTransition::Hide => (false, false, false),
+            SidebarTransition::Independent => {
+                let decision = neoism_ui::panels::file_tree::toggle_visibility_policy(
+                    neoism_ui::panels::file_tree::FileTreeBridgeState {
+                        visible: was_visible,
+                        focused: self.renderer.file_tree.is_focused(),
+                    },
+                );
+                (decision.visible, decision.focused, decision.refresh_workspace_root)
+            }
+        };
+        self.renderer
+            .set_left_sidebar_view_state(LeftSidebarView::Files, visible, focused);
+        if focused {
+            self.renderer.conversations_pane.side_panel_mut().set_focused(false);
             self.renderer.notes_sidebar.set_focused(false);
+            self.renderer.left_sidebar_host.set_focused(Some(LeftSidebarView::Files));
         }
-        if decision.refresh_workspace_root {
+        if refresh_workspace_root {
             // Opening the tree adopts the active workspace root. For a
             // terminal this is OSC 7 cwd; for an editor this is nvim's
             // cwd. Force a refresh on open so the tree never shows a
@@ -104,8 +130,12 @@ impl Screen<'_> {
                 self.set_active_workspace_root(root, true);
             }
         }
-        if decision.visibility_changed {
+        if was_visible != visible || transition == SidebarTransition::Show {
             self.reapply_chrome_layout();
+        }
+        if let Some(id) = self.current_workspace_id() {
+            self.workspace_conversations_visibility
+                .insert(id, self.renderer.conversations_visible);
         }
         self.sync_file_tree_watchers();
         self.mark_dirty();
@@ -118,7 +148,11 @@ impl Screen<'_> {
                 focused: self.renderer.file_tree.is_focused(),
             },
         );
-        self.renderer.file_tree.set_visible(decision.visible);
+        self.renderer.set_left_sidebar_visibility(
+            neoism_ui::panels::left_sidebar_host::LeftSidebarView::Files,
+            decision.visible,
+            decision.focused,
+        );
         if decision.refresh_workspace_root {
             // See toggle_file_tree — set_visible(true) must precede the
             // populate so the async git-status kickoff doesn't bail on
@@ -127,7 +161,6 @@ impl Screen<'_> {
                 self.set_active_workspace_root(root, true);
             }
         }
-        self.renderer.file_tree.set_focused(decision.focused);
         if decision.visibility_changed {
             self.reapply_chrome_layout();
         }
@@ -145,8 +178,11 @@ impl Screen<'_> {
         ) else {
             return;
         };
-        self.renderer.file_tree.set_focused(decision.focused);
-        self.renderer.file_tree.set_visible(decision.visible);
+        self.renderer.set_left_sidebar_visibility(
+            neoism_ui::panels::left_sidebar_host::LeftSidebarView::Files,
+            decision.visible,
+            decision.focused,
+        );
         self.reapply_chrome_layout();
         self.sync_file_tree_watchers();
         self.mark_dirty();
@@ -168,7 +204,11 @@ impl Screen<'_> {
         // set_visible before set_active_workspace_root so when the tree
         // was hidden the populate kicks off the git-status worker (which
         // bails on `!is_visible()`).
-        self.renderer.file_tree.set_visible(decision.visible);
+        self.renderer.set_left_sidebar_visibility(
+            neoism_ui::panels::left_sidebar_host::LeftSidebarView::Files,
+            decision.visible,
+            decision.focused,
+        );
         // `force_tree_refresh = false`: a terminal-link click into the
         // *same* root the tree already shows should not wipe expanded
         // folders and re-scan. `set_active_workspace_root` populates
@@ -177,7 +217,6 @@ impl Screen<'_> {
         // collapse the tree before `reveal_directory` re-expanded it —
         // looked like a freeze and thrashed the fs watcher.
         self.set_active_workspace_root(decision.reveal_root, false);
-        self.renderer.file_tree.set_focused(decision.focused);
         self.renderer.file_tree.reveal_directory(&dir);
         if decision.visibility_changed {
             self.reapply_chrome_layout();

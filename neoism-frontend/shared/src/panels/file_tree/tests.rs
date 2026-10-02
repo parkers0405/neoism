@@ -141,6 +141,7 @@ fn with_ctx<R>(f: impl FnOnce(&PanelContext) -> R) -> R {
         services,
         theme: &theme,
         time: Duration::ZERO,
+        plugins: None,
     };
     f(&ctx)
 }
@@ -170,6 +171,7 @@ fn with_ctx_mut<R>(f: impl FnOnce(&mut PanelContext) -> R) -> R {
         services,
         theme: &theme,
         time: Duration::ZERO,
+        plugins: None,
     };
     f(&mut ctx)
 }

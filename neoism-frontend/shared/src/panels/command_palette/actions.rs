@@ -17,6 +17,7 @@ use crate::widgets::modal::{ModalAction, ModalButton, ModalSpec};
 /// reference now `.clone()` it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PaletteAction {
+    Plugin { id: String },
     TabCreate,
     TabClose,
     TabCloseUnfocused,
@@ -762,7 +763,8 @@ pub(crate) fn command_visible_for_surface(
         PaletteAction::ToggleGitBlame | PaletteAction::ToggleWordWrap | PaletteAction::ReplaceInFile => {
             surface == PaletteSurface::Editor
         }
-        PaletteAction::TabCreate
+        PaletteAction::Plugin { .. }
+        | PaletteAction::TabCreate
         | PaletteAction::TabClose
         | PaletteAction::TabCloseUnfocused
         | PaletteAction::SelectNextTab

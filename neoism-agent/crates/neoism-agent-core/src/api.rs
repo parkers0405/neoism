@@ -595,6 +595,8 @@ mod tests {
             "disabledProviders": ["legacy"],
             "enabledProviders": ["openai"],
             "smallModel": "openai/small",
+            "imageModel": "openai/gpt-image-2",
+            "videoModel": "xai/grok-imagine-video-1.5",
             "defaultAgent": "build",
             "textVerbosity": "high",
             "dangerouslySkipPermissions": true
@@ -603,6 +605,11 @@ mod tests {
         assert_eq!(canonical.disabled_providers, ["legacy"]);
         assert_eq!(canonical.enabled_providers.unwrap(), ["openai"]);
         assert_eq!(canonical.small_model.as_deref(), Some("openai/small"));
+        assert_eq!(canonical.image_model.as_deref(), Some("openai/gpt-image-2"));
+        assert_eq!(
+            canonical.video_model.as_deref(),
+            Some("xai/grok-imagine-video-1.5")
+        );
         assert_eq!(canonical.default_agent.as_deref(), Some("build"));
         assert_eq!(canonical.text_verbosity, Some(TextVerbosity::High));
         assert!(canonical.dangerously_skip_permissions);

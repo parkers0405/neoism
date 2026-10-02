@@ -29,6 +29,7 @@ pub mod status_line;
 pub mod breadcrumbs;
 pub mod completion_menu;
 pub mod custom_cursor;
+pub mod custom_ui;
 pub mod editor_scroll;
 pub mod git_branch;
 pub mod minimap;
@@ -50,6 +51,7 @@ pub mod extensions_page;
 pub mod hover_popup;
 pub mod inline_diagnostics;
 pub mod lsp_popup;
+pub mod left_sidebar_host;
 pub mod settings_page;
 pub mod tags_view;
 
@@ -86,6 +88,15 @@ pub struct PanelContext<'a> {
     pub services: Services<'a>,
     pub theme: &'a ChromeTheme,
     pub time: web_time::Duration,
+    pub plugins: Option<&'a neoism_lua::PluginSnapshot>,
+}
+
+impl PanelContext<'_> {
+    pub fn style(&self, selector: &str) -> neoism_lua::StylePatch {
+        self.plugins
+            .map(|plugins| plugins.styles.resolve(selector))
+            .unwrap_or_default()
+    }
 }
 
 pub trait Panel: Send {

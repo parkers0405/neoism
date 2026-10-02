@@ -544,7 +544,7 @@ impl Screen<'_> {
         self.renderer.minimap.begin_frame();
         if self.renderer.minimap.is_enabled() {
             let s = self.sugarloaf.scale_factor();
-            let theme = self.renderer.theme;
+            let theme = self.renderer.styled_theme(neoism_lua::selector::TERMINAL);
             for p in &ctx.panels {
                 if !neoism_ui::render_policy::pane_overlay_is_paintable(
                     false, p.cols, p.rows, p.cell_w, p.cell_h,
@@ -587,8 +587,7 @@ impl Screen<'_> {
         {
             let scale = self.sugarloaf.scale_factor();
             let logical_width = self.sugarloaf.window_size().width as f32 / scale;
-            // The Agent icon is always present and opens a new Agent tab.
-            self.renderer.top_bar.set_right_button_visible(true);
+            let details_available = self.renderer.top_bar.is_right_button_visible();
             // Reflect which panels are open so the toggle buttons
             // paint in their active accent style.
             let tree_open = self.renderer.file_tree.is_visible();
@@ -602,7 +601,7 @@ impl Screen<'_> {
             self.renderer
                 .top_bar
                 .set_search_open(self.renderer.finder.is_visible());
-            let details_open = self.details_panel_enabled
+            let details_open = details_available
                 && self
                     .context_manager
                     .current()
@@ -643,13 +642,28 @@ impl Screen<'_> {
                     );
                 }
             }
-            self.renderer.top_bar.set_peers(peers);
+            let peer_layout_changed = self.renderer.top_bar.set_peers(peers);
             #[cfg(target_os = "macos")]
-            self.renderer.top_bar.set_left_safe_inset(if is_fullscreen {
-                0.0
-            } else {
-                self.renderer.macos_traffic_light_inset
-            });
+            {
+                let top_docked = self
+                    .renderer
+                    .surface_layout
+                    .surfaces
+                    .get(neoism_ui::surface_layout::CHROME_ACTIONS_SURFACE)
+                    .is_some_and(|surface| surface.dock == neoism_lua::DockEdge::Top);
+                self.renderer.top_bar.set_left_safe_inset(
+                    if is_fullscreen || !top_docked {
+                        0.0
+                    } else {
+                        self.renderer.macos_traffic_light_inset
+                    },
+                );
+            }
+            if peer_layout_changed {
+                let logical_height = self.sugarloaf.window_size().height as f32 / scale;
+                self.renderer
+                    .relayout_surfaces(logical_width, logical_height);
+            }
             self.renderer.render_top_bar(
                 &mut self.sugarloaf,
                 self.context_manager.len(),

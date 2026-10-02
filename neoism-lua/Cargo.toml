@@ -1,0 +1,17 @@
+[package]
+name = "neoism-lua"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Typed Lua configuration and plugin host for Neoism."
+
+[features]
+default = []
+runtime = ["dep:mlua"]
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+mlua = { version = "0.11", optional = true, features = ["lua54", "vendored", "serialize", "send"] }

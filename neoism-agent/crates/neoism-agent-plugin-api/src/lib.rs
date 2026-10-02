@@ -15,12 +15,16 @@ use thiserror::Error;
 
 pub mod context;
 pub mod plugin;
+pub mod package;
+pub mod process_v2;
 pub mod route;
 pub mod services;
 pub mod testkit;
 
 pub use context::*;
 pub use plugin::*;
+pub use package::*;
+pub use process_v2::*;
 pub use route::*;
 pub use services::*;
 
@@ -38,6 +42,7 @@ pub enum ContributionKind {
     Part,
     ConfigLoader,
     Hook,
+    Mcp,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -339,6 +344,42 @@ pub struct RegistrySnapshot {
 }
 
 impl RegistrySnapshot {
+    /// Compose lower-priority scoped registries into this snapshot. Existing
+    /// workspace registrations always win name conflicts.
+    pub fn with_lower_priority_scopes(
+        mut self,
+        scopes: impl IntoIterator<Item = Arc<RegistrySnapshot>>,
+    ) -> Self {
+        for scope in scopes {
+            self.manifests.extend(scope.manifests.iter().cloned());
+            self.capabilities.extend(scope.capabilities.iter().cloned());
+            macro_rules! merge_map {
+                ($field:ident) => {
+                    for (name, value) in &scope.$field {
+                        self.$field.entry(name.clone()).or_insert_with(|| value.clone());
+                    }
+                };
+            }
+            merge_map!(contributions);
+            merge_map!(skill_sources);
+            merge_map!(command_sources);
+            merge_map!(runtime_tools);
+            merge_map!(agent_sources);
+            merge_map!(agent_services);
+            merge_map!(command_services);
+            merge_map!(skill_services);
+            self.runtime_hooks.extend(scope.runtime_hooks.iter().cloned());
+            merge_map!(runtime_routes);
+            merge_map!(runtime_websocket_routes);
+            merge_map!(config_services);
+            merge_map!(system_context_services);
+            merge_map!(prompt_services);
+            merge_map!(provider_services);
+            merge_map!(service_metadata);
+        }
+        self
+    }
+
     pub fn empty() -> Self {
         Self {
             generation: 0,
@@ -522,6 +563,7 @@ impl Default for PluginHost {
 pub struct InstalledPlugins {
     snapshot: Arc<RegistrySnapshot>,
     instances: Vec<(String, Arc<dyn PluginInstance>)>,
+    leases: Vec<CapabilityLease>,
     shutdown: AtomicU8,
 }
 
@@ -530,6 +572,7 @@ impl InstalledPlugins {
         Self {
             snapshot,
             instances: Vec::new(),
+            leases: Vec::new(),
             shutdown: AtomicU8::new(SHUTDOWN_OPEN),
         }
     }
@@ -560,6 +603,9 @@ impl InstalledPlugins {
             }
         }
         self.snapshot.active.store(false, Ordering::Release);
+        for lease in &self.leases {
+            lease.revoke();
+        }
         let mut attempt = ShutdownAttempt {
             state: &self.shutdown,
             complete: false,
@@ -638,6 +684,12 @@ impl PluginHost {
         disabled: &[String],
         context: PluginContext,
     ) -> Result<InstalledPlugins, PluginInstallError> {
+        // Bind every callback owner to the candidate generation before any
+        // process starts. Failed candidates may consume a number; generation
+        // identity is monotonic, not a count of successful publications.
+        let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let context =
+            context.with_host_metadata("registryGeneration", Value::from(generation));
         let mut manifests = BTreeMap::new();
         let mut descriptors = BTreeMap::new();
         let mut implementations = BTreeMap::new();
@@ -707,6 +759,7 @@ impl PluginHost {
         let mut provider_services = BTreeMap::new();
         let mut service_metadata = BTreeMap::new();
         let mut instances: Vec<(String, Arc<dyn PluginInstance>)> = Vec::new();
+        let mut leases: Vec<CapabilityLease> = Vec::new();
         for id in order {
             let manifest = &manifests[&id];
             let requested_disabled =
@@ -726,9 +779,14 @@ impl PluginHost {
                 let descriptor = &descriptors[&id];
                 let plugin_context =
                     context.restricted_to(&descriptor.required_capabilities);
+                let lease = plugin_context.capability_lease();
                 let instance = match implementations[&id].create(plugin_context).await {
                     Ok(instance) => Arc::<dyn PluginInstance>::from(instance),
                     Err(error) => {
+                        lease.revoke();
+                        for lease in &leases {
+                            lease.revoke();
+                        }
                         return Err(cleanup_failure(
                             PluginHostError::Lifecycle {
                                 plugin: id,
@@ -741,6 +799,10 @@ impl PluginHost {
                     }
                 };
                 if let Err(error) = instance.start().await {
+                    lease.revoke();
+                    for lease in &leases {
+                        lease.revoke();
+                    }
                     return Err(cleanup_failure(
                         PluginHostError::Lifecycle {
                             plugin: id,
@@ -756,6 +818,10 @@ impl PluginHost {
                     readiness.state,
                     ReadinessState::Ready | ReadinessState::Degraded
                 ) {
+                    lease.revoke();
+                    for lease in &leases {
+                        lease.revoke();
+                    }
                     return Err(cleanup_failure(
                         PluginHostError::Lifecycle {
                             plugin: id,
@@ -839,6 +905,10 @@ impl PluginHost {
                 macro_rules! abort_install {
                     ($error:expr) => {{
                         let error = $error;
+                        lease.revoke();
+                        for retained in &leases {
+                            retained.revoke();
+                        }
                         return Err(cleanup_failure(
                             error,
                             Some(instance.clone()),
@@ -1011,6 +1081,7 @@ impl PluginHost {
                     }
                 }
                 instances.push((id.clone(), instance));
+                leases.push(lease);
             }
             // Disableable plugins are structurally absent. Consumers must not
             // infer availability from an inactive manifest that still leaked
@@ -1052,7 +1123,6 @@ impl PluginHost {
                 config: manifest.config.clone(),
             });
         }
-        let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         let snapshot = Arc::new(RegistrySnapshot {
             generation,
             active: Arc::new(AtomicBool::new(true)),
@@ -1078,6 +1148,7 @@ impl PluginHost {
         Ok(InstalledPlugins {
             snapshot,
             instances,
+            leases,
             shutdown: AtomicU8::new(SHUTDOWN_OPEN),
         })
     }
@@ -1113,6 +1184,7 @@ async fn cleanup_failure(
             .enumerate()
             .map(|(index, instance)| (format!("quarantine-{index}"), instance))
             .collect(),
+        leases: Vec::new(),
         shutdown: AtomicU8::new(SHUTDOWN_OPEN),
     };
     PluginInstallError {
@@ -1138,12 +1210,28 @@ pub(crate) fn validate_route_contract(
     policy: &RoutePrefixPolicy,
 ) -> Result<(), PluginHostError> {
     match (descriptor.scope, route.scope) {
+        (PluginScope::Global | PluginScope::User, RouteScope::Workspace) => {}
+        (PluginScope::Global | PluginScope::User, RouteScope::Session)
+            if route.path.contains(":session_id") => {}
+        (PluginScope::Global | PluginScope::User, RouteScope::Session) => {
+            return Err(PluginHostError::Registration(format!(
+                "session route `{}` must contain `:session_id`",
+                route.id
+            )))
+        }
         (PluginScope::Workspace, RouteScope::Workspace) => {}
         (PluginScope::Workspace, RouteScope::Session)
             if route.path.contains(":session_id") => {}
         (PluginScope::Workspace, RouteScope::Session) => {
             return Err(PluginHostError::Registration(format!(
                 "session route `{}` must contain `:session_id`",
+                route.id
+            )))
+        }
+        (PluginScope::Session, RouteScope::Session) => {}
+        (PluginScope::Session, RouteScope::Workspace) => {
+            return Err(PluginHostError::Registration(format!(
+                "session plugin route `{}` cannot use workspace scope",
                 route.id
             )))
         }
@@ -2388,5 +2476,115 @@ mod tests {
             seen.lock().unwrap().as_ref().unwrap(),
             &BTreeSet::from([HostCapability::ProcessSpawn])
         );
+    }
+
+    struct LeaseFactory(Arc<std::sync::Mutex<Option<PluginContext>>>);
+    impl PluginFactory for LeaseFactory {
+        fn descriptor(&self) -> PluginDescriptor {
+            PluginDescriptor {
+                manifest: PluginManifest {
+                    id: "dev.example.lease".into(),
+                    name: "lease".into(),
+                    version: "1".into(),
+                    internal: true,
+                    disableable: true,
+                    capabilities: Vec::new(),
+                    requires: Vec::new(),
+                    event_namespaces: Vec::new(),
+                    api_prefix: None,
+                    config: BTreeMap::new(),
+                },
+                scope: PluginScope::Session,
+                required_capabilities: vec![HostCapability::PromptRead],
+                plugin_api_major: PLUGIN_API_MAJOR,
+            }
+        }
+        fn create<'a>(&'a self, context: PluginContext) -> PluginFuture<'a, Box<dyn PluginInstance>> {
+            *self.0.lock().unwrap() = Some(context);
+            Box::pin(async {
+                Ok(Box::new(StaticPluginInstance::new(PluginContributions::default()))
+                    as Box<dyn PluginInstance>)
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn exact_session_generation_lease_is_revoked_before_cleanup() {
+        let captured = Arc::new(std::sync::Mutex::new(None));
+        let context = PluginContext::new(
+            RuntimeScope::Session {
+                workspace: WorkspaceIdentity { id: "workspace".into(), root: ".".into() },
+                session_id: "session-7".into(),
+            },
+            CapabilityGrants::default().allow(HostCapability::PromptRead),
+        );
+        let installed = PluginHost::default()
+            .install(vec![Box::new(LeaseFactory(Arc::clone(&captured)))], &[], context)
+            .await
+            .unwrap();
+        assert!(captured.lock().unwrap().as_ref().unwrap().capabilities_active());
+        installed.shutdown().await.unwrap();
+        assert!(!captured.lock().unwrap().as_ref().unwrap().capabilities_active());
+    }
+
+    struct ScopedFactory(PluginScope, String);
+    impl PluginFactory for ScopedFactory {
+        fn descriptor(&self) -> PluginDescriptor {
+            PluginDescriptor {
+                manifest: PluginManifest {
+                    id: self.1.clone(),
+                    name: self.1.clone(),
+                    version: "1".into(),
+                    internal: true,
+                    disableable: true,
+                    capabilities: Vec::new(),
+                    requires: Vec::new(),
+                    event_namespaces: Vec::new(),
+                    api_prefix: None,
+                    config: BTreeMap::new(),
+                },
+                scope: self.0,
+                required_capabilities: Vec::new(),
+                plugin_api_major: PLUGIN_API_MAJOR,
+            }
+        }
+        fn create<'a>(&'a self, _context: PluginContext) -> PluginFuture<'a, Box<dyn PluginInstance>> {
+            Box::pin(async {
+                Ok(Box::new(StaticPluginInstance::new(PluginContributions::default()))
+                    as Box<dyn PluginInstance>)
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn all_runtime_scopes_install_only_into_their_exact_host_scope() {
+        let cases = [
+            (PluginScope::Global, RuntimeScope::Global),
+            (PluginScope::User, RuntimeScope::User { user_id: "user-opaque".into() }),
+            (
+                PluginScope::Workspace,
+                RuntimeScope::Workspace(WorkspaceIdentity { id: "workspace-opaque".into(), root: ".".into() }),
+            ),
+            (
+                PluginScope::Session,
+                RuntimeScope::Session {
+                    workspace: WorkspaceIdentity { id: "workspace-opaque".into(), root: ".".into() },
+                    session_id: "session-opaque".into(),
+                },
+            ),
+        ];
+        for (index, (scope, runtime)) in cases.into_iter().enumerate() {
+            let host = PluginHost::default();
+            let installed = host
+                .install(
+                    vec![Box::new(ScopedFactory(scope, format!("dev.example.scope{index}")))],
+                    &[],
+                    PluginContext::new(runtime, CapabilityGrants::default()),
+                )
+                .await
+                .unwrap();
+            assert_eq!(installed.len(), 1);
+            installed.shutdown().await.unwrap();
+        }
     }
 }

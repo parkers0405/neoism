@@ -6,8 +6,11 @@
 use std::path::PathBuf;
 
 use neoism_protocol::editor::{
-    DiagnosticItem, DiagnosticSeverity, EditorClientMessage, EditorServerMessage,
-    GridCell, GridPos, HighlightAttrs, PopupMenuItem,
+    DiagnosticItem, DiagnosticSeverity, EditorClientMessage, EditorLspActionCapability,
+    EditorLspBufferSnapshot, EditorLspEditOperation, EditorLspOpenBuffer, EditorLspReadDiagnostic,
+    EditorLspReadOperation, EditorLspReadOutcome, EditorLspReadPosition,
+    EditorLspReadRange, EditorLspReadRelatedInformation, EditorLspStructuredFileEdit,
+    EditorLspTextEdit, EditorServerMessage, GridCell, GridPos, HighlightAttrs, PopupMenuItem,
 };
 
 fn roundtrip_client(msg: &EditorClientMessage) {
@@ -95,6 +98,172 @@ fn editor_client_surface_id_accessor_tracks_targeted_commands() {
     };
     assert_eq!(msg.surface_id(), Some("pane:2"));
     assert_eq!(EditorClientMessage::Close.surface_id(), None);
+}
+
+#[test]
+fn structured_lsp_reads_preserve_opaque_host_paths_and_diagnostic_data() {
+    let windows_path = r"C:\Work\项目\main.rs".to_string();
+    roundtrip_client(&EditorClientMessage::LspRead {
+        surface_id: Some("lua-lsp:remote:44".into()),
+        operation: EditorLspReadOperation::Diagnostics,
+        path: windows_path.clone(),
+        line: 8,
+        character: 5,
+        query: String::new(),
+        buffer_text: Some("fn main() {}\n".into()),
+    });
+
+    let unc_path = r"\\Server\Share\项目\dep.rs".to_string();
+    let message = EditorServerMessage::LspReadResult {
+        surface_id: Some("lua-lsp:remote:44".into()),
+        operation: EditorLspReadOperation::Diagnostics,
+        outcome: EditorLspReadOutcome::Diagnostics(vec![EditorLspReadDiagnostic {
+            path: windows_path.clone(),
+            range: Some(EditorLspReadRange {
+                start: EditorLspReadPosition {
+                    line: 8,
+                    character: 5,
+                },
+                end: EditorLspReadPosition {
+                    line: 8,
+                    character: 9,
+                },
+            }),
+            severity: "warning".into(),
+            code: Some("W44".into()),
+            code_description: None,
+            source: Some("fixture".into()),
+            message: "opaque path".into(),
+            tags: vec!["unnecessary".into(), "deprecated".into()],
+            related_information: vec![EditorLspReadRelatedInformation {
+                path: unc_path.clone(),
+                range: Some(EditorLspReadRange {
+                    start: EditorLspReadPosition {
+                        line: 2,
+                        character: 0,
+                    },
+                    end: EditorLspReadPosition {
+                        line: 2,
+                        character: 4,
+                    },
+                }),
+                message: "related".into(),
+            }],
+            data: Some(serde_json::json!({"fix": {"title": "Apply", "id": 44}})),
+            language: Some("rust".into()),
+        }]),
+    };
+    roundtrip_server(&message);
+
+    let encoded = serde_json::to_string(&message).unwrap();
+    let decoded: EditorServerMessage = serde_json::from_str(&encoded).unwrap();
+    let EditorServerMessage::LspReadResult {
+        outcome: EditorLspReadOutcome::Diagnostics(items),
+        ..
+    } = decoded
+    else {
+        panic!("structured diagnostic result changed shape");
+    };
+    assert_eq!(items[0].path, windows_path);
+    assert_eq!(items[0].related_information[0].path, unc_path);
+    assert_eq!(
+        items[0].data,
+        Some(serde_json::json!({"fix": {"title": "Apply", "id": 44}}))
+    );
+}
+
+#[test]
+fn structured_lsp_edits_expose_only_opaque_capabilities_and_typed_state() {
+    let capability = EditorLspActionCapability {
+        request_id: 41,
+        action_id: "random-one-shot-id".into(),
+        title: "Fix it".into(),
+        kind: Some("quickfix".into()),
+        preferred: true,
+    };
+    let prepare = EditorClientMessage::LspEditPrepare {
+        operation: EditorLspEditOperation::ApplyCodeAction,
+        path: "/host/work/main.rs".into(),
+        line: 3,
+        character: 7,
+        argument: None,
+        action: Some(capability.clone()),
+        buffer_text: Some("fn main() {}".into()),
+        open_buffers: vec![EditorLspOpenBuffer {
+            path: "/host/work/main.rs".into(),
+            revision: 9,
+        }],
+        surface_id: Some("lua-lsp:41".into()),
+    };
+    roundtrip_client(&prepare);
+    let text = serde_json::to_string(&prepare).unwrap();
+    for forbidden in [
+        "pluginOwner",
+        "pluginRevision",
+        "workspaceEdit",
+        "serverId",
+        "payload",
+        "command",
+    ] {
+        assert!(!text.contains(forbidden), "leaked {forbidden}: {text}");
+    }
+    roundtrip_server(&EditorServerMessage::LspEditPrepared {
+        surface_id: Some("lua-lsp:41".into()),
+        operation: EditorLspEditOperation::CodeActions,
+        actions: vec![capability],
+        plan: None,
+    });
+    roundtrip_client(&EditorClientMessage::LspEditCommit {
+        plan_id: "random-plan-id".into(),
+        open_buffers: vec![EditorLspOpenBuffer {
+            path: "/host/work/main.rs".into(),
+            revision: 9,
+        }],
+        surface_id: Some("lua-lsp:42".into()),
+    });
+    roundtrip_client(&EditorClientMessage::LspEditFinalize {
+        command_id: "random-command-id".into(),
+        buffers: vec![EditorLspBufferSnapshot {
+            path: r"C:\host\work\main.rs".into(),
+            revision: 10,
+            text: "fn main() { fixed(); }".into(),
+        }],
+        surface_id: Some("lua-lsp:43".into()),
+    });
+    roundtrip_server(&EditorServerMessage::LspEditFinalized {
+        surface_id: Some("lua-lsp:43".into()),
+        ran_command: true,
+    });
+    let committed = EditorServerMessage::LspEditCommitted {
+        surface_id: Some("lua-lsp:42".into()),
+        title: "Fix it".into(),
+        edits: vec![EditorLspStructuredFileEdit {
+            path: r"C:\Host\Work\main.rs".into(),
+            edits: vec![EditorLspTextEdit {
+                start_line: 0,
+                start_col: 0,
+                end_line: 0,
+                end_col: 2,
+                new_text: "fn".into(),
+            }],
+        }],
+        applied_files: vec![r"\\Server\Share\Work\closed.rs".into()],
+        ran_command: false,
+        command_id: Some("random-command-id".into()),
+    };
+    roundtrip_server(&committed);
+    let json = serde_json::to_string(&committed).unwrap();
+    let decoded: EditorServerMessage = serde_json::from_str(&json).unwrap();
+    let EditorServerMessage::LspEditCommitted {
+        edits,
+        applied_files,
+        ..
+    } = decoded
+    else {
+        unreachable!()
+    };
+    assert_eq!(edits[0].path, r"C:\Host\Work\main.rs");
+    assert_eq!(applied_files[0], r"\\Server\Share\Work\closed.rs");
 }
 
 #[test]

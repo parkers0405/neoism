@@ -661,7 +661,7 @@ fn unversioned_poll_none_never_clears_a_live_goal() {
 }
 
 #[test]
-fn running_dot_predicate_only_lights_active_sessions() {
+fn running_spinner_predicate_only_lights_active_sessions() {
     let running = NeoismAgentSessionEntry::new("a", "a", "")
         .with_runtime_status(Some("running".to_string()));
     assert!(session_entry_is_running(&running));
@@ -680,6 +680,18 @@ fn running_dot_predicate_only_lights_active_sessions() {
 
     let idle = NeoismAgentSessionEntry::new("e", "e", "");
     assert!(!session_entry_is_running(&idle));
+}
+
+#[test]
+fn running_conversation_keeps_catalog_animation_alive() {
+    let mut panel = NeoismAgentSidePanel::default();
+    panel.set_sessions(vec![NeoismAgentSessionEntry::new("active", "Active", "")
+        .with_runtime_status(Some("running".to_string()))]);
+    assert!(panel.catalog_is_animating());
+
+    panel.set_sessions(vec![NeoismAgentSessionEntry::new("done", "Done", "")
+        .with_runtime_status(Some("completed".to_string()))]);
+    assert!(!panel.catalog_is_animating());
 }
 
 #[test]
@@ -1221,7 +1233,7 @@ fn conversations_width_clamps_to_supported_drag_range() {
     };
 
     let mut panel = NeoismAgentSidePanel::default();
-    assert_eq!(panel.width(), 340.0);
+    assert_eq!(panel.width(), 360.0);
     panel.set_width(0.0);
     assert_eq!(panel.width(), SIDE_PANEL_MIN_WIDTH);
     panel.resize(10_000.0);

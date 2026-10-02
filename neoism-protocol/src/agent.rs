@@ -1011,9 +1011,18 @@ pub struct HistoryMessage {
     pub todos: Vec<TodoItem>,
     #[serde(default)]
     pub usage: Option<Usage>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<HistoryAttachment>,
     /// Unix-ms timestamp when the message landed.
     #[serde(default)]
     pub created_at: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HistoryAttachment {
+    pub filename: String,
+    pub url: String,
+    pub mime: String,
 }
 
 /// Discriminator for [`HistoryMessage`]. Mirrors the desktop pane's

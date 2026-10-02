@@ -1,10 +1,31 @@
 use super::*;
 use neoism_ui::panels::extensions_page::{
-    ExtensionStatus, NeoismExtensionsPane, PaneAction,
+    ExtensionEntry, ExtensionKind, ExtensionStatus, NeoismExtensionsPane, PaneAction,
 };
 use neoism_window::event::MouseButton;
 
 impl Screen<'_> {
+    pub(crate) fn needs_lua_plugin_entries(&self) -> bool {
+        self.context_manager.current_grid().contexts().values().any(|item| {
+            item.val.neoism_extensions.as_ref().is_some_and(|pane| {
+                !pane.entries().iter().any(|entry| entry.kind == ExtensionKind::LuaPlugin)
+            })
+        })
+    }
+
+    pub(crate) fn set_lua_plugin_entries(&mut self, entries: Vec<ExtensionEntry>) {
+        for item in self.context_manager.current_grid_mut().contexts_mut().values_mut() {
+            if let Some(pane) = item.val.neoism_extensions.as_mut() {
+                pane.set_lua_plugin_entries(entries.clone());
+            }
+        }
+        self.mark_dirty();
+    }
+
+    pub(crate) fn take_lua_plugin_actions(&mut self) -> Vec<(String, neoism_ui::panels::extensions_page::LuaPluginAction)> {
+        std::mem::take(&mut self.pending_lua_plugin_actions)
+    }
+
     /// Per-frame renderer. Mirrors `render_neoism_tags_panels`.
     /// Returns true if any pane painted so the caller can mark dirty.
     pub(crate) fn render_neoism_extensions_panels(&mut self) -> bool {
@@ -121,7 +142,8 @@ impl Screen<'_> {
                 continue;
             };
             for entry in pane.entries_mut() {
-                if matches!(entry.status, ExtensionStatus::Installing { .. })
+                if entry.kind == ExtensionKind::ManagedPackage
+                    && matches!(entry.status, ExtensionStatus::Installing { .. })
                     && !in_flight_ids.contains(&entry.id)
                 {
                     // A row showing an install phase with no live job behind
@@ -240,6 +262,9 @@ impl Screen<'_> {
                         )
                         .spawn();
                 }
+            }
+            PaneAction::LuaPluginActionRequested { id, action } => {
+                self.pending_lua_plugin_actions.push((id, action));
             }
         }
         self.mark_dirty();

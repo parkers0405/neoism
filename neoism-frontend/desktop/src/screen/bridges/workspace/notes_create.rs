@@ -3,6 +3,44 @@ use crate::workspace::{self as neo_workspace};
 use std::path::PathBuf;
 
 impl Screen<'_> {
+    fn toggle_notes_sidebar_host(&mut self) -> bool {
+        use neoism_ui::panels::left_sidebar_host::{LeftSidebarView, SidebarTransition};
+        self.renderer.reconcile_left_sidebar_host();
+        let was_visible = self.renderer.notes_sidebar.is_visible();
+        let transition = self.renderer.left_sidebar_host.toggle(
+            LeftSidebarView::Notes,
+            self.renderer.notes_sidebar.is_focused(),
+        );
+        let (visible, focused) = match transition {
+            SidebarTransition::Show => {
+                self.renderer.hide_other_unified_sidebars(LeftSidebarView::Notes);
+                (true, true)
+            }
+            SidebarTransition::Focus => (true, true),
+            SidebarTransition::Hide => (false, false),
+            SidebarTransition::Independent => {
+                self.renderer.notes_sidebar.toggle_focus_or_visibility();
+                (
+                    self.renderer.notes_sidebar.is_visible(),
+                    self.renderer.notes_sidebar.is_focused(),
+                )
+            }
+        };
+        self.renderer
+            .set_left_sidebar_view_state(LeftSidebarView::Notes, visible, focused);
+        if focused {
+            self.renderer.file_tree.set_focused(false);
+            self.renderer.conversations_pane.side_panel_mut().set_focused(false);
+            self.renderer.left_sidebar_host.set_focused(Some(LeftSidebarView::Notes));
+        }
+        if let Some(id) = self.current_workspace_id() {
+            self.workspace_conversations_visibility
+                .insert(id, self.renderer.conversations_visible);
+        }
+        self.sync_file_tree_watchers();
+        was_visible != visible || transition == SidebarTransition::Show
+    }
+
     /// Resolve creation to the vault currently displayed by Alt+N. If the
     /// sidebar has not been initialized yet, fall back to the vault linked
     /// to the active project (or Default for an unlinked project).
@@ -198,15 +236,7 @@ impl Screen<'_> {
             self.renderer.notes_sidebar.workspace_path().is_none()
                 && !self.renderer.notes_sidebar.shows_vault_actions();
         if initialize_served_vault && self.point_notes_sidebar_at_served_vault() {
-            let visibility_changed =
-                self.renderer.notes_sidebar.toggle_focus_or_visibility();
-            if self.renderer.notes_sidebar.is_visible() {
-                self.renderer.file_tree.set_focused(false);
-                self.renderer
-                    .conversations_pane
-                    .side_panel_mut()
-                    .set_focused(false);
-            }
+            let visibility_changed = self.toggle_notes_sidebar_host();
             if visibility_changed {
                 self.reapply_chrome_layout();
             }
@@ -214,15 +244,7 @@ impl Screen<'_> {
             return;
         }
         if self.served_workspace_root().is_some() {
-            let visibility_changed =
-                self.renderer.notes_sidebar.toggle_focus_or_visibility();
-            if self.renderer.notes_sidebar.is_visible() {
-                self.renderer.file_tree.set_focused(false);
-                self.renderer
-                    .conversations_pane
-                    .side_panel_mut()
-                    .set_focused(false);
-            }
+            let visibility_changed = self.toggle_notes_sidebar_host();
             if visibility_changed {
                 self.reapply_chrome_layout();
             }
@@ -261,20 +283,13 @@ impl Screen<'_> {
                 Some(workspace.notes_workspace_dir()),
             );
         }
-        let visibility_changed = self.renderer.notes_sidebar.toggle_focus_or_visibility();
+        let visibility_changed = self.toggle_notes_sidebar_host();
         if let (Some(workspace), Some(path)) = (
             self.current_workspace_id(),
             self.renderer.notes_sidebar.workspace_path(),
         ) {
             self.workspace_notes_vaults
                 .insert(workspace, path.to_path_buf());
-        }
-        if self.renderer.notes_sidebar.is_visible() {
-            self.renderer.file_tree.set_focused(false);
-            self.renderer
-                .conversations_pane
-                .side_panel_mut()
-                .set_focused(false);
         }
         if visibility_changed {
             self.reapply_chrome_layout();
@@ -348,8 +363,11 @@ impl Screen<'_> {
         // the splash/terminal keeps keyboard focus, the notes tree just
         // appears alongside.
         let was_visible = self.renderer.notes_sidebar.is_visible();
-        self.renderer.notes_sidebar.set_visible(true);
-        self.renderer.notes_sidebar.set_focused(false);
+        self.renderer.set_left_sidebar_visibility(
+            neoism_ui::panels::left_sidebar_host::LeftSidebarView::Notes,
+            true,
+            false,
+        );
         // Expand the bundled `Welcome/` folder; open no note, leave
         // selection untouched.
         self.renderer

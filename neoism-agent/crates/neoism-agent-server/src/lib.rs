@@ -49,6 +49,8 @@ mod permission;
 mod permission_runtime;
 mod platform_shell;
 mod plugin;
+mod plugin_package;
+mod scoped_plugin_runtime;
 mod plugin_adapters;
 mod plugin_host_process;
 mod plugins;

@@ -14,6 +14,7 @@
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+use crate::plugin_resource::{PluginResourceReply, PluginResourceRequest};
 
 /// Syntax token classes carried over the wire. Mirrors
 /// `neoism_ui::syntax::SynTok` variant-for-variant; kept here so the
@@ -46,6 +47,9 @@ pub struct SyntaxSpan {
 /// session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum EditorClientMessage {
+    /// Daemon-owned opaque resources used by remote plugin adapters. The
+    /// websocket connection itself supplies the unforgeable socket binding.
+    PluginResource { request: PluginResourceRequest },
     /// Ask the daemon to tree-sitter-highlight `text`.
     ///
     /// Every `tree-sitter*` crate is gated `cfg(not(target_arch =
@@ -228,6 +232,59 @@ pub enum EditorClientMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         surface_id: Option<String>,
     },
+    /// Structured, position-explicit read for non-UI consumers. Paths are
+    /// opaque identities in the daemon host's syntax, not guest-native paths.
+    /// The editor envelope request id is the sole transport correlation id.
+    LspRead {
+        operation: EditorLspReadOperation,
+        path: String,
+        line: u32,
+        character: u32,
+        #[serde(default)]
+        query: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        buffer_text: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        surface_id: Option<String>,
+    },
+    /// Prepare a structured mutating LSP operation without changing files.
+    /// Code-action/server payloads remain in a connection-local daemon vault;
+    /// only random, one-shot capability ids cross the wire.
+    LspEditPrepare {
+        operation: EditorLspEditOperation,
+        path: String,
+        line: u32,
+        character: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        argument: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        action: Option<EditorLspActionCapability>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        buffer_text: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        open_buffers: Vec<EditorLspOpenBuffer>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        surface_id: Option<String>,
+    },
+    /// Consume a prepared mutation capability. The daemon revalidates the
+    /// complete live-buffer revision snapshot and all closed-file digests
+    /// before applying any closed-file edits.
+    LspEditCommit {
+        plan_id: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        open_buffers: Vec<EditorLspOpenBuffer>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        surface_id: Option<String>,
+    },
+    /// Execute a private command retained by a successful edit commit, after
+    /// the frontend has applied and synchronized every returned open-buffer edit.
+    LspEditFinalize {
+        command_id: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        buffers: Vec<EditorLspBufferSnapshot>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        surface_id: Option<String>,
+    },
     /// Apply one code action from an `LspQueryAt { action: CodeActions }`
     /// result, seq-tokened and open-path-aware like `LspQueryAt` (the
     /// legacy `ApplyLspCodeAction` predates the native editor and kept
@@ -280,6 +337,218 @@ pub enum EditorLspAction {
     /// synthetic hover, matching the desktop card surface.
     SignatureHelp,
     DocumentHighlight,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EditorLspReadOperation {
+    Hover,
+    SignatureHelp,
+    Definition,
+    References,
+    DocumentSymbols,
+    WorkspaceSymbols,
+    Diagnostics,
+    Clients,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EditorLspEditOperation {
+    CodeActions,
+    ApplyCodeAction,
+    Rename,
+    Format,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditorLspOpenBuffer {
+    pub path: String,
+    pub revision: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditorLspBufferSnapshot {
+    pub path: String,
+    pub revision: u64,
+    pub text: String,
+}
+
+/// Public half of a daemon-retained code action. `request_id` binds the
+/// capability to the exact preparation that created it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditorLspActionCapability {
+    pub request_id: u64,
+    pub action_id: String,
+    pub title: String,
+    pub kind: Option<String>,
+    pub preferred: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditorLspPreparedFile {
+    pub path: String,
+    pub edit_count: usize,
+    pub open: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditorLspMutationPlan {
+    pub plan_id: String,
+    pub title: String,
+    pub files: Vec<EditorLspPreparedFile>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditorLspReadPosition {
+    pub line: u32,
+    pub character: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditorLspReadRange {
+    pub start: EditorLspReadPosition,
+    pub end: EditorLspReadPosition,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditorLspReadLocation {
+    pub path: String,
+    pub range: Option<EditorLspReadRange>,
+    pub language: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditorLspReadHover {
+    pub path: String,
+    pub contents: String,
+    pub kind: Option<String>,
+    pub range: Option<EditorLspReadRange>,
+    pub language: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditorLspReadParameter {
+    pub label: String,
+    pub documentation: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditorLspReadSignature {
+    pub label: String,
+    pub documentation: Option<String>,
+    pub parameters: Vec<EditorLspReadParameter>,
+    pub active_parameter: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditorLspReadSignatureHelp {
+    pub path: String,
+    pub signatures: Vec<EditorLspReadSignature>,
+    pub active_signature: Option<u32>,
+    pub active_parameter: Option<u32>,
+    pub language: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditorLspReadDocumentSymbol {
+    pub name: String,
+    pub kind: String,
+    pub detail: Option<String>,
+    pub path: String,
+    pub range: Option<EditorLspReadRange>,
+    pub selection_range: Option<EditorLspReadRange>,
+    pub children: Vec<EditorLspReadDocumentSymbol>,
+    pub language: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditorLspReadWorkspaceSymbol {
+    pub name: String,
+    pub kind: String,
+    pub path: String,
+    pub line: Option<u32>,
+    pub language: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditorLspReadRelatedInformation {
+    pub path: String,
+    pub range: Option<EditorLspReadRange>,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditorLspReadDiagnostic {
+    pub path: String,
+    pub range: Option<EditorLspReadRange>,
+    pub severity: String,
+    pub code: Option<String>,
+    pub code_description: Option<String>,
+    pub source: Option<String>,
+    pub message: String,
+    pub tags: Vec<String>,
+    pub related_information: Vec<EditorLspReadRelatedInformation>,
+    pub data: Option<serde_json::Value>,
+    pub language: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditorLspReadCapabilities {
+    pub workspace_symbols: bool,
+    pub completion: bool,
+    pub hover: bool,
+    pub definition: bool,
+    pub references: bool,
+    pub implementation: bool,
+    pub call_hierarchy: bool,
+    pub diagnostics: bool,
+    pub document_symbols: bool,
+    pub formatting: bool,
+    pub code_actions: bool,
+    pub rename: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditorLspReadClient {
+    pub id: String,
+    pub name: String,
+    pub status: String,
+    pub language: String,
+    pub command: Vec<String>,
+    pub workspace_root: String,
+    pub capabilities: EditorLspReadCapabilities,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "items", rename_all = "snake_case")]
+pub enum EditorLspReadOutcome {
+    Hover(Vec<EditorLspReadHover>),
+    SignatureHelp(Vec<EditorLspReadSignatureHelp>),
+    Definition(Vec<EditorLspReadLocation>),
+    References(Vec<EditorLspReadLocation>),
+    DocumentSymbols(Vec<EditorLspReadDocumentSymbol>),
+    WorkspaceSymbols(Vec<EditorLspReadWorkspaceSymbol>),
+    Diagnostics(Vec<EditorLspReadDiagnostic>),
+    Clients(Vec<EditorLspReadClient>),
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
@@ -488,6 +757,15 @@ pub struct EditorLspFileEdit {
     pub edits: Vec<EditorLspTextEdit>,
 }
 
+/// A structured-edit result path is an opaque identity in the daemon host's
+/// syntax. Guests must not interpret it with their native `Path` semantics.
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditorLspStructuredFileEdit {
+    pub path: String,
+    pub edits: Vec<EditorLspTextEdit>,
+}
+
 /// One completion candidate for the editor popup.
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct EditorLspCompletionItem {
@@ -531,6 +809,7 @@ pub struct EditorLspCompletionItem {
 /// from nvim's `ext_linegrid` UI surface.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum EditorServerMessage {
+    PluginResource { reply: PluginResourceReply },
     /// Reply to `HighlightBuffer`. Empty `spans` means the daemon has no
     /// grammar for this file type — the client keeps its per-line
     /// fallback rather than painting nothing.
@@ -818,6 +1097,47 @@ pub enum EditorServerMessage {
         #[serde(default)]
         title: String,
     },
+    /// Structured result for [`EditorClientMessage::LspRead`]. It remains
+    /// separate from popup/finder results so native UI state is never scraped.
+    LspReadResult {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        surface_id: Option<String>,
+        operation: EditorLspReadOperation,
+        outcome: EditorLspReadOutcome,
+    },
+    /// Non-mutating result of `LspEditPrepare`. Exactly one of `actions` and
+    /// `plan` is populated according to `operation`.
+    LspEditPrepared {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        surface_id: Option<String>,
+        operation: EditorLspEditOperation,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        actions: Vec<EditorLspActionCapability>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        plan: Option<EditorLspMutationPlan>,
+    },
+    /// Commit result. Only portable typed edits for buffers still owned by the
+    /// frontend cross the wire; closed host files were patched by the daemon.
+    LspEditCommitted {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        surface_id: Option<String>,
+        title: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        edits: Vec<EditorLspStructuredFileEdit>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        applied_files: Vec<String>,
+        #[serde(default)]
+        ran_command: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        command_id: Option<String>,
+    },
+    /// Terminal acknowledgement for a deferred structured code-action command.
+    LspEditFinalized {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        surface_id: Option<String>,
+        #[serde(default)]
+        ran_command: bool,
+    },
     /// Completion items for the active cursor, answering an
     /// `EditorClientMessage::LspComplete`. `seq` echoes the request so the
     /// client drops superseded responses. `replace_prefix` is the identifier
@@ -947,11 +1267,15 @@ impl EditorClientMessage {
             | EditorClientMessage::CancelLspCompletion { surface_id }
             | EditorClientMessage::CloseLspBuffer { surface_id, .. }
             | EditorClientMessage::LspQueryAt { surface_id, .. }
+            | EditorClientMessage::LspRead { surface_id, .. }
+            | EditorClientMessage::LspEditPrepare { surface_id, .. }
+            | EditorClientMessage::LspEditCommit { surface_id, .. }
+            | EditorClientMessage::LspEditFinalize { surface_id, .. }
             | EditorClientMessage::ApplyLspCodeActionAt { surface_id, .. }
             | EditorClientMessage::LspHoverAt { surface_id, .. }
             | EditorClientMessage::DidSave { surface_id, .. } => surface_id.as_deref(),
             // Highlighting is keyed by path, not by a pane route.
-            EditorClientMessage::HighlightBuffer { .. } => None,
+            EditorClientMessage::HighlightBuffer { .. } | EditorClientMessage::PluginResource { .. } => None,
             EditorClientMessage::Close => None,
         }
     }
@@ -1302,6 +1626,15 @@ mod tests {
             open_paths: vec!["src/lib.rs".into()],
             surface_id: Some("pane:7".into()),
         });
+        roundtrip_client(&EditorClientMessage::LspRead {
+            operation: EditorLspReadOperation::WorkspaceSymbols,
+            path: r"C:\host\workspace\src\main.rs".into(),
+            line: 12,
+            character: 4,
+            query: "shared".into(),
+            buffer_text: Some("fn shared() {}".into()),
+            surface_id: Some("lua:lsp:7".into()),
+        });
         roundtrip_client(&EditorClientMessage::CloseLspBuffer {
             surface_id: Some("pane:7".into()),
         });
@@ -1343,6 +1676,36 @@ mod tests {
             applied_files: vec!["/workspace/src/other.rs".into()],
             ran_command: false,
             title: "Rename".into(),
+        });
+    }
+
+    #[test]
+    fn structured_lsp_read_result_roundtrip_preserves_portable_data() {
+        roundtrip_server(&EditorServerMessage::LspReadResult {
+            surface_id: Some("lua:lsp:7".into()),
+            operation: EditorLspReadOperation::Diagnostics,
+            outcome: EditorLspReadOutcome::Diagnostics(vec![EditorLspReadDiagnostic {
+                path: r"C:\host\workspace\src\main.rs".into(),
+                range: Some(EditorLspReadRange {
+                    start: EditorLspReadPosition {
+                        line: 2,
+                        character: 4,
+                    },
+                    end: EditorLspReadPosition {
+                        line: 2,
+                        character: 9,
+                    },
+                }),
+                severity: "error".into(),
+                code: Some("E1".into()),
+                code_description: None,
+                source: Some("fixture".into()),
+                message: "broken".into(),
+                tags: vec!["unnecessary".into()],
+                related_information: Vec::new(),
+                data: Some(serde_json::json!({ "fix": 7 })),
+                language: Some("rust".into()),
+            }]),
         });
     }
 

@@ -39,7 +39,7 @@ use crate::state::AppState;
 use crate::tool_routes::tool_list;
 use crate::v2_routes::{
     v2_capabilities, v2_compact, v2_context, v2_events, v2_message_list, v2_meta,
-    v2_plugin, v2_plugins, v2_prompt, v2_prompt_async, v2_session_catalog_events,
+    v2_plugin, v2_plugin_lifecycle, v2_plugins, v2_prompt, v2_prompt_async, v2_session_catalog_events,
     v2_session_children, v2_session_list, v2_session_runtime, v2_wait,
 };
 
@@ -59,6 +59,7 @@ pub(crate) fn app_with_cors(state: AppState, allowed_origins: &[String]) -> Rout
         .route("/v2/audit", get(audit_list))
         .route("/v2/capabilities", get(v2_capabilities))
         .route("/v2/plugins", get(v2_plugins))
+        .route("/v2/plugins/lifecycle", get(v2_plugin_lifecycle))
         .route("/v2/plugins/:plugin_id/manifest", get(v2_plugin))
         .route(
             "/v2/execution-activity",
@@ -303,6 +304,11 @@ async fn plugin_route_dispatch(
     State(state): State<AppState>,
     request: Request<Body>,
 ) -> Response {
+    let tenant_id = request
+        .extensions()
+        .get::<crate::caller::CallerClaims>()
+        .map_or("local", |claims| claims.tenant_id.as_str())
+        .to_string();
     let installation = installation_resource_request(&request);
     let directory = if installation {
         let context = match crate::workflow::installation_context(state.services()) {
@@ -348,6 +354,7 @@ async fn plugin_route_dispatch(
             &state,
             request.uri().path(),
             request.method().as_str(),
+            &tenant_id,
         )
         .await
         {
@@ -368,7 +375,20 @@ async fn plugin_route_dispatch(
             .to_string_lossy()
             .into_owned()
     };
-    let snapshot = state.plugin_snapshot(&directory).await;
+    let snapshot = match state
+        .try_plugin_snapshot_for_tenant(&tenant_id, &directory)
+        .await
+    {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            tracing::error!(%error, %tenant_id, %directory, "failed to initialize plugin generation");
+            return auth_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "plugin.generation_unavailable",
+                "The plugin generation could not be initialized",
+            );
+        }
+    };
     if !snapshot.is_active() {
         return auth_error(
             StatusCode::GONE,
@@ -439,6 +459,7 @@ async fn find_scoped_plugin_session(
     state: &AppState,
     path: &str,
     method: &str,
+    tenant_id: &str,
 ) -> Option<neoism_agent_core::SessionInfo> {
     for candidate_id in path.split('/').filter(|segment| !segment.is_empty()).rev() {
         let Some(session) = state
@@ -451,7 +472,14 @@ async fn find_scoped_plugin_session(
         else {
             continue;
         };
-        let snapshot = state.plugin_snapshot(&session.directory).await;
+        let snapshot = state
+            .try_plugin_snapshot_for_session_tenant(
+                tenant_id,
+                &session.directory,
+                session.id.as_str(),
+            )
+            .await
+            .ok()?;
         if snapshot_matches_session_route(&snapshot, method, path, session.id.as_str()) {
             return Some(session);
         }
@@ -465,7 +493,8 @@ async fn resolve_scoped_plugin_session(
     method: &str,
     claims: &crate::caller::CallerClaims,
 ) -> Result<Option<MatchedPluginSession>, Response> {
-    let Some(session) = find_scoped_plugin_session(state, path, method).await else {
+    let Some(session) = find_scoped_plugin_session(state, path, method, &claims.tenant_id).await
+    else {
         return Ok(None);
     };
     if !allows_session_or_ancestor(state, claims, &session)
@@ -1596,6 +1625,49 @@ mod hosted_plugin_authorization_tests {
         assert!(!allows_global_execution_observation(&claims));
     }
 
+    #[tokio::test]
+    async fn joined_and_hosted_catalogs_use_distinct_active_tenant_generations() {
+        let root = std::env::temp_dir().join(format!(
+            "neoism-plugin-tenant-catalog-{}",
+            neoism_agent_core::Id::ascending(neoism_agent_core::IdKind::Event)
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let state = AppState::open_database(root.join("state.sqlite3"))
+            .await
+            .unwrap();
+        let directory = root.to_string_lossy().into_owned();
+
+        for (tenant_id, hosted) in [("workspace:joined", false), ("hosted:tenant", true)] {
+            let mut request = Request::builder()
+                .method(Method::GET)
+                .uri(format!("/v2/agents?directory={directory}"))
+                .body(Body::empty())
+                .unwrap();
+            let mut claims = scoped_claims(directory.clone(), tenant_id);
+            claims.hosted = hosted;
+            request.extensions_mut().insert(claims);
+            let response = plugin_route_dispatch(State(state.clone()), request).await;
+            assert_eq!(response.status(), StatusCode::OK, "{tenant_id}");
+            assert!(state
+                .try_plugin_snapshot_for_tenant(tenant_id, &directory)
+                .await
+                .unwrap()
+                .is_active());
+        }
+
+        let joined = state
+            .workspace_runtime_for_tenant("workspace:joined", &directory)
+            .await
+            .unwrap();
+        let hosted = state
+            .workspace_runtime_for_tenant("hosted:tenant", &directory)
+            .await
+            .unwrap();
+        assert!(!std::sync::Arc::ptr_eq(&joined, &hosted));
+        state.shutdown().await.unwrap();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     async fn session_route_fixture(
     ) -> (AppState, neoism_agent_core::SessionInfo, std::path::PathBuf) {
         let root = std::env::temp_dir().join(format!(
@@ -1668,7 +1740,7 @@ mod hosted_plugin_authorization_tests {
         // workspace-scoped — a server name that collides with a real session
         // id must not resolve dispatch into that session's workspace.
         let path = format!("/v2/plugins/dev.neoism.mcp/{}/tools", session.id);
-        assert!(find_scoped_plugin_session(&state, &path, "GET")
+        assert!(find_scoped_plugin_session(&state, &path, "GET", "local")
             .await
             .is_none());
         // The same session id on a genuinely session-scoped route resolves.
@@ -1677,7 +1749,7 @@ mod hosted_plugin_authorization_tests {
             neoism_agent_builtins::plugin::goals::ID,
             session.id
         );
-        let matched = find_scoped_plugin_session(&state, &scoped, "GET")
+        let matched = find_scoped_plugin_session(&state, &scoped, "GET", "local")
             .await
             .expect("session-scoped descriptor must resolve");
         assert_eq!(matched.id, session.id);

@@ -24,7 +24,12 @@
 //! the diagnostics worker removes that one-based offset exactly once.
 
 use super::*;
+mod lua;
 mod remote;
+pub(crate) use lua::{
+    drain_lua_lsp_completions, LuaLspPrivateResult, LuaLspRetainedCodeAction,
+};
+pub(crate) use remote::cancel_remote_lua_lsp_request;
 use neoism_agent_server::language_server as engine;
 use neoism_backend::event::{EventProxy, RioEvent, RioEventType, WindowId};
 // Pure LSP session helpers now live in the shared crate
@@ -42,6 +47,7 @@ use neoism_ui::editor::code::lsp_session::{
 use neoism_ui::editor::code::{
     CodeDiagAnchor, CodeDiagnosticSeverity, CodeDiagnosticSummary, CodeLineDiagnostic,
 };
+use neoism_ui::editor::code::buffer::CodeTextEdit;
 use neoism_ui::editor_snapshot::{PopupMenu, PopupMenuItem};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -230,6 +236,7 @@ enum CodeLspJob {
 
 struct CodeLspShared {
     jobs: Sender<CodeLspJob>,
+    runtime: engine::LspRuntime,
 }
 
 static CODE_LSP: OnceLock<CodeLspShared> = OnceLock::new();
@@ -1090,7 +1097,7 @@ fn ensure_workers(proxy: EventProxy, window_id: WindowId) -> &'static CodeLspSha
             neoism_agent_neoism_adapter::neoism_services(),
         );
         let query_runtime = runtime.clone();
-        let diagnostics_runtime = runtime;
+        let diagnostics_runtime = runtime.clone();
         let (tx, rx) = mpsc::channel::<CodeLspJob>();
         let query_proxy = proxy.clone();
         let _ = std::thread::Builder::new()
@@ -1773,7 +1780,7 @@ fn ensure_workers(proxy: EventProxy, window_id: WindowId) -> &'static CodeLspSha
                     }
                 }
             });
-        CodeLspShared { jobs: tx }
+        CodeLspShared { jobs: tx, runtime }
     })
 }
 
@@ -1936,7 +1943,7 @@ impl Screen<'_> {
                                 file: canonical_key(&code.path),
                             },
                             revision,
-                            lines: code.buffer.lines.clone(),
+                            lines: code.buffer.lines_for_diff().to_vec(),
                         },
                     );
                 }
@@ -2885,6 +2892,47 @@ impl Screen<'_> {
             trigger,
             seq,
         });
+    }
+
+    /// Install exact-revision plugin candidates into the same Rust-owned menu
+    /// and acceptance path used by LSP. Snippet expansion and CRDT sync stay in
+    /// the native acceptance path; no plugin callback runs while drawing.
+    pub(crate) fn install_plugin_completions(
+        &mut self,
+        expected_revision: u64,
+        position: neoism_lua::TextPosition,
+        candidates: Vec<neoism_lua::CompletionCandidate>,
+    ) -> Result<(), String> {
+        if candidates.len() > 256 { return Err("completion source returned more than 256 candidates".into()); }
+        let Some(code) = self.context_manager.current().code.as_ref() else { return Err("completion target is not a code document".into()); };
+        if code.buffer.revision != expected_revision || code.buffer.cursor_line != position.line as usize || code.buffer.cursor_col != position.character as usize {
+            return Err("completion target revision or cursor is stale".into());
+        }
+        let path = code.path.clone();
+        let line_text = code.buffer.lines.get(code.buffer.cursor_line).cloned().unwrap_or_default();
+        let anchor_col = word_start_col(&line_text, code.buffer.cursor_col);
+        let id = QUERY_SEQ.fetch_add(1, Ordering::SeqCst);
+        let items = candidates.into_iter().map(|candidate| {
+            let snippet = candidate.snippet;
+            let insert_text = snippet.clone().unwrap_or_else(|| if candidate.insert_text.is_empty() { candidate.label.clone() } else { candidate.insert_text });
+            engine::LspCompletionItem {
+                server_id: None,
+                label: candidate.label,
+                kind: if candidate.kind.is_empty() { "plugin".into() } else { candidate.kind },
+                detail: (!candidate.detail.is_empty()).then_some(candidate.detail),
+                documentation: (!candidate.documentation.is_empty()).then_some(candidate.documentation),
+                insert_text,
+                filter_text: (!candidate.filter_text.is_empty()).then_some(candidate.filter_text),
+                sort_text: (!candidate.sort_text.is_empty()).then_some(candidate.sort_text),
+                preselect: false,
+                payload: if snippet.is_some() { serde_json::json!({ "insertTextFormat": 2 }) } else { serde_json::Value::Null },
+            }
+        }).collect::<Vec<_>>();
+        let mut session = CodeCompletionSession { path, line: position.line as usize, anchor_col, id, seq: id, items, filtered: Vec::new(), selected: 0, display: PopupMenu::default() };
+        rebuild_completion_filter(&mut session, &line_text[anchor_col..position.character as usize]);
+        self.renderer.code_lsp.completion = (!session.filtered.is_empty()).then_some(session);
+        self.mark_dirty();
+        Ok(())
     }
 
     /// Request hover docs at the cursor (Ctrl+K / vim `K`).

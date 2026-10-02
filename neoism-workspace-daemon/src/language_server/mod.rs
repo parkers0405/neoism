@@ -23,6 +23,8 @@ pub(crate) use active_buffer::{
 };
 pub use live_sync::{flush_document_sync, save_document, sync_document};
 pub(crate) use native_queries::{
-    apply_code_action_at, query_at, scoped_file as native_lsp_file,
+    apply_code_action_at, commit_structured_edit, finalize_structured_edit,
+    prepare_structured_edit, query_at, read_query, scoped_file as native_lsp_file,
+    StructuredEditVault,
 };
 pub(crate) use queries::{completion, hover_at};

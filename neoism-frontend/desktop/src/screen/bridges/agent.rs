@@ -606,7 +606,7 @@ impl Screen<'_> {
         crate::neoism::view::clear_overlays(&mut self.sugarloaf);
 
         let scale = self.sugarloaf.scale_factor();
-        let theme = self.renderer.theme;
+        let theme = self.renderer.styled_theme(neoism_lua::selector::AGENT_CHAT);
         let active_route = self.context_manager.current_route();
         let chrome_scale = self.renderer.chrome_scale();
         let mouse = Some((self.mouse.x as f32 / scale, self.mouse.y as f32 / scale));
@@ -672,11 +672,19 @@ impl Screen<'_> {
         .1;
 
         let workspace_margins = self.workspace_chrome_margins();
+        let checkout_context = {
+            let info = self.renderer.status_line.info();
+            neoism_ui::panels::agent_pane::view::AgentCheckoutContext::new(
+                info.cwd_label.clone(),
+                info.branch.clone(),
+            )
+        };
         let mut agent_animating = false;
         let mut agent_animating_reason = None;
         let mut agent_ui_events = Vec::new();
         let mut agent_tab_titles = Vec::new();
         let mut external_root_bound = false;
+        let mut active_agent_details_available = false;
         let agent_event_wake = crate::neoism::agent::AgentEventWake::new(
             self.context_manager.event_proxy(),
             self.context_manager.window_id(),
@@ -797,6 +805,15 @@ impl Screen<'_> {
             rect = agent_surface_content_rect(rect, chrome_bottom);
             rect[3] = rect[3].min((logical_window_bottom - rect[1]).max(0.0));
             let is_active_pane = route_id == active_route;
+            if is_active_pane {
+                active_agent_details_available = self.details_panel_enabled
+                    && neoism_ui::panels::agent_pane::view::detail_rail_available(
+                        agent.has_conversation(),
+                        false,
+                        rect[2],
+                        chrome_scale,
+                    );
+            }
             crate::neoism::view::render(
                 &mut self.sugarloaf,
                 agent,
@@ -807,10 +824,26 @@ impl Screen<'_> {
                 mouse,
                 chrome_scale,
                 &text_occlusions,
+                &checkout_context,
+                Some(&self.renderer.plugins),
             );
             let animation_reason = agent.animation_reason();
             agent_animating |= animation_reason.is_some();
             agent_animating_reason = agent_animating_reason.or(animation_reason);
+        }
+        let details_button_changed = self.renderer.top_bar.is_right_button_visible()
+            != active_agent_details_available;
+        self.renderer
+            .top_bar
+            .set_right_button_visible(active_agent_details_available);
+        self.renderer
+            .top_bar
+            .set_mobile_agent_panel_button_visible(false);
+        if details_button_changed {
+            self.renderer.relayout_surfaces(
+                window_size.width as f32 / scale,
+                window_size.height as f32 / scale,
+            );
         }
         // Synchronize by agent route, not the active tab index or strip owner:
         // a hidden agent can share a strip with an active editor/terminal tab.
@@ -858,8 +891,10 @@ impl Screen<'_> {
         // The notes sidebar wordmark hover needs the pointer; the
         // renderer owns no input, so push the logical position here
         // (this bridge already runs every frame).
-        self.renderer.notes_sidebar_mouse =
-            Some((self.mouse.x as f32 / scale, self.mouse.y as f32 / scale));
+        self.renderer.notes_sidebar_mouse = self
+            .mouse
+            .inside_window
+            .then_some((self.mouse.x as f32 / scale, self.mouse.y as f32 / scale));
         // Publish the open picker card's rect so chrome text drawn
         // later (tab-strip labels, panels) occludes under the modal
         // instead of bleeding through it.
@@ -1270,7 +1305,13 @@ impl Screen<'_> {
         // fires — so the panel would close but never re-open. Bail for
         // clicks in the top-bar row so they fall through. Mirrors the
         // open-menu / buffer-tab / Island-strip guards.
-        if self.renderer.top_bar.is_visible() && my < self.renderer.top_bar_strip_height()
+        if self
+            .renderer
+            .surface_layout
+            .surfaces
+            .get(neoism_ui::surface_layout::CHROME_ACTIONS_SURFACE)
+            .and_then(|surface| surface.bounds)
+            .is_some_and(|rect| rect.contains(mx, my))
         {
             return false;
         }

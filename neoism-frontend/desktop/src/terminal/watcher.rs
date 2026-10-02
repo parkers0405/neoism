@@ -28,6 +28,9 @@ fn config_update_paths_match(
     paths.iter().any(|path| {
         path.as_path() == config_dir.join("config.json")
             || path.file_name() == Some(std::ffi::OsStr::new("config.json"))
+            || path.as_path() == config_dir.join("init.lua")
+            || path.starts_with(config_dir.join("lua"))
+            || path.starts_with(config_dir.join("plugins"))
             || path.starts_with(config_dir.join("ide-themes"))
             || path.starts_with(config_dir.join("packs"))
             || omarchy_current_dir.is_some_and(|dir| {

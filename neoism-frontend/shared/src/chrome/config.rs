@@ -186,6 +186,10 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         std::mem::take(&mut self.pending_plugin_commands)
     }
 
+    pub fn queue_plugin_command(&mut self, id: String) {
+        self.pending_plugin_commands.push(id);
+    }
+
     pub(crate) fn apply_top_bar_action(&mut self, action: TopBarAction) {
         match action {
             TopBarAction::TogglePanel => {

@@ -5588,6 +5588,7 @@ dependencies = [
  "console_error_panic_hook",
  "getrandom 0.2.17",
  "js-sys",
+ "neoism-lua",
  "neoism-neoworld-core",
  "neoism-protocol",
  "neoism-terminal-core",

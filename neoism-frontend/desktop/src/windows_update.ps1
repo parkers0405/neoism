@@ -15,7 +15,7 @@ if (-not $LibraryOnly) {
     Import-Module ([IO.Path]::Combine($PSHOME, 'Modules\Microsoft.PowerShell.Management\Microsoft.PowerShell.Management.psd1')) -Force
     Import-Module ([IO.Path]::Combine($PSHOME, 'Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1')) -Force
 }
-$script:BinaryNames = @('neoism.exe', 'neoism-workspace-daemon.exe', 'neoism-agent.exe')
+$script:BinaryNames = @('neoism.exe', 'neoism-workspace-daemon.exe', 'neoism-agent.exe', 'neoism-agent-lua-runner.exe')
 
 function Get-FullPath([string]$Path) {
     # Rust may supply a verbatim path while Process.Path/registry use DOS paths.
@@ -242,7 +242,7 @@ function Stop-TargetStack([string]$Directory) {
     $deadline = [DateTime]::UtcNow.AddSeconds(30)
     do {
         $relevant = @()
-        foreach ($process in Get-Process -Name 'neoism', 'neoism-workspace-daemon', 'neoism-agent' -ErrorAction SilentlyContinue) {
+        foreach ($process in Get-Process -Name 'neoism', 'neoism-workspace-daemon', 'neoism-agent', 'neoism-agent-lua-runner' -ErrorAction SilentlyContinue) {
             # Inaccessible unrelated processes are not killed. Any target file
             # still locked is rejected by exclusive-open below (and by MSI).
             try { $path = $process.Path } catch { continue }
@@ -318,7 +318,7 @@ function Complete-VerifiedUpdate([string]$Directory, [hashtable]$Manifest) {
         # Explicit verified path; neither PATH nor the old portable/MSI alternative.
         Start-Process -FilePath (Join-Path $Directory 'neoism.exe') -WorkingDirectory $Directory | Out-Null
     }
-    Write-UpdateResult 'succeeded' 'All three installed binaries match the expected release version and payload hashes'
+    Write-UpdateResult 'succeeded' 'All four installed binaries match the expected release version and payload hashes'
 }
 function Invoke-WindowsUpdate {
     $script:Target = $null; $script:MsiExitCode = $null; $script:InstallationVerified = $false

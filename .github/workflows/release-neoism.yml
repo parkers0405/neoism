@@ -98,7 +98,7 @@ jobs:
           # (aarch64 mac runner + x86_64-apple-darwin target) if Intel macs
           # ever matter.
           # - { runner: macos-13,      goos: darwin, goarch: x86_64,  target: x86_64-apple-darwin }
-          # Windows ships as a per-user WiX MSI. The installer owns the three
+          # Windows ships as a per-user WiX MSI. The installer owns the four
           # binaries, PATH, shortcuts, associations, upgrades, and uninstall.
           - { runner: windows-latest, goos: windows, goarch: x86_64,  target: x86_64-pc-windows-msvc }
           # linux-aarch64 dropped for now: `ubuntu-24.04-arm` isn't free on a
@@ -211,7 +211,7 @@ jobs:
         shell: bash
         run: |
           env -u CI cargo build --release --locked --target ${{ matrix.target }} \
-           -p neoism -p neoism-workspace-daemon -p neoism-agent --features wgpu
+           -p neoism -p neoism-workspace-daemon -p neoism-agent -p neoism-agent-lua-runner --features wgpu
           sccache --show-stats || true
 
       - name: Verify all packaged executable versions
@@ -220,7 +220,7 @@ jobs:
           set -euo pipefail
           suffix=''
           if [ "$RUNNER_OS" = Windows ]; then suffix='.exe'; fi
-          for binary in neoism neoism-workspace-daemon neoism-agent; do
+          for binary in neoism neoism-workspace-daemon neoism-agent neoism-agent-lua-runner; do
             actual=$("target/${{ matrix.target }}/release/$binary$suffix" --version | tr -d '\r')
             if [ "$actual" != "$binary $NEOISM_RELEASE_VERSION" ]; then
               printf 'Version mismatch in %s: expected %s, received %s\n' "$binary" "$NEOISM_RELEASE_VERSION" "$actual" >&2
@@ -256,7 +256,7 @@ jobs:
             Sort-Object FullName -Descending | Select-Object -First 1).FullName
           if (-not $signtool) { throw "signtool.exe was not found" }
           $bin = "target/${{ matrix.target }}/release"
-          foreach ($file in @("$bin/neoism.exe", "$bin/neoism-workspace-daemon.exe", "$bin/neoism-agent.exe")) {
+          foreach ($file in @("$bin/neoism.exe", "$bin/neoism-workspace-daemon.exe", "$bin/neoism-agent.exe", "$bin/neoism-agent-lua-runner.exe")) {
             & $signtool sign /fd SHA256 /td SHA256 /tr http://timestamp.digicert.com `
               /f $pfx /p $env:WINDOWS_SIGN_PFX_PASSWORD $file
             if ($LASTEXITCODE -ne 0) { throw "failed to sign $file" }
@@ -278,7 +278,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "agent GUI payload validation failed" }
           $fixtureBin = Join-Path $env:RUNNER_TEMP "neoism-upgrade-fixture"
           New-Item -ItemType Directory -Force $fixtureBin | Out-Null
-          Copy-Item "$bin\neoism.exe", "$bin\neoism-workspace-daemon.exe", "$bin\neoism-agent.exe" $fixtureBin
+          Copy-Item "$bin\neoism.exe", "$bin\neoism-workspace-daemon.exe", "$bin\neoism-agent.exe", "$bin\neoism-agent-lua-runner.exe" $fixtureBin
           Copy-Item (Join-Path $bin "web") (Join-Path $fixtureBin "web") -Recurse
           [IO.File]::AppendAllText((Join-Path $fixtureBin "neoism.exe"), "neoism-upgrade-fixture")
           wix build misc/windows/neoism.wxs `
@@ -352,7 +352,8 @@ jobs:
           bash scripts/audit-macos-dylibs.sh \
             "$BIN/neoism" \
             "$BIN/neoism-workspace-daemon" \
-            "$BIN/neoism-agent"
+            "$BIN/neoism-agent" \
+            "$BIN/neoism-agent-lua-runner"
 
       - name: Package neoism-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz
         if: matrix.goos != 'windows'
@@ -362,7 +363,7 @@ jobs:
           OUT="neoism-${{ matrix.goos }}-${{ matrix.goarch }}"
           mkdir -p "stage/$OUT"
           BIN="target/${{ matrix.target }}/release"
-          cp "$BIN/neoism" "$BIN/neoism-workspace-daemon" "$BIN/neoism-agent" "stage/$OUT/"
+          cp "$BIN/neoism" "$BIN/neoism-workspace-daemon" "$BIN/neoism-agent" "$BIN/neoism-agent-lua-runner" "stage/$OUT/"
           cp -a neoism-frontend/web/dist "stage/$OUT/web"
           test -f "stage/$OUT/web/index.html"
           node scripts/package-agent-gui.mjs "stage/$OUT/web/agent-gui"
@@ -373,7 +374,7 @@ jobs:
             # installs keep using those, the .app is dragged to /Applications.
             APP="stage/$OUT/Neoism.app"
             mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-            cp "$BIN/neoism" "$BIN/neoism-workspace-daemon" "$BIN/neoism-agent" "$APP/Contents/MacOS/"
+            cp "$BIN/neoism" "$BIN/neoism-workspace-daemon" "$BIN/neoism-agent" "$BIN/neoism-agent-lua-runner" "$APP/Contents/MacOS/"
             cp misc/macos/neoism.icns "$APP/Contents/Resources/neoism.icns"
             cp -a neoism-frontend/web/dist "$APP/Contents/Resources/web"
             VERSION="${GITHUB_REF_NAME#v}"
@@ -431,7 +432,7 @@ jobs:
             codesign --force --options runtime --timestamp --sign "$IDENTITY" "$bin"
           done
           codesign --force --options runtime --timestamp --sign "$IDENTITY" "$APP"
-          for bin in neoism neoism-workspace-daemon neoism-agent; do
+          for bin in neoism neoism-workspace-daemon neoism-agent neoism-agent-lua-runner; do
             codesign --force --options runtime --timestamp --sign "$IDENTITY" "stage/$OUT/$bin"
           done
           codesign --verify --strict --verbose=2 "$APP"
@@ -503,7 +504,7 @@ jobs:
           fi
           hdiutil verify "$OUT.dmg"
 
-          # Mount the final image and prove all three executables survived the
+          # Mount the final image and prove all four executables survived the
           # copy. A valid container with a truncated app is not a release.
           VERIFY_MOUNT="$RUNNER_TEMP/neoism-dmg-verify"
           mkdir -p "$VERIFY_MOUNT"
@@ -516,7 +517,7 @@ jobs:
           trap cleanup_dmg_mount EXIT
           hdiutil attach "$OUT.dmg" -readonly -nobrowse -mountpoint "$VERIFY_MOUNT"
           DMG_MOUNTED=true
-          for bin in neoism neoism-workspace-daemon neoism-agent; do
+          for bin in neoism neoism-workspace-daemon neoism-agent neoism-agent-lua-runner; do
             test -x "$VERIFY_MOUNT/Neoism.app/Contents/MacOS/$bin"
           done
           test -f "$VERIFY_MOUNT/Neoism.app/Contents/Resources/web/index.html"

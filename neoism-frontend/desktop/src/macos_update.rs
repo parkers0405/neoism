@@ -8,7 +8,12 @@ use std::path::{Path, PathBuf};
 
 pub type Error = Box<dyn std::error::Error>;
 const BUNDLE_ID: &str = "dev.neoism.Neoism";
-const BINS: [&str; 3] = ["neoism", "neoism-workspace-daemon", "neoism-agent"];
+const BINS: [&str; 4] = [
+    "neoism",
+    "neoism-workspace-daemon",
+    "neoism-agent",
+    "neoism-agent-lua-runner",
+];
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Installation {
@@ -214,9 +219,14 @@ fn loose_manifest(root: &Path, gui_name: &std::ffi::OsStr) -> Result<Manifest, E
 
 fn loose_components(target: &Path) -> Result<Vec<(&'static str, PathBuf)>, Error> {
     let parent = target.parent().ok_or("loose executable has no parent")?;
-    if ["neoism-workspace-daemon", "neoism-agent", "web"]
-        .iter()
-        .any(|name| target.file_name().is_some_and(|file| file == *name))
+    if [
+        "neoism-workspace-daemon",
+        "neoism-agent",
+        "neoism-agent-lua-runner",
+        "web",
+    ]
+    .iter()
+    .any(|name| target.file_name().is_some_and(|file| file == *name))
     {
         return Err("loose GUI executable name collides with an update companion".into());
     }
@@ -227,6 +237,10 @@ fn loose_components(target: &Path) -> Result<Vec<(&'static str, PathBuf)>, Error
             parent.join("neoism-workspace-daemon"),
         ),
         ("neoism-agent", parent.join("neoism-agent")),
+        (
+            "neoism-agent-lua-runner",
+            parent.join("neoism-agent-lua-runner"),
+        ),
         ("web", parent.join("web")),
     ])
 }
@@ -994,7 +1008,7 @@ mod native {
         let binaries = if plan.loose {
             loose_components(&plan.target)?
                 .into_iter()
-                .take(3)
+                .take(BINS.len())
                 .map(|(_, path)| path)
                 .collect::<Vec<_>>()
         } else {
@@ -1450,6 +1464,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let installed = root.path().join("installed");
         let target = loose_fixture(&installed, "0.7.102");
+        fs::remove_file(installed.join("neoism-agent-lua-runner")).unwrap();
         fs::remove_dir_all(installed.join("web/agent-gui")).unwrap();
         let staged = root.path().join("payload");
         loose_fixture(&staged, "0.7.103");
@@ -1461,6 +1476,7 @@ mod tests {
         );
         fs::write(staged.join("web/agent-gui/index.html"), "GUI").unwrap();
         install_unix_loose(&target, &staged).unwrap();
+        assert!(installed.join("neoism-agent-lua-runner").is_file());
         assert_eq!(
             fs::read_to_string(installed.join("web/agent-gui/assets/app.js")).unwrap(),
             "0.7.103"
@@ -1500,7 +1516,7 @@ mod tests {
 
     #[test]
     fn loose_missing_component_never_replaces_the_gui() {
-        for missing in ["neoism-agent", "web/index.html"] {
+        for missing in ["neoism-agent", "neoism-agent-lua-runner", "web/index.html"] {
             let root = tempfile::tempdir().unwrap();
             let target = loose_fixture(&root.path().join("installed"), "0.7.7");
             let staged = root.path().join("staged");
@@ -1526,7 +1542,7 @@ mod tests {
     }
 
     #[test]
-    fn loose_late_rename_failure_rolls_back_all_three_binaries_and_web() {
+    fn loose_late_rename_failure_rolls_back_all_four_binaries_and_web() {
         let root = tempfile::tempdir().unwrap();
         let target = loose_fixture(&root.path().join("installed"), "0.7.7");
         let staged = root.path().join("staged");
@@ -1889,6 +1905,7 @@ mod tests {
             "Contents/MacOS/neoism",
             "Contents/MacOS/neoism-workspace-daemon",
             "Contents/MacOS/neoism-agent",
+            "Contents/MacOS/neoism-agent-lua-runner",
             "Contents/Resources/web/index.html",
         ] {
             let original = fs::read(staged.join(path)).unwrap();

@@ -30,7 +30,7 @@ RUN CARGO_BUILD_JOBS=4 \
     CARGO_PROFILE_RELEASE_DEBUG=0 \
     CARGO_PROFILE_RELEASE_LTO=thin \
     CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 \
-    cargo build --release -p neoism-workspace-daemon -p neoism-agent
+    cargo build --release -p neoism-workspace-daemon -p neoism-agent -p neoism-agent-lua-runner
 
 FROM debian:bookworm-slim AS runtime
 
@@ -67,9 +67,10 @@ RUN useradd --system --create-home --home-dir /var/lib/neoism --shell /usr/sbin/
 COPY --from=builder /src/target/release/neoism-workspace-daemon /usr/local/bin/neoism-workspace-daemon
 COPY --from=agent-gui /gui /usr/local/bin/web/agent-gui
 COPY --from=builder /src/target/release/neoism-agent /usr/local/bin/neoism-agent
+COPY --from=builder /src/target/release/neoism-agent-lua-runner /usr/local/bin/neoism-agent-lua-runner
 # Exercise the runtime loader in the slim image before publishing it. A builder
 # dependency alone does not provide the shared libraries needed at startup.
-RUN neoism-workspace-daemon --version && neoism-agent --version
+RUN neoism-workspace-daemon --version && neoism-agent --version && neoism-agent-lua-runner --version
 USER neoism
 ENV NEOISM_DAEMON_ADDR=0.0.0.0:9876 \
     NEOISM_DAEMON_DATA_DIR=/var/lib/neoism/data \

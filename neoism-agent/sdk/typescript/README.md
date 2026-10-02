@@ -2,6 +2,8 @@
 
 Frontend-neutral clients for the Neoism Agent `/v2` API.
 
+This package contains two distinct surfaces: `@neoism/sdk` is the generated HTTP client, while `@neoism/plugin` authors supervised `neoism-plugin/2` processes. The complete package, Agent Lua, process-wire, native-plugin, trust, capability, scope, lifecycle, limit and remote-resource reference is [`docs/agent-plugins.md`](../../../docs/agent-plugins.md); shared package architecture is in [`docs/plugins.md`](../../../docs/plugins.md). Do not infer the process author API from generated OpenAPI client types.
+
 ```sh
 npm install @neoism/sdk
 ```
@@ -135,7 +137,8 @@ invocation restores health.
 ## Serve plugins (`neoism-plugin/2`) — the third-party plugin runtime
 
 A serve plugin is a long-lived process the agent server spawns once per
-workspace plugin generation. It declares tools, hooks, and event
+workspace plugin generation. It declares tools, hooks, events, providers,
+HTTP/WebSocket routes, message-part schemas, MCP metadata, and catalog services
 subscriptions at handshake, and they register into the same runtime registry
 native plugins use — tools run through the normal permission pipeline, hook
 failures surface in `/v2/plugins`, and generation reloads restart the
@@ -152,16 +155,22 @@ await runPlugin(definePlugin({
     description: "Count TODO markers",
     parameters: { type: "object", properties: {} },
     async execute(_input, context) {
-      // context.client is an SDK client bound to the local agent server.
-      return { output: `workspace: ${context.directory}` };
+      const files = await context.host.workspace.list(".");
+      return { output: `${files.length} workspace entries` };
     },
   }],
   hooks: { "chat.options": (_context, value) => ({ ...value, temperature: 0 }) },
   events: { namespaces: ["session."], handler: (event) => console.error(event.type) },
+  services: {
+    commands: [{
+      id: "dev.example.commands",
+      handler: () => [{ name: "todos", description: "List TODOs" }],
+    }],
+  },
 }));
 ```
 
-Configure it in the workspace `plugins` map — any one of:
+Legacy configuration-driven process plugins remain supported through the workspace `plugins` map using any one of:
 
 ```jsonc
 "plugins": {
@@ -174,13 +183,26 @@ Configure it in the workspace `plugins` map — any one of:
 `npm:` packages install into the server's plugin cache in the background;
 the plugin reports `Degraded ("installing …")` until the install lands, then
 the next generation refresh brings it live. Options: `config` (passed to the
-plugin's `initialize`), `env`, `timeoutMs` (per call), `network`
-(default `true` — SDK callbacks need loopback), and `sandbox` as above. A
+plugin's `initialize`), `env`, `timeoutMs` (per call), `network`, `sandbox`, and
+an explicit `capabilities` array such as `["config-read", "workspace-write",
+"event-publish"]`. The process always receives only the intersection of these
+requested grants and host policy. A
 plugin that fails to spawn or handshake degrades with a reason instead of
 breaking the workspace.
 
+New distributable packages should use the shared `neoism-plugin.json` `agent` target documented in [`docs/agent-plugins.md`](../../../docs/agent-plugins.md). Existing configuration-driven plugins do not need to migrate unless they want shared editor/Agent identity, immutable package revisions, exact-revision trust or the package lifecycle UI.
+
 Any language works: speak newline-delimited JSON on stdio — reply to
 `initialize` with `{ protocol: "neoism-plugin/2", tools, hooks,
-eventNamespaces }`, answer `tool.invoke` / `hook.invoke` by echoing the
+eventNamespaces, services, routes, websocketRoutes, messageParts, mcp }`, answer `tool.invoke`, `hook.invoke`, and the
+declared unary service methods by echoing the
 request `id` with a `result` (or `error`), treat `event` frames as
 notifications, and exit on `shutdown`.
+
+Unary services include agent/command/skill list, system-context sections, prompt render, and config load. Providers use bounded open/item/end/error streams; HTTP and WebSocket handlers use the native route registry. All declarations become ordinary `PluginContributions` and are conflict-checked and retired by `PluginHost` exactly like native services. A plugin can call capability-scoped host methods (`host.config.*`, `host.workspace.*`, and `host.event.publish`) over the same stdio channel. Every reverse request and stream frame carries the exact package, instance, scope, workspace, and registry-generation owner supplied during initialization. Stale generations are ignored or rejected. Host resource paths remain relative and opaque, no agent-server bearer token is handed to the process, frames and queues are bounded, and cancellation sends `$/cancel` or `$/cancelStream`.
+
+Shared packages use `neoism-plugin.json` and an explicit `agent` entrypoint. Workspace packages are discovered as metadata only and execute only when the installation-owned plugin configuration contains an exact workspace/package/revision/capability trust record plus runtime approval. Lua Agent entrypoints run in the dedicated `neoism-agent-lua-runner` subprocess, not in the server: system libraries and native loading are removed, `require` is package-contained, and memory/instruction/wall-time/frame/queue budgets are enforced. Trust is invalidated whenever any package file changes.
+
+Capability brokerage remains host-owned. `context.host` exposes separate network, process, task, secret-use, explicit secret-read, prompt, message, response-transform, provider, and policy brokers. Calls carry the exact package generation and scope owner, use opaque resource/task identities, are input/output bounded, audited, cancellable where applicable, and stop working as soon as the generation lease is revoked. Declaring a capability does not grant it: the package declaration, installation-owned exact-revision trust record, and an installed host broker must all intersect. `secrets.use()` performs host-defined signing/authorization operations without revealing credential material; raw `secrets.read()` is a separate capability.
+
+Agent entrypoints may declare `global`, `user`, `workspace`, or `session` scope. User/session activation requires an exact `scopeId` trust pin, workspace/session activation additionally binds the workspace identity, and workspace-located packages cannot claim installation scope. Lifecycle records exposed by the plugin API include requested versus granted capabilities, source, revision, scope, retained revision/lease state, and actionable diagnostics.

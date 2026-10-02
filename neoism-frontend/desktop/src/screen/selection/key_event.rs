@@ -40,6 +40,10 @@ impl Screen<'_> {
 
         let mods = self.modifiers.state();
 
+        if self.handle_plugin_keymap(key, mods) {
+            return;
+        }
+
         if self.handle_app_global_shortcut(key) {
             return;
         }
@@ -749,4 +753,221 @@ impl Screen<'_> {
         }
         true
     }
+
+    fn handle_plugin_keymap(
+        &mut self,
+        key: &neoism_window::event::KeyEvent,
+        mods: neoism_window::keyboard::ModifiersState,
+    ) -> bool {
+        let key_name = match key.key_without_modifiers().as_ref() {
+            Key::Character(value) => value.to_lowercase(),
+            Key::Named(named) => format!("{named:?}").to_lowercase(),
+            _ => return false,
+        };
+        let mut chord = String::new();
+        for (active, name) in [
+            (mods.control_key(), "ctrl"),
+            (mods.alt_key(), "alt"),
+            (mods.shift_key(), "shift"),
+            (mods.super_key(), "super"),
+        ] {
+            if active {
+                if !chord.is_empty() {
+                    chord.push('+');
+                }
+                chord.push_str(name);
+            }
+        }
+        if !chord.is_empty() {
+            chord.push('+');
+        }
+        chord.push_str(&key_name);
+
+        let current = self.context_manager.current();
+        let surface = if self.renderer.command_palette.is_enabled() {
+            "palette"
+        } else if self.renderer.finder.is_enabled() {
+            "finder"
+        } else if self.renderer.git_diff_panel.is_focused() {
+            "git"
+        } else if self.renderer.file_tree.is_focused() {
+            "file-tree"
+        } else if self.renderer.notes_sidebar.is_focused() {
+            "notes"
+        } else if current.neoism_agent.is_some() {
+            "agent"
+        } else if current.code.is_some() {
+            "editor"
+        } else if current.active_markdown().is_some() {
+            "markdown"
+        } else {
+            "terminal"
+        };
+        let edit_mode = current.code.as_ref().map(|code| match code.buffer.mode {
+            neoism_ui::editor::code::CodeMode::Normal => "normal",
+            neoism_ui::editor::code::CodeMode::Insert => "insert",
+            neoism_ui::editor::code::CodeMode::Visual => "visual",
+        });
+
+        if self.plugin_key_sequence_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            self.plugin_key_sequence.clear();
+            self.plugin_key_sequence_deadline = None;
+        }
+        if key.state == ElementState::Released {
+            return !self.plugin_key_sequence.is_empty()
+                || self.plugin_command_for_sequence(&chord, surface, edit_mode).is_some();
+        }
+        let prior = self.plugin_key_sequence.clone();
+        let mut candidate = prior.clone();
+        candidate.push(chord.clone());
+        let candidate_text = candidate.join(" ");
+        if let Some(command) = self.plugin_command_for_sequence(&candidate_text, surface, edit_mode) {
+            self.plugin_key_sequence.clear();
+            self.plugin_key_sequence_deadline = None;
+            self.pending_plugin_commands.push(command);
+            return true;
+        }
+        let has_prefix = self.renderer.plugins.keymaps.iter().any(|mapping| {
+            plugin_mapping_matches(mapping, surface, edit_mode)
+                && normalize_lua_sequence(&mapping.key).starts_with(&(candidate_text.clone() + " "))
+        });
+        if has_prefix {
+            self.plugin_key_sequence = candidate;
+            self.plugin_key_sequence_deadline = Some(Instant::now() + Duration::from_millis(750));
+            return true;
+        }
+        if !prior.is_empty() {
+            let prefix = prior.join(" ");
+            let fallback = self.renderer.plugins.keymaps.iter()
+                .filter(|mapping| plugin_mapping_matches(mapping, surface, edit_mode))
+                .filter(|mapping| normalize_lua_sequence(&mapping.key).starts_with(&(prefix.clone() + " ")))
+                .all(|mapping| mapping.fallback);
+            self.plugin_key_sequence.clear();
+            self.plugin_key_sequence_deadline = None;
+            if !fallback {
+                return true;
+            }
+        }
+        let command = self.plugin_command_for_sequence(&chord, surface, edit_mode);
+        let Some(command) = command else {
+            let lazy = self.renderer.plugins.lazy_keys.iter().any(|trigger| {
+                (matches!(trigger.mode.as_str(), "global" | "*")
+                    || trigger.mode == surface
+                    || edit_mode.is_some_and(|mode| trigger.mode == mode))
+                    && normalize_lua_sequence(&trigger.key) == chord
+                    && plugin_when_matches(trigger.when.as_deref(), surface, edit_mode)
+            });
+            if lazy && key.state == ElementState::Pressed {
+                self.pending_plugin_keys.push(chord);
+            }
+            return lazy;
+        };
+        self.pending_plugin_commands.push(command);
+        true
+    }
+
+    pub fn replay_plugin_key(&mut self, chord: &str) -> Option<String> {
+        let current = self.context_manager.current();
+        let surface = if self.renderer.command_palette.is_enabled() {
+            "palette"
+        } else if self.renderer.finder.is_enabled() {
+            "finder"
+        } else if self.renderer.git_diff_panel.is_focused() {
+            "git"
+        } else if self.renderer.file_tree.is_focused() {
+            "file-tree"
+        } else if self.renderer.notes_sidebar.is_focused() {
+            "notes"
+        } else if current.neoism_agent.is_some() {
+            "agent"
+        } else if current.code.is_some() {
+            "editor"
+        } else if current.active_markdown().is_some() {
+            "markdown"
+        } else {
+            "terminal"
+        };
+        let edit_mode = current.code.as_ref().map(|code| match code.buffer.mode {
+            neoism_ui::editor::code::CodeMode::Normal => "normal",
+            neoism_ui::editor::code::CodeMode::Insert => "insert",
+            neoism_ui::editor::code::CodeMode::Visual => "visual",
+        });
+        self.plugin_command_for_sequence(chord, surface, edit_mode)
+    }
+
+    fn plugin_command_for_sequence(
+        &self,
+        chord: &str,
+        surface: &str,
+        edit_mode: Option<&str>,
+    ) -> Option<String> {
+        self.renderer
+            .plugins
+            .keymaps
+            .iter()
+            .filter(|mapping| plugin_mapping_matches(mapping, surface, edit_mode))
+            .filter(|mapping| normalize_lua_sequence(&mapping.key) == chord)
+            .max_by_key(|mapping| (mapping.priority, mapping.order))
+            .map(|mapping| mapping.command.clone())
+    }
+}
+
+fn plugin_mapping_matches(
+    mapping: &neoism_lua::KeymapContribution,
+    surface: &str,
+    edit_mode: Option<&str>,
+) -> bool {
+    (matches!(mapping.mode.as_str(), "global" | "*")
+        || mapping.mode == surface
+        || edit_mode.is_some_and(|mode| mapping.mode == mode))
+        && plugin_when_matches(mapping.when.as_deref(), surface, edit_mode)
+}
+
+fn plugin_when_matches(when: Option<&str>, surface: &str, edit_mode: Option<&str>) -> bool {
+    let Some(when) = when else { return true };
+    when.split("&&").all(|term| {
+        let term = term.trim();
+        let (negated, term) = term.strip_prefix('!').map_or((false, term), |term| (true, term.trim()));
+        let matches = match term {
+            "editorFocus" | "editor" => surface == "editor",
+            "terminalFocus" | "terminal" => surface == "terminal",
+            "agentFocus" | "agent" => surface == "agent",
+            "markdownFocus" | "markdown" => surface == "markdown",
+            "fileTreeFocus" | "file-tree" => surface == "file-tree",
+            "notesFocus" | "notes" => surface == "notes",
+            "gitFocus" | "git" => surface == "git",
+            "normalMode" | "normal" => edit_mode == Some("normal"),
+            "insertMode" | "insert" => edit_mode == Some("insert"),
+            "visualMode" | "visual" => edit_mode == Some("visual"),
+            _ => false,
+        };
+        matches != negated
+    })
+}
+
+fn normalize_lua_chord(value: &str) -> String {
+    let value = value.trim().trim_start_matches('<').trim_end_matches('>');
+    let mut modifiers = Vec::new();
+    let mut key = String::new();
+    for part in value.split(['+', '-']) {
+        let part = part.trim().to_ascii_lowercase();
+        match part.as_str() {
+            "c" | "ctrl" | "control" => modifiers.push("ctrl"),
+            "a" | "alt" | "option" => modifiers.push("alt"),
+            "s" | "shift" => modifiers.push("shift"),
+            "m" | "cmd" | "meta" | "super" => modifiers.push("super"),
+            other => key = other.to_owned(),
+        }
+    }
+    ["ctrl", "alt", "shift", "super"]
+        .into_iter()
+        .filter(|modifier| modifiers.contains(modifier))
+        .chain(std::iter::once(key.as_str()))
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("+")
+}
+
+fn normalize_lua_sequence(value: &str) -> String {
+    value.split_whitespace().map(normalize_lua_chord).collect::<Vec<_>>().join(" ")
 }

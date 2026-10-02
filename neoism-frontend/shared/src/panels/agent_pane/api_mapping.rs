@@ -2085,6 +2085,40 @@ mod tests {
         assert_eq!(message.images.len(), 1);
         assert_eq!(message.images[0].url, "data:image/png;base64,AA==");
     }
+
+    #[test]
+    fn generated_image_is_an_assistant_attachment() {
+        let message = part_block(&json!({
+            "id": "part-image-2",
+            "messageID": "msg-assistant-1",
+            "type": "file",
+            "mime": "image/png",
+            "filename": "generated-image.png",
+            "url": "/v2/artifacts/art_1/content"
+        }))
+        .expect("assistant image part");
+
+        assert_eq!(message.kind, NeoismAgentMessageKind::Assistant);
+        assert_eq!(message.id, "part-image-2");
+        assert_eq!(message.images.len(), 1);
+        assert_eq!(message.images[0].url, "/v2/artifacts/art_1/content");
+    }
+
+    #[test]
+    fn generated_video_keeps_its_artifact_url() {
+        let message = part_block(&json!({
+            "id": "part-video-1",
+            "type": "file",
+            "mime": "video/mp4",
+            "filename": "generated-video.mp4",
+            "url": "/v2/artifacts/art_2/content"
+        }))
+        .expect("video part");
+
+        assert_eq!(message.kind, NeoismAgentMessageKind::System);
+        assert!(message.text.contains("generated-video.mp4"));
+        assert!(message.text.contains("/v2/artifacts/art_2/content"));
+    }
 }
 
 pub fn part_block(part: &Value) -> Option<NeoismAgentMessage> {
@@ -2184,16 +2218,24 @@ pub fn part_block(part: &Value) -> Option<NeoismAgentMessage> {
                 .is_some_and(|mime| mime.starts_with("image/")) =>
         {
             image_from_part(part).map(|image| {
-                let mut message = agent_message_user("");
+                let mut message =
+                    if part.get("role").and_then(Value::as_str) == Some("user") {
+                        agent_message_user("")
+                    } else {
+                        agent_message_assistant("")
+                    };
                 message.images.push(image);
                 message
             })
         }
-        "file" => part
-            .get("filename")
-            .and_then(Value::as_str)
-            .or_else(|| part.get("url").and_then(Value::as_str))
-            .map(|name| agent_message_system("File", name)),
+        "file" => {
+            let url = part.get("url").and_then(Value::as_str)?;
+            let filename = part
+                .get("filename")
+                .and_then(Value::as_str)
+                .unwrap_or("Generated file");
+            Some(agent_message_system("File", format!("{filename}\n{url}")))
+        }
         "step-finish" => step_finish_block(part),
         _ => None,
     }?;

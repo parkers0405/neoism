@@ -33,57 +33,95 @@ impl<A: Send + Copy + 'static> Chrome<A> {
     /// a layout pass.
     pub fn set_layout(&mut self, viewport: Rect) {
         self.last_viewport = Some(viewport);
+        self.reconcile_left_sidebar_host();
         let scale = self.chrome_scale.clamp(0.5, 3.0);
+        let top_style = self.plugins.styles.resolve(neoism_lua::selector::CHROME_TOP);
+        let status_style = self.plugins.styles.resolve(neoism_lua::selector::STATUS);
+        let tabs_style = self.plugins.styles.resolve(neoism_lua::selector::BUFFER_TABS);
+        let tree_style = self.plugins.styles.resolve(neoism_lua::selector::FILE_TREE);
+        let notes_style = self.plugins.styles.resolve(neoism_lua::selector::NOTES_TREE);
+        let agent_style = self.plugins.styles.resolve(neoism_lua::selector::AGENT_SIDEBAR);
+        let composer_style = self.plugins.styles.resolve(neoism_lua::selector::COMPOSER);
         self.mobile_agent_narrow = self.mobile_web_agent_panel_enabled
             && viewport.w
                 < (crate::panels::agent_pane::state::side_panel::SIDE_PANEL_WIDTH
                     + RESPONSIVE_CONTENT_MIN_W
                     + TREE_CONTENT_GAP)
                     * scale;
-        self.top_bar.set_mobile_agent_panel_button_visible(
-            self.mobile_agent_narrow && self.is_neoism_agent_tab_active(),
+        // The former global Neoism mark is gone. The right-side slot now
+        // belongs only to an eligible active chat's details rail; resolve it
+        // after the actual content width is known below.
+        self.top_bar.set_mobile_agent_panel_button_visible(false);
+        self.top_bar.set_right_button_visible(false);
+        let mut surface_patch = self.plugins.surface_layout.clone();
+        let actions_patch = surface_patch
+            .surfaces
+            .entry(crate::surface_layout::CHROME_ACTIONS_SURFACE.into())
+            .or_default();
+        if actions_patch.visible.is_none() {
+            actions_patch.visible = Some(
+                self.top_bar.is_visible() && top_style.visible != Some(false),
+            );
+        }
+        if actions_patch.thickness.is_none() {
+            actions_patch.thickness = Some(
+                top_style
+                    .height
+                    .unwrap_or_else(|| self.top_bar.layout_reservation())
+                    .max(0.0),
+            );
+        }
+        let mut surface_registry = crate::surface_layout::SurfaceRegistry::chrome_defaults(
+            crate::surface_layout::SurfaceItemSize::new(26.0 * scale, 26.0 * scale),
         );
-        let tabs_h = BUFFER_TABS_HEIGHT * scale;
-        let status_h = STATUS_LINE_HEIGHT * scale;
-
-        // Top bar spans the full viewport width, pinned to the top
-        // edge above everything else (its rect is built below). The
-        // side panels (tree / notes / git) are confined to the band
-        // beneath the top chrome rather than running the full window
-        // height, so they no longer push the top bar / tabs inward.
-        // Agent is a global open/focus action, not an active-tab control.
-        // Keep its affordance available from every surface, matching desktop.
-        self.top_bar.set_right_button_visible(true);
-        let top_bar_h = if self.top_bar.is_visible() {
-            self.top_bar.layout_reservation()
-        } else {
+        self.top_bar
+            .configure_surface_registry(&mut surface_registry);
+        let mut surface_layout = crate::surface_layout::resolve_surface_layout(
+            viewport,
+            scale,
+            &surface_registry,
+            &surface_patch,
+        )
+        .unwrap_or_else(|error| {
+            tracing::warn!(%error, "rejecting invalid plugin surface layout");
+            crate::surface_layout::resolve_surface_layout(
+                viewport,
+                scale,
+                &surface_registry,
+                &neoism_lua::SurfaceLayoutPatch::default(),
+            )
+            .expect("built-in surface registry must resolve")
+        });
+        let frame = surface_layout.content;
+        let top_bar_rect = surface_layout
+            .surfaces
+            .get(crate::surface_layout::CHROME_ACTIONS_SURFACE)
+            .and_then(|surface| surface.bounds);
+        let tabs_h = tabs_style
+            .height
+            .unwrap_or(BUFFER_TABS_HEIGHT * scale)
+            .max(0.0);
+        let status_h = if status_style.visible == Some(false) {
             0.0
+        } else {
+            status_style
+                .height
+                .unwrap_or(STATUS_LINE_HEIGHT * scale)
+                .max(0.0)
         };
 
-        // === Full-width top chrome ===
-        // Only the top bar and the workspace island strip span the
-        // entire viewport width, pinned to the top edge. The buffer
-        // tabs / breadcrumbs below them stay scoped to the content
-        // column so the file tree (and the other side panels) push
-        // them inward, exactly as before.
-        let top_bar_rect = if self.top_bar.is_visible() {
-            Some(Rect::new(viewport.x, viewport.y, viewport.w, top_bar_h))
-        } else {
-            None
-        };
-        // Workspace island strip sits directly under the top bar. The
-        // side-panel band (tree / notes / git / tabs / terminal) begins
-        // right below it.
-        let strip_top = top_bar_rect.map(|r| r.y + r.h).unwrap_or(viewport.y);
+        // The host-owned workspace strip starts inside the remaining frame;
+        // moving actions to a side rail no longer leaves a blank top band.
+        let strip_top = frame.y;
         let band_top = strip_top + self.top_workspace_strip_h;
 
         // === Full-width status bar ===
         // Status line spans the entire width along the bottom edge; the
         // side panels stop at its top rather than running underneath.
         let status_line = Rect::new(
-            viewport.x,
-            viewport.y + viewport.h - status_h,
-            viewport.w,
+            frame.x,
+            frame.y + frame.h - status_h,
+            frame.w,
             status_h,
         );
         // With no obstruction, content stops at the status line as usual.
@@ -91,7 +129,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         // the keyboard) and content stops exactly at the keyboard's top — do
         // not reserve status_h a second time or a visible gap appears.
         let band_bottom = if self.bottom_content_inset > 0.0 {
-            (viewport.y + viewport.h - self.bottom_content_inset).max(band_top)
+            (frame.y + frame.h - self.bottom_content_inset).max(band_top)
         } else {
             status_line.y
         };
@@ -108,30 +146,48 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         // underneath it (chrome reflow, not z-order).
         let right_inset = self
             .git_diff_panel
-            .effective_width(viewport.w)
-            .clamp(0.0, viewport.w);
-        let middle_right = viewport.x + viewport.w - right_inset;
-        let middle_w = (middle_right - viewport.x).max(0.0);
-        // Allocate all visible left columns in Files → Notes → Conversations
-        // order. Under pressure shrink them proportionally, retaining a small
-        // center canvas; visibility and focus never change with viewport width.
+            .effective_width(frame.w)
+            .clamp(0.0, frame.w);
+        let middle_right = frame.x + frame.w - right_inset;
+        let middle_w = (middle_right - frame.x).max(0.0);
+        self.reconcile_left_sidebar_host();
+        let sidebar_requests = self.sidebar_requests();
         let tree_natural = self
             .file_tree
             .as_ref()
-            .filter(|tree| tree.is_visible())
-            .map(|tree| tree.width());
-        let notes_natural = self
-            .notes_sidebar
-            .is_visible()
-            .then(|| self.notes_sidebar.width());
+            .filter(|tree| tree.is_visible() && tree_style.visible != Some(false))
+            .map(|tree| self.left_sidebar_host.resolved_width(
+                crate::panels::left_sidebar_host::LeftSidebarView::Files,
+                tree_style.width.unwrap_or_else(|| tree.width()).max(0.0),
+            ));
+        let notes_natural = (self.notes_sidebar.is_visible()
+            && notes_style.visible != Some(false))
+            .then(|| {
+                self.left_sidebar_host.resolved_width(
+                    crate::panels::left_sidebar_host::LeftSidebarView::Notes,
+                    notes_style.width.unwrap_or_else(|| self.notes_sidebar.width()).max(0.0),
+                )
+            });
         let conversations_natural = (self.conversations_visible
-            && self.agent_pane.is_some())
-        .then(|| self.agent_pane.as_ref().unwrap().side_panel().width() * scale);
-        let natural_total = tree_natural.unwrap_or(0.0)
-            + notes_natural.unwrap_or(0.0)
-            + conversations_natural.unwrap_or(0.0);
+            && self.agent_pane.is_some()
+            && agent_style.visible != Some(false))
+        .then(|| {
+            self.left_sidebar_host.resolved_width(
+                crate::panels::left_sidebar_host::LeftSidebarView::Conversations,
+                agent_style.width.unwrap_or_else(|| {
+                self.agent_pane.as_ref().unwrap().side_panel().width() * scale
+                }).max(0.0),
+            )
+        });
+        let resolved_views = self.left_sidebar_host.resolved_views(sidebar_requests);
+        let natural_width = |view| match view {
+            crate::panels::left_sidebar_host::LeftSidebarView::Files => tree_natural,
+            crate::panels::left_sidebar_host::LeftSidebarView::Notes => notes_natural,
+            crate::panels::left_sidebar_host::LeftSidebarView::Conversations => conversations_natural,
+        };
+        let natural_total = resolved_views.iter().filter_map(|view| natural_width(*view)).sum::<f32>();
         let gap = if natural_total > 0.0 {
-            TREE_CONTENT_GAP.min(middle_w)
+            tree_style.gap.unwrap_or(TREE_CONTENT_GAP).max(0.0).min(middle_w)
         } else {
             0.0
         };
@@ -143,24 +199,54 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         } else {
             0.0
         };
-        let mut next_x = viewport.x;
-        let file_tree_rect = tree_natural.map(|w| {
-            let rect = Rect::new(next_x, band_top, w * ratio, band_h);
+        let mut next_x = frame.x;
+        let mut file_tree_rect = None;
+        let mut notes_sidebar_rect = None;
+        let mut conversations_rect = None;
+        for view in resolved_views {
+            let Some(width) = natural_width(view) else { continue };
+            let rect = Rect::new(next_x, band_top, width * ratio, band_h);
             next_x += rect.w;
-            rect
-        });
-        let notes_sidebar_rect = notes_natural.map(|w| {
-            let rect = Rect::new(next_x, band_top, w * ratio, band_h);
-            next_x += rect.w;
-            rect
-        });
-        let conversations_rect = conversations_natural.map(|w| {
-            let rect = Rect::new(next_x, band_top, w * ratio, band_h);
-            next_x += rect.w;
-            rect
-        });
+            match view {
+                crate::panels::left_sidebar_host::LeftSidebarView::Files => file_tree_rect = Some(rect),
+                crate::panels::left_sidebar_host::LeftSidebarView::Notes => notes_sidebar_rect = Some(rect),
+                crate::panels::left_sidebar_host::LeftSidebarView::Conversations => conversations_rect = Some(rect),
+            }
+        }
         let content_x = (next_x + gap).min(middle_right);
         let content_w = (middle_right - content_x).max(0.0);
+        let has_conversation = self
+            .agent_pane
+            .as_ref()
+            .is_some_and(|pane| pane.has_conversation());
+        let details_available = self.details_panel_enabled
+            && self.is_neoism_agent_tab_active()
+            && crate::panels::agent_pane::view::detail_rail_available(
+                has_conversation,
+                self.mobile_agent_narrow,
+                content_w,
+                scale,
+            );
+        self.top_bar.set_right_button_visible(details_available);
+        self.top_bar
+            .configure_surface_registry(&mut surface_registry);
+        surface_layout = crate::surface_layout::resolve_surface_layout(
+            viewport,
+            scale,
+            &surface_registry,
+            &surface_patch,
+        )
+        .unwrap_or_else(|error| {
+            tracing::warn!(%error, "rejecting invalid plugin surface layout");
+            crate::surface_layout::resolve_surface_layout(
+                viewport,
+                scale,
+                &surface_registry,
+                &neoism_lua::SurfaceLayoutPatch::default(),
+            )
+            .expect("built-in surface registry must resolve")
+        });
+        self.surface_layout = surface_layout;
 
         // Buffer tabs — top of the content column, pushed inward by the
         // tree / notes (left) and git panel (right).
@@ -174,7 +260,9 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             )
         });
 
-        let composer_h = if content_w > 0.0 && self.terminal_composer_eligible() {
+        let composer_h = if let Some(height) = composer_style.height {
+            height.max(0.0)
+        } else if content_w > 0.0 && self.terminal_composer_eligible() {
             let pane_rows = ((band_bottom - band_top) / self.cell_h.max(1.0))
                 .floor()
                 .max(0.0) as usize;
@@ -196,7 +284,10 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         // and is confined to the live terminal tab. File/nvim/agent
         // tabs own their whole content rect and should not inherit the
         // terminal command bar.
-        let composer_rect = if content_w > 0.0 && self.terminal_composer_eligible() {
+        let composer_rect = if content_w > 0.0
+            && self.terminal_composer_eligible()
+            && composer_style.visible != Some(false)
+        {
             Some(Rect::new(
                 content_x,
                 band_bottom - composer_h,
@@ -228,23 +319,31 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         // underlying panel is currently visible — `None` for hidden.
         let center_modal = |w: f32, h: f32| {
             let w = w.min(content_w);
-            let h = h.min(viewport.h);
+            let h = h.min(frame.h);
             let x = content_x + (content_w - w) * 0.5;
-            let y = viewport.y + (viewport.h - h) * 0.25;
+            let y = frame.y + (frame.h - h) * 0.25;
             Rect::new(x, y, w, h)
         };
 
+        let palette_style = self.plugins.styles.resolve(neoism_lua::selector::PALETTE);
+        let finder_style = self.plugins.styles.resolve(neoism_lua::selector::FINDER);
         let command_palette = self
             .command_palette
             .is_visible()
-            .then(|| center_modal(MODAL_WIDTH, MODAL_HEIGHT));
+            .then(|| center_modal(
+                palette_style.width.unwrap_or(MODAL_WIDTH),
+                palette_style.height.unwrap_or(MODAL_HEIGHT),
+            ));
         let finder = self
             .finder
             .is_visible()
-            .then(|| center_modal(MODAL_WIDTH, MODAL_HEIGHT));
+            .then(|| center_modal(
+                finder_style.width.unwrap_or(MODAL_WIDTH),
+                finder_style.height.unwrap_or(MODAL_HEIGHT),
+            ));
         // Git diff is a full-window overlay rather than a centered
         // card — it needs the room for two columns of hunks.
-        let git_diff = self.git_diff.is_visible().then(|| viewport);
+        let git_diff = self.git_diff.is_visible().then_some(frame);
 
         self.layout = ChromeLayout {
             top_bar: top_bar_rect,
@@ -571,11 +670,23 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         services: Services<'_>,
         time: Duration,
     ) {
+        match event {
+            UiEvent::PointerMove { x, y, .. }
+            | UiEvent::PointerDown { x, y, .. }
+            | UiEvent::PointerUp { x, y, .. } => {
+                self.last_pointer_pos = (*x, *y);
+                self.pointer_inside = true;
+            }
+            UiEvent::PointerLeave => self.pointer_inside = false,
+            _ => {}
+        }
         let theme = self.theme.clone();
+        let plugins = self.plugins.clone();
         let mut ctx = PanelContext {
             services,
             theme: &theme,
             time,
+            plugins: Some(&plugins),
         };
 
         // The file browser is a true modal and owns every input shape. It is
@@ -608,8 +719,25 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             return;
         }
 
-        if self.handle_chrome_key_shortcut(event, &mut ctx) {
+        if self.handle_chrome_key_shortcut(event) {
             return;
+        }
+
+        if let UiEvent::PointerDown {
+            button: crate::event::PointerButton::Left,
+            x,
+            y,
+            ..
+        } = event
+        {
+            if let Some(command) = self.plugin_hitboxes.iter().rev().find_map(|hitbox| {
+                let [left, top, width, height] = hitbox.rect;
+                (*x >= left && *x <= left + width && *y >= top && *y <= top + height)
+                    .then(|| hitbox.command.clone())
+            }) {
+                self.pending_plugin_commands.push(command);
+                return;
+            }
         }
 
         if let UiEvent::PointerDown { x, y, .. } = event {
@@ -623,17 +751,6 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                     self.blur(PanelKey::FileTree);
                 }
             }
-        }
-
-        // Track pointer position so subsequent Wheel events (which
-        // don't carry coords in this vocabulary) can be routed to the
-        // panel under the cursor — specifically, the file-viewer
-        // smooth scroll below.
-        if let UiEvent::PointerMove { x, y, .. }
-        | UiEvent::PointerDown { x, y, .. }
-        | UiEvent::PointerUp { x, y, .. } = event
-        {
-            self.last_pointer_pos = (*x, *y);
         }
 
         // Wheel events don't carry x/y in this vocabulary; route them
@@ -824,7 +941,6 @@ impl<A: Send + Copy + 'static> Chrome<A> {
     pub(crate) fn handle_chrome_key_shortcut(
         &mut self,
         event: &UiEvent,
-        _ctx: &mut PanelContext,
     ) -> bool {
         let UiEvent::Key(key) = event else {
             return false;
@@ -838,7 +954,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         let alt = key.modifiers.contains(Modifiers::ALT);
         let meta = key.modifiers.contains(Modifiers::META);
 
-        if self.conversations_visible {
+        if self.conversations_visible && !ctrl && !alt && !meta {
             if let Some(pane) = self.agent_pane.as_mut() {
                 if pane.side_panel().is_focused() {
                     match &key.logical {
@@ -923,7 +1039,16 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             match &key.logical {
                 LogicalKey::Named(NamedKey::ArrowUp) => {
                     self.hide_focus_modals();
-                    if self.buffer_tabs.is_focused() {
+                    let left_sidebar_focused = self.left_sidebar_host.focused().is_some()
+                        || self.file_tree.as_ref().is_some_and(|tree| tree.is_focused())
+                        || self.notes_sidebar.is_focused()
+                        || self
+                            .agent_pane
+                            .as_ref()
+                            .is_some_and(|pane| pane.side_panel().is_focused());
+                    if left_sidebar_focused {
+                        self.focus_buffer_tabs();
+                    } else if self.buffer_tabs.is_focused() {
                         self.buffer_tabs.move_focused(false);
                     } else {
                         self.focus_buffer_tabs();
@@ -1127,6 +1252,11 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         if let Some(tree) = self.file_tree.as_mut() {
             tree.set_focused(false);
         }
+        self.notes_sidebar.set_focused(false);
+        if let Some(pane) = self.agent_pane.as_mut() {
+            pane.side_panel_mut().set_focused(false);
+        }
+        self.left_sidebar_host.set_focused(None);
         self.blur(PanelKey::FileTree);
         self.buffer_tabs.set_focused(true);
         self.focus(PanelKey::BufferTabs);
@@ -1242,11 +1372,35 @@ impl<A: Send + Copy + 'static> Chrome<A> {
     /// writes, so the panel listed an empty (or unrelated) folder while
     /// new notes landed in `~/Neoism/Vaults/...` and never appeared.
     pub fn toggle_notes_sidebar(&mut self) -> bool {
+        use crate::panels::left_sidebar_host::{LeftSidebarView, SidebarTransition};
         if !self.notes_sidebar.is_visible() {
             self.apply_notes_vault();
             self.pending_notes_refresh = true;
         }
-        let changed = self.notes_sidebar.toggle_focus_or_visibility();
+        let transition = self.left_sidebar_host.toggle(
+            LeftSidebarView::Notes,
+            self.notes_sidebar.is_focused(),
+        );
+        let changed = match transition {
+            SidebarTransition::Show => {
+                let changed = !self.notes_sidebar.is_visible();
+                self.notes_sidebar.set_visible(true);
+                self.notes_sidebar.set_focused(true);
+                self.hide_other_unified_sidebars(LeftSidebarView::Notes);
+                changed
+            }
+            SidebarTransition::Focus => {
+                self.notes_sidebar.set_focused(true);
+                self.hide_other_unified_sidebars(LeftSidebarView::Notes);
+                false
+            }
+            SidebarTransition::Hide => {
+                self.notes_sidebar.set_focused(false);
+                self.notes_sidebar.set_visible(false);
+                true
+            }
+            SidebarTransition::Independent => self.notes_sidebar.toggle_focus_or_visibility(),
+        };
         if self.notes_sidebar.is_visible() {
             if let Some(tree) = self.file_tree.as_mut() {
                 tree.set_focused(false);
@@ -2047,6 +2201,11 @@ mod tests {
         chrome
     }
 
+    fn use_independent_left_sidebars(chrome: &mut Chrome<()>) {
+        use crate::panels::left_sidebar_host::SidebarPlacement::Independent;
+        chrome.set_left_sidebar_placements(Independent, Independent, Independent);
+    }
+
     fn assert_surface_column_is_bounded(chrome: &Chrome<()>, viewport: Rect) {
         let layout = chrome.layout();
         let surface = layout.terminal;
@@ -2064,13 +2223,31 @@ mod tests {
 
     #[test]
     fn alt_up_tab_focus_owns_the_chrome_focus_slot() {
-        let mut chrome = Chrome::<()>::new();
-        chrome.buffer_tabs.ensure_terminal_tab();
+        use crate::event::{KeyDescriptor, PhysicalKey};
+        use crate::panels::left_sidebar_host::LeftSidebarView;
 
-        // This is the state transition used by the Alt+Up event branch.
-        assert!(chrome.focus_buffer_tabs());
+        let mut chrome = chrome_with_active_agent();
+        chrome.buffer_tabs.set_visible(true);
+        chrome.show_conversations(true);
+        assert!(chrome.agent_pane().unwrap().side_panel().is_focused());
+        assert_eq!(
+            chrome.left_sidebar_host.focused(),
+            Some(LeftSidebarView::Conversations)
+        );
+
+        let alt_up = UiEvent::Key(KeyDescriptor {
+            physical: PhysicalKey(0),
+            logical: LogicalKey::Named(NamedKey::ArrowUp),
+            state: KeyState::Pressed,
+            modifiers: Modifiers::ALT,
+            repeat: false,
+        });
+
+        assert!(chrome.handle_chrome_key_shortcut(&alt_up));
         assert!(chrome.buffer_tabs.is_focused());
         assert_eq!(chrome.focused(), Some(PanelKey::BufferTabs));
+        assert!(!chrome.agent_pane().unwrap().side_panel().is_focused());
+        assert_eq!(chrome.left_sidebar_host.focused(), None);
     }
 
     #[test]
@@ -2084,6 +2261,7 @@ mod tests {
     {
         let viewport = Rect::new(0.0, 0.0, 1200.0, 800.0);
         let mut chrome = chrome_with_active_agent();
+        use_independent_left_sidebars(&mut chrome);
         chrome.notes_sidebar.set_visible(true);
         chrome.set_layout(viewport);
         let mut tabs = chrome.buffer_tabs.tabs().to_vec();
@@ -2261,6 +2439,7 @@ mod tests {
         let viewport = Rect::new(0.0, 0.0, 820.0, 720.0);
         for open in ["tree", "notes", "both"] {
             let mut chrome = chrome_with_tree(600.0);
+            use_independent_left_sidebars(&mut chrome);
             if open == "notes" {
                 chrome.file_tree.as_mut().unwrap().set_visible(false);
             }
@@ -2290,9 +2469,10 @@ mod tests {
     }
 
     #[test]
-    fn wide_viewport_does_not_expand_tree_past_its_configured_width() {
+    fn wide_viewport_does_not_expand_independent_tree_past_its_configured_width() {
         let viewport = Rect::new(0.0, 0.0, 2560.0, 1440.0);
         let mut chrome = chrome_with_tree(280.0);
+        use_independent_left_sidebars(&mut chrome);
         chrome.set_layout(viewport);
 
         assert_eq!(chrome.layout.file_tree.unwrap().w, 280.0);
@@ -2300,13 +2480,52 @@ mod tests {
     }
 
     #[test]
-    fn agent_top_bar_action_stays_visible_outside_agent_tabs() {
+    fn agent_details_button_is_hidden_without_an_active_chat() {
         let mut chrome = Chrome::<()>::new();
         chrome.set_layout(Rect::new(0.0, 0.0, 1200.0, 800.0));
 
         assert!(!chrome.is_neoism_agent_tab_active());
-        assert!(chrome.top_bar.is_right_button_visible());
+        assert!(!chrome.top_bar.is_right_button_visible());
         assert!(!chrome.top_bar.is_mobile_agent_panel_button_visible());
+
+        let mut chrome = chrome_with_active_agent();
+        chrome.set_layout(Rect::new(0.0, 0.0, 1200.0, 800.0));
+        assert!(!chrome.top_bar.is_right_button_visible());
+    }
+
+    #[test]
+    fn agent_details_button_tracks_eligible_chat_not_open_state() {
+        let mut chrome = chrome_with_active_agent();
+        chrome
+            .agent_pane_mut()
+            .unwrap()
+            .switch_session("thread-1".to_string());
+        chrome.agent_pane_mut().unwrap().apply_history(vec![
+            crate::panels::agent_pane::state::NeoismAgentMessage {
+                id: "message-1".to_string(),
+                kind: crate::panels::agent_pane::state::NeoismAgentMessageKind::User,
+                title: String::new(),
+                text: "Hello".to_string(),
+                status: String::new(),
+                tool: String::new(),
+                output_kind:
+                    crate::panels::agent_pane::state::NeoismAgentOutputKind::Text,
+                lang: String::new(),
+                line_offset: None,
+                todos: Vec::new(),
+                detail: String::new(),
+                usage: None,
+                author: None,
+                images: Vec::new(),
+            },
+        ]);
+        chrome.set_layout(Rect::new(0.0, 0.0, 1200.0, 800.0));
+        assert!(chrome.top_bar.is_right_button_visible());
+
+        chrome.apply_top_bar_action(TopBarAction::ToggleAgentSidePanel);
+        assert!(chrome.agent_pane().unwrap().side_panel().user_hidden());
+        chrome.set_layout(Rect::new(0.0, 0.0, 1200.0, 800.0));
+        assert!(chrome.top_bar.is_right_button_visible());
     }
 
     fn chrome_with_active_agent() -> Chrome<()> {
@@ -2333,29 +2552,82 @@ mod tests {
     }
 
     #[test]
-    fn mobile_agent_toggle_reflows_content_without_takeover() {
+    fn top_agent_toggle_preserves_the_active_chat_tab() {
+        let mut chrome = chrome_with_active_agent();
+        chrome.set_layout(Rect::new(0.0, 0.0, 1200.0, 800.0));
+        let tab_count = chrome.buffer_tabs.tabs().len();
+        let active = chrome.buffer_tabs.active();
+        let route = chrome.buffer_tabs.tabs()[active].neoism_agent_route_id;
+
+        chrome.apply_top_bar_action(TopBarAction::ToggleConversations);
+        assert!(chrome.conversations_visible);
+        assert_eq!(chrome.buffer_tabs.tabs().len(), tab_count);
+        assert_eq!(chrome.buffer_tabs.active(), active);
+        assert_eq!(chrome.buffer_tabs.tabs()[active].neoism_agent_route_id, route);
+
+        chrome.apply_top_bar_action(TopBarAction::ToggleConversations);
+        assert!(!chrome.conversations_visible);
+        assert_eq!(chrome.buffer_tabs.tabs().len(), tab_count);
+        assert_eq!(chrome.buffer_tabs.active(), active);
+        assert_eq!(chrome.buffer_tabs.tabs()[active].neoism_agent_route_id, route);
+    }
+
+    #[test]
+    fn unified_views_switch_one_slot_without_dropping_panel_state() {
+        let viewport = Rect::new(0.0, 0.0, 1200.0, 800.0);
+        let mut chrome = chrome_with_tree(280.0);
+        chrome.install_agent_pane(chrome_with_active_agent().agent_pane.take().unwrap());
+        chrome
+            .agent_pane_mut()
+            .unwrap()
+            .side_panel_mut()
+            .set_sessions(vec![
+                crate::panels::agent_pane::state::side_panel::NeoismAgentSessionEntry::new(
+                    "thread-42",
+                    "Retained chat",
+                    "Today",
+                ),
+            ]);
+
+        chrome.toggle_conversations();
+        chrome.set_layout(viewport);
+        assert!(!chrome.file_tree.as_ref().unwrap().is_visible());
+        assert!(chrome.layout.conversations.is_some());
+        assert_eq!(chrome.layout.conversations.unwrap().w, 300.0);
+
+        assert!(chrome.toggle_notes_sidebar());
+        chrome.set_layout(viewport);
+        assert!(!chrome.conversations_visible);
+        assert!(chrome.layout.conversations.is_none());
+        assert_eq!(chrome.layout.notes_sidebar.unwrap().w, 300.0);
+        assert!(chrome
+            .agent_pane()
+            .unwrap()
+            .side_panel()
+            .sessions()
+            .iter()
+            .any(|entry| entry.id == "thread-42"));
+    }
+
+    #[test]
+    fn narrow_agent_chat_hides_unavailable_details_button() {
         let viewport = Rect::new(0.0, 0.0, 390.0, 844.0);
         let mut chrome = chrome_with_active_agent();
+        chrome
+            .agent_pane_mut()
+            .unwrap()
+            .switch_session("thread-1".to_string());
         chrome.set_mobile_web_agent_panel_enabled(true);
         chrome.set_layout(viewport);
 
-        assert!(chrome.top_bar.is_mobile_agent_panel_button_visible());
+        assert!(!chrome.top_bar.is_right_button_visible());
+        assert!(!chrome.top_bar.is_mobile_agent_panel_button_visible());
         assert!(!chrome.agent_side_panel_takeover_active());
         assert!(chrome.content_surface_available());
-
-        chrome.apply_top_bar_action(TopBarAction::ToggleAgentSidePanel);
-        assert!(chrome.agent_pane().unwrap().side_panel().user_hidden());
         assert!(chrome.layout.conversations.is_none());
-        assert!(!chrome.agent_side_panel_takeover_active());
-        assert!(chrome.content_surface_available());
         assert!(chrome.layout.terminal.w > 0.0);
         assert!(chrome.layout.top_bar.is_some());
         assert!(chrome.layout.status_line.h > 0.0);
-
-        chrome.apply_top_bar_action(TopBarAction::ToggleAgentSidePanel);
-        assert!(!chrome.agent_pane().unwrap().side_panel().user_hidden());
-        assert!(!chrome.agent_side_panel_takeover_active());
-        assert!(chrome.content_surface_available());
     }
 
     #[test]
@@ -2389,6 +2661,7 @@ mod tests {
         let viewport = Rect::new(0.0, 0.0, 820.0, 720.0);
         for open in ["tree", "notes", "both"] {
             let mut chrome = chrome_with_tree(280.0);
+            use_independent_left_sidebars(&mut chrome);
             if open == "notes" {
                 chrome.file_tree.as_mut().unwrap().set_visible(false);
             }
@@ -2410,8 +2683,9 @@ mod tests {
     }
 
     #[test]
-    fn toggles_never_close_another_visible_left_sidebar() {
+    fn independent_toggles_never_close_another_visible_left_sidebar() {
         let mut chrome = chrome_with_tree(280.0);
+        use_independent_left_sidebars(&mut chrome);
         chrome.install_agent_pane(chrome_with_active_agent().agent_pane.take().unwrap());
         chrome.toggle_conversations();
         assert!(chrome.toggle_notes_sidebar());
@@ -2434,6 +2708,7 @@ mod tests {
         let viewport = Rect::new(0.0, 0.0, 390.0, 844.0);
         for mask in 0..8 {
             let mut chrome = chrome_with_tree(600.0);
+            use_independent_left_sidebars(&mut chrome);
             chrome
                 .file_tree
                 .as_mut()

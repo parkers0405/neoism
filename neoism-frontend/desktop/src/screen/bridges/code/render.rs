@@ -5,7 +5,7 @@ impl Screen<'_> {
         neoism_ui::editor::code::render::clear_blame_overlays(&mut self.sugarloaf);
         self.pump_code_lsp();
         let scale = self.sugarloaf.scale_factor();
-        let theme = self.renderer.theme;
+        let theme = self.renderer.styled_theme(neoism_lua::selector::EDITOR);
         let font_scale = self.renderer.chrome_scale();
         let window_size = self.sugarloaf.window_size();
         let text_occlusions = self.renderer.active_text_occlusion_rects(

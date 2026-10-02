@@ -26,6 +26,10 @@ use super::{ProviderEventStream, ProviderRuntime};
 
 const CODEX_RESPONSES_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/responses";
 const CODEX_MODELS_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/models";
+// The backend requires a Codex CLI version and silently returns an empty list
+// for older versions. Neoism applies its own compatibility intersection with
+// models.dev, so catalog discovery must not use Neoism's unrelated semver.
+const CODEX_MODELS_CLIENT_VERSION: &str = "999.0.0";
 const CODEX_MODELS_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 const CODEX_MODELS_FAILURE_TTL: Duration = Duration::from_secs(15);
 const CODEX_MODELS_RESPONSE_LIMIT: usize = 2 * 1024 * 1024;
@@ -112,10 +116,13 @@ impl OpenAiClient {
         let fetched = async {
             let endpoint = std::env::var("NEOISM_AGENT_OPENAI_CODEX_MODELS_URL")
                 .unwrap_or_else(|_| CODEX_MODELS_ENDPOINT.to_string());
+            let client_version =
+                std::env::var("NEOISM_AGENT_OPENAI_CODEX_CLIENT_VERSION")
+                    .unwrap_or_else(|_| CODEX_MODELS_CLIENT_VERSION.to_string());
             let mut request = self
                 .client
                 .get(endpoint)
-                .query(&[("client_version", env!("CARGO_PKG_VERSION"))])
+                .query(&[("client_version", client_version)])
                 .bearer_auth(access)
                 .header("accept", "application/json")
                 .header("originator", "neoism")

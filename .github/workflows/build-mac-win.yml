@@ -63,7 +63,7 @@ jobs:
         shell: bash
         run: |
           env -u CI cargo build --release --locked --target ${{ matrix.target }} \
-           -p neoism -p neoism-workspace-daemon -p neoism-agent --features wgpu
+           -p neoism -p neoism-workspace-daemon -p neoism-agent -p neoism-agent-lua-runner --features wgpu
 
       - name: Install WiX Toolset
         if: matrix.goos == 'windows'
@@ -102,7 +102,7 @@ jobs:
           $installDir = Join-Path $env:LOCALAPPDATA "Programs\Neoism"
           $install = Start-Process msiexec.exe -ArgumentList "/i `"$installer`" /qn /norestart" -Wait -PassThru
           if ($install.ExitCode -notin @(0, 3010, 1641)) { throw "install failed: $($install.ExitCode)" }
-          foreach ($binary in @("neoism.exe", "neoism-workspace-daemon.exe", "neoism-agent.exe")) {
+          foreach ($binary in @("neoism.exe", "neoism-workspace-daemon.exe", "neoism-agent.exe", "neoism-agent-lua-runner.exe")) {
             if (-not (Test-Path (Join-Path $installDir $binary))) { throw "$binary was not installed" }
           }
           if (-not (Test-Path (Join-Path $installDir "web\agent-gui\index.html"))) { throw "agent GUI was not installed" }
@@ -163,7 +163,7 @@ jobs:
           OUT="neoism-${{ matrix.goos }}-${{ matrix.goarch }}"
           mkdir -p "stage/$OUT"
           BIN="target/${{ matrix.target }}/release"
-          cp "$BIN/neoism" "$BIN/neoism-workspace-daemon" "$BIN/neoism-agent" "stage/$OUT/"
+          cp "$BIN/neoism" "$BIN/neoism-workspace-daemon" "$BIN/neoism-agent" "$BIN/neoism-agent-lua-runner" "stage/$OUT/"
           cp -a neoism-frontend/web/dist "stage/$OUT/web"
           node scripts/package-agent-gui.mjs "stage/$OUT/web/agent-gui"
           if [[ "${{ matrix.goos }}" == "darwin" ]]; then
@@ -173,7 +173,7 @@ jobs:
             # installs keep using those, the .app is dragged to /Applications.
             APP="stage/$OUT/Neoism.app"
             mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-            cp "$BIN/neoism" "$BIN/neoism-workspace-daemon" "$BIN/neoism-agent" "$APP/Contents/MacOS/"
+            cp "$BIN/neoism" "$BIN/neoism-workspace-daemon" "$BIN/neoism-agent" "$BIN/neoism-agent-lua-runner" "$APP/Contents/MacOS/"
             cp misc/macos/neoism.icns "$APP/Contents/Resources/neoism.icns"
             cp -a neoism-frontend/web/dist "$APP/Contents/Resources/web"
             VERSION="${GITHUB_REF_NAME#v}"

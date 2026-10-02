@@ -99,17 +99,11 @@ pub(crate) async fn auth_start_with_config(
         default_redirect_uri.clone()
     };
     let existing = stored_client_info(name, url, auth_store).await?;
-    // Registrations are bound to their redirect URI. Re-register only when
-    // switching between a host callback and a previous loopback/host route.
-    // Older stored registrations had no URI field and used the default.
+    // Registrations are bound to their redirect URI. Legacy registrations did
+    // not persist that URI, so their allowlist cannot be assumed to match the
+    // current callback (whose route has changed before).
     let needs_registration = configured_client_id(oauth).is_none()
-        && !existing.as_ref().is_some_and(|client| {
-            client
-                .redirect_uri
-                .as_deref()
-                .unwrap_or(&default_redirect_uri)
-                == redirect_uri
-        });
+        && !registration_matches_redirect(existing.as_ref(), &redirect_uri);
     let endpoints = oauth_endpoints(url, oauth, true, false, needs_registration).await;
     if needs_registration {
         let registration_url = endpoints.registration_url.as_deref()
@@ -408,6 +402,13 @@ fn client_secret_expired(client_info: &McpAuthClientInfo) -> bool {
         .unwrap_or(false)
 }
 
+fn registration_matches_redirect(
+    client_info: Option<&McpAuthClientInfo>,
+    redirect_uri: &str,
+) -> bool {
+    client_info.and_then(|client| client.redirect_uri.as_deref()) == Some(redirect_uri)
+}
+
 #[derive(Clone)]
 struct OAuthClientCredentials {
     client_id: String,
@@ -621,6 +622,37 @@ struct OAuthTokenResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_registration_without_redirect_uri_must_be_replaced() {
+        let legacy = McpAuthClientInfo {
+            client_id: "legacy-client".to_string(),
+            client_secret: None,
+            redirect_uri: None,
+            client_id_issued_at: None,
+            client_secret_expires_at: None,
+        };
+
+        assert!(!registration_matches_redirect(
+            Some(&legacy),
+            "http://127.0.0.1:4096/v2/plugins/dev.neoism.mcp/supabase/auth/callback"
+        ));
+    }
+
+    #[test]
+    fn registration_with_current_redirect_uri_is_reused() {
+        let redirect_uri =
+            "http://127.0.0.1:4096/v2/plugins/dev.neoism.mcp/supabase/auth/callback";
+        let current = McpAuthClientInfo {
+            client_id: "current-client".to_string(),
+            client_secret: None,
+            redirect_uri: Some(redirect_uri.to_string()),
+            client_id_issued_at: None,
+            client_secret_expires_at: None,
+        };
+
+        assert!(registration_matches_redirect(Some(&current), redirect_uri));
+    }
 
     #[tokio::test]
     async fn bearer_token_for_url_ignores_expired_tokens() {

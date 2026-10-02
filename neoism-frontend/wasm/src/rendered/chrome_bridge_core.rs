@@ -35,16 +35,9 @@ impl ChromeBridge {
         self.chrome
             .set_top_workspace_strip_height(self.workspace_island_height());
         self.chrome.set_layout(self.chrome_content_viewport());
-        let layout = self.chrome.layout();
-        let top = layout
-            .top_bar
-            .map(|rect| rect.y + rect.h)
-            .unwrap_or(self.viewport.y);
-        self.workspace_island.set_top_offset(top);
-        // Workspace strip spans the full viewport width on top now,
-        // so its tabs start at the left edge rather than the
-        // content column (the side panels sit in the band below).
-        self.workspace_island.set_left_offset(self.viewport.x);
+        let content = self.chrome.surface_layout().content;
+        self.workspace_island.set_top_offset(content.y);
+        self.workspace_island.set_left_offset(content.x);
     }
 
     pub(crate) fn active_workspace_island_index(&self) -> usize {
@@ -62,7 +55,7 @@ impl ChromeBridge {
         self.workspace_island.hit_test_tab(
             x,
             y,
-            self.viewport.w,
+            self.chrome.surface_layout().content.w,
             1.0,
             self.workspace_island_tabs.len(),
         )

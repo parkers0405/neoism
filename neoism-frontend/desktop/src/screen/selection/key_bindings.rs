@@ -6,6 +6,9 @@ impl Screen<'_> {
         button: MouseButton,
         clipboard: &mut Clipboard,
     ) {
+        if button == MouseButton::Left && self.handle_plugin_ui_click() {
+            return;
+        }
         let mode = self.get_mode();
         let binding_mode = BindingMode::new(&mode, self.search_active());
         let mouse_mode = self.mouse_mode();
@@ -47,6 +50,26 @@ impl Screen<'_> {
                 self.paste(&content, true);
             }
         }
+    }
+
+    pub fn handle_plugin_ui_click(&mut self) -> bool {
+        let scale = self.sugarloaf.scale_factor();
+        let x = self.mouse.x as f32 / scale;
+        let y = self.mouse.y as f32 / scale;
+        let command = self
+            .renderer
+            .plugin_hitboxes
+            .iter()
+            .rev()
+            .find(|hit| {
+                let [left, top, width, height] = hit.rect;
+                x >= left && x <= left + width && y >= top && y <= top + height
+            })
+            .map(|hit| hit.command.clone());
+        let Some(command) = command else { return false };
+        self.queue_plugin_command(command);
+        self.mark_dirty();
+        true
     }
 
     pub fn process_key_bindings(

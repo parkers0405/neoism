@@ -1,6 +1,97 @@
 use super::*;
 
 impl Renderer {
+    pub fn set_plugin_snapshot(&mut self, snapshot: std::sync::Arc<neoism_lua::PluginSnapshot>) {
+        self.plugins = snapshot;
+        self.command_palette
+            .set_plugin_commands(self.plugins.commands.clone());
+        let tree = self.style(neoism_lua::selector::FILE_TREE);
+        if let Some(font_size) = tree.font_size {
+            self.file_tree.set_scale((font_size / 14.0).clamp(0.5, 3.0));
+        }
+        if let Some(width) = tree.width {
+            self.file_tree.set_width(width);
+        }
+        if let Some(visible) = tree.visible {
+            self.set_left_sidebar_visibility(
+                neoism_ui::panels::left_sidebar_host::LeftSidebarView::Files,
+                visible,
+                false,
+            );
+        }
+        let notes = self.style(neoism_lua::selector::NOTES_TREE);
+        if let Some(font_size) = notes.font_size {
+            self.notes_sidebar.set_scale((font_size / 14.0).clamp(0.5, 3.0));
+        }
+        if let Some(width) = notes.width {
+            self.notes_sidebar.set_width(width);
+        }
+        if let Some(visible) = notes.visible {
+            self.set_left_sidebar_visibility(
+                neoism_ui::panels::left_sidebar_host::LeftSidebarView::Notes,
+                visible,
+                false,
+            );
+        }
+        if let Some(visible) = self.style(neoism_lua::selector::CHROME_TOP).visible {
+            self.top_bar.set_visible(visible);
+        }
+        if let Some(font_size) = self.style(neoism_lua::selector::CHROME_TOP).font_size {
+            self.top_bar.set_scale((font_size / 14.0).clamp(0.5, 3.0));
+        }
+        if let Some(visible) = self.style(neoism_lua::selector::STATUS).visible {
+            self.status_line.set_visible(visible);
+        }
+        if let Some(font_size) = self.style(neoism_lua::selector::STATUS).font_size {
+            self.status_line.set_scale((font_size / 14.0).clamp(0.5, 3.0));
+        }
+        if let Some(visible) = self.style(neoism_lua::selector::COMPOSER).visible {
+            self.command_composer.set_visible(visible);
+        }
+        if let Some(font_size) = self.style(neoism_lua::selector::COMPOSER).font_size {
+            self.command_composer.set_scale((font_size / 14.0).clamp(0.5, 3.0));
+        }
+        if let Some(visible) = self.style(neoism_lua::selector::BUFFER_TABS).visible {
+            self.buffer_tabs.set_visible(visible);
+        }
+        if let Some(font_size) = self.style(neoism_lua::selector::BUFFER_TABS).font_size {
+            self.buffer_tabs.set_scale((font_size / 14.0).clamp(0.5, 3.0));
+        }
+        if let Some(font_size) = self.style(neoism_lua::selector::BREADCRUMBS).font_size {
+            self.breadcrumbs.set_scale((font_size / 14.0).clamp(0.5, 3.0));
+        }
+        if let Some(font_size) = self.style(neoism_lua::selector::PALETTE).font_size {
+            self.command_palette.set_scale((font_size / 14.0).clamp(0.5, 3.0));
+        }
+        if let Some(font_size) = self.style(neoism_lua::selector::FINDER).font_size {
+            self.finder.set_scale((font_size / 14.0).clamp(0.5, 3.0));
+        }
+        if let Some(font_size) = self.style(neoism_lua::selector::GIT).font_size {
+            self.git_diff_panel.set_scale((font_size / 14.0).clamp(0.5, 3.0));
+        }
+        if let Some(font_size) = self.style(neoism_lua::selector::NOTIFICATION).font_size {
+            self.notifications.set_scale((font_size / 14.0).clamp(0.5, 3.0));
+        }
+        if let Some(visible) = self.style(neoism_lua::selector::AGENT_SIDEBAR).visible {
+            self.set_left_sidebar_visibility(
+                neoism_ui::panels::left_sidebar_host::LeftSidebarView::Conversations,
+                visible,
+                false,
+            );
+        }
+    }
+
+    pub fn style(&self, selector: &str) -> neoism_lua::StylePatch {
+        self.plugins.styles.resolve(selector)
+    }
+
+    pub fn styled_theme(&self, selector: &str) -> IdeTheme {
+        let mut style = self.style(neoism_lua::selector::APP);
+        let specific = self.style(selector);
+        style.overlay(Some(&specific));
+        neoism_ui::customization::styled_ide_theme(self.theme, &style)
+    }
+
     /// Scale factor applied to all chrome rows. `1.0` matches the
     /// base constants when the user's config font.size = 14pt.
     /// Callers (e.g. `change_font_size`) should use `set_chrome_scale`
@@ -236,6 +327,9 @@ impl Renderer {
         }
         if !self.install_tracker.in_flight.is_empty() {
             return Some("extension_install");
+        }
+        if self.lua_plugin_job_active {
+            return Some("lua_plugin_job");
         }
         if self.modal.needs_redraw() {
             return Some("modal");

@@ -570,24 +570,47 @@ where
 
     match message.kind() {
         AgentMessageCardKind::Assistant => {
-            return D::render_assistant_text(
-                sugarloaf,
-                x,
-                y,
-                w,
-                h,
-                AgentToolMessage::id(message),
-                AgentToolMessage::text(message),
-                AgentToolMessage::status(message),
-                markdown_blocks,
-                pane,
-                theme,
-                s,
-                now_seconds,
-                mouse,
-                viewport_clip,
-                occlusion_rects,
-            );
+            let image_h = if message.images().is_empty() {
+                0.0
+            } else {
+                164.0 * s
+            };
+            let text_h = (h - image_h).max(0.0);
+            if !AgentToolMessage::text(message).trim().is_empty() {
+                D::render_assistant_text(
+                    sugarloaf,
+                    x,
+                    y,
+                    w,
+                    text_h,
+                    AgentToolMessage::id(message),
+                    AgentToolMessage::text(message),
+                    AgentToolMessage::status(message),
+                    markdown_blocks,
+                    pane,
+                    theme,
+                    s,
+                    now_seconds,
+                    mouse,
+                    viewport_clip,
+                    occlusion_rects,
+                );
+            }
+            if image_h > 0.0 {
+                super::image_preview::render_image_strip(
+                    sugarloaf,
+                    message.images(),
+                    x + ASSISTANT_TEXT_PAD_LEFT * s,
+                    y + text_h,
+                    (w - 30.0 * s - ASSISTANT_TEXT_PAD_LEFT * s).max(80.0 * s),
+                    theme,
+                    s,
+                    super::image_preview::MESSAGE_THUMB_SIZE,
+                    viewport_clip,
+                    occlusion_rects,
+                );
+            }
+            return h;
         }
         AgentMessageCardKind::User => {
             // Choke point: resolve who sent this into (orb seed, tooltip
@@ -893,25 +916,32 @@ where
     };
     match message.kind() {
         AgentMessageCardKind::Assistant => {
-            if AgentToolMessage::text(message).trim().is_empty() {
-                return 0.0;
-            }
-            let markdown_h = D::measure_markdown_text(
-                sugarloaf,
-                pane,
-                AgentToolMessage::text(message),
-                // Mirror the `pad_left` inset in `render_assistant_text_with`
-                // (30*s right margin + ASSISTANT_TEXT_PAD_LEFT left pad) so
-                // the measured height matches the rendered wrap exactly.
-                (width - 30.0 * s - ASSISTANT_TEXT_PAD_LEFT * s).max(80.0 * s),
-                theme,
-                s,
-            );
-            if AgentToolMessage::status(message).trim().is_empty() {
-                markdown_h
+            let image_h = if message.images().is_empty() {
+                0.0
             } else {
-                markdown_h + ASSISTANT_RESPONSE_FOOTER_H * s
-            }
+                164.0 * s
+            };
+            let text_h = if AgentToolMessage::text(message).trim().is_empty() {
+                0.0
+            } else {
+                let markdown_h = D::measure_markdown_text(
+                    sugarloaf,
+                    pane,
+                    AgentToolMessage::text(message),
+                    // Mirror the `pad_left` inset in `render_assistant_text_with`
+                    // (30*s right margin + ASSISTANT_TEXT_PAD_LEFT left pad) so
+                    // the measured height matches the rendered wrap exactly.
+                    (width - 30.0 * s - ASSISTANT_TEXT_PAD_LEFT * s).max(80.0 * s),
+                    theme,
+                    s,
+                );
+                if AgentToolMessage::status(message).trim().is_empty() {
+                    markdown_h
+                } else {
+                    markdown_h + ASSISTANT_RESPONSE_FOOTER_H * s
+                }
+            };
+            text_h + image_h
         }
         AgentMessageCardKind::Reasoning => {
             if AgentToolMessage::text(message).trim().is_empty() {

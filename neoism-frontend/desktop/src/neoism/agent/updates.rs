@@ -1089,10 +1089,17 @@ fn send_event_updates(
             SessionEventUpdate::PartUpdated(part) => {
                 message_refresh_epochs.advance(session_id);
                 if let Some(message) = part_block(&part) {
+                    let parent_message_id = part_parent_message_id(&part);
                     tx.send(AgentSessionUpdate::PartUpdated {
-                        message,
-                        parent_message_id: part_parent_message_id(&part),
+                        message: message.clone(),
+                        parent_message_id: parent_message_id.clone(),
                     })?;
+                    hydrate_live_images(server, tx, message, move |message| {
+                        AgentSessionUpdate::PartUpdated {
+                            message,
+                            parent_message_id,
+                        }
+                    });
                 }
             }
             SessionEventUpdate::PartRemoved(part_id) => {
@@ -1118,11 +1125,20 @@ fn send_event_updates(
             SessionEventUpdate::ChildPartUpdated { session_id, part } => {
                 message_refresh_epochs.advance(&session_id);
                 if let Some(message) = part_block(&part) {
+                    let parent_message_id = part_parent_message_id(&part);
+                    let child_session_id = session_id.clone();
                     tx.send(AgentSessionUpdate::ChildPartUpdated {
-                        session_id,
-                        message,
-                        parent_message_id: part_parent_message_id(&part),
+                        session_id: session_id.clone(),
+                        message: message.clone(),
+                        parent_message_id: parent_message_id.clone(),
                     })?;
+                    hydrate_live_images(server, tx, message, move |message| {
+                        AgentSessionUpdate::ChildPartUpdated {
+                            session_id: child_session_id,
+                            message,
+                            parent_message_id,
+                        }
+                    });
                 }
             }
             SessionEventUpdate::ChildPartRemoved {
@@ -1332,6 +1348,28 @@ fn send_event_updates(
         wake_event_loop(wake);
     }
     Ok(())
+}
+
+fn hydrate_live_images(
+    server: &str,
+    tx: &Sender<AgentSessionUpdate>,
+    message: super::pane::NeoismAgentMessage,
+    update: impl FnOnce(super::pane::NeoismAgentMessage) -> AgentSessionUpdate
+        + Send
+        + 'static,
+) {
+    if !message.images.iter().any(|image| {
+        image.mime.starts_with("image/") && image.url.starts_with("/v2/artifacts/")
+    }) {
+        return;
+    }
+    let server = server.to_string();
+    let tx = tx.clone();
+    std::thread::spawn(move || {
+        let mut message = message;
+        super::api::hydrate_generated_images(&server, std::slice::from_mut(&mut message));
+        let _ = tx.send(update(message));
+    });
 }
 
 fn spawn_message_refreshes(

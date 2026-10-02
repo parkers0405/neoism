@@ -5,6 +5,7 @@ use sugarloaf::text::DrawOpts;
 use sugarloaf::Sugarloaf;
 
 use crate::primitives::IdeTheme;
+use crate::customization::{color_f32, color_u8};
 pub(super) use crate::primitives::{
     draw_icon_centered_with_occlusion, draw_text_with_occlusion, edge_left_row_radii,
     edge_row_radii, snap_to_device_px,
@@ -194,6 +195,7 @@ impl FileTree {
         panel_height: f32,
         theme: &IdeTheme,
         text_occlusion_rects: &[[f32; 4]],
+        plugins: Option<&neoism_lua::PluginSnapshot>,
     ) {
         if !self.visible || panel_width <= 0.0 || panel_height <= 0.0 {
             return;
@@ -334,6 +336,10 @@ impl FileTree {
             self.skeleton_started = None;
         }
 
+        let row_style = plugins.map(|plugins| plugins.styles.resolve("file-tree.row"));
+        let selected_style = plugins
+            .map(|plugins| plugins.styles.resolve("file-tree.row.selected"));
+        let icon_style = plugins.map(|plugins| plugins.styles.resolve("file-tree.icon"));
         if !self.entries.is_empty() && self.selected < self.entries.len() {
             let row_ix = self.selected as isize - self.scroll_top as isize;
             let row_y = content_y + row_ix as f32 * row_h + scroll_offset + cursor_offset;
@@ -347,7 +353,13 @@ impl FileTree {
                     visible_row_y,
                     content_w,
                     visible_row_h,
-                    theme.f32(theme.surface),
+                    color_f32(
+                        selected_style
+                            .as_ref()
+                            .and_then(|style| style.background.as_deref()),
+                        theme,
+                        theme.f32(theme.surface),
+                    ),
                     edge_row_radii(
                         visible_row_y,
                         visible_row_h,
@@ -619,6 +631,19 @@ impl FileTree {
                 NodeKind::File if is_selected || is_active_buffer => theme.u8(theme.fg),
                 NodeKind::File => theme.u8(theme.dim),
             };
+            let label_color = color_u8(
+                if is_selected {
+                    selected_style
+                        .as_ref()
+                        .and_then(|style| style.foreground.as_deref())
+                } else {
+                    row_style
+                        .as_ref()
+                        .and_then(|style| style.foreground.as_deref())
+                },
+                theme,
+                label_color,
+            );
             let (icon_glyph, icon_color) = icon_for(entry);
             let icon_color = match entry.kind {
                 NodeKind::Dir { .. } if entry.git_status != GitStatus::None => {
@@ -627,9 +652,21 @@ impl FileTree {
                 NodeKind::Dir { .. } => theme.u8(theme.folder),
                 NodeKind::File => icon_color,
             };
+            let icon_color = color_u8(
+                icon_style
+                    .as_ref()
+                    .and_then(|style| style.foreground.as_deref()),
+                theme,
+                icon_color,
+            );
 
             let label_opts = DrawOpts {
-                font_size,
+                font_size: if is_selected {
+                    selected_style.as_ref().and_then(|style| style.font_size)
+                } else {
+                    row_style.as_ref().and_then(|style| style.font_size)
+                }
+                .unwrap_or(font_size),
                 color: fade_u8(label_color, row_reveal),
                 clip_rect: Some(panel_clip),
                 ..DrawOpts::default()

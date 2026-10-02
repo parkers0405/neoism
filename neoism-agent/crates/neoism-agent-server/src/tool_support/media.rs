@@ -45,6 +45,8 @@ async fn generate_media(
         MediaKind::Image => snapshot.config().image_model.as_deref(),
         MediaKind::Video => snapshot.config().video_model.as_deref(),
     }
+    .map(str::trim)
+    .filter(|model| !model.is_empty())
     .ok_or_else(|| {
         anyhow::anyhow!(
             "agent.{}Model is not configured",

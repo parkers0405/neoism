@@ -442,6 +442,36 @@ impl GitDiffPanel {
         Some((abs, root))
     }
 
+    pub fn branch(&self) -> Option<String> {
+        self.data.lock().ok()?.branch.clone()
+    }
+
+    pub fn repo_root(&self) -> Option<PathBuf> {
+        self.data.lock().ok()?.repo_root.clone()
+    }
+
+    pub fn files(&self) -> Vec<super::types::FileChange> {
+        self.data
+            .lock()
+            .map(|data| data.files.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn selected_file_index(&self) -> Option<usize> {
+        self.data
+            .lock()
+            .ok()
+            .and_then(|data| (self.selected < data.files.len()).then_some(self.selected))
+    }
+
+    pub fn loading(&self) -> bool {
+        self.data.lock().is_ok_and(|data| data.loading)
+    }
+
+    pub fn error(&self) -> Option<String> {
+        self.data.lock().ok()?.error.clone()
+    }
+
     pub fn is_animating(&self) -> bool {
         self.file_scroll_spring.position != 0.0
             || self.diff_scroll_spring.position != 0.0

@@ -288,6 +288,16 @@ impl Screen<'_> {
         root
     }
 
+    pub(crate) fn local_plugin_workspace_root(&self) -> Option<&std::path::Path> {
+        if self.context_manager.current_workspace_is_remote_joined()
+            && !self.context_manager.current_workspace_is_quick_ssh()
+        {
+            None
+        } else {
+            self.active_workspace_root.as_deref()
+        }
+    }
+
     pub(crate) fn set_active_workspace_root(
         &mut self,
         root: PathBuf,
@@ -459,6 +469,11 @@ impl Screen<'_> {
         claim_live_panel_owner(&mut self.conversations_pane_workspace, &id);
         self.workspace_conversations_visibility
             .insert(id.clone(), self.renderer.conversations_visible);
+        if let Some(view) = self.renderer.left_sidebar_host.active_unified() {
+            self.workspace_active_left_sidebar.insert(id.clone(), view);
+        } else {
+            self.workspace_active_left_sidebar.remove(&id);
+        }
         let next_tabs_empty = self.renderer.buffer_tabs.tabs().is_empty();
         let saved_tabs_non_empty = self
             .workspace_buffer_tabs
@@ -628,6 +643,13 @@ impl Screen<'_> {
             self.renderer.conversations_pane = incoming;
             self.renderer.conversations_directory = directory;
             self.conversations_pane_workspace = Some(id.clone());
+        }
+        if let Some(view) = self.workspace_active_left_sidebar.get(&id).copied() {
+            self.renderer.left_sidebar_host.show(view, false);
+            self.renderer.hide_other_unified_sidebars(view);
+            self.renderer.set_left_sidebar_view_state(view, true, false);
+        } else {
+            self.renderer.reconcile_left_sidebar_host();
         }
         // The agent runtime is workspace-owned just like the tree and notes
         // panel. A local grid uses this machine's loopback agent; a joined

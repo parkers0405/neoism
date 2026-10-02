@@ -37,6 +37,7 @@ use std::collections::HashSet;
 use std::error::Error;
 use std::path::PathBuf;
 use std::sync::mpsc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::server_registry::ServerRegistry;
@@ -65,12 +66,138 @@ struct PendingSshWorkspace {
     title: String,
 }
 
+struct PendingLuaLspRequest {
+    window_id: WindowId,
+    operation: neoism_lua::LuaLspOperation,
+    target: neoism_lua::LuaLspTarget,
+}
+
+struct LuaLspActionLease {
+    window_id: WindowId,
+    target: neoism_lua::LuaLspTarget,
+    created_at: Instant,
+    action: crate::screen::bridges::code::lsp::LuaLspRetainedCodeAction,
+}
+
+#[derive(Clone)]
+struct LuaPluginTimerLease {
+    owner: neoism_lua::PluginOwner,
+    due: Instant,
+    interval: Option<Duration>,
+    command: String,
+    arguments: serde_json::Value,
+}
+
+fn advance_lua_timer_deadline(due: Instant, interval: Duration, now: Instant) -> Instant {
+    let overdue = now.saturating_duration_since(due);
+    let skipped = (overdue.as_millis() / interval.as_millis().max(1)) as u32 + 1;
+    due + interval.saturating_mul(skipped)
+}
+
+#[cfg(test)]
+mod lua_timer_tests {
+    use super::*;
+
+    #[test]
+    fn repeating_deadline_coalesces_missed_ticks_without_cadence_drift() {
+        let due = Instant::now();
+        let interval = Duration::from_millis(20);
+        let now = due + Duration::from_millis(95);
+        assert_eq!(advance_lua_timer_deadline(due, interval, now), due + Duration::from_millis(100));
+    }
+
+    #[test]
+    fn lua_state_polling_is_reserved_for_state_event_subscribers() {
+        assert!(lua_autocmd_needs_state_poll("DocumentChanged"));
+        assert!(lua_autocmd_needs_state_poll("*"));
+        assert!(!lua_autocmd_needs_state_poll("Startup"));
+        assert!(!lua_autocmd_needs_state_poll("Command"));
+        assert!(!lua_autocmd_needs_state_poll("AsyncResult"));
+    }
+}
+
+#[derive(Clone)]
+struct LuaPluginStickyAnchor {
+    window_id: WindowId,
+    buffer_id: String,
+    anchor: neoism_ui::editor::crdt::CrdtStickyAnchor,
+}
+
+#[derive(Clone)]
+struct LuaPluginAnchorLease {
+    owner: neoism_lua::PluginOwner,
+    namespace: neoism_lua::PluginNamespaceHandle,
+    resource: neoism_lua::PluginResourceId,
+    sticky: Option<LuaPluginStickyAnchor>,
+    window_id: WindowId,
+}
+
+#[derive(Clone)]
+struct LuaEditorOptionBaseline {
+    window_id: WindowId,
+    route_id: usize,
+    wrap: bool,
+    input_mode: neoism_ui::editor::code::CodeInputMode,
+    indent: neoism_ui::editor::code::CodeIndent,
+}
+
+#[derive(Default)]
+struct LuaEditorResources {
+    registry: neoism_lua::PluginResourceRegistry,
+    namespaces: HashMap<String, (neoism_lua::PluginOwner, neoism_lua::PluginNamespaceHandle)>,
+    anchors: HashMap<String, LuaPluginAnchorLease>,
+    decorations: HashMap<String, (neoism_lua::PluginOwner, neoism_lua::PluginNamespaceHandle, neoism_lua::PluginResourceId, neoism_lua::DecorationLayer)>,
+    published_targets: HashMap<neoism_lua::DocumentHandle, (WindowId, usize)>,
+    document_text: HashMap<neoism_lua::DocumentHandle, String>,
+}
+
+#[derive(Clone)]
+struct LuaResultList {
+    owner: neoism_lua::PluginOwner,
+    window_id: WindowId,
+    title: String,
+    kind: String,
+    entries: Vec<neoism_lua::PluginResultEntry>,
+}
+
 fn ssh_server_id(workspace_id: &str) -> String {
     format!("ssh:{workspace_id}")
 }
 
 const NOTEBOOK_STATUS_TICK_MS: u64 = 500;
 const FRAME_WATCHDOG_NOTE_INTERVAL: Duration = Duration::from_secs(1);
+const LUA_STATE_PUBLISH_INTERVAL: Duration = Duration::from_millis(100);
+const LUA_LSP_PENDING_PER_OWNER: usize = 64;
+const LUA_LSP_PENDING_GLOBAL: usize = 512;
+const LUA_LSP_ACTIONS_PER_OWNER: usize = 256;
+const LUA_LSP_ACTIONS_GLOBAL: usize = 2048;
+const LUA_LSP_ACTION_TTL: Duration = Duration::from_secs(5 * 60);
+
+fn lua_autocmd_needs_state_poll(event: &str) -> bool {
+    matches!(
+        event,
+        "*"
+            | "BufferChanged"
+            | "WorkspaceChanged"
+            | "TabChanged"
+            | "PanelChanged"
+            | "FileTreeChanged"
+            | "NotesChanged"
+            | "AgentChanged"
+            | "TerminalChanged"
+            | "GitChanged"
+            | "ThemeChanged"
+            | "PluginsChanged"
+            | "ConfigChanged"
+            | "DocumentOpened"
+            | "DocumentClosed"
+            | "DocumentFocused"
+            | "DocumentChanged"
+            | "SelectionChanged"
+            | "PaneFocused"
+            | "PaneChanged"
+    )
+}
 
 #[cfg(target_os = "linux")]
 pub(crate) mod agent_tray;
@@ -134,6 +261,29 @@ pub struct Application<'a> {
     _external_command_listener: Option<crate::ipc::ExternalCommandListener>,
     update_check_started: bool,
     pending_update_version: Option<String>,
+    lua_runtime: Option<neoism_lua::LuaRuntime>,
+    lua_host: Arc<neoism_lua::QueuedHost>,
+    lua_published: HashMap<String, serde_json::Value>,
+    lua_plugins: crate::plugin_manager::LuaPluginManager,
+    lua_plugin_jobs: crate::lua_plugin_jobs::LuaPluginJobs,
+    lua_lsp_pending: HashMap<(neoism_lua::PluginOwner, String), PendingLuaLspRequest>,
+    lua_lsp_actions:
+        HashMap<(neoism_lua::PluginOwner, String, String), LuaLspActionLease>,
+    lua_command_completions:
+        HashMap<(neoism_lua::PluginOwner, String), neoism_lua::PluginCommandCompletion>,
+    lua_active_owners: HashSet<neoism_lua::PluginOwner>,
+    lua_editor_option_baselines: HashMap<String, LuaEditorOptionBaseline>,
+    lua_editor_resources: LuaEditorResources,
+    lua_timers: Option<HashMap<String, LuaPluginTimerLease>>,
+    lua_async: Option<crate::lua_async::LuaAsyncCoordinator>,
+    lua_dap: Option<crate::lua_dap::LuaDap>,
+    lua_jobs: Option<crate::lua_jobs::LuaJobs>,
+    lua_ptys: Option<crate::lua_ptys::LuaPtys>,
+    lua_prompts: Option<HashMap<(WindowId, String), neoism_lua::PluginOwner>>,
+    lua_progress: Option<HashMap<String, (neoism_lua::PluginOwner, WindowId)>>,
+    lua_result_lists: Option<HashMap<String, LuaResultList>>,
+    lua_watchers: Option<crate::lua_watchers::LuaWatchers>,
+    lua_state_publish_deadline: Instant,
 }
 
 impl Application<'_> {
@@ -147,18 +297,34 @@ impl Application<'_> {
         daemon_token: Option<String>,
         initial_server_id: Option<String>,
         home_daemon_endpoint: Option<String>,
+        mut lua_runtime: Option<neoism_lua::LuaRuntime>,
+        lua_host: Arc<neoism_lua::QueuedHost>,
     ) -> Application<'app> {
         // SAFETY: Since this takes a pointer to the winit event loop, it MUST be dropped first,
         // which is done in `exiting`.
         let clipboard =
             unsafe { Clipboard::new(event_loop.display_handle().unwrap().as_raw()) };
 
+        let config_dir = neoism_backend::config::config_dir_path();
+        let (mut lua_plugins, lua_plugin_error) = crate::plugin_manager::LuaPluginManager::discover_for_startup(
+            &config_dir,
+            lua_host.clone(),
+            &config.plugins,
+        );
+        if let Some(error) = lua_plugin_error {
+            tracing::warn!(%error, "Lua plugin activation failed; retaining plugin diagnostics and user init");
+        }
+        let plugin_snapshot = Arc::new(crate::plugin_manager::overlay_snapshot(
+            lua_plugins.snapshot(),
+            lua_runtime.as_ref().map(neoism_lua::LuaRuntime::snapshot),
+        ));
         let mut router = Router::new(
             crate::mashup::fonts_with_markdown_family(
                 config.appearance.fonts.to_owned(),
                 config.appearance.look.markdown.font_family.as_deref(),
             ),
             clipboard,
+            plugin_snapshot,
         );
         if let Some(error) = config_error {
             router.propagate_error_to_next_route(error.into());
@@ -210,6 +376,34 @@ impl Application<'_> {
 
         neoism_notifier::request_authorization();
 
+        if let Some(runtime) = lua_runtime.as_mut() {
+            if let Err(error) = runtime.emit(neoism_lua::PluginEvent {
+                name: "Startup".into(),
+                payload: serde_json::Value::Null,
+                scope: neoism_lua::ExecutionScope::Local,
+                origin: Some("neoism".into()),
+            }) {
+                tracing::warn!(%error, "Lua Startup autocmd failed");
+            }
+            router.set_plugin_snapshot(Arc::new(runtime.snapshot().clone()));
+        }
+        for failure in lua_plugins.emit(neoism_lua::PluginEvent {
+            name: "Startup".into(),
+            payload: serde_json::Value::Null,
+            scope: neoism_lua::ExecutionScope::Local,
+            origin: Some("neoism".into()),
+        }) {
+            tracing::warn!(plugin = %failure.plugin_id, error = %failure.message, "Lua plugin Startup failed");
+        }
+        router.set_plugin_snapshot(Arc::new(crate::plugin_manager::overlay_snapshot(
+            lua_plugins.snapshot(),
+            lua_runtime.as_ref().map(neoism_lua::LuaRuntime::snapshot),
+        )));
+        let mut lua_active_owners = lua_plugins.active_owners().cloned().collect::<HashSet<_>>();
+        if let Some(runtime) = &lua_runtime {
+            lua_active_owners.insert(runtime.owner().clone());
+        }
+
         Application {
             #[cfg(target_os = "linux")]
             agent_tray: if config.ui.agent_tray {
@@ -246,6 +440,27 @@ impl Application<'_> {
             _external_command_listener: external_command_listener,
             update_check_started: false,
             pending_update_version: None,
+            lua_runtime,
+            lua_host,
+            lua_published: HashMap::new(),
+            lua_plugins,
+            lua_plugin_jobs: Default::default(),
+            lua_lsp_pending: HashMap::new(),
+            lua_lsp_actions: HashMap::new(),
+            lua_command_completions: HashMap::new(),
+            lua_active_owners,
+            lua_editor_option_baselines: HashMap::new(),
+            lua_editor_resources: LuaEditorResources::default(),
+            lua_timers: None,
+            lua_async: None,
+            lua_dap: None,
+            lua_jobs: None,
+            lua_ptys: None,
+            lua_prompts: None,
+            lua_progress: None,
+            lua_result_lists: None,
+            lua_watchers: None,
+            lua_state_publish_deadline: Instant::now(),
         }
     }
 
@@ -356,6 +571,7 @@ impl Application<'_> {
     }
 
     fn pump_daemon(&mut self, event_loop: &ActiveEventLoop) {
+        self.pump_lua();
         self.drain_server_health_results();
         self.drain_ssh_attach_results();
         self.drain_server_switch_results();
@@ -633,6 +849,3639 @@ impl Application<'_> {
             self.process_window_server_requests(window_id);
             self.flush_window_outbound(window_id);
         }
+    }
+
+    fn pump_lua(&mut self) {
+        self.drain_lua_lsp_completions();
+        self.drain_lua_command_completions();
+        let mut plugin_actions = Vec::new();
+        for (window_id, route) in &mut self.router.routes {
+            plugin_actions.extend(
+                route.window.screen.take_lua_plugin_actions().into_iter()
+                    .map(|(id, action)| (*window_id, id, action)),
+            );
+        }
+        for (window_id, id, action) in plugin_actions {
+            self.handle_lua_plugin_action(window_id, id, action);
+        }
+        let completions = self.lua_plugin_jobs.pump(&self.event_proxy);
+        let jobs_changed = self.lua_plugin_jobs.take_changed();
+        if !completions.is_empty() {
+            for completion in completions {
+                if completion.success {
+                    match crate::plugin_manager::LuaPluginManager::discover(
+                        &neoism_backend::config::config_dir_path(),
+                        self.lua_host.clone(),
+                        &self.config.plugins,
+                    ) {
+                        Ok(manager) => self.lua_plugins = manager,
+                        Err(error) => {
+                            let message = format!("Installed package could not be activated: {error}");
+                            if completion.lock_changed {
+                                let store = neoism_extensions::lua_plugins::LuaPluginStore::managed();
+                                if let Err(rollback_error) = store.rollback_lock_entry(
+                                    &completion.plugin_id,
+                                    completion.previous_lock_entry,
+                                ) {
+                                    tracing::error!(plugin = %completion.plugin_id, %rollback_error, "failed to roll back rejected Lua plugin lock entry");
+                                }
+                            }
+                            self.lua_plugin_jobs.record_failure(completion.plugin_id.clone(), message.clone());
+                            tracing::warn!(plugin = %completion.plugin_id, %message);
+                            continue;
+                        }
+                    }
+                } else {
+                    tracing::warn!(plugin = %completion.plugin_id, error = %completion.message, "Lua plugin lifecycle operation failed");
+                }
+            }
+            self.sync_lua_snapshot(None);
+        } else if jobs_changed {
+            self.refresh_lua_extension_rows();
+        }
+        if self.router.routes.values().any(|route| route.window.screen.needs_lua_plugin_entries()) {
+            self.refresh_lua_extension_rows();
+        }
+        self.poll_lua_async();
+        if self.lua_runtime.is_none() && self.lua_plugins.is_empty() {
+            return;
+        }
+        self.sync_lua_editor_resources();
+        let now = Instant::now();
+        self.poll_lua_timers(now);
+        let mut state_published = false;
+        let needs_state_poll = self
+            .lua_runtime
+            .as_ref()
+            .into_iter()
+            .flat_map(|runtime| &runtime.snapshot().autocmds)
+            .chain(self.lua_plugins.snapshot().autocmds.iter())
+            .any(|autocmd| lua_autocmd_needs_state_poll(&autocmd.event));
+        if self.lua_published.is_empty()
+            || (needs_state_poll && now >= self.lua_state_publish_deadline)
+        {
+            self.publish_lua_state();
+            self.lua_state_publish_deadline = now + LUA_STATE_PUBLISH_INTERVAL;
+            state_published = true;
+        }
+        let mut commands = Vec::new();
+        let mut keys = Vec::new();
+        let mut plugin_actions = Vec::new();
+        let mut prompt_replies = Vec::new();
+        for (window_id, route) in &mut self.router.routes {
+            plugin_actions.extend(
+                route.window.screen.take_plugin_actions().into_iter().map(|action| (*window_id, action)),
+            );
+            prompt_replies.extend(route.window.screen.take_lua_prompt_replies().into_iter().map(|reply| (*window_id, reply)));
+            commands.extend(
+                route
+                    .window
+                    .screen
+                    .take_plugin_commands()
+                    .into_iter()
+                    .map(|command| (*window_id, command)),
+            );
+            keys.extend(
+                route
+                    .window
+                    .screen
+                    .take_plugin_keys()
+                    .into_iter()
+                    .map(|key| (*window_id, key)),
+            );
+        }
+        for (window_id, (request_id, value, cancelled)) in prompt_replies {
+            let owner = self.lua_prompts.as_mut()
+                .and_then(|prompts| prompts.remove(&(window_id, request_id.clone())));
+            let Some(owner) = owner else { continue };
+            let coordinator = self.lua_async.get_or_insert_with(Default::default);
+            if cancelled {
+                coordinator.cancel(&owner, &request_id);
+            } else {
+                coordinator.sender().complete(owner, request_id, serde_json::json!({ "value": value }));
+            }
+        }
+        for (window_id, action) in plugin_actions {
+            self.apply_lua_action(window_id, action);
+        }
+        for (window_id, key) in keys {
+            if !state_published {
+                self.publish_lua_state();
+                self.lua_state_publish_deadline = Instant::now() + LUA_STATE_PUBLISH_INTERVAL;
+                state_published = true;
+            }
+            let revision_before = self.lua_plugins.revision();
+            if let Err(error) = self.lua_plugins.activate_key(&key) {
+                tracing::warn!(%key, %error, "lazy Lua plugin key activation failed");
+                continue;
+            }
+            if self.lua_plugins.revision() != revision_before {
+                self.sync_lua_snapshot(Some(window_id));
+            }
+            let command = self
+                .router
+                .routes
+                .get_mut(&window_id)
+                .and_then(|route| route.window.screen.replay_plugin_key(&key));
+            if let Some(command) = command {
+                commands.push((window_id, command));
+            } else {
+                tracing::warn!(%key, "lazy Lua plugin did not register its declared keymap");
+            }
+        }
+        let mut builtins = Vec::new();
+        {
+            for (window_id, id) in commands {
+                if !state_published {
+                    self.publish_lua_state();
+                    self.lua_state_publish_deadline = Instant::now() + LUA_STATE_PUBLISH_INTERVAL;
+                    state_published = true;
+                }
+                let revision_before = self.lua_plugins.revision();
+                if let Err(error) = self.lua_plugins.activate_command(&id) {
+                    tracing::warn!(command = %id, %error, "lazy Lua plugin activation failed");
+                }
+                if self.lua_plugins.revision() != revision_before {
+                    self.sync_lua_snapshot(None);
+                }
+                let callback = self
+                    .lua_runtime
+                    .as_ref()
+                    .and_then(|runtime| {
+                        runtime
+                            .snapshot()
+                            .commands
+                            .iter()
+                            .find(|command| command.id == id || command.aliases.iter().any(|alias| alias == &id))
+                    })
+                    .or_else(|| {
+                        self.lua_plugins
+                            .snapshot()
+                    .commands
+                    .iter()
+                    .find(|command| command.id == id || command.aliases.iter().any(|alias| alias == &id))
+                    })
+                    .cloned();
+                let Some(command) = callback else {
+                    builtins.push((window_id, id));
+                    continue;
+                };
+                if command.callback.is_empty() {
+                    tracing::warn!(command = %id, "lazy Lua plugin did not register its declared command");
+                    continue;
+                }
+                let request = neoism_lua::PluginCommandRequest {
+                    command: id.clone(),
+                    arguments: serde_json::json!({}),
+                    range: None,
+                    count: None,
+                    bang: false,
+                };
+                if let Err(error) = neoism_lua::validate_command_request(&command, &request) {
+                    tracing::warn!(command = %id, %error, "Lua palette command arguments rejected");
+                    continue;
+                }
+                let event = neoism_lua::PluginEvent {
+                    name: "Command".into(),
+                    payload: serde_json::json!({
+                        "id": command.id,
+                        "requestedAs": id,
+                        "arguments": request.arguments,
+                        "range": null,
+                        "count": null,
+                        "bang": false,
+                    }),
+                    scope: neoism_lua::ExecutionScope::Local,
+                    origin: Some("command-palette".into()),
+                };
+                let result = if command.callback.starts_with("lua:neoism.user-init@") {
+                    self.lua_runtime
+                        .as_ref()
+                        .expect("user-init callback requires runtime")
+                        .invoke(&command.callback, event)
+                        .map_err(|error| error.to_string())
+                } else {
+                    self.lua_plugins
+                        .invoke(&command.callback, event)
+                        .map_err(|error| error.to_string())
+                };
+                match result {
+                    Ok(value) => if let Err(error) = neoism_lua::validate_command_arguments(&command.result_schema, &value) {
+                        tracing::warn!(%error, "Lua command returned an invalid structured result");
+                    },
+                    Err(error) => tracing::warn!(%error, "Lua command failed"),
+                }
+            }
+        }
+        for (window_id, id) in builtins {
+            let Some(command) = lua_palette_action(&id) else { continue };
+            let router = &mut self.router;
+            if let Some(route) = router.routes.get_mut(&window_id) {
+                route
+                    .window
+                    .screen
+                    .execute_palette_action(command, &mut router.clipboard);
+                route.request_redraw();
+            }
+        }
+
+        let actions = self.lua_host.drain_actions();
+        let Some(window_id) = self.router.get_focused_route() else {
+            self.flush_lua_persistent_state();
+            return;
+        };
+        for action in actions {
+            self.apply_lua_action(window_id, action);
+        }
+        self.flush_lua_persistent_state();
+    }
+
+    fn flush_lua_persistent_state(&self) {
+        if !self.lua_host.take_persistent_dirty() {
+            return;
+        }
+        let path = neoism_backend::config::config_dir_path().join("plugin-state.json");
+        let temporary = path.with_extension("json.tmp");
+        let result = serde_json::to_vec_pretty(&self.lua_host.persistent_state_snapshot())
+            .map_err(std::io::Error::other)
+            .and_then(|bytes| std::fs::write(&temporary, bytes))
+            .and_then(|()| std::fs::rename(&temporary, &path));
+        if let Err(error) = result {
+            self.lua_host.mark_persistent_dirty();
+            tracing::warn!(%error, "failed to persist bounded Lua plugin state");
+        }
+    }
+
+    fn drain_lua_lsp_completions(&mut self) {
+        for mut completed in crate::screen::bridges::code::lsp::drain_lua_lsp_completions() {
+            let key = (completed.owner.clone(), completed.completion.id.clone());
+            let Some(pending) = self.lua_lsp_pending.remove(&key) else {
+                continue;
+            };
+            if pending.window_id != completed.window_id
+                || pending.operation != completed.completion.operation
+                || completed.completion.target.as_ref() != Some(&pending.target)
+            {
+                tracing::warn!(
+                    plugin = %completed.owner.plugin_id,
+                    request = %completed.completion.id,
+                    "discarded mismatched structured LSP completion"
+                );
+                continue;
+            }
+            if !self.lua_lsp_owner_is_active(&completed.owner) {
+                tracing::debug!(plugin = %completed.owner.plugin_id, request = %completed.completion.id, "discarded stale structured LSP owner before private result installation");
+                continue;
+            }
+            match completed.private.take() {
+                Some(crate::screen::bridges::code::lsp::LuaLspPrivateResult::CodeActions(
+                    actions,
+                )) => {
+                    let now = Instant::now();
+                    self.lua_lsp_actions.retain(|_, lease| {
+                        now.saturating_duration_since(lease.created_at) < LUA_LSP_ACTION_TTL
+                    });
+                    let owner_actions = self
+                        .lua_lsp_actions
+                        .keys()
+                        .filter(|(owner, _, _)| owner == &completed.owner)
+                        .count();
+                    if owner_actions.saturating_add(actions.len()) > LUA_LSP_ACTIONS_PER_OWNER
+                        || self.lua_lsp_actions.len().saturating_add(actions.len())
+                            > LUA_LSP_ACTIONS_GLOBAL
+                    {
+                        completed.completion = neoism_lua::LuaLspCompletion::failed(
+                            completed.completion.id,
+                            completed.completion.operation,
+                            Some(pending.target.clone()),
+                            "action_limit",
+                            "too many structured LSP code actions are retained",
+                        );
+                    } else {
+                        let source_request_id = completed.completion.id.clone();
+                        for (action_id, action) in actions {
+                            if action.target() != &pending.target {
+                                tracing::warn!(plugin = %completed.owner.plugin_id, request = %source_request_id, "discarded mismatched structured LSP action material");
+                                continue;
+                            }
+                            self.lua_lsp_actions.insert(
+                                (
+                                    completed.owner.clone(),
+                                    source_request_id.clone(),
+                                    action_id,
+                                ),
+                            LuaLspActionLease {
+                                window_id: pending.window_id,
+                                target: pending.target.clone(),
+                                created_at: now,
+                                action,
+                            },
+                            );
+                        }
+                    }
+                }
+                Some(crate::screen::bridges::code::lsp::LuaLspPrivateResult::Mutation(
+                    mutation,
+                )) => {
+                    if mutation.target != pending.target {
+                        completed.completion = neoism_lua::LuaLspCompletion::failed(
+                            completed.completion.id,
+                            completed.completion.operation,
+                            Some(pending.target.clone()),
+                            "stale_target",
+                            "structured LSP mutation target did not match its request",
+                        );
+                    } else {
+                        let deferred_command = mutation.command.clone();
+                        let command_root = mutation.root.clone();
+                        let applied = self
+                            .router
+                            .routes
+                            .get_mut(&pending.window_id)
+                            .ok_or_else(|| "the mutation window is no longer available".to_string())
+                            .and_then(|route| {
+                                let result = route
+                                    .window
+                                    .screen
+                                    .apply_local_lua_lsp_mutation(mutation);
+                                if result.is_ok() {
+                                    route.request_redraw();
+                                }
+                                result
+                            });
+                        completed.completion = match applied {
+                            Ok(mutation) => {
+                                if let Some((server_id, command)) = deferred_command {
+                                    let dispatched = self
+                                        .router
+                                        .routes
+                                        .get_mut(&pending.window_id)
+                                        .ok_or_else(|| {
+                                            "the mutation window is no longer available".to_string()
+                                        })
+                                        .and_then(|route| {
+                                            route.window.screen.dispatch_local_lua_lsp_command(
+                                                completed.owner.clone(),
+                                                completed.completion.id.clone(),
+                                                pending.target.clone(),
+                                                command_root,
+                                                server_id,
+                                                command,
+                                                mutation,
+                                            )
+                                        });
+                                    if let Err(message) = dispatched {
+                                        neoism_lua::LuaLspCompletion::failed(
+                                            completed.completion.id,
+                                            completed.completion.operation,
+                                            Some(pending.target.clone()),
+                                            "command_failed",
+                                            message,
+                                        )
+                                    } else {
+                                        self.lua_lsp_pending.insert(key, pending);
+                                        continue;
+                                    }
+                                } else {
+                                    let result = match completed.completion.operation {
+                                        neoism_lua::LuaLspOperation::ApplyCodeAction => {
+                                            neoism_lua::LuaLspOutcome::ApplyCodeAction(mutation)
+                                        }
+                                        neoism_lua::LuaLspOperation::Rename => {
+                                            neoism_lua::LuaLspOutcome::Rename(mutation)
+                                        }
+                                        neoism_lua::LuaLspOperation::Format => {
+                                            neoism_lua::LuaLspOutcome::Format(mutation)
+                                        }
+                                        _ => {
+                                            unreachable!("only edit operations produce mutations")
+                                        }
+                                    };
+                                    neoism_lua::LuaLspCompletion::success(
+                                        completed.completion.id,
+                                        completed.completion.operation,
+                                        pending.target.clone(),
+                                        result,
+                                    )
+                                }
+                            }
+                            Err(message) => neoism_lua::LuaLspCompletion::failed(
+                                completed.completion.id,
+                                completed.completion.operation,
+                                Some(pending.target.clone()),
+                                "mutation_rejected",
+                                message,
+                            ),
+                        };
+                    }
+                }
+                Some(
+                    crate::screen::bridges::code::lsp::LuaLspPrivateResult::RemoteMutation(
+                        mutation,
+                    ),
+                ) => {
+                    if mutation.target != pending.target {
+                        completed.completion = neoism_lua::LuaLspCompletion::failed(
+                            completed.completion.id,
+                            completed.completion.operation,
+                            Some(pending.target.clone()),
+                            "stale_target",
+                            "remote LSP mutation target did not match its request",
+                        );
+                    } else {
+                        let dispatched = self
+                            .router
+                            .routes
+                            .get_mut(&pending.window_id)
+                            .ok_or_else(|| {
+                                "the mutation window is no longer available".to_string()
+                            })
+                            .and_then(|route| {
+                                route.window.screen.dispatch_remote_lua_mutation(
+                                    completed.owner.clone(),
+                                    completed.completion.id.clone(),
+                                    mutation,
+                                )
+                            });
+                        match dispatched {
+                            Ok(target) if target == pending.target => {
+                                self.lua_lsp_pending.insert(key, pending);
+                                continue;
+                            }
+                            Ok(_) => {
+                                completed.completion = neoism_lua::LuaLspCompletion::failed(
+                                    completed.completion.id,
+                                    completed.completion.operation,
+                                    Some(pending.target.clone()),
+                                    "stale_target",
+                                    "remote mutation target no longer matches its request",
+                                );
+                            }
+                            Err(message) => {
+                                completed.completion = neoism_lua::LuaLspCompletion::failed(
+                                    completed.completion.id,
+                                    completed.completion.operation,
+                                    Some(pending.target.clone()),
+                                    "mutation_rejected",
+                                    message,
+                                );
+                            }
+                        }
+                    }
+                }
+                None => {}
+            }
+            self.emit_lua_lsp_completion(&completed.owner, completed.completion);
+        }
+    }
+
+    fn lua_lsp_owner_is_active(&self, owner: &neoism_lua::PluginOwner) -> bool {
+        self.lua_runtime
+            .as_ref()
+            .is_some_and(|runtime| runtime.owner() == owner)
+            || self.lua_plugins.is_active_owner(owner)
+    }
+
+    fn emit_lua_lsp_completion(
+        &mut self,
+        owner: &neoism_lua::PluginOwner,
+        completion: neoism_lua::LuaLspCompletion,
+    ) {
+        if let Err(error) = neoism_lua::validate_async_result(
+            neoism_lua::AsyncResultKind::Lsp,
+            owner,
+            &completion.id,
+        ) {
+            tracing::debug!(plugin = %owner.plugin_id, %error, "discarded invalid Lua async result");
+            return;
+        }
+        let Ok(payload) = serde_json::to_value(completion) else {
+            tracing::warn!(plugin = %owner.plugin_id, "failed to serialize structured LSP completion");
+            return;
+        };
+        let event = neoism_lua::PluginEvent::new(
+            neoism_lua::PluginEventKind::LspResult,
+            payload,
+            neoism_lua::ExecutionScope::Local,
+            Some("desktop-lsp".into()),
+        ).expect("registered LSP result event");
+        let user_owner_matches = self
+            .lua_runtime
+            .as_ref()
+            .is_some_and(|runtime| runtime.owner() == owner);
+        let changed = if user_owner_matches {
+            let before = self.lua_runtime.as_ref().map(|runtime| runtime.snapshot().clone());
+            let result = self
+                .lua_runtime
+                .as_mut()
+                .expect("matched user Lua owner must have a runtime")
+                .emit(event);
+            if let Err(error) = result {
+                tracing::warn!(plugin = %owner.plugin_id, %error, "Lua LspResult autocmd failed");
+            }
+            self.lua_runtime.as_ref().map(neoism_lua::LuaRuntime::snapshot) != before.as_ref()
+        } else {
+            match self.lua_plugins.emit_to_owner(owner, event) {
+                Ok(changed) => changed,
+                Err(error) => {
+                    tracing::debug!(plugin = %owner.plugin_id, revision = %owner.revision.0, %error, "discarded stale Lua LSP completion");
+                    false
+                }
+            }
+        };
+        if changed {
+            self.sync_lua_snapshot(None);
+        }
+    }
+
+    fn drain_lua_command_completions(&mut self) {
+        let completions = std::mem::take(&mut self.lua_command_completions);
+        for ((owner, _), completion) in completions {
+            if !self.lua_lsp_owner_is_active(&owner) {
+                continue;
+            }
+            if let Err(error) = neoism_lua::validate_async_result(
+                neoism_lua::AsyncResultKind::Command,
+                &owner,
+                &completion.id,
+            ) {
+                tracing::debug!(plugin = %owner.plugin_id, %error, "discarded invalid Lua command result");
+                continue;
+            }
+            let Ok(payload) = serde_json::to_value(completion) else { continue };
+            let event = neoism_lua::PluginEvent::new(
+                neoism_lua::PluginEventKind::CommandResult,
+                payload,
+                neoism_lua::ExecutionScope::Local,
+                Some("desktop-command".into()),
+            ).expect("registered command result event");
+            let changed = if self.lua_runtime.as_ref().is_some_and(|runtime| runtime.owner() == &owner) {
+                let before = self.lua_runtime.as_ref().map(|runtime| runtime.snapshot().clone());
+                if let Err(error) = self.lua_runtime.as_mut().expect("matched user runtime").emit(event) {
+                    tracing::warn!(plugin = %owner.plugin_id, %error, "Lua CommandResult autocmd failed");
+                }
+                self.lua_runtime.as_ref().map(neoism_lua::LuaRuntime::snapshot) != before.as_ref()
+            } else {
+                self.lua_plugins.emit_to_owner(&owner, event).unwrap_or(false)
+            };
+            if changed {
+                self.sync_lua_snapshot(None);
+            }
+        }
+    }
+
+    fn publish_lua_state(&mut self) {
+        let Some(window_id) = self.router.get_focused_route() else {
+            return;
+        };
+        let Some(route) = self.router.routes.get(&window_id) else {
+            return;
+        };
+        let screen = &route.window.screen;
+        let manager = &screen.context_manager;
+        let current = manager.current();
+        let workspace_identity = format!("{:?}", manager.current_workspace_tree_id());
+        let window_identity = format!("{window_id:?}");
+        let route_identity = current.route_id.to_string();
+        let workspace_handle = neoism_lua::WorkspaceHandle(neoism_lua::opaque_resource_handle(
+            "workspace",
+            &[&workspace_identity],
+        ));
+        let pane_handle = neoism_lua::PaneHandle(neoism_lua::opaque_resource_handle(
+            "pane",
+            &[&window_identity, &workspace_identity, &route_identity],
+        ));
+        let tab_identity = manager.current_index().to_string();
+        let tab_handle = neoism_lua::TabHandle(neoism_lua::opaque_resource_handle(
+            "tab",
+            &[&window_identity, &workspace_identity, &route_identity, &tab_identity],
+        ));
+        let option_route_id = current.route_id;
+        let option_pane = pane_handle.0.clone();
+        let option_tab = tab_handle.0.clone();
+        let option_workspace = workspace_handle.0.clone();
+        let mut document_state = serde_json::Value::Null;
+        let mut pane_state = serde_json::to_value(neoism_lua::PaneSnapshot {
+            handle: pane_handle.clone(),
+            workspace: workspace_handle.clone(),
+            focused: true,
+            ..Default::default()
+        }).unwrap_or_default();
+        let buffer = if let Some(code) = current.code.as_ref() {
+            let filetype = format!("{:?}", code.language).to_ascii_lowercase();
+            let host_path = code.path.to_string_lossy().into_owned();
+            let document_handle = neoism_lua::DocumentHandle(neoism_lua::opaque_resource_handle(
+                "document",
+                &[&window_identity, &workspace_identity, &route_identity, &host_path],
+            ));
+            let revision = code.buffer.revision;
+            let cursor_position = neoism_lua::TextPosition {
+                line: code.buffer.cursor_line as u32,
+                character: code.buffer.cursor_col as u32,
+            };
+            let cursor_handle = neoism_lua::CursorHandle(neoism_lua::opaque_resource_handle(
+                "cursor",
+                &[document_handle.as_str(), &revision.to_string(), &cursor_position.line.to_string(), &cursor_position.character.to_string()],
+            ));
+            let mut selections = code.buffer.selection_range().map(|(start, end)| {
+                let anchor = neoism_lua::TextPosition { line: start.line as u32, character: start.col as u32 };
+                let active = neoism_lua::TextPosition { line: end.line as u32, character: end.col as u32 };
+                neoism_lua::DocumentSelection {
+                    handle: neoism_lua::SelectionHandle(neoism_lua::opaque_resource_handle(
+                        "selection",
+                        &[document_handle.as_str(), &revision.to_string(), &anchor.line.to_string(), &anchor.character.to_string(), &active.line.to_string(), &active.character.to_string()],
+                    )),
+                    anchor,
+                    active,
+                }
+            }).into_iter().collect::<Vec<_>>();
+            selections.extend(code.buffer.extra_carets.iter().map(|caret| {
+                let anchor = caret.anchor.unwrap_or(neoism_ui::editor::code::CodePosition {
+                    line: caret.line,
+                    col: caret.col,
+                });
+                let anchor = neoism_lua::TextPosition { line: anchor.line as u32, character: anchor.col as u32 };
+                let active = neoism_lua::TextPosition { line: caret.line as u32, character: caret.col as u32 };
+                neoism_lua::DocumentSelection {
+                    handle: neoism_lua::SelectionHandle(neoism_lua::opaque_resource_handle(
+                        "selection",
+                        &[document_handle.as_str(), &revision.to_string(), &anchor.line.to_string(), &anchor.character.to_string(), &active.line.to_string(), &active.character.to_string()],
+                    )),
+                    anchor,
+                    active,
+                }
+            }));
+            let document = neoism_lua::DocumentSnapshot {
+                handle: document_handle.clone(),
+                pane: pane_handle.clone(),
+                tab: tab_handle.clone(),
+                workspace: workspace_handle.clone(),
+                revision,
+                text: code.buffer.text(),
+                cursor: neoism_lua::DocumentCursor { handle: cursor_handle, position: cursor_position },
+                selections,
+                metadata: neoism_lua::DocumentMetadata {
+                    title: code.title.clone(),
+                    host_path: host_path.clone(),
+                    language: filetype.clone(),
+                    kind: "code".into(),
+                    remote: manager.current_workspace_is_remote_joined(),
+                    dirty: code.buffer.is_dirty(),
+                    revision,
+                    line_count: code.buffer.line_count() as u32,
+                },
+            };
+            document_state = serde_json::to_value(&document).unwrap_or_default();
+            pane_state = serde_json::to_value(neoism_lua::PaneSnapshot {
+                handle: pane_handle.clone(),
+                document: Some(document_handle.clone()),
+                workspace: workspace_handle.clone(),
+                rect: code.geometry.rect,
+                first_visible_line: code.geometry.first_row as u32,
+                visible_line_count: code.geometry.viewport_rows() as u32,
+                scroll_x: code.geometry.scroll_x,
+                scroll_y: code.geometry.scroll_y,
+                focused: true,
+            }).unwrap_or_default();
+            serde_json::json!({
+                "id": code.path.to_string_lossy(),
+                "handle": document_handle,
+                "pane": pane_handle,
+                "tab": tab_handle,
+                "workspace": workspace_handle,
+                "path": code.path,
+                "title": code.title,
+                "kind": "code",
+                "filetype": filetype,
+                "mode": format!("{:?}", code.buffer.mode).to_ascii_lowercase(),
+                "revision": revision,
+                "dirty": code.buffer.is_dirty(),
+            })
+        } else if let Some(markdown) = current.active_markdown() {
+            serde_json::json!({
+                "id": markdown.path.to_string_lossy(),
+                "path": markdown.path,
+                "kind": "markdown",
+                "filetype": "markdown",
+            })
+        } else {
+            serde_json::json!({ "id": current.route_id, "kind": "terminal" })
+        };
+        let mut tabs = manager
+            .titles
+            .titles
+            .iter()
+            .map(|(id, title)| serde_json::json!({ "id": id, "title": title.content }))
+            .collect::<Vec<_>>();
+        tabs.sort_by_key(|tab| tab.get("id").and_then(serde_json::Value::as_u64));
+        let workspace = serde_json::json!({
+            "handle": workspace_handle,
+            "currentId": manager.current_workspace_tree_id(),
+            "currentIndex": manager.current_index(),
+            "collaborative": manager.current_workspace_is_collaborative(),
+            "remote": manager.current_workspace_is_remote_joined(),
+            "items": manager.local_workspace_summaries(),
+        });
+        let panel = serde_json::json!({
+            "fileTree": { "visible": screen.renderer.file_tree.is_visible(), "focused": screen.renderer.file_tree.is_focused() },
+            "notes": { "visible": screen.renderer.notes_sidebar.is_visible(), "focused": screen.renderer.notes_sidebar.is_focused() },
+            "git": { "visible": screen.renderer.git_diff_panel.is_visible(), "focused": screen.renderer.git_diff_panel.is_focused() },
+            "agentSidebar": { "visible": screen.renderer.conversations_visible },
+            "status": { "visible": screen.renderer.status_line.is_visible() },
+            "top": { "visible": screen.renderer.top_bar.is_visible() },
+            "composer": { "visible": screen.renderer.command_composer.is_visible() },
+        });
+        let file_tree_entries = screen
+            .renderer
+            .file_tree
+            .entries()
+            .iter()
+            .map(|entry| {
+                let (kind, open) = match entry.kind {
+                    neoism_ui::panels::file_tree::NodeKind::File => ("file", None),
+                    neoism_ui::panels::file_tree::NodeKind::Dir { open } => {
+                        ("directory", Some(open))
+                    }
+                };
+                serde_json::json!({
+                    "label": entry.label,
+                    "path": entry.path,
+                    "depth": entry.depth,
+                    "kind": kind,
+                    "open": open,
+                    "gitStatus": format!("{:?}", entry.git_status).to_ascii_lowercase(),
+                    "virtual": entry.virtual_kind.map(|kind| format!("{kind:?}").to_ascii_lowercase()),
+                })
+            })
+            .collect::<Vec<_>>();
+        let notes_entries = screen
+            .renderer
+            .notes_sidebar
+            .entries()
+            .iter()
+            .map(|entry| {
+                serde_json::json!({
+                    "label": entry.label,
+                    "path": entry.path,
+                    "depth": entry.depth(),
+                    "kind": if entry.is_dir { "directory" } else { "note" },
+                    "icon": entry.icon,
+                })
+            })
+            .collect::<Vec<_>>();
+        let agent_sessions = current
+            .neoism_agent
+            .as_ref()
+            .map(|agent| {
+                agent
+                    .side_panel()
+                    .sessions()
+                    .iter()
+                    .filter(|entry| !entry.is_header && !entry.is_excerpt)
+                    .map(|entry| {
+                        serde_json::json!({
+                            "id": entry.id,
+                            "title": entry.title,
+                            "timeLabel": entry.time_label,
+                            "depth": entry.depth,
+                            "source": entry.source.provider().unwrap_or("neoism"),
+                            "agentKind": entry.agent_kind.map(|kind| format!("{kind:?}").to_ascii_lowercase()),
+                            "runtimeStatus": entry.runtime_status,
+                            "updatedMs": entry.updated_ms,
+                            "pinned": entry.pinned,
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let terminal_sessions = manager
+            .sessions()
+            .iter()
+            .map(|session| serde_json::to_value(session).unwrap_or_default())
+            .collect::<Vec<_>>();
+        let git_files = screen
+            .renderer
+            .git_diff_panel
+            .files()
+            .into_iter()
+            .map(|file| {
+                serde_json::json!({
+                    "path": file.path,
+                    "status": file.status.as_str(),
+                    "additions": file.additions,
+                    "deletions": file.deletions,
+                    "staged": file.staged,
+                })
+            })
+            .collect::<Vec<_>>();
+        let (registers, marks, jumplist, macros) = current.code.as_ref().map_or_else(
+            || (serde_json::json!({}), serde_json::json!({}), serde_json::json!([]), serde_json::json!({})),
+            |code| {
+                let register_value = |value: &neoism_ui::editor::markdown::vim::VimRegisterValue| {
+                    serde_json::json!({ "text": value.text, "linewise": value.linewise, "blockwise": value.blockwise })
+                };
+                let mut registers = serde_json::Map::new();
+                registers.insert("\"".into(), register_value(&code.buffer.vim.registers.unnamed));
+                registers.insert("0".into(), register_value(&code.buffer.vim.registers.yank));
+                for (index, value) in code.buffer.vim.registers.deletes.iter().enumerate() {
+                    registers.insert((index + 1).to_string(), register_value(value));
+                }
+                for (name, value) in &code.buffer.vim.registers.named {
+                    registers.insert(name.to_string(), register_value(value));
+                }
+                let marks = code.buffer.vim.marks.iter().map(|(name, mark)| {
+                    (name.to_string(), serde_json::json!({ "line": mark.line, "character": mark.col }))
+                }).collect::<serde_json::Map<_, _>>();
+                let jumps = code.buffer.vim.jumplist.iter().map(|mark| {
+                    serde_json::json!({ "line": mark.line, "character": mark.col })
+                }).collect::<Vec<_>>();
+                let macros = code.buffer.vim.registers.macros.iter().map(|(name, keys)| {
+                    (name.to_string(), serde_json::Value::String(keys.clone()))
+                }).collect::<serde_json::Map<_, _>>();
+                (serde_json::Value::Object(registers), serde_json::Value::Object(marks), serde_json::Value::Array(jumps), serde_json::Value::Object(macros))
+            },
+        );
+        let states = [
+            ("buffer", buffer),
+            ("document", document_state),
+            ("pane", pane_state),
+            ("workspace", workspace),
+            ("tab", serde_json::json!({ "handle": tab_handle, "current": manager.current_index(), "items": tabs })),
+            ("panel", panel),
+            ("file_tree", serde_json::json!({
+                "visible": screen.renderer.file_tree.is_visible(),
+                "focused": screen.renderer.file_tree.is_focused(),
+                "root": screen.renderer.file_tree.root(),
+                "selectedPath": screen.renderer.file_tree.selected_path(),
+                "selectedIndex": screen.renderer.file_tree.selected_index(),
+                "showHidden": screen.renderer.file_tree.show_hidden(),
+                "remote": screen.renderer.file_tree.is_remote(),
+                "entries": file_tree_entries,
+            })),
+            ("notes", serde_json::json!({
+                "visible": screen.renderer.notes_sidebar.is_visible(),
+                "focused": screen.renderer.notes_sidebar.is_focused(),
+                "workspacePath": screen.renderer.notes_sidebar.workspace_path(),
+                "notebookRoot": screen.renderer.notes_sidebar.notebook_root(),
+                "selectedPath": screen.renderer.notes_sidebar.selected_note_path(),
+                "selectedIndex": screen.renderer.notes_sidebar.selected_index(),
+                "remote": screen.renderer.notes_sidebar.is_remote_workspace(),
+                "entries": notes_entries,
+            })),
+            ("agent", current.neoism_agent.as_ref().map_or_else(
+                || serde_json::json!({ "active": false, "sidebarVisible": screen.renderer.conversations_visible, "sessions": [] }),
+                |agent| serde_json::json!({
+                    "active": true,
+                    "sidebarVisible": screen.renderer.conversations_visible,
+                    "sessionId": agent.session_id_str(),
+                    "title": agent.session_title(),
+                    "directory": agent.session_directory(),
+                    "server": agent.server_address(),
+                    "streaming": agent.is_streaming(),
+                    "streamingState": format!("{:?}", agent.streaming_state()).to_ascii_lowercase(),
+                    "streamingLabel": agent.streaming_label(),
+                    "sessions": agent_sessions,
+                })
+            )),
+            ("terminal", serde_json::json!({
+                "active": !current.has_non_terminal_surface(),
+                "routeId": current.route_id,
+                "shellPid": current.shell_pid,
+                "activeSessionId": manager.cached_active_session_id(),
+                "sessions": terminal_sessions,
+            })),
+            ("git", serde_json::json!({
+                "visible": screen.renderer.git_diff_panel.is_visible(),
+                "focused": screen.renderer.git_diff_panel.is_focused(),
+                "branch": screen.renderer.git_diff_panel.branch(),
+                "repoRoot": screen.renderer.git_diff_panel.repo_root(),
+                "selectedIndex": screen.renderer.git_diff_panel.selected_file_index(),
+                "loading": screen.renderer.git_diff_panel.loading(),
+                "error": screen.renderer.git_diff_panel.error(),
+                "commitMessage": screen.renderer.git_diff_panel.commit_input_text(),
+                "allStaged": screen.renderer.git_diff_panel.all_files_staged(),
+                "files": git_files,
+            })),
+            ("theme", serde_json::to_value(&self.config.appearance.theme).unwrap_or_default()),
+            ("plugins", self.lua_plugins.status_snapshot()),
+            ("config", serde_json::to_value(&self.config).unwrap_or_default()),
+            ("register", registers),
+            ("mark", marks),
+            ("jumplist", jumplist),
+            ("macro", macros),
+        ];
+        let mut active_surfaces = vec![
+            states[0]
+                .1
+                .get("kind")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("terminal")
+                .to_string(),
+        ];
+        for (visible, name) in [
+            (screen.renderer.file_tree.is_visible(), "file-tree"),
+            (screen.renderer.notes_sidebar.is_visible(), "notes"),
+            (screen.renderer.git_diff_panel.is_visible(), "git"),
+            (screen.renderer.conversations_visible, "agent-sidebar"),
+            (screen.renderer.command_palette.is_enabled(), "palette"),
+            (screen.renderer.finder.is_enabled(), "finder"),
+        ] {
+            if visible {
+                active_surfaces.push(name.into());
+            }
+        }
+        let surface_revision = self.lua_plugins.revision();
+        if let Some(filetype) = states[0]
+            .1
+            .get("filetype")
+            .and_then(serde_json::Value::as_str)
+        {
+            if let Err(error) = self.lua_plugins.activate_filetype(filetype) {
+                tracing::warn!(%filetype, %error, "lazy Lua plugin filetype activation failed");
+            }
+        }
+        for surface in active_surfaces {
+            if let Err(error) = self.lua_plugins.activate_surface(&surface) {
+                tracing::warn!(%surface, %error, "lazy Lua plugin surface activation failed");
+            }
+        }
+        if self.lua_plugins.revision() != surface_revision {
+            self.sync_lua_snapshot(Some(window_id));
+        }
+        let initialized = !self.lua_published.is_empty();
+        let mut events = Vec::new();
+        for (namespace, value) in states {
+            let previous = self.lua_published.get(namespace).cloned();
+            if previous.as_ref() == Some(&value) {
+                continue;
+            }
+            if let Some(scope) = match namespace {
+                "document" => Some(neoism_lua::PluginStateScope::Document),
+                "pane" => Some(neoism_lua::PluginStateScope::Pane),
+                "tab" => Some(neoism_lua::PluginStateScope::Tab),
+                "workspace" => Some(neoism_lua::PluginStateScope::Workspace),
+                _ => None,
+            } {
+                let previous_handle = previous.as_ref().and_then(|value| value.get("handle")).and_then(serde_json::Value::as_str);
+                let next_handle = value.get("handle").and_then(serde_json::Value::as_str);
+                if previous_handle != next_handle {
+                    if let Some(previous_handle) = previous_handle {
+                        self.lua_host.clear_target_state(scope, previous_handle);
+                    }
+                }
+            }
+            self.lua_host.publish(namespace, value.clone());
+            self.lua_published.insert(namespace.to_string(), value.clone());
+            if initialized {
+                let event = match namespace {
+                    "document" => {
+                        let old_handle = previous.as_ref().and_then(|value| value.get("handle")).and_then(serde_json::Value::as_str);
+                        let new_handle = value.get("handle").and_then(serde_json::Value::as_str);
+                        if old_handle.is_none() && new_handle.is_some() { "DocumentOpened" }
+                        else if old_handle.is_some() && new_handle.is_none() { "DocumentClosed" }
+                        else if old_handle != new_handle { "DocumentFocused" }
+                        else { "DocumentChanged" }
+                    }
+                    "pane" => {
+                        let old_handle = previous.as_ref().and_then(|value| value.get("handle"));
+                        if old_handle != value.get("handle") { "PaneFocused" } else { "PaneChanged" }
+                    }
+                    "buffer" => "BufferChanged",
+                    "workspace" => "WorkspaceChanged",
+                    "tab" => "TabChanged",
+                    "panel" => "PanelChanged",
+                    "file_tree" => "FileTreeChanged",
+                    "notes" => "NotesChanged",
+                    "agent" => "AgentChanged",
+                    "terminal" => "TerminalChanged",
+                    "git" => "GitChanged",
+                    "theme" => "ThemeChanged",
+                    "plugins" => "PluginsChanged",
+                    "config" => "ConfigChanged",
+                    _ => continue,
+                };
+                if namespace == "document"
+                    && previous.as_ref().and_then(|value| value.get("selections")) != value.get("selections")
+                {
+                    events.push(("SelectionChanged", value.clone()));
+                }
+                events.push((event, value));
+            }
+        }
+        if events.is_empty() {
+            return;
+        }
+        let user_snapshot_before_events = self
+            .lua_runtime
+            .as_ref()
+            .map(|runtime| runtime.snapshot().clone());
+        let plugin_revision_before_events = self.lua_plugins.revision();
+        for (event, payload) in events {
+            let plugin_event = neoism_lua::PluginEvent {
+                name: event.to_string(),
+                payload,
+                scope: neoism_lua::ExecutionScope::Local,
+                origin: Some("desktop-state".to_string()),
+            };
+            if event == "BufferChanged" {
+                if let Some(filetype) = plugin_event
+                    .payload
+                    .get("filetype")
+                    .and_then(serde_json::Value::as_str)
+                {
+                    if let Err(error) = self.lua_plugins.activate_filetype(filetype) {
+                        tracing::warn!(%filetype, %error, "lazy Lua plugin filetype activation failed");
+                    }
+                }
+            }
+            if let Err(error) = self.lua_plugins.activate_trigger(event) {
+                tracing::warn!(event, %error, "lazy Lua plugin event activation failed");
+            }
+            for failure in self.lua_plugins.emit(plugin_event.clone()) {
+                tracing::warn!(event, plugin = %failure.plugin_id, error = %failure.message, "Lua plugin autocmd failed");
+            }
+            if let Some(runtime) = self.lua_runtime.as_mut() {
+                if let Err(error) = runtime.emit(plugin_event) {
+                    tracing::warn!(event, %error, "Lua autocmd failed");
+                }
+            }
+        }
+        let user_changed = self
+            .lua_runtime
+            .as_ref()
+            .map(neoism_lua::LuaRuntime::snapshot)
+            != user_snapshot_before_events.as_ref();
+        let option_document = self.lua_published.get("document")
+            .and_then(|value| value.get("handle"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        self.apply_lua_editor_options(
+            window_id,
+            option_route_id,
+            option_document.as_deref(),
+            &option_pane,
+            &option_tab,
+            &option_workspace,
+        );
+        if !user_changed && self.lua_plugins.revision() == plugin_revision_before_events {
+            return;
+        }
+        self.sync_lua_snapshot(Some(window_id));
+    }
+
+    fn sync_lua_editor_resources(&mut self) {
+        let mut active = self.lua_plugins.active_owners().cloned().collect::<HashSet<_>>();
+        if let Some(runtime) = &self.lua_runtime {
+            active.insert(runtime.owner().clone());
+        }
+        for retired in self.lua_active_owners.difference(&active) {
+            self.lua_editor_resources.registry.remove_owner(retired);
+            self.lua_host.remove_owner_state(retired);
+            let _ = crate::credential_broker::broker().revoke_owner(retired);
+        }
+        self.lua_active_owners = active.clone();
+        self.lua_editor_resources.namespaces.retain(|_, (owner, _)| active.contains(owner));
+        self.lua_editor_resources.anchors.retain(|_, lease| active.contains(&lease.owner));
+        self.lua_editor_resources.decorations.retain(|_, (owner, _, _, _)| active.contains(owner));
+
+        let targets = self.lua_editor_resources.published_targets.clone();
+        for (document, (window_id, route_id)) in &targets {
+            let current_text = self.router.routes.get_mut(window_id)
+                .and_then(|route| route.window.screen.context_manager.get_by_route_id(*route_id))
+                .and_then(|item| item.context().code.as_ref())
+                .map(|code| code.buffer.text());
+            let Some(current_text) = current_text else { continue };
+            if let Some(previous) = self.lua_editor_resources.document_text.insert(document.clone(), current_text.clone()) {
+                if let Some(delta) = neoism_ui::editor::markdown::doc_sync::diff_doc_texts(&previous, &current_text) {
+                    let _ = self.lua_editor_resources.registry.apply_text_edit(
+                        document,
+                        delta.byte_start,
+                        delta.byte_start.saturating_add(delta.byte_removed),
+                        delta.inserted.len(),
+                    );
+                }
+            }
+        }
+
+        let anchors = self.lua_editor_resources.anchors.values().cloned().collect::<Vec<_>>();
+        for lease in anchors {
+            let Some(sticky) = lease.sticky else { continue };
+            let resolved = self.router.routes.get(&sticky.window_id).and_then(|route| {
+                route.window.screen.code_crdt.binding_for(&sticky.buffer_id)
+                    .and_then(|binding| binding.resolve_sticky_anchor(&sticky.anchor))
+            });
+            let Some((line, col)) = resolved else { continue };
+            let offset = self.router.routes.get(&lease.window_id).and_then(|route| {
+                route.window.screen.context_manager.all_grids().iter()
+                    .flat_map(|grid| grid.contexts().values())
+                    .filter_map(|item| item.context().code.as_ref())
+                    .find(|code| crate::screen::markdown_crdt::buffer_id_for_markdown_path(&code.path) == sticky.buffer_id)
+                    .map(|code| neoism_ui::editor::markdown::doc_sync::position_to_doc_byte(&code.buffer.lines, line, col))
+            });
+            if let Some(offset) = offset {
+                let _ = self.lua_editor_resources.registry.set_anchor_offset(
+                    &lease.owner, lease.namespace, lease.resource, offset,
+                );
+            }
+        }
+
+        for (document, (window_id, route_id)) in targets {
+            let Some(route) = self.router.routes.get_mut(&window_id) else {
+                self.lua_editor_resources.published_targets.remove(&document);
+                self.lua_editor_resources.document_text.remove(&document);
+                continue;
+            };
+            let Some(item) = route.window.screen.context_manager.get_by_route_id(route_id) else {
+                self.lua_editor_resources.published_targets.remove(&document);
+                self.lua_editor_resources.document_text.remove(&document);
+                continue;
+            };
+            let Some(code) = item.context_mut().code.as_mut() else {
+                self.lua_editor_resources.published_targets.remove(&document);
+                self.lua_editor_resources.document_text.remove(&document);
+                continue;
+            };
+            let text = code.buffer.text();
+            let snapshot = self.lua_editor_resources.registry.snapshot_for_document(Some(&document), &text);
+            let previous_revision = code.plugin_decorations.as_ref().map(|snapshot| snapshot.revision);
+            if previous_revision == Some(snapshot.revision)
+                || (previous_revision.is_none() && snapshot.decorations.is_empty())
+            {
+                continue;
+            }
+            code.plugin_decorations = if snapshot.decorations.is_empty() {
+                None
+            } else {
+                match neoism_ui::editor::code::feed::CodePluginRenderSnapshot::try_from_contract(&snapshot, &code.buffer.lines) {
+                    Ok(snapshot) => Some(std::sync::Arc::new(snapshot)),
+                    Err(error) => {
+                        tracing::warn!(%error, "rejected invalid immutable Lua decoration geometry");
+                        None
+                    }
+                }
+            };
+            route.window.screen.mark_dirty();
+            route.request_redraw();
+        }
+    }
+
+    fn apply_lua_editor_options(
+        &mut self,
+        window_id: WindowId,
+        route_id: usize,
+        document: Option<&str>,
+        pane: &str,
+        tab: &str,
+        workspace: &str,
+    ) {
+        for (_, baseline) in self.lua_editor_option_baselines.drain() {
+            let Some(route) = self.router.routes.get_mut(&baseline.window_id) else { continue };
+            let Some(item) = route.window.screen.context_manager.get_by_route_id(baseline.route_id) else { continue };
+            let Some(code) = item.context_mut().code.as_mut() else { continue };
+            code.wrap = baseline.wrap;
+            code.input_mode = baseline.input_mode;
+            code.buffer.indent = baseline.indent;
+        }
+        let snapshot = crate::plugin_manager::overlay_snapshot(
+            self.lua_plugins.snapshot(),
+            self.lua_runtime.as_ref().map(neoism_lua::LuaRuntime::snapshot),
+        );
+        let mut options = snapshot.editor_options.into_iter().filter(|option| {
+            if !self.lua_active_owners.contains(&option.owner) {
+                return false;
+            }
+            let current = match option.scope {
+                neoism_lua::PluginStateScope::Document => document,
+                neoism_lua::PluginStateScope::Pane => Some(pane),
+                neoism_lua::PluginStateScope::Tab => Some(tab),
+                neoism_lua::PluginStateScope::Workspace => Some(workspace),
+                neoism_lua::PluginStateScope::Plugin => None,
+            };
+            current.is_some_and(|current| option.target.as_deref().is_none_or(|target| target == current))
+        }).collect::<Vec<_>>();
+        options.sort_by_key(|option| {
+            let specificity = match option.scope {
+                neoism_lua::PluginStateScope::Workspace => 0,
+                neoism_lua::PluginStateScope::Tab => 1,
+                neoism_lua::PluginStateScope::Pane => 2,
+                neoism_lua::PluginStateScope::Document => 3,
+                neoism_lua::PluginStateScope::Plugin => 0,
+            };
+            (specificity, option.priority, option.order)
+        });
+        if options.is_empty() {
+            return;
+        }
+        let Some(route) = self.router.routes.get_mut(&window_id) else { return };
+        let Some(item) = route.window.screen.context_manager.get_by_route_id(route_id) else { return };
+        let Some(code) = item.context_mut().code.as_mut() else { return };
+        self.lua_editor_option_baselines.insert(pane.to_owned(), LuaEditorOptionBaseline {
+            window_id,
+            route_id,
+            wrap: code.wrap,
+            input_mode: code.input_mode,
+            indent: code.buffer.indent,
+        });
+        for option in options {
+            match option.name {
+                neoism_lua::EditorOptionName::Wrap => code.wrap = option.value.as_bool().unwrap_or(code.wrap),
+                neoism_lua::EditorOptionName::TabWidth => {
+                    code.buffer.indent.width = option.value.as_u64().unwrap_or(code.buffer.indent.width as u64) as usize;
+                }
+                neoism_lua::EditorOptionName::UseTabs => {
+                    code.buffer.indent.use_tabs = option.value.as_bool().unwrap_or(code.buffer.indent.use_tabs);
+                }
+                neoism_lua::EditorOptionName::InputMode => {
+                    code.input_mode = if option.value.as_str() == Some("vim") {
+                        neoism_ui::editor::code::CodeInputMode::Vim
+                    } else {
+                        neoism_ui::editor::code::CodeInputMode::Standard
+                    };
+                }
+            }
+        }
+    }
+
+    fn poll_lua_timers(&mut self, now: Instant) {
+        let active = self.lua_plugins.active_owners().cloned()
+            .chain(self.lua_runtime.as_ref().map(|runtime| runtime.owner().clone()))
+            .collect::<HashSet<_>>();
+        if let Some(jobs) = self.lua_jobs.as_mut() {
+            jobs.retire_inactive(&active);
+        }
+        if let Some(watchers) = self.lua_watchers.as_mut() {
+            watchers.retire_inactive(&active);
+        }
+        if let Some(ptys) = self.lua_ptys.as_mut() {
+            ptys.retire_inactive(&active);
+        }
+        if let Some(dap) = self.lua_dap.as_mut() {
+            dap.retire_inactive(&active);
+        }
+        if let Some(progress) = self.lua_progress.as_mut() {
+            progress.retain(|_, (owner, _)| active.contains(owner));
+        }
+        if let Some(lists) = self.lua_result_lists.as_mut() {
+            lists.retain(|_, list| active.contains(&list.owner));
+        }
+        if let Some(prompts) = self.lua_prompts.as_mut() {
+            let stale_windows = prompts.iter().filter(|(_, owner)| !active.contains(owner))
+                .map(|((window, _), _)| *window).collect::<HashSet<_>>();
+            prompts.retain(|_, owner| active.contains(owner));
+            for window in stale_windows {
+                if let Some(route) = self.router.routes.get_mut(&window) { route.window.screen.renderer.modal.close(); }
+            }
+        }
+        let Some(timers) = self.lua_timers.as_mut() else { return };
+        timers.retain(|_, timer| active.contains(&timer.owner));
+        let started = Instant::now();
+        let due = timers.iter().filter(|(_, timer)| timer.due <= now)
+            .take(64).map(|(id, timer)| (id.clone(), timer.clone())).collect::<Vec<_>>();
+        let _ = timers;
+        for (id, timer) in due {
+            if started.elapsed() >= Duration::from_millis(8) { break; }
+            let command = self.lua_runtime.as_ref()
+                .filter(|runtime| runtime.owner() == &timer.owner)
+                .and_then(|runtime| runtime.snapshot().commands.iter().find(|command| command.id == timer.command || command.aliases.iter().any(|alias| alias == &timer.command)))
+                .cloned()
+                .or_else(|| self.lua_plugins.command_contribution(&timer.owner, &timer.command));
+            if let Some(command) = command {
+                let request = neoism_lua::PluginCommandRequest {
+                    command: timer.command.clone(),
+                    arguments: timer.arguments.clone(),
+                    range: None,
+                    count: None,
+                    bang: false,
+                };
+                if neoism_lua::validate_command_request(&command, &request).is_ok() {
+                    let event = neoism_lua::PluginEvent::new(
+                        neoism_lua::PluginEventKind::Command,
+                        serde_json::json!({ "id": command.id, "arguments": timer.arguments, "timer": id }),
+                        neoism_lua::ExecutionScope::Local,
+                        Some("plugin-timer".into()),
+                    ).expect("registered command event");
+                    let result = if command.callback.starts_with("lua:neoism.user-init@") {
+                        self.lua_runtime.as_ref().expect("user timer runtime").invoke(&command.callback, event).map_err(|error| error.to_string())
+                    } else {
+                        self.lua_plugins.invoke(&command.callback, event).map_err(|error| error.to_string())
+                    };
+                    match result {
+                        Ok(value) => if let Err(error) = neoism_lua::validate_command_arguments(&command.result_schema, &value) {
+                            tracing::warn!(%error, "Lua timer command returned an invalid structured result");
+                        },
+                        Err(error) => tracing::warn!(%error, "Lua timer callback failed"),
+                    }
+                }
+            }
+            if let Some(interval) = timer.interval {
+                if let Some(live) = self.lua_timers.as_mut().and_then(|timers| timers.get_mut(&id)) {
+                    live.due = advance_lua_timer_deadline(live.due, interval, now);
+                }
+            } else {
+                if let Some(timers) = self.lua_timers.as_mut() { timers.remove(&id); }
+            }
+        }
+    }
+
+    fn poll_lua_async(&mut self) {
+        let active = self.lua_plugins.active_owners().cloned()
+            .chain(self.lua_runtime.as_ref().map(|runtime| runtime.owner().clone()))
+            .collect::<HashSet<_>>();
+        let Some(coordinator) = self.lua_async.as_mut() else { return };
+        coordinator.retire_inactive(&active);
+        let deliveries = coordinator.drain();
+        for delivery in deliveries {
+            if !active.contains(&delivery.owner) || !self.router.routes.contains_key(&delivery.window_id) {
+                continue;
+            }
+            if neoism_lua::validate_async_result(
+                neoism_lua::AsyncResultKind::Host,
+                &delivery.owner,
+                delivery.payload.get("id").and_then(serde_json::Value::as_str).unwrap_or_default(),
+            ).is_err() {
+                continue;
+            }
+            let event = neoism_lua::PluginEvent::new(
+                neoism_lua::PluginEventKind::AsyncResult,
+                delivery.payload,
+                neoism_lua::ExecutionScope::Local,
+                Some("desktop-host-service".into()),
+            ).expect("registered async host result event");
+            let changed = if self.lua_runtime.as_ref().is_some_and(|runtime| runtime.owner() == &delivery.owner) {
+                let before = self.lua_runtime.as_ref().map(|runtime| runtime.snapshot().clone());
+                if let Err(error) = self.lua_runtime.as_mut().expect("matched user runtime").emit(event) {
+                    tracing::warn!(plugin = %delivery.owner.plugin_id, %error, "Lua AsyncResult autocmd failed");
+                }
+                self.lua_runtime.as_ref().map(neoism_lua::LuaRuntime::snapshot) != before.as_ref()
+            } else {
+                self.lua_plugins.emit_to_owner(&delivery.owner, event).unwrap_or(false)
+            };
+            if changed {
+                self.sync_lua_snapshot(Some(delivery.window_id));
+            }
+        }
+    }
+
+    fn sync_lua_snapshot(&mut self, window_id: Option<WindowId>) {
+        let mut snapshot = crate::plugin_manager::overlay_snapshot(
+            self.lua_plugins.snapshot(),
+            self.lua_runtime.as_ref().map(neoism_lua::LuaRuntime::snapshot),
+        );
+        let window_id = window_id.or_else(|| self.router.get_focused_route());
+        if let Some(window_id) = window_id {
+            if let Some(route) = self.router.routes.get(&window_id) {
+                for panel in &mut snapshot.panels {
+                    if let Some(current) = route
+                        .window
+                        .screen
+                        .renderer
+                        .plugins
+                        .panels
+                        .iter()
+                        .find(|current| current.id == panel.id)
+                    {
+                        panel.visible = current.visible;
+                    }
+                }
+            }
+        }
+        self.router.set_plugin_snapshot(Arc::new(snapshot));
+        self.refresh_lua_extension_rows();
+    }
+
+    fn refresh_lua_extension_rows(&mut self) {
+        use neoism_ui::panels::extensions_page::{
+            ExtensionEntry, ExtensionKind, ExtensionStatus, LuaPluginAction,
+            LuaPluginLifecycle as UiLifecycle, LuaPluginPresentation,
+        };
+        use crate::plugin_manager::LuaPluginLifecycle as ManagerLifecycle;
+
+        let inventory = self.lua_plugins.inventory(&self.config.plugins);
+        for error in &inventory.global_errors {
+            tracing::warn!(%error, "Lua plugin inventory scan failed");
+        }
+        let entries = inventory.entries.into_values().map(|row| {
+            let mut lifecycle = match row.lifecycle {
+                ManagerLifecycle::Discovered => UiLifecycle::Discovered,
+                ManagerLifecycle::Lazy => UiLifecycle::Lazy,
+                ManagerLifecycle::Loaded => UiLifecycle::Loaded,
+                ManagerLifecycle::Disabled => UiLifecycle::Disabled,
+                ManagerLifecycle::UpdateAvailable => UiLifecycle::UpdateAvailable,
+                ManagerLifecycle::PermissionRequired => UiLifecycle::PermissionRequired,
+                ManagerLifecycle::Approved => UiLifecycle::Approved,
+                ManagerLifecycle::Revoked => UiLifecycle::Revoked,
+                ManagerLifecycle::Incompatible => UiLifecycle::Incompatible,
+                ManagerLifecycle::Blocked => UiLifecycle::Blocked,
+                ManagerLifecycle::Failed => UiLifecycle::Failed,
+                ManagerLifecycle::RestoreRequired => UiLifecycle::RestoreRequired,
+            };
+            let managed = row.repository_url.is_some();
+            let mut status_text = row.status_text.clone();
+            let mut retryable = matches!(lifecycle, UiLifecycle::Failed);
+            if let Some(job) = self.lua_plugin_jobs.view(&row.id) {
+                use crate::lua_plugin_jobs::LuaPluginJobKind;
+                lifecycle = match job.kind {
+                    LuaPluginJobKind::Installing => UiLifecycle::Installing,
+                    LuaPluginJobKind::Updating => UiLifecycle::Updating,
+                    LuaPluginJobKind::Restoring => UiLifecycle::Restoring,
+                    LuaPluginJobKind::Removing => UiLifecycle::Removing,
+                    LuaPluginJobKind::Failed => UiLifecycle::Failed,
+                };
+                status_text = job.status_text.clone();
+                retryable = job.retryable;
+            }
+            let primary_action = match lifecycle {
+                UiLifecycle::Discovered if managed => Some(LuaPluginAction::Install),
+                UiLifecycle::Lazy | UiLifecycle::Loaded => Some(LuaPluginAction::Disable),
+                UiLifecycle::Disabled => Some(LuaPluginAction::Enable),
+                UiLifecycle::UpdateAvailable => Some(LuaPluginAction::Update),
+                UiLifecycle::PermissionRequired => Some(LuaPluginAction::GrantAll),
+                UiLifecycle::Approved => Some(LuaPluginAction::Disable),
+                UiLifecycle::Revoked => Some(LuaPluginAction::GrantAll),
+                UiLifecycle::Failed if retryable => Some(LuaPluginAction::Retry),
+                UiLifecycle::RestoreRequired => Some(LuaPluginAction::Restore),
+                _ => None,
+            };
+            let mut secondary_actions = Vec::new();
+            if managed && !matches!(lifecycle, UiLifecycle::Discovered | UiLifecycle::RestoreRequired) {
+                secondary_actions.push(LuaPluginAction::Update);
+                secondary_actions.push(LuaPluginAction::Remove);
+            }
+            if row.grants.len() > 0 {
+                secondary_actions.push(LuaPluginAction::RevokeAll);
+            }
+            let status = match lifecycle {
+                UiLifecycle::Discovered => ExtensionStatus::NotInstalled,
+                UiLifecycle::Incompatible | UiLifecycle::Blocked => ExtensionStatus::Unavailable,
+                UiLifecycle::Failed => ExtensionStatus::Failed { message: status_text.clone() },
+                UiLifecycle::Installing | UiLifecycle::Updating | UiLifecycle::Restoring => ExtensionStatus::Installing { percent: None, status_text: status_text.clone() },
+                UiLifecycle::Removing => ExtensionStatus::Uninstalling,
+                _ => ExtensionStatus::Installed { version: row.version.clone() },
+            };
+            ExtensionEntry {
+                kind: ExtensionKind::LuaPlugin,
+                id: row.id,
+                name: row.name,
+                version: row.version,
+                description: status_text.clone(),
+                author: "Lua plugin".into(),
+                downloads: None,
+                categories: vec!["Lua Plugin".into()],
+                languages: Vec::new(),
+                status,
+                repository_url: row.repository_url,
+                lsp_source: None,
+                lua_plugin: Some(LuaPluginPresentation {
+                    lifecycle,
+                    status_text,
+                    requested_permissions: row.capabilities,
+                    granted_permissions: row.grants,
+                    missing_permissions: row.missing_permissions,
+                    installed_commit: row.installed_commit,
+                    retryable,
+                    primary_action,
+                    secondary_actions,
+                }),
+            }
+        }).collect::<Vec<_>>();
+        for route in self.router.routes.values_mut() {
+            route.window.screen.renderer.lua_plugin_job_active = self.lua_plugin_jobs.is_active();
+            route.window.screen.set_lua_plugin_entries(entries.clone());
+            route.request_redraw();
+        }
+    }
+
+    fn handle_lua_plugin_action(
+        &mut self,
+        window_id: WindowId,
+        plugin_id: String,
+        action: neoism_ui::panels::extensions_page::LuaPluginAction,
+    ) {
+        use neoism_ui::panels::extensions_page::LuaPluginAction;
+        let inventory = self.lua_plugins.inventory(&self.config.plugins);
+        let row = inventory.entries.get(&plugin_id).cloned();
+        match action {
+            LuaPluginAction::Install | LuaPluginAction::Update => {
+                let Some(row) = row else { return };
+                let (Some(repository_url), Some(requested_ref)) = (row.repository_url, row.requested_ref) else { return };
+                let spec = neoism_extensions::lua_plugins::PluginSpec { plugin_id: plugin_id.clone(), repository_url, requested_ref };
+                let operation = if action == LuaPluginAction::Install {
+                    crate::lua_plugin_jobs::LuaPluginOperation::Install(spec)
+                } else {
+                    crate::lua_plugin_jobs::LuaPluginOperation::Update(spec)
+                };
+                self.lua_plugin_jobs.enqueue(window_id, plugin_id, operation);
+            }
+            LuaPluginAction::Restore => self.lua_plugin_jobs.enqueue(
+                window_id, plugin_id, crate::lua_plugin_jobs::LuaPluginOperation::Restore,
+            ),
+            LuaPluginAction::Remove => {
+                let dependents = self.lua_plugins.enabled_dependents(&plugin_id);
+                if dependents.is_empty() {
+                    self.lua_plugin_jobs.enqueue(
+                        window_id, plugin_id, crate::lua_plugin_jobs::LuaPluginOperation::Remove,
+                    );
+                } else {
+                    self.lua_plugin_jobs.record_failure(
+                        plugin_id,
+                        format!("Required by enabled plugin(s): {}", dependents.join(", ")),
+                    );
+                }
+            }
+            LuaPluginAction::Retry => {
+                if !self.lua_plugin_jobs.retry(window_id, &plugin_id) {
+                    match crate::plugin_manager::LuaPluginManager::discover(
+                        &neoism_backend::config::config_dir_path(), self.lua_host.clone(), &self.config.plugins,
+                    ) {
+                        Ok(manager) => {
+                            self.lua_plugins = manager;
+                            self.sync_lua_snapshot(Some(window_id));
+                        }
+                        Err(error) => self.lua_plugin_jobs.record_failure(plugin_id, error.to_string()),
+                    }
+                }
+            }
+            LuaPluginAction::Enable | LuaPluginAction::Disable => {
+                let mut policy = self.config.plugins.clone();
+                policy.disabled.retain(|id| id != &plugin_id);
+                if action == LuaPluginAction::Disable {
+                    policy.disabled.push(plugin_id);
+                    policy.disabled.sort();
+                    policy.disabled.dedup();
+                }
+                self.apply_lua_plugin_policy(window_id, policy, "plugins.disabled");
+            }
+            LuaPluginAction::GrantAll | LuaPluginAction::RevokeAll => {
+                if let Some(root) = row.as_ref().and_then(|row| row.root.as_deref()) {
+                    if let Ok(discovered) = neoism_lua::read_plugin_manifest(root) {
+                        let mut artifacts = discovered.manifest.entrypoints.native.iter().cloned().collect::<Vec<_>>();
+                        artifacts.extend(self.lua_plugins.snapshot().platform.iter().filter_map(|owned| {
+                            if owned.owner.plugin_id != plugin_id { return None; }
+                            match &owned.contribution { neoism_lua::PlatformContribution::TreeSitter(parser) => Some(parser.parser.clone()), _ => None }
+                        }));
+                        let trust_result = (|| -> Result<(), String> {
+                            let revision = neoism_lua::plugin_content_revision(root, discovered.manifest.editor_entrypoint()).map_err(|e| e.to_string())?;
+                            let capabilities = discovered.manifest.capabilities.iter().map(|value| value.key()).collect::<std::collections::BTreeSet<_>>();
+                            let owner = neoism_lua::PluginOwner { plugin_id: plugin_id.clone(), revision: revision.clone() };
+                            if action == LuaPluginAction::RevokeAll {
+                                crate::credential_broker::broker().revoke_owner(&owner)?;
+                            } else {
+                                for alias in capabilities.iter().filter_map(|value| value.strip_prefix("credential:")) {
+                                    crate::credential_broker::broker().grant(owner.clone(), alias, crate::credential_broker::CredentialScope::User, std::collections::BTreeSet::from(["network.authorize".into()]))?;
+                                }
+                            }
+                            if !artifacts.is_empty() {
+                                let package_digest = neoism_extensions::lua_plugins::tree_sha256(root).map_err(|e| e.to_string())?;
+                                let store = neoism_extensions::trust::ExtensionTrustStore::managed();
+                                for artifact in artifacts {
+                                    let approval = neoism_extensions::trust::ExtensionApproval {
+                                        plugin_id: plugin_id.clone(), revision: revision.0.clone(), package_digest: package_digest.clone(),
+                                        artifact_digest: artifact.sha256, abi_version: artifact.abi,
+                                        capabilities: capabilities.clone(), scope: neoism_extensions::trust::ApprovalScope::User,
+                                        state: neoism_extensions::trust::ApprovalState::PermissionRequired,
+                                        decided_at_millis: 0, decided_by: "native-extensions-ui".into(), reason: None,
+                                    };
+                                    if action == LuaPluginAction::GrantAll { store.approve(approval) } else { store.revoke(approval, Some("revoked from Extensions UI".into())) }.map_err(|e| e.to_string())?;
+                                }
+                            }
+                            Ok(())
+                        })();
+                        if let Err(error) = trust_result { self.lua_plugin_jobs.record_failure(plugin_id.clone(), error); }
+                    }
+                }
+                let mut policy = self.config.plugins.clone();
+                if action == LuaPluginAction::GrantAll {
+                    let grants = row.map(|row| row.capabilities).unwrap_or_default();
+                    policy.grants.insert(plugin_id, grants);
+                } else {
+                    policy.grants.remove(&plugin_id);
+                }
+                self.apply_lua_plugin_policy(window_id, policy, "plugins.grants");
+            }
+        }
+        self.refresh_lua_extension_rows();
+    }
+
+    fn apply_lua_plugin_policy(
+        &mut self,
+        window_id: WindowId,
+        policy: neoism_backend::config::PluginPreferences,
+        key: &str,
+    ) {
+        let candidate = match crate::plugin_manager::LuaPluginManager::discover(
+            &neoism_backend::config::config_dir_path(), self.lua_host.clone(), &policy,
+        ) {
+            Ok(candidate) => candidate,
+            Err(error) => {
+                tracing::warn!(%error, "Lua plugin policy change rejected");
+                return;
+            }
+        };
+        let value = if key == "plugins.disabled" {
+            serde_json::to_value(&policy.disabled)
+        } else {
+            serde_json::to_value(&policy.grants)
+        };
+        let Ok(value) = value else { return };
+        if let Err(error) = neoism_backend::config::write_setting(key, value) {
+            tracing::warn!(%error, key, "failed to persist Lua plugin policy");
+            return;
+        }
+        self.config.plugins = policy;
+        self.lua_plugins = candidate;
+        self.sync_lua_snapshot(Some(window_id));
+    }
+
+    fn invoke_lua_owned_command(&mut self, owner: &neoism_lua::PluginOwner, id: &str, arguments: serde_json::Value) -> Result<serde_json::Value, String> {
+        let command = self.lua_runtime.as_ref().filter(|runtime| runtime.owner() == owner)
+            .and_then(|runtime| runtime.snapshot().commands.iter().find(|command| command.id == id || command.aliases.iter().any(|alias| alias == id)).cloned())
+            .or_else(|| self.lua_plugins.command_contribution(owner, id))
+            .ok_or_else(|| format!("plugin command `{id}` is not registered by the exact owner"))?;
+        let event = neoism_lua::PluginEvent::new(
+            neoism_lua::PluginEventKind::Command,
+            serde_json::json!({ "id": command.id, "arguments": arguments }),
+            neoism_lua::ExecutionScope::Local,
+            Some("plugin-adapter".into()),
+        ).map_err(|error| error.to_string())?;
+        let value = if self.lua_runtime.as_ref().is_some_and(|runtime| runtime.owner() == owner) {
+            self.lua_runtime.as_mut().expect("matched user runtime").invoke(&command.callback, event).map_err(|error| error.to_string())?
+        } else {
+            self.lua_plugins.invoke(&command.callback, event).map_err(|error| error.to_string())?
+        };
+        neoism_lua::validate_command_arguments(&command.result_schema, &value)?;
+        Ok(value)
+    }
+
+    fn apply_lua_action(&mut self, window_id: WindowId, action: neoism_lua::HostAction) {
+        use neoism_ui::panels::command_palette::PaletteAction;
+
+        let argument = |name: &str| {
+            action
+                .arguments
+                .as_str()
+                .map(str::to_owned)
+                .or_else(|| {
+                    action
+                        .arguments
+                        .get(name)
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                })
+        };
+        let contract = match neoism_lua::action_contract(&action) {
+            Ok(contract) => contract,
+            Err(error) => {
+                tracing::warn!(%error, "rejected unregistered Lua host action");
+                return;
+            }
+        };
+        let owner = match neoism_lua::require_exact_owner(&action) {
+            Ok(owner) => owner,
+            Err(error) => {
+                tracing::warn!(%error, "rejected unowned Lua host action");
+                return;
+            }
+        };
+        // Candidate VMs may enqueue during initialization. Only the exact
+        // revision that survived candidate validation and publication may
+        // mutate host state; rejected/retired generations are inert.
+        if !self.lua_lsp_owner_is_active(owner) {
+            tracing::debug!(plugin = %owner.plugin_id, revision = %owner.revision.0, "discarded stale Lua host action");
+            return;
+        }
+        if contract.operation == neoism_lua::HostOperation::AsyncCancel {
+            let Ok(request) = serde_json::from_value::<neoism_lua::PluginAsyncCancelRequest>(action.arguments.clone()) else {
+                tracing::warn!(plugin = %owner.plugin_id, "invalid Lua async cancellation request");
+                return;
+            };
+            if let Some(watchers) = self.lua_watchers.as_mut() { watchers.cancel(owner, &request.id); }
+            let prompt_windows = self.lua_prompts.as_ref().into_iter().flat_map(|prompts| prompts.iter())
+                .filter_map(|((window, id), candidate)| (id == &request.id && candidate == owner).then_some(*window))
+                .collect::<Vec<_>>();
+            if let Some(prompts) = self.lua_prompts.as_mut() {
+                prompts.retain(|(_, id), candidate| id != &request.id || candidate != owner);
+            }
+            for window in prompt_windows {
+                if let Some(route) = self.router.routes.get_mut(&window) { route.window.screen.renderer.modal.close(); }
+            }
+            if !self.lua_async.as_mut().is_some_and(|coordinator| coordinator.cancel(owner, &request.id)) {
+                tracing::debug!(plugin = %owner.plugin_id, request = %request.id, "ignored stale or cross-owner async cancellation");
+            }
+            return;
+        }
+        if contract.operation == neoism_lua::HostOperation::ClipboardRead {
+            let Some(request_id) = action.invocation_id.clone() else { return };
+            let coordinator = self.lua_async.get_or_insert_with(Default::default);
+            if let Err(error) = coordinator.register(owner.clone(), request_id.clone(), window_id, "clipboard") {
+                tracing::warn!(plugin = %owner.plugin_id, %error, "Lua clipboard read rejected");
+                return;
+            }
+            let text = self.router.clipboard.get(neoism_backend::clipboard::ClipboardType::Clipboard);
+            coordinator.sender().complete(owner.clone(), request_id, serde_json::json!({ "text": text }));
+            return;
+        }
+        if matches!(contract.operation,
+            neoism_lua::HostOperation::JobSpawn
+                | neoism_lua::HostOperation::JobStdin
+                | neoism_lua::HostOperation::JobCloseStdin
+                | neoism_lua::HostOperation::JobCancel)
+        {
+            match contract.operation {
+                neoism_lua::HostOperation::JobSpawn => {
+                    let Some(request_id) = action.invocation_id.clone() else { return };
+                    let request = match serde_json::from_value::<neoism_lua::PluginJobSpawnRequest>(action.arguments.clone()) {
+                        Ok(request) => request,
+                        Err(error) => { tracing::warn!(%error, "invalid managed job request"); return; }
+                    };
+                    let Some(root) = self.router.routes.get(&window_id)
+                        .and_then(|route| route.window.screen.local_plugin_workspace_root())
+                        .map(std::path::Path::to_path_buf) else {
+                        tracing::warn!(plugin = %owner.plugin_id, "managed jobs require a local workspace root");
+                        return;
+                    };
+                    let coordinator = self.lua_async.get_or_insert_with(Default::default);
+                    let token = match coordinator.register(owner.clone(), request_id.clone(), window_id, "job") {
+                        Ok(token) => token,
+                        Err(error) => { tracing::warn!(plugin = %owner.plugin_id, %error, "managed job rejected"); return; }
+                    };
+                    let sender = coordinator.sender();
+                    let jobs = self.lua_jobs.get_or_insert_with(Default::default);
+                    if let Err(error) = jobs.spawn(
+                        owner.clone(), request_id.clone(), window_id, &root, request, token,
+                        sender.clone(), self.event_proxy.clone(),
+                    ) {
+                        sender.fail(owner.clone(), request_id, "spawn_rejected", error);
+                        self.event_proxy.send_event(neoism_backend::event::RioEventType::Rio(neoism_backend::event::RioEvent::Render), window_id);
+                    }
+                }
+                neoism_lua::HostOperation::JobStdin | neoism_lua::HostOperation::JobCloseStdin => {
+                    let Ok(request) = serde_json::from_value::<neoism_lua::PluginJobControlRequest>(action.arguments.clone()) else { return };
+                    let Some(jobs) = self.lua_jobs.as_mut() else { return };
+                    if contract.operation == neoism_lua::HostOperation::JobStdin {
+                        if let Err(error) = jobs.stdin(owner, &request.job, request.data.as_deref().unwrap_or_default()) {
+                            tracing::warn!(plugin = %owner.plugin_id, %error, "managed job stdin rejected");
+                        }
+                    } else if !jobs.close_stdin(owner, &request.job) {
+                        tracing::warn!(plugin = %owner.plugin_id, "managed job close_stdin rejected stale handle");
+                    }
+                }
+                neoism_lua::HostOperation::JobCancel => {
+                    let Ok(request) = serde_json::from_value::<neoism_lua::PluginJobControlRequest>(action.arguments.clone()) else { return };
+                    if !self.lua_async.as_mut().is_some_and(|coordinator| coordinator.cancel(owner, &request.job)) {
+                        tracing::debug!(plugin = %owner.plugin_id, "managed job cancellation rejected stale handle");
+                    }
+                }
+                _ => unreachable!(),
+            }
+            return;
+        }
+        if matches!(contract.operation, neoism_lua::HostOperation::TaskRun | neoism_lua::HostOperation::TestRun | neoism_lua::HostOperation::TaskCancel | neoism_lua::HostOperation::TestCancel) {
+            if matches!(contract.operation, neoism_lua::HostOperation::TaskCancel | neoism_lua::HostOperation::TestCancel) {
+                let id = action.arguments.get("id").or_else(|| action.arguments.get("job")).and_then(serde_json::Value::as_str).unwrap_or_default();
+                if !self.lua_async.as_mut().is_some_and(|coordinator| coordinator.cancel(owner, id)) {
+                    tracing::debug!(plugin = %owner.plugin_id, "task/test cancellation rejected stale handle");
+                }
+                return;
+            }
+            let Some(request_id) = action.invocation_id.clone() else { return };
+            let request_value = action.arguments.get("process").cloned().unwrap_or_else(|| action.arguments.clone());
+            let Ok(request) = serde_json::from_value::<neoism_lua::PluginJobSpawnRequest>(request_value) else { return };
+            let Some(root) = self.router.routes.get(&window_id).and_then(|route| route.window.screen.local_plugin_workspace_root()).map(std::path::Path::to_path_buf) else { return };
+            let coordinator = self.lua_async.get_or_insert_with(Default::default);
+            let kind = if contract.operation == neoism_lua::HostOperation::TaskRun { "task" } else { "test" };
+            let token = match coordinator.register(owner.clone(), request_id.clone(), window_id, kind) { Ok(token) => token, Err(_) => return };
+            let sender = coordinator.sender();
+            if let Err(error) = self.lua_jobs.get_or_insert_with(Default::default).spawn(owner.clone(), request_id.clone(), window_id, &root, request, token, sender.clone(), self.event_proxy.clone()) {
+                sender.fail(owner.clone(), request_id, "spawn_rejected", error);
+            }
+            return;
+        }
+        if matches!(contract.operation, neoism_lua::HostOperation::AgentQuery | neoism_lua::HostOperation::AgentMutation) {
+            let Some(request_id) = action.invocation_id.clone() else { return };
+            let coordinator = self.lua_async.get_or_insert_with(Default::default);
+            if coordinator.register(owner.clone(), request_id.clone(), window_id, "agent_bridge").is_err() { return; }
+            let sender = coordinator.sender();
+            if contract.operation == neoism_lua::HostOperation::AgentMutation {
+                let requested = action.arguments.get("requestId").or_else(|| action.arguments.get("request_id")).and_then(serde_json::Value::as_str);
+                let routed = self.router.routes.get_mut(&window_id)
+                    .and_then(|route| route.window.screen.context_manager.current_mut().neoism_agent.as_mut())
+                    .and_then(|agent| agent.pending_permission().map(|permission| {
+                        requested.is_none_or(|id| id == permission.id) && !permission.responding
+                    }))
+                    .unwrap_or(false);
+                if routed {
+                    // Deliberately do not choose an answer. The existing native
+                    // permission card owns the human decision and its normal
+                    // Agent reply path; Lua receives only a workflow state.
+                    sender.complete(owner.clone(), request_id, serde_json::json!({
+                        "state": "permission_required",
+                        "routedTo": "native_agent_approval"
+                    }));
+                } else {
+                    sender.fail(owner.clone(), request_id, "workflow_required", "no matching native Agent approval is pending; open the Agent workflow UI");
+                }
+                return;
+            }
+            let result = match action.action.as_str() {
+                "status" => self.lua_published.get("agent").cloned().ok_or_else(|| "agent state is unavailable".to_string()),
+                "sessions" => self.lua_published.get("agent")
+                    .and_then(|value| value.get("sessions"))
+                    .cloned()
+                    .ok_or_else(|| "agent sessions are unavailable".to_string()),
+                "messages" => {
+                    let requested_session = action.arguments.get("sessionId").or_else(|| action.arguments.get("session_id")).and_then(serde_json::Value::as_str);
+                    let limit = action.arguments.get("limit").and_then(serde_json::Value::as_u64).unwrap_or(200).clamp(1, 1_000) as usize;
+                    self.router.routes.get(&window_id)
+                        .and_then(|route| route.window.screen.context_manager.current().neoism_agent.as_ref())
+                        .ok_or_else(|| "there is no active agent session".to_string())
+                        .and_then(|agent| {
+                            if requested_session.is_some_and(|id| Some(id) != agent.session_id_str()) {
+                                return Err("only the active native agent session can be queried".to_string());
+                            }
+                            let messages = agent.messages();
+                            let start = messages.len().saturating_sub(limit);
+                            Ok(serde_json::Value::Array(messages[start..].iter().map(|message| serde_json::json!({
+                                "id": message.id,
+                                "kind": format!("{:?}", message.kind).to_ascii_lowercase(),
+                                "title": message.title,
+                                "text": message.text,
+                                "status": message.status,
+                                "tool": message.tool,
+                                "outputKind": format!("{:?}", message.output_kind).to_ascii_lowercase(),
+                                "language": message.lang,
+                                "lineOffset": message.line_offset,
+                                "detail": message.detail,
+                                "author": message.author,
+                            })).collect()))
+                        })
+                }
+                "checkpoints" => Err("native agent checkpoints are not exposed by the current agent pane".to_string()),
+                _ => Err("unknown agent bridge query".to_string()),
+            };
+            match result {
+                Ok(value) => sender.complete(owner.clone(), request_id, value),
+                Err(error) => sender.fail(owner.clone(), request_id, "agent_query_failed", error),
+            }
+            return;
+        }
+        if matches!(contract.operation, neoism_lua::HostOperation::PtyCreate | neoism_lua::HostOperation::PtySend | neoism_lua::HostOperation::PtyResize | neoism_lua::HostOperation::PtyStatus | neoism_lua::HostOperation::PtyClose) {
+            if contract.operation == neoism_lua::HostOperation::PtyCreate {
+                let Some(request_id) = action.invocation_id.clone() else { return };
+                let Ok(request) = serde_json::from_value::<neoism_lua::PluginPtyCreateRequest>(action.arguments.clone()) else { return };
+                let Some(root) = self.router.routes.get(&window_id).and_then(|route| route.window.screen.local_plugin_workspace_root()).map(std::path::Path::to_path_buf) else { return };
+                let coordinator = self.lua_async.get_or_insert_with(Default::default);
+                let token = match coordinator.register(owner.clone(), request_id.clone(), window_id, "pty") { Ok(token) => token, Err(_) => return };
+                let sender = coordinator.sender();
+                if let Err(error) = self.lua_ptys.get_or_insert_with(Default::default).create(owner.clone(), request_id.clone(), window_id, &root, request, token, sender.clone(), self.event_proxy.clone()) {
+                    sender.fail(owner.clone(), request_id, "pty_rejected", error);
+                }
+                return;
+            }
+            let Ok(request) = serde_json::from_value::<neoism_lua::PluginPtyControlRequest>(action.arguments.clone()) else { return };
+            let Some(ptys) = self.lua_ptys.as_mut() else { return };
+            match contract.operation {
+                neoism_lua::HostOperation::PtySend => { if let Err(error) = ptys.write(owner, &request.pty, &request.data) { tracing::warn!(plugin = %owner.plugin_id, %error, "plugin PTY write rejected"); } }
+                neoism_lua::HostOperation::PtyResize => { if let Err(error) = ptys.resize(owner, &request.pty, request.cols.unwrap_or(80), request.rows.unwrap_or(24)) { tracing::warn!(plugin = %owner.plugin_id, %error, "plugin PTY resize rejected"); } }
+                neoism_lua::HostOperation::PtyClose => { if ptys.close(owner, &request.pty) { if let Some(coordinator) = self.lua_async.as_mut() { coordinator.cancel(owner, &request.pty); } } }
+                neoism_lua::HostOperation::PtyStatus => {
+                    let Some(request_id) = action.invocation_id.clone() else { return };
+                    let result = ptys.status(owner, &request.pty);
+                    let coordinator = self.lua_async.get_or_insert_with(Default::default);
+                    if coordinator.register(owner.clone(), request_id.clone(), window_id, "pty_status").is_ok() { let sender = coordinator.sender(); match result { Ok(value) => sender.complete(owner.clone(), request_id, value), Err(error) => sender.fail(owner.clone(), request_id, "stale_pty", error) } }
+                }
+                _ => {}
+            }
+            return;
+        }
+        if matches!(contract.operation, neoism_lua::HostOperation::DebugStart | neoism_lua::HostOperation::DebugControl | neoism_lua::HostOperation::DebugStop) {
+            if contract.operation == neoism_lua::HostOperation::DebugStart {
+                let Some(request_id) = action.invocation_id.clone() else { return };
+                let Ok(mut request) = serde_json::from_value::<neoism_lua::PluginDapStartRequest>(action.arguments.clone()) else { return };
+                let registration = self.lua_runtime.as_ref().filter(|runtime| runtime.owner() == owner).and_then(|runtime| runtime.snapshot().platform.iter().find_map(|value| match &value.contribution { neoism_lua::PlatformContribution::DebugAdapter(adapter) if adapter.id == request.adapter => Some(adapter.clone()), _ => None }))
+                    .or_else(|| self.lua_plugins.snapshot().platform.iter().find_map(|value| if &value.owner == owner { match &value.contribution { neoism_lua::PlatformContribution::DebugAdapter(adapter) if adapter.id == request.adapter => Some(adapter.clone()), _ => None } } else { None }));
+                let Some(registration) = registration else { return };
+                request.command = registration.command;
+                let Some(root) = self.router.routes.get(&window_id).and_then(|route| route.window.screen.local_plugin_workspace_root()).map(std::path::Path::to_path_buf) else { return };
+                let coordinator = self.lua_async.get_or_insert_with(Default::default);
+                let token = match coordinator.register(owner.clone(), request_id.clone(), window_id, "debug") { Ok(token) => token, Err(_) => return };
+                let sender = coordinator.sender();
+                let dap = self.lua_dap.get_or_insert_with(Default::default);
+                if let Err(error) = dap.start(owner.clone(), request_id.clone(), window_id, &root, request.clone(), token, sender.clone(), self.event_proxy.clone()) { sender.fail(owner.clone(), request_id, "debug_start", error); return; }
+                if let Some(message) = request.initialize { if let Err(error) = dap.send(owner, &request_id, &message) { sender.fail(owner.clone(), request_id, "debug_initialize", error); } }
+                return;
+            }
+            let Ok(request) = serde_json::from_value::<neoism_lua::PluginDapControlRequest>(action.arguments.clone()) else { return };
+            let Some(dap) = self.lua_dap.as_mut() else { return };
+            if contract.operation == neoism_lua::HostOperation::DebugStop {
+                if dap.stop(owner, &request.session) { if let Some(coordinator) = self.lua_async.as_mut() { coordinator.cancel(owner, &request.session); } }
+            } else if let Err(error) = dap.send(owner, &request.session, &request.message) {
+                tracing::warn!(plugin = %owner.plugin_id, %error, "debug adapter message rejected");
+            }
+            return;
+        }
+        if matches!(contract.operation, neoism_lua::HostOperation::GitQuery | neoism_lua::HostOperation::GitMutation) {
+            let Some(request_id) = action.invocation_id.clone() else { return };
+            let request = match crate::lua_git::request(&action.action, &action.arguments) { Ok(request) => request, Err(error) => { tracing::warn!(plugin = %owner.plugin_id, %error, "plugin Git operation rejected"); return; } };
+            let Some(root) = self.router.routes.get(&window_id).and_then(|route| route.window.screen.local_plugin_workspace_root()).map(std::path::Path::to_path_buf) else { return };
+            let coordinator = self.lua_async.get_or_insert_with(Default::default);
+            let token = match coordinator.register(owner.clone(), request_id.clone(), window_id, "git") { Ok(token) => token, Err(_) => return };
+            let sender = coordinator.sender();
+            if let Err(error) = self.lua_jobs.get_or_insert_with(Default::default).spawn(owner.clone(), request_id.clone(), window_id, &root, request, token, sender.clone(), self.event_proxy.clone()) { sender.fail(owner.clone(), request_id, "git_spawn", error); }
+            return;
+        }
+        if matches!(contract.operation, neoism_lua::HostOperation::WatchCreate | neoism_lua::HostOperation::WatchCancel) {
+            if contract.operation == neoism_lua::HostOperation::WatchCancel {
+                let Ok(request) = serde_json::from_value::<neoism_lua::PluginAsyncCancelRequest>(action.arguments.clone()) else { return };
+                if self.lua_watchers.as_mut().is_some_and(|watchers| watchers.cancel(owner, &request.id)) {
+                    if let Some(coordinator) = self.lua_async.as_mut() { coordinator.cancel(owner, &request.id); }
+                }
+                return;
+            }
+            let Some(request_id) = action.invocation_id.clone() else { return };
+            let Ok(request) = serde_json::from_value::<neoism_lua::PluginWatchRequest>(action.arguments.clone()) else { return };
+            let Some(root) = self.router.routes.get(&window_id)
+                .and_then(|route| route.window.screen.local_plugin_workspace_root())
+                .map(std::path::Path::to_path_buf) else { return };
+            let coordinator = self.lua_async.get_or_insert_with(Default::default);
+            if coordinator.register(owner.clone(), request_id.clone(), window_id, "watcher").is_err() { return; }
+            let sender = coordinator.sender();
+            let watchers = self.lua_watchers.get_or_insert_with(Default::default);
+            if let Err(error) = watchers.watch(owner.clone(), request_id.clone(), window_id, &root, request, sender.clone(), self.event_proxy.clone()) {
+                sender.fail(owner.clone(), request_id, "watch_rejected", error);
+                self.event_proxy.send_event(neoism_backend::event::RioEventType::Rio(neoism_backend::event::RioEvent::Render), window_id);
+            }
+            return;
+        }
+        if contract.operation == neoism_lua::HostOperation::NetworkRequest {
+            let Some(request_id) = action.invocation_id.clone() else { return };
+            let Ok(request) = serde_json::from_value::<neoism_lua::PluginNetworkRequest>(action.arguments.clone()) else { return };
+            let coordinator = self.lua_async.get_or_insert_with(Default::default);
+            let token = match coordinator.register(owner.clone(), request_id.clone(), window_id, "network") {
+                Ok(token) => token,
+                Err(error) => { tracing::warn!(plugin = %owner.plugin_id, %error, "plugin network request rejected"); return; }
+            };
+            let sender = coordinator.sender();
+            let workspace = self.router.routes.get(&window_id).and_then(|route| route.window.screen.local_plugin_workspace_root()).map(|root| root.to_string_lossy().into_owned());
+            if let Err(error) = crate::lua_network::spawn_request(owner.clone(), request_id.clone(), window_id, request, token, sender.clone(), self.event_proxy.clone(), workspace) {
+                sender.fail(owner.clone(), request_id, "request_rejected", error);
+            }
+            return;
+        }
+        if contract.operation == neoism_lua::HostOperation::CredentialStatus {
+            let Some(request_id) = action.invocation_id.clone() else { return };
+            let alias = action.arguments.get("alias").and_then(serde_json::Value::as_str).unwrap_or_default();
+            let coordinator = self.lua_async.get_or_insert_with(Default::default);
+            if coordinator.register(owner.clone(), request_id.clone(), window_id, "credential").is_ok() {
+                let sender = coordinator.sender();
+                let workspace = self.router.routes.get(&window_id).and_then(|route| route.window.screen.local_plugin_workspace_root()).map(|root| root.to_string_lossy().into_owned());
+                match crate::lua_network::credential_available(owner, alias, workspace.as_deref()) {
+                    Ok(available) => sender.complete(owner.clone(), request_id, serde_json::json!({ "alias": alias, "available": available })),
+                    Err(error) => sender.fail(owner.clone(), request_id, "invalid_alias", error),
+                }
+            }
+            return;
+        }
+        if matches!(contract.operation, neoism_lua::HostOperation::CompletionRequest | neoism_lua::HostOperation::CompletionResolve | neoism_lua::HostOperation::CompletionCancel) {
+            if contract.operation == neoism_lua::HostOperation::CompletionCancel {
+                let id = action.arguments.get("id").and_then(serde_json::Value::as_str).unwrap_or_default();
+                if let Some(coordinator) = self.lua_async.as_mut() { coordinator.cancel(owner, id); }
+                return;
+            }
+            let Some(request_id) = action.invocation_id.clone() else { return };
+            if contract.operation == neoism_lua::HostOperation::CompletionResolve {
+                let command = action.arguments.get("command").and_then(serde_json::Value::as_str).unwrap_or_default();
+                let Some(candidate) = action.arguments.get("candidate").cloned() else { return };
+                let result = self.invoke_lua_owned_command(owner, command, candidate);
+                let coordinator = self.lua_async.get_or_insert_with(Default::default);
+                if coordinator.register(owner.clone(), request_id.clone(), window_id, "completion_resolve").is_ok() { let sender = coordinator.sender(); match result { Ok(value) => sender.complete(owner.clone(), request_id, value), Err(error) => sender.fail(owner.clone(), request_id, "resolve_failed", error) } }
+                return;
+            }
+            let Ok(request) = serde_json::from_value::<neoism_lua::PluginCompletionRequest>(action.arguments.clone()) else { return };
+            let source = self.lua_runtime.as_ref().filter(|runtime| runtime.owner() == owner).and_then(|runtime| runtime.snapshot().platform.iter().find_map(|value| match &value.contribution { neoism_lua::PlatformContribution::CompletionSource(source) if source.id == request.source => Some(source.clone()), _ => None }))
+                .or_else(|| self.lua_plugins.snapshot().platform.iter().find_map(|value| if &value.owner == owner { match &value.contribution { neoism_lua::PlatformContribution::CompletionSource(source) if source.id == request.source => Some(source.clone()), _ => None } } else { None }));
+            let Some(source) = source else { return };
+            let result = self.invoke_lua_owned_command(owner, &source.request_command, serde_json::to_value(&request).unwrap_or_default())
+                .and_then(|value| serde_json::from_value::<Vec<neoism_lua::CompletionCandidate>>(value).map_err(|error| error.to_string()));
+            let coordinator = self.lua_async.get_or_insert_with(Default::default);
+            if coordinator.register(owner.clone(), request_id.clone(), window_id, "completion").is_err() { return; }
+            let sender = coordinator.sender();
+            match result {
+                Ok(candidates) => {
+                    let presented = self.router.routes.get_mut(&window_id).ok_or_else(|| "completion window is unavailable".to_string()).and_then(|route| route.window.screen.install_plugin_completions(request.target.revision, request.target.position, candidates.clone()));
+                    match presented { Ok(()) => sender.complete(owner.clone(), request_id, serde_json::json!({ "count": candidates.len(), "presented": true })), Err(error) => sender.fail(owner.clone(), request_id, "stale_target", error) }
+                }
+                Err(error) => sender.fail(owner.clone(), request_id, "source_failed", error),
+            }
+            return;
+        }
+        if contract.operation == neoism_lua::HostOperation::SyntaxQuery {
+            let Some(request_id) = action.invocation_id.clone() else { return };
+            let Some(document) = action.arguments.get("document").and_then(serde_json::Value::as_str).map(|value| neoism_lua::DocumentHandle(value.to_owned())) else { return };
+            let Some((target_window, route_id)) = self.lua_editor_resources.published_targets.get(&document).copied() else { return };
+            let Some(item) = self.router.routes.get_mut(&target_window).and_then(|route| route.window.screen.context_manager.get_by_route_id(route_id)) else { return };
+            let Some(code) = item.context_mut().code.as_ref() else { return };
+            let expected_revision = action.arguments.get("expectedRevision").and_then(serde_json::Value::as_u64).unwrap_or(u64::MAX);
+            if code.buffer.revision != expected_revision { return; }
+            let text = code.buffer.text();
+            let language = action.arguments.get("language").and_then(serde_json::Value::as_str).unwrap_or_default().to_owned();
+            let query = action.arguments.get("query").and_then(serde_json::Value::as_str).unwrap_or_default().to_owned();
+            let coordinator = self.lua_async.get_or_insert_with(Default::default);
+            let token = match coordinator.register(owner.clone(), request_id.clone(), window_id, "syntax") { Ok(token) => token, Err(_) => return };
+            let sender = coordinator.sender(); let proxy = self.event_proxy.clone(); let owner = owner.clone();
+            let _ = std::thread::Builder::new().name("lua-syntax-query".into()).spawn(move || {
+                if token.is_cancelled() { return; }
+                match neoism_ui::syntax::plugin_query(&language, &text, &query) {
+                    Ok(captures) => sender.complete(owner, request_id, serde_json::json!({ "document": document, "revision": expected_revision, "captures": captures })),
+                    Err(error) => sender.fail(owner, request_id, "query_failed", error),
+                }
+                proxy.send_event(neoism_backend::event::RioEventType::Rio(neoism_backend::event::RioEvent::Render), window_id);
+            });
+            return;
+        }
+        if contract.operation == neoism_lua::HostOperation::NotificationShow {
+            let title = action.arguments.get("title").and_then(serde_json::Value::as_str).unwrap_or("Plugin");
+            let message = action.arguments.get("message").and_then(serde_json::Value::as_str).unwrap_or_default();
+            if title.len() > 256 || message.len() > 16 * 1024 { return; }
+            let level = match action.arguments.get("level").and_then(serde_json::Value::as_str) {
+                Some("error") => neoism_ui::panels::notifications::NotificationLevel::Error,
+                Some("warning" | "warn") => neoism_ui::panels::notifications::NotificationLevel::Warn,
+                _ => neoism_ui::panels::notifications::NotificationLevel::Info,
+            };
+            if let Some(route) = self.router.routes.get_mut(&window_id) {
+                route.window.screen.renderer.notifications.push(format!("{title}: {message}"), level);
+            }
+            return;
+        }
+        if matches!(contract.operation,
+            neoism_lua::HostOperation::ProgressCreate
+                | neoism_lua::HostOperation::ProgressUpdate
+                | neoism_lua::HostOperation::ProgressFinish)
+        {
+            let handle = action.arguments.get("progress").and_then(serde_json::Value::as_str)
+                .map(str::to_owned).or_else(|| action.invocation_id.clone());
+            let Some(handle) = handle else { return };
+            if contract.operation == neoism_lua::HostOperation::ProgressCreate {
+                let progress = self.lua_progress.get_or_insert_with(Default::default);
+                if progress.values().filter(|(candidate, _)| candidate == owner).count() >= 64 { return; }
+                progress.insert(handle.clone(), (owner.clone(), window_id));
+            } else if !self.lua_progress.as_ref().is_some_and(|progress| {
+                progress.get(&handle).is_some_and(|(candidate, target)| candidate == owner && *target == window_id)
+            }) {
+                return;
+            }
+            let message = action.arguments.get("message").and_then(serde_json::Value::as_str).unwrap_or_default();
+            if message.len() <= 16 * 1024 && !message.is_empty() {
+                if let Some(route) = self.router.routes.get_mut(&window_id) {
+                    route.window.screen.renderer.notifications.push(message, neoism_ui::panels::notifications::NotificationLevel::Info);
+                }
+            }
+            if contract.operation == neoism_lua::HostOperation::ProgressFinish {
+                if let Some(progress) = self.lua_progress.as_mut() { progress.remove(&handle); }
+            }
+            return;
+        }
+        if matches!(contract.operation, neoism_lua::HostOperation::PromptRequest | neoism_lua::HostOperation::PromptCancel) {
+            if contract.operation == neoism_lua::HostOperation::PromptCancel {
+                let Ok(request) = serde_json::from_value::<neoism_lua::PluginAsyncCancelRequest>(action.arguments.clone()) else { return };
+                if self.lua_prompts.as_ref().and_then(|prompts| prompts.get(&(window_id, request.id.clone()))) != Some(owner) { return; }
+                if let Some(prompts) = self.lua_prompts.as_mut() { prompts.remove(&(window_id, request.id.clone())); }
+                if let Some(route) = self.router.routes.get_mut(&window_id) { route.window.screen.renderer.modal.close(); }
+                if let Some(coordinator) = self.lua_async.as_mut() { coordinator.cancel(owner, &request.id); }
+                return;
+            }
+            let Some(request_id) = action.invocation_id.clone() else { return };
+            let request = match serde_json::from_value::<neoism_lua::PluginPromptRequest>(action.arguments.clone()) {
+                Ok(request) => request,
+                Err(error) => { tracing::warn!(%error, "invalid plugin prompt request"); return; }
+            };
+            if request.title.len() > 256 || request.message.len() > 16 * 1024 || request.options.len() > 32
+                || request.options.iter().any(|option| option.len() > 1024) { return; }
+            let Some(route) = self.router.routes.get_mut(&window_id) else { return };
+            if route.window.screen.renderer.modal.is_active() { return; }
+            let coordinator = self.lua_async.get_or_insert_with(Default::default);
+            if coordinator.register(owner.clone(), request_id.clone(), window_id, "prompt").is_err() { return; }
+            self.lua_prompts.get_or_insert_with(Default::default).insert((window_id, request_id.clone()), owner.clone());
+            use neoism_ui::widgets::modal::{ModalAction, ModalButton, ModalInputSpec, ModalSpec};
+            let reply = |value: String, cancelled| ModalAction::LuaPromptReply { request_id: request_id.clone(), value, cancelled };
+            let (input, mut buttons) = match action.action.as_str() {
+                "input" => (Some(ModalInputSpec { value: request.default.unwrap_or_default(), placeholder: String::new() }), vec![ModalButton::new("Submit", "Enter", reply(String::new(), false))]),
+                "confirm" => (None, vec![ModalButton::new("Confirm", "Enter", reply("true".into(), false))]),
+                "select" => (None, request.options.into_iter().enumerate().map(|(index, option)| ModalButton::new(option.clone(), (index + 1).to_string(), reply(option, false))).collect()),
+                _ => return,
+            };
+            buttons.push(ModalButton::new("Cancel", "Esc", reply(String::new(), true)));
+            route.window.screen.renderer.modal.open(ModalSpec {
+                title: request.title, body: request.message, meta: owner.plugin_id.clone(), input, buttons, busy: false, blocking: true,
+            });
+            return;
+        }
+        if matches!(contract.operation,
+            neoism_lua::HostOperation::ResultListCreate
+                | neoism_lua::HostOperation::ResultListReplace
+                | neoism_lua::HostOperation::ResultListAppend
+                | neoism_lua::HostOperation::ResultListClear
+                | neoism_lua::HostOperation::ResultListDelete
+                | neoism_lua::HostOperation::ResultListOpen
+                | neoism_lua::HostOperation::ResultListQuery)
+        {
+            let request = match serde_json::from_value::<neoism_lua::PluginResultListRequest>(action.arguments.clone()) {
+                Ok(request) => request,
+                Err(error) => { tracing::warn!(%error, "invalid plugin result-list request"); return; }
+            };
+            if request.entries.len() > 2_000 || request.title.len() > 256 || request.kind.len() > 64
+                || request.entries.iter().any(|entry| entry.label.len() > 4_096 || entry.detail.len() > 16 * 1024)
+            { return; }
+            let handle = request.list.clone().or_else(|| action.invocation_id.clone());
+            let Some(handle) = handle else { return };
+            if contract.operation == neoism_lua::HostOperation::ResultListCreate {
+                let lists = self.lua_result_lists.get_or_insert_with(Default::default);
+                if lists.values().filter(|list| &list.owner == owner).count() >= 128
+                    || lists.values().map(|list| list.entries.len()).sum::<usize>() + request.entries.len() > 10_000
+                { return; }
+                lists.insert(handle, LuaResultList {
+                    owner: owner.clone(), window_id, title: request.title, kind: request.kind, entries: request.entries,
+                });
+                return;
+            }
+            let valid = self.lua_result_lists.as_ref().and_then(|lists| lists.get(&handle))
+                .is_some_and(|list| &list.owner == owner && list.window_id == window_id);
+            if !valid { return; }
+            match contract.operation {
+                neoism_lua::HostOperation::ResultListReplace => {
+                    if let Some(list) = self.lua_result_lists.as_mut().and_then(|lists| lists.get_mut(&handle)) {
+                        list.title = request.title; list.kind = request.kind; list.entries = request.entries;
+                    }
+                }
+                neoism_lua::HostOperation::ResultListAppend => {
+                    if let Some(list) = self.lua_result_lists.as_mut().and_then(|lists| lists.get_mut(&handle)) {
+                        if list.entries.len() + request.entries.len() <= 2_000 { list.entries.extend(request.entries); }
+                    }
+                }
+                neoism_lua::HostOperation::ResultListClear => {
+                    if let Some(list) = self.lua_result_lists.as_mut().and_then(|lists| lists.get_mut(&handle)) { list.entries.clear(); }
+                }
+                neoism_lua::HostOperation::ResultListDelete => {
+                    if let Some(lists) = self.lua_result_lists.as_mut() { lists.remove(&handle); }
+                }
+                neoism_lua::HostOperation::ResultListQuery => {
+                    let Some(request_id) = action.invocation_id.clone() else { return };
+                    let Some(list) = self.lua_result_lists.as_ref().and_then(|lists| lists.get(&handle)).cloned() else { return };
+                    let coordinator = self.lua_async.get_or_insert_with(Default::default);
+                    if coordinator.register(owner.clone(), request_id.clone(), window_id, "result_list").is_ok() {
+                        coordinator.sender().complete(owner.clone(), request_id, serde_json::json!({
+                            "list": handle, "title": list.title, "kind": list.kind, "entries": list.entries,
+                        }));
+                    }
+                }
+                neoism_lua::HostOperation::ResultListOpen => {
+                    let index = request.index.unwrap_or(0);
+                    let entry = self.lua_result_lists.as_ref().and_then(|lists| lists.get(&handle))
+                        .and_then(|list| list.entries.get(index)).cloned();
+                    let Some(entry) = entry else { return };
+                    let Some((target_window, route_id)) = self.lua_editor_resources.published_targets.get(&entry.document).copied() else { return };
+                    let Some(route) = self.router.routes.get_mut(&target_window) else { return };
+                    let Some(item) = route.window.screen.context_manager.get_by_route_id(route_id) else { return };
+                    let Some(code) = item.context_mut().code.as_mut() else { return };
+                    let line = entry.position.line as usize;
+                    let col = entry.position.character as usize;
+                    if code.buffer.lines.get(line).is_some_and(|text| col <= text.len() && text.is_char_boundary(col)) {
+                        code.buffer.cursor_line = line; code.buffer.cursor_col = col;
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+        if matches!(contract.operation, neoism_lua::HostOperation::CommandExecute | neoism_lua::HostOperation::CommandCancel) {
+            match contract.operation {
+                neoism_lua::HostOperation::CommandExecute => {
+                    let Some(request_id) = action.invocation_id.clone() else {
+                        tracing::warn!("Lua command request is missing its request id");
+                        return;
+                    };
+                    let mut value = action.arguments.clone();
+                    if value.get("command").is_none() {
+                        if let Some(id) = value.get("id").cloned() {
+                            value["command"] = id;
+                        }
+                    }
+                    let request = match serde_json::from_value::<neoism_lua::PluginCommandRequest>(value) {
+                        Ok(request) => request,
+                        Err(error) => {
+                            self.lua_command_completions.insert(
+                                (owner.clone(), request_id.clone()),
+                                neoism_lua::PluginCommandCompletion::failed(
+                                    request_id, "unknown".into(), "invalid_request", error.to_string(),
+                                ),
+                            );
+                            return;
+                        }
+                    };
+                    let user_command = self.lua_runtime.as_ref().and_then(|runtime| {
+                        runtime.snapshot().commands.iter().find(|command| {
+                            command.id == request.command
+                                || command.aliases.iter().any(|alias| alias == &request.command)
+                        }).cloned().map(|command| (runtime.owner().clone(), command))
+                    });
+                    let resolved = user_command.or_else(|| self.lua_plugins.resolve_command(&request.command));
+                    let Some((target_owner, command)) = resolved else {
+                        if let Some(native) = lua_palette_action(&request.command) {
+                            if request.range.is_some() || request.count.is_some() || request.bang {
+                                self.lua_command_completions.insert(
+                                    (owner.clone(), request_id.clone()),
+                                    neoism_lua::PluginCommandCompletion::failed(
+                                        request_id, request.command, "invalid_arguments",
+                                        "native compatibility commands do not accept range, count, or bang",
+                                    ),
+                                );
+                                return;
+                            }
+                            if let Some(route) = self.router.routes.get_mut(&window_id) {
+                                route.window.screen.execute_palette_action(native, &mut self.router.clipboard);
+                                route.request_redraw();
+                            }
+                            self.lua_command_completions.insert(
+                                (owner.clone(), request_id.clone()),
+                                neoism_lua::PluginCommandCompletion::succeeded(
+                                    request_id, request.command, serde_json::Value::Null,
+                                ),
+                            );
+                            return;
+                        }
+                        self.lua_command_completions.insert(
+                            (owner.clone(), request_id.clone()),
+                            neoism_lua::PluginCommandCompletion::failed(
+                                request_id, request.command, "unknown_command", "command is not registered",
+                            ),
+                        );
+                        return;
+                    };
+                    if let Err(error) = neoism_lua::validate_command_request(&command, &request) {
+                        self.lua_command_completions.insert(
+                            (owner.clone(), request_id.clone()),
+                            neoism_lua::PluginCommandCompletion::failed(
+                                request_id, command.id, "invalid_arguments", error,
+                            ),
+                        );
+                        return;
+                    }
+                    let event = neoism_lua::PluginEvent::new(
+                        neoism_lua::PluginEventKind::Command,
+                        serde_json::json!({
+                            "id": command.id,
+                            "requestedAs": request.command,
+                            "requestId": request_id,
+                            "arguments": request.arguments,
+                            "range": request.range,
+                            "count": request.count,
+                            "bang": request.bang,
+                        }),
+                        command.scope,
+                        Some(format!("plugin-command:{}", owner.plugin_id)),
+                    ).expect("registered command event");
+                    let invoked = if self.lua_runtime.as_ref().is_some_and(|runtime| runtime.owner() == &target_owner) {
+                        self.lua_runtime.as_ref().expect("matched user runtime").invoke(&command.callback, event)
+                            .map_err(|error| error.to_string())
+                    } else {
+                        self.lua_plugins.invoke(&command.callback, event).map_err(|error| error.to_string())
+                    };
+                    let completion = match invoked {
+                        Ok(result) => match neoism_lua::validate_command_arguments(&command.result_schema, &result) {
+                            Ok(()) => neoism_lua::PluginCommandCompletion::succeeded(request_id.clone(), command.id, result),
+                            Err(error) => neoism_lua::PluginCommandCompletion::failed(
+                                request_id.clone(), command.id, "invalid_result", error,
+                            ),
+                        },
+                        Err(error) => neoism_lua::PluginCommandCompletion::failed(
+                            request_id.clone(), command.id, "callback_failed", error,
+                        ),
+                    };
+                    self.lua_command_completions.insert((owner.clone(), request_id), completion);
+                }
+                neoism_lua::HostOperation::CommandCancel => {
+                    let request = match serde_json::from_value::<neoism_lua::PluginCommandCancelRequest>(action.arguments.clone()) {
+                        Ok(request) if !request.id.is_empty() => request,
+                        _ => { tracing::warn!("Lua command cancellation requires a request id"); return; }
+                    };
+                    let key = (owner.clone(), request.id.clone());
+                    if let Some(previous) = self.lua_command_completions.get(&key) {
+                        let command = previous.command.clone();
+                        self.lua_command_completions.insert(
+                            key,
+                            neoism_lua::PluginCommandCompletion::cancelled(request.id, command),
+                        );
+                    } else if self.lua_command_completions.keys().any(|(_, id)| id == &request.id) {
+                        tracing::warn!(plugin = %owner.plugin_id, "rejected cross-owner Lua command cancellation");
+                    } else {
+                        tracing::debug!(plugin = %owner.plugin_id, "Lua command cancellation matched no pending request");
+                    }
+                }
+                _ => unreachable!(),
+            }
+            return;
+        }
+        if matches!(
+            contract.operation,
+            neoism_lua::HostOperation::RegisterSet
+                | neoism_lua::HostOperation::ClipboardSet
+                | neoism_lua::HostOperation::MarkSet
+                | neoism_lua::HostOperation::MarkDelete
+                | neoism_lua::HostOperation::JumplistJump
+                | neoism_lua::HostOperation::MacroSet
+                | neoism_lua::HostOperation::MacroPlay
+        ) {
+            let expected_document = action.arguments.get("document").and_then(serde_json::Value::as_str);
+            let active_document = self.lua_published.get("document")
+                .and_then(|value| value.get("handle"))
+                .and_then(serde_json::Value::as_str);
+            if contract.operation != neoism_lua::HostOperation::ClipboardSet
+                && (expected_document.is_none() || expected_document != active_document)
+            {
+                tracing::warn!(plugin = %owner.plugin_id, "rejected stale plugin editor resource action");
+                return;
+            }
+            match contract.operation {
+                neoism_lua::HostOperation::ClipboardSet => {
+                    let Some(text) = action.arguments.get("text").and_then(serde_json::Value::as_str) else { return };
+                    if text.len() > 1024 * 1024 { return }
+                    self.router.clipboard.set(neoism_backend::clipboard::ClipboardType::Clipboard, text.to_owned());
+                }
+                neoism_lua::HostOperation::RegisterSet => {
+                    let Some(name) = action.arguments.get("name").and_then(serde_json::Value::as_str)
+                        .and_then(|name| (name.chars().count() == 1).then(|| name.chars().next()).flatten()) else { return };
+                    let Some(text) = action.arguments.get("text").and_then(serde_json::Value::as_str) else { return };
+                    if text.len() > 1024 * 1024 { return }
+                    let value = neoism_ui::editor::markdown::vim::VimRegisterValue {
+                        text: text.to_owned(),
+                        linewise: action.arguments.get("linewise").and_then(serde_json::Value::as_bool).unwrap_or(false),
+                        blockwise: action.arguments.get("blockwise").and_then(serde_json::Value::as_bool).unwrap_or(false),
+                    };
+                    if let Some(route) = self.router.routes.get_mut(&window_id) {
+                        if let Some(code) = route.window.screen.context_manager.current_mut().code.as_mut() {
+                            code.buffer.vim.registers.write(name, value, true);
+                            if matches!(name, '"' | '+' | '*') {
+                                self.router.clipboard.set(neoism_backend::clipboard::ClipboardType::Clipboard, text.to_owned());
+                            }
+                        }
+                    }
+                }
+                neoism_lua::HostOperation::MarkSet => {
+                    let Some(name) = action.arguments.get("name").and_then(serde_json::Value::as_str)
+                        .and_then(|name| name.chars().next()).filter(|name| name.is_ascii_lowercase()) else { return };
+                    let (Some(line), Some(col)) = (
+                        action.arguments.get("line").and_then(serde_json::Value::as_u64),
+                        action.arguments.get("character").and_then(serde_json::Value::as_u64),
+                    ) else { return };
+                    if let Some(route) = self.router.routes.get_mut(&window_id) {
+                        if let Some(code) = route.window.screen.context_manager.current_mut().code.as_mut() {
+                            let line = line as usize;
+                            let col = col as usize;
+                            if code.buffer.lines.get(line).is_some_and(|text| col <= text.len() && text.is_char_boundary(col)) {
+                                code.buffer.vim.marks.insert(name, neoism_ui::editor::markdown::vim::VimMark { line, col });
+                            }
+                        }
+                    }
+                }
+                neoism_lua::HostOperation::MarkDelete => {
+                    let Some(name) = action.arguments.get("name").and_then(serde_json::Value::as_str).and_then(|name| name.chars().next()) else { return };
+                    if let Some(route) = self.router.routes.get_mut(&window_id) {
+                        if let Some(code) = route.window.screen.context_manager.current_mut().code.as_mut() {
+                            code.buffer.vim.marks.remove(&name);
+                        }
+                    }
+                }
+                neoism_lua::HostOperation::JumplistJump => {
+                    let forward = action.arguments.get("direction").and_then(serde_json::Value::as_str) == Some("forward");
+                    let count = action.arguments.get("count").and_then(serde_json::Value::as_u64).unwrap_or(1) as usize;
+                    if let Some(route) = self.router.routes.get_mut(&window_id) {
+                        if let Some(code) = route.window.screen.context_manager.current_mut().code.as_mut() {
+                            let action = if forward { neoism_ui::editor::markdown::vim::VimAction::JumpForward { count } }
+                                else { neoism_ui::editor::markdown::vim::VimAction::JumpBack { count } };
+                            code.buffer.apply_vim_action(&action, None);
+                        }
+                    }
+                }
+                neoism_lua::HostOperation::MacroSet => {
+                    let Some(name) = action.arguments.get("name").and_then(serde_json::Value::as_str)
+                        .and_then(|name| name.chars().next()).filter(|name| name.is_ascii_lowercase()) else { return };
+                    let Some(keys) = action.arguments.get("keys").and_then(serde_json::Value::as_str) else { return };
+                    if keys.chars().count() > 4096 { return }
+                    if let Some(route) = self.router.routes.get_mut(&window_id) {
+                        if let Some(code) = route.window.screen.context_manager.current_mut().code.as_mut() {
+                            code.buffer.vim.registers.macros.insert(name, keys.to_owned());
+                        }
+                    }
+                }
+                neoism_lua::HostOperation::MacroPlay => {
+                    let Some(name) = action.arguments.get("name").and_then(serde_json::Value::as_str).and_then(|name| name.chars().next()) else { return };
+                    let count = action.arguments.get("count").and_then(serde_json::Value::as_u64).unwrap_or(1).min(100) as usize;
+                    if let Some(route) = self.router.routes.get_mut(&window_id) {
+                        route.window.screen.play_code_macro(name, count, &mut self.router.clipboard);
+                    }
+                }
+                _ => unreachable!(),
+            }
+            return;
+        }
+        if contract.operation == neoism_lua::HostOperation::DiagnosticActionExecute {
+            let resource = action.arguments.get("resource").cloned()
+                .and_then(|value| serde_json::from_value::<neoism_lua::PluginResourceId>(value).ok());
+            let command = action.arguments.get("command").and_then(serde_json::Value::as_str);
+            let (Some(resource), Some(command)) = (resource, command) else {
+                tracing::warn!("invalid plugin diagnostic action invocation"); return;
+            };
+            if !self.lua_editor_resources.registry.owns_resource(owner, resource) {
+                tracing::warn!(plugin = %owner.plugin_id, "rejected stale or cross-owner diagnostic action"); return;
+            }
+            let command_contribution = self.lua_runtime.as_ref()
+                .filter(|runtime| runtime.owner() == owner)
+                .and_then(|runtime| runtime.snapshot().commands.iter().find(|candidate| candidate.id == command))
+                .cloned()
+                .or_else(|| self.lua_plugins.command_contribution(owner, command));
+            let Some(command_contribution) = command_contribution else {
+                tracing::warn!(plugin = %owner.plugin_id, %command, "diagnostic action command is stale"); return;
+            };
+            let arguments = action.arguments.get("arguments").cloned().unwrap_or_default();
+            if let Err(error) = neoism_lua::validate_command_arguments(&command_contribution.arguments_schema, &arguments) {
+                tracing::warn!(plugin = %owner.plugin_id, %command, %error, "diagnostic action arguments rejected"); return;
+            }
+            let event = neoism_lua::PluginEvent::new(
+                neoism_lua::PluginEventKind::Command,
+                serde_json::json!({ "id": command, "arguments": arguments }),
+                neoism_lua::ExecutionScope::Local,
+                Some("plugin-diagnostic-action".into()),
+            ).expect("registered command event");
+            let result = if command_contribution.callback.starts_with("lua:neoism.user-init@") {
+                self.lua_runtime.as_ref().expect("user callback runtime").invoke(&command_contribution.callback, event)
+                    .map_err(|error| error.to_string())
+            } else {
+                self.lua_plugins.invoke(&command_contribution.callback, event).map_err(|error| error.to_string())
+            };
+            match result {
+                Ok(value) => if let Err(error) = neoism_lua::validate_command_arguments(&command_contribution.result_schema, &value) {
+                    tracing::warn!(%error, "Lua diagnostic action returned an invalid structured result");
+                },
+                Err(error) => tracing::warn!(%error, "Lua diagnostic action failed"),
+            }
+            return;
+        }
+        if matches!(contract.operation, neoism_lua::HostOperation::SchedulerCreate | neoism_lua::HostOperation::SchedulerCancel) {
+            match contract.operation {
+                neoism_lua::HostOperation::SchedulerCreate => {
+                    let Some(timer_id) = action.invocation_id.clone() else { tracing::warn!("Lua timer is missing its handle"); return };
+                    let mut request = match serde_json::from_value::<neoism_lua::PluginTimerRequest>(action.arguments.clone()) {
+                        Ok(request) => request,
+                        Err(error) => { tracing::warn!(%error, "invalid Lua timer request"); return; }
+                    };
+                    if action.action == "every" && request.interval_millis.is_none() {
+                        request.interval_millis = Some(request.delay_millis);
+                    }
+                    let timers = self.lua_timers.get_or_insert_with(Default::default);
+                    let owner_count = timers.values().filter(|timer| &timer.owner == owner).count();
+                    const MAX_TIMER_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
+                    if owner_count >= 256 || timers.len() >= 1_024 || request.delay_millis > MAX_TIMER_MS
+                        || request.interval_millis.is_some_and(|interval| !(10..=MAX_TIMER_MS).contains(&interval))
+                    {
+                        tracing::warn!(plugin = %owner.plugin_id, "Lua timer budget rejected request"); return;
+                    }
+                    timers.insert(timer_id, LuaPluginTimerLease {
+                        owner: owner.clone(),
+                        due: Instant::now() + Duration::from_millis(request.delay_millis),
+                        interval: request.interval_millis.map(Duration::from_millis),
+                        command: request.command,
+                        arguments: request.arguments,
+                    });
+                }
+                neoism_lua::HostOperation::SchedulerCancel => {
+                    let request = match serde_json::from_value::<neoism_lua::PluginTimerCancelRequest>(action.arguments.clone()) {
+                        Ok(request) => request,
+                        Err(error) => { tracing::warn!(%error, "invalid Lua timer cancellation"); return; }
+                    };
+                    if self.lua_timers.as_ref().and_then(|timers| timers.get(&request.timer)).is_some_and(|timer| &timer.owner == owner) {
+                        if let Some(timers) = self.lua_timers.as_mut() { timers.remove(&request.timer); }
+                    } else {
+                        tracing::warn!(plugin = %owner.plugin_id, "rejected stale or cross-owner Lua timer cancellation");
+                    }
+                }
+                _ => unreachable!(),
+            }
+            return;
+        }
+
+        if matches!(
+            contract.operation,
+            neoism_lua::HostOperation::NamespaceCreate
+                | neoism_lua::HostOperation::NamespaceClear
+                | neoism_lua::HostOperation::NamespaceDelete
+                | neoism_lua::HostOperation::AnchorCreate
+                | neoism_lua::HostOperation::AnchorDelete
+                | neoism_lua::HostOperation::DecorationCreate
+                | neoism_lua::HostOperation::DecorationDelete
+                | neoism_lua::HostOperation::DecorationClear
+                | neoism_lua::HostOperation::DiagnosticPublish
+                | neoism_lua::HostOperation::DiagnosticClear
+        ) {
+            let Some(external_id) = action.invocation_id.clone() else {
+                tracing::warn!("Lua editor resource action is missing its reserved handle");
+                return;
+            };
+            let owner = owner.clone();
+            match contract.operation {
+                neoism_lua::HostOperation::NamespaceCreate => {
+                    match self.lua_editor_resources.registry.create_namespace(&owner) {
+                        Ok(namespace) => {
+                            self.lua_editor_resources.namespaces.insert(external_id, (owner, namespace));
+                        }
+                        Err(error) => tracing::warn!(%error, "failed to create Lua editor namespace"),
+                    }
+                }
+                neoism_lua::HostOperation::NamespaceClear
+                | neoism_lua::HostOperation::NamespaceDelete
+                | neoism_lua::HostOperation::DecorationClear
+                | neoism_lua::HostOperation::DiagnosticClear => {
+                    let request = match serde_json::from_value::<neoism_lua::PluginResourceTargetRequest>(action.arguments.clone()) {
+                        Ok(request) => request,
+                        Err(error) => { tracing::warn!(%error, "invalid Lua namespace target"); return; }
+                    };
+                    let Some((namespace_owner, namespace)) = self.lua_editor_resources.namespaces.get(&request.namespace).cloned() else {
+                        tracing::warn!("Lua editor namespace handle is stale"); return;
+                    };
+                    if namespace_owner != owner {
+                        tracing::warn!("Lua editor namespace belongs to another owner revision"); return;
+                    }
+                    let result = match contract.operation {
+                        neoism_lua::HostOperation::NamespaceDelete => self.lua_editor_resources.registry.remove_namespace(&owner, namespace),
+                        neoism_lua::HostOperation::DecorationClear => self.lua_editor_resources.registry.clear_decorations(&owner, namespace, None),
+                        neoism_lua::HostOperation::DiagnosticClear => self.lua_editor_resources.registry.clear_decorations(&owner, namespace, Some(neoism_lua::DecorationLayer::Diagnostic)),
+                        _ => self.lua_editor_resources.registry.clear_namespace(&owner, namespace),
+                    };
+                    if let Err(error) = result { tracing::warn!(%error, "failed to clear Lua editor namespace"); }
+                    if matches!(contract.operation, neoism_lua::HostOperation::NamespaceClear | neoism_lua::HostOperation::NamespaceDelete) {
+                        self.lua_editor_resources.anchors.retain(|_, lease| lease.owner != owner || lease.namespace != namespace);
+                    }
+                    self.lua_editor_resources.decorations.retain(|_, lease| {
+                        lease.0 != owner || lease.1 != namespace
+                            || (contract.operation == neoism_lua::HostOperation::DiagnosticClear && lease.3 != neoism_lua::DecorationLayer::Diagnostic)
+                    });
+                    if contract.operation == neoism_lua::HostOperation::NamespaceDelete {
+                        self.lua_editor_resources.namespaces.remove(&request.namespace);
+                    }
+                }
+                neoism_lua::HostOperation::AnchorCreate => {
+                    let request = match serde_json::from_value::<neoism_lua::PluginAnchorRequest>(action.arguments.clone()) {
+                        Ok(request) => request,
+                        Err(error) => { tracing::warn!(%error, "invalid Lua anchor request"); return; }
+                    };
+                    let Some((namespace_owner, namespace)) = self.lua_editor_resources.namespaces.get(&request.namespace).cloned() else {
+                        tracing::warn!("Lua anchor namespace handle is stale"); return;
+                    };
+                    if namespace_owner != owner { tracing::warn!("Lua anchor namespace belongs to another owner revision"); return; }
+                    let Some(route) = self.router.routes.get(&window_id) else { return };
+                    let manager = &route.window.screen.context_manager;
+                    let current = manager.current();
+                    let Some(code) = current.code.as_ref() else { tracing::warn!("Lua anchor target is not a code document"); return };
+                    let workspace_identity = format!("{:?}", manager.current_workspace_tree_id());
+                    let window_identity = format!("{window_id:?}");
+                    let route_identity = current.route_id.to_string();
+                    let host_path = code.path.to_string_lossy().into_owned();
+                    let actual_document = neoism_lua::DocumentHandle(neoism_lua::opaque_resource_handle(
+                        "document", &[&window_identity, &workspace_identity, &route_identity, &host_path],
+                    ));
+                    if request.document != actual_document || request.expected_revision != code.buffer.revision {
+                        tracing::warn!("Lua anchor rejected a stale document handle or revision"); return;
+                    }
+                    let line = request.position.line as usize;
+                    let col = request.position.character as usize;
+                    if code.buffer.lines.get(line).is_none_or(|text| col > text.len() || !text.is_char_boundary(col)) {
+                        tracing::warn!("Lua anchor position is outside the document or not a UTF-8 boundary"); return;
+                    }
+                    let offset = neoism_ui::editor::markdown::doc_sync::position_to_doc_byte(&code.buffer.lines, line, col);
+                    let buffer_id = crate::screen::markdown_crdt::buffer_id_for_markdown_path(&code.path);
+                    let sticky = route.window.screen.code_crdt.binding_for(&buffer_id)
+                        .and_then(|binding| binding.sticky_anchor_at(line, col, request.bias == neoism_lua::AnchorBias::After))
+                        .map(|anchor| LuaPluginStickyAnchor { window_id, buffer_id, anchor });
+                    match self.lua_editor_resources.registry.create_anchor(&owner, namespace, request.document, offset, request.bias) {
+                        Ok(resource) => {
+                            self.lua_editor_resources.published_targets.insert(actual_document.clone(), (window_id, current.route_id));
+                            self.lua_editor_resources.document_text.entry(actual_document.clone()).or_insert_with(|| code.buffer.text());
+                            self.lua_editor_resources.anchors.insert(external_id, LuaPluginAnchorLease {
+                                owner, namespace, resource, sticky, window_id,
+                            });
+                        }
+                        Err(error) => tracing::warn!(%error, "failed to create Lua editor anchor"),
+                    }
+                }
+                neoism_lua::HostOperation::AnchorDelete
+                | neoism_lua::HostOperation::DecorationDelete => {
+                    let request = match serde_json::from_value::<neoism_lua::PluginResourceTargetRequest>(action.arguments.clone()) {
+                        Ok(request) => request,
+                        Err(error) => { tracing::warn!(%error, "invalid Lua resource delete"); return; }
+                    };
+                    let Some(resource_handle) = request.resource else { tracing::warn!("Lua resource delete requires a resource handle"); return };
+                    let Some((namespace_owner, namespace)) = self.lua_editor_resources.namespaces.get(&request.namespace).cloned() else { tracing::warn!("Lua resource namespace is stale"); return };
+                    if namespace_owner != owner { tracing::warn!("Lua resource namespace belongs to another owner revision"); return; }
+                    let resource = self.lua_editor_resources.anchors.get(&resource_handle)
+                        .filter(|lease| lease.owner == owner && lease.namespace == namespace)
+                        .map(|lease| lease.resource)
+                        .or_else(|| self.lua_editor_resources.decorations.get(&resource_handle)
+                            .filter(|lease| lease.0 == owner && lease.1 == namespace)
+                            .map(|lease| lease.2));
+                    let Some(resource) = resource else { tracing::warn!("Lua editor resource handle is stale or cross-owner"); return };
+                    if let Err(error) = self.lua_editor_resources.registry.remove_resource(&owner, namespace, resource) {
+                        tracing::warn!(%error, "failed to remove Lua editor resource");
+                    }
+                    self.lua_editor_resources.anchors.remove(&resource_handle);
+                    self.lua_editor_resources.decorations.remove(&resource_handle);
+                }
+                neoism_lua::HostOperation::DecorationCreate
+                | neoism_lua::HostOperation::DiagnosticPublish => {
+                    let mut request = match serde_json::from_value::<neoism_lua::PluginDecorationRequest>(action.arguments.clone()) {
+                        Ok(request) => request,
+                        Err(error) => { tracing::warn!(%error, "invalid Lua decoration request"); return; }
+                    };
+                    if contract.operation == neoism_lua::HostOperation::DiagnosticPublish {
+                        request.layer = neoism_lua::DecorationLayer::Diagnostic;
+                    }
+                    let Some((namespace_owner, namespace)) = self.lua_editor_resources.namespaces.get(&request.namespace).cloned() else { tracing::warn!("Lua decoration namespace is stale"); return };
+                    if namespace_owner != owner { tracing::warn!("Lua decoration namespace belongs to another owner revision"); return; }
+                    let Some(start) = self.lua_editor_resources.anchors.get(&request.start)
+                        .filter(|lease| lease.owner == owner && lease.namespace == namespace).map(|lease| lease.resource) else { tracing::warn!("Lua decoration start anchor is stale or cross-owner"); return };
+                    let Some(end) = self.lua_editor_resources.anchors.get(&request.end)
+                        .filter(|lease| lease.owner == owner && lease.namespace == namespace).map(|lease| lease.resource) else { tracing::warn!("Lua decoration end anchor is stale or cross-owner"); return };
+                    if action.action == "update" || action.action == "set" {
+                        if let Some(existing_handle) = request.resource.as_deref() {
+                            let existing = self.lua_editor_resources.decorations.get(existing_handle)
+                                .filter(|lease| lease.0 == owner && lease.1 == namespace)
+                                .map(|lease| lease.2);
+                            let Some(existing) = existing else { tracing::warn!("Lua decoration update target is stale or cross-owner"); return };
+                            if let Err(error) = self.lua_editor_resources.registry.remove_resource(&owner, namespace, existing) {
+                                tracing::warn!(%error, "failed to replace Lua editor decoration"); return;
+                            }
+                            self.lua_editor_resources.decorations.remove(existing_handle);
+                        }
+                    }
+                    let decoration = neoism_lua::PluginDecoration {
+                        id: neoism_lua::PluginResourceId(0), start, end, layer: request.layer,
+                        class: request.class, text: request.text, severity: request.severity,
+                        style: request.style, related_information: request.related_information,
+                        tags: request.tags, actions: request.actions,
+                    };
+                    match self.lua_editor_resources.registry.create_decoration(&owner, namespace, decoration) {
+                        Ok(resource) => { self.lua_editor_resources.decorations.insert(external_id, (owner, namespace, resource, request.layer)); }
+                        Err(error) => tracing::warn!(%error, "failed to create Lua editor decoration"),
+                    }
+                }
+                _ => unreachable!(),
+            }
+            self.sync_lua_editor_resources();
+            if matches!(contract.operation, neoism_lua::HostOperation::DiagnosticPublish | neoism_lua::HostOperation::DiagnosticClear) {
+                let event = neoism_lua::PluginEvent::new(
+                    neoism_lua::PluginEventKind::DiagnosticsChanged,
+                    action.arguments,
+                    neoism_lua::ExecutionScope::Local,
+                    Some("desktop-plugin-diagnostics".into()),
+                ).expect("registered diagnostics event");
+                if let Err(error) = self.lua_plugins.activate_trigger("DiagnosticsChanged") {
+                    tracing::warn!(%error, "lazy Lua diagnostic event activation failed");
+                }
+                for failure in self.lua_plugins.emit(event.clone()) {
+                    tracing::warn!(plugin = %failure.plugin_id, error = %failure.message, "Lua diagnostic autocmd failed");
+                }
+                if let Some(runtime) = self.lua_runtime.as_mut() {
+                    if let Err(error) = runtime.emit(event) {
+                        tracing::warn!(%error, "Lua diagnostic autocmd failed");
+                    }
+                }
+            }
+            return;
+        }
+
+        if matches!(
+            contract.operation,
+            neoism_lua::HostOperation::DocumentEdit
+                | neoism_lua::HostOperation::DocumentSetSelections
+                | neoism_lua::HostOperation::DocumentMoveCursor
+                | neoism_lua::HostOperation::DocumentFocus
+                | neoism_lua::HostOperation::DocumentSave
+                | neoism_lua::HostOperation::DocumentClose
+        ) {
+            let Some(route) = self.router.routes.get_mut(&window_id) else { return };
+            let manager = &mut route.window.screen.context_manager;
+            let workspace_identity = format!("{:?}", manager.current_workspace_tree_id());
+            let window_identity = format!("{window_id:?}");
+            let route_identity = manager.current().route_id.to_string();
+            let Some(code) = manager.current_mut().code.as_mut() else {
+                tracing::warn!("Lua document action target is no longer a code document");
+                return;
+            };
+            let host_path = code.path.to_string_lossy().into_owned();
+            let handle = neoism_lua::DocumentHandle(neoism_lua::opaque_resource_handle(
+                "document",
+                &[&window_identity, &workspace_identity, &route_identity, &host_path],
+            ));
+            let requested = action.arguments.get("document")
+                .or_else(|| action.arguments.get("handle"))
+                .and_then(serde_json::Value::as_str);
+            if requested != Some(handle.as_str()) {
+                tracing::warn!("Lua document handle is stale; action was not retargeted");
+                return;
+            }
+            let expected_revision = action.arguments.get("expectedRevision")
+                .or_else(|| action.arguments.get("expected_revision"))
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(u64::MAX);
+            if expected_revision != code.buffer.revision {
+                tracing::warn!(expected_revision, actual_revision = code.buffer.revision, "Lua document action rejected a stale revision");
+                return;
+            }
+            match contract.operation {
+                neoism_lua::HostOperation::DocumentEdit => {
+                    let request = match serde_json::from_value::<neoism_lua::DocumentEditRequest>(action.arguments.clone()) {
+                        Ok(request) => request,
+                        Err(error) => {
+                            tracing::warn!(%error, "invalid Lua document edit");
+                            return;
+                        }
+                    };
+                    let mut edits = Vec::with_capacity(request.edits.len());
+                    for edit in request.edits {
+                        let expected_range = neoism_lua::opaque_resource_handle(
+                            "range",
+                            &[
+                                handle.as_str(),
+                                &request.expected_revision.to_string(),
+                                &edit.range.start.line.to_string(),
+                                &edit.range.start.character.to_string(),
+                                &edit.range.end.line.to_string(),
+                                &edit.range.end.character.to_string(),
+                            ],
+                        );
+                        if !edit.range.handle.is_empty() && edit.range.handle.as_str() != expected_range {
+                            tracing::warn!("Lua document range handle is stale");
+                            return;
+                        }
+                        edits.push(neoism_ui::editor::code::buffer::CodeTextEdit {
+                            start_line: edit.range.start.line as usize,
+                            start_col: edit.range.start.character as usize,
+                            end_line: edit.range.end.line as usize,
+                            end_col: edit.range.end.character as usize,
+                            text: edit.text,
+                        });
+                    }
+                    if let Err(error) = code.buffer.validate_text_edits(&edits) {
+                        tracing::warn!(%error, "Lua document edit failed preflight");
+                        return;
+                    }
+                    code.buffer.apply_text_edits(&edits);
+                }
+                neoism_lua::HostOperation::DocumentMoveCursor => {
+                    let request = match serde_json::from_value::<neoism_lua::DocumentCursorRequest>(action.arguments.clone()) {
+                        Ok(request) => request,
+                        Err(error) => {
+                            tracing::warn!(%error, "invalid Lua cursor move");
+                            return;
+                        }
+                    };
+                    let line = request.position.line as usize;
+                    let col = request.position.character as usize;
+                    if code.buffer.lines.get(line).is_none_or(|text| col > text.len() || !text.is_char_boundary(col)) {
+                        tracing::warn!("Lua cursor target is outside the document or not a UTF-8 boundary");
+                        return;
+                    }
+                    code.buffer.set_cursor_position(line, col, request.extend_selection);
+                }
+                neoism_lua::HostOperation::DocumentSetSelections => {
+                    let request = match serde_json::from_value::<neoism_lua::DocumentSelectionsRequest>(action.arguments.clone()) {
+                        Ok(request) if !request.selections.is_empty() => request,
+                        Ok(_) => {
+                            code.buffer.clear_selection();
+                            code.buffer.extra_carets.clear();
+                            route.window.screen.mark_dirty();
+                            route.request_redraw();
+                            return;
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "invalid Lua document selections");
+                            return;
+                        }
+                    };
+                    for selection in &request.selections {
+                        for position in [selection.anchor, selection.active] {
+                            let line = position.line as usize;
+                            let col = position.character as usize;
+                            if code.buffer.lines.get(line).is_none_or(|text| col > text.len() || !text.is_char_boundary(col)) {
+                                tracing::warn!("Lua selection is outside the document or not a UTF-8 boundary");
+                                return;
+                            }
+                        }
+                        let expected = neoism_lua::opaque_resource_handle(
+                            "selection",
+                            &[handle.as_str(), &request.expected_revision.to_string(), &selection.anchor.line.to_string(), &selection.anchor.character.to_string(), &selection.active.line.to_string(), &selection.active.character.to_string()],
+                        );
+                        if !selection.handle.is_empty() && selection.handle.as_str() != expected {
+                            tracing::warn!("Lua selection handle is stale");
+                            return;
+                        }
+                    }
+                    let primary = &request.selections[0];
+                    code.buffer.set_cursor_position(primary.anchor.line as usize, primary.anchor.character as usize, false);
+                    code.buffer.set_cursor_position(primary.active.line as usize, primary.active.character as usize, true);
+                    code.buffer.extra_carets = request.selections.iter().skip(1).map(|selection| {
+                        neoism_ui::editor::code::CodeExtraCaret {
+                            line: selection.active.line as usize,
+                            col: selection.active.character as usize,
+                            anchor: Some(neoism_ui::editor::code::CodePosition {
+                                line: selection.anchor.line as usize,
+                                col: selection.anchor.character as usize,
+                            }),
+                        }
+                    }).collect();
+                }
+                neoism_lua::HostOperation::DocumentFocus => {}
+                neoism_lua::HostOperation::DocumentSave => {
+                    route.window.screen.execute_palette_action(PaletteAction::SaveDocument, &mut self.router.clipboard);
+                }
+                neoism_lua::HostOperation::DocumentClose => {
+                    route.window.screen.execute_palette_action(PaletteAction::TabClose, &mut self.router.clipboard);
+                }
+                _ => unreachable!(),
+            }
+            route.window.screen.mark_dirty();
+            route.request_redraw();
+            return;
+        }
+        if action.namespace == "lsp" {
+            if action.action == "request" {
+                let request = match serde_json::from_value::<neoism_lua::LuaLspRequest>(
+                    action.arguments.clone(),
+                ) {
+                    Ok(request) => request,
+                    Err(error) => {
+                        tracing::warn!(%error, "invalid structured Lua LSP request");
+                        return;
+                    }
+                };
+                let (Some(owner), Some(id)) =
+                    (action.owner.clone(), action.invocation_id.clone())
+                else {
+                    tracing::warn!(
+                        "structured Lua LSP request is missing owner or invocation id"
+                    );
+                    return;
+                };
+                let key = (owner.clone(), id.clone());
+                if self.lua_lsp_pending.contains_key(&key) {
+                    tracing::warn!(plugin = %owner.plugin_id, request = %id, "duplicate structured Lua LSP request id");
+                    return;
+                }
+                let owner_pending = self
+                    .lua_lsp_pending
+                    .keys()
+                    .filter(|(pending_owner, _)| pending_owner == &owner)
+                    .count();
+                if owner_pending >= LUA_LSP_PENDING_PER_OWNER
+                    || self.lua_lsp_pending.len() >= LUA_LSP_PENDING_GLOBAL
+                {
+                    self.emit_lua_lsp_completion(
+                        &owner,
+                        neoism_lua::LuaLspCompletion::failed(
+                            id,
+                            request.operation,
+                            None,
+                            "request_limit",
+                            "too many structured LSP requests are pending",
+                        ),
+                    );
+                    return;
+                }
+                if request.operation == neoism_lua::LuaLspOperation::ApplyCodeAction {
+                    let request_id = request
+                        .arguments
+                        .get("requestId")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned);
+                    let action_id = request
+                        .arguments
+                        .get("actionId")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned);
+                    let has_override = request
+                        .arguments
+                        .as_object()
+                        .is_some_and(|arguments| {
+                            arguments
+                                .keys()
+                                .any(|key| key != "requestId" && key != "actionId")
+                        });
+                    let Some((request_id, action_id)) = request_id.zip(action_id) else {
+                        self.emit_lua_lsp_completion(
+                            &owner,
+                            neoism_lua::LuaLspCompletion::failed(
+                                id,
+                                request.operation,
+                                None,
+                                "invalid_action",
+                                "apply_code_action requires requestId and actionId",
+                            ),
+                        );
+                        return;
+                    };
+                    if has_override {
+                        self.emit_lua_lsp_completion(
+                            &owner,
+                            neoism_lua::LuaLspCompletion::failed(
+                                id,
+                                request.operation,
+                                None,
+                                "invalid_action",
+                                "apply_code_action cannot override the captured target",
+                            ),
+                        );
+                        return;
+                    }
+                    let now = Instant::now();
+                    self.lua_lsp_actions.retain(|_, lease| {
+                        now.saturating_duration_since(lease.created_at) < LUA_LSP_ACTION_TTL
+                    });
+                    let lease_key = (owner.clone(), request_id, action_id);
+                    let Some(lease) = self.lua_lsp_actions.remove(&lease_key) else {
+                        self.emit_lua_lsp_completion(
+                            &owner,
+                            neoism_lua::LuaLspCompletion::failed(
+                                id,
+                                request.operation,
+                                None,
+                                "invalid_action",
+                                "the code action is stale, unknown, or already consumed",
+                            ),
+                        );
+                        return;
+                    };
+                    let target = lease.target.clone();
+                    let dispatched = self
+                        .router
+                        .routes
+                        .get_mut(&lease.window_id)
+                        .ok_or_else(|| "the action window is no longer available".to_string())
+                        .and_then(|route| match lease.action {
+                            crate::screen::bridges::code::lsp::LuaLspRetainedCodeAction::Local(
+                                action,
+                            ) => route.window.screen.dispatch_local_lua_code_action(
+                                owner.clone(),
+                                id.clone(),
+                                action,
+                            ),
+                            crate::screen::bridges::code::lsp::LuaLspRetainedCodeAction::Remote(
+                                action,
+                            ) => route.window.screen.dispatch_remote_lua_code_action(
+                                owner.clone(),
+                                id.clone(),
+                                action,
+                            ),
+                        });
+                    match dispatched {
+                        Ok(dispatched_target) if dispatched_target == target => {
+                            self.lua_lsp_pending.insert(
+                                key,
+                                PendingLuaLspRequest {
+                                    window_id: lease.window_id,
+                                    operation: request.operation,
+                                    target,
+                                },
+                            );
+                        }
+                        Ok(_) => self.emit_lua_lsp_completion(
+                            &owner,
+                            neoism_lua::LuaLspCompletion::failed(
+                                id,
+                                request.operation,
+                                Some(target),
+                                "stale_target",
+                                "the code action target no longer matches its lease",
+                            ),
+                        ),
+                        Err(message) => self.emit_lua_lsp_completion(
+                            &owner,
+                            neoism_lua::LuaLspCompletion::failed(
+                                id,
+                                request.operation,
+                                Some(target),
+                                "stale_target",
+                                message,
+                            ),
+                        ),
+                    }
+                    return;
+                }
+                let dispatched = self
+                    .router
+                    .routes
+                    .get_mut(&window_id)
+                    .ok_or_else(|| {
+                        "the request window is no longer available".to_string()
+                    })
+                    .and_then(|route| {
+                        route.window.screen.dispatch_lua_lsp_request(
+                            owner.clone(),
+                            id.clone(),
+                            request.operation,
+                            &request.arguments,
+                        )
+                    });
+                match dispatched {
+                    Ok(target) => {
+                        self.lua_lsp_pending.insert(
+                            key,
+                            PendingLuaLspRequest {
+                                window_id,
+                                operation: request.operation,
+                                target,
+                            },
+                        );
+                    }
+                    Err(message) => self.emit_lua_lsp_completion(
+                        &owner,
+                        neoism_lua::LuaLspCompletion::failed(
+                            id,
+                            request.operation,
+                            None,
+                            "invalid_target",
+                            message,
+                        ),
+                    ),
+                }
+                return;
+            }
+            if action.action == "cancel" {
+                let requested_id = action
+                    .arguments
+                    .as_str()
+                    .or_else(|| {
+                        action
+                            .arguments
+                            .get("id")
+                            .and_then(serde_json::Value::as_str)
+                    })
+                    .or_else(|| {
+                        action
+                            .arguments
+                            .get("requestId")
+                            .and_then(serde_json::Value::as_str)
+                    })
+                    .map(str::to_owned);
+                let (Some(owner), Some(requested_id)) = (action.owner.as_ref(), requested_id)
+                else {
+                    tracing::warn!("Lua lsp.cancel requires an owned request id");
+                    return;
+                };
+                let key = (owner.clone(), requested_id.clone());
+                if let Some(pending) = self.lua_lsp_pending.remove(&key) {
+                    crate::screen::bridges::code::lsp::cancel_remote_lua_lsp_request(
+                        owner,
+                        &requested_id,
+                    );
+                    self.emit_lua_lsp_completion(
+                        owner,
+                        neoism_lua::LuaLspCompletion::cancelled(
+                            requested_id,
+                            pending.operation,
+                            pending.target,
+                        ),
+                    );
+                } else if self
+                    .lua_lsp_pending
+                    .keys()
+                    .any(|(_, id)| id == &requested_id)
+                {
+                    tracing::warn!(plugin = %owner.plugin_id, request = %requested_id, "Lua plugin cannot cancel another owner's LSP request");
+                } else {
+                    tracing::debug!(plugin = %owner.plugin_id, request = %requested_id, "Lua LSP cancellation did not match a pending request");
+                }
+                return;
+            }
+            if action.action == "signature_help" {
+                if let Some(route) = self.router.routes.get_mut(&window_id) {
+                    route.window.screen.request_code_signature_help();
+                    route.request_redraw();
+                }
+                return;
+            }
+            let palette = match action.action.as_str() {
+                "definition" => Some(PaletteAction::LspDefinition),
+                "references" => Some(PaletteAction::LspReferences),
+                "rename" => Some(PaletteAction::LspRename),
+                "code_actions" => Some(PaletteAction::LspCodeAction),
+                "format" => Some(PaletteAction::LspFormat),
+                "hover" => Some(PaletteAction::LspHover),
+                "document_symbols" => Some(PaletteAction::LspDocumentSymbols),
+                "workspace_symbols" => Some(PaletteAction::LspWorkspaceSymbols),
+                _ => None,
+            };
+            let Some(palette) = palette else {
+                tracing::warn!(operation = %action.action, "Lua LSP operation is not wired yet");
+                return;
+            };
+            if let Some(route) = self.router.routes.get_mut(&window_id) {
+                route
+                    .window
+                    .screen
+                    .execute_palette_action(palette, &mut self.router.clipboard);
+                route.request_redraw();
+            }
+            return;
+        }
+        if action.namespace == "buffer" && action.action == "edit" {
+            let Some(buffer_id) = argument("buffer_id").or_else(|| argument("bufferId")) else {
+                tracing::warn!("Lua buffer.edit requires buffer_id");
+                return;
+            };
+            let values = action
+                .arguments
+                .get("edits")
+                .and_then(serde_json::Value::as_array)
+                .cloned()
+                .unwrap_or_else(|| vec![action.arguments.clone()]);
+            let mut edits = Vec::with_capacity(values.len());
+            for value in values {
+                let Some(index) = value
+                    .get("index")
+                    .or_else(|| value.get("start"))
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|value| u32::try_from(value).ok())
+                else {
+                    tracing::warn!("Lua buffer.edit requires a UTF-16 index");
+                    return;
+                };
+                let len = value
+                    .get("len")
+                    .or_else(|| value.get("length"))
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|value| u32::try_from(value).ok())
+                    .unwrap_or(0);
+                let content = value
+                    .get("content")
+                    .or_else(|| value.get("text"))
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                let edit = match value
+                    .get("kind")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(if len == 0 { "insert" } else { "replace" })
+                {
+                    "insert" => neoism_protocol::CrdtBufferEdit::Insert { index, content },
+                    "delete" => neoism_protocol::CrdtBufferEdit::Delete { index, len },
+                    "replace" => neoism_protocol::CrdtBufferEdit::Replace {
+                        index,
+                        len,
+                        content,
+                    },
+                    kind => {
+                        tracing::warn!(kind, "invalid Lua buffer.edit kind");
+                        return;
+                    }
+                };
+                edits.push(edit);
+            }
+            let expected_state_vector_v1 = action
+                .arguments
+                .get("expected_state_vector_v1")
+                .or_else(|| action.arguments.get("expectedStateVectorV1"))
+                .cloned()
+                .and_then(|value| serde_json::from_value(value).ok())
+                .unwrap_or_default();
+            let invocation_id = action
+                .invocation_id
+                .unwrap_or_else(|| "lua-untracked".to_string());
+            let plugin_id = action
+                .owner
+                .as_ref()
+                .map(|owner| owner.plugin_id.clone())
+                .unwrap_or_else(|| "user.init.lua".to_string());
+            let idempotency_key = argument("idempotency_key")
+                .or_else(|| argument("idempotencyKey"))
+                .unwrap_or_else(|| invocation_id.clone());
+            if let Some(session) = self.window_sessions.get(&window_id) {
+                session.connection.send_crdt_batch(vec![neoism_protocol::CrdtClientMessage::ApplyEdits {
+                    transaction: neoism_protocol::CrdtEditTransaction {
+                        buffer_id,
+                        plugin_id,
+                        invocation_id,
+                        idempotency_key,
+                        expected_state_vector_v1,
+                        edits,
+                    },
+                }]);
+            }
+            return;
+        }
+        if action.namespace == "agent" && action.action == "send" {
+            let Some(text) = argument("text").or_else(|| argument("message")) else { return };
+            let Some(route) = self.router.routes.get_mut(&window_id) else { return };
+            let Some(agent) = route.window.screen.context_manager.current_mut().neoism_agent.as_mut() else {
+                return;
+            };
+            if !agent.input().is_empty() {
+                tracing::warn!("Lua agent.send ignored while the composer contains unsent text");
+                return;
+            }
+            agent.insert_text(&text);
+            agent.submit();
+            route.window.screen.mark_dirty();
+            route.request_redraw();
+            return;
+        }
+        if matches!(action.namespace.as_str(), "buffer" | "file_tree" | "notes")
+            && matches!(action.action.as_str(), "open" | "reveal")
+            && argument("path").is_some()
+        {
+            let path = std::path::PathBuf::from(argument("path").unwrap_or_default());
+            if let Some(route) = self.router.routes.get_mut(&window_id) {
+                route.window.screen.open_path_in_editor(path);
+                route.request_redraw();
+            }
+            return;
+        }
+        if matches!(action.namespace.as_str(), "file_tree" | "notes")
+            && matches!(
+                action.action.as_str(),
+                "create" | "create_dir" | "rename" | "move" | "delete"
+            )
+        {
+            let Some(route) = self.router.routes.get_mut(&window_id) else { return };
+            let screen = &mut route.window.screen;
+            let notes = action.namespace == "notes";
+            let root = if notes {
+                screen.renderer.notes_sidebar.workspace_path()
+            } else {
+                screen
+                    .renderer
+                    .file_tree
+                    .remote_root()
+                    .or_else(|| screen.renderer.file_tree.root().map(std::path::Path::to_path_buf))
+            };
+            let Some(root) = root else {
+                tracing::warn!(namespace = %action.namespace, "Lua file operation has no active root");
+                return;
+            };
+            let resolve = |value: &str| {
+                let path = std::path::PathBuf::from(value);
+                if path
+                    .components()
+                    .any(|part| matches!(part, std::path::Component::ParentDir))
+                {
+                    return None;
+                }
+                let absolute = if path.is_absolute() { path } else { root.join(path) };
+                absolute.starts_with(&root).then_some(absolute)
+            };
+            let relative = |path: &std::path::Path| {
+                path.strip_prefix(&root)
+                    .ok()
+                    .map(|path| path.to_string_lossy().replace('\\', "/"))
+            };
+            let shared_notes = notes && screen.notes_sidebar_shows_shared_vault();
+            let remote_tree = !notes && screen.renderer.file_tree.is_remote();
+            let sent = match action.action.as_str() {
+                "create" | "create_dir" => {
+                    let exact = argument("path").and_then(|path| resolve(&path));
+                    let dir = argument("dir")
+                        .and_then(|dir| resolve(&dir))
+                        .or_else(|| {
+                            exact.as_ref().and_then(|path| {
+                                path.parent().map(std::path::Path::to_path_buf)
+                            })
+                        })
+                        .unwrap_or_else(|| root.clone());
+                    let name = argument("name").or_else(|| {
+                        exact.as_ref().and_then(|path| {
+                            path.file_name()?.to_str().map(str::to_owned)
+                        })
+                    });
+                    let Some(name) = name else {
+                        tracing::warn!(namespace = %action.namespace, "Lua create requires path or name");
+                        return;
+                    };
+                    let Some(dir_rel) = relative(&dir) else { return };
+                    if shared_notes {
+                        if action.action == "create_dir" {
+                            screen.send_remote_notes_create_dir(root.clone(), dir_rel, name)
+                        } else {
+                            screen.send_remote_notes_create(root.clone(), dir_rel, name)
+                        }
+                    } else if remote_tree {
+                        screen.send_remote_files_op(if action.action == "create_dir" {
+                            neoism_protocol::files::FilesClientMessage::CreateDir {
+                                dir: dir_rel,
+                                name,
+                            }
+                        } else {
+                            neoism_protocol::files::FilesClientMessage::CreateFile {
+                                dir: dir_rel,
+                                name,
+                            }
+                        })
+                    } else {
+                        let path = dir.join(name);
+                        if action.action == "create_dir" {
+                            std::fs::create_dir(&path).is_ok()
+                        } else {
+                            std::fs::OpenOptions::new()
+                                .write(true)
+                                .create_new(true)
+                                .open(&path)
+                                .is_ok()
+                        }
+                    }
+                }
+                "rename" | "move" => {
+                    let Some(from) = argument("from").and_then(|path| resolve(&path)) else { return };
+                    let Some(to) = argument("to").and_then(|path| resolve(&path)) else { return };
+                    let (Some(from_rel), Some(to_rel)) = (relative(&from), relative(&to)) else { return };
+                    if shared_notes {
+                        screen.send_remote_notes_move(root.clone(), from_rel, to_rel)
+                    } else if remote_tree {
+                        screen.send_remote_files_op(
+                            neoism_protocol::files::FilesClientMessage::Rename {
+                                from: from_rel,
+                                to: to_rel,
+                            },
+                        )
+                    } else {
+                        std::fs::rename(from, to).is_ok()
+                    }
+                }
+                "delete" => {
+                    let Some(path) = argument("path").and_then(|path| resolve(&path)) else { return };
+                    let Some(path_rel) = relative(&path) else { return };
+                    if shared_notes {
+                        screen.send_remote_notes_delete(root.clone(), path_rel)
+                    } else if remote_tree {
+                        screen.send_remote_files_op(
+                            neoism_protocol::files::FilesClientMessage::Delete { path: path_rel },
+                        )
+                    } else if path.is_dir() {
+                        std::fs::remove_dir_all(path).is_ok()
+                    } else {
+                        std::fs::remove_file(path).is_ok()
+                    }
+                }
+                _ => false,
+            };
+            if sent && !shared_notes && !remote_tree {
+                if notes {
+                    screen.refresh_notes_sidebar_if_visible();
+                } else {
+                    screen.refresh_file_tree();
+                }
+            }
+            if !sent {
+                tracing::warn!(namespace = %action.namespace, operation = %action.action, "Lua file operation failed");
+            }
+            screen.mark_dirty();
+            route.request_redraw();
+            return;
+        }
+        if action.namespace == "terminal" && matches!(action.action.as_str(), "send" | "run") {
+            let Some(mut text) = argument("text").or_else(|| argument("command")) else { return };
+            if action.action == "run" && !text.ends_with('\n') {
+                text.push('\n');
+            }
+            let Some(route_id) = self
+                .router
+                .routes
+                .get(&window_id)
+                .map(|route| route.window.screen.context_manager.current_route())
+            else {
+                return;
+            };
+            Self::send_bytes_to_route_context(&mut self.router, window_id, route_id, text.into_bytes());
+            return;
+        }
+        if action.namespace == "tab" && matches!(action.action.as_str(), "focus" | "select") {
+            let Some(index) = action.arguments.get("index").and_then(serde_json::Value::as_u64) else {
+                return;
+            };
+            if let Some(route) = self.router.routes.get_mut(&window_id) {
+                route.window.screen.context_manager.select_tab(index as usize);
+                route.window.screen.mark_dirty();
+                route.request_redraw();
+            }
+            return;
+        }
+        if action.namespace == "tab" && action.action == "move" {
+            let Some(from) = action
+                .arguments
+                .get("from")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|value| u32::try_from(value).ok())
+            else {
+                return;
+            };
+            let Some(to) = action
+                .arguments
+                .get("to")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|value| u32::try_from(value).ok())
+            else {
+                return;
+            };
+            if let Some(route) = self.router.routes.get_mut(&window_id) {
+                let pane_external_id = action
+                    .arguments
+                    .get("pane_id")
+                    .or_else(|| action.arguments.get("paneId"))
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or_else(|| {
+                        route.window.screen.context_manager.current_route() as u64
+                    });
+                route
+                    .window
+                    .screen
+                    .request_move_tab(pane_external_id, from, to);
+                route.request_redraw();
+            }
+            return;
+        }
+        if action.namespace == "workspace" && matches!(action.action.as_str(), "open" | "focus") {
+            let Some(id) = argument("id").or_else(|| argument("workspace_id")) else { return };
+            if let Some(route) = self.router.routes.get_mut(&window_id) {
+                route.window.screen.open_or_adopt_daemon_workspace(id);
+                route.request_redraw();
+            }
+            return;
+        }
+        if action.namespace == "git"
+            && matches!(action.action.as_str(), "stage" | "unstage" | "commit" | "refresh")
+        {
+            let Some(route) = self.router.routes.get_mut(&window_id) else { return };
+            match action.action.as_str() {
+                "stage" => route.window.screen.renderer.git_diff_panel.stage_all(),
+                "unstage" => route.window.screen.renderer.git_diff_panel.unstage_all(),
+                "commit" => {
+                    if let Some(message) = argument("message") {
+                        route.window.screen.renderer.git_diff_panel.commit_input_insert(&message);
+                    }
+                    route.window.screen.renderer.git_diff_panel.commit();
+                }
+                "refresh" => route.window.screen.sync_host_git(),
+                _ => {}
+            }
+            route.request_redraw();
+            return;
+        }
+        if matches!(action.namespace.as_str(), "config" | "theme")
+            && matches!(action.action.as_str(), "set" | "apply")
+        {
+            let patch = action
+                .arguments
+                .get("value")
+                .cloned()
+                .unwrap_or_else(|| action.arguments.clone());
+            let mut candidate = self.config.clone();
+            if let Err(error) = candidate.apply_json_patch(&patch) {
+                tracing::warn!(%error, "Lua config patch rejected");
+                return;
+            }
+            self.config = candidate;
+            for route in self.router.routes.values_mut() {
+                route.update_config(&self.config, &self.router.font_library, false);
+                route.window.configure_window(&self.config);
+                route.request_redraw();
+            }
+            let snapshot = self
+                .lua_runtime
+                .as_ref()
+                .map(|runtime| runtime.snapshot().clone())
+                .unwrap_or_else(neoism_lua::PluginSnapshot::empty);
+            self.router.set_plugin_snapshot(Arc::new(snapshot));
+            return;
+        }
+        let palette_action = match (action.namespace.as_str(), action.action.as_str()) {
+            ("workspace", "split") => match argument("direction").as_deref() {
+                Some("down" | "bottom") => Some(PaletteAction::SplitDown),
+                _ => Some(PaletteAction::SplitRight),
+            },
+            ("tab", "create" | "open") => Some(PaletteAction::TabCreate),
+            ("tab", "close") => Some(PaletteAction::TabClose),
+            ("buffer", "save") => Some(PaletteAction::SaveDocument),
+            ("notes", "open") => Some(PaletteAction::OpenNeoismNotes),
+            ("notes", "create") => Some(PaletteAction::CreateNeoismNote),
+            ("git", "open" | "toggle") => Some(PaletteAction::ToggleGitDiffPanel),
+            ("agent", "open" | "create") => Some(PaletteAction::OpenNeoismAgent),
+            _ => None,
+        };
+        if action.namespace == "command" && action.action == "execute" {
+            let Some(id) = argument("id") else { return };
+            if let Some(command) = lua_palette_action(&id) {
+                let router = &mut self.router;
+                if let Some(route) = router.routes.get_mut(&window_id) {
+                    route.window.screen.execute_palette_action(command, &mut router.clipboard);
+                    route.request_redraw();
+                }
+            } else if let Some(route) = self.router.routes.get_mut(&window_id) {
+                route.window.screen.queue_plugin_command(id);
+            }
+            return;
+        }
+        if let Some(action) = palette_action {
+            let router = &mut self.router;
+            if let Some(route) = router.routes.get_mut(&window_id) {
+                route
+                    .window
+                    .screen
+                    .execute_palette_action(action, &mut router.clipboard);
+                route.request_redraw();
+            }
+            return;
+        }
+
+        if action.namespace != "panel" {
+            tracing::warn!(
+                namespace = %action.namespace,
+                action = %action.action,
+                "unsupported Lua host action"
+            );
+            return;
+        }
+        let Some(panel) = argument("id") else { return };
+        let desired = match action.action.as_str() {
+            "show" => Some(true),
+            "hide" | "close" => Some(false),
+            "toggle" | "open" => None,
+            _ => return,
+        };
+        let built_in = matches!(
+            panel.as_str(),
+            "file-tree" | "file_tree" | "notes" | "notes-tree" | "notes_tree"
+                | "agent" | "agent-sidebar" | "agent_sidebar" | "status"
+                | "status-line" | "status_line" | "top" | "top-bar" | "top_bar"
+                | "composer" | "bottom" | "bottom-chrome"
+        );
+        if !built_in {
+            let Some(route) = self.router.routes.get(&window_id) else { return };
+            let mut snapshot = (*route.window.screen.renderer.plugins).clone();
+            let Some(contribution) = snapshot.panels.iter_mut().find(|item| item.id == panel) else {
+                return;
+            };
+            contribution.visible = desired.unwrap_or(!contribution.visible);
+            self.router.set_plugin_snapshot(Arc::new(snapshot));
+            return;
+        }
+        let Some(route) = self.router.routes.get_mut(&window_id) else {
+            return;
+        };
+        let screen = &mut route.window.screen;
+        match panel.as_str() {
+            "file-tree" | "file_tree" => {
+                let visible = screen.renderer.file_tree.is_visible();
+                screen.renderer.set_left_sidebar_visibility(
+                    neoism_ui::panels::left_sidebar_host::LeftSidebarView::Files,
+                    desired.unwrap_or(!visible),
+                    false,
+                );
+            }
+            "notes" | "notes-tree" | "notes_tree" => {
+                let visible = screen.renderer.notes_sidebar.is_visible();
+                screen.renderer.set_left_sidebar_visibility(
+                    neoism_ui::panels::left_sidebar_host::LeftSidebarView::Notes,
+                    desired.unwrap_or(!visible),
+                    false,
+                );
+            }
+            "agent" | "agent-sidebar" | "agent_sidebar" => {
+                let visible = screen.renderer.conversations_visible;
+                screen.renderer.set_left_sidebar_visibility(
+                    neoism_ui::panels::left_sidebar_host::LeftSidebarView::Conversations,
+                    desired.unwrap_or(!visible),
+                    false,
+                );
+            }
+            "status" | "status-line" | "status_line" => {
+                let visible = screen.renderer.status_line.is_visible();
+                screen
+                    .renderer
+                    .status_line
+                    .set_visible(desired.unwrap_or(!visible));
+            }
+            "top" | "top-bar" | "top_bar" => {
+                let visible = screen.renderer.top_bar.is_visible();
+                screen.renderer.top_bar.set_visible(desired.unwrap_or(!visible));
+            }
+            "composer" | "bottom" | "bottom-chrome" => {
+                let visible = screen.renderer.command_composer.is_visible();
+                screen
+                    .renderer
+                    .command_composer
+                    .set_visible(desired.unwrap_or(!visible));
+            }
+            _ => return,
+        }
+        screen.sync_current_workspace_chrome_snapshot();
+        screen.sync_file_tree_watchers();
+        screen.reapply_chrome_layout();
+        screen.mark_dirty();
+        route.request_redraw();
     }
 
     /// Turn a dead Quick-SSH transport back into the same workspace attach.
@@ -2411,12 +6260,9 @@ impl Application<'_> {
     fn schedule_next_event(&mut self, event_loop: &ActiveEventLoop) {
         let redraw_deadline = self.request_event_loop_redraws();
         let scheduler_deadline = self.scheduler.update();
-        let next_deadline = match (redraw_deadline, scheduler_deadline) {
-            (Some(redraw), Some(scheduled)) => Some(redraw.min(scheduled)),
-            (Some(redraw), None) => Some(redraw),
-            (None, Some(scheduled)) => Some(scheduled),
-            (None, None) => None,
-        };
+        let lua_timer_deadline = self.lua_timers.as_ref().and_then(|timers| timers.values().map(|timer| timer.due).min());
+        let next_deadline = [redraw_deadline, scheduler_deadline, lua_timer_deadline]
+            .into_iter().flatten().min();
         let control_flow = match next_deadline {
             Some(instant) => ControlFlow::WaitUntil(instant),
             None => ControlFlow::Wait,
@@ -3344,4 +7190,92 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
         // reclaim window/GPU resources without blocking the UI thread.
         std::process::exit(0);
     }
+}
+
+fn lua_palette_action(id: &str) -> Option<neoism_ui::panels::command_palette::PaletteAction> {
+    use neoism_ui::panels::command_palette::PaletteAction::*;
+    Some(match id {
+        "tab.create" => TabCreate,
+        "tab.close" => TabClose,
+        "tab.close-others" => TabCloseUnfocused,
+        "tab.next" => SelectNextTab,
+        "tab.previous" => SelectPrevTab,
+        "split.right" => SplitRight,
+        "split.down" => SplitDown,
+        "split.next" => SelectNextSplit,
+        "split.previous" => SelectPrevSplit,
+        "split.close" => CloseCurrentSplitOrTab,
+        "config.open" | "palette.toggle" => ConfigEditor,
+        "settings.open" => OpenSettings,
+        "window.create" => WindowCreateNew,
+        "font.increase" => IncreaseFontSize,
+        "font.decrease" => DecreaseFontSize,
+        "font.reset" => ResetFontSize,
+        "vim.toggle" => ToggleViMode,
+        "git.blame.toggle" => ToggleGitBlame,
+        "editor.wrap.toggle" => ToggleWordWrap,
+        "editor.replace" => ReplaceInFile,
+        "editor.problems" => ProjectProblems,
+        "window.fullscreen.toggle" => ToggleFullscreen,
+        "theme.toggle" => ToggleAppearanceTheme,
+        "theme.pick" => OpenThemePicker,
+        "shader.pick" => OpenShaders,
+        "mashup.pick" => OpenMashupPacks,
+        "edit.copy" => Copy,
+        "edit.paste" => Paste,
+        "buffer.save" => SaveDocument,
+        "search.forward" => SearchForward,
+        "search.backward" => SearchBackward,
+        "search.files" | "files.find" => SearchFiles,
+        "search.workspace" | "workspace.find" => SearchWords,
+        "search.git" => SearchGitChanges,
+        "goto.line" => GoToLine,
+        "goto.symbol" => GoToSymbol,
+        "git.panel.toggle" => ToggleGitDiffPanel,
+        "notes.create" => CreateNeoismNote,
+        "notes.open" => OpenNeoismNotes,
+        "notes.draw" => DrawOnNote,
+        "epub.toc" => OpenEpubTableOfContents,
+        "lsp.hover" => LspHover,
+        "lsp.action" => LspCodeAction,
+        "lsp.format" => LspFormat,
+        "lsp.definition" => LspDefinition,
+        "lsp.references" => LspReferences,
+        "lsp.rename" => LspRename,
+        "lsp.document-symbols" => LspDocumentSymbols,
+        "lsp.workspace-symbols" => LspWorkspaceSymbols,
+        "editor.inlay-hints.toggle" => ToggleInlayHints,
+        "editor.minimap.toggle" => ToggleMinimap,
+        "terminal.clear" => ClearHistory,
+        "buffers.list" => ListBuffers,
+        "fonts.list" => ListFonts,
+        "servers.show" => ShowServers,
+        "servers.add" => AddServer,
+        "servers.create" => CreateServer,
+        "workspace.create" => CreateWorkspace,
+        "workspace.leave" => LeaveWorkspace,
+        "agent.open" => OpenNeoismAgent,
+        "neoworld.open" => OpenNeoWorld,
+        "agent.claude" => RunClaude,
+        "agent.codex" => RunCodex,
+        "agent.opencode" => RunOpenCode,
+        "notebook.create" => CreateDocumentationNotebook,
+        "notebook.open" => OpenDocumentationNotebook,
+        "notebook.run-cell" => RunNotebookCell,
+        "notebook.run-below" => RunNotebookCellAndBelow,
+        "notebook.run-all" => RunAllNotebookCells,
+        "notebook.insert-code-above" => InsertNotebookCodeCellAbove,
+        "notebook.insert-code-below" => InsertNotebookCodeCellBelow,
+        "notebook.insert-markdown-above" => InsertNotebookMarkdownCellAbove,
+        "notebook.insert-markdown-below" => InsertNotebookMarkdownCellBelow,
+        "notebook.delete-cell" => DeleteNotebookCell,
+        "notebook.move-cell-up" => MoveNotebookCellUp,
+        "notebook.move-cell-down" => MoveNotebookCellDown,
+        "notebook.interrupt" => InterruptNotebookKernel,
+        "notebook.clear-output" => ClearNotebookCellOutput,
+        "notebook.clear-outputs" => ClearNotebookOutputs,
+        "notebook.restart" => RestartNotebookKernel,
+        "app.quit" => Quit,
+        _ => return None,
+    })
 }

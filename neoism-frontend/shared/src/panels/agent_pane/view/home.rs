@@ -4,7 +4,7 @@ use crate::panels::agent_pane::state::NeoismAgentPane;
 
 use super::user_input::AgentUserInputPane;
 use super::wordmark::WordmarkState;
-use super::{user_input, wordmark};
+use super::{user_input, wordmark, AgentCheckoutContext};
 use crate::panels::agent_pane::input_controller::InputWrapRow;
 use crate::primitives::ide_theme::IdeTheme;
 
@@ -48,6 +48,7 @@ pub fn render_home_with<P: AgentHomePane>(
     input_rect: [f32; 4],
     occlusion_rects: &[[f32; 4]],
     prepared_input_rows: Option<&[InputWrapRow]>,
+    checkout_context: Option<&AgentCheckoutContext>,
 ) {
     let [x, y, w, h] = rect;
     let input_y = input_rect[1];
@@ -92,5 +93,6 @@ pub fn render_home_with<P: AgentHomePane>(
         now_seconds,
         occlusion_rects,
         prepared_input_rows,
+        checkout_context,
     );
 }

@@ -453,12 +453,13 @@ impl NeoismAgentPane {
             0,
         ));
         let server = self.server.clone();
+        let directory = self.directory.clone();
         let tx = self.background_tx.clone();
         std::thread::Builder::new()
             .name("neoism-model-options".into())
             .spawn(move || {
                 let _ = tx.send(NeoismAgentBackgroundUpdate::ModelOptionsRefreshed(
-                    fetch_model_options(&server),
+                    fetch_model_options(&server, directory.as_deref()),
                 ));
             })
             .ok();

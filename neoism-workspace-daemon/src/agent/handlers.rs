@@ -1,4 +1,5 @@
 use super::*;
+use neoism_protocol::agent::HistoryAttachment;
 
 // -- Session lifecycle ------------------------------------------------------
 
@@ -408,6 +409,15 @@ pub(crate) fn history_from_agent_message(
             cost_micros: usage.cost_micros,
             context_limit: usage.context_limit,
         }),
+        attachments: message
+            .images
+            .into_iter()
+            .map(|image| HistoryAttachment {
+                filename: image.filename,
+                url: image.url,
+                mime: image.mime,
+            })
+            .collect(),
         created_at: 0,
     }
 }

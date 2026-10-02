@@ -2,12 +2,11 @@
 //!
 //! Owns the value-identity bits an agent pane needs everywhere (which
 //! agent is in this tab? what's its display name? what's its image id
-//! and which synthetic panel does its overlay live on?). Asset bytes,
-//! image registration, and `/proc` foreground-process detection stay
-//! in the desktop fork (`frontends/neoism/src/neoism/icon.rs`) — that
-//! file re-exports the items defined here so callers don't have to
-//! care which side of the split owns what.
+//! and which synthetic panel does its overlay live on?). Shared asset
+//! registration keeps provider logos identical in native and web UI;
+//! `/proc` foreground-process detection stays in the desktop fork.
 
+use base64::Engine;
 use sugarloaf::{
     ColorType, GraphicData, GraphicDataEntry, GraphicId, GraphicOverlay, Sugarloaf,
 };
@@ -27,6 +26,7 @@ pub const CLAUDE_IMAGE_ID: u32 = 0xA0DE_0001;
 pub const CODEX_IMAGE_ID: u32 = 0xA0DE_0002;
 pub const OPENCODE_IMAGE_ID: u32 = 0xA0DE_0003;
 pub const NEOISM_IMAGE_ID: u32 = 0xA0DE_0004;
+const PROVIDER_LOGO_IMAGE_PREFIX: u32 = 0xB000_0000;
 
 /// POD agent identity. Mirrors the desktop enum variant-for-variant so
 /// the view code can switch on `AgentKind` without dragging in PTY /
@@ -107,6 +107,105 @@ impl AgentKind {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProviderLogo {
+    OpenRouter,
+    Anthropic,
+    OpenAi,
+    Google,
+    GitHubCopilot,
+    Vercel,
+    OpenCode,
+}
+
+impl ProviderLogo {
+    const COUNT: f32 = 7.0;
+    pub const SOURCE_SIDE: usize = 64;
+
+    pub fn from_provider_id(id: &str) -> Option<Self> {
+        match id.trim().to_ascii_lowercase().as_str() {
+            "openrouter" => Some(Self::OpenRouter),
+            "anthropic" | "claude" | "claude-code" => Some(Self::Anthropic),
+            "openai" | "chatgpt" | "codex" => Some(Self::OpenAi),
+            "google" | "google-vertex" | "vertex-ai" => Some(Self::Google),
+            "github-copilot" | "copilot" => Some(Self::GitHubCopilot),
+            "vercel" | "vercel-ai-gateway" => Some(Self::Vercel),
+            "opencode" | "open-code" => Some(Self::OpenCode),
+            _ => None,
+        }
+    }
+
+    pub fn from_model(model: &str) -> Option<Self> {
+        let (provider, _) = model.trim().split_once('/')?;
+        Self::from_provider_id(provider)
+    }
+
+    pub fn source_rect(self) -> [f32; 4] {
+        let index = self.index() as f32;
+        [index / Self::COUNT, 0.0, (index + 1.0) / Self::COUNT, 1.0]
+    }
+
+    fn index(self) -> usize {
+        match self {
+            Self::OpenRouter => 0,
+            Self::Anthropic => 1,
+            Self::OpenAi => 2,
+            Self::Google => 3,
+            Self::GitHubCopilot => 4,
+            Self::Vercel => 5,
+            Self::OpenCode => 6,
+        }
+    }
+}
+
+pub fn register_provider_logo_atlas(
+    sugarloaf: &mut Sugarloaf,
+    color: [u8; 4],
+) -> Option<u32> {
+    let image_id = PROVIDER_LOGO_IMAGE_PREFIX
+        | ((color[0] as u32) << 16)
+        | ((color[1] as u32) << 8)
+        | color[2] as u32;
+    if sugarloaf.image_data.contains_key(&image_id) {
+        return Some(image_id);
+    }
+
+    let encoded: String = PROVIDER_LOGO_ATLAS_BASE64.split_whitespace().collect();
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .ok()?;
+    let mut image = image_rs::load_from_memory(&bytes).ok()?.to_rgba8();
+    let expected_width = ProviderLogo::SOURCE_SIDE * ProviderLogo::COUNT as usize;
+    if image.width() as usize != expected_width
+        || image.height() as usize != ProviderLogo::SOURCE_SIDE
+    {
+        return None;
+    }
+    for pixel in image.pixels_mut() {
+        pixel[0] = color[0];
+        pixel[1] = color[1];
+        pixel[2] = color[2];
+        pixel[3] = ((pixel[3] as u16 * color[3] as u16) / 255) as u8;
+    }
+    let (width, height) = image.dimensions();
+    sugarloaf.image_data.insert(
+        image_id,
+        GraphicDataEntry::from_graphic_data(GraphicData {
+            id: GraphicId::new(image_id as u64),
+            width: width as usize,
+            height: height as usize,
+            color_type: ColorType::Rgba,
+            pixels: image.into_raw(),
+            is_opaque: false,
+            resize: None,
+            display_width: None,
+            display_height: None,
+            transmit_time: Instant::now(),
+        }),
+    );
+    Some(image_id)
+}
+
 // Bridge `AgentKind` into the shared `AgentLabel` trait so generic
 // `BufferTabs<AgentKind>` can read tab titles without depending on the
 // desktop fork.
@@ -116,11 +215,16 @@ impl crate::panels::buffer_tabs::AgentLabel for AgentKind {
     }
 }
 
-/// The Neoism mark, owned by the SHARED crate so a host without its own
-/// `AgentIconProvider` can still paint a real logo. `image_rs` is a
-/// non-gated dependency here (the splash wordmark already decodes a PNG
-/// this way on wasm), so this works in the browser build too.
+// Keep the existing tab artwork as the single provider-logo source. These
+// files remain in the desktop asset bundle for packaging compatibility, but
+// registration lives here so the shared composer and web host use them too.
+const CLAUDE_PNG: &[u8] = include_bytes!("../../../../desktop/assets/icons/claude.png");
+const CODEX_PNG: &[u8] = include_bytes!("../../../../desktop/assets/icons/codex.png");
+const OPENCODE_PNG: &[u8] =
+    include_bytes!("../../../../desktop/assets/icons/opencode.png");
 const NEOISM_PNG: &[u8] = include_bytes!("../../../assets/icons/neoism.png");
+const PROVIDER_LOGO_ATLAS_BASE64: &str =
+    include_str!("../../../assets/icons/provider-logos.png.b64");
 
 /// Decode + upload the Neoism mark to sugarloaf's image store. Returns
 /// `true` once the image is available. Idempotent — safe to call every
@@ -132,28 +236,7 @@ const NEOISM_PNG: &[u8] = include_bytes!("../../../assets/icons/neoism.png");
 /// `Chrome<()>`) can't distinguish Claude/Codex/OpenCode tabs anyway —
 /// but it CAN tell a Neoism agent tab from `neoism_agent_route_id`.
 pub fn register_neoism_icon(sugarloaf: &mut Sugarloaf) -> bool {
-    if sugarloaf.image_data.contains_key(&NEOISM_IMAGE_ID) {
-        return true;
-    }
-    let Ok(img) = image_rs::load_from_memory(NEOISM_PNG) else {
-        return false;
-    };
-    let img = img.to_rgba8();
-    let (width, height) = img.dimensions();
-    let entry = GraphicDataEntry::from_graphic_data(GraphicData {
-        id: GraphicId::new(NEOISM_IMAGE_ID as u64),
-        width: width as usize,
-        height: height as usize,
-        color_type: ColorType::Rgba,
-        pixels: img.into_raw(),
-        is_opaque: false,
-        resize: None,
-        display_width: None,
-        display_height: None,
-        transmit_time: Instant::now(),
-    });
-    sugarloaf.image_data.insert(NEOISM_IMAGE_ID, entry);
-    true
+    register_icon(sugarloaf, NEOISM_IMAGE_ID, NEOISM_PNG)
 }
 
 /// Paint the registered Neoism mark into the tab strip's icon slot.
@@ -182,17 +265,6 @@ pub fn draw_neoism_tab_icon(
     );
 }
 
-// ── Stubs ──────────────────────────────────────────────────────────
-//
-// The desktop fork owns icon registration / overlay machinery (asset
-// bytes + image_rs decode + `Sugarloaf::push_image_overlay`). The web
-// build has no equivalent and the shared agent pane view calls into
-// these from the same call sites the desktop does. Keep them as
-// no-ops so the shared view compiles standalone; native callers reach
-// the real impls through the desktop `crate::neoism::icon::*` path
-// (those functions have the same names but live on the desktop side
-// of the tree, parallel to these stubs).
-
 /// Side-panel overlays are immediate-mode on every host. Sugarloaf retains
 /// the vectors between frames, so failing to clear here grows one image per
 /// visible conversation on every repaint.
@@ -200,21 +272,118 @@ pub fn clear_side_panel_icon_overlays(sugarloaf: &mut Sugarloaf) {
     sugarloaf.clear_image_overlays_for(SIDE_PANEL_ICON_PANEL_ID);
 }
 
-/// Stub: the desktop fork owns the actual overlay push.
 pub fn push_icon_overlay_to_panel(
-    _sugarloaf: &mut Sugarloaf,
-    _kind: AgentKind,
-    _panel_id: usize,
-    _x: f32,
-    _y: f32,
-    _size: f32,
+    sugarloaf: &mut Sugarloaf,
+    kind: AgentKind,
+    panel_id: usize,
+    x: f32,
+    y: f32,
+    size: f32,
 ) {
+    let scale = sugarloaf.scale_factor();
+    sugarloaf.push_image_overlay(
+        panel_id,
+        GraphicOverlay {
+            image_id: kind.image_id(),
+            x: x * scale,
+            y: y * scale,
+            width: size * scale,
+            height: size * scale,
+            z_index: 1,
+            source_rect: [0.0, 0.0, 1.0, 1.0],
+        },
+    );
 }
 
-/// Stub: the desktop fork registers the actual icon images on startup.
-/// Returning `true` here lets the shared view's "icons ready" gate stay
-/// open; when the icon provider trait lands this becomes a host-supplied
-/// readiness check.
-pub fn register_agent_icons(_sugarloaf: &mut Sugarloaf) -> bool {
+pub fn register_agent_icons(sugarloaf: &mut Sugarloaf) -> bool {
+    [
+        (CLAUDE_IMAGE_ID, CLAUDE_PNG),
+        (CODEX_IMAGE_ID, CODEX_PNG),
+        (OPENCODE_IMAGE_ID, OPENCODE_PNG),
+        (NEOISM_IMAGE_ID, NEOISM_PNG),
+    ]
+    .into_iter()
+    .all(|(id, bytes)| register_icon(sugarloaf, id, bytes))
+}
+
+fn register_icon(sugarloaf: &mut Sugarloaf, id: u32, bytes: &[u8]) -> bool {
+    if sugarloaf.image_data.contains_key(&id) {
+        return true;
+    }
+    let Ok(image) = image_rs::load_from_memory(bytes) else {
+        return false;
+    };
+    let image = image.to_rgba8();
+    let (width, height) = image.dimensions();
+    let entry = GraphicDataEntry::from_graphic_data(GraphicData {
+        id: GraphicId::new(id as u64),
+        width: width as usize,
+        height: height as usize,
+        color_type: ColorType::Rgba,
+        pixels: image.into_raw(),
+        is_opaque: false,
+        resize: None,
+        display_width: None,
+        display_height: None,
+        transmit_time: Instant::now(),
+    });
+    sugarloaf.image_data.insert(id, entry);
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ProviderLogo, PROVIDER_LOGO_ATLAS_BASE64};
+    use base64::Engine;
+
+    #[test]
+    fn resolves_known_model_providers_without_guessing_routed_models() {
+        assert_eq!(
+            ProviderLogo::from_model("anthropic/claude-sonnet-4"),
+            Some(ProviderLogo::Anthropic)
+        );
+        assert_eq!(
+            ProviderLogo::from_model("openai/gpt-5"),
+            Some(ProviderLogo::OpenAi)
+        );
+        assert_eq!(
+            ProviderLogo::from_model("openai/gpt-6-astra"),
+            Some(ProviderLogo::OpenAi)
+        );
+        assert_eq!(
+            ProviderLogo::from_model("opencode/big-pickle"),
+            Some(ProviderLogo::OpenCode)
+        );
+        assert_eq!(
+            ProviderLogo::from_model("openrouter/openai/gpt-5"),
+            Some(ProviderLogo::OpenRouter)
+        );
+        assert_eq!(ProviderLogo::from_model("server default"), None);
+    }
+
+    #[test]
+    fn provider_logo_atlas_decodes_to_expected_strip() {
+        let encoded: String = PROVIDER_LOGO_ATLAS_BASE64.split_whitespace().collect();
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .expect("provider atlas base64");
+        let image = image_rs::load_from_memory(&bytes).expect("provider atlas PNG");
+        assert_eq!((image.width(), image.height()), (448, 64));
+        let image = image.to_rgba8();
+        for provider in [
+            ProviderLogo::OpenRouter,
+            ProviderLogo::Anthropic,
+            ProviderLogo::OpenAi,
+            ProviderLogo::Google,
+            ProviderLogo::GitHubCopilot,
+            ProviderLogo::Vercel,
+            ProviderLogo::OpenCode,
+        ] {
+            let start_x = provider.index() * ProviderLogo::SOURCE_SIDE;
+            assert!((0..ProviderLogo::SOURCE_SIDE).any(|y| {
+                (0..ProviderLogo::SOURCE_SIDE)
+                    .any(|x| image.get_pixel((start_x + x) as u32, y as u32)[3] != 0)
+            }));
+        }
+    }
 }

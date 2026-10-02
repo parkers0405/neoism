@@ -23,6 +23,28 @@ fn from_text_roundtrip_preserves_line_ending_and_trailing_newline() {
 }
 
 #[test]
+fn git_diff_normalizes_editable_terminal_newline_row() {
+    let baseline = buffer("a\n");
+    let mut current = buffer("a");
+    current.cursor_col = 1;
+    current.insert_newline();
+
+    assert_eq!(current.text_for_disk(), "a\n");
+    assert!(
+        super::gitdiff::compute_git_marks(&baseline.lines, current.lines_for_diff())
+            .is_empty()
+    );
+
+    current.insert_newline();
+    let marks =
+        super::gitdiff::compute_git_marks(&baseline.lines, current.lines_for_diff());
+    assert_eq!(
+        marks.lines.get(&1),
+        Some(&super::gitdiff::CodeGitMark::Added)
+    );
+}
+
+#[test]
 fn insert_burst_coalesces_into_one_undo_entry() {
     let mut buf = buffer("fn main() {}\n");
     buf.insert_char('a');
@@ -305,6 +327,27 @@ fn styled_runs_strongest_severity_wins() {
 }
 
 #[test]
+fn plugin_spans_merge_into_immutable_feed_without_callbacks() {
+    let spans = [CodeLinePluginSpan {
+        start: 1,
+        end: 3,
+        foreground: Some([1, 2, 3, 255]),
+        background: Some([4, 5, 6, 128]),
+        underline: Some([7, 8, 9, 255]),
+        concealed: true,
+        severity: Some(CodeDiagnosticSeverity::Hint),
+    }];
+    let runs = styled_runs_with_syntax("abcd", None, Lang::Other, None, &[], &spans);
+    assert_eq!(runs.len(), 3);
+    assert_eq!((runs[1].start, runs[1].end), (1, 3));
+    assert_eq!(runs[1].plugin_foreground, spans[0].foreground);
+    assert_eq!(runs[1].plugin_background, spans[0].background);
+    assert_eq!(runs[1].plugin_underline, spans[0].underline);
+    assert!(runs[1].concealed);
+    assert_eq!(runs[1].severity, Some(CodeDiagnosticSeverity::Hint));
+}
+
+#[test]
 fn selection_on_line_spans_middle_lines_fully() {
     let mut buf = buffer("alpha\nbeta\ngamma\n");
     buf.set_cursor_position(0, 2, false);
@@ -479,6 +522,60 @@ fn wrap_index_prefix_sum_and_totals() {
     let index = WrapIndex::build(&lines, 0, TAB_DISPLAY_WIDTH);
     assert_eq!(index.total_rows(3), 3);
     assert_eq!(index.line_of_row(2, 3), (2, 0));
+}
+
+#[test]
+fn plugin_fold_index_preserves_scroll_and_hit_test_row_mapping() {
+    let lines = vec!["start".to_string(), "hidden one".to_string(), "hidden two".to_string(), "tail".to_string()];
+    let hidden = [1usize, 2].into_iter().collect();
+    let index = WrapIndex::build_with_hidden(&lines, 80, TAB_DISPLAY_WIDTH, &hidden);
+    assert_eq!(index.total_rows(lines.len()), 2);
+    assert_eq!(index.line_of_row(0, lines.len()), (0, 0));
+    assert_eq!(index.line_of_row(1, lines.len()), (3, 0));
+    assert_eq!(index.rows_of_line(1), 0);
+    assert_eq!(index.first_row_of_line(3), 1);
+}
+
+#[test]
+fn plugin_virtual_lines_reserve_real_visual_rows() {
+    let lines = vec!["first".to_string(), "second".to_string()];
+    let virtual_rows = [(0usize, 2usize)].into_iter().collect();
+    let index = WrapIndex::build_with_projection(
+        &lines, 80, TAB_DISPLAY_WIDTH, &Default::default(), &virtual_rows,
+    );
+    assert_eq!(index.total_rows(lines.len()), 4);
+    assert_eq!(index.row_kind(0), Some(VisualRow::Source { line: 0, segment: 0 }));
+    assert_eq!(index.row_kind(1), Some(VisualRow::Synthetic { line: 0, index: 0 }));
+    assert_eq!(index.row_kind(2), Some(VisualRow::Synthetic { line: 0, index: 1 }));
+    assert_eq!(index.row_kind(3), Some(VisualRow::Source { line: 1, segment: 0 }));
+    assert_eq!(index.line_of_row(2, lines.len()), (0, usize::MAX));
+    assert_eq!(index.first_row_of_line(1), 3);
+}
+
+#[test]
+fn large_plugin_snapshot_is_validated_and_indexed_once() {
+    let owner = neoism_lua::PluginOwner {
+        plugin_id: "dev.stress".into(),
+        revision: neoism_lua::PluginRevision("r1".into()),
+    };
+    let decorations = (0..10_000).map(|id| neoism_lua::ResolvedPluginDecoration {
+        id: neoism_lua::PluginResourceId(id), owner: owner.clone(),
+        document: neoism_lua::DocumentHandle("document:stress".into()),
+        start: 0, end: 1,
+        start_position: neoism_lua::TextPosition { line: 0, character: 0 },
+        end_position: neoism_lua::TextPosition { line: 0, character: 1 },
+        layer: neoism_lua::DecorationLayer::Highlight,
+        class: None, text: None, severity: None,
+        style: Default::default(), resolved_style: Default::default(),
+        related_information: Vec::new(), tags: Vec::new(), actions: Vec::new(),
+    }).collect();
+    let snapshot = neoism_lua::PluginDecorationSnapshot { revision: 1, decorations };
+    let projected = CodePluginRenderSnapshot::try_from_contract(&snapshot, &["x".into()]).unwrap();
+    assert_eq!(projected.by_line.get(&0).unwrap().len(), 10_000);
+
+    let mut invalid = snapshot;
+    invalid.decorations[0].start_position.character = 2;
+    assert!(CodePluginRenderSnapshot::try_from_contract(&invalid, &["x".into()]).is_err());
 }
 
 #[test]

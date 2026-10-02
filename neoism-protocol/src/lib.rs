@@ -17,12 +17,14 @@ pub mod git;
 pub mod host_path;
 pub mod ide_tools;
 pub mod pairing;
+pub mod plugin_resource;
 pub mod pty;
 pub mod search;
 pub mod workspace;
 
 pub use crdt::{
     CrdtBufferEdit, CrdtBufferId, CrdtBufferUpdate, CrdtClientId, CrdtClientMessage,
+    CrdtEditTransaction,
     CrdtCompactionStatus, CrdtCursorPosition, CrdtPeerPresence, CrdtPresenceColor,
     CrdtPresencePeerId, CrdtPresenceUpdate, CrdtSelectionRange, CrdtServerMessage,
     CrdtSyncEnvelope, CrdtTextOffset,

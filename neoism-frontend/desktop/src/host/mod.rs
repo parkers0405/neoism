@@ -58,6 +58,9 @@ pub struct TabDropPreview {
 }
 
 pub struct Renderer {
+    pub plugins: std::sync::Arc<neoism_lua::PluginSnapshot>,
+    pub plugin_hitboxes: Vec<neoism_ui::panels::custom_ui::CustomUiHitbox>,
+    pub surface_layout: neoism_ui::surface_layout::ResolvedSurfaceLayout,
     pub(super) is_vi_mode_enabled: bool,
     pub(super) is_game_mode_enabled: bool,
     pub(super) draw_bold_text_with_light_colors: bool,
@@ -173,6 +176,7 @@ pub struct Renderer {
     pub splash_overlay: splash_overlay::SplashOverlay,
     pub file_tree: file_tree::FileTree,
     pub notes_sidebar: notes_sidebar::NotesSidebar,
+    pub left_sidebar_host: neoism_ui::panels::left_sidebar_host::LeftSidebarHost,
     pub conversations_visible: bool,
     pub conversations_pane: crate::neoism::agent::NeoismAgentPane,
     pub conversations_directory: Option<String>,
@@ -284,6 +288,7 @@ pub struct Renderer {
     /// channels and update pane status without sweeping every grid for
     /// transient state.
     pub install_tracker: crate::screen::bridges::extensions::InstallTracker,
+    pub lua_plugin_job_active: bool,
     /// Cache of bundled + catalog `ExtensionManifest`s keyed by id,
     /// populated by `bridges/extensions.rs::load_bundled_extension_entries`.
     /// Lets the install/uninstall dispatcher re-resolve a full manifest
@@ -349,6 +354,16 @@ impl Renderer {
             None
         };
         let top_bar = chrome_topbar::ChromeTopBar::new();
+        let surface_registry = neoism_ui::surface_layout::SurfaceRegistry::chrome_defaults(
+            neoism_ui::surface_layout::SurfaceItemSize::new(26.0, 26.0),
+        );
+        let surface_layout = neoism_ui::surface_layout::resolve_surface_layout(
+            neoism_ui::layout::Rect::new(0.0, 0.0, 0.0, 0.0),
+            1.0,
+            &surface_registry,
+            &neoism_lua::SurfaceLayoutPatch::default(),
+        )
+        .expect("built-in surface registry must resolve");
         #[cfg(target_os = "macos")]
         let macos_traffic_light_inset =
             if config.ui.window.decorations != Decorations::Buttonless {
@@ -363,7 +378,21 @@ impl Renderer {
                 0.0
             };
 
+        let mut left_sidebar_host = neoism_ui::panels::left_sidebar_host::LeftSidebarHost::default();
+        let placement = |value| match value {
+            neoism_backend::config::SidebarPlacementPreference::Unified => neoism_ui::panels::left_sidebar_host::SidebarPlacement::Unified,
+            neoism_backend::config::SidebarPlacementPreference::Independent => neoism_ui::panels::left_sidebar_host::SidebarPlacement::Independent,
+        };
+        left_sidebar_host.set_placements(
+            placement(config.ui.left_sidebar.file_tree),
+            placement(config.ui.left_sidebar.notes),
+            placement(config.ui.left_sidebar.conversations),
+        );
+
         Renderer {
+            plugins: std::sync::Arc::new(neoism_lua::PluginSnapshot::empty()),
+            plugin_hitboxes: Vec::new(),
+            surface_layout,
             unfocused_split_opacity: config.ui.navigation.unfocused_split_opacity,
             unfocused_split_fill: config.ui.navigation.unfocused_split_fill,
             last_active: None,
@@ -437,6 +466,7 @@ impl Renderer {
             splash_overlay: splash_overlay::SplashOverlay::new(),
             file_tree: file_tree::FileTree::new(),
             notes_sidebar: notes_sidebar::NotesSidebar::default(),
+            left_sidebar_host,
             conversations_visible: false,
             conversations_pane: crate::neoism::agent::NeoismAgentPane::default(),
             conversations_directory: None,
@@ -488,6 +518,7 @@ impl Renderer {
             agent_detection_worker: None,
             install_tracker: crate::screen::bridges::extensions::InstallTracker::default(
             ),
+            lua_plugin_job_active: false,
             bundled_manifests: std::collections::BTreeMap::new(),
             catalog_seeded: false,
         }
@@ -762,6 +793,141 @@ impl Renderer {
                 z_index,
                 source_rect: geom.source_rect,
             });
+        }
+    }
+}
+
+impl Renderer {
+    pub(crate) fn left_sidebar_requests(&self) -> neoism_ui::panels::left_sidebar_host::SidebarRequests {
+        neoism_ui::panels::left_sidebar_host::SidebarRequests {
+            files: self.file_tree.is_visible(),
+            notes: self.notes_sidebar.is_visible(),
+            conversations: self.conversations_visible,
+        }
+    }
+
+    pub(crate) fn reconcile_left_sidebar_host(&mut self) {
+        self.left_sidebar_host.reconcile(self.left_sidebar_requests());
+    }
+
+    pub(crate) fn resolved_left_sidebar_views(&self) -> Vec<neoism_ui::panels::left_sidebar_host::LeftSidebarView> {
+        self.left_sidebar_host.resolved_views(self.left_sidebar_requests())
+    }
+
+    pub(crate) fn left_sidebar_view_width(
+        &self,
+        view: neoism_ui::panels::left_sidebar_host::LeftSidebarView,
+    ) -> f32 {
+        use neoism_ui::panels::left_sidebar_host::LeftSidebarView;
+        let natural = match view {
+            LeftSidebarView::Files => self.file_tree.width(),
+            LeftSidebarView::Notes => self.notes_sidebar.width(),
+            LeftSidebarView::Conversations => self.conversations_pane.side_panel().width(),
+        };
+        self.left_sidebar_host.resolved_width(view, natural)
+    }
+
+    pub(crate) fn left_sidebar_total_width(&self) -> f32 {
+        self.resolved_left_sidebar_views().into_iter()
+            .map(|view| self.left_sidebar_view_width(view))
+            .sum()
+    }
+
+    pub(crate) fn left_sidebar_view_left(
+        &self,
+        view: neoism_ui::panels::left_sidebar_host::LeftSidebarView,
+    ) -> Option<f32> {
+        let mut x = self.surface_layout.content.x;
+        for current in self.resolved_left_sidebar_views() {
+            if current == view {
+                return Some(x);
+            }
+            x += self.left_sidebar_view_width(current);
+        }
+        None
+    }
+
+    pub(crate) fn left_sidebar_view_focused(
+        &self,
+        view: neoism_ui::panels::left_sidebar_host::LeftSidebarView,
+    ) -> bool {
+        use neoism_ui::panels::left_sidebar_host::LeftSidebarView;
+        match view {
+            LeftSidebarView::Files => self.file_tree.is_focused(),
+            LeftSidebarView::Notes => self.notes_sidebar.is_focused(),
+            LeftSidebarView::Conversations => self.conversations_pane.side_panel().is_focused(),
+        }
+    }
+
+    pub(crate) fn set_left_sidebar_view_state(
+        &mut self,
+        view: neoism_ui::panels::left_sidebar_host::LeftSidebarView,
+        visible: bool,
+        focused: bool,
+    ) {
+        use neoism_ui::panels::left_sidebar_host::LeftSidebarView;
+        match view {
+            LeftSidebarView::Files => {
+                self.file_tree.set_visible(visible);
+                self.file_tree.set_focused(focused);
+            }
+            LeftSidebarView::Notes => {
+                self.notes_sidebar.set_visible(visible);
+                self.notes_sidebar.set_focused(focused);
+            }
+            LeftSidebarView::Conversations => {
+                self.conversations_visible = visible;
+                self.conversations_pane.side_panel_mut().set_focused(focused);
+            }
+        }
+    }
+
+    pub(crate) fn hide_other_unified_sidebars(
+        &mut self,
+        active: neoism_ui::panels::left_sidebar_host::LeftSidebarView,
+    ) {
+        use neoism_ui::panels::left_sidebar_host::{LeftSidebarView, SidebarPlacement};
+        for view in LeftSidebarView::ALL {
+            if view != active && self.left_sidebar_host.placement(view) == SidebarPlacement::Unified {
+                self.set_left_sidebar_view_state(view, false, false);
+            }
+        }
+    }
+
+    pub(crate) fn set_left_sidebar_focus(
+        &mut self,
+        focused: Option<neoism_ui::panels::left_sidebar_host::LeftSidebarView>,
+    ) {
+        use neoism_ui::panels::left_sidebar_host::LeftSidebarView;
+        self.file_tree.set_focused(focused == Some(LeftSidebarView::Files));
+        self.notes_sidebar.set_focused(focused == Some(LeftSidebarView::Notes));
+        self.conversations_pane
+            .side_panel_mut()
+            .set_focused(focused == Some(LeftSidebarView::Conversations));
+        self.left_sidebar_host.set_focused(focused);
+    }
+
+    pub(crate) fn set_left_sidebar_visibility(
+        &mut self,
+        view: neoism_ui::panels::left_sidebar_host::LeftSidebarView,
+        visible: bool,
+        focus: bool,
+    ) {
+        use neoism_ui::panels::left_sidebar_host::{SidebarPlacement, SidebarTransition};
+        if visible {
+            let transition = self.left_sidebar_host.show(view, focus);
+            if transition != SidebarTransition::Independent
+                && self.left_sidebar_host.placement(view) == SidebarPlacement::Unified
+            {
+                self.hide_other_unified_sidebars(view);
+            }
+            self.set_left_sidebar_view_state(view, true, focus);
+            if focus {
+                self.set_left_sidebar_focus(Some(view));
+            }
+        } else {
+            self.left_sidebar_host.hide(view);
+            self.set_left_sidebar_view_state(view, false, false);
         }
     }
 }

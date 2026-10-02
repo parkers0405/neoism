@@ -23,6 +23,7 @@
       <ComponentRef Id="NeoismExe" />
       <ComponentRef Id="WorkspaceDaemonExe" />
       <ComponentRef Id="AgentExe" />
+      <ComponentRef Id="AgentLuaRunnerExe" />
       <ComponentGroupRef Id="WebFiles" />
       <ComponentRef Id="InstallRegistration" />
       <ComponentRef Id="UserPath" />
@@ -54,6 +55,10 @@
       <Component Id="AgentExe" Guid="6ff55ead-ec4f-4dc4-8bc5-aa36fe1d24d6" Bitness="always64">
         <File Id="AgentExeFile" Source="$(var.BinaryDir)\neoism-agent.exe" Name="neoism-agent.exe" />
         <RegistryValue Root="HKCU" Key="Software\Neoism\Components" Name="AgentExe" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <Component Id="AgentLuaRunnerExe" Guid="7534762d-0eb0-4b3d-ad59-bc65e1c3c62b" Bitness="always64">
+        <File Id="AgentLuaRunnerExeFile" Source="$(var.BinaryDir)\neoism-agent-lua-runner.exe" Name="neoism-agent-lua-runner.exe" />
+        <RegistryValue Root="HKCU" Key="Software\Neoism\Components" Name="AgentLuaRunnerExe" Type="integer" Value="1" KeyPath="yes" />
       </Component>
 
       <Component Id="UserPath" Guid="39eee899-4a06-438e-9e95-061d4f46a3f5" Bitness="always64">

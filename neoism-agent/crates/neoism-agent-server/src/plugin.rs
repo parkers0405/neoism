@@ -6,9 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
-use neoism_agent_core::{
-    AgentConfigDocument, EventPayload, PluginConfig, ProviderMessage, ToolListItem,
-};
+use neoism_agent_core::{EventPayload, PluginConfig, ProviderMessage, ToolListItem};
 use neoism_agent_plugin_api::{
     PluginContributions, PluginDefinition, PluginFactory, PluginHostError,
     PluginManifest, PluginRuntimeError, ProcessHookRequest, ProcessHookResponse,
@@ -419,12 +417,33 @@ pub(crate) fn batch_shim_command(
 
 pub(crate) fn configured_agent_plugins(
     services: &neoism_agent_service_api::AgentServices,
-    config: &AgentConfigDocument,
+    configured: &BTreeMap<String, PluginConfig>,
+    discovery_roots: &[PathBuf],
     directory: &str,
 ) -> Vec<Box<dyn PluginFactory>> {
-    configured_plugins(config)
+    let packages = crate::plugin_package::discover(directory)
         .into_iter()
-        .chain(discovered_plugin_configs(services, directory))
+        .filter_map(|result| match result {
+            Ok(package) => Some(package),
+            Err(error) => {
+                tracing::warn!(%error, "Agent package metadata is invalid");
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    let package_ids = packages
+        .iter()
+        .map(|package| package.manifest.id.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut factories = configured_plugins(configured)
+        .into_iter()
+        .chain(discovered_plugin_configs(discovery_roots))
+        .filter(|plugin| {
+            plugin
+                .id
+                .as_deref()
+                .is_none_or(|id| !package_ids.contains(id))
+        })
         .filter(|plugin| plugin.enabled)
         .filter_map(|plugin| {
             let id = plugin_id(&plugin)?;
@@ -447,7 +466,31 @@ pub(crate) fn configured_agent_plugins(
                 }
             }
         })
-        .collect()
+        .collect::<Vec<_>>();
+    for package in packages {
+        let Some(config) = configured.get(&package.manifest.id) else {
+            tracing::info!(plugin = %package.manifest.id, revision = %package.revision, "discovered Agent package; external trust is required");
+            continue;
+        };
+        if !config.enabled {
+            continue;
+        }
+        if let Err(reason) = crate::plugin_package::authorized(&package, directory, &config.options)
+        {
+            tracing::warn!(plugin = %package.manifest.id, revision = %package.revision, %reason, "Agent package is not authorized");
+            continue;
+        }
+        match crate::plugin_host_process::package_plugin_spec(&package, config) {
+            Ok(spec) => factories.push(Box::new(
+                crate::plugin_host_process::ServePluginFactory::new(
+                    spec,
+                    Arc::clone(&services.executables),
+                ),
+            )),
+            Err(error) => tracing::warn!(plugin = %package.manifest.id, %error, "Agent package cannot be activated"),
+        }
+    }
+    factories
 }
 
 fn invoke<T: Serialize + serde::de::DeserializeOwned>(
@@ -555,9 +598,8 @@ fn merge_value_map(
     value
 }
 
-fn configured_plugins(config: &AgentConfigDocument) -> Vec<PluginConfig> {
-    config
-        .plugins
+fn configured_plugins(configured: &BTreeMap<String, PluginConfig>) -> Vec<PluginConfig> {
+    configured
         .iter()
         .map(|(id, plugin)| {
             let mut plugin = plugin.clone();
@@ -725,12 +767,9 @@ fn resolve_path_candidates(
     candidates
 }
 
-fn discovered_plugin_configs(
-    services: &neoism_agent_service_api::AgentServices,
-    directory: &str,
-) -> Vec<PluginConfig> {
+fn discovered_plugin_configs(discovery_roots: &[PathBuf]) -> Vec<PluginConfig> {
     let mut configs = Vec::new();
-    for root in crate::config::roots(services, directory) {
+    for root in discovery_roots {
         let dir = root.join("plugins");
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;

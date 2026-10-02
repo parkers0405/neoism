@@ -37,11 +37,28 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         services: Services<'_>,
         time: Duration,
     ) {
-        let theme = self.theme.clone();
+        let plugins = self.plugins.clone();
+        let app_style = plugins.styles.resolve(neoism_lua::selector::APP);
+        let mut theme = self.theme.clone();
+        let resolve = |value: Option<&str>, fallback: crate::theme::RgbTriple| {
+            let color = crate::customization::color_u8(
+                value,
+                &self.ide_theme,
+                [fallback.r, fallback.g, fallback.b, 255],
+            );
+            crate::theme::RgbTriple { r: color[0], g: color[1], b: color[2] }
+        };
+        theme.bg = resolve(app_style.background.as_deref(), theme.bg);
+        theme.bg_elevated = resolve(app_style.background.as_deref(), theme.bg_elevated);
+        theme.fg = resolve(app_style.foreground.as_deref(), theme.fg);
+        theme.fg_dim = resolve(app_style.muted.as_deref(), theme.fg_dim);
+        theme.accent = resolve(app_style.accent.as_deref(), theme.accent);
+        theme.border = resolve(app_style.border_color.as_deref(), theme.border);
         let ctx = PanelContext {
             services,
             theme: &theme,
             time,
+            plugins: Some(&plugins),
         };
         let dt = match self.last_draw_time {
             Some(prev) if time > prev => (time - prev).as_secs_f32().clamp(0.0, 0.1),
@@ -223,6 +240,10 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                 SplashOverlay::clear_image_overlays(sugarloaf);
                 self.splash_overlay.reset();
                 let narrow_takeover = self.agent_side_panel_takeover_active();
+                let checkout_context = agent_pane_view::AgentCheckoutContext::new(
+                    self.status_line.info().cwd_label.clone(),
+                    self.status_line.info().branch.clone(),
+                );
                 if let Some(pane) = self.agent_pane.as_mut() {
                     if narrow_takeover {
                         // The composer is not rendered during takeover, so its
@@ -245,6 +266,8 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                         self.chrome_scale,
                         &active_text_occlusions,
                         narrow_takeover,
+                        &checkout_context,
+                        Some(&self.plugins),
                     );
                 }
             } else {
@@ -974,6 +997,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                 &[],
                 None,
                 0.0,
+                Some(&self.plugins),
             );
         }
 
@@ -990,7 +1014,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                 self.chrome_scale,
                 self.last_draw_time
                     .map_or(0.0, |t| t.as_secs_f32() % 10_000.0),
-                Some(self.last_pointer_pos),
+                self.pointer_inside.then_some(self.last_pointer_pos),
                 &[],
             );
         } else if let Some(pane) = self.agent_pane.as_mut() {
@@ -1042,27 +1066,49 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         // TOP BAR LAST PASS — render after every other chrome panel so
         // hit rects and late overlay menu draws use the final tab /
         // breadcrumb geometry for this frame.
-        if let Some(rect) = layout.top_bar {
+        if layout.top_bar.is_some() {
             let ide_theme = self.ide_theme;
             // Reflect which panels are open so the toggle buttons paint
             // in their active accent style.
             let tree_open = self.file_tree.as_ref().is_some_and(|t| t.is_visible());
-            let agent_panel_open = self
-                .agent_pane
-                .as_ref()
-                .is_some_and(|p| !p.side_panel().user_hidden());
+            let agent_panel_open = self.top_bar.is_right_button_visible()
+                && self
+                    .agent_pane
+                    .as_ref()
+                    .is_some_and(|p| !p.side_panel().user_hidden());
             self.top_bar.set_panel_open(tree_open);
             self.top_bar.set_notes_open(self.notes_sidebar.is_visible());
             self.top_bar
                 .set_conversations_open(self.conversations_visible);
             self.top_bar.set_search_open(self.finder.is_visible());
             self.top_bar.set_right_panel_open(agent_panel_open);
-            // The top bar spans the full viewport width and sits above
-            // every side panel (the agent side panel now docks in the
-            // band below it), so it no longer shrinks to dodge them.
-            self.top_bar
-                .render(sugarloaf, rect.x, rect.y, rect.w, &ide_theme);
+            self.top_bar.render_resolved(
+                sugarloaf,
+                &self.surface_layout,
+                &ide_theme,
+                &ctx.style(neoism_lua::selector::CHROME_TOP),
+            );
         }
+
+        let mut custom_style = ctx.style(neoism_lua::selector::APP);
+        custom_style.overlay(Some(&ctx.style(neoism_lua::selector::CHROME_TOP)));
+        let custom_theme = crate::customization::styled_ide_theme(self.ide_theme, &custom_style);
+        let (status_slot_left, status_slot_right) = self.status_line.custom_slot_bounds();
+        let status_slot_gap = 8.0 * self.chrome_scale;
+        let status_slot_left = status_slot_left + status_slot_gap;
+        let status_slot_right = (status_slot_right - status_slot_gap).max(status_slot_left);
+        self.plugin_hitboxes = crate::panels::custom_ui::render(
+            sugarloaf,
+            &plugins,
+            crate::panels::custom_ui::CustomUiLayout {
+                window: [0.0, 0.0, window_width, layout.status_line.y + layout.status_line.h],
+                top: layout.top_bar.map_or([0.0, 0.0, window_width, 0.0], |rect| [rect.x, rect.y, rect.w, rect.h]),
+                bottom: [status_slot_left, layout.status_line.y, (status_slot_right - status_slot_left).max(0.0), layout.status_line.h],
+                left: [0.0, band_top, layout.terminal.x.max(0.0), (band_bottom - band_top).max(0.0)],
+                right: [layout.terminal.x, band_top, layout.terminal.w, (band_bottom - band_top).max(0.0)],
+            },
+            &custom_theme,
+        );
 
         // FULL-SCREEN CHROME OVERLAYS — settings page + About modal —
         // paint after every other panel, through sugarloaf's late

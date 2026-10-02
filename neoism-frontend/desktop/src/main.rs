@@ -14,6 +14,7 @@ mod bridges;
 mod cli;
 mod constants;
 mod context;
+mod credential_broker;
 #[cfg(not(target_arch = "wasm32"))]
 mod daemon_client;
 #[cfg(not(target_arch = "wasm32"))]
@@ -28,12 +29,22 @@ mod layout;
 #[cfg(unix)]
 mod macos_update;
 mod mashup;
+mod native_extension;
 mod neoism;
 mod neoworld_runtime;
 mod notebook_runtime;
 #[cfg(windows)]
 mod panic;
 mod platform;
+mod plugin_manager;
+mod lua_plugin_jobs;
+mod lua_async;
+mod lua_dap;
+mod lua_git;
+mod lua_jobs;
+mod lua_network;
+mod lua_ptys;
+mod lua_watchers;
 mod router;
 mod screen;
 #[cfg(not(target_arch = "wasm32"))]
@@ -1574,6 +1585,9 @@ fn self_update(
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if native_extension::maybe_run_host()? {
+        return Ok(());
+    }
     #[cfg(not(target_arch = "wasm32"))]
     if neoism_desktop::notes_mcp::maybe_run()? {
         return Ok(());
@@ -1689,7 +1703,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    let (mut config, config_error) = match neoism_backend::config::Config::try_load() {
+    let (mut config, mut config_error) = match neoism_backend::config::Config::try_load() {
         Ok(config) => (config, None),
         // First launch: write the default config silently and continue as a
         // normal terminal window. Routing this through the error report used
@@ -1726,6 +1740,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // windows.shell.program = "pwsh"
     // windows.shell.args = ["-l"]
     config.overwrite_based_on_platform();
+
+    let lua_config_dir = neoism_backend::config::config_dir_path();
+    let persistent_lua_state = std::fs::read(lua_config_dir.join("plugin-state.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+    let new_lua_host = || {
+        let host = std::sync::Arc::new(neoism_lua::QueuedHost::default());
+        if let Some(snapshot) = &persistent_lua_state {
+            let _ = host.restore_persistent_state(snapshot);
+        }
+        host
+    };
+    let mut lua_host = new_lua_host();
+    let lua_runtime = if lua_config_dir.join("init.lua").is_file() {
+        match neoism_lua::LuaRuntime::load(&lua_config_dir, lua_host.clone()) {
+            Ok(runtime) => match config.apply_json_patch(&runtime.snapshot().config_patch) {
+                Ok(()) => Some(runtime),
+                Err(error) => {
+                    lua_host = new_lua_host();
+                    config_error = Some(neoism_backend::config::ConfigError::ErrLoadingConfig(
+                        format!("init.lua: {error}"),
+                    ));
+                    None
+                }
+            },
+            Err(error) => {
+                lua_host = new_lua_host();
+                config_error = Some(neoism_backend::config::ConfigError::ErrLoadingConfig(
+                    format!("init.lua: {error}"),
+                ));
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     #[cfg(windows)]
     if config.terminal.working_dir.is_none() {
@@ -1874,6 +1924,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         daemon_token,
         initial_server_id,
         home_daemon_endpoint,
+        lua_runtime,
+        lua_host,
     );
     let _ = application.run(window_event_loop);
 

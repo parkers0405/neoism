@@ -316,6 +316,19 @@
 - [Compaction timeline identity — FIXED](bug_compaction_timeline_identity.md) - Compaction marker/text/deltas share assistant identity and kind across live, WASM, and hydration timelines
 - [Nightly FPS regression: preferred-font coverage](perf_nightly_font_coverage_fps.md) - Nightly explicit-font shaping locked and parsed coverage per character per frame; cached by font and character
 - [Multi-agent conversation sidebar](feature_multi_agent_conversation_sidebar.md) - Neoism-owned ACP conversations sidebar, preserved pixel UI, resize/marquee/state/performance overhaul
-- [Provider model visibility by auth path — FIXED](bug_provider_model_visibility.md) - Codex OAuth models now account-authoritative; disconnected Zen no longer advertises or uses anonymous free models
 - [Agent nested code fences — FIXED](bug_agent_nested_code_fences.md) - Rare empty agent code cards caused by unconditional fence toggling; fixed with marker/length-aware CommonMark fence tracking.
 - [Mashup wallpaper pane occlusion — FIXED](bug_mashup_wallpaper_occluded.md) - Mashup wallpaper only top/bottom due pane bg fills; fixed all central surfaces + parked PTY suppression
+- [Lua startup poison + slow debug fixed](bug_lua_startup_poison_slow_debug.md) - Fixed false Lua lock poison and no-init debug runtime regression
+- [Provider model visibility by auth path — FIXED](bug_provider_model_visibility.md) - Codex OAuth models now account-authoritative; disconnected Zen no longer advertises or uses anonymous free models
+- [Conversation sidebar stale hover — FIXED](bug_conversation_hover_stale.md) - Side-panel hover now strictly follows current pointer presence and target
+- [Lua plugin status overlap and 60 FPS regression](bug_lua_plugin_fps_status_overlap.md) - Plugin state publication serialized full desktop state every frame; status contributions shared native pill origins
+- [Supabase MCP redirect_uri not allowed — FIXED](bug_supabase_mcp_redirect_uri_not_allowed.md) - Legacy Supabase DCR client reused after callback route change; missing redirectUri must force re-registration
+- [Neoism Lua customization platform](project_lua_customization.md) - Neovim-style Lua runtime, isolated plugins, managed lifecycle, relocatable chrome, unified sidebar, and owner/revision-safe local/remote structured LSP reads and edits
+- [Agent plugin openness A1-A3 process-v2 wave](project_agent_plugin_openness_a1_a3.md) - Process v2 now adapts six unary native services through PluginHost, supports exact-owner reverse host RPC, bounded cancellation/stream foundations, and TS author APIs; provider/routes and Agent Lua remain open.
+- [Agent plugin openness architecture](project_agent_plugin_openness.md) - Broad Agent plugin openness: package trust, scoped generations, brokered capabilities, Lua runner, lifecycle and verification
+- [Lua E3/E4 progress](project_lua_e3_e4_progress.md) - Scoped options complete; input/editor resources partial with precise blockers
+- [Native IDE plugin adapters E4–E10](project_plugin_native_adapters.md) - Exact-owner plugin declarations plus native completion, syntax, task/test, PTY, DAP, Git, and Agent read adapters; trust blockers.
+- [Plugin openness trust/broker closure](project_plugin_openness_trust_closure.md) - Credential keyring broker, exact extension trust approvals, supervised native/Tree-sitter host, opaque daemon resources, Agent approval routing
+- [Plugin openness: Agent and IDE](project_plugin_openness.md) - Completed OpenCode-class Agent and Neovim-outcome IDE plugin openness architecture and implementation
+- [Agent catalog generation 410 fixed](bug_agent_catalog_generation_closed.md) - Fresh Agent catalogs returned 410 because built-in capability admission failed and errors became closed snapshots; fixed grants, tenant-aware fallible routing, local/joined/hosted tests.
+- [Lua state polling FPS fixed](bug_lua_plugin_fps_state_poll.md) - Expanded Lua platform regressed FPS by serializing full state at 10 Hz for style-only plugins; fixed by subscriber-gated polling.

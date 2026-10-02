@@ -30,7 +30,7 @@ sha2 = { workspace = true }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.60", features = ["Win32_System_Threading"] }
+windows-sys = { version = "0.60", features = ["Win32_Storage_FileSystem", "Win32_System_Threading"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }

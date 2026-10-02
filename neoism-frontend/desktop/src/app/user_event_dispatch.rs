@@ -314,15 +314,64 @@ impl Application<'_> {
         route.request_redraw();
     }
 
-    /// `RioEvent::UpdateConfig` — reload `neoism.toml` from disk,
+    /// `RioEvent::UpdateConfig` — reload configuration from disk,
     /// rebuild the font library if fonts changed, re-apply the
     /// adaptive / forced theme, and push the new config into every
     /// open route.
     pub(super) fn apply_update_config(&mut self) {
-        let (config, config_error) = match neoism_backend::config::Config::try_load() {
-            Ok(config) => (config, None),
-            Err(error) => (neoism_backend::config::Config::default(), Some(error)),
+        let mut lua_candidate = None;
+        let mut plugin_candidate = None;
+        let mut candidate_host = Arc::new(self.lua_host.fork_candidate());
+        let (mut config, mut config_error) = match neoism_backend::config::Config::try_load() {
+            Ok(mut config) => {
+                let config_dir = neoism_backend::config::config_dir_path();
+                if !config_dir.join("init.lua").is_file() {
+                    candidate_host = Arc::new(self.lua_host.fork_candidate());
+                    lua_candidate = Some(None);
+                    (config, None)
+                } else {
+                    match neoism_lua::LuaRuntime::load(&config_dir, candidate_host.clone()) {
+                        Ok(runtime) => match config.apply_json_patch(&runtime.snapshot().config_patch) {
+                            Ok(()) => {
+                                lua_candidate = Some(Some(runtime));
+                                (config, None)
+                            }
+                            Err(error) => (
+                                self.config.clone(),
+                                Some(neoism_backend::config::ConfigError::ErrLoadingConfig(
+                                    format!("init.lua: {error}"),
+                                )),
+                            ),
+                        },
+                        Err(error) => (
+                            self.config.clone(),
+                            Some(neoism_backend::config::ConfigError::ErrLoadingConfig(
+                                format!("init.lua: {error}"),
+                            )),
+                        ),
+                    }
+                }
+            }
+            Err(error) => (self.config.clone(), Some(error)),
         };
+        if config_error.is_none() {
+            match crate::plugin_manager::LuaPluginManager::discover(
+                neoism_backend::config::config_dir_path(),
+                candidate_host.clone(),
+                &config.plugins,
+            ) {
+                Ok(candidate) => plugin_candidate = Some(candidate),
+                Err(error) => {
+                    config = self.config.clone();
+                    config_error = Some(
+                        neoism_backend::config::ConfigError::ErrLoadingConfig(format!(
+                            "Lua plugins: {error}"
+                        )),
+                    );
+                    lua_candidate = None;
+                }
+            }
+        }
 
         let has_font_updates = self.config.appearance.fonts != config.appearance.fonts
             || self.config.appearance.look.markdown.font_family
@@ -343,6 +392,33 @@ impl Application<'_> {
         };
 
         self.config = config;
+        let lua_reloaded = lua_candidate.is_some();
+        if let Some(runtime) = lua_candidate {
+            self.lua_host = candidate_host;
+            self.lua_runtime = runtime;
+            if let Some(candidate) = plugin_candidate {
+                self.lua_plugins = candidate;
+            }
+            self.lua_published.clear();
+            if let Some(runtime) = self.lua_runtime.as_mut() {
+                if let Err(error) = runtime.emit(neoism_lua::PluginEvent {
+                    name: "ConfigReloaded".into(),
+                    payload: serde_json::Value::Null,
+                    scope: neoism_lua::ExecutionScope::Local,
+                    origin: Some("watcher".into()),
+                }) {
+                    tracing::warn!(%error, "Lua ConfigReloaded autocmd failed");
+                }
+            }
+            for failure in self.lua_plugins.emit(neoism_lua::PluginEvent {
+                name: "ConfigReloaded".into(),
+                payload: serde_json::Value::Null,
+                scope: neoism_lua::ExecutionScope::Local,
+                origin: Some("watcher".into()),
+            }) {
+                tracing::warn!(plugin = %failure.plugin_id, error = %failure.message, "Lua plugin ConfigReloaded failed");
+            }
+        }
 
         #[cfg(target_os = "linux")]
         {
@@ -395,6 +471,9 @@ impl Application<'_> {
             } else {
                 route.clear_errors();
             }
+        }
+        if lua_reloaded {
+            self.sync_lua_snapshot(None);
         }
     }
 
@@ -872,7 +951,7 @@ impl Application<'_> {
     /// to `window_id`. Free-function style (`&mut Router`) so callers
     /// that already hold a `&mut self.router` borrow can use it
     /// without re-borrowing through `self`.
-    fn send_bytes_to_route_context(
+    pub(super) fn send_bytes_to_route_context(
         router: &mut Router<'_>,
         window_id: WindowId,
         route_id: usize,

@@ -131,7 +131,7 @@ impl Screen<'_> {
 
     #[allow(private_interfaces)]
     pub(crate) fn render_block_chrome_overlay(&mut self, headers: &ActiveBlockHeaders) {
-        let theme = self.renderer.theme;
+        let theme = self.renderer.styled_theme(neoism_lua::selector::TERMINAL);
         let left = headers.panel_left_logical;
         let right = headers.panel_right_logical;
         let width = (right - left).max(0.0);
@@ -392,7 +392,7 @@ impl Screen<'_> {
             cell_h_logical: headers.cell_h_logical,
             anchor_display_row: anchor_row,
         });
-        let theme = self.renderer.theme;
+        let theme = self.renderer.styled_theme(neoism_lua::selector::TERMINAL);
         let bg = theme.f32(theme.surface);
         let fg = theme.u8(theme.fg);
 

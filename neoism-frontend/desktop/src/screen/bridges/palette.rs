@@ -883,7 +883,7 @@ impl Screen<'_> {
 
                 if let Some(pack) = self.renderer.command_palette.get_selected_mashup() {
                     self.renderer.command_palette.set_enabled(false);
-                    self.apply_mashup_pack(pack);
+                    self.request_mashup_pack(pack);
                     self.mark_dirty();
                     return true;
                 }

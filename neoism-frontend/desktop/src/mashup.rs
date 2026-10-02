@@ -119,15 +119,23 @@ pub fn fonts_with_markdown_family(
 /// Merge the active pack's look slots (scrollbar/markdown/icons)
 /// under the user's `[look.*]` config — config wins field-by-field —
 /// and publish the result to the shared `active_look` cell that draw
-/// sites read. `active_pack` lets the pack-apply path publish
-/// immediately instead of waiting for the config-write hot-reload.
+/// sites read. Startup and ordinary watcher reloads resolve by id; the
+/// application-owned pack transaction uses `publish_resolved_look`.
 pub fn publish_active_look(config_look: &LookConfig, active_pack: Option<&str>) {
-    let pack_look = active_pack
+    let pack = active_pack
         .map(str::trim)
         .filter(|id| !id.is_empty())
-        .and_then(find_mashup_pack)
-        .map(|pack| pack.look)
-        .unwrap_or_default();
+        .and_then(find_mashup_pack);
+    publish_resolved_look(config_look, pack.as_ref());
+}
+
+/// Publish look slots from an already-resolved pack so a transaction cannot
+/// observe a different manifest between plugin validation and visual commit.
+pub fn publish_resolved_look(
+    config_look: &LookConfig,
+    pack: Option<&neoism_backend::config::mashup::MashupPack>,
+) {
+    let pack_look = pack.map(|pack| &pack.look).cloned().unwrap_or_default();
     let merged = pack_look.merged_under(config_look);
     set_active_look(convert_look(&merged));
 }
@@ -205,6 +213,9 @@ fn convert_look(look: &LookConfig) -> LookStyle {
 /// whose dirs are present are assumed already-seeded.
 pub fn seed_example_packs() {
     let packs_dir = neoism_backend::config::mashup::packs_dir();
+    if let Err(error) = migrate_lucid_blocks_manifest_at(&packs_dir) {
+        tracing::warn!(target: "neoism::mashup", %error, "failed to migrate unmodified Lucid Blocks manifest");
+    }
     let marker_path = packs_dir.join(".seeded");
     let mut seeded: Vec<String> = std::fs::read_to_string(&marker_path)
         .map(|contents| contents.lines().map(str::to_string).collect())
@@ -252,7 +263,87 @@ pub fn seed_example_packs() {
     }
 }
 
+fn migrate_lucid_blocks_manifest_at(packs_dir: &std::path::Path) -> std::io::Result<bool> {
+    let path = packs_dir.join("lucid-blocks/pack.json");
+    let Ok(installed) = std::fs::read(&path) else {
+        return Ok(false);
+    };
+    if installed.as_slice() != LUCID_BLOCKS_V1_MANIFEST {
+        return Ok(false);
+    }
+
+    let temporary = path.with_extension(format!("json.{}.tmp", std::process::id()));
+    let _ = std::fs::remove_file(&temporary);
+    let result = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        std::io::Write::write_all(&mut file, LUCID_BLOCKS_PLUGIN_FILES[0].1)?;
+        file.sync_all()?;
+        std::fs::rename(&temporary, &path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result.map(|()| true)
+}
+
+/// Install Neoism's first-party Lucid Rabbit editor package once, independently
+/// from pack and welcome-document seeds. Existing package directories are
+/// treated as user-owned and are never modified.
+pub fn seed_first_party_plugins() {
+    if let Err(error) = seed_first_party_plugins_at(&neoism_backend::config::config_dir_path()) {
+        tracing::warn!(target: "neoism::mashup", %error, "failed to seed first-party editor plugin");
+    }
+}
+
+fn seed_first_party_plugins_at(config_dir: &std::path::Path) -> std::io::Result<()> {
+    const SEED_ID: &str = "io.neoism.lucid-birds@1";
+    const PLUGIN_ID: &str = "io.neoism.lucid-birds";
+    let plugins_dir = config_dir.join("plugins");
+    std::fs::create_dir_all(&plugins_dir)?;
+    let marker = plugins_dir.join(".neoism-first-party-seeds");
+    let mut seeded = std::fs::read_to_string(&marker).unwrap_or_default();
+    if seeded.lines().any(|line| line == SEED_ID) {
+        return Ok(());
+    }
+
+    let destination = plugins_dir.join(PLUGIN_ID);
+    if !destination.exists() {
+        let staging = plugins_dir.join(format!(".{PLUGIN_ID}.{}.seed", std::process::id()));
+        let _ = std::fs::remove_dir_all(&staging);
+        std::fs::create_dir(&staging)?;
+        let install = (|| {
+            for (name, bytes) in LUCID_RABBIT_PLUGIN_FILES {
+                let mut file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(staging.join(name))?;
+                std::io::Write::write_all(&mut file, bytes)?;
+                file.sync_all()?;
+            }
+            std::fs::rename(&staging, &destination)
+        })();
+        if install.is_err() {
+            let _ = std::fs::remove_dir_all(&staging);
+            install?;
+        }
+    }
+
+    if !seeded.is_empty() && !seeded.ends_with('\n') {
+        seeded.push('\n');
+    }
+    seeded.push_str(SEED_ID);
+    seeded.push('\n');
+    std::fs::write(marker, seeded)
+}
+
 const EXAMPLE_PACKS: &[(&str, &[(&str, &[u8])])] = &[
+    (
+        "lucid-blocks",
+        LUCID_BLOCKS_PLUGIN_FILES,
+    ),
     (
         "neon-unit-01",
         &[
@@ -297,3 +388,125 @@ const EXAMPLE_PACKS: &[(&str, &[(&str, &[u8])])] = &[
         ],
     ),
 ];
+
+const LUCID_BLOCKS_PLUGIN_FILES: &[(&str, &[u8])] = &[
+    ("pack.json", include_bytes!("mashup/seed/lucid-blocks/pack.json")),
+    ("theme.json", include_bytes!("mashup/seed/lucid-blocks/theme.json")),
+    ("looking-glass.glsl", include_bytes!("mashup/seed/lucid-blocks/looking-glass.glsl")),
+];
+
+const LUCID_BLOCKS_V1_MANIFEST: &[u8] =
+    include_bytes!("mashup/seed/lucid-blocks/pack-v1.jsonc");
+
+const LUCID_RABBIT_PLUGIN_FILES: &[(&str, &[u8])] = &[
+    (
+        "neoism-plugin.json",
+        include_bytes!("mashup/plugin-seed/lucid-rabbit/neoism-plugin.json"),
+    ),
+    (
+        "init.lua",
+        include_bytes!("mashup/plugin-seed/lucid-rabbit/init.lua"),
+    ),
+];
+
+#[cfg(test)]
+mod seed_tests {
+    use super::{migrate_lucid_blocks_manifest_at, seed_first_party_plugins_at, LUCID_BLOCKS_V1_MANIFEST};
+
+    #[test]
+    fn lucid_blocks_migration_only_replaces_the_exact_first_manifest() {
+        let root = std::env::temp_dir().join(format!("neoism-lucid-pack-migrate-{}", std::process::id()));
+        let pack = root.join("lucid-blocks/pack.json");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(pack.parent().unwrap()).unwrap();
+        std::fs::write(&pack, LUCID_BLOCKS_V1_MANIFEST).unwrap();
+        assert!(migrate_lucid_blocks_manifest_at(&root).unwrap());
+        assert!(std::fs::read_to_string(&pack).unwrap().contains("io.neoism.lucid-birds"));
+
+        std::fs::write(&pack, "// user edit\n{}").unwrap();
+        assert!(!migrate_lucid_blocks_manifest_at(&root).unwrap());
+        assert_eq!(std::fs::read_to_string(&pack).unwrap(), "// user edit\n{}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn first_party_plugin_seed_never_overwrites_existing_package() {
+        let root = std::env::temp_dir().join(format!("neoism-lucid-seed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let plugin = root.join("plugins/io.neoism.lucid-birds");
+        std::fs::create_dir_all(&plugin).unwrap();
+        std::fs::write(plugin.join("init.lua"), "-- user edit").unwrap();
+        seed_first_party_plugins_at(&root).unwrap();
+        assert_eq!(std::fs::read_to_string(plugin.join("init.lua")).unwrap(), "-- user edit");
+        assert!(std::fs::read_to_string(root.join("plugins/.neoism-first-party-seeds")).unwrap().contains("io.neoism.lucid-birds@1"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn bundled_lucid_rabbit_manifest_uses_current_exact_capabilities() {
+        let manifest: neoism_lua::PluginManifest = serde_json::from_slice(
+            include_bytes!("mashup/plugin-seed/lucid-rabbit/neoism-plugin.json"),
+        ).unwrap();
+        assert_eq!(manifest.id, "io.neoism.lucid-birds");
+        assert_eq!(
+            manifest.capabilities.iter().map(neoism_lua::PluginCapability::key).collect::<Vec<_>>(),
+            ["config.current", "effect.emit"]
+        );
+    }
+
+    #[test]
+    fn freshly_seeded_lucid_rabbit_source_builds_as_a_sandboxed_candidate() {
+        let root = std::env::temp_dir().join(format!("neoism-lucid-source-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        seed_first_party_plugins_at(&root).unwrap();
+        let plugin_root = root.join("plugins/io.neoism.lucid-birds");
+        let discovered = neoism_lua::load_plugin_manifest(&plugin_root).unwrap();
+        let host = std::sync::Arc::new(neoism_lua::QueuedHost::default());
+        host.publish("config", serde_json::json!({
+            "appearance": { "mashup-pack": "lucid-blocks" }
+        }));
+        let candidate = neoism_lua::PluginRuntime::build_candidate(
+            &plugin_root,
+            &discovered.manifest,
+            neoism_lua::PluginRevision("seed-test".into()),
+            host.clone(),
+        ).unwrap();
+        let mut runtime = candidate.activate();
+        assert!(runtime.snapshot().panels.is_empty());
+        assert_eq!(runtime.snapshot().autocmds.len(), 1);
+        runtime.emit(neoism_lua::PluginEvent::new(
+            neoism_lua::PluginEventKind::AgentChanged,
+            serde_json::json!({ "composerRevision": 7, "composerLength": 23 }),
+            neoism_lua::ExecutionScope::Local,
+            Some("seed-test".into()),
+        ).unwrap()).unwrap();
+        let actions = host.drain_actions();
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].namespace, "effect");
+        assert_eq!(actions[0].action, "emit");
+        assert_eq!(actions[0].arguments["kind"], "particles");
+        assert_eq!(actions[0].arguments["seed"], 7);
+        assert_eq!(actions[0].arguments["polygons"].as_array().unwrap().len(), 7);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn lucid_rabbit_registers_nothing_outside_its_pack() {
+        let root = std::env::temp_dir().join(format!("neoism-lucid-inert-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        seed_first_party_plugins_at(&root).unwrap();
+        let plugin_root = root.join("plugins/io.neoism.lucid-birds");
+        let discovered = neoism_lua::load_plugin_manifest(&plugin_root).unwrap();
+        let host = std::sync::Arc::new(neoism_lua::QueuedHost::default());
+        host.publish("config", serde_json::json!({ "appearance": {} }));
+        let candidate = neoism_lua::PluginRuntime::build_candidate(
+            &plugin_root,
+            &discovered.manifest,
+            neoism_lua::PluginRevision("inert-test".into()),
+            host,
+        ).unwrap();
+        assert!(candidate.snapshot().panels.is_empty());
+        assert!(candidate.snapshot().autocmds.is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
+}

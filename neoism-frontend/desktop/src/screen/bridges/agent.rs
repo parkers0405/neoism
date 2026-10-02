@@ -222,7 +222,7 @@ impl Screen<'_> {
             .as_ref()
             .is_some_and(|a| a.side_panel().is_focused())
         {
-            if mods.alt_key() || mods.control_key() || mods.super_key() {
+            if mods.alt_key() || mods.super_key() {
                 return false;
             }
             let agent = self
@@ -232,6 +232,24 @@ impl Screen<'_> {
                 .as_mut()
                 .expect("Neoism agent pane exists");
             match key.logical_key.as_ref() {
+                Key::Character(ch)
+                    if mods.control_key() && ch.eq_ignore_ascii_case("d") =>
+                {
+                    let rows = agent.side_panel().last_panel_height_rows();
+                    agent.side_panel_mut().select_next_by((rows / 2).max(1));
+                    agent.maybe_request_side_panel_session_page();
+                    self.mark_dirty();
+                    return true;
+                }
+                Key::Character(ch)
+                    if mods.control_key() && ch.eq_ignore_ascii_case("u") =>
+                {
+                    let rows = agent.side_panel().last_panel_height_rows();
+                    agent.side_panel_mut().select_prev_by((rows / 2).max(1));
+                    self.mark_dirty();
+                    return true;
+                }
+                _ if mods.control_key() => return false,
                 Key::Named(NamedKey::ArrowDown) => {
                     agent.side_panel_mut().select_next();
                     agent.maybe_request_side_panel_session_page();
@@ -1032,7 +1050,6 @@ impl Screen<'_> {
         self.sync_agent_server_for_current_workspace();
         self.renderer.file_tree.set_focused(false);
         self.renderer.file_tree.set_active_path(None);
-        self.show_conversations_sidebar(false);
         self.reapply_chrome_layout();
         self.renderer.trail_cursor.reset();
         self.mark_dirty();
@@ -1384,8 +1401,7 @@ impl Screen<'_> {
                 agent.detail_panel_mut().set_focused(true);
                 if let Some(rect) = agent.detail_panel().last_panel_rect() {
                     if let Some(row) = agent.detail_panel().hit_test_row(mx, my, rect) {
-                        agent.detail_panel_mut().set_selected(row);
-                        let activated = agent.activate_detail_panel_subagent();
+                        let activated = agent.activate_clicked_detail_panel_subagent(row);
                         if activated {
                             agent.detail_panel_mut().set_focused(false);
                         }

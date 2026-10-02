@@ -110,6 +110,9 @@ impl NeoismAgentPane {
         if self.agent_label_changed_elapsed_ms().is_some() {
             return Some("agent_label_transition");
         }
+        if self.config_chip_transition().is_some() {
+            return Some("config_chip_hydration");
+        }
         if !self.has_conversation() {
             return Some("agent_home_wordmark");
         }
@@ -774,6 +777,22 @@ impl NeoismAgentPane {
         }
         self.switch_session(entry.id);
         true
+    }
+
+    /// Pointer clicks on the active child act as a compact return-to-main
+    /// toggle. Keyboard activation remains explicit: select `main session`
+    /// and press Enter.
+    pub fn activate_clicked_detail_panel_subagent(&mut self, row: usize) -> bool {
+        self.detail_panel.set_selected(row);
+        let clicked_active_child = row > 0
+            && self
+                .detail_panel
+                .selected_row()
+                .is_some_and(|entry| Some(entry.id.as_str()) == self.session_id.as_deref());
+        if clicked_active_child {
+            self.detail_panel.set_selected(0);
+        }
+        self.activate_detail_panel_subagent()
     }
 
     pub fn is_streaming(&self) -> bool {

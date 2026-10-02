@@ -29,6 +29,7 @@ pub static BUNDLED_DOCS: &[BundledDoc] = docs![
     "Neoism/Notes and Drawings.md",
     "Neoism/Navigation and Keybindings.md",
     "Neoism/Appearance.md",
+    "Neoism/Mash Up Packs.md",
     "Neoism Agent/The Neoism Agent.md",
     "Neoism Agent/Configure.md",
     "Neoism Agent/Providers.md",
@@ -130,5 +131,26 @@ mod tests {
             .unwrap()
             .body
             .contains("[[Computer Use]]"));
+    }
+
+    #[test]
+    fn mashup_pack_editor_plugin_policy_is_bundled_and_linked() {
+        let page = bundled_doc("Neoism/Mash Up Packs.md").unwrap();
+        for required in [
+            "editor-plugins",
+            "overlay",
+            "only",
+            "plugins.mashup-overrides",
+            "hard veto",
+            "last-known-good",
+            "same application operation",
+            "deferred GPU upload",
+        ] {
+            assert!(page.body.contains(required), "missing Mash Up Pack guidance: {required}");
+        }
+        assert!(bundled_doc("Neoism/Appearance.md")
+            .unwrap()
+            .body
+            .contains("[[Mash Up Packs]]"));
     }
 }

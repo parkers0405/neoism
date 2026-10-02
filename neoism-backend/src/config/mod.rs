@@ -102,11 +102,15 @@ pub struct Appearance {
     pub fonts: SugarloafFonts,
     #[serde(rename = "line-height", default = "default_line_height")]
     pub line_height: f32,
-    /// Active Mash Up Pack id (a directory under `packs/`). Applied on
-    /// startup: the pack's theme wins over `theme` above, and its
-    /// shader overlay / filters are re-applied. Empty/unset = no pack.
+    /// Active Mash Up Pack id (a directory under `packs/`). Its resolved
+    /// theme/font are persisted above; shader, filters, and look slots are
+    /// re-applied on startup. Empty/unset = no pack.
     #[serde(default, rename = "mashup-pack")]
     pub mashup_pack: Option<String>,
+    /// Appearance captured before the first active Mash Up Pack. Absent in
+    /// legacy configurations and never synthesized merely by loading config.
+    #[serde(default, rename = "mashup-baseline")]
+    pub mashup_baseline: Option<mashup::MashupBaseline>,
     /// Individual look-slot overrides (`[appearance.look.scrollbar]`,
     /// `…markdown]`, `…icons]`) — win field-by-field over the active
     /// Mash Up Pack's slots.
@@ -138,6 +142,7 @@ impl Default for Appearance {
             fonts: SugarloafFonts::default(),
             line_height: default_line_height(),
             mashup_pack: None,
+            mashup_baseline: None,
             look: mashup::LookConfig::default(),
             effects: effects::Effects::default(),
             force_theme: None,
@@ -417,6 +422,8 @@ pub struct PluginPreferences {
     pub grants: std::collections::BTreeMap<String, Vec<String>>,
     pub update_policy: PluginUpdatePolicy,
     pub trusted_sources: Vec<String>,
+    /// User replacements for fields in a pack's `editor-plugins` declaration.
+    pub mashup_overrides: std::collections::BTreeMap<String, mashup::EditorPluginOverride>,
 }
 
 /// The golden grouped `config.json`. Every domain is its own block —
@@ -800,6 +807,73 @@ pub fn write_neoism_preferences(
     write_settings(&updates)
 }
 
+/// Persist every config field owned by one Mash Up Pack activation in one
+/// JSONC edit and one filesystem write. `None` clears the corresponding pack,
+/// baseline, or font field.
+/// Theme/font values are the complete accepted candidate state, including
+/// unchanged user values when a pack does not own that slot.
+pub fn write_mashup_pack_settings(
+    mashup_pack: Option<&str>,
+    mashup_baseline: Option<&mashup::MashupBaseline>,
+    theme: &str,
+    font_family: Option<&str>,
+) -> std::io::Result<()> {
+    let updates = vec![
+        (
+            "appearance.mashup-pack",
+            mashup_pack
+                .map(|id| serde_json::Value::String(id.to_string()))
+                .unwrap_or(serde_json::Value::Null),
+        ),
+        (
+            "appearance.mashup-baseline",
+            mashup_baseline
+                .map(serde_json::to_value)
+                .transpose()
+                .map_err(std::io::Error::other)?
+                .unwrap_or(serde_json::Value::Null),
+        ),
+        (
+            "appearance.theme",
+            serde_json::Value::String(theme.to_string()),
+        ),
+        (
+            "appearance.fonts.family",
+            font_family
+                .map(|family| serde_json::Value::String(family.to_string()))
+                .unwrap_or(serde_json::Value::Null),
+        ),
+    ];
+    write_settings(&updates)
+}
+
+/// Persist a direct desktop theme choice. While a pack is active the choice is
+/// also the restoration target, composed into the same crash-atomic write.
+pub fn write_manual_theme_selection(theme: &str) -> std::io::Result<()> {
+    let config = Config::load();
+    let mut updates = vec![(
+        "appearance.theme",
+        serde_json::Value::String(theme.to_string()),
+    )];
+    if config
+        .appearance
+        .mashup_pack
+        .as_deref()
+        .is_some_and(|id| !id.trim().is_empty())
+    {
+        let mut baseline = config.appearance.mashup_baseline.unwrap_or(mashup::MashupBaseline {
+            theme: theme.to_string(),
+            font_family: config.appearance.fonts.family,
+        });
+        baseline.theme = theme.to_string();
+        updates.push((
+            "appearance.mashup-baseline",
+            serde_json::to_value(baseline).map_err(std::io::Error::other)?,
+        ));
+    }
+    write_settings(&updates)
+}
+
 /// Persist one setting to `config.json` for the GUI settings panel. The
 /// dotted `key` is the golden grouped path (`appearance.fonts.family`,
 /// `ui.window.opacity`, `editor.vim-mode`) and each segment nests an
@@ -844,7 +918,49 @@ fn write_settings(updates: &[(&str, serde_json::Value)]) -> std::io::Result<()> 
         return Ok(());
     }
     let path = create_config_file(None)?;
-    let mut content = std::fs::read_to_string(&path)?;
+    let content = std::fs::read_to_string(&path)?;
+    let content = settings_content_after_updates(&content, updates)?;
+    atomic_replace(&path, content.as_bytes())?;
+    invalidate_config_json_cache();
+    Ok(())
+}
+
+fn atomic_replace(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+
+    let parent = path
+        .parent()
+        .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "config path has no parent"))?;
+    let suffix = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
+    let temporary = parent.join(format!(".config.json.{}.{}.tmp", std::process::id(), suffix));
+    let permissions = std::fs::metadata(path).ok().map(|metadata| metadata.permissions());
+    let result = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        if let Some(permissions) = permissions {
+            file.set_permissions(permissions)?;
+        }
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        std::fs::rename(&temporary, path)?;
+        #[cfg(unix)]
+        std::fs::File::open(parent)?.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
+}
+
+fn settings_content_after_updates(
+    content: &str,
+    updates: &[(&str, serde_json::Value)],
+) -> std::io::Result<String> {
+    let mut content = content.to_string();
     for (key, value) in updates {
         content = jsonc_edit::set_path(
             &content,
@@ -852,9 +968,7 @@ fn write_settings(updates: &[(&str, serde_json::Value)]) -> std::io::Result<()> 
             value.clone(),
         )?;
     }
-    std::fs::write(path, content)?;
-    invalidate_config_json_cache();
-    Ok(())
+    Ok(content)
 }
 
 /// Upsert (or clear) a `keybinds.keys` binding override for `action` in
@@ -924,9 +1038,9 @@ fn invalidate_config_json_cache() {
     }
 }
 
-/// Persist `appearance.fonts.family` — Mash Up Packs use this so their
-/// font lands the same way a manual config edit would (the config watcher
-/// rebuilds the font library from the write).
+/// Persist `appearance.fonts.family` for individual font changes. Mash Up
+/// Pack activation uses `write_mashup_pack_settings` so pack-owned fields
+/// share one write.
 pub fn write_fonts_family(family: &str) -> std::io::Result<()> {
     write_setting(
         "appearance.fonts.family",
@@ -1489,7 +1603,10 @@ mod tests {
                     "disabled": ["dev.neoism.off"],
                     "grants": { "dev.neoism.git": ["git.read", "git.write"] },
                     "update-policy": "notify",
-                    "trusted-sources": ["https://github.com/neoism/"]
+                    "trusted-sources": ["https://github.com/neoism/"],
+                    "mashup-overrides": {
+                        "focused": { "mode": "only", "enabled": [], "disabled": ["dev.neoism.off"] }
+                    }
                 }
             }"#,
         );
@@ -1503,6 +1620,38 @@ mod tests {
             config.plugins.trusted_sources,
             ["https://github.com/neoism/"]
         );
+        let mashup = &config.plugins.mashup_overrides["focused"];
+        assert_eq!(mashup.mode, Some(mashup::EditorPluginMode::Only));
+        assert_eq!(mashup.enabled, Some(Vec::new()));
+    }
+
+    #[test]
+    fn mashup_owned_fields_are_composed_for_one_write() {
+        let updates = [
+            ("appearance.mashup-pack", serde_json::json!("focused")),
+            ("appearance.mashup-baseline", serde_json::json!({
+                "theme": "global-theme", "font-family": null
+            })),
+            ("appearance.theme", serde_json::json!("focused-theme")),
+            ("appearance.fonts.family", serde_json::json!("Iosevka")),
+        ];
+        let content = settings_content_after_updates(
+            r#"{
+                // unrelated settings and comments survive
+                "appearance": { "line-height": 1.3 },
+                "editor": { "minimap": true }
+            }"#,
+            &updates,
+        ).unwrap();
+        let config = deserialize_config(&content).unwrap();
+        assert_eq!(config.appearance.mashup_pack.as_deref(), Some("focused"));
+        assert_eq!(config.appearance.mashup_baseline, Some(mashup::MashupBaseline {
+            theme: "global-theme".into(), font_family: None,
+        }));
+        assert_eq!(config.appearance.theme, "focused-theme");
+        assert_eq!(config.appearance.fonts.family.as_deref(), Some("Iosevka"));
+        assert!(config.editor.minimap);
+        assert!(content.contains("unrelated settings and comments survive"));
     }
 
     #[test]

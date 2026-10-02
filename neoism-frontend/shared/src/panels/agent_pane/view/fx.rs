@@ -468,6 +468,180 @@ pub fn render(
     }
 }
 
+pub const MAX_PARTICLE_BURSTS: usize = 64;
+
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ParticleEffectSpec {
+    pub seed: u64,
+    pub duration_seconds: f32,
+    pub angle_min_degrees: f32,
+    pub angle_max_degrees: f32,
+    pub speed_min: f32,
+    pub speed_max: f32,
+    #[serde(default)]
+    pub gravity: f32,
+    #[serde(default)]
+    pub wobble: f32,
+    #[serde(default)]
+    pub origin_spread: f32,
+    pub size_min: f32,
+    pub size_max: f32,
+    #[serde(default = "default_flap_hz")]
+    pub flap_hz: f32,
+    #[serde(default = "default_flap_amplitude")]
+    pub flap_amplitude: f32,
+    pub polygons: Vec<ParticlePolygon>,
+}
+
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ParticlePolygon {
+    pub color: String,
+    pub points: Vec<[f32; 3]>,
+}
+
+const fn default_flap_hz() -> f32 {
+    12.0
+}
+
+const fn default_flap_amplitude() -> f32 {
+    0.45
+}
+
+impl ParticleEffectSpec {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        let scalars = [
+            self.duration_seconds,
+            self.angle_min_degrees,
+            self.angle_max_degrees,
+            self.speed_min,
+            self.speed_max,
+            self.gravity,
+            self.wobble,
+            self.origin_spread,
+            self.size_min,
+            self.size_max,
+            self.flap_hz,
+            self.flap_amplitude,
+        ];
+        if scalars.iter().any(|value| !value.is_finite()) {
+            return Err("particle values must be finite");
+        }
+        if !(0.1..=3.0).contains(&self.duration_seconds) {
+            return Err("particle durationSeconds must be between 0.1 and 3.0");
+        }
+        if self.speed_min < 0.0 || self.speed_max < self.speed_min || self.speed_max > 1_200.0 {
+            return Err("particle speed range is invalid");
+        }
+        if self.size_min < 1.0 || self.size_max < self.size_min || self.size_max > 96.0 {
+            return Err("particle size range is invalid");
+        }
+        if self.gravity.abs() > 1_200.0 || self.wobble.abs() > 240.0 || self.origin_spread.abs() > 400.0 {
+            return Err("particle motion exceeds host limits");
+        }
+        if !(0.0..=30.0).contains(&self.flap_hz) || !(0.0..=2.0).contains(&self.flap_amplitude) {
+            return Err("particle flap range is invalid");
+        }
+        if self.polygons.is_empty() || self.polygons.len() > 12 {
+            return Err("particle sprites require 1 to 12 polygons");
+        }
+        for polygon in &self.polygons {
+            if !matches!(
+                polygon.color.as_str(),
+                "foreground" | "muted" | "accent" | "red" | "green" | "yellow" | "blue" | "magenta" | "cyan" | "white" | "black"
+            ) {
+                return Err("particle polygon uses an unknown theme color");
+            }
+            if polygon.points.len() < 3 || polygon.points.len() > 12 {
+                return Err("particle polygons require 3 to 12 points");
+            }
+            if polygon.points.iter().flatten().any(|value| !value.is_finite() || value.abs() > 4.0) {
+                return Err("particle polygon points must be finite and normalized");
+            }
+        }
+        Ok(())
+    }
+}
+
+fn particle_random(seed: u64, stream: u64) -> f32 {
+    let mut value = seed.wrapping_add(stream.wrapping_mul(0x9e37_79b9_7f4a_7c15));
+    value ^= value >> 30;
+    value = value.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value ^= value >> 27;
+    value = value.wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^= value >> 31;
+    (value as u32) as f32 / u32::MAX as f32
+}
+
+pub fn render_particle(
+    sugarloaf: &mut Sugarloaf,
+    rect: [f32; 4],
+    elapsed: f32,
+    spec: &ParticleEffectSpec,
+    scale: f32,
+    theme: &IdeTheme,
+) {
+    let s = scale.clamp(0.5, 3.0);
+    let progress = (elapsed / spec.duration_seconds).clamp(0.0, 1.0);
+    let angle_degrees = spec.angle_min_degrees
+        + particle_random(spec.seed, 1) * (spec.angle_max_degrees - spec.angle_min_degrees);
+    let angle = angle_degrees.to_radians();
+    let speed = (spec.speed_min
+        + particle_random(spec.seed, 2) * (spec.speed_max - spec.speed_min))
+        * s;
+    let origin_x = rect[0] + rect[2] * 0.5
+        + (particle_random(spec.seed, 3) - 0.5) * spec.origin_spread * s;
+    let origin_y = rect[1] + rect[3] - 12.0 * s;
+    let x = origin_x
+        + angle.cos() * speed * elapsed
+        + (elapsed * 7.0 + particle_random(spec.seed, 4) * 6.0).sin()
+            * spec.wobble
+            * s;
+    let y = origin_y
+        + angle.sin() * speed * elapsed
+        + elapsed * elapsed * spec.gravity * 0.5 * s;
+    let size = (spec.size_min
+        + particle_random(spec.seed, 5) * (spec.size_max - spec.size_min))
+        * s;
+    let flap = (elapsed * spec.flap_hz * std::f32::consts::TAU
+        + particle_random(spec.seed, 6) * std::f32::consts::TAU)
+        .sin();
+    let fade = ((1.0 - progress) / 0.22).clamp(0.0, 1.0);
+    let direction = if angle.cos() < 0.0 { -1.0 } else { 1.0 };
+    for polygon in &spec.polygons {
+        let mut color = particle_color(theme, &polygon.color);
+        color[3] *= fade;
+        let points = polygon
+            .points
+            .iter()
+            .map(|[px, py, flap_weight]| {
+                (
+                    x + px * size * direction,
+                    y + (py + flap * flap_weight * spec.flap_amplitude) * size,
+                )
+            })
+            .collect::<Vec<_>>();
+        sugarloaf.polygon(&points, DEPTH, color);
+    }
+}
+
+fn particle_color(theme: &IdeTheme, token: &str) -> [f32; 4] {
+    theme.f32(match token {
+        "muted" => theme.muted,
+        "accent" => theme.accent,
+        "red" => theme.red,
+        "green" => theme.green,
+        "yellow" => theme.yellow,
+        "blue" => theme.blue,
+        "magenta" => theme.magenta,
+        "cyan" => theme.cyan,
+        "white" => theme.white,
+        "black" => theme.black,
+        _ => theme.fg,
+    })
+}
+
 /// Jesus on a golden throne at center, light streaming down, and
 /// worshipers gathering from both sides to bow in staggered waves
 /// while music notes float up. Reverent, 16 pixels tall.

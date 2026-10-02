@@ -72,6 +72,12 @@ Known slots are `top.left`, `top.right`, `status.left`, `status.right`, `bottom.
 
 `neoism.panel.register(id, panel)` accepts `{ title, icon?, location?, visible?, content?, render? }`. `location` is kebab-case `left`, `right`, `bottom`, `center` or `overlay` (default), `visible` defaults true, and `content` is an array of UI contribution DTOs. `render` is called at registration and retained as an application-executor callback for host event refreshes; it never runs during paint or hit testing.
 
+Desktop `AgentChanged` payloads include `composerRevision`, `composerLength`, and `composerEmpty`. `composerRevision` advances immediately for any focused Agent composer edit, so retained `render(event)` callbacks can react to typing, deletion, paste, history recall, clear, and submit without key interception or polling. Composer text remains private and is not included in the event.
+
+### `neoism.effect.emit(args)`
+
+`neoism.effect.emit({ kind = "particles", ... })` queues one bounded, non-interactive vector sprite over the active Agent timeline. The plugin defines normalized polygons as `{ color, points = {{x, y, flapWeight}, ...} }` plus `seed`, `durationSeconds`, `angleMinDegrees`, `angleMaxDegrees`, `speedMin`, `speedMax`, `gravity`, `wobble`, `originSpread`, `sizeMin`, `sizeMax`, `flapHz`, and `flapAmplitude`. Colors are theme tokens. The application validates the exact plugin owner, `effect.emit` capability, finite values, motion limits, and polygon budgets; Rust then owns all per-frame state, rendering, clipping, and retirement. Lua is never called from paint, hit testing, or animation frames, and expired particles leave no redraw owner.
+
 ### Chrome surfaces
 
 `neoism.ui.surface("chrome.actions", patch)` accepts `camelCase` `{ visible?, dock?, thickness?, order? }`, where `dock` is lowercase `top`, `bottom`, `left` or `right`, and thickness must be finite and non-negative.

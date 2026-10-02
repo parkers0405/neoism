@@ -2594,6 +2594,21 @@ fn approval_card_persists_across_parent_child_navigation() {
 }
 
 #[test]
+fn clicking_the_active_detail_child_returns_to_main() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("child".to_string());
+    pane.parent_session_id = Some("root".to_string());
+    pane.detail_panel.set_subagents(vec![
+        NeoismAgentSessionEntry::new("root", "main session", "return"),
+        NeoismAgentSessionEntry::new("child", "Worker", "general"),
+    ]);
+
+    assert!(pane.activate_clicked_detail_panel_subagent(1));
+    assert_eq!(pane.session_id.as_deref(), Some("root"));
+    assert_eq!(pane.detail_panel.selected_index(), 0);
+}
+
+#[test]
 fn approval_card_does_not_leak_into_an_unrelated_family() {
     let mut pane = NeoismAgentPane::default();
     pane.session_id = Some("root-a".to_string());
@@ -3656,10 +3671,24 @@ fn tab_mode_switch_rearms_agent_chip_transition() {
 fn with_directory_queues_config_defaults_for_runtime() {
     let mut pane = NeoismAgentPane::with_directory(Some("/tmp/project".to_string()));
 
+    assert!(matches!(
+        pane.config_chip_transition(),
+        Some(neoism_ui::panels::agent_pane::state::ConfigChipTransition::Loading { .. })
+    ));
+    assert_eq!(pane.animation_reason(), Some("config_chip_hydration"));
     assert_eq!(
         pane.drain_pending_outbound(),
         vec![OutboundAgentCommand::ApplyConfigDefaults]
     );
+
+    pane.background_tx
+        .send(NeoismAgentBackgroundUpdate::ConfigDefaultsFailed)
+        .unwrap();
+    pane.drain_background_updates();
+    assert!(matches!(
+        pane.config_chip_transition(),
+        Some(neoism_ui::panels::agent_pane::state::ConfigChipTransition::Settling { .. })
+    ));
 }
 
 #[test]

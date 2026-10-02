@@ -22,6 +22,80 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+/// The user's effective appearance before the first active Mash Up Pack.
+/// It remains unchanged while switching packs and is restored on deactivation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct MashupBaseline {
+    pub theme: String,
+    pub font_family: Option<String>,
+}
+
+/// Complete persisted appearance state produced by one pack transition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppearanceTransition {
+    pub mashup_pack: Option<String>,
+    pub mashup_baseline: Option<MashupBaseline>,
+    pub theme: String,
+    pub font_family: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppearanceTransitionError {
+    pub pack_id: String,
+}
+
+impl std::fmt::Display for AppearanceTransitionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "Mash Up Pack not found: {}", self.pack_id)
+    }
+}
+
+impl std::error::Error for AppearanceTransitionError {}
+
+/// How a Mash Up Pack selects editor Lua plugins.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EditorPluginMode {
+    /// Keep the normal globally eligible set and subtract `disabled`.
+    #[default]
+    Overlay,
+    /// Admit only `enabled` roots and their dependency closure.
+    Only,
+}
+
+/// A pack's normalized editor-only Lua plugin declaration.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct EditorPluginSelection {
+    pub mode: EditorPluginMode,
+    pub enabled: Vec<String>,
+    pub disabled: Vec<String>,
+}
+
+/// Per-pack user overrides. `None` means inherit the pack field, while
+/// `Some([])` explicitly clears a list.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct EditorPluginOverride {
+    pub mode: Option<EditorPluginMode>,
+    pub enabled: Option<Vec<String>>,
+    pub disabled: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EditorPluginSelectionError {
+    pub plugin_id: String,
+}
+
+impl std::fmt::Display for EditorPluginSelectionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "editor plugin `{}` is both enabled and disabled", self.plugin_id)
+    }
+}
+
+impl std::error::Error for EditorPluginSelectionError {}
+
 /// Look slots beyond theme/shader: scrollbars, markdown decorations,
 /// icon overrides. A pack sets these from top-level sections of its
 /// `pack.toml` (`[scrollbar]`, `[markdown]`, `[icons]`); the user can
@@ -206,12 +280,17 @@ pub struct MashupPack {
     /// Scrollbar / markdown / icon slots from the manifest's top-level
     /// `[scrollbar]` / `[markdown]` / `[icons]` sections.
     pub look: LookConfig,
+    /// Editor Lua plugin policy shipped by this pack. Agent and daemon
+    /// plugins are intentionally outside this selection.
+    pub editor_plugins: Option<EditorPluginSelection>,
     pub dir: PathBuf,
 }
 
 #[derive(Deserialize)]
 struct PackFile {
     pack: PackSection,
+    #[serde(default, rename = "editor-plugins")]
+    editor_plugins: Option<EditorPluginSelection>,
     #[serde(flatten)]
     look: LookConfig,
 }
@@ -477,6 +556,7 @@ pub fn load_mashup_packs() -> Vec<MashupPack> {
                         opacity: section.wallpaper_opacity.unwrap_or(1.0).clamp(0.0, 1.0),
                     }),
                 look: file.look,
+                editor_plugins: file.editor_plugins,
                 id,
                 dir,
             })
@@ -489,9 +569,148 @@ pub fn find_mashup_pack(id: &str) -> Option<MashupPack> {
     load_mashup_packs().into_iter().find(|pack| pack.id == id)
 }
 
+/// Resolve a Mash Up Pack appearance transition without reading or writing disk.
+/// The original baseline is the only fallback for omitted pack slots, preventing
+/// values from the previously active pack from leaking into the next one.
+pub fn resolve_appearance_transition(
+    active_pack: Option<&str>,
+    baseline: Option<&MashupBaseline>,
+    effective_theme: &str,
+    effective_font_family: Option<&str>,
+    requested_pack: Option<&str>,
+    packs: &[MashupPack],
+) -> Result<AppearanceTransition, AppearanceTransitionError> {
+    let active_pack = active_pack.map(str::trim).filter(|id| !id.is_empty());
+    let requested_pack = requested_pack.map(str::trim).filter(|id| !id.is_empty());
+
+    let requested = requested_pack
+        .map(|id| {
+            packs
+                .iter()
+                .find(|pack| pack.id == id)
+                .ok_or_else(|| AppearanceTransitionError { pack_id: id.to_string() })
+        })
+        .transpose()?;
+
+    if active_pack.is_none() && requested.is_none() {
+        return Ok(AppearanceTransition {
+            mashup_pack: None,
+            mashup_baseline: None,
+            theme: effective_theme.to_string(),
+            font_family: effective_font_family.map(str::to_string),
+        });
+    }
+
+    // A legacy active pack has no trustworthy pre-pack state. Preserve the
+    // current effective values on its next explicit transition rather than
+    // guessing from defaults or recapturing during startup.
+    let capture_effective = || MashupBaseline {
+        theme: effective_theme.to_string(),
+        font_family: effective_font_family.map(str::to_string),
+    };
+    let baseline = if active_pack.is_none() {
+        // A stale baseline is never authoritative while no pack is active.
+        capture_effective()
+    } else {
+        baseline.cloned().unwrap_or_else(capture_effective)
+    };
+
+    let Some(requested) = requested else {
+        return Ok(AppearanceTransition {
+            mashup_pack: None,
+            mashup_baseline: None,
+            theme: baseline.theme,
+            font_family: baseline.font_family,
+        });
+    };
+
+    Ok(AppearanceTransition {
+        mashup_pack: Some(requested.id.clone()),
+        mashup_baseline: Some(baseline.clone()),
+        theme: requested.theme.clone().unwrap_or_else(|| baseline.theme.clone()),
+        font_family: requested
+            .font_family
+            .clone()
+            .or_else(|| baseline.font_family.clone()),
+    })
+}
+
+fn normalize_plugin_ids(ids: Vec<String>) -> Vec<String> {
+    let mut ids = ids
+        .into_iter()
+        .map(|id| id.trim().to_string())
+        .filter(|id| !id.is_empty())
+        .collect::<Vec<_>>();
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+/// Resolve the effective editor Lua plugin selection for an active pack.
+/// This is pure: callers provide the already-loaded packs and preferences.
+/// No active pack, an unknown pack, or a pack with no declaration/override
+/// returns `None`, preserving the global plugin policy exactly.
+pub fn resolve_editor_plugin_selection(
+    active_pack: Option<&str>,
+    packs: &[MashupPack],
+    overrides: &BTreeMap<String, EditorPluginOverride>,
+) -> Result<Option<EditorPluginSelection>, EditorPluginSelectionError> {
+    let Some(active_pack) = active_pack.map(str::trim).filter(|id| !id.is_empty()) else {
+        return Ok(None);
+    };
+    let Some(pack) = packs.iter().find(|pack| pack.id == active_pack) else {
+        return Ok(None);
+    };
+    let override_value = overrides.get(active_pack);
+    if pack.editor_plugins.is_none() && override_value.is_none() {
+        return Ok(None);
+    }
+
+    let mut selection = pack.editor_plugins.clone().unwrap_or_default();
+    if let Some(override_value) = override_value {
+        if let Some(mode) = override_value.mode {
+            selection.mode = mode;
+        }
+        if let Some(enabled) = &override_value.enabled {
+            selection.enabled = enabled.clone();
+        }
+        if let Some(disabled) = &override_value.disabled {
+            selection.disabled = disabled.clone();
+        }
+    }
+    selection.enabled = normalize_plugin_ids(selection.enabled);
+    selection.disabled = normalize_plugin_ids(selection.disabled);
+    if let Some(plugin_id) = selection
+        .enabled
+        .iter()
+        .find(|id| selection.disabled.binary_search(id).is_ok())
+    {
+        return Err(EditorPluginSelectionError {
+            plugin_id: plugin_id.clone(),
+        });
+    }
+    Ok(Some(selection))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pack(id: &str, editor_plugins: Option<EditorPluginSelection>) -> MashupPack {
+        MashupPack {
+            id: id.into(),
+            name: id.into(),
+            description: String::new(),
+            theme: None,
+            shader_overlay: None,
+            filters: Vec::new(),
+            font_family: None,
+            wallpaper: None,
+            look: LookConfig::default(),
+            editor_plugins,
+            dir: PathBuf::new(),
+        }
+    }
 
     fn scratch_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir()
@@ -605,5 +824,131 @@ cyan = "#94e2d5"
         );
         assert_eq!(resolve_asset(&dir, "/abs/path.glsl"), "/abs/path.glsl");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn editor_plugin_declaration_parses_kebab_case() {
+        let file: PackFile = super::super::parse_config_content(
+            Path::new("pack.json"),
+            r#"{
+                "pack": {},
+                "editor-plugins": {
+                    "mode": "only",
+                    "enabled": [" dev.example.a ", "dev.example.a"],
+                    "disabled": ["dev.example.b"]
+                }
+            }"#,
+        ).unwrap();
+        let selection = file.editor_plugins.unwrap();
+        assert_eq!(selection.mode, EditorPluginMode::Only);
+        assert_eq!(selection.enabled.len(), 2);
+    }
+
+    #[test]
+    fn resolver_preserves_no_pack_behavior_and_normalizes_lists() {
+        let packs = vec![pack("focused", Some(EditorPluginSelection {
+            mode: EditorPluginMode::Overlay,
+            enabled: vec![" z ".into(), "".into(), "z".into()],
+            disabled: vec![" b ".into(), "a".into()],
+        }))];
+        assert_eq!(resolve_editor_plugin_selection(None, &packs, &BTreeMap::new()).unwrap(), None);
+        assert_eq!(resolve_editor_plugin_selection(Some("missing"), &packs, &BTreeMap::new()).unwrap(), None);
+        let resolved = resolve_editor_plugin_selection(Some("focused"), &packs, &BTreeMap::new()).unwrap().unwrap();
+        assert_eq!(resolved.enabled, ["z"]);
+        assert_eq!(resolved.disabled, ["a", "b"]);
+    }
+
+    #[test]
+    fn explicit_empty_override_replaces_pack_list() {
+        let packs = vec![pack("focused", Some(EditorPluginSelection {
+            mode: EditorPluginMode::Only,
+            enabled: vec!["dev.example.a".into()],
+            disabled: vec!["dev.example.b".into()],
+        }))];
+        let overrides = BTreeMap::from([("focused".into(), EditorPluginOverride {
+            enabled: Some(Vec::new()),
+            disabled: Some(Vec::new()),
+            mode: None,
+        })]);
+        let resolved = resolve_editor_plugin_selection(Some("focused"), &packs, &overrides).unwrap().unwrap();
+        assert_eq!(resolved.mode, EditorPluginMode::Only);
+        assert!(resolved.enabled.is_empty());
+        assert!(resolved.disabled.is_empty());
+    }
+
+    #[test]
+    fn resolver_rejects_first_sorted_conflict() {
+        let packs = vec![pack("bad", Some(EditorPluginSelection {
+            mode: EditorPluginMode::Overlay,
+            enabled: vec!["z".into(), "a".into()],
+            disabled: vec!["z".into(), "a".into()],
+        }))];
+        let error = resolve_editor_plugin_selection(Some("bad"), &packs, &BTreeMap::new()).unwrap_err();
+        assert_eq!(error.plugin_id, "a");
+    }
+
+    #[test]
+    fn appearance_transition_captures_null_font_and_uses_baseline_for_omitted_slots() {
+        let mut a = pack("a", None);
+        a.theme = Some("alice".into());
+        let mut b = pack("b", None);
+        b.font_family = Some("Rabbit Mono".into());
+        let packs = vec![a, b];
+
+        let first = resolve_appearance_transition(None, None, "global", None, Some("a"), &packs).unwrap();
+        assert_eq!(first.theme, "alice");
+        assert_eq!(first.font_family, None);
+        assert_eq!(first.mashup_baseline, Some(MashupBaseline { theme: "global".into(), font_family: None }));
+
+        let switched = resolve_appearance_transition(
+            first.mashup_pack.as_deref(),
+            first.mashup_baseline.as_ref(),
+            &first.theme,
+            first.font_family.as_deref(),
+            Some("b"),
+            &packs,
+        ).unwrap();
+        assert_eq!(switched.theme, "global");
+        assert_eq!(switched.font_family.as_deref(), Some("Rabbit Mono"));
+        assert_eq!(switched.mashup_baseline, first.mashup_baseline);
+
+        let stale = MashupBaseline { theme: "stale".into(), font_family: Some("stale-font".into()) };
+        let recaptured = resolve_appearance_transition(None, Some(&stale), "current", None, Some("a"), &packs).unwrap();
+        assert_eq!(recaptured.mashup_baseline, Some(MashupBaseline { theme: "current".into(), font_family: None }));
+    }
+
+    #[test]
+    fn appearance_transition_deactivation_restores_and_clears() {
+        let baseline = MashupBaseline { theme: "global".into(), font_family: None };
+        let restored = resolve_appearance_transition(Some("a"), Some(&baseline), "alice", Some("Pack Font"), None, &[]).unwrap();
+        assert_eq!(restored.mashup_pack, None);
+        assert_eq!(restored.mashup_baseline, None);
+        assert_eq!(restored.theme, "global");
+        assert_eq!(restored.font_family, None);
+
+        let idle = resolve_appearance_transition(None, Some(&baseline), "manual", None, None, &[]).unwrap();
+        assert_eq!(idle.theme, "manual");
+        assert_eq!(idle.mashup_baseline, None);
+    }
+
+    #[test]
+    fn legacy_active_pack_synthesizes_current_effective_state_on_transition() {
+        let mut next = pack("next", None);
+        next.font_family = Some("Rabbit Mono".into());
+        let transition = resolve_appearance_transition(
+            Some("legacy"), None, "legacy-effective", None, Some("next"), &[next],
+        ).unwrap();
+        assert_eq!(transition.theme, "legacy-effective");
+        assert_eq!(transition.mashup_baseline, Some(MashupBaseline {
+            theme: "legacy-effective".into(), font_family: None,
+        }));
+    }
+
+    #[test]
+    fn appearance_transition_rejects_unknown_requested_pack() {
+        assert_eq!(
+            resolve_appearance_transition(None, None, "global", None, Some("missing"), &[]).unwrap_err().pack_id,
+            "missing"
+        );
     }
 }

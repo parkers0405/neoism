@@ -183,7 +183,7 @@ impl Screen<'_> {
                 self.apply_shader_overlay(path);
             }
             ModalAction::ApplyMashupPack { id } => {
-                self.apply_mashup_pack(id);
+                self.request_mashup_pack(id);
             }
             ModalAction::RunEditorCommand { command: _ } => {
                 // nvim removed; native editor equivalent TBD.

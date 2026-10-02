@@ -1,0 +1,14 @@
+{
+  "id": "io.neoism.lucid-birds",
+  "name": "Lucid Birds",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "editor": { "entrypoint": "init.lua" },
+  "platforms": ["linux", "macos", "windows"],
+  "dependencies": [],
+  "triggers": [],
+  "capabilities": [
+    "config.current",
+    "effect.emit"
+  ]
+}

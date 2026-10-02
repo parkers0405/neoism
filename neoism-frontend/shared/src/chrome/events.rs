@@ -954,10 +954,24 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         let alt = key.modifiers.contains(Modifiers::ALT);
         let meta = key.modifiers.contains(Modifiers::META);
 
-        if self.conversations_visible && !ctrl && !alt && !meta {
+        if self.conversations_visible && !alt && !meta {
             if let Some(pane) = self.agent_pane.as_mut() {
                 if pane.side_panel().is_focused() {
                     match &key.logical {
+                        LogicalKey::Character(ch)
+                            if ctrl && !shift && ch.eq_ignore_ascii_case("d") =>
+                        {
+                            let rows = pane.side_panel().last_panel_height_rows();
+                            pane.side_panel_mut().select_next_by((rows / 2).max(1));
+                            pane.maybe_request_side_panel_session_page();
+                        }
+                        LogicalKey::Character(ch)
+                            if ctrl && !shift && ch.eq_ignore_ascii_case("u") =>
+                        {
+                            let rows = pane.side_panel().last_panel_height_rows();
+                            pane.side_panel_mut().select_prev_by((rows / 2).max(1));
+                        }
+                        _ if ctrl => return false,
                         LogicalKey::Named(NamedKey::ArrowDown) => {
                             pane.side_panel_mut().select_next();
                             pane.maybe_request_side_panel_session_page();
@@ -966,14 +980,20 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                             pane.side_panel_mut().select_prev()
                         }
                         LogicalKey::Named(NamedKey::Enter) => {
-                            self.pending_conversation_open =
-                                pane.side_panel().selected_session().and_then(|entry| {
+                            if pane.side_panel().new_chat_selected() {
+                                self.apply_top_bar_action(TopBarAction::OpenAgent);
+                            } else {
+                                self.pending_conversation_open = pane
+                                    .side_panel()
+                                    .selected_session()
+                                    .and_then(|entry| {
                                     entry
                                         .external_preview
                                         .as_ref()
                                         .map(|preview| preview.neoism_session_id.clone())
                                         .unwrap_or_else(|| Some(entry.id.clone()))
-                                });
+                                    });
+                            }
                         }
                         LogicalKey::Named(NamedKey::Escape) => {
                             pane.side_panel_mut().set_focused(false)
@@ -1270,7 +1290,6 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             tree.set_focused(false);
         }
         self.blur(PanelKey::FileTree);
-        self.show_conversations(false);
         idx
     }
 
@@ -1716,6 +1735,16 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                     ..
                 }
             ) {
+                return true;
+            }
+            let new_chat_hit = self.agent_pane.as_ref().is_some_and(|pane| {
+                matches!(pane.side_panel().new_chat_hit(*x, *y), Some(None))
+            });
+            if new_chat_hit {
+                if let Some(pane) = self.agent_pane.as_mut() {
+                    pane.side_panel_mut().select_new_chat();
+                }
+                self.apply_top_bar_action(TopBarAction::OpenAgent);
                 return true;
             }
             if let Some(pane) = self.agent_pane.as_mut() {
@@ -2298,17 +2327,21 @@ mod tests {
 
         chrome.set_agent_panel_preferences(true, true);
         chrome.open_neoism_agent_tab(42);
-        assert!(chrome.conversations_visible);
+        assert!(!chrome.conversations_visible);
         assert!(!chrome.agent_pane().unwrap().side_panel().is_focused());
         assert!(chrome.agent_pane().unwrap().side_panel().user_hidden());
 
+        chrome.toggle_conversations();
+        assert!(chrome.conversations_visible);
+        chrome.open_neoism_agent_tab(43);
+        assert!(chrome.conversations_visible);
         chrome.toggle_agent_details_panel();
         assert!(!chrome.agent_pane().unwrap().side_panel().user_hidden());
         assert!(chrome.conversations_visible);
     }
 
     #[test]
-    fn hidden_provider_chooser_cannot_queue_new_chat_from_terminal_tab() {
+    fn catalog_new_chat_opens_blank_agent_tab_from_terminal_tab() {
         let mut chrome = chrome_with_active_agent();
         let mut tabs = chrome.buffer_tabs.tabs().to_vec();
         let mut terminal = tabs[0].clone();
@@ -2335,13 +2368,10 @@ mod tests {
         let x = rect.x + 12.0;
         let action_y = rect.y + 24.0;
         assert!(chrome.handle_side_panel_pointer(&click(x, action_y), x, action_y));
-        assert!(!chrome
-            .agent_pane()
-            .unwrap()
-            .side_panel()
-            .provider_menu_open());
-        let codex_y = rect.y + 12.0 + 28.0 * 4.5;
-        assert!(chrome.handle_side_panel_pointer(&click(x, codex_y), x, codex_y));
+        assert_eq!(
+            chrome.drain_top_bar_action(),
+            Some(TopBarAction::OpenAgent)
+        );
         assert!(chrome.take_conversation_new().is_none());
         assert!(chrome.take_conversation_open().is_none());
     }

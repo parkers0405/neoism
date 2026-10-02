@@ -249,7 +249,8 @@ pub fn default_config_file_content() -> String {
     //     "theme": "tokyo_night",    // IDE theme: pastel_dark | nvchad_one | tokyo_night | catppuccin_mocha
     //     "palette": "lucario",      // terminal color file in themes/<name>.json
     //     "line-height": 1.2,
-    //     "mashup-pack": "synth",    // active Mash Up Pack under packs/<id>
+    //     "mashup-pack": "lucid-blocks", // active Mash Up Pack under packs/<id>; picker captures/restores your prior theme/font
+    //     // "mashup-baseline": { "theme": "tokyo_night", "font-family": null }, // Neoism-managed while a pack is active
     //     "fonts": { "family": "CascadiaCode", "size": 14.0, "weight": 400 },
     //     "effects": { "trail-cursor": true },
     // },
@@ -301,6 +302,9 @@ pub fn default_config_file_content() -> String {
     //     "grants": { "dev.example.git": ["git.read", "git.write"] },
     //     "update-policy": "manual", // manual | notify | automatic
     //     "trusted-sources": ["https://github.com/example/"],
+    //     "mashup-overrides": { // fields replace the active pack's editor-plugins fields; [] explicitly clears
+    //         "my-pack": { "mode": "overlay", "disabled": ["dev.example.noisy"] }
+    //     },
     // },
 
     // ── [keybinds] — override the built-in shortcuts ──────────────
@@ -309,7 +313,7 @@ pub fn default_config_file_content() -> String {
     // ── [agent] — the coding agent (its own block, same file) ─────
     // "agent": {
     //     "default-chat-source": "neoism", // neoism | opencode | claude-code | codex; new chat source, not agent persona
-    //     "conversations-panel-enabled": true, // allow and auto-open the left panel with Alt+A
+    //     "conversations-panel-enabled": true, // allow the left Conversations panel toggled by Alt+C
     //     "details-panel-enabled": true,       // allow the in-chat right panel and Alt+H
     //     "model": "anthropic/claude-opus-5",
     //     "smallModel": "anthropic/claude-haiku-4-5",

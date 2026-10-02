@@ -718,6 +718,9 @@ pub struct Screen<'screen> {
     /// loop (which can borrow both windows' routes) completes it.
     pending_cross_window_tab_move: Option<(usize, u64, usize)>,
     pending_lua_plugin_actions: Vec<(String, neoism_ui::panels::extensions_page::LuaPluginAction)>,
+    /// Latest pack intent from picker/modal input. The application layer
+    /// drains it and owns validation, persistence, Lua, and visual commit.
+    pending_mashup_pack_request: Option<Option<String>>,
     pub daemon_pane_layout: daemon_layout::ScreenPaneLayoutCache,
     /// Wave 7A multiplayer presence: remote peer cursors per buffer id,
     /// fed from daemon `CrdtReply` pushes. Renderer reads it per frame
@@ -1788,6 +1791,7 @@ impl Screen<'_> {
             pending_detached_workspace: None,
             pending_cross_window_tab_move: None,
             pending_lua_plugin_actions: Vec::new(),
+            pending_mashup_pack_request: None,
             daemon_pane_layout: daemon_layout::ScreenPaneLayoutCache::default(),
             remote_presence: neoism_ui::editor::crdt::RemotePresenceStore::new(),
             presence_publisher: None,

@@ -622,6 +622,7 @@ pub(crate) enum NeoismAgentBackgroundUpdate {
     CompactFinished,
     CompactFailed(String),
     ConfigDefaultsLoaded(neoism_ui::panels::agent_pane::api_mapping::ConfigDefaults),
+    ConfigDefaultsFailed,
     ModelContextLimitRefreshed {
         model: String,
         limit: Option<u64>,
@@ -858,6 +859,7 @@ pub struct NeoismAgentPane {
     /// Rearms the footer chip's rainbow/scramble transition when the user
     /// switches agents (including Build/Plan via Tab).
     pub(super) agent_label_changed_at: Option<Instant>,
+    config_chip_hydration: neoism_ui::panels::agent_pane::state::ConfigChipHydration,
     pub(super) model: String,
     pub(super) connection_id: Option<String>,
     pub(super) pending_account_model: Option<String>,
@@ -972,6 +974,10 @@ pub struct NeoismAgentPane {
     fx_requested: Option<neoism_ui::panels::agent_pane::view::fx::AgentFxKind>,
     fx_started: Option<(neoism_ui::panels::agent_pane::view::fx::AgentFxKind, f32)>,
     fx_pending_prompt: Option<String>,
+    particle_burst_requests:
+        Vec<neoism_ui::panels::agent_pane::view::fx::ParticleEffectSpec>,
+    particle_bursts:
+        Vec<(neoism_ui::panels::agent_pane::view::fx::ParticleEffectSpec, f32)>,
     cursor_byte: usize,
     /// Soft-wrapped visual rows of the input (byte spans + per-boundary
     /// x offsets), registered by the renderer each frame — the same
@@ -1204,6 +1210,7 @@ impl Default for NeoismAgentPane {
             mode: NeoismAgentMode::Build,
             agent: Some(DEFAULT_AGENT.to_string()),
             agent_label_changed_at: None,
+            config_chip_hydration: Default::default(),
             model: DEFAULT_MODEL.to_string(),
             connection_id: None,
             pending_account_model: None,
@@ -1274,6 +1281,8 @@ impl Default for NeoismAgentPane {
             fx_requested: None,
             fx_started: None,
             fx_pending_prompt: None,
+            particle_burst_requests: Vec::new(),
+            particle_bursts: Vec::new(),
             cursor_byte: 0,
             input_wrap_rows: Vec::new(),
             input_wrap_len: 0,

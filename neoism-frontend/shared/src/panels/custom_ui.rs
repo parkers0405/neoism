@@ -92,11 +92,18 @@ pub fn render(
     panels.sort_by_key(|panel| plugins.styles.resolve(&format!("panel.{}", panel.id)).order.unwrap_or(0));
     for panel in panels {
         let style = plugins.styles.resolve(&format!("panel.{}", panel.id));
-        let anchor = match panel.location {
+        let candidate_anchor = match panel.location {
             neoism_lua::PanelLocation::Left => layout.left,
             neoism_lua::PanelLocation::Right => layout.right,
             neoism_lua::PanelLocation::Bottom => layout.bottom,
             neoism_lua::PanelLocation::Center | neoism_lua::PanelLocation::Overlay => layout.window,
+        };
+        // A retained left/right/bottom panel remains a real overlay even when
+        // the corresponding native sidebar/status slot is currently hidden.
+        let anchor = if candidate_anchor[2] <= 0.0 || candidate_anchor[3] <= 0.0 {
+            layout.window
+        } else {
+            candidate_anchor
         };
         let width = style.width.unwrap_or(320.0).min(anchor[2]);
         let height = style.height.unwrap_or(240.0).min(anchor[3]);

@@ -67,6 +67,8 @@ Window opacity, blur, navigation visibility, tabs, panels, and status UI live in
 
 Renderer shader overlays and Mash Up Packs can create more opinionated looks. Packs group coordinated appearance settings; shaders run as GPU effects over supported content. Disable expensive effects when diagnosing animation or rendering performance.
 
+See [[Mash Up Packs]] for pack manifests, editor Lua plugin selection, user overrides, and transaction behavior.
+
 ## Extensions
 
 Use **hamburger menu → Extensions** for installable runtime components such as language servers, formatters/linters where available, MCP servers, and kernels. Themes use the adjacent Themes flow; built-in syntax parsers require no download.

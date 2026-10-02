@@ -179,7 +179,6 @@ pub struct Renderer {
     pub left_sidebar_host: neoism_ui::panels::left_sidebar_host::LeftSidebarHost,
     pub conversations_visible: bool,
     pub conversations_pane: crate::neoism::agent::NeoismAgentPane,
-    pub conversations_directory: Option<String>,
     /// Logical mouse position for the notes sidebar's wordmark hover —
     /// pushed by the screen each frame (the renderer owns no input).
     pub notes_sidebar_mouse: Option<(f32, f32)>,
@@ -469,7 +468,6 @@ impl Renderer {
             left_sidebar_host,
             conversations_visible: false,
             conversations_pane: crate::neoism::agent::NeoismAgentPane::default(),
-            conversations_directory: None,
             notes_sidebar_mouse: None,
             agent_picker_occlusion: None,
             buffer_tabs: buffer_tabs::BufferTabs::new(),

@@ -860,6 +860,13 @@ impl Sugarloaf<'_> {
         }
     }
 
+    /// Currently accepted background-image properties. Callers that stage a
+    /// multi-slot visual transaction may clone this value for rollback.
+    #[inline]
+    pub fn background_image(&self) -> Option<&ImageProperties> {
+        self.background_image.as_ref()
+    }
+
     /// Drop the current background image, if any.
     #[inline]
     pub fn clear_background_image(&mut self) {

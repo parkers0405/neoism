@@ -1455,7 +1455,7 @@ impl Route<'_> {
                                 .renderer
                                 .command_palette
                                 .set_enabled(false);
-                            self.window.screen.apply_mashup_pack(pack);
+                            self.window.screen.request_mashup_pack(pack);
                             self.request_overlay_redraw();
                             return true;
                         }

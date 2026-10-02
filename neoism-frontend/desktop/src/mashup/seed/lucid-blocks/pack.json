@@ -1,0 +1,34 @@
+// Lucid Blocks — an original looking-glass palette and restrained edge effect.
+{
+  "pack": {
+    "name": "Lucid Blocks",
+    "description": "White Rabbit signal cards in a lucid checker garden",
+    "shader-overlay": "looking-glass.glsl"
+  },
+  "editor-plugins": {
+    "mode": "overlay",
+    "enabled": ["io.neoism.lucid-birds"],
+    "disabled": ["io.neoism.lucid-rabbit", "io.neoism.lucid-rabbit-typing"]
+  },
+  "scrollbar": {
+    "width": 8,
+    "radius-factor": 0.18,
+    "min-thumb": 28,
+    "thumb": "#d65b8f",
+    "thumb-drag": "#77e1d2",
+    "track": "#19172c"
+  },
+  "wordmark": {
+    "colors": ["#f2e7d5", "#d65b8f", "#77e1d2", "#e7bd5f"]
+  },
+  "icons": {
+    "folder": { "glyph": "◇", "color": "#e7bd5f" },
+    "file": { "color": "#b8acd4" },
+    "workspace": { "glyph": "♕", "color": "#d65b8f" },
+    "note": { "glyph": "♧", "color": "#77e1d2" },
+    "tab.terminal": { "color": "#77e1d2" },
+    "status.branch": { "glyph": "♢", "color": "#d65b8f" },
+    "status.lsp": { "color": "#77e1d2" },
+    "status.warn": { "color": "#e7bd5f" }
+  }
+}

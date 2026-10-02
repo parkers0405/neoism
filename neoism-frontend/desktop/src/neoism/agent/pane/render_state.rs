@@ -283,6 +283,12 @@ impl NeoismAgentPane {
         (elapsed < 320.0).then_some(elapsed)
     }
 
+    pub fn config_chip_transition(
+        &self,
+    ) -> Option<neoism_ui::panels::agent_pane::state::ConfigChipTransition> {
+        self.config_chip_hydration.transition()
+    }
+
     pub fn thinking_label(&self) -> &str {
         self.thinking.as_deref().unwrap_or("none")
     }
@@ -321,6 +327,7 @@ impl NeoismAgentPane {
     }
 
     pub(crate) fn apply_config_defaults(&mut self) {
+        self.config_chip_hydration.begin();
         self.push_outbound(OutboundAgentCommand::ApplyConfigDefaults);
     }
 
@@ -350,6 +357,7 @@ impl NeoismAgentPane {
                 }
                 if let Some(error) = last_error {
                     tracing::warn!(%error, "failed to load agent config defaults");
+                    let _ = tx.send(NeoismAgentBackgroundUpdate::ConfigDefaultsFailed);
                 }
             })
             .ok();
@@ -417,6 +425,37 @@ impl NeoismAgentPane {
         );
     }
 
+    pub fn queue_plugin_particle(
+        &mut self,
+        spec: neoism_ui::panels::agent_pane::view::fx::ParticleEffectSpec,
+    ) {
+        if self.particle_burst_requests.len()
+            == neoism_ui::panels::agent_pane::view::fx::MAX_PARTICLE_BURSTS
+        {
+            self.particle_burst_requests.remove(0);
+        }
+        self.particle_burst_requests.push(spec);
+    }
+
+    pub fn take_particle_burst_requests(
+        &mut self,
+    ) -> Vec<neoism_ui::panels::agent_pane::view::fx::ParticleEffectSpec> {
+        std::mem::take(&mut self.particle_burst_requests)
+    }
+
+    pub fn particle_bursts(
+        &self,
+    ) -> &[(neoism_ui::panels::agent_pane::view::fx::ParticleEffectSpec, f32)] {
+        &self.particle_bursts
+    }
+
+    pub fn set_particle_bursts(
+        &mut self,
+        bursts: Vec<(neoism_ui::panels::agent_pane::view::fx::ParticleEffectSpec, f32)>,
+    ) {
+        self.particle_bursts = bursts;
+    }
+
     pub fn take_fx_request(&mut self) -> Option<AgentFxKind> {
         self.fx_requested.take()
     }
@@ -473,7 +512,10 @@ impl NeoismAgentPane {
     /// pane registered as an animation owner so frames flow even when
     /// no reply is streaming yet.
     pub(crate) fn fx_active(&self) -> bool {
-        self.fx_requested.is_some() || self.fx_started.is_some()
+        self.fx_requested.is_some()
+            || self.fx_started.is_some()
+            || !self.particle_burst_requests.is_empty()
+            || !self.particle_bursts.is_empty()
     }
 
     pub fn set_input_wrap_rows(

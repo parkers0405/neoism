@@ -18,6 +18,12 @@ const COMPACTION_TOOL_OUTPUT_MAX_CHARS: usize = 2_000;
 // malformed tool result cannot expand every later provider request without
 // limit.
 const NORMAL_TOOL_OUTPUT_MAX_CHARS: usize = 51_200;
+// Tool-driven image reads are persisted as base64 data URLs. Keep enough room
+// for one large screenshot, but never replay an unbounded collection of old
+// images into every later provider request.
+const NORMAL_TOOL_MEDIA_MAX_BYTES: usize = 20 * 1024 * 1024;
+const TOOL_MEDIA_MESSAGE_PREFIX: &str = "[Tool ";
+const TOOL_MEDIA_MESSAGE_SUFFIX: &str = " returned media attachments]";
 
 pub(crate) fn is_runtime_system_notification(system: &str) -> bool {
     system.contains(SUBTASK_COMPLETION_NOTIFICATION_KIND)
@@ -77,7 +83,7 @@ fn provider_messages_with_options(
     messages: &[MessageWithParts],
     options: MessageModelOptions,
 ) -> Vec<ProviderMessage> {
-    messages
+    let mut provider_messages = messages
         .iter()
         .flat_map(|message| match &message.info {
             MessageInfo::User(user) => {
@@ -130,7 +136,44 @@ fn provider_messages_with_options(
                 || !message.reasoning.is_empty()
                 || matches!(message.role, ProviderRole::Tool)
         })
-        .collect()
+        .collect::<Vec<_>>();
+    if options.include_attachments {
+        bound_tool_media_replay(&mut provider_messages, NORMAL_TOOL_MEDIA_MAX_BYTES);
+    }
+    provider_messages
+}
+
+fn bound_tool_media_replay(messages: &mut [ProviderMessage], max_bytes: usize) {
+    let mut remaining = max_bytes;
+    let mut kept_data_attachment = false;
+    for message in messages.iter_mut().rev() {
+        if !matches!(message.role, ProviderRole::User)
+            || !message.content.starts_with(TOOL_MEDIA_MESSAGE_PREFIX)
+            || !message.content.ends_with(TOOL_MEDIA_MESSAGE_SUFFIX)
+        {
+            continue;
+        }
+        message.attachments.retain(|attachment| {
+            let bytes = attachment
+                .url
+                .starts_with("data:")
+                .then_some(attachment.url.len())
+                .unwrap_or(0);
+            if bytes > remaining && kept_data_attachment {
+                return false;
+            }
+            kept_data_attachment |= bytes > 0;
+            remaining = remaining.saturating_sub(bytes);
+            true
+        });
+        if message.attachments.is_empty() {
+            message.content = message
+                .content
+                .strip_suffix(']')
+                .map(|content| format!("{content} omitted from replay budget]"))
+                .unwrap_or_else(|| "[Tool media omitted from replay budget]".to_string());
+        }
+    }
 }
 
 fn user_provider_message(parts: &[Part], include_attachments: bool) -> ProviderMessage {
@@ -283,7 +326,7 @@ fn tool_result_messages(
     part: &ToolPart,
     options: &MessageModelOptions,
 ) -> Vec<ProviderMessage> {
-    let mut result = match &part.state {
+    let result = match &part.state {
         ToolState::Completed { output, .. } => ProviderMessage::tool_result(
             &part.call_id,
             &part.tool,
@@ -313,7 +356,6 @@ fn tool_result_messages(
     if attachments.is_empty() {
         return vec![result];
     }
-    result.attachments = attachments.clone();
     let mut media = ProviderMessage::text(
         ProviderRole::User,
         format!("[Tool {} returned media attachments]", part.tool),
@@ -822,11 +864,44 @@ mod tests {
 
         assert_eq!(messages.len(), 3);
         assert!(matches!(messages[1].role, ProviderRole::Tool));
-        assert_eq!(messages[1].attachments.len(), 1);
+        assert!(messages[1].attachments.is_empty());
         assert!(matches!(messages[2].role, ProviderRole::User));
         assert_eq!(
             messages[2].attachments[0].filename.as_deref(),
             Some("shot.png")
+        );
+    }
+
+    #[test]
+    fn tool_media_replay_keeps_newest_attachments_within_aggregate_budget() {
+        let mut old = ProviderMessage::text(
+            ProviderRole::User,
+            "[Tool read returned media attachments]",
+        );
+        old.attachments.push(ProviderAttachment {
+            mime: "image/png".to_string(),
+            url: "data:old".to_string(),
+            filename: Some("old.png".to_string()),
+        });
+        let mut recent = ProviderMessage::text(
+            ProviderRole::User,
+            "[Tool read returned media attachments]",
+        );
+        recent.attachments.push(ProviderAttachment {
+            mime: "image/png".to_string(),
+            url: "data:new".to_string(),
+            filename: Some("new.png".to_string()),
+        });
+        let mut messages = vec![old, recent];
+
+        bound_tool_media_replay(&mut messages, 8);
+
+        assert!(messages[0].attachments.is_empty());
+        assert!(messages[0].content.contains("omitted from replay budget"));
+        assert_eq!(messages[1].attachments.len(), 1);
+        assert_eq!(
+            messages[1].attachments[0].filename.as_deref(),
+            Some("new.png")
         );
     }
 

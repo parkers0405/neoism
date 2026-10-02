@@ -1111,7 +1111,11 @@ pub(crate) async fn handle_get_config_defaults(
                 sidebar_visible: value.get("sidebar").and_then(Value::as_bool),
             });
         }
-        Err(message) => emit_error(&inner.tx, message),
+        Err(error) => {
+            let _ = inner
+                .tx
+                .send(AgentServerMessage::ConfigDefaultsFailed { error });
+        }
     }
 }
 

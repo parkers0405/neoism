@@ -37,7 +37,7 @@ const COMPOSER_STOP_SIDE_RATIO: f32 = 0.28;
 const COMPOSER_SEND_FONT_RATIO: f32 = 0.62;
 const COMPOSER_ATTACH_FONT_RATIO: f32 = 0.72;
 const MODEL_LOGO_SIDE: f32 = 17.0;
-const THINKING_ICON_SIDE: f32 = 17.0;
+const THINKING_ICON_SIDE: f32 = 12.0;
 const THINKING_ICON_GLYPH: &str = "\u{f0e7}";
 const MODEL_LOGO_GAP: f32 = 5.0;
 
@@ -430,6 +430,9 @@ pub trait AgentUserInputPane {
     fn usage_summary_label(&self) -> Option<String>;
     fn agent_label(&self) -> &str;
     fn agent_label_changed_elapsed_ms(&self) -> Option<f32>;
+    fn config_chip_transition(
+        &self,
+    ) -> Option<crate::panels::agent_pane::state::ConfigChipTransition>;
     fn status_chip_activation_ms(&self, index: usize) -> Option<f32>;
     fn model(&self) -> &str;
     fn thinking_label(&self) -> &str;
@@ -582,6 +585,10 @@ macro_rules! neoism_ui_impl_agent_user_input {
 
             fn agent_label_changed_elapsed_ms(&self) -> Option<f32> {
                 <$pane>::agent_label_changed_elapsed_ms(self)
+            }
+
+            fn config_chip_transition(&self) -> Option<$crate::panels::agent_pane::state::ConfigChipTransition> {
+                <$pane>::config_chip_transition(self)
             }
 
             fn status_chip_activation_ms(&self, index: usize) -> Option<f32> {
@@ -825,6 +832,12 @@ impl AgentUserInputPane for NeoismAgentPane {
         NeoismAgentPane::agent_label_changed_elapsed_ms(self)
     }
 
+    fn config_chip_transition(
+        &self,
+    ) -> Option<crate::panels::agent_pane::state::ConfigChipTransition> {
+        NeoismAgentPane::config_chip_transition(self)
+    }
+
     fn status_chip_activation_ms(&self, index: usize) -> Option<f32> {
         NeoismAgentPane::status_chip_activation_ms(self, index)
     }
@@ -995,7 +1008,7 @@ pub fn user_message_orb_identity(
 
 #[cfg(test)]
 mod orb_identity_tests {
-    use super::user_message_orb_identity;
+    use super::{user_message_line_x, user_message_orb_identity};
 
     #[test]
     fn explicit_local_author_is_you() {
@@ -1016,6 +1029,13 @@ mod orb_identity_tests {
         let identity = user_message_orb_identity(None, Some("Parker"));
         assert_eq!(identity.seed, "unknown-user");
         assert_eq!(identity.label, "Unknown user");
+    }
+
+    #[test]
+    fn human_message_lines_align_to_the_right_edge_of_the_text_column() {
+        assert_eq!(user_message_line_x(20.0, 300.0, 80.0), 240.0);
+        assert_eq!(user_message_line_x(20.0, 300.0, 300.0), 20.0);
+        assert_eq!(user_message_line_x(20.0, 300.0, 340.0), 20.0);
     }
 }
 
@@ -1040,8 +1060,8 @@ pub fn render_user_message<P: AgentMarkdownPane>(
     viewport_clip: [f32; 4],
     occlusion_rects: &[[f32; 4]],
 ) -> f32 {
-    // The grey bubble spans the full row, with text on the left and the
-    // sender orb inside the right edge.
+    // The grey bubble spans the full row, with the human's text aligned back
+    // from the sender orb inside the right edge.
     let bubble_x = x;
     let bubble_w = w.max(160.0 * s);
     draw_rect_clipped(
@@ -1105,15 +1125,16 @@ pub fn render_user_message<P: AgentMarkdownPane>(
     }
     let suppress_interactions = pane.suppress_markdown_interactions();
     for line in wrap_text(sugarloaf, text, text_w, &opts, USER_MESSAGE_MAX_LINES) {
+        let line_w = sugarloaf.text_mut().measure(&line, &opts).max(12.0);
+        let line_x = user_message_line_x(text_x, text_w, line_w);
         if !suppress_interactions {
             // User bubbles belong to the same transcript selection surface as
             // assistant Markdown and tool output. Previously these rows were
             // only painted, so a downward drag commonly appeared to stop as
             // soon as it crossed the next user prompt.
-            let line_w = sugarloaf.text_mut().measure(&line, &opts).max(12.0);
             let line_index = pane.register_selectable_line(
                 &line,
-                [text_x, line_y - 3.0 * s, line_w, opts.font_size + 8.0 * s],
+                [line_x, line_y - 3.0 * s, line_w, opts.font_size + 8.0 * s],
             );
             if let Some((sel_left, sel_right)) =
                 pane.selectable_line_highlight(line_index)
@@ -1135,7 +1156,7 @@ pub fn render_user_message<P: AgentMarkdownPane>(
         }
         draw_agent_prompt_text(
             sugarloaf,
-            text_x,
+            line_x,
             line_y,
             &line,
             &opts,
@@ -1163,6 +1184,10 @@ pub fn render_user_message<P: AgentMarkdownPane>(
         }
     }
     h
+}
+
+fn user_message_line_x(text_x: f32, text_w: f32, line_w: f32) -> f32 {
+    text_x + (text_w - line_w).max(0.0)
 }
 
 /// Small name pill under a hovered user-message orb. Mirrors the
@@ -1620,7 +1645,10 @@ fn render_input_help_strip(
     };
     let baseline_y = y + (h - key_opts.font_size) * 0.5;
 
-    let mut activity_guard = checkout_context.map_or(x, |context| {
+    // A settled conversation mirrors New Chat's checkout context. While a run
+    // is active, the activity scanner and interrupt hint own this same slot.
+    let visible_checkout = visible_footer_checkout_context(policy, checkout_context);
+    let mut activity_guard = visible_checkout.map_or(x, |context| {
         render_checkout_context(
             sugarloaf,
             context,
@@ -1737,6 +1765,13 @@ fn render_input_help_strip(
         &label_opts,
         occlusion_rects,
     );
+}
+
+fn visible_footer_checkout_context<'a>(
+    policy: ComposerVisualPolicy,
+    checkout_context: Option<&'a AgentCheckoutContext>,
+) -> Option<&'a AgentCheckoutContext> {
+    checkout_context.filter(|_| !policy.show_activity)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2409,6 +2444,7 @@ pub fn render_status_chips(
     // the normal accent while model and thinking keep their existing roles.
     let agent_label = pane.agent_label().to_string();
     let agent_transition = pane.agent_label_changed_elapsed_ms();
+    let config_transition = pane.config_chip_transition();
     let agent_color = agent_chip_accent(theme, &agent_label);
     let chips: [(
         String,
@@ -2478,8 +2514,22 @@ pub fn render_status_chips(
             occlusion_rects,
         );
         let label_x = x + logo_advance;
-        if index == 0 {
-            if let Some(elapsed_ms) = agent_transition {
+        match config_transition {
+            Some(crate::panels::agent_pane::state::ConfigChipTransition::Loading {
+                elapsed_ms,
+            }) => {
+                super::side_panel::draw::render_loading_scramble_text(
+                    sugarloaf,
+                    label_x,
+                    y + lift,
+                    &label,
+                    &opts,
+                    elapsed_ms,
+                );
+            }
+            Some(crate::panels::agent_pane::state::ConfigChipTransition::Settling {
+                elapsed_ms,
+            }) => {
                 super::side_panel::draw::render_scramble_text(
                     sugarloaf,
                     label_x,
@@ -2488,7 +2538,18 @@ pub fn render_status_chips(
                     &opts,
                     elapsed_ms,
                 );
-            } else {
+            }
+            None if index == 0 && agent_transition.is_some() => {
+                super::side_panel::draw::render_scramble_text(
+                    sugarloaf,
+                    label_x,
+                    y + lift,
+                    &label,
+                    &opts,
+                    agent_transition.unwrap(),
+                );
+            }
+            None => {
                 draw_text_clipped(
                     sugarloaf,
                     label_x,
@@ -2498,15 +2559,6 @@ pub fn render_status_chips(
                     occlusion_rects,
                 );
             }
-        } else {
-            draw_text_clipped(
-                sugarloaf,
-                label_x,
-                y + lift,
-                &label,
-                &opts,
-                occlusion_rects,
-            );
         }
         draw_text_clipped(
             sugarloaf,
@@ -2727,6 +2779,25 @@ mod composer_visual_policy_tests {
         assert_eq!(policy.action, ComposerControlAction::Interrupt);
         assert_eq!(policy.visual_side, 26.0);
         assert_eq!(policy.hit_side, 26.0);
+    }
+
+    #[test]
+    fn settled_chat_shows_checkout_context_but_running_chat_uses_activity_slot() {
+        let context =
+            AgentCheckoutContext::new(Some("/workspace".into()), Some("main".into()));
+        let settled = composer_visual_policy(900.0, 1.0, false, false, false, false);
+        let running = composer_visual_policy(900.0, 1.0, false, false, true, true);
+
+        assert_eq!(
+            visible_footer_checkout_context(settled, Some(&context)),
+            Some(&context)
+        );
+        assert_eq!(
+            visible_footer_checkout_context(running, Some(&context)),
+            None
+        );
+        assert!(running.show_activity);
+        assert!(running.show_interrupt_hint);
     }
 
     #[test]

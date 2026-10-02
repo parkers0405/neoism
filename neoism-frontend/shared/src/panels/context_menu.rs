@@ -101,6 +101,12 @@ pub enum AgentContextAction {
         session_id: String,
         job_id: String,
     },
+    SetSessionPinned {
+        session_id: String,
+        pinned: bool,
+        server: String,
+        directory: Option<String>,
+    },
     RenameSession {
         session_id: String,
         title: String,

@@ -332,3 +332,4 @@
 - [Plugin openness: Agent and IDE](project_plugin_openness.md) - Completed OpenCode-class Agent and Neovim-outcome IDE plugin openness architecture and implementation
 - [Agent catalog generation 410 fixed](bug_agent_catalog_generation_closed.md) - Fresh Agent catalogs returned 410 because built-in capability admission failed and errors became closed snapshots; fixed grants, tenant-aware fallible routing, local/joined/hosted tests.
 - [Lua state polling FPS fixed](bug_lua_plugin_fps_state_poll.md) - Expanded Lua platform regressed FPS by serializing full state at 10 Hz for style-only plugins; fixed by subscriber-gated polling.
+- [Tool media BadRecordMac — FIXED](bug_tool_media_badrecordmac.md) - Single-chat BadRecordMac caused by 50MB of replayed base64 tool image attachments; fixed media budget/pruning and repaired affected chat via compaction.

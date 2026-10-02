@@ -228,6 +228,46 @@ impl Screen<'_> {
                             );
                         }
                     }
+                    neoism_ui::panels::context_menu::AgentContextAction::SetSessionPinned {
+                        session_id,
+                        pinned,
+                        server,
+                        directory,
+                    } => {
+                        if !self
+                            .conversation_context_scope_matches(&server, directory.as_deref())
+                        {
+                            return;
+                        }
+                        match crate::neoism::agent::set_session_pinned(
+                            &server,
+                            &session_id,
+                            pinned,
+                        ) {
+                            Ok(_) => {
+                                self.renderer
+                                    .conversations_pane
+                                    .refresh_sessions_after_mutation();
+                                for grid in self.context_manager.contexts_mut() {
+                                    for item in grid.contexts_mut().values_mut() {
+                                        if let Some(agent) =
+                                            item.val.neoism_agent.as_mut().filter(|agent| {
+                                                agent.server_address() == server
+                                                    && agent.session_directory()
+                                                        == directory.as_deref()
+                                            })
+                                        {
+                                            agent.refresh_sessions_after_mutation();
+                                        }
+                                    }
+                                }
+                            }
+                            Err(error) => self.renderer.notifications.push(
+                                error,
+                                neoism_ui::panels::notifications::NotificationLevel::Warn,
+                            ),
+                        }
+                    }
                     neoism_ui::panels::context_menu::AgentContextAction::RenameSession { session_id, title, server, directory } => {
                         if !self.conversation_context_scope_matches(&server, directory.as_deref()) { return; }
                         use neoism_ui::widgets::modal::{ModalAction, ModalButton, ModalInputSpec, ModalSpec};

@@ -2451,7 +2451,7 @@ fn session_pinned(session: &Value) -> bool {
 
 /// `POST /session/:id/pin` — toggle the session's pinned flag. Returns the new
 /// pinned state read back from the updated session info.
-pub(super) fn set_session_pinned(
+pub(crate) fn set_session_pinned(
     server: &str,
     session_id: &str,
     pinned: bool,

@@ -290,6 +290,10 @@ impl NeoismAgentPane {
         (elapsed < 320.0).then_some(elapsed)
     }
 
+    pub fn config_chip_transition(&self) -> Option<ConfigChipTransition> {
+        self.config_chip_hydration.transition()
+    }
+
     pub fn thinking_label(&self) -> &str {
         self.thinking.as_deref().unwrap_or("none")
     }
@@ -403,6 +407,7 @@ impl NeoismAgentPane {
         // In-memory: nothing to mutate without the response. Record the
         // request so the host can fetch config defaults and feed the
         // result back via the snapshot / setters.
+        self.config_chip_hydration.begin();
         self.push_outbound(OutboundAgentCommand::ApplyConfigDefaults);
     }
 

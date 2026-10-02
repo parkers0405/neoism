@@ -9,6 +9,54 @@ use serde_json::{json, Value};
 use crate::session_queue::{queued_prompt_count, queued_prompt_preview};
 use crate::state::{AppState, SessionRun};
 
+/// Releases a claimed session run if the prompt future exits before its normal
+/// teardown. This is deliberately a drop guard: request cancellation, a
+/// provider error, and a database error can all unwind through `?` after the
+/// coordinator slot has been claimed.
+pub(crate) struct SessionRunGuard {
+    state: AppState,
+    session_id: String,
+    run_id: String,
+    armed: bool,
+}
+
+impl SessionRunGuard {
+    pub(crate) fn new(state: &AppState, session_id: &str, run_id: &str) -> Self {
+        Self {
+            state: state.clone(),
+            session_id: session_id.to_string(),
+            run_id: run_id.to_string(),
+            armed: true,
+        }
+    }
+
+    pub(crate) fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for SessionRunGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let state = self.state.clone();
+        let session_id = self.session_id.clone();
+        let run_id = self.run_id.clone();
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                abandon_session_run(
+                    &state,
+                    &session_id,
+                    &run_id,
+                    "Prompt task exited before run teardown",
+                )
+                .await;
+            });
+        }
+    }
+}
+
 pub(crate) fn busy_status(queue_count: usize, preview: Option<String>) -> SessionStatus {
     SessionStatus::Busy {
         queue: (queue_count > 0).then_some(SessionQueueStatus {
@@ -54,6 +102,53 @@ pub(crate) async fn start_session_run(
 pub(crate) async fn finish_session_run(state: &AppState, session_id: &str, run_id: &str) {
     if let Err(error) = try_finish_session_run(state, session_id, run_id).await {
         tracing::warn!(%error, %session_id, %run_id, "failed to durably finish session run");
+        // Store pressure must never strand the in-memory coordinator slot.
+        // Once stranded, every later prompt is durably queued behind a run
+        // that no task can finish. Keep the durable error visible, but release
+        // the exact owned run so its queue can continue.
+        abandon_session_run(state, session_id, run_id, &error.to_string()).await;
+    }
+}
+
+async fn abandon_session_run(
+    state: &AppState,
+    session_id: &str,
+    run_id: &str,
+    reason: &str,
+) {
+    let owns_run = state
+        .inner
+        .session_coordinator
+        .active_run(session_id)
+        .await
+        .is_some_and(|run| run.id == run_id);
+    if !owns_run {
+        return;
+    }
+
+    let error = json!({ "message": reason });
+    if let Err(store_error) = state
+        .inner
+        .store
+        .finish_run(run_id, "interrupted", Some(error))
+        .await
+    {
+        tracing::warn!(
+            %store_error,
+            %session_id,
+            %run_id,
+            "failed to persist abandoned run interruption"
+        );
+    }
+    if state
+        .inner
+        .session_coordinator
+        .finish_run(session_id, run_id)
+        .await
+    {
+        tracing::warn!(%session_id, %run_id, reason, "released abandoned session run");
+        publish_idle_if_no_run(state, session_id).await;
+        crate::execution_activity::finish_if_quiescent(state, session_id).await;
     }
 }
 
@@ -163,4 +258,95 @@ pub(crate) async fn session_status_payload(
         }
     }
     payload
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn dropped_run_guard_releases_the_exact_coordinator_slot() {
+        let path = std::env::temp_dir().join(format!(
+            "neoism-run-guard-{}.sqlite3",
+            Id::ascending(IdKind::Event)
+        ));
+        let state = AppState::open_database(path.clone()).await.unwrap();
+        let session_id = Id::ascending(IdKind::Session).to_string();
+        let run = SessionRun {
+            id: Id::ascending(IdKind::Event).to_string(),
+            started_at: crate::now_millis(),
+            cancel: Arc::new(AtomicBool::new(false)),
+        };
+        state
+            .inner
+            .session_coordinator
+            .try_start_run(&session_id, run.clone())
+            .await
+            .unwrap();
+
+        drop(SessionRunGuard::new(&state, &session_id, &run.id));
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if state
+                    .inner
+                    .session_coordinator
+                    .active_run(&session_id)
+                    .await
+                    .is_none()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("dropped guard should release abandoned run");
+
+        let _ = state.shutdown().await;
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn disarmed_run_guard_keeps_the_coordinator_slot() {
+        let path = std::env::temp_dir().join(format!(
+            "neoism-run-guard-disarmed-{}.sqlite3",
+            Id::ascending(IdKind::Event)
+        ));
+        let state = AppState::open_database(path.clone()).await.unwrap();
+        let session_id = Id::ascending(IdKind::Session).to_string();
+        let run = SessionRun {
+            id: Id::ascending(IdKind::Event).to_string(),
+            started_at: crate::now_millis(),
+            cancel: Arc::new(AtomicBool::new(false)),
+        };
+        state
+            .inner
+            .session_coordinator
+            .try_start_run(&session_id, run.clone())
+            .await
+            .unwrap();
+
+        let mut guard = SessionRunGuard::new(&state, &session_id, &run.id);
+        guard.disarm();
+        drop(guard);
+        tokio::task::yield_now().await;
+
+        assert_eq!(
+            state
+                .inner
+                .session_coordinator
+                .active_run(&session_id)
+                .await
+                .map(|active| active.id),
+            Some(run.id.clone())
+        );
+        state
+            .inner
+            .session_coordinator
+            .finish_run(&session_id, &run.id)
+            .await;
+        let _ = state.shutdown().await;
+        let _ = std::fs::remove_file(path);
+    }
 }

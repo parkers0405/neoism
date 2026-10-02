@@ -527,6 +527,9 @@ impl NeoismAgentPane {
         if self.agent_label_changed_elapsed_ms().is_some() {
             return Some("agent_label_transition");
         }
+        if self.config_chip_transition().is_some() {
+            return Some("config_chip_hydration");
+        }
         if !self.has_conversation() {
             return Some("agent_home_wordmark");
         }

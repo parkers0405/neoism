@@ -121,14 +121,28 @@ async fn revert_session(
         return Err(ApiError::not_found("Message not found"));
     }
 
-    let previous_snapshots = previous_revert
-        .as_ref()
-        .map(|revert| {
-            snapshot::collect_from_revert_items(&revert.messages, &revert.parts)
-        })
-        .unwrap_or_default();
-    let snapshots =
-        snapshot::collect_from_revert_items(&removed_messages, &removed_parts);
+    let tenant_id = crate::caller::session_tenant(&info).to_string();
+    let previous_snapshots = match previous_revert.as_ref() {
+        Some(revert) => snapshot::collect_from_revert_items_hydrated(
+            state,
+            &tenant_id,
+            &session_id,
+            &revert.messages,
+            &revert.parts,
+        )
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?,
+        None => Vec::new(),
+    };
+    let snapshots = snapshot::collect_from_revert_items_hydrated(
+        state,
+        &tenant_id,
+        &session_id,
+        &removed_messages,
+        &removed_parts,
+    )
+    .await
+    .map_err(|error| ApiError::internal(error.to_string()))?;
     if !previous_snapshots.is_empty() {
         apply_file_snapshots(
             &info.directory,
@@ -273,7 +287,15 @@ async fn unrevert_session(
         .transpose()
         .map_err(|error| ApiError::internal(error.to_string()))?
         .unwrap_or_default();
-    let snapshots = snapshot::collect_from_revert_items(&removed_messages, &parts);
+    let snapshots = snapshot::collect_from_revert_items_hydrated(
+        state,
+        crate::caller::session_tenant(&info),
+        &session_id,
+        &removed_messages,
+        &parts,
+    )
+    .await
+    .map_err(|error| ApiError::internal(error.to_string()))?;
     apply_file_snapshots(
         &info.directory,
         &snapshots,

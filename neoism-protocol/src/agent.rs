@@ -767,6 +767,10 @@ pub enum AgentServerMessage {
         #[serde(default)]
         sidebar_visible: Option<bool>,
     },
+    /// Terminal failure for [`AgentClientMessage::GetConfigDefaults`].
+    ConfigDefaultsFailed {
+        error: String,
+    },
     /// Reply to [`AgentClientMessage::ListAgents`].
     AgentCatalog {
         agents: Vec<AgentInfo>,

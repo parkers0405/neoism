@@ -34,7 +34,7 @@ use crate::session_context::{
     provider_messages_for_session_with_plugins, title_from_parts,
 };
 use crate::session_retry;
-use crate::session_run::{finish_session_run, start_session_run};
+use crate::session_run::{finish_session_run, start_session_run, SessionRunGuard};
 use crate::state::AppState;
 use crate::tool_selection::provider_tool_map;
 use crate::{permission, plugin, provider_tools_for_agent};
@@ -409,6 +409,7 @@ pub(crate) async fn append_prompt(
         .map_err(|_| ApiError::conflict("Session is already running"))?;
     let run_id = run.id.clone();
     let cancellation = run.cancel.clone();
+    let mut run_guard = SessionRunGuard::new(state, &session_id_text, &run_id);
 
     let subtask_parts = user_message
         .parts
@@ -439,7 +440,16 @@ pub(crate) async fn append_prompt(
         provider_id: reply_model.provider_id.clone(),
         model_id: reply_model.model_id.clone(),
     };
-    let history = state.inner.store.list_messages(&session_id_text).await?;
+    let mut history = state.inner.store.list_messages(&session_id_text).await?;
+    if let Err(error) =
+        prune_old_tool_outputs_in_messages(state, &session_id_text, &mut history).await
+    {
+        tracing::warn!(
+            session_id = %session_id_text,
+            %error,
+            "pre-run tool-output pruning failed"
+        );
+    }
     let provider_service = plugin_snapshot
         .provider_services_by_priority()
         .into_iter()
@@ -609,6 +619,7 @@ pub(crate) async fn append_prompt(
     }
 
     finish_session_run(state, session_id.as_str(), &run_id).await;
+    run_guard.disarm();
     // The final cleanup is useful but must not add user-visible latency:
     // not hold the completed prompt response open while it scans and persists
     // old tool parts.
@@ -723,7 +734,7 @@ async fn prune_old_tool_outputs_in_messages(
             {
                 break 'messages;
             }
-            let size = estimate_tokens(output);
+            let size = tool_replay_tokens(output, metadata);
             total = total.saturating_add(size);
             if total <= TOOL_PRUNE_PROTECT_TOKENS {
                 continue;
@@ -767,6 +778,18 @@ async fn prune_old_tool_outputs_in_messages(
         ));
     }
     Ok(())
+}
+
+fn tool_replay_tokens(output: &str, metadata: &Value) -> u64 {
+    let attachment_tokens = metadata
+        .get("attachments")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|attachment| attachment.get("url").and_then(Value::as_str))
+        .map(estimate_tokens)
+        .fold(0_u64, u64::saturating_add);
+    estimate_tokens(output).saturating_add(attachment_tokens)
 }
 
 fn same_user_prompt(existing: &MessageWithParts, proposed: &MessageWithParts) -> bool {
@@ -2201,6 +2224,18 @@ mod tests {
             estimated_provider_prompt_tokens(&[small.clone(), with_tool])
                 > estimated_provider_prompt_tokens(&[small])
         );
+    }
+
+    #[test]
+    fn tool_replay_tokens_counts_media_attachment_payloads() {
+        let metadata = json!({
+            "attachments": [{
+                "mime": "image/png",
+                "url": format!("data:image/png;base64,{}", "x".repeat(200_000))
+            }]
+        });
+
+        assert!(tool_replay_tokens("Image read successfully", &metadata) > 40_000);
     }
 
     #[test]

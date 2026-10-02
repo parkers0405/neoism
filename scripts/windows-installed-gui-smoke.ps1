@@ -142,7 +142,7 @@ public static class NeoismWindowProbe {
         else { Stop-ValidationProcessTree -Process $p -Log "$Evidence/gui-cleanup.log" }
     }
     # Catch detached installed daemon/agent children on this dedicated CI runner before uninstall.
-    Get-Process neoism, neoism-workspace-daemon, neoism-agent -ErrorAction SilentlyContinue |
+    Get-Process neoism, neoism-workspace-daemon, neoism-agent, neoism-agent-lua-runner -ErrorAction SilentlyContinue |
         Where-Object { Test-InstalledProcess -Process $_ -InstallDir $InstallDir } |
         Stop-Process -Force -ErrorAction Continue
     Start-Sleep -Seconds 2

@@ -1001,7 +1001,7 @@ fn resolve_daemon(daemon_url: Option<&str>) -> Option<ResolvedDaemon> {
 
 /// `neoism update` / `neoism upgrade` — self-update from GitHub Releases.
 /// Downloads the same `neoism-<os>-<arch>.tar.gz` the installer uses and
-/// swaps the three binaries in place. Returns true if it handled the args.
+/// swaps the packaged binaries in place. Returns true if it handled the args.
 #[derive(Default)]
 struct SelfUpdateOptions {
     nightly: bool,

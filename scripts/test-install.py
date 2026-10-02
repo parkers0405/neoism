@@ -22,7 +22,7 @@ class InstallerTests(unittest.TestCase):
             (payload / 'web/index.html').write_text('workspace')
             (payload / 'web/agent-gui/index.html').write_text('agent GUI')
             (gui / 'app.js').write_text('new JS')
-            for binary in ['neoism', 'neoism-agent', 'neoism-workspace-daemon']:
+            for binary in ['neoism', 'neoism-agent', 'neoism-agent-lua-runner', 'neoism-workspace-daemon']:
                 path = payload / binary
                 path.write_text('#!/bin/sh\necho new\n')
                 path.chmod(0o755)

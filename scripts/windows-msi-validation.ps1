@@ -22,7 +22,7 @@ $fixtureHash = (Get-FileHash (Join-Path $installDir "neoism.exe") -Algorithm SHA
 Invoke-Msi "/i `"$installer`" /qn /norestart"
 $upgraded = $true
 $packagingDir = Join-Path $PWD 'target/x86_64-pc-windows-msvc/release'
-foreach ($binary in @('neoism.exe', 'neoism-workspace-daemon.exe', 'neoism-agent.exe')) {
+foreach ($binary in @('neoism.exe', 'neoism-workspace-daemon.exe', 'neoism-agent.exe', 'neoism-agent-lua-runner.exe')) {
     $sourceHash = (Get-FileHash (Join-Path $packagingDir $binary) -Algorithm SHA256).Hash
     $installedHash = (Get-FileHash (Join-Path $installDir $binary) -Algorithm SHA256).Hash
     $signature = Get-AuthenticodeSignature (Join-Path $installDir $binary)
@@ -35,7 +35,7 @@ foreach ($binary in @('neoism.exe', 'neoism-workspace-daemon.exe', 'neoism-agent
     }
 }
 
-foreach ($binary in @("neoism.exe", "neoism-workspace-daemon.exe", "neoism-agent.exe")) {
+foreach ($binary in @("neoism.exe", "neoism-workspace-daemon.exe", "neoism-agent.exe", "neoism-agent-lua-runner.exe")) {
   if (-not (Test-Path (Join-Path $installDir $binary))) { throw "$binary was not installed" }
 }
 if (-not (Test-Path (Join-Path $installDir "web\index.html"))) { throw "web UI was not installed" }
@@ -71,7 +71,9 @@ if (($userPath -split ';').TrimEnd('\') -notcontains $installDir.TrimEnd('\')) {
         Invoke-Msi "/x `"$remove`" /qn /norestart"
     } finally { Stop-Transcript }
 }
-if (Test-Path (Join-Path $installDir "neoism.exe")) { throw "Neoism remained after uninstall" }
+foreach ($binary in @("neoism.exe", "neoism-workspace-daemon.exe", "neoism-agent.exe", "neoism-agent-lua-runner.exe")) {
+  if (Test-Path (Join-Path $installDir $binary)) { throw "$binary remained after uninstall" }
+}
 if (Test-Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\App Paths\neoism.exe") { throw "App Paths registration remained after uninstall" }
 if (Test-Path $shortcut) { throw "Start Menu shortcut remained after uninstall" }
 if (Test-Path "HKCU:\Software\Classes\Directory\Background\shell\Open Neoism here") { throw "context menu remained after uninstall" }

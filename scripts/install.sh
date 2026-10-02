@@ -20,7 +20,7 @@ set -euo pipefail
 REPO="${NEOISM_REPO:-parkers0405/neoism}"  # GitHub repo whose Releases host the prebuilt binaries
 BIN_DIR="${NEOISM_BIN_DIR:-${HOME}/.local/bin}"
 VERSION="${NEOISM_VERSION:-latest}"
-BINARIES=(neoism neoism-workspace-daemon neoism-agent)
+BINARIES=(neoism neoism-workspace-daemon neoism-agent neoism-agent-lua-runner)
 SKIP_CHECKSUM="${NEOISM_SKIP_CHECKSUM:-0}"
 
 say()  { printf '\033[1;36m==>\033[0m %s\n' "$*"; }

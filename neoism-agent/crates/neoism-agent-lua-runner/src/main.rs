@@ -25,6 +25,7 @@ const MAX_INSTRUCTIONS: u64 = 10_000_000;
 const MAX_STREAM_ITEMS: usize = 4096;
 
 #[derive(Parser)]
+#[command(version)]
 struct Args {
     #[arg(long)]
     manifest: PathBuf,

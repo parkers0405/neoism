@@ -4,7 +4,7 @@
 #   ./install.sh                # release build into ~/.local/bin
 #
 # This script only builds and places files:
-#   - neoism, neoism-workspace-daemon, neoism-agent -> BIN_DIR
+#   - neoism, neoism-workspace-daemon, neoism-agent, neoism-agent-lua-runner -> BIN_DIR
 #   - wasm bundle + Vite web build (optional)        -> neoism-frontend/web/dist
 #
 # Everything user-facing (desktop launcher + icons and default config) is handled by the
@@ -25,7 +25,7 @@ usage() {
 Usage: ./install.sh [options]
 
 Builds and installs the Neoism stack from source:
-  - neoism desktop, neoism-workspace-daemon, neoism-agent -> BIN_DIR
+  - neoism desktop, neoism-workspace-daemon, neoism-agent, neoism-agent-lua-runner -> BIN_DIR
   - web wasm bundle + Vite web build (optional)
 
 Options:
@@ -180,14 +180,14 @@ ensure_web_tools() {
 }
 
 build_binaries() {
-  local cargo_args=(+1.92 build -p neoism -p neoism-workspace-daemon -p neoism-agent)
+  local cargo_args=(+1.92 build -p neoism -p neoism-workspace-daemon -p neoism-agent -p neoism-agent-lua-runner)
   local target_dir="$ROOT_DIR/target/debug"
   if [ "$PROFILE" = "release" ]; then
     cargo_args+=(--release)
     target_dir="$ROOT_DIR/target/release"
   fi
 
-  log "Building desktop, daemon, and agent (${PROFILE})"
+  log "Building desktop, daemon, agent, and Agent Lua runner (${PROFILE})"
   run cargo "${cargo_args[@]}"
 
   log "Installing binaries to $BIN_DIR"
@@ -195,6 +195,7 @@ build_binaries() {
   run install -m 0755 "$target_dir/neoism" "$BIN_DIR/neoism"
   run install -m 0755 "$target_dir/neoism-workspace-daemon" "$BIN_DIR/neoism-workspace-daemon"
   run install -m 0755 "$target_dir/neoism-agent" "$BIN_DIR/neoism-agent"
+  run install -m 0755 "$target_dir/neoism-agent-lua-runner" "$BIN_DIR/neoism-agent-lua-runner"
 }
 
 install_web() {
@@ -246,6 +247,7 @@ Binaries:
   $BIN_DIR/neoism
   $BIN_DIR/neoism-workspace-daemon
   $BIN_DIR/neoism-agent
+  $BIN_DIR/neoism-agent-lua-runner
 EOF
 
 if [ "$BUILD_WEB" -eq 1 ]; then

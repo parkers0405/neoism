@@ -117,7 +117,8 @@ jobs:
           bash scripts/audit-macos-dylibs.sh \
             "$BIN/neoism" \
             "$BIN/neoism-workspace-daemon" \
-            "$BIN/neoism-agent"
+            "$BIN/neoism-agent" \
+            "$BIN/neoism-agent-lua-runner"
 
       # Runtime validation on the real OS: PTY-layer unit + ConPTY spawn
       # smoke tests, then boot the daemon and require its loopback

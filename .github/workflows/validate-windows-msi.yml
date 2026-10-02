@@ -56,7 +56,7 @@ jobs:
             $installDir = Join-Path $env:LOCALAPPDATA 'Programs\Neoism'
             try {
               Invoke-CheckedProcess 'msiexec.exe' "/i `"$installer`" /qn /norestart /L*v `"$evidence/install.log`"" "$evidence/install" 180 @(0, 3010)
-              foreach ($binary in @('neoism.exe', 'neoism-workspace-daemon.exe', 'neoism-agent.exe')) {
+              foreach ($binary in @('neoism.exe', 'neoism-workspace-daemon.exe', 'neoism-agent.exe', 'neoism-agent-lua-runner.exe')) {
                 $file = Join-Path $installDir $binary
                 $signature = Get-AuthenticodeSignature $file
                 [pscustomobject]@{ binary = $binary; sha256 = (Get-FileHash $file).Hash; signature = "$($signature.Status)"; signer = "$($signature.SignerCertificate.Thumbprint)" } | ConvertTo-Json -Compress | Add-Content "$evidence/installed-binaries.jsonl"
@@ -65,7 +65,7 @@ jobs:
               Invoke-CheckedProcess (Join-Path $installDir 'neoism.exe') '--version' "$evidence/version" 30
               if ((Get-Content "$evidence/version.stdout.log" -Raw).Trim() -cne "neoism $env:EXPECTED_VERSION") { throw 'Installed version differs from requested version' }
               $baseline = New-Item -ItemType Directory -Force (Join-Path $env:RUNNER_TEMP 'neoism-update-baseline')
-              foreach ($name in @('neoism.exe', 'neoism-workspace-daemon.exe', 'neoism-agent.exe', 'web')) {
+              foreach ($name in @('neoism.exe', 'neoism-workspace-daemon.exe', 'neoism-agent.exe', 'neoism-agent-lua-runner.exe', 'web')) {
                 Copy-Item -LiteralPath (Join-Path $installDir $name) -Destination $baseline.FullName -Recurse
               }
               & ./scripts/windows-updater-native-validation.ps1 -CandidateMsi $installer -ManagedDir $installDir -PackagingDir $baseline.FullName -Version $env:EXPECTED_VERSION -Evidence $evidence
@@ -73,7 +73,9 @@ jobs:
             } finally {
               Invoke-CheckedProcess 'msiexec.exe' "/x `"$installer`" /qn /norestart /L*v `"$evidence/uninstall.log`"" "$evidence/uninstall" 180 @(0, 3010, 1605)
             }
-            if (Test-Path (Join-Path $installDir 'neoism.exe')) { throw 'Neoism remained after uninstall' }
+            foreach ($binary in @('neoism.exe', 'neoism-workspace-daemon.exe', 'neoism-agent.exe', 'neoism-agent-lua-runner.exe')) {
+              if (Test-Path (Join-Path $installDir $binary)) { throw "$binary remained after uninstall" }
+            }
           } finally { Stop-Transcript }
       - name: Retain full logs and original artifact evidence
         if: always()

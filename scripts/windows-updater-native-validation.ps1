@@ -23,7 +23,7 @@ $markerText = 'unrelated fixture data must survive the updater'
 $markers = @()
 function Assert-Native($Condition, [string]$Message) { if (-not $Condition) { throw $Message } }
 function Assert-NoFixtureProcesses([string]$Directory) {
-    foreach ($process in Get-Process -Name 'neoism', 'neoism-workspace-daemon', 'neoism-agent' -ErrorAction SilentlyContinue) {
+    foreach ($process in Get-Process -Name 'neoism', 'neoism-workspace-daemon', 'neoism-agent', 'neoism-agent-lua-runner' -ErrorAction SilentlyContinue) {
         $path = $process.Path
         if ($path -and (Test-SamePath ([IO.Path]::GetDirectoryName($path)) $Directory)) {
             throw "Fixture target already has a live process ($($process.Id)); refusing to stop it"

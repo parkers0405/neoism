@@ -205,7 +205,7 @@ try {
         if ($failure -in @('version', 'cancelled')) { Assert (-not $script:SawHandoff) "$failure must fail before handoff" }
     }
     New-Fixture 'portable'
-    Remove-Item -LiteralPath (Join-Path $script:FixtureInstall 'neoism-agent.exe'), (Join-Path $script:FixtureInstall 'neoism-workspace-daemon.exe'), (Join-Path $script:FixtureInstall 'web') -Recurse -Force
+    Remove-Item -LiteralPath (Join-Path $script:FixtureInstall 'neoism-agent.exe'), (Join-Path $script:FixtureInstall 'neoism-agent-lua-runner.exe'), (Join-Path $script:FixtureInstall 'neoism-workspace-daemon.exe'), (Join-Path $script:FixtureInstall 'web') -Recurse -Force
     Assert ((Invoke-WindowsUpdate) -eq 0) 'Loose portable copy must expand into a complete in-place stack'
     Assert ($script:MsiCalls.Count -eq 1 -and $script:Launches -eq 1) 'Loose portable must not migrate to managed MSI path'
     New-Fixture 'portable'

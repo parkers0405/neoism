@@ -127,7 +127,9 @@ pub enum AgentKeyIntent {
     SessionRenameInput(String),
     SidePanelActivateSelection,
     SidePanelBlur,
+    SidePanelSelectNextByHalfPage,
     SidePanelSelectNext,
+    SidePanelSelectPrevByHalfPage,
     SidePanelSelectPrev,
     ScrollTimelineHalfPageDown,
     ScrollTimelineHalfPageUp,
@@ -346,6 +348,21 @@ fn side_panel_key_decision(
     event: &AgentBridgeKeyEvent,
     mods: AgentBridgeModifiers,
 ) -> AgentKeyDecision {
+    if mods.control && !mods.alt && !mods.super_key && !mods.shift {
+        match ctrl_u_d_history_direction(event) {
+            Some(false) => {
+                return AgentKeyDecision::dirty_intents(vec![
+                    AgentKeyIntent::SidePanelSelectNextByHalfPage,
+                ]);
+            }
+            Some(true) => {
+                return AgentKeyDecision::dirty_intents(vec![
+                    AgentKeyIntent::SidePanelSelectPrevByHalfPage,
+                ]);
+            }
+            None => {}
+        }
+    }
     if mods.alt || mods.control || mods.super_key {
         return AgentKeyDecision::passthrough();
     }
@@ -995,6 +1012,26 @@ mod tests {
                 AgentKeyContext::default()
             ),
             AgentKeyDecision::passthrough()
+        );
+    }
+
+    #[test]
+    fn ctrl_u_and_d_page_the_focused_conversations_panel() {
+        let ctx = AgentKeyContext {
+            side_panel_focused: true,
+            ..AgentKeyContext::default()
+        };
+        let ctrl = AgentBridgeModifiers {
+            control: true,
+            ..AgentBridgeModifiers::default()
+        };
+        assert_eq!(
+            agent_key_decision(&character("d", ""), ctrl, ctx).intents,
+            vec![AgentKeyIntent::SidePanelSelectNextByHalfPage]
+        );
+        assert_eq!(
+            agent_key_decision(&character("u", ""), ctrl, ctx).intents,
+            vec![AgentKeyIntent::SidePanelSelectPrevByHalfPage]
         );
     }
 

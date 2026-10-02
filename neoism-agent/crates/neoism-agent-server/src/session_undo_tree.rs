@@ -303,9 +303,7 @@ fn undo_snapshot_summary(
 ) -> SessionUndoSnapshotSummary {
     let mut paths = BTreeSet::new();
     let mut refs = BTreeSet::new();
-    for snapshot in snapshot::collect_from_revert_items(messages, parts) {
-        paths.insert(snapshot.path);
-    }
+    paths.extend(snapshot::snapshot_paths_from_revert_items(messages, parts));
     for message in messages {
         for part in &message.parts {
             collect_snapshot_ref(part, &mut refs);

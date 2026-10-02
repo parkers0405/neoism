@@ -38,7 +38,8 @@ pub(crate) struct InnerState {
     pub(crate) external_session_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     pub(crate) utilities: Arc<crate::utility_runtime::UtilityRuntime>,
     pub(crate) workspace_runtimes: crate::workspace_runtime::WorkspaceRuntimeRegistry,
-    pub(crate) scoped_plugin_runtimes: crate::scoped_plugin_runtime::ScopedPluginRuntimeRegistry,
+    pub(crate) scoped_plugin_runtimes:
+        crate::scoped_plugin_runtime::ScopedPluginRuntimeRegistry,
     pub(crate) workspace_plugin_generations: Mutex<
         HashMap<crate::workspace_runtime::TenantRuntimeKey, (u64, BTreeSet<String>)>,
     >,
@@ -596,9 +597,11 @@ impl AppState {
     ) -> Result<Arc<neoism_agent_plugin_api::RegistrySnapshot>, String> {
         let config_snapshot = crate::config::snapshot(self.services(), directory)
             .map_err(|error| error.to_string())?;
-        let (config, _) = neoism_agent_builtins::plugin::config::load_snapshot(&config_snapshot)
-            .map_err(|error| error.to_string())?;
-        let (configured, _) = crate::config::installation_plugin_inputs(&config_snapshot, &config);
+        let (config, _) =
+            neoism_agent_builtins::plugin::config::load_snapshot(&config_snapshot)
+                .map_err(|error| error.to_string())?;
+        let (configured, _) =
+            crate::config::installation_plugin_inputs(&config_snapshot, &config);
         self.activate_scoped_agent_packages(
             directory,
             neoism_agent_plugin_api::RuntimeScope::Session {
@@ -1104,7 +1107,9 @@ impl AppState {
         directory: &str,
     ) -> Result<crate::workspace_runtime::PluginGenerationLease, String> {
         let generation = if tenant_id == "local" {
-            if let Some(generation) = crate::workspace_runtime::active_generation(directory) {
+            if let Some(generation) =
+                crate::workspace_runtime::active_generation(directory)
+            {
                 generation
             } else {
                 self.try_workspace_runtime_for_tenant(tenant_id, directory)
@@ -1277,9 +1282,16 @@ impl AppState {
         });
         drop(generations);
         if runtime.tenant_id == "local" {
-            if let Ok(config_snapshot) = crate::config::snapshot(self.services(), &runtime.root.to_string_lossy()) {
-                if let Ok((config, _)) = neoism_agent_builtins::plugin::config::load_snapshot(&config_snapshot) {
-                    let (configured, _) = crate::config::installation_plugin_inputs(&config_snapshot, &config);
+            if let Ok(config_snapshot) =
+                crate::config::snapshot(self.services(), &runtime.root.to_string_lossy())
+            {
+                if let Ok((config, _)) =
+                    neoism_agent_builtins::plugin::config::load_snapshot(&config_snapshot)
+                {
+                    let (configured, _) = crate::config::installation_plugin_inputs(
+                        &config_snapshot,
+                        &config,
+                    );
                     let grants = crate::plugins::production_scoped_grants(
                         std::sync::Arc::new(crate::plugins::PluginEventPublisher {
                             state: self.clone(),
@@ -1288,14 +1300,19 @@ impl AppState {
                     );
                     for scoped in [
                         neoism_agent_plugin_api::RuntimeScope::Global,
-                        neoism_agent_plugin_api::RuntimeScope::User { user_id: "installation".into() },
+                        neoism_agent_plugin_api::RuntimeScope::User {
+                            user_id: "installation".into(),
+                        },
                     ] {
-                        if let Err(error) = self.activate_scoped_agent_packages(
-                            &runtime.root.to_string_lossy(),
-                            scoped,
-                            &configured,
-                            grants.clone(),
-                        ).await {
+                        if let Err(error) = self
+                            .activate_scoped_agent_packages(
+                                &runtime.root.to_string_lossy(),
+                                scoped,
+                                &configured,
+                                grants.clone(),
+                            )
+                            .await
+                        {
                             tracing::warn!(%error, "scoped Agent package candidate rejected; retaining last-known-good generation");
                         }
                     }
@@ -4281,7 +4298,7 @@ impl SessionStore {
         };
         let sql = format!(
             "SELECT message_json FROM messages WHERE session_id = ?{cursor_clause} \
-             ORDER BY position {direction}, created {direction}{limit_clause}"
+             ORDER BY position {direction}{limit_clause}"
         );
         let mut params = vec![text(session_id)];
         if let Some(position) = cursor_position {

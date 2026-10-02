@@ -1278,6 +1278,9 @@ pub(crate) async fn execute_tool_call_in_generation(
             Ok(mut result) => {
                 plugin::tool_execute_after(&snapshot, &ctx, &mut result)
                     .map_err(|error| error.to_string())?;
+                if let Some(session) = session.as_ref() {
+                    apply_central_metadata_bounds(state, session, &mut result).await?;
+                }
                 apply_central_output_truncation(&mut result)?;
                 publish_lsp_updated_if_needed(state, &result);
                 tracing::info!(
@@ -1355,6 +1358,33 @@ pub(crate) async fn execute_tool_call_in_generation(
         }
     }
     Err("permission approval did not satisfy the tool call".to_string())
+}
+
+async fn apply_central_metadata_bounds(
+    state: &AppState,
+    session: &neoism_agent_core::SessionInfo,
+    result: &mut tool::ToolExecutionResult,
+) -> Result<(), String> {
+    let Some(metadata) = result.metadata.as_mut() else {
+        return Ok(());
+    };
+    let tenant_id = crate::caller::session_tenant(session);
+    crate::artifact_routes::externalize_tool_attachments(
+        state,
+        tenant_id,
+        session.id.as_str(),
+        metadata,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    crate::snapshot::externalize_metadata_snapshots(
+        state,
+        tenant_id,
+        session.id.as_str(),
+        metadata,
+    )
+    .await
+    .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]

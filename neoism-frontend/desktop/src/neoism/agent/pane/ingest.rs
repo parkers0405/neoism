@@ -1643,6 +1643,7 @@ impl NeoismAgentPane {
                     changed = true;
                 }
                 Ok(NeoismAgentBackgroundUpdate::ConfigDefaultsLoaded(defaults)) => {
+                    self.config_chip_hydration.complete();
                     if let Some(agent) = defaults.agent {
                         match agent.as_str() {
                             "build" => self.mode = NeoismAgentMode::Build,
@@ -1666,6 +1667,10 @@ impl NeoismAgentPane {
                         self.side_panel.set_user_hidden(!visible);
                     }
                     self.execute_refresh_model_context_limit_command();
+                    changed = true;
+                }
+                Ok(NeoismAgentBackgroundUpdate::ConfigDefaultsFailed) => {
+                    self.config_chip_hydration.complete();
                     changed = true;
                 }
                 Ok(NeoismAgentBackgroundUpdate::ModelContextLimitRefreshed {

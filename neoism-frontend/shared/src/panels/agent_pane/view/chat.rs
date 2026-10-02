@@ -4,7 +4,7 @@ use crate::panels::agent_pane::state::NeoismAgentPane;
 
 use super::timeline::{AgentTimelineDelegate, AgentTimelinePane, SharedTimelineDelegate};
 use super::user_input::AgentUserInputPane;
-use super::{timeline, user_input};
+use super::{timeline, user_input, AgentCheckoutContext};
 use crate::panels::agent_pane::input_controller::InputWrapRow;
 use crate::primitives::ide_theme::IdeTheme;
 
@@ -85,6 +85,7 @@ pub fn render_chat(
         occlusion_rects,
         plugins,
         None,
+        None,
     );
 }
 
@@ -102,6 +103,7 @@ pub fn render_chat_with<P, D>(
     occlusion_rects: &[[f32; 4]],
     plugins: Option<&neoism_lua::PluginSnapshot>,
     prepared_input_rows: Option<&[InputWrapRow]>,
+    checkout_context: Option<&AgentCheckoutContext>,
 ) where
     P: AgentChatPane,
     D: AgentTimelineDelegate<P>,
@@ -166,7 +168,7 @@ pub fn render_chat_with<P, D>(
             now_seconds,
             occlusion_rects,
             prepared_input_rows,
-            None,
+            checkout_context,
         );
     }
 }

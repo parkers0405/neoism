@@ -31,7 +31,7 @@ pub(crate) mod perf {
 
 pub(crate) use api::{
     agent_reverse_proxy_for_daemon_workspace, delete_session, neoism_agent_server,
-    register_agent_server_credential, rename_session,
+    register_agent_server_credential, rename_session, set_session_pinned,
 };
 pub(crate) use pane::TimelineMeasureKey;
 pub use pane::{

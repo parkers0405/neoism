@@ -630,6 +630,9 @@ pub(crate) fn apply_agent_event_to_pane(
                 pane.side_panel_mut().set_user_hidden(!visible);
             }
         }
+        AgentServerMessage::ConfigDefaultsFailed { .. } => {
+            pane.finish_config_defaults_loading();
+        }
         AgentServerMessage::AgentCatalog { agents } => {
             pane.set_agent_options(agent_options_from_catalog(&agents));
         }
@@ -1263,6 +1266,7 @@ pub(crate) fn agent_event_session_id(
         | AgentServerMessage::ThreadListFailed { .. }
         | AgentServerMessage::ProviderCatalog { .. }
         | AgentServerMessage::ConfigDefaults { .. }
+        | AgentServerMessage::ConfigDefaultsFailed { .. }
         | AgentServerMessage::AgentCatalog { .. }
         | AgentServerMessage::SkillCatalog { .. }
         | AgentServerMessage::McpCatalog { .. }

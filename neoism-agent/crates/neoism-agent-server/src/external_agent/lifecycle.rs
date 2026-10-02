@@ -8,17 +8,13 @@ struct ExternalRunGuard {
 
 impl ExternalRunGuard {
     async fn finish(mut self) {
-        if let Some(run_id) = self.run_id.clone() {
-            if crate::session_run::try_finish_session_run(
+        if let Some(run_id) = self.run_id.take() {
+            crate::session_run::finish_session_run(
                 &self.state,
                 &self.session_id,
                 &run_id,
             )
-            .await
-            .is_ok()
-            {
-                self.run_id = None;
-            }
+            .await;
         }
     }
 }
@@ -32,12 +28,8 @@ impl Drop for ExternalRunGuard {
         let session_id = self.session_id.clone();
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             runtime.spawn(async move {
-                let _ = crate::session_run::try_finish_session_run(
-                    &state,
-                    &session_id,
-                    &run_id,
-                )
-                .await;
+                crate::session_run::finish_session_run(&state, &session_id, &run_id)
+                    .await;
             });
         }
     }

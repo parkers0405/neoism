@@ -4,13 +4,17 @@ use std::path::{Path, PathBuf};
 use anyhow::Context;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
+use flate2::{read::GzDecoder, write::GzEncoder, Compression};
 use neoism_agent_core::{MessageWithParts, Part, ToolState};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use std::io::{Read, Write};
 
 const MAX_SCAN_FILES: usize = 1000;
 const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_SNAPSHOT_BUNDLE_BYTES: usize = 512 * 1024 * 1024;
+const MAX_DIFF_PREVIEW_BYTES: usize = 50 * 1024;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -155,6 +159,101 @@ pub(crate) fn add_metadata_snapshots(metadata: &mut Value, snapshots: Vec<FileSn
     }
 }
 
+pub(crate) async fn externalize_metadata_snapshots(
+    state: &crate::state::AppState,
+    tenant_id: &str,
+    session_id: &str,
+    metadata: &mut Value,
+) -> Result<(), crate::error::ApiError> {
+    let Some(object) = metadata.as_object_mut() else {
+        return Ok(());
+    };
+    let Some(snapshots) = object.remove("snapshots") else {
+        bound_diff_previews(object);
+        return Ok(());
+    };
+    let encoded = serde_json::to_vec(&snapshots)
+        .map_err(|error| crate::error::ApiError::internal(error.to_string()))?;
+    if encoded.len() > MAX_SNAPSHOT_BUNDLE_BYTES {
+        return Err(crate::error::ApiError::bad_request(format!(
+            "Tool snapshot bundle exceeds the {} MiB safety limit",
+            MAX_SNAPSHOT_BUNDLE_BYTES / 1024 / 1024
+        )));
+    }
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder
+        .write_all(&encoded)
+        .map_err(|error| crate::error::ApiError::internal(error.to_string()))?;
+    let compressed = encoder
+        .finish()
+        .map_err(|error| crate::error::ApiError::internal(error.to_string()))?;
+    let artifact = crate::artifact_routes::store_generated_artifact(
+        state,
+        tenant_id,
+        session_id,
+        "tool-snapshots.json.gz".to_string(),
+        "application/gzip".to_string(),
+        &compressed,
+        crate::artifact_routes::MAX_GENERATED_VIDEO_BYTES,
+    )
+    .await?;
+    object.insert(
+        "snapshotArtifact".to_string(),
+        json!({
+            "id": artifact.id,
+            "url": artifact.download_url,
+            "encoding": "gzip",
+            "rawBytes": encoded.len(),
+            "storedBytes": compressed.len(),
+        }),
+    );
+    bound_diff_previews(object);
+    Ok(())
+}
+
+fn bound_diff_previews(object: &mut serde_json::Map<String, Value>) {
+    if let Some(Value::String(diff)) = object.get_mut("diff") {
+        truncate_preview(diff, MAX_DIFF_PREVIEW_BYTES);
+    }
+    let mut remaining = MAX_DIFF_PREVIEW_BYTES;
+    if let Some(files) = object.get_mut("files").and_then(Value::as_array_mut) {
+        for file in files {
+            let Some(patch) = file
+                .get_mut("patch")
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+            else {
+                continue;
+            };
+            if remaining == 0 {
+                if let Some(file) = file.as_object_mut() {
+                    file.remove("patch");
+                    file.insert("patchOmitted".to_string(), Value::Bool(true));
+                }
+                continue;
+            }
+            let mut bounded = patch;
+            truncate_preview(&mut bounded, remaining);
+            remaining = remaining.saturating_sub(bounded.len());
+            if let Some(file) = file.as_object_mut() {
+                file.insert("patch".to_string(), Value::String(bounded));
+            }
+        }
+    }
+}
+
+fn truncate_preview(value: &mut String, max_bytes: usize) {
+    if value.len() <= max_bytes {
+        return;
+    }
+    let mut end = max_bytes.saturating_sub(64).min(value.len());
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value.truncate(end);
+    value.push_str("\n[diff preview truncated; full snapshot stored as an artifact]");
+}
+
 pub(crate) fn bash_before(root: &Path) -> BashSnapshot {
     let root = canonical_or_self(root);
     let before = git_status_states(&root)
@@ -228,6 +327,116 @@ pub(crate) fn collect_from_revert_items(
         snapshots.extend(collect_from_parts(&message.parts));
     }
     snapshots
+}
+
+pub(crate) async fn collect_from_revert_items_hydrated(
+    state: &crate::state::AppState,
+    tenant_id: &str,
+    session_id: &str,
+    removed_messages: &[MessageWithParts],
+    removed_parts: &[Part],
+) -> anyhow::Result<Vec<FileSnapshot>> {
+    let mut snapshots = collect_from_revert_items(removed_messages, removed_parts);
+    let mut artifact_ids = BTreeSet::new();
+    for part in removed_parts {
+        collect_snapshot_artifact_id(part, &mut artifact_ids);
+    }
+    for message in removed_messages {
+        for part in &message.parts {
+            collect_snapshot_artifact_id(part, &mut artifact_ids);
+        }
+    }
+    for artifact_id in artifact_ids {
+        let artifact = state
+            .inner
+            .store
+            .get_artifact(
+                crate::state::TenantQueryScope::Tenant(tenant_id),
+                &artifact_id,
+            )
+            .await?
+            .ok_or_else(|| {
+                anyhow::anyhow!("snapshot artifact {artifact_id} is missing")
+            })?;
+        anyhow::ensure!(
+            artifact.session_id.as_deref() == Some(session_id),
+            "snapshot artifact {artifact_id} belongs to another session"
+        );
+        let compressed = state
+            .get_artifact_blob(tenant_id, &artifact_id)
+            .await?
+            .ok_or_else(|| {
+                anyhow::anyhow!("snapshot artifact {artifact_id} content is missing")
+            })?;
+        let mut decoder = GzDecoder::new(compressed.as_slice()).take(
+            MAX_SNAPSHOT_BUNDLE_BYTES
+                .saturating_add(1)
+                .try_into()
+                .unwrap_or(u64::MAX),
+        );
+        let mut encoded = Vec::new();
+        decoder.read_to_end(&mut encoded)?;
+        anyhow::ensure!(
+            encoded.len() <= MAX_SNAPSHOT_BUNDLE_BYTES,
+            "snapshot artifact {artifact_id} exceeds the decoded safety limit"
+        );
+        snapshots.extend(serde_json::from_slice::<Vec<FileSnapshot>>(&encoded)?);
+    }
+    Ok(snapshots)
+}
+
+fn collect_snapshot_artifact_id(part: &Part, artifact_ids: &mut BTreeSet<String>) {
+    let Part::Tool(tool) = part else {
+        return;
+    };
+    let ToolState::Completed { metadata, .. } = &tool.state else {
+        return;
+    };
+    if let Some(id) = metadata
+        .get("snapshotArtifact")
+        .and_then(|artifact| artifact.get("id"))
+        .and_then(Value::as_str)
+    {
+        artifact_ids.insert(id.to_string());
+    }
+}
+
+pub(crate) fn snapshot_paths_from_revert_items(
+    messages: &[MessageWithParts],
+    parts: &[Part],
+) -> BTreeSet<String> {
+    let mut paths = collect_from_revert_items(messages, parts)
+        .into_iter()
+        .map(|snapshot| snapshot.path)
+        .collect::<BTreeSet<_>>();
+    for part in parts {
+        collect_diff_paths(part, &mut paths);
+    }
+    for message in messages {
+        for part in &message.parts {
+            collect_diff_paths(part, &mut paths);
+        }
+    }
+    paths
+}
+
+fn collect_diff_paths(part: &Part, paths: &mut BTreeSet<String>) {
+    let Part::Tool(tool) = part else {
+        return;
+    };
+    let ToolState::Completed { metadata, .. } = &tool.state else {
+        return;
+    };
+    for diff in metadata
+        .get("diffs")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if let Some(path) = diff.get("path").and_then(Value::as_str) {
+            paths.insert(path.to_string());
+        }
+    }
 }
 
 pub(crate) fn collect_from_parts(parts: &[Part]) -> Vec<FileSnapshot> {

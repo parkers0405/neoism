@@ -121,6 +121,116 @@ pub(crate) async fn store_generated_artifact(
     .await
 }
 
+pub(crate) async fn externalize_tool_attachments(
+    state: &AppState,
+    tenant_id: &str,
+    session_id: &str,
+    metadata: &mut serde_json::Value,
+) -> Result<(), ApiError> {
+    let Some(object) = metadata.as_object_mut() else {
+        return Ok(());
+    };
+    let Some(attachments) = object
+        .get_mut("attachments")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        strip_embedded_mcp_media(object);
+        return Ok(());
+    };
+    for (index, attachment) in attachments.iter_mut().enumerate() {
+        let Some(item) = attachment.as_object_mut() else {
+            continue;
+        };
+        let Some(url) = item
+            .get("url")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        let Some((header, encoded)) = url.split_once(',') else {
+            continue;
+        };
+        let Some(mime) = header
+            .strip_prefix("data:")
+            .and_then(|value| value.strip_suffix(";base64"))
+        else {
+            continue;
+        };
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .map_err(|error| {
+                ApiError::bad_request(format!("Invalid tool attachment: {error}"))
+            })?;
+        let filename = item
+            .get("filename")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                format!("tool-attachment-{}.{}", index + 1, media_extension(mime))
+            });
+        let artifact = store_generated_artifact(
+            state,
+            tenant_id,
+            session_id,
+            filename,
+            mime.to_string(),
+            &bytes,
+            MAX_ARTIFACT_BYTES,
+        )
+        .await?;
+        item.insert(
+            "url".to_string(),
+            serde_json::Value::String(artifact.download_url),
+        );
+        item.insert(
+            "artifactID".to_string(),
+            serde_json::Value::String(artifact.id),
+        );
+    }
+    strip_embedded_mcp_media(object);
+    Ok(())
+}
+
+fn strip_embedded_mcp_media(object: &mut serde_json::Map<String, serde_json::Value>) {
+    let Some(mcp) = object
+        .get_mut("mcp")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return;
+    };
+    let Some(result) = mcp.remove("result") else {
+        return;
+    };
+    let content_types = result
+        .get("content")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.get("type").and_then(serde_json::Value::as_str))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    mcp.insert(
+        "resultSummary".to_string(),
+        serde_json::json!({
+            "isError": result.get("isError").cloned().unwrap_or(serde_json::Value::Null),
+            "contentTypes": content_types,
+            "contentOmitted": true,
+        }),
+    );
+}
+
+fn media_extension(mime: &str) -> &'static str {
+    match mime {
+        "image/png" => "png",
+        "image/jpeg" => "jpg",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        "application/pdf" => "pdf",
+        _ => "bin",
+    }
+}
+
 async fn store_artifact(
     state: &AppState,
     tenant_id: &str,

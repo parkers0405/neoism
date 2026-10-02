@@ -2,6 +2,17 @@
 
 All notable user-facing changes to Neoism are documented here.
 
+## [0.7.113-nightly.20261002.1] - 2026-10-02
+
+### Mash Up Packs and plugin effects
+
+- Adds atomic Mash Up Pack activation with reversible theme/font baselines and pack-scoped desktop editor Lua selection.
+- Adds the Lucid Blocks showcase with a plugin-defined vector-particle effect: every Agent composer edit emits an independently seeded bird while Rust owns bounded physics, rendering, and retirement.
+- Adds capability-gated `neoism.effect.emit`, privacy-safe composer revision metadata, and exact-owner validation without exposing draft text or running Lua on input/render threads.
+- Fixes Agent New Chat keyboard navigation, child-to-main pointer switching, and stale workspace ownership reconciliation.
+
+This is an opt-in prerelease. Use `neoism update --nightly`; plain `neoism update` stays on stable. Nightly assets become visible only after the full Linux, macOS, and Windows matrix succeeds.
+
 ## [0.7.112-nightly.20261002.1] - 2026-10-02
 
 ### Open plugin platform

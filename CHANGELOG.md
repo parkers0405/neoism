@@ -2,6 +2,17 @@
 
 All notable user-facing changes to Neoism are documented here.
 
+## [0.7.112-nightly.20261002.1] - 2026-10-02
+
+### Open plugin platform
+
+- Adds sandboxed editor Lua packages, isolated Agent Lua packages, managed package discovery, transactional activation, capabilities and grants, retained plugin UI, commands, diagnostics, decorations, LSP, Tree-sitter, tasks, debugging, Git, Agent tools, providers, routes, hooks, prompts, context, MCP, and custom message parts.
+- Keeps Rust authoritative for rendering, input, synchronization, processes, transport, mutations, and GPU work; Lua callbacks remain isolated and event-driven.
+- Fixes editor panel registration, startup failure visibility, Agent plugin-generation acquisition, web/WASM plugin command routing, and idle plugin state polling.
+- Ships and validates the Agent Lua runner across Linux, macOS, Windows MSI, source/download installers, transactional updaters, macOS bundles and DMGs, and Docker.
+
+This is an opt-in prerelease. Use `neoism update --nightly`; plain `neoism update` stays on stable. Nightly assets become visible only after the full Linux, macOS, and Windows matrix succeeds.
+
 ## [0.7.106-nightly.20260917.2] - 2026-09-17
 
 ### Nightly validation fix

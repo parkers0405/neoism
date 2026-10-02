@@ -68,7 +68,7 @@ jobs:
         # but it builds fine natively (exactly like the local build).
         run: |
           env -u CI cargo build --release --locked \
-            -p neoism -p neoism-workspace-daemon -p neoism-agent
+            -p neoism -p neoism-workspace-daemon -p neoism-agent -p neoism-agent-lua-runner
 
       - name: Install web dependencies
         run: npm --prefix neoism-frontend/web ci
@@ -86,6 +86,7 @@ jobs:
           cp target/release/neoism \
              target/release/neoism-workspace-daemon \
              target/release/neoism-agent \
+             target/release/neoism-agent-lua-runner \
              "stage/$OUT/"
           # Ship the built web UI NEXT TO the binaries. The daemon's
           # `web::web_root()` probes `<exe dir>/web` first, so an untarred

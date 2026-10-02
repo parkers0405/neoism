@@ -69,6 +69,10 @@ cargo build --bin neoism
 
 Documentation ships inside Neoism. Open **Neoism Notes** with `Alt+N` for the editor, agent, daemon, multiplayer, extensions, configuration, keybindings, and troubleshooting.
 
+Native UI, commands, keymaps, events, panels, agent surfaces, trees, tabs, status, and chrome are customizable from [`~/.config/neoism/init.lua`](docs/lua.md) without moving rendering out of Rust.
+
+Plugin authors and coding agents should start with the canonical [`plugin architecture and package guide`](docs/plugins.md), then use the complete [`editor plugin API`](docs/editor-plugin-api.md), [`Agent plugin API`](docs/agent-plugins.md), and generated [`Lua annotations`](docs/lua-api.lua). These references cover every exposed tier, manifest field, capability, contribution, lifecycle rule, protocol frame, broker and security boundary.
+
 A first tour: open a project, `Alt+E` for the file tree, `Ctrl+Shift+T` for a terminal, `Alt+A` for an agent, `Alt+P` when you do not know the command.
 
 ## Architecture

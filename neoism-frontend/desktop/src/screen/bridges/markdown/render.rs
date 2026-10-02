@@ -17,7 +17,7 @@ impl Screen<'_> {
             tracing::enabled!(target: "neoism::markdown_perf", tracing::Level::DEBUG)
                 .then(std::time::Instant::now);
         let scale = self.sugarloaf.scale_factor();
-        let theme = self.renderer.theme;
+        let theme = self.renderer.styled_theme(neoism_lua::selector::MARKDOWN);
         let markdown_font_scale = self.renderer.chrome_scale();
         let spellcheck_enabled = self.renderer.markdown_spellcheck;
         let remote_joined = self.context_manager.current_workspace_is_remote_joined();

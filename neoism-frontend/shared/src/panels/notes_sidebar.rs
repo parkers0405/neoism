@@ -7,6 +7,7 @@ use sugarloaf::text::DrawOpts;
 use sugarloaf::Sugarloaf;
 
 use crate::animation::CriticallyDampedSpring;
+use crate::customization::{color_f32, color_u8};
 use crate::panels::file_tree::icons::{
     icon_for_file, FOLDER_CLOSED_ICON, FOLDER_OPEN_ICON,
 };
@@ -179,6 +180,12 @@ pub struct NoteSidebarEntry {
     parent: PathBuf,
 }
 
+impl NoteSidebarEntry {
+    pub fn depth(&self) -> usize {
+        self.depth
+    }
+}
+
 /// File name of the per-vault icon map (relative path → glyph).
 pub const NOTES_ICONS_FILE: &str = ".neoism-icons.json";
 
@@ -263,6 +270,10 @@ impl Default for NotesSidebar {
 }
 
 impl NotesSidebar {
+    pub fn entries(&self) -> &[NoteSidebarEntry] {
+        &self.all_entries
+    }
+
     pub fn is_visible(&self) -> bool {
         self.visible
     }
@@ -1245,6 +1256,7 @@ impl NotesSidebar {
         occlusion: &[[f32; 4]],
         mouse: Option<(f32, f32)>,
         _now_seconds: f32,
+        plugins: Option<&neoism_lua::PluginSnapshot>,
     ) {
         self.panel_rect = Some([x_left, y_top, panel_width, panel_height]);
         if !self.visible || panel_width <= 0.0 || panel_height <= 0.0 {
@@ -1267,6 +1279,12 @@ impl NotesSidebar {
         let row_pad_x = ROW_PADDING_X * self.scale;
         let indent_px = INDENT_PX * self.scale;
         let icon_gap = ICON_GAP * self.scale;
+        let row_style = plugins.map(|plugins| plugins.styles.resolve("notes-tree.row"));
+        let selected_style = plugins
+            .map(|plugins| plugins.styles.resolve("notes-tree.row.selected"));
+        let hover_style = plugins
+            .map(|plugins| plugins.styles.resolve("notes-tree.row.hover"));
+        let icon_style = plugins.map(|plugins| plugins.styles.resolve("notes-tree.icon"));
         let frame_stroke = (FRAME_STROKE * self.scale).max(2.0);
         let frame_radius = FRAME_RADIUS * self.scale;
         let content_x = x_left + frame_stroke;
@@ -1830,6 +1848,35 @@ impl NotesSidebar {
                 ));
 
                 let is_selected = absolute_ix == self.selected_index;
+                let is_hovered = mouse.is_some_and(|(mx, my)| {
+                    rect_contains([content_x, visible_row_y, content_w, visible_row_h], mx, my)
+                });
+                let state_style = if is_selected {
+                    selected_style.as_ref()
+                } else if is_hovered {
+                    hover_style.as_ref()
+                } else {
+                    row_style.as_ref()
+                };
+                if let Some(background) = state_style.and_then(|style| style.background.as_deref()) {
+                    sugarloaf.quad(
+                        None,
+                        content_x,
+                        visible_row_y,
+                        content_w,
+                        visible_row_h,
+                        color_f32(Some(background), theme, theme.f32(theme.surface)),
+                        edge_row_radii(
+                            visible_row_y,
+                            visible_row_h,
+                            content_y,
+                            panel_bottom,
+                            content_radius,
+                        ),
+                        DEPTH,
+                        ORDER + 1,
+                    );
+                }
                 let is_notebook = self.is_notebook_dir(&entry.path);
                 let book_view = self.notebook_root.is_some();
                 // Spring-loaded drop target: accent-tinted band so it
@@ -1909,11 +1956,23 @@ impl NotesSidebar {
                 } else {
                     icon_for_file(&entry.label).1
                 };
+                let icon_color = color_u8(
+                    icon_style
+                        .as_ref()
+                        .and_then(|style| style.foreground.as_deref()),
+                    theme,
+                    icon_color,
+                );
                 let label_color = if entry.is_dir || is_selected {
                     theme.u8(theme.fg)
                 } else {
                     theme.u8(theme.dim)
                 };
+                let label_color = color_u8(
+                    state_style.and_then(|style| style.foreground.as_deref()),
+                    theme,
+                    label_color,
+                );
                 let chevron_opts = DrawOpts {
                     font_size: (indent_px - 6.0 * self.scale).max(6.0 * self.scale),
                     color: fade_u8(theme.u8(theme.muted), row_dim),
@@ -1927,7 +1986,9 @@ impl NotesSidebar {
                     ..DrawOpts::default()
                 };
                 let label_opts = DrawOpts {
-                    font_size,
+                    font_size: state_style
+                        .and_then(|style| style.font_size)
+                        .unwrap_or(font_size),
                     color: fade_u8(label_color, row_dim),
                     clip_rect: Some(list_clip),
                     ..DrawOpts::default()

@@ -246,8 +246,14 @@ pub enum PanelKey {
 /// `AgentLabel + Copy + PartialEq` API without dragging the host's
 /// `AgentKind` enum into this crate.
 pub struct Chrome<A: Send + Copy + 'static = ()> {
+    /// Immutable per-window plugin output. Lua never enters draw or event
+    /// paths; panels only resolve typed values from this snapshot.
+    plugins: std::sync::Arc<neoism_lua::PluginSnapshot>,
+    plugin_hitboxes: Vec<crate::panels::custom_ui::CustomUiHitbox>,
+    pending_plugin_commands: Vec<String>,
     /// Per-frame rects for each panel. Re-computed by `set_layout`.
     layout: ChromeLayout,
+    surface_layout: crate::surface_layout::ResolvedSurfaceLayout,
     /// Resolved chrome palette. Panels read this through
     /// `PanelContext::theme`.
     theme: ChromeTheme,
@@ -389,6 +395,7 @@ pub struct Chrome<A: Send + Copy + 'static = ()> {
     /// the file tree; entry data comes from local fs on desktop and
     /// from daemon listings (`set_entries_from_host`) on web.
     pub notes_sidebar: NotesSidebar,
+    pub left_sidebar_host: crate::panels::left_sidebar_host::LeftSidebarHost,
     /// Selects the workspace-level catalog slot; Files/Notes retain their
     /// state and reappear unchanged when another sidebar is selected.
     pub conversations_visible: bool,
@@ -518,6 +525,7 @@ pub struct Chrome<A: Send + Copy + 'static = ()> {
     /// inside the file-viewer rect (the `Wheel` variant itself
     /// doesn't carry a cursor position).
     last_pointer_pos: (f32, f32),
+    pointer_inside: bool,
 
     /// Buffer-tab close intents drained out of `buffer_tabs` and
     /// queued for the host bridge. `set_buffer_tabs` clears these

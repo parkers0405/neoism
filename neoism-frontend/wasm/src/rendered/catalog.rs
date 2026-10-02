@@ -788,8 +788,8 @@ fn map_history(
     m: neoism_protocol::agent::HistoryMessage,
 ) -> neoism_ui::panels::agent_pane::state::NeoismAgentMessage {
     use neoism_ui::panels::agent_pane::state::{
-        NeoismAgentMessage, NeoismAgentMessageKind, NeoismAgentOutputKind,
-        NeoismAgentTodo,
+        NeoismAgentImage, NeoismAgentMessage, NeoismAgentMessageKind,
+        NeoismAgentOutputKind, NeoismAgentTodo,
     };
     let kind = map_history_kind(m.kind);
     let output_kind = match kind {
@@ -817,9 +817,15 @@ fn map_history(
             .collect(),
         detail: m.detail,
         usage: m.usage.map(map_usage),
-        // The daemon's HistoryMessage carries no attachment list;
-        // image parts arrive through the live part stream instead.
-        images: Vec::new(),
+        images: m
+            .attachments
+            .into_iter()
+            .map(|attachment| NeoismAgentImage {
+                filename: attachment.filename,
+                url: attachment.url,
+                mime: attachment.mime,
+            })
+            .collect(),
     }
 }
 

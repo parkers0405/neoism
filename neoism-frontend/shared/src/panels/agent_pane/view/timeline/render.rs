@@ -14,6 +14,7 @@ pub fn render_timeline_with<P, D>(
     now_seconds: f32,
     mouse: Option<(f32, f32)>,
     occlusion_rects: &[[f32; 4]],
+    plugins: Option<&neoism_lua::PluginSnapshot>,
 ) where
     P: AgentTimelinePane,
     D: AgentTimelineDelegate<P>,
@@ -270,6 +271,7 @@ pub fn render_timeline_with<P, D>(
         rendered_rows += 1;
         if let Some(message) = row.display_message.as_ref() {
             rendered_text_bytes += message.text().len();
+            let message_theme = message_theme(theme, plugins, message.kind());
             D::render_message_card(
                 sugarloaf,
                 x,
@@ -280,7 +282,7 @@ pub fn render_timeline_with<P, D>(
                 message,
                 markdown_blocks,
                 tool_diff_sections,
-                theme,
+                &message_theme,
                 s,
                 now_seconds,
                 mouse,
@@ -300,6 +302,7 @@ pub fn render_timeline_with<P, D>(
                 message = message.with_text(text.clone());
             }
             rendered_text_bytes += message.text().len();
+            let message_theme = message_theme(theme, plugins, message.kind());
             D::render_message_card(
                 sugarloaf,
                 x,
@@ -310,7 +313,7 @@ pub fn render_timeline_with<P, D>(
                 &message,
                 markdown_blocks,
                 tool_diff_sections,
-                theme,
+                &message_theme,
                 s,
                 now_seconds,
                 mouse,
@@ -390,6 +393,23 @@ pub fn render_timeline_with<P, D>(
             .saturating_duration_since(render_started)
             .as_micros(),
     );
+}
+
+fn message_theme(
+    theme: &IdeTheme,
+    plugins: Option<&neoism_lua::PluginSnapshot>,
+    kind: AgentTimelineMessageKind,
+) -> IdeTheme {
+    let Some(plugins) = plugins else { return *theme };
+    let selector = match kind {
+        AgentTimelineMessageKind::User => "agent.chat.message.user",
+        AgentTimelineMessageKind::Assistant => "agent.chat.message.assistant",
+        AgentTimelineMessageKind::Tool | AgentTimelineMessageKind::Subtask => "agent.chat.tool",
+        AgentTimelineMessageKind::Reasoning
+        | AgentTimelineMessageKind::System
+        | AgentTimelineMessageKind::Compaction => "agent.chat.message",
+    };
+    crate::customization::styled_ide_theme(*theme, &plugins.styles.resolve(selector))
 }
 
 #[allow(clippy::too_many_arguments)]

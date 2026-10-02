@@ -5,6 +5,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -25,13 +26,23 @@ pub enum HostCapability {
     EventPublish,
     Network,
     ProcessSpawn,
+    TaskSpawn,
+    SecretUse,
     SecretRead,
+    PromptRead,
+    MessageRead,
+    ResponseTransform,
+    ProviderAccess,
+    PolicyInvoke,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "kebab-case")]
 pub enum PluginScope {
+    Global,
+    User,
     Workspace,
+    Session,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -43,13 +54,22 @@ pub struct WorkspaceIdentity {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RuntimeScope {
+    Global,
+    User { user_id: String },
     Workspace(WorkspaceIdentity),
+    Session {
+        workspace: WorkspaceIdentity,
+        session_id: String,
+    },
 }
 
 impl RuntimeScope {
     pub fn kind(&self) -> PluginScope {
         match self {
+            Self::Global => PluginScope::Global,
+            Self::User { .. } => PluginScope::User,
             Self::Workspace(_) => PluginScope::Workspace,
+            Self::Session { .. } => PluginScope::Session,
         }
     }
 }
@@ -81,13 +101,97 @@ pub trait EventPublisher: Send + Sync + 'static {
     fn publish(&self, event: PluginEvent) -> Result<(), PluginRuntimeError>;
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct BrokerRequest {
+    /// Host-defined opaque operation or resource name. It is never a path,
+    /// bearer token, or provider credential.
+    pub operation: String,
+    #[serde(default)]
+    pub input: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<BrokerOwner>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BrokerOwner {
+    pub plugin_id: String,
+    pub instance_id: String,
+    pub registry_generation: u64,
+    pub scope: PluginScope,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct BrokerResponse {
+    #[serde(default)]
+    pub output: Value,
+}
+
+pub trait CapabilityBroker: Send + Sync + 'static {
+    fn call(
+        &self,
+        request: BrokerRequest,
+        lease: CapabilityLease,
+    ) -> Result<BrokerResponse, PluginRuntimeError>;
+    fn cancel(
+        &self,
+        opaque_id: &str,
+        owner: Option<BrokerOwner>,
+        lease: CapabilityLease,
+    ) -> Result<(), PluginRuntimeError> {
+        let _ = (opaque_id, owner, lease);
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
 pub struct CapabilityGrants {
     capabilities: BTreeSet<HostCapability>,
     config: Option<Arc<dyn ConfigAccess>>,
     workspace: Option<Arc<dyn WorkspaceAccess>>,
     events: Option<Arc<dyn EventPublisher>>,
+    brokers: BTreeMap<HostCapability, Arc<dyn CapabilityBroker>>,
     metadata: BTreeMap<String, Value>,
+    lease: CapabilityLease,
+}
+
+#[derive(Clone, Debug)]
+pub struct CapabilityLease(Arc<AtomicBool>);
+
+impl Default for CapabilityLease {
+    fn default() -> Self {
+        Self(Arc::new(AtomicBool::new(true)))
+    }
+}
+
+impl CapabilityLease {
+    pub fn is_active(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+
+    pub fn revoke(&self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
+impl Default for CapabilityGrants {
+    fn default() -> Self {
+        Self {
+            capabilities: BTreeSet::new(),
+            config: None,
+            workspace: None,
+            events: None,
+            brokers: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            lease: CapabilityLease::default(),
+        }
+    }
 }
 
 impl CapabilityGrants {
@@ -117,6 +221,16 @@ impl CapabilityGrants {
     pub fn events(mut self, publisher: Arc<dyn EventPublisher>) -> Self {
         self.capabilities.insert(HostCapability::EventPublish);
         self.events = Some(publisher);
+        self
+    }
+
+    pub fn broker(
+        mut self,
+        capability: HostCapability,
+        broker: Arc<dyn CapabilityBroker>,
+    ) -> Self {
+        self.capabilities.insert(capability);
+        self.brokers.insert(capability, broker);
         self
     }
 
@@ -157,7 +271,14 @@ impl CapabilityGrants {
                 .contains(&HostCapability::EventPublish)
                 .then(|| self.events.clone())
                 .flatten(),
+            brokers: self
+                .brokers
+                .iter()
+                .filter(|(capability, _)| required.contains(capability))
+                .map(|(capability, broker)| (*capability, Arc::clone(broker)))
+                .collect(),
             metadata: self.metadata.clone(),
+            lease: CapabilityLease::default(),
         }
     }
 }
@@ -179,13 +300,15 @@ impl PluginContext {
     pub fn workspace(&self) -> Option<&WorkspaceIdentity> {
         match &self.scope {
             RuntimeScope::Workspace(workspace) => Some(workspace),
+            RuntimeScope::Session { workspace, .. } => Some(workspace),
+            RuntimeScope::Global | RuntimeScope::User { .. } => None,
         }
     }
     pub fn capabilities(&self) -> &BTreeSet<HostCapability> {
         &self.grants.capabilities
     }
     pub fn has(&self, capability: HostCapability) -> bool {
-        self.grants.capabilities.contains(&capability)
+        self.grants.lease.is_active() && self.grants.capabilities.contains(&capability)
     }
     pub fn require(&self, capability: HostCapability) -> Result<(), CapabilityError> {
         self.has(capability)
@@ -208,7 +331,21 @@ impl PluginContext {
             })
     }
     pub fn events(&self) -> Option<&dyn EventPublisher> {
-        self.grants.events.as_deref()
+        self.grants
+            .lease
+            .is_active()
+            .then(|| self.grants.events.as_deref())
+            .flatten()
+    }
+    pub fn broker(&self, capability: HostCapability) -> Option<GrantedBroker<'_>> {
+        self.grants
+            .brokers
+            .get(&capability)
+            .map(|broker| GrantedBroker {
+                context: self,
+                capability,
+                broker: broker.as_ref(),
+            })
     }
     pub fn metadata(&self, key: &str) -> Option<&Value> {
         self.grants.metadata.get(key)
@@ -219,6 +356,51 @@ impl PluginContext {
             scope: self.scope.clone(),
             grants: self.grants.restricted_to(required),
         }
+    }
+
+    pub fn capability_lease(&self) -> CapabilityLease {
+        self.grants.lease.clone()
+    }
+
+    pub fn capabilities_active(&self) -> bool {
+        self.grants.lease.is_active()
+    }
+
+    pub fn revoke_capabilities(&self) {
+        self.grants.lease.revoke();
+    }
+
+    #[doc(hidden)]
+    pub fn with_host_metadata(mut self, key: impl Into<String>, value: Value) -> Self {
+        self.grants.metadata.insert(key.into(), value);
+        self
+    }
+}
+
+pub struct GrantedBroker<'a> {
+    context: &'a PluginContext,
+    capability: HostCapability,
+    broker: &'a dyn CapabilityBroker,
+}
+
+impl GrantedBroker<'_> {
+    pub fn call(&self, request: BrokerRequest) -> Result<BrokerResponse, PluginRuntimeError> {
+        self.context
+            .require(self.capability)
+            .map_err(|error| PluginRuntimeError::new(error.to_string()))?;
+        self.broker.call(request, self.context.capability_lease())
+    }
+
+    pub fn cancel(
+        &self,
+        opaque_id: &str,
+        owner: Option<BrokerOwner>,
+    ) -> Result<(), PluginRuntimeError> {
+        self.context
+            .require(self.capability)
+            .map_err(|error| PluginRuntimeError::new(error.to_string()))?;
+        self.broker
+            .cancel(opaque_id, owner, self.context.capability_lease())
     }
 }
 
@@ -318,5 +500,25 @@ mod tests {
             .unwrap_err();
         assert!(error.to_string().contains("ConfigWrite"));
         assert_eq!(access.0.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn revocation_is_shared_by_generation_clones_but_not_other_generations() {
+        let base = PluginContext::new(
+            RuntimeScope::Workspace(WorkspaceIdentity {
+                id: "test".into(),
+                root: ".".into(),
+            }),
+            CapabilityGrants::default().allow(HostCapability::Network),
+        );
+        let generation = base.restricted_to(&[HostCapability::Network]);
+        let callback_context = generation.clone();
+        let next_generation = base.restricted_to(&[HostCapability::Network]);
+
+        generation.revoke_capabilities();
+
+        assert!(!callback_context.capabilities_active());
+        assert!(callback_context.require(HostCapability::Network).is_err());
+        assert!(next_generation.require(HostCapability::Network).is_ok());
     }
 }

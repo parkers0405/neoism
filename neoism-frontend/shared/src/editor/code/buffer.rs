@@ -141,6 +141,39 @@ pub struct CodeTextEdit {
 }
 
 impl CodeBuffer {
+    pub fn validate_text_edits(&self, edits: &[CodeTextEdit]) -> Result<(), String> {
+        let mut ranges = Vec::with_capacity(edits.len());
+        for edit in edits {
+            let Some(start_line) = self.lines.get(edit.start_line) else {
+                return Err("LSP edit start line is outside the buffer".into());
+            };
+            let Some(end_line) = self.lines.get(edit.end_line) else {
+                return Err("LSP edit end line is outside the buffer".into());
+            };
+            if (edit.end_line, edit.end_col) < (edit.start_line, edit.start_col) {
+                return Err("LSP edit range ends before it starts".into());
+            }
+            if edit.start_col > start_line.len() || !start_line.is_char_boundary(edit.start_col) {
+                return Err("LSP edit start is not a UTF-8 byte boundary".into());
+            }
+            if edit.end_col > end_line.len() || !end_line.is_char_boundary(edit.end_col) {
+                return Err("LSP edit end is not a UTF-8 byte boundary".into());
+            }
+            ranges.push((
+                (edit.start_line, edit.start_col),
+                (edit.end_line, edit.end_col),
+            ));
+        }
+        ranges.sort_unstable();
+        if ranges
+            .windows(2)
+            .any(|pair| pair[1].0 < pair[0].1 || pair[1].0 == pair[0].0)
+        {
+            return Err("overlapping LSP edits are not supported".into());
+        }
+        Ok(())
+    }
+
     /// Apply LSP-shaped text edits (e.g. formatting) as ONE undo step,
     /// bottom-up so earlier edits don't shift later ranges. Cursor
     /// keeps its line/col numerically, clamped — good enough for
@@ -185,6 +218,43 @@ impl CodeBuffer {
         let new_lines: Vec<String> =
             replacement.split('\n').map(str::to_string).collect();
         self.lines.splice(sl..=el, new_lines);
+    }
+}
+
+#[cfg(test)]
+mod strict_edit_tests {
+    use super::{CodeBuffer, CodeTextEdit};
+
+    fn edit(start: (usize, usize), end: (usize, usize)) -> CodeTextEdit {
+        CodeTextEdit {
+            start_line: start.0,
+            start_col: start.1,
+            end_line: end.0,
+            end_col: end.1,
+            text: "x".into(),
+        }
+    }
+
+    #[test]
+    fn validates_non_overlapping_utf8_byte_ranges() {
+        let buffer = CodeBuffer::from_text("aéz\nnext");
+        assert!(buffer
+            .validate_text_edits(&[edit((0, 1), (0, 3)), edit((1, 0), (1, 4))])
+            .is_ok());
+        assert!(buffer.validate_text_edits(&[edit((0, 2), (0, 3))]).is_err());
+    }
+
+    #[test]
+    fn rejects_reversed_out_of_bounds_and_overlapping_ranges() {
+        let buffer = CodeBuffer::from_text("abcdef");
+        assert!(buffer.validate_text_edits(&[edit((0, 4), (0, 2))]).is_err());
+        assert!(buffer.validate_text_edits(&[edit((1, 0), (1, 0))]).is_err());
+        assert!(buffer
+            .validate_text_edits(&[edit((0, 1), (0, 4)), edit((0, 3), (0, 5))])
+            .is_err());
+        assert!(buffer
+            .validate_text_edits(&[edit((0, 3), (0, 3)), edit((0, 3), (0, 3))])
+            .is_err());
     }
 }
 
@@ -257,6 +327,21 @@ impl CodeBuffer {
 
     pub fn line_count(&self) -> usize {
         self.lines.len()
+    }
+
+    /// Lines normalized like a file read from disk, for line-oriented diffs.
+    /// An editable empty EOF row can encode the terminal newline itself; it is
+    /// not an additional blank line unless the buffer already had one.
+    pub fn lines_for_diff(&self) -> &[String] {
+        let end = if !self.trailing_newline
+            && self.lines.len() > 1
+            && self.lines.last().is_some_and(String::is_empty)
+        {
+            self.lines.len() - 1
+        } else {
+            self.lines.len()
+        };
+        &self.lines[..end]
     }
 
     pub fn cursor(&self) -> CodePosition {

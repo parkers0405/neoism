@@ -4,6 +4,7 @@ use std::net::ToSocketAddrs;
 use std::sync::{OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
+use base64::Engine as _;
 use serde_json::Value;
 
 use crate::neoism::agent::side_panel::{NeoismAgentSessionEntry, SessionGoal};
@@ -453,23 +454,31 @@ fn agent_server_credential(server: &str) -> Option<String> {
 
 pub(super) fn fetch_model_options(
     server: &str,
+    directory: Option<&str>,
 ) -> Result<Vec<NeoismAgentPickerOption>, String> {
-    let value = api_request_json(server, "GET", "/v2/providers/configured", None)?
+    let path = directory
+        .map(|dir| format!("/v2/providers/configured?directory={}", percent_encode(dir)))
+        .unwrap_or_else(|| "/v2/providers/configured".to_string());
+    let value = api_request_json(server, "GET", &path, None)?
         .ok_or_else(|| "Neoism Agent returned an empty provider response".to_string())?;
     Ok(model_options_from_providers_json(&value))
 }
 
 pub(super) fn fetch_model_context_limit(
     server: &str,
+    directory: Option<&str>,
     model_ref: &str,
 ) -> Result<Option<u64>, String> {
     // The provider catalog is assembled lazily and can exceed the normal
     // 900 ms UI-request timeout on a cold agent-server start. A timeout here
     // silently left the usage panel without its `/ context limit` denominator.
+    let path = directory
+        .map(|dir| format!("/v2/providers/configured?directory={}", percent_encode(dir)))
+        .unwrap_or_else(|| "/v2/providers/configured".to_string());
     let value = api_request_json_with_read_timeout(
         server,
         "GET",
-        "/v2/providers/configured",
+        &path,
         None,
         Duration::from_secs(5),
     )?
@@ -1627,7 +1636,8 @@ pub(super) fn fetch_session_messages_page(
             .map(str::to_string)
     });
     let raw_bytes = value.to_string().len();
-    let blocks = message_blocks_from_response(messages, true);
+    let mut blocks = message_blocks_from_response(messages, true);
+    hydrate_generated_images(server, &mut blocks);
     if super::perf::enabled() {
         let tool_blocks = blocks
             .iter()
@@ -1755,10 +1765,10 @@ pub(super) fn fetch_session_goal(
 }
 
 fn response_json(response: HttpResponse) -> Result<Option<Value>, String> {
-    if response.body.trim().is_empty() {
+    if response.body.iter().all(u8::is_ascii_whitespace) {
         return Ok(None);
     }
-    serde_json::from_str(&response.body)
+    serde_json::from_slice(&response.body)
         .map(Some)
         .map_err(|error| format!("Neoism Agent returned invalid JSON: {error}"))
 }
@@ -2047,7 +2057,7 @@ pub(super) fn percent_encode(value: &str) -> String {
 }
 
 struct HttpResponse {
-    body: String,
+    body: Vec<u8>,
 }
 
 pub(super) struct EventStreamConnection {
@@ -2260,10 +2270,8 @@ fn http_request(
     } else {
         body.to_vec()
     };
-    let body = String::from_utf8(body)
-        .map_err(|error| format!("Neoism Agent returned non-UTF8 data: {error}"))?;
     if !(200..300).contains(&status) {
-        return Err(http_error(status, reason, &body));
+        return Err(http_error(status, reason, &String::from_utf8_lossy(&body)));
     }
     Ok(HttpResponse { body })
 }
@@ -2515,6 +2523,32 @@ fn model_label(model: Option<&Value>) -> String {
 pub(super) fn part_block(part: &Value) -> Option<NeoismAgentMessage> {
     neoism_ui::panels::agent_pane::api_mapping::part_block(part)
         .map(NeoismAgentMessage::from)
+}
+
+pub(super) fn hydrate_generated_images(
+    server: &str,
+    messages: &mut [NeoismAgentMessage],
+) {
+    for message in messages {
+        for image in &mut message.images {
+            if !image.mime.starts_with("image/")
+                || !image.url.starts_with("/v2/artifacts/")
+                || !image.url.ends_with("/content")
+            {
+                continue;
+            }
+            let Ok(response) =
+                http_request(server, "GET", &image.url, None, Duration::from_secs(30))
+            else {
+                continue;
+            };
+            if response.body.len() > 25 * 1024 * 1024 {
+                continue;
+            }
+            let encoded = base64::engine::general_purpose::STANDARD.encode(response.body);
+            image.url = format!("data:{};base64,{encoded}", image.mime);
+        }
+    }
 }
 
 impl From<neoism_ui::panels::agent_pane::state::NeoismAgentTodo> for NeoismAgentTodo {

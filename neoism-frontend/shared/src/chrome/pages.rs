@@ -1221,6 +1221,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             PaneAction::OpenRepository(_) => {
                 self.pending_extensions_actions.push(action);
             }
+            PaneAction::LuaPluginActionRequested { .. } => {}
         }
     }
 

@@ -42,6 +42,15 @@ const TEXT_PAD_X: f32 = 8.0;
 const SCROLLBAR_W: f32 = 6.0;
 const SCROLLBAR_MIN_THUMB_H: f32 = 28.0;
 
+fn rgba_f32(color: [u8; 4]) -> [f32; 4] {
+    [
+        color[0] as f32 / 255.0,
+        color[1] as f32 / 255.0,
+        color[2] as f32 / 255.0,
+        color[3] as f32 / 255.0,
+    ]
+}
+
 /// Return the real, positive-area intersection of `rect` and `clip`.
 ///
 /// Carets are document anchored.  In particular, a caret outside the
@@ -68,6 +77,7 @@ pub fn render(
     font_scale: f32,
     mouse: Option<[f32; 2]>,
 ) -> bool {
+    pane.plugin_hit_regions.clear();
     let [x, y, w, h] = rect;
     if w <= 0.0 || h <= 0.0 {
         return false;
@@ -140,13 +150,20 @@ pub fn render(
     } else {
         0 // NoWrap sentinel: identity index, horizontal caret-follow.
     };
-    let wrap_key = (pane.buffer.revision, cols);
+    let plugin_revision = pane.plugin_decorations.as_ref().map_or(0, |snapshot| snapshot.revision);
+    let wrap_key = (pane.buffer.revision, cols, plugin_revision);
     if pane.wrap_index_key != Some(wrap_key) || !pane.wrap_index.is_valid_for(line_count)
     {
-        pane.wrap_index = std::sync::Arc::new(WrapIndex::build(
-            &pane.buffer.lines,
-            cols,
-            TAB_DISPLAY_WIDTH,
+        let hidden = pane.plugin_decorations.as_ref()
+            .filter(|snapshot| !snapshot.hidden_lines.contains(&pane.buffer.cursor_line))
+            .map(|snapshot| &snapshot.hidden_lines)
+            .cloned()
+            .unwrap_or_default();
+        let virtual_rows = pane.plugin_decorations.as_ref()
+            .map(|snapshot| snapshot.virtual_lines.iter().map(|(line, rows)| (*line, rows.len())).collect())
+            .unwrap_or_default();
+        pane.wrap_index = std::sync::Arc::new(WrapIndex::build_with_projection(
+            &pane.buffer.lines, cols, TAB_DISPLAY_WIDTH, &hidden, &virtual_rows,
         ));
         pane.wrap_index_key = Some(wrap_key);
     }
@@ -339,30 +356,20 @@ pub fn render(
         visual_indent: usize,
     }
     let mut visible: Vec<RowView> = Vec::with_capacity(visible_rows.min(256));
-    {
-        let (mut line_ix, mut seg) = wrap.line_of_row(first_row, line_count);
-        let mut vrow = first_row;
-        while vrow < last_row && line_ix < line_count {
-            let Some(segments) = wrap.segments_of_line(line_ix) else {
-                break;
-            };
-            while seg < segments.len() && vrow < last_row {
-                let segment = segments[seg];
-                visible.push(RowView {
-                    vrow,
-                    line: line_ix,
-                    seg,
-                    seg_start: segment.byte_start,
-                    seg_end: segment.byte_end,
-                    base_col: segment.source_col,
-                    visual_indent: segment.visual_indent,
-                });
-                vrow += 1;
-                seg += 1;
-            }
-            line_ix += 1;
-            seg = 0;
-        }
+    for vrow in first_row..last_row {
+        let Some(VisualRow::Source { line, segment: seg }) = wrap.row_kind(vrow) else {
+            continue;
+        };
+        let Some(segment) = wrap.segment(line, seg) else { continue };
+        visible.push(RowView {
+            vrow,
+            line,
+            seg,
+            seg_start: segment.byte_start,
+            seg_end: segment.byte_end,
+            base_col: segment.source_col,
+            visual_indent: segment.visual_indent,
+        });
     }
 
     // Buffer text draws clip at the gutter edge so NoWrap horizontal
@@ -387,6 +394,38 @@ pub fn render(
         scroll_x,
         wrap: wrap.clone(),
     };
+
+    // True virtual lines own visual rows in WrapIndex. Their geometry and
+    // interaction regions are retained here; no callback or VM is reachable.
+    if let Some(snapshot) = pane.plugin_decorations.clone() {
+        for vrow in first_row..last_row {
+            let Some(VisualRow::Synthetic { line, index }) = wrap.row_kind(vrow) else { continue };
+            let Some(virtual_line) = snapshot.virtual_lines.get(&line).and_then(|rows| rows.get(index)) else { continue };
+            let ry = row_screen_y(vrow);
+            if ry + row_h <= grid_y || ry >= grid_y + h_content { continue; }
+            let opts = DrawOpts {
+                color: virtual_line.style.foreground.unwrap_or_else(|| theme.u8_alpha(theme.dim, 0.82)),
+                clip_rect: Some(text_clip),
+                ..base_opts
+            };
+            draw_text(sugarloaf, x + GUTTER_PAD_X, ry + ((row_h - font_size * 1.2) * 0.5).max(0.0), "·", &opts, text_occlusions);
+            let vx = text_x - scroll_x;
+            draw_text(sugarloaf, vx, ry + ((row_h - font_size * 1.2) * 0.5).max(0.0), &virtual_line.text, &opts, text_occlusions);
+            let mut action_x = vx + sugarloaf.text_mut().measure(&virtual_line.text, &opts) + cell_w;
+            for action in &virtual_line.actions {
+                let label = format!("[{}]", action.title);
+                let width = sugarloaf.text_mut().measure(&label, &opts).max(cell_w);
+                draw_text(sugarloaf, action_x, ry + ((row_h - font_size * 1.2) * 0.5).max(0.0), &label, &opts, text_occlusions);
+                pane.plugin_hit_regions.push(super::feed::CodePluginHitRegion {
+                    rect: [action_x, ry, width, row_h],
+                    owner: virtual_line.owner.clone(),
+                    resource: virtual_line.id,
+                    action: action.clone(),
+                });
+                action_x += width + cell_w;
+            }
+        }
+    }
 
     // Cursorline band across the full pane width (nvim `cursorline`
     // covers every wrapped row of the cursor's buffer line).
@@ -811,6 +850,20 @@ pub fn render(
         let ry = row_screen_y(rv.vrow);
         let ty = ry + text_pad_y;
         if rv.seg == 0 {
+            if let Some(sign) = pane.plugin_decorations.as_ref()
+                .and_then(|snapshot| snapshot.by_line.get(&rv.line))
+                .and_then(|items| items.iter().rev().find(|item| item.layer == neoism_lua::DecorationLayer::GutterSign))
+            {
+                let icon = sign.icon.as_deref().or(sign.text.as_deref()).unwrap_or("●");
+                let sign_opts = DrawOpts {
+                    color: sign.style.foreground.unwrap_or_else(|| theme.u8(theme.accent)),
+                    ..base_opts
+                };
+                draw_icon_centered_with_occlusion(
+                    sugarloaf, x + 2.0, [x + 2.0, ry, cell_w, row_h], icon,
+                    &sign_opts, text_occlusions, true,
+                );
+            }
             // Git gutter: a slim bar left of the number (green added,
             // yellow modified), and a red tick at the top edge when
             // baseline lines were deleted above this one.
@@ -896,12 +949,16 @@ pub fn render(
                 .map(|diags| diags.as_slice())
                 .unwrap_or(&[]);
             let syntax = pane.highlight.line_runs(rv.line);
+            let plugin_spans = pane.plugin_decorations.as_ref()
+                .map(|snapshot| snapshot.spans_for_line(rv.line))
+                .unwrap_or(&[]);
             runs = styled_runs_with_syntax(
                 line,
                 syntax,
                 pane.language,
                 selection,
                 diagnostics,
+                plugin_spans,
             );
         }
         for run in &runs {
@@ -917,12 +974,20 @@ pub fn render(
                 - scroll_x;
             let display =
                 expand_tabs_from(&line[sub_start..sub_end], start_col, TAB_DISPLAY_WIDTH);
+            if let Some(color) = run.plugin_background {
+                let end_col = display_col_for_byte(line, sub_end, TAB_DISPLAY_WIDTH);
+                if let Some((bx, bw)) = clamp_band(run_x, (end_col.saturating_sub(start_col)).max(1) as f32 * cell_w) {
+                    sugarloaf.rect(None, bx, ry, bw, row_h, rgba_f32(color), DEPTH, ORDER_BG);
+                }
+            }
             let run_opts = DrawOpts {
-                color: syn_color(run.token, theme, false),
+                color: run.plugin_foreground.unwrap_or_else(|| syn_color(run.token, theme, false)),
                 clip_rect: Some(text_clip),
                 ..base_opts
             };
-            draw_text(sugarloaf, run_x, ty, &display, &run_opts, text_occlusions);
+            if !run.concealed {
+                draw_text(sugarloaf, run_x, ty, &display, &run_opts, text_occlusions);
+            }
             if let Some(severity) = run.severity {
                 let end_col = display_col_for_byte(line, sub_end, TAB_DISPLAY_WIDTH);
                 let underline_color = match severity {
@@ -943,6 +1008,12 @@ pub fn render(
                         DEPTH,
                         ORDER_TEXT,
                     );
+                }
+            }
+            if let Some(color) = run.plugin_underline {
+                let end_col = display_col_for_byte(line, sub_end, TAB_DISPLAY_WIDTH);
+                if let Some((bx, bw)) = clamp_band(run_x, (end_col.saturating_sub(start_col)).max(1) as f32 * cell_w) {
+                    sugarloaf.rect(None, bx, ry + row_h - 2.0, bw, 1.0, rgba_f32(color), DEPTH, ORDER_TEXT);
                 }
             }
         }
@@ -987,6 +1058,39 @@ pub fn render(
                     ..base_opts
                 };
                 draw_text(sugarloaf, vx, ty, &virt, &virt_opts, text_occlusions);
+            }
+            if let Some(virtual_item) = pane.plugin_decorations.as_ref()
+                .and_then(|snapshot| snapshot.by_line.get(&rv.line))
+                .and_then(|items| items.iter().rev().find(|item| matches!(item.layer,
+                    neoism_lua::DecorationLayer::VirtualText
+                    | neoism_lua::DecorationLayer::InlineWidget
+                    | neoism_lua::DecorationLayer::CodeLens
+                    | neoism_lua::DecorationLayer::Fold)))
+            {
+                let text = virtual_item.text.as_deref().unwrap_or("…");
+                let end_col = display_col_for_byte(line, line.len(), TAB_DISPLAY_WIDTH);
+                let vx = text_x
+                    + (rv.visual_indent + end_col.saturating_sub(rv.base_col) + 2) as f32 * cell_w
+                    - scroll_x;
+                let opts = DrawOpts {
+                    color: virtual_item.style.foreground.unwrap_or_else(|| theme.u8_alpha(theme.dim, 0.82)),
+                    clip_rect: Some(text_clip),
+                    ..base_opts
+                };
+                draw_text(sugarloaf, vx, ty, text, &opts, text_occlusions);
+                let mut action_x = vx + sugarloaf.text_mut().measure(text, &opts) + cell_w;
+                for action in &virtual_item.actions {
+                    let label = format!("[{}]", action.title);
+                    let width = sugarloaf.text_mut().measure(&label, &opts).max(cell_w);
+                    draw_text(sugarloaf, action_x, ty, &label, &opts, text_occlusions);
+                    pane.plugin_hit_regions.push(super::feed::CodePluginHitRegion {
+                        rect: [action_x, ry, width, row_h],
+                        owner: virtual_item.owner.clone(),
+                        resource: virtual_item.id,
+                        action: action.clone(),
+                    });
+                    action_x += width + cell_w;
+                }
             }
         }
     }

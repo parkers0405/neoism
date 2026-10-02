@@ -22,18 +22,16 @@ impl Screen<'_> {
         &mut self,
         delta: &neoism_window::event::MouseScrollDelta,
     ) -> bool {
-        if !self.renderer.file_tree.is_visible() {
+        let Some((tree_left, tree_top, tree_height, tree_width)) = self.file_tree_bounds() else {
             return false;
-        }
+        };
         let scale_factor = self.sugarloaf.scale_factor();
         let mouse_x = self.mouse.x as f32 / scale_factor;
-        if mouse_x < 0.0 || mouse_x > self.renderer.file_tree.width() {
+        if mouse_x < tree_left || mouse_x > tree_left + tree_width {
             return false;
         }
         let row_h = self.renderer.file_tree.row_height().max(1.0);
         let mouse_y = self.mouse.y as f32 / scale_factor;
-        let (tree_top, tree_bottom) = self.side_panel_band();
-        let tree_height = (tree_bottom - tree_top).max(0.0);
         if mouse_y < tree_top || mouse_y > tree_top + tree_height {
             return false;
         }
@@ -55,24 +53,26 @@ impl Screen<'_> {
     }
 
     pub(crate) fn file_tree_row_under_mouse(&self) -> (Option<usize>, bool) {
-        if !self.renderer.file_tree.is_visible() {
+        let Some((tree_left, tree_top, tree_height, tree_width)) = self.file_tree_bounds() else {
             return (None, false);
-        }
+        };
         let (mouse_x, mouse_y) = self.mouse_logical_for_hit_test();
 
         // Tree occupies the middle band (below the full-width top
         // chrome, above the full-width status bar). MUST match the
         // `tree_top` used in `host/run.rs` render — both read
         // `side_panel_band()` so they can't drift.
-        let (tree_top, tree_bottom) = self.side_panel_band();
-        let tree_height = (tree_bottom - tree_top).max(0.0);
-
         let row =
             self.renderer
                 .file_tree
-                .hit_test(mouse_x, mouse_y, tree_top, tree_height);
-        let in_tree_bounds = mouse_x >= 0.0
-            && mouse_x <= self.renderer.file_tree.width()
+                .hit_test(
+                    mouse_x - tree_left,
+                    mouse_y,
+                    tree_top,
+                    tree_height,
+                );
+        let in_tree_bounds = mouse_x >= tree_left
+            && mouse_x <= tree_left + tree_width
             && mouse_y >= tree_top
             && mouse_y <= tree_top + tree_height;
         (row, in_tree_bounds)

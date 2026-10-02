@@ -20,7 +20,8 @@
 //!   with a leading nerd-font icon (see [`MenuItem::icon`]). Each item
 //!   dispatches the matching `TopBarAction` variant; the host owns the
 //!   actual destination screens.
-//! - Right: a standalone server-rack button with a connection-status dot.
+//! - Right: an optional active-chat details toggle, followed by a standalone
+//!   server-rack button with a connection-status dot.
 //!
 //! The strip is render-only on the shared crate: it doesn't reach into
 //! `Chrome` state. Chrome drains [`ChromeTopBar::take_action`] each
@@ -34,6 +35,12 @@ use crate::event::{PointerButton, UiEvent};
 use crate::layout::{PanelLayout, Rect};
 use crate::panels::{Panel, PanelContext};
 use crate::primitives::{draw_overlay_icon_centered, snap_to_device_px, IdeTheme};
+use crate::surface_layout::{
+    ResolvedSurfaceLayout, SurfaceRegistry, CHROME_ACTIONS_SURFACE, CHROME_AGENT_DETAILS_ITEM,
+    CHROME_AGENT_ITEM, CHROME_EXPLORER_ITEM, CHROME_MENU_ITEM, CHROME_NEW_AGENT_ITEM,
+    CHROME_NOTES_ITEM, CHROME_PRESENCE_ITEM, CHROME_SEARCH_ITEM, CHROME_SERVERS_ITEM,
+};
+use neoism_lua::DockEdge;
 
 pub const CHROME_TOPBAR_HEIGHT: f32 = 30.0;
 
@@ -45,7 +52,6 @@ const HAMBURGER_GLYPH: &str = "\u{f0c9}"; // FA bars
 const SEARCH_GLYPH: &str = "\u{f002}"; // FA magnifying-glass — opens the finder
 const CONVERSATIONS_GLYPH: &str = "\u{f0674}"; // Nerd Font Material creation sparkle
 const NOTES_GLYPH: &str = "\u{f15c}"; // Same glyph as Markdown files in the tree
-const NEOISM_AGENT_GLYPH: &str = "n"; // Same mark used by Agent buffer tabs.
 const AGENT_PANEL_GLYPH: &str = "\u{eb56}"; // codicon split-horizontal / side panel
 
 const ICON_FONT_SIZE: f32 = 13.0;
@@ -83,14 +89,13 @@ const ORDER_MENU_BORDER: u8 = 33;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TopBarAction {
     TogglePanel,
-    /// Mobile-only, active-Agent-tab control for the pane's existing side
-    /// panel. Chrome consumes this directly through `toggle_side_panel`.
+    /// Active-Agent-chat control for the pane's right details panel.
     ToggleAgentSidePanel,
-    /// Right-side button — opens or creates an Agent tab. Only fires
-    /// when the host has enabled the right button via
-    /// `set_right_button_visible(true)`.
+    /// Explicit chat creation/opening action used outside the top agent controls.
     OpenAgent,
     OpenNotes,
+    /// Switch the left Conversations sidebar without creating, replacing, or
+    /// activating a main-pane chat tab.
     ToggleConversations,
     OpenServers,
     OpenSettings,
@@ -202,8 +207,8 @@ pub struct ChromeTopBar {
     visible: bool,
     scale: f32,
     menu_open: bool,
-    /// True when the host has an agent side panel to toggle. Drives
-    /// whether the right-edge button is painted + hit-tested.
+    /// True when the active Agent chat can show its right details panel.
+    /// Drives whether the right-edge button is painted and hit-tested.
     right_button_visible: bool,
     mobile_agent_panel_button_visible: bool,
     /// Open/closed state for chrome actions. Active icons paint their entire
@@ -213,7 +218,6 @@ pub struct ChromeTopBar {
     conversations_open: bool,
     search_open: bool,
     right_panel_open: bool,
-    agent_icon_overlay: bool,
     /// Web hosts set this to surface the "Share with Phone" row.
     share_with_phone_enabled: bool,
     left_safe_inset: f32,
@@ -266,7 +270,6 @@ impl ChromeTopBar {
             conversations_open: false,
             search_open: false,
             right_panel_open: false,
-            agent_icon_overlay: false,
             share_with_phone_enabled: false,
             left_safe_inset: 0.0,
             right_safe_inset: 0.0,
@@ -297,8 +300,7 @@ impl ChromeTopBar {
         }
     }
 
-    /// Show / hide the right-side panel toggle button. Hosts call
-    /// this with `true` when an agent side panel exists.
+    /// Show or hide the active chat's right-side details toggle.
     pub fn set_right_button_visible(&mut self, v: bool) {
         self.right_button_visible = v;
         if !v {
@@ -333,16 +335,10 @@ impl ChromeTopBar {
             .then_some(self.mobile_agent_panel_hit_rect)
     }
 
-    /// Suppress the glyph fallback when the host paints the same PNG-backed
-    /// Neoism Agent icon used by buffer tabs over this button.
     /// Offer the web-only "Share with Phone" row (QR to open this
     /// workspace on a phone).
     pub fn set_share_with_phone_enabled(&mut self, enabled: bool) {
         self.share_with_phone_enabled = enabled;
-    }
-
-    pub fn set_agent_icon_overlay(&mut self, enabled: bool) {
-        self.agent_icon_overlay = enabled;
     }
 
     pub fn right_button_rect(&self) -> [f32; 4] {
@@ -385,14 +381,16 @@ impl ChromeTopBar {
     /// Push the currently connected remote peers so the top bar can draw
     /// their presence orbs. Hosts source these from the per-window
     /// presence store; pass an empty vec when nobody else is connected.
-    pub fn set_peers(&mut self, peers: Vec<PresenceAvatarPeer>) {
-        if peers.len() != self.peers.len() {
+    pub fn set_peers(&mut self, peers: Vec<PresenceAvatarPeer>) -> bool {
+        let layout_changed = peers.len() != self.peers.len();
+        if layout_changed {
             // Peer count shifted — any lingering hover index is now
             // ambiguous; clear it so a tooltip never points at the wrong
             // peer until the next pointer move refreshes it.
             self.hover_peer = None;
         }
         self.peers = peers;
+        layout_changed
     }
 
     pub fn set_left_safe_inset(&mut self, inset: f32) {
@@ -466,7 +464,13 @@ impl ChromeTopBar {
         self.pending_action.take()
     }
 
-    fn menu_overlay_rect_for(&self, menu_btn: Rect, strip: Rect) -> Rect {
+    fn menu_overlay_rect_for(
+        &self,
+        menu_btn: Rect,
+        strip: Rect,
+        dock: DockEdge,
+        viewport: Rect,
+    ) -> Rect {
         let scale = self.scale;
         let menu_w = MENU_WIDTH * scale;
         let item_h = MENU_ITEM_HEIGHT * scale;
@@ -474,10 +478,18 @@ impl ChromeTopBar {
         let menu_h = item_h
             * MenuItem::visible(self.share_with_phone_enabled).len() as f32
             + pad_y * 2.0;
-        // Anchor below the hamburger, clamped inside the viewport so a
-        // narrow window never pushes the card off-screen.
-        let menu_x = menu_btn.x.min(strip.x + strip.w - menu_w).max(strip.x);
-        let menu_y = strip.y + strip.h;
+        let (menu_x, menu_y) = match dock {
+            DockEdge::Top => (menu_btn.x, strip.y + strip.h),
+            DockEdge::Bottom => (menu_btn.x, strip.y - menu_h),
+            DockEdge::Left => (strip.x + strip.w, menu_btn.y),
+            DockEdge::Right => (strip.x - menu_w, menu_btn.y),
+        };
+        let menu_x = menu_x
+            .min(viewport.x + viewport.w - menu_w)
+            .max(viewport.x);
+        let menu_y = menu_y
+            .min(viewport.y + viewport.h - menu_h)
+            .max(viewport.y);
         Rect::new(menu_x, menu_y, menu_w, menu_h)
     }
 
@@ -565,7 +577,109 @@ impl ChromeTopBar {
                     .push(Rect::new(group_left + i as f32 * step, ay, av, av));
             }
         }
-        self.menu_rect = self.menu_overlay_rect_for(self.menu_btn_rect, strip);
+        self.menu_rect =
+            self.menu_overlay_rect_for(self.menu_btn_rect, strip, DockEdge::Top, strip);
+    }
+
+    pub fn configure_surface_registry(&self, registry: &mut SurfaceRegistry) {
+        if let Some(item) = registry.items.get_mut(CHROME_AGENT_ITEM) {
+            item.visible = self.right_button_visible;
+        }
+        if let Some(item) = registry.items.get_mut(CHROME_AGENT_DETAILS_ITEM) {
+            item.visible = self.mobile_agent_panel_button_visible;
+        }
+        if let Some(item) = registry.items.get_mut(CHROME_PRESENCE_ITEM) {
+            item.visible = !self.peers.is_empty();
+            let shown = self.peers.len().min(CHROME_PEER_CAP) as f32;
+            let avatar = (BTN_SIZE * self.scale * 0.74).clamp(16.0, 22.0);
+            let extent = if shown > 0.0 { avatar + (shown - 1.0) * avatar * 0.64 } else { 0.0 };
+            item.size.width = extent;
+            item.size.height = extent;
+        }
+    }
+
+    fn refresh_resolved_rects(&mut self, layout: &ResolvedSurfaceLayout, dock: DockEdge) {
+        let icon_rect = |id: &str| {
+            layout
+                .items
+                .get(id)
+                .and_then(|item| item.bounds)
+                .map(|cell| {
+                    let size = (BTN_SIZE * self.scale).min(cell.w).min(cell.h);
+                    Rect::new(
+                        cell.x + (cell.w - size) * 0.5,
+                        cell.y + (cell.h - size) * 0.5,
+                        size,
+                        size,
+                    )
+                })
+                .unwrap_or(Rect::new(0.0, 0.0, 0.0, 0.0))
+        };
+        self.menu_btn_rect = icon_rect(CHROME_MENU_ITEM);
+        self.panel_btn_rect = icon_rect(CHROME_EXPLORER_ITEM);
+        self.notes_btn_rect = icon_rect(CHROME_NOTES_ITEM);
+        self.conversations_btn_rect = icon_rect(CHROME_NEW_AGENT_ITEM);
+        self.search_btn_rect = icon_rect(CHROME_SEARCH_ITEM);
+        if dock == DockEdge::Top && self.left_safe_inset > 0.0 {
+            let offset = self.left_safe_inset * self.scale;
+            for rect in [
+                &mut self.menu_btn_rect,
+                &mut self.panel_btn_rect,
+                &mut self.notes_btn_rect,
+                &mut self.conversations_btn_rect,
+                &mut self.search_btn_rect,
+            ] {
+                rect.x += offset;
+            }
+        }
+        self.server_btn_rect = icon_rect(CHROME_SERVERS_ITEM);
+        self.right_btn_rect = icon_rect(CHROME_AGENT_ITEM);
+        self.mobile_agent_panel_btn_rect = icon_rect(CHROME_AGENT_DETAILS_ITEM);
+        self.mobile_agent_panel_hit_rect = layout
+            .items
+            .get(CHROME_AGENT_DETAILS_ITEM)
+            .and_then(|item| item.bounds)
+            .unwrap_or(Rect::new(0.0, 0.0, 0.0, 0.0));
+
+        self.peer_rects.clear();
+        if let Some(cell) = layout
+            .items
+            .get(CHROME_PRESENCE_ITEM)
+            .and_then(|item| item.bounds)
+        {
+            let shown = self.peers.len().min(CHROME_PEER_CAP);
+            if shown > 0 {
+                let avatar = (BTN_SIZE * self.scale * 0.74)
+                    .clamp(16.0, 22.0)
+                    .min(cell.w)
+                    .min(cell.h);
+                let step = avatar * 0.64;
+                for index in 0..shown {
+                    let rect = if matches!(dock, DockEdge::Top | DockEdge::Bottom) {
+                        Rect::new(
+                            cell.x + index as f32 * step,
+                            cell.y + (cell.h - avatar) * 0.5,
+                            avatar,
+                            avatar,
+                        )
+                    } else {
+                        Rect::new(
+                            cell.x + (cell.w - avatar) * 0.5,
+                            cell.y + index as f32 * step,
+                            avatar,
+                            avatar,
+                        )
+                    };
+                    self.peer_rects.push(rect);
+                }
+            }
+        }
+        let strip = layout
+            .surfaces
+            .get(CHROME_ACTIONS_SURFACE)
+            .and_then(|surface| surface.bounds)
+            .unwrap_or(Rect::new(0.0, 0.0, 0.0, 0.0));
+        self.menu_rect = self.menu_overlay_rect_for(self.menu_btn_rect, strip, dock, layout.viewport);
     }
 
     fn menu_item_rect(&self, idx: usize) -> Rect {
@@ -661,7 +775,7 @@ impl ChromeTopBar {
             return true;
         }
         if self.conversations_btn_rect.contains(x, y) {
-            self.pending_action = Some(TopBarAction::OpenAgent);
+            self.pending_action = Some(TopBarAction::ToggleConversations);
             self.menu_open = false;
             return true;
         }
@@ -676,7 +790,7 @@ impl ChromeTopBar {
             return true;
         }
         if self.right_button_visible && self.right_btn_rect.contains(x, y) {
-            self.pending_action = Some(TopBarAction::OpenAgent);
+            self.pending_action = Some(TopBarAction::ToggleAgentSidePanel);
             self.menu_open = false;
             return true;
         }
@@ -713,12 +827,45 @@ impl ChromeTopBar {
         y_top: f32,
         width: f32,
         theme: &IdeTheme,
+        style: &neoism_lua::StylePatch,
     ) {
         if !self.visible || width <= 0.0 {
             return;
         }
-        let strip = Rect::new(x_left, y_top, width, self.height());
+        let strip = Rect::new(
+            x_left,
+            y_top,
+            width,
+            style.height.unwrap_or_else(|| self.height()).max(0.0),
+        );
         self.refresh_rects(strip, sugarloaf.scale_factor());
+        self.paint(sugarloaf, strip, DockEdge::Top, theme, style);
+    }
+
+    pub fn render_resolved(
+        &mut self,
+        sugarloaf: &mut Sugarloaf,
+        layout: &ResolvedSurfaceLayout,
+        theme: &IdeTheme,
+        style: &neoism_lua::StylePatch,
+    ) {
+        let Some(surface) = layout.surfaces.get(CHROME_ACTIONS_SURFACE) else { return };
+        let Some(strip) = surface.bounds else { return };
+        if !self.visible || strip.w <= 0.0 || strip.h <= 0.0 {
+            return;
+        }
+        self.refresh_resolved_rects(layout, surface.dock);
+        self.paint(sugarloaf, strip, surface.dock, theme, style);
+    }
+
+    fn paint(
+        &mut self,
+        sugarloaf: &mut Sugarloaf,
+        strip: Rect,
+        dock: DockEdge,
+        theme: &IdeTheme,
+        style: &neoism_lua::StylePatch,
+    ) {
 
         let row_h = strip.h;
 
@@ -731,17 +878,31 @@ impl ChromeTopBar {
             strip.y,
             strip.w,
             row_h - 1.0,
-            theme.f32(theme.bg),
+            crate::customization::color_f32(
+                style.background.as_deref(),
+                theme,
+                theme.f32(theme.bg),
+            ),
             DEPTH,
             ORDER_BG,
         );
+        let border = match dock {
+            DockEdge::Top => Rect::new(strip.x, strip.y + strip.h - 1.0, strip.w, 1.0),
+            DockEdge::Bottom => Rect::new(strip.x, strip.y, strip.w, 1.0),
+            DockEdge::Left => Rect::new(strip.x + strip.w - 1.0, strip.y, 1.0, strip.h),
+            DockEdge::Right => Rect::new(strip.x, strip.y, 1.0, strip.h),
+        };
         sugarloaf.rect(
             None,
-            strip.x,
-            strip.y + row_h - 1.0,
-            strip.w,
-            1.0,
-            theme.f32(theme.border),
+            border.x,
+            border.y,
+            border.w,
+            border.h,
+            crate::customization::color_f32(
+                style.border_color.as_deref(),
+                theme,
+                theme.f32(theme.border),
+            ),
             DEPTH,
             ORDER_BG,
         );
@@ -793,12 +954,14 @@ impl ChromeTopBar {
         // Standalone server selector at the far-right edge.
         self.draw_server_button(sugarloaf, theme);
 
-        // Bare Agent mark sits immediately left of the server selector.
-        if self.right_button_visible && !self.agent_icon_overlay {
-            self.draw_bare_agent_button(
+        // The active chat's right-details toggle sits beside the server selector.
+        if self.right_button_visible {
+            self.draw_icon_button(
                 sugarloaf,
                 self.right_btn_rect,
+                AGENT_PANEL_GLYPH,
                 self.hover_right_btn,
+                self.right_panel_open,
                 theme,
             );
         }
@@ -815,8 +978,8 @@ impl ChromeTopBar {
 
         // Connected-peer orbs beside the server selector, then the
         // hover tooltip on top of everything.
-        self.draw_peer_cluster(sugarloaf, strip, theme);
-        self.draw_peer_tooltip(sugarloaf, strip, theme);
+        self.draw_peer_cluster(sugarloaf, strip, dock, theme);
+        self.draw_peer_tooltip(sugarloaf, strip, dock, theme);
 
         if self.menu_open {
             self.draw_menu(sugarloaf, theme);
@@ -834,6 +997,7 @@ impl ChromeTopBar {
         &self,
         sugarloaf: &mut Sugarloaf,
         strip: Rect,
+        dock: DockEdge,
         theme: &IdeTheme,
     ) {
         if self.peer_rects.is_empty() {
@@ -878,8 +1042,17 @@ impl ChromeTopBar {
                 };
                 let label = format!("+{overflow}");
                 let w = sugarloaf.text_mut().measure(&label, &opts);
-                let tx = first.x - 4.0 * self.scale - w;
-                let ty = strip.y + (strip.h - opts.font_size) * 0.5;
+                let (tx, ty) = if matches!(dock, DockEdge::Top | DockEdge::Bottom) {
+                    (
+                        first.x - 4.0 * self.scale - w,
+                        strip.y + (strip.h - opts.font_size) * 0.5,
+                    )
+                } else {
+                    (
+                        strip.x + (strip.w - w) * 0.5,
+                        first.y - 4.0 * self.scale - opts.font_size,
+                    )
+                };
                 sugarloaf.text_mut().draw(tx, ty, &label, &opts);
             }
         }
@@ -893,6 +1066,7 @@ impl ChromeTopBar {
         &self,
         sugarloaf: &mut Sugarloaf,
         strip: Rect,
+        dock: DockEdge,
         theme: &IdeTheme,
     ) {
         let Some(idx) = self.hover_peer else {
@@ -913,10 +1087,30 @@ impl ChromeTopBar {
         let tip_h = 20.0 * scale;
         let tip_w = sugarloaf.text_mut().measure(&peer.display_name, &opts) + pad_x * 2.0;
         let margin = 4.0 * scale;
-        let min_x = strip.x + margin;
-        let max_x = (strip.x + strip.w - tip_w - margin).max(min_x);
-        let tip_x = (anchor.x + anchor.w * 0.5 - tip_w * 0.5).clamp(min_x, max_x);
-        let tip_y = strip.y + strip.h + margin;
+        let (tip_x, tip_y) = match dock {
+            DockEdge::Top | DockEdge::Bottom => {
+                let min_x = strip.x + margin;
+                let max_x = (strip.x + strip.w - tip_w - margin).max(min_x);
+                let x = (anchor.x + anchor.w * 0.5 - tip_w * 0.5).clamp(min_x, max_x);
+                let y = if dock == DockEdge::Top {
+                    strip.y + strip.h + margin
+                } else {
+                    strip.y - tip_h - margin
+                };
+                (x, y)
+            }
+            DockEdge::Left | DockEdge::Right => {
+                let min_y = strip.y + margin;
+                let max_y = (strip.y + strip.h - tip_h - margin).max(min_y);
+                let y = (anchor.y + anchor.h * 0.5 - tip_h * 0.5).clamp(min_y, max_y);
+                let x = if dock == DockEdge::Left {
+                    strip.x + strip.w + margin
+                } else {
+                    strip.x - tip_w - margin
+                };
+                (x, y)
+            }
+        };
         sugarloaf.rounded_rect(
             None,
             tip_x,
@@ -945,6 +1139,9 @@ impl ChromeTopBar {
         active: bool,
         theme: &IdeTheme,
     ) {
+        if rect.w <= 0.0 || rect.h <= 0.0 {
+            return;
+        }
         if hovered {
             sugarloaf.rect(
                 None,
@@ -993,49 +1190,6 @@ impl ChromeTopBar {
             true,
         );
         let _ = ORDER_ICON;
-    }
-
-    fn draw_bare_agent_button(
-        &self,
-        sugarloaf: &mut Sugarloaf,
-        rect: Rect,
-        hovered: bool,
-        theme: &IdeTheme,
-    ) {
-        let icon_size = ICON_FONT_SIZE * self.scale;
-        // Paint the real Neoism mark rather than the Nerd-Font "n"
-        // stand-in. Desktop never reaches this branch — it sets
-        // `agent_icon_overlay` and paints its own PNG overlay on top —
-        // so this is the web host's equivalent, using the asset the
-        // shared crate owns.
-        if crate::panels::agent_pane::icon::register_neoism_icon(sugarloaf) {
-            let size = icon_size.min(rect.w).min(rect.h);
-            crate::panels::agent_pane::icon::draw_neoism_tab_icon(
-                sugarloaf,
-                rect.x + (rect.w - size) * 0.5,
-                rect.y + (rect.h - size) * 0.5,
-                size,
-                size,
-                [0.0, 0.0, 1.0, 1.0],
-            );
-            return;
-        }
-        let opts = DrawOpts {
-            font_size: icon_size,
-            color: if hovered {
-                theme.u8(theme.fg)
-            } else {
-                theme.u8(theme.accent)
-            },
-            ..DrawOpts::default()
-        };
-        let glyph_w = sugarloaf.text_mut().measure(NEOISM_AGENT_GLYPH, &opts);
-        sugarloaf.text_mut().draw(
-            rect.x + (rect.w - glyph_w) * 0.5,
-            rect.y + (rect.h - icon_size) * 0.5,
-            NEOISM_AGENT_GLYPH,
-            &opts,
-        );
     }
 
     fn draw_server_button(&self, sugarloaf: &mut Sugarloaf, theme: &IdeTheme) {
@@ -1324,7 +1478,7 @@ mod tests {
     }
 
     #[test]
-    fn notes_and_conversations_buttons_queue_their_open_actions() {
+    fn notes_opens_and_conversations_toggles_without_creating_a_chat() {
         let mut bar = ChromeTopBar::new();
         let strip = Rect::new(0.0, 0.0, 800.0, CHROME_TOPBAR_HEIGHT);
         paint_strip(&mut bar, strip);
@@ -1341,7 +1495,7 @@ mod tests {
             conversations.x + conversations.w * 0.5,
             conversations.y + conversations.h * 0.5,
         );
-        assert_eq!(bar.take_action(), Some(TopBarAction::OpenAgent));
+        assert_eq!(bar.take_action(), Some(TopBarAction::ToggleConversations));
         let btn = bar.notes_btn_rect;
         bar.handle_pointer_down(btn.x + btn.w * 0.5, btn.y + btn.h * 0.5);
         assert_eq!(bar.take_action(), Some(TopBarAction::OpenNotes));
@@ -1428,7 +1582,7 @@ mod tests {
     }
 
     #[test]
-    fn server_is_far_right_and_agent_button_precedes_it() {
+    fn server_is_far_right_and_details_toggle_precedes_it() {
         let mut bar = ChromeTopBar::new();
         bar.set_right_button_visible(true);
         let strip = Rect::new(0.0, 0.0, 800.0, CHROME_TOPBAR_HEIGHT);
@@ -1449,7 +1603,7 @@ mod tests {
 
         let agent = bar.right_btn_rect;
         bar.handle_pointer_down(agent.x + agent.w * 0.5, agent.y + agent.h * 0.5);
-        assert_eq!(bar.take_action(), Some(TopBarAction::OpenAgent));
+        assert_eq!(bar.take_action(), Some(TopBarAction::ToggleAgentSidePanel));
     }
 
     #[test]

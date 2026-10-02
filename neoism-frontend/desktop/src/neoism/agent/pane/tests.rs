@@ -262,6 +262,63 @@ fn external_root_usage_reports_known_tokens_with_and_without_limit() {
 }
 
 #[test]
+fn active_preload_rebinds_context_limit_to_hydrated_model() {
+    use neoism_ui::panels::agent_pane::api_mapping::session_state_from_json;
+
+    let mut pane = NeoismAgentPane::default();
+    pane.server = "http://127.0.0.1:0".to_string();
+    pane.session_id = Some("session".into());
+    pane.model = "openai/old-model".into();
+    pane.model_context_limit = Some(128_000);
+    let mut message = NeoismAgentMessage::assistant("answer");
+    message.usage = Some(NeoismAgentUsage {
+        input: 4200,
+        output: 0,
+        reasoning: 0,
+        cache_read: 0,
+        cache_write: 0,
+        total: 4200,
+        cost_micros: 0,
+        context_limit: None,
+    });
+    pane.messages.push(message);
+
+    pane.background_tx
+        .send(NeoismAgentBackgroundUpdate::SessionPreloaded {
+            session_id: "session".into(),
+            state: session_state_from_json(&serde_json::json!({
+                "id": "session",
+                "model": { "providerId": "openai", "modelId": "gpt-6-astra" }
+            })),
+            messages: Vec::new(),
+            oldest_cursor: None,
+        })
+        .unwrap();
+    pane.drain_background_updates();
+
+    assert_eq!(pane.model, "openai/gpt-6-astra");
+    assert_eq!(pane.context_usage(), Some((4200, None)));
+
+    pane.background_tx
+        .send(NeoismAgentBackgroundUpdate::ModelContextLimitRefreshed {
+            model: "openai/old-model".into(),
+            limit: Some(128_000),
+        })
+        .unwrap();
+    pane.drain_background_updates();
+    assert_eq!(pane.context_usage(), Some((4200, None)));
+
+    pane.background_tx
+        .send(NeoismAgentBackgroundUpdate::ModelContextLimitRefreshed {
+            model: "openai/gpt-6-astra".into(),
+            limit: Some(272_000),
+        })
+        .unwrap();
+    pane.drain_background_updates();
+    assert_eq!(pane.context_usage(), Some((4200, Some(272_000))));
+}
+
+#[test]
 fn provider_plan_live_refresh_clear_and_reload_never_revives_old_todowrite() {
     use neoism_ui::panels::agent_pane::api_mapping::session_state_from_json;
     let mut pane = NeoismAgentPane::default();

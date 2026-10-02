@@ -9,6 +9,7 @@ use web_time::Duration;
 impl ChromeBridge {
     pub fn refresh_file_tree(&mut self) {
         let theme = self.chrome.theme().clone();
+        let plugins = self.chrome.plugin_snapshot_arc();
         let services = Services {
             files: &*self.files,
             clipboard: &*self.clipboard,
@@ -24,6 +25,7 @@ impl ChromeBridge {
             time: Duration::from_micros(
                 (self.services_state.0.borrow().now_ms * 1000.0).max(0.0) as u64,
             ),
+            plugins: Some(&plugins),
         };
         let Some(tree) = self.chrome.file_tree.as_mut() else {
             return;

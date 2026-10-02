@@ -236,21 +236,12 @@ impl ChromeBridge {
         let strip_h = self.workspace_island_height();
         if let Some(s) = self.rendered.sugarloaf_mut() {
             if self.chrome.is_terminal_tab_active() && strip_h > 0.0 {
-                // Full-width workspace strip background: sits between
-                // the top bar and the buffer tabs, spanning the whole
-                // viewport width (the side panels live in the band
-                // below this top chrome).
-                let top = self
-                    .chrome
-                    .layout()
-                    .top_bar
-                    .map(|r| r.y + r.h)
-                    .unwrap_or(self.viewport.y);
+                let content = self.chrome.surface_layout().content;
                 s.rect(
                     None,
-                    self.viewport.x,
-                    top,
-                    self.viewport.w,
+                    content.x,
+                    content.y,
+                    content.w,
                     strip_h,
                     theme.f32(theme.surface),
                     0.0,
@@ -259,7 +250,11 @@ impl ChromeBridge {
             }
             self.workspace_island.render(
                 s,
-                (self.viewport.w, self.viewport.h, 1.0),
+                (
+                    self.chrome.surface_layout().content.w,
+                    self.chrome.surface_layout().content.h,
+                    1.0,
+                ),
                 &contexts,
                 &theme,
             );
@@ -390,6 +385,19 @@ impl ChromeBridge {
     /// Snapshot of the per-panel layout rects as JSON.
     pub fn layout_json(&self) -> JsValue {
         serde_wasm_bindgen::to_value(self.chrome.layout()).unwrap_or(JsValue::NULL)
+    }
+
+    pub fn set_plugin_snapshot(&mut self, snapshot_json: &str) -> Result<(), JsValue> {
+        let snapshot: neoism_lua::PluginSnapshot = serde_json::from_str(snapshot_json)
+            .map_err(|error| JsValue::from_str(&format!("plugin snapshot parse: {error}")))?;
+        self.chrome
+            .set_plugin_snapshot(std::sync::Arc::new(snapshot));
+        Ok(())
+    }
+
+    pub fn drain_plugin_commands(&mut self) -> JsValue {
+        serde_wasm_bindgen::to_value(&self.chrome.drain_plugin_commands())
+            .unwrap_or(JsValue::NULL)
     }
 
     pub fn drain_top_bar_action(&mut self) -> Option<String> {

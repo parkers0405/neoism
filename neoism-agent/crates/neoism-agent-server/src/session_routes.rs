@@ -456,6 +456,9 @@ async fn create_session_in_directory_inner(
     };
 
     state.inner.store.insert_session(&info).await?;
+    if let Err(error) = state.activate_session_agent_packages(&info.directory, info.id.as_str()).await {
+        tracing::warn!(%error, session_id = %info.id, "session Agent package candidate rejected");
+    }
     if pending_import.is_none() {
         state.publish(EventPayload::new(
             event_type::SESSION_CREATED,
@@ -494,6 +497,18 @@ pub(crate) async fn session_delete(
         return Err(ApiError::not_found("Session not found"));
     }
     state.inner.statuses.write().await.remove(&session_id);
+    if let Some(session) = deleted_session.as_ref() {
+        let runtime = neoism_agent_plugin_api::RuntimeScope::Session {
+            workspace: neoism_agent_plugin_api::WorkspaceIdentity {
+                id: session.directory.clone(),
+                root: std::path::PathBuf::from(&session.directory),
+            },
+            session_id: session_id.clone(),
+        };
+        if let Err(error) = state.deactivate_scoped_agent_packages(&runtime).await {
+            tracing::warn!(%error, %session_id, "session Agent package cleanup failed");
+        }
+    }
     state.publish(EventPayload::new(
         event_type::SESSION_DELETED,
         json!({

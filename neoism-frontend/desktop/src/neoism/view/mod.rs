@@ -1,5 +1,7 @@
 use neoism_backend::sugarloaf::Sugarloaf;
-use neoism_ui::panels::agent_pane::view::{fx, render_agent_pane_with, AgentPaneView};
+use neoism_ui::panels::agent_pane::view::{
+    fx, render_agent_pane_with, AgentCheckoutContext, AgentPaneView,
+};
 use neoism_ui::primitives::ide_theme::IdeTheme;
 
 use crate::neoism::agent::NeoismAgentPane;
@@ -85,6 +87,8 @@ pub fn render(
     mouse: Option<(f32, f32)>,
     chrome_scale: f32,
     occlusion_rects: &[[f32; 4]],
+    checkout_context: &AgentCheckoutContext,
+    plugins: Option<&neoism_lua::PluginSnapshot>,
 ) {
     render_agent_pane_with::<
         NeoismAgentPane,
@@ -100,5 +104,7 @@ pub fn render(
         mouse,
         chrome_scale,
         occlusion_rects,
+        checkout_context,
+        plugins,
     );
 }

@@ -4,6 +4,7 @@
 use super::super::*;
 use crate::notebook_runtime::managed_python_kernel_env;
 use crate::workspace::extensions::{ExtensionEntry, ExtensionStatus};
+use neoism_ui::panels::extensions_page::ExtensionKind;
 use neoism_extensions::{
     ExtensionManifest, InstallError, InstallHandle, InstalledEntry, InstalledIndex,
     ProgressEvent,
@@ -136,6 +137,7 @@ fn extension_manifest_to_entry(
         None => ExtensionStatus::NotInstalled,
     };
     ExtensionEntry {
+        kind: ExtensionKind::ManagedPackage,
         id: manifest.id,
         name: manifest.name,
         version: manifest.version,
@@ -147,6 +149,7 @@ fn extension_manifest_to_entry(
         repository_url: manifest.repository_url,
         status,
         lsp_source: None,
+        lua_plugin: None,
     }
 }
 
@@ -351,6 +354,7 @@ fn language_server_entries(
                 } => {
                     categories.push("Built-in".to_string());
                     ExtensionEntry {
+                        kind: ExtensionKind::ManagedPackage,
                         id: format!("builtin-lsp-{}", adapter.id),
                         name: format!("{} Language Server", adapter.name),
                         // The adapter follows Neoism's own release and is not a
@@ -371,6 +375,7 @@ fn language_server_entries(
                             if connected { "connected" } else { "built-in/socket" }
                                 .to_string(),
                         ),
+                        lua_plugin: None,
                     }
                 }
                 LspAdapterTransport::Stdio { command } => {
@@ -439,6 +444,7 @@ fn language_server_entries(
                         ));
                     }
                     ExtensionEntry {
+                        kind: ExtensionKind::ManagedPackage,
                         id,
                         name: format!("{} Language Server", adapter.name),
                         version: installed_version.unwrap_or_default(),
@@ -457,9 +463,11 @@ fn language_server_entries(
                             }
                             .to_string(),
                         ),
+                        lua_plugin: None,
                     }
                 }
                 LspAdapterTransport::Invalid => ExtensionEntry {
+                    kind: ExtensionKind::ManagedPackage,
                     id: format!("lsp-{}", adapter.id),
                     name: format!("{} Language Server", adapter.name),
                     version: String::new(),
@@ -479,6 +487,7 @@ fn language_server_entries(
                     status: ExtensionStatus::Unavailable,
                     repository_url: None,
                     lsp_source: Some("missing".to_string()),
+                    lua_plugin: None,
                 },
             }
         })
@@ -492,6 +501,7 @@ fn built_in_syntax_entries() -> Vec<ExtensionEntry> {
     neoism_ui::syntax::built_in_grammars()
         .iter()
         .map(|(grammar_id, language)| ExtensionEntry {
+            kind: ExtensionKind::ManagedPackage,
             id: format!("grammar-{grammar_id}"),
             name: format!("{language} Syntax"),
             // Grammars version with the Neoism release itself; a blank
@@ -511,6 +521,7 @@ fn built_in_syntax_entries() -> Vec<ExtensionEntry> {
             status: ExtensionStatus::BuiltIn,
             repository_url: None,
             lsp_source: None,
+            lua_plugin: None,
         })
         .collect()
 }

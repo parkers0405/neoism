@@ -17,7 +17,7 @@
 
 use neoism_protocol::config::{
     ConfigClientMessage, ConfigDocument, ConfigServerMessage, ExtensionStatusSummary,
-    ExtensionSummary, MashupPackSummary,
+    ExtensionSummary, MashupPackSummary, TrustedExtensionLifecycle,
 };
 
 use crate::files as files_handler;
@@ -329,6 +329,7 @@ fn collect_extension_entries(
             installed_version: None,
             repository_url: None,
             lsp_source: None,
+            trust_lifecycle: None,
         });
     }
 
@@ -369,6 +370,7 @@ fn collect_extension_entries(
             installed_version,
             repository_url: repo.map(str::to_string),
             lsp_source: None,
+            trust_lifecycle: None,
         });
     }
 
@@ -404,12 +406,39 @@ fn collect_extension_entries(
             installed_version,
             repository_url: manifest.repository_url,
             lsp_source: None,
+            trust_lifecycle: None,
         });
     }
 
     entries.extend(language_server_entries(runtime, workspace_root, &installed));
     entries.extend(built_in_grammar_entries());
+    if let Ok(approvals) = neoism_extensions::trust::ExtensionTrustStore::managed().approvals() {
+        for approval in approvals {
+            let lifecycle = match approval.state {
+                neoism_extensions::trust::ApprovalState::PermissionRequired => TrustedExtensionLifecycle::PermissionRequired,
+                neoism_extensions::trust::ApprovalState::Approved => TrustedExtensionLifecycle::Approved,
+                neoism_extensions::trust::ApprovalState::Revoked => TrustedExtensionLifecycle::Revoked,
+                neoism_extensions::trust::ApprovalState::Failed => TrustedExtensionLifecycle::Failed,
+            };
+            if let Some(entry) = entries.iter_mut().find(|entry| entry.id == approval.plugin_id) {
+                entry.trust_lifecycle = Some(worse_trust(entry.trust_lifecycle, lifecycle));
+                continue;
+            }
+            entries.push(ExtensionSummary {
+                id: approval.plugin_id.clone(), name: approval.plugin_id, version: approval.revision,
+                description: "Trusted executable extension artifact".into(), author: String::new(), downloads: None,
+                categories: vec!["Plugin".into(), "Trusted Native".into()], languages: Vec::new(),
+                status: ExtensionStatusSummary::Installed, installed_version: None, repository_url: None,
+                lsp_source: None, trust_lifecycle: Some(lifecycle),
+            });
+        }
+    }
     entries
+}
+
+fn worse_trust(current: Option<TrustedExtensionLifecycle>, next: TrustedExtensionLifecycle) -> TrustedExtensionLifecycle {
+    fn severity(value: TrustedExtensionLifecycle) -> u8 { match value { TrustedExtensionLifecycle::Approved => 0, TrustedExtensionLifecycle::PermissionRequired => 1, TrustedExtensionLifecycle::Revoked => 2, TrustedExtensionLifecycle::Failed => 3 } }
+    current.filter(|value| severity(*value) >= severity(next)).unwrap_or(next)
 }
 
 /// One row per engine language-server adapter, with the LIVE state the
@@ -469,6 +498,7 @@ fn language_server_entries(
                             if connected { "connected" } else { "built-in/socket" }
                                 .to_string(),
                         ),
+                        trust_lifecycle: None,
                     }
                 }
                 LspAdapterTransport::Stdio { command } => {
@@ -539,6 +569,7 @@ fn language_server_entries(
                         installed_version,
                         repository_url: None,
                         lsp_source: Some(lsp_source),
+                        trust_lifecycle: None,
                     }
                 }
                 LspAdapterTransport::Invalid => ExtensionSummary {
@@ -562,6 +593,7 @@ fn language_server_entries(
                     installed_version: None,
                     repository_url: None,
                     lsp_source: Some("missing".to_string()),
+                    trust_lifecycle: None,
                 },
             }
         })
@@ -591,6 +623,7 @@ fn built_in_grammar_entries() -> Vec<ExtensionSummary> {
             installed_version: None,
             repository_url: None,
             lsp_source: None,
+            trust_lifecycle: None,
         })
         .collect()
 }

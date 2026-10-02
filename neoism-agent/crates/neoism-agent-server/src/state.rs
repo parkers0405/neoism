@@ -38,6 +38,7 @@ pub(crate) struct InnerState {
     pub(crate) external_session_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     pub(crate) utilities: Arc<crate::utility_runtime::UtilityRuntime>,
     pub(crate) workspace_runtimes: crate::workspace_runtime::WorkspaceRuntimeRegistry,
+    pub(crate) scoped_plugin_runtimes: crate::scoped_plugin_runtime::ScopedPluginRuntimeRegistry,
     pub(crate) workspace_plugin_generations: Mutex<
         HashMap<crate::workspace_runtime::TenantRuntimeKey, (u64, BTreeSet<String>)>,
     >,
@@ -562,6 +563,72 @@ pub(crate) struct PersistedEvent {
 }
 
 impl AppState {
+    pub(crate) async fn activate_scoped_agent_packages(
+        &self,
+        directory: &str,
+        runtime: neoism_agent_plugin_api::RuntimeScope,
+        configured: &BTreeMap<String, neoism_agent_core::PluginConfig>,
+        grants: neoism_agent_plugin_api::CapabilityGrants,
+    ) -> Result<Arc<neoism_agent_plugin_api::RegistrySnapshot>, String> {
+        self.inner
+            .scoped_plugin_runtimes
+            .activate_packages(
+                directory,
+                runtime,
+                configured,
+                grants,
+                Arc::clone(&self.inner.services.executables),
+            )
+            .await
+    }
+
+    pub(crate) async fn deactivate_scoped_agent_packages(
+        &self,
+        runtime: &neoism_agent_plugin_api::RuntimeScope,
+    ) -> Result<(), neoism_agent_plugin_api::PluginRuntimeError> {
+        self.inner.scoped_plugin_runtimes.deactivate(runtime).await
+    }
+
+    pub(crate) async fn activate_session_agent_packages(
+        &self,
+        directory: &str,
+        session_id: &str,
+    ) -> Result<Arc<neoism_agent_plugin_api::RegistrySnapshot>, String> {
+        let config_snapshot = crate::config::snapshot(self.services(), directory)
+            .map_err(|error| error.to_string())?;
+        let (config, _) = neoism_agent_builtins::plugin::config::load_snapshot(&config_snapshot)
+            .map_err(|error| error.to_string())?;
+        let (configured, _) = crate::config::installation_plugin_inputs(&config_snapshot, &config);
+        self.activate_scoped_agent_packages(
+            directory,
+            neoism_agent_plugin_api::RuntimeScope::Session {
+                workspace: neoism_agent_plugin_api::WorkspaceIdentity {
+                    id: directory.to_string(),
+                    root: std::path::PathBuf::from(directory),
+                },
+                session_id: session_id.to_string(),
+            },
+            &configured,
+            crate::plugins::production_scoped_grants(
+                std::sync::Arc::new(crate::plugins::PluginEventPublisher {
+                    state: self.clone(),
+                }),
+                &config,
+            ),
+        )
+        .await
+    }
+
+    pub(crate) async fn scoped_plugin_snapshots(
+        &self,
+        workspace_id: &str,
+    ) -> Vec<Arc<neoism_agent_plugin_api::RegistrySnapshot>> {
+        self.inner
+            .scoped_plugin_runtimes
+            .snapshots_for_workspace(workspace_id)
+            .await
+    }
+
     pub(crate) async fn put_artifact_blob(
         &self,
         tenant_id: &str,
@@ -831,6 +898,7 @@ impl AppState {
                 external_session_locks: Mutex::new(HashMap::new()),
                 utilities,
                 workspace_runtimes: Default::default(),
+                scoped_plugin_runtimes: Default::default(),
                 workspace_plugin_generations: Mutex::new(HashMap::new()),
                 statuses: RwLock::new(HashMap::new()),
                 session_coordinator: Default::default(),
@@ -1022,13 +1090,77 @@ impl AppState {
         &self,
         directory: &str,
     ) -> crate::workspace_runtime::PluginGenerationLease {
-        if let Some(generation) = crate::workspace_runtime::active_generation(directory) {
-            return generation;
+        self.try_plugin_snapshot_for_tenant("local", directory)
+            .await
+            .unwrap_or_else(|error| {
+                tracing::error!(%error, %directory, "failed to construct plugin generation");
+                crate::workspace_runtime::closed_snapshot()
+            })
+    }
+
+    pub(crate) async fn try_plugin_snapshot_for_tenant(
+        &self,
+        tenant_id: &str,
+        directory: &str,
+    ) -> Result<crate::workspace_runtime::PluginGenerationLease, String> {
+        let generation = if tenant_id == "local" {
+            if let Some(generation) = crate::workspace_runtime::active_generation(directory) {
+                generation
+            } else {
+                self.try_workspace_runtime_for_tenant(tenant_id, directory)
+                    .await?
+                    .snapshot()
+            }
+        } else {
+            self.try_workspace_runtime_for_tenant(tenant_id, directory)
+                .await?
+                .snapshot()
+        };
+        if tenant_id == "local" {
+            Ok(generation.with_lower_priority_scopes(
+                self.inner.scoped_plugin_runtimes.ambient_snapshots().await,
+            ))
+        } else {
+            Ok(generation)
         }
-        self.try_workspace_runtime(directory).await.map_or_else(
-            |_| crate::workspace_runtime::closed_snapshot(),
-            |runtime| runtime.snapshot(),
-        )
+    }
+
+    pub(crate) async fn plugin_snapshot_for_session(
+        &self,
+        directory: &str,
+        session_id: &str,
+    ) -> crate::workspace_runtime::PluginGenerationLease {
+        self.try_plugin_snapshot_for_session_tenant("local", directory, session_id)
+            .await
+            .unwrap_or_else(|error| {
+                tracing::error!(%error, %directory, %session_id, "failed to construct session plugin generation");
+                crate::workspace_runtime::closed_snapshot()
+            })
+    }
+
+    pub(crate) async fn try_plugin_snapshot_for_session_tenant(
+        &self,
+        tenant_id: &str,
+        directory: &str,
+        session_id: &str,
+    ) -> Result<crate::workspace_runtime::PluginGenerationLease, String> {
+        let snapshot = self
+            .try_plugin_snapshot_for_tenant(tenant_id, directory)
+            .await?;
+        if tenant_id != "local" {
+            return Ok(snapshot);
+        }
+        let runtime = neoism_agent_plugin_api::RuntimeScope::Session {
+            workspace: neoism_agent_plugin_api::WorkspaceIdentity {
+                id: directory.to_string(),
+                root: std::path::PathBuf::from(directory),
+            },
+            session_id: session_id.to_string(),
+        };
+        match self.inner.scoped_plugin_runtimes.snapshot(&runtime).await {
+            Some(session) => Ok(snapshot.with_lower_priority_scopes(vec![session])),
+            None => Ok(snapshot),
+        }
     }
 
     pub(crate) async fn refreshed_plugin_snapshot(
@@ -1036,7 +1168,9 @@ impl AppState {
         directory: &str,
     ) -> crate::workspace_runtime::PluginGenerationLease {
         if let Some(generation) = crate::workspace_runtime::active_generation(directory) {
-            return generation;
+            return generation.with_lower_priority_scopes(
+                self.inner.scoped_plugin_runtimes.ambient_snapshots().await,
+            );
         }
         let runtime = match self.try_workspace_runtime(directory).await {
             Ok(runtime) => runtime,
@@ -1045,7 +1179,9 @@ impl AppState {
         let _ = crate::workspace_runtime::refresh_plugins(&runtime, self).await;
         let snapshot = runtime.published_snapshot();
         self.reconcile_workspace_plugins(&runtime, &snapshot).await;
-        snapshot
+        snapshot.with_lower_priority_scopes(
+            self.inner.scoped_plugin_runtimes.ambient_snapshots().await,
+        )
     }
 
     /// Publish persisted configuration before replying to a mutation. Unlike a
@@ -1136,6 +1272,36 @@ impl AppState {
             return;
         }
         generations.insert(key, (snapshot.generation, enabled.clone()));
+        let any_semantic_enabled = generations.values().any(|(_, plugins)| {
+            plugins.contains(neoism_agent_builtins::plugin::semantic::ID)
+        });
+        drop(generations);
+        if runtime.tenant_id == "local" {
+            if let Ok(config_snapshot) = crate::config::snapshot(self.services(), &runtime.root.to_string_lossy()) {
+                if let Ok((config, _)) = neoism_agent_builtins::plugin::config::load_snapshot(&config_snapshot) {
+                    let (configured, _) = crate::config::installation_plugin_inputs(&config_snapshot, &config);
+                    let grants = crate::plugins::production_scoped_grants(
+                        std::sync::Arc::new(crate::plugins::PluginEventPublisher {
+                            state: self.clone(),
+                        }),
+                        &config,
+                    );
+                    for scoped in [
+                        neoism_agent_plugin_api::RuntimeScope::Global,
+                        neoism_agent_plugin_api::RuntimeScope::User { user_id: "installation".into() },
+                    ] {
+                        if let Err(error) = self.activate_scoped_agent_packages(
+                            &runtime.root.to_string_lossy(),
+                            scoped,
+                            &configured,
+                            grants.clone(),
+                        ).await {
+                            tracing::warn!(%error, "scoped Agent package candidate rejected; retaining last-known-good generation");
+                        }
+                    }
+                }
+            }
+        }
         let workflow = enabled.contains(neoism_agent_builtins::plugin::workflows::ID);
         snapshot.set_workflow_enabled(workflow, self.clone());
         if workflow {
@@ -1154,10 +1320,7 @@ impl AppState {
                 )));
             }
         } else {
-            let semantic_enabled = generations.values().any(|(_, plugins)| {
-                plugins.contains(neoism_agent_builtins::plugin::semantic::ID)
-            });
-            if !semantic_enabled {
+            if !any_semantic_enabled {
                 if let Some(memory) = self.inner.services.memory.as_ref() {
                     memory.set_semantic_index(None);
                 }
@@ -1214,6 +1377,10 @@ impl AppState {
         if let Err(error) = self.inner.workspace_runtimes.retry_quarantines().await {
             tracing::error!(%error, "plugin cleanup quarantine still contains live ownership");
             errors.push(format!("plugin cleanup quarantine: {error}"));
+        }
+        if let Err(error) = self.inner.scoped_plugin_runtimes.close().await {
+            tracing::error!(%error, "scoped plugin runtime shutdown failed");
+            errors.push(format!("scoped plugin runtime: {error}"));
         }
         self.inner.workspace_plugin_generations.lock().await.clear();
         if errors.is_empty() {

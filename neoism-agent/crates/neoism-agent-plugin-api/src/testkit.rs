@@ -120,6 +120,8 @@ fn check_instance_with_policy(
     let mut contributions = instance.contributions();
     let workspace_id = match runtime_scope {
         RuntimeScope::Workspace(workspace) => Some(workspace.id.clone()),
+        RuntimeScope::Session { workspace, .. } => Some(workspace.id.clone()),
+        RuntimeScope::Global | RuntimeScope::User { .. } => None,
     };
     macro_rules! stamp_services {
         ($items:expr) => {

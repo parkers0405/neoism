@@ -58,6 +58,25 @@ pub(super) const INPUT_HELP_STRIP_H: f32 = 28.0;
 pub(super) const STREAMING_STATUS_LINE_H: f32 = 26.0;
 pub(super) const INPUT_IMAGE_RAIL_H: f32 = 82.0;
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AgentCheckoutContext {
+    pub cwd: Option<String>,
+    pub branch: Option<String>,
+}
+
+impl AgentCheckoutContext {
+    pub fn new(cwd: Option<String>, branch: Option<String>) -> Self {
+        Self {
+            cwd: cwd.filter(|value| !value.trim().is_empty()),
+            branch: branch.filter(|value| !value.trim().is_empty()),
+        }
+    }
+
+    fn has_content(&self) -> bool {
+        self.cwd.is_some() || self.branch.is_some()
+    }
+}
+
 pub fn clear_overlays(sugarloaf: &mut Sugarloaf) {
     sugarloaf.clear_image_overlays_for(OVERLAY_PANEL_ID);
     crate::panels::agent_pane::icon::clear_side_panel_icon_overlays(sugarloaf);
@@ -150,6 +169,8 @@ pub fn render(
     mouse: Option<(f32, f32)>,
     chrome_scale: f32,
     occlusion_rects: &[[f32; 4]],
+    checkout_context: &AgentCheckoutContext,
+    plugins: Option<&neoism_lua::PluginSnapshot>,
 ) {
     render_responsive(
         sugarloaf,
@@ -162,6 +183,8 @@ pub fn render(
         chrome_scale,
         occlusion_rects,
         false,
+        checkout_context,
+        plugins,
     );
 }
 
@@ -177,6 +200,8 @@ pub fn render_responsive(
     chrome_scale: f32,
     occlusion_rects: &[[f32; 4]],
     narrow_takeover: bool,
+    checkout_context: &AgentCheckoutContext,
+    plugins: Option<&neoism_lua::PluginSnapshot>,
 ) {
     render_agent_pane_with_responsive::<
         NeoismAgentPane,
@@ -192,7 +217,9 @@ pub fn render_responsive(
         mouse,
         chrome_scale,
         occlusion_rects,
+        plugins,
         narrow_takeover,
+        checkout_context,
     );
 }
 
@@ -207,6 +234,8 @@ pub fn render_agent_pane_with<P, D, I>(
     mouse: Option<(f32, f32)>,
     chrome_scale: f32,
     occlusion_rects: &[[f32; 4]],
+    checkout_context: &AgentCheckoutContext,
+    plugins: Option<&neoism_lua::PluginSnapshot>,
 ) where
     P: AgentPaneView,
     D: timeline::AgentTimelineDelegate<P>,
@@ -222,11 +251,24 @@ pub fn render_agent_pane_with<P, D, I>(
         mouse,
         chrome_scale,
         occlusion_rects,
+        plugins,
         false,
+        checkout_context,
     );
 }
 
 #[allow(clippy::too_many_arguments)]
+pub fn detail_rail_available(
+    has_conversation: bool,
+    narrow_takeover: bool,
+    width: f32,
+    scale: f32,
+) -> bool {
+    has_conversation
+        && !narrow_takeover
+        && width >= side_panel::state_detail_min_width(scale)
+}
+
 fn detail_rail_allowed(
     has_conversation: bool,
     hidden: bool,
@@ -234,15 +276,12 @@ fn detail_rail_allowed(
     width: f32,
     scale: f32,
 ) -> bool {
-    has_conversation
-        && !hidden
-        && !narrow_takeover
-        && width >= side_panel::state_detail_min_width(scale)
+    !hidden && detail_rail_available(has_conversation, narrow_takeover, width, scale)
 }
 
 #[cfg(test)]
 mod detail_rail_tests {
-    use super::detail_rail_allowed;
+    use super::{detail_rail_allowed, detail_rail_available};
 
     #[test]
     fn alt_h_and_narrow_layout_do_not_reserve_detail_width() {
@@ -252,6 +291,8 @@ mod detail_rail_tests {
         assert!(!detail_rail_allowed(true, false, true, wide, 1.0));
         assert!(!detail_rail_allowed(false, false, false, wide, 1.0));
         assert!(!detail_rail_allowed(true, false, false, 100.0, 1.0));
+        assert!(detail_rail_available(true, false, wide, 1.0));
+        assert!(!detail_rail_available(false, false, wide, 1.0));
     }
 
     #[test]
@@ -286,7 +327,9 @@ fn render_agent_pane_with_responsive<P, D, I>(
     mouse: Option<(f32, f32)>,
     chrome_scale: f32,
     occlusion_rects: &[[f32; 4]],
+    plugins: Option<&neoism_lua::PluginSnapshot>,
     narrow_takeover: bool,
+    checkout_context: &AgentCheckoutContext,
 ) where
     P: AgentPaneView,
     D: timeline::AgentTimelineDelegate<P>,
@@ -411,6 +454,7 @@ fn render_agent_pane_with_responsive<P, D, I>(
             chrome_scale,
             input_rect,
             &local_occlusions,
+            plugins,
             Some(&prompt_wrap_rows),
         );
     } else {
@@ -426,6 +470,7 @@ fn render_agent_pane_with_responsive<P, D, I>(
             input_rect,
             &local_occlusions,
             Some(&prompt_wrap_rows),
+            checkout_context.has_content().then_some(checkout_context),
         );
     }
     if let Some(detail) = detail_rect {

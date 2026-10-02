@@ -897,6 +897,21 @@ impl Screen<'_> {
         }
     }
 
+    pub(crate) fn play_code_macro(
+        &mut self,
+        name: char,
+        count: usize,
+        clipboard: &mut Clipboard,
+    ) -> bool {
+        let applied = self.context_manager.current_mut().code.as_mut()
+            .map(|code| code.buffer.apply_vim_action(&VimAction::MacroPlay { name, count }, None));
+        let Some(keys) = applied.and_then(|applied| applied.replay_keys) else { return false };
+        self.code_vim_replay_keys(&keys, clipboard);
+        self.sync_active_code_modified();
+        self.mark_dirty();
+        true
+    }
+
     pub(crate) fn code_scrollbar_drag_active(&self) -> bool {
         self.context_manager
             .current()
@@ -1005,6 +1020,25 @@ impl Screen<'_> {
         let Some(code) = self.context_manager.current_mut().code.as_mut() else {
             return false;
         };
+        if let Some(hit) = code.plugin_hit_regions.iter().rev().find(|hit| {
+            x >= hit.rect[0] && x < hit.rect[0] + hit.rect[2]
+                && y >= hit.rect[1] && y < hit.rect[1] + hit.rect[3]
+        }).cloned() {
+            self.pending_plugin_actions.push(neoism_lua::HostAction {
+                namespace: "diagnostic".into(),
+                action: "execute_action".into(),
+                arguments: serde_json::json!({
+                    "resource": hit.resource,
+                    "command": hit.action.command,
+                    "arguments": hit.action.arguments,
+                }),
+                scope: neoism_lua::ExecutionScope::Local,
+                invocation_id: None,
+                owner: Some(hit.owner),
+            });
+            self.mark_dirty();
+            return true;
+        }
         // Scrollbar first refusal: thumb press starts a 1:1 drag,
         // track press jumps a viewport toward the click (house style).
         if let (Some(track), Some(thumb)) = (code.scrollbar_track, code.scrollbar_thumb) {

@@ -223,6 +223,7 @@ pub(crate) struct PluginGeneration {
 pub(crate) struct PluginGenerationLease {
     inner: Arc<PluginGeneration>,
     _token: Arc<GenerationLeaseToken>,
+    snapshot: Arc<neoism_agent_plugin_api::RegistrySnapshot>,
 }
 
 pub(crate) struct LeasedResource<T> {
@@ -251,7 +252,7 @@ impl Deref for PluginGenerationLease {
     type Target = neoism_agent_plugin_api::RegistrySnapshot;
 
     fn deref(&self) -> &Self::Target {
-        &self.inner.snapshot
+        &self.snapshot
     }
 }
 
@@ -276,9 +277,25 @@ impl PluginGenerationLease {
             generation: inner.clone(),
         });
         Some(Self {
+            snapshot: inner.snapshot.clone(),
             inner,
             _token: token,
         })
+    }
+
+    pub(crate) fn with_lower_priority_scopes(
+        mut self,
+        scopes: Vec<Arc<neoism_agent_plugin_api::RegistrySnapshot>>,
+    ) -> Self {
+        if !scopes.is_empty() {
+            self.snapshot = Arc::new(
+                self.snapshot
+                    .as_ref()
+                    .clone()
+                    .with_lower_priority_scopes(scopes),
+            );
+        }
+        self
     }
 
     fn new(inner: Arc<PluginGeneration>) -> Self {
@@ -287,6 +304,7 @@ impl PluginGenerationLease {
             generation: inner.clone(),
         });
         Self {
+            snapshot: inner.snapshot.clone(),
             inner,
             _token: token,
         }

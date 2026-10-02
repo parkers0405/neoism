@@ -75,7 +75,60 @@ pub enum ExtensionStatus {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExtensionKind {
+    ManagedPackage,
+    LuaPlugin,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LuaPluginLifecycle {
+    Discovered,
+    Lazy,
+    Loaded,
+    Disabled,
+    UpdateAvailable,
+    PermissionRequired,
+    Approved,
+    Revoked,
+    Incompatible,
+    Blocked,
+    Failed,
+    Installing,
+    Updating,
+    Restoring,
+    Removing,
+    RestoreRequired,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LuaPluginAction {
+    Install,
+    Update,
+    Remove,
+    Restore,
+    Enable,
+    Disable,
+    GrantAll,
+    RevokeAll,
+    Retry,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LuaPluginPresentation {
+    pub lifecycle: LuaPluginLifecycle,
+    pub status_text: String,
+    pub requested_permissions: Vec<String>,
+    pub granted_permissions: Vec<String>,
+    pub missing_permissions: Vec<String>,
+    pub installed_commit: Option<String>,
+    pub retryable: bool,
+    pub primary_action: Option<LuaPluginAction>,
+    pub secondary_actions: Vec<LuaPluginAction>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExtensionTab {
+    All,
     McpServers,
     LanguageServers,
     TreeSitterParsers,
@@ -84,12 +137,13 @@ pub enum ExtensionTab {
 
 impl Default for ExtensionTab {
     fn default() -> Self {
-        Self::McpServers
+        Self::All
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct ExtensionEntry {
+    pub kind: ExtensionKind,
     pub id: String,
     pub name: String,
     pub version: String,
@@ -113,11 +167,13 @@ pub struct ExtensionEntry {
     /// Drives the source badge so the page reflects what the engine will
     /// actually run.
     pub lsp_source: Option<String>,
+    pub lua_plugin: Option<LuaPluginPresentation>,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) enum RowAction {
     ToggleInstall(String),
+    LuaPlugin(String, LuaPluginAction),
     Focus(usize),
 }
 
@@ -132,6 +188,10 @@ pub enum PaneAction {
         currently_installed: bool,
     },
     OpenRepository(String),
+    LuaPluginActionRequested {
+        id: String,
+        action: LuaPluginAction,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -259,7 +319,8 @@ impl NeoismExtensionsPane {
     /// Kernels, wrapping). `forward` advances; otherwise steps back.
     /// Resets selection + scroll so the new tab starts at the top.
     pub fn cycle_tab(&mut self, forward: bool) {
-        const ORDER: [ExtensionTab; 4] = [
+        const ORDER: [ExtensionTab; 5] = [
+            ExtensionTab::All,
             ExtensionTab::McpServers,
             ExtensionTab::LanguageServers,
             ExtensionTab::TreeSitterParsers,
@@ -313,12 +374,20 @@ impl NeoismExtensionsPane {
     pub fn tab_supports_language_filter(&self) -> bool {
         !matches!(
             self.active_tab,
-            ExtensionTab::McpServers | ExtensionTab::Kernels
+            ExtensionTab::All | ExtensionTab::McpServers | ExtensionTab::Kernels
         )
     }
 
     pub fn set_entries(&mut self, entries: Vec<ExtensionEntry>) {
         self.entries = entries;
+        if self.selected_index >= self.entries.len() {
+            self.selected_index = 0;
+        }
+    }
+
+    pub fn set_lua_plugin_entries(&mut self, entries: Vec<ExtensionEntry>) {
+        self.entries.retain(|entry| entry.kind != ExtensionKind::LuaPlugin);
+        self.entries.extend(entries);
         if self.selected_index >= self.entries.len() {
             self.selected_index = 0;
         }
@@ -456,7 +525,7 @@ impl NeoismExtensionsPane {
         self.active_tab = tab;
         // Tabs that don't carry language tags ignore the filter;
         // close the picker so it doesn't paint over the wrong tab.
-        if matches!(tab, ExtensionTab::McpServers | ExtensionTab::Kernels) {
+        if matches!(tab, ExtensionTab::All | ExtensionTab::McpServers | ExtensionTab::Kernels) {
             self.language_picker_open = false;
         }
     }
@@ -582,6 +651,19 @@ impl NeoismExtensionsPane {
     }
 
     fn passes_status(&self, entry: &ExtensionEntry) -> bool {
+        if let Some(plugin) = &entry.lua_plugin {
+            return match self.filter {
+                ExtensionFilter::All => true,
+                ExtensionFilter::Installed => !matches!(
+                    plugin.lifecycle,
+                    LuaPluginLifecycle::Discovered | LuaPluginLifecycle::Installing
+                ),
+                ExtensionFilter::NotInstalled => matches!(
+                    plugin.lifecycle,
+                    LuaPluginLifecycle::Discovered | LuaPluginLifecycle::Installing
+                ),
+            };
+        }
         match self.filter {
             ExtensionFilter::All => true,
             ExtensionFilter::Installed => matches!(
@@ -724,7 +806,7 @@ impl NeoismExtensionsPane {
                 let was = self.active_tab;
                 self.active_tab = *tab;
                 if was != *tab
-                    && matches!(*tab, ExtensionTab::McpServers | ExtensionTab::Kernels)
+                    && matches!(*tab, ExtensionTab::All | ExtensionTab::McpServers | ExtensionTab::Kernels)
                 {
                     // These tabs ignore language filter — reset so the
                     // user doesn't see "no results" because of a stale
@@ -741,14 +823,23 @@ impl NeoismExtensionsPane {
         // (pushed after the row focus rect by view::draw_card_body)
         // gets matched first.
         let mut focus_target: Option<usize> = None;
-        let mut toggle_target: Option<String> = None;
+        let mut action_target: Option<PaneAction> = None;
         for hit in self.row_hits.iter().rev() {
             if !point_in_rect(x, y, hit.rect) {
                 continue;
             }
             match &hit.action {
                 RowAction::ToggleInstall(id) => {
-                    toggle_target = Some(id.clone());
+                    let currently_installed = self
+                        .entries
+                        .iter()
+                        .find(|entry| entry.id == *id)
+                        .is_some_and(|entry| matches!(entry.status, ExtensionStatus::Installed { .. }));
+                    action_target = Some(PaneAction::InstallToggleRequested { id: id.clone(), currently_installed });
+                    break;
+                }
+                RowAction::LuaPlugin(id, action) => {
+                    action_target = Some(PaneAction::LuaPluginActionRequested { id: id.clone(), action: action.clone() });
                     break;
                 }
                 RowAction::Focus(idx) => {
@@ -757,18 +848,9 @@ impl NeoismExtensionsPane {
                 }
             }
         }
-        if let Some(id) = toggle_target {
+        if let Some(action) = action_target {
             self.focused_search = false;
-            let currently_installed = self
-                .entries
-                .iter()
-                .find(|e| e.id == id)
-                .map(|e| matches!(e.status, ExtensionStatus::Installed { .. }))
-                .unwrap_or(false);
-            return Some(PaneAction::InstallToggleRequested {
-                id,
-                currently_installed,
-            });
+            return Some(action);
         }
         if let Some(idx) = focus_target {
             self.focused_search = false;
@@ -922,6 +1004,9 @@ impl NeoismExtensionsPane {
                 let clamped = self.selected_index.min(last);
                 let entry_idx = visible[clamped];
                 let entry = &self.entries[entry_idx];
+                if let Some(action) = entry.lua_plugin.as_ref().and_then(|plugin| plugin.primary_action.clone()) {
+                    return KeyResponse::with_action(PaneAction::LuaPluginActionRequested { id: entry.id.clone(), action });
+                }
                 if matches!(
                     entry.status,
                     ExtensionStatus::BuiltIn
@@ -1033,6 +1118,7 @@ use super::view;
 fn matches_tab(category: &str, tab: ExtensionTab) -> bool {
     let c = category.to_lowercase();
     match tab {
+        ExtensionTab::All => true,
         ExtensionTab::McpServers => c.contains("mcp"),
         ExtensionTab::LanguageServers => {
             c.contains("lsp") || c.contains("language server")
@@ -1059,6 +1145,7 @@ mod interaction_tests {
 
     fn entry(id: &str, status: ExtensionStatus) -> ExtensionEntry {
         ExtensionEntry {
+            kind: ExtensionKind::ManagedPackage,
             id: id.to_string(),
             name: format!("Entry {id}"),
             version: "1.0.0".into(),
@@ -1070,6 +1157,7 @@ mod interaction_tests {
             status,
             repository_url: None,
             lsp_source: None,
+            lua_plugin: None,
         }
     }
 
@@ -1081,6 +1169,7 @@ mod interaction_tests {
         status: ExtensionStatus,
     ) -> ExtensionEntry {
         ExtensionEntry {
+            kind: ExtensionKind::ManagedPackage,
             id: id.to_string(),
             name: name.to_string(),
             version: "1.0.0".into(),
@@ -1092,6 +1181,7 @@ mod interaction_tests {
             status,
             repository_url: None,
             lsp_source: None,
+            lua_plugin: None,
         }
     }
 
@@ -1307,14 +1397,14 @@ mod interaction_tests {
     #[test]
     fn alt_arrow_cycles_category_tabs() {
         let mut pane = NeoismExtensionsPane::new();
-        assert_eq!(pane.active_tab, ExtensionTab::McpServers);
+        assert_eq!(pane.active_tab, ExtensionTab::All);
         assert!(
             pane.on_key(&key_press_mods(NamedKey::ArrowRight, Modifiers::ALT))
                 .consumed
         );
-        assert_eq!(pane.active_tab, ExtensionTab::LanguageServers);
-        pane.on_key(&key_press_mods(NamedKey::ArrowLeft, Modifiers::ALT));
         assert_eq!(pane.active_tab, ExtensionTab::McpServers);
+        pane.on_key(&key_press_mods(NamedKey::ArrowLeft, Modifiers::ALT));
+        assert_eq!(pane.active_tab, ExtensionTab::All);
         // Wrap backwards from the first tab to the last.
         pane.on_key(&key_press_mods(NamedKey::ArrowLeft, Modifiers::ALT));
         assert_eq!(pane.active_tab, ExtensionTab::Kernels);

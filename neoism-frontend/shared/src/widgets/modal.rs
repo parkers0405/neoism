@@ -66,6 +66,11 @@ pub enum ModalAction {
         command: String,
         value: String,
     },
+    LuaPromptReply {
+        request_id: String,
+        value: String,
+        cancelled: bool,
+    },
     MarkdownFileLink {
         document: std::path::PathBuf,
         value: String,
@@ -334,6 +339,9 @@ impl ModalAction {
             },
             ModalAction::RunEditorCommandWithInput { command, .. } => {
                 ModalAction::RunEditorCommandWithInput { command, value }
+            }
+            ModalAction::LuaPromptReply { request_id, cancelled, .. } => {
+                ModalAction::LuaPromptReply { request_id, value, cancelled }
             }
             ModalAction::MarkdownFileLink { document, .. } => {
                 ModalAction::MarkdownFileLink { document, value }

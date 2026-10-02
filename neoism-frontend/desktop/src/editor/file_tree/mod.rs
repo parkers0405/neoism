@@ -213,6 +213,7 @@ pub(super) fn with_panel_context_files<R>(
         services,
         theme: &theme,
         time: neoism_ui::services::ClockService::now_monotonic(&clock),
+        plugins: None,
     };
     f(&ctx)
 }

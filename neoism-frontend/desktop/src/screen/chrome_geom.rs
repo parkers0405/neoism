@@ -33,6 +33,42 @@ fn top_aligned_pane_content_rect(
 use neoism_ui::chrome_policy::{workspace_chrome_margins, WorkspaceChromeMetrics};
 
 impl Screen<'_> {
+    pub fn take_plugin_commands(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.pending_plugin_commands)
+    }
+
+    pub fn take_plugin_actions(&mut self) -> Vec<neoism_lua::HostAction> {
+        std::mem::take(&mut self.pending_plugin_actions)
+    }
+
+    pub fn take_lua_prompt_replies(&mut self) -> Vec<(String, String, bool)> {
+        std::mem::take(&mut self.pending_lua_prompt_replies)
+    }
+
+    pub fn take_plugin_keys(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.pending_plugin_keys)
+    }
+
+    pub fn queue_plugin_command(&mut self, id: String) {
+        self.pending_plugin_commands.push(id);
+    }
+
+    pub fn set_plugin_snapshot(
+        &mut self,
+        snapshot: std::sync::Arc<neoism_lua::PluginSnapshot>,
+    ) {
+        self.renderer.set_plugin_snapshot(snapshot);
+        if let Some(width) = self
+            .renderer
+            .style(neoism_lua::selector::AGENT_SIDEBAR)
+            .width
+        {
+            self.conversations_sidebar_width = width.max(0.0);
+        }
+        self.reapply_chrome_layout();
+        self.mark_dirty();
+    }
+
     pub fn mark_dirty(&mut self) {
         self.context_manager
             .current_mut()
@@ -53,15 +89,35 @@ impl Screen<'_> {
     ) {
         self.conversations_panel_enabled = config.agent.conversations_panel_enabled;
         self.details_panel_enabled = config.agent.details_panel_enabled;
+        let placement = |value| match value {
+            neoism_backend::config::SidebarPlacementPreference::Unified => {
+                neoism_ui::panels::left_sidebar_host::SidebarPlacement::Unified
+            }
+            neoism_backend::config::SidebarPlacementPreference::Independent => {
+                neoism_ui::panels::left_sidebar_host::SidebarPlacement::Independent
+            }
+        };
+        self.renderer.left_sidebar_host.set_placements(
+            placement(config.ui.left_sidebar.file_tree),
+            placement(config.ui.left_sidebar.notes),
+            placement(config.ui.left_sidebar.conversations),
+        );
+        self.renderer.reconcile_left_sidebar_host();
+        if let Some(active) = self.renderer.left_sidebar_host.active_unified() {
+            self.renderer.hide_other_unified_sidebars(active);
+        }
         if !self.conversations_panel_enabled {
-            self.renderer.conversations_visible = false;
-            self.renderer
-                .conversations_pane
-                .side_panel_mut()
-                .set_focused(false);
+            self.renderer.set_left_sidebar_visibility(
+                neoism_ui::panels::left_sidebar_host::LeftSidebarView::Conversations,
+                false,
+                false,
+            );
             self.workspace_conversations_visibility
                 .values_mut()
                 .for_each(|visible| *visible = false);
+            self.workspace_active_left_sidebar.retain(|_, view| {
+                *view != neoism_ui::panels::left_sidebar_host::LeftSidebarView::Conversations
+            });
         }
         self.renderer.code_git_blame = config.editor.git_blame;
         self.renderer.code_git_blame_delay_ms = config.editor.git_blame_delay_ms;
@@ -163,6 +219,7 @@ impl Screen<'_> {
         let old_pane_breadcrumbs = std::mem::take(&mut self.renderer.pane_breadcrumbs);
         let old_breadcrumbs = std::mem::take(&mut self.renderer.breadcrumbs);
         let old_status_line = std::mem::take(&mut self.renderer.status_line);
+        let old_plugins = self.renderer.plugins.clone();
         tracing::info!(
             target: "neoism::config_reload",
             file_tree_visible = old_file_tree.is_visible(),
@@ -184,6 +241,7 @@ impl Screen<'_> {
         renderer.pane_breadcrumbs = old_pane_breadcrumbs;
         renderer.breadcrumbs = old_breadcrumbs;
         renderer.status_line = old_status_line;
+        renderer.set_plugin_snapshot(old_plugins);
         renderer.settings = old_settings;
         renderer.set_chrome_scale(chrome_scale);
         self.renderer = renderer;
@@ -627,23 +685,15 @@ impl Screen<'_> {
     }
 
     pub(crate) fn chrome_x_offset(&self) -> f32 {
-        let mut offset = 0.0;
-        if self.renderer.file_tree.is_visible() {
-            offset += self.renderer.file_tree.width();
-        }
-        if self.renderer.notes_sidebar.is_visible() {
-            offset += self.renderer.notes_sidebar.width();
-        }
-        if self.renderer.conversations_visible {
-            offset += self.renderer.conversations_pane.side_panel().width();
-        }
-        offset
+        self.renderer.surface_layout.content.x + self.renderer.left_sidebar_total_width()
     }
 
     pub(crate) fn chrome_x_offset_right(&self) -> f32 {
         let scale_factor = self.sugarloaf.scale_factor();
         let logical_width = self.sugarloaf.window_size().width as f32 / scale_factor;
-        self.renderer.git_diff_panel.effective_width(logical_width)
+        let content = self.renderer.surface_layout.content;
+        let surface_inset = (logical_width - content.x - content.w).max(0.0);
+        surface_inset + self.renderer.git_diff_panel.effective_width(content.w)
     }
 
     pub(crate) fn island_chrome_top(&self) -> f32 {
@@ -660,11 +710,9 @@ impl Screen<'_> {
     /// render used `y = 0` while its click math used
     /// `rio_island_height()`, which drifted by a row.
     pub(crate) fn side_panel_band(&self) -> (f32, f32) {
-        let scale = self.sugarloaf.scale_factor();
-        let logical_height = self.sugarloaf.window_size().height as f32 / scale;
+        let content = self.renderer.surface_layout.content;
         let top = self.island_chrome_top();
-        let bottom =
-            (logical_height - self.renderer.status_line.scaled_height()).max(top);
+        let bottom = (content.y + content.h - self.renderer.status_line.scaled_height()).max(top);
         (top, bottom)
     }
 
@@ -702,12 +750,10 @@ impl Screen<'_> {
         }
         // Workspace strip spans the full width now (side panels live in
         // the band below it), so it starts at the window's left edge.
-        let left = 0.0;
+        let left = self.renderer.surface_layout.content.x;
         let logical_width =
             self.sugarloaf.window_size().width as f32 / self.sugarloaf.scale_factor();
-        let right = self
-            .renderer
-            .right_chrome_edge(&self.context_manager, logical_width);
+        let right = self.renderer.right_chrome_edge(&self.context_manager, logical_width);
         mx >= left && mx <= right
     }
 
@@ -720,7 +766,12 @@ impl Screen<'_> {
             island_top: self.island_chrome_top(),
             buffer_tabs_height: self.renderer.buffer_tabs_height(),
             breadcrumbs_height: self.renderer.breadcrumbs_height(),
-            status_line_height: self.renderer.status_line_height(),
+            status_line_height: self.renderer.status_line_height()
+                + (self.sugarloaf.window_size().height as f32
+                    / self.sugarloaf.scale_factor()
+                    - self.renderer.surface_layout.content.y
+                    - self.renderer.surface_layout.content.h)
+                    .max(0.0),
             terminal_top_padding: terminal_top_padding_for_chrome_scale(
                 self.renderer.chrome_scale(),
             ),
@@ -814,6 +865,11 @@ impl Screen<'_> {
     pub(crate) fn reapply_chrome_layout(&mut self) {
         let started_at = std::time::Instant::now();
         let scale = self.sugarloaf.scale_factor();
+        let window_size = self.sugarloaf.window_size();
+        self.renderer.relayout_surfaces(
+            window_size.width as f32 / scale,
+            window_size.height as f32 / scale,
+        );
         let left_logical = self.renderer.margin.left + self.chrome_x_offset();
         let left_scaled = left_logical * scale;
         let right_logical = self.renderer.margin.right + self.chrome_x_offset_right();
@@ -838,7 +894,6 @@ impl Screen<'_> {
             ));
         }
 
-        let window_size = self.sugarloaf.window_size();
         let width = window_size.width as f32;
         let height = window_size.height as f32;
         self.context_manager

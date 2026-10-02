@@ -279,6 +279,11 @@ pub fn default_config_file_content() -> String {
     // "ui": {
     //     "window": { "opacity": 0.95, "blur": true },
     //     "navigation": { "hide-if-single": true, "use-split": true },
+    //     "left-sidebar": {
+    //         "file-tree": "unified",       // unified | independent
+    //         "notes": "unified",
+    //         "conversations": "unified"
+    //     },
     //     "status-fps": true,        // FPS pill on the status bar
     //     "confirm-before-quit": false,
     // },
@@ -288,6 +293,14 @@ pub fn default_config_file_content() -> String {
     //     "display-name": "parker",  // the name collaborators see
     //     "cursor-color": "#44C9F0", // your caret colour (collaborators see it too)
     //     "cursor-style": "rainbow", // "solid" (default) or "rainbow"
+    // },
+
+    // ── [plugins] — Lua plugin permissions + updates ───────────────
+    // "plugins": {
+    //     "disabled": ["dev.example.disabled"],
+    //     "grants": { "dev.example.git": ["git.read", "git.write"] },
+    //     "update-policy": "manual", // manual | notify | automatic
+    //     "trusted-sources": ["https://github.com/example/"],
     // },
 
     // ── [keybinds] — override the built-in shortcuts ──────────────

@@ -70,6 +70,7 @@ pub fn render_chat(
     s: f32,
     input_rect: [f32; 4],
     occlusion_rects: &[[f32; 4]],
+    plugins: Option<&neoism_lua::PluginSnapshot>,
 ) {
     render_chat_with::<NeoismAgentPane, SharedTimelineDelegate>(
         sugarloaf,
@@ -82,6 +83,7 @@ pub fn render_chat(
         s,
         input_rect,
         occlusion_rects,
+        plugins,
         None,
     );
 }
@@ -98,6 +100,7 @@ pub fn render_chat_with<P, D>(
     s: f32,
     input_rect: [f32; 4],
     occlusion_rects: &[[f32; 4]],
+    plugins: Option<&neoism_lua::PluginSnapshot>,
     prepared_input_rows: Option<&[InputWrapRow]>,
 ) where
     P: AgentChatPane,
@@ -141,16 +144,14 @@ pub fn render_chat_with<P, D>(
         now_seconds,
         mouse,
         occlusion_rects,
+        plugins,
     );
 
     if composer_visible {
-        // Image overlays render in Sugarloaf's normal image pass. Routing the
-        // composer surface to the late quad pass would paint that surface over
-        // attached-image thumbnails. The timeline is already clipped exactly
-        // at the composer border above, so image-bearing composers do not need
-        // that extra masking pass.
-        let late_overlay = pane.input_images().is_empty();
-        sugarloaf.set_late_overlay_mode(late_overlay);
+        // The timeline is clipped exactly at the composer border, so the
+        // composer does not need the late quad pass for masking. Keeping it in
+        // the normal pass also lets provider logos and attachment thumbnails
+        // composite above the island surface.
         user_input::render_input(
             sugarloaf,
             pane,
@@ -165,9 +166,7 @@ pub fn render_chat_with<P, D>(
             now_seconds,
             occlusion_rects,
             prepared_input_rows,
+            None,
         );
-        if late_overlay {
-            sugarloaf.set_late_overlay_mode(false);
-        }
     }
 }

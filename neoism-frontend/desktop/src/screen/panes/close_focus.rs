@@ -365,9 +365,8 @@ impl Screen<'_> {
     }
 
     pub(crate) fn focus_buffer_tabs_for_current_pane(&mut self) -> bool {
-        self.renderer.file_tree.set_focused(false);
+        self.renderer.set_left_sidebar_focus(None);
         self.renderer.git_diff_panel.set_focused(false);
-        self.renderer.notes_sidebar.set_focused(false);
 
         if let Some(route) = self.active_pane_strip_route() {
             self.renderer.buffer_tabs.set_focused(false);
@@ -442,6 +441,18 @@ impl Screen<'_> {
                 {
                     self.renderer.notes_sidebar.select_prev();
                     self.mark_dirty();
+                    return true;
+                }
+                let left_sidebar_focused = self.renderer.left_sidebar_host.focused().is_some()
+                    || self.renderer.file_tree.is_focused()
+                    || self.renderer.notes_sidebar.is_focused()
+                    || self
+                        .renderer
+                        .conversations_pane
+                        .side_panel()
+                        .is_focused();
+                if left_sidebar_focused {
+                    self.focus_buffer_tabs_for_current_pane();
                     return true;
                 }
                 if let Some(strip) = self.focused_buffer_tabs_strip() {
@@ -751,67 +762,25 @@ impl Screen<'_> {
             return true;
         }
 
-        if self.renderer.conversations_visible
-            && self.renderer.conversations_pane.side_panel().is_focused()
-        {
-            self.renderer
-                .conversations_pane
-                .side_panel_mut()
-                .set_focused(false);
-            if !right {
-                if self.renderer.notes_sidebar.is_visible() {
-                    self.renderer.notes_sidebar.set_focused(true);
-                } else if self.renderer.file_tree.is_visible() {
-                    self.renderer.file_tree.set_focused(true);
-                } else {
-                    self.focus_main_workspace();
-                }
+        let left_views = self.renderer.resolved_left_sidebar_views();
+        let focused_left = left_views.iter().position(|view| {
+            self.renderer.left_sidebar_view_focused(*view)
+        });
+        if let Some(index) = focused_left {
+            if !right && index == 0 {
+                return false;
+            }
+            let next = if right {
+                left_views.get(index + 1).copied()
             } else {
+                index.checked_sub(1).and_then(|index| left_views.get(index).copied())
+            };
+            self.renderer.set_left_sidebar_focus(next);
+            if next.is_none() && right {
                 self.focus_main_workspace();
             }
             self.mark_dirty();
-            return true;
-        }
-        if right
-            && self.renderer.conversations_visible
-            && (self.renderer.notes_sidebar.is_focused()
-                || (self.renderer.file_tree.is_focused()
-                    && !self.renderer.notes_sidebar.is_visible()))
-        {
-            self.renderer.file_tree.set_focused(false);
-            self.renderer.notes_sidebar.set_focused(false);
-            self.renderer
-                .conversations_pane
-                .side_panel_mut()
-                .set_focused(true);
-            self.mark_dirty();
-            return true;
-        }
-        if !right
-            && self.renderer.conversations_visible
-            && !self.renderer.file_tree.is_focused()
-            && !self.renderer.notes_sidebar.is_focused()
-            && self
-                .renderer
-                .conversations_pane
-                .side_panel()
-                .last_panel_rect()
-                .is_some()
-            && !self
-                .context_manager
-                .current()
-                .neoism_agent
-                .as_ref()
-                .is_some_and(|agent| {
-                    agent.detail_panel().is_focused() || agent.side_panel().is_focused()
-                })
-        {
-            self.renderer
-                .conversations_pane
-                .side_panel_mut()
-                .set_focused(true);
-            self.mark_dirty();
-            return true;
+            return right || next.is_some();
         }
         // Spatial order: catalog ← agent body → conversation detail.
         if let Some(agent) = self.context_manager.current_mut().neoism_agent.as_mut() {
@@ -863,35 +832,6 @@ impl Screen<'_> {
             return true;
         }
 
-        if self.renderer.file_tree.is_focused() {
-            if right && self.renderer.notes_sidebar.is_visible() {
-                self.renderer.file_tree.set_focused(false);
-                self.renderer.notes_sidebar.set_focused(true);
-                self.mark_dirty();
-                return true;
-            }
-            return right && self.focus_main_workspace();
-        }
-
-        if self.renderer.notes_sidebar.is_focused() {
-            // Alt+arrows are PANEL-level navigation — they leave the
-            // sidebar directly, skipping the footer's selector↔gear
-            // walk (plain ArrowLeft/Right does that walk instead).
-            if right {
-                self.renderer.notes_sidebar.set_focused(false);
-                self.focus_main_workspace();
-                self.mark_dirty();
-                return true;
-            }
-            if self.renderer.file_tree.is_visible() {
-                self.renderer.notes_sidebar.set_focused(false);
-                self.renderer.file_tree.set_focused(true);
-                self.mark_dirty();
-                return true;
-            }
-            return false;
-        }
-
         // Any pane in a multi-pane grid owns a nearest ancestor divider,
         // including the primary/workspace pane. Restricting this to
         // `current_grid_split_focused()` made Ctrl+Alt+Arrow work only from
@@ -911,12 +851,8 @@ impl Screen<'_> {
                 // the left chrome chain instead of re-focusing the workspace
                 // root (which made Alt+Left appear dead whenever splits
                 // existed).
-                if self.renderer.notes_sidebar.is_visible() {
-                    self.renderer.notes_sidebar.set_focused(true);
-                    self.renderer.file_tree.set_focused(false);
-                    self.mark_dirty();
-                } else if self.renderer.file_tree.is_visible() {
-                    self.renderer.file_tree.set_focused(true);
+                if let Some(view) = left_views.last().copied() {
+                    self.renderer.set_left_sidebar_focus(Some(view));
                     self.mark_dirty();
                 }
                 return true;
@@ -936,12 +872,8 @@ impl Screen<'_> {
             }
             self.focus_split_stack()
         } else {
-            if self.renderer.notes_sidebar.is_visible() {
-                self.renderer.notes_sidebar.set_focused(true);
-                self.renderer.file_tree.set_focused(false);
-                self.mark_dirty();
-            } else if self.renderer.file_tree.is_visible() {
-                self.renderer.file_tree.set_focused(true);
+            if let Some(view) = left_views.last().copied() {
+                self.renderer.set_left_sidebar_focus(Some(view));
                 self.mark_dirty();
             }
             true

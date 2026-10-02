@@ -19,6 +19,19 @@ pub enum FileStatus {
 }
 
 impl FileStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            FileStatus::Modified => "modified",
+            FileStatus::Staged => "staged",
+            FileStatus::Mixed => "mixed",
+            FileStatus::Added => "added",
+            FileStatus::Deleted => "deleted",
+            FileStatus::Renamed => "renamed",
+            FileStatus::Untracked => "untracked",
+            FileStatus::Conflict => "conflict",
+        }
+    }
+
     pub(super) fn marker(&self) -> &'static str {
         match self {
             FileStatus::Modified => "M",

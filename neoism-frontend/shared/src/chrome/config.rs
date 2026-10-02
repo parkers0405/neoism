@@ -30,11 +30,24 @@ impl<A: Send + Copy + 'static> Chrome<A> {
     pub fn new() -> Self {
         let ide_theme = IdeTheme::pastel_dark();
         let theme = ChromeTheme::from_ide_theme(&ide_theme);
+        let surface_registry = crate::surface_layout::SurfaceRegistry::chrome_defaults(
+            crate::surface_layout::SurfaceItemSize::new(26.0, 26.0),
+        );
+        let surface_layout = crate::surface_layout::resolve_surface_layout(
+            Rect::new(0.0, 0.0, 0.0, 0.0),
+            1.0,
+            &surface_registry,
+            &neoism_lua::SurfaceLayoutPatch::default(),
+        )
+        .expect("built-in surface registry must resolve");
         if let Ok(mut g) = ACTIVE_IDE_THEME.write() {
             *g = Some(ide_theme);
         }
 
         Self {
+            plugins: std::sync::Arc::new(neoism_lua::PluginSnapshot::empty()),
+            plugin_hitboxes: Vec::new(),
+            pending_plugin_commands: Vec::new(),
             layout: ChromeLayout {
                 top_bar: None,
                 file_tree: None,
@@ -50,6 +63,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                 command_composer: None,
                 panes: Vec::new(),
             },
+            surface_layout,
             theme,
             ide_theme,
             cursor_color_override: None,
@@ -91,6 +105,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             git_diff: GitDiff::new(),
             git_diff_panel: GitDiffPanel::new(),
             notes_sidebar: NotesSidebar::default(),
+            left_sidebar_host: crate::panels::left_sidebar_host::LeftSidebarHost::default(),
             conversations_visible: false,
             conversations_panel_enabled: true,
             details_panel_enabled: true,
@@ -131,6 +146,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             scroll_spring: CriticallyDampedSpring::new(),
             scroll_offset_px: 0.0,
             last_pointer_pos: (0.0, 0.0),
+            pointer_inside: false,
             pending_buffer_tab_closes: Vec::new(),
             pending_buffer_tab_activate: None,
             pending_buffer_tab_new: false,
@@ -146,10 +162,33 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         }
     }
 
+    pub fn set_plugin_snapshot(
+        &mut self,
+        snapshot: std::sync::Arc<neoism_lua::PluginSnapshot>,
+    ) {
+        self.plugins = snapshot;
+        self.relayout();
+    }
+
+    pub fn plugin_snapshot(&self) -> &neoism_lua::PluginSnapshot {
+        &self.plugins
+    }
+
+    pub fn plugin_snapshot_arc(&self) -> std::sync::Arc<neoism_lua::PluginSnapshot> {
+        self.plugins.clone()
+    }
+
+    pub fn surface_layout(&self) -> &crate::surface_layout::ResolvedSurfaceLayout {
+        &self.surface_layout
+    }
+
+    pub fn drain_plugin_commands(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.pending_plugin_commands)
+    }
+
     pub(crate) fn apply_top_bar_action(&mut self, action: TopBarAction) {
         match action {
             TopBarAction::TogglePanel => {
-                self.hide_conversations();
                 // Strict visibility toggle — click 1 opens, click 2
                 // closes, regardless of focus state. The chrome's
                 // pointer-down handler defocuses the tree whenever
@@ -198,7 +237,6 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                 self.pending_top_bar_action = Some(TopBarAction::ShareWithPhone);
             }
             TopBarAction::OpenNotes => {
-                self.hide_conversations();
                 // Strict visibility toggle, same contract as
                 // `TogglePanel` above: click 1 opens, click 2 closes.
                 // This used to be open-ONLY (`if !visible { toggle }`),
@@ -208,6 +246,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                 // only move focus for an already-open panel, which is
                 // why the close path is spelled out here.
                 if self.notes_sidebar.is_visible() {
+                    self.left_sidebar_host.hide(crate::panels::left_sidebar_host::LeftSidebarView::Notes);
                     self.notes_sidebar.set_visible(false);
                     self.notes_sidebar.set_focused(false);
                     self.relayout();
@@ -338,6 +377,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
     }
 
     pub fn hide_conversations(&mut self) {
+        self.left_sidebar_host.hide(crate::panels::left_sidebar_host::LeftSidebarView::Conversations);
         self.conversations_visible = false;
         if let Some(pane) = self.agent_pane.as_mut() {
             pane.side_panel_mut().set_focused(false);
@@ -350,7 +390,18 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             self.relayout();
             return;
         }
-        self.conversations_visible = !self.conversations_visible;
+        use crate::panels::left_sidebar_host::{LeftSidebarView, SidebarTransition};
+        let focused = self.agent_pane.as_ref().is_some_and(|pane| pane.side_panel().is_focused());
+        match self.left_sidebar_host.toggle(LeftSidebarView::Conversations, focused) {
+            SidebarTransition::Independent => {
+                self.conversations_visible = !self.conversations_visible;
+            }
+            SidebarTransition::Hide => self.conversations_visible = false,
+            SidebarTransition::Show | SidebarTransition::Focus => {
+                self.conversations_visible = true;
+                self.hide_other_unified_sidebars(LeftSidebarView::Conversations);
+            }
+        }
         if self.conversations_visible {
             if let Some(tree) = self.file_tree.as_mut() {
                 tree.set_focused(false);
@@ -374,7 +425,10 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         if !self.conversations_panel_enabled {
             return;
         }
+        use crate::panels::left_sidebar_host::LeftSidebarView;
+        self.left_sidebar_host.show(LeftSidebarView::Conversations, focus);
         self.conversations_visible = true;
+        self.hide_other_unified_sidebars(LeftSidebarView::Conversations);
         if let Some(pane) = self.agent_pane.as_mut() {
             pane.side_panel_mut().set_focused(focus);
             pane.side_panel_mut().hide_catalog_controls();
@@ -421,6 +475,76 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             }
         }
         self.relayout();
+    }
+
+    pub fn set_left_sidebar_placements(
+        &mut self,
+        files: crate::panels::left_sidebar_host::SidebarPlacement,
+        notes: crate::panels::left_sidebar_host::SidebarPlacement,
+        conversations: crate::panels::left_sidebar_host::SidebarPlacement,
+    ) {
+        self.left_sidebar_host.set_placements(files, notes, conversations);
+        self.reconcile_left_sidebar_host();
+        if let Some(active) = self.left_sidebar_host.active_unified() {
+            self.hide_other_unified_sidebars(active);
+        }
+        self.relayout();
+    }
+
+    pub fn set_left_sidebar_placement(
+        &mut self,
+        view: crate::panels::left_sidebar_host::LeftSidebarView,
+        placement: crate::panels::left_sidebar_host::SidebarPlacement,
+    ) {
+        self.left_sidebar_host.set_placement(view, placement);
+        self.reconcile_left_sidebar_host();
+        if let Some(active) = self.left_sidebar_host.active_unified() {
+            self.hide_other_unified_sidebars(active);
+        }
+        self.relayout();
+    }
+
+    pub(crate) fn sidebar_requests(&self) -> crate::panels::left_sidebar_host::SidebarRequests {
+        crate::panels::left_sidebar_host::SidebarRequests {
+            files: self.file_tree.as_ref().is_some_and(|tree| tree.is_visible()),
+            notes: self.notes_sidebar.is_visible(),
+            conversations: self.conversations_visible,
+        }
+    }
+
+    pub(crate) fn reconcile_left_sidebar_host(&mut self) {
+        let requests = self.sidebar_requests();
+        self.left_sidebar_host.reconcile(requests);
+    }
+
+    pub(crate) fn hide_other_unified_sidebars(
+        &mut self,
+        active: crate::panels::left_sidebar_host::LeftSidebarView,
+    ) {
+        use crate::panels::left_sidebar_host::{LeftSidebarView, SidebarPlacement};
+        for view in LeftSidebarView::ALL {
+            if view == active || self.left_sidebar_host.placement(view) != SidebarPlacement::Unified {
+                continue;
+            }
+            match view {
+                LeftSidebarView::Files => {
+                    if let Some(tree) = self.file_tree.as_mut() {
+                        tree.set_visible(false);
+                        tree.set_focused(false);
+                    }
+                }
+                LeftSidebarView::Notes => {
+                    self.notes_sidebar.set_visible(false);
+                    self.notes_sidebar.set_focused(false);
+                }
+                LeftSidebarView::Conversations => {
+                    self.conversations_visible = false;
+                    if let Some(pane) = self.agent_pane.as_mut() {
+                        pane.side_panel_mut().set_focused(false);
+                    }
+                }
+            }
+        }
     }
 
     /// Install the pane used for the active chat and the workspace catalog;
@@ -508,10 +632,25 @@ impl<A: Send + Copy + 'static> Chrome<A> {
     /// - visible + focused -> hide
     /// - visible + unfocused -> focus without changing width/layout
     pub fn toggle_file_tree(&mut self) -> bool {
+        use crate::panels::left_sidebar_host::{LeftSidebarView, SidebarTransition};
+        let focused = self.file_tree.as_ref().is_some_and(|tree| tree.is_focused());
+        let transition = self.left_sidebar_host.toggle(LeftSidebarView::Files, focused);
         let Some(tree) = self.file_tree.as_mut() else {
             return false;
         };
-        let (focus_tree, visibility_changed) = if !tree.is_visible() {
+        let (focus_tree, visibility_changed) = if transition == SidebarTransition::Show {
+            let changed = !tree.is_visible();
+            tree.set_visible(true);
+            tree.set_focused(true);
+            (true, changed)
+        } else if transition == SidebarTransition::Hide {
+            tree.set_focused(false);
+            tree.set_visible(false);
+            (false, true)
+        } else if transition == SidebarTransition::Focus {
+            tree.set_focused(true);
+            (true, false)
+        } else if !tree.is_visible() {
             tree.set_visible(true);
             tree.set_focused(true);
             (true, true)
@@ -523,6 +662,9 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             tree.set_focused(true);
             (true, false)
         };
+        if focus_tree && transition != SidebarTransition::Independent {
+            self.hide_other_unified_sidebars(LeftSidebarView::Files);
+        }
         if focus_tree {
             self.notes_sidebar.set_focused(false);
             if let Some(pane) = self.agent_pane.as_mut() {
@@ -536,6 +678,9 @@ impl<A: Send + Copy + 'static> Chrome<A> {
     }
 
     pub fn show_file_tree(&mut self) -> bool {
+        use crate::panels::left_sidebar_host::LeftSidebarView;
+        self.left_sidebar_host.show(LeftSidebarView::Files, true);
+        self.hide_other_unified_sidebars(LeftSidebarView::Files);
         let Some(tree) = self.file_tree.as_mut() else {
             return false;
         };
@@ -547,6 +692,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
     }
 
     pub fn hide_file_tree(&mut self) -> bool {
+        self.left_sidebar_host.hide(crate::panels::left_sidebar_host::LeftSidebarView::Files);
         let Some(tree) = self.file_tree.as_mut() else {
             return false;
         };

@@ -38,6 +38,7 @@ fn modal_action_policy_tag(
         A::ApplyMashupPack { .. } => Tag::ApplyMashupPack,
         A::RunEditorCommand { .. } => Tag::RunEditorCommand,
         A::RunEditorCommandWithInput { .. } => Tag::RunEditorCommandWithInput,
+        A::LuaPromptReply { .. } => Tag::RunEditorCommandWithInput,
         A::MarkdownFileLink { .. } => Tag::RunEditorCommandWithInput,
         A::DocumentationNotebook { .. } => Tag::RunEditorCommandWithInput,
         A::EpubAddNote { .. } => Tag::RunEditorCommandWithInput,

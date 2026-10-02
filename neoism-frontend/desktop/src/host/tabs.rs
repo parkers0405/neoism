@@ -6,17 +6,7 @@ impl Renderer {
     /// is rendered in Sugarloaf's overlay pass and cannot be hidden later by
     /// painting a sidebar background over it.
     fn left_sidebar_edge(&self) -> f32 {
-        let mut edge = 0.0;
-        if self.file_tree.is_visible() {
-            edge += self.file_tree.width();
-        }
-        if self.notes_sidebar.is_visible() {
-            edge += self.notes_sidebar.width();
-        }
-        if self.conversations_visible {
-            edge += self.conversations_pane.side_panel().width();
-        }
-        edge
+        self.surface_layout.content.x + self.left_sidebar_total_width()
     }
 
     /// Add the visible left-sidebar rectangles to a text occlusion set.
@@ -33,19 +23,11 @@ impl Renderer {
         if height <= 0.0 {
             return;
         }
-        let mut x = 0.0;
-        if self.file_tree.is_visible() {
-            let width = self.file_tree.width();
+        let mut x = self.surface_layout.content.x;
+        for view in self.resolved_left_sidebar_views() {
+            let width = self.left_sidebar_view_width(view);
             rects.push([x, top, width, height]);
             x += width;
-        }
-        if self.notes_sidebar.is_visible() {
-            let width = self.notes_sidebar.width();
-            rects.push([x, top, width, height]);
-            x += width;
-        }
-        if self.conversations_visible {
-            rects.push([x, top, self.conversations_pane.side_panel().width(), height]);
         }
     }
 
@@ -58,9 +40,9 @@ impl Renderer {
     pub fn right_chrome_edge(
         &self,
         _context_manager: &ContextManager<EventProxy>,
-        logical_width: f32,
+        _logical_width: f32,
     ) -> f32 {
-        logical_width
+        self.surface_layout.content.x + self.surface_layout.content.w
     }
 
     /// Right edge of the editor chrome band. Only true window-edge
@@ -70,10 +52,11 @@ impl Renderer {
     fn content_right_edge(
         &self,
         _context_manager: &ContextManager<EventProxy>,
-        logical_width: f32,
+        _logical_width: f32,
     ) -> f32 {
-        let right = logical_width - self.git_diff_panel.effective_width(logical_width);
-        right.clamp(0.0, logical_width)
+        let frame_right = self.surface_layout.content.x + self.surface_layout.content.w;
+        let right = frame_right - self.git_diff_panel.effective_width(self.surface_layout.content.w);
+        right.clamp(self.surface_layout.content.x, frame_right)
     }
 
     pub fn right_chrome_inset(
@@ -215,11 +198,57 @@ impl Renderer {
     /// menu is open so content panels reflow below the menu card and
     /// nothing paints behind it.
     pub fn top_bar_strip_height(&self) -> f32 {
-        if self.top_bar.is_visible() {
-            self.top_bar.layout_reservation()
+        if self.surface_layout.viewport.w == 0.0 && self.surface_layout.viewport.h == 0.0 {
+            if self.top_bar.is_visible() {
+                self.top_bar.layout_reservation()
+            } else {
+                0.0
+            }
         } else {
-            0.0
+            self.surface_layout.content.y
         }
+    }
+
+    pub fn relayout_surfaces(&mut self, logical_width: f32, logical_height: f32) {
+        let scale = self.chrome_scale().clamp(0.5, 3.0);
+        let style = self.style(neoism_lua::selector::CHROME_TOP);
+        let mut patch = self.plugins.surface_layout.clone();
+        let actions = patch
+            .surfaces
+            .entry(neoism_ui::surface_layout::CHROME_ACTIONS_SURFACE.into())
+            .or_default();
+        if actions.visible.is_none() {
+            actions.visible = Some(self.top_bar.is_visible() && style.visible != Some(false));
+        }
+        if actions.thickness.is_none() {
+            actions.thickness = Some(
+                style
+                    .height
+                    .unwrap_or_else(|| self.top_bar.layout_reservation())
+                    .max(0.0),
+            );
+        }
+        let mut registry = neoism_ui::surface_layout::SurfaceRegistry::chrome_defaults(
+            neoism_ui::surface_layout::SurfaceItemSize::new(26.0 * scale, 26.0 * scale),
+        );
+        self.top_bar.configure_surface_registry(&mut registry);
+        let viewport = neoism_ui::layout::Rect::new(0.0, 0.0, logical_width, logical_height);
+        self.surface_layout = neoism_ui::surface_layout::resolve_surface_layout(
+            viewport,
+            scale,
+            &registry,
+            &patch,
+        )
+        .unwrap_or_else(|error| {
+            tracing::warn!(%error, "rejecting invalid plugin surface layout");
+            neoism_ui::surface_layout::resolve_surface_layout(
+                viewport,
+                scale,
+                &registry,
+                &neoism_lua::SurfaceLayoutPatch::default(),
+            )
+            .expect("built-in surface registry must resolve")
+        });
     }
 
     /// Render the window-top chrome strip. Caller positions it after
@@ -244,20 +273,10 @@ impl Renderer {
         let _ = num_tabs;
         let bar_top = 0.0;
         let theme = self.theme;
-        self.top_bar.set_agent_icon_overlay(true);
+        let style = self.style(neoism_lua::selector::CHROME_TOP);
+        let _ = (content_x, bar_top, content_w);
         self.top_bar
-            .render(sugarloaf, content_x, bar_top, content_w, &theme);
-        let [x, y, w, h] = self.top_bar.right_button_rect();
-        let size = (w.min(h) * 0.72).max(1.0);
-        crate::neoism::icon::push_cropped_icon_overlay(
-            sugarloaf,
-            crate::neoism::icon::AgentKind::Neoism,
-            x + (w - size) * 0.5,
-            y + (h - size) * 0.5,
-            size,
-            size,
-            [0.0, 0.0, 1.0, 1.0],
-        );
+            .render_resolved(sugarloaf, &self.surface_layout, &theme, &style);
     }
 
     pub fn notifications_top_offset(

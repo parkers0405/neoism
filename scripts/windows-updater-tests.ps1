@@ -158,6 +158,19 @@ function New-Fixture([string]$Mode) {
 }
 function Read-Receipt { return (Get-Content -LiteralPath $ResultPath -Raw | ConvertFrom-Json) }
 try {
+    # Exercise the production -File entrypoint, not only dot-sourced functions.
+    # An inert PowerShell host can exit 0 without writing any receipt at all.
+    $entryRoot = Join-Path $root 'entrypoint'
+    New-Item -ItemType Directory -Path $entryRoot | Out-Null
+    $entryReceipt = Join-Path $entryRoot 'result.json'
+    $hostExe = Join-Path $PSHOME $(if ($PSVersionTable.PSEdition -eq 'Core') { 'pwsh.exe' } else { 'powershell.exe' })
+    & $hostExe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $Helper `
+        -UpdaterPid 0 -GuiPid 0 -MsiPath (Join-Path $entryRoot 'missing.msi') `
+        -TempDir $entryRoot -InvokingExe (Join-Path $entryRoot 'neoism.exe') `
+        -ExpectedVersion '0.7.110-nightly.20260921.3' -ResultPath $entryReceipt -Relaunch 0
+    Assert ($LASTEXITCODE -eq 1) 'Production helper must exit nonzero when preflight fails'
+    $entry = Get-Content -LiteralPath $entryReceipt -Raw | ConvertFrom-Json
+    Assert ($entry.state -eq 'failed' -and -not $entry.installation_verified) 'Production helper must persist preflight failure'
     $hashFixture = Join-Path $root 'hash.bin'
     [IO.File]::WriteAllBytes($hashFixture, [Text.Encoding]::UTF8.GetBytes('abc'))
     & {

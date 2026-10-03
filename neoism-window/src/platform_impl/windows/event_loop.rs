@@ -1170,7 +1170,10 @@ pub(super) unsafe extern "system" fn public_window_callback(
             let initdata = createstruct.lpCreateParams;
             let initdata = &mut *(initdata as *mut InitData<'_>);
 
-            initdata.on_create();
+            let runner = initdata.event_loop.runner_shared.clone();
+            if runner.catch_unwind(|| initdata.on_create()).is_none() {
+                return -1;
+            }
             return DefWindowProcW(window, msg, wparam, lparam);
         },
         (0, _) => return unsafe { DefWindowProcW(window, msg, wparam, lparam) },

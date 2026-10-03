@@ -321,8 +321,15 @@ fn new_with_watcher(
 
 impl Conpty {
     pub fn on_resize(&mut self, window_size: Winsize) {
-        let result = unsafe { (self.api.resize)(self.handle, window_size.into()) };
-        assert_eq!(result, S_OK);
+        let size: COORD = window_size.into();
+        let result = unsafe { (self.api.resize)(self.handle, size) };
+        if result < 0 {
+            // Resizing is best-effort: a rejected size must not abort a window callback.
+            warn!(
+                "ResizePseudoConsole failed for {}x{}: HRESULT 0x{:08X}",
+                size.X, size.Y, result as u32
+            );
+        }
     }
 }
 
@@ -341,6 +348,40 @@ impl From<Winsize> for COORD {
 mod tests {
     use super::*;
     use windows_sys::Win32::Foundation::GetHandleInformation;
+
+    #[test]
+    fn unsupported_resize_does_not_panic() {
+        unsafe extern "system" fn resize(_handle: HPCON, _size: COORD) -> HRESULT {
+            windows_sys::Win32::Foundation::E_NOTIMPL
+        }
+        unsafe extern "system" fn close(_handle: HPCON) {}
+        let mut conpty = Conpty {
+            handle: Default::default(),
+            api: ConptyApi {
+                create: CreatePseudoConsole,
+                resize,
+                close,
+            },
+        };
+        conpty.on_resize(Winsize {
+            ws_row: 24,
+            ws_col: 80,
+            ws_width: 0,
+            ws_height: 0,
+        });
+    }
+
+    #[test]
+    #[ignore = "requires live ConPTY"]
+    fn live_resize_does_not_panic() {
+        let mut pty = new(None, "cmd.exe /D /C exit 0", &None, 80, 24, &[]).unwrap();
+        pty.backend.on_resize(Winsize {
+            ws_row: 30,
+            ws_col: 100,
+            ws_width: 0,
+            ws_height: 0,
+        });
+    }
 
     #[test]
     #[ignore = "requires real ConPTY; injects a wait-registration failure"]

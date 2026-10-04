@@ -1290,7 +1290,7 @@ checksum = "9885fa71e26b8ab7855e2ec7cae6e9b380edff76cd052e07c683a0319d51b3a2"
 
 [[package]]
 name = "copa"
-version = "0.7.116"
+version = "0.7.117"
 dependencies = [
  "arrayvec",
  "criterion",
@@ -1316,7 +1316,7 @@ dependencies = [
 
 [[package]]
 name = "corcovado"
-version = "0.7.116"
+version = "0.7.117"
 dependencies = [
  "bytes",
  "cfg-if 0.1.10",
@@ -5105,7 +5105,7 @@ checksum = "7a2f6120a8da26bea3587731072111062c5d8c51ca3a3a75a716bd8b735d5882"
 
 [[package]]
 name = "neoism"
-version = "0.7.116"
+version = "0.7.117"
 dependencies = [
  "ahash",
  "axum",
@@ -5192,7 +5192,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-agent"
-version = "0.7.116"
+version = "0.7.117"
 dependencies = [
  "anyhow",
  "base64",
@@ -5216,7 +5216,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-agent-builtins"
-version = "0.7.116"
+version = "0.7.117"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -5241,7 +5241,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-agent-core"
-version = "0.7.116"
+version = "0.7.117"
 dependencies = [
  "getrandom 0.2.17",
  "rand 0.8.5",
@@ -5252,7 +5252,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-agent-lua-runner"
-version = "0.7.116"
+version = "0.7.117"
 dependencies = [
  "base64",
  "clap",
@@ -5265,7 +5265,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-agent-neoism-adapter"
-version = "0.7.116"
+version = "0.7.117"
 dependencies = [
  "neoism-agent-service-api",
  "neoism-agent-workspace-search-fff",
@@ -5280,7 +5280,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-agent-plugin-api"
-version = "0.7.116"
+version = "0.7.117"
 dependencies = [
  "futures-core",
  "neoism-agent-core",
@@ -5292,7 +5292,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-agent-server"
-version = "0.7.116"
+version = "0.7.117"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -5345,7 +5345,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-agent-service-api"
-version = "0.7.116"
+version = "0.7.117"
 dependencies = [
  "base64",
  "dirs 6.0.0",
@@ -5361,7 +5361,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-agent-workspace-search-fff"
-version = "0.7.116"
+version = "0.7.117"
 dependencies = [
  "anyhow",
  "dirs 6.0.0",
@@ -5376,7 +5376,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-backend"
-version = "0.7.116"
+version = "0.7.117"
 dependencies = [
  "base64",
  "bitflags 2.13.2",
@@ -5419,7 +5419,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-extensions"
-version = "0.7.116"
+version = "0.7.117"
 dependencies = [
  "bzip2",
  "dirs 5.0.1",
@@ -5441,7 +5441,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-grapheme-width"
-version = "0.7.116"
+version = "0.7.117"
 dependencies = [
  "phf 0.13.1",
  "ucd-trie",
@@ -5449,7 +5449,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-lua"
-version = "0.7.116"
+version = "0.7.117"
 dependencies = [
  "mlua",
  "serde",
@@ -5459,7 +5459,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-neoworld"
-version = "0.7.116"
+version = "0.7.117"
 dependencies = [
  "anyhow",
  "neoism-neoworld-core",
@@ -5471,11 +5471,11 @@ dependencies = [
 
 [[package]]
 name = "neoism-neoworld-core"
-version = "0.7.116"
+version = "0.7.117"
 
 [[package]]
 name = "neoism-notifier"
-version = "0.7.116"
+version = "0.7.117"
 dependencies = [
  "async-channel",
  "async-io",
@@ -5491,7 +5491,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-proc-macros"
-version = "0.7.116"
+version = "0.7.117"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -5499,11 +5499,11 @@ dependencies = [
 
 [[package]]
 name = "neoism-product-docs"
-version = "0.7.116"
+version = "0.7.117"
 
 [[package]]
 name = "neoism-protocol"
-version = "0.7.116"
+version = "0.7.117"
 dependencies = [
  "serde",
  "serde_json",
@@ -5514,7 +5514,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-remarkable"
-version = "0.7.116"
+version = "0.7.117"
 dependencies = [
  "neoism-sync",
  "neoism-ui",
@@ -5523,14 +5523,14 @@ dependencies = [
 
 [[package]]
 name = "neoism-rm-agent"
-version = "0.7.116"
+version = "0.7.117"
 dependencies = [
  "neoism-sync",
 ]
 
 [[package]]
 name = "neoism-sync"
-version = "0.7.116"
+version = "0.7.117"
 dependencies = [
  "loro",
  "mdns-sd",
@@ -5541,7 +5541,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-terminal-core"
-version = "0.7.116"
+version = "0.7.117"
 dependencies = [
  "base64",
  "bitflags 2.13.2",
@@ -5571,7 +5571,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-terminal-pty"
-version = "0.7.116"
+version = "0.7.117"
 dependencies = [
  "base64",
  "corcovado",
@@ -5584,7 +5584,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-terminal-wasm"
-version = "0.7.116"
+version = "0.7.117"
 dependencies = [
  "console_error_panic_hook",
  "getrandom 0.2.17",
@@ -5609,7 +5609,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-ui"
-version = "0.7.116"
+version = "0.7.117"
 dependencies = [
  "base64",
  "bitflags 2.13.2",
@@ -5667,7 +5667,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-window"
-version = "0.7.116"
+version = "0.7.117"
 dependencies = [
  "ahash",
  "atomic-waker",
@@ -5722,7 +5722,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-workspace-daemon"
-version = "0.7.116"
+version = "0.7.117"
 dependencies = [
  "anyhow",
  "axum",
@@ -5773,7 +5773,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-workspace-index"
-version = "0.7.116"
+version = "0.7.117"
 dependencies = [
  "dirs 6.0.0",
  "dunce",
@@ -8882,7 +8882,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "sugarloaf"
-version = "0.7.116"
+version = "0.7.117"
 dependencies = [
  "approx",
  "ash",
@@ -9236,7 +9236,7 @@ checksum = "adb6935a6f5c20170eeceb1a3835a49e12e19d792f6dd344ccc76a985ca5a6ca"
 
 [[package]]
 name = "teletypewriter"
-version = "0.7.116"
+version = "0.7.117"
 dependencies = [
  "corcovado",
  "dirs 6.0.0",

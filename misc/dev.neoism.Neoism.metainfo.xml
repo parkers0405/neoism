@@ -52,6 +52,12 @@
   </categories>
 
   <releases>
+    <release version="0.7.117" date="2026-10-04">
+      <description>
+        <p>YOLO stable release: fixes a Windows startup stack overflow during graphics adapter enumeration with an 8 MiB desktop main-thread stack reserve.</p>
+      </description>
+      <url>https://github.com/parkers0405/neoism/releases/tag/v0.7.117</url>
+    </release>
     <!-- Populated automatically by scripts/release.sh on each cut -->
     <release version="0.5.0" date="2025-08-01">
       <description>

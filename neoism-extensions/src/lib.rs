@@ -1,10 +1,10 @@
 pub mod agent_config;
 pub mod install_runner;
 pub mod installed;
+pub mod lua_plugins;
 pub mod managed_bin;
 pub mod manifest;
 pub mod mason;
-pub mod lua_plugins;
 pub mod paths;
 pub mod trust;
 #[cfg(windows)]

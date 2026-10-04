@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 impl Screen<'_> {
     pub(crate) fn file_tree_bounds(&self) -> Option<(f32, f32, f32, f32)> {
         use neoism_ui::panels::left_sidebar_host::LeftSidebarView;
-        let left = self.renderer.left_sidebar_view_left(LeftSidebarView::Files)?;
+        let left = self
+            .renderer
+            .left_sidebar_view_left(LeftSidebarView::Files)?;
         // Tree occupies the middle band: below the full-width top
         // chrome (top bar + workspace strip), above the full-width
         // status bar.
@@ -14,7 +16,8 @@ impl Screen<'_> {
             left,
             tree_top,
             tree_height,
-            self.renderer.left_sidebar_view_width(LeftSidebarView::Files),
+            self.renderer
+                .left_sidebar_view_width(LeftSidebarView::Files),
         ))
     }
 
@@ -56,10 +59,15 @@ impl Screen<'_> {
         let mouse_x = self.mouse.x as f32 / scale_factor;
         let target_width = state.original_width + (mouse_x - state.start_x);
         use neoism_ui::panels::left_sidebar_host::{LeftSidebarView, SidebarPlacement};
-        if self.renderer.left_sidebar_host.placement(LeftSidebarView::Files)
+        if self
+            .renderer
+            .left_sidebar_host
+            .placement(LeftSidebarView::Files)
             == SidebarPlacement::Unified
         {
-            self.renderer.left_sidebar_host.set_unified_width(target_width);
+            self.renderer
+                .left_sidebar_host
+                .set_unified_width(target_width);
         } else {
             let current_width = self.renderer.file_tree.width();
             self.renderer.file_tree.resize(target_width - current_width);
@@ -87,13 +95,14 @@ impl Screen<'_> {
         use neoism_ui::panels::left_sidebar_host::{LeftSidebarView, SidebarTransition};
         self.renderer.reconcile_left_sidebar_host();
         let was_visible = self.renderer.file_tree.is_visible();
-        let transition = self.renderer.left_sidebar_host.toggle(
-            LeftSidebarView::Files,
-            self.renderer.file_tree.is_focused(),
-        );
+        let transition = self
+            .renderer
+            .left_sidebar_host
+            .toggle(LeftSidebarView::Files, self.renderer.file_tree.is_focused());
         let (visible, focused, refresh_workspace_root) = match transition {
             SidebarTransition::Show => {
-                self.renderer.hide_other_unified_sidebars(LeftSidebarView::Files);
+                self.renderer
+                    .hide_other_unified_sidebars(LeftSidebarView::Files);
                 (true, true, !was_visible)
             }
             SidebarTransition::Focus => (true, true, false),
@@ -105,15 +114,27 @@ impl Screen<'_> {
                         focused: self.renderer.file_tree.is_focused(),
                     },
                 );
-                (decision.visible, decision.focused, decision.refresh_workspace_root)
+                (
+                    decision.visible,
+                    decision.focused,
+                    decision.refresh_workspace_root,
+                )
             }
         };
-        self.renderer
-            .set_left_sidebar_view_state(LeftSidebarView::Files, visible, focused);
+        self.renderer.set_left_sidebar_view_state(
+            LeftSidebarView::Files,
+            visible,
+            focused,
+        );
         if focused {
-            self.renderer.conversations_pane.side_panel_mut().set_focused(false);
+            self.renderer
+                .conversations_pane
+                .side_panel_mut()
+                .set_focused(false);
             self.renderer.notes_sidebar.set_focused(false);
-            self.renderer.left_sidebar_host.set_focused(Some(LeftSidebarView::Files));
+            self.renderer
+                .left_sidebar_host
+                .set_focused(Some(LeftSidebarView::Files));
         }
         if refresh_workspace_root {
             // Opening the tree adopts the active workspace root. For a

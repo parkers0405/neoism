@@ -340,9 +340,15 @@ impl ModalAction {
             ModalAction::RunEditorCommandWithInput { command, .. } => {
                 ModalAction::RunEditorCommandWithInput { command, value }
             }
-            ModalAction::LuaPromptReply { request_id, cancelled, .. } => {
-                ModalAction::LuaPromptReply { request_id, value, cancelled }
-            }
+            ModalAction::LuaPromptReply {
+                request_id,
+                cancelled,
+                ..
+            } => ModalAction::LuaPromptReply {
+                request_id,
+                value,
+                cancelled,
+            },
             ModalAction::MarkdownFileLink { document, .. } => {
                 ModalAction::MarkdownFileLink { document, value }
             }

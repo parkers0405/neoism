@@ -1057,7 +1057,11 @@ fn draw_card_body(
     let lua_action_count = entry.lua_plugin.as_ref().map_or(0, |plugin| {
         usize::from(plugin.primary_action.is_some()) + plugin.secondary_actions.len()
     });
-    let button_w = if lua_action_count > 1 { 196.0 * s } else { BUTTON_W * s };
+    let button_w = if lua_action_count > 1 {
+        196.0 * s
+    } else {
+        BUTTON_W * s
+    };
     let button_h = BUTTON_H * s;
     let button_x = x + w - pad - button_w;
     let button_y = y + (h - button_h) * 0.5;
@@ -1221,29 +1225,91 @@ fn draw_card_body(
     // entry so click-resolution can prefer the button before falling
     // back to row-level focus. Informational states have no action.
     if let Some(plugin) = entry.lua_plugin.as_ref() {
-        let actions = plugin.primary_action.iter().chain(plugin.secondary_actions.iter()).collect::<Vec<_>>();
+        let actions = plugin
+            .primary_action
+            .iter()
+            .chain(plugin.secondary_actions.iter())
+            .collect::<Vec<_>>();
         if actions.is_empty() {
-            paint_install_button(sugarloaf, button_rect, &entry.status, theme, s, false, clip, occlusion_rects, Some(lua_button_label(plugin)));
+            paint_install_button(
+                sugarloaf,
+                button_rect,
+                &entry.status,
+                theme,
+                s,
+                false,
+                clip,
+                occlusion_rects,
+                Some(lua_button_label(plugin)),
+            );
         } else {
             let gap = 4.0 * s;
-            let width = (button_w - gap * (actions.len().saturating_sub(1) as f32)) / actions.len() as f32;
+            let width = (button_w - gap * (actions.len().saturating_sub(1) as f32))
+                / actions.len() as f32;
             for (index, action) in actions.into_iter().enumerate() {
-                let rect = [button_x + index as f32 * (width + gap), button_y, width, button_h];
+                let rect = [
+                    button_x + index as f32 * (width + gap),
+                    button_y,
+                    width,
+                    button_h,
+                ];
                 let hovered = mouse.is_some_and(|(mx, my)| point_in_rect(mx, my, rect));
-                paint_install_button(sugarloaf, rect, &entry.status, theme, s, hovered, clip, occlusion_rects, Some(lua_action_label(action)));
-                row_hits.push(RowHit { rect, action: RowAction::LuaPlugin(entry.id.clone(), action.clone()) });
+                paint_install_button(
+                    sugarloaf,
+                    rect,
+                    &entry.status,
+                    theme,
+                    s,
+                    hovered,
+                    clip,
+                    occlusion_rects,
+                    Some(lua_action_label(action)),
+                );
+                row_hits.push(RowHit {
+                    rect,
+                    action: RowAction::LuaPlugin(entry.id.clone(), action.clone()),
+                });
             }
         }
-    } else if entry.lua_plugin.is_none() && !matches!(entry.status, ExtensionStatus::BuiltIn | ExtensionStatus::Detected | ExtensionStatus::Unavailable) {
-        let button_hovered = mouse.is_some_and(|(mx, my)| point_in_rect(mx, my, button_rect));
-        paint_install_button(sugarloaf, button_rect, &entry.status, theme, s, button_hovered, clip, occlusion_rects, None);
+    } else if entry.lua_plugin.is_none()
+        && !matches!(
+            entry.status,
+            ExtensionStatus::BuiltIn
+                | ExtensionStatus::Detected
+                | ExtensionStatus::Unavailable
+        )
+    {
+        let button_hovered =
+            mouse.is_some_and(|(mx, my)| point_in_rect(mx, my, button_rect));
+        paint_install_button(
+            sugarloaf,
+            button_rect,
+            &entry.status,
+            theme,
+            s,
+            button_hovered,
+            clip,
+            occlusion_rects,
+            None,
+        );
         row_hits.push(RowHit {
             rect: button_rect,
             action: RowAction::ToggleInstall(entry.id.clone()),
         });
     } else {
-        let button_hovered = mouse.is_some_and(|(mx, my)| point_in_rect(mx, my, button_rect));
-        paint_install_button(sugarloaf, button_rect, &entry.status, theme, s, button_hovered, clip, occlusion_rects, None);
+        let button_hovered =
+            mouse.is_some_and(|(mx, my)| point_in_rect(mx, my, button_rect));
+        paint_install_button(
+            sugarloaf,
+            button_rect,
+            &entry.status,
+            theme,
+            s,
+            button_hovered,
+            clip,
+            occlusion_rects,
+            None,
+        );
     }
 
     let _ = idx;
@@ -1457,7 +1523,8 @@ fn paint_install_button(
                 btn_clip,
             );
             paint_outline_clipped(sugarloaf, rect, theme.f32(theme.red), s, btn_clip);
-            let label = label_override.unwrap_or(if hovered { "Retry" } else { "Failed" });
+            let label =
+                label_override.unwrap_or(if hovered { "Retry" } else { "Failed" });
             let opts = DrawOpts {
                 font_size: 11.0 * s,
                 color: theme.u8(theme.red),

@@ -299,11 +299,7 @@ fn execute(
         ),
         neoism_lua::LuaLspOperation::CodeActions => {
             let items = flatten_code_actions(&engine::code_actions(
-                runtime,
-                &job.root,
-                &job.file,
-                line,
-                character,
+                runtime, &job.root, &job.file, line, character,
             ));
             let mut private = Vec::new();
             let public = items
@@ -342,7 +338,8 @@ fn execute(
         }
         neoism_lua::LuaLspOperation::Format => {
             let groups = engine::formatting(runtime, &job.root, &job.file);
-            let edits = neoism_ui::editor::code::lsp_session::formatting_text_edits(&groups);
+            let edits =
+                neoism_ui::editor::code::lsp_session::formatting_text_edits(&groups);
             let parsed = parse_structured_text_edits(&edits)?;
             let files = prepare_local_files(
                 &job.root,
@@ -372,21 +369,19 @@ fn execute(
             let new_name = job.new_name.as_deref().ok_or_else(|| {
                 ("invalid_arguments".into(), "rename requires newName".into())
             })?;
-            let groups = engine::rename(
-                runtime,
-                &job.root,
-                &job.file,
-                line,
-                character,
-                new_name,
-            );
+            let groups =
+                engine::rename(runtime, &job.root, &job.file, line, character, new_name);
             let edit = groups.iter().find_map(|group| {
                 group.get("edit").filter(|edit| !edit.is_null()).cloned()
             });
-            if edit.as_ref().is_some_and(workspace_edit_has_resource_operations) {
+            if edit
+                .as_ref()
+                .is_some_and(workspace_edit_has_resource_operations)
+            {
                 return Err((
                     "unsupported_edit".into(),
-                    "resource operations are not supported by structured LSP edits".into(),
+                    "resource operations are not supported by structured LSP edits"
+                        .into(),
                 ));
             }
             let files = prepare_local_files(
@@ -440,10 +435,14 @@ fn execute(
             let edit = (!is_bare_command)
                 .then(|| action.get("edit").filter(|edit| !edit.is_null()).cloned())
                 .flatten();
-            if edit.as_ref().is_some_and(workspace_edit_has_resource_operations) {
+            if edit
+                .as_ref()
+                .is_some_and(workspace_edit_has_resource_operations)
+            {
                 return Err((
                     "unsupported_edit".into(),
-                    "resource operations are not supported by structured LSP edits".into(),
+                    "resource operations are not supported by structured LSP edits"
+                        .into(),
                 ));
             }
             let files = prepare_local_files(
@@ -588,7 +587,10 @@ fn prepare_local_files(
             let canonical_path = std::fs::canonicalize(&path).map_err(|error| {
                 (
                     "invalid_edit_path".into(),
-                    format!("failed to resolve LSP edit path {}: {error}", path.display()),
+                    format!(
+                        "failed to resolve LSP edit path {}: {error}",
+                        path.display()
+                    ),
                 )
             })?;
             if !canonical_path.starts_with(&canonical_root) {
@@ -606,7 +608,10 @@ fn prepare_local_files(
                 Some(std::fs::read_to_string(&canonical_path).map_err(|error| {
                     (
                         "read_failed".into(),
-                        format!("failed to read LSP edit target {}: {error}", path.display()),
+                        format!(
+                            "failed to read LSP edit target {}: {error}",
+                            path.display()
+                        ),
                     )
                 })?)
             };
@@ -825,7 +830,8 @@ impl Screen<'_> {
             })
             .filter_map(|code| {
                 let key = canonical_key(&code.path);
-                seen.insert(key).then(|| (code.path.clone(), code.buffer.text()))
+                seen.insert(key)
+                    .then(|| (code.path.clone(), code.buffer.text()))
             })
             .collect();
         let job = LuaLspJob {
@@ -866,7 +872,9 @@ impl Screen<'_> {
                 .context_manager
                 .get_by_route_id(route_id)
                 .and_then(|item| item.context().code.as_ref())
-                .ok_or_else(|| "structured LSP target buffer is no longer open".to_string())?;
+                .ok_or_else(|| {
+                    "structured LSP target buffer is no longer open".to_string()
+                })?;
             if code_uses_host_lsp(code)
                 || canonical_key(&code.path) != canonical_key(&action.file)
                 || target.buffer_revision != Some(code.buffer.revision)
@@ -882,7 +890,9 @@ impl Screen<'_> {
                 .context_manager
                 .get_by_route_id(open.route_id)
                 .and_then(|item| item.context().code.as_ref())
-                .ok_or_else(|| "an open buffer changed before action selection".to_string())?;
+                .ok_or_else(|| {
+                    "an open buffer changed before action selection".to_string()
+                })?;
             if code_uses_host_lsp(current)
                 || canonical_key(&current.path) != canonical_key(&open.path)
                 || current.buffer.revision != open.revision
@@ -928,7 +938,9 @@ impl Screen<'_> {
                 .context_manager
                 .get_by_route_id(target_route)
                 .and_then(|item| item.context().code.as_ref())
-                .ok_or_else(|| "structured LSP target buffer is no longer open".to_string())?;
+                .ok_or_else(|| {
+                    "structured LSP target buffer is no longer open".to_string()
+                })?;
             if code_uses_host_lsp(target)
                 || canonical_key(&target.path)
                     != canonical_key(Path::new(&mutation.target.path))
@@ -952,7 +964,9 @@ impl Screen<'_> {
                 .context_manager
                 .get_by_route_id(open.route_id)
                 .and_then(|item| item.context().code.as_ref())
-                .ok_or_else(|| "an LSP edit buffer was closed before mutation".to_string())?;
+                .ok_or_else(|| {
+                    "an LSP edit buffer was closed before mutation".to_string()
+                })?;
             if code_uses_host_lsp(current)
                 || canonical_key(&current.path) != canonical_key(&open.path)
                 || current.buffer.revision != open.revision
@@ -972,7 +986,9 @@ impl Screen<'_> {
             let captured = mutation
                 .open_buffers
                 .iter()
-                .filter(|open| canonical_key(&open.path) == canonical_key(&canonical_path))
+                .filter(|open| {
+                    canonical_key(&open.path) == canonical_key(&canonical_path)
+                })
                 .collect::<Vec<_>>();
             let current_routes = self
                 .context_manager
@@ -985,20 +1001,25 @@ impl Screen<'_> {
                         .as_ref()
                         .filter(|code| {
                             !code_uses_host_lsp(code)
-                                && canonical_key(&code.path) == canonical_key(&canonical_path)
+                                && canonical_key(&code.path)
+                                    == canonical_key(&canonical_path)
                         })
                         .map(|_| item.context().route_id)
                 })
                 .collect::<Vec<_>>();
             if captured.is_empty() {
                 if !current_routes.is_empty() {
-                    return Err("a closed LSP edit target became open before mutation".into());
+                    return Err(
+                        "a closed LSP edit target became open before mutation".into()
+                    );
                 }
                 let expected = file.expected_closed_text.as_ref().ok_or_else(|| {
                     "closed LSP edit target is missing its captured content".to_string()
                 })?;
-                let current = std::fs::read_to_string(&canonical_path)
-                    .map_err(|error| format!("failed to read LSP edit target: {error}"))?;
+                let current =
+                    std::fs::read_to_string(&canonical_path).map_err(|error| {
+                        format!("failed to read LSP edit target: {error}")
+                    })?;
                 if &current != expected {
                     return Err("a closed LSP edit target changed before mutation".into());
                 }
@@ -1012,7 +1033,9 @@ impl Screen<'_> {
                         .iter()
                         .any(|open| !current_routes.contains(&open.route_id))
                 {
-                    return Err("LSP edit buffer ownership changed before mutation".into());
+                    return Err(
+                        "LSP edit buffer ownership changed before mutation".into()
+                    );
                 }
                 for route_id in current_routes {
                     let code = self
@@ -1021,15 +1044,20 @@ impl Screen<'_> {
                         .and_then(|item| item.context().code.as_ref())
                         .ok_or_else(|| "LSP edit buffer disappeared".to_string())?;
                     code.buffer.validate_text_edits(&file.edits)?;
-                    open_targets.push((route_id, canonical_path.clone(), file.edits.clone()));
+                    open_targets.push((
+                        route_id,
+                        canonical_path.clone(),
+                        file.edits.clone(),
+                    ));
                 }
             }
         }
 
         let mut changed_files = Vec::new();
         for (path, edit_count, text) in closed_targets {
-            std::fs::write(&path, text)
-                .map_err(|error| format!("failed to apply closed-file LSP edits: {error}"))?;
+            std::fs::write(&path, text).map_err(|error| {
+                format!("failed to apply closed-file LSP edits: {error}")
+            })?;
             changed_files.push(neoism_lua::LuaLspChangedFile {
                 path: path.to_string_lossy().into_owned(),
                 edit_count,
@@ -1042,7 +1070,9 @@ impl Screen<'_> {
                 .context_manager
                 .get_by_route_id(route_id)
                 .and_then(|item| item.context_mut().code.as_mut())
-                .ok_or_else(|| "LSP edit buffer disappeared during mutation".to_string())?;
+                .ok_or_else(|| {
+                    "LSP edit buffer disappeared during mutation".to_string()
+                })?;
             code.buffer.apply_text_edits(&edits);
             code.buffer.follow_cursor = true;
             if reported_open.insert(canonical_key(&path)) {
@@ -1114,7 +1144,9 @@ impl Screen<'_> {
         }
         let new_name = argument_str(arguments, "newName")?.map(str::to_owned);
         if operation == neoism_lua::LuaLspOperation::Rename
-            && new_name.as_deref().is_none_or(|name| name.trim().is_empty())
+            && new_name
+                .as_deref()
+                .is_none_or(|name| name.trim().is_empty())
         {
             return Err("rename requires a non-empty newName".into());
         }
@@ -1143,10 +1175,9 @@ impl Screen<'_> {
                     open.buffer.revision,
                     open.buffer.text(),
                 );
-                if target_live
-                    .as_ref()
-                    .is_some_and(|existing| existing.1 != candidate.1 || existing.2 != candidate.2)
-                {
+                if target_live.as_ref().is_some_and(|existing| {
+                    existing.1 != candidate.1 || existing.2 != candidate.2
+                }) {
                     return Err(
                         "structured LSP target has conflicting open buffer owners".into(),
                     );
@@ -1158,11 +1189,7 @@ impl Screen<'_> {
             Some((route_id, revision, text)) => {
                 (route_id as u64, Some(revision), Some(text))
             }
-            None => (
-                self.context_manager.current().route_id as u64,
-                None,
-                None,
-            ),
+            None => (self.context_manager.current().route_id as u64, None, None),
         };
         if operation == neoism_lua::LuaLspOperation::Format && buffer_revision.is_none() {
             return Err("structured format requires an open target buffer".into());

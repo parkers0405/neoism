@@ -29,12 +29,13 @@ mod remote;
 pub(crate) use lua::{
     drain_lua_lsp_completions, LuaLspPrivateResult, LuaLspRetainedCodeAction,
 };
-pub(crate) use remote::cancel_remote_lua_lsp_request;
 use neoism_agent_server::language_server as engine;
 use neoism_backend::event::{EventProxy, RioEvent, RioEventType, WindowId};
+pub(crate) use remote::cancel_remote_lua_lsp_request;
 // Pure LSP session helpers now live in the shared crate
 // (`neoism_ui::editor::code::lsp_session`) so the web frontend runs the
 // exact same logic; desktop delegates instead of keeping copies.
+use neoism_ui::editor::code::buffer::CodeTextEdit;
 pub(crate) use neoism_ui::editor::code::lsp_session::is_ident_char;
 /// One selectable row of the code-action popup — the shared session
 /// type; `action` is the raw LSP CodeAction/Command payload.
@@ -47,7 +48,6 @@ use neoism_ui::editor::code::lsp_session::{
 use neoism_ui::editor::code::{
     CodeDiagAnchor, CodeDiagnosticSeverity, CodeDiagnosticSummary, CodeLineDiagnostic,
 };
-use neoism_ui::editor::code::buffer::CodeTextEdit;
 use neoism_ui::editor_snapshot::{PopupMenu, PopupMenuItem};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -2903,34 +2903,80 @@ impl Screen<'_> {
         position: neoism_lua::TextPosition,
         candidates: Vec<neoism_lua::CompletionCandidate>,
     ) -> Result<(), String> {
-        if candidates.len() > 256 { return Err("completion source returned more than 256 candidates".into()); }
-        let Some(code) = self.context_manager.current().code.as_ref() else { return Err("completion target is not a code document".into()); };
-        if code.buffer.revision != expected_revision || code.buffer.cursor_line != position.line as usize || code.buffer.cursor_col != position.character as usize {
+        if candidates.len() > 256 {
+            return Err("completion source returned more than 256 candidates".into());
+        }
+        let Some(code) = self.context_manager.current().code.as_ref() else {
+            return Err("completion target is not a code document".into());
+        };
+        if code.buffer.revision != expected_revision
+            || code.buffer.cursor_line != position.line as usize
+            || code.buffer.cursor_col != position.character as usize
+        {
             return Err("completion target revision or cursor is stale".into());
         }
         let path = code.path.clone();
-        let line_text = code.buffer.lines.get(code.buffer.cursor_line).cloned().unwrap_or_default();
+        let line_text = code
+            .buffer
+            .lines
+            .get(code.buffer.cursor_line)
+            .cloned()
+            .unwrap_or_default();
         let anchor_col = word_start_col(&line_text, code.buffer.cursor_col);
         let id = QUERY_SEQ.fetch_add(1, Ordering::SeqCst);
-        let items = candidates.into_iter().map(|candidate| {
-            let snippet = candidate.snippet;
-            let insert_text = snippet.clone().unwrap_or_else(|| if candidate.insert_text.is_empty() { candidate.label.clone() } else { candidate.insert_text });
-            engine::LspCompletionItem {
-                server_id: None,
-                label: candidate.label,
-                kind: if candidate.kind.is_empty() { "plugin".into() } else { candidate.kind },
-                detail: (!candidate.detail.is_empty()).then_some(candidate.detail),
-                documentation: (!candidate.documentation.is_empty()).then_some(candidate.documentation),
-                insert_text,
-                filter_text: (!candidate.filter_text.is_empty()).then_some(candidate.filter_text),
-                sort_text: (!candidate.sort_text.is_empty()).then_some(candidate.sort_text),
-                preselect: false,
-                payload: if snippet.is_some() { serde_json::json!({ "insertTextFormat": 2 }) } else { serde_json::Value::Null },
-            }
-        }).collect::<Vec<_>>();
-        let mut session = CodeCompletionSession { path, line: position.line as usize, anchor_col, id, seq: id, items, filtered: Vec::new(), selected: 0, display: PopupMenu::default() };
-        rebuild_completion_filter(&mut session, &line_text[anchor_col..position.character as usize]);
-        self.renderer.code_lsp.completion = (!session.filtered.is_empty()).then_some(session);
+        let items = candidates
+            .into_iter()
+            .map(|candidate| {
+                let snippet = candidate.snippet;
+                let insert_text = snippet.clone().unwrap_or_else(|| {
+                    if candidate.insert_text.is_empty() {
+                        candidate.label.clone()
+                    } else {
+                        candidate.insert_text
+                    }
+                });
+                engine::LspCompletionItem {
+                    server_id: None,
+                    label: candidate.label,
+                    kind: if candidate.kind.is_empty() {
+                        "plugin".into()
+                    } else {
+                        candidate.kind
+                    },
+                    detail: (!candidate.detail.is_empty()).then_some(candidate.detail),
+                    documentation: (!candidate.documentation.is_empty())
+                        .then_some(candidate.documentation),
+                    insert_text,
+                    filter_text: (!candidate.filter_text.is_empty())
+                        .then_some(candidate.filter_text),
+                    sort_text: (!candidate.sort_text.is_empty())
+                        .then_some(candidate.sort_text),
+                    preselect: false,
+                    payload: if snippet.is_some() {
+                        serde_json::json!({ "insertTextFormat": 2 })
+                    } else {
+                        serde_json::Value::Null
+                    },
+                }
+            })
+            .collect::<Vec<_>>();
+        let mut session = CodeCompletionSession {
+            path,
+            line: position.line as usize,
+            anchor_col,
+            id,
+            seq: id,
+            items,
+            filtered: Vec::new(),
+            selected: 0,
+            display: PopupMenu::default(),
+        };
+        rebuild_completion_filter(
+            &mut session,
+            &line_text[anchor_col..position.character as usize],
+        );
+        self.renderer.code_lsp.completion =
+            (!session.filtered.is_empty()).then_some(session);
         self.mark_dirty();
         Ok(())
     }

@@ -26,8 +26,11 @@ use super::tool_message::{
     AgentToolMessage, AgentToolPane, AgentToolTodo, TodoVisualState, ToolDiffSection,
     TODO_ROW_HEIGHT,
 };
-use super::user_input::{render_user_message, user_message_orb_identity};
-use super::{ORDER_PANEL, ORDER_TEXT, USER_MESSAGE_MAX_LINES};
+use super::user_input::{
+    render_user_message, user_message_orb_identity, user_message_text_width,
+    wrap_user_message,
+};
+use super::{ORDER_PANEL, ORDER_TEXT};
 use crate::primitives::ide_theme::IdeTheme;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -970,12 +973,11 @@ where
                 AgentToolMessage::text(message),
                 message.images(),
             );
-            let lines = wrap_text(
+            let lines = wrap_user_message(
                 sugarloaf,
                 &display_text,
-                (width - 56.0 * s).max(80.0 * s),
+                user_message_text_width(width, s),
                 &user_opts,
-                USER_MESSAGE_MAX_LINES,
             );
             let image_h = if message.images().is_empty() {
                 0.0

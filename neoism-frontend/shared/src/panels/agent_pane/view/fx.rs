@@ -531,16 +531,24 @@ impl ParticleEffectSpec {
         if !(0.1..=3.0).contains(&self.duration_seconds) {
             return Err("particle durationSeconds must be between 0.1 and 3.0");
         }
-        if self.speed_min < 0.0 || self.speed_max < self.speed_min || self.speed_max > 1_200.0 {
+        if self.speed_min < 0.0
+            || self.speed_max < self.speed_min
+            || self.speed_max > 1_200.0
+        {
             return Err("particle speed range is invalid");
         }
         if self.size_min < 1.0 || self.size_max < self.size_min || self.size_max > 96.0 {
             return Err("particle size range is invalid");
         }
-        if self.gravity.abs() > 1_200.0 || self.wobble.abs() > 240.0 || self.origin_spread.abs() > 400.0 {
+        if self.gravity.abs() > 1_200.0
+            || self.wobble.abs() > 240.0
+            || self.origin_spread.abs() > 400.0
+        {
             return Err("particle motion exceeds host limits");
         }
-        if !(0.0..=30.0).contains(&self.flap_hz) || !(0.0..=2.0).contains(&self.flap_amplitude) {
+        if !(0.0..=30.0).contains(&self.flap_hz)
+            || !(0.0..=2.0).contains(&self.flap_amplitude)
+        {
             return Err("particle flap range is invalid");
         }
         if self.polygons.is_empty() || self.polygons.len() > 12 {
@@ -549,14 +557,29 @@ impl ParticleEffectSpec {
         for polygon in &self.polygons {
             if !matches!(
                 polygon.color.as_str(),
-                "foreground" | "muted" | "accent" | "red" | "green" | "yellow" | "blue" | "magenta" | "cyan" | "white" | "black"
+                "foreground"
+                    | "muted"
+                    | "accent"
+                    | "red"
+                    | "green"
+                    | "yellow"
+                    | "blue"
+                    | "magenta"
+                    | "cyan"
+                    | "white"
+                    | "black"
             ) {
                 return Err("particle polygon uses an unknown theme color");
             }
             if polygon.points.len() < 3 || polygon.points.len() > 12 {
                 return Err("particle polygons require 3 to 12 points");
             }
-            if polygon.points.iter().flatten().any(|value| !value.is_finite() || value.abs() > 4.0) {
+            if polygon
+                .points
+                .iter()
+                .flatten()
+                .any(|value| !value.is_finite() || value.abs() > 4.0)
+            {
                 return Err("particle polygon points must be finite and normalized");
             }
         }
@@ -585,19 +608,19 @@ pub fn render_particle(
     let s = scale.clamp(0.5, 3.0);
     let progress = (elapsed / spec.duration_seconds).clamp(0.0, 1.0);
     let angle_degrees = spec.angle_min_degrees
-        + particle_random(spec.seed, 1) * (spec.angle_max_degrees - spec.angle_min_degrees);
+        + particle_random(spec.seed, 1)
+            * (spec.angle_max_degrees - spec.angle_min_degrees);
     let angle = angle_degrees.to_radians();
     let speed = (spec.speed_min
         + particle_random(spec.seed, 2) * (spec.speed_max - spec.speed_min))
         * s;
-    let origin_x = rect[0] + rect[2] * 0.5
+    let origin_x = rect[0]
+        + rect[2] * 0.5
         + (particle_random(spec.seed, 3) - 0.5) * spec.origin_spread * s;
     let origin_y = rect[1] + rect[3] - 12.0 * s;
     let x = origin_x
         + angle.cos() * speed * elapsed
-        + (elapsed * 7.0 + particle_random(spec.seed, 4) * 6.0).sin()
-            * spec.wobble
-            * s;
+        + (elapsed * 7.0 + particle_random(spec.seed, 4) * 6.0).sin() * spec.wobble * s;
     let y = origin_y
         + angle.sin() * speed * elapsed
         + elapsed * elapsed * spec.gravity * 0.5 * s;

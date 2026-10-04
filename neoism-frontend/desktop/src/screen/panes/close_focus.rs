@@ -443,14 +443,11 @@ impl Screen<'_> {
                     self.mark_dirty();
                     return true;
                 }
-                let left_sidebar_focused = self.renderer.left_sidebar_host.focused().is_some()
-                    || self.renderer.file_tree.is_focused()
-                    || self.renderer.notes_sidebar.is_focused()
-                    || self
-                        .renderer
-                        .conversations_pane
-                        .side_panel()
-                        .is_focused();
+                let left_sidebar_focused =
+                    self.renderer.left_sidebar_host.focused().is_some()
+                        || self.renderer.file_tree.is_focused()
+                        || self.renderer.notes_sidebar.is_focused()
+                        || self.renderer.conversations_pane.side_panel().is_focused();
                 if left_sidebar_focused {
                     self.focus_buffer_tabs_for_current_pane();
                     return true;
@@ -763,9 +760,9 @@ impl Screen<'_> {
         }
 
         let left_views = self.renderer.resolved_left_sidebar_views();
-        let focused_left = left_views.iter().position(|view| {
-            self.renderer.left_sidebar_view_focused(*view)
-        });
+        let focused_left = left_views
+            .iter()
+            .position(|view| self.renderer.left_sidebar_view_focused(*view));
         if let Some(index) = focused_left {
             if !right && index == 0 {
                 return false;
@@ -773,7 +770,9 @@ impl Screen<'_> {
             let next = if right {
                 left_views.get(index + 1).copied()
             } else {
-                index.checked_sub(1).and_then(|index| left_views.get(index).copied())
+                index
+                    .checked_sub(1)
+                    .and_then(|index| left_views.get(index).copied())
             };
             self.renderer.set_left_sidebar_focus(next);
             if next.is_none() && right {

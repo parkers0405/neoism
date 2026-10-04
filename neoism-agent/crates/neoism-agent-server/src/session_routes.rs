@@ -456,7 +456,10 @@ async fn create_session_in_directory_inner(
     };
 
     state.inner.store.insert_session(&info).await?;
-    if let Err(error) = state.activate_session_agent_packages(&info.directory, info.id.as_str()).await {
+    if let Err(error) = state
+        .activate_session_agent_packages(&info.directory, info.id.as_str())
+        .await
+    {
         tracing::warn!(%error, session_id = %info.id, "session Agent package candidate rejected");
     }
     if pending_import.is_none() {

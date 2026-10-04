@@ -28,6 +28,7 @@ pub fn render_prompt_picker(
     input_rect: [f32; 4],
     theme: &IdeTheme,
     s: f32,
+    min_y: f32,
 ) -> Option<[f32; 4]> {
     pane.clear_permission_choice_hit_rects();
     pane.clear_question_option_rects();
@@ -35,7 +36,7 @@ pub fn render_prompt_picker(
         return render_permission_prompt(sugarloaf, pane, input_rect, theme, s);
     }
     if pane.pending_question().is_some() {
-        return render_question_prompt(sugarloaf, pane, input_rect, theme, s);
+        return render_question_prompt(sugarloaf, pane, input_rect, theme, s, min_y);
     }
     None
 }
@@ -135,6 +136,7 @@ fn render_permission_prompt(
             footer_hint,
             rename: None,
             show_search_caret: false,
+            wrap_prompt: false,
             search_placeholder: &meta,
             loading: false,
             empty_message: Some("No results"),
@@ -161,6 +163,7 @@ fn render_question_prompt(
     input_rect: [f32; 4],
     theme: &IdeTheme,
     s: f32,
+    min_y: f32,
 ) -> Option<[f32; 4]> {
     let (title, typed, rows_data, selected, scroll_offset, responding, has_options) = {
         let question = pane.pending_question()?;
@@ -217,7 +220,7 @@ fn render_question_prompt(
     } else {
         "enter answer · esc skip"
     };
-    let state = inline_picker::render(
+    let state = inline_picker::render_limited(
         sugarloaf,
         InlinePickerView {
             title: &title,
@@ -230,6 +233,7 @@ fn render_question_prompt(
             footer_hint: Some(footer_hint),
             rename: None,
             show_search_caret: true,
+            wrap_prompt: true,
             search_placeholder: if has_options {
                 "Filter or type your own answer"
             } else {
@@ -242,6 +246,8 @@ fn render_question_prompt(
         input_rect,
         theme,
         s,
+        inline_picker::DEFAULT_MAX_ROWS,
+        min_y,
     )?;
     if !responding {
         for visible_index in 0..state.visible_rows {
@@ -251,7 +257,7 @@ fn render_question_prompt(
             }
             pane.register_question_option_rect(
                 source_index,
-                inline_picker::row_rect(state.rect, visible_index, s),
+                state.row_rect(visible_index, s),
             );
         }
     }

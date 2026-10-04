@@ -116,14 +116,14 @@ impl ChromeBridge {
             .unwrap_or(true);
         self.chrome
             .set_agent_panel_preferences(conversations_enabled, details_enabled);
-        let sidebar = values
-            .get("ui")
-            .and_then(|ui| ui.get("left-sidebar"));
+        let sidebar = values.get("ui").and_then(|ui| ui.get("left-sidebar"));
         let placement = |key: &str| match sidebar
             .and_then(|sidebar| sidebar.get(key))
             .and_then(serde_json::Value::as_str)
         {
-            Some("independent") => neoism_ui::panels::left_sidebar_host::SidebarPlacement::Independent,
+            Some("independent") => {
+                neoism_ui::panels::left_sidebar_host::SidebarPlacement::Independent
+            }
             _ => neoism_ui::panels::left_sidebar_host::SidebarPlacement::Unified,
         };
         self.chrome.set_left_sidebar_placements(
@@ -238,7 +238,9 @@ impl ChromeBridge {
                     self.set_font_scale((size as f32 / 14.0).clamp(0.5, 3.0));
                 }
             }
-            "ui.left-sidebar.file-tree" | "ui.left-sidebar.notes" | "ui.left-sidebar.conversations" => {
+            "ui.left-sidebar.file-tree"
+            | "ui.left-sidebar.notes"
+            | "ui.left-sidebar.conversations" => {
                 let Some(value) = value.as_str() else { return };
                 let placement = match value {
                     "independent" => neoism_ui::panels::left_sidebar_host::SidebarPlacement::Independent,

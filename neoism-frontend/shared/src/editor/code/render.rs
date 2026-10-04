@@ -150,20 +150,37 @@ pub fn render(
     } else {
         0 // NoWrap sentinel: identity index, horizontal caret-follow.
     };
-    let plugin_revision = pane.plugin_decorations.as_ref().map_or(0, |snapshot| snapshot.revision);
+    let plugin_revision = pane
+        .plugin_decorations
+        .as_ref()
+        .map_or(0, |snapshot| snapshot.revision);
     let wrap_key = (pane.buffer.revision, cols, plugin_revision);
     if pane.wrap_index_key != Some(wrap_key) || !pane.wrap_index.is_valid_for(line_count)
     {
-        let hidden = pane.plugin_decorations.as_ref()
+        let hidden = pane
+            .plugin_decorations
+            .as_ref()
             .filter(|snapshot| !snapshot.hidden_lines.contains(&pane.buffer.cursor_line))
             .map(|snapshot| &snapshot.hidden_lines)
             .cloned()
             .unwrap_or_default();
-        let virtual_rows = pane.plugin_decorations.as_ref()
-            .map(|snapshot| snapshot.virtual_lines.iter().map(|(line, rows)| (*line, rows.len())).collect())
+        let virtual_rows = pane
+            .plugin_decorations
+            .as_ref()
+            .map(|snapshot| {
+                snapshot
+                    .virtual_lines
+                    .iter()
+                    .map(|(line, rows)| (*line, rows.len()))
+                    .collect()
+            })
             .unwrap_or_default();
         pane.wrap_index = std::sync::Arc::new(WrapIndex::build_with_projection(
-            &pane.buffer.lines, cols, TAB_DISPLAY_WIDTH, &hidden, &virtual_rows,
+            &pane.buffer.lines,
+            cols,
+            TAB_DISPLAY_WIDTH,
+            &hidden,
+            &virtual_rows,
         ));
         pane.wrap_index_key = Some(wrap_key);
     }
@@ -360,7 +377,9 @@ pub fn render(
         let Some(VisualRow::Source { line, segment: seg }) = wrap.row_kind(vrow) else {
             continue;
         };
-        let Some(segment) = wrap.segment(line, seg) else { continue };
+        let Some(segment) = wrap.segment(line, seg) else {
+            continue;
+        };
         visible.push(RowView {
             vrow,
             line,
@@ -399,29 +418,65 @@ pub fn render(
     // interaction regions are retained here; no callback or VM is reachable.
     if let Some(snapshot) = pane.plugin_decorations.clone() {
         for vrow in first_row..last_row {
-            let Some(VisualRow::Synthetic { line, index }) = wrap.row_kind(vrow) else { continue };
-            let Some(virtual_line) = snapshot.virtual_lines.get(&line).and_then(|rows| rows.get(index)) else { continue };
+            let Some(VisualRow::Synthetic { line, index }) = wrap.row_kind(vrow) else {
+                continue;
+            };
+            let Some(virtual_line) = snapshot
+                .virtual_lines
+                .get(&line)
+                .and_then(|rows| rows.get(index))
+            else {
+                continue;
+            };
             let ry = row_screen_y(vrow);
-            if ry + row_h <= grid_y || ry >= grid_y + h_content { continue; }
+            if ry + row_h <= grid_y || ry >= grid_y + h_content {
+                continue;
+            }
             let opts = DrawOpts {
-                color: virtual_line.style.foreground.unwrap_or_else(|| theme.u8_alpha(theme.dim, 0.82)),
+                color: virtual_line
+                    .style
+                    .foreground
+                    .unwrap_or_else(|| theme.u8_alpha(theme.dim, 0.82)),
                 clip_rect: Some(text_clip),
                 ..base_opts
             };
-            draw_text(sugarloaf, x + GUTTER_PAD_X, ry + ((row_h - font_size * 1.2) * 0.5).max(0.0), "·", &opts, text_occlusions);
+            draw_text(
+                sugarloaf,
+                x + GUTTER_PAD_X,
+                ry + ((row_h - font_size * 1.2) * 0.5).max(0.0),
+                "·",
+                &opts,
+                text_occlusions,
+            );
             let vx = text_x - scroll_x;
-            draw_text(sugarloaf, vx, ry + ((row_h - font_size * 1.2) * 0.5).max(0.0), &virtual_line.text, &opts, text_occlusions);
-            let mut action_x = vx + sugarloaf.text_mut().measure(&virtual_line.text, &opts) + cell_w;
+            draw_text(
+                sugarloaf,
+                vx,
+                ry + ((row_h - font_size * 1.2) * 0.5).max(0.0),
+                &virtual_line.text,
+                &opts,
+                text_occlusions,
+            );
+            let mut action_x =
+                vx + sugarloaf.text_mut().measure(&virtual_line.text, &opts) + cell_w;
             for action in &virtual_line.actions {
                 let label = format!("[{}]", action.title);
                 let width = sugarloaf.text_mut().measure(&label, &opts).max(cell_w);
-                draw_text(sugarloaf, action_x, ry + ((row_h - font_size * 1.2) * 0.5).max(0.0), &label, &opts, text_occlusions);
-                pane.plugin_hit_regions.push(super::feed::CodePluginHitRegion {
-                    rect: [action_x, ry, width, row_h],
-                    owner: virtual_line.owner.clone(),
-                    resource: virtual_line.id,
-                    action: action.clone(),
-                });
+                draw_text(
+                    sugarloaf,
+                    action_x,
+                    ry + ((row_h - font_size * 1.2) * 0.5).max(0.0),
+                    &label,
+                    &opts,
+                    text_occlusions,
+                );
+                pane.plugin_hit_regions
+                    .push(super::feed::CodePluginHitRegion {
+                        rect: [action_x, ry, width, row_h],
+                        owner: virtual_line.owner.clone(),
+                        resource: virtual_line.id,
+                        action: action.clone(),
+                    });
                 action_x += width + cell_w;
             }
         }
@@ -850,18 +905,32 @@ pub fn render(
         let ry = row_screen_y(rv.vrow);
         let ty = ry + text_pad_y;
         if rv.seg == 0 {
-            if let Some(sign) = pane.plugin_decorations.as_ref()
+            if let Some(sign) = pane
+                .plugin_decorations
+                .as_ref()
                 .and_then(|snapshot| snapshot.by_line.get(&rv.line))
-                .and_then(|items| items.iter().rev().find(|item| item.layer == neoism_lua::DecorationLayer::GutterSign))
+                .and_then(|items| {
+                    items.iter().rev().find(|item| {
+                        item.layer == neoism_lua::DecorationLayer::GutterSign
+                    })
+                })
             {
                 let icon = sign.icon.as_deref().or(sign.text.as_deref()).unwrap_or("●");
                 let sign_opts = DrawOpts {
-                    color: sign.style.foreground.unwrap_or_else(|| theme.u8(theme.accent)),
+                    color: sign
+                        .style
+                        .foreground
+                        .unwrap_or_else(|| theme.u8(theme.accent)),
                     ..base_opts
                 };
                 draw_icon_centered_with_occlusion(
-                    sugarloaf, x + 2.0, [x + 2.0, ry, cell_w, row_h], icon,
-                    &sign_opts, text_occlusions, true,
+                    sugarloaf,
+                    x + 2.0,
+                    [x + 2.0, ry, cell_w, row_h],
+                    icon,
+                    &sign_opts,
+                    text_occlusions,
+                    true,
                 );
             }
             // Git gutter: a slim bar left of the number (green added,
@@ -949,7 +1018,9 @@ pub fn render(
                 .map(|diags| diags.as_slice())
                 .unwrap_or(&[]);
             let syntax = pane.highlight.line_runs(rv.line);
-            let plugin_spans = pane.plugin_decorations.as_ref()
+            let plugin_spans = pane
+                .plugin_decorations
+                .as_ref()
                 .map(|snapshot| snapshot.spans_for_line(rv.line))
                 .unwrap_or(&[]);
             runs = styled_runs_with_syntax(
@@ -976,12 +1047,26 @@ pub fn render(
                 expand_tabs_from(&line[sub_start..sub_end], start_col, TAB_DISPLAY_WIDTH);
             if let Some(color) = run.plugin_background {
                 let end_col = display_col_for_byte(line, sub_end, TAB_DISPLAY_WIDTH);
-                if let Some((bx, bw)) = clamp_band(run_x, (end_col.saturating_sub(start_col)).max(1) as f32 * cell_w) {
-                    sugarloaf.rect(None, bx, ry, bw, row_h, rgba_f32(color), DEPTH, ORDER_BG);
+                if let Some((bx, bw)) = clamp_band(
+                    run_x,
+                    (end_col.saturating_sub(start_col)).max(1) as f32 * cell_w,
+                ) {
+                    sugarloaf.rect(
+                        None,
+                        bx,
+                        ry,
+                        bw,
+                        row_h,
+                        rgba_f32(color),
+                        DEPTH,
+                        ORDER_BG,
+                    );
                 }
             }
             let run_opts = DrawOpts {
-                color: run.plugin_foreground.unwrap_or_else(|| syn_color(run.token, theme, false)),
+                color: run
+                    .plugin_foreground
+                    .unwrap_or_else(|| syn_color(run.token, theme, false)),
                 clip_rect: Some(text_clip),
                 ..base_opts
             };
@@ -1012,8 +1097,20 @@ pub fn render(
             }
             if let Some(color) = run.plugin_underline {
                 let end_col = display_col_for_byte(line, sub_end, TAB_DISPLAY_WIDTH);
-                if let Some((bx, bw)) = clamp_band(run_x, (end_col.saturating_sub(start_col)).max(1) as f32 * cell_w) {
-                    sugarloaf.rect(None, bx, ry + row_h - 2.0, bw, 1.0, rgba_f32(color), DEPTH, ORDER_TEXT);
+                if let Some((bx, bw)) = clamp_band(
+                    run_x,
+                    (end_col.saturating_sub(start_col)).max(1) as f32 * cell_w,
+                ) {
+                    sugarloaf.rect(
+                        None,
+                        bx,
+                        ry + row_h - 2.0,
+                        bw,
+                        1.0,
+                        rgba_f32(color),
+                        DEPTH,
+                        ORDER_TEXT,
+                    );
                 }
             }
         }
@@ -1059,36 +1156,50 @@ pub fn render(
                 };
                 draw_text(sugarloaf, vx, ty, &virt, &virt_opts, text_occlusions);
             }
-            if let Some(virtual_item) = pane.plugin_decorations.as_ref()
+            if let Some(virtual_item) = pane
+                .plugin_decorations
+                .as_ref()
                 .and_then(|snapshot| snapshot.by_line.get(&rv.line))
-                .and_then(|items| items.iter().rev().find(|item| matches!(item.layer,
-                    neoism_lua::DecorationLayer::VirtualText
-                    | neoism_lua::DecorationLayer::InlineWidget
-                    | neoism_lua::DecorationLayer::CodeLens
-                    | neoism_lua::DecorationLayer::Fold)))
+                .and_then(|items| {
+                    items.iter().rev().find(|item| {
+                        matches!(
+                            item.layer,
+                            neoism_lua::DecorationLayer::VirtualText
+                                | neoism_lua::DecorationLayer::InlineWidget
+                                | neoism_lua::DecorationLayer::CodeLens
+                                | neoism_lua::DecorationLayer::Fold
+                        )
+                    })
+                })
             {
                 let text = virtual_item.text.as_deref().unwrap_or("…");
                 let end_col = display_col_for_byte(line, line.len(), TAB_DISPLAY_WIDTH);
                 let vx = text_x
-                    + (rv.visual_indent + end_col.saturating_sub(rv.base_col) + 2) as f32 * cell_w
+                    + (rv.visual_indent + end_col.saturating_sub(rv.base_col) + 2) as f32
+                        * cell_w
                     - scroll_x;
                 let opts = DrawOpts {
-                    color: virtual_item.style.foreground.unwrap_or_else(|| theme.u8_alpha(theme.dim, 0.82)),
+                    color: virtual_item
+                        .style
+                        .foreground
+                        .unwrap_or_else(|| theme.u8_alpha(theme.dim, 0.82)),
                     clip_rect: Some(text_clip),
                     ..base_opts
                 };
                 draw_text(sugarloaf, vx, ty, text, &opts, text_occlusions);
-                let mut action_x = vx + sugarloaf.text_mut().measure(text, &opts) + cell_w;
+                let mut action_x =
+                    vx + sugarloaf.text_mut().measure(text, &opts) + cell_w;
                 for action in &virtual_item.actions {
                     let label = format!("[{}]", action.title);
                     let width = sugarloaf.text_mut().measure(&label, &opts).max(cell_w);
                     draw_text(sugarloaf, action_x, ty, &label, &opts, text_occlusions);
-                    pane.plugin_hit_regions.push(super::feed::CodePluginHitRegion {
-                        rect: [action_x, ry, width, row_h],
-                        owner: virtual_item.owner.clone(),
-                        resource: virtual_item.id,
-                        action: action.clone(),
-                    });
+                    pane.plugin_hit_regions
+                        .push(super::feed::CodePluginHitRegion {
+                            rect: [action_x, ry, width, row_h],
+                            owner: virtual_item.owner.clone(),
+                            resource: virtual_item.id,
+                            action: action.clone(),
+                        });
                     action_x += width + cell_w;
                 }
             }

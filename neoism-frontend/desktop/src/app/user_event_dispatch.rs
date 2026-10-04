@@ -322,15 +322,16 @@ impl Application<'_> {
         let mut lua_candidate = None;
         let mut plugin_candidate = None;
         let mut candidate_host = Arc::new(self.lua_host.fork_candidate());
-        let (mut config, mut config_error) = match neoism_backend::config::Config::try_load() {
-            Ok(mut config) => {
-                let config_dir = neoism_backend::config::config_dir_path();
-                if !config_dir.join("init.lua").is_file() {
-                    candidate_host = Arc::new(self.lua_host.fork_candidate());
-                    lua_candidate = Some(None);
-                    (config, None)
-                } else {
-                    match neoism_lua::LuaRuntime::load(&config_dir, candidate_host.clone()) {
+        let (mut config, mut config_error) =
+            match neoism_backend::config::Config::try_load() {
+                Ok(mut config) => {
+                    let config_dir = neoism_backend::config::config_dir_path();
+                    if !config_dir.join("init.lua").is_file() {
+                        candidate_host = Arc::new(self.lua_host.fork_candidate());
+                        lua_candidate = Some(None);
+                        (config, None)
+                    } else {
+                        match neoism_lua::LuaRuntime::load(&config_dir, candidate_host.clone()) {
                         Ok(runtime) => match config.apply_json_patch(&runtime.snapshot().config_patch) {
                             Ok(()) => {
                                 lua_candidate = Some(Some(runtime));
@@ -350,27 +351,28 @@ impl Application<'_> {
                             )),
                         ),
                     }
+                    }
                 }
-            }
-            Err(error) => (self.config.clone(), Some(error)),
-        };
+                Err(error) => (self.config.clone(), Some(error)),
+            };
         if config_error.is_none() {
             let candidate = crate::plugin_manager::resolve_mashup_selection(&config)
-                .and_then(|selection| crate::plugin_manager::LuaPluginManager::discover(
-                    neoism_backend::config::config_dir_path(),
-                    candidate_host.clone(),
-                    &config.plugins,
-                    selection.as_ref(),
-                ));
+                .and_then(|selection| {
+                    crate::plugin_manager::LuaPluginManager::discover(
+                        neoism_backend::config::config_dir_path(),
+                        candidate_host.clone(),
+                        &config.plugins,
+                        selection.as_ref(),
+                    )
+                });
             match candidate {
                 Ok(candidate) => plugin_candidate = Some(candidate),
                 Err(error) => {
                     config = self.config.clone();
-                    config_error = Some(
-                        neoism_backend::config::ConfigError::ErrLoadingConfig(format!(
-                            "Lua plugins: {error}"
-                        )),
-                    );
+                    config_error =
+                        Some(neoism_backend::config::ConfigError::ErrLoadingConfig(
+                            format!("Lua plugins: {error}"),
+                        ));
                     lua_candidate = None;
                 }
             }

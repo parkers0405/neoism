@@ -618,7 +618,13 @@ impl WrapIndex {
         tab: usize,
         hidden_lines: &std::collections::BTreeSet<usize>,
     ) -> Self {
-        Self::build_with_projection(lines, cols, tab, hidden_lines, &std::collections::BTreeMap::new())
+        Self::build_with_projection(
+            lines,
+            cols,
+            tab,
+            hidden_lines,
+            &std::collections::BTreeMap::new(),
+        )
     }
 
     pub fn build_with_projection(
@@ -639,12 +645,21 @@ impl WrapIndex {
             } else {
                 wrap_segments(line, cols, tab)
             };
-            row_to_line.extend((0..segments.len()).map(|segment| VisualRow::Source { line: line_ix, segment }));
+            row_to_line.extend((0..segments.len()).map(|segment| VisualRow::Source {
+                line: line_ix,
+                segment,
+            }));
             acc += segments.len() as u32;
             segments_by_line.push(segments);
             if !hidden_lines.contains(&line_ix) {
-                let virtual_count = virtual_rows_after.get(&line_ix).copied().unwrap_or(0);
-                row_to_line.extend((0..virtual_count).map(|index| VisualRow::Synthetic { line: line_ix, index }));
+                let virtual_count =
+                    virtual_rows_after.get(&line_ix).copied().unwrap_or(0);
+                row_to_line.extend((0..virtual_count).map(|index| {
+                    VisualRow::Synthetic {
+                        line: line_ix,
+                        index,
+                    }
+                }));
                 acc = acc.saturating_add(virtual_count as u32);
             }
         }
@@ -732,7 +747,10 @@ impl WrapIndex {
         if !self.is_valid_for(line_count) {
             return (vrow.min(line_count - 1), 0);
         }
-        let row = self.row_to_line.get(vrow.min(self.row_to_line.len().saturating_sub(1))).copied();
+        let row = self
+            .row_to_line
+            .get(vrow.min(self.row_to_line.len().saturating_sub(1)))
+            .copied();
         match row {
             Some(VisualRow::Source { line, segment }) => (line, segment),
             Some(VisualRow::Synthetic { line, .. }) => (line, usize::MAX),

@@ -475,7 +475,8 @@ pub(crate) fn configured_agent_plugins(
         if !config.enabled {
             continue;
         }
-        if let Err(reason) = crate::plugin_package::authorized(&package, directory, &config.options)
+        if let Err(reason) =
+            crate::plugin_package::authorized(&package, directory, &config.options)
         {
             tracing::warn!(plugin = %package.manifest.id, revision = %package.revision, %reason, "Agent package is not authorized");
             continue;
@@ -487,7 +488,9 @@ pub(crate) fn configured_agent_plugins(
                     Arc::clone(&services.executables),
                 ),
             )),
-            Err(error) => tracing::warn!(plugin = %package.manifest.id, %error, "Agent package cannot be activated"),
+            Err(error) => {
+                tracing::warn!(plugin = %package.manifest.id, %error, "Agent package cannot be activated")
+            }
         }
     }
     factories

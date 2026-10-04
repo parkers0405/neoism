@@ -269,7 +269,12 @@ pub enum ExtensionStatusSummary {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum TrustedExtensionLifecycle { PermissionRequired, Approved, Revoked, Failed }
+pub enum TrustedExtensionLifecycle {
+    PermissionRequired,
+    Approved,
+    Revoked,
+    Failed,
+}
 
 /// One extension catalog row. Field-for-field mirror of the shared
 /// extensions panel's `ExtensionEntry` (which is not serializable and

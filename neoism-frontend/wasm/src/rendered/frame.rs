@@ -389,7 +389,9 @@ impl ChromeBridge {
 
     pub fn set_plugin_snapshot(&mut self, snapshot_json: &str) -> Result<(), JsValue> {
         let snapshot: neoism_lua::PluginSnapshot = serde_json::from_str(snapshot_json)
-            .map_err(|error| JsValue::from_str(&format!("plugin snapshot parse: {error}")))?;
+            .map_err(|error| {
+                JsValue::from_str(&format!("plugin snapshot parse: {error}"))
+            })?;
         self.chrome
             .set_plugin_snapshot(std::sync::Arc::new(snapshot));
         Ok(())

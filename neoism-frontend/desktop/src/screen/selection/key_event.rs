@@ -809,19 +809,26 @@ impl Screen<'_> {
             neoism_ui::editor::code::CodeMode::Visual => "visual",
         });
 
-        if self.plugin_key_sequence_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        if self
+            .plugin_key_sequence_deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
             self.plugin_key_sequence.clear();
             self.plugin_key_sequence_deadline = None;
         }
         if key.state == ElementState::Released {
             return !self.plugin_key_sequence.is_empty()
-                || self.plugin_command_for_sequence(&chord, surface, edit_mode).is_some();
+                || self
+                    .plugin_command_for_sequence(&chord, surface, edit_mode)
+                    .is_some();
         }
         let prior = self.plugin_key_sequence.clone();
         let mut candidate = prior.clone();
         candidate.push(chord.clone());
         let candidate_text = candidate.join(" ");
-        if let Some(command) = self.plugin_command_for_sequence(&candidate_text, surface, edit_mode) {
+        if let Some(command) =
+            self.plugin_command_for_sequence(&candidate_text, surface, edit_mode)
+        {
             self.plugin_key_sequence.clear();
             self.plugin_key_sequence_deadline = None;
             self.pending_plugin_commands.push(command);
@@ -829,18 +836,27 @@ impl Screen<'_> {
         }
         let has_prefix = self.renderer.plugins.keymaps.iter().any(|mapping| {
             plugin_mapping_matches(mapping, surface, edit_mode)
-                && normalize_lua_sequence(&mapping.key).starts_with(&(candidate_text.clone() + " "))
+                && normalize_lua_sequence(&mapping.key)
+                    .starts_with(&(candidate_text.clone() + " "))
         });
         if has_prefix {
             self.plugin_key_sequence = candidate;
-            self.plugin_key_sequence_deadline = Some(Instant::now() + Duration::from_millis(750));
+            self.plugin_key_sequence_deadline =
+                Some(Instant::now() + Duration::from_millis(750));
             return true;
         }
         if !prior.is_empty() {
             let prefix = prior.join(" ");
-            let fallback = self.renderer.plugins.keymaps.iter()
+            let fallback = self
+                .renderer
+                .plugins
+                .keymaps
+                .iter()
                 .filter(|mapping| plugin_mapping_matches(mapping, surface, edit_mode))
-                .filter(|mapping| normalize_lua_sequence(&mapping.key).starts_with(&(prefix.clone() + " ")))
+                .filter(|mapping| {
+                    normalize_lua_sequence(&mapping.key)
+                        .starts_with(&(prefix.clone() + " "))
+                })
                 .all(|mapping| mapping.fallback);
             self.plugin_key_sequence.clear();
             self.plugin_key_sequence_deadline = None;
@@ -923,11 +939,17 @@ fn plugin_mapping_matches(
         && plugin_when_matches(mapping.when.as_deref(), surface, edit_mode)
 }
 
-fn plugin_when_matches(when: Option<&str>, surface: &str, edit_mode: Option<&str>) -> bool {
+fn plugin_when_matches(
+    when: Option<&str>,
+    surface: &str,
+    edit_mode: Option<&str>,
+) -> bool {
     let Some(when) = when else { return true };
     when.split("&&").all(|term| {
         let term = term.trim();
-        let (negated, term) = term.strip_prefix('!').map_or((false, term), |term| (true, term.trim()));
+        let (negated, term) = term
+            .strip_prefix('!')
+            .map_or((false, term), |term| (true, term.trim()));
         let matches = match term {
             "editorFocus" | "editor" => surface == "editor",
             "terminalFocus" | "terminal" => surface == "terminal",
@@ -969,5 +991,9 @@ fn normalize_lua_chord(value: &str) -> String {
 }
 
 fn normalize_lua_sequence(value: &str) -> String {
-    value.split_whitespace().map(normalize_lua_chord).collect::<Vec<_>>().join(" ")
+    value
+        .split_whitespace()
+        .map(normalize_lua_chord)
+        .collect::<Vec<_>>()
+        .join(" ")
 }

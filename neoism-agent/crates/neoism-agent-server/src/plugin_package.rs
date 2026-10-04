@@ -2,12 +2,12 @@
 
 use std::path::{Component, Path, PathBuf};
 
-use neoism_agent_plugin_api::{
-    AgentEntrypointRuntime, NeoismPackageManifest, PackageDiagnostic, PackageLifecycleInfo,
-    PackageLifecycleState, PackageLocation, PackageTrustRecord, PluginScope,
-    PROCESS_PLUGIN_V2_PROTOCOL,
-};
 use neoism_agent_core::{PluginConfig, PluginManifestInfo};
+use neoism_agent_plugin_api::{
+    AgentEntrypointRuntime, NeoismPackageManifest, PackageDiagnostic,
+    PackageLifecycleInfo, PackageLifecycleState, PackageLocation, PackageTrustRecord,
+    PluginScope, PROCESS_PLUGIN_V2_PROTOCOL,
+};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -41,7 +41,9 @@ pub(crate) fn discover(directory: &str) -> Vec<Result<DiscoveredAgentPackage, St
         entries.sort_by_key(|entry| entry.file_name());
         for entry in entries {
             let package_root = entry.path();
-            if !package_root.is_dir() || !package_root.join("neoism-plugin.json").is_file() {
+            if !package_root.is_dir()
+                || !package_root.join("neoism-plugin.json").is_file()
+            {
                 continue;
             }
             found.push(load(&package_root, location));
@@ -50,10 +52,14 @@ pub(crate) fn discover(directory: &str) -> Vec<Result<DiscoveredAgentPackage, St
     found
 }
 
-fn load(root: &Path, location: PackageLocation) -> Result<DiscoveredAgentPackage, String> {
+fn load(
+    root: &Path,
+    location: PackageLocation,
+) -> Result<DiscoveredAgentPackage, String> {
     let manifest_path = root.join("neoism-plugin.json");
-    let raw = std::fs::read_to_string(&manifest_path)
-        .map_err(|error| format!("failed to read {}: {error}", manifest_path.display()))?;
+    let raw = std::fs::read_to_string(&manifest_path).map_err(|error| {
+        format!("failed to read {}: {error}", manifest_path.display())
+    })?;
     let manifest: NeoismPackageManifest = serde_json::from_str(&raw)
         .map_err(|error| format!("invalid {}: {error}", manifest_path.display()))?;
     validate(&manifest, root, location)?;
@@ -81,7 +87,9 @@ fn validate(
     if location == PackageLocation::Workspace
         && matches!(agent.scope, PluginScope::Global | PluginScope::User)
     {
-        return Err("workspace packages cannot declare global or user Agent scope".into());
+        return Err(
+            "workspace packages cannot declare global or user Agent scope".into(),
+        );
     }
     if matches!(agent.runtime, AgentEntrypointRuntime::Lua) {
         validate_entrypoint(root, &agent.entrypoint)?;
@@ -120,9 +128,9 @@ fn valid_id(id: &str) -> bool {
         && parts.iter().all(|part| {
             !part.is_empty()
                 && part.as_bytes()[0].is_ascii_lowercase()
-                && part
-                    .bytes()
-                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+                && part.bytes().all(|byte| {
+                    byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'
+                })
                 && !part.ends_with('-')
         })
 }
@@ -136,7 +144,8 @@ fn package_revision(root: &Path) -> Result<String, String> {
         for entry in std::fs::read_dir(directory)
             .map_err(|error| format!("failed to inspect package: {error}"))?
         {
-            let entry = entry.map_err(|error| format!("failed to inspect package: {error}"))?;
+            let entry =
+                entry.map_err(|error| format!("failed to inspect package: {error}"))?;
             let file_type = entry
                 .file_type()
                 .map_err(|error| format!("failed to inspect package: {error}"))?;
@@ -178,7 +187,9 @@ fn package_revision(root: &Path) -> Result<String, String> {
     Ok(format!("sha256:{:x}", digest.finalize()))
 }
 
-pub(crate) fn trust_record(options: &std::collections::BTreeMap<String, Value>) -> Option<PackageTrustRecord> {
+pub(crate) fn trust_record(
+    options: &std::collections::BTreeMap<String, Value>,
+) -> Option<PackageTrustRecord> {
     options
         .get("trust")
         .cloned()
@@ -206,7 +217,8 @@ pub(crate) fn authorized_for(
     scope_id: Option<&str>,
     options: &std::collections::BTreeMap<String, Value>,
 ) -> Result<(), String> {
-    let trust = trust_record(options).ok_or_else(|| "external trust record is required".to_string())?;
+    let trust = trust_record(options)
+        .ok_or_else(|| "external trust record is required".to_string())?;
     let agent = package
         .manifest
         .agent
@@ -217,7 +229,9 @@ pub(crate) fn authorized_for(
         || trust.package_id != package.manifest.id
         || trust.revision != package.revision
     {
-        return Err("trust record does not match package revision and runtime scope".into());
+        return Err(
+            "trust record does not match package revision and runtime scope".into(),
+        );
     }
     match runtime_scope {
         PluginScope::Workspace | PluginScope::Session => {
@@ -227,7 +241,10 @@ pub(crate) fn authorized_for(
         }
         PluginScope::Global | PluginScope::User => {
             if package.location != PackageLocation::User {
-                return Err("only installation packages may activate outside workspace scope".into());
+                return Err(
+                    "only installation packages may activate outside workspace scope"
+                        .into(),
+                );
             }
         }
     }
@@ -378,10 +395,15 @@ mod tests {
         let package = discover(base.to_str().unwrap())
             .into_iter()
             .filter_map(Result::ok)
-            .find(|package| package.location == PackageLocation::Workspace && package.manifest.id == "dev.example.fixture")
+            .find(|package| {
+                package.location == PackageLocation::Workspace
+                    && package.manifest.id == "dev.example.fixture"
+            })
             .unwrap();
         assert_eq!(package.location, PackageLocation::Workspace);
-        assert!(authorized(&package, base.to_str().unwrap(), &Default::default()).is_err());
+        assert!(
+            authorized(&package, base.to_str().unwrap(), &Default::default()).is_err()
+        );
         let discovered = lifecycle_manifests(base.to_str().unwrap(), &Default::default())
             .into_iter()
             .find(|manifest| manifest.id == "dev.example.fixture")
@@ -406,7 +428,11 @@ mod tests {
         assert!(authorized(&package, base.to_str().unwrap(), &options).is_ok());
         let configured = std::collections::BTreeMap::from([(
             package.manifest.id.clone(),
-            PluginConfig { enabled: true, options, ..PluginConfig::default() },
+            PluginConfig {
+                enabled: true,
+                options,
+                ..PluginConfig::default()
+            },
         )]);
         let trusted = lifecycle_manifests(base.to_str().unwrap(), &configured)
             .into_iter()
@@ -416,7 +442,12 @@ mod tests {
         std::fs::write(root.join("agent.lua"), "return { version = 2 }").unwrap();
         let changed = load(&root, PackageLocation::Workspace).unwrap();
         assert_ne!(changed.revision, package.revision);
-        assert!(authorized(&changed, base.to_str().unwrap(), &configured["dev.example.fixture"].options).is_err());
+        assert!(authorized(
+            &changed,
+            base.to_str().unwrap(),
+            &configured["dev.example.fixture"].options
+        )
+        .is_err());
         let _ = std::fs::remove_dir_all(base);
     }
 
@@ -426,7 +457,8 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = std::env::temp_dir().join(format!("neoism-agent-session-package-{unique}"));
+        let root =
+            std::env::temp_dir().join(format!("neoism-agent-session-package-{unique}"));
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("agent.lua"), "return {}").unwrap();
         std::fs::write(
@@ -484,7 +516,8 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = std::env::temp_dir().join(format!("neoism-agent-global-package-{unique}"));
+        let root =
+            std::env::temp_dir().join(format!("neoism-agent-global-package-{unique}"));
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("agent.lua"), "return {}").unwrap();
         std::fs::write(
@@ -504,9 +537,14 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = std::env::temp_dir().join(format!("neoism-editor-only-package-{unique}"));
+        let root =
+            std::env::temp_dir().join(format!("neoism-editor-only-package-{unique}"));
         std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(root.join("editor.lua"), "this is deliberately not valid Lua !!!").unwrap();
+        std::fs::write(
+            root.join("editor.lua"),
+            "this is deliberately not valid Lua !!!",
+        )
+        .unwrap();
         std::fs::write(
             root.join("neoism-plugin.json"),
             r#"{"id":"dev.example.editor","name":"Editor only","version":"1","entrypoint":"editor.lua"}"#,
@@ -524,7 +562,8 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = std::env::temp_dir().join(format!("neoism-installation-package-{unique}"));
+        let root =
+            std::env::temp_dir().join(format!("neoism-installation-package-{unique}"));
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("agent.lua"), "return {}").unwrap();
         std::fs::write(
@@ -544,8 +583,13 @@ mod tests {
             native_approved: false,
             lua_approved: true,
         };
-        let options = std::collections::BTreeMap::from([("trust".into(), serde_json::to_value(trust).unwrap())]);
-        assert!(authorized_for(&package, PluginScope::Global, None, None, &options).is_ok());
+        let options = std::collections::BTreeMap::from([(
+            "trust".into(),
+            serde_json::to_value(trust).unwrap(),
+        )]);
+        assert!(
+            authorized_for(&package, PluginScope::Global, None, None, &options).is_ok()
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 }

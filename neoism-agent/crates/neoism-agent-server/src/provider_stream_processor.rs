@@ -1082,9 +1082,11 @@ async fn apply_queued_tool_result(
             }
             updated
         }
-        Err(error) => set_tool_error(&mut message.parts, result.call.part_id.as_str(), error)
-            .into_iter()
-            .collect(),
+        Err(error) => {
+            set_tool_error(&mut message.parts, result.call.part_id.as_str(), error)
+                .into_iter()
+                .collect()
+        }
     }
 }
 

@@ -353,9 +353,10 @@ impl Renderer {
             None
         };
         let top_bar = chrome_topbar::ChromeTopBar::new();
-        let surface_registry = neoism_ui::surface_layout::SurfaceRegistry::chrome_defaults(
-            neoism_ui::surface_layout::SurfaceItemSize::new(26.0, 26.0),
-        );
+        let surface_registry =
+            neoism_ui::surface_layout::SurfaceRegistry::chrome_defaults(
+                neoism_ui::surface_layout::SurfaceItemSize::new(26.0, 26.0),
+            );
         let surface_layout = neoism_ui::surface_layout::resolve_surface_layout(
             neoism_ui::layout::Rect::new(0.0, 0.0, 0.0, 0.0),
             1.0,
@@ -377,10 +378,15 @@ impl Renderer {
                 0.0
             };
 
-        let mut left_sidebar_host = neoism_ui::panels::left_sidebar_host::LeftSidebarHost::default();
+        let mut left_sidebar_host =
+            neoism_ui::panels::left_sidebar_host::LeftSidebarHost::default();
         let placement = |value| match value {
-            neoism_backend::config::SidebarPlacementPreference::Unified => neoism_ui::panels::left_sidebar_host::SidebarPlacement::Unified,
-            neoism_backend::config::SidebarPlacementPreference::Independent => neoism_ui::panels::left_sidebar_host::SidebarPlacement::Independent,
+            neoism_backend::config::SidebarPlacementPreference::Unified => {
+                neoism_ui::panels::left_sidebar_host::SidebarPlacement::Unified
+            }
+            neoism_backend::config::SidebarPlacementPreference::Independent => {
+                neoism_ui::panels::left_sidebar_host::SidebarPlacement::Independent
+            }
         };
         left_sidebar_host.set_placements(
             placement(config.ui.left_sidebar.file_tree),
@@ -796,7 +802,9 @@ impl Renderer {
 }
 
 impl Renderer {
-    pub(crate) fn left_sidebar_requests(&self) -> neoism_ui::panels::left_sidebar_host::SidebarRequests {
+    pub(crate) fn left_sidebar_requests(
+        &self,
+    ) -> neoism_ui::panels::left_sidebar_host::SidebarRequests {
         neoism_ui::panels::left_sidebar_host::SidebarRequests {
             files: self.file_tree.is_visible(),
             notes: self.notes_sidebar.is_visible(),
@@ -805,11 +813,15 @@ impl Renderer {
     }
 
     pub(crate) fn reconcile_left_sidebar_host(&mut self) {
-        self.left_sidebar_host.reconcile(self.left_sidebar_requests());
+        self.left_sidebar_host
+            .reconcile(self.left_sidebar_requests());
     }
 
-    pub(crate) fn resolved_left_sidebar_views(&self) -> Vec<neoism_ui::panels::left_sidebar_host::LeftSidebarView> {
-        self.left_sidebar_host.resolved_views(self.left_sidebar_requests())
+    pub(crate) fn resolved_left_sidebar_views(
+        &self,
+    ) -> Vec<neoism_ui::panels::left_sidebar_host::LeftSidebarView> {
+        self.left_sidebar_host
+            .resolved_views(self.left_sidebar_requests())
     }
 
     pub(crate) fn left_sidebar_view_width(
@@ -820,13 +832,16 @@ impl Renderer {
         let natural = match view {
             LeftSidebarView::Files => self.file_tree.width(),
             LeftSidebarView::Notes => self.notes_sidebar.width(),
-            LeftSidebarView::Conversations => self.conversations_pane.side_panel().width(),
+            LeftSidebarView::Conversations => {
+                self.conversations_pane.side_panel().width()
+            }
         };
         self.left_sidebar_host.resolved_width(view, natural)
     }
 
     pub(crate) fn left_sidebar_total_width(&self) -> f32 {
-        self.resolved_left_sidebar_views().into_iter()
+        self.resolved_left_sidebar_views()
+            .into_iter()
             .map(|view| self.left_sidebar_view_width(view))
             .sum()
     }
@@ -853,7 +868,9 @@ impl Renderer {
         match view {
             LeftSidebarView::Files => self.file_tree.is_focused(),
             LeftSidebarView::Notes => self.notes_sidebar.is_focused(),
-            LeftSidebarView::Conversations => self.conversations_pane.side_panel().is_focused(),
+            LeftSidebarView::Conversations => {
+                self.conversations_pane.side_panel().is_focused()
+            }
         }
     }
 
@@ -875,7 +892,9 @@ impl Renderer {
             }
             LeftSidebarView::Conversations => {
                 self.conversations_visible = visible;
-                self.conversations_pane.side_panel_mut().set_focused(focused);
+                self.conversations_pane
+                    .side_panel_mut()
+                    .set_focused(focused);
             }
         }
     }
@@ -886,7 +905,9 @@ impl Renderer {
     ) {
         use neoism_ui::panels::left_sidebar_host::{LeftSidebarView, SidebarPlacement};
         for view in LeftSidebarView::ALL {
-            if view != active && self.left_sidebar_host.placement(view) == SidebarPlacement::Unified {
+            if view != active
+                && self.left_sidebar_host.placement(view) == SidebarPlacement::Unified
+            {
                 self.set_left_sidebar_view_state(view, false, false);
             }
         }
@@ -897,8 +918,10 @@ impl Renderer {
         focused: Option<neoism_ui::panels::left_sidebar_host::LeftSidebarView>,
     ) {
         use neoism_ui::panels::left_sidebar_host::LeftSidebarView;
-        self.file_tree.set_focused(focused == Some(LeftSidebarView::Files));
-        self.notes_sidebar.set_focused(focused == Some(LeftSidebarView::Notes));
+        self.file_tree
+            .set_focused(focused == Some(LeftSidebarView::Files));
+        self.notes_sidebar
+            .set_focused(focused == Some(LeftSidebarView::Notes));
         self.conversations_pane
             .side_panel_mut()
             .set_focused(focused == Some(LeftSidebarView::Conversations));

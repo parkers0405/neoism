@@ -3,8 +3,17 @@ use neoism_lua::PluginJobSpawnRequest;
 /// Translate typed Git operations to a fixed git argv. No shell is involved;
 /// path operands are separated with `--` so repository data cannot become an
 /// option. The managed-job host supplies containment, limits and teardown.
-pub(crate) fn request(action: &str, value: &serde_json::Value) -> Result<PluginJobSpawnRequest, String> {
-    let string = |name: &str| value.get(name).and_then(serde_json::Value::as_str).filter(|value| value.len() <= 16 * 1024).map(str::to_owned);
+pub(crate) fn request(
+    action: &str,
+    value: &serde_json::Value,
+) -> Result<PluginJobSpawnRequest, String> {
+    let string = |name: &str| {
+        value
+            .get(name)
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| value.len() <= 16 * 1024)
+            .map(str::to_owned)
+    };
     let args = match action {
         "status" => vec!["status".into(), "--porcelain=v2".into(), "--branch".into()],
         "diff" => { let mut args = vec!["diff".into(), "--no-ext-diff".into(), "--".into()]; if let Some(path) = string("path") { safe_relative(&path)?; args.push(path); } args }
@@ -18,9 +27,47 @@ pub(crate) fn request(action: &str, value: &serde_json::Value) -> Result<PluginJ
         "worktree" => return Err("worktree mutation requires a host-owned destination picker".into()),
         _ => return Err(format!("unsupported Git operation `{action}`")),
     };
-    if args.iter().any(|argument| argument.contains('\0')) { return Err("Git argument contains NUL".into()); }
-    Ok(PluginJobSpawnRequest { program: "git".into(), arguments: args, cwd: Some(".".into()), env: Default::default(), timeout_millis: Some(120_000), max_output_bytes: Some(4 * 1024 * 1024) })
+    if args.iter().any(|argument| argument.contains('\0')) {
+        return Err("Git argument contains NUL".into());
+    }
+    Ok(PluginJobSpawnRequest {
+        program: "git".into(),
+        arguments: args,
+        cwd: Some(".".into()),
+        env: Default::default(),
+        timeout_millis: Some(120_000),
+        max_output_bytes: Some(4 * 1024 * 1024),
+    })
 }
 
-fn safe_relative(value: &str) -> Result<(), String> { let path = std::path::Path::new(value); if value.is_empty() || path.is_absolute() || path.components().any(|part| matches!(part, std::path::Component::ParentDir | std::path::Component::RootDir | std::path::Component::Prefix(_))) { Err("Git path must be workspace-relative".into()) } else { Ok(()) } }
-fn safe_ref(value: &str) -> Result<(), String> { if value.is_empty() || value.starts_with('-') || value.contains([' ', '\0', '~', '^', ':', '?', '*', '[', '\\']) || value.contains("..") || value.ends_with('.') || value.ends_with('/') { Err("Git ref name is invalid".into()) } else { Ok(()) } }
+fn safe_relative(value: &str) -> Result<(), String> {
+    let path = std::path::Path::new(value);
+    if value.is_empty()
+        || path.is_absolute()
+        || path.components().any(|part| {
+            matches!(
+                part,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        })
+    {
+        Err("Git path must be workspace-relative".into())
+    } else {
+        Ok(())
+    }
+}
+fn safe_ref(value: &str) -> Result<(), String> {
+    if value.is_empty()
+        || value.starts_with('-')
+        || value.contains([' ', '\0', '~', '^', ':', '?', '*', '[', '\\'])
+        || value.contains("..")
+        || value.ends_with('.')
+        || value.ends_with('/')
+    {
+        Err("Git ref name is invalid".into())
+    } else {
+        Ok(())
+    }
+}

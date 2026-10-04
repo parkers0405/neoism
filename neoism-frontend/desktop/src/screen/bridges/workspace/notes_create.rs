@@ -13,7 +13,8 @@ impl Screen<'_> {
         );
         let (visible, focused) = match transition {
             SidebarTransition::Show => {
-                self.renderer.hide_other_unified_sidebars(LeftSidebarView::Notes);
+                self.renderer
+                    .hide_other_unified_sidebars(LeftSidebarView::Notes);
                 (true, true)
             }
             SidebarTransition::Focus => (true, true),
@@ -26,12 +27,20 @@ impl Screen<'_> {
                 )
             }
         };
-        self.renderer
-            .set_left_sidebar_view_state(LeftSidebarView::Notes, visible, focused);
+        self.renderer.set_left_sidebar_view_state(
+            LeftSidebarView::Notes,
+            visible,
+            focused,
+        );
         if focused {
             self.renderer.file_tree.set_focused(false);
-            self.renderer.conversations_pane.side_panel_mut().set_focused(false);
-            self.renderer.left_sidebar_host.set_focused(Some(LeftSidebarView::Notes));
+            self.renderer
+                .conversations_pane
+                .side_panel_mut()
+                .set_focused(false);
+            self.renderer
+                .left_sidebar_host
+                .set_focused(Some(LeftSidebarView::Notes));
         }
         if let Some(id) = self.current_workspace_id() {
             self.workspace_conversations_visibility

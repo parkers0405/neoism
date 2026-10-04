@@ -921,8 +921,12 @@ impl Renderer {
                     ),
                     LeftSidebarView::Conversations => {
                         let panel = &mut self.conversations_pane;
-                        if panel.side_panel().viewed_session_id() != active_agent_id.as_deref() {
-                            panel.side_panel_mut().set_viewed_session_id(active_agent_id.clone());
+                        if panel.side_panel().viewed_session_id()
+                            != active_agent_id.as_deref()
+                        {
+                            panel
+                                .side_panel_mut()
+                                .set_viewed_session_id(active_agent_id.clone());
                         }
                         panel.drain_server_updates();
                         neoism_ui::panels::agent_pane::view::side_panel::render_side_panel_with_icons::<
@@ -1144,7 +1148,8 @@ impl Renderer {
             // sidebars stop at `status_y` rather than pushing status content
             // inward to the editor column.
             let frame = self.surface_layout.content;
-            let status_y = (frame.y + frame.h - self.status_line.scaled_height()).max(frame.y);
+            let status_y =
+                (frame.y + frame.h - self.status_line.scaled_height()).max(frame.y);
             let status_left = frame.x;
             let status_width = frame.w.max(0.0);
             self.status_line.set_split_toggle(false, false);
@@ -1515,7 +1520,8 @@ impl Renderer {
         let (status_slot_left, status_slot_right) = self.status_line.custom_slot_bounds();
         let status_slot_gap = 8.0 * self.chrome_scale();
         let status_slot_left = status_slot_left + status_slot_gap;
-        let status_slot_right = (status_slot_right - status_slot_gap).max(status_slot_left);
+        let status_slot_right =
+            (status_slot_right - status_slot_gap).max(status_slot_left);
         self.plugin_hitboxes = neoism_ui::panels::custom_ui::render(
             sugarloaf,
             &self.plugins,

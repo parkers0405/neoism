@@ -46,12 +46,22 @@ impl LuaJobs {
     ) -> Result<(), String> {
         self.reap();
         if self.active.len() >= MAX_JOBS_GLOBAL
-            || self.active.values().filter(|job| job.owner == owner).count() >= MAX_JOBS_PER_OWNER
+            || self
+                .active
+                .values()
+                .filter(|job| job.owner == owner)
+                .count()
+                >= MAX_JOBS_PER_OWNER
         {
             return Err("managed job limit reached".into());
         }
         validate_program(&request.program)?;
-        if request.arguments.len() > 256 || request.arguments.iter().any(|argument| argument.len() > 64 * 1024) {
+        if request.arguments.len() > 256
+            || request
+                .arguments
+                .iter()
+                .any(|argument| argument.len() > 64 * 1024)
+        {
             return Err("managed job arguments exceed limits".into());
         }
         let cwd = resolve_cwd(workspace_root, request.cwd.as_deref())?;
@@ -66,7 +76,8 @@ impl LuaJobs {
         validate_env(&request.env)?;
 
         let mut command = Command::new(&request.program);
-        command.args(&request.arguments)
+        command
+            .args(&request.arguments)
             .current_dir(cwd)
             .env_clear()
             .envs(&request.env)
@@ -74,15 +85,29 @@ impl LuaJobs {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         configure_process_group(&mut command);
-        let mut child = command.spawn().map_err(|error| format!("failed to spawn managed job: {error}"))?;
+        let mut child = command
+            .spawn()
+            .map_err(|error| format!("failed to spawn managed job: {error}"))?;
         let pid = child.id();
         let stdin = Arc::new(Mutex::new(child.stdin.take()));
-        let stdout = child.stdout.take().ok_or("managed job stdout pipe is unavailable")?;
-        let stderr = child.stderr.take().ok_or("managed job stderr pipe is unavailable")?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or("managed job stdout pipe is unavailable")?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or("managed job stderr pipe is unavailable")?;
         let finished = Arc::new(AtomicBool::new(false));
-        self.active.insert(id.clone(), ActiveJob {
-            owner: owner.clone(), stdin: stdin.clone(), token: token.clone(), finished: finished.clone(),
-        });
+        self.active.insert(
+            id.clone(),
+            ActiveJob {
+                owner: owner.clone(),
+                stdin: stdin.clone(),
+                token: token.clone(),
+                finished: finished.clone(),
+            },
+        );
 
         std::thread::Builder::new().name(format!("lua-job-{pid}")).spawn(move || {
             let total = Arc::new(AtomicUsize::new(0));
@@ -132,16 +157,38 @@ impl LuaJobs {
         Ok(())
     }
 
-    pub(crate) fn stdin(&mut self, owner: &PluginOwner, id: &str, data: &str) -> Result<(), String> {
-        if data.len() > MAX_STDIN_BYTES { return Err("managed job stdin chunk exceeds limit".into()); }
-        let job = self.active.get(id).filter(|job| &job.owner == owner).ok_or("managed job handle is stale or cross-owner")?;
-        let mut guard = job.stdin.lock().map_err(|_| "managed job stdin lock was poisoned")?;
-        guard.as_mut().ok_or("managed job stdin is closed")?.write_all(data.as_bytes()).map_err(|error| error.to_string())
+    pub(crate) fn stdin(
+        &mut self,
+        owner: &PluginOwner,
+        id: &str,
+        data: &str,
+    ) -> Result<(), String> {
+        if data.len() > MAX_STDIN_BYTES {
+            return Err("managed job stdin chunk exceeds limit".into());
+        }
+        let job = self
+            .active
+            .get(id)
+            .filter(|job| &job.owner == owner)
+            .ok_or("managed job handle is stale or cross-owner")?;
+        let mut guard = job
+            .stdin
+            .lock()
+            .map_err(|_| "managed job stdin lock was poisoned")?;
+        guard
+            .as_mut()
+            .ok_or("managed job stdin is closed")?
+            .write_all(data.as_bytes())
+            .map_err(|error| error.to_string())
     }
 
     pub(crate) fn close_stdin(&mut self, owner: &PluginOwner, id: &str) -> bool {
-        self.active.get(id).filter(|job| &job.owner == owner)
-            .and_then(|job| job.stdin.lock().ok()).map(|mut stdin| stdin.take()).is_some()
+        self.active
+            .get(id)
+            .filter(|job| &job.owner == owner)
+            .and_then(|job| job.stdin.lock().ok())
+            .map(|mut stdin| stdin.take())
+            .is_some()
     }
 
     pub(crate) fn retire_inactive(&mut self, active: &HashSet<PluginOwner>) {
@@ -154,7 +201,8 @@ impl LuaJobs {
     }
 
     fn reap(&mut self) {
-        self.active.retain(|_, job| !job.finished.load(Ordering::Acquire));
+        self.active
+            .retain(|_, job| !job.finished.load(Ordering::Acquire));
     }
 }
 
@@ -173,15 +221,25 @@ fn spawn_reader<R: Read + Send + 'static>(
     std::thread::spawn(move || {
         let mut buffer = [0u8; CHUNK_BYTES];
         loop {
-            let Ok(read) = reader.read(&mut buffer) else { break };
-            if read == 0 { break; }
+            let Ok(read) = reader.read(&mut buffer) else {
+                break;
+            };
+            if read == 0 {
+                break;
+            }
             let accepted = reserve_output(&total, read, limit);
-            if accepted < read { truncated.store(true, Ordering::Release); }
+            if accepted < read {
+                truncated.store(true, Ordering::Release);
+            }
             if accepted > 0 {
-                sender.progress(owner.clone(), id.clone(), serde_json::json!({
-                    "event": "output", "stream": stream,
-                    "data": String::from_utf8_lossy(&buffer[..accepted]),
-                }));
+                sender.progress(
+                    owner.clone(),
+                    id.clone(),
+                    serde_json::json!({
+                        "event": "output", "stream": stream,
+                        "data": String::from_utf8_lossy(&buffer[..accepted]),
+                    }),
+                );
                 wake(&event_proxy, window_id);
             }
         }
@@ -192,7 +250,12 @@ fn reserve_output(total: &AtomicUsize, wanted: usize, limit: usize) -> usize {
     let mut current = total.load(Ordering::Acquire);
     loop {
         let accepted = wanted.min(limit.saturating_sub(current));
-        match total.compare_exchange_weak(current, current + accepted, Ordering::AcqRel, Ordering::Acquire) {
+        match total.compare_exchange_weak(
+            current,
+            current + accepted,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
             Ok(_) => return accepted,
             Err(actual) => current = actual,
         }
@@ -200,31 +263,63 @@ fn reserve_output(total: &AtomicUsize, wanted: usize, limit: usize) -> usize {
 }
 
 fn validate_program(program: &str) -> Result<(), String> {
-    if program.is_empty() || program.len() > 256 || program.contains('/') || program.contains('\\') || program == "." || program == ".." {
+    if program.is_empty()
+        || program.len() > 256
+        || program.contains('/')
+        || program.contains('\\')
+        || program == "."
+        || program == ".."
+    {
         Err("managed jobs require a bounded executable name, not a path".into())
-    } else { Ok(()) }
+    } else {
+        Ok(())
+    }
 }
 
 fn validate_env(env: &std::collections::BTreeMap<String, String>) -> Result<(), String> {
-    if env.len() > 64 { return Err("managed job environment exceeds limit".into()); }
+    if env.len() > 64 {
+        return Err("managed job environment exceeds limit".into());
+    }
     for (key, value) in env {
-        if key.is_empty() || key.len() > 128 || value.len() > 16 * 1024
-            || !key.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-            || matches!(key.as_str(), "PATH" | "HOME" | "LD_PRELOAD" | "LD_LIBRARY_PATH" | "DYLD_INSERT_LIBRARIES")
+        if key.is_empty()
+            || key.len() > 128
+            || value.len() > 16 * 1024
+            || !key
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+            || matches!(
+                key.as_str(),
+                "PATH"
+                    | "HOME"
+                    | "LD_PRELOAD"
+                    | "LD_LIBRARY_PATH"
+                    | "DYLD_INSERT_LIBRARIES"
+            )
         {
-            return Err(format!("managed job environment key `{key}` is not allowed"));
+            return Err(format!(
+                "managed job environment key `{key}` is not allowed"
+            ));
         }
     }
     Ok(())
 }
 
 fn resolve_cwd(root: &Path, requested: Option<&str>) -> Result<PathBuf, String> {
-    let root = root.canonicalize().map_err(|error| format!("workspace root is unavailable: {error}"))?;
+    let root = root
+        .canonicalize()
+        .map_err(|error| format!("workspace root is unavailable: {error}"))?;
     let relative = requested.unwrap_or(".");
     let path = Path::new(relative);
-    if path.is_absolute() { return Err("managed job cwd must be workspace-relative".into()); }
-    let cwd = root.join(path).canonicalize().map_err(|error| format!("managed job cwd is unavailable: {error}"))?;
-    if !cwd.starts_with(&root) { return Err("managed job cwd escapes the workspace".into()); }
+    if path.is_absolute() {
+        return Err("managed job cwd must be workspace-relative".into());
+    }
+    let cwd = root
+        .join(path)
+        .canonicalize()
+        .map_err(|error| format!("managed job cwd is unavailable: {error}"))?;
+    if !cwd.starts_with(&root) {
+        return Err("managed job cwd escapes the workspace".into());
+    }
     Ok(cwd)
 }
 
@@ -235,13 +330,24 @@ fn wake(proxy: &EventProxy, window_id: WindowId) {
 #[cfg(unix)]
 fn configure_process_group(command: &mut Command) {
     use std::os::unix::process::CommandExt;
-    unsafe { command.pre_exec(|| if libc::setpgid(0, 0) == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }); }
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setpgid(0, 0) == 0 {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error())
+            }
+        });
+    }
 }
 
 #[cfg(windows)]
 fn configure_process_group(command: &mut Command) {
     use std::os::windows::process::CommandExt;
-    command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP | windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+    command.creation_flags(
+        windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP
+            | windows_sys::Win32::System::Threading::CREATE_NO_WINDOW,
+    );
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -249,7 +355,9 @@ fn configure_process_group(_command: &mut Command) {}
 
 #[cfg(unix)]
 fn terminate_process_tree(pid: u32, child: &mut std::process::Child) {
-    unsafe { libc::kill(-(pid as i32), libc::SIGKILL); }
+    unsafe {
+        libc::kill(-(pid as i32), libc::SIGKILL);
+    }
     let _ = child.kill();
 }
 
@@ -257,14 +365,17 @@ fn terminate_process_tree(pid: u32, child: &mut std::process::Child) {
 fn terminate_process_tree(pid: u32, child: &mut std::process::Child) {
     use std::os::windows::process::CommandExt;
     let mut command = Command::new("taskkill");
-    command.args(["/PID", &pid.to_string(), "/T", "/F"])
+    command
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
         .creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
     let _ = command.status();
     let _ = child.kill();
 }
 
 #[cfg(not(any(unix, windows)))]
-fn terminate_process_tree(_pid: u32, child: &mut std::process::Child) { let _ = child.kill(); }
+fn terminate_process_tree(_pid: u32, child: &mut std::process::Child) {
+    let _ = child.kill();
+}
 
 #[cfg(test)]
 mod tests {
@@ -281,7 +392,8 @@ mod tests {
 
     #[test]
     fn cwd_and_environment_policy_reject_escape_and_loader_injection() {
-        let root = std::env::temp_dir().join(format!("neoism-lua-job-root-{}", std::process::id()));
+        let root = std::env::temp_dir()
+            .join(format!("neoism-lua-job-root-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         assert!(resolve_cwd(&root, Some(".")).is_ok());
         assert!(resolve_cwd(&root, Some("../")).is_err());
@@ -295,7 +407,10 @@ mod tests {
     fn real_process_output_is_truncated_at_the_aggregate_bound() {
         #[cfg(unix)]
         {
-            let output = Command::new("sh").args(["-c", "printf 123456789; printf abcdefghi >&2"]).output().unwrap();
+            let output = Command::new("sh")
+                .args(["-c", "printf 123456789; printf abcdefghi >&2"])
+                .output()
+                .unwrap();
             let total = AtomicUsize::new(0);
             let stdout = reserve_output(&total, output.stdout.len(), 10);
             let stderr = reserve_output(&total, output.stderr.len(), 10);

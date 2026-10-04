@@ -4,8 +4,8 @@ use std::path::PathBuf;
 
 use neoism_agent_core::{AgentConfigDocument, FormatterConfig, McpConfig, PluginConfig};
 use neoism_agent_service_api::{
-    AgentServices, ConfigDiscoveryScope, ConfigSnapshot, ConfigSnapshotRequest, ConfigUpdate,
-    ConfigUpdateRequest,
+    AgentServices, ConfigDiscoveryScope, ConfigSnapshot, ConfigSnapshotRequest,
+    ConfigUpdate, ConfigUpdateRequest,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -372,7 +372,10 @@ mod service_boundary_tests {
         }))
         .unwrap();
         let (plugins, roots) = installation_plugin_inputs(&snapshot, &effective);
-        assert_eq!(plugins.keys().cloned().collect::<Vec<_>>(), vec!["user.safe"]);
+        assert_eq!(
+            plugins.keys().cloned().collect::<Vec<_>>(),
+            vec!["user.safe"]
+        );
         assert_eq!(roots, vec![PathBuf::from("/user")]);
     }
 }

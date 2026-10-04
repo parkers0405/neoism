@@ -526,7 +526,12 @@ fn wrap_index_prefix_sum_and_totals() {
 
 #[test]
 fn plugin_fold_index_preserves_scroll_and_hit_test_row_mapping() {
-    let lines = vec!["start".to_string(), "hidden one".to_string(), "hidden two".to_string(), "tail".to_string()];
+    let lines = vec![
+        "start".to_string(),
+        "hidden one".to_string(),
+        "hidden two".to_string(),
+        "tail".to_string(),
+    ];
     let hidden = [1usize, 2].into_iter().collect();
     let index = WrapIndex::build_with_hidden(&lines, 80, TAB_DISPLAY_WIDTH, &hidden);
     assert_eq!(index.total_rows(lines.len()), 2);
@@ -541,13 +546,35 @@ fn plugin_virtual_lines_reserve_real_visual_rows() {
     let lines = vec!["first".to_string(), "second".to_string()];
     let virtual_rows = [(0usize, 2usize)].into_iter().collect();
     let index = WrapIndex::build_with_projection(
-        &lines, 80, TAB_DISPLAY_WIDTH, &Default::default(), &virtual_rows,
+        &lines,
+        80,
+        TAB_DISPLAY_WIDTH,
+        &Default::default(),
+        &virtual_rows,
     );
     assert_eq!(index.total_rows(lines.len()), 4);
-    assert_eq!(index.row_kind(0), Some(VisualRow::Source { line: 0, segment: 0 }));
-    assert_eq!(index.row_kind(1), Some(VisualRow::Synthetic { line: 0, index: 0 }));
-    assert_eq!(index.row_kind(2), Some(VisualRow::Synthetic { line: 0, index: 1 }));
-    assert_eq!(index.row_kind(3), Some(VisualRow::Source { line: 1, segment: 0 }));
+    assert_eq!(
+        index.row_kind(0),
+        Some(VisualRow::Source {
+            line: 0,
+            segment: 0
+        })
+    );
+    assert_eq!(
+        index.row_kind(1),
+        Some(VisualRow::Synthetic { line: 0, index: 0 })
+    );
+    assert_eq!(
+        index.row_kind(2),
+        Some(VisualRow::Synthetic { line: 0, index: 1 })
+    );
+    assert_eq!(
+        index.row_kind(3),
+        Some(VisualRow::Source {
+            line: 1,
+            segment: 0
+        })
+    );
     assert_eq!(index.line_of_row(2, lines.len()), (0, usize::MAX));
     assert_eq!(index.first_row_of_line(1), 3);
 }
@@ -558,24 +585,45 @@ fn large_plugin_snapshot_is_validated_and_indexed_once() {
         plugin_id: "dev.stress".into(),
         revision: neoism_lua::PluginRevision("r1".into()),
     };
-    let decorations = (0..10_000).map(|id| neoism_lua::ResolvedPluginDecoration {
-        id: neoism_lua::PluginResourceId(id), owner: owner.clone(),
-        document: neoism_lua::DocumentHandle("document:stress".into()),
-        start: 0, end: 1,
-        start_position: neoism_lua::TextPosition { line: 0, character: 0 },
-        end_position: neoism_lua::TextPosition { line: 0, character: 1 },
-        layer: neoism_lua::DecorationLayer::Highlight,
-        class: None, text: None, severity: None,
-        style: Default::default(), resolved_style: Default::default(),
-        related_information: Vec::new(), tags: Vec::new(), actions: Vec::new(),
-    }).collect();
-    let snapshot = neoism_lua::PluginDecorationSnapshot { revision: 1, decorations };
-    let projected = CodePluginRenderSnapshot::try_from_contract(&snapshot, &["x".into()]).unwrap();
+    let decorations = (0..10_000)
+        .map(|id| neoism_lua::ResolvedPluginDecoration {
+            id: neoism_lua::PluginResourceId(id),
+            owner: owner.clone(),
+            document: neoism_lua::DocumentHandle("document:stress".into()),
+            start: 0,
+            end: 1,
+            start_position: neoism_lua::TextPosition {
+                line: 0,
+                character: 0,
+            },
+            end_position: neoism_lua::TextPosition {
+                line: 0,
+                character: 1,
+            },
+            layer: neoism_lua::DecorationLayer::Highlight,
+            class: None,
+            text: None,
+            severity: None,
+            style: Default::default(),
+            resolved_style: Default::default(),
+            related_information: Vec::new(),
+            tags: Vec::new(),
+            actions: Vec::new(),
+        })
+        .collect();
+    let snapshot = neoism_lua::PluginDecorationSnapshot {
+        revision: 1,
+        decorations,
+    };
+    let projected =
+        CodePluginRenderSnapshot::try_from_contract(&snapshot, &["x".into()]).unwrap();
     assert_eq!(projected.by_line.get(&0).unwrap().len(), 10_000);
 
     let mut invalid = snapshot;
     invalid.decorations[0].start_position.character = 2;
-    assert!(CodePluginRenderSnapshot::try_from_contract(&invalid, &["x".into()]).is_err());
+    assert!(
+        CodePluginRenderSnapshot::try_from_contract(&invalid, &["x".into()]).is_err()
+    );
 }
 
 #[test]

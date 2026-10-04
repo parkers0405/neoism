@@ -39,8 +39,9 @@ use crate::state::AppState;
 use crate::tool_routes::tool_list;
 use crate::v2_routes::{
     v2_capabilities, v2_compact, v2_context, v2_events, v2_message_list, v2_meta,
-    v2_plugin, v2_plugin_lifecycle, v2_plugins, v2_prompt, v2_prompt_async, v2_session_catalog_events,
-    v2_session_children, v2_session_list, v2_session_runtime, v2_wait,
+    v2_plugin, v2_plugin_lifecycle, v2_plugins, v2_prompt, v2_prompt_async,
+    v2_session_catalog_events, v2_session_children, v2_session_list, v2_session_runtime,
+    v2_wait,
 };
 
 pub fn app(state: AppState) -> Router {
@@ -493,7 +494,8 @@ async fn resolve_scoped_plugin_session(
     method: &str,
     claims: &crate::caller::CallerClaims,
 ) -> Result<Option<MatchedPluginSession>, Response> {
-    let Some(session) = find_scoped_plugin_session(state, path, method, &claims.tenant_id).await
+    let Some(session) =
+        find_scoped_plugin_session(state, path, method, &claims.tenant_id).await
     else {
         return Ok(None);
     };
@@ -1637,7 +1639,8 @@ mod hosted_plugin_authorization_tests {
             .unwrap();
         let directory = root.to_string_lossy().into_owned();
 
-        for (tenant_id, hosted) in [("workspace:joined", false), ("hosted:tenant", true)] {
+        for (tenant_id, hosted) in [("workspace:joined", false), ("hosted:tenant", true)]
+        {
             let mut request = Request::builder()
                 .method(Method::GET)
                 .uri(format!("/v2/agents?directory={directory}"))

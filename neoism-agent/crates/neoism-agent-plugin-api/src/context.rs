@@ -55,7 +55,9 @@ pub struct WorkspaceIdentity {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RuntimeScope {
     Global,
-    User { user_id: String },
+    User {
+        user_id: String,
+    },
     Workspace(WorkspaceIdentity),
     Session {
         workspace: WorkspaceIdentity,
@@ -384,7 +386,10 @@ pub struct GrantedBroker<'a> {
 }
 
 impl GrantedBroker<'_> {
-    pub fn call(&self, request: BrokerRequest) -> Result<BrokerResponse, PluginRuntimeError> {
+    pub fn call(
+        &self,
+        request: BrokerRequest,
+    ) -> Result<BrokerResponse, PluginRuntimeError> {
         self.context
             .require(self.capability)
             .map_err(|error| PluginRuntimeError::new(error.to_string()))?;

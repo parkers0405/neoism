@@ -4,8 +4,8 @@ use std::collections::HashMap;
 use sugarloaf::text::DrawOpts;
 use sugarloaf::Sugarloaf;
 
-use crate::primitives::IdeTheme;
 use crate::customization::{color_f32, color_u8};
+use crate::primitives::IdeTheme;
 pub(super) use crate::primitives::{
     draw_icon_centered_with_occlusion, draw_text_with_occlusion, edge_left_row_radii,
     edge_row_radii, snap_to_device_px,
@@ -337,8 +337,8 @@ impl FileTree {
         }
 
         let row_style = plugins.map(|plugins| plugins.styles.resolve("file-tree.row"));
-        let selected_style = plugins
-            .map(|plugins| plugins.styles.resolve("file-tree.row.selected"));
+        let selected_style =
+            plugins.map(|plugins| plugins.styles.resolve("file-tree.row.selected"));
         let icon_style = plugins.map(|plugins| plugins.styles.resolve("file-tree.icon"));
         if !self.entries.is_empty() && self.selected < self.entries.len() {
             let row_ix = self.selected as isize - self.scroll_top as isize;

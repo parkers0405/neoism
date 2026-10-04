@@ -28,16 +28,16 @@ fn document_revision(runtime: &engine::LspRuntime, root: &Path, file: &Path) -> 
 
 use neoism_agent_server::language_server as engine;
 use neoism_protocol::editor::{
-    EditorLspAction, EditorLspActionCapability, EditorLspBufferSnapshot, EditorLspCodeAction,
-    EditorLspCompletionItem, EditorLspEditOperation, EditorLspFileEdit,
-    EditorLspLocation, EditorLspMutationPlan, EditorLspOpenBuffer, EditorLspPreparedFile,
-    EditorLspReadCapabilities, EditorLspReadClient, EditorLspReadDiagnostic,
-    EditorLspReadDocumentSymbol, EditorLspReadHover, EditorLspReadLocation,
-    EditorLspReadOperation, EditorLspReadOutcome, EditorLspReadParameter,
-    EditorLspReadPosition, EditorLspReadRange, EditorLspReadRelatedInformation,
-    EditorLspReadSignature, EditorLspReadSignatureHelp, EditorLspReadWorkspaceSymbol,
-    EditorLspReference, EditorLspStructuredFileEdit, EditorLspTextEdit,
-    EditorServerMessage,
+    EditorLspAction, EditorLspActionCapability, EditorLspBufferSnapshot,
+    EditorLspCodeAction, EditorLspCompletionItem, EditorLspEditOperation,
+    EditorLspFileEdit, EditorLspLocation, EditorLspMutationPlan, EditorLspOpenBuffer,
+    EditorLspPreparedFile, EditorLspReadCapabilities, EditorLspReadClient,
+    EditorLspReadDiagnostic, EditorLspReadDocumentSymbol, EditorLspReadHover,
+    EditorLspReadLocation, EditorLspReadOperation, EditorLspReadOutcome,
+    EditorLspReadParameter, EditorLspReadPosition, EditorLspReadRange,
+    EditorLspReadRelatedInformation, EditorLspReadSignature, EditorLspReadSignatureHelp,
+    EditorLspReadWorkspaceSymbol, EditorLspReference, EditorLspStructuredFileEdit,
+    EditorLspTextEdit, EditorServerMessage,
 };
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -524,7 +524,10 @@ pub(crate) fn finalize_structured_edit(
         for buffer in buffers {
             let path = scoped_file(root, Path::new(&buffer.path))?;
             if !seen.insert(path.clone()) {
-                return Err(format!("Duplicate synchronized LSP buffer: {}", path.display()));
+                return Err(format!(
+                    "Duplicate synchronized LSP buffer: {}",
+                    path.display()
+                ));
             }
             let _ = buffer.revision;
             let _ = engine::sync_document(runtime, root, &path, Some(&buffer.text));

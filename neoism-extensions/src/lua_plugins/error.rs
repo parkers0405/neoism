@@ -71,10 +71,14 @@ pub enum AcquisitionError {
 impl AcquisitionError {
     pub fn stage(&self) -> AcquisitionStage {
         match self {
-            Self::InvalidPluginId(_) | Self::InvalidRepositoryUrl { .. } | Self::InvalidRef(_) => AcquisitionStage::ValidateInput,
+            Self::InvalidPluginId(_)
+            | Self::InvalidRepositoryUrl { .. }
+            | Self::InvalidRef(_) => AcquisitionStage::ValidateInput,
             Self::StoreBusy(_) => AcquisitionStage::Lock,
             Self::Io { stage, .. } | Self::Git { stage, .. } => *stage,
-            Self::LockfileParse { .. } | Self::UnsupportedLockfileVersion { .. } | Self::LockfileSerialize(_) => AcquisitionStage::PublishLockfile,
+            Self::LockfileParse { .. }
+            | Self::UnsupportedLockfileVersion { .. }
+            | Self::LockfileSerialize(_) => AcquisitionStage::PublishLockfile,
             Self::GitMissing => AcquisitionStage::Clone,
             Self::InvalidResolvedCommit(_) => AcquisitionStage::Resolve,
             Self::Validation(_) => AcquisitionStage::ValidatePlugin,
@@ -86,10 +90,21 @@ impl AcquisitionError {
     }
 
     pub fn retryable(&self) -> bool {
-        matches!(self, Self::StoreBusy(_) | Self::Git { .. } | Self::Io { .. })
+        matches!(
+            self,
+            Self::StoreBusy(_) | Self::Git { .. } | Self::Io { .. }
+        )
     }
 }
 
-pub(crate) fn io(stage: AcquisitionStage, path: impl Into<PathBuf>, source: std::io::Error) -> AcquisitionError {
-    AcquisitionError::Io { stage, path: path.into(), source }
+pub(crate) fn io(
+    stage: AcquisitionStage,
+    path: impl Into<PathBuf>,
+    source: std::io::Error,
+) -> AcquisitionError {
+    AcquisitionError::Io {
+        stage,
+        path: path.into(),
+        source,
+    }
 }

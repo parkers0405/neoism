@@ -7,10 +7,11 @@ use std::path::PathBuf;
 
 use neoism_protocol::editor::{
     DiagnosticItem, DiagnosticSeverity, EditorClientMessage, EditorLspActionCapability,
-    EditorLspBufferSnapshot, EditorLspEditOperation, EditorLspOpenBuffer, EditorLspReadDiagnostic,
-    EditorLspReadOperation, EditorLspReadOutcome, EditorLspReadPosition,
-    EditorLspReadRange, EditorLspReadRelatedInformation, EditorLspStructuredFileEdit,
-    EditorLspTextEdit, EditorServerMessage, GridCell, GridPos, HighlightAttrs, PopupMenuItem,
+    EditorLspBufferSnapshot, EditorLspEditOperation, EditorLspOpenBuffer,
+    EditorLspReadDiagnostic, EditorLspReadOperation, EditorLspReadOutcome,
+    EditorLspReadPosition, EditorLspReadRange, EditorLspReadRelatedInformation,
+    EditorLspStructuredFileEdit, EditorLspTextEdit, EditorServerMessage, GridCell,
+    GridPos, HighlightAttrs, PopupMenuItem,
 };
 
 fn roundtrip_client(msg: &EditorClientMessage) {

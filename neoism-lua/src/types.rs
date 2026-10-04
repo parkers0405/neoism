@@ -8,14 +8,18 @@ use serde_json::Value;
 /// Identifies the exact plugin generation which owns a runtime resource.
 /// Revisions are opaque: callers may use a content hash, version, or monotonic
 /// generation string.
-#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 #[serde(default, rename_all = "camelCase")]
 pub struct PluginOwner {
     pub plugin_id: String,
     pub revision: PluginRevision,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 #[serde(transparent)]
 pub struct PluginRevision(pub String);
 
@@ -35,7 +39,9 @@ pub enum PluginStatus {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum PluginSource {
-    Local { path: String },
+    Local {
+        path: String,
+    },
     Git {
         url: String,
         #[serde(default)]
@@ -50,7 +56,9 @@ pub enum PluginSource {
 
 impl Default for PluginSource {
     fn default() -> Self {
-        Self::Local { path: String::new() }
+        Self::Local {
+            path: String::new(),
+        }
     }
 }
 
@@ -121,8 +129,14 @@ impl PluginTrigger {
     pub fn key(&self) -> String {
         match self {
             Self::Name(name) => name.clone(),
-            Self::Detailed { kind, value: None, .. } => kind.clone(),
-            Self::Detailed { kind, value: Some(value), .. } => format!("{kind}:{value}"),
+            Self::Detailed {
+                kind, value: None, ..
+            } => kind.clone(),
+            Self::Detailed {
+                kind,
+                value: Some(value),
+                ..
+            } => format!("{kind}:{value}"),
         }
     }
 }
@@ -135,7 +149,9 @@ pub struct LazyKeyTrigger {
     pub when: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum DockEdge {
     Top,
@@ -144,7 +160,9 @@ pub enum DockEdge {
     Right,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum SurfaceAlign {
     Start,
@@ -238,7 +256,11 @@ impl SurfaceLayoutPatch {
             if id.trim().is_empty() {
                 return Err("surface item id cannot be empty".into());
             }
-            if item.surface.as_deref().is_some_and(|id| id.trim().is_empty()) {
+            if item
+                .surface
+                .as_deref()
+                .is_some_and(|id| id.trim().is_empty())
+            {
                 return Err(format!("item `{id}` references an empty surface id"));
             }
             if !matches!(
@@ -253,7 +275,9 @@ impl SurfaceLayoutPatch {
                     | "chrome.agent"
                     | "chrome.servers"
             ) {
-                return Err(format!("surface item `{id}` is not registered by this host"));
+                return Err(format!(
+                    "surface item `{id}` is not registered by this host"
+                ));
             }
             if item
                 .surface
@@ -272,7 +296,11 @@ impl SurfaceLayoutPatch {
 
 impl Default for LazyKeyTrigger {
     fn default() -> Self {
-        Self { key: String::new(), mode: "global".into(), when: None }
+        Self {
+            key: String::new(),
+            mode: "global".into(),
+            when: None,
+        }
     }
 }
 
@@ -292,7 +320,10 @@ impl PluginCapability {
         match self {
             Self::Name(name) => name.clone(),
             Self::Detailed { name, scope: None } => name.clone(),
-            Self::Detailed { name, scope: Some(scope) } => format!("{name}:{scope}"),
+            Self::Detailed {
+                name,
+                scope: Some(scope),
+            } => format!("{name}:{scope}"),
         }
     }
 }
@@ -377,8 +408,20 @@ pub struct PluginSnapshot {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PluginViewKind {
-    Picker, Tree, Table, List, Form, Modal, Inspector, Toolbar, Breadcrumb,
-    Detail, VirtualDocument, Scene, AgentTimeline, ApprovalCard,
+    Picker,
+    Tree,
+    Table,
+    List,
+    Form,
+    Modal,
+    Inspector,
+    Toolbar,
+    Breadcrumb,
+    Detail,
+    VirtualDocument,
+    Scene,
+    AgentTimeline,
+    ApprovalCard,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -418,11 +461,22 @@ impl PluginViewContribution {
         if self.id.is_empty() || self.id.len() > 256 || self.title.len() > 1024 {
             return Err("plugin view identity or title exceeds limits".into());
         }
-        fn walk(nodes: &[PluginViewNode], depth: usize, count: &mut usize) -> Result<(), String> {
-            if depth > 32 { return Err("plugin view nesting exceeds 32 levels".into()); }
+        fn walk(
+            nodes: &[PluginViewNode],
+            depth: usize,
+            count: &mut usize,
+        ) -> Result<(), String> {
+            if depth > 32 {
+                return Err("plugin view nesting exceeds 32 levels".into());
+            }
             for node in nodes {
                 *count += 1;
-                if *count > 10_000 || node.id.is_empty() || node.id.len() > 256 || node.kind.len() > 64 || node.label.len() > 16 * 1024 {
+                if *count > 10_000
+                    || node.id.is_empty()
+                    || node.id.len() > 256
+                    || node.kind.len() > 64
+                    || node.label.len() > 16 * 1024
+                {
                     return Err("plugin view node budget exceeded".into());
                 }
                 walk(&node.children, depth + 1, count)?;
@@ -431,7 +485,11 @@ impl PluginViewContribution {
         }
         let mut count = 0;
         walk(&self.nodes, 0, &mut count)?;
-        if serde_json::to_vec(self).map_err(|error| error.to_string())?.len() > 1024 * 1024 {
+        if serde_json::to_vec(self)
+            .map_err(|error| error.to_string())?
+            .len()
+            > 1024 * 1024
+        {
             return Err("plugin view snapshot exceeds 1 MiB".into());
         }
         Ok(())
@@ -525,11 +583,36 @@ impl StylePatch {
             )*};
         }
         take!(
-            visible, width, height, min_width, max_width, min_height, max_height,
-            padding, padding_x, padding_y, gap, row_height, font_family, font_size,
-            font_weight, line_height, foreground, background, border_color, accent,
-            muted, border_width, radius, opacity, order, scroll_multiplier,
-            scroll_smooth, animation_ms, animation_easing, icon
+            visible,
+            width,
+            height,
+            min_width,
+            max_width,
+            min_height,
+            max_height,
+            padding,
+            padding_x,
+            padding_y,
+            gap,
+            row_height,
+            font_family,
+            font_size,
+            font_weight,
+            line_height,
+            foreground,
+            background,
+            border_color,
+            accent,
+            muted,
+            border_width,
+            radius,
+            opacity,
+            order,
+            scroll_multiplier,
+            scroll_smooth,
+            animation_ms,
+            animation_easing,
+            icon
         );
     }
 }
@@ -564,27 +647,50 @@ pub struct CommandContribution {
 }
 
 pub fn validate_command_arguments(schema: &Value, value: &Value) -> Result<(), String> {
-    let Some(schema) = schema.as_object() else { return Ok(()) };
+    let Some(schema) = schema.as_object() else {
+        return Ok(());
+    };
     if let Some(expected) = schema.get("type").and_then(Value::as_str) {
         let matches = match expected {
-            "object" => value.is_object(), "array" => value.is_array(), "string" => value.is_string(),
-            "number" => value.is_number(), "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
-            "boolean" => value.is_boolean(), "null" => value.is_null(), _ => true,
+            "object" => value.is_object(),
+            "array" => value.is_array(),
+            "string" => value.is_string(),
+            "number" => value.is_number(),
+            "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
+            "boolean" => value.is_boolean(),
+            "null" => value.is_null(),
+            _ => true,
         };
-        if !matches { return Err(format!("command arguments must have type `{expected}`")); }
-    }
-    if let (Some(required), Some(object)) = (schema.get("required").and_then(Value::as_array), value.as_object()) {
-        for key in required.iter().filter_map(Value::as_str) {
-            if !object.contains_key(key) { return Err(format!("command arguments are missing required key `{key}`")); }
+        if !matches {
+            return Err(format!("command arguments must have type `{expected}`"));
         }
     }
-    if let (Some(properties), Some(object)) = (schema.get("properties").and_then(Value::as_object), value.as_object()) {
+    if let (Some(required), Some(object)) = (
+        schema.get("required").and_then(Value::as_array),
+        value.as_object(),
+    ) {
+        for key in required.iter().filter_map(Value::as_str) {
+            if !object.contains_key(key) {
+                return Err(format!(
+                    "command arguments are missing required key `{key}`"
+                ));
+            }
+        }
+    }
+    if let (Some(properties), Some(object)) = (
+        schema.get("properties").and_then(Value::as_object),
+        value.as_object(),
+    ) {
         for (key, property_schema) in properties {
-            if let Some(value) = object.get(key) { validate_command_arguments(property_schema, value)?; }
+            if let Some(value) = object.get(key) {
+                validate_command_arguments(property_schema, value)?;
+            }
         }
     }
     if let Some(values) = schema.get("enum").and_then(Value::as_array) {
-        if !values.contains(value) { return Err("command argument is outside the declared enum".into()); }
+        if !values.contains(value) {
+            return Err("command argument is outside the declared enum".into());
+        }
     }
     Ok(())
 }
@@ -627,7 +733,9 @@ pub struct KeymapContribution {
     pub fallback: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum EditorOptionName {
     Wrap,
@@ -649,10 +757,20 @@ impl EditorOptionName {
     pub fn validate(self, value: &Value) -> Result<(), String> {
         match self {
             Self::Wrap | Self::UseTabs if value.is_boolean() => Ok(()),
-            Self::TabWidth if value.as_u64().is_some_and(|width| (1..=16).contains(&width)) => Ok(()),
-            Self::InputMode if matches!(value.as_str(), Some("standard" | "vim")) => Ok(()),
+            Self::TabWidth
+                if value
+                    .as_u64()
+                    .is_some_and(|width| (1..=16).contains(&width)) =>
+            {
+                Ok(())
+            }
+            Self::InputMode if matches!(value.as_str(), Some("standard" | "vim")) => {
+                Ok(())
+            }
             Self::Wrap | Self::UseTabs => Err("editor option requires a boolean".into()),
-            Self::TabWidth => Err("tab_width must be an integer from 1 through 16".into()),
+            Self::TabWidth => {
+                Err("tab_width must be an integer from 1 through 16".into())
+            }
             Self::InputMode => Err("input_mode must be `standard` or `vim`".into()),
         }
     }
@@ -694,7 +812,9 @@ pub struct AutocmdContribution {
     pub order: u64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum PluginStateScope {
     Plugin,
@@ -773,22 +893,44 @@ pub struct PluginCommandCompletion {
 
 impl PluginCommandCompletion {
     pub fn succeeded(id: String, command: String, result: Value) -> Self {
-        Self { id, command, ok: true, cancelled: false, result: Some(result), error: None }
+        Self {
+            id,
+            command,
+            ok: true,
+            cancelled: false,
+            result: Some(result),
+            error: None,
+        }
     }
 
-    pub fn failed(id: String, command: String, code: impl Into<String>, message: impl Into<String>) -> Self {
+    pub fn failed(
+        id: String,
+        command: String,
+        code: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
         Self {
             id,
             command,
             ok: false,
             cancelled: false,
             result: None,
-            error: Some(PluginAsyncError { code: code.into(), message: message.into() }),
+            error: Some(PluginAsyncError {
+                code: code.into(),
+                message: message.into(),
+            }),
         }
     }
 
     pub fn cancelled(id: String, command: String) -> Self {
-        Self { id, command, ok: false, cancelled: true, result: None, error: None }
+        Self {
+            id,
+            command,
+            ok: false,
+            cancelled: true,
+            result: None,
+            error: None,
+        }
     }
 }
 
@@ -884,7 +1026,9 @@ pub struct PluginNetworkRequest {
     pub credential: Option<String>,
 }
 
-fn default_network_method() -> String { "GET".into() }
+fn default_network_method() -> String {
+    "GET".into()
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -972,13 +1116,28 @@ pub enum ExecutionScope {
 
 macro_rules! opaque_handle {
     ($name:ident) => {
-        #[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+        #[derive(
+            Clone,
+            Debug,
+            Default,
+            PartialEq,
+            Eq,
+            PartialOrd,
+            Ord,
+            Hash,
+            Serialize,
+            Deserialize,
+        )]
         #[serde(transparent)]
         pub struct $name(pub String);
 
         impl $name {
-            pub fn as_str(&self) -> &str { &self.0 }
-            pub fn is_empty(&self) -> bool { self.0.is_empty() }
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+            pub fn is_empty(&self) -> bool {
+                self.0.is_empty()
+            }
         }
     };
 }
@@ -1004,7 +1163,9 @@ pub fn opaque_resource_handle(kind: &str, parts: &[&str]) -> String {
     format!("neoism:{kind}:{:016x}", hasher.finish())
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct TextPosition {
     pub line: u32,
@@ -1450,10 +1611,16 @@ impl PluginEvent {
         if scope != contract.scope {
             return Err(format!(
                 "Lua host event `{}` requires scope `{:?}`, got `{scope:?}`",
-                kind.name(), contract.scope
+                kind.name(),
+                contract.scope
             ));
         }
-        Ok(Self { name: kind.name().into(), payload, scope, origin })
+        Ok(Self {
+            name: kind.name().into(),
+            payload,
+            scope,
+            origin,
+        })
     }
 
     pub fn validate(&self) -> Result<crate::EventContract, String> {
@@ -1477,8 +1644,12 @@ fn default_object() -> Value {
 }
 
 pub trait PluginHost: Send + Sync + 'static {
-    fn query(&self, namespace: &str, operation: &str, arguments: Value)
-        -> Result<Value, String>;
+    fn query(
+        &self,
+        namespace: &str,
+        operation: &str,
+        arguments: Value,
+    ) -> Result<Value, String>;
     fn query_owned(
         &self,
         _owner: &PluginOwner,
@@ -1489,7 +1660,9 @@ pub trait PluginHost: Send + Sync + 'static {
         self.query(namespace, operation, arguments)
     }
     fn dispatch(&self, action: HostAction) -> Result<Value, String>;
-    fn activate_owner(&self, _owner: &PluginOwner) -> Result<(), String> { Ok(()) }
+    fn activate_owner(&self, _owner: &PluginOwner) -> Result<(), String> {
+        Ok(())
+    }
     fn retire_owner(&self, _owner: &PluginOwner) {}
 }
 
@@ -1511,7 +1684,11 @@ impl ScopedPluginHost {
             .into_iter()
             .filter(|capability| requested.contains(capability))
             .collect();
-        Self { inner, owner, grants }
+        Self {
+            inner,
+            owner,
+            grants,
+        }
     }
 
     fn denied(&self, namespace: &str, operation: &str) -> String {
@@ -1530,19 +1707,24 @@ impl PluginHost for ScopedPluginHost {
         arguments: Value,
     ) -> Result<Value, String> {
         let contract = crate::query_contract(namespace, operation)?;
-        if !self.grants.contains("*") && !self.grants.contains(&contract.capability)
+        if !self.grants.contains("*")
+            && !self.grants.contains(&contract.capability)
             && !self.grants.contains(&format!("{namespace}.{operation}"))
         {
             return Err(self.denied(namespace, operation));
         }
-        self.inner.query_owned(&self.owner, namespace, operation, arguments)
+        self.inner
+            .query_owned(&self.owner, namespace, operation, arguments)
     }
 
     fn dispatch(&self, mut action: HostAction) -> Result<Value, String> {
         action.owner = Some(self.owner.clone());
         let contract = crate::action_contract(&action)?;
-        if !self.grants.contains("*") && !self.grants.contains(&contract.capability)
-            && !self.grants.contains(&format!("{}.{}", action.namespace, action.action))
+        if !self.grants.contains("*")
+            && !self.grants.contains(&contract.capability)
+            && !self
+                .grants
+                .contains(&format!("{}.{}", action.namespace, action.action))
         {
             return Err(self.denied(&action.namespace, &action.action));
         }
@@ -1599,7 +1781,10 @@ impl QueuedHost {
     }
 
     pub fn published_state(&self) -> BTreeMap<String, Value> {
-        self.state.read().map(|state| state.clone()).unwrap_or_default()
+        self.state
+            .read()
+            .map(|state| state.clone())
+            .unwrap_or_default()
     }
 
     pub fn from_state(state: BTreeMap<String, Value>) -> Self {
@@ -1616,20 +1801,25 @@ impl QueuedHost {
         Self {
             state: RwLock::new(self.published_state()),
             scoped_state: RwLock::new(
-                self.scoped_state.read().map(|state| state.fork_candidate()).unwrap_or_default()
+                self.scoped_state
+                    .read()
+                    .map(|state| state.fork_candidate())
+                    .unwrap_or_default(),
             ),
             ..Self::default()
         }
     }
 
     pub fn restore_persistent_state(&self, snapshot: &Value) -> Result<(), String> {
-        self.scoped_state.write()
+        self.scoped_state
+            .write()
             .map_err(|_| "Lua scoped state lock poisoned".to_string())?
             .restore_persistent(snapshot)
     }
 
     pub fn persistent_state_snapshot(&self) -> Value {
-        self.scoped_state.read()
+        self.scoped_state
+            .read()
             .map(|state| state.persistent_snapshot())
             .unwrap_or_else(|_| serde_json::json!({ "version": 1, "entries": [] }))
     }
@@ -1674,21 +1864,54 @@ impl PluginHost for QueuedHost {
             return self.query(namespace, operation, arguments);
         }
         crate::query_contract(namespace, operation)?;
-        let query: PluginStateQuery = serde_json::from_value(arguments).map_err(|error| error.to_string())?;
+        let query: PluginStateQuery =
+            serde_json::from_value(arguments).map_err(|error| error.to_string())?;
         validate_state_scope_target(&self.state, query.scope, query.target.as_deref())?;
-        if query.persistent && !matches!(query.scope, PluginStateScope::Plugin | PluginStateScope::Workspace) {
-            return Err("persistent state is restricted to plugin and workspace scopes".into());
+        if query.persistent
+            && !matches!(
+                query.scope,
+                PluginStateScope::Plugin | PluginStateScope::Workspace
+            )
+        {
+            return Err(
+                "persistent state is restricted to plugin and workspace scopes".into(),
+            );
         }
-        let state = self.scoped_state.read().map_err(|_| "Lua scoped state lock poisoned".to_string())?;
+        let state = self
+            .scoped_state
+            .read()
+            .map_err(|_| "Lua scoped state lock poisoned".to_string())?;
         match operation {
             "get" => {
-                let key = query.key.as_deref().ok_or_else(|| "state.get requires a key".to_string())?;
+                let key = query
+                    .key
+                    .as_deref()
+                    .ok_or_else(|| "state.get requires a key".to_string())?;
                 if key.is_empty() || key.len() > 256 {
                     return Err("state.get key must contain at most 256 bytes".into());
                 }
-                Ok(state.get(owner, query.scope, query.target.as_deref(), key, query.persistent).cloned().unwrap_or(Value::Null))
+                Ok(state
+                    .get(
+                        owner,
+                        query.scope,
+                        query.target.as_deref(),
+                        key,
+                        query.persistent,
+                    )
+                    .cloned()
+                    .unwrap_or(Value::Null))
             }
-            "list" => Ok(Value::Object(state.list(owner, query.scope, query.target.as_deref(), query.persistent).into_iter().collect())),
+            "list" => Ok(Value::Object(
+                state
+                    .list(
+                        owner,
+                        query.scope,
+                        query.target.as_deref(),
+                        query.persistent,
+                    )
+                    .into_iter()
+                    .collect(),
+            )),
             _ => Err(format!("unregistered Lua state query `{operation}`")),
         }
     }
@@ -1710,26 +1933,64 @@ impl PluginHost for QueuedHost {
                 .get("document")
                 .or_else(|| arguments.get("handle"))
                 .and_then(Value::as_str)
-                .is_none_or(|requested| value.get("handle").and_then(Value::as_str) == Some(requested));
+                .is_none_or(|requested| {
+                    value.get("handle").and_then(Value::as_str) == Some(requested)
+                });
             if !handle_matches {
-                return Err("document handle is stale or not present in this host snapshot".into());
+                return Err(
+                    "document handle is stale or not present in this host snapshot"
+                        .into(),
+                );
             }
             return match contract.operation {
-                crate::HostOperation::DocumentText => Ok(value.get("text").cloned().unwrap_or(Value::Null)),
-                crate::HostOperation::DocumentLines => {
-                    let text = value.get("text").and_then(Value::as_str).unwrap_or_default();
-                    let lines = text.split('\n').map(str::to_owned).collect::<Vec<_>>();
-                    let start = arguments.get("startLine").and_then(Value::as_u64).unwrap_or(0) as usize;
-                    let end = arguments.get("endLine").and_then(Value::as_u64).map(|v| v as usize).unwrap_or(lines.len());
-                    Ok(serde_json::to_value(&lines[start.min(lines.len())..end.min(lines.len()).max(start.min(lines.len()))]).unwrap_or(Value::Null))
+                crate::HostOperation::DocumentText => {
+                    Ok(value.get("text").cloned().unwrap_or(Value::Null))
                 }
-                crate::HostOperation::DocumentRange => document_range_query(&value, &arguments),
-                crate::HostOperation::DocumentSelections => Ok(value.get("selections").cloned().unwrap_or_else(|| Value::Array(Vec::new()))),
-                crate::HostOperation::DocumentCursor => Ok(value.get("cursor").cloned().unwrap_or(Value::Null)),
-                crate::HostOperation::DocumentMetadata => Ok(value.get("metadata").cloned().unwrap_or(Value::Null)),
-                crate::HostOperation::DocumentLanguage => Ok(value.pointer("/metadata/language").cloned().unwrap_or(Value::Null)),
-                crate::HostOperation::DocumentDirty => Ok(value.pointer("/metadata/dirty").cloned().unwrap_or(Value::Bool(false))),
-                crate::HostOperation::DocumentRevision => Ok(value.get("revision").cloned().unwrap_or(Value::Null)),
+                crate::HostOperation::DocumentLines => {
+                    let text = value
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    let lines = text.split('\n').map(str::to_owned).collect::<Vec<_>>();
+                    let start = arguments
+                        .get("startLine")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0) as usize;
+                    let end = arguments
+                        .get("endLine")
+                        .and_then(Value::as_u64)
+                        .map(|v| v as usize)
+                        .unwrap_or(lines.len());
+                    Ok(serde_json::to_value(
+                        &lines[start.min(lines.len())
+                            ..end.min(lines.len()).max(start.min(lines.len()))],
+                    )
+                    .unwrap_or(Value::Null))
+                }
+                crate::HostOperation::DocumentRange => {
+                    document_range_query(&value, &arguments)
+                }
+                crate::HostOperation::DocumentSelections => Ok(value
+                    .get("selections")
+                    .cloned()
+                    .unwrap_or_else(|| Value::Array(Vec::new()))),
+                crate::HostOperation::DocumentCursor => {
+                    Ok(value.get("cursor").cloned().unwrap_or(Value::Null))
+                }
+                crate::HostOperation::DocumentMetadata => {
+                    Ok(value.get("metadata").cloned().unwrap_or(Value::Null))
+                }
+                crate::HostOperation::DocumentLanguage => Ok(value
+                    .pointer("/metadata/language")
+                    .cloned()
+                    .unwrap_or(Value::Null)),
+                crate::HostOperation::DocumentDirty => Ok(value
+                    .pointer("/metadata/dirty")
+                    .cloned()
+                    .unwrap_or(Value::Bool(false))),
+                crate::HostOperation::DocumentRevision => {
+                    Ok(value.get("revision").cloned().unwrap_or(Value::Null))
+                }
                 _ => Ok(value),
             };
         }
@@ -1738,7 +1999,9 @@ impl PluginHost for QueuedHost {
                 crate::HostOperation::RegisterGet
                 | crate::HostOperation::MarkGet
                 | crate::HostOperation::MacroGet => {
-                    let name = arguments.get("name").and_then(Value::as_str)
+                    let name = arguments
+                        .get("name")
+                        .and_then(Value::as_str)
                         .ok_or_else(|| format!("{namespace}.get requires a name"))?;
                     Ok(value.get(name).cloned().unwrap_or(Value::Null))
                 }
@@ -1746,10 +2009,13 @@ impl PluginHost for QueuedHost {
             };
         }
         match contract.operation {
-            crate::HostOperation::QueryGet | crate::HostOperation::QueryCurrent
-                | crate::HostOperation::QueryList | crate::HostOperation::QuerySnapshot
-                | crate::HostOperation::QueryStatus | crate::HostOperation::QueryDiff
-                | crate::HostOperation::QuerySessions => Ok(value),
+            crate::HostOperation::QueryGet
+            | crate::HostOperation::QueryCurrent
+            | crate::HostOperation::QueryList
+            | crate::HostOperation::QuerySnapshot
+            | crate::HostOperation::QueryStatus
+            | crate::HostOperation::QueryDiff
+            | crate::HostOperation::QuerySessions => Ok(value),
             _ => Ok(serde_json::json!({ "state": value, "arguments": arguments })),
         }
     }
@@ -1764,15 +2030,37 @@ impl PluginHost for QueuedHost {
             ));
         }
         let invocation_id = action.invocation_id.clone().unwrap_or_default();
-        if matches!(contract.operation, crate::HostOperation::StateSet | crate::HostOperation::StateDelete | crate::HostOperation::StateClear) {
-            let request: PluginStateRequest = serde_json::from_value(action.arguments).map_err(|error| error.to_string())?;
+        if matches!(
+            contract.operation,
+            crate::HostOperation::StateSet
+                | crate::HostOperation::StateDelete
+                | crate::HostOperation::StateClear
+        ) {
+            let request: PluginStateRequest = serde_json::from_value(action.arguments)
+                .map_err(|error| error.to_string())?;
             validate_state_target(&self.state, &request)?;
             let persistent = request.persistent;
-            let mut state = self.scoped_state.write().map_err(|_| "Lua scoped state lock poisoned".to_string())?;
+            let mut state = self
+                .scoped_state
+                .write()
+                .map_err(|_| "Lua scoped state lock poisoned".to_string())?;
             match contract.operation {
                 crate::HostOperation::StateSet => state.set(&owner, request)?,
-                crate::HostOperation::StateDelete => { state.remove(&owner, request.scope, request.target.as_deref(), &request.key, persistent); }
-                crate::HostOperation::StateClear => state.clear_scope(&owner, request.scope, request.target.as_deref(), persistent),
+                crate::HostOperation::StateDelete => {
+                    state.remove(
+                        &owner,
+                        request.scope,
+                        request.target.as_deref(),
+                        &request.key,
+                        persistent,
+                    );
+                }
+                crate::HostOperation::StateClear => state.clear_scope(
+                    &owner,
+                    request.scope,
+                    request.target.as_deref(),
+                    persistent,
+                ),
                 _ => unreachable!(),
             }
             if persistent {
@@ -1780,13 +2068,18 @@ impl PluginHost for QueuedHost {
             }
             return Ok(serde_json::json!({ "id": invocation_id }));
         }
-        let mut actions = self.actions
+        let mut actions = self
+            .actions
             .lock()
             .map_err(|_| "Lua action queue lock poisoned".to_string())?;
         const MAX_ACTIONS_PER_OWNER: usize = 1_024;
         const MAX_ACTIONS_GLOBAL: usize = 8_192;
         if actions.len() >= MAX_ACTIONS_GLOBAL
-            || actions.iter().filter(|queued| queued.owner.as_ref() == Some(&owner)).count() >= MAX_ACTIONS_PER_OWNER
+            || actions
+                .iter()
+                .filter(|queued| queued.owner.as_ref() == Some(&owner))
+                .count()
+                >= MAX_ACTIONS_PER_OWNER
         {
             return Err("Lua host action queue budget exceeded".into());
         }
@@ -1795,7 +2088,9 @@ impl PluginHost for QueuedHost {
     }
 
     fn activate_owner(&self, owner: &PluginOwner) -> Result<(), String> {
-        let changed = self.scoped_state.write()
+        let changed = self
+            .scoped_state
+            .write()
             .map_err(|_| "Lua scoped state lock poisoned".to_string())?
             .activate_owner(owner);
         if changed {
@@ -1825,10 +2120,12 @@ fn validate_state_scope_target(
     target: Option<&str>,
 ) -> Result<(), String> {
     if scope == PluginStateScope::Plugin {
-        return target.is_none().then_some(())
-            .ok_or_else(|| "plugin-scoped state does not accept a target handle".to_string());
+        return target.is_none().then_some(()).ok_or_else(|| {
+            "plugin-scoped state does not accept a target handle".to_string()
+        });
     }
-    let target = target.ok_or_else(|| "scoped plugin state requires a target".to_string())?;
+    let target =
+        target.ok_or_else(|| "scoped plugin state requires a target".to_string())?;
     let namespace = match scope {
         PluginStateScope::Document => "document",
         PluginStateScope::Pane => "pane",
@@ -1836,8 +2133,11 @@ fn validate_state_scope_target(
         PluginStateScope::Workspace => "workspace",
         PluginStateScope::Plugin => unreachable!(),
     };
-    let state = published.read().map_err(|_| "Lua host state lock poisoned".to_string())?;
-    state.get(namespace)
+    let state = published
+        .read()
+        .map_err(|_| "Lua host state lock poisoned".to_string())?;
+    state
+        .get(namespace)
         .and_then(|value| value.get("handle"))
         .and_then(Value::as_str)
         .is_some_and(|handle| handle == target)
@@ -1846,25 +2146,46 @@ fn validate_state_scope_target(
 }
 
 fn document_range_query(snapshot: &Value, arguments: &Value) -> Result<Value, String> {
-    let text = snapshot.get("text").and_then(Value::as_str).unwrap_or_default();
+    let text = snapshot
+        .get("text")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     let lines = text.split('\n').collect::<Vec<_>>();
     let range = arguments.get("range").unwrap_or(arguments);
     let point = |name: &str| -> Result<(usize, usize), String> {
-        let value = range.get(name).ok_or_else(|| format!("document range requires `{name}`"))?;
-        let line = value.get("line").and_then(Value::as_u64).ok_or_else(|| format!("document range `{name}.line` is invalid"))? as usize;
-        let col = value.get("character").and_then(Value::as_u64).ok_or_else(|| format!("document range `{name}.character` is invalid"))? as usize;
-        let content = lines.get(line).ok_or_else(|| format!("document range `{name}` line is outside the document"))?;
+        let value = range
+            .get(name)
+            .ok_or_else(|| format!("document range requires `{name}`"))?;
+        let line = value
+            .get("line")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| format!("document range `{name}.line` is invalid"))?
+            as usize;
+        let col = value
+            .get("character")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| format!("document range `{name}.character` is invalid"))?
+            as usize;
+        let content = lines.get(line).ok_or_else(|| {
+            format!("document range `{name}` line is outside the document")
+        })?;
         if col > content.len() || !content.is_char_boundary(col) {
-            return Err(format!("document range `{name}` is not a UTF-8 byte boundary"));
+            return Err(format!(
+                "document range `{name}` is not a UTF-8 byte boundary"
+            ));
         }
         Ok((line, col))
     };
     let start = point("start")?;
     let end = point("end")?;
-    if end < start { return Err("document range ends before it starts".into()); }
+    if end < start {
+        return Err("document range ends before it starts".into());
+    }
     let mut output = String::new();
     for line in start.0..=end.0 {
-        if line > start.0 { output.push('\n'); }
+        if line > start.0 {
+            output.push('\n');
+        }
         let content = lines[line];
         let from = if line == start.0 { start.1 } else { 0 };
         let to = if line == end.0 { end.1 } else { content.len() };
@@ -1882,27 +2203,50 @@ mod tests {
     fn scoped_state_reads_writes_and_cleanup_are_exact_owner() {
         let host = Arc::new(QueuedHost::default());
         host.publish("document", serde_json::json!({ "handle": "document:one" }));
-        let make = |revision: &str| ScopedPluginHost::new(
-            host.clone(),
-            PluginOwner { plugin_id: "dev.state".into(), revision: PluginRevision(revision.into()) },
-            ["state.read".into(), "state.write".into()],
-            ["state.read".into(), "state.write".into()],
-        );
+        let make = |revision: &str| {
+            ScopedPluginHost::new(
+                host.clone(),
+                PluginOwner {
+                    plugin_id: "dev.state".into(),
+                    revision: PluginRevision(revision.into()),
+                },
+                ["state.read".into(), "state.write".into()],
+                ["state.read".into(), "state.write".into()],
+            )
+        };
         let first = make("r1");
         let second = make("r2");
         let set = |value| HostAction {
-            namespace: "state".into(), action: "set".into(),
+            namespace: "state".into(),
+            action: "set".into(),
             arguments: serde_json::json!({ "scope": "document", "target": "document:one", "key": "value", "value": value }),
-            scope: ExecutionScope::Local, invocation_id: None, owner: None,
+            scope: ExecutionScope::Local,
+            invocation_id: None,
+            owner: None,
         };
         first.dispatch(set(1)).unwrap();
         second.dispatch(set(2)).unwrap();
         let query = serde_json::json!({ "scope": "document", "target": "document:one", "key": "value" });
-        assert_eq!(first.query("state", "get", query.clone()).unwrap(), serde_json::json!(1));
-        assert_eq!(second.query("state", "get", query.clone()).unwrap(), serde_json::json!(2));
-        host.remove_owner_state(&PluginOwner { plugin_id: "dev.state".into(), revision: PluginRevision("r1".into()) });
-        assert!(first.query("state", "get", query.clone()).unwrap().is_null());
-        assert_eq!(second.query("state", "get", query).unwrap(), serde_json::json!(2));
+        assert_eq!(
+            first.query("state", "get", query.clone()).unwrap(),
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            second.query("state", "get", query.clone()).unwrap(),
+            serde_json::json!(2)
+        );
+        host.remove_owner_state(&PluginOwner {
+            plugin_id: "dev.state".into(),
+            revision: PluginRevision("r1".into()),
+        });
+        assert!(first
+            .query("state", "get", query.clone())
+            .unwrap()
+            .is_null());
+        assert_eq!(
+            second.query("state", "get", query).unwrap(),
+            serde_json::json!(2)
+        );
         host.clear_target_state(PluginStateScope::Document, "document:one");
         assert!(second.query("state", "get", serde_json::json!({ "scope": "document", "target": "document:one", "key": "value" })).unwrap().is_null());
         assert!(second.dispatch(HostAction {
@@ -1910,17 +2254,27 @@ mod tests {
             arguments: serde_json::json!({ "scope": "document", "target": "document:stale", "key": "value", "value": 3 }),
             scope: ExecutionScope::Local, invocation_id: None, owner: None,
         }).is_err());
-        assert!(second.query("state", "get", serde_json::json!({
-            "scope": "document", "target": "document:stale", "key": "value"
-        })).is_err());
+        assert!(second
+            .query(
+                "state",
+                "get",
+                serde_json::json!({
+                    "scope": "document", "target": "document:stale", "key": "value"
+                })
+            )
+            .is_err());
     }
 
     #[test]
     fn persistent_state_is_transactional_across_candidate_hosts() {
         let host = Arc::new(QueuedHost::default());
-        let owner = PluginOwner { plugin_id: "dev.persist".into(), revision: PluginRevision("r1".into()) };
+        let owner = PluginOwner {
+            plugin_id: "dev.persist".into(),
+            revision: PluginRevision("r1".into()),
+        };
         let scoped = ScopedPluginHost::new(
-            host.clone(), owner.clone(),
+            host.clone(),
+            owner.clone(),
             ["state.read".into(), "state.write".into()],
             ["state.read".into(), "state.write".into()],
         );
@@ -1930,9 +2284,13 @@ mod tests {
             scope: ExecutionScope::Local, invocation_id: None, owner: None,
         }).unwrap();
         let candidate = Arc::new(host.fork_candidate());
-        let candidate_owner = PluginOwner { plugin_id: owner.plugin_id.clone(), revision: PluginRevision("r2".into()) };
+        let candidate_owner = PluginOwner {
+            plugin_id: owner.plugin_id.clone(),
+            revision: PluginRevision("r2".into()),
+        };
         let candidate_scoped = ScopedPluginHost::new(
-            candidate.clone(), candidate_owner,
+            candidate.clone(),
+            candidate_owner,
             ["state.read".into(), "state.write".into()],
             ["state.read".into(), "state.write".into()],
         );
@@ -1941,7 +2299,8 @@ mod tests {
             arguments: serde_json::json!({ "scope": "plugin", "persistent": true, "key": "value", "value": 2 }),
             scope: ExecutionScope::Local, invocation_id: None, owner: None,
         }).unwrap();
-        let query = serde_json::json!({ "scope": "plugin", "persistent": true, "key": "value" });
+        let query =
+            serde_json::json!({ "scope": "plugin", "persistent": true, "key": "value" });
         assert_eq!(scoped.query("state", "get", query.clone()).unwrap(), 1);
         assert_eq!(candidate_scoped.query("state", "get", query).unwrap(), 2);
         assert!(candidate.take_persistent_dirty());
@@ -1950,42 +2309,71 @@ mod tests {
     #[test]
     fn host_action_queue_has_an_exact_owner_storm_budget() {
         let host = QueuedHost::default();
-        let owner = PluginOwner { plugin_id: "dev.queue".into(), revision: PluginRevision("r1".into()) };
+        let owner = PluginOwner {
+            plugin_id: "dev.queue".into(),
+            revision: PluginRevision("r1".into()),
+        };
         for _ in 0..1_024 {
             host.dispatch(HostAction {
-                namespace: "config".into(), action: "set".into(), arguments: Value::Null,
-                scope: ExecutionScope::Local, invocation_id: None, owner: Some(owner.clone()),
-            }).unwrap();
+                namespace: "config".into(),
+                action: "set".into(),
+                arguments: Value::Null,
+                scope: ExecutionScope::Local,
+                invocation_id: None,
+                owner: Some(owner.clone()),
+            })
+            .unwrap();
         }
-        assert!(host.dispatch(HostAction {
-            namespace: "config".into(), action: "set".into(), arguments: Value::Null,
-            scope: ExecutionScope::Local, invocation_id: None, owner: Some(owner),
-        }).is_err());
+        assert!(host
+            .dispatch(HostAction {
+                namespace: "config".into(),
+                action: "set".into(),
+                arguments: Value::Null,
+                scope: ExecutionScope::Local,
+                invocation_id: None,
+                owner: Some(owner),
+            })
+            .is_err());
     }
 
     #[test]
     fn command_request_enforces_schema_and_range_count_bang_contract() {
         let command = CommandContribution {
-            id: "typed".into(), callback: "callback".into(), title: String::new(),
-            description: String::new(), scope: ExecutionScope::Local,
+            id: "typed".into(),
+            callback: "callback".into(),
+            title: String::new(),
+            description: String::new(),
+            scope: ExecutionScope::Local,
             arguments_schema: serde_json::json!({
                 "type": "object", "required": ["name"],
                 "properties": { "name": { "type": "string" } }
             }),
-            completions: Vec::new(), accepts_range: true, accepts_count: false,
-            accepts_bang: false, aliases: vec!["t".into()], completion_callback: None,
+            completions: Vec::new(),
+            accepts_range: true,
+            accepts_count: false,
+            accepts_bang: false,
+            aliases: vec!["t".into()],
+            completion_callback: None,
             result_schema: serde_json::json!({}),
         };
         let mut request = PluginCommandRequest {
-            command: "t".into(), arguments: serde_json::json!({ "name": "ok" }),
-            range: Some(PluginCommandRange { start_line: 2, end_line: 4 }),
-            count: None, bang: false,
+            command: "t".into(),
+            arguments: serde_json::json!({ "name": "ok" }),
+            range: Some(PluginCommandRange {
+                start_line: 2,
+                end_line: 4,
+            }),
+            count: None,
+            bang: false,
         };
         validate_command_request(&command, &request).unwrap();
         request.count = Some(2);
         assert!(validate_command_request(&command, &request).is_err());
         request.count = None;
-        request.range = Some(PluginCommandRange { start_line: 5, end_line: 1 });
+        request.range = Some(PluginCommandRange {
+            start_line: 5,
+            end_line: 1,
+        });
         assert!(validate_command_request(&command, &request).is_err());
         request.range = None;
         request.arguments = serde_json::json!({});
@@ -2036,7 +2424,10 @@ mod tests {
             .is_err());
         let actions = host.drain_actions();
         assert_eq!(actions.len(), 1);
-        assert_eq!(actions[0].owner.as_ref().unwrap().plugin_id, "dev.neoism.test");
+        assert_eq!(
+            actions[0].owner.as_ref().unwrap().plugin_id,
+            "dev.neoism.test"
+        );
     }
 
     #[test]
@@ -2080,32 +2471,52 @@ mod tests {
     #[test]
     fn document_queries_are_handle_checked_and_utf8_strict() {
         let host = QueuedHost::default();
-        host.publish("document", serde_json::json!({
-            "handle": "neoism:document:one",
-            "revision": 7,
-            "text": "aéz\nnext",
-            "cursor": { "position": { "line": 0, "character": 3 } },
-            "selections": [],
-            "metadata": { "language": "rust", "dirty": true }
-        }));
+        host.publish(
+            "document",
+            serde_json::json!({
+                "handle": "neoism:document:one",
+                "revision": 7,
+                "text": "aéz\nnext",
+                "cursor": { "position": { "line": 0, "character": 3 } },
+                "selections": [],
+                "metadata": { "language": "rust", "dirty": true }
+            }),
+        );
         assert_eq!(
-            host.query("document", "range", serde_json::json!({
-                "document": "neoism:document:one",
-                "range": {
-                    "start": { "line": 0, "character": 1 },
-                    "end": { "line": 0, "character": 3 }
-                }
-            })).unwrap(),
+            host.query(
+                "document",
+                "range",
+                serde_json::json!({
+                    "document": "neoism:document:one",
+                    "range": {
+                        "start": { "line": 0, "character": 1 },
+                        "end": { "line": 0, "character": 3 }
+                    }
+                })
+            )
+            .unwrap(),
             Value::String("é".into())
         );
-        assert!(host.query("document", "text", serde_json::json!({
-            "document": "neoism:document:stale"
-        })).is_err());
-        assert!(host.query("document", "range", serde_json::json!({
-            "document": "neoism:document:one",
-            "start": { "line": 0, "character": 2 },
-            "end": { "line": 0, "character": 3 }
-        })).is_err());
+        assert!(host
+            .query(
+                "document",
+                "text",
+                serde_json::json!({
+                    "document": "neoism:document:stale"
+                })
+            )
+            .is_err());
+        assert!(host
+            .query(
+                "document",
+                "range",
+                serde_json::json!({
+                    "document": "neoism:document:one",
+                    "start": { "line": 0, "character": 2 },
+                    "end": { "line": 0, "character": 3 }
+                })
+            )
+            .is_err());
     }
 
     #[test]
@@ -2158,16 +2569,15 @@ mod tests {
 
     #[test]
     fn structured_code_actions_expose_only_request_scoped_capabilities() {
-        let value = serde_json::to_value(LuaLspOutcome::CodeActions(vec![
-            LuaLspCodeAction {
+        let value =
+            serde_json::to_value(LuaLspOutcome::CodeActions(vec![LuaLspCodeAction {
                 id: "action-token".into(),
                 request_id: "lua-9".into(),
                 title: "Import HashMap".into(),
                 kind: Some("quickfix".into()),
                 preferred: true,
-            },
-        ]))
-        .unwrap();
+            }]))
+            .unwrap();
         let action = &value["items"][0];
         assert_eq!(action["id"], "action-token");
         assert_eq!(action["requestId"], "lua-9");

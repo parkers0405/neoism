@@ -989,16 +989,18 @@ pub(crate) async fn handle_socket(
                         EditorClientMessage::PluginResource { request: neoism_protocol::plugin_resource::PluginResourceRequest::Invoke { operation, .. } }
                             if operation == "write"
                     );
-                    let required: &[Permission] = if plugin_resource_writes || matches!(
-                        &message,
-                        EditorClientMessage::ApplyLspCodeActionAt { .. }
-                            | EditorClientMessage::LspEditCommit { .. }
-                            | EditorClientMessage::LspEditFinalize { .. }
-                            | EditorClientMessage::LspQueryAt {
-                                action: neoism_protocol::editor::EditorLspAction::Rename,
-                                ..
-                            }
-                    ) {
+                    let required: &[Permission] = if plugin_resource_writes
+                        || matches!(
+                            &message,
+                            EditorClientMessage::ApplyLspCodeActionAt { .. }
+                                | EditorClientMessage::LspEditCommit { .. }
+                                | EditorClientMessage::LspEditFinalize { .. }
+                                | EditorClientMessage::LspQueryAt {
+                                    action:
+                                        neoism_protocol::editor::EditorLspAction::Rename,
+                                    ..
+                                }
+                        ) {
                         &[Permission::ReadFiles, Permission::WriteFiles]
                     } else {
                         &[Permission::ReadFiles]
@@ -1056,7 +1058,13 @@ pub(crate) async fn handle_socket(
                     // native editor's daemon path lands and rewires them.
                     let reply = match message {
                         EditorClientMessage::PluginResource { request } => {
-                            EditorServerMessage::PluginResource { reply: plugin_resources.handle(&root, connection_workspace.active_workspace.as_deref(), request) }
+                            EditorServerMessage::PluginResource {
+                                reply: plugin_resources.handle(
+                                    &root,
+                                    connection_workspace.active_workspace.as_deref(),
+                                    request,
+                                ),
+                            }
                         }
                         EditorClientMessage::OpenBuffer {
                             path,
@@ -1433,14 +1441,15 @@ pub(crate) async fn handle_socket(
                             let lsp_runtime = lsp_runtime.clone();
                             let vault = structured_edit_vault.clone();
                             tokio::task::spawn_blocking(move || {
-                                let message = crate::language_server::finalize_structured_edit(
-                                    &lsp_runtime,
-                                    &vault,
-                                    &root,
-                                    &command_id,
-                                    &buffers,
-                                    surface_id,
-                                );
+                                let message =
+                                    crate::language_server::finalize_structured_edit(
+                                        &lsp_runtime,
+                                        &vault,
+                                        &root,
+                                        &command_id,
+                                        &buffers,
+                                        surface_id,
+                                    );
                                 let _ = tx.send(ServiceServerMessage::EditorReply {
                                     request_id,
                                     message,

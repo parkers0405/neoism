@@ -976,8 +976,10 @@ pub struct NeoismAgentPane {
     fx_pending_prompt: Option<String>,
     particle_burst_requests:
         Vec<neoism_ui::panels::agent_pane::view::fx::ParticleEffectSpec>,
-    particle_bursts:
-        Vec<(neoism_ui::panels::agent_pane::view::fx::ParticleEffectSpec, f32)>,
+    particle_bursts: Vec<(
+        neoism_ui::panels::agent_pane::view::fx::ParticleEffectSpec,
+        f32,
+    )>,
     cursor_byte: usize,
     /// Soft-wrapped visual rows of the input (byte spans + per-boundary
     /// x offsets), registered by the renderer each frame — the same

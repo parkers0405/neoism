@@ -70,24 +70,41 @@ pub(crate) struct LuaPluginJobs {
 }
 
 impl LuaPluginJobs {
-    pub fn enqueue(&mut self, window_id: WindowId, plugin_id: String, operation: LuaPluginOperation) {
-        if self.active.as_ref().is_some_and(|job| job.plugin_id == plugin_id)
+    pub fn enqueue(
+        &mut self,
+        window_id: WindowId,
+        plugin_id: String,
+        operation: LuaPluginOperation,
+    ) {
+        if self
+            .active
+            .as_ref()
+            .is_some_and(|job| job.plugin_id == plugin_id)
             || self.queued.iter().any(|job| job.plugin_id == plugin_id)
         {
             return;
         }
         let kind = operation_kind(&operation);
-        self.views.insert(plugin_id.clone(), LuaPluginJobView {
-            kind,
-            status_text: initial_status(kind).into(),
-            retryable: false,
-        });
+        self.views.insert(
+            plugin_id.clone(),
+            LuaPluginJobView {
+                kind,
+                status_text: initial_status(kind).into(),
+                retryable: false,
+            },
+        );
         self.changed = true;
-        self.queued.push_back(QueuedJob { window_id, plugin_id, operation });
+        self.queued.push_back(QueuedJob {
+            window_id,
+            plugin_id,
+            operation,
+        });
     }
 
     pub fn retry(&mut self, window_id: WindowId, plugin_id: &str) -> bool {
-        let Some(operation) = self.failed_operations.remove(plugin_id) else { return false };
+        let Some(operation) = self.failed_operations.remove(plugin_id) else {
+            return false;
+        };
         self.enqueue(window_id, plugin_id.to_string(), operation);
         true
     }
@@ -105,11 +122,14 @@ impl LuaPluginJobs {
     }
 
     pub fn record_failure(&mut self, plugin_id: String, message: String) {
-        self.views.insert(plugin_id, LuaPluginJobView {
-            kind: LuaPluginJobKind::Failed,
-            status_text: message,
-            retryable: false,
-        });
+        self.views.insert(
+            plugin_id,
+            LuaPluginJobView {
+                kind: LuaPluginJobKind::Failed,
+                status_text: message,
+                retryable: false,
+            },
+        );
         self.changed = true;
     }
 
@@ -128,7 +148,11 @@ impl LuaPluginJobs {
                         }
                         self.changed = true;
                     }
-                    WorkerUpdate::Finished { result, previous_lock_entry, lock_changed } => {
+                    WorkerUpdate::Finished {
+                        result,
+                        previous_lock_entry,
+                        lock_changed,
+                    } => {
                         finished = Some((result, previous_lock_entry, lock_changed));
                         break;
                     }
@@ -136,7 +160,10 @@ impl LuaPluginJobs {
             }
         }
         if let Some((result, previous_lock_entry, lock_changed)) = finished {
-            let active = self.active.take().expect("finished Lua plugin job must be active");
+            let active = self
+                .active
+                .take()
+                .expect("finished Lua plugin job must be active");
             match result {
                 Ok(()) => {
                     self.views.remove(&active.plugin_id);
@@ -152,12 +179,16 @@ impl LuaPluginJobs {
                 Err(error) => {
                     let message = error.to_string();
                     let retryable = error.retryable();
-                    self.failed_operations.insert(active.plugin_id.clone(), active.operation);
-                    self.views.insert(active.plugin_id.clone(), LuaPluginJobView {
-                        kind: LuaPluginJobKind::Failed,
-                        status_text: message.clone(),
-                        retryable,
-                    });
+                    self.failed_operations
+                        .insert(active.plugin_id.clone(), active.operation);
+                    self.views.insert(
+                        active.plugin_id.clone(),
+                        LuaPluginJobView {
+                            kind: LuaPluginJobKind::Failed,
+                            status_text: message.clone(),
+                            retryable,
+                        },
+                    );
                     completions.push(LuaPluginCompletion {
                         plugin_id: active.plugin_id,
                         success: false,
@@ -174,7 +205,9 @@ impl LuaPluginJobs {
     }
 
     fn start_next(&mut self, event_proxy: EventProxy) {
-        let Some(job) = self.queued.pop_front() else { return };
+        let Some(job) = self.queued.pop_front() else {
+            return;
+        };
         let (tx, rx) = mpsc::channel();
         let window_id = job.window_id;
         let plugin_id = job.plugin_id.clone();
@@ -183,38 +216,76 @@ impl LuaPluginJobs {
             .name(format!("lua-plugin-{plugin_id}"))
             .spawn(move || {
                 let store = LuaPluginStore::managed();
-                let previous_lock_entry = store.load_lock().ok().and_then(|lock| lock.plugins.get(&plugin_id).cloned());
-                let lock_changed = matches!(&operation, LuaPluginOperation::Install(_) | LuaPluginOperation::Update(_) | LuaPluginOperation::Remove);
-                let wake = || event_proxy.send_event(RioEventType::Rio(RioEvent::Render), window_id);
+                let previous_lock_entry = store
+                    .load_lock()
+                    .ok()
+                    .and_then(|lock| lock.plugins.get(&plugin_id).cloned());
+                let lock_changed = matches!(
+                    &operation,
+                    LuaPluginOperation::Install(_)
+                        | LuaPluginOperation::Update(_)
+                        | LuaPluginOperation::Remove
+                );
+                let wake = || {
+                    event_proxy.send_event(RioEventType::Rio(RioEvent::Render), window_id)
+                };
                 let progress_tx = tx.clone();
                 let progress = |event| {
                     let _ = progress_tx.send(WorkerUpdate::Progress(event));
                     wake();
                 };
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match operation {
-                    LuaPluginOperation::Install(spec) => store.install(spec, progress, validate_checkout).map(|_| ()),
-                    LuaPluginOperation::Update(spec) => store.update(spec, progress, validate_checkout).map(|_| ()),
-                    LuaPluginOperation::Restore => store.restore_exact(&plugin_id, progress, validate_checkout).map(|_| ()),
-                    LuaPluginOperation::Remove => store.remove(&plugin_id, progress).map(|_| ()),
-                })).unwrap_or_else(|_| Err(AcquisitionError::Validation("plugin lifecycle worker panicked".into())));
-                let _ = tx.send(WorkerUpdate::Finished { result, previous_lock_entry, lock_changed });
+                let result =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        match operation {
+                            LuaPluginOperation::Install(spec) => store
+                                .install(spec, progress, validate_checkout)
+                                .map(|_| ()),
+                            LuaPluginOperation::Update(spec) => store
+                                .update(spec, progress, validate_checkout)
+                                .map(|_| ()),
+                            LuaPluginOperation::Restore => store
+                                .restore_exact(&plugin_id, progress, validate_checkout)
+                                .map(|_| ()),
+                            LuaPluginOperation::Remove => {
+                                store.remove(&plugin_id, progress).map(|_| ())
+                            }
+                        }
+                    }))
+                    .unwrap_or_else(|_| {
+                        Err(AcquisitionError::Validation(
+                            "plugin lifecycle worker panicked".into(),
+                        ))
+                    });
+                let _ = tx.send(WorkerUpdate::Finished {
+                    result,
+                    previous_lock_entry,
+                    lock_changed,
+                });
                 wake();
             })
             .expect("spawn Lua plugin lifecycle worker");
-        self.active = Some(ActiveJob { plugin_id: job.plugin_id, operation: job.operation, updates: rx });
+        self.active = Some(ActiveJob {
+            plugin_id: job.plugin_id,
+            operation: job.operation,
+            updates: rx,
+        });
     }
 }
 
-fn validate_checkout(context: &neoism_extensions::lua_plugins::ValidationContext<'_>) -> Result<ValidatedPluginMetadata, String> {
-    let package = neoism_lua::load_plugin_manifest(context.checkout_path).map_err(|error| error.to_string())?;
+fn validate_checkout(
+    context: &neoism_extensions::lua_plugins::ValidationContext<'_>,
+) -> Result<ValidatedPluginMetadata, String> {
+    let package = neoism_lua::load_plugin_manifest(context.checkout_path)
+        .map_err(|error| error.to_string())?;
     if package.manifest.id != context.spec.plugin_id {
         return Err(format!(
             "package manifest id `{}` does not match requested plugin `{}`",
             package.manifest.id, context.spec.plugin_id
         ));
     }
-    let manifest_checksum = neoism_extensions::lua_plugins::file_sha256(&package.manifest_path)
-        .map_err(|error| error.to_string())?;
+    let manifest_checksum =
+        neoism_extensions::lua_plugins::file_sha256(&package.manifest_path)
+            .map_err(|error| error.to_string())?;
     Ok(ValidatedPluginMetadata {
         plugin_version: package.manifest.version,
         manifest_checksum,

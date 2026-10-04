@@ -31,10 +31,10 @@ mod file;
 mod format;
 #[path = "tool_support/locks.rs"]
 pub(crate) mod locks;
-#[path = "tool_support/memory.rs"]
-mod memory;
 #[path = "tool_support/media.rs"]
 mod media;
+#[path = "tool_support/memory.rs"]
+mod memory;
 #[path = "tool_support/patch.rs"]
 mod patch;
 #[path = "tool_support/patch_tool.rs"]

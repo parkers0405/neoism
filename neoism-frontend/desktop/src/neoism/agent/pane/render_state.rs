@@ -445,13 +445,19 @@ impl NeoismAgentPane {
 
     pub fn particle_bursts(
         &self,
-    ) -> &[(neoism_ui::panels::agent_pane::view::fx::ParticleEffectSpec, f32)] {
+    ) -> &[(
+        neoism_ui::panels::agent_pane::view::fx::ParticleEffectSpec,
+        f32,
+    )] {
         &self.particle_bursts
     }
 
     pub fn set_particle_bursts(
         &mut self,
-        bursts: Vec<(neoism_ui::panels::agent_pane::view::fx::ParticleEffectSpec, f32)>,
+        bursts: Vec<(
+            neoism_ui::panels::agent_pane::view::fx::ParticleEffectSpec,
+            f32,
+        )>,
     ) {
         self.particle_bursts = bursts;
     }

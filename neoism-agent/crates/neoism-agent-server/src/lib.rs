@@ -49,15 +49,15 @@ mod permission;
 mod permission_runtime;
 mod platform_shell;
 mod plugin;
-mod plugin_package;
-mod scoped_plugin_runtime;
 mod plugin_adapters;
 mod plugin_host_process;
+mod plugin_package;
 mod plugins;
 mod project;
 mod project_routes;
 mod provider_stream_message;
 mod provider_stream_processor;
+mod scoped_plugin_runtime;
 
 mod provider {
     pub(crate) use neoism_agent_builtins::provider::{

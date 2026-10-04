@@ -146,7 +146,10 @@ mod tests {
             "same application operation",
             "deferred GPU upload",
         ] {
-            assert!(page.body.contains(required), "missing Mash Up Pack guidance: {required}");
+            assert!(
+                page.body.contains(required),
+                "missing Mash Up Pack guidance: {required}"
+            );
         }
         assert!(bundled_doc("Neoism/Appearance.md")
             .unwrap()

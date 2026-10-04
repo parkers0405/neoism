@@ -196,8 +196,13 @@ impl Screen<'_> {
                 // nvim removed; native editor equivalent TBD.
                 self.renderer.modal.close();
             }
-            ModalAction::LuaPromptReply { request_id, value, cancelled } => {
-                self.pending_lua_prompt_replies.push((request_id, value, cancelled));
+            ModalAction::LuaPromptReply {
+                request_id,
+                value,
+                cancelled,
+            } => {
+                self.pending_lua_prompt_replies
+                    .push((request_id, value, cancelled));
                 self.renderer.modal.close();
             }
             ModalAction::MarkdownFileLink { document, value } => {

@@ -4,9 +4,9 @@
 //! workspace, document and revision are checked again at delivery.
 use super::*;
 use neoism_protocol::editor::{
-    EditorClientMessage as Request, EditorLspAction as Action,
-    EditorLspActionCapability, EditorLspBufferSnapshot, EditorLspEditOperation,
-    EditorLspMutationPlan, EditorLspOpenBuffer, EditorServerMessage as Reply,
+    EditorClientMessage as Request, EditorLspAction as Action, EditorLspActionCapability,
+    EditorLspBufferSnapshot, EditorLspEditOperation, EditorLspMutationPlan,
+    EditorLspOpenBuffer, EditorServerMessage as Reply,
 };
 use std::time::{Duration, Instant};
 
@@ -275,7 +275,11 @@ impl Screen<'_> {
             {
                 continue;
             }
-            let Some(code) = item.context().code.as_ref().filter(|code| code_uses_host_lsp(code))
+            let Some(code) = item
+                .context()
+                .code
+                .as_ref()
+                .filter(|code| code_uses_host_lsp(code))
             else {
                 continue;
             };
@@ -283,9 +287,10 @@ impl Screen<'_> {
             if root.relative(&path).is_none() {
                 continue;
             }
-            if unique.insert(path.clone(), code.buffer.revision).is_some_and(|revision| {
-                revision != code.buffer.revision
-            }) {
+            if unique
+                .insert(path.clone(), code.buffer.revision)
+                .is_some_and(|revision| revision != code.buffer.revision)
+            {
                 return Err("remote LSP buffer has conflicting open revisions".into());
             }
             snapshots.push((route, code.path.clone(), code.buffer.revision));
@@ -311,16 +316,21 @@ impl Screen<'_> {
                 .context_manager
                 .get_by_route_id(*route)
                 .and_then(|item| item.context().code.as_ref())
-                .ok_or_else(|| "remote LSP buffer disappeared during synchronization".to_string())?;
+                .ok_or_else(|| {
+                    "remote LSP buffer disappeared during synchronization".to_string()
+                })?;
             let identity = path.to_string_lossy().into_owned();
             let snapshot = EditorLspBufferSnapshot {
                 path: identity.clone(),
                 revision: *revision,
                 text: code.buffer.text(),
             };
-            if unique.insert(identity, snapshot.clone()).is_some_and(|prior| {
-                prior.revision != snapshot.revision || prior.text != snapshot.text
-            }) {
+            if unique
+                .insert(identity, snapshot.clone())
+                .is_some_and(|prior| {
+                    prior.revision != snapshot.revision || prior.text != snapshot.text
+                })
+            {
                 return Err("remote LSP buffer has conflicting live content".into());
             }
         }
@@ -337,7 +347,9 @@ impl Screen<'_> {
         open_revisions: Vec<(usize, PathBuf, u64)>,
         request: Request,
     ) -> Result<(), String> {
-        let Some((handle, runtime)) = self.context_manager.daemon_link_handle_and_runtime() else {
+        let Some((handle, runtime)) =
+            self.context_manager.daemon_link_handle_and_runtime()
+        else {
             return Err("workspace LSP connection is unavailable".into());
         };
         let key = (document.window, document.endpoint.clone(), request_id);
@@ -429,13 +441,9 @@ impl Screen<'_> {
                 document.file.to_string_lossy().into_owned(),
             ),
         };
-        let line =
-            super::lua::argument_u32(arguments, &["line"], cursor_line)?;
-        let character = super::lua::argument_u32(
-            arguments,
-            &["character", "column"],
-            cursor_col,
-        )?;
+        let line = super::lua::argument_u32(arguments, &["line"], cursor_line)?;
+        let character =
+            super::lua::argument_u32(arguments, &["character", "column"], cursor_col)?;
         let focused = host_path_eq(&PathBuf::from(host_file.as_str()), &document.file);
         let mut target = neoism_lua::LuaLspTarget {
             root: host_root.as_str().to_owned(),
@@ -481,12 +489,15 @@ impl Screen<'_> {
                 },
             )
         } else {
-            let wire_operation = edit_operation.expect("checked structured edit operation");
+            let wire_operation =
+                edit_operation.expect("checked structured edit operation");
             let argument = match operation {
                 neoism_lua::LuaLspOperation::Rename => {
                     let value = super::lua::argument_str(arguments, "newName")?
                         .filter(|value| !value.trim().is_empty())
-                        .ok_or_else(|| "rename requires a non-empty newName".to_string())?;
+                        .ok_or_else(|| {
+                            "rename requires a non-empty newName".to_string()
+                        })?;
                     Some(value.to_owned())
                 }
                 _ => None,
@@ -532,7 +543,8 @@ impl Screen<'_> {
         if !owner_matches_link(&action.document, self.context_manager.daemon_endpoint()) {
             return Err("workspace LSP connection is no longer attached".into());
         }
-        let (open_buffers, open_revisions) = self.remote_lua_open_buffers(&action.document)?;
+        let (open_buffers, open_revisions) =
+            self.remote_lua_open_buffers(&action.document)?;
         if open_revisions != action.open_revisions {
             return Err("an open remote buffer changed before action selection".into());
         }
@@ -591,7 +603,8 @@ impl Screen<'_> {
         id: String,
         prepared: RemoteLuaLspPreparedMutation,
     ) -> Result<neoism_lua::LuaLspTarget, String> {
-        if !owner_matches_link(&prepared.document, self.context_manager.daemon_endpoint()) {
+        if !owner_matches_link(&prepared.document, self.context_manager.daemon_endpoint())
+        {
             return Err("workspace LSP connection is no longer attached".into());
         }
         let (open_buffers, current) = self.remote_lua_open_buffers(&prepared.document)?;
@@ -604,7 +617,10 @@ impl Screen<'_> {
                 .and_then(|item| item.context().code.as_ref())
                 .is_none_or(|code| {
                     !code_uses_host_lsp(code)
-                        || !host_path_eq(&code.path, &PathBuf::from(&prepared.target.path))
+                        || !host_path_eq(
+                            &code.path,
+                            &PathBuf::from(&prepared.target.path),
+                        )
                         || code.buffer.revision != revision
                 })
         }) {
@@ -1576,18 +1592,22 @@ impl Screen<'_> {
                             )
                         }
                         neoism_lua::LuaLspOperation::Rename => {
-                            neoism_lua::LuaLspOutcome::Rename(neoism_lua::LuaLspMutation {
-                                title: plan.title.clone(),
-                                changed_files: Vec::new(),
-                                ran_command: false,
-                            })
+                            neoism_lua::LuaLspOutcome::Rename(
+                                neoism_lua::LuaLspMutation {
+                                    title: plan.title.clone(),
+                                    changed_files: Vec::new(),
+                                    ran_command: false,
+                                },
+                            )
                         }
                         neoism_lua::LuaLspOperation::Format => {
-                            neoism_lua::LuaLspOutcome::Format(neoism_lua::LuaLspMutation {
-                                title: plan.title.clone(),
-                                changed_files: Vec::new(),
-                                ran_command: false,
-                            })
+                            neoism_lua::LuaLspOutcome::Format(
+                                neoism_lua::LuaLspMutation {
+                                    title: plan.title.clone(),
+                                    changed_files: Vec::new(),
+                                    ran_command: false,
+                                },
+                            )
                         }
                         _ => unreachable!("only remote mutations produce plans"),
                     },
@@ -1664,7 +1684,10 @@ impl Screen<'_> {
                 .filter(|file| !file.open)
                 .map(|file| file.path.as_str())
                 .collect::<std::collections::HashSet<_>>();
-            let applied = applied_files.iter().map(String::as_str).collect::<std::collections::HashSet<_>>();
+            let applied = applied_files
+                .iter()
+                .map(String::as_str)
+                .collect::<std::collections::HashSet<_>>();
             let mut returned = std::collections::HashSet::new();
             if *ran_command
                 || (command_id.is_some()
@@ -1727,7 +1750,11 @@ impl Screen<'_> {
                         return true;
                     };
                     if let Err(message) = code.buffer.validate_text_edits(&typed) {
-                        enqueue_remote_lua_error(&pending, "invalid_remote_result", &message);
+                        enqueue_remote_lua_error(
+                            &pending,
+                            "invalid_remote_result",
+                            &message,
+                        );
                         return true;
                     }
                     applications.push((route, file.path.clone(), typed.clone()));
@@ -1771,7 +1798,8 @@ impl Screen<'_> {
                 ran_command: false,
             };
             if let Some(command_id) = command_id {
-                let Ok((buffers, current)) = self.remote_lua_buffer_snapshots(document) else {
+                let Ok((buffers, current)) = self.remote_lua_buffer_snapshots(document)
+                else {
                     enqueue_remote_lua_error(
                         &pending,
                         "command_failed",
@@ -1779,8 +1807,7 @@ impl Screen<'_> {
                     );
                     return true;
                 };
-                let finalize_id =
-                    (1u64 << 63) | QUERY_SEQ.fetch_add(1, Ordering::SeqCst);
+                let finalize_id = (1u64 << 63) | QUERY_SEQ.fetch_add(1, Ordering::SeqCst);
                 let surface = format!("lua-lsp:{}:{finalize_id}", document.route);
                 let request = Request::LspEditFinalize {
                     command_id: command_id.clone(),
@@ -1839,8 +1866,7 @@ impl Screen<'_> {
         } = &pending.kind
         {
             let Reply::LspEditFinalized {
-                ran_command: true,
-                ..
+                ran_command: true, ..
             } = message
             else {
                 let message = match message {
@@ -2615,10 +2641,7 @@ mod tests {
             "lua-cancel-test"
         ));
         assert!(lock().pending.contains_key(&key));
-        assert!(cancel_remote_lua_lsp_request(
-            &owner,
-            "lua-cancel-test"
-        ));
+        assert!(cancel_remote_lua_lsp_request(&owner, "lua-cancel-test"));
         assert!(!lock().pending.contains_key(&key));
     }
     #[test]

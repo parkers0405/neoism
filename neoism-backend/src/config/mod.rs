@@ -423,7 +423,8 @@ pub struct PluginPreferences {
     pub update_policy: PluginUpdatePolicy,
     pub trusted_sources: Vec<String>,
     /// User replacements for fields in a pack's `editor-plugins` declaration.
-    pub mashup_overrides: std::collections::BTreeMap<String, mashup::EditorPluginOverride>,
+    pub mashup_overrides:
+        std::collections::BTreeMap<String, mashup::EditorPluginOverride>,
 }
 
 /// The golden grouped `config.json`. Every domain is its own block —
@@ -861,10 +862,14 @@ pub fn write_manual_theme_selection(theme: &str) -> std::io::Result<()> {
         .as_deref()
         .is_some_and(|id| !id.trim().is_empty())
     {
-        let mut baseline = config.appearance.mashup_baseline.unwrap_or(mashup::MashupBaseline {
-            theme: theme.to_string(),
-            font_family: config.appearance.fonts.family,
-        });
+        let mut baseline =
+            config
+                .appearance
+                .mashup_baseline
+                .unwrap_or(mashup::MashupBaseline {
+                    theme: theme.to_string(),
+                    font_family: config.appearance.fonts.family,
+                });
         baseline.theme = theme.to_string();
         updates.push((
             "appearance.mashup-baseline",
@@ -929,12 +934,18 @@ fn atomic_replace(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
-    let parent = path
-        .parent()
-        .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "config path has no parent"))?;
+    let parent = path.parent().ok_or_else(|| {
+        Error::new(ErrorKind::InvalidInput, "config path has no parent")
+    })?;
     let suffix = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
-    let temporary = parent.join(format!(".config.json.{}.{}.tmp", std::process::id(), suffix));
-    let permissions = std::fs::metadata(path).ok().map(|metadata| metadata.permissions());
+    let temporary = parent.join(format!(
+        ".config.json.{}.{}.tmp",
+        std::process::id(),
+        suffix
+    ));
+    let permissions = std::fs::metadata(path)
+        .ok()
+        .map(|metadata| metadata.permissions());
     let result = (|| {
         let mut file = std::fs::OpenOptions::new()
             .write(true)
@@ -1061,9 +1072,11 @@ impl Config {
             return Err("configuration patch root must be an object".into());
         }
         let old_appearance = self.appearance.clone();
-        let mut value = serde_json::to_value(&*self).map_err(|error| error.to_string())?;
+        let mut value =
+            serde_json::to_value(&*self).map_err(|error| error.to_string())?;
         merge_json_patch(&mut value, patch);
-        let mut candidate: Config = serde_json::from_value(value).map_err(|error| error.to_string())?;
+        let mut candidate: Config =
+            serde_json::from_value(value).map_err(|error| error.to_string())?;
 
         if candidate.appearance.palette == old_appearance.palette {
             candidate.appearance.colors = old_appearance.colors;
@@ -1366,7 +1379,10 @@ fn merge_json_patch(target: &mut serde_json::Value, patch: &serde_json::Value) {
     match (target, patch) {
         (serde_json::Value::Object(target), serde_json::Value::Object(patch)) => {
             for (key, value) in patch {
-                merge_json_patch(target.entry(key.clone()).or_insert(serde_json::Value::Null), value);
+                merge_json_patch(
+                    target.entry(key.clone()).or_insert(serde_json::Value::Null),
+                    value,
+                );
             }
         }
         (target, patch) => *target = patch.clone(),
@@ -1629,9 +1645,12 @@ mod tests {
     fn mashup_owned_fields_are_composed_for_one_write() {
         let updates = [
             ("appearance.mashup-pack", serde_json::json!("focused")),
-            ("appearance.mashup-baseline", serde_json::json!({
-                "theme": "global-theme", "font-family": null
-            })),
+            (
+                "appearance.mashup-baseline",
+                serde_json::json!({
+                    "theme": "global-theme", "font-family": null
+                }),
+            ),
             ("appearance.theme", serde_json::json!("focused-theme")),
             ("appearance.fonts.family", serde_json::json!("Iosevka")),
         ];
@@ -1642,12 +1661,17 @@ mod tests {
                 "editor": { "minimap": true }
             }"#,
             &updates,
-        ).unwrap();
+        )
+        .unwrap();
         let config = deserialize_config(&content).unwrap();
         assert_eq!(config.appearance.mashup_pack.as_deref(), Some("focused"));
-        assert_eq!(config.appearance.mashup_baseline, Some(mashup::MashupBaseline {
-            theme: "global-theme".into(), font_family: None,
-        }));
+        assert_eq!(
+            config.appearance.mashup_baseline,
+            Some(mashup::MashupBaseline {
+                theme: "global-theme".into(),
+                font_family: None,
+            })
+        );
         assert_eq!(config.appearance.theme, "focused-theme");
         assert_eq!(config.appearance.fonts.family.as_deref(), Some("Iosevka"));
         assert!(config.editor.minimap);
@@ -1667,9 +1691,18 @@ mod tests {
                 }
             }"#,
         );
-        assert_eq!(config.ui.left_sidebar.file_tree, SidebarPlacementPreference::Unified);
-        assert_eq!(config.ui.left_sidebar.notes, SidebarPlacementPreference::Independent);
-        assert_eq!(config.ui.left_sidebar.conversations, SidebarPlacementPreference::Unified);
+        assert_eq!(
+            config.ui.left_sidebar.file_tree,
+            SidebarPlacementPreference::Unified
+        );
+        assert_eq!(
+            config.ui.left_sidebar.notes,
+            SidebarPlacementPreference::Independent
+        );
+        assert_eq!(
+            config.ui.left_sidebar.conversations,
+            SidebarPlacementPreference::Unified
+        );
     }
 
     #[test]

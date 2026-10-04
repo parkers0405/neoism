@@ -804,9 +804,12 @@ fn render_subagent_rows<I: AgentSidePanelIconHost>(
     // the full list's top (`list_rect[1]`, already shifted by the page
     // scroll), which can sit above the viewport; `set_row_hit_rect` keeps
     // that origin so indices stay correct, only the bounds are clamped.
-    let hit_rect = intersect_rect(list_rect, viewport).unwrap_or(list_rect);
-    pane.side_panel_mut()
-        .set_row_hit_rect_with_origin(hit_rect, list_rect[1], row_h);
+    if let Some(hit_rect) = intersect_rect(list_rect, viewport) {
+        pane.side_panel_mut()
+            .set_row_hit_rect_with_origin(hit_rect, list_rect[1], row_h);
+    } else {
+        pane.side_panel_mut().clear_row_hit_rect();
+    }
 
     let cursor_offset = pane.side_panel_mut().tick_cursor();
     let selected = pane.side_panel().selected_index();
@@ -831,7 +834,10 @@ fn render_subagent_rows<I: AgentSidePanelIconHost>(
     // how file_tree keeps its cursor visible. The branch row's offset
     // from the content top is fixed; we only need the scroll to land it
     // between the viewport edges.
-    if focused && selected < rows_len {
+    // Only selection movement requests a reveal. Pointer focus by itself
+    // must not scroll a wheel-scrolled branch list back to the old selection.
+    let reveal_selected = pane.side_panel_mut().take_reveal_selected_branch();
+    if focused && reveal_selected && selected < rows_len {
         let row_offset_in_list = selected as f32 * row_h;
         // Row top/bottom in *unscrolled* content space, relative to the
         // list's scrolled origin: convert back to absolute by adding the

@@ -199,7 +199,8 @@ impl Screen<'_> {
             Key::Named(NamedKey::Enter) => {
                 if panel.side_panel().new_chat_selected() {
                     self.open_neoism_agent_tab();
-                } else if let Some(entry) = panel.side_panel().selected_session().cloned() {
+                } else if let Some(entry) = panel.side_panel().selected_session().cloned()
+                {
                     self.activate_catalog_entry(entry);
                 }
             }
@@ -373,11 +374,17 @@ impl Screen<'_> {
             self.hide_conversations_sidebar();
             return;
         }
-        self.renderer.left_sidebar_host.show(LeftSidebarView::Conversations, focus);
-        if self.renderer.left_sidebar_host.placement(LeftSidebarView::Conversations)
+        self.renderer
+            .left_sidebar_host
+            .show(LeftSidebarView::Conversations, focus);
+        if self
+            .renderer
+            .left_sidebar_host
+            .placement(LeftSidebarView::Conversations)
             == SidebarPlacement::Unified
         {
-            self.renderer.hide_other_unified_sidebars(LeftSidebarView::Conversations);
+            self.renderer
+                .hide_other_unified_sidebars(LeftSidebarView::Conversations);
         }
         let directory = self
             .workspace_root_for_new_shell()
@@ -416,7 +423,9 @@ impl Screen<'_> {
 
     fn hide_conversations_sidebar(&mut self) {
         use neoism_ui::panels::left_sidebar_host::LeftSidebarView;
-        self.renderer.left_sidebar_host.hide(LeftSidebarView::Conversations);
+        self.renderer
+            .left_sidebar_host
+            .hide(LeftSidebarView::Conversations);
         self.renderer.conversations_visible = false;
         self.renderer
             .conversations_pane
@@ -493,13 +502,20 @@ impl Screen<'_> {
         let mouse_x = self.mouse.x as f32 / scale_factor;
         let width = state.original_width + mouse_x - state.start_x;
         use neoism_ui::panels::left_sidebar_host::{LeftSidebarView, SidebarPlacement};
-        if self.renderer.left_sidebar_host.placement(LeftSidebarView::Conversations)
+        if self
+            .renderer
+            .left_sidebar_host
+            .placement(LeftSidebarView::Conversations)
             == SidebarPlacement::Unified
         {
             self.renderer.left_sidebar_host.set_unified_width(width);
         } else {
-            self.renderer.conversations_pane.side_panel_mut().set_width(width);
-            self.conversations_sidebar_width = self.renderer.conversations_pane.side_panel().width();
+            self.renderer
+                .conversations_pane
+                .side_panel_mut()
+                .set_width(width);
+            self.conversations_sidebar_width =
+                self.renderer.conversations_pane.side_panel().width();
         }
         self.reapply_chrome_layout();
         self.mark_dirty();
@@ -568,7 +584,11 @@ impl Screen<'_> {
         let directory = panel.session_directory().map(str::to_owned);
         let items = vec![
             ContextMenuItem::new(
-                if entry.pinned { "Unpin Chat" } else { "Pin Chat" },
+                if entry.pinned {
+                    "Unpin Chat"
+                } else {
+                    "Pin Chat"
+                },
                 "p",
                 ContextMenuAction::Agent(AgentContextAction::SetSessionPinned {
                     session_id: entry.id.clone(),
@@ -614,16 +634,13 @@ impl Screen<'_> {
     }
 
     pub(crate) fn handle_conversations_click(&mut self) -> bool {
-        let Some((panel_left, top, height, width)) = self.conversations_sidebar_bounds() else {
+        let Some((panel_left, top, height, width)) = self.conversations_sidebar_bounds()
+        else {
             return false;
         };
         let (x, y) = self.mouse_logical_for_hit_test();
         let panel = &mut self.renderer.conversations_pane;
-        if y < top
-            || y > top + height
-            || x < panel_left
-            || x >= panel_left + width
-        {
+        if y < top || y > top + height || x < panel_left || x >= panel_left + width {
             panel.side_panel_mut().set_focused(false);
             return false;
         }
@@ -657,16 +674,13 @@ impl Screen<'_> {
         &mut self,
         delta: &neoism_window::event::MouseScrollDelta,
     ) -> bool {
-        let Some((panel_left, top, height, width)) = self.conversations_sidebar_bounds() else {
+        let Some((panel_left, top, height, width)) = self.conversations_sidebar_bounds()
+        else {
             return false;
         };
         let (x, y) = self.mouse_logical_for_hit_test();
         let panel = &mut self.renderer.conversations_pane;
-        if y < top
-            || y > top + height
-            || x < panel_left
-            || x >= panel_left + width
-        {
+        if y < top || y > top + height || x < panel_left || x >= panel_left + width {
             return false;
         }
         let row_h = panel.side_panel().row_height().max(1.0);
@@ -679,7 +693,9 @@ impl Screen<'_> {
 
     pub(crate) fn notes_sidebar_bounds(&self) -> Option<(f32, f32, f32, f32)> {
         use neoism_ui::panels::left_sidebar_host::LeftSidebarView;
-        let left = self.renderer.left_sidebar_view_left(LeftSidebarView::Notes)?;
+        let left = self
+            .renderer
+            .left_sidebar_view_left(LeftSidebarView::Notes)?;
         // Notes dock right of the file tree, sharing the same middle
         // band (below the full-width top chrome, above the status bar).
         let (tree_top, tree_bottom) = self.side_panel_band();
@@ -688,7 +704,8 @@ impl Screen<'_> {
             left,
             tree_top,
             tree_height,
-            self.renderer.left_sidebar_view_width(LeftSidebarView::Notes),
+            self.renderer
+                .left_sidebar_view_width(LeftSidebarView::Notes),
         ))
     }
 
@@ -727,10 +744,15 @@ impl Screen<'_> {
         let mouse_x = self.mouse.x as f32 / scale_factor;
         let target_width = mouse_x - state.start_x + state.original_width;
         use neoism_ui::panels::left_sidebar_host::{LeftSidebarView, SidebarPlacement};
-        if self.renderer.left_sidebar_host.placement(LeftSidebarView::Notes)
+        if self
+            .renderer
+            .left_sidebar_host
+            .placement(LeftSidebarView::Notes)
             == SidebarPlacement::Unified
         {
-            self.renderer.left_sidebar_host.set_unified_width(target_width);
+            self.renderer
+                .left_sidebar_host
+                .set_unified_width(target_width);
         } else {
             self.renderer
                 .notes_sidebar

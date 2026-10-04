@@ -22,7 +22,9 @@ impl Screen<'_> {
         &mut self,
         delta: &neoism_window::event::MouseScrollDelta,
     ) -> bool {
-        let Some((tree_left, tree_top, tree_height, tree_width)) = self.file_tree_bounds() else {
+        let Some((tree_left, tree_top, tree_height, tree_width)) =
+            self.file_tree_bounds()
+        else {
             return false;
         };
         let scale_factor = self.sugarloaf.scale_factor();
@@ -53,7 +55,9 @@ impl Screen<'_> {
     }
 
     pub(crate) fn file_tree_row_under_mouse(&self) -> (Option<usize>, bool) {
-        let Some((tree_left, tree_top, tree_height, tree_width)) = self.file_tree_bounds() else {
+        let Some((tree_left, tree_top, tree_height, tree_width)) =
+            self.file_tree_bounds()
+        else {
             return (None, false);
         };
         let (mouse_x, mouse_y) = self.mouse_logical_for_hit_test();
@@ -62,15 +66,12 @@ impl Screen<'_> {
         // chrome, above the full-width status bar). MUST match the
         // `tree_top` used in `host/run.rs` render — both read
         // `side_panel_band()` so they can't drift.
-        let row =
-            self.renderer
-                .file_tree
-                .hit_test(
-                    mouse_x - tree_left,
-                    mouse_y,
-                    tree_top,
-                    tree_height,
-                );
+        let row = self.renderer.file_tree.hit_test(
+            mouse_x - tree_left,
+            mouse_y,
+            tree_top,
+            tree_height,
+        );
         let in_tree_bounds = mouse_x >= tree_left
             && mouse_x <= tree_left + tree_width
             && mouse_y >= tree_top

@@ -210,7 +210,10 @@ impl Default for CommandPalette {
 }
 
 impl CommandPalette {
-    pub fn set_plugin_commands(&mut self, commands: Vec<neoism_lua::CommandContribution>) {
+    pub fn set_plugin_commands(
+        &mut self,
+        commands: Vec<neoism_lua::CommandContribution>,
+    ) {
         self.plugin_commands = commands;
         self.selected_index = 0;
         self.scroll_offset = 0;

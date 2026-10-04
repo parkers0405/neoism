@@ -35,12 +35,24 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         self.last_viewport = Some(viewport);
         self.reconcile_left_sidebar_host();
         let scale = self.chrome_scale.clamp(0.5, 3.0);
-        let top_style = self.plugins.styles.resolve(neoism_lua::selector::CHROME_TOP);
+        let top_style = self
+            .plugins
+            .styles
+            .resolve(neoism_lua::selector::CHROME_TOP);
         let status_style = self.plugins.styles.resolve(neoism_lua::selector::STATUS);
-        let tabs_style = self.plugins.styles.resolve(neoism_lua::selector::BUFFER_TABS);
+        let tabs_style = self
+            .plugins
+            .styles
+            .resolve(neoism_lua::selector::BUFFER_TABS);
         let tree_style = self.plugins.styles.resolve(neoism_lua::selector::FILE_TREE);
-        let notes_style = self.plugins.styles.resolve(neoism_lua::selector::NOTES_TREE);
-        let agent_style = self.plugins.styles.resolve(neoism_lua::selector::AGENT_SIDEBAR);
+        let notes_style = self
+            .plugins
+            .styles
+            .resolve(neoism_lua::selector::NOTES_TREE);
+        let agent_style = self
+            .plugins
+            .styles
+            .resolve(neoism_lua::selector::AGENT_SIDEBAR);
         let composer_style = self.plugins.styles.resolve(neoism_lua::selector::COMPOSER);
         self.mobile_agent_narrow = self.mobile_web_agent_panel_enabled
             && viewport.w
@@ -59,9 +71,8 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             .entry(crate::surface_layout::CHROME_ACTIONS_SURFACE.into())
             .or_default();
         if actions_patch.visible.is_none() {
-            actions_patch.visible = Some(
-                self.top_bar.is_visible() && top_style.visible != Some(false),
-            );
+            actions_patch.visible =
+                Some(self.top_bar.is_visible() && top_style.visible != Some(false));
         }
         if actions_patch.thickness.is_none() {
             actions_patch.thickness = Some(
@@ -71,9 +82,10 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                     .max(0.0),
             );
         }
-        let mut surface_registry = crate::surface_layout::SurfaceRegistry::chrome_defaults(
-            crate::surface_layout::SurfaceItemSize::new(26.0 * scale, 26.0 * scale),
-        );
+        let mut surface_registry =
+            crate::surface_layout::SurfaceRegistry::chrome_defaults(
+                crate::surface_layout::SurfaceItemSize::new(26.0 * scale, 26.0 * scale),
+            );
         self.top_bar
             .configure_surface_registry(&mut surface_registry);
         let mut surface_layout = crate::surface_layout::resolve_surface_layout(
@@ -118,12 +130,8 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         // === Full-width status bar ===
         // Status line spans the entire width along the bottom edge; the
         // side panels stop at its top rather than running underneath.
-        let status_line = Rect::new(
-            frame.x,
-            frame.y + frame.h - status_h,
-            frame.w,
-            status_h,
-        );
+        let status_line =
+            Rect::new(frame.x, frame.y + frame.h - status_h, frame.w, status_h);
         // With no obstruction, content stops at the status line as usual.
         // With a mobile keyboard, status stays at the physical bottom (behind
         // the keyboard) and content stops exactly at the keyboard's top — do
@@ -156,38 +164,55 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             .file_tree
             .as_ref()
             .filter(|tree| tree.is_visible() && tree_style.visible != Some(false))
-            .map(|tree| self.left_sidebar_host.resolved_width(
-                crate::panels::left_sidebar_host::LeftSidebarView::Files,
-                tree_style.width.unwrap_or_else(|| tree.width()).max(0.0),
-            ));
-        let notes_natural = (self.notes_sidebar.is_visible()
-            && notes_style.visible != Some(false))
-            .then(|| {
+            .map(|tree| {
                 self.left_sidebar_host.resolved_width(
-                    crate::panels::left_sidebar_host::LeftSidebarView::Notes,
-                    notes_style.width.unwrap_or_else(|| self.notes_sidebar.width()).max(0.0),
+                    crate::panels::left_sidebar_host::LeftSidebarView::Files,
+                    tree_style.width.unwrap_or_else(|| tree.width()).max(0.0),
                 )
             });
+        let notes_natural = (self.notes_sidebar.is_visible()
+            && notes_style.visible != Some(false))
+        .then(|| {
+            self.left_sidebar_host.resolved_width(
+                crate::panels::left_sidebar_host::LeftSidebarView::Notes,
+                notes_style
+                    .width
+                    .unwrap_or_else(|| self.notes_sidebar.width())
+                    .max(0.0),
+            )
+        });
         let conversations_natural = (self.conversations_visible
             && self.agent_pane.is_some()
             && agent_style.visible != Some(false))
         .then(|| {
             self.left_sidebar_host.resolved_width(
                 crate::panels::left_sidebar_host::LeftSidebarView::Conversations,
-                agent_style.width.unwrap_or_else(|| {
-                self.agent_pane.as_ref().unwrap().side_panel().width() * scale
-                }).max(0.0),
+                agent_style
+                    .width
+                    .unwrap_or_else(|| {
+                        self.agent_pane.as_ref().unwrap().side_panel().width() * scale
+                    })
+                    .max(0.0),
             )
         });
         let resolved_views = self.left_sidebar_host.resolved_views(sidebar_requests);
         let natural_width = |view| match view {
             crate::panels::left_sidebar_host::LeftSidebarView::Files => tree_natural,
             crate::panels::left_sidebar_host::LeftSidebarView::Notes => notes_natural,
-            crate::panels::left_sidebar_host::LeftSidebarView::Conversations => conversations_natural,
+            crate::panels::left_sidebar_host::LeftSidebarView::Conversations => {
+                conversations_natural
+            }
         };
-        let natural_total = resolved_views.iter().filter_map(|view| natural_width(*view)).sum::<f32>();
+        let natural_total = resolved_views
+            .iter()
+            .filter_map(|view| natural_width(*view))
+            .sum::<f32>();
         let gap = if natural_total > 0.0 {
-            tree_style.gap.unwrap_or(TREE_CONTENT_GAP).max(0.0).min(middle_w)
+            tree_style
+                .gap
+                .unwrap_or(TREE_CONTENT_GAP)
+                .max(0.0)
+                .min(middle_w)
         } else {
             0.0
         };
@@ -204,13 +229,21 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         let mut notes_sidebar_rect = None;
         let mut conversations_rect = None;
         for view in resolved_views {
-            let Some(width) = natural_width(view) else { continue };
+            let Some(width) = natural_width(view) else {
+                continue;
+            };
             let rect = Rect::new(next_x, band_top, width * ratio, band_h);
             next_x += rect.w;
             match view {
-                crate::panels::left_sidebar_host::LeftSidebarView::Files => file_tree_rect = Some(rect),
-                crate::panels::left_sidebar_host::LeftSidebarView::Notes => notes_sidebar_rect = Some(rect),
-                crate::panels::left_sidebar_host::LeftSidebarView::Conversations => conversations_rect = Some(rect),
+                crate::panels::left_sidebar_host::LeftSidebarView::Files => {
+                    file_tree_rect = Some(rect)
+                }
+                crate::panels::left_sidebar_host::LeftSidebarView::Notes => {
+                    notes_sidebar_rect = Some(rect)
+                }
+                crate::panels::left_sidebar_host::LeftSidebarView::Conversations => {
+                    conversations_rect = Some(rect)
+                }
             }
         }
         let content_x = (next_x + gap).min(middle_right);
@@ -327,20 +360,18 @@ impl<A: Send + Copy + 'static> Chrome<A> {
 
         let palette_style = self.plugins.styles.resolve(neoism_lua::selector::PALETTE);
         let finder_style = self.plugins.styles.resolve(neoism_lua::selector::FINDER);
-        let command_palette = self
-            .command_palette
-            .is_visible()
-            .then(|| center_modal(
+        let command_palette = self.command_palette.is_visible().then(|| {
+            center_modal(
                 palette_style.width.unwrap_or(MODAL_WIDTH),
                 palette_style.height.unwrap_or(MODAL_HEIGHT),
-            ));
-        let finder = self
-            .finder
-            .is_visible()
-            .then(|| center_modal(
+            )
+        });
+        let finder = self.finder.is_visible().then(|| {
+            center_modal(
                 finder_style.width.unwrap_or(MODAL_WIDTH),
                 finder_style.height.unwrap_or(MODAL_HEIGHT),
-            ));
+            )
+        });
         // Git diff is a full-window overlay rather than a centered
         // card — it needs the room for two columns of hunks.
         let git_diff = self.git_diff.is_visible().then_some(frame);
@@ -938,10 +969,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         (lines * line_h - viewport_h).max(0.0)
     }
 
-    pub(crate) fn handle_chrome_key_shortcut(
-        &mut self,
-        event: &UiEvent,
-    ) -> bool {
+    pub(crate) fn handle_chrome_key_shortcut(&mut self, event: &UiEvent) -> bool {
         let UiEvent::Key(key) = event else {
             return false;
         };
@@ -987,11 +1015,13 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                                     .side_panel()
                                     .selected_session()
                                     .and_then(|entry| {
-                                    entry
-                                        .external_preview
-                                        .as_ref()
-                                        .map(|preview| preview.neoism_session_id.clone())
-                                        .unwrap_or_else(|| Some(entry.id.clone()))
+                                        entry
+                                            .external_preview
+                                            .as_ref()
+                                            .map(|preview| {
+                                                preview.neoism_session_id.clone()
+                                            })
+                                            .unwrap_or_else(|| Some(entry.id.clone()))
                                     });
                             }
                         }
@@ -1060,7 +1090,10 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                 LogicalKey::Named(NamedKey::ArrowUp) => {
                     self.hide_focus_modals();
                     let left_sidebar_focused = self.left_sidebar_host.focused().is_some()
-                        || self.file_tree.as_ref().is_some_and(|tree| tree.is_focused())
+                        || self
+                            .file_tree
+                            .as_ref()
+                            .is_some_and(|tree| tree.is_focused())
                         || self.notes_sidebar.is_focused()
                         || self
                             .agent_pane
@@ -1396,10 +1429,9 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             self.apply_notes_vault();
             self.pending_notes_refresh = true;
         }
-        let transition = self.left_sidebar_host.toggle(
-            LeftSidebarView::Notes,
-            self.notes_sidebar.is_focused(),
-        );
+        let transition = self
+            .left_sidebar_host
+            .toggle(LeftSidebarView::Notes, self.notes_sidebar.is_focused());
         let changed = match transition {
             SidebarTransition::Show => {
                 let changed = !self.notes_sidebar.is_visible();
@@ -1418,7 +1450,9 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                 self.notes_sidebar.set_visible(false);
                 true
             }
-            SidebarTransition::Independent => self.notes_sidebar.toggle_focus_or_visibility(),
+            SidebarTransition::Independent => {
+                self.notes_sidebar.toggle_focus_or_visibility()
+            }
         };
         if self.notes_sidebar.is_visible() {
             if let Some(tree) = self.file_tree.as_mut() {
@@ -2368,10 +2402,7 @@ mod tests {
         let x = rect.x + 12.0;
         let action_y = rect.y + 24.0;
         assert!(chrome.handle_side_panel_pointer(&click(x, action_y), x, action_y));
-        assert_eq!(
-            chrome.drain_top_bar_action(),
-            Some(TopBarAction::OpenAgent)
-        );
+        assert_eq!(chrome.drain_top_bar_action(), Some(TopBarAction::OpenAgent));
         assert!(chrome.take_conversation_new().is_none());
         assert!(chrome.take_conversation_open().is_none());
     }
@@ -2593,13 +2624,19 @@ mod tests {
         assert!(chrome.conversations_visible);
         assert_eq!(chrome.buffer_tabs.tabs().len(), tab_count);
         assert_eq!(chrome.buffer_tabs.active(), active);
-        assert_eq!(chrome.buffer_tabs.tabs()[active].neoism_agent_route_id, route);
+        assert_eq!(
+            chrome.buffer_tabs.tabs()[active].neoism_agent_route_id,
+            route
+        );
 
         chrome.apply_top_bar_action(TopBarAction::ToggleConversations);
         assert!(!chrome.conversations_visible);
         assert_eq!(chrome.buffer_tabs.tabs().len(), tab_count);
         assert_eq!(chrome.buffer_tabs.active(), active);
-        assert_eq!(chrome.buffer_tabs.tabs()[active].neoism_agent_route_id, route);
+        assert_eq!(
+            chrome.buffer_tabs.tabs()[active].neoism_agent_route_id,
+            route
+        );
     }
 
     #[test]
@@ -2612,12 +2649,12 @@ mod tests {
             .unwrap()
             .side_panel_mut()
             .set_sessions(vec![
-                crate::panels::agent_pane::state::side_panel::NeoismAgentSessionEntry::new(
-                    "thread-42",
-                    "Retained chat",
-                    "Today",
-                ),
-            ]);
+            crate::panels::agent_pane::state::side_panel::NeoismAgentSessionEntry::new(
+                "thread-42",
+                "Retained chat",
+                "Today",
+            ),
+        ]);
 
         chrome.toggle_conversations();
         chrome.set_layout(viewport);

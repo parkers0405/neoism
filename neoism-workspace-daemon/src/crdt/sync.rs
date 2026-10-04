@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use neoism_protocol::crdt::{
     CrdtBufferEdit, CrdtBufferId, CrdtBufferUpdate, CrdtClientId, CrdtClientMessage,
-    CrdtCompactionStatus, CrdtPeerPresence, CrdtPresencePeerId, CrdtPresenceUpdate,
-    CrdtEditTransaction, CrdtServerMessage, CrdtSyncEnvelope,
+    CrdtCompactionStatus, CrdtEditTransaction, CrdtPeerPresence, CrdtPresencePeerId,
+    CrdtPresenceUpdate, CrdtServerMessage, CrdtSyncEnvelope,
 };
 use parking_lot::Mutex;
 

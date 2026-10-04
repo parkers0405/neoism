@@ -153,7 +153,9 @@ impl CodeBuffer {
             if (edit.end_line, edit.end_col) < (edit.start_line, edit.start_col) {
                 return Err("LSP edit range ends before it starts".into());
             }
-            if edit.start_col > start_line.len() || !start_line.is_char_boundary(edit.start_col) {
+            if edit.start_col > start_line.len()
+                || !start_line.is_char_boundary(edit.start_col)
+            {
                 return Err("LSP edit start is not a UTF-8 byte boundary".into());
             }
             if edit.end_col > end_line.len() || !end_line.is_char_boundary(edit.end_col) {

@@ -197,11 +197,12 @@ impl CrdtBufferRegistry {
         edits: Vec<CrdtBufferEdit>,
     ) -> Result<CrdtBufferUpdate, CrdtDaemonError> {
         let mut inner = self.inner.lock();
-        let buffer = inner
-            .get_mut(buffer_id)
-            .ok_or_else(|| CrdtDaemonError::UnknownBuffer {
-                buffer_id: buffer_id.to_string(),
-            })?;
+        let buffer =
+            inner
+                .get_mut(buffer_id)
+                .ok_or_else(|| CrdtDaemonError::UnknownBuffer {
+                    buffer_id: buffer_id.to_string(),
+                })?;
         if !expected_state_vector_v1.is_empty()
             && buffer.replica.state_vector_v1() != expected_state_vector_v1
         {

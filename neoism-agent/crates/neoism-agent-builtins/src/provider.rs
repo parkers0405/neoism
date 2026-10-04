@@ -14,19 +14,19 @@ use crate::provider_catalog::OpenAiModelAccess;
 mod provider_anthropic;
 #[path = "provider_chat_completion.rs"]
 mod provider_chat_completion;
+#[path = "provider_media.rs"]
+mod provider_media;
 #[path = "provider_openai.rs"]
 mod provider_openai;
 #[path = "provider_openai_stream.rs"]
 mod provider_openai_stream;
-#[path = "provider_media.rs"]
-mod provider_media;
 #[path = "provider_stub.rs"]
 mod provider_stub;
 use provider_anthropic::{AnthropicClient, AnthropicRuntime};
 pub(crate) use provider_chat_completion::reasoning_effort;
+pub(crate) use provider_media::generate_media;
 use provider_openai::{OpenAiClient, OpenAiRuntime};
 pub use provider_openai_stream::estimate_tokens;
-pub(crate) use provider_media::generate_media;
 use provider_stub::StubRuntime;
 
 pub type ProviderEventStream =

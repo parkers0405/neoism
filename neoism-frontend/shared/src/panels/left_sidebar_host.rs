@@ -62,7 +62,7 @@ impl Default for LeftSidebarHost {
         Self {
             active_unified: None,
             focused: None,
-            unified_width: 360.0,
+            unified_width: 300.0,
             placements: [SidebarPlacement::Unified; 3],
         }
     }
@@ -88,7 +88,10 @@ impl LeftSidebarHost {
         conversations: SidebarPlacement,
     ) {
         self.placements = [files, notes, conversations];
-        if self.active_unified.is_some_and(|view| self.placement(view) != SidebarPlacement::Unified) {
+        if self
+            .active_unified
+            .is_some_and(|view| self.placement(view) != SidebarPlacement::Unified)
+        {
             self.active_unified = None;
         }
     }
@@ -109,20 +112,30 @@ impl LeftSidebarHost {
     }
 
     pub fn reconcile(&mut self, requests: SidebarRequests) {
-        if self.active_unified.is_some_and(|view| !requests.visible(view) || self.placement(view) != SidebarPlacement::Unified) {
+        if self.active_unified.is_some_and(|view| {
+            !requests.visible(view) || self.placement(view) != SidebarPlacement::Unified
+        }) {
             self.active_unified = None;
         }
         if self.active_unified.is_none() {
             self.active_unified = LeftSidebarView::ALL.into_iter().find(|view| {
-                requests.visible(*view) && self.placement(*view) == SidebarPlacement::Unified
+                requests.visible(*view)
+                    && self.placement(*view) == SidebarPlacement::Unified
             });
         }
-        if self.focused.is_some_and(|view| !self.is_resolved_visible(view, requests)) {
+        if self
+            .focused
+            .is_some_and(|view| !self.is_resolved_visible(view, requests))
+        {
             self.focused = None;
         }
     }
 
-    pub fn toggle(&mut self, view: LeftSidebarView, currently_focused: bool) -> SidebarTransition {
+    pub fn toggle(
+        &mut self,
+        view: LeftSidebarView,
+        currently_focused: bool,
+    ) -> SidebarTransition {
         if self.placement(view) == SidebarPlacement::Independent {
             return SidebarTransition::Independent;
         }
@@ -166,7 +179,11 @@ impl LeftSidebarHost {
         self.focused = view;
     }
 
-    pub fn is_resolved_visible(&self, view: LeftSidebarView, requests: SidebarRequests) -> bool {
+    pub fn is_resolved_visible(
+        &self,
+        view: LeftSidebarView,
+        requests: SidebarRequests,
+    ) -> bool {
         if self.placement(view) == SidebarPlacement::Unified {
             self.active_unified == Some(view) && requests.visible(view)
         } else {
@@ -180,7 +197,8 @@ impl LeftSidebarHost {
             resolved.push(view);
         }
         resolved.extend(LeftSidebarView::ALL.into_iter().filter(|view| {
-            self.placement(*view) == SidebarPlacement::Independent && requests.visible(*view)
+            self.placement(*view) == SidebarPlacement::Independent
+                && requests.visible(*view)
         }));
         resolved
     }
@@ -201,19 +219,31 @@ mod tests {
     #[test]
     fn unified_views_switch_in_one_constant_width_slot() {
         let mut host = LeftSidebarHost::default();
-        assert_eq!(host.toggle(LeftSidebarView::Files, false), SidebarTransition::Show);
+        assert_eq!(
+            host.toggle(LeftSidebarView::Files, false),
+            SidebarTransition::Show
+        );
         assert_eq!(host.active_unified(), Some(LeftSidebarView::Files));
-        assert_eq!(host.toggle(LeftSidebarView::Notes, false), SidebarTransition::Show);
+        assert_eq!(
+            host.toggle(LeftSidebarView::Notes, false),
+            SidebarTransition::Show
+        );
         assert_eq!(host.active_unified(), Some(LeftSidebarView::Notes));
-        assert_eq!(host.resolved_width(LeftSidebarView::Notes, 440.0), 360.0);
+        assert_eq!(host.resolved_width(LeftSidebarView::Notes, 440.0), 300.0);
     }
 
     #[test]
     fn focused_active_toggle_closes_but_unfocused_toggle_refocuses() {
         let mut host = LeftSidebarHost::default();
         host.show(LeftSidebarView::Files, false);
-        assert_eq!(host.toggle(LeftSidebarView::Files, false), SidebarTransition::Focus);
-        assert_eq!(host.toggle(LeftSidebarView::Files, true), SidebarTransition::Hide);
+        assert_eq!(
+            host.toggle(LeftSidebarView::Files, false),
+            SidebarTransition::Focus
+        );
+        assert_eq!(
+            host.toggle(LeftSidebarView::Files, true),
+            SidebarTransition::Hide
+        );
         assert_eq!(host.active_unified(), None);
     }
 
@@ -227,16 +257,35 @@ mod tests {
         );
         host.show(LeftSidebarView::Files, true);
         assert_eq!(
-            host.resolved_views(SidebarRequests { files: true, notes: true, conversations: true }),
-            vec![LeftSidebarView::Files, LeftSidebarView::Notes, LeftSidebarView::Conversations]
+            host.resolved_views(SidebarRequests {
+                files: true,
+                notes: true,
+                conversations: true
+            }),
+            vec![
+                LeftSidebarView::Files,
+                LeftSidebarView::Notes,
+                LeftSidebarView::Conversations
+            ]
         );
     }
 
     #[test]
     fn reconcile_collapses_legacy_multi_visible_state_to_one_unified_view() {
         let mut host = LeftSidebarHost::default();
-        host.reconcile(SidebarRequests { files: true, notes: true, conversations: true });
+        host.reconcile(SidebarRequests {
+            files: true,
+            notes: true,
+            conversations: true,
+        });
         assert_eq!(host.active_unified(), Some(LeftSidebarView::Files));
-        assert_eq!(host.resolved_views(SidebarRequests { files: true, notes: true, conversations: true }), vec![LeftSidebarView::Files]);
+        assert_eq!(
+            host.resolved_views(SidebarRequests {
+                files: true,
+                notes: true,
+                conversations: true
+            }),
+            vec![LeftSidebarView::Files]
+        );
     }
 }

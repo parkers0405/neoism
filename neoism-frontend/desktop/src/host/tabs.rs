@@ -55,7 +55,10 @@ impl Renderer {
         _logical_width: f32,
     ) -> f32 {
         let frame_right = self.surface_layout.content.x + self.surface_layout.content.w;
-        let right = frame_right - self.git_diff_panel.effective_width(self.surface_layout.content.w);
+        let right = frame_right
+            - self
+                .git_diff_panel
+                .effective_width(self.surface_layout.content.w);
         right.clamp(self.surface_layout.content.x, frame_right)
     }
 
@@ -198,7 +201,8 @@ impl Renderer {
     /// menu is open so content panels reflow below the menu card and
     /// nothing paints behind it.
     pub fn top_bar_strip_height(&self) -> f32 {
-        if self.surface_layout.viewport.w == 0.0 && self.surface_layout.viewport.h == 0.0 {
+        if self.surface_layout.viewport.w == 0.0 && self.surface_layout.viewport.h == 0.0
+        {
             if self.top_bar.is_visible() {
                 self.top_bar.layout_reservation()
             } else {
@@ -218,7 +222,8 @@ impl Renderer {
             .entry(neoism_ui::surface_layout::CHROME_ACTIONS_SURFACE.into())
             .or_default();
         if actions.visible.is_none() {
-            actions.visible = Some(self.top_bar.is_visible() && style.visible != Some(false));
+            actions.visible =
+                Some(self.top_bar.is_visible() && style.visible != Some(false));
         }
         if actions.thickness.is_none() {
             actions.thickness = Some(
@@ -232,12 +237,10 @@ impl Renderer {
             neoism_ui::surface_layout::SurfaceItemSize::new(26.0 * scale, 26.0 * scale),
         );
         self.top_bar.configure_surface_registry(&mut registry);
-        let viewport = neoism_ui::layout::Rect::new(0.0, 0.0, logical_width, logical_height);
+        let viewport =
+            neoism_ui::layout::Rect::new(0.0, 0.0, logical_width, logical_height);
         self.surface_layout = neoism_ui::surface_layout::resolve_surface_layout(
-            viewport,
-            scale,
-            &registry,
-            &patch,
+            viewport, scale, &registry, &patch,
         )
         .unwrap_or_else(|error| {
             tracing::warn!(%error, "rejecting invalid plugin surface layout");

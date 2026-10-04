@@ -31,18 +31,35 @@ pub(crate) struct LuaAsyncSender(mpsc::Sender<WorkerCompletion>);
 
 impl LuaAsyncSender {
     pub(crate) fn progress(&self, owner: PluginOwner, id: String, value: Value) {
-        let _ = self.0.send(WorkerCompletion { owner, id, terminal: Terminal::Progress(value) });
-    }
-
-    pub(crate) fn complete(&self, owner: PluginOwner, id: String, result: Value) {
-        let _ = self.0.send(WorkerCompletion { owner, id, terminal: Terminal::Success(result) });
-    }
-
-    pub(crate) fn fail(&self, owner: PluginOwner, id: String, code: impl Into<String>, message: impl Into<String>) {
         let _ = self.0.send(WorkerCompletion {
             owner,
             id,
-            terminal: Terminal::Failure { code: code.into(), message: message.into() },
+            terminal: Terminal::Progress(value),
+        });
+    }
+
+    pub(crate) fn complete(&self, owner: PluginOwner, id: String, result: Value) {
+        let _ = self.0.send(WorkerCompletion {
+            owner,
+            id,
+            terminal: Terminal::Success(result),
+        });
+    }
+
+    pub(crate) fn fail(
+        &self,
+        owner: PluginOwner,
+        id: String,
+        code: impl Into<String>,
+        message: impl Into<String>,
+    ) {
+        let _ = self.0.send(WorkerCompletion {
+            owner,
+            id,
+            terminal: Terminal::Failure {
+                code: code.into(),
+                message: message.into(),
+            },
         });
     }
 }
@@ -86,13 +103,20 @@ pub(crate) struct LuaAsyncCoordinator {
 impl Default for LuaAsyncCoordinator {
     fn default() -> Self {
         let (tx, rx) = mpsc::channel();
-        Self { pending: HashMap::new(), terminal: VecDeque::new(), tx, rx }
+        Self {
+            pending: HashMap::new(),
+            terminal: VecDeque::new(),
+            tx,
+            rx,
+        }
     }
 }
 
 impl LuaAsyncCoordinator {
     fn enqueue_completion(&mut self, completion: WorkerCompletion) {
-        if self.terminal.len() < MAX_QUEUED_RESULTS || !matches!(completion.terminal, Terminal::Progress(_)) {
+        if self.terminal.len() < MAX_QUEUED_RESULTS
+            || !matches!(completion.terminal, Terminal::Progress(_))
+        {
             self.terminal.push_back(completion);
         }
     }
@@ -114,7 +138,13 @@ impl LuaAsyncCoordinator {
         if self.pending.len() >= MAX_PENDING_GLOBAL {
             return Err("global async request limit reached");
         }
-        if self.pending.keys().filter(|(candidate, _)| candidate == &owner).count() >= MAX_PENDING_PER_OWNER {
+        if self
+            .pending
+            .keys()
+            .filter(|(candidate, _)| candidate == &owner)
+            .count()
+            >= MAX_PENDING_PER_OWNER
+        {
             return Err("plugin async request limit reached");
         }
         let key = (owner, id);
@@ -122,19 +152,35 @@ impl LuaAsyncCoordinator {
             return Err("duplicate async request id");
         }
         let cancelled = Arc::new(AtomicBool::new(false));
-        self.pending.insert(key, Pending { window_id, kind: kind.into(), cancelled: cancelled.clone() });
+        self.pending.insert(
+            key,
+            Pending {
+                window_id,
+                kind: kind.into(),
+                cancelled: cancelled.clone(),
+            },
+        );
         Ok(LuaAsyncToken { cancelled })
     }
 
     pub(crate) fn cancel(&mut self, owner: &PluginOwner, id: &str) -> bool {
         let key = (owner.clone(), id.to_owned());
-        let Some(pending) = self.pending.get(&key) else { return false };
+        let Some(pending) = self.pending.get(&key) else {
+            return false;
+        };
         pending.cancelled.store(true, Ordering::Release);
-        self.enqueue_completion(WorkerCompletion { owner: owner.clone(), id: id.into(), terminal: Terminal::Cancelled });
+        self.enqueue_completion(WorkerCompletion {
+            owner: owner.clone(),
+            id: id.into(),
+            terminal: Terminal::Cancelled,
+        });
         true
     }
 
-    pub(crate) fn retire_inactive(&mut self, active: &std::collections::HashSet<PluginOwner>) {
+    pub(crate) fn retire_inactive(
+        &mut self,
+        active: &std::collections::HashSet<PluginOwner>,
+    ) {
         self.pending.retain(|(owner, _), pending| {
             let keep = active.contains(owner);
             if !keep {
@@ -142,7 +188,8 @@ impl LuaAsyncCoordinator {
             }
             keep
         });
-        self.terminal.retain(|completion| active.contains(&completion.owner));
+        self.terminal
+            .retain(|completion| active.contains(&completion.owner));
         while let Ok(completion) = self.rx.try_recv() {
             if active.contains(&completion.owner) {
                 self.enqueue_completion(completion);
@@ -156,10 +203,18 @@ impl LuaAsyncCoordinator {
         }
         let mut deliveries = Vec::new();
         while deliveries.len() < MAX_DELIVERIES_PER_DRAIN {
-            let Some(completion) = self.terminal.pop_front() else { break };
+            let Some(completion) = self.terminal.pop_front() else {
+                break;
+            };
             let key = (completion.owner.clone(), completion.id.clone());
             let is_progress = matches!(completion.terminal, Terminal::Progress(_));
-            let Some(pending) = (if is_progress { self.pending.get(&key).cloned() } else { self.pending.remove(&key) }) else { continue };
+            let Some(pending) = (if is_progress {
+                self.pending.get(&key).cloned()
+            } else {
+                self.pending.remove(&key)
+            }) else {
+                continue;
+            };
             let (ok, cancelled, terminal, result, error) = match completion.terminal {
                 Terminal::Progress(value) => (true, false, false, Some(value), None),
                 Terminal::Success(value) => (true, false, true, Some(value), None),
@@ -196,7 +251,10 @@ mod tests {
     use neoism_lua::PluginRevision;
 
     fn owner(revision: &str) -> PluginOwner {
-        PluginOwner { plugin_id: "dev.test".into(), revision: PluginRevision(revision.into()) }
+        PluginOwner {
+            plugin_id: "dev.test".into(),
+            revision: PluginRevision(revision.into()),
+        }
     }
 
     #[test]
@@ -204,10 +262,16 @@ mod tests {
         let mut coordinator = LuaAsyncCoordinator::default();
         let owner = owner("one");
         let window = WindowId::from(1);
-        let token = coordinator.register(owner.clone(), "r1".into(), window, "job").unwrap();
+        let token = coordinator
+            .register(owner.clone(), "r1".into(), window, "job")
+            .unwrap();
         let sender = coordinator.sender();
         assert!(coordinator.cancel(&owner, "r1"));
-        sender.complete(owner.clone(), "r1".into(), serde_json::json!({ "late": true }));
+        sender.complete(
+            owner.clone(),
+            "r1".into(),
+            serde_json::json!({ "late": true }),
+        );
         let deliveries = coordinator.drain();
         assert_eq!(deliveries.len(), 1);
         assert_eq!(deliveries[0].payload["cancelled"], true);
@@ -221,7 +285,9 @@ mod tests {
         let old = owner("old");
         let new = owner("new");
         let window = WindowId::from(1);
-        let token = coordinator.register(old.clone(), "r1".into(), window, "prompt").unwrap();
+        let token = coordinator
+            .register(old.clone(), "r1".into(), window, "prompt")
+            .unwrap();
         let sender = coordinator.sender();
         let active = [new].into_iter().collect();
         coordinator.retire_inactive(&active);
@@ -235,11 +301,19 @@ mod tests {
         let mut coordinator = LuaAsyncCoordinator::default();
         let owner = owner("one");
         let window = WindowId::from(1);
-        coordinator.register(owner.clone(), "same".into(), window, "job").unwrap();
-        assert!(coordinator.register(owner.clone(), "same".into(), window, "job").is_err());
+        coordinator
+            .register(owner.clone(), "same".into(), window, "job")
+            .unwrap();
+        assert!(coordinator
+            .register(owner.clone(), "same".into(), window, "job")
+            .is_err());
         for index in 1..MAX_PENDING_PER_OWNER {
-            coordinator.register(owner.clone(), format!("r{index}"), window, "job").unwrap();
+            coordinator
+                .register(owner.clone(), format!("r{index}"), window, "job")
+                .unwrap();
         }
-        assert!(coordinator.register(owner, "overflow".into(), window, "job").is_err());
+        assert!(coordinator
+            .register(owner, "overflow".into(), window, "job")
+            .is_err());
     }
 }

@@ -46,7 +46,11 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                 &self.ide_theme,
                 [fallback.r, fallback.g, fallback.b, 255],
             );
-            crate::theme::RgbTriple { r: color[0], g: color[1], b: color[2] }
+            crate::theme::RgbTriple {
+                r: color[0],
+                g: color[1],
+                b: color[2],
+            }
         };
         theme.bg = resolve(app_style.background.as_deref(), theme.bg);
         theme.bg_elevated = resolve(app_style.background.as_deref(), theme.bg_elevated);
@@ -1092,20 +1096,46 @@ impl<A: Send + Copy + 'static> Chrome<A> {
 
         let mut custom_style = ctx.style(neoism_lua::selector::APP);
         custom_style.overlay(Some(&ctx.style(neoism_lua::selector::CHROME_TOP)));
-        let custom_theme = crate::customization::styled_ide_theme(self.ide_theme, &custom_style);
+        let custom_theme =
+            crate::customization::styled_ide_theme(self.ide_theme, &custom_style);
         let (status_slot_left, status_slot_right) = self.status_line.custom_slot_bounds();
         let status_slot_gap = 8.0 * self.chrome_scale;
         let status_slot_left = status_slot_left + status_slot_gap;
-        let status_slot_right = (status_slot_right - status_slot_gap).max(status_slot_left);
+        let status_slot_right =
+            (status_slot_right - status_slot_gap).max(status_slot_left);
         self.plugin_hitboxes = crate::panels::custom_ui::render(
             sugarloaf,
             &plugins,
             crate::panels::custom_ui::CustomUiLayout {
-                window: [0.0, 0.0, window_width, layout.status_line.y + layout.status_line.h],
-                top: layout.top_bar.map_or([0.0, 0.0, window_width, 0.0], |rect| [rect.x, rect.y, rect.w, rect.h]),
-                bottom: [status_slot_left, layout.status_line.y, (status_slot_right - status_slot_left).max(0.0), layout.status_line.h],
-                left: [0.0, band_top, layout.terminal.x.max(0.0), (band_bottom - band_top).max(0.0)],
-                right: [layout.terminal.x, band_top, layout.terminal.w, (band_bottom - band_top).max(0.0)],
+                window: [
+                    0.0,
+                    0.0,
+                    window_width,
+                    layout.status_line.y + layout.status_line.h,
+                ],
+                top: layout
+                    .top_bar
+                    .map_or([0.0, 0.0, window_width, 0.0], |rect| {
+                        [rect.x, rect.y, rect.w, rect.h]
+                    }),
+                bottom: [
+                    status_slot_left,
+                    layout.status_line.y,
+                    (status_slot_right - status_slot_left).max(0.0),
+                    layout.status_line.h,
+                ],
+                left: [
+                    0.0,
+                    band_top,
+                    layout.terminal.x.max(0.0),
+                    (band_bottom - band_top).max(0.0),
+                ],
+                right: [
+                    layout.terminal.x,
+                    band_top,
+                    layout.terminal.w,
+                    (band_bottom - band_top).max(0.0),
+                ],
             },
             &custom_theme,
         );

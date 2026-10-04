@@ -386,7 +386,8 @@ impl NeoismExtensionsPane {
     }
 
     pub fn set_lua_plugin_entries(&mut self, entries: Vec<ExtensionEntry>) {
-        self.entries.retain(|entry| entry.kind != ExtensionKind::LuaPlugin);
+        self.entries
+            .retain(|entry| entry.kind != ExtensionKind::LuaPlugin);
         self.entries.extend(entries);
         if self.selected_index >= self.entries.len() {
             self.selected_index = 0;
@@ -525,7 +526,10 @@ impl NeoismExtensionsPane {
         self.active_tab = tab;
         // Tabs that don't carry language tags ignore the filter;
         // close the picker so it doesn't paint over the wrong tab.
-        if matches!(tab, ExtensionTab::All | ExtensionTab::McpServers | ExtensionTab::Kernels) {
+        if matches!(
+            tab,
+            ExtensionTab::All | ExtensionTab::McpServers | ExtensionTab::Kernels
+        ) {
             self.language_picker_open = false;
         }
     }
@@ -806,7 +810,12 @@ impl NeoismExtensionsPane {
                 let was = self.active_tab;
                 self.active_tab = *tab;
                 if was != *tab
-                    && matches!(*tab, ExtensionTab::All | ExtensionTab::McpServers | ExtensionTab::Kernels)
+                    && matches!(
+                        *tab,
+                        ExtensionTab::All
+                            | ExtensionTab::McpServers
+                            | ExtensionTab::Kernels
+                    )
                 {
                     // These tabs ignore language filter — reset so the
                     // user doesn't see "no results" because of a stale
@@ -834,12 +843,20 @@ impl NeoismExtensionsPane {
                         .entries
                         .iter()
                         .find(|entry| entry.id == *id)
-                        .is_some_and(|entry| matches!(entry.status, ExtensionStatus::Installed { .. }));
-                    action_target = Some(PaneAction::InstallToggleRequested { id: id.clone(), currently_installed });
+                        .is_some_and(|entry| {
+                            matches!(entry.status, ExtensionStatus::Installed { .. })
+                        });
+                    action_target = Some(PaneAction::InstallToggleRequested {
+                        id: id.clone(),
+                        currently_installed,
+                    });
                     break;
                 }
                 RowAction::LuaPlugin(id, action) => {
-                    action_target = Some(PaneAction::LuaPluginActionRequested { id: id.clone(), action: action.clone() });
+                    action_target = Some(PaneAction::LuaPluginActionRequested {
+                        id: id.clone(),
+                        action: action.clone(),
+                    });
                     break;
                 }
                 RowAction::Focus(idx) => {
@@ -1004,8 +1021,17 @@ impl NeoismExtensionsPane {
                 let clamped = self.selected_index.min(last);
                 let entry_idx = visible[clamped];
                 let entry = &self.entries[entry_idx];
-                if let Some(action) = entry.lua_plugin.as_ref().and_then(|plugin| plugin.primary_action.clone()) {
-                    return KeyResponse::with_action(PaneAction::LuaPluginActionRequested { id: entry.id.clone(), action });
+                if let Some(action) = entry
+                    .lua_plugin
+                    .as_ref()
+                    .and_then(|plugin| plugin.primary_action.clone())
+                {
+                    return KeyResponse::with_action(
+                        PaneAction::LuaPluginActionRequested {
+                            id: entry.id.clone(),
+                            action,
+                        },
+                    );
                 }
                 if matches!(
                     entry.status,

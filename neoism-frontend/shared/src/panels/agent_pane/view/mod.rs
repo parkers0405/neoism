@@ -506,6 +506,7 @@ fn render_agent_pane_with_responsive<P, D, I>(
         input_rect,
         theme,
         chrome_scale,
+        picker_min_y,
     );
     pane.set_prompt_picker_rect(prompt_rect);
     if prompt_rect.is_none() {
@@ -552,7 +553,14 @@ fn render_agent_pane_with_responsive<P, D, I>(
     particle_bursts.retain(|(spec, started)| {
         let elapsed = now_seconds - *started;
         if (0.0..=spec.duration_seconds).contains(&elapsed) {
-            fx::render_particle(sugarloaf, particle_scene, elapsed, spec, chrome_scale, theme);
+            fx::render_particle(
+                sugarloaf,
+                particle_scene,
+                elapsed,
+                spec,
+                chrome_scale,
+                theme,
+            );
             true
         } else {
             false

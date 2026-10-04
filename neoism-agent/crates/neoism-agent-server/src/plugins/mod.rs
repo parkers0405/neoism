@@ -288,7 +288,9 @@ async fn build_host_with_config(
             root: std::path::PathBuf::from(directory),
         }),
         production_workspace_grants(
-            std::sync::Arc::new(PluginEventPublisher { state: state.clone() }),
+            std::sync::Arc::new(PluginEventPublisher {
+                state: state.clone(),
+            }),
             directory,
             &config,
         ),
@@ -614,10 +616,18 @@ pub(crate) fn manifests_with_packages(
 ) -> Vec<PluginManifestInfo> {
     let mut manifests = manifests(snapshot);
     if let Ok(config_snapshot) = crate::config::snapshot(services, directory) {
-        if let Ok((config, _)) = neoism_agent_builtins::plugin::config::load_snapshot(&config_snapshot) {
-            let (configured, _) = crate::config::installation_plugin_inputs(&config_snapshot, &config);
-            for mut package in crate::plugin_package::lifecycle_manifests(directory, &configured) {
-                if let Some(installed) = manifests.iter_mut().find(|manifest| manifest.id == package.id) {
+        if let Ok((config, _)) =
+            neoism_agent_builtins::plugin::config::load_snapshot(&config_snapshot)
+        {
+            let (configured, _) =
+                crate::config::installation_plugin_inputs(&config_snapshot, &config);
+            for mut package in
+                crate::plugin_package::lifecycle_manifests(directory, &configured)
+            {
+                if let Some(installed) = manifests
+                    .iter_mut()
+                    .find(|manifest| manifest.id == package.id)
+                {
                     let retained_revision = installed
                         .config
                         .get("packageRevision")
@@ -628,7 +638,9 @@ pub(crate) fn manifests_with_packages(
                         .get("packageRevision")
                         .and_then(serde_json::Value::as_str);
                     let update_retained = installed.active
-                        && retained_revision.as_deref().zip(discovered_revision)
+                        && retained_revision
+                            .as_deref()
+                            .zip(discovered_revision)
                             .is_some_and(|(retained, discovered)| retained != discovered);
                     let lifecycle_state = if update_retained {
                         "update-available"
@@ -649,11 +661,15 @@ pub(crate) fn manifests_with_packages(
                         .and_then(serde_json::Value::as_object_mut)
                     {
                         info.insert("state".into(), serde_json::json!(lifecycle_state));
-                        info.insert("leaseActive".into(), serde_json::json!(installed.active));
+                        info.insert(
+                            "leaseActive".into(),
+                            serde_json::json!(installed.active),
+                        );
                         if update_retained {
                             info.insert(
                                 "retainedRevision".into(),
-                                serde_json::to_value(retained_revision).unwrap_or(serde_json::Value::Null),
+                                serde_json::to_value(retained_revision)
+                                    .unwrap_or(serde_json::Value::Null),
                             );
                         }
                         if let Some(reason) = &installed.reason {

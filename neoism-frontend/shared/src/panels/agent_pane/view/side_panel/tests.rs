@@ -975,6 +975,65 @@ fn two_line_catalog_stride_aligns_header_session_and_search_excerpt_hits() {
 }
 
 #[test]
+fn detail_branch_hits_follow_scrolled_list_origin_not_legacy_row_scroll() {
+    use super::draw::intersect_rect;
+    use crate::panels::agent_pane::state::side_panel::SidePanelMode;
+    let mut panel = NeoismAgentSidePanel::default();
+    panel.set_mode(SidePanelMode::Subagents);
+    panel.set_subagents(
+        (0..5)
+            .map(|index| {
+                NeoismAgentSessionEntry::new(index.to_string(), "Branch", "")
+                    .with_runtime_status(Some("running".into()))
+            })
+            .collect(),
+    );
+    let row_h = panel.row_height();
+    let viewport = [0.0, 100.0, 220.0, row_h * 2.5];
+    panel.set_row_hit_rect_with_origin(viewport, viewport[1], row_h);
+    assert_eq!(
+        panel.hit_test_row(10.0, 100.0 + row_h * 0.5, viewport),
+        Some(0)
+    );
+    assert_eq!(
+        panel.hit_test_row(10.0, 100.0 + row_h * 1.5, viewport),
+        Some(1)
+    );
+
+    // Selecting a child must not start the catalog's row scroll. A focused
+    // rail can then wheel to later children without snapping back to it.
+    panel.set_focused(true);
+    panel.set_selected(1);
+    assert_eq!(panel.scroll_top(), 0);
+    assert!(panel.take_reveal_selected_branch());
+    panel.set_content_scroll_max(row_h * 5.0);
+    assert!(panel.scroll_content_pixels(row_h * (2.0 - 1.0 / 3.0)));
+    assert!(!panel.take_reveal_selected_branch());
+    let origin = viewport[1] - panel.content_scroll_px();
+    let list = [0.0, origin, 220.0, row_h * 5.0];
+    panel.set_row_hit_rect_with_origin(
+        intersect_rect(list, viewport).unwrap(),
+        origin,
+        row_h,
+    );
+    for index in 2..=4 {
+        let row_top = origin + index as f32 * row_h;
+        let visible_y = row_top.max(viewport[1]);
+        let visible_bottom = (row_top + row_h).min(viewport[1] + viewport[3]);
+        assert_eq!(
+            panel.hit_test_row(10.0, (visible_y + visible_bottom) / 2.0, viewport),
+            Some(index)
+        );
+    }
+    assert_eq!(panel.hit_test_row(10.0, viewport[1] - 1.0, viewport), None);
+    assert_eq!(
+        panel.hit_test_row(10.0, viewport[1] + viewport[3], viewport),
+        None
+    );
+    assert_eq!(intersect_rect([0.0, 400.0, 220.0, row_h], viewport), None);
+}
+
+#[test]
 fn catalog_touch_scroll_keeps_mixed_row_hit_stride() {
     use crate::panels::agent_pane::state::side_panel::ROW_HEIGHT;
     let mut panel = NeoismAgentSidePanel::default();
@@ -1033,10 +1092,19 @@ fn new_chat_button_does_not_overlap_the_session_list() {
     let list = [0.0, 40.0 + ROW_HEIGHT + 6.0, 200.0, ROW_HEIGHT];
     panel.set_row_hit_rect(list, ROW_HEIGHT);
 
-    assert_eq!(panel.new_chat_hit(20.0, 40.0 + ROW_HEIGHT / 2.0), Some(None));
-    assert_eq!(panel.hit_test_row(20.0, 40.0 + ROW_HEIGHT / 2.0, list), None);
+    assert_eq!(
+        panel.new_chat_hit(20.0, 40.0 + ROW_HEIGHT / 2.0),
+        Some(None)
+    );
+    assert_eq!(
+        panel.hit_test_row(20.0, 40.0 + ROW_HEIGHT / 2.0, list),
+        None
+    );
     assert_eq!(panel.new_chat_hit(20.0, list[1] + ROW_HEIGHT / 2.0), None);
-    assert_eq!(panel.hit_test_row(20.0, list[1] + ROW_HEIGHT / 2.0, list), Some(0));
+    assert_eq!(
+        panel.hit_test_row(20.0, list[1] + ROW_HEIGHT / 2.0, list),
+        Some(0)
+    );
 }
 
 #[test]
@@ -1290,7 +1358,7 @@ fn conversations_width_clamps_to_supported_drag_range() {
     };
 
     let mut panel = NeoismAgentSidePanel::default();
-    assert_eq!(panel.width(), 360.0);
+    assert_eq!(panel.width(), 300.0);
     panel.set_width(0.0);
     assert_eq!(panel.width(), SIDE_PANEL_MIN_WIDTH);
     panel.resize(10_000.0);

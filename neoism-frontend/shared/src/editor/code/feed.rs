@@ -129,13 +129,21 @@ pub struct CodeLinePluginDecoration {
 }
 
 impl CodePluginRenderSnapshot {
-    pub fn try_from_contract(snapshot: &neoism_lua::PluginDecorationSnapshot, lines: &[String]) -> Result<Self, String> {
+    pub fn try_from_contract(
+        snapshot: &neoism_lua::PluginDecorationSnapshot,
+        lines: &[String],
+    ) -> Result<Self, String> {
         const MAX_DECORATIONS: usize = 50_000;
         const MAX_VIRTUAL_TEXT_BYTES: usize = 64 * 1024;
         if snapshot.decorations.len() > MAX_DECORATIONS {
-            return Err(format!("plugin decoration snapshot exceeds {MAX_DECORATIONS} items"));
+            return Err(format!(
+                "plugin decoration snapshot exceeds {MAX_DECORATIONS} items"
+            ));
         }
-        let mut output = Self { revision: snapshot.revision, ..Self::default() };
+        let mut output = Self {
+            revision: snapshot.revision,
+            ..Self::default()
+        };
         for decoration in &snapshot.decorations {
             let first = decoration.start_position.line as usize;
             let last = decoration.end_position.line as usize;
@@ -146,64 +154,108 @@ impl CodePluginRenderSnapshot {
             let last_len = lines[last].len();
             let first_col = decoration.start_position.character as usize;
             let last_col = decoration.end_position.character as usize;
-            if first_col > first_len || last_col > last_len
+            if first_col > first_len
+                || last_col > last_len
                 || !lines[first].is_char_boundary(first_col)
                 || !lines[last].is_char_boundary(last_col)
             {
-                return Err("plugin decoration has invalid resolved UTF-8 geometry".into());
+                return Err(
+                    "plugin decoration has invalid resolved UTF-8 geometry".into()
+                );
             }
-            if decoration.text.as_ref().is_some_and(|text| text.len() > MAX_VIRTUAL_TEXT_BYTES) {
-                return Err("plugin virtual text exceeds the immutable snapshot limit".into());
+            if decoration
+                .text
+                .as_ref()
+                .is_some_and(|text| text.len() > MAX_VIRTUAL_TEXT_BYTES)
+            {
+                return Err(
+                    "plugin virtual text exceeds the immutable snapshot limit".into()
+                );
             }
             if decoration.layer == neoism_lua::DecorationLayer::VirtualLine {
-                output.virtual_lines.entry(first).or_default().push(CodePluginVirtualLine {
-                    id: decoration.id,
-                    owner: decoration.owner.clone(),
-                    text: decoration.text.clone().unwrap_or_default(),
-                    style: decoration.resolved_style,
-                    actions: decoration.actions.clone(),
-                });
+                output.virtual_lines.entry(first).or_default().push(
+                    CodePluginVirtualLine {
+                        id: decoration.id,
+                        owner: decoration.owner.clone(),
+                        text: decoration.text.clone().unwrap_or_default(),
+                        style: decoration.resolved_style,
+                        actions: decoration.actions.clone(),
+                    },
+                );
                 continue;
             }
             if decoration.layer == neoism_lua::DecorationLayer::Fold && last > first {
-                output.hidden_lines.extend((first + 1)..=last.min(lines.len().saturating_sub(1)));
+                output
+                    .hidden_lines
+                    .extend((first + 1)..=last.min(lines.len().saturating_sub(1)));
             }
             for line in first..=last.min(lines.len().saturating_sub(1)) {
                 let line_len = lines.get(line).map_or(0, String::len);
-                let start = if line == first { decoration.start_position.character as usize } else { 0 }.min(line_len);
-                let end = if line == last { decoration.end_position.character as usize } else { line_len }.min(line_len);
-                output.by_line.entry(line).or_default().push(CodeLinePluginDecoration {
-                    id: decoration.id,
-                    owner: decoration.owner.clone(),
-                    start,
-                    end,
-                    layer: decoration.layer,
-                    text: decoration.text.clone(),
-                    icon: decoration.style.icon.clone(),
-                    severity: decoration.severity.map(|severity| match severity {
-                        neoism_lua::PluginDiagnosticSeverity::Error => CodeDiagnosticSeverity::Error,
-                        neoism_lua::PluginDiagnosticSeverity::Warning => CodeDiagnosticSeverity::Warn,
-                        neoism_lua::PluginDiagnosticSeverity::Information => CodeDiagnosticSeverity::Info,
-                        neoism_lua::PluginDiagnosticSeverity::Hint => CodeDiagnosticSeverity::Hint,
-                    }),
-                    style: decoration.resolved_style,
-                    actions: decoration.actions.clone(),
-                });
+                let start = if line == first {
+                    decoration.start_position.character as usize
+                } else {
+                    0
+                }
+                .min(line_len);
+                let end = if line == last {
+                    decoration.end_position.character as usize
+                } else {
+                    line_len
+                }
+                .min(line_len);
+                output
+                    .by_line
+                    .entry(line)
+                    .or_default()
+                    .push(CodeLinePluginDecoration {
+                        id: decoration.id,
+                        owner: decoration.owner.clone(),
+                        start,
+                        end,
+                        layer: decoration.layer,
+                        text: decoration.text.clone(),
+                        icon: decoration.style.icon.clone(),
+                        severity: decoration.severity.map(|severity| match severity {
+                            neoism_lua::PluginDiagnosticSeverity::Error => {
+                                CodeDiagnosticSeverity::Error
+                            }
+                            neoism_lua::PluginDiagnosticSeverity::Warning => {
+                                CodeDiagnosticSeverity::Warn
+                            }
+                            neoism_lua::PluginDiagnosticSeverity::Information => {
+                                CodeDiagnosticSeverity::Info
+                            }
+                            neoism_lua::PluginDiagnosticSeverity::Hint => {
+                                CodeDiagnosticSeverity::Hint
+                            }
+                        }),
+                        style: decoration.resolved_style,
+                        actions: decoration.actions.clone(),
+                    });
             }
         }
         for (line, decorations) in &output.by_line {
-            let spans = decorations.iter().filter_map(|decoration| {
-                matches!(decoration.layer, neoism_lua::DecorationLayer::Highlight | neoism_lua::DecorationLayer::Conceal | neoism_lua::DecorationLayer::Diagnostic)
+            let spans = decorations
+                .iter()
+                .filter_map(|decoration| {
+                    matches!(
+                        decoration.layer,
+                        neoism_lua::DecorationLayer::Highlight
+                            | neoism_lua::DecorationLayer::Conceal
+                            | neoism_lua::DecorationLayer::Diagnostic
+                    )
                     .then_some(CodeLinePluginSpan {
                         start: decoration.start,
                         end: decoration.end,
                         foreground: decoration.style.foreground,
                         background: decoration.style.background,
                         underline: decoration.style.underline,
-                        concealed: decoration.layer == neoism_lua::DecorationLayer::Conceal,
+                        concealed: decoration.layer
+                            == neoism_lua::DecorationLayer::Conceal,
                         severity: decoration.severity,
                     })
-            }).collect::<Vec<_>>();
+                })
+                .collect::<Vec<_>>();
             if !spans.is_empty() {
                 output.spans_by_line.insert(*line, spans);
             }
@@ -211,12 +263,18 @@ impl CodePluginRenderSnapshot {
         Ok(output)
     }
 
-    pub fn from_contract(snapshot: &neoism_lua::PluginDecorationSnapshot, lines: &[String]) -> Self {
+    pub fn from_contract(
+        snapshot: &neoism_lua::PluginDecorationSnapshot,
+        lines: &[String],
+    ) -> Self {
         Self::try_from_contract(snapshot, lines).unwrap_or_default()
     }
 
     pub fn spans_for_line(&self, line: usize) -> &[CodeLinePluginSpan] {
-        self.spans_by_line.get(&line).map(Vec::as_slice).unwrap_or(&[])
+        self.spans_by_line
+            .get(&line)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
 }
 
@@ -314,11 +372,16 @@ pub fn styled_runs_with_syntax(
             .filter(|diag| diag.start <= start && end <= diag.end.min(line.len()))
             .map(|diag| diag.severity)
             .max()
-            .max(plugin_spans.iter()
-                .filter(|span| span.start <= start && end <= span.end.min(line.len()))
-                .filter_map(|span| span.severity)
-                .max());
-        let plugin = plugin_spans.iter().rev()
+            .max(
+                plugin_spans
+                    .iter()
+                    .filter(|span| span.start <= start && end <= span.end.min(line.len()))
+                    .filter_map(|span| span.severity)
+                    .max(),
+            );
+        let plugin = plugin_spans
+            .iter()
+            .rev()
             .find(|span| span.start <= start && end <= span.end.min(line.len()));
         let plugin_foreground = plugin.and_then(|span| span.foreground);
         let plugin_background = plugin.and_then(|span| span.background);

@@ -712,7 +712,8 @@ impl Screen<'_> {
     pub(crate) fn side_panel_band(&self) -> (f32, f32) {
         let content = self.renderer.surface_layout.content;
         let top = self.island_chrome_top();
-        let bottom = (content.y + content.h - self.renderer.status_line.scaled_height()).max(top);
+        let bottom =
+            (content.y + content.h - self.renderer.status_line.scaled_height()).max(top);
         (top, bottom)
     }
 
@@ -753,7 +754,9 @@ impl Screen<'_> {
         let left = self.renderer.surface_layout.content.x;
         let logical_width =
             self.sugarloaf.window_size().width as f32 / self.sugarloaf.scale_factor();
-        let right = self.renderer.right_chrome_edge(&self.context_manager, logical_width);
+        let right = self
+            .renderer
+            .right_chrome_edge(&self.context_manager, logical_width);
         mx >= left && mx <= right
     }
 
@@ -1169,7 +1172,8 @@ impl Screen<'_> {
     pub(crate) fn apply_unified_theme(&mut self, name: &str) {
         self.apply_unified_theme_visual(name);
         let theme_name = self.renderer.theme.name.as_str();
-        if let Err(err) = neoism_backend::config::write_manual_theme_selection(theme_name) {
+        if let Err(err) = neoism_backend::config::write_manual_theme_selection(theme_name)
+        {
             tracing::warn!(target: "neoism::config", "failed to persist theme: {err}");
         }
     }
@@ -1243,7 +1247,12 @@ impl Screen<'_> {
         config: &neoism_backend::config::Config,
         font_library: Option<&neoism_backend::sugarloaf::font::FontLibrary>,
     ) -> Result<(), String> {
-        let wallpaper = config.ui.window.background_image.as_ref().or_else(|| pack.and_then(|pack| pack.wallpaper.as_ref()));
+        let wallpaper = config
+            .ui
+            .window
+            .background_image
+            .as_ref()
+            .or_else(|| pack.and_then(|pack| pack.wallpaper.as_ref()));
         let previous_wallpaper = self.sugarloaf.background_image().cloned();
         match wallpaper {
             Some(image) => self.sugarloaf.set_background_image(image)?,
@@ -1253,7 +1262,10 @@ impl Screen<'_> {
         if let Err(error) = self.try_apply_shader_overlay(shader) {
             let rollback = match previous_wallpaper.as_ref() {
                 Some(image) => self.sugarloaf.set_background_image(image),
-                None => { self.sugarloaf.clear_background_image(); Ok(()) }
+                None => {
+                    self.sugarloaf.clear_background_image();
+                    Ok(())
+                }
             };
             if let Err(rollback_error) = rollback {
                 tracing::error!(target: "neoism::mashup", %rollback_error, "failed to restore prior wallpaper after rejected pack visual commit");

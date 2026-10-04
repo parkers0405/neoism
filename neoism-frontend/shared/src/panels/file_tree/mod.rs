@@ -147,7 +147,13 @@ impl crate::panels::Panel for FileTree {
         unsafe {
             let this = self as *const FileTree as *mut FileTree;
             (*this).render(
-                sugarloaf, bounds.x, bounds.y, bounds.w, bounds.h, &theme, &occlusion,
+                sugarloaf,
+                bounds.x,
+                bounds.y,
+                bounds.w,
+                bounds.h,
+                &theme,
+                &occlusion,
                 ctx.plugins,
             );
         }

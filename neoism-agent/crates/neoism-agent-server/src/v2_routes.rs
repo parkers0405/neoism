@@ -208,7 +208,11 @@ pub(crate) async fn v2_plugins(
 ) -> Json<Vec<PluginManifestInfo>> {
     let directory = resolve_directory(query.directory, &headers);
     let snapshot = state.plugin_snapshot(&directory).await;
-    Json(crate::plugins::manifests_with_packages(state.services(), &directory, snapshot.as_ref()))
+    Json(crate::plugins::manifests_with_packages(
+        state.services(),
+        &directory,
+        snapshot.as_ref(),
+    ))
 }
 
 pub(crate) async fn v2_plugin_lifecycle(
@@ -257,7 +261,11 @@ pub(crate) async fn v2_plugin(
 ) -> Result<Json<PluginManifestInfo>, ApiError> {
     let directory = resolve_directory(query.directory, &headers);
     let snapshot = state.plugin_snapshot(&directory).await;
-    let manifests = crate::plugins::manifests_with_packages(state.services(), &directory, snapshot.as_ref());
+    let manifests = crate::plugins::manifests_with_packages(
+        state.services(),
+        &directory,
+        snapshot.as_ref(),
+    );
     manifests
         .into_iter()
         .find(|plugin| plugin.id == plugin_id)

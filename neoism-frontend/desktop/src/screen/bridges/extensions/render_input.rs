@@ -6,15 +6,27 @@ use neoism_window::event::MouseButton;
 
 impl Screen<'_> {
     pub(crate) fn needs_lua_plugin_entries(&self) -> bool {
-        self.context_manager.current_grid().contexts().values().any(|item| {
-            item.val.neoism_extensions.as_ref().is_some_and(|pane| {
-                !pane.entries().iter().any(|entry| entry.kind == ExtensionKind::LuaPlugin)
+        self.context_manager
+            .current_grid()
+            .contexts()
+            .values()
+            .any(|item| {
+                item.val.neoism_extensions.as_ref().is_some_and(|pane| {
+                    !pane
+                        .entries()
+                        .iter()
+                        .any(|entry| entry.kind == ExtensionKind::LuaPlugin)
+                })
             })
-        })
     }
 
     pub(crate) fn set_lua_plugin_entries(&mut self, entries: Vec<ExtensionEntry>) {
-        for item in self.context_manager.current_grid_mut().contexts_mut().values_mut() {
+        for item in self
+            .context_manager
+            .current_grid_mut()
+            .contexts_mut()
+            .values_mut()
+        {
             if let Some(pane) = item.val.neoism_extensions.as_mut() {
                 pane.set_lua_plugin_entries(entries.clone());
             }
@@ -22,7 +34,9 @@ impl Screen<'_> {
         self.mark_dirty();
     }
 
-    pub(crate) fn take_lua_plugin_actions(&mut self) -> Vec<(String, neoism_ui::panels::extensions_page::LuaPluginAction)> {
+    pub(crate) fn take_lua_plugin_actions(
+        &mut self,
+    ) -> Vec<(String, neoism_ui::panels::extensions_page::LuaPluginAction)> {
         std::mem::take(&mut self.pending_lua_plugin_actions)
     }
 

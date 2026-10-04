@@ -26,6 +26,14 @@ mod host;
 mod input;
 mod ipc;
 mod layout;
+mod lua_async;
+mod lua_dap;
+mod lua_git;
+mod lua_jobs;
+mod lua_network;
+mod lua_plugin_jobs;
+mod lua_ptys;
+mod lua_watchers;
 #[cfg(unix)]
 mod macos_update;
 mod mashup;
@@ -37,14 +45,6 @@ mod notebook_runtime;
 mod panic;
 mod platform;
 mod plugin_manager;
-mod lua_plugin_jobs;
-mod lua_async;
-mod lua_dap;
-mod lua_git;
-mod lua_jobs;
-mod lua_network;
-mod lua_ptys;
-mod lua_watchers;
 mod router;
 mod screen;
 #[cfg(not(target_arch = "wasm32"))]
@@ -1703,7 +1703,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    let (mut config, mut config_error) = match neoism_backend::config::Config::try_load() {
+    let (mut config, mut config_error) = match neoism_backend::config::Config::try_load()
+    {
         Ok(config) => (config, None),
         // First launch: write the default config silently and continue as a
         // normal terminal window. Routing this through the error report used
@@ -1755,21 +1756,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut lua_host = new_lua_host();
     let lua_runtime = if lua_config_dir.join("init.lua").is_file() {
         match neoism_lua::LuaRuntime::load(&lua_config_dir, lua_host.clone()) {
-            Ok(runtime) => match config.apply_json_patch(&runtime.snapshot().config_patch) {
-                Ok(()) => Some(runtime),
-                Err(error) => {
-                    lua_host = new_lua_host();
-                    config_error = Some(neoism_backend::config::ConfigError::ErrLoadingConfig(
-                        format!("init.lua: {error}"),
-                    ));
-                    None
+            Ok(runtime) => {
+                match config.apply_json_patch(&runtime.snapshot().config_patch) {
+                    Ok(()) => Some(runtime),
+                    Err(error) => {
+                        lua_host = new_lua_host();
+                        config_error =
+                            Some(neoism_backend::config::ConfigError::ErrLoadingConfig(
+                                format!("init.lua: {error}"),
+                            ));
+                        None
+                    }
                 }
-            },
+            }
             Err(error) => {
                 lua_host = new_lua_host();
-                config_error = Some(neoism_backend::config::ConfigError::ErrLoadingConfig(
-                    format!("init.lua: {error}"),
-                ));
+                config_error =
+                    Some(neoism_backend::config::ConfigError::ErrLoadingConfig(
+                        format!("init.lua: {error}"),
+                    ));
                 None
             }
         }

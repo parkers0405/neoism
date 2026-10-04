@@ -144,13 +144,22 @@ impl CrdtTextBuffer {
                     (*index, 0, content.encode_utf16().count() as CrdtTextOffset)
                 }
                 CrdtTextEdit::Delete { index, len } => (*index, *len, 0),
-                CrdtTextEdit::Replace { index, len, content } => {
-                    (*index, *len, content.encode_utf16().count() as CrdtTextOffset)
-                }
+                CrdtTextEdit::Replace {
+                    index,
+                    len,
+                    content,
+                } => (
+                    *index,
+                    *len,
+                    content.encode_utf16().count() as CrdtTextOffset,
+                ),
             };
-            let end = index
-                .checked_add(delete_len)
-                .ok_or(CrdtTextBufferError::OffsetOutOfBounds { index, len: text_len })?;
+            let end = index.checked_add(delete_len).ok_or(
+                CrdtTextBufferError::OffsetOutOfBounds {
+                    index,
+                    len: text_len,
+                },
+            )?;
             if index > text_len || end > text_len {
                 return Err(CrdtTextBufferError::RangeOutOfBounds {
                     index,
@@ -172,7 +181,11 @@ impl CrdtTextBuffer {
                     CrdtTextEdit::Delete { index, len } => {
                         self.text.remove_range(&mut txn, index, len);
                     }
-                    CrdtTextEdit::Replace { index, len, content } => {
+                    CrdtTextEdit::Replace {
+                        index,
+                        len,
+                        content,
+                    } => {
                         if len > 0 {
                             self.text.remove_range(&mut txn, index, len);
                         }

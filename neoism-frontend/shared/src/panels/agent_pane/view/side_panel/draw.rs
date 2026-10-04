@@ -280,7 +280,7 @@ pub(crate) fn render_sessions_list(
     y += SECTION_GAP * s;
     y = render_section_header(
         sugarloaf,
-        "Conversations",
+        "Chats",
         text_x,
         y,
         theme,
@@ -298,8 +298,8 @@ pub(crate) fn render_sessions_list(
             && my >= button_rect[1]
             && my <= button_rect[1] + button_rect[3]
     });
-    let button_selected = pane.side_panel().new_chat_selected()
-        && pane.side_panel().is_focused();
+    let button_selected =
+        pane.side_panel().new_chat_selected() && pane.side_panel().is_focused();
     let radius = 7.0 * s;
     if button_hovered || button_selected {
         sugarloaf.rounded_rect(

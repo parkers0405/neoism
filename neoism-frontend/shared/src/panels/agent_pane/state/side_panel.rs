@@ -31,9 +31,9 @@ use crate::animation::CriticallyDampedSpring;
 use crate::panels::agent_pane::icon::AgentKind;
 use crate::widgets::scroll::Scroll;
 
-/// Default width of the workspace Conversations panel. The in-chat details
+/// Default width of the workspace Chats panel. The in-chat details
 /// rail has its own fixed width and must not inherit this resizable value.
-pub const SIDE_PANEL_WIDTH: f32 = 360.0;
+pub const SIDE_PANEL_WIDTH: f32 = 300.0;
 pub const SIDE_PANEL_MIN_WIDTH: f32 = 180.0;
 pub const SIDE_PANEL_MAX_WIDTH: f32 = 700.0;
 
@@ -886,6 +886,7 @@ pub struct NeoismAgentSidePanel {
     /// reach. Clamped against `content_scroll_max` each frame.
     content_scroll_px: f32,
     content_scroll_max: f32,
+    reveal_selected_branch: bool,
     new_chat_rect: Option<[f32; 4]>,
     new_chat_selected: bool,
     provider_menu_open: bool,
@@ -966,6 +967,7 @@ impl Default for NeoismAgentSidePanel {
             goal_version: 0,
             content_scroll_px: 0.0,
             content_scroll_max: 0.0,
+            reveal_selected_branch: false,
             new_chat_rect: None,
             new_chat_selected: false,
             provider_menu_open: false,
@@ -1071,6 +1073,7 @@ impl NeoismAgentSidePanel {
             self.branch_activities.clear();
             self.retained_viewed_subagent_id = None;
             self.content_scroll_px = 0.0;
+            self.reveal_selected_branch = false;
             self.selected = 0;
             self.viewed_session_id
                 .clone_from(&catalog.viewed_session_id);
@@ -1269,6 +1272,7 @@ impl NeoismAgentSidePanel {
         self.scroll.reset();
         self.cursor_spring.reset();
         self.content_scroll_px = 0.0;
+        self.reveal_selected_branch = false;
     }
 
     /// The session's persistent goal, if any has been fetched.
@@ -1364,6 +1368,10 @@ impl NeoismAgentSidePanel {
     /// column. The renderer subtracts this from every section's `y`.
     pub fn content_scroll_px(&self) -> f32 {
         self.content_scroll_px
+    }
+
+    pub fn take_reveal_selected_branch(&mut self) -> bool {
+        std::mem::take(&mut self.reveal_selected_branch)
     }
 
     /// Record the total scrollable overflow for the chat-mode content
@@ -1664,7 +1672,9 @@ impl NeoismAgentSidePanel {
             return false;
         }
         match self.mode {
-            SidePanelMode::Sessions => self.new_chat_rect.is_some() || !self.sessions.is_empty(),
+            SidePanelMode::Sessions => {
+                self.new_chat_rect.is_some() || !self.sessions.is_empty()
+            }
             SidePanelMode::Subagents => self.subagents.len() > 1,
         }
     }
@@ -2997,7 +3007,9 @@ impl NeoismAgentSidePanel {
             return;
         }
         if self.active_len() == 0 {
-            if matches!(self.mode, SidePanelMode::Sessions) && self.new_chat_rect.is_some() {
+            if matches!(self.mode, SidePanelMode::Sessions)
+                && self.new_chat_rect.is_some()
+            {
                 self.select_new_chat();
             }
             return;
@@ -3084,7 +3096,11 @@ impl NeoismAgentSidePanel {
             self.last_cursor_frame = Instant::now();
         }
         self.selected = new_selected;
-        self.clamp_scroll(self.last_panel_height_rows);
+        if matches!(self.mode, SidePanelMode::Subagents) {
+            self.reveal_selected_branch = true;
+        } else {
+            self.clamp_scroll(self.last_panel_height_rows);
+        }
     }
 
     fn scrolloff_for(panel_height_rows: usize) -> usize {
@@ -3302,15 +3318,13 @@ impl NeoismAgentSidePanel {
         if mouse_y < content_y || mouse_y >= content_y + content_h {
             return None;
         }
-        // Home mode scrolls by continuous rows: convert the spring's
-        // pixel position to rows and add the visual row under the cursor.
-        // Chat (subagent) mode keeps the row-index + lag-offset anchor.
+        // Home mode uses the row spring; chat mode has already shifted the
+        // full list origin by its content scroll in the renderer.
         let row = if matches!(self.mode, SidePanelMode::Sessions) {
             let scroll_rows = self.scroll.current().max(0.0) / self.row_height();
             ((mouse_y - self.last_row_origin_y) / row_h + scroll_rows).floor() as isize
         } else {
-            let local_y = mouse_y - self.last_row_origin_y - self.scroll.current();
-            (local_y / row_h).floor() as isize + self.scroll_top as isize
+            ((mouse_y - self.last_row_origin_y) / row_h).floor() as isize
         };
         if row < 0 {
             return None;

@@ -17,7 +17,9 @@ use crate::widgets::modal::{ModalAction, ModalButton, ModalSpec};
 /// reference now `.clone()` it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PaletteAction {
-    Plugin { id: String },
+    Plugin {
+        id: String,
+    },
     TabCreate,
     TabClose,
     TabCloseUnfocused,

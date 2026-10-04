@@ -4,11 +4,11 @@
 use super::super::*;
 use crate::notebook_runtime::managed_python_kernel_env;
 use crate::workspace::extensions::{ExtensionEntry, ExtensionStatus};
-use neoism_ui::panels::extensions_page::ExtensionKind;
 use neoism_extensions::{
     ExtensionManifest, InstallError, InstallHandle, InstalledEntry, InstalledIndex,
     ProgressEvent,
 };
+use neoism_ui::panels::extensions_page::ExtensionKind;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::Stdio;

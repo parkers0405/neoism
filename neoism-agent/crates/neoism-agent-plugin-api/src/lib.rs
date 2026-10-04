@@ -14,16 +14,16 @@ use serde_json::Value;
 use thiserror::Error;
 
 pub mod context;
-pub mod plugin;
 pub mod package;
+pub mod plugin;
 pub mod process_v2;
 pub mod route;
 pub mod services;
 pub mod testkit;
 
 pub use context::*;
-pub use plugin::*;
 pub use package::*;
+pub use plugin::*;
 pub use process_v2::*;
 pub use route::*;
 pub use services::*;
@@ -356,7 +356,9 @@ impl RegistrySnapshot {
             macro_rules! merge_map {
                 ($field:ident) => {
                     for (name, value) in &scope.$field {
-                        self.$field.entry(name.clone()).or_insert_with(|| value.clone());
+                        self.$field
+                            .entry(name.clone())
+                            .or_insert_with(|| value.clone());
                     }
                 };
             }
@@ -368,7 +370,8 @@ impl RegistrySnapshot {
             merge_map!(agent_services);
             merge_map!(command_services);
             merge_map!(skill_services);
-            self.runtime_hooks.extend(scope.runtime_hooks.iter().cloned());
+            self.runtime_hooks
+                .extend(scope.runtime_hooks.iter().cloned());
             merge_map!(runtime_routes);
             merge_map!(runtime_websocket_routes);
             merge_map!(config_services);
@@ -2499,11 +2502,16 @@ mod tests {
                 plugin_api_major: PLUGIN_API_MAJOR,
             }
         }
-        fn create<'a>(&'a self, context: PluginContext) -> PluginFuture<'a, Box<dyn PluginInstance>> {
+        fn create<'a>(
+            &'a self,
+            context: PluginContext,
+        ) -> PluginFuture<'a, Box<dyn PluginInstance>> {
             *self.0.lock().unwrap() = Some(context);
             Box::pin(async {
-                Ok(Box::new(StaticPluginInstance::new(PluginContributions::default()))
-                    as Box<dyn PluginInstance>)
+                Ok(
+                    Box::new(StaticPluginInstance::new(PluginContributions::default()))
+                        as Box<dyn PluginInstance>,
+                )
             })
         }
     }
@@ -2513,18 +2521,35 @@ mod tests {
         let captured = Arc::new(std::sync::Mutex::new(None));
         let context = PluginContext::new(
             RuntimeScope::Session {
-                workspace: WorkspaceIdentity { id: "workspace".into(), root: ".".into() },
+                workspace: WorkspaceIdentity {
+                    id: "workspace".into(),
+                    root: ".".into(),
+                },
                 session_id: "session-7".into(),
             },
             CapabilityGrants::default().allow(HostCapability::PromptRead),
         );
         let installed = PluginHost::default()
-            .install(vec![Box::new(LeaseFactory(Arc::clone(&captured)))], &[], context)
+            .install(
+                vec![Box::new(LeaseFactory(Arc::clone(&captured)))],
+                &[],
+                context,
+            )
             .await
             .unwrap();
-        assert!(captured.lock().unwrap().as_ref().unwrap().capabilities_active());
+        assert!(captured
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .capabilities_active());
         installed.shutdown().await.unwrap();
-        assert!(!captured.lock().unwrap().as_ref().unwrap().capabilities_active());
+        assert!(!captured
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .capabilities_active());
     }
 
     struct ScopedFactory(PluginScope, String);
@@ -2548,10 +2573,15 @@ mod tests {
                 plugin_api_major: PLUGIN_API_MAJOR,
             }
         }
-        fn create<'a>(&'a self, _context: PluginContext) -> PluginFuture<'a, Box<dyn PluginInstance>> {
+        fn create<'a>(
+            &'a self,
+            _context: PluginContext,
+        ) -> PluginFuture<'a, Box<dyn PluginInstance>> {
             Box::pin(async {
-                Ok(Box::new(StaticPluginInstance::new(PluginContributions::default()))
-                    as Box<dyn PluginInstance>)
+                Ok(
+                    Box::new(StaticPluginInstance::new(PluginContributions::default()))
+                        as Box<dyn PluginInstance>,
+                )
             })
         }
     }
@@ -2560,15 +2590,26 @@ mod tests {
     async fn all_runtime_scopes_install_only_into_their_exact_host_scope() {
         let cases = [
             (PluginScope::Global, RuntimeScope::Global),
-            (PluginScope::User, RuntimeScope::User { user_id: "user-opaque".into() }),
+            (
+                PluginScope::User,
+                RuntimeScope::User {
+                    user_id: "user-opaque".into(),
+                },
+            ),
             (
                 PluginScope::Workspace,
-                RuntimeScope::Workspace(WorkspaceIdentity { id: "workspace-opaque".into(), root: ".".into() }),
+                RuntimeScope::Workspace(WorkspaceIdentity {
+                    id: "workspace-opaque".into(),
+                    root: ".".into(),
+                }),
             ),
             (
                 PluginScope::Session,
                 RuntimeScope::Session {
-                    workspace: WorkspaceIdentity { id: "workspace-opaque".into(), root: ".".into() },
+                    workspace: WorkspaceIdentity {
+                        id: "workspace-opaque".into(),
+                        root: ".".into(),
+                    },
                     session_id: "session-opaque".into(),
                 },
             ),
@@ -2577,7 +2618,10 @@ mod tests {
             let host = PluginHost::default();
             let installed = host
                 .install(
-                    vec![Box::new(ScopedFactory(scope, format!("dev.example.scope{index}")))],
+                    vec![Box::new(ScopedFactory(
+                        scope,
+                        format!("dev.example.scope{index}"),
+                    ))],
                     &[],
                     PluginContext::new(runtime, CapabilityGrants::default()),
                 )

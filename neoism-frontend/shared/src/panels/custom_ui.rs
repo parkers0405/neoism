@@ -30,7 +30,9 @@ pub fn render(
     let mut left_offsets = std::collections::HashMap::<&str, f32>::new();
     let mut right_offsets = std::collections::HashMap::<&str, f32>::new();
     for item in items {
-        let Some(rect) = slot_rect(&item.slot, &layout) else { continue };
+        let Some(rect) = slot_rect(&item.slot, &layout) else {
+            continue;
+        };
         if rect[2] <= 0.0 || rect[3] <= 0.0 {
             continue;
         }
@@ -78,7 +80,9 @@ pub fn render(
                 176,
             );
         }
-        sugarloaf.overlay_text_mut().draw(x + padding, y, &text, &opts);
+        sugarloaf
+            .overlay_text_mut()
+            .draw(x + padding, y, &text, &opts);
         if let Some(command) = item.command.as_ref() {
             hitboxes.push(CustomUiHitbox {
                 rect: [x, rect[1], width, rect[3]],
@@ -88,15 +92,27 @@ pub fn render(
         *offset += width + style.gap.unwrap_or(4.0);
     }
 
-    let mut panels = plugins.panels.iter().filter(|panel| panel.visible).collect::<Vec<_>>();
-    panels.sort_by_key(|panel| plugins.styles.resolve(&format!("panel.{}", panel.id)).order.unwrap_or(0));
+    let mut panels = plugins
+        .panels
+        .iter()
+        .filter(|panel| panel.visible)
+        .collect::<Vec<_>>();
+    panels.sort_by_key(|panel| {
+        plugins
+            .styles
+            .resolve(&format!("panel.{}", panel.id))
+            .order
+            .unwrap_or(0)
+    });
     for panel in panels {
         let style = plugins.styles.resolve(&format!("panel.{}", panel.id));
         let candidate_anchor = match panel.location {
             neoism_lua::PanelLocation::Left => layout.left,
             neoism_lua::PanelLocation::Right => layout.right,
             neoism_lua::PanelLocation::Bottom => layout.bottom,
-            neoism_lua::PanelLocation::Center | neoism_lua::PanelLocation::Overlay => layout.window,
+            neoism_lua::PanelLocation::Center | neoism_lua::PanelLocation::Overlay => {
+                layout.window
+            }
         };
         // A retained left/right/bottom panel remains a real overlay even when
         // the corresponding native sidebar/status slot is currently hidden.
@@ -109,12 +125,16 @@ pub fn render(
         let height = style.height.unwrap_or(240.0).min(anchor[3]);
         let x = match panel.location {
             neoism_lua::PanelLocation::Right => anchor[0] + anchor[2] - width,
-            neoism_lua::PanelLocation::Center | neoism_lua::PanelLocation::Overlay => anchor[0] + (anchor[2] - width) * 0.5,
+            neoism_lua::PanelLocation::Center | neoism_lua::PanelLocation::Overlay => {
+                anchor[0] + (anchor[2] - width) * 0.5
+            }
             _ => anchor[0],
         };
         let y = match panel.location {
             neoism_lua::PanelLocation::Bottom => anchor[1] + anchor[3] - height,
-            neoism_lua::PanelLocation::Center | neoism_lua::PanelLocation::Overlay => anchor[1] + (anchor[3] - height) * 0.5,
+            neoism_lua::PanelLocation::Center | neoism_lua::PanelLocation::Overlay => {
+                anchor[1] + (anchor[3] - height) * 0.5
+            }
             _ => anchor[1],
         };
         sugarloaf.overlay_rounded_rect(
@@ -128,15 +148,31 @@ pub fn render(
             170,
         );
         let mut content_y = y + style.padding_y.or(style.padding).unwrap_or(12.0);
-        let title_opts = DrawOpts { font_size: style.font_size.unwrap_or(13.0), color: color_u8(style.foreground.as_deref(), theme, theme.u8(theme.fg)), ..DrawOpts::default() };
-        sugarloaf.overlay_text_mut().draw(x + 12.0, content_y, &panel.title, &title_opts);
+        let title_opts = DrawOpts {
+            font_size: style.font_size.unwrap_or(13.0),
+            color: color_u8(style.foreground.as_deref(), theme, theme.u8(theme.fg)),
+            ..DrawOpts::default()
+        };
+        sugarloaf
+            .overlay_text_mut()
+            .draw(x + 12.0, content_y, &panel.title, &title_opts);
         content_y += title_opts.font_size * 1.6;
         for item in &panel.content {
-            let text = item.icon.as_deref().map_or_else(|| item.text.clone(), |icon| format!("{icon} {}", item.text));
-            sugarloaf.overlay_text_mut().draw(x + 12.0, content_y, &text, &title_opts);
+            let text = item.icon.as_deref().map_or_else(
+                || item.text.clone(),
+                |icon| format!("{icon} {}", item.text),
+            );
+            sugarloaf
+                .overlay_text_mut()
+                .draw(x + 12.0, content_y, &text, &title_opts);
             if let Some(command) = item.command.as_ref() {
                 hitboxes.push(CustomUiHitbox {
-                    rect: [x + 8.0, content_y - 2.0, width - 16.0, title_opts.font_size * 1.5],
+                    rect: [
+                        x + 8.0,
+                        content_y - 2.0,
+                        width - 16.0,
+                        title_opts.font_size * 1.5,
+                    ],
                     command: command.clone(),
                 });
             }

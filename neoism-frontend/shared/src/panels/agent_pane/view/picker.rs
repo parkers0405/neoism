@@ -100,6 +100,7 @@ pub fn render_picker(
             footer_hint,
             rename: rename.as_deref(),
             show_search_caret,
+            wrap_prompt: false,
             search_placeholder: picker.search_placeholder.as_deref().unwrap_or("Search"),
             loading: picker.loading,
             empty_message,

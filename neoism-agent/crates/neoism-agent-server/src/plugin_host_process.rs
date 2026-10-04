@@ -30,28 +30,28 @@ use neoism_agent_core::{
     UserModel,
 };
 use neoism_agent_plugin_api::{
-    AgentCatalog, AgentService, BrokerOwner, BrokerRequest, CommandService, ConfigDocument, ConfigService,
-    ContributionMetadata, GeneratedMedia, HostCapability, MediaGenerationRequest,
-    MediaKind, PluginContext, PluginContributions, PluginDescriptor, PluginFactory,
-    PluginFuture, PluginInstance, PluginManifest, PluginReadiness, PluginRuntimeError,
-    PluginScope, PluginToolDefinition, PluginToolInvocation, PluginToolResult,
-    ProcessCancelRequest, ProcessHostConfigGetRequest, ProcessHostConfigSetRequest,
-    ProcessHostBrokerCancelRequest, ProcessHostBrokerRequest, ProcessHostFrame,
+    AgentCatalog, AgentService, BrokerOwner, BrokerRequest, CommandService,
+    ConfigDocument, ConfigService, ContributionMetadata, GeneratedMedia, HostCapability,
+    MediaGenerationRequest, MediaKind, PluginContext, PluginContributions,
+    PluginDescriptor, PluginFactory, PluginFuture, PluginInstance, PluginManifest,
+    PluginReadiness, PluginRuntimeError, PluginScope, PluginToolDefinition,
+    PluginToolInvocation, PluginToolResult, ProcessCancelRequest,
+    ProcessHostBrokerCancelRequest, ProcessHostBrokerRequest,
+    ProcessHostConfigGetRequest, ProcessHostConfigSetRequest, ProcessHostFrame,
     ProcessHostReplyFrame, ProcessHostWorkspacePathRequest,
     ProcessHostWorkspaceWriteRequest, ProcessInitializeRequest,
     ProcessInitializeResponse, ProcessMediaRequest, ProcessMediaResult,
     ProcessPluginFrame, ProcessPluginOwner, ProcessProviderAuthRequest,
     ProcessProviderDeclaration, ProcessProviderMetadataRequest, ProcessProviderRouteCall,
-    ProcessProviderStreamRequest, ProcessRouteCall,
-    ProcessServiceCall, ProcessServiceDeclaration, ProcessStreamEnvelope,
-    ProcessToolInvokeRequest, ProcessWebSocketMessage, ProcessWebSocketMessageRequest,
-    ProcessWebSocketOpenRequest, PromptRequest, PromptService, ProviderDescriptor,
-    ProviderEventStream, ProviderModelMetadata, ProviderRouteRequest, ProviderService,
-    ProviderStream, ReadinessState, RenderedPrompt, RouteContribution, RouteHandler,
-    RouteRequest, RouteResponse, RuntimeHook, RuntimeTool, ServiceContribution,
-    ServiceRequest, SkillService, SystemContextSection, SystemContextService,
-    WebSocketRouteContribution, WebSocketRouteHandler,
-    WebSocketSession, PROCESS_PLUGIN_V2_PROTOCOL,
+    ProcessProviderStreamRequest, ProcessRouteCall, ProcessServiceCall,
+    ProcessServiceDeclaration, ProcessStreamEnvelope, ProcessToolInvokeRequest,
+    ProcessWebSocketMessage, ProcessWebSocketMessageRequest, ProcessWebSocketOpenRequest,
+    PromptRequest, PromptService, ProviderDescriptor, ProviderEventStream,
+    ProviderModelMetadata, ProviderRouteRequest, ProviderService, ProviderStream,
+    ReadinessState, RenderedPrompt, RouteContribution, RouteHandler, RouteRequest,
+    RouteResponse, RuntimeHook, RuntimeTool, ServiceContribution, ServiceRequest,
+    SkillService, SystemContextSection, SystemContextService, WebSocketRouteContribution,
+    WebSocketRouteHandler, WebSocketSession, PROCESS_PLUGIN_V2_PROTOCOL,
 };
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -138,16 +138,18 @@ pub(crate) fn package_plugin_spec(
                 package.manifest_path.to_string_lossy().into_owned(),
             ])
         }
-        neoism_agent_plugin_api::AgentEntrypointRuntime::Process if !agent.command.is_empty() => {
+        neoism_agent_plugin_api::AgentEntrypointRuntime::Process
+            if !agent.command.is_empty() =>
+        {
             ServeSource::Command(agent.command.clone())
         }
-        neoism_agent_plugin_api::AgentEntrypointRuntime::Process => ServeSource::Command(vec![
-            package
+        neoism_agent_plugin_api::AgentEntrypointRuntime::Process => {
+            ServeSource::Command(vec![package
                 .root
                 .join(&agent.entrypoint)
                 .to_string_lossy()
-                .into_owned(),
-        ]),
+                .into_owned()])
+        }
     };
     Ok(ServePluginSpec {
         id: package.manifest.id.clone(),
@@ -166,12 +168,7 @@ pub(crate) fn package_plugin_spec(
                 .unwrap_or(60_000)
                 .clamp(1_000, 600_000),
         ),
-        sandbox: sandbox_policy(
-            config
-                .options
-                .get("sandbox")
-                .and_then(Value::as_bool),
-        ),
+        sandbox: sandbox_policy(config.options.get("sandbox").and_then(Value::as_bool)),
         network: agent.capabilities.contains(&HostCapability::Network),
         working_directory: package.root.clone(),
         requested_capabilities: agent.capabilities.clone(),
@@ -676,18 +673,42 @@ fn dispatch_reverse_request_for_owner(
                 .map_err(|error| error.to_string())?;
             Ok(json!({}))
         }
-        "host.network.request" => dispatch_broker(context, owner, HostCapability::Network, params),
-        "host.process.spawn" => dispatch_broker(context, owner, HostCapability::ProcessSpawn, params),
-        "host.process.cancel" => cancel_broker(context, owner, HostCapability::ProcessSpawn, params),
-        "host.task.spawn" => dispatch_broker(context, owner, HostCapability::TaskSpawn, params),
-        "host.task.cancel" => cancel_broker(context, owner, HostCapability::TaskSpawn, params),
-        "host.secret.use" => dispatch_broker(context, owner, HostCapability::SecretUse, params),
-        "host.secret.read" => dispatch_broker(context, owner, HostCapability::SecretRead, params),
-        "host.prompt.read" => dispatch_broker(context, owner, HostCapability::PromptRead, params),
-        "host.message.read" => dispatch_broker(context, owner, HostCapability::MessageRead, params),
-        "host.response.transform" => dispatch_broker(context, owner, HostCapability::ResponseTransform, params),
-        "host.provider.call" => dispatch_broker(context, owner, HostCapability::ProviderAccess, params),
-        "host.policy.call" => dispatch_broker(context, owner, HostCapability::PolicyInvoke, params),
+        "host.network.request" => {
+            dispatch_broker(context, owner, HostCapability::Network, params)
+        }
+        "host.process.spawn" => {
+            dispatch_broker(context, owner, HostCapability::ProcessSpawn, params)
+        }
+        "host.process.cancel" => {
+            cancel_broker(context, owner, HostCapability::ProcessSpawn, params)
+        }
+        "host.task.spawn" => {
+            dispatch_broker(context, owner, HostCapability::TaskSpawn, params)
+        }
+        "host.task.cancel" => {
+            cancel_broker(context, owner, HostCapability::TaskSpawn, params)
+        }
+        "host.secret.use" => {
+            dispatch_broker(context, owner, HostCapability::SecretUse, params)
+        }
+        "host.secret.read" => {
+            dispatch_broker(context, owner, HostCapability::SecretRead, params)
+        }
+        "host.prompt.read" => {
+            dispatch_broker(context, owner, HostCapability::PromptRead, params)
+        }
+        "host.message.read" => {
+            dispatch_broker(context, owner, HostCapability::MessageRead, params)
+        }
+        "host.response.transform" => {
+            dispatch_broker(context, owner, HostCapability::ResponseTransform, params)
+        }
+        "host.provider.call" => {
+            dispatch_broker(context, owner, HostCapability::ProviderAccess, params)
+        }
+        "host.policy.call" => {
+            dispatch_broker(context, owner, HostCapability::PolicyInvoke, params)
+        }
         _ => Err(format!("unknown host-service method `{method}`")),
     };
     value
@@ -699,7 +720,9 @@ fn dispatch_broker(
     capability: HostCapability,
     params: Value,
 ) -> Result<Value, String> {
-    if serde_json::to_vec(&params).map_err(|error| error.to_string())?.len()
+    if serde_json::to_vec(&params)
+        .map_err(|error| error.to_string())?
+        .len()
         > MAX_BROKER_INPUT_BYTES
     {
         return Err("host broker input exceeds limit".into());
@@ -725,7 +748,9 @@ fn dispatch_broker(
         })
         .map_err(|error| error.to_string())?;
     let value = serde_json::to_value(response).map_err(|error| error.to_string())?;
-    if serde_json::to_vec(&value).map_err(|error| error.to_string())?.len()
+    if serde_json::to_vec(&value)
+        .map_err(|error| error.to_string())?
+        .len()
         > MAX_BROKER_OUTPUT_BYTES
     {
         return Err("host broker output exceeds limit".into());
@@ -854,8 +879,12 @@ impl ProcessHost {
                 scope: Some(context.scope().kind()),
                 workspace_id: context.workspace().map(|workspace| workspace.id.clone()),
                 scope_id: match context.scope() {
-                    neoism_agent_plugin_api::RuntimeScope::User { user_id } => Some(user_id.clone()),
-                    neoism_agent_plugin_api::RuntimeScope::Session { session_id, .. } => Some(session_id.clone()),
+                    neoism_agent_plugin_api::RuntimeScope::User { user_id } => {
+                        Some(user_id.clone())
+                    }
+                    neoism_agent_plugin_api::RuntimeScope::Session {
+                        session_id, ..
+                    } => Some(session_id.clone()),
                     _ => None,
                 },
             },
@@ -2183,11 +2212,18 @@ mod tests {
             request: BrokerRequest,
             lease: neoism_agent_plugin_api::CapabilityLease,
         ) -> Result<neoism_agent_plugin_api::BrokerResponse, PluginRuntimeError> {
-            let owner = request.owner.ok_or_else(|| PluginRuntimeError::new("owner missing"))?;
-            if owner.registry_generation != 7 || owner.scope_id.as_deref() != Some("session-1") || !lease.is_active() {
+            let owner = request
+                .owner
+                .ok_or_else(|| PluginRuntimeError::new("owner missing"))?;
+            if owner.registry_generation != 7
+                || owner.scope_id.as_deref() != Some("session-1")
+                || !lease.is_active()
+            {
                 return Err(PluginRuntimeError::new("owner mismatch"));
             }
-            Ok(neoism_agent_plugin_api::BrokerResponse { output: json!({"ok":true}) })
+            Ok(neoism_agent_plugin_api::BrokerResponse {
+                output: json!({"ok":true}),
+            })
         }
     }
 
@@ -2461,7 +2497,10 @@ rl.on("line", (line) => {
             r#"const readline=require('node:readline');const rl=readline.createInterface({input:process.stdin});rl.on('line',line=>{const f=JSON.parse(line);if(f.method==='initialize')process.stdout.write(JSON.stringify({id:f.id,result:{protocol:'neoism-plugin/2',tools:[{id:'hang',description:'hang',parameters:{type:'object'}}]}})+'\n');if(f.method==='shutdown')process.exit(0);});"#,
         )
         .unwrap();
-        let mut spec = spec_with_command(vec!["node".into(), fixture.to_string_lossy().into_owned()]);
+        let mut spec = spec_with_command(vec![
+            "node".into(),
+            fixture.to_string_lossy().into_owned(),
+        ]);
         spec.call_timeout = Duration::from_millis(25);
         let instance = ServePluginFactory::new(spec, standard_executables())
             .create(test_context())
@@ -2601,9 +2640,11 @@ rl.on("line", (line) => {
         let mut wrong_session = expected.clone();
         wrong_session.scope = Some(PluginScope::Session);
         wrong_session.scope_id = Some("session-other".into());
-        assert!(validate_reverse_owner(Some(&wrong_session), &expected, true)
-            .unwrap_err()
-            .contains("wrong owner"));
+        assert!(
+            validate_reverse_owner(Some(&wrong_session), &expected, true)
+                .unwrap_err()
+                .contains("wrong owner")
+        );
     }
 
     #[test]
@@ -2728,7 +2769,10 @@ rl.on("line", (line) => {
     fn broker_receives_exact_generation_and_session_owner() {
         let context = PluginContext::new(
             neoism_agent_plugin_api::RuntimeScope::Session {
-                workspace: neoism_agent_plugin_api::WorkspaceIdentity { id: "workspace".into(), root: ".".into() },
+                workspace: neoism_agent_plugin_api::WorkspaceIdentity {
+                    id: "workspace".into(),
+                    root: ".".into(),
+                },
                 session_id: "session-1".into(),
             },
             neoism_agent_plugin_api::CapabilityGrants::default()
@@ -2794,7 +2838,9 @@ rl.on("line", (line) => {
             Some(&stale),
             &owner,
             Some(11),
-            ProcessStreamEnvelope::Open { stream_id: "stream-1".into() },
+            ProcessStreamEnvelope::Open {
+                stream_id: "stream-1".into(),
+            },
             true,
         );
         assert!(!streams.lock().unwrap()["stream-1"].opened);
@@ -2804,11 +2850,16 @@ rl.on("line", (line) => {
             Some(&owner),
             &owner,
             Some(12),
-            ProcessStreamEnvelope::Open { stream_id: "stream-1".into() },
+            ProcessStreamEnvelope::Open {
+                stream_id: "stream-1".into(),
+            },
             true,
         );
         assert!(streams.lock().unwrap().is_empty());
-        assert_eq!(terminal.lock().unwrap().as_deref(), Some("stream request id mismatch"));
+        assert_eq!(
+            terminal.lock().unwrap().as_deref(),
+            Some("stream request id mismatch")
+        );
     }
 
     #[test]
@@ -2819,10 +2870,15 @@ rl.on("line", (line) => {
             Some(&owner),
             &owner,
             Some(11),
-            ProcessStreamEnvelope::End { stream_id: "stream-1".into() },
+            ProcessStreamEnvelope::End {
+                stream_id: "stream-1".into(),
+            },
             true,
         );
         assert!(streams.lock().unwrap().is_empty());
-        assert_eq!(terminal.lock().unwrap().as_deref(), Some("plugin stream ended before open"));
+        assert_eq!(
+            terminal.lock().unwrap().as_deref(),
+            Some("plugin stream ended before open")
+        );
     }
 }

@@ -24,10 +24,9 @@ pub mod workspace;
 
 pub use crdt::{
     CrdtBufferEdit, CrdtBufferId, CrdtBufferUpdate, CrdtClientId, CrdtClientMessage,
-    CrdtEditTransaction,
-    CrdtCompactionStatus, CrdtCursorPosition, CrdtPeerPresence, CrdtPresenceColor,
-    CrdtPresencePeerId, CrdtPresenceUpdate, CrdtSelectionRange, CrdtServerMessage,
-    CrdtSyncEnvelope, CrdtTextOffset,
+    CrdtCompactionStatus, CrdtCursorPosition, CrdtEditTransaction, CrdtPeerPresence,
+    CrdtPresenceColor, CrdtPresencePeerId, CrdtPresenceUpdate, CrdtSelectionRange,
+    CrdtServerMessage, CrdtSyncEnvelope, CrdtTextOffset,
 };
 pub use cursor::{
     CursorOverlayClientMessage, CursorOverlayServerMessage, CursorShape, YankFlashRegion,

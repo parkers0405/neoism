@@ -168,7 +168,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn canonical_dual_target_manifest_keeps_agent_contract_and_ignores_editor_extensions() {
+    fn canonical_dual_target_manifest_keeps_agent_contract_and_ignores_editor_extensions()
+    {
         let manifest: NeoismPackageManifest = serde_json::from_str(r#"{
             "id":"dev.neoism.dual-target","name":"Dual target","version":"1",
             "entrypoint":"legacy.lua",
@@ -197,7 +198,10 @@ mod tests {
             revision: "sha256:new".into(),
             scope: PluginScope::Session,
             scope_id: Some("session-opaque".into()),
-            requested_capabilities: vec![HostCapability::SecretUse, HostCapability::Network],
+            requested_capabilities: vec![
+                HostCapability::SecretUse,
+                HostCapability::Network,
+            ],
             granted_capabilities: vec![HostCapability::SecretUse],
             retained_revision: Some("sha256:old".into()),
             lease_active: true,

@@ -50,8 +50,8 @@ pub mod diagnostics_popup;
 pub mod extensions_page;
 pub mod hover_popup;
 pub mod inline_diagnostics;
-pub mod lsp_popup;
 pub mod left_sidebar_host;
+pub mod lsp_popup;
 pub mod settings_page;
 pub mod tags_view;
 

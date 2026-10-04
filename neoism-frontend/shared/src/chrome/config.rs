@@ -105,7 +105,8 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             git_diff: GitDiff::new(),
             git_diff_panel: GitDiffPanel::new(),
             notes_sidebar: NotesSidebar::default(),
-            left_sidebar_host: crate::panels::left_sidebar_host::LeftSidebarHost::default(),
+            left_sidebar_host: crate::panels::left_sidebar_host::LeftSidebarHost::default(
+            ),
             conversations_visible: false,
             conversations_panel_enabled: true,
             details_panel_enabled: true,
@@ -250,7 +251,8 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                 // only move focus for an already-open panel, which is
                 // why the close path is spelled out here.
                 if self.notes_sidebar.is_visible() {
-                    self.left_sidebar_host.hide(crate::panels::left_sidebar_host::LeftSidebarView::Notes);
+                    self.left_sidebar_host
+                        .hide(crate::panels::left_sidebar_host::LeftSidebarView::Notes);
                     self.notes_sidebar.set_visible(false);
                     self.notes_sidebar.set_focused(false);
                     self.relayout();
@@ -381,7 +383,8 @@ impl<A: Send + Copy + 'static> Chrome<A> {
     }
 
     pub fn hide_conversations(&mut self) {
-        self.left_sidebar_host.hide(crate::panels::left_sidebar_host::LeftSidebarView::Conversations);
+        self.left_sidebar_host
+            .hide(crate::panels::left_sidebar_host::LeftSidebarView::Conversations);
         self.conversations_visible = false;
         if let Some(pane) = self.agent_pane.as_mut() {
             pane.side_panel_mut().set_focused(false);
@@ -395,8 +398,14 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             return;
         }
         use crate::panels::left_sidebar_host::{LeftSidebarView, SidebarTransition};
-        let focused = self.agent_pane.as_ref().is_some_and(|pane| pane.side_panel().is_focused());
-        match self.left_sidebar_host.toggle(LeftSidebarView::Conversations, focused) {
+        let focused = self
+            .agent_pane
+            .as_ref()
+            .is_some_and(|pane| pane.side_panel().is_focused());
+        match self
+            .left_sidebar_host
+            .toggle(LeftSidebarView::Conversations, focused)
+        {
             SidebarTransition::Independent => {
                 self.conversations_visible = !self.conversations_visible;
             }
@@ -430,7 +439,8 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             return;
         }
         use crate::panels::left_sidebar_host::LeftSidebarView;
-        self.left_sidebar_host.show(LeftSidebarView::Conversations, focus);
+        self.left_sidebar_host
+            .show(LeftSidebarView::Conversations, focus);
         self.conversations_visible = true;
         self.hide_other_unified_sidebars(LeftSidebarView::Conversations);
         if let Some(pane) = self.agent_pane.as_mut() {
@@ -487,7 +497,8 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         notes: crate::panels::left_sidebar_host::SidebarPlacement,
         conversations: crate::panels::left_sidebar_host::SidebarPlacement,
     ) {
-        self.left_sidebar_host.set_placements(files, notes, conversations);
+        self.left_sidebar_host
+            .set_placements(files, notes, conversations);
         self.reconcile_left_sidebar_host();
         if let Some(active) = self.left_sidebar_host.active_unified() {
             self.hide_other_unified_sidebars(active);
@@ -508,9 +519,14 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         self.relayout();
     }
 
-    pub(crate) fn sidebar_requests(&self) -> crate::panels::left_sidebar_host::SidebarRequests {
+    pub(crate) fn sidebar_requests(
+        &self,
+    ) -> crate::panels::left_sidebar_host::SidebarRequests {
         crate::panels::left_sidebar_host::SidebarRequests {
-            files: self.file_tree.as_ref().is_some_and(|tree| tree.is_visible()),
+            files: self
+                .file_tree
+                .as_ref()
+                .is_some_and(|tree| tree.is_visible()),
             notes: self.notes_sidebar.is_visible(),
             conversations: self.conversations_visible,
         }
@@ -527,7 +543,9 @@ impl<A: Send + Copy + 'static> Chrome<A> {
     ) {
         use crate::panels::left_sidebar_host::{LeftSidebarView, SidebarPlacement};
         for view in LeftSidebarView::ALL {
-            if view == active || self.left_sidebar_host.placement(view) != SidebarPlacement::Unified {
+            if view == active
+                || self.left_sidebar_host.placement(view) != SidebarPlacement::Unified
+            {
                 continue;
             }
             match view {
@@ -637,8 +655,13 @@ impl<A: Send + Copy + 'static> Chrome<A> {
     /// - visible + unfocused -> focus without changing width/layout
     pub fn toggle_file_tree(&mut self) -> bool {
         use crate::panels::left_sidebar_host::{LeftSidebarView, SidebarTransition};
-        let focused = self.file_tree.as_ref().is_some_and(|tree| tree.is_focused());
-        let transition = self.left_sidebar_host.toggle(LeftSidebarView::Files, focused);
+        let focused = self
+            .file_tree
+            .as_ref()
+            .is_some_and(|tree| tree.is_focused());
+        let transition = self
+            .left_sidebar_host
+            .toggle(LeftSidebarView::Files, focused);
         let Some(tree) = self.file_tree.as_mut() else {
             return false;
         };
@@ -696,7 +719,8 @@ impl<A: Send + Copy + 'static> Chrome<A> {
     }
 
     pub fn hide_file_tree(&mut self) -> bool {
-        self.left_sidebar_host.hide(crate::panels::left_sidebar_host::LeftSidebarView::Files);
+        self.left_sidebar_host
+            .hide(crate::panels::left_sidebar_host::LeftSidebarView::Files);
         let Some(tree) = self.file_tree.as_mut() else {
             return false;
         };

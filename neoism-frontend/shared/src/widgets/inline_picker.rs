@@ -1,5 +1,6 @@
 use sugarloaf::text::DrawOpts;
 use sugarloaf::Sugarloaf;
+use unicode_segmentation::UnicodeSegmentation;
 
 use crate::primitives::IdeTheme;
 
@@ -80,6 +81,9 @@ pub struct InlinePickerView<'a> {
     /// already shows a caret there, so a second one in the search row reads
     /// as a doubled/misplaced cursor.
     pub show_search_caret: bool,
+    /// Multiline title and answer field for model questions. Other pickers
+    /// retain their compact, single-line header.
+    pub wrap_prompt: bool,
     /// Muted placeholder shown in the empty search/input row. Defaults to
     /// "Search" for filter pickers; the `/connect` secret-entry stage passes
     /// e.g. "API key" so the row reads as a single-field input.
@@ -104,6 +108,54 @@ pub struct InlinePickerRenderState {
     /// Source-row range actually painted into the card.
     pub first_row: usize,
     pub visible_rows: usize,
+    /// Height of the header; question prompts can have wrapped lines.
+    pub header_h: f32,
+}
+
+impl InlinePickerRenderState {
+    pub fn row_rect(self, visible_ix: usize, scale: f32) -> [f32; 4] {
+        let s = scale.clamp(0.5, 3.0);
+        [
+            self.rect[0],
+            self.rect[1] + self.header_h + visible_ix as f32 * ROW_H * s,
+            self.rect[2],
+            ROW_H * s,
+        ]
+    }
+}
+
+/// Wrap measured text, breaking oversized words at grapheme boundaries.
+fn wrap_prompt_text(
+    text: &str,
+    width: f32,
+    mut measure: impl FnMut(&str) -> f32,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    for paragraph in text.split('\n') {
+        let mut line = String::new();
+        for word in paragraph.split_whitespace() {
+            let candidate = if line.is_empty() {
+                word.to_owned()
+            } else {
+                format!("{line} {word}")
+            };
+            if measure(&candidate) <= width {
+                line = candidate;
+                continue;
+            }
+            if !line.is_empty() {
+                lines.push(std::mem::take(&mut line));
+            }
+            for cluster in word.graphemes(true) {
+                if !line.is_empty() && measure(&format!("{line}{cluster}")) > width {
+                    lines.push(std::mem::take(&mut line));
+                }
+                line.push_str(cluster);
+            }
+        }
+        lines.push(line);
+    }
+    lines
 }
 
 /// Trim `text` with an ellipsis so its measured width is ≤ `max_w`.
@@ -241,25 +293,97 @@ pub fn render_limited(
         view.rows.len()
     };
     let reserve_empty_row = view.loading || view.empty_message.is_some();
-    let [x, y, width, height] = layout_limited_with_empty_row(
-        layout_rows,
-        input_rect,
-        scale,
-        has_footer,
-        max_rows,
-        min_y,
-        reserve_empty_row,
-    )?;
+    let title_opts = DrawOpts {
+        font_size: 13.0 * s,
+        color: theme.u8(theme.fg),
+        bold: true,
+        ..DrawOpts::default()
+    };
+    let search_opts = DrawOpts {
+        font_size: 13.0 * s,
+        color: theme.u8(theme.fg),
+        ..DrawOpts::default()
+    };
+    let mut title_lines = Vec::new();
+    let mut query_lines = Vec::new();
+    let mut header_h = title_h;
+    let mut available_rows = max_rows.clamp(1, MAX_ROWS);
+    if view.wrap_prompt {
+        let title_w = (input_rect[2] - 62.0 * s).max(1.0);
+        let query_w = (input_rect[2] - 32.0 * s).max(1.0);
+        title_lines = wrap_prompt_text(view.title, title_w, |part| {
+            sugarloaf.overlay_text_mut().measure(part, &title_opts)
+        });
+        query_lines = wrap_prompt_text(view.query, query_w, |part| {
+            sugarloaf.overlay_text_mut().measure(part, &search_opts)
+        });
+        // Keep a list row and the footer visible on short panes. The answer
+        // field shows its latest lines so the caret never disappears.
+        let extra_space =
+            (input_rect[1] - min_y - title_h - ROW_H * s - footer_h - 6.0 * s).max(0.0);
+        let extra_lines = (extra_space / (18.0 * s)).floor() as usize;
+        let title_count = title_lines.len().min(extra_lines.saturating_add(1).min(6));
+        let query_count = query_lines.len().min(
+            extra_lines
+                .saturating_sub(title_count - 1)
+                .saturating_add(1)
+                .min(5),
+        );
+        let title_overflows = title_count < title_lines.len();
+        title_lines.truncate(title_count);
+        if title_overflows {
+            let last = title_lines.last_mut().expect("question has a title line");
+            *last = truncate_to_pixel_width(
+                sugarloaf,
+                &format!("{last}…"),
+                &title_opts,
+                title_w,
+            );
+        }
+        query_lines = query_lines.split_off(query_lines.len() - query_count);
+        header_h += (title_count + query_count - 2) as f32 * 18.0 * s;
+        available_rows = row_limit_for_space(
+            input_rect[1] - (header_h - title_h),
+            min_y,
+            s,
+            has_footer,
+            available_rows,
+        );
+    }
+    let [x, y, width, height] = if view.wrap_prompt {
+        let visible = if layout_rows == 0 && !reserve_empty_row {
+            0
+        } else {
+            layout_rows.min(available_rows).max(1)
+        };
+        let height = header_h + visible as f32 * row_h + footer_h;
+        [
+            input_rect[0],
+            (input_rect[1] - height - 6.0 * s).max(min_y),
+            input_rect[2],
+            height,
+        ]
+    } else {
+        layout_limited_with_empty_row(
+            layout_rows,
+            input_rect,
+            scale,
+            has_footer,
+            max_rows,
+            min_y,
+            reserve_empty_row,
+        )?
+    };
     let visible_rows = if layout_rows == 0 && !reserve_empty_row {
         0
     } else {
-        layout_rows.min(max_rows.clamp(1, MAX_ROWS)).max(1)
+        layout_rows.min(available_rows).max(1)
     };
     let selected = view.selected.min(view.rows.len().saturating_sub(1));
     let first = view
         .scroll_offset
         .min(view.rows.len().saturating_sub(visible_rows));
-    let header_clip = [x, y, width, title_h];
+    let header_clip = [x, y, width, header_h];
 
     // NB: no square backing rect here — a full-bounds `rect` would fill
     // the four corner triangles the rounded rects leave empty, showing as
@@ -299,18 +423,29 @@ pub fn render_limited(
     // Header band: modal title (left) + `esc` hint (right), then a search
     // row below showing the live query or a muted "Search" placeholder.
     // Type-to-filter is always on; this just gives it a visible input.
-    sugarloaf.overlay_text_mut().draw(
-        x + 14.0 * s,
-        y + 9.0 * s,
-        view.title,
-        &DrawOpts {
-            font_size: 13.0 * s,
-            color: theme.u8(theme.fg),
-            bold: true,
-            clip_rect: Some(header_clip),
-            ..DrawOpts::default()
-        },
-    );
+    if view.wrap_prompt {
+        for (index, line) in title_lines.iter().enumerate() {
+            sugarloaf.overlay_text_mut().draw(
+                x + 14.0 * s,
+                y + (9.0 + index as f32 * 18.0) * s,
+                line,
+                &DrawOpts {
+                    clip_rect: Some(header_clip),
+                    ..title_opts
+                },
+            );
+        }
+    } else {
+        sugarloaf.overlay_text_mut().draw(
+            x + 14.0 * s,
+            y + 9.0 * s,
+            view.title,
+            &DrawOpts {
+                clip_rect: Some(header_clip),
+                ..title_opts
+            },
+        );
+    }
     let esc_opts = DrawOpts {
         font_size: 12.0 * s,
         color: theme.u8(theme.muted),
@@ -362,9 +497,35 @@ pub fn render_limited(
             clip_rect: Some(header_clip),
             ..DrawOpts::default()
         };
-        // Caret sits after the typed query, or at the field start (with the
-        // muted placeholder pushed right) when empty — reads as a live input.
-        let caret_x = if view.query.is_empty() {
+        let query_y = y + (31.0 + title_lines.len().saturating_sub(1) as f32 * 18.0) * s;
+        // Caret follows the last visible answer line, even if earlier lines
+        // were dropped to fit above the composer.
+        let caret_x = if view.wrap_prompt {
+            for (index, line) in query_lines.iter().enumerate() {
+                sugarloaf.overlay_text_mut().draw(
+                    x + 14.0 * s,
+                    query_y + index as f32 * 18.0 * s,
+                    line,
+                    &search_opts,
+                );
+            }
+            if view.query.is_empty() {
+                sugarloaf.overlay_text_mut().draw(
+                    x + 19.0 * s,
+                    query_y,
+                    view.search_placeholder,
+                    &DrawOpts {
+                        color: theme.u8(theme.muted),
+                        ..search_opts
+                    },
+                );
+            }
+            x + 14.0 * s
+                + sugarloaf.overlay_text_mut().measure(
+                    query_lines.last().map(String::as_str).unwrap_or(""),
+                    &search_opts,
+                )
+        } else if view.query.is_empty() {
             sugarloaf.overlay_text_mut().draw(
                 x + 14.0 * s + 5.0 * s,
                 y + 31.0 * s,
@@ -395,7 +556,11 @@ pub fn render_limited(
             let caret_w = (1.5 * s).max(1.0);
             sugarloaf.overlay_rounded_rect(
                 caret_x + 1.0 * s,
-                y + 31.0 * s,
+                if view.wrap_prompt {
+                    query_y + query_lines.len().saturating_sub(1) as f32 * 18.0 * s
+                } else {
+                    y + 31.0 * s
+                },
                 caret_w,
                 13.0 * s,
                 theme.f32(theme.accent),
@@ -406,7 +571,7 @@ pub fn render_limited(
         }
     }
 
-    let list_y = y + title_h;
+    let list_y = y + header_h;
     let list_clip = [x, list_y, width, visible_rows as f32 * row_h];
     let title_opts = DrawOpts {
         font_size: 14.0 * s,
@@ -725,12 +890,48 @@ pub fn render_limited(
         footer_h,
         first_row: first,
         visible_rows,
+        header_h,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn question_header_wraps_words_long_tokens_and_hard_breaks() {
+        let text = "The subagent accidentally formatted unrelated files. May I what?\nYour answer";
+        let lines = wrap_prompt_text(text, 20.0, |s| s.graphemes(true).count() as f32);
+        assert_eq!(
+            lines,
+            [
+                "The subagent",
+                "accidentally",
+                "formatted unrelated",
+                "files. May I what?",
+                "Your answer"
+            ]
+        );
+        assert!(lines.iter().all(|line| line.graphemes(true).count() <= 20));
+        let token =
+            wrap_prompt_text("👩‍💻👩‍💻👩‍💻abcdef", 2.0, |s| {
+                s.graphemes(true).count() as f32
+            });
+        assert_eq!(token, ["👩‍💻👩‍💻", "👩‍💻a", "bc", "de", "f"]);
+    }
+
+    #[test]
+    fn question_row_hitbox_starts_below_wrapped_header() {
+        let state = InlinePickerRenderState {
+            rect: [20.0, 40.0, 300.0, 200.0],
+            selected_cursor_rect: None,
+            footer_h: 26.0,
+            first_row: 0,
+            visible_rows: 2,
+            header_h: 90.0,
+        };
+        assert_eq!(state.row_rect(1, 1.0), [20.0, 176.0, 300.0, 46.0]);
+    }
 
     #[test]
     fn limited_picker_stays_below_pane_chrome_and_above_composer() {

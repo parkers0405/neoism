@@ -3,10 +3,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use neoism_lua::{
-    build_plugin_graph, discover_local_manifests, discover_plugin_specs, load_plugin_manifest,
-    read_plugin_manifest, validate_manifest, CommandContribution, DiscoveredManifest, ExecutionScope, LazyKeyTrigger,
-    PluginEcosystemError, PluginEvent, PluginGraph, PluginHost, PluginRuntime,
-    PluginRuntimeCandidate, PluginSnapshot, PluginSource, PluginTrigger,
+    build_plugin_graph, discover_local_manifests, discover_plugin_specs,
+    load_plugin_manifest, read_plugin_manifest, validate_manifest, CommandContribution,
+    DiscoveredManifest, ExecutionScope, LazyKeyTrigger, PluginEcosystemError,
+    PluginEvent, PluginGraph, PluginHost, PluginRuntime, PluginRuntimeCandidate,
+    PluginSnapshot, PluginSource, PluginTrigger,
 };
 use thiserror::Error;
 
@@ -20,7 +21,9 @@ pub(crate) enum PluginManagerError {
         #[source]
         source: neoism_lua::LuaPluginError,
     },
-    #[error("plugin contribution conflict for {kind} `{id}` between `{first}` and `{second}`")]
+    #[error(
+        "plugin contribution conflict for {kind} `{id}` between `{first}` and `{second}`"
+    )]
     Conflict {
         kind: &'static str,
         id: String,
@@ -107,7 +110,8 @@ impl LuaPluginManager {
         policy: &neoism_backend::config::PluginPreferences,
         selection: Option<&neoism_backend::config::mashup::EditorPluginSelection>,
     ) -> Result<Self, PluginManagerError> {
-        let mut manager = Self::discover_inactive(config_dir.into(), host, policy, selection)?;
+        let mut manager =
+            Self::discover_inactive(config_dir.into(), host, policy, selection)?;
         manager.activate_eager()?;
         manager.add_lazy_placeholders();
         Ok(manager)
@@ -120,7 +124,12 @@ impl LuaPluginManager {
         selection: Option<&neoism_backend::config::mashup::EditorPluginSelection>,
     ) -> (Self, Option<PluginManagerError>) {
         let config_dir = config_dir.into();
-        let mut manager = match Self::discover_inactive(config_dir.clone(), host.clone(), policy, selection) {
+        let mut manager = match Self::discover_inactive(
+            config_dir.clone(),
+            host.clone(),
+            policy,
+            selection,
+        ) {
             Ok(manager) => manager,
             Err(error) => return (Self::empty(config_dir, host), Some(error)),
         };
@@ -137,7 +146,8 @@ impl LuaPluginManager {
     ) -> Result<Self, PluginManagerError> {
         let disabled = policy.disabled.iter().cloned().collect::<BTreeSet<_>>();
         let manifests = discover_manifests(&config_dir, &policy.trusted_sources)?;
-        let (manifests, mashup_excluded) = select_manifests(manifests, &disabled, selection)?;
+        let (manifests, mashup_excluded) =
+            select_manifests(manifests, &disabled, selection)?;
         let graph = build_plugin_graph(
             &manifests
                 .iter()
@@ -202,8 +212,16 @@ impl LuaPluginManager {
     }
 
     pub fn enabled_dependents(&self, plugin_id: &str) -> Vec<String> {
-        self.discovered.values()
-            .filter(|plugin| plugin.manifest.id != plugin_id && plugin.manifest.dependencies.iter().any(|dependency| dependency == plugin_id))
+        self.discovered
+            .values()
+            .filter(|plugin| {
+                plugin.manifest.id != plugin_id
+                    && plugin
+                        .manifest
+                        .dependencies
+                        .iter()
+                        .any(|dependency| dependency == plugin_id)
+            })
             .map(|plugin| plugin.manifest.id.clone())
             .collect()
     }
@@ -241,15 +259,20 @@ impl LuaPluginManager {
                 "grants": self.grants.get(id).cloned().unwrap_or_default(),
             })
         }));
-        rows.extend(self.mashup_excluded.iter().filter(|id| !self.disabled.contains(*id)).map(|id| {
-            serde_json::json!({
-                "id": id,
-                "name": id,
-                "status": "mashup-excluded",
-                "capabilities": [],
-                "grants": self.grants.get(id).cloned().unwrap_or_default(),
-            })
-        }));
+        rows.extend(
+            self.mashup_excluded
+                .iter()
+                .filter(|id| !self.disabled.contains(*id))
+                .map(|id| {
+                    serde_json::json!({
+                        "id": id,
+                        "name": id,
+                        "status": "mashup-excluded",
+                        "capabilities": [],
+                        "grants": self.grants.get(id).cloned().unwrap_or_default(),
+                    })
+                }),
+        );
         rows.sort_by(|left, right| {
             left.get("id")
                 .and_then(serde_json::Value::as_str)
@@ -266,10 +289,15 @@ impl LuaPluginManager {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.discovered.is_empty() && self.disabled.is_empty() && self.mashup_excluded.is_empty()
+        self.discovered.is_empty()
+            && self.disabled.is_empty()
+            && self.mashup_excluded.is_empty()
     }
 
-    pub fn activate_trigger(&mut self, trigger: &str) -> Result<bool, PluginManagerError> {
+    pub fn activate_trigger(
+        &mut self,
+        trigger: &str,
+    ) -> Result<bool, PluginManagerError> {
         let targets = self
             .graph
             .trigger_index
@@ -279,11 +307,17 @@ impl LuaPluginManager {
         self.activate_plugins(&targets)
     }
 
-    pub fn activate_surface(&mut self, surface: &str) -> Result<bool, PluginManagerError> {
+    pub fn activate_surface(
+        &mut self,
+        surface: &str,
+    ) -> Result<bool, PluginManagerError> {
         self.activate_trigger(&format!("surface:{surface}"))
     }
 
-    pub fn activate_command(&mut self, command: &str) -> Result<bool, PluginManagerError> {
+    pub fn activate_command(
+        &mut self,
+        command: &str,
+    ) -> Result<bool, PluginManagerError> {
         self.activate_trigger(&format!("command:{command}"))
     }
 
@@ -291,7 +325,10 @@ impl LuaPluginManager {
         self.activate_trigger(&format!("key:{key}"))
     }
 
-    pub fn activate_filetype(&mut self, filetype: &str) -> Result<bool, PluginManagerError> {
+    pub fn activate_filetype(
+        &mut self,
+        filetype: &str,
+    ) -> Result<bool, PluginManagerError> {
         self.activate_trigger(&format!("filetype:{filetype}"))
     }
 
@@ -392,11 +429,15 @@ impl LuaPluginManager {
         owner: &neoism_lua::PluginOwner,
         command_id: &str,
     ) -> Option<neoism_lua::CommandContribution> {
-        self.active.get(&owner.plugin_id)
+        self.active
+            .get(&owner.plugin_id)
             .filter(|runtime| runtime.owner() == owner)
-            .and_then(|runtime| runtime.snapshot().commands.iter().find(|command| {
-                command.id == command_id || command.aliases.iter().any(|alias| alias == command_id)
-            }))
+            .and_then(|runtime| {
+                runtime.snapshot().commands.iter().find(|command| {
+                    command.id == command_id
+                        || command.aliases.iter().any(|alias| alias == command_id)
+                })
+            })
             .cloned()
     }
 
@@ -405,9 +446,16 @@ impl LuaPluginManager {
         command_id: &str,
     ) -> Option<(neoism_lua::PluginOwner, neoism_lua::CommandContribution)> {
         self.active.values().find_map(|runtime| {
-            runtime.snapshot().commands.iter().find(|command| {
-                command.id == command_id || command.aliases.iter().any(|alias| alias == command_id)
-            }).cloned().map(|command| (runtime.owner().clone(), command))
+            runtime
+                .snapshot()
+                .commands
+                .iter()
+                .find(|command| {
+                    command.id == command_id
+                        || command.aliases.iter().any(|alias| alias == command_id)
+                })
+                .cloned()
+                .map(|command| (runtime.owner().clone(), command))
         })
     }
 
@@ -417,15 +465,22 @@ impl LuaPluginManager {
         command_id: &str,
         prefix: &str,
     ) -> Result<Vec<String>, PluginManagerError> {
-        let runtime = self.active.get(&owner.plugin_id)
+        let runtime = self
+            .active
+            .get(&owner.plugin_id)
             .filter(|runtime| runtime.owner() == owner)
-            .ok_or_else(|| PluginManagerError::StaleCallback(format!(
-                "{}@{}", owner.plugin_id, owner.revision.0
-            )))?;
-        runtime.complete_command(command_id, prefix).map_err(|source| PluginManagerError::Runtime {
-            plugin: owner.plugin_id.clone(),
-            source,
-        })
+            .ok_or_else(|| {
+                PluginManagerError::StaleCallback(format!(
+                    "{}@{}",
+                    owner.plugin_id, owner.revision.0
+                ))
+            })?;
+        runtime
+            .complete_command(command_id, prefix)
+            .map_err(|source| PluginManagerError::Runtime {
+                plugin: owner.plugin_id.clone(),
+                source,
+            })
     }
 
     fn activate_eager(&mut self) -> Result<(), PluginManagerError> {
@@ -434,11 +489,9 @@ impl LuaPluginManager {
             .values()
             .filter(|plugin| {
                 plugin.manifest.triggers.is_empty()
-                    || plugin
-                        .manifest
-                        .triggers
-                        .iter()
-                        .any(|trigger| matches!(trigger.key().as_str(), "startup" | "Startup"))
+                    || plugin.manifest.triggers.iter().any(|trigger| {
+                        matches!(trigger.key().as_str(), "startup" | "Startup")
+                    })
             })
             .map(|plugin| plugin.manifest.id.clone())
             .collect::<Vec<_>>();
@@ -446,7 +499,10 @@ impl LuaPluginManager {
         Ok(())
     }
 
-    fn activate_plugins(&mut self, targets: &[String]) -> Result<bool, PluginManagerError> {
+    fn activate_plugins(
+        &mut self,
+        targets: &[String],
+    ) -> Result<bool, PluginManagerError> {
         if targets.is_empty() {
             return Ok(false);
         }
@@ -488,28 +544,73 @@ impl LuaPluginManager {
                         plugin_id: plugin_id.clone(),
                         revision,
                     },
-                    plugin.manifest.capabilities.iter().map(|capability| capability.key()),
+                    plugin
+                        .manifest
+                        .capabilities
+                        .iter()
+                        .map(|capability| capability.key()),
                     self.grants.get(&plugin_id).cloned().unwrap_or_default(),
                 )),
             ) {
                 Ok(candidate) => {
                     let owner = candidate.owner().clone();
-                    let package_digest = neoism_extensions::lua_plugins::tree_sha256(&plugin.root)
-                        .map_err(PluginManagerError::Acquisition)?;
-                    let capabilities = plugin.manifest.capabilities.iter().map(|value| value.key()).collect::<BTreeSet<_>>();
+                    let package_digest =
+                        neoism_extensions::lua_plugins::tree_sha256(&plugin.root)
+                            .map_err(PluginManagerError::Acquisition)?;
+                    let capabilities = plugin
+                        .manifest
+                        .capabilities
+                        .iter()
+                        .map(|value| value.key())
+                        .collect::<BTreeSet<_>>();
                     if let Some(artifact) = &plugin.manifest.entrypoints.native {
-                        if exact_artifact_approved(&owner, &package_digest, artifact, &capabilities) {
-                            let generation = crate::native_extension::start_approved(owner.clone(), &plugin.root, &package_digest, artifact, &capabilities, neoism_extensions::trust::ApprovalScope::User)
-                                .map_err(|message| { mark_artifact_failed(&owner, &package_digest, artifact, &capabilities, &message); PluginManagerError::InvalidContribution { plugin: plugin_id.clone(), message } })?;
-                            native_candidates.insert(format!("{}:native", plugin_id), generation);
+                        if exact_artifact_approved(
+                            &owner,
+                            &package_digest,
+                            artifact,
+                            &capabilities,
+                        ) {
+                            let generation = crate::native_extension::start_approved(
+                                owner.clone(),
+                                &plugin.root,
+                                &package_digest,
+                                artifact,
+                                &capabilities,
+                                neoism_extensions::trust::ApprovalScope::User,
+                            )
+                            .map_err(|message| {
+                                mark_artifact_failed(
+                                    &owner,
+                                    &package_digest,
+                                    artifact,
+                                    &capabilities,
+                                    &message,
+                                );
+                                PluginManagerError::InvalidContribution {
+                                    plugin: plugin_id.clone(),
+                                    message,
+                                }
+                            })?;
+                            native_candidates
+                                .insert(format!("{}:native", plugin_id), generation);
                         }
                     }
                     for contribution in &candidate.snapshot().platform {
-                        if let neoism_lua::PlatformContribution::TreeSitter(parser) = &contribution.contribution {
-                            if exact_artifact_approved(&owner, &package_digest, &parser.parser, &capabilities) {
+                        if let neoism_lua::PlatformContribution::TreeSitter(parser) =
+                            &contribution.contribution
+                        {
+                            if exact_artifact_approved(
+                                &owner,
+                                &package_digest,
+                                &parser.parser,
+                                &capabilities,
+                            ) {
                                 let generation = crate::native_extension::validate_tree_sitter_approved(owner.clone(), &plugin.root, &package_digest, &parser.parser, &parser.language, &capabilities, neoism_extensions::trust::ApprovalScope::User)
                                     .map_err(|message| { mark_artifact_failed(&owner, &package_digest, &parser.parser, &capabilities, &message); PluginManagerError::InvalidContribution { plugin: plugin_id.clone(), message } })?;
-                                native_candidates.insert(format!("{}:parser:{}", plugin_id, parser.id), generation);
+                                native_candidates.insert(
+                                    format!("{}:parser:{}", plugin_id, parser.id),
+                                    generation,
+                                );
                             }
                         }
                     }
@@ -531,7 +632,8 @@ impl LuaPluginManager {
 
         validate_candidate_snapshot(&self.active, &candidates)?;
         for (plugin_id, candidate) in candidates {
-            self.native_generations.retain(|_, generation| generation.owner.plugin_id != plugin_id);
+            self.native_generations
+                .retain(|_, generation| generation.owner.plugin_id != plugin_id);
             self.active.insert(plugin_id.clone(), candidate.activate());
             self.failures.remove(&plugin_id);
         }
@@ -601,15 +703,46 @@ impl LuaPluginManager {
     }
 }
 
-fn exact_artifact_approved(owner: &neoism_lua::PluginOwner, package_digest: &str, artifact: &neoism_lua::OpaqueArtifact, capabilities: &BTreeSet<String>) -> bool {
+fn exact_artifact_approved(
+    owner: &neoism_lua::PluginOwner,
+    package_digest: &str,
+    artifact: &neoism_lua::OpaqueArtifact,
+    capabilities: &BTreeSet<String>,
+) -> bool {
     neoism_extensions::trust::ExtensionTrustStore::managed()
-        .exact(&owner.plugin_id, &owner.revision.0, package_digest, &artifact.sha256, artifact.abi, capabilities, &neoism_extensions::trust::ApprovalScope::User)
-        .ok().flatten().is_some_and(|approval| approval.state == neoism_extensions::trust::ApprovalState::Approved)
+        .exact(
+            &owner.plugin_id,
+            &owner.revision.0,
+            package_digest,
+            &artifact.sha256,
+            artifact.abi,
+            capabilities,
+            &neoism_extensions::trust::ApprovalScope::User,
+        )
+        .ok()
+        .flatten()
+        .is_some_and(|approval| {
+            approval.state == neoism_extensions::trust::ApprovalState::Approved
+        })
 }
 
-fn mark_artifact_failed(owner: &neoism_lua::PluginOwner, package_digest: &str, artifact: &neoism_lua::OpaqueArtifact, capabilities: &BTreeSet<String>, message: &str) {
+fn mark_artifact_failed(
+    owner: &neoism_lua::PluginOwner,
+    package_digest: &str,
+    artifact: &neoism_lua::OpaqueArtifact,
+    capabilities: &BTreeSet<String>,
+    message: &str,
+) {
     let store = neoism_extensions::trust::ExtensionTrustStore::managed();
-    if let Ok(Some(mut approval)) = store.exact(&owner.plugin_id, &owner.revision.0, package_digest, &artifact.sha256, artifact.abi, capabilities, &neoism_extensions::trust::ApprovalScope::User) {
+    if let Ok(Some(mut approval)) = store.exact(
+        &owner.plugin_id,
+        &owner.revision.0,
+        package_digest,
+        &artifact.sha256,
+        artifact.abi,
+        capabilities,
+        &neoism_extensions::trust::ApprovalScope::User,
+    ) {
         approval.decided_by = "extension-host".into();
         let _ = store.record_failure(approval, message.into());
     }
@@ -653,7 +786,10 @@ fn scan_plugin_inventory(
     let local_root = manager.config_dir.join("plugins");
     match std::fs::read_dir(&local_root) {
         Ok(entries) => {
-            let mut roots = entries.flatten().map(|entry| entry.path()).collect::<Vec<_>>();
+            let mut roots = entries
+                .flatten()
+                .map(|entry| entry.path())
+                .collect::<Vec<_>>();
             roots.sort();
             for root in roots {
                 if !root.join("neoism-plugin.json").is_file() {
@@ -663,49 +799,72 @@ fn scan_plugin_inventory(
                     Ok(plugin) => {
                         let validation = validate_manifest(&plugin.manifest, &root);
                         let id = plugin.manifest.id.clone();
-                        let lifecycle = if policy.disabled.iter().any(|disabled| disabled == &id) {
-                            LuaPluginLifecycle::Disabled
-                        } else if manager.mashup_excluded.contains(&id) {
-                            LuaPluginLifecycle::MashupExcluded
-                        } else if validation.is_err() {
-                            LuaPluginLifecycle::Incompatible
-                        } else if manager.active.contains_key(&id) {
-                            LuaPluginLifecycle::Loaded
-                        } else {
-                            LuaPluginLifecycle::Lazy
-                        };
+                        let lifecycle =
+                            if policy.disabled.iter().any(|disabled| disabled == &id) {
+                                LuaPluginLifecycle::Disabled
+                            } else if manager.mashup_excluded.contains(&id) {
+                                LuaPluginLifecycle::MashupExcluded
+                            } else if validation.is_err() {
+                                LuaPluginLifecycle::Incompatible
+                            } else if manager.active.contains_key(&id) {
+                                LuaPluginLifecycle::Loaded
+                            } else {
+                                LuaPluginLifecycle::Lazy
+                            };
                         let status = validation
                             .err()
                             .map(|error| error.to_string())
                             .unwrap_or_else(|| lifecycle_label(lifecycle).into());
                         inventory.entries.entry(id).or_insert_with(|| {
-                            inventory_entry(&plugin.manifest, Some(root), lifecycle, &status, policy)
+                            inventory_entry(
+                                &plugin.manifest,
+                                Some(root),
+                                lifecycle,
+                                &status,
+                                policy,
+                            )
                         });
                     }
                     Err(error) => {
-                        let id = root.file_name().and_then(|name| name.to_str()).unwrap_or("invalid-local-plugin").to_string();
+                        let id = root
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or("invalid-local-plugin")
+                            .to_string();
                         let mashup_controlled = manager.mashup_excluded.contains(&id);
-                        inventory.entries.entry(id.clone()).or_insert(LuaPluginInventoryEntry {
-                            id: id.clone(),
-                            name: id,
-                            version: String::new(),
-                            lifecycle: LuaPluginLifecycle::Incompatible,
-                            status_text: error.to_string(),
-                            capabilities: Vec::new(),
-                            grants: policy.grants.get(root.file_name().and_then(|name| name.to_str()).unwrap_or_default()).cloned().unwrap_or_default(),
-                            missing_permissions: Vec::new(),
-                            repository_url: None,
-                            requested_ref: None,
-                            installed_commit: None,
-                            root: Some(root),
-                            mashup_controlled,
-                        });
+                        inventory.entries.entry(id.clone()).or_insert(
+                            LuaPluginInventoryEntry {
+                                id: id.clone(),
+                                name: id,
+                                version: String::new(),
+                                lifecycle: LuaPluginLifecycle::Incompatible,
+                                status_text: error.to_string(),
+                                capabilities: Vec::new(),
+                                grants: policy
+                                    .grants
+                                    .get(
+                                        root.file_name()
+                                            .and_then(|name| name.to_str())
+                                            .unwrap_or_default(),
+                                    )
+                                    .cloned()
+                                    .unwrap_or_default(),
+                                missing_permissions: Vec::new(),
+                                repository_url: None,
+                                requested_ref: None,
+                                installed_commit: None,
+                                root: Some(root),
+                                mashup_controlled,
+                            },
+                        );
                     }
                 }
             }
         }
         Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
-            inventory.global_errors.push(format!("unable to scan {}: {error}", local_root.display()));
+            inventory
+                .global_errors
+                .push(format!("unable to scan {}: {error}", local_root.display()));
         }
         Err(_) => {}
     }
@@ -717,60 +876,125 @@ fn scan_plugin_inventory(
                 match &spec.source {
                     PluginSource::Git { url, rev } => {
                         let trusted = policy.trusted_sources.is_empty()
-                            || policy.trusted_sources.iter().any(|source| url.starts_with(source));
+                            || policy
+                                .trusted_sources
+                                .iter()
+                                .any(|source| url.starts_with(source));
                         let (mut lifecycle, mut status) = if !trusted {
-                            (LuaPluginLifecycle::Blocked, format!("Git source `{url}` is not trusted"))
-                        } else if !spec.enabled || policy.disabled.iter().any(|id| id == &spec.id) {
+                            (
+                                LuaPluginLifecycle::Blocked,
+                                format!("Git source `{url}` is not trusted"),
+                            )
+                        } else if !spec.enabled
+                            || policy.disabled.iter().any(|id| id == &spec.id)
+                        {
                             (LuaPluginLifecycle::Disabled, "Disabled".into())
                         } else if manager.mashup_excluded.contains(&spec.id) {
-                            (LuaPluginLifecycle::MashupExcluded, "Excluded by active Mash Up Pack".into())
+                            (
+                                LuaPluginLifecycle::MashupExcluded,
+                                "Excluded by active Mash Up Pack".into(),
+                            )
                         } else if existing_lock.is_none() {
-                            (LuaPluginLifecycle::Discovered, "Available to install".into())
+                            (
+                                LuaPluginLifecycle::Discovered,
+                                "Available to install".into(),
+                            )
                         } else if existing_lock.is_some_and(|entry| {
-                            entry.repository_url != *url || rev.as_deref().is_some_and(|requested| requested != entry.requested_ref)
+                            entry.repository_url != *url
+                                || rev.as_deref().is_some_and(|requested| {
+                                    requested != entry.requested_ref
+                                })
                         }) {
-                            (LuaPluginLifecycle::UpdateAvailable, "Configured source differs from the installed revision".into())
+                            (
+                                LuaPluginLifecycle::UpdateAvailable,
+                                "Configured source differs from the installed revision"
+                                    .into(),
+                            )
                         } else {
                             (LuaPluginLifecycle::Lazy, "Installed".into())
                         };
                         if let Some(current) = inventory.entries.get(&spec.id) {
-                            if matches!(current.lifecycle, LuaPluginLifecycle::Loaded | LuaPluginLifecycle::PermissionRequired | LuaPluginLifecycle::Approved | LuaPluginLifecycle::Revoked | LuaPluginLifecycle::Failed) {
+                            if matches!(
+                                current.lifecycle,
+                                LuaPluginLifecycle::Loaded
+                                    | LuaPluginLifecycle::PermissionRequired
+                                    | LuaPluginLifecycle::Approved
+                                    | LuaPluginLifecycle::Revoked
+                                    | LuaPluginLifecycle::Failed
+                            ) {
                                 lifecycle = current.lifecycle;
                                 status = current.status_text.clone();
                             }
                         }
-                        let row = inventory.entries.entry(spec.id.clone()).or_insert_with(|| LuaPluginInventoryEntry {
-                            id: spec.id.clone(),
-                            name: spec.id.clone(),
-                            version: existing_lock.map(|entry| entry.plugin_version.clone()).unwrap_or_default(),
-                            lifecycle,
-                            status_text: status.clone(),
-                            capabilities: Vec::new(),
-                            grants: policy.grants.get(&spec.id).cloned().unwrap_or_default(),
-                            missing_permissions: Vec::new(),
-                            repository_url: Some(url.clone()),
-                            requested_ref: Some(rev.clone().unwrap_or_else(|| "HEAD".into())),
-                            installed_commit: existing_lock.map(|entry| entry.resolved_commit.clone()),
-                            root: existing_lock.and_then(|entry| store.installed_path(entry).ok()),
-                            mashup_controlled: manager.mashup_excluded.contains(&spec.id),
-                        });
+                        let row = inventory
+                            .entries
+                            .entry(spec.id.clone())
+                            .or_insert_with(|| LuaPluginInventoryEntry {
+                                id: spec.id.clone(),
+                                name: spec.id.clone(),
+                                version: existing_lock
+                                    .map(|entry| entry.plugin_version.clone())
+                                    .unwrap_or_default(),
+                                lifecycle,
+                                status_text: status.clone(),
+                                capabilities: Vec::new(),
+                                grants: policy
+                                    .grants
+                                    .get(&spec.id)
+                                    .cloned()
+                                    .unwrap_or_default(),
+                                missing_permissions: Vec::new(),
+                                repository_url: Some(url.clone()),
+                                requested_ref: Some(
+                                    rev.clone().unwrap_or_else(|| "HEAD".into()),
+                                ),
+                                installed_commit: existing_lock
+                                    .map(|entry| entry.resolved_commit.clone()),
+                                root: existing_lock
+                                    .and_then(|entry| store.installed_path(entry).ok()),
+                                mashup_controlled: manager
+                                    .mashup_excluded
+                                    .contains(&spec.id),
+                            });
                         row.repository_url = Some(url.clone());
-                        row.requested_ref = Some(rev.clone().unwrap_or_else(|| "HEAD".into()));
-                        row.installed_commit = existing_lock.map(|entry| entry.resolved_commit.clone());
-                        if !matches!(row.lifecycle, LuaPluginLifecycle::Loaded | LuaPluginLifecycle::PermissionRequired | LuaPluginLifecycle::Approved | LuaPluginLifecycle::Revoked | LuaPluginLifecycle::Failed) {
+                        row.requested_ref =
+                            Some(rev.clone().unwrap_or_else(|| "HEAD".into()));
+                        row.installed_commit =
+                            existing_lock.map(|entry| entry.resolved_commit.clone());
+                        if !matches!(
+                            row.lifecycle,
+                            LuaPluginLifecycle::Loaded
+                                | LuaPluginLifecycle::PermissionRequired
+                                | LuaPluginLifecycle::Approved
+                                | LuaPluginLifecycle::Revoked
+                                | LuaPluginLifecycle::Failed
+                        ) {
                             row.lifecycle = lifecycle;
                             row.status_text = status;
                         }
                     }
                     PluginSource::Registry { .. } => {
-                        let mashup_controlled = manager.mashup_excluded.contains(&spec.id);
-                        inventory.entries.entry(spec.id.clone()).or_insert(LuaPluginInventoryEntry {
-                            id: spec.id.clone(), name: spec.id, version: String::new(), lifecycle: LuaPluginLifecycle::Blocked,
-                            status_text: "Registry plugin acquisition is not implemented".into(), capabilities: Vec::new(),
-                            grants: Vec::new(), missing_permissions: Vec::new(), repository_url: None, requested_ref: None,
-                            installed_commit: None, root: None,
-                            mashup_controlled,
-                        });
+                        let mashup_controlled =
+                            manager.mashup_excluded.contains(&spec.id);
+                        inventory.entries.entry(spec.id.clone()).or_insert(
+                            LuaPluginInventoryEntry {
+                                id: spec.id.clone(),
+                                name: spec.id,
+                                version: String::new(),
+                                lifecycle: LuaPluginLifecycle::Blocked,
+                                status_text:
+                                    "Registry plugin acquisition is not implemented"
+                                        .into(),
+                                capabilities: Vec::new(),
+                                grants: Vec::new(),
+                                missing_permissions: Vec::new(),
+                                repository_url: None,
+                                requested_ref: None,
+                                installed_commit: None,
+                                root: None,
+                                mashup_controlled,
+                            },
+                        );
                     }
                     PluginSource::Local { .. } => {}
                 }
@@ -782,18 +1006,39 @@ fn scan_plugin_inventory(
     for (id, entry) in &lock.plugins {
         let root = store.installed_path(entry).ok();
         let exists = root.as_ref().is_some_and(|path| path.is_dir());
-        let row = inventory.entries.entry(id.clone()).or_insert(LuaPluginInventoryEntry {
-            id: id.clone(), name: id.clone(), version: entry.plugin_version.clone(),
-            lifecycle: if exists { LuaPluginLifecycle::Lazy } else { LuaPluginLifecycle::RestoreRequired },
-            status_text: if exists { "Installed".into() } else { "Installed revision is missing".into() },
-            capabilities: Vec::new(), grants: policy.grants.get(id).cloned().unwrap_or_default(), missing_permissions: Vec::new(),
-            repository_url: Some(entry.repository_url.clone()), requested_ref: Some(entry.requested_ref.clone()),
-            installed_commit: Some(entry.resolved_commit.clone()), root: root.clone(),
-            mashup_controlled: manager.mashup_excluded.contains(id),
-        });
-        row.repository_url.get_or_insert_with(|| entry.repository_url.clone());
-        row.requested_ref.get_or_insert_with(|| entry.requested_ref.clone());
-        row.installed_commit.get_or_insert_with(|| entry.resolved_commit.clone());
+        let row =
+            inventory
+                .entries
+                .entry(id.clone())
+                .or_insert(LuaPluginInventoryEntry {
+                    id: id.clone(),
+                    name: id.clone(),
+                    version: entry.plugin_version.clone(),
+                    lifecycle: if exists {
+                        LuaPluginLifecycle::Lazy
+                    } else {
+                        LuaPluginLifecycle::RestoreRequired
+                    },
+                    status_text: if exists {
+                        "Installed".into()
+                    } else {
+                        "Installed revision is missing".into()
+                    },
+                    capabilities: Vec::new(),
+                    grants: policy.grants.get(id).cloned().unwrap_or_default(),
+                    missing_permissions: Vec::new(),
+                    repository_url: Some(entry.repository_url.clone()),
+                    requested_ref: Some(entry.requested_ref.clone()),
+                    installed_commit: Some(entry.resolved_commit.clone()),
+                    root: root.clone(),
+                    mashup_controlled: manager.mashup_excluded.contains(id),
+                });
+        row.repository_url
+            .get_or_insert_with(|| entry.repository_url.clone());
+        row.requested_ref
+            .get_or_insert_with(|| entry.requested_ref.clone());
+        row.installed_commit
+            .get_or_insert_with(|| entry.resolved_commit.clone());
         if !exists {
             row.lifecycle = LuaPluginLifecycle::RestoreRequired;
             row.status_text = "Installed revision is missing".into();
@@ -801,17 +1046,55 @@ fn scan_plugin_inventory(
     }
 
     for owned in &manager.snapshot.platform {
-        let neoism_lua::PlatformContribution::TreeSitter(parser) = &owned.contribution else { continue };
-        let Some(row) = inventory.entries.get_mut(&owned.owner.plugin_id) else { continue };
-        let Some(root) = row.root.as_deref() else { continue };
-        let Ok(package_digest) = neoism_extensions::lua_plugins::tree_sha256(root) else { continue };
+        let neoism_lua::PlatformContribution::TreeSitter(parser) = &owned.contribution
+        else {
+            continue;
+        };
+        let Some(row) = inventory.entries.get_mut(&owned.owner.plugin_id) else {
+            continue;
+        };
+        let Some(root) = row.root.as_deref() else {
+            continue;
+        };
+        let Ok(package_digest) = neoism_extensions::lua_plugins::tree_sha256(root) else {
+            continue;
+        };
         let capabilities = row.capabilities.iter().cloned().collect::<BTreeSet<_>>();
-        let state = neoism_extensions::trust::ExtensionTrustStore::managed().exact(&owned.owner.plugin_id, &owned.owner.revision.0, &package_digest, &parser.parser.sha256, parser.parser.abi, &capabilities, &neoism_extensions::trust::ApprovalScope::User).ok().flatten().map(|approval| approval.state);
+        let state = neoism_extensions::trust::ExtensionTrustStore::managed()
+            .exact(
+                &owned.owner.plugin_id,
+                &owned.owner.revision.0,
+                &package_digest,
+                &parser.parser.sha256,
+                parser.parser.abi,
+                &capabilities,
+                &neoism_extensions::trust::ApprovalScope::User,
+            )
+            .ok()
+            .flatten()
+            .map(|approval| approval.state);
         match state {
-            Some(neoism_extensions::trust::ApprovalState::Approved) if row.lifecycle == LuaPluginLifecycle::Loaded => { row.lifecycle = LuaPluginLifecycle::Approved; row.status_text = "Parser artifact approved for this exact revision".into(); }
-            Some(neoism_extensions::trust::ApprovalState::Revoked) => { row.lifecycle = LuaPluginLifecycle::Revoked; row.status_text = "Parser artifact approval was revoked".into(); }
-            Some(neoism_extensions::trust::ApprovalState::Failed) => { row.lifecycle = LuaPluginLifecycle::Failed; row.status_text = "Parser artifact failed validation or activation".into(); }
-            None | Some(neoism_extensions::trust::ApprovalState::PermissionRequired) => { row.lifecycle = LuaPluginLifecycle::PermissionRequired; row.status_text = "Parser artifact requires exact revision approval".into(); }
+            Some(neoism_extensions::trust::ApprovalState::Approved)
+                if row.lifecycle == LuaPluginLifecycle::Loaded =>
+            {
+                row.lifecycle = LuaPluginLifecycle::Approved;
+                row.status_text =
+                    "Parser artifact approved for this exact revision".into();
+            }
+            Some(neoism_extensions::trust::ApprovalState::Revoked) => {
+                row.lifecycle = LuaPluginLifecycle::Revoked;
+                row.status_text = "Parser artifact approval was revoked".into();
+            }
+            Some(neoism_extensions::trust::ApprovalState::Failed) => {
+                row.lifecycle = LuaPluginLifecycle::Failed;
+                row.status_text =
+                    "Parser artifact failed validation or activation".into();
+            }
+            None | Some(neoism_extensions::trust::ApprovalState::PermissionRequired) => {
+                row.lifecycle = LuaPluginLifecycle::PermissionRequired;
+                row.status_text =
+                    "Parser artifact requires exact revision approval".into();
+            }
             _ => {}
         }
     }
@@ -822,12 +1105,25 @@ fn scan_plugin_inventory(
         }
     }
     for id in &policy.disabled {
-        let row = inventory.entries.entry(id.clone()).or_insert(LuaPluginInventoryEntry {
-            id: id.clone(), name: id.clone(), version: String::new(), lifecycle: LuaPluginLifecycle::Disabled,
-            status_text: "Disabled".into(), capabilities: Vec::new(), grants: policy.grants.get(id).cloned().unwrap_or_default(),
-            missing_permissions: Vec::new(), repository_url: None, requested_ref: None, installed_commit: None, root: None,
-            mashup_controlled: false,
-        });
+        let row =
+            inventory
+                .entries
+                .entry(id.clone())
+                .or_insert(LuaPluginInventoryEntry {
+                    id: id.clone(),
+                    name: id.clone(),
+                    version: String::new(),
+                    lifecycle: LuaPluginLifecycle::Disabled,
+                    status_text: "Disabled".into(),
+                    capabilities: Vec::new(),
+                    grants: policy.grants.get(id).cloned().unwrap_or_default(),
+                    missing_permissions: Vec::new(),
+                    repository_url: None,
+                    requested_ref: None,
+                    installed_commit: None,
+                    root: None,
+                    mashup_controlled: false,
+                });
         row.lifecycle = LuaPluginLifecycle::Disabled;
         row.status_text = "Disabled".into();
         row.mashup_controlled = false;
@@ -847,12 +1143,23 @@ fn scan_plugin_inventory(
         row.capabilities.dedup();
         row.grants.sort();
         row.grants.dedup();
-        row.missing_permissions = row.capabilities.iter().filter(|capability| !row.grants.contains(capability)).cloned().collect();
+        row.missing_permissions = row
+            .capabilities
+            .iter()
+            .filter(|capability| !row.grants.contains(capability))
+            .cloned()
+            .collect();
         if !row.missing_permissions.is_empty()
-            && matches!(row.lifecycle, LuaPluginLifecycle::Loaded | LuaPluginLifecycle::Lazy)
+            && matches!(
+                row.lifecycle,
+                LuaPluginLifecycle::Loaded | LuaPluginLifecycle::Lazy
+            )
         {
             row.lifecycle = LuaPluginLifecycle::PermissionRequired;
-            row.status_text = format!("{} permission grant(s) required", row.missing_permissions.len());
+            row.status_text = format!(
+                "{} permission grant(s) required",
+                row.missing_permissions.len()
+            );
         }
     }
     inventory
@@ -865,14 +1172,23 @@ fn inventory_entry(
     status_text: &str,
     policy: &neoism_backend::config::PluginPreferences,
 ) -> LuaPluginInventoryEntry {
-    let (lifecycle, status_text) = trust_lifecycle(manifest, root.as_deref()).unwrap_or((lifecycle, status_text.into()));
+    let (lifecycle, status_text) = trust_lifecycle(manifest, root.as_deref())
+        .unwrap_or((lifecycle, status_text.into()));
     LuaPluginInventoryEntry {
         id: manifest.id.clone(),
-        name: if manifest.name.is_empty() { manifest.id.clone() } else { manifest.name.clone() },
+        name: if manifest.name.is_empty() {
+            manifest.id.clone()
+        } else {
+            manifest.name.clone()
+        },
         version: manifest.version.clone(),
         lifecycle,
         status_text,
-        capabilities: manifest.capabilities.iter().map(|capability| capability.key()).collect(),
+        capabilities: manifest
+            .capabilities
+            .iter()
+            .map(|capability| capability.key())
+            .collect(),
         grants: policy.grants.get(&manifest.id).cloned().unwrap_or_default(),
         missing_permissions: Vec::new(),
         repository_url: None,
@@ -901,18 +1217,49 @@ fn lifecycle_label(lifecycle: LuaPluginLifecycle) -> &'static str {
     }
 }
 
-fn trust_lifecycle(manifest: &neoism_lua::PluginManifest, root: Option<&Path>) -> Option<(LuaPluginLifecycle, String)> {
+fn trust_lifecycle(
+    manifest: &neoism_lua::PluginManifest,
+    root: Option<&Path>,
+) -> Option<(LuaPluginLifecycle, String)> {
     let artifact = manifest.entrypoints.native.as_ref()?;
     let root = root?;
-    let revision = neoism_lua::plugin_content_revision(root, manifest.editor_entrypoint()).ok()?;
+    let revision =
+        neoism_lua::plugin_content_revision(root, manifest.editor_entrypoint()).ok()?;
     let package_digest = neoism_extensions::lua_plugins::tree_sha256(root).ok()?;
-    let capabilities = manifest.capabilities.iter().map(|value| value.key()).collect::<BTreeSet<_>>();
-    let approval = neoism_extensions::trust::ExtensionTrustStore::managed().exact(&manifest.id, &revision.0, &package_digest, &artifact.sha256, artifact.abi, &capabilities, &neoism_extensions::trust::ApprovalScope::User).ok().flatten();
+    let capabilities = manifest
+        .capabilities
+        .iter()
+        .map(|value| value.key())
+        .collect::<BTreeSet<_>>();
+    let approval = neoism_extensions::trust::ExtensionTrustStore::managed()
+        .exact(
+            &manifest.id,
+            &revision.0,
+            &package_digest,
+            &artifact.sha256,
+            artifact.abi,
+            &capabilities,
+            &neoism_extensions::trust::ApprovalScope::User,
+        )
+        .ok()
+        .flatten();
     Some(match approval.map(|value| value.state) {
-        Some(neoism_extensions::trust::ApprovalState::Approved) => (LuaPluginLifecycle::Approved, "Native artifact approved for this exact revision".into()),
-        Some(neoism_extensions::trust::ApprovalState::Revoked) => (LuaPluginLifecycle::Revoked, "Native artifact approval was revoked".into()),
-        Some(neoism_extensions::trust::ApprovalState::Failed) => (LuaPluginLifecycle::Failed, "Native artifact failed validation or activation".into()),
-        _ => (LuaPluginLifecycle::PermissionRequired, "Native artifact requires exact revision approval".into()),
+        Some(neoism_extensions::trust::ApprovalState::Approved) => (
+            LuaPluginLifecycle::Approved,
+            "Native artifact approved for this exact revision".into(),
+        ),
+        Some(neoism_extensions::trust::ApprovalState::Revoked) => (
+            LuaPluginLifecycle::Revoked,
+            "Native artifact approval was revoked".into(),
+        ),
+        Some(neoism_extensions::trust::ApprovalState::Failed) => (
+            LuaPluginLifecycle::Failed,
+            "Native artifact failed validation or activation".into(),
+        ),
+        _ => (
+            LuaPluginLifecycle::PermissionRequired,
+            "Native artifact requires exact revision approval".into(),
+        ),
     })
 }
 
@@ -932,20 +1279,30 @@ fn discover_manifests(
         let root = match &spec.source {
             PluginSource::Local { path } => {
                 let path = PathBuf::from(path);
-                if path.is_absolute() { path } else { config_dir.join(path) }
+                if path.is_absolute() {
+                    path
+                } else {
+                    config_dir.join(path)
+                }
             }
             PluginSource::Git { url, rev } => {
                 if !trusted_sources.is_empty()
-                    && !trusted_sources.iter().any(|trusted| url.starts_with(trusted))
+                    && !trusted_sources
+                        .iter()
+                        .any(|trusted| url.starts_with(trusted))
                 {
                     return Err(PluginManagerError::Ecosystem(
                         PluginEcosystemError::InvalidManifest {
                             id: spec.id.clone(),
-                            message: format!("Git source `{url}` is not in plugins.trusted-sources"),
+                            message: format!(
+                                "Git source `{url}` is not in plugins.trusted-sources"
+                            ),
                         },
                     ));
                 }
-                let Some(entry) = lock.plugins.get(&spec.id) else { continue };
+                let Some(entry) = lock.plugins.get(&spec.id) else {
+                    continue;
+                };
                 if entry.repository_url != *url
                     || rev
                         .as_deref()
@@ -968,7 +1325,10 @@ fn discover_manifests(
             return Err(PluginManagerError::Ecosystem(
                 PluginEcosystemError::InvalidManifest {
                     id: manifest.manifest.id,
-                    message: format!("spec id `{}` does not match the package manifest", spec.id),
+                    message: format!(
+                        "spec id `{}` does not match the package manifest",
+                        spec.id
+                    ),
                 },
             ));
         }
@@ -981,7 +1341,9 @@ fn discover_manifests(
 
     for (id, entry) in &lock.plugins {
         if manifests.contains_key(id)
-            || specs.iter().any(|(_, spec)| spec.id == *id && !spec.enabled)
+            || specs
+                .iter()
+                .any(|(_, spec)| spec.id == *id && !spec.enabled)
         {
             continue;
         }
@@ -1005,7 +1367,9 @@ fn discover_manifests(
             return Err(PluginManagerError::Ecosystem(
                 PluginEcosystemError::InvalidManifest {
                     id: manifest.manifest.id,
-                    message: format!("lockfile id `{id}` does not match the package manifest"),
+                    message: format!(
+                        "lockfile id `{id}` does not match the package manifest"
+                    ),
                 },
             ));
         }
@@ -1016,7 +1380,10 @@ fn discover_manifests(
 
 pub(crate) fn resolve_mashup_selection(
     config: &neoism_backend::config::Config,
-) -> Result<Option<neoism_backend::config::mashup::EditorPluginSelection>, PluginManagerError> {
+) -> Result<
+    Option<neoism_backend::config::mashup::EditorPluginSelection>,
+    PluginManagerError,
+> {
     neoism_backend::config::mashup::resolve_editor_plugin_selection(
         config.appearance.mashup_pack.as_deref(),
         &neoism_backend::config::mashup::load_mashup_packs(),
@@ -1049,9 +1416,14 @@ fn select_manifests(
     let mut keep = BTreeSet::new();
     match selection.mode {
         EditorPluginMode::Overlay => {
-            keep.extend(by_id.keys().filter(|id| {
-                !globally_disabled.contains(*id) && !pack_disabled.contains(*id)
-            }).cloned());
+            keep.extend(
+                by_id
+                    .keys()
+                    .filter(|id| {
+                        !globally_disabled.contains(*id) && !pack_disabled.contains(*id)
+                    })
+                    .cloned(),
+            );
         }
         EditorPluginMode::Only => {
             fn collect(
@@ -1068,7 +1440,10 @@ fn select_manifests(
                     collect(dependency, by_id, vetoed, keep);
                 }
             }
-            let vetoed = globally_disabled.union(&pack_disabled).cloned().collect::<BTreeSet<_>>();
+            let vetoed = globally_disabled
+                .union(&pack_disabled)
+                .cloned()
+                .collect::<BTreeSet<_>>();
             for root in &selection.enabled {
                 if vetoed.contains(root) {
                     continue;
@@ -1131,14 +1506,19 @@ pub(crate) fn overlay_snapshot(
         combined.views.push(view.clone());
     }
     for contribution in &user.platform {
-        combined.platform.retain(|current| current.contribution.id() != contribution.contribution.id());
+        combined.platform.retain(|current| {
+            current.contribution.id() != contribution.contribution.id()
+        });
         combined.platform.push(contribution.clone());
     }
     combined
 }
 
 fn callback_owner(callback: &str) -> Option<&str> {
-    callback.strip_prefix("lua:")?.split_once('@').map(|(owner, _)| owner)
+    callback
+        .strip_prefix("lua:")?
+        .split_once('@')
+        .map(|(owner, _)| owner)
 }
 
 fn validate_candidate_snapshot(
@@ -1172,11 +1552,15 @@ fn combined_snapshot(
         }
         combined.commands.extend(snapshot.commands.clone());
         combined.keymaps.extend(snapshot.keymaps.clone());
-        combined.editor_options.extend(snapshot.editor_options.clone());
+        combined
+            .editor_options
+            .extend(snapshot.editor_options.clone());
         combined.surface_layout.overlay(&snapshot.surface_layout);
         combined.autocmds.extend(snapshot.autocmds.clone());
         combined.panels.extend(snapshot.panels.clone());
-        combined.contributions.extend(snapshot.contributions.clone());
+        combined
+            .contributions
+            .extend(snapshot.contributions.clone());
         combined.views.extend(snapshot.views.clone());
         combined.platform.extend(snapshot.platform.clone());
     }
@@ -1200,22 +1584,40 @@ fn validate_snapshot_ids<'a>(
             check_id("panel", &panel.id, plugin, &mut panels)?;
         }
         for contribution in &snapshot.contributions {
-            check_id("UI contribution", &contribution.id, plugin, &mut contributions)?;
+            check_id(
+                "UI contribution",
+                &contribution.id,
+                plugin,
+                &mut contributions,
+            )?;
         }
         for view in &snapshot.views {
             check_id("retained view", &view.id, plugin, &mut views)?;
-            view.validate().map_err(|message| PluginManagerError::InvalidContribution {
-                plugin: plugin.to_string(), message,
+            view.validate().map_err(|message| {
+                PluginManagerError::InvalidContribution {
+                    plugin: plugin.to_string(),
+                    message,
+                }
             })?;
         }
         for contribution in &snapshot.platform {
-            check_id("platform contribution", contribution.contribution.id(), plugin, &mut platform)?;
-            contribution.contribution.validate().map_err(|message| PluginManagerError::InvalidContribution {
-                plugin: plugin.to_string(), message,
+            check_id(
+                "platform contribution",
+                contribution.contribution.id(),
+                plugin,
+                &mut platform,
+            )?;
+            contribution.contribution.validate().map_err(|message| {
+                PluginManagerError::InvalidContribution {
+                    plugin: plugin.to_string(),
+                    message,
+                }
             })?;
             if contribution.owner.plugin_id != plugin {
                 return Err(PluginManagerError::InvalidContribution {
-                    plugin: plugin.to_string(), message: "platform contribution owner does not match its package".into(),
+                    plugin: plugin.to_string(),
+                    message: "platform contribution owner does not match its package"
+                        .into(),
                 });
             }
         }
@@ -1227,13 +1629,12 @@ fn validate_surface_layout(
     plugin: &str,
     snapshot: &PluginSnapshot,
 ) -> Result<(), PluginManagerError> {
-    snapshot
-        .surface_layout
-        .validate()
-        .map_err(|message| PluginManagerError::InvalidSurfaceLayout {
+    snapshot.surface_layout.validate().map_err(|message| {
+        PluginManagerError::InvalidSurfaceLayout {
             plugin: plugin.into(),
             message,
-        })
+        }
+    })
 }
 
 fn check_id<'a>(
@@ -1259,7 +1660,8 @@ mod tests {
 
     #[test]
     fn command_alias_and_dynamic_completion_remain_exact_owner_scoped() {
-        let root = std::env::temp_dir().join(format!("neoism-desktop-command-{}", std::process::id()));
+        let root = std::env::temp_dir()
+            .join(format!("neoism-desktop-command-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("init.lua"), r#"
             neoism.command.register('build', function() return { ok = true } end, {
@@ -1276,7 +1678,9 @@ mod tests {
             &manifest,
             neoism_lua::PluginRevision("r1".into()),
             Arc::new(neoism_lua::InertHost),
-        ).unwrap().activate();
+        )
+        .unwrap()
+        .activate();
         let owner = runtime.owner().clone();
         let host = Arc::new(neoism_lua::QueuedHost::default());
         let mut manager = LuaPluginManager::empty(&root, host);
@@ -1285,7 +1689,10 @@ mod tests {
         let (resolved_owner, command) = manager.resolve_command("b").unwrap();
         assert_eq!(resolved_owner, owner);
         assert_eq!(command.id, "build");
-        assert_eq!(manager.complete_command(&owner, "b", "d").unwrap(), vec!["d-dynamic", "debug"]);
+        assert_eq!(
+            manager.complete_command(&owner, "b", "d").unwrap(),
+            vec!["d-dynamic", "debug"]
+        );
         let stale = neoism_lua::PluginOwner {
             plugin_id: owner.plugin_id.clone(),
             revision: neoism_lua::PluginRevision("stale".into()),
@@ -1318,7 +1725,11 @@ mod tests {
             }"#,
         )
         .unwrap();
-        std::fs::write(plugin_root.join("init.lua"), "error('expected startup failure')").unwrap();
+        std::fs::write(
+            plugin_root.join("init.lua"),
+            "error('expected startup failure')",
+        )
+        .unwrap();
 
         let policy = neoism_backend::config::PluginPreferences::default();
         let (manager, error) = LuaPluginManager::discover_for_startup(
@@ -1349,14 +1760,17 @@ mod tests {
                 "editor": { "entrypoint": "init.lua" },
                 "dependencies": dependencies,
                 "triggers": []
-            }).to_string(),
-        ).unwrap();
+            })
+            .to_string(),
+        )
+        .unwrap();
         std::fs::write(plugin_root.join("init.lua"), "").unwrap();
     }
 
     #[test]
     fn only_selection_activates_roots_and_dependency_closure() {
-        let root = std::env::temp_dir().join(format!("neoism-desktop-mashup-only-{}", std::process::id()));
+        let root = std::env::temp_dir()
+            .join(format!("neoism-desktop-mashup-only-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         write_test_plugin(&root, "dev.neoism.root", &["dev.neoism.dep"]);
         write_test_plugin(&root, "dev.neoism.dep", &[]);
@@ -1371,16 +1785,25 @@ mod tests {
             Arc::new(neoism_lua::QueuedHost::default()),
             &Default::default(),
             Some(&selection),
-        ).unwrap();
-        assert_eq!(manager.active_ids().collect::<Vec<_>>(), ["dev.neoism.dep", "dev.neoism.root"]);
+        )
+        .unwrap();
+        assert_eq!(
+            manager.active_ids().collect::<Vec<_>>(),
+            ["dev.neoism.dep", "dev.neoism.root"]
+        );
         assert!(manager.mashup_excluded.contains("dev.neoism.unrelated"));
-        assert!(!manager.snapshot().commands.iter().any(|command| command.id.contains("unrelated")));
+        assert!(!manager
+            .snapshot()
+            .commands
+            .iter()
+            .any(|command| command.id.contains("unrelated")));
         std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn global_disabled_dependency_is_a_hard_veto_and_graph_error() {
-        let root = std::env::temp_dir().join(format!("neoism-desktop-mashup-veto-{}", std::process::id()));
+        let root = std::env::temp_dir()
+            .join(format!("neoism-desktop-mashup-veto-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         write_test_plugin(&root, "dev.neoism.root", &["dev.neoism.dep"]);
         write_test_plugin(&root, "dev.neoism.dep", &[]);

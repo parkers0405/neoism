@@ -230,13 +230,15 @@ fn apply_mashup_pack(id: Option<String>) -> Result<(), String> {
         config.appearance.fonts.family.as_deref(),
         id.as_deref(),
         &packs,
-    ).map_err(|error| error.to_string())?;
+    )
+    .map_err(|error| error.to_string())?;
     neoism_backend::config::write_mashup_pack_settings(
         transition.mashup_pack.as_deref(),
         transition.mashup_baseline.as_ref(),
         &transition.theme,
         transition.font_family.as_deref(),
-    ).map_err(|error| format!("persist Mash Up Pack transition: {error}"))
+    )
+    .map_err(|error| format!("persist Mash Up Pack transition: {error}"))
 }
 
 fn document_result(
@@ -412,33 +414,67 @@ fn collect_extension_entries(
 
     entries.extend(language_server_entries(runtime, workspace_root, &installed));
     entries.extend(built_in_grammar_entries());
-    if let Ok(approvals) = neoism_extensions::trust::ExtensionTrustStore::managed().approvals() {
+    if let Ok(approvals) =
+        neoism_extensions::trust::ExtensionTrustStore::managed().approvals()
+    {
         for approval in approvals {
             let lifecycle = match approval.state {
-                neoism_extensions::trust::ApprovalState::PermissionRequired => TrustedExtensionLifecycle::PermissionRequired,
-                neoism_extensions::trust::ApprovalState::Approved => TrustedExtensionLifecycle::Approved,
-                neoism_extensions::trust::ApprovalState::Revoked => TrustedExtensionLifecycle::Revoked,
-                neoism_extensions::trust::ApprovalState::Failed => TrustedExtensionLifecycle::Failed,
+                neoism_extensions::trust::ApprovalState::PermissionRequired => {
+                    TrustedExtensionLifecycle::PermissionRequired
+                }
+                neoism_extensions::trust::ApprovalState::Approved => {
+                    TrustedExtensionLifecycle::Approved
+                }
+                neoism_extensions::trust::ApprovalState::Revoked => {
+                    TrustedExtensionLifecycle::Revoked
+                }
+                neoism_extensions::trust::ApprovalState::Failed => {
+                    TrustedExtensionLifecycle::Failed
+                }
             };
-            if let Some(entry) = entries.iter_mut().find(|entry| entry.id == approval.plugin_id) {
-                entry.trust_lifecycle = Some(worse_trust(entry.trust_lifecycle, lifecycle));
+            if let Some(entry) = entries
+                .iter_mut()
+                .find(|entry| entry.id == approval.plugin_id)
+            {
+                entry.trust_lifecycle =
+                    Some(worse_trust(entry.trust_lifecycle, lifecycle));
                 continue;
             }
             entries.push(ExtensionSummary {
-                id: approval.plugin_id.clone(), name: approval.plugin_id, version: approval.revision,
-                description: "Trusted executable extension artifact".into(), author: String::new(), downloads: None,
-                categories: vec!["Plugin".into(), "Trusted Native".into()], languages: Vec::new(),
-                status: ExtensionStatusSummary::Installed, installed_version: None, repository_url: None,
-                lsp_source: None, trust_lifecycle: Some(lifecycle),
+                id: approval.plugin_id.clone(),
+                name: approval.plugin_id,
+                version: approval.revision,
+                description: "Trusted executable extension artifact".into(),
+                author: String::new(),
+                downloads: None,
+                categories: vec!["Plugin".into(), "Trusted Native".into()],
+                languages: Vec::new(),
+                status: ExtensionStatusSummary::Installed,
+                installed_version: None,
+                repository_url: None,
+                lsp_source: None,
+                trust_lifecycle: Some(lifecycle),
             });
         }
     }
     entries
 }
 
-fn worse_trust(current: Option<TrustedExtensionLifecycle>, next: TrustedExtensionLifecycle) -> TrustedExtensionLifecycle {
-    fn severity(value: TrustedExtensionLifecycle) -> u8 { match value { TrustedExtensionLifecycle::Approved => 0, TrustedExtensionLifecycle::PermissionRequired => 1, TrustedExtensionLifecycle::Revoked => 2, TrustedExtensionLifecycle::Failed => 3 } }
-    current.filter(|value| severity(*value) >= severity(next)).unwrap_or(next)
+fn worse_trust(
+    current: Option<TrustedExtensionLifecycle>,
+    next: TrustedExtensionLifecycle,
+) -> TrustedExtensionLifecycle {
+    fn severity(value: TrustedExtensionLifecycle) -> u8 {
+        match value {
+            TrustedExtensionLifecycle::Approved => 0,
+            TrustedExtensionLifecycle::PermissionRequired => 1,
+            TrustedExtensionLifecycle::Revoked => 2,
+            TrustedExtensionLifecycle::Failed => 3,
+        }
+    }
+    current
+        .filter(|value| severity(*value) >= severity(next))
+        .unwrap_or(next)
 }
 
 /// One row per engine language-server adapter, with the LIVE state the
@@ -696,7 +732,8 @@ mod tests {
             Some("pack-font"),
             None,
             &[],
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(transition.mashup_pack, None);
         assert_eq!(transition.mashup_baseline, None);
         assert_eq!(transition.theme, "global-theme");

@@ -1,5 +1,6 @@
 use sugarloaf::text::DrawOpts;
 use sugarloaf::Sugarloaf;
+use unicode_segmentation::UnicodeSegmentation;
 
 use crate::panels::agent_pane::input_controller::{visual_row_index, InputWrapRow};
 use crate::panels::agent_pane::state::{
@@ -8,8 +9,8 @@ use crate::panels::agent_pane::state::{
 };
 
 use super::draw::{
-    draw_rect_clipped, draw_rounded_rect_clipped, draw_text_clipped, opts_with_clip,
-    push_image_overlay_clipped, wrap_text,
+    draw_rect_clipped, draw_rounded_rect_clipped, draw_text_clipped, measure_text_cached,
+    opts_with_clip, push_image_overlay_clipped,
 };
 use super::markdown::AgentMarkdownPane;
 use super::wordmark::format_elapsed;
@@ -1039,6 +1040,145 @@ mod orb_identity_tests {
     }
 }
 
+/// The same available column is used to measure and paint the user card.
+/// Never grow the bubble or text column past the caller's actual pane width.
+pub(super) fn user_message_text_width(width: f32, scale: f32) -> f32 {
+    (width.max(0.0) - (28.0 + USER_ORB_SIZE + 10.0) * scale).max(1.0)
+}
+
+/// Wrap user prompts at measured glyph widths, including URLs and other tokens
+/// without spaces. Keep grapheme clusters intact (emoji sequences/combining
+/// marks) and preserve explicit paragraph breaks. `measure` uses the very same
+/// font/options as rendering, rather than an estimated character count.
+fn wrap_user_message_with(
+    text: &str,
+    width: f32,
+    limit: usize,
+    mut measure: impl FnMut(&str) -> f32,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    let width = width.max(0.0);
+    for (paragraph_index, paragraph) in text.split('\n').enumerate() {
+        if paragraph_index > 0 {
+            lines.push(std::mem::take(&mut current));
+            if lines.len() >= limit {
+                return lines;
+            }
+        }
+        for word in paragraph.split_whitespace() {
+            let candidate = if current.is_empty() {
+                word.to_owned()
+            } else {
+                format!("{current} {word}")
+            };
+            if measure(&candidate) <= width {
+                current = candidate;
+                continue;
+            }
+            if !current.is_empty() {
+                lines.push(std::mem::take(&mut current));
+                if lines.len() >= limit {
+                    return lines;
+                }
+            }
+            if measure(word) <= width {
+                current.push_str(word);
+                continue;
+            }
+            // Binary-search a maximal measured prefix; long URLs are common,
+            // so avoid measuring every prefix of a potentially huge token.
+            let graphemes: Vec<&str> = word.graphemes(true).collect();
+            let mut start = 0;
+            while start < graphemes.len() {
+                let mut lo = start + 1;
+                let mut hi = graphemes.len() + 1;
+                while lo < hi {
+                    let mid = lo + (hi - lo) / 2;
+                    if measure(&graphemes[start..mid].concat()) <= width {
+                        lo = mid + 1;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                let end = (lo - 1).max(start + 1);
+                current = graphemes[start..end].concat();
+                start = end;
+                if start < graphemes.len() {
+                    lines.push(std::mem::take(&mut current));
+                    if lines.len() >= limit {
+                        return lines;
+                    }
+                }
+            }
+        }
+    }
+    if lines.len() < limit {
+        lines.push(current);
+    }
+    lines
+}
+
+pub(super) fn wrap_user_message(
+    sugarloaf: &mut Sugarloaf,
+    text: &str,
+    width: f32,
+    opts: &DrawOpts,
+) -> Vec<String> {
+    wrap_user_message_with(text, width, USER_MESSAGE_MAX_LINES, |part| {
+        measure_text_cached(sugarloaf, part, opts)
+    })
+}
+
+#[cfg(test)]
+mod user_message_wrap_tests {
+    use super::{user_message_text_width, wrap_user_message_with};
+    use unicode_segmentation::UnicodeSegmentation;
+
+    fn measure(s: &str) -> f32 {
+        s.graphemes(true)
+            .map(|g| if g == "界" { 2.0 } else { 1.0 })
+            .sum()
+    }
+
+    #[test]
+    fn url_and_long_token_wrap_at_the_measured_column() {
+        let text = "See https://app.read.ai/analytics/meetings/01M3Z0Y8V3T1PFUB1RXYZ now";
+        let lines = wrap_user_message_with(text, 12.0, 30, measure);
+        assert_eq!(lines.concat().replace(' ', ""), text.replace(' ', ""));
+        assert!(lines.len() > 3);
+        assert!(lines.iter().all(|line| measure(line) <= 12.0));
+    }
+
+    #[test]
+    fn utf8_clusters_variable_width_and_hard_breaks() {
+        let text = "界界 e\u{301}e\u{301}e\u{301}e\u{301}e\u{301}\n👩‍💻👩‍💻👩‍💻";
+        let lines = wrap_user_message_with(text, 4.0, 30, measure);
+        assert_eq!(
+            lines,
+            [
+                "界界",
+                "e\u{301}e\u{301}e\u{301}e\u{301}",
+                "e\u{301}",
+                "👩‍💻👩‍💻👩‍💻"
+            ]
+        );
+        assert!(lines.iter().all(|line| measure(line) <= 4.0));
+    }
+
+    #[test]
+    fn width_and_limit_follow_the_card_at_resize() {
+        assert_eq!(user_message_text_width(300.0, 1.0), 244.0);
+        assert_eq!(user_message_text_width(100.0, 1.0), 44.0);
+        let text = "abcdefghij";
+        assert_eq!(
+            wrap_user_message_with(text, 4.0, 2, measure),
+            ["abcd", "efgh"]
+        );
+        assert_eq!(wrap_user_message_with(text, 10.0, 2, measure), [text]);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn render_user_message<P: AgentMarkdownPane>(
     sugarloaf: &mut Sugarloaf,
@@ -1063,7 +1203,7 @@ pub fn render_user_message<P: AgentMarkdownPane>(
     // The grey bubble spans the full row, with the human's text aligned back
     // from the sender orb inside the right edge.
     let bubble_x = x;
-    let bubble_w = w.max(160.0 * s);
+    let bubble_w = w.max(0.0);
     draw_rect_clipped(
         sugarloaf,
         [bubble_x, y, bubble_w, h],
@@ -1106,15 +1246,26 @@ pub fn render_user_message<P: AgentMarkdownPane>(
         return h;
     };
     let text_x = bubble_x + pad_x;
-    let text_w = (orb_x - text_x - 10.0 * s).max(80.0 * s);
+    let text_w = user_message_text_width(bubble_w, s);
     let mut line_y = y + 12.0 * s;
     if !images.is_empty() {
+        let thumb = super::image_preview::MESSAGE_THUMB_SIZE * s;
+        let gap = 10.0 * s;
+        let shown = images
+            .len()
+            .min(((text_w + gap) / (thumb + gap)).floor() as usize);
+        let strip_w = if shown == 0 {
+            0.0
+        } else {
+            shown as f32 * thumb + (shown - 1) as f32 * gap
+        };
+        let image_x = text_x + (text_w - strip_w).max(0.0);
         super::image_preview::render_image_strip(
             sugarloaf,
             images,
-            text_x,
+            image_x,
             line_y,
-            text_w,
+            strip_w,
             theme,
             s,
             super::image_preview::MESSAGE_THUMB_SIZE,
@@ -1124,8 +1275,8 @@ pub fn render_user_message<P: AgentMarkdownPane>(
         line_y += 164.0 * s;
     }
     let suppress_interactions = pane.suppress_markdown_interactions();
-    for line in wrap_text(sugarloaf, text, text_w, &opts, USER_MESSAGE_MAX_LINES) {
-        let line_w = sugarloaf.text_mut().measure(&line, &opts).max(12.0);
+    for line in wrap_user_message(sugarloaf, text, text_w, &opts) {
+        let line_w = measure_text_cached(sugarloaf, &line, &opts).max(12.0);
         let line_x = user_message_line_x(text_x, text_w, line_w);
         if !suppress_interactions {
             // User bubbles belong to the same transcript selection surface as

@@ -400,11 +400,15 @@ fn message_theme(
     plugins: Option<&neoism_lua::PluginSnapshot>,
     kind: AgentTimelineMessageKind,
 ) -> IdeTheme {
-    let Some(plugins) = plugins else { return *theme };
+    let Some(plugins) = plugins else {
+        return *theme;
+    };
     let selector = match kind {
         AgentTimelineMessageKind::User => "agent.chat.message.user",
         AgentTimelineMessageKind::Assistant => "agent.chat.message.assistant",
-        AgentTimelineMessageKind::Tool | AgentTimelineMessageKind::Subtask => "agent.chat.tool",
+        AgentTimelineMessageKind::Tool | AgentTimelineMessageKind::Subtask => {
+            "agent.chat.tool"
+        }
         AgentTimelineMessageKind::Reasoning
         | AgentTimelineMessageKind::System
         | AgentTimelineMessageKind::Compaction => "agent.chat.message",

@@ -54,12 +54,8 @@ pub fn color_f32(value: Option<&str>, theme: &IdeTheme, fallback: [f32; 4]) -> [
 }
 
 pub fn color_u8(value: Option<&str>, theme: &IdeTheme, fallback: [u8; 4]) -> [u8; 4] {
-    color_f32(
-        value,
-        theme,
-        fallback.map(|channel| channel as f32 / 255.0),
-    )
-    .map(|channel| (channel.clamp(0.0, 1.0) * 255.0).round() as u8)
+    color_f32(value, theme, fallback.map(|channel| channel as f32 / 255.0))
+        .map(|channel| (channel.clamp(0.0, 1.0) * 255.0).round() as u8)
 }
 
 fn parse_hex(value: &str) -> Option<[f32; 4]> {

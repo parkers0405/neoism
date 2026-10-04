@@ -1280,10 +1280,10 @@ impl NotesSidebar {
         let indent_px = INDENT_PX * self.scale;
         let icon_gap = ICON_GAP * self.scale;
         let row_style = plugins.map(|plugins| plugins.styles.resolve("notes-tree.row"));
-        let selected_style = plugins
-            .map(|plugins| plugins.styles.resolve("notes-tree.row.selected"));
-        let hover_style = plugins
-            .map(|plugins| plugins.styles.resolve("notes-tree.row.hover"));
+        let selected_style =
+            plugins.map(|plugins| plugins.styles.resolve("notes-tree.row.selected"));
+        let hover_style =
+            plugins.map(|plugins| plugins.styles.resolve("notes-tree.row.hover"));
         let icon_style = plugins.map(|plugins| plugins.styles.resolve("notes-tree.icon"));
         let frame_stroke = (FRAME_STROKE * self.scale).max(2.0);
         let frame_radius = FRAME_RADIUS * self.scale;
@@ -1849,7 +1849,11 @@ impl NotesSidebar {
 
                 let is_selected = absolute_ix == self.selected_index;
                 let is_hovered = mouse.is_some_and(|(mx, my)| {
-                    rect_contains([content_x, visible_row_y, content_w, visible_row_h], mx, my)
+                    rect_contains(
+                        [content_x, visible_row_y, content_w, visible_row_h],
+                        mx,
+                        my,
+                    )
                 });
                 let state_style = if is_selected {
                     selected_style.as_ref()
@@ -1858,7 +1862,9 @@ impl NotesSidebar {
                 } else {
                     row_style.as_ref()
                 };
-                if let Some(background) = state_style.and_then(|style| style.background.as_deref()) {
+                if let Some(background) =
+                    state_style.and_then(|style| style.background.as_deref())
+                {
                     sugarloaf.quad(
                         None,
                         content_x,

@@ -576,20 +576,22 @@ impl NeoismAgentPane {
         let tx = self.background_tx.clone();
         std::thread::Builder::new()
             .name("neoism-agent-model-limit".into())
-            .spawn(move || match fetch_model_context_limit(&server, directory.as_deref(), &model) {
-                Ok(limit) => {
-                    let _ = tx.send(
-                        NeoismAgentBackgroundUpdate::ModelContextLimitRefreshed {
-                            model,
-                            limit,
-                        },
-                    );
+            .spawn(move || {
+                match fetch_model_context_limit(&server, directory.as_deref(), &model) {
+                    Ok(limit) => {
+                        let _ = tx.send(
+                            NeoismAgentBackgroundUpdate::ModelContextLimitRefreshed {
+                                model,
+                                limit,
+                            },
+                        );
+                    }
+                    Err(error) => tracing::warn!(
+                        %error,
+                        model,
+                        "failed to refresh agent model context limit"
+                    ),
                 }
-                Err(error) => tracing::warn!(
-                    %error,
-                    model,
-                    "failed to refresh agent model context limit"
-                ),
             })
             .ok();
     }

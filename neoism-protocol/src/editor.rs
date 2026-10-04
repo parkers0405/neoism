@@ -13,8 +13,8 @@
 
 use std::path::PathBuf;
 
-use serde::{Deserialize, Serialize};
 use crate::plugin_resource::{PluginResourceReply, PluginResourceRequest};
+use serde::{Deserialize, Serialize};
 
 /// Syntax token classes carried over the wire. Mirrors
 /// `neoism_ui::syntax::SynTok` variant-for-variant; kept here so the
@@ -809,7 +809,9 @@ pub struct EditorLspCompletionItem {
 /// from nvim's `ext_linegrid` UI surface.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum EditorServerMessage {
-    PluginResource { reply: PluginResourceReply },
+    PluginResource {
+        reply: PluginResourceReply,
+    },
     /// Reply to `HighlightBuffer`. Empty `spans` means the daemon has no
     /// grammar for this file type — the client keeps its per-line
     /// fallback rather than painting nothing.
@@ -1275,7 +1277,8 @@ impl EditorClientMessage {
             | EditorClientMessage::LspHoverAt { surface_id, .. }
             | EditorClientMessage::DidSave { surface_id, .. } => surface_id.as_deref(),
             // Highlighting is keyed by path, not by a pane route.
-            EditorClientMessage::HighlightBuffer { .. } | EditorClientMessage::PluginResource { .. } => None,
+            EditorClientMessage::HighlightBuffer { .. }
+            | EditorClientMessage::PluginResource { .. } => None,
             EditorClientMessage::Close => None,
         }
     }

@@ -36,9 +36,10 @@ use crate::layout::{PanelLayout, Rect};
 use crate::panels::{Panel, PanelContext};
 use crate::primitives::{draw_overlay_icon_centered, snap_to_device_px, IdeTheme};
 use crate::surface_layout::{
-    ResolvedSurfaceLayout, SurfaceRegistry, CHROME_ACTIONS_SURFACE, CHROME_AGENT_DETAILS_ITEM,
-    CHROME_AGENT_ITEM, CHROME_EXPLORER_ITEM, CHROME_MENU_ITEM, CHROME_NEW_AGENT_ITEM,
-    CHROME_NOTES_ITEM, CHROME_PRESENCE_ITEM, CHROME_SEARCH_ITEM, CHROME_SERVERS_ITEM,
+    ResolvedSurfaceLayout, SurfaceRegistry, CHROME_ACTIONS_SURFACE,
+    CHROME_AGENT_DETAILS_ITEM, CHROME_AGENT_ITEM, CHROME_EXPLORER_ITEM, CHROME_MENU_ITEM,
+    CHROME_NEW_AGENT_ITEM, CHROME_NOTES_ITEM, CHROME_PRESENCE_ITEM, CHROME_SEARCH_ITEM,
+    CHROME_SERVERS_ITEM,
 };
 use neoism_lua::DockEdge;
 
@@ -484,12 +485,8 @@ impl ChromeTopBar {
             DockEdge::Left => (strip.x + strip.w, menu_btn.y),
             DockEdge::Right => (strip.x - menu_w, menu_btn.y),
         };
-        let menu_x = menu_x
-            .min(viewport.x + viewport.w - menu_w)
-            .max(viewport.x);
-        let menu_y = menu_y
-            .min(viewport.y + viewport.h - menu_h)
-            .max(viewport.y);
+        let menu_x = menu_x.min(viewport.x + viewport.w - menu_w).max(viewport.x);
+        let menu_y = menu_y.min(viewport.y + viewport.h - menu_h).max(viewport.y);
         Rect::new(menu_x, menu_y, menu_w, menu_h)
     }
 
@@ -508,7 +505,8 @@ impl ChromeTopBar {
         };
         self.menu_btn_rect = snap_square(Rect::new(left_x, cy, btn, btn));
         self.panel_btn_rect = snap_square(Rect::new(left_x + btn + gap, cy, btn, btn));
-        self.notes_btn_rect = snap_square(Rect::new(left_x + (btn + gap) * 2.0, cy, btn, btn));
+        self.notes_btn_rect =
+            snap_square(Rect::new(left_x + (btn + gap) * 2.0, cy, btn, btn));
         self.conversations_btn_rect =
             snap_square(Rect::new(left_x + (btn + gap) * 3.0, cy, btn, btn));
         self.search_btn_rect =
@@ -520,12 +518,7 @@ impl ChromeTopBar {
             btn,
         ));
         self.right_btn_rect = if self.right_button_visible {
-            snap_square(Rect::new(
-                self.server_btn_rect.x - gap - btn,
-                cy,
-                btn,
-                btn,
-            ))
+            snap_square(Rect::new(self.server_btn_rect.x - gap - btn, cy, btn, btn))
         } else {
             Rect::new(0.0, 0.0, 0.0, 0.0)
         };
@@ -542,12 +535,8 @@ impl ChromeTopBar {
             // shorter than 44px, matching iOS touch-target guidance.
             self.mobile_agent_panel_hit_rect =
                 snap_square(Rect::new(hit_x, strip.y, hit, hit));
-            self.mobile_agent_panel_btn_rect = snap_square(Rect::new(
-                hit_x + (hit - btn) * 0.5,
-                cy,
-                btn,
-                btn,
-            ));
+            self.mobile_agent_panel_btn_rect =
+                snap_square(Rect::new(hit_x + (hit - btn) * 0.5, cy, btn, btn));
         } else {
             self.mobile_agent_panel_hit_rect = Rect::new(0.0, 0.0, 0.0, 0.0);
             self.mobile_agent_panel_btn_rect = Rect::new(0.0, 0.0, 0.0, 0.0);
@@ -592,7 +581,11 @@ impl ChromeTopBar {
             item.visible = !self.peers.is_empty();
             let shown = self.peers.len().min(CHROME_PEER_CAP) as f32;
             let avatar = (BTN_SIZE * self.scale * 0.74).clamp(16.0, 22.0);
-            let extent = if shown > 0.0 { avatar + (shown - 1.0) * avatar * 0.64 } else { 0.0 };
+            let extent = if shown > 0.0 {
+                avatar + (shown - 1.0) * avatar * 0.64
+            } else {
+                0.0
+            };
             item.size.width = extent;
             item.size.height = extent;
         }
@@ -679,7 +672,8 @@ impl ChromeTopBar {
             .get(CHROME_ACTIONS_SURFACE)
             .and_then(|surface| surface.bounds)
             .unwrap_or(Rect::new(0.0, 0.0, 0.0, 0.0));
-        self.menu_rect = self.menu_overlay_rect_for(self.menu_btn_rect, strip, dock, layout.viewport);
+        self.menu_rect =
+            self.menu_overlay_rect_for(self.menu_btn_rect, strip, dock, layout.viewport);
     }
 
     fn menu_item_rect(&self, idx: usize) -> Rect {
@@ -849,7 +843,9 @@ impl ChromeTopBar {
         theme: &IdeTheme,
         style: &neoism_lua::StylePatch,
     ) {
-        let Some(surface) = layout.surfaces.get(CHROME_ACTIONS_SURFACE) else { return };
+        let Some(surface) = layout.surfaces.get(CHROME_ACTIONS_SURFACE) else {
+            return;
+        };
         let Some(strip) = surface.bounds else { return };
         if !self.visible || strip.w <= 0.0 || strip.h <= 0.0 {
             return;
@@ -866,7 +862,6 @@ impl ChromeTopBar {
         theme: &IdeTheme,
         style: &neoism_lua::StylePatch,
     ) {
-
         let row_h = strip.h;
 
         // Background + hairline border at the bottom edge — matches the

@@ -1,9 +1,9 @@
 use neoism_agent_core::{EventPayload, Id, IdKind};
 use neoism_agent_plugin_api::{
-    PluginScope, ProcessHookInvokeRequest, ProcessHostBrokerRequest, ProcessHostFrame, ProcessInitializeRequest,
-    ProcessInitializeResponse, ProcessPluginFrame, ProcessPluginOwner,
-    ProcessServiceDeclaration, ProcessServiceDeclarations, ProcessStreamEnvelope,
-    ProcessToolInvokeRequest, PROCESS_PLUGIN_V2_PROTOCOL,
+    PluginScope, ProcessHookInvokeRequest, ProcessHostBrokerRequest, ProcessHostFrame,
+    ProcessInitializeRequest, ProcessInitializeResponse, ProcessPluginFrame,
+    ProcessPluginOwner, ProcessServiceDeclaration, ProcessServiceDeclarations,
+    ProcessStreamEnvelope, ProcessToolInvokeRequest, PROCESS_PLUGIN_V2_PROTOCOL,
 };
 use serde_json::json;
 
@@ -113,7 +113,10 @@ fn scoped_owner_and_broker_requests_have_stable_additive_shapes() {
         workspace_id: Some("workspace-opaque".into()),
         scope_id: Some("session-opaque".into()),
     };
-    assert_eq!(serde_json::to_value(owner).unwrap()["scopeId"], "session-opaque");
+    assert_eq!(
+        serde_json::to_value(owner).unwrap()["scopeId"],
+        "session-opaque"
+    );
     assert_eq!(
         serde_json::to_value(ProcessHostBrokerRequest {
             operation: "sign-request".into(),

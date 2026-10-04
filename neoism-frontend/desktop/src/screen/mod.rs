@@ -717,7 +717,8 @@ pub struct Screen<'screen> {
     /// `(tab_index, target_window_u64, target_workspace_index)`. The app
     /// loop (which can borrow both windows' routes) completes it.
     pending_cross_window_tab_move: Option<(usize, u64, usize)>,
-    pending_lua_plugin_actions: Vec<(String, neoism_ui::panels::extensions_page::LuaPluginAction)>,
+    pending_lua_plugin_actions:
+        Vec<(String, neoism_ui::panels::extensions_page::LuaPluginAction)>,
     /// Latest pack intent from picker/modal input. The application layer
     /// drains it and owns validation, persistence, Lua, and visual commit.
     pending_mashup_pack_request: Option<Option<String>>,

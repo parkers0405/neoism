@@ -2,6 +2,16 @@
 
 All notable user-facing changes to Neoism are documented here.
 
+## [0.7.118] - 2026-10-04
+
+### Fixed
+
+- Fixes the Windows release-only startup crash reporting "panic in a function that cannot unwind". Lua callback errors use Windows SEH unwinding; the release profile now preserves unwinding so those errors can be handled instead of aborting the desktop or Agent Lua runner.
+- Retains the 8 MiB Windows desktop stack reserve introduced in 0.7.117 for graphics adapter initialization.
+- Adds an actual release-executable Lua regression check to both Windows release workflows, covering callback errors, Lua `pcall`, execution-budget errors, and continued VM use. The check reproduces the crash with the old abort profile; a normal Rust test harness would mask that profile difference.
+
+This is a stable release with the full desktop, workspace daemon, agent, and Agent Lua runner payloads for Windows, macOS, and Linux.
+
 ## [0.7.117] - 2026-10-04
 
 ### YOLO — Windows startup fix

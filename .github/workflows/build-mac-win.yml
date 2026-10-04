@@ -58,6 +58,13 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
+      - name: Smoke-test Windows release Lua error recovery
+        if: matrix.goos == 'windows'
+        shell: bash
+        run: |
+          cargo run --release --locked --target ${{ matrix.target }} \
+            -p neoism-lua --features runtime --example release_smoke
+
       - name: Build the stack (release)
         # Unset CI: `fff-search`'s build script demands Zig when CI is set.
         shell: bash

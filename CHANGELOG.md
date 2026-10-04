@@ -2,6 +2,15 @@
 
 All notable user-facing changes to Neoism are documented here.
 
+## [0.7.117] - 2026-10-04
+
+### YOLO — Windows startup fix
+
+- Fixes a reproduced Windows startup stack overflow during native graphics adapter enumeration by increasing the desktop executable's main-thread stack reserve from 1 MiB to 8 MiB. Stack pages remain committed on demand.
+- Applies the linker setting only to the Windows desktop executable, with target-aware MSVC and GNU flags. Other platforms and helper executables are unchanged.
+
+This is a stable release, available through plain `neoism update` after all platform builds and packaging checks succeed.
+
 ## [0.7.113-nightly.20261002.1] - 2026-10-02
 
 ### Mash Up Packs and plugin effects

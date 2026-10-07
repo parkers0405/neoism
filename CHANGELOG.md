@@ -2,6 +2,19 @@
 
 All notable user-facing changes to Neoism are documented here.
 
+## [0.7.119-nightly.20261007.1] - 2026-10-07
+
+### Native Agent UI and frame pacing
+
+- Fixes overdue redraws waiting an extra refresh interval, removes repeated workspace/Git filesystem probes on cache hits, and stops search watchers from feeding back on Neoism's own logs while preserving live workspace indexes.
+- Reuses composer/message wrapping, text measurements, and static avatar geometry without disabling visible animations; adds frame-time percentiles and diagnostics for event-loop work and Vulkan waits.
+- Adds streaming text reveal, compact tool rows, Codex usage inspection, and Agent navigation/rendering improvements.
+- Expands Mash Up Pack background effects and refreshes the terminal splash layout.
+- Includes experimental inline HTML artifact and Servo worker source behind explicit opt-in features; the experimental browser worker is not part of the default release stack.
+- Retains the stable Windows Lua startup/error-unwinding fix and its release smoke test.
+
+This is a real, opt-in nightly release with production platform artifacts, not a workflow dry run. Use `neoism update --nightly`; plain `neoism update` remains on stable. Assets become public only after the Linux, macOS, and Windows release matrix succeeds. Sustained 144 Hz has not been established by an end-to-end before/after benchmark.
+
 ## [0.7.118] - 2026-10-04
 
 ### Fixed

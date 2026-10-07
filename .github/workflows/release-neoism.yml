@@ -212,6 +212,18 @@ jobs:
           cargo run --release --locked --target ${{ matrix.target }} \
             -p neoism-lua --features runtime --example release_smoke
 
+      - name: Verify Servo is excluded from release dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo tree --locked --target ${{ matrix.target }} --edges normal,build --prefix none \
+            -p neoism -p neoism-workspace-daemon -p neoism-agent -p neoism-agent-lua-runner \
+            --features wgpu > release-dependency-tree.txt
+          if grep -E '^(neoism-servo-runtime|servo|libservo) v' release-dependency-tree.txt; then
+            echo 'Experimental Servo runtime must not be built in this release.' >&2
+            exit 1
+          fi
+
       - name: Build the stack (release)
         # Unset CI: `fff-search`'s build script demands Zig when CI is set,
         # but it builds fine natively (exactly like the local build).

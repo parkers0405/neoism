@@ -52,6 +52,12 @@
   </categories>
 
   <releases>
+    <release version="0.7.119-nightly.20261007.1" date="2026-10-07" type="development">
+      <description>
+        <p>Nightly Agent UI and frame-pacing improvements, live workspace search lifecycle fixes, streaming text reveal, and Codex usage inspection. Visible animations are preserved.</p>
+      </description>
+      <url>https://github.com/parkers0405/neoism/releases/tag/v0.7.119-nightly.20261007.1</url>
+    </release>
     <release version="0.7.118" date="2026-10-04">
       <description>
         <p>Fixes the Windows release-only Lua startup abort by preserving error unwinding, and adds release-executable Lua regression coverage.</p>

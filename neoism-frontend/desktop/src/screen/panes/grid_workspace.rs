@@ -29,6 +29,20 @@ fn normalize_root_transition(
     }
 }
 
+// The first/root terminal follows its shell cwd; split terminals do not re-root
+// the workspace. A cached root is only a fallback when that shell has no cwd.
+fn terminal_workspace_root(
+    is_root_terminal: bool,
+    terminal_cwd: impl FnOnce() -> Option<PathBuf>,
+    fallback: impl FnOnce() -> Option<PathBuf>,
+) -> Option<PathBuf> {
+    if is_root_terminal {
+        terminal_cwd().or_else(fallback)
+    } else {
+        fallback()
+    }
+}
+
 impl Screen<'_> {
     pub(crate) fn reconcile_conversations_directory(
         &mut self,
@@ -241,14 +255,6 @@ impl Screen<'_> {
                 );
             }
         }
-        // Workspace = declared directory. A terminal-local `cd` must neither
-        // poll the filesystem each paint nor replace an established root.
-        // The joined host-root override above remains authoritative.
-        if !quick_ssh {
-            if let Some(root) = self.active_workspace_root.as_ref() {
-                return Some(root.clone());
-            }
-        }
         let current = self.context_manager.current();
         if let Some(markdown) = current.markdown.as_ref() {
             return self
@@ -284,38 +290,30 @@ impl Screen<'_> {
         // Split terminals remain local helpers. Only the grid's root terminal
         // owns cwd-driven workspace and Explorer updates.
         let grid = self.context_manager.current_grid();
-        if grid.root != Some(grid.current) {
-            return self
-                .active_workspace_root
-                .clone()
-                .or_else(|| {
-                    self.context_manager
-                        .config
-                        .working_dir
-                        .clone()
-                        .map(PathBuf::from)
+        terminal_workspace_root(
+            grid.root == Some(grid.current),
+            || {
+                self.active_terminal_process_cwd().or_else(|| {
+                    current
+                        .terminal
+                        .try_lock_unfair()
+                        .and_then(|terminal| terminal.current_directory.clone())
                 })
-                .or_else(|| std::env::current_dir().ok())
-                .and_then(|root| self.normalize_workspace_dir_for_current(root));
-        }
-
-        self.active_terminal_process_cwd()
-            .or_else(|| {
-                current
-                    .terminal
-                    .try_lock_unfair()
-                    .and_then(|terminal| terminal.current_directory.clone())
-            })
-            .or_else(|| self.active_workspace_root.clone())
-            .or_else(|| {
-                self.context_manager
-                    .config
-                    .working_dir
+            },
+            || {
+                self.active_workspace_root
                     .clone()
-                    .map(PathBuf::from)
-            })
-            .or_else(|| std::env::current_dir().ok())
-            .and_then(|root| self.normalize_workspace_dir_for_current(root))
+                    .or_else(|| {
+                        self.context_manager
+                            .config
+                            .working_dir
+                            .clone()
+                            .map(PathBuf::from)
+                    })
+                    .or_else(|| std::env::current_dir().ok())
+            },
+        )
+        .and_then(|root| self.normalize_workspace_dir_for_current(root))
     }
 
     pub(crate) fn workspace_root_for_new_shell(&mut self) -> Option<PathBuf> {
@@ -1311,9 +1309,47 @@ impl Screen<'_> {
 mod workspace_panel_owner_tests {
     use super::{
         claim_live_panel_owner, conversations_directory_changed,
-        normalize_root_transition,
+        normalize_root_transition, terminal_workspace_root,
     };
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn first_terminal_cd_replaces_an_existing_workspace_root() {
+        let mut root = PathBuf::from("workspace");
+        for cwd in ["workspace/subdir", "other-project", "workspace"] {
+            let previous = root.clone();
+            let next = terminal_workspace_root(
+                true,
+                || Some(PathBuf::from(cwd)),
+                || Some(previous.clone()),
+            )
+            .unwrap();
+            root = normalize_root_transition(Some(&previous), next, false, Some).unwrap();
+            assert_eq!(root, PathBuf::from(cwd));
+        }
+    }
+
+    #[test]
+    fn split_terminal_cd_does_not_replace_workspace_root() {
+        let root = PathBuf::from("workspace");
+        assert_eq!(
+            terminal_workspace_root(
+                false,
+                || panic!("split terminal cwd must not drive workspace root"),
+                || Some(root.clone()),
+            ),
+            Some(root),
+        );
+    }
+
+    #[test]
+    fn first_terminal_without_cwd_keeps_existing_root() {
+        let root = PathBuf::from("workspace");
+        assert_eq!(
+            terminal_workspace_root(true, || None, || Some(root.clone())),
+            Some(root),
+        );
+    }
 
     #[test]
     fn workspace_directory_normalization_rejects_invalid_roots() {

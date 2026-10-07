@@ -52,6 +52,12 @@
   </categories>
 
   <releases>
+    <release version="0.7.119-nightly.20261007.2" date="2026-10-07" type="development">
+      <description>
+        <p>Restores workspace and Explorer directory following when the first terminal changes directory. Servo runtime remains excluded.</p>
+      </description>
+      <url>https://github.com/parkers0405/neoism/releases/tag/v0.7.119-nightly.20261007.2</url>
+    </release>
     <release version="0.7.119-nightly.20261007.1" date="2026-10-07" type="development">
       <description>
         <p>Nightly Agent UI and frame-pacing improvements, live workspace search lifecycle fixes, streaming text reveal, and Codex usage inspection. Visible animations are preserved.</p>

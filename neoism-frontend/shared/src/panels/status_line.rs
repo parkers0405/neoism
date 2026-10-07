@@ -990,6 +990,10 @@ impl StatusLine {
             DEPTH,
             ORDER_BG,
         );
+        crate::primitives::surface_background::render(
+            sugarloaf, "status", [background_x, y_top, background_width, strip_h],
+            0.0, s, DEPTH, ORDER_BG, &[],
+        );
 
         // Top border — matches the file tree's frame exactly: `surface`
         // color at `FRAME_STROKE` thickness, so the full-width status

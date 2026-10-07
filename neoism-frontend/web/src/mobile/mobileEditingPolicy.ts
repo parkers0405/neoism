@@ -29,6 +29,7 @@ export type SplashAction =
   | "open-file-tree"
   | "open-notes"
   | "open-agent"
+  | "open-agent-panel"
   | "search"
   | "open-command-palette"
   | "new-terminal";

@@ -105,6 +105,16 @@ impl Application<'_> {
             _ => (),
         }
 
+        #[cfg(feature = "servo-artifacts")]
+        if route
+            .window
+            .screen
+            .html_artifact_pointer(Some((button, state)))
+        {
+            route.request_redraw();
+            return;
+        }
+
         match state {
             ElementState::Pressed => {
                 // Calculate time since the last click to handle double/triple clicks.
@@ -998,6 +1008,12 @@ impl Application<'_> {
             return;
         }
 
+        #[cfg(feature = "servo-artifacts")]
+        if route.window.screen.html_artifact_pointer(None) {
+            route.request_redraw();
+            return;
+        }
+
         if route.window.screen.handle_neoism_agent_drag_move() {
             route.window.set_cursor(
                 if route
@@ -1534,6 +1550,9 @@ impl Application<'_> {
             Some(window) => window,
             None => return,
         };
+
+        #[cfg(feature = "servo-artifacts")]
+        route.window.screen.leave_html_artifact();
 
         route.window.screen.mouse.inside_window = false;
         route.window.screen.renderer.notes_sidebar_mouse = None;

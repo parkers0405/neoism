@@ -2,8 +2,9 @@ use super::diff::{
     cached_diff_card_view, cached_edit_diff_sections, diag_footer_height,
     diag_footer_rows, diff_body_height, diff_link_target, tool_diff_card_width,
 };
-use super::widgets::{draw_checkbox, draw_tool_connector, draw_tool_title};
+use super::widgets::{draw_checkbox, draw_tool_connector, draw_tool_symbol};
 use super::*;
+use crate::primitives::truncate_to_fit;
 
 fn tool_message_accent(status: &str, theme: &IdeTheme) -> u32 {
     match status {
@@ -13,10 +14,15 @@ fn tool_message_accent(status: &str, theme: &IdeTheme) -> u32 {
     }
 }
 
-/// Height of an archived, unexpanded tool card: just the header row (status
-/// dot + title). The body only exists after a click.
-fn minimal_tool_header_height(s: f32) -> f32 {
-    30.0 * s
+/// Ordinary collapsed calls have a fixed height; edit diffs keep their cards.
+pub const TOOL_HEADER_HEIGHT: f32 = 30.0;
+const TOOL_GROUP_BODY_Y: f32 = 36.0;
+
+fn tool_status_label(status: &str) -> &str {
+    match status {
+        "completed" => "",
+        _ => status,
+    }
 }
 
 fn fixed_diff_viewport_height(preview_rows: usize, s: f32) -> f32 {
@@ -30,7 +36,6 @@ pub fn measure_tool_message_height(
     width: f32,
     s: f32,
     tool_expanded: bool,
-    tool_archived: bool,
     selected_group_child: Option<&str>,
 ) -> Option<f32> {
     if message.is_todos_output() {
@@ -55,51 +60,30 @@ pub fn measure_tool_message_height(
             .max(1);
         return Some(42.0 * s + rows as f32 * TODO_ROW_HEIGHT * s);
     }
-    // Settled turns keep tool/edit cards folded to their header line — the
-    // transcript shows what ran without replaying every byte. A click
-    // (tool_expanded) restores the full card.
-    let minimal = tool_archived && !tool_expanded;
-    let title_opts = DrawOpts {
-        font_size: 15.5 * s,
-        bold: true,
-        ..DrawOpts::default()
-    };
-    let title_extra = wrap_text(
-        sugarloaf,
-        &message.title_text(),
-        (width - 46.0 * s).max(40.0 * s),
-        &title_opts,
-        4,
-    )
-    .len()
-    .saturating_sub(1) as f32
-        * 20.0
-        * s;
-    if let Some(sections) = cached_edit_diff_sections(message) {
-        let card_w = tool_diff_card_width(width, s);
-        let mut height = 30.0 * s + title_extra;
-        for (section_index, section) in sections.iter().enumerate() {
-            let card_key = format!("{}:{section_index}", message.id());
-            let card_expanded = !minimal && pane.tool_expanded(&card_key);
-            let body_h = if minimal {
-                0.0
-            } else {
+    if show_tool_diff_cards(
+        message.tool(),
+        message.status(),
+        tool_expanded,
+        pane.tool_archived(message.id()),
+    ) {
+        if let Some(sections) = cached_edit_diff_sections(message) {
+            let card_w = tool_diff_card_width(width, s);
+            let mut height = TOOL_HEADER_HEIGHT * s;
+            for (section_index, section) in sections.iter().enumerate() {
+                let card_key = format!("{}:{section_index}", message.id());
+                let card_expanded = pane.tool_expanded(&card_key);
                 let view = cached_diff_card_view(section, card_w, s, card_expanded);
-                fixed_diff_viewport_height(view.preview_visual_rows, s)
-            };
-            height += diff_card::HEADER_HEIGHT * s
-                + body_h
-                + diag_footer_height(section, s)
-                + 10.0 * s;
-        }
-        if minimal {
+                height += diff_card::HEADER_HEIGHT * s
+                    + fixed_diff_viewport_height(view.preview_visual_rows, s)
+                    + diag_footer_height(section, s)
+                    + 10.0 * s;
+            }
             return Some(height);
         }
-        return Some(height.max(58.0 * s));
     }
-
-    if minimal {
-        return Some(minimal_tool_header_height(s) + title_extra);
+    // Ordinary collapsed calls need no title shaping or output wrapping.
+    if !tool_expanded {
+        return Some(TOOL_HEADER_HEIGHT * s);
     }
 
     if message.tool() == "tool_group" {
@@ -112,8 +96,7 @@ pub fn measure_tool_message_height(
         ));
     }
 
-    let expanded = tool_expanded && !message.detail().trim().is_empty();
-    let body = if expanded {
+    let body = if !message.detail().trim().is_empty() {
         message.detail()
     } else {
         message.text()
@@ -122,22 +105,17 @@ pub fn measure_tool_message_height(
         font_size: 13.0 * s,
         ..DrawOpts::default()
     };
-    let max_lines = if expanded { 12 } else { 4 };
+    let max_lines = 12;
     let rows = tool_wrapped_rows(
         sugarloaf,
         body,
-        tool_body_wrap_width(width, expanded, s),
+        tool_body_wrap_width(width, s),
         &opts,
         max_lines,
     );
-    let extra = line_count_until(body, max_lines + 1)
-        .max(1)
-        .saturating_sub(max_lines);
-    let has_hint = extra > 0 || (!message.detail().trim().is_empty() && !expanded);
+    let has_hint = line_count_until(body, max_lines + 1) > max_lines;
     Some(
-        (28.0 * s
-            + title_extra
-            + (rows.len() + has_hint as usize).max(1) as f32 * 20.0 * s)
+        (28.0 * s + (rows.len() + has_hint as usize).max(1) as f32 * 20.0 * s)
             .max(58.0 * s),
     )
 }
@@ -169,7 +147,7 @@ fn measure_tool_group_activity_height(
             }
         }
     }
-    (28.0 * s + rows.max(1) as f32 * 20.0 * s).max(58.0 * s)
+    ((TOOL_GROUP_BODY_Y + 2.0) * s + rows.max(1) as f32 * 20.0 * s).max(58.0 * s)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -194,16 +172,6 @@ pub fn render_tool_message(
         return h;
     };
     let suppress_interactions = pane.suppress_tool_interactions();
-    let cached_diff_sections;
-    let diff_sections = if let Some(sections) = prepared_diff_sections {
-        Some(sections)
-    } else {
-        cached_diff_sections = cached_edit_diff_sections(message);
-        cached_diff_sections
-            .as_ref()
-            .map(|sections| sections.as_slice())
-    };
-    let archived = pane.tool_archived(message.id());
     let accent = tool_message_accent(message.status(), theme);
     draw_status_dot_text(
         sugarloaf,
@@ -220,70 +188,93 @@ pub fn render_tool_message(
         DrawOpts {
             font_size: 15.5 * s,
             color: theme.u8(theme.fg),
-            bold: true,
             ..DrawOpts::default()
         },
         message_clip,
     ) else {
         return h;
     };
-    // Constrain the header to the same right edge the body wraps to (the body
-    // spans [x+58s, x+w-24s]); the title starts at x+22s. Without this a long
-    // tool title runs off the pane, over the scrollbar and into the sidebar.
-    let title_avail_w = (w - 46.0 * s).max(40.0 * s);
-    let title_text = message.title_text();
-    let title_lines = wrap_text(sugarloaf, &title_text, title_avail_w, &title_opts, 4);
-    for (line_index, line) in title_lines.iter().enumerate() {
-        let line_y = y + 2.0 * s + line_index as f32 * 20.0 * s;
-        if !suppress_interactions {
-            let text_x = x + 22.0 * s;
-            let title_w = sugarloaf.text_mut().measure(line, &title_opts).max(12.0);
-            let stops = measured_caret_stops(sugarloaf, line, &title_opts, text_x);
-            let title_sel = pane.register_selectable_line_with_caret_stops(
-                line,
+    let mut symbol_opts = title_opts;
+    symbol_opts.bold = false;
+    symbol_opts.color = theme.u8(theme.muted);
+    draw_tool_symbol(
+        sugarloaf,
+        [x + 20.0 * s, y, 18.0 * s, 22.0 * s],
+        message.tool(),
+        &symbol_opts,
+        occlusion_rects,
+    );
+    // Reserve the lifecycle label before truncating so pending/running cannot
+    // disappear behind a long path or command.
+    let status = tool_status_label(message.status());
+    let mut status_opts = title_opts;
+    status_opts.font_size = 12.0 * s;
+    status_opts.bold = false;
+    status_opts.color = theme.u8(accent);
+    let status_w = if status.is_empty() {
+        0.0
+    } else {
+        sugarloaf.text_mut().measure(status, &status_opts) + 12.0 * s
+    };
+    let title_avail_w = (w - 66.0 * s - status_w).max(0.0);
+    let title =
+        truncate_to_fit(&message.title_text(), title_avail_w, sugarloaf, &title_opts);
+    let text_x = x + 42.0 * s;
+    let line_y = y + 2.0 * s;
+    if !suppress_interactions {
+        let title_w = sugarloaf.text_mut().measure(&title, &title_opts).max(12.0);
+        let stops = measured_caret_stops(sugarloaf, &title, &title_opts, text_x);
+        let title_sel = pane.register_selectable_line_with_caret_stops(
+            &title,
+            [
+                text_x,
+                line_y - 3.0 * s,
+                title_w,
+                title_opts.font_size + 8.0 * s,
+            ],
+            &stops,
+        );
+        if let Some((sel_left, sel_right)) = pane.selectable_line_highlight(title_sel) {
+            draw_rounded_rect_clipped(
+                sugarloaf,
                 [
-                    text_x,
+                    sel_left - 2.0,
                     line_y - 3.0 * s,
-                    title_w,
+                    (sel_right - sel_left + 4.0).max(2.0),
                     title_opts.font_size + 8.0 * s,
                 ],
-                &stops,
+                theme.f32_alpha(theme.accent, 0.22),
+                4.0,
+                ORDER_PANEL + 2,
+                message_clip,
             );
-            if let Some((sel_left, sel_right)) = pane.selectable_line_highlight(title_sel)
-            {
-                draw_rounded_rect_clipped(
-                    sugarloaf,
-                    [
-                        sel_left - 2.0,
-                        line_y - 3.0 * s,
-                        (sel_right - sel_left + 4.0).max(2.0),
-                        title_opts.font_size + 8.0 * s,
-                    ],
-                    theme.f32_alpha(theme.accent, 0.22),
-                    4.0,
-                    ORDER_PANEL + 2,
-                    message_clip,
-                );
-            }
         }
-        draw_tool_title(
+    }
+    draw_text_clipped(
+        sugarloaf,
+        text_x,
+        line_y,
+        &title,
+        &title_opts,
+        occlusion_rects,
+    );
+    if !status.is_empty() {
+        draw_text_clipped(
             sugarloaf,
-            x + 22.0 * s,
-            line_y,
-            line,
-            &title_opts,
-            theme,
+            x + w - 24.0 * s - status_w + 12.0 * s,
+            y + 4.0 * s,
+            status,
+            &status_opts,
             occlusion_rects,
         );
     }
-    let title_offset = title_lines.len().saturating_sub(1) as f32 * 20.0 * s;
 
     if message.is_todos_output() {
         render_tool_todos(
             sugarloaf,
             pane,
             x + 30.0 * s,
-            y + 28.0 * s + title_offset,
+            y + 28.0 * s,
             w - 40.0 * s,
             message.todos(),
             theme,
@@ -295,22 +286,77 @@ pub fn render_tool_message(
         return h;
     }
 
-    // Archived diff cards toggle as one unit through the message-level hit
-    // rect (per-card rects are skipped below); live diff cards keep their
-    // per-card toggles and register no message-level rect. Todos are not
-    // foldable, so they return above without installing an inert target.
-    if (diff_sections.is_none() || archived) && !suppress_interactions {
-        pane.register_tool_hit_rect(message.id().to_string(), message_clip);
-    }
-
     let render_expanded = pane.tool_expanded(message.id())
         || pane.tool_expand_progress(message.id()) > 0.01;
-    let minimal = archived && !render_expanded;
+    let archived = pane.tool_archived(message.id());
+    let cached_diff_sections;
+    let diff_sections = if !show_tool_diff_cards(
+        message.tool(),
+        message.status(),
+        render_expanded,
+        archived,
+    ) {
+        None
+    } else if let Some(sections) = prepared_diff_sections {
+        Some(sections)
+    } else {
+        cached_diff_sections = cached_edit_diff_sections(message);
+        cached_diff_sections
+            .as_ref()
+            .map(|sections| sections.as_slice())
+    };
+    // Live edit cards use their per-file toggles rather than a parent toggle.
+    if (diff_sections.is_none() || archived) && !suppress_interactions {
+        if let Some(header_clip) =
+            intersect_rect([x, y, w, TOOL_HEADER_HEIGHT * s], message_clip)
+        {
+            pane.register_tool_hit_rect(message.id().to_string(), header_clip);
+        }
+    }
+    if !render_expanded && diff_sections.is_none() {
+        return h;
+    }
+    if let Some(sections) = diff_sections {
+        render_tool_diff_cards(
+            sugarloaf,
+            pane,
+            message,
+            x,
+            y + TOOL_HEADER_HEIGHT * s,
+            w,
+            sections,
+            theme,
+            s,
+            message_clip,
+            suppress_interactions,
+        );
+        return h;
+    }
+
+    let Some(connector_opts) = opts_with_clip(
+        DrawOpts {
+            font_size: 14.0 * s,
+            color: theme.u8(theme.fg),
+            bold: true,
+            ..DrawOpts::default()
+        },
+        message_clip,
+    ) else {
+        return h;
+    };
+    draw_tool_connector(
+        sugarloaf,
+        x + 28.0 * s,
+        y + if message.tool() == "tool_group" {
+            TOOL_GROUP_BODY_Y
+        } else {
+            26.0
+        } * s,
+        &connector_opts,
+        occlusion_rects,
+    );
 
     if message.tool() == "tool_group" {
-        if minimal {
-            return h;
-        }
         render_tool_group_activity(
             sugarloaf,
             pane,
@@ -328,31 +374,7 @@ pub fn render_tool_message(
         return h;
     }
 
-    if let Some(sections) = diff_sections {
-        render_tool_diff_cards(
-            sugarloaf,
-            pane,
-            message,
-            x,
-            y + 30.0 * s + title_offset,
-            w,
-            sections,
-            theme,
-            s,
-            message_clip,
-            suppress_interactions,
-            archived,
-            minimal,
-        );
-        return h;
-    }
-
-    if minimal {
-        return h;
-    }
-
-    let expanded = render_expanded && !message.detail().trim().is_empty();
-    let body = if expanded {
+    let body = if !message.detail().trim().is_empty() {
         message.detail()
     } else {
         message.text()
@@ -360,87 +382,35 @@ pub fn render_tool_message(
     let Some(body_opts) = opts_with_clip(
         DrawOpts {
             font_size: 13.0 * s,
-            color: theme.u8(if expanded { theme.fg } else { theme.muted }),
+            color: theme.u8(theme.fg),
             ..DrawOpts::default()
         },
         message_clip,
     ) else {
         return h;
     };
-    let mut line_y = y + 26.0 * s + title_offset;
-    // Connector glyph "╰─" is ~24*s wide at font_size 14 — start
-    // it at x+28*s, leave a small gap, then place text at x+58*s so the
-    // glyph and the row label never overlap.
+    let mut line_y = y + 26.0 * s;
     let body_x = x + 58.0 * s;
-    // Match the subagent branch connector for each tool row; no static
-    // vertical tree bar needed.
-    let nested_connector_x = x + 46.0 * s;
     let nested_body_x = x + 76.0 * s;
-    let max_lines = if expanded { 12 } else { 4 };
-    let wrap_width = tool_body_wrap_width(w, expanded, s);
+    let max_lines = 12;
+    let wrap_width = tool_body_wrap_width(w, s);
     let wrapped_rows =
         tool_wrapped_rows(sugarloaf, body, wrap_width, &body_opts, max_lines);
     let total_lines = line_count_until(body, max_lines + 1).max(1);
-    let extra_lines = total_lines.saturating_sub(max_lines);
-    let has_trailing_hint =
-        extra_lines > 0 || (!message.detail().trim().is_empty() && !expanded);
-    let rendered_rows = wrapped_rows.len() + has_trailing_hint as usize;
-    let draw_line_connectors = !expanded || rendered_rows <= 1;
-    // Bright white connector — visually anchors the row to its parent
-    // title (the "Read"/"Update" header above).
-    let Some(connector_opts) = opts_with_clip(
-        DrawOpts {
-            font_size: 14.0 * s,
-            color: theme.u8(theme.fg),
-            bold: true,
-            ..DrawOpts::default()
-        },
-        message_clip,
-    ) else {
-        return h;
-    };
     let mut nested_body_opts = body_opts;
     nested_body_opts.color = theme.u8(theme.muted);
-    let mut nested_connector_opts = connector_opts;
-    nested_connector_opts.color = theme.u8(theme.muted);
-    nested_connector_opts.bold = false;
     let row_bottom_limit = y + h - 3.0 * s;
-    for (row_ix, row) in wrapped_rows.iter().enumerate() {
+    for row in wrapped_rows.iter() {
         if line_y + body_opts.font_size > row_bottom_limit {
             break;
         }
-        // The closing "╰─" elbow belongs to the last real content row, not
-        // the trailing "click to expand" / "+N lines" hint — the hint is a
-        // plain affordance and must NOT spawn its own curved connector
-        // below the tree (see the hint branches further down).
-        let is_last = row_ix + 1 == wrapped_rows.len();
-        let nested = expanded && row.nested;
-        let connector_x = if nested {
-            nested_connector_x
-        } else {
-            x + 28.0 * s
-        };
+        let nested = row.nested;
         let text_x = if nested { nested_body_x } else { body_x };
         let text_opts = if nested {
             &nested_body_opts
         } else {
             &body_opts
         };
-        let connector_opts = if nested {
-            &nested_connector_opts
-        } else {
-            &connector_opts
-        };
-        if draw_line_connectors {
-            draw_tool_connector(
-                sugarloaf,
-                connector_x,
-                line_y,
-                is_last,
-                connector_opts,
-                occlusion_rects,
-            );
-        }
         let rendered = row.text.as_str();
         if !suppress_interactions {
             let line_w = sugarloaf.text_mut().measure(rendered, text_opts).max(12.0);
@@ -484,32 +454,12 @@ pub fn render_tool_message(
     }
     let extra = total_lines.saturating_sub(max_lines);
     if extra > 0 && line_y + body_opts.font_size <= row_bottom_limit {
-        let hint = if expanded {
-            format!("... +{extra} lines")
-        } else {
-            format!("... +{extra} lines (click to expand)")
-        };
-        // No connector for the hint — the tree's closing elbow already
-        // sits on the last content row above, so a second "╰─" here would
-        // read as a stray duplicate curved line. Just the affordance text.
+        let hint = format!("... +{extra} lines");
         draw_text_clipped(
             sugarloaf,
             body_x,
             line_y,
             &hint,
-            &body_opts,
-            occlusion_rects,
-        );
-    } else if !message.detail().trim().is_empty()
-        && !expanded
-        && line_y + body_opts.font_size <= row_bottom_limit
-    {
-        // No connector for "click to expand" — see the +N lines branch.
-        draw_text_clipped(
-            sugarloaf,
-            body_x,
-            line_y,
-            "click to expand",
             &body_opts,
             occlusion_rects,
         );
@@ -554,7 +504,7 @@ fn render_tool_group_activity(
     };
     let body_x = x + 58.0 * s;
     let row_h = 20.0 * s;
-    let mut line_y = y + 26.0 * s;
+    let mut line_y = y + TOOL_GROUP_BODY_Y * s;
     let row_bottom_limit = y + h - 3.0 * s;
     let previews = tool_group_child_previews(message);
     let selected_child = pane
@@ -565,14 +515,15 @@ fn render_tool_group_activity(
             break;
         }
         let child_key = group_child_key(line);
+        let label = line.split_once('\t').map_or(line, |(_, label)| label);
+        let child_rect = [
+            body_x - 8.0 * s,
+            line_y - 4.0 * s,
+            (w - 70.0 * s).max(40.0 * s),
+            row_h,
+        ];
         if let Some(child_key) = child_key.as_ref().filter(|_| !suppress_interactions) {
-            let rect = [
-                body_x - 8.0 * s,
-                line_y - 4.0 * s,
-                (w - 70.0 * s).max(40.0 * s),
-                row_h,
-            ];
-            if let Some(rect) = intersect_rect(rect, message_clip) {
+            if let Some(rect) = intersect_rect(child_rect, message_clip) {
                 pane.register_tool_hit_rect(
                     format!("{}::child::{}", message.id(), child_key),
                     rect,
@@ -586,12 +537,7 @@ fn render_tool_group_activity(
         if selected {
             draw_rounded_rect_clipped(
                 sugarloaf,
-                [
-                    body_x - 8.0 * s,
-                    line_y - 4.0 * s,
-                    (w - 70.0 * s).max(40.0 * s),
-                    row_h,
-                ],
+                child_rect,
                 theme.f32_alpha(theme.accent, 0.16),
                 7.0 * s,
                 ORDER_PANEL + 1,
@@ -602,7 +548,7 @@ fn render_tool_group_activity(
             sugarloaf,
             body_x,
             line_y,
-            &truncate_chars(line, ((w / (8.0 * s)).floor().max(18.0)) as usize),
+            &truncate_chars(label, ((w / (8.0 * s)).floor().max(18.0)) as usize),
             &body_opts,
             occlusion_rects,
         );
@@ -634,11 +580,7 @@ fn render_tool_group_activity(
 }
 
 fn group_child_key(line: &str) -> Option<String> {
-    let trimmed = line.trim();
-    if trimmed.starts_with('+') {
-        return None;
-    }
-    Some(trimmed.to_string())
+    line.split_once('\t').map(|(id, _)| id.to_string())
 }
 
 fn tool_group_child_previews(message: &impl AgentToolMessage) -> HashMap<String, String> {
@@ -664,8 +606,6 @@ fn render_tool_diff_cards(
     s: f32,
     viewport_clip: [f32; 4],
     suppress_interactions: bool,
-    archived: bool,
-    minimal: bool,
 ) {
     let card_x = x + 30.0 * s;
     let card_w = tool_diff_card_width(w, s);
@@ -678,14 +618,10 @@ fn render_tool_diff_cards(
         // shared the message id, so clicking one expanded (and made scrollable)
         // every card in the patch.
         let card_key = format!("{}:{section_index}", message.id());
-        let card_expanded = !minimal && pane.tool_expanded(&card_key);
+        let card_expanded = pane.tool_expanded(&card_key);
         let view = cached_diff_card_view(section, card_w, s, card_expanded);
         let full_body_h = diff_body_height(view.visual_rows, s);
-        let body_h = if minimal {
-            0.0
-        } else {
-            fixed_diff_viewport_height(view.preview_visual_rows, s)
-        };
+        let body_h = fixed_diff_viewport_height(view.preview_visual_rows, s);
         let scroll_key = card_key.clone();
         let body_scroll = if card_expanded {
             pane.diff_scroll_offset(&scroll_key, (full_body_h - body_h).max(0.0))
@@ -720,7 +656,7 @@ fn render_tool_diff_cards(
             clip_top,
             clip_bottom,
         );
-        if !suppress_interactions && !archived {
+        if !suppress_interactions {
             if let Some(rect) = intersect_rect(
                 [card_x, card_y, card_w, layout.total_height],
                 viewport_clip,
@@ -783,7 +719,63 @@ fn render_tool_diff_cards(
 
 #[cfg(test)]
 mod tests {
-    use super::{diff_body_height, fixed_diff_viewport_height};
+    use super::{
+        diff_body_height, fixed_diff_viewport_height, group_child_key,
+        tool_group_child_previews, tool_message_accent, tool_status_label,
+        ToolMessageParts, TOOL_GROUP_BODY_Y, TOOL_HEADER_HEIGHT,
+    };
+    use crate::primitives::ide_theme::IdeTheme;
+
+    #[test]
+    fn read_group_children_use_ids_not_duplicate_labels() {
+        let message = ToolMessageParts {
+            id: "read-a..",
+            title: "Reading/searching 2 items",
+            text: "read-a\tRead(src/same.rs) [done]\nread-b\tRead(src/same.rs) [done]",
+            status: "completed",
+            tool: "tool_group",
+            detail: "read-a\tfirst output\nread-b\tsecond output",
+        };
+        let previews = tool_group_child_previews(&message);
+        let keys = message
+            .text
+            .lines()
+            .map(group_child_key)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            keys,
+            [Some("read-a".to_string()), Some("read-b".to_string())]
+        );
+        assert_eq!(previews["read-a"], "first output");
+        assert_eq!(previews["read-b"], "second output");
+        assert_eq!(
+            group_child_key("read-a\tRead(src/same.rs) [running]"),
+            keys[0]
+        );
+        assert!(group_child_key("+3 more").is_none());
+    }
+
+    #[test]
+    fn read_group_children_start_below_the_header_click_target() {
+        for scale in [1.0, 2.0] {
+            let header_bottom = TOOL_HEADER_HEIGHT * scale;
+            let first_child_top = (TOOL_GROUP_BODY_Y - 4.0) * scale;
+            assert!(first_child_top > header_bottom);
+        }
+    }
+
+    #[test]
+    fn compact_rows_keep_lifecycle_labels_and_status_dot_colors() {
+        let theme = IdeTheme::default();
+        for status in ["pending", "running", "streaming"] {
+            assert_eq!(tool_status_label(status), status);
+            assert_eq!(tool_message_accent(status, &theme), theme.yellow);
+        }
+        assert_eq!(tool_status_label("completed"), "");
+        assert_eq!(tool_message_accent("completed", &theme), theme.green);
+        assert_eq!(tool_status_label("error"), "error");
+        assert_eq!(tool_message_accent("error", &theme), theme.red);
+    }
 
     #[test]
     fn expanded_diff_keeps_the_collapsed_viewport_height() {

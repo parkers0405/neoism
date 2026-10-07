@@ -284,15 +284,24 @@ pub struct MashupPack {
     /// Scrollbar / markdown / icon slots from the manifest's top-level
     /// `[scrollbar]` / `[markdown]` / `[icons]` sections.
     pub look: LookConfig,
+    pub ui: PackUi,
     /// Editor Lua plugin policy shipped by this pack. Agent and daemon
     /// plugins are intentionally outside this selection.
     pub editor_plugins: Option<EditorPluginSelection>,
     pub dir: PathBuf,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PackUi {
+    pub styles: neoism_lua::StyleSheet,
+}
+
 #[derive(Deserialize)]
 struct PackFile {
     pack: PackSection,
+    #[serde(default)]
+    ui: PackUi,
     #[serde(default, rename = "editor-plugins")]
     editor_plugins: Option<EditorPluginSelection>,
     #[serde(flatten)]
@@ -513,8 +522,11 @@ fn resolve_asset(dir: &Path, value: &str) -> String {
 /// Every installed pack, sorted by id. A pack with a `theme.json` but
 /// no explicit `theme` key applies its bundled theme.
 pub fn load_mashup_packs() -> Vec<MashupPack> {
-    pack_dirs()
-        .into_iter()
+    load_mashup_pack_dirs(pack_dirs())
+}
+
+fn load_mashup_pack_dirs(dirs: Vec<PathBuf>) -> Vec<MashupPack> {
+    dirs.into_iter()
         .filter_map(|dir| {
             let id = dir.file_name()?.to_string_lossy().to_string();
             let manifest = existing_variant(&dir, "pack")?;
@@ -560,6 +572,7 @@ pub fn load_mashup_packs() -> Vec<MashupPack> {
                         opacity: section.wallpaper_opacity.unwrap_or(1.0).clamp(0.0, 1.0),
                     }),
                 look: file.look,
+                ui: file.ui,
                 editor_plugins: file.editor_plugins,
                 id,
                 dir,
@@ -715,6 +728,7 @@ mod tests {
             font_family: None,
             wallpaper: None,
             look: LookConfig::default(),
+            ui: PackUi::default(),
             editor_plugins,
             dir: PathBuf::new(),
         }
@@ -832,6 +846,51 @@ cyan = "#94e2d5"
         );
         assert_eq!(resolve_asset(&dir, "/abs/path.glsl"), "/abs/path.glsl");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn invalid_effect_pack_is_dropped_without_polluting_valid_pack() {
+        let root = scratch_dir("pack-effects");
+        let good = root.join("good");
+        let bad = root.join("bad");
+        std::fs::create_dir_all(&good).unwrap();
+        std::fs::create_dir_all(&bad).unwrap();
+        std::fs::write(good.join("pack.json"), r#"{"pack":{},"ui":{"styles":{"composer.agent":{"background_effects":[{"kind":"stars"}]}}}}"#).unwrap();
+        std::fs::write(bad.join("pack.json"), r#"{"pack":{},"ui":{"styles":{"composer.agent":{"background_effects":[{"kind":"stars","density":10}]}}}}"#).unwrap();
+        let packs = load_mashup_pack_dirs(vec![bad, good]);
+        assert_eq!(packs.len(), 1);
+        assert_eq!(packs[0].id, "good");
+        assert_eq!(
+            packs[0]
+                .ui
+                .styles
+                .resolve("composer.agent")
+                .background_effects
+                .as_ref()
+                .unwrap()
+                .len(),
+            1
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn pack_ui_effects_are_strict_and_opt_in() {
+        let parse = |source: &str| {
+            super::super::parse_config_content::<PackFile>(Path::new("pack.json"), source)
+        };
+        let file = parse(r##"{"pack":{},"ui":{"styles":{"composer.agent":{"background":"#000000","background_effects":[{"kind":"stars"}]}}}}"##).unwrap();
+        assert_eq!(
+            file.ui
+                .styles
+                .resolve("composer.agent")
+                .background_effects
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(parse(r#"{"pack":{},"ui":{"styles":{"composer":{"background_effects":[{"kind":"rain"}]}}}}"#).is_err());
+        assert!(parse(r#"{"pack":{}}"#).unwrap().ui.styles.0.is_empty());
     }
 
     #[test]

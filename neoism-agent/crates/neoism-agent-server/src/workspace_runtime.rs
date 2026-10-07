@@ -186,6 +186,10 @@ pub(crate) struct WorkspaceRuntime {
     pub(crate) tenant_id: String,
     pub(crate) root: PathBuf,
     services: neoism_agent_service_api::AgentServices,
+    // One lazy search pin per declared runtime root, on the tool service itself.
+    // Keep it across plugin reloads and release only after workspace lease drain.
+    search_root_pin:
+        StdMutex<Option<Arc<dyn neoism_agent_service_api::WorkspaceSearchRootPin>>>,
     generation: PluginGenerationSlot,
     signature: RwLock<Vec<u8>>,
     reload: Mutex<()>,
@@ -1282,6 +1286,14 @@ impl WorkspaceRuntime {
             errors.push(error.to_string());
         }
         if errors.is_empty() {
+            // The runtime Arc can outlive explicit disposal. Retire its search
+            // index now, but never while generations still have active leases.
+            let pin = self
+                .search_root_pin
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            drop(pin);
             Ok(())
         } else {
             Err(neoism_agent_plugin_api::PluginRuntimeError::new(
@@ -1434,10 +1446,20 @@ impl WorkspaceRuntimeRegistry {
             root.clone(),
         );
         let next_generation = generation.snapshot.generation.saturating_add(1);
+        let search_root_pin = match services.workspace_search.pin_root(&root) {
+            Ok(pin) => Some(pin),
+            Err(error) => {
+                // Some injected services deliberately have no persistent index.
+                // Do not make workspace/plugin startup depend on that capability.
+                tracing::debug!(%error, root = %root.display(), "workspace search root pin unavailable");
+                None
+            }
+        };
         let runtime = Arc::new(WorkspaceRuntime {
             tenant_id: tenant_id.to_string(),
             root: root.clone(),
             services: services.clone(),
+            search_root_pin: StdMutex::new(search_root_pin),
             generation: PluginGenerationSlot::with_quarantine(
                 generation,
                 self.generation_quarantine.clone(),

@@ -66,6 +66,16 @@ pub(crate) fn is_unsettled_edit_tool(tool: &str, status: &str) -> bool {
     is_streaming_patch_tool_name(tool) && is_unsettled_edit_status(status)
 }
 
+pub(crate) fn show_tool_diff_cards(
+    tool: &str,
+    status: &str,
+    expanded: bool,
+    archived: bool,
+) -> bool {
+    expanded
+        || (!archived && is_edit_tool_name(tool) && !is_unsettled_edit_tool(tool, status))
+}
+
 pub(super) fn wrap_todo_text(
     sugarloaf: &mut Sugarloaf,
     content: &str,
@@ -252,13 +262,18 @@ pub trait AgentToolMessage {
     fn todos(&self) -> &[Self::Todo];
 
     fn title_text(&self) -> String {
-        if !self.title().is_empty() {
-            if !self.status().is_empty() {
-                return format!("{}  {}", self.title(), self.status());
+        let title = self.title().trim();
+        let title = if title.is_empty() { "Tool" } else { title };
+        let compact = if let Some((name, args)) = title.split_once('(') {
+            if let Some(args) = args.strip_suffix(')') {
+                format!("{}  {}", name.trim_end(), args)
+            } else {
+                title.to_string()
             }
-            return self.title().to_string();
-        }
-        "Tool".to_string()
+        } else {
+            title.to_string()
+        };
+        compact.replace(['\r', '\n', '\t'], " ")
     }
 }
 
@@ -616,12 +631,9 @@ struct ToolWrappedRow {
     nested: bool,
 }
 
-fn tool_body_wrap_width(width: f32, expanded: bool, s: f32) -> f32 {
-    let left = if expanded { 76.0 } else { 58.0 } * s;
-    // `width` is the timeline allocation, while tool text starts inside the
-    // card. Reserve the card's right inset as well as the connector/text inset
-    // so long paths wrap before the viewport clip rather than being clipped.
-    (width - left - 120.0 * s).max(80.0 * s)
+fn tool_body_wrap_width(width: f32, s: f32) -> f32 {
+    // Reserve the deepest text inset and the same right padding as the header.
+    (width - 100.0 * s).max(40.0 * s)
 }
 
 fn tool_wrapped_rows(

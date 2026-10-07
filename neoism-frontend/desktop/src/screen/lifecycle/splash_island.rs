@@ -60,6 +60,10 @@ impl Screen<'_> {
                     self.dismiss_other_modals(SplashModalKind::None);
                     self.open_neoism_agent_tab();
                 }
+                SplashMenuAction::OpenAgentPanel => {
+                    self.dismiss_other_modals(SplashModalKind::None);
+                    self.toggle_conversations_sidebar();
+                }
                 SplashMenuAction::Search => {
                     self.dismiss_other_modals(SplashModalKind::Finder);
                     self.open_finder_files();

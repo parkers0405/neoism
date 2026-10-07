@@ -1205,6 +1205,7 @@ impl NeoismAgentPane {
     }
 
     pub(in crate::neoism::agent) fn close_connect(&mut self) {
+        self.pending_usage = None;
         self.pending_connect = None;
         self.pending_account_model = None;
         self.connect = None;

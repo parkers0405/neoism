@@ -19,6 +19,49 @@ pub struct AvatarCell {
     pub color: [f32; 4],
 }
 
+/// Cache only grid-dependent geometry for grids 11–15 (including the f32
+/// rounding edge case); size, origin and time stay live.
+struct CircularCellGeometry {
+    i: usize,
+    j: usize,
+    nx: f32,
+    ny: f32,
+    dist: f32,
+    rim: f32,
+}
+
+fn circular_geometry(grid: u32) -> &'static [CircularCellGeometry] {
+    static CACHE: std::sync::OnceLock<[Vec<CircularCellGeometry>; 5]> =
+        std::sync::OnceLock::new();
+    &CACHE.get_or_init(|| {
+        std::array::from_fn(|index| {
+            let grid = (11 + index) as u32;
+            let mut cells = Vec::new();
+            for j in 0..grid {
+                for i in 0..grid {
+                    // Keep the original floating-point expression order.
+                    let nx = ((i as f32 + 0.5) / grid as f32) * 2.0 - 1.0;
+                    let ny = ((j as f32 + 0.5) / grid as f32) * 2.0 - 1.0;
+                    let dist = (nx * nx + ny * ny).sqrt();
+                    if dist > 1.02 {
+                        continue;
+                    }
+                    let rim = 1.0 - (((dist - 0.62) / 0.38).max(0.0)) * 0.55;
+                    cells.push(CircularCellGeometry {
+                        i: i as usize,
+                        j: j as usize,
+                        nx,
+                        ny,
+                        dist,
+                        rim,
+                    });
+                }
+            }
+            cells
+        })
+    })[(grid - 11) as usize]
+}
+
 /// Hashed plasma parameters — the identity of one avatar. Deterministic in
 /// the seed; build once and reuse across frames.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -34,7 +77,8 @@ pub struct AvatarProfile {
     s4: f32,
     p1: f32,
     p2: f32,
-    /// Chunky pixel resolution across (11–14), matching Synapse.
+    /// Chunky pixel resolution across (normally 11–14, matching Synapse).
+    /// `Rng::next` can round to 1.0 in f32, producing 15; preserve that output.
     grid: u32,
 }
 
@@ -61,7 +105,7 @@ fn hash_seed(seed: &str) -> u32 {
     h
 }
 
-/// xorshift32 PRNG matching Synapse's `makeRng` (returns 0..1).
+/// xorshift32 PRNG matching Synapse's `makeRng` (0..=1 after f32 rounding).
 struct Rng(u32);
 impl Rng {
     fn new(seed: u32) -> Self {
@@ -236,47 +280,42 @@ impl AvatarProfile {
         t: f32,
         mut push: impl FnMut(AvatarCell),
     ) {
-        let grid = self.grid as f32;
-        let cell = size / grid;
-        for j in 0..self.grid {
-            // Integer-snapped row band: this row's bottom edge IS the
-            // next row's top edge, so rows tile seamlessly.
-            let y0 = (oy + j as f32 * cell).round();
-            let y1 = (oy + (j as f32 + 1.0) * cell).round();
-            for i in 0..self.grid {
-                let nx = ((i as f32 + 0.5) / grid) * 2.0 - 1.0;
-                let ny = ((j as f32 + 0.5) / grid) * 2.0 - 1.0;
-                let dist = (nx * nx + ny * ny).sqrt();
-                // Keep the rim cells a hair past the unit circle so the
-                // silhouette reads full and round at the cardinal
-                // shoulders instead of being clipped a pixel shy.
-                if dist > 1.02 {
-                    continue; // outside the circle → transparent
-                }
-                let mut p = (nx * self.f1 + t * self.s1 + self.p1).sin()
-                    + (ny * self.f2 - t * self.s2 + self.p2).sin()
-                    + ((nx + ny) * self.f3 + t * self.s3).sin()
-                    + (dist * self.f4 - t * self.s4).sin();
-                p = (p + 4.0) / 8.0; // → 0..1
-                let idx = p * self.hues.len() as f32;
-                let lo = idx.floor() as usize;
-                let hue = lerp_hue(
-                    self.hues[lo % self.hues.len()],
-                    self.hues[(lo + 1) % self.hues.len()],
-                    idx - lo as f32,
-                );
-                // Rim falloff darkens the outer edge for a lit-sphere read.
-                let rim = 1.0 - (((dist - 0.62) / 0.38).max(0.0)) * 0.55;
-                let lightness = ((34.0 + p * 40.0) * rim) / 100.0;
-                let color = hsl_to_rgba(hue, 0.88, lightness);
-                // Integer-snapped column band, tiling with its neighbour.
-                let x0 = (ox + i as f32 * cell).round();
-                let x1 = (ox + (i as f32 + 1.0) * cell).round();
-                push(AvatarCell {
-                    rect: [x0, y0, x1 - x0, y1 - y0],
-                    color,
-                });
-            }
+        let cell = size / self.grid as f32;
+        // Adjacent boundaries used the same formula in the original loop.
+        // Integer indices 0..=15 convert/add exactly, so sharing them is exact.
+        let mut xs = [0.0; 16];
+        let mut ys = [0.0; 16];
+        for k in 0..=self.grid as usize {
+            xs[k] = (ox + k as f32 * cell).round();
+            ys[k] = (oy + k as f32 * cell).round();
+        }
+        for geometry in circular_geometry(self.grid) {
+            let CircularCellGeometry {
+                i,
+                j,
+                nx,
+                ny,
+                dist,
+                rim,
+            } = *geometry;
+            let mut p = (nx * self.f1 + t * self.s1 + self.p1).sin()
+                + (ny * self.f2 - t * self.s2 + self.p2).sin()
+                + ((nx + ny) * self.f3 + t * self.s3).sin()
+                + (dist * self.f4 - t * self.s4).sin();
+            p = (p + 4.0) / 8.0; // → 0..1
+            let idx = p * self.hues.len() as f32;
+            let lo = idx.floor() as usize;
+            let hue = lerp_hue(
+                self.hues[lo % self.hues.len()],
+                self.hues[(lo + 1) % self.hues.len()],
+                idx - lo as f32,
+            );
+            let lightness = ((34.0 + p * 40.0) * rim) / 100.0;
+            let color = hsl_to_rgba(hue, 0.88, lightness);
+            push(AvatarCell {
+                rect: [xs[i], ys[j], xs[i + 1] - xs[i], ys[j + 1] - ys[j]],
+                color,
+            });
         }
     }
 }
@@ -346,6 +385,128 @@ fn hsl_to_rgba(h: f32, s: f32, l: f32) -> [f32; 4] {
 mod tests {
     use super::*;
 
+    // Original circular algorithm, deliberately independent of the geometry cache.
+    fn reference_cells(
+        profile: &AvatarProfile,
+        ox: f32,
+        oy: f32,
+        size: f32,
+        t: f32,
+        mut push: impl FnMut(AvatarCell),
+    ) {
+        let grid = profile.grid as f32;
+        let cell = size / grid;
+        for j in 0..profile.grid {
+            // Integer-snapped row band: this row's bottom edge IS the
+            // next row's top edge, so rows tile seamlessly.
+            let y0 = (oy + j as f32 * cell).round();
+            let y1 = (oy + (j as f32 + 1.0) * cell).round();
+            for i in 0..profile.grid {
+                let nx = ((i as f32 + 0.5) / grid) * 2.0 - 1.0;
+                let ny = ((j as f32 + 0.5) / grid) * 2.0 - 1.0;
+                let dist = (nx * nx + ny * ny).sqrt();
+                // Keep the rim cells a hair past the unit circle so the
+                // silhouette reads full and round at the cardinal
+                // shoulders instead of being clipped a pixel shy.
+                if dist > 1.02 {
+                    continue; // outside the circle → transparent
+                }
+                let mut p = (nx * profile.f1 + t * profile.s1 + profile.p1).sin()
+                    + (ny * profile.f2 - t * profile.s2 + profile.p2).sin()
+                    + ((nx + ny) * profile.f3 + t * profile.s3).sin()
+                    + (dist * profile.f4 - t * profile.s4).sin();
+                p = (p + 4.0) / 8.0; // → 0..1
+                let idx = p * profile.hues.len() as f32;
+                let lo = idx.floor() as usize;
+                let hue = lerp_hue(
+                    profile.hues[lo % profile.hues.len()],
+                    profile.hues[(lo + 1) % profile.hues.len()],
+                    idx - lo as f32,
+                );
+                // Rim falloff darkens the outer edge for a lit-sphere read.
+                let rim = 1.0 - (((dist - 0.62) / 0.38).max(0.0)) * 0.55;
+                let lightness = ((34.0 + p * 40.0) * rim) / 100.0;
+                let color = hsl_to_rgba(hue, 0.88, lightness);
+                // Integer-snapped column band, tiling with its neighbour.
+                let x0 = (ox + i as f32 * cell).round();
+                let x1 = (ox + (i as f32 + 1.0) * cell).round();
+                push(AvatarCell {
+                    rect: [x0, y0, x1 - x0, y1 - y0],
+                    color,
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn cached_geometry_matches_original_bit_for_bit() {
+        for seed in ["", " ", "piss-desktop", "other-host", "λ🚀", "a", "z"] {
+            let mut profile = AvatarProfile::from_seed(seed);
+            // Cover every cached grid for every palette/frequency set.
+            for grid in 11..=15 {
+                profile.grid = grid;
+                for t in [-123.25, -0.0, 0.0, 0.6, 0.6001, 1.0, 37.125, 9999.0] {
+                    for size in [-3.0, 0.0, 0.5, 1.0, 7.25, 14.0, 42.0, 127.75] {
+                        for (ox, oy) in
+                            [(0.0, 0.0), (-0.5, 0.5), (3.25, -17.75), (1024.5, 4096.25)]
+                        {
+                            let mut actual = Vec::new();
+                            let mut expected = Vec::new();
+                            profile.cells(ox, oy, size, t, |c| actual.push(c));
+                            reference_cells(&profile, ox, oy, size, t, |c| {
+                                expected.push(c)
+                            });
+                            assert_eq!(actual.len(), expected.len());
+                            for (a, b) in actual.iter().zip(&expected) {
+                                assert_eq!(
+                                    a.rect.map(f32::to_bits),
+                                    b.rect.map(f32::to_bits)
+                                );
+                                assert_eq!(a.color.map(f32::to_bits), b.color.map(f32::to_bits),
+                                    "seed={seed:?} grid={grid} t={t} size={size} origin=({ox},{oy})");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cached_geometry_keeps_animation_live() {
+        let mut profile = AvatarProfile::from_seed("piss-desktop");
+        for grid in 11..=15 {
+            profile.grid = grid;
+            let frame = |t| {
+                let mut cells = Vec::new();
+                profile.cells(0.25, -0.5, 42.0, t, |c| cells.push(c));
+                cells
+            };
+            let first = frame(0.6);
+            for t in [0.6001, 0.616, 0.7, 1.0, 37.125] {
+                let next = frame(t);
+                assert_eq!(
+                    first.iter().map(|c| c.rect).collect::<Vec<_>>(),
+                    next.iter().map(|c| c.rect).collect::<Vec<_>>()
+                );
+                assert!(first.iter().zip(&next).any(|(a, b)| a.color != b.color));
+            }
+        }
+    }
+
+    #[test]
+    fn cached_geometry_work_reduction() {
+        for grid in 11..=15 {
+            let retained = circular_geometry(grid).len();
+            // Steady state: no coordinate normalization, distance square roots,
+            // circle tests or rim calculations; sine evaluations are unchanged.
+            println!("grid {grid}: sqrt/circle tests {} -> 0; rim calculations {retained} -> 0; boundary rounds {} -> {}; sine evaluations {} unchanged",
+                grid * grid, 2 * grid as usize + 2 * retained,
+                2 * (grid + 1), 4 * retained);
+            assert!(retained > 0 && retained < (grid * grid) as usize);
+        }
+    }
+
     #[test]
     fn profile_is_deterministic_in_the_seed() {
         let a = AvatarProfile::from_seed("piss-desktop");
@@ -353,7 +514,7 @@ mod tests {
         assert_eq!(a, b);
         let c = AvatarProfile::from_seed("other-host");
         assert_ne!(a, c);
-        assert!((11..=14).contains(&a.grid()));
+        assert!((11..=15).contains(&a.grid()));
     }
 
     #[test]

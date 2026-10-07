@@ -1254,6 +1254,36 @@ impl Renderer {
         // Reset clip_rect after rendering all content
         self.comp.batches.clip_rect = [0.0; 4];
 
+        // Keep offscreen images, but release textures whose owning CPU entries
+        // were deleted (including closed/evicted browser surfaces).
+        if self
+            .image_textures
+            .keys()
+            .any(|id| !image_data.contains_key(id))
+        {
+            #[cfg(target_os = "linux")]
+            let can_evict = match &context.inner {
+                crate::context::ContextType::Vulkan(ctx) => {
+                    // Native Vulkan drops destroy resources immediately, and prepare
+                    // runs before frame acquisition. Do not destroy in-flight images.
+                    match unsafe { ctx.device().device_wait_idle() } {
+                        Ok(()) => true,
+                        Err(error) => {
+                            tracing::warn!("Image texture eviction deferred: {error:?}");
+                            false
+                        }
+                    }
+                }
+                _ => true,
+            };
+            #[cfg(not(target_os = "linux"))]
+            let can_evict = true;
+            if can_evict {
+                self.image_textures
+                    .retain(|id, _| image_data.contains_key(id));
+            }
+        }
+
         // Image overlays come from the per-panel `image_overlays` map
         // on `Sugarloaf`. Visibility filter: skip hidden panels so
         // inactive-tab overlays don't bleed through. We still consult
@@ -1415,18 +1445,23 @@ impl Renderer {
             if matches!(&context.inner, crate::context::ContextType::Cpu(_)) {
                 continue;
             }
-            // Vulkan: synchronous one-shot upload via the renderer's
-            // descriptor-set layout + sampler. The submit-and-wait
-            // is fine here — kitty placements come in bursts (a
-            // single image transmit, then many placements), and the
-            // upload is the cost we'd pay regardless. Move to a
-            // deferred per-frame pattern later if profiling shows
-            // image-heavy workloads stall.
+            // Reuse image/descriptor/staging storage for streaming frames.
+            // Transfers remain synchronous until they join the frame command buffer.
             #[cfg(target_os = "linux")]
             if let crate::context::ContextType::Vulkan(vk_ctx) = &context.inner {
                 let RendererType::Vulkan(brush) = &self.brush_type else {
                     continue;
                 };
+                if let Some(existing) = self.image_textures.get_mut(&overlay.image_id) {
+                    if let ImageTexture::Vulkan(texture) = &mut existing.gpu {
+                        if texture.image.width == width && texture.image.height == height
+                        {
+                            texture.update_rgba(vk_ctx, pixels);
+                            existing.transmit_time = entry.transmit_time;
+                            continue;
+                        }
+                    }
+                }
                 let texture = vulkan::VulkanImageTexture::upload_rgba(
                     vk_ctx,
                     pixels,

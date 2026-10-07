@@ -11,6 +11,12 @@ impl Application<'_> {
             None => return,
         };
 
+        #[cfg(feature = "servo-artifacts")]
+        if route.window.screen.html_artifact_ime(&ime) {
+            route.request_redraw();
+            return;
+        }
+
         if route.window.screen.renderer.assistant.is_active() {
             return;
         }

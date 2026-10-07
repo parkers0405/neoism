@@ -3852,6 +3852,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "keyboard-types"
+version = "0.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0fbe853b403ae61a04233030ae8a79d94975281ed9770a1f9e246732b534b28d"
+dependencies = [
+ "bitflags 2.13.2",
+ "serde",
+]
+
+[[package]]
 name = "keyring"
 version = "3.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5138,6 +5148,7 @@ dependencies = [
  "neoism-agent-workspace-search-fff",
  "neoism-backend",
  "neoism-extensions",
+ "neoism-interactive-artifacts",
  "neoism-lua",
  "neoism-neoworld",
  "neoism-neoworld-core",
@@ -5394,6 +5405,7 @@ dependencies = [
  "neoism-agent-core",
  "neoism-agent-service-api",
  "neoism-grapheme-width",
+ "neoism-lua",
  "neoism-protocol",
  "neoism-terminal-core",
  "neoism-terminal-pty",
@@ -5445,6 +5457,15 @@ version = "0.7.117"
 dependencies = [
  "phf 0.13.1",
  "ucd-trie",
+]
+
+[[package]]
+name = "neoism-interactive-artifacts"
+version = "0.1.0"
+dependencies = [
+ "keyboard-types",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

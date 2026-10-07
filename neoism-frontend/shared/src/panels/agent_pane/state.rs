@@ -572,6 +572,7 @@ impl Default for NeoismWordmarkState {
 }
 
 pub struct NeoismAgentPane {
+    pub(crate) text_reveal: crate::panels::agent_pane::text_reveal::TextRevealState,
     pub(super) input: String,
     /// Whether the keyboard/help strip below the composer is
     /// visible. `/hints` toggles this pane-local presentation preference.
@@ -1072,6 +1073,7 @@ impl Default for NeoismAgentPane {
             timeline_scroll_decay_tau: Self::TIMELINE_TRACKPAD_DECAY_TAU,
             timeline_scroll_stop_px_s: Self::TIMELINE_TRACKPAD_STOP_PX_S,
             timeline_measure_cache: RefCell::new(HashMap::new()),
+            text_reveal: Default::default(),
             markdown_blocks_cache: RefCell::new(HashMap::new()),
             markdown_blocks_tick: Cell::new(0),
             markdown_blocks_source_bytes: Cell::new(0),
@@ -1268,6 +1270,12 @@ impl NeoismAgentPane {
         }
         if !snapshot.messages.is_empty() || self.messages.is_empty() {
             self.messages = snapshot.messages;
+            self.text_reveal.scope(self.session_id.as_deref());
+            self.text_reveal.reconcile_history(
+                self.messages
+                    .iter()
+                    .map(|m| (m.id.as_str(), m.text.as_str())),
+            );
             if self.background_tasks_started_at.is_some()
                 || self.running_background_task_count > 0
             {
@@ -1297,6 +1305,7 @@ impl NeoismAgentPane {
                 self.timeline_live_trace_anchor = None;
             }
             self.session_id = session_id;
+            self.text_reveal.scope(self.session_id.as_deref());
         }
         if let Some(streaming_state) = snapshot.streaming_state {
             self.note_streaming(streaming_state, None);
@@ -1951,6 +1960,12 @@ impl NeoismAgentPane {
         let messages = self.preserve_streamed_response_text(messages);
         let messages = self.preserve_background_completion_cards(messages);
         self.messages = messages;
+        self.text_reveal.scope(self.session_id.as_deref());
+        self.text_reveal.reconcile_history(
+            self.messages
+                .iter()
+                .map(|m| (m.id.as_str(), m.text.as_str())),
+        );
         if let Some((prompt, first_live_id)) = optimistic_trace {
             let end = first_live_id
                 .as_deref()
@@ -2602,7 +2617,9 @@ fn hash_value<T: Hash>(value: &T) -> u64 {
 
 fn hash_agent_message_text_for_measure(text: &str) -> u64 {
     const FULL_HASH_LIMIT: usize = 24 * 1024;
-    if text.len() <= FULL_HASH_LIMIT {
+    if text.len() <= FULL_HASH_LIMIT || text.contains("neoism-html") {
+        // Fence completion and middle-of-source edits can change projected
+        // artifact layout even when the sampled prefix/suffix are identical.
         return hash_value(&text);
     }
     let bytes = text.as_bytes();

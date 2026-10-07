@@ -280,6 +280,14 @@ impl NeoismAgentPane {
     }
 
     pub fn clear_or_abort(&mut self) {
+        if self
+            .picker
+            .as_ref()
+            .is_some_and(|picker| picker.kind == NeoismAgentPickerKind::Usage)
+        {
+            self.close_picker();
+            return;
+        }
         if self.pending_connect.is_some() {
             self.close_connect();
             return;
@@ -860,6 +868,7 @@ impl NeoismAgentPane {
     }
 
     pub fn close_picker(&mut self) {
+        self.pending_usage = None;
         if self.pending_connect.is_some() {
             self.close_connect();
             return;

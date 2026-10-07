@@ -137,7 +137,9 @@ pub fn publish_resolved_look(
 ) {
     let pack_look = pack.map(|pack| &pack.look).cloned().unwrap_or_default();
     let merged = pack_look.merged_under(config_look);
-    set_active_look(convert_look(&merged));
+    let mut look = convert_look(&merged);
+    look.styles = pack.map(|pack| pack.ui.styles.clone()).unwrap_or_default();
+    set_active_look(look);
 }
 
 fn convert_look(look: &LookConfig) -> LookStyle {
@@ -198,6 +200,7 @@ fn convert_look(look: &LookConfig) -> LookStyle {
         })
         .collect();
     LookStyle {
+        styles: Default::default(),
         scrollbar,
         markdown,
         wordmark_colors,
@@ -422,6 +425,33 @@ const LUCID_RABBIT_PLUGIN_FILES: &[(&str, &[u8])] = &[
 
 #[cfg(test)]
 mod seed_tests {
+    #[test]
+    fn accepted_pack_styles_replace_reload_and_clear_with_no_pack() {
+        use neoism_backend::config::mashup::{LookConfig, MashupPack, PackUi};
+        use neoism_lua::{BackgroundEffect, StylePatch};
+        let config = LookConfig::default();
+        let mut pack = MashupPack {
+            id: "test-only".into(), name: "test".into(), description: String::new(),
+            theme: None, shader_overlay: None, filters: vec![], font_family: None,
+            wallpaper: None, look: LookConfig::default(), ui: PackUi::default(),
+            editor_plugins: None, dir: Default::default(),
+        };
+        pack.ui.styles.insert("composer.agent", StylePatch {
+            background: Some("#000000".into()),
+            background_effects: Some(vec![BackgroundEffect::Stars(Default::default())]),
+            ..Default::default()
+        });
+        super::publish_resolved_look(&config, Some(&pack));
+        let resolved = neoism_ui::primitives::look::active_look().styles.resolve("composer.agent");
+        assert_eq!(resolved.background.as_deref(), Some("#000000"));
+        assert_eq!(resolved.background_effects.unwrap().len(), 1);
+        pack.ui = PackUi::default();
+        super::publish_resolved_look(&config, Some(&pack));
+        assert!(neoism_ui::primitives::look::active_look().styles.resolve("composer.agent").background_effects.is_none());
+        super::publish_resolved_look(&config, None);
+        assert!(neoism_ui::primitives::look::active_look().styles.0.is_empty());
+    }
+
     use super::{
         migrate_lucid_blocks_manifest_at, seed_first_party_plugins_at,
         LUCID_BLOCKS_V1_MANIFEST,

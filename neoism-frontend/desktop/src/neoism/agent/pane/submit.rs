@@ -37,6 +37,16 @@ impl NeoismAgentPane {
         }
     }
     pub fn commit_picker(&mut self) -> bool {
+        if self
+            .picker
+            .as_ref()
+            .is_some_and(|picker| picker.kind == NeoismAgentPickerKind::Usage)
+        {
+            if self.pending_usage.is_none() {
+                self.open_usage_picker();
+            }
+            return true;
+        }
         if !self
             .picker
             .as_ref()
@@ -84,6 +94,7 @@ impl NeoismAgentPane {
             return true;
         };
         match picker.kind {
+            NeoismAgentPickerKind::Usage => unreachable!("handled above"),
             NeoismAgentPickerKind::Slash => {
                 if self.new_chat_source.provider().is_some() {
                     if option.value == "__retry_external_options" {

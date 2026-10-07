@@ -33,6 +33,7 @@ impl NeoismAgentPane {
                 self.apply_model(normalize_model_ref(&model));
             }
             SlashCommandAction::OpenModelPicker => self.open_model_picker(),
+            SlashCommandAction::OpenUsagePicker => self.open_usage_picker(),
             SlashCommandAction::OpenConnectPicker => self.open_connect_picker(),
             SlashCommandAction::ApplyThinking(value) => {
                 self.apply_thinking(normalize_thinking(&value));

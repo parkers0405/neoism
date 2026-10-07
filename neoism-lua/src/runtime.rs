@@ -590,6 +590,9 @@ fn build_module(
     )?;
 
     let ui = lua.create_table()?;
+    ui.set("surfaces", lua.create_function(|lua, ()| {
+        lua.to_value(crate::BACKGROUND_EFFECT_SURFACES)
+    })?)?;
     let style_state = state.clone();
     ui.set(
         "style",
@@ -1437,6 +1440,40 @@ fn collect_lua_sources(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn background_effects_validate_at_lua_boundary_and_report_real_surfaces() {
+        let lua = Lua::new();
+        let owner = PluginOwner {
+            plugin_id: "dev.neoism.effects".into(),
+            revision: crate::PluginRevision("r1".into()),
+        };
+        let state = Arc::new(Mutex::new(BuildState {
+            snapshot: PluginSnapshot::empty(),
+            owner: owner.clone(),
+            ..BuildState::default()
+        }));
+        let module =
+            build_module(&lua, state.clone(), Arc::new(crate::InertHost), owner).unwrap();
+        lua.globals().set("neoism", module).unwrap();
+        for value in [
+            "{kind='rain'}",
+            "{kind='stars',speed=math.huge}",
+            "{kind='stars',density=-1}",
+            "{kind='stars',opacity=2}",
+            "{kind='stars',seed=4294967296}",
+            "{kind='stars',unknown=1}",
+            "{kind='stars',color={1,1,1,0/0}}",
+        ] {
+            let source = format!("neoism.ui.style('custom.selector', {{background_effects={{{value}}}}})");
+            assert!(lua.load(&source).exec().is_err(), "{source}");
+        }
+        lua.load("neoism.ui.style('composer.agent', {background_effects={{kind='stars',speed=0}}}); neoism.ui.style('custom', {background_effects={}})").exec().unwrap();
+        assert_eq!(state.lock().unwrap().snapshot.styles.resolve("custom").background_effects, Some(vec![]));
+        let surfaces: Vec<String> = lua.from_value(lua.load("return neoism.ui.surfaces()").eval().unwrap()).unwrap();
+        assert_eq!(surfaces, crate::BACKGROUND_EFFECT_SURFACES);
+        assert!(!surfaces.iter().any(|s| s == "terminal"));
+    }
 
     #[test]
     fn runtime_module_exposes_every_registered_namespace_and_method() {

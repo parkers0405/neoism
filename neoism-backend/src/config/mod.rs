@@ -390,6 +390,9 @@ pub struct AgentPreferences {
     pub conversations_panel_enabled: bool,
     #[serde(default = "default_bool_true", rename = "details-panel-enabled")]
     pub details_panel_enabled: bool,
+    /// Paint-only blur-to-sharp reveal for newly streamed assistant text.
+    #[serde(default = "default_bool_true", rename = "streaming-text-animation")]
+    pub streaming_text_animation: bool,
     /// Keep server-owned keys intact when the application config is serialized.
     #[serde(flatten)]
     pub server_settings: serde_json::Map<String, serde_json::Value>,
@@ -401,6 +404,7 @@ impl Default for AgentPreferences {
             default_chat_source: default_chat_source(),
             conversations_panel_enabled: true,
             details_panel_enabled: true,
+            streaming_text_animation: true,
             server_settings: serde_json::Map::new(),
         }
     }
@@ -1453,6 +1457,22 @@ mod tests {
         assert_eq!(serialized["agent"]["details-panel-enabled"], false);
         assert!(serialized.get("conversations-panel-enabled").is_none());
         assert!(serialized.get("details-panel-enabled").is_none());
+    }
+
+    #[test]
+    fn streaming_text_animation_is_grouped_and_enabled_by_default() {
+        assert!(parse("{}").agent.streaming_text_animation);
+        let config = parse(r#"{"agent":{"streaming-text-animation":false}}"#);
+        assert!(!config.agent.streaming_text_animation);
+        let serialized = serde_json::to_value(config).unwrap();
+        assert_eq!(serialized["agent"]["streaming-text-animation"], false);
+        assert!(serialized.get("streaming-text-animation").is_none());
+        validate_config_document(r#"{"agent":{"streaming-text-animation":false}}"#)
+            .unwrap();
+        assert!(validate_config_document(
+            r#"{"agent":{"streaming-text-animation":"off"}}"#
+        )
+        .is_err());
     }
 
     #[test]

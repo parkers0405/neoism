@@ -264,6 +264,13 @@ impl FileTree {
             ORDER + 1,
         );
 
+        // Conservative full rounded inset also contains the frame's square
+        // bottom corners, without drawing into the border rails.
+        crate::primitives::surface_background::render(
+            sugarloaf, "file-tree", panel_clip, content_radius, self.scale,
+            DEPTH, ORDER + 1, text_occlusion_rects,
+        );
+
         // Loading skeleton: a root listing is in flight and there is
         // nothing to draw yet — the window a remote/tailnet join sits
         // in while the host daemon streams the first DirListing.
@@ -336,10 +343,10 @@ impl FileTree {
             self.skeleton_started = None;
         }
 
-        let row_style = plugins.map(|plugins| plugins.styles.resolve("file-tree.row"));
+        let row_style = plugins.map(|plugins| crate::primitives::surface_background::resolve_style("file-tree.row", &plugins.styles));
         let selected_style =
-            plugins.map(|plugins| plugins.styles.resolve("file-tree.row.selected"));
-        let icon_style = plugins.map(|plugins| plugins.styles.resolve("file-tree.icon"));
+            plugins.map(|plugins| crate::primitives::surface_background::resolve_style("file-tree.row.selected", &plugins.styles));
+        let icon_style = plugins.map(|plugins| crate::primitives::surface_background::resolve_style("file-tree.icon", &plugins.styles));
         if !self.entries.is_empty() && self.selected < self.entries.len() {
             let row_ix = self.selected as isize - self.scroll_top as isize;
             let row_y = content_y + row_ix as f32 * row_h + scroll_offset + cursor_offset;

@@ -7,7 +7,7 @@
 // `sugarloaf::text::Text`.
 //
 // Per-instance vertex layout matches `TextInstance` in
-// `sugarloaf/src/text.rs` (56 bytes):
+// `sugarloaf/src/text.rs` (60 bytes):
 //   loc 0  R32G32_SFLOAT    pos         (offset 0)   text-box top-left
 //   loc 1  R32G32_UINT      glyph_pos   (offset 8)
 //   loc 2  R32G32_UINT      glyph_size  (offset 16)
@@ -16,6 +16,7 @@
 //   loc 5  R8_UINT          atlas       (offset 32)
 //   loc 6  R32G32B32A32_SFLOAT clip_rect (offset 36)
 //   loc 7  R32_SFLOAT      raster_scale (offset 52; zero means unscaled)
+//   loc 8  R32_SFLOAT      blur_radius (offset 56; physical pixels)
 //
 // 4-vertex triangle strip per instance (`vkCmdDraw(4, N, ..)`).
 //
@@ -36,11 +37,14 @@ layout(location = 4) in vec4  in_color;     // unorm8 → vec4 0..1
 layout(location = 5) in uint  in_atlas;
 layout(location = 6) in vec4  in_clip_rect;
 layout(location = 7) in float in_raster_scale;
+layout(location = 8) in float in_blur_radius;
 
 layout(location = 0) flat out uint out_atlas;
 layout(location = 1) flat out vec4 out_color;
 layout(location = 2)      out vec2 out_tex_coord;
 layout(location = 3) flat out vec4 out_clip_rect;
+layout(location = 4) flat out vec4 out_glyph_bounds;
+layout(location = 5) flat out float out_blur_radius;
 
 void main() {
     // Quad corner 0..1 from vertex id (4-vertex TRIANGLE_STRIP).
@@ -51,7 +55,10 @@ void main() {
     vec2 size    = vec2(in_glyph_size);
     float scale = in_raster_scale > 0.0 ? in_raster_scale : 1.0;
     vec2 origin = in_pos + vec2(in_bearings) * scale;
-    vec2 quad_px = origin + size * corner * scale;
+    float radius = clamp(in_blur_radius, 0.0, 4.0);
+    float pad = radius > 0.0 ? radius + scale : 0.0;
+    vec2 local = size * corner + (corner * 2.0 - 1.0) * pad / scale;
+    vec2 quad_px = origin + local * scale;
 
     // Pixel → NDC (y-up convention). The Vulkan render pass uses a
     // negative-height viewport (set in `Sugarloaf::render_vulkan`)
@@ -66,9 +73,11 @@ void main() {
 
     // Atlas tex coord in PIXEL space — fragment shader uses
     // `texelFetch` (nearest filter, no normalization needed).
-    out_tex_coord = vec2(in_glyph_pos) + size * corner;
+    out_tex_coord = vec2(in_glyph_pos) + local;
     out_atlas = in_atlas | (in_raster_scale > 0.0 ? 2u : 0u);
     out_clip_rect = in_clip_rect;
+    out_glyph_bounds = vec4(vec2(in_glyph_pos), vec2(in_glyph_pos) + size);
+    out_blur_radius = radius / scale;
 
     // Premultiplied RGBA. Color path's atlas already returns
     // premultiplied bytes; grayscale path's `color * mask_a` in the

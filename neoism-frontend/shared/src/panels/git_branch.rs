@@ -22,13 +22,8 @@ const BRANCH_TTL: Duration = Duration::from_secs(2);
 const ROOT_TTL: Duration = Duration::from_secs(10);
 const CHANGE_TTL: Duration = Duration::from_secs(10);
 
-struct Entry {
-    value: Option<String>,
-    fetched_at: Instant,
-}
-
-struct RootEntry {
-    value: Option<PathBuf>,
+struct Entry<T> {
+    value: Option<T>,
     fetched_at: Instant,
 }
 
@@ -56,8 +51,8 @@ impl GitChangeSummary {
 }
 
 thread_local! {
-    static CACHE: RefCell<HashMap<PathBuf, Entry>> = RefCell::new(HashMap::new());
-    static ROOT_CACHE: RefCell<HashMap<PathBuf, RootEntry>> = RefCell::new(HashMap::new());
+    static CACHE: RefCell<HashMap<PathBuf, Entry<String>>> = RefCell::new(HashMap::new());
+    static ROOT_CACHE: RefCell<HashMap<PathBuf, Entry<PathBuf>>> = RefCell::new(HashMap::new());
 }
 
 static CHANGE_CACHE: OnceLock<Mutex<HashMap<PathBuf, ChangeEntry>>> = OnceLock::new();
@@ -66,34 +61,48 @@ fn change_cache() -> &'static Mutex<HashMap<PathBuf, ChangeEntry>> {
     CHANGE_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-pub fn branch_for(start: &Path) -> Option<String> {
-    let dir: PathBuf = if start.is_file() {
-        start.parent()?.to_path_buf()
-    } else {
-        start.to_path_buf()
-    };
-
-    let now = Instant::now();
-    if let Some(hit) = CACHE.with(|c| {
-        let map = c.borrow();
-        map.get(&dir)
-            .filter(|e| now.saturating_duration_since(e.fetched_at) < BRANCH_TTL)
-            .map(|e| e.value.clone())
-    }) {
+// Key by the requested path, not its filesystem-derived directory. Both
+// positive and negative hits must bypass classification until the TTL expires.
+fn cached_lookup<T: Clone>(
+    cache: &RefCell<HashMap<PathBuf, Entry<T>>>,
+    start: &Path,
+    now: Instant,
+    ttl: Duration,
+    fetch: impl FnOnce() -> Option<T>,
+) -> Option<T> {
+    if let Some(hit) = cache
+        .borrow()
+        .get(start)
+        .filter(|e| now.saturating_duration_since(e.fetched_at) < ttl)
+        .map(|e| e.value.clone())
+    {
         return hit;
     }
-
-    let value = read_head(&dir);
-    CACHE.with(|c| {
-        c.borrow_mut().insert(
-            dir,
-            Entry {
-                value: value.clone(),
-                fetched_at: now,
-            },
-        );
-    });
+    let value = fetch();
+    cache.borrow_mut().insert(
+        start.to_path_buf(),
+        Entry {
+            value: value.clone(),
+            fetched_at: now,
+        },
+    );
     value
+}
+
+fn lookup_directory(start: &Path) -> Option<&Path> {
+    if start.is_file() {
+        start.parent()
+    } else {
+        Some(start)
+    }
+}
+
+pub fn branch_for(start: &Path) -> Option<String> {
+    CACHE.with(|cache| {
+        cached_lookup(cache, start, Instant::now(), BRANCH_TTL, || {
+            read_head(lookup_directory(start)?)
+        })
+    })
 }
 
 pub fn change_summary_for(start: &Path) -> Option<GitChangeSummary> {
@@ -151,33 +160,11 @@ fn read_head(dir: &Path) -> Option<String> {
 }
 
 pub fn repo_root_for(start: &Path) -> Option<PathBuf> {
-    let dir = if start.is_file() {
-        start.parent()?.to_path_buf()
-    } else {
-        start.to_path_buf()
-    };
-
-    let now = Instant::now();
-    if let Some(hit) = ROOT_CACHE.with(|c| {
-        let map = c.borrow();
-        map.get(&dir)
-            .filter(|e| now.saturating_duration_since(e.fetched_at) < ROOT_TTL)
-            .map(|e| e.value.clone())
-    }) {
-        return hit;
-    }
-
-    let value = find_repo_root(&dir);
-    ROOT_CACHE.with(|c| {
-        c.borrow_mut().insert(
-            dir,
-            RootEntry {
-                value: value.clone(),
-                fetched_at: now,
-            },
-        );
-    });
-    value
+    ROOT_CACHE.with(|cache| {
+        cached_lookup(cache, start, Instant::now(), ROOT_TTL, || {
+            find_repo_root(lookup_directory(start)?)
+        })
+    })
 }
 
 fn find_repo_root(start: &Path) -> Option<PathBuf> {
@@ -342,6 +329,56 @@ fn count_lines(path: &Path) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn requested_path_cache_skips_work_and_refreshes_at_ttl() {
+        // Exercise both production TTLs, including cached misses. The fetch
+        // closure contains path classification as well as the repository walk.
+        for ttl in [BRANCH_TTL, ROOT_TTL] {
+            for initial in [None, Some("main".to_string())] {
+                let cache = RefCell::new(HashMap::new());
+                let now = Instant::now();
+                let start = Path::new("repo/file.rs");
+                let mut work = 0;
+                assert_eq!(
+                    cached_lookup(&cache, start, now, ttl, || {
+                        work += 1;
+                        initial.clone()
+                    }),
+                    initial
+                );
+                for _ in 0..100 {
+                    assert_eq!(
+                        cached_lookup(
+                            &cache,
+                            start,
+                            now + ttl - Duration::from_nanos(1),
+                            ttl,
+                            || panic!("cache hit must not classify the requested path")
+                        ),
+                        initial
+                    );
+                }
+                assert_eq!(
+                    cached_lookup(&cache, start, now + ttl, ttl, || {
+                        work += 1;
+                        Some("changed".to_string())
+                    }),
+                    Some("changed".to_string())
+                );
+                assert_eq!(work, 2);
+                // A different request is not accidentally served the old path.
+                assert_eq!(
+                    cached_lookup(&cache, Path::new("other"), now + ttl, ttl, || {
+                        work += 1;
+                        None
+                    }),
+                    None
+                );
+                assert_eq!(work, 3);
+            }
+        }
+    }
 
     #[test]
     fn sum_numstat_adds_and_deletes() {

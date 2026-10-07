@@ -5,6 +5,49 @@ use neoism_ui::panels::agent_pane::selection_model::SelectableCaretStop;
 use neoism_ui::panels::agent_pane::view::markdown::AgentMarkdownPane;
 
 impl AgentMarkdownPane for NeoismAgentPane {
+    fn retain_reveal_markdown_layout(
+        &self,
+        blocks: &[AssistantMarkdownBlock],
+    ) -> Option<std::rc::Rc<Vec<AssistantMarkdownBlock>>> {
+        NeoismAgentPane::retain_reveal_markdown_layout(self, blocks)
+    }
+    fn text_reveal_state(
+        &mut self,
+    ) -> Option<&mut neoism_ui::panels::agent_pane::text_reveal::TextRevealState> {
+        Some(&mut self.text_reveal)
+    }
+
+    #[cfg(feature = "servo-artifacts")]
+    fn cached_html_artifact_frame(
+        &self,
+        key: &str,
+    ) -> Option<neoism_ui::panels::agent_pane::view::markdown::HtmlArtifactFrame> {
+        if std::env::var("NEOISM_SERVO_ARTIFACTS").as_deref() != Ok("1") {
+            return None;
+        }
+        let session = self.session_id_str().unwrap_or("draft");
+        let source_key = format!("{}:{}:{key}", session.len(), session);
+        self.html_artifact_frames.get(&source_key).copied()
+    }
+    #[cfg(feature = "servo-artifacts")]
+    fn html_artifact_frame(
+        &mut self,
+        request: neoism_ui::panels::agent_pane::view::markdown::HtmlArtifactRequest,
+    ) -> Option<neoism_ui::panels::agent_pane::view::markdown::HtmlArtifactFrame> {
+        // Never instantiate an unsandboxed engine just because a model emitted HTML.
+        if std::env::var("NEOISM_SERVO_ARTIFACTS").as_deref() != Ok("1") {
+            return None;
+        }
+        if self.html_artifact_requests.len() >= 8 {
+            return None;
+        }
+        let session = self.session_id_str().unwrap_or("draft");
+        let source_key = format!("{}:{}:{}", session.len(), session, request.key);
+        let frame = self.html_artifact_frames.get(&source_key).copied();
+        self.html_artifact_requests.push(request);
+        frame
+    }
+
     fn cached_markdown_blocks_for(
         &self,
         text: &str,

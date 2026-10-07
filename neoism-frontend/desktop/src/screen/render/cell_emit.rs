@@ -19,7 +19,7 @@ impl Screen<'_> {
 
         let scaled_margin = ctx.scaled_margin;
         let any_panel_dirty = ctx.any_panel_dirty;
-        let has_animation = ctx.has_animation;
+        let mut has_animation = ctx.has_animation;
         let initial_redraw_reason = ctx.initial_redraw_reason;
         let late_redraw_reason = ctx.late_redraw_reason;
         // --- emit cells + build uniforms per panel ---
@@ -672,6 +672,8 @@ impl Screen<'_> {
             );
         }
 
+        self.renderer.background_effects_animating = neoism_ui::primitives::surface_background::animation_demand();
+        has_animation |= self.renderer.background_effects_animating;
         let should_present = neoism_ui::render_policy::should_present_frame(
             any_panel_dirty,
             has_animation,

@@ -1,3 +1,5 @@
+mod wrap_cache;
+
 use sugarloaf::text::DrawOpts;
 use sugarloaf::Sugarloaf;
 use unicode_segmentation::UnicodeSegmentation;
@@ -1125,8 +1127,10 @@ pub(super) fn wrap_user_message(
     width: f32,
     opts: &DrawOpts,
 ) -> Vec<String> {
-    wrap_user_message_with(text, width, USER_MESSAGE_MAX_LINES, |part| {
-        measure_text_cached(sugarloaf, part, opts)
+    wrap_cache::bubble(sugarloaf, text, width, opts, |sugarloaf| {
+        wrap_user_message_with(text, width, USER_MESSAGE_MAX_LINES, |part| {
+            measure_text_cached(sugarloaf, part, opts)
+        })
     })
 }
 
@@ -1476,10 +1480,25 @@ pub fn render_input(
         box_y + border_w,
         (box_w - 2.0 * border_w).max(0.0),
         (box_h - 2.0 * border_w).max(0.0),
-        theme.f32(theme.surface),
+        crate::primitives::surface_background::base_color("composer.agent", theme, theme.f32(theme.surface)),
         DEPTH,
         (corner_radius - border_w).max(0.0),
         ORDER_PANEL + 1,
+    );
+    crate::primitives::surface_background::render(
+        sugarloaf,
+        "composer.agent",
+        [
+            box_x + border_w,
+            box_y + border_w,
+            (box_w - 2.0 * border_w).max(0.0),
+            (box_h - 2.0 * border_w).max(0.0),
+        ],
+        (corner_radius - border_w).max(0.0),
+        s,
+        DEPTH,
+        ORDER_PANEL + 1,
+        occlusion_rects,
     );
     if !input_images.is_empty() {
         super::image_preview::render_image_strip(
@@ -3240,6 +3259,18 @@ fn wrap_agent_prompt_rows(
     max_w: f32,
     opts: &DrawOpts,
 ) -> Vec<InputWrapRow> {
+    wrap_cache::prompt(sugarloaf, text, max_w, opts, |sugarloaf| {
+        wrap_agent_prompt_rows_with(text, max_w, |part| {
+            sugarloaf.text_mut().measure(part, opts)
+        })
+    })
+}
+
+fn wrap_agent_prompt_rows_with(
+    text: &str,
+    max_w: f32,
+    mut measure: impl FnMut(&str) -> f32,
+) -> Vec<InputWrapRow> {
     let token_spans = agent_attachment_token_spans(text);
     let mut wrap = PromptWrapRanges {
         offsets: vec![0.0],
@@ -3248,11 +3279,9 @@ fn wrap_agent_prompt_rows(
     let mut cursor = 0;
 
     for (start, end) in token_spans {
-        push_wrapped_prompt_segment(
-            sugarloaf, text, cursor, start, max_w, opts, &mut wrap,
-        );
+        push_wrapped_prompt_segment(text, cursor, start, max_w, &mut measure, &mut wrap);
         let token = &text[start..end];
-        let token_w = sugarloaf.text_mut().measure(token, opts);
+        let token_w = measure(token);
         if wrap.end > wrap.start && wrap.width + token_w > max_w {
             wrap.break_soft();
         }
@@ -3270,12 +3299,11 @@ fn wrap_agent_prompt_rows(
     }
 
     push_wrapped_prompt_segment(
-        sugarloaf,
         text,
         cursor,
         text.len(),
         max_w,
-        opts,
+        &mut measure,
         &mut wrap,
     );
     // Once the last glyph exactly fills a row, the insertion point belongs at
@@ -3322,12 +3350,11 @@ pub(super) fn measure_prompt_visual_rows(
 }
 
 fn push_wrapped_prompt_segment(
-    sugarloaf: &mut Sugarloaf,
     text: &str,
     seg_start: usize,
     seg_end: usize,
     max_w: f32,
-    opts: &DrawOpts,
+    measure: &mut impl FnMut(&str) -> f32,
     wrap: &mut PromptWrapRanges,
 ) {
     let mut ix = seg_start;
@@ -3340,7 +3367,7 @@ fn push_wrapped_prompt_segment(
         }
         let mut buf = [0; 4];
         let s = ch.encode_utf8(&mut buf);
-        let ch_w = sugarloaf.text_mut().measure(s, opts);
+        let ch_w = measure(s);
         if wrap.end > wrap.start && wrap.width + ch_w > max_w {
             wrap.push_row(ix);
         }

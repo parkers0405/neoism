@@ -164,6 +164,80 @@ fn assert_prompt(action: impl FnOnce()) {
 }
 
 #[test]
+fn slash_usage_fetches_all_accounts_without_blocking_or_creating_a_session() {
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let server = MockServer::new(move |verb, path| {
+        assert_eq!(verb, "GET");
+        assert!(path.ends_with("/v2/providers/openai/usage"));
+        entered_tx.send(()).unwrap();
+        release_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        (
+            200,
+            json!({"accounts":[
+                {"connection_id":"first","label":"Personal","is_default":true,
+                 "auth_type":"oauth","plan_type":"pro","windows":[
+                    {"label":"Weekly limit","used_percent":25.0,"reset_at":2000000000,"limit_window_seconds":604800}
+                 ],"error":null},
+                {"connection_id":"second","label":"Work API","is_default":false,
+                 "auth_type":"api","plan_type":null,"windows":[],"error":"Subscription usage is unavailable for API keys"}
+            ]}),
+        )
+    });
+    let mut pane = pane_for(&server);
+    let (wake_tx, wake_rx) = mpsc::channel();
+    pane.set_event_wake(AgentEventWake::for_test(move || {
+        let _ = wake_tx.send(());
+    }));
+    assert_prompt(|| pane.execute_slash_text("/usage"));
+    assert_eq!(
+        pane.picker.as_ref().unwrap().kind,
+        NeoismAgentPickerKind::Usage
+    );
+    entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert!(pane.commit_picker());
+    assert!(pane.picker.as_ref().unwrap().loading);
+    release_tx.send(()).unwrap();
+    wake_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(4);
+    while pane.pending_usage.is_some() {
+        assert!(Instant::now() < deadline, "usage did not settle");
+        pane.drain_background_updates();
+        thread::sleep(Duration::from_millis(2));
+    }
+    let picker = pane.picker.as_ref().unwrap();
+    assert!(!picker.loading);
+    assert_eq!(picker.usage_accounts.len(), 2);
+    assert_eq!(picker.usage_accounts[0].label, "Personal");
+    assert_eq!(
+        picker.usage_accounts[0].windows[0].remaining_percent(),
+        Some(75.0)
+    );
+    assert!(picker.usage_accounts[1].error.is_some());
+    assert!(pane.messages.is_empty());
+    assert!(pane.session_id.is_none());
+    assert_eq!(
+        server
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, path)| path.ends_with("/usage"))
+            .count(),
+        1
+    );
+    pane.input = "unsent draft".into();
+    release_tx.send(()).unwrap();
+    assert_prompt(|| assert!(pane.commit_picker()));
+    entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    wake_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    pane.drain_background_updates();
+    assert_eq!(pane.input, "unsent draft");
+    assert!(!pane.picker.as_ref().unwrap().loading);
+    assert!(pane.session_id.is_none());
+}
+
+#[test]
 fn slash_connect_returns_while_catalog_is_blocked_and_completion_wakes_picker() {
     let (entered_tx, entered_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();

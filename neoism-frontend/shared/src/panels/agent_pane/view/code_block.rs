@@ -498,12 +498,86 @@ pub fn render_code_line_text(
     theme: &IdeTheme,
     occlusion_rects: &[[f32; 4]],
 ) {
+    render_code_line_text_impl(
+        sugarloaf,
+        x,
+        y,
+        line,
+        lang,
+        diff,
+        opts,
+        theme,
+        occlusion_rects,
+        false,
+    );
+}
+
+pub fn render_code_line_text_revealed(
+    sugarloaf: &mut Sugarloaf,
+    x: f32,
+    y: f32,
+    line: &str,
+    lang: Lang,
+    diff: Option<DiffLineKind>,
+    opts: &DrawOpts,
+    theme: &IdeTheme,
+    occlusion_rects: &[[f32; 4]],
+) {
+    render_code_line_text_impl(
+        sugarloaf,
+        x,
+        y,
+        line,
+        lang,
+        diff,
+        opts,
+        theme,
+        occlusion_rects,
+        true,
+    );
+}
+
+fn render_code_line_text_impl(
+    sugarloaf: &mut Sugarloaf,
+    x: f32,
+    y: f32,
+    line: &str,
+    lang: Lang,
+    diff: Option<DiffLineKind>,
+    opts: &DrawOpts,
+    theme: &IdeTheme,
+    occlusion_rects: &[[f32; 4]],
+    reveal: bool,
+) {
     if let Some(kind) = diff {
         let mut diff_opts = *opts;
         diff_opts.color = theme.u8(diff_color(kind, theme));
-        draw_text_clipped(sugarloaf, x, y, line, &diff_opts, occlusion_rects);
+        let reveals = if reveal {
+            crate::panels::agent_pane::text_reveal::ranges(line)
+        } else {
+            Vec::new()
+        };
+        super::draw::draw_text_revealed_clipped(
+            sugarloaf,
+            x,
+            y,
+            line,
+            &diff_opts,
+            occlusion_rects,
+            &reveals,
+        );
     } else {
-        draw_syntax_line(sugarloaf, x, y, line, lang, opts, theme, occlusion_rects);
+        draw_syntax_line_impl(
+            sugarloaf,
+            x,
+            y,
+            line,
+            lang,
+            opts,
+            theme,
+            occlusion_rects,
+            reveal,
+        );
     }
 }
 
@@ -532,7 +606,7 @@ pub fn syntax_lang(lang: &str) -> crate::syntax::Lang {
 
 pub fn draw_syntax_line(
     sugarloaf: &mut Sugarloaf,
-    mut x: f32,
+    x: f32,
     y: f32,
     line: &str,
     lang: Lang,
@@ -540,14 +614,51 @@ pub fn draw_syntax_line(
     theme: &IdeTheme,
     occlusion_rects: &[[f32; 4]],
 ) {
+    draw_syntax_line_impl(
+        sugarloaf,
+        x,
+        y,
+        line,
+        lang,
+        opts,
+        theme,
+        occlusion_rects,
+        false,
+    );
+}
+
+fn draw_syntax_line_impl(
+    sugarloaf: &mut Sugarloaf,
+    mut x: f32,
+    y: f32,
+    line: &str,
+    lang: Lang,
+    opts: &DrawOpts,
+    theme: &IdeTheme,
+    occlusion_rects: &[[f32; 4]],
+    reveal: bool,
+) {
     let spans = highlighted_code_line(line, lang);
     for (tok, slice) in spans.iter() {
         let mut span_opts = *opts;
         span_opts.color = crate::syntax::syn_color(*tok, theme, false);
         let width = measure_text_cached(sugarloaf, slice, &span_opts);
         let visible = syntax_span_visible(x, width, span_opts.clip_rect);
+        let reveals = if reveal {
+            crate::panels::agent_pane::text_reveal::ranges(slice)
+        } else {
+            Vec::new()
+        };
         if visible {
-            draw_text_clipped(sugarloaf, x, y, slice, &span_opts, occlusion_rects);
+            super::draw::draw_text_revealed_clipped(
+                sugarloaf,
+                x,
+                y,
+                slice,
+                &span_opts,
+                occlusion_rects,
+                &reveals,
+            );
         }
         x += width;
         if span_opts

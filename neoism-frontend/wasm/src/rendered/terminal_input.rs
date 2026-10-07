@@ -613,6 +613,9 @@ impl ChromeBridge {
             SplashMenuAction::OpenAgent => {
                 self.queue_agent_tab_open();
             }
+            SplashMenuAction::OpenAgentPanel => {
+                self.chrome.toggle_conversations();
+            }
             SplashMenuAction::Search => self.chrome.finder.set_enabled(true),
             SplashMenuAction::OpenCommandPalette => {
                 self.chrome.command_palette.set_enabled(true)

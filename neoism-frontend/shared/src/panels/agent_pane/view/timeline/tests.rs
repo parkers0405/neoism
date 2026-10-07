@@ -60,6 +60,101 @@ fn text_message(
 }
 
 #[test]
+fn artifact_estimates_and_multi_message_prefixes_ignore_html_source_length() {
+    let source = "<div>dashboard data</div>\n".repeat(500);
+    let preview = format!("```neoism-html\n{source}```");
+    let messages = [
+        text_message("a", NeoismAgentMessageKind::Assistant, &preview),
+        text_message("u", NeoismAgentMessageKind::User, "next prompt"),
+        text_message(
+            "b",
+            NeoismAgentMessageKind::Assistant,
+            &format!("{preview}\n{preview}"),
+        ),
+    ];
+    let heights: Vec<_> = messages
+        .iter()
+        .map(|m| estimate_message_height(m, 900.0, 1.0))
+        .collect();
+    assert_eq!(heights, [354.0, 43.0, 674.0]);
+    let mut top = 0.0;
+    let rows = heights
+        .iter()
+        .enumerate()
+        .map(|(index, height)| {
+            let row = layout_row(index, top, *height);
+            top += height + 18.0;
+            row
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        rows.iter().map(|r| r.top).collect::<Vec<_>>(),
+        [0.0, 372.0, 433.0]
+    );
+    let cache = lazy_cache(rows, 0, 3);
+    assert_eq!(cache.content_height, 1107.0);
+    let measurements =
+        super::layout::timeline_virtual_row_measurements(&cache.rows, 18.0);
+    assert_eq!(
+        measurements.iter().map(|m| m.height).sum::<f32>(),
+        cache.content_height
+    );
+}
+
+#[test]
+fn artifact_fence_completion_marks_owning_row_for_suffix_repatch() {
+    let source = "<div>dashboard</div>\n".repeat(500);
+    let incomplete = text_message(
+        "a",
+        NeoismAgentMessageKind::Assistant,
+        &format!("```neoism-html\n{source}"),
+    );
+    let complete = text_message(
+        "a",
+        NeoismAgentMessageKind::Assistant,
+        &format!("```neoism-html\n{source}```"),
+    );
+    let next = text_message("u", NeoismAgentMessageKind::User, "next");
+    let mut row = layout_row(0, 0.0, 354.0);
+    row.display_message = Some(incomplete);
+    let cache = lazy_cache(vec![row, layout_row(1, 372.0, 43.0)], 0, 2);
+    let mut dirty = TimelineDirtyMarks::default();
+    super::layout::mark_changed_artifact_rows(
+        &cache,
+        &[complete.clone(), next.clone()],
+        &mut dirty,
+    );
+    assert!(dirty.indices.contains(&0));
+    assert_eq!(super::layout::patch_start_row(&cache, 0), Some(0));
+    let mut current_cache = cache;
+    current_cache.rows[0].display_message = Some(complete.clone());
+    let mut unchanged = TimelineDirtyMarks::default();
+    super::layout::mark_changed_artifact_rows(
+        &current_cache,
+        &[complete, next],
+        &mut unchanged,
+    );
+    assert!(unchanged.indices.is_empty());
+}
+
+#[test]
+fn lazy_tool_height_is_one_row_for_long_titles_and_outputs() {
+    for status in ["pending", "running", "completed", "error"] {
+        let mut message =
+            tool_message("tool", "read", &"Read(long/path)".repeat(50), status);
+        message.text = "output\n".repeat(1000);
+        message.detail = "details\n".repeat(1000);
+        for output_kind in [NeoismAgentOutputKind::Text, NeoismAgentOutputKind::Code] {
+            message.output_kind = output_kind;
+            for width in [160.0, 900.0] {
+                assert_eq!(estimate_message_height(&message, width, 1.0), 30.0);
+                assert_eq!(estimate_message_height(&message, width, 2.0), 60.0);
+            }
+        }
+    }
+}
+
+#[test]
 fn lazy_user_height_obeys_the_rendered_six_line_cap() {
     let long_paste = (0..200)
         .map(|index| format!("command line {index}"))
@@ -328,12 +423,64 @@ fn live_read_tools_group_into_one_display_message() {
     let (end, group) = read_tool_group_at(&messages, 0).expect("group");
 
     assert_eq!(end, 3);
-    assert_eq!(group.id, "read-a..list-c");
+    assert_eq!(group.id, "read-a..");
     assert_eq!(group.tool, "tool_group");
     assert_eq!(group.status, "running");
     assert!(group.text.contains("Read(src/a.rs)"));
     assert!(group.detail.contains("Read(src/a.rs)"));
     assert!(group.detail.contains("Read(src/a.rs) detail"));
+}
+
+#[test]
+fn read_group_identity_survives_append_and_status_updates() {
+    let mut messages = vec![
+        tool_message("read-a", "read", "Read(src/same.rs)", "completed"),
+        tool_message("read-b", "read", "Read(src/same.rs)", "running"),
+        tool_message("read-c", "read", "Read(src/c.rs)", "completed"),
+    ];
+    let (_, before) = read_tool_group_at(&messages, 0).unwrap();
+    messages[1].status = "completed".to_string();
+    messages.push(tool_message(
+        "read-d",
+        "read",
+        "Read(src/d.rs)",
+        "completed",
+    ));
+    let (_, after) = read_tool_group_at(&messages, 0).unwrap();
+    assert_eq!(before.id, after.id);
+    assert_eq!(after.status, "completed");
+    for group in [&before, &after] {
+        assert!(group.text.lines().any(|line| line.starts_with("read-a\t")));
+        assert!(group.text.lines().any(|line| line.starts_with("read-b\t")));
+        assert!(group
+            .detail
+            .lines()
+            .any(|line| line.starts_with("read-a\t")));
+        assert!(group
+            .detail
+            .lines()
+            .any(|line| line.starts_with("read-b\t")));
+    }
+}
+
+#[test]
+fn read_group_animation_dirties_its_source_row_without_new_messages() {
+    let mut pane = NeoismAgentPane::default();
+    pane.messages = vec![
+        tool_message("read-a", "read", "Read(src/a.rs)", "completed"),
+        tool_message("read-b", "read", "Read(src/b.rs)", "completed"),
+        tool_message("read-c", "read", "Read(src/c.rs)", "completed"),
+    ];
+    let (_, group) = read_tool_group_at(&pane.messages, 0).unwrap();
+    pane.register_tool_hit_rect(group.id.clone(), [0.0, 0.0, 300.0, 30.0]);
+    assert!(pane.toggle_tool_at(10.0, 10.0));
+    let _ = pane.take_timeline_dirty_marks();
+    let mut dirty = TimelineDirtyMarks::default();
+    super::layout::mark_animating_tool_rows_dirty(&pane, &mut dirty);
+    assert!(dirty.indices.contains(&0));
+    assert!(pane.tool_expand_animating(&group.id));
+    assert!(pane.tool_expand_animating("read-a"));
+    assert!(!pane.tool_expand_animating("read-b"));
 }
 
 #[test]
@@ -365,7 +512,15 @@ diff --git a/src/lib.rs b/src/lib.rs
 "
     .to_string();
 
-    let sections = prepared_message_tool_diff_sections(&patch).expect("diff sections");
+    assert!(prepared_message_tool_diff_sections(&patch, false).is_some());
+    let mut pending = patch.clone();
+    pending.status = "running".to_string();
+    assert!(prepared_message_tool_diff_sections(&pending, false).is_none());
+    assert!(prepared_message_tool_diff_sections(&pending, true).is_none());
+    let read = tool_message("read", "read", "Read(src/lib.rs)", "completed");
+    assert!(prepared_message_tool_diff_sections(&read, false).is_none());
+    let sections =
+        prepared_message_tool_diff_sections(&patch, true).expect("diff sections");
     assert!(!sections.is_empty());
 
     let cache = TimelineLayoutCache {

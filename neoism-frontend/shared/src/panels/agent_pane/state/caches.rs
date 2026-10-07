@@ -1,9 +1,27 @@
 use super::*;
+use crate::panels::agent_pane::view::markdown::AssistantMarkdownBlock;
 
 pub(super) const MAX_MARKDOWN_BLOCKS_CACHE: usize = 4096;
 pub(super) const MAX_MARKDOWN_SOURCE_BYTES: usize = 32 * 1024 * 1024;
 
 impl NeoismAgentPane {
+    /// Keep the actual allocation alive while its positional paint map is cached.
+    pub(crate) fn retain_reveal_markdown_layout(
+        &self,
+        blocks: &[AssistantMarkdownBlock],
+    ) -> Option<CachedMarkdownBlocks> {
+        self.markdown_blocks_cache
+            .borrow()
+            .values()
+            .find(|(cached, _)| cached.as_ptr() == blocks.as_ptr())
+            .map(|(cached, _)| cached.clone())
+    }
+
+    /// Paint-only streaming reveal, enabled by default.
+    pub fn set_text_reveal_enabled(&mut self, enabled: bool) {
+        self.text_reveal.set_enabled(enabled);
+    }
+
     pub fn input(&self) -> &str {
         &self.input
     }
@@ -214,6 +232,16 @@ impl NeoismAgentPane {
     }
 
     pub(crate) fn take_timeline_dirty_marks(&mut self) -> TimelineDirtyMarks {
+        // Remeasure once at the settled height, including synthetic read groups.
+        self.tool_expand_anims.retain(|id, animation| {
+            if animation.is_active() {
+                return true;
+            }
+            let source_id = id.split_once("..").map_or(id.as_str(), |(first, _)| first);
+            self.timeline_dirty_message_ids
+                .insert(source_id.to_string());
+            false
+        });
         TimelineDirtyMarks {
             ids: std::mem::take(&mut self.timeline_dirty_message_ids),
             indices: std::mem::take(&mut self.timeline_dirty_message_indices),

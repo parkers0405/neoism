@@ -20,6 +20,11 @@ thread_local! {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct TextMeasureKey {
     text: String,
+    style: TextMeasureStyle,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct TextMeasureStyle {
     font_size_bits: u32,
     bold: bool,
     italic: bool,
@@ -28,7 +33,7 @@ struct TextMeasureKey {
 }
 
 struct TextMeasureCache {
-    values: HashMap<TextMeasureKey, f32>,
+    values: HashMap<TextMeasureStyle, HashMap<String, f32>>,
     order: VecDeque<TextMeasureKey>,
 }
 
@@ -46,20 +51,26 @@ impl TextMeasureCache {
         }
     }
 
-    fn get(&self, key: &TextMeasureKey) -> Option<f32> {
-        self.values.get(key).copied()
+    fn get(&self, text: &str, style: &TextMeasureStyle) -> Option<f32> {
+        self.values.get(style)?.get(text).copied()
     }
 
     fn insert(&mut self, key: TextMeasureKey, value: f32) {
-        if self.values.contains_key(&key) {
-            self.values.insert(key, value);
+        let values = self.values.entry(key.style).or_default();
+        if let Some(previous) = values.get_mut(key.text.as_str()) {
+            *previous = value;
             return;
         }
-        self.order.push_back(key.clone());
-        self.values.insert(key, value);
+        values.insert(key.text.clone(), value);
+        self.order.push_back(key);
         while self.order.len() > TEXT_MEASURE_CACHE_LIMIT {
             if let Some(old) = self.order.pop_front() {
-                self.values.remove(&old);
+                if let Some(values) = self.values.get_mut(&old.style) {
+                    values.remove(old.text.as_str());
+                    if values.is_empty() {
+                        self.values.remove(&old.style);
+                    }
+                }
             }
         }
     }
@@ -116,6 +127,12 @@ impl CaretStopCache {
 fn text_measure_key(text: &str, opts: &DrawOpts, scale_factor: f32) -> TextMeasureKey {
     TextMeasureKey {
         text: text.to_owned(),
+        style: text_measure_style(opts, scale_factor),
+    }
+}
+
+fn text_measure_style(opts: &DrawOpts, scale_factor: f32) -> TextMeasureStyle {
+    TextMeasureStyle {
         font_size_bits: opts.font_size.to_bits(),
         bold: opts.bold,
         italic: opts.italic,
@@ -132,10 +149,16 @@ pub fn measure_text_cached(
     if text.is_empty() {
         return 0.0;
     }
-    let key = text_measure_key(text, opts, sugarloaf.scale_factor());
-    if let Some(value) = TEXT_MEASURE_CACHE.with(|cache| cache.borrow().get(&key)) {
+    // Borrow the text on hits; animated frames repeatedly measure unchanged runs.
+    let style = text_measure_style(opts, sugarloaf.scale_factor());
+    if let Some(value) = TEXT_MEASURE_CACHE.with(|cache| cache.borrow().get(text, &style))
+    {
         return value;
     }
+    let key = TextMeasureKey {
+        text: text.to_owned(),
+        style,
+    };
     let measured = sugarloaf.text_mut().measure(text, opts);
     let value = if text.chars().all(char::is_whitespace) {
         // Some shapers omit glyphs for a whitespace-only run and report zero
@@ -191,6 +214,44 @@ mod measure_tests {
         alternate_font.font_id = Some(1);
         assert_ne!(base, text_measure_key("Yes", &alternate_font, 1.0));
         assert_ne!(base, text_measure_key("Yes", &opts, 2.0));
+    }
+
+    #[test]
+    fn measurement_cache_borrows_text_and_separates_styles() {
+        let mut cache = super::TextMeasureCache::new();
+        let opts = DrawOpts::default();
+        let key = text_measure_key("unchanged text", &opts, 1.0);
+        let style = key.style;
+        cache.insert(key, 12.0);
+        assert_eq!(cache.get("unchanged text", &style), Some(12.0));
+        assert_eq!(cache.get("changed text", &style), None);
+        assert_eq!(
+            cache.get("unchanged text", &super::text_measure_style(&opts, 2.0)),
+            None
+        );
+        cache.insert(text_measure_key("unchanged text", &opts, 1.0), 15.0);
+        assert_eq!(cache.get("unchanged text", &style), Some(15.0));
+        assert_eq!(cache.order.len(), 1);
+    }
+
+    #[test]
+    fn measurement_cache_eviction_removes_empty_style_buckets() {
+        let mut cache = super::TextMeasureCache::new();
+        let opts = DrawOpts::default();
+        cache.insert(text_measure_key("old", &opts, 2.0), 1.0);
+        for i in 0..super::TEXT_MEASURE_CACHE_LIMIT {
+            cache.insert(text_measure_key(&i.to_string(), &opts, 1.0), i as f32);
+        }
+        assert_eq!(cache.values.len(), 1);
+        assert_eq!(cache.order.len(), super::TEXT_MEASURE_CACHE_LIMIT);
+        assert_eq!(
+            cache.get("old", &super::text_measure_style(&opts, 2.0)),
+            None
+        );
+        assert_eq!(
+            cache.get("0", &super::text_measure_style(&opts, 1.0)),
+            Some(0.0)
+        );
     }
 
     #[test]
@@ -400,8 +461,20 @@ pub fn draw_text_clipped(
     opts: &DrawOpts,
     occlusion_rects: &[[f32; 4]],
 ) -> f32 {
+    draw_text_revealed_clipped(sugarloaf, x, y, text, opts, occlusion_rects, &[])
+}
+
+pub fn draw_text_revealed_clipped(
+    sugarloaf: &mut Sugarloaf,
+    x: f32,
+    y: f32,
+    text: &str,
+    opts: &DrawOpts,
+    occlusion_rects: &[[f32; 4]],
+    reveals: &[sugarloaf::text::TextReveal],
+) -> f32 {
     let y = snap_text_y(y);
-    if occlusion_rects.is_empty() {
+    if occlusion_rects.is_empty() && reveals.is_empty() {
         return sugarloaf.text_mut().draw(x, y, text, opts);
     }
     // Keep this tied to the draw shaper rather than the process-global
@@ -417,15 +490,33 @@ pub fn draw_text_clipped(
     // right diagonal off the chip chevrons (˅) whenever any occlusion
     // was active. Pad the fallback clip only; explicit `clip_rect`s
     // stay exact, and occlusion carving below still cuts overlaps.
-    let ink_slack = 2.0;
+    // Match the GPU's four-physical-pixel support plus bilinear footprint.
+    let scale = sugarloaf.scale_factor().max(f32::EPSILON);
+    let reveal_halo = |radius: f32| {
+        if radius > 0.0 {
+            ((radius * scale).min(4.0) + 1.0) / scale
+        } else {
+            0.0
+        }
+    };
+    let halo = reveals
+        .iter()
+        .map(|r| reveal_halo(r.blur_radius))
+        .fold(0.0_f32, f32::max);
+    let ink_slack = 2.0 + halo;
     let base_clip = opts.clip_rect.unwrap_or([
         x - ink_slack,
-        y - 4.0,
+        y - 4.0 - halo,
         width + 2.0 * ink_slack,
-        opts.font_size * 1.8,
+        opts.font_size * 1.8 + 2.0 * halo,
     ]);
-    let text_h = (opts.font_size * 1.8).max(opts.font_size + 8.0);
-    let text_rect = [x - ink_slack, y - 4.0, width + 2.0 * ink_slack, text_h];
+    let text_h = (opts.font_size * 1.8).max(opts.font_size + 8.0) + 2.0 * halo;
+    let text_rect = [
+        x - ink_slack,
+        y - 4.0 - halo,
+        width + 2.0 * ink_slack,
+        text_h,
+    ];
     let mut intervals = vec![(base_clip[0], base_clip[0] + base_clip[2])];
 
     for rect in occlusion_rects {
@@ -456,6 +547,24 @@ pub fn draw_text_clipped(
         }
     }
 
+    // Redraw ownership belongs to visible active ink, not a message, overscan,
+    // or a wholly covered row. Prefix measurement preserves shaped run layout.
+    for reveal in reveals {
+        let rx = x + measure_text_cached(sugarloaf, &text[..reveal.range.start], opts);
+        let rw = measure_text_cached(sugarloaf, &text[reveal.range.clone()], opts);
+        let halo = reveal_halo(reveal.blur_radius) + 2.0;
+        let active_rect = [
+            rx - halo,
+            y - 4.0 - halo,
+            rw + 2.0 * halo,
+            opts.font_size * 1.8 + 2.0 * halo,
+        ];
+        if reveal_ink_visible(active_rect, base_clip, &intervals) {
+            crate::panels::agent_pane::text_reveal::painted_visible(
+                std::slice::from_ref(reveal),
+            );
+        }
+    }
     for (start, end) in intervals {
         let clip_w = end - start;
         if clip_w <= 0.0 {
@@ -463,9 +572,48 @@ pub fn draw_text_clipped(
         }
         let mut clipped = *opts;
         clipped.clip_rect = Some([start, base_clip[1], clip_w, base_clip[3]]);
-        sugarloaf.text_mut().draw(x, y, text, &clipped);
+        sugarloaf
+            .text_mut()
+            .draw_revealed(x, y, text, &clipped, reveals);
     }
     width
+}
+
+fn reveal_ink_visible(ink: [f32; 4], clip: [f32; 4], intervals: &[(f32, f32)]) -> bool {
+    intersect_rect(ink, clip).is_some()
+        && intervals
+            .iter()
+            .any(|(start, end)| ink[0] + ink[2] > *start && ink[0] < *end)
+}
+
+#[cfg(test)]
+mod reveal_visibility_tests {
+    use super::reveal_ink_visible;
+    #[test]
+    fn reveal_ownership_excludes_offscreen_and_fully_occluded_ink() {
+        let clip = [0.0, 0.0, 100.0, 100.0];
+        assert!(!reveal_ink_visible(
+            [10.0, 200.0, 20.0, 18.0],
+            clip,
+            &[(0.0, 100.0)]
+        ));
+        assert!(!reveal_ink_visible(
+            [10.0, 10.0, 20.0, 18.0],
+            clip,
+            &[(0.0, 10.0), (30.0, 100.0)]
+        ));
+        assert!(reveal_ink_visible(
+            [10.0, 10.0, 20.0, 18.0],
+            clip,
+            &[(0.0, 20.0)]
+        ));
+        // A real blur halo crossing the viewport edge is still visible ink.
+        assert!(reveal_ink_visible(
+            [-3.0, 10.0, 6.0, 18.0],
+            clip,
+            &[(0.0, 100.0)]
+        ));
+    }
 }
 
 fn snap_text_y(y: f32) -> f32 {

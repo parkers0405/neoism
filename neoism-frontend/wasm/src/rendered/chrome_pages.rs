@@ -116,6 +116,12 @@ impl ChromeBridge {
             .unwrap_or(true);
         self.chrome
             .set_agent_panel_preferences(conversations_enabled, details_enabled);
+        let streaming_text_animation = agent
+            .and_then(|agent| agent.get("streaming-text-animation"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true);
+        self.chrome
+            .set_streaming_text_animation(streaming_text_animation);
         let sidebar = values.get("ui").and_then(|ui| ui.get("left-sidebar"));
         let placement = |key: &str| match sidebar
             .and_then(|sidebar| sidebar.get(key))

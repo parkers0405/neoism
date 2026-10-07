@@ -1,7 +1,20 @@
 use super::*;
 
 impl NeoismAgentPane {
+    pub fn open_usage_picker(&mut self) {
+        let mut picker = NeoismAgentPicker::usage_loading();
+        picker.set_usage_error("Usage is available in the native app".into());
+        self.picker = Some(picker);
+    }
+
     pub fn commit_picker(&mut self) -> bool {
+        if self
+            .picker
+            .as_ref()
+            .is_some_and(|p| p.kind == NeoismAgentPickerKind::Usage)
+        {
+            return true; // Read-only; never fall through to sending the composer.
+        }
         if self.picker.as_ref().is_some_and(|picker| {
             picker.kind == NeoismAgentPickerKind::McpActions && picker.loading
         }) {
@@ -155,7 +168,8 @@ impl NeoismAgentPane {
                 }
             }
             // Handled above (no selectable row).
-            NeoismAgentPickerKind::ExternalOption
+            NeoismAgentPickerKind::Usage
+            | NeoismAgentPickerKind::ExternalOption
             | NeoismAgentPickerKind::ConnectSecret
             | NeoismAgentPickerKind::ConnectLabel => {}
         }
@@ -639,6 +653,7 @@ impl NeoismAgentPane {
         self.remember_current_provider_connection();
         self.new_chat_source = super::side_panel::ConversationSource::Neoism;
         self.session_id = None;
+        self.text_reveal.scope(self.session_id.as_deref());
         self.parent_session_id = None;
         self.side_panel.set_viewed_session_id(None);
         // A fresh chat must not inherit the previous conversation's
@@ -728,6 +743,7 @@ impl NeoismAgentPane {
         self.cache_current_session();
         let live_only = self.take_live_only_cache(&trimmed);
         self.session_id = Some(trimmed.clone());
+        self.text_reveal.scope(self.session_id.as_deref());
         // Opening a roster child makes this a view-only subagent
         // transcript keyed to the family root (desktop restores the
         // same linkage from its cached SessionState); opening the root
@@ -797,6 +813,7 @@ impl NeoismAgentPane {
             }
             SlashCommandAction::OpenModelPicker => self.open_model_picker(),
             SlashCommandAction::OpenConnectPicker => self.open_connect_picker(),
+            SlashCommandAction::OpenUsagePicker => self.open_usage_picker(),
             SlashCommandAction::ApplyThinking(value) => {
                 self.apply_thinking(normalize_thinking(&value));
             }

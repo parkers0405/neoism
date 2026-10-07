@@ -750,6 +750,28 @@ pub(super) async fn openai_oauth_credentials(
     auth_store: &AuthStore,
     auth: AuthInfo,
 ) -> anyhow::Result<(String, Option<String>)> {
+    // Refresh tokens rotate. Usage polling and generation can race with the
+    // same expired snapshot; serialize refreshes and re-read the exact scoped
+    // connection before exchanging a token. Never refresh a stale snapshot.
+    static REFRESH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    if let AuthInfo::OAuth {
+        access,
+        account_id,
+        expires,
+        ..
+    } = &auth
+    {
+        if !should_refresh_oauth(*expires) {
+            return Ok((access.clone(), account_id.clone()));
+        }
+    } else {
+        anyhow::bail!("OpenAI OAuth credentials are required")
+    }
+    let _refresh_guard = REFRESH_LOCK.lock().await;
+    let auth = auth_store
+        .get("openai")
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("OpenAI account is no longer connected"))?;
     let AuthInfo::OAuth {
         refresh,
         access,
@@ -817,6 +839,7 @@ async fn refresh_openai_oauth(
     Ok(AuthInfo::OAuth {
         refresh: response
             .refresh_token
+            .filter(|token| !token.is_empty())
             .unwrap_or_else(|| refresh_token.to_string()),
         access: response.access_token,
         expires: now_millis()

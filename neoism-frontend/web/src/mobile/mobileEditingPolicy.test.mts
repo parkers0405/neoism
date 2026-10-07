@@ -158,6 +158,7 @@ test("all splash rows and background have explicit keyboard intent", () => {
     ["open-file-tree", null],
     ["open-notes", null],
     ["open-agent", null],
+    ["open-agent-panel", null],
     ["search", "finder"],
     ["open-command-palette", "command-palette"],
     ["new-terminal", null],

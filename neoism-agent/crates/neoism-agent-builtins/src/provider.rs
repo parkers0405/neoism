@@ -18,6 +18,9 @@ mod provider_chat_completion;
 mod provider_media;
 #[path = "provider_openai.rs"]
 mod provider_openai;
+#[path = "provider_openai_usage.rs"]
+mod provider_openai_usage;
+pub(crate) use provider_openai_usage::openai_usage;
 #[path = "provider_openai_stream.rs"]
 mod provider_openai_stream;
 #[path = "provider_stub.rs"]

@@ -9,7 +9,7 @@
 //      to the white pixels — no rectangle washing the bg).
 //   2. The "neoism · terminal" tagline, rendered via sugarloaf
 //      text inside the tagline band.
-//   3. Seven rounded-rect menu buttons inside the menu band, each with hover
+//   3. Eight rounded-rect menu buttons inside the menu band, each with hover
 //      + click states and click-to-shortcut wired through the
 //      input layer.
 //   4. The click "fidget" on the wordmark — a
@@ -127,6 +127,7 @@ pub enum SplashMenuAction {
     OpenFileTree,
     OpenNotes,
     OpenAgent,
+    OpenAgentPanel,
     Search,
     OpenCommandPalette,
     NewTerminal,
@@ -139,6 +140,7 @@ impl SplashMenuAction {
             Self::OpenFileTree => "open-file-tree",
             Self::OpenNotes => "open-notes",
             Self::OpenAgent => "open-agent",
+            Self::OpenAgentPanel => "open-agent-panel",
             Self::Search => "search",
             Self::OpenCommandPalette => "open-command-palette",
             Self::NewTerminal => "new-terminal",
@@ -147,18 +149,12 @@ impl SplashMenuAction {
     }
 }
 
-const MENU: [MenuSpec; 7] = [
+const MENU: [MenuSpec; 8] = [
     MenuSpec {
         action: SplashMenuAction::ChangeDirectory,
         icon: MenuIcon::Glyph("\u{f07b}"),
         label: "Change Directory",
         keybind: "Alt + D",
-    },
-    MenuSpec {
-        action: SplashMenuAction::OpenFileTree,
-        icon: MenuIcon::Service(CommandService::Workspace),
-        label: "Open file tree",
-        keybind: "Alt + E",
     },
     MenuSpec {
         action: SplashMenuAction::OpenNotes,
@@ -167,9 +163,15 @@ const MENU: [MenuSpec; 7] = [
         keybind: "Alt + N",
     },
     MenuSpec {
+        action: SplashMenuAction::OpenFileTree,
+        icon: MenuIcon::Service(CommandService::Workspace),
+        label: "Open file tree",
+        keybind: "Alt + E",
+    },
+    MenuSpec {
         action: SplashMenuAction::OpenAgent,
         icon: MenuIcon::Service(CommandService::Agent),
-        label: "Neoism",
+        label: "Neoism Agent",
         keybind: "Alt + A",
     },
     MenuSpec {
@@ -177,6 +179,12 @@ const MENU: [MenuSpec; 7] = [
         icon: MenuIcon::Glyph("\u{f002}"),
         label: "Search",
         keybind: "Alt + S",
+    },
+    MenuSpec {
+        action: SplashMenuAction::OpenAgentPanel,
+        icon: MenuIcon::Glyph("\u{f0674}"),
+        label: "Agent panel",
+        keybind: "Alt + C",
     },
     MenuSpec {
         action: SplashMenuAction::OpenCommandPalette,
@@ -202,6 +210,9 @@ fn platform_keybind(keybind: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
+// Set to 1 to revert the two-column layout experiment.
+const MENU_COLUMNS: usize = 2;
+const MENU_COLUMN_GAP: f32 = 32.0;
 const MENU_BTN_H: f32 = 42.0;
 const MENU_BTN_GAP: f32 = 8.0;
 const MENU_RADIUS: f32 = 10.0;
@@ -209,9 +220,35 @@ const MENU_BTN_PAD: f32 = 22.0;
 const MENU_ICON_SLOT: f32 = 22.0;
 const MENU_LABEL_GAP: f32 = 14.0;
 const MENU_KEY_GAP: f32 = 32.0;
-const MENU_LABEL_FONT: f32 = 17.0;
-const MENU_KEY_FONT: f32 = 16.0;
-const MENU_ICON_FONT: f32 = 17.0;
+const MENU_LABEL_FONT: f32 = 15.0;
+const MENU_KEY_FONT: f32 = 14.0;
+const MENU_ICON_FONT: f32 = 15.0;
+
+fn menu_columns(available_width: f32, button_width: f32, column_gap: f32) -> usize {
+    let grid_width =
+        MENU_COLUMNS as f32 * button_width + (MENU_COLUMNS - 1) as f32 * column_gap;
+    // Stack on narrow panes rather than shrinking two columns below 75%.
+    if available_width < grid_width * 0.75 {
+        1
+    } else {
+        MENU_COLUMNS
+    }
+}
+
+fn menu_button_rect(
+    index: usize,
+    columns: usize,
+    origin: [f32; 2],
+    button_size: [f32; 2],
+    gaps: [f32; 2],
+) -> [f32; 4] {
+    [
+        origin[0] + (index % columns) as f32 * (button_size[0] + gaps[0]),
+        origin[1] + (index / columns) as f32 * (button_size[1] + gaps[1]),
+        button_size[0],
+        button_size[1],
+    ]
+}
 
 #[derive(Clone, Copy, Debug)]
 struct Click {
@@ -471,18 +508,12 @@ impl SplashOverlay {
         let layout_scale =
             layout_scale.clamp(0.20, crate::panels::terminal_splash::MAX_SPLASH_SCALE);
 
-        // Wordmark sized to fill the wordmark band's height,
-        // capped at ~50% of pane width so it reads as a logo
-        // not a billboard. The PNG is auto-trimmed (no gutter)
-        // so band height = visible letter height.
-        // Fill ~96 % of the (now-tightened) band so the letters hug
-        // top+bottom like the agent home wordmark — no dead padding.
-        // Width is still capped at 42 % pane width so it reads as a
-        // refined header, not a pane-spanning banner.
+        // Fill the wordmark band without stretching the image. Allow a wider
+        // header to balance the two-column menu, capped at 60% of pane width.
         let target_h = wordmark_h * 0.96;
         let aspect = crate::panels::terminal_splash::WORDMARK_ASPECT;
         let mut img_w = target_h * aspect;
-        let max_w = pane_size.0 * 0.42;
+        let max_w = pane_size.0 * 0.60;
         if img_w > max_w {
             img_w = max_w;
         }
@@ -674,11 +705,15 @@ impl SplashOverlay {
         };
 
         let base_widest_text = widest_text_at_scale(s, sugarloaf);
-        let base_menu_btn_w = scaled_w.max(base_widest_text);
+        let columns = menu_columns(max_menu_w, base_widest_text, MENU_COLUMN_GAP * s);
+        let rows = MENU.len().div_ceil(columns);
+        let base_menu_btn_w = (scaled_w / columns as f32).max(base_widest_text);
+        let base_total_menu_w =
+            columns as f32 * base_menu_btn_w + (columns - 1) as f32 * MENU_COLUMN_GAP * s;
         let base_total_menu_h =
-            MENU.len() as f32 * menu_btn_h + (MENU.len() - 1) as f32 * menu_btn_gap;
-        let width_fit = if base_menu_btn_w > max_menu_w {
-            max_menu_w / base_menu_btn_w
+            rows as f32 * menu_btn_h + (rows - 1) as f32 * menu_btn_gap;
+        let width_fit = if base_total_menu_w > max_menu_w {
+            max_menu_w / base_total_menu_w
         } else {
             1.0
         };
@@ -701,13 +736,16 @@ impl SplashOverlay {
             menu_radius = MENU_RADIUS * s;
         }
 
-        // Menu width matches the logo when possible, but never exceeds
-        // the terminal pane. At tight widths the text scale shrinks
-        // first, then the row clips to its own rect as a final guard.
+        // Center the whole grid, fitting both columns and their gutter inside
+        // the terminal pane. Narrow panes use the same geometry with one column.
         let widest_text = widest_text_at_scale(s, sugarloaf);
-        let menu_btn_w = scaled_w.max(widest_text).min(max_menu_w);
-        let total_menu_h =
-            MENU.len() as f32 * menu_btn_h + (MENU.len() - 1) as f32 * menu_btn_gap;
+        let menu_column_gap = (MENU_COLUMN_GAP * s).min(max_menu_w / columns as f32);
+        let total_column_gap = (columns - 1) as f32 * menu_column_gap;
+        let menu_btn_w = (scaled_w / columns as f32 * fit)
+            .max(widest_text)
+            .min((max_menu_w - total_column_gap) / columns as f32);
+        let total_menu_w = columns as f32 * menu_btn_w + total_column_gap;
+        let total_menu_h = rows as f32 * menu_btn_h + (rows - 1) as f32 * menu_btn_gap;
         // Menu buttons drift up alongside the wordmark during
         // dismiss, with a slightly bigger rise so they "leave"
         // last (reads as: wordmark first, then menu peels off).
@@ -720,8 +758,8 @@ impl SplashOverlay {
             let max_top = menu_top + (menu_band_h - total_menu_h).max(0.0);
             raw_menu_block_top.clamp(menu_top, max_top)
         };
-        let raw_menu_x = pane_origin.0 + (pane_size.0 - menu_btn_w) / 2.0;
-        let max_x = pane_origin.0 + (pane_size.0 - menu_btn_w).max(0.0);
+        let raw_menu_x = pane_origin.0 + (pane_size.0 - total_menu_w) / 2.0;
+        let max_x = pane_origin.0 + (pane_size.0 - total_menu_w).max(0.0);
         let menu_x = raw_menu_x.clamp(pane_origin.0, max_x);
         let dims = MenuDims {
             label_font: menu_label_font,
@@ -734,8 +772,14 @@ impl SplashOverlay {
         };
         self.menu_rects.clear();
         for (i, spec) in MENU.iter().enumerate() {
-            let y = menu_block_top + i as f32 * (menu_btn_h + menu_btn_gap);
-            let rect = [menu_x, y, menu_btn_w, menu_btn_h];
+            let rect = menu_button_rect(
+                i,
+                columns,
+                [menu_x, menu_block_top],
+                [menu_btn_w, menu_btn_h],
+                [menu_column_gap, menu_btn_gap],
+            );
+            let [x, y, _, _] = rect;
             // Cancel hit-test rects during dismiss so a stray
             // click as the splash fades doesn't fire a shortcut.
             if dismiss_t <= 0.0 {
@@ -745,8 +789,8 @@ impl SplashOverlay {
                 .mouse
                 .map(|(mx, my)| {
                     dismiss_t == 0.0
-                        && mx >= menu_x
-                        && mx <= menu_x + menu_btn_w
+                        && mx >= x
+                        && mx <= x + menu_btn_w
                         && my >= y
                         && my <= y + menu_btn_h
                 })
@@ -999,37 +1043,63 @@ mod tests {
     use super::*;
 
     #[test]
-    fn splash_has_seven_typed_rows_in_display_order() {
-        assert_eq!(MENU.len(), 7);
+    fn splash_has_eight_actions_in_column_order() {
+        assert_eq!(MENU.len(), 8);
         assert_eq!(
             MENU.map(|item| item.action),
             [
                 SplashMenuAction::ChangeDirectory,
-                SplashMenuAction::OpenFileTree,
                 SplashMenuAction::OpenNotes,
+                SplashMenuAction::OpenFileTree,
                 SplashMenuAction::OpenAgent,
                 SplashMenuAction::Search,
+                SplashMenuAction::OpenAgentPanel,
                 SplashMenuAction::OpenCommandPalette,
                 SplashMenuAction::NewTerminal,
             ]
         );
+        assert_eq!(MENU[3].label, "Neoism Agent");
+        assert_eq!(MENU[5].label, "Agent panel");
+        assert_eq!(MENU[5].keybind, "Alt + C");
+        assert_eq!(MENU[5].action.as_str(), "open-agent-panel");
     }
 
     #[test]
-    fn dynamic_menu_hits_return_actions_not_indices() {
+    fn narrow_panes_stack_menu_columns() {
+        assert_eq!(menu_columns(300.0, 400.0, 32.0), 1);
+        assert_eq!(menu_columns(1000.0, 400.0, 32.0), MENU_COLUMNS);
+    }
+
+    #[test]
+    fn dynamic_menu_hits_cover_both_columns_but_not_gaps() {
         let mut overlay = SplashOverlay::new();
-        overlay.menu_rects = MENU
-            .iter()
-            .enumerate()
-            .map(|(index, item)| (item.action, [0.0, index as f32 * 10.0, 20.0, 9.0]))
-            .collect();
-        for (index, item) in MENU.iter().enumerate() {
-            assert_eq!(
-                overlay.menu_hit(5.0, index as f32 * 10.0 + 2.0),
-                Some(item.action)
-            );
+        for columns in [1, 2] {
+            overlay.menu_rects = MENU
+                .iter()
+                .enumerate()
+                .map(|(index, item)| {
+                    (
+                        item.action,
+                        menu_button_rect(
+                            index,
+                            columns,
+                            [10.0, 20.0],
+                            [20.0, 9.0],
+                            [8.0, 1.0],
+                        ),
+                    )
+                })
+                .collect();
+            for (index, item) in MENU.iter().enumerate() {
+                let x = 10.0 + (index % columns) as f32 * 28.0;
+                let y = 20.0 + (index / columns) as f32 * 10.0;
+                assert_eq!(overlay.menu_rects[index].1, [x, y, 20.0, 9.0]);
+                assert_eq!(overlay.menu_hit(x + 5.0, y + 2.0), Some(item.action));
+            }
+            assert_eq!(overlay.menu_hit(34.0, 22.0), None, "column gutter");
+            assert_eq!(overlay.menu_hit(15.0, 29.5), None, "row gap");
+            assert_eq!(overlay.menu_hit(70.0, 22.0), None, "outside menu");
         }
-        assert_eq!(overlay.menu_hit(50.0, 50.0), None);
     }
 
     #[test]

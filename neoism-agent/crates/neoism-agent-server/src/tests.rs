@@ -5315,13 +5315,30 @@ fn test_models_catalog() -> &'static str {
 struct RecordingWorkspaceSearch {
     label: String,
     warms: AtomicUsize,
+    pin_calls: AtomicUsize,
+    active_roots: Arc<Mutex<std::collections::BTreeMap<PathBuf, usize>>>,
+    grep_pins: Mutex<Vec<(PathBuf, usize)>>,
 }
 
-struct RecordingRootPin(PathBuf);
+struct RecordingRootPin {
+    root: PathBuf,
+    active_roots: Arc<Mutex<std::collections::BTreeMap<PathBuf, usize>>>,
+}
+
+impl Drop for RecordingRootPin {
+    fn drop(&mut self) {
+        let mut roots = self.active_roots.lock().unwrap();
+        let count = roots.get_mut(&self.root).unwrap();
+        *count -= 1;
+        if *count == 0 {
+            roots.remove(&self.root);
+        }
+    }
+}
 
 impl neoism_agent_service_api::WorkspaceSearchRootPin for RecordingRootPin {
     fn root(&self) -> &std::path::Path {
-        &self.0
+        &self.root
     }
 }
 
@@ -5341,7 +5358,18 @@ impl neoism_agent_service_api::WorkspaceSearchService for RecordingWorkspaceSear
         Arc<dyn neoism_agent_service_api::WorkspaceSearchRootPin>,
         neoism_agent_service_api::ServiceError,
     > {
-        Ok(Arc::new(RecordingRootPin(root.to_path_buf())))
+        let root = crate::workspace_runtime::canonical_location(&root.to_string_lossy());
+        self.pin_calls.fetch_add(1, Ordering::SeqCst);
+        *self
+            .active_roots
+            .lock()
+            .unwrap()
+            .entry(root.clone())
+            .or_default() += 1;
+        Ok(Arc::new(RecordingRootPin {
+            root,
+            active_roots: self.active_roots.clone(),
+        }))
     }
 
     fn find_files(
@@ -5367,11 +5395,21 @@ impl neoism_agent_service_api::WorkspaceSearchService for RecordingWorkspaceSear
 
     fn grep(
         &self,
-        _request: &neoism_agent_service_api::GrepWorkspaceRequest,
+        request: &neoism_agent_service_api::GrepWorkspaceRequest,
     ) -> Result<
         neoism_agent_service_api::GrepWorkspaceResult,
         neoism_agent_service_api::ServiceError,
     > {
+        let root =
+            crate::workspace_runtime::canonical_location(&request.root.to_string_lossy());
+        let pins = self
+            .active_roots
+            .lock()
+            .unwrap()
+            .get(&root)
+            .copied()
+            .unwrap_or(0);
+        self.grep_pins.lock().unwrap().push((root, pins));
         Ok(neoism_agent_service_api::GrepWorkspaceResult {
             items: Vec::new(),
             files_with_matches: 0,
@@ -5396,6 +5434,113 @@ impl neoism_agent_service_api::WorkspaceSearchService for RecordingWorkspaceSear
             engine: Some("fake".to_string()),
         })
     }
+}
+
+#[tokio::test]
+async fn declared_workspace_search_pin_is_reused_by_grep_and_released_on_disposal() {
+    let root = std::env::temp_dir().join(format!(
+        "neoism-search-pin-lifecycle-{}",
+        Id::ascending(IdKind::Event)
+    ));
+    let subdir = root.join("src");
+    let other = root.join("other");
+    std::fs::create_dir_all(&subdir).unwrap();
+    std::fs::create_dir_all(&other).unwrap();
+    let search = Arc::new(RecordingWorkspaceSearch::default());
+    let state = AppState::open_database_with_services(
+        root.join("agent.db"),
+        services_with_workspace_search(search.clone()),
+    )
+    .await
+    .unwrap();
+    let canonical = crate::workspace_runtime::canonical_location(root.to_str().unwrap());
+    let runtime = state
+        .workspace_runtime(root.to_str().unwrap())
+        .await
+        .unwrap();
+    let generation = runtime.published_snapshot().generation;
+    for _ in 0..3 {
+        let lookup = state
+            .workspace_runtime(root.to_str().unwrap())
+            .await
+            .unwrap();
+        assert!(Arc::ptr_eq(&lookup, &runtime));
+        assert_eq!(lookup.published_snapshot().generation, generation);
+        tool::warm_search(state.services(), &root);
+        tool::execute(
+            "grep",
+            tool::ToolContext::new(&root)
+                .with_state(Some(state.clone()))
+                .with_permission_rules(vec![neoism_agent_core::PermissionRule {
+                    permission: "grep".into(),
+                    pattern: "*".into(),
+                    action: neoism_agent_core::PermissionAction::Allow,
+                }]),
+            json!({"pattern":"needle", "path":"src"}),
+        )
+        .await
+        .unwrap();
+    }
+    assert_eq!(search.pin_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        *search.grep_pins.lock().unwrap(),
+        vec![(canonical.clone(), 1); 3]
+    );
+    assert!(!search.active_roots.lock().unwrap().contains_key(&subdir));
+    // Plugin generations can rotate without retiring the workspace search index.
+    std::fs::create_dir_all(root.join(".agent")).unwrap();
+    std::fs::write(
+        root.join(".agent/agent.json"),
+        r#"{"dangerouslySkipPermissions":true}"#,
+    )
+    .unwrap();
+    assert!(crate::workspace_runtime::refresh_plugins(&runtime, &state)
+        .await
+        .unwrap());
+    assert!(runtime.published_snapshot().generation > generation);
+    assert_eq!(search.pin_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        search.active_roots.lock().unwrap().get(&canonical),
+        Some(&1)
+    );
+
+    // A new declared root has independent ownership, not an ad hoc-path pin.
+    let other_runtime = state
+        .workspace_runtime(other.to_str().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(search.pin_calls.load(Ordering::SeqCst), 2);
+    let lease = runtime.snapshot();
+    let disposed = state
+        .inner
+        .workspace_runtimes
+        .evict(root.to_str().unwrap())
+        .await
+        .unwrap();
+    let closing_state = state.clone();
+    let mut closing =
+        tokio::spawn(async move { disposed.teardown(&closing_state).await });
+    // Disposal cannot finish or release its pin while a turn lease is held.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), &mut closing)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        search.active_roots.lock().unwrap().get(&canonical),
+        Some(&1)
+    );
+    drop(lease);
+    closing.await.unwrap().unwrap();
+    // Retaining `runtime` after disposal must not retain its pin.
+    assert!(!search.active_roots.lock().unwrap().contains_key(&canonical));
+    assert_eq!(search.active_roots.lock().unwrap().len(), 1);
+    state.shutdown().await.unwrap();
+    assert!(search.active_roots.lock().unwrap().is_empty());
+    drop(other_runtime);
+    drop(runtime);
+    drop(state);
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[tokio::test]

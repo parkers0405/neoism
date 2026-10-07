@@ -101,7 +101,61 @@ impl SystemContextService for WorkspaceContext {
                 }
             }
         }
+        if request
+            .options
+            .get("htmlArtifactsEnabled")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+        {
+            sections.push(SystemContextSection {
+                id: "html-artifacts".into(),
+                title: None,
+                content: include_str!("html_artifacts.md").into(),
+            });
+        }
         Ok(sections)
+    }
+}
+
+#[cfg(test)]
+mod artifact_guidance_tests {
+    use super::*;
+
+    #[test]
+    fn artifact_guidance_requires_explicit_boolean_opt_in() {
+        for enabled in [
+            None,
+            Some(serde_json::json!(false)),
+            Some(serde_json::json!("true")),
+            Some(serde_json::json!(true)),
+        ] {
+            let mut request = ServiceRequest {
+                workspace_id: None,
+                directory: None,
+                options: Default::default(),
+            };
+            if let Some(value) = &enabled {
+                request
+                    .options
+                    .insert("htmlArtifactsEnabled".into(), value.clone());
+            }
+            let sections = WorkspaceContext.sections(&request).expect("valid context");
+            let guidance = sections
+                .iter()
+                .find(|section| section.id == "html-artifacts");
+            assert_eq!(guidance.is_some(), enabled == Some(serde_json::json!(true)));
+            if let Some(guidance) = guidance {
+                for required in [
+                    "neoism-html",
+                    "--background",
+                    "--chart-6",
+                    "--font-mono",
+                    "neoism-theme-changed",
+                ] {
+                    assert!(guidance.content.contains(required), "missing {required}");
+                }
+            }
+        }
     }
 }
 

@@ -515,6 +515,25 @@ impl StyleSheet {
         self.0.insert(selector.into(), style);
     }
 
+    pub fn overlay(&mut self, other: &Self) {
+        for (selector, patch) in &other.0 {
+            self.0.entry(selector.clone()).or_default().overlay(Some(patch));
+        }
+    }
+
+    /// Resolve each retained layer before combining, so a higher-priority
+    /// parent patch can override a lower-priority child's property too.
+    pub fn overlay_layer(&mut self, other: &Self) {
+        let selectors: std::collections::BTreeSet<_> = self.0.keys().chain(other.0.keys()).cloned().collect();
+        let mut output = Self::default();
+        for selector in selectors {
+            let mut patch = self.resolve(&selector);
+            patch.overlay(Some(&other.resolve(&selector)));
+            output.insert(selector, patch);
+        }
+        *self = output;
+    }
+
     pub fn get(&self, selector: &str) -> Option<&StylePatch> {
         self.0.get(selector)
     }
@@ -540,6 +559,9 @@ impl StyleSheet {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "snake_case", deny_unknown_fields)]
 pub struct StylePatch {
+    /// None inherits; an explicit empty list disables inherited effects.
+    #[serde(default, deserialize_with = "crate::background_effects::deserialize_effects")]
+    pub background_effects: Option<Vec<crate::BackgroundEffect>>,
     pub visible: Option<bool>,
     pub width: Option<f32>,
     pub height: Option<f32>,
@@ -583,6 +605,7 @@ impl StylePatch {
             )*};
         }
         take!(
+            background_effects,
             visible,
             width,
             height,

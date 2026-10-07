@@ -79,6 +79,9 @@ impl ProviderPlatform {
             .auth
             .scoped(scope.clone(), request.connection_id.clone());
         match request.action {
+            ProviderRouteAction::OpenAiUsage => {
+                crate::provider::openai_usage(&auth).await
+            }
             ProviderRouteAction::List => {
                 let raw = self.catalog.providers().await?;
                 let connected = self.registry.connected_ids(&raw).await?;
@@ -507,6 +510,117 @@ mod tests {
     use super::{runtime_error, ProviderAuthorizeRequest, ProviderCallbackRequest};
     use crate::provider_error::ProviderError;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn openai_usage_preserves_scoped_accounts_and_uses_exact_auth() {
+        use super::*;
+        use neoism_agent_service_api::{
+            CreateProviderConnection, LocalProviderCredentialStore, ProviderCredential,
+            ProviderCredentialStore,
+        };
+
+        let path = std::env::temp_dir()
+            .join(format!("neoism-usage-{}.json", opaque_attempt_id()));
+        let store = Arc::new(LocalProviderCredentialStore::new(path.clone()));
+        let scope = CredentialScope {
+            tenant_id: "usage-tenant".into(),
+            workspace_id: Some("usage-workspace".into()),
+        };
+        let api = store
+            .create(CreateProviderConnection {
+                provider_id: "openai".into(),
+                label: "API account".into(),
+                scope: scope.clone(),
+                credential: ProviderCredential::Api {
+                    key: "secret-api-key".into(),
+                    metadata: None,
+                },
+                set_default: true,
+            })
+            .await
+            .unwrap();
+        let oauth = store
+            .create(CreateProviderConnection {
+                provider_id: "openai".into(),
+                label: "ChatGPT account".into(),
+                scope: scope.clone(),
+                credential: ProviderCredential::OAuth {
+                    access: "secret-access-token".into(),
+                    refresh: "secret-refresh-token".into(),
+                    expires: 0,
+                    account_id: None,
+                    enterprise_url: None,
+                },
+                set_default: false,
+            })
+            .await
+            .unwrap();
+        store
+            .create(CreateProviderConnection {
+                provider_id: "openai".into(),
+                label: "Other workspace".into(),
+                scope: CredentialScope {
+                    workspace_id: Some("other-workspace".into()),
+                    ..scope.clone()
+                },
+                credential: ProviderCredential::Api {
+                    key: "other-secret".into(),
+                    metadata: None,
+                },
+                set_default: true,
+            })
+            .await
+            .unwrap();
+        let platform = ProviderPlatform::new(store);
+        let request = || ProviderRouteRequest {
+            action: ProviderRouteAction::OpenAiUsage,
+            provider_id: None,
+            // A caller selection must not restrict usage to just the default.
+            connection_id: Some(api.connection_id.clone()),
+            tenant_id: Some(scope.tenant_id.clone()),
+            workspace_id: scope.workspace_id.clone(),
+            hosted: false,
+            body: Value::Null,
+        };
+        let result = platform.execute_route(request()).await.unwrap();
+        let accounts = result["accounts"].as_array().unwrap();
+        assert_eq!(accounts.len(), 2);
+        let api_result = accounts
+            .iter()
+            .find(|a| a["connection_id"] == api.connection_id)
+            .unwrap();
+        assert_eq!(api_result["auth_type"], "api");
+        assert_eq!(api_result["is_default"], true);
+        assert_eq!(api_result["label"], "API account");
+        assert_eq!(
+            api_result["error"],
+            "ChatGPT usage is unavailable for API accounts"
+        );
+        let oauth_result = accounts
+            .iter()
+            .find(|a| a["connection_id"] == oauth.connection_id)
+            .unwrap();
+        assert_eq!(oauth_result["auth_type"], "oauth");
+        assert_eq!(oauth_result["is_default"], false);
+        assert_eq!(
+            oauth_result["error"],
+            "OpenAI account ID is unavailable; reconnect this account"
+        );
+        assert!(accounts
+            .iter()
+            .all(|a| a["windows"] == json!([]) && a["plan_type"].is_null()));
+        assert!(!result.to_string().contains("secret"));
+        let mut empty = request();
+        empty.workspace_id = Some("empty-workspace".into());
+        assert_eq!(
+            platform.execute_route(empty).await.unwrap(),
+            json!({"accounts": []})
+        );
+        let mut hosted = request();
+        hosted.hosted = true;
+        assert!(platform.execute_route(hosted).await.is_err());
+        let _ = std::fs::remove_file(path);
+    }
 
     #[test]
     fn oauth_route_requests_accept_public_camel_case_field_names() {

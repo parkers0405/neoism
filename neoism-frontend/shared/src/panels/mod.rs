@@ -94,8 +94,8 @@ pub struct PanelContext<'a> {
 impl PanelContext<'_> {
     pub fn style(&self, selector: &str) -> neoism_lua::StylePatch {
         self.plugins
-            .map(|plugins| plugins.styles.resolve(selector))
-            .unwrap_or_default()
+            .map(|plugins| crate::primitives::surface_background::resolve_style(selector, &plugins.styles))
+            .unwrap_or_else(|| crate::primitives::look::active_look().styles.resolve(selector))
     }
 }
 

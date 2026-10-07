@@ -315,6 +315,7 @@ pub fn default_config_file_content() -> String {
     //     "default-chat-source": "neoism", // neoism | opencode | claude-code | codex; new chat source, not agent persona
     //     "conversations-panel-enabled": true, // allow the left Conversations panel toggled by Alt+C
     //     "details-panel-enabled": true,       // allow the in-chat right panel and Alt+H
+    //     "streaming-text-animation": true,    // short blur-to-sharp reveal; false for reduced motion
     //     "model": "anthropic/claude-opus-5",
     //     "smallModel": "anthropic/claude-haiku-4-5",
     //     "imageModel": "openai/gpt-image-2", // enables the generate_image tool

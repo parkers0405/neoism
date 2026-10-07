@@ -733,6 +733,13 @@ pub(crate) enum NeoismAgentBackgroundUpdate {
         title: String,
         error: String,
     },
+    UsageCompleted {
+        token: Arc<std::sync::atomic::AtomicBool>,
+        result: Result<
+            Vec<neoism_ui::panels::agent_pane::state::picker::NeoismAgentUsageAccount>,
+            String,
+        >,
+    },
     ConnectCompleted {
         token: Arc<std::sync::atomic::AtomicBool>,
         result: Result<connect::ConnectOutcome, String>,
@@ -849,6 +856,7 @@ impl Default for NeoismWordmarkState {
 }
 
 pub struct NeoismAgentPane {
+    pub(crate) text_reveal: neoism_ui::panels::agent_pane::text_reveal::TextRevealState,
     pub(super) input: String,
     /// Whether the keyboard/help strip below the composer is
     /// visible. `/hints` toggles this pane-local presentation preference.
@@ -904,6 +912,7 @@ pub struct NeoismAgentPane {
     /// the fetched catalog and the in-progress provider/method selection.
     pub(super) connect: Option<connect::ConnectFlow>,
     pending_connect: Option<connect::PendingConnect>,
+    pending_usage: Option<usage::PendingUsage>,
     /// Active inline rename of a `/sessions` picker row: `(session_id,
     /// buffer)`. `Some` diverts typed keys into the buffer until the user
     /// commits (Enter) or cancels (Esc).
@@ -967,6 +976,14 @@ pub struct NeoismAgentPane {
     /// options, kept so semantic hits can be merged in without refetching.
     pub(crate) session_picker_base: Vec<NeoismAgentPickerOption>,
     cursor_rect: Option<[f32; 4]>,
+    #[cfg(feature = "servo-artifacts")]
+    pub(crate) html_artifact_requests:
+        Vec<neoism_ui::panels::agent_pane::view::markdown::HtmlArtifactRequest>,
+    #[cfg(feature = "servo-artifacts")]
+    pub(crate) html_artifact_frames: std::collections::HashMap<
+        String,
+        neoism_ui::panels::agent_pane::view::markdown::HtmlArtifactFrame,
+    >,
     /// Easter-egg skit (`/piss`, `/cuss`): request consumed by the
     /// next render (which stamps `fx_started` on its animation
     /// clock); `fx_pending_prompt` is submitted once the skit's
@@ -1246,6 +1263,7 @@ impl Default for NeoismAgentPane {
             picker: None,
             connect: None,
             pending_connect: None,
+            pending_usage: None,
             session_rename: None,
             recent_model_options: Vec::new(),
             skill_options: Vec::new(),
@@ -1280,6 +1298,11 @@ impl Default for NeoismAgentPane {
             semantic_unavailable: false,
             session_picker_base: Vec::new(),
             cursor_rect: None,
+            #[cfg(feature = "servo-artifacts")]
+            html_artifact_requests: Vec::new(),
+            #[cfg(feature = "servo-artifacts")]
+            html_artifact_frames: std::collections::HashMap::new(),
+
             fx_requested: None,
             fx_started: None,
             fx_pending_prompt: None,
@@ -1347,6 +1370,7 @@ impl Default for NeoismAgentPane {
             timeline_scroll_decay_tau: Self::TIMELINE_TRACKPAD_DECAY_TAU,
             timeline_scroll_stop_px_s: Self::TIMELINE_TRACKPAD_STOP_PX_S,
             timeline_measure_cache: RefCell::new(HashMap::new()),
+            text_reveal: Default::default(),
             markdown_blocks_cache: RefCell::new(HashMap::new()),
             markdown_blocks_tick: std::cell::Cell::new(0),
             markdown_blocks_source_bytes: std::cell::Cell::new(0),
@@ -1409,6 +1433,7 @@ mod session;
 mod status_timing;
 mod submit;
 mod timeline;
+mod usage;
 
 /// Options for the agent input bar's `@` file-mention picker. Candidates
 /// come from the workspace search service rooted at `root`, ranked best-first
@@ -2246,7 +2271,9 @@ fn hash_value<T: Hash>(value: &T) -> u64 {
 
 fn hash_agent_message_text_for_measure(text: &str) -> u64 {
     const FULL_HASH_LIMIT: usize = 24 * 1024;
-    if text.len() <= FULL_HASH_LIMIT {
+    if text.len() <= FULL_HASH_LIMIT || text.contains("neoism-html") {
+        // Fence completion and middle-of-source edits can change projected
+        // artifact layout even when the sampled prefix/suffix are identical.
         return hash_value(&text);
     }
     let bytes = text.as_bytes();

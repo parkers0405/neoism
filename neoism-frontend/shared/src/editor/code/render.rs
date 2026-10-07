@@ -83,6 +83,14 @@ pub fn render(
         return false;
     }
     let font_scale = font_scale.clamp(0.5, 3.0);
+    if crate::primitives::surface_background::style("editor.code").background.is_some() {
+        sugarloaf.rect(None, x, y, w, h,
+            crate::primitives::surface_background::base_color("editor.code", theme, theme.f32(theme.bg)),
+            DEPTH, ORDER_BG);
+    }
+    crate::primitives::surface_background::render(
+        sugarloaf, "editor.code", rect, 0.0, font_scale, DEPTH, ORDER_BG, text_occlusions,
+    );
 
     let font_size = CODE_FONT_SIZE * font_scale;
     let row_h_base = (font_size * ROW_HEIGHT_FACTOR).round();

@@ -277,6 +277,7 @@ where
     });
 
     if let Some(mut cache) = cache {
+        mark_changed_artifact_rows(&cache, pane.messages(), &mut dirty);
         let needs_patch = cache.source_len != source_len
             || !dirty.ids.is_empty()
             || !dirty.indices.is_empty();
@@ -309,6 +310,42 @@ where
         ),
         true,
     )
+}
+
+/// Reconcile artifact source transitions even if an ingest path missed a dirty
+/// mark. Repatching from the owning row also rebuilds every following row top,
+/// page height and virtual measurement; the renderer restores its view anchor.
+pub(super) fn mark_changed_artifact_rows<M: AgentTimelineMessage>(
+    cache: &TimelineLayoutCache<M>,
+    messages: &[M],
+    dirty: &mut TimelineDirtyMarks,
+) {
+    for (index, row) in cache.rows.iter().enumerate() {
+        if row.source_index != row.source_end_index {
+            continue;
+        }
+        let Some(current) = messages.get(row.source_index) else {
+            continue;
+        };
+        let Some(old) = row.display_message.as_ref() else {
+            continue;
+        };
+        if current.text() == old.text() && current.status() == old.status() {
+            continue;
+        }
+        if !current.text().contains("neoism-html") && !old.text().contains("neoism-html")
+        {
+            continue;
+        }
+        let previous_edit = index > 0 && cache.rows[index - 1].is_edit_tool;
+        let changed =
+            display_timeline_message(current, previous_edit).is_none_or(|display| {
+                display.text() != old.text() || display.status() != old.status()
+            });
+        if changed {
+            dirty.indices.insert(row.source_index);
+        }
+    }
 }
 
 pub(super) fn prepend_cache_is_exact<M>(cache: &TimelineLayoutCache<M>) -> bool {
@@ -360,7 +397,7 @@ pub(super) fn lazy_cache_covers_viewport_for_test<M>(
     lazy_cache_covers_viewport(cache, offset, viewport_h)
 }
 
-fn mark_animating_tool_rows_dirty<P: AgentTimelinePane>(
+pub(super) fn mark_animating_tool_rows_dirty<P: AgentTimelinePane>(
     pane: &P,
     dirty: &mut TimelineDirtyMarks,
 ) {
@@ -607,7 +644,7 @@ where
     M: AgentTimelineMessage,
 {
     if message.kind() == AgentTimelineMessageKind::Tool {
-        return 48.0 * s;
+        return super::super::tool_message::TOOL_HEADER_HEIGHT * s;
     }
     let text = message.text();
     if message.kind() == AgentTimelineMessageKind::User {
@@ -633,13 +670,8 @@ where
         // Mirror the eager path, which skips empty non-user text kinds.
         return 0.0;
     }
-    let line_h = 20.0 * s;
     let chars_per_line = ((width / (7.0 * s)) as usize).max(24);
-    let mut lines = 0usize;
-    for raw_line in text.split('\n') {
-        lines += raw_line.chars().count() / chars_per_line + 1;
-    }
-    base + lines as f32 * line_h
+    base + super::super::markdown::estimated_artifact_body_height(text, chars_per_line, s)
 }
 
 pub(super) fn patch_start_row<M>(
@@ -753,11 +785,19 @@ where
 
 pub(crate) fn prepared_message_tool_diff_sections<M>(
     message: &M,
+    expanded: bool,
 ) -> Option<CachedToolDiffSections>
 where
     M: AgentTimelineMessage,
 {
-    if message.kind() != AgentTimelineMessageKind::Tool {
+    if message.kind() != AgentTimelineMessageKind::Tool
+        || !crate::panels::agent_pane::view::tool_message::show_tool_diff_cards(
+            message.tool(),
+            message.status(),
+            expanded,
+            false,
+        )
+    {
         return None;
     }
     if crate::panels::agent_pane::view::tool_message::is_unsettled_edit_tool(
@@ -881,8 +921,10 @@ where
                         theme,
                         s,
                     );
-                    let tool_diff_sections =
-                        prepared_message_tool_diff_sections(&group_message);
+                    let tool_diff_sections = prepared_message_tool_diff_sections(
+                        &group_message,
+                        pane.tool_expand_progress(group_message.id()) > 0.001,
+                    );
                     new_rows.push(TimelineLayoutRow {
                         source_index,
                         source_end_index: source_end_exclusive.saturating_sub(1),
@@ -914,7 +956,10 @@ where
                 let markdown_blocks = prepared_message_markdown_blocks(
                     sugarloaf, pane, &message, width, theme, s,
                 );
-                let tool_diff_sections = prepared_message_tool_diff_sections(&message);
+                let tool_diff_sections = prepared_message_tool_diff_sections(
+                    &message,
+                    pane.tool_expand_progress(message.id()) > 0.001,
+                );
                 new_rows.push(TimelineLayoutRow {
                     source_index,
                     source_end_index: source_index,
@@ -1058,8 +1103,10 @@ where
                         theme,
                         s,
                     );
-                    let tool_diff_sections =
-                        prepared_message_tool_diff_sections(&group_message);
+                    let tool_diff_sections = prepared_message_tool_diff_sections(
+                        &group_message,
+                        pane.tool_expand_progress(group_message.id()) > 0.001,
+                    );
                     rows.push(TimelineLayoutRow {
                         source_index,
                         source_end_index: source_end_exclusive.saturating_sub(1),
@@ -1092,7 +1139,10 @@ where
                 let markdown_blocks = prepared_message_markdown_blocks(
                     sugarloaf, pane, &message, width, theme, s,
                 );
-                let tool_diff_sections = prepared_message_tool_diff_sections(&message);
+                let tool_diff_sections = prepared_message_tool_diff_sections(
+                    &message,
+                    pane.tool_expand_progress(message.id()) > 0.001,
+                );
                 rows.push(TimelineLayoutRow {
                     source_index,
                     source_end_index: source_index,

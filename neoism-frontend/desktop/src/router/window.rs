@@ -277,6 +277,40 @@ pub fn configure_window(winit_window: &Window, config: &Config) {
     winit_window.set_blur(config.ui.window.blur);
 }
 
+#[cfg(any(not(target_os = "macos"), test))]
+fn frame_wait_remaining(elapsed: Duration, interval: Duration) -> Option<Duration> {
+    // A missed deadline is due now, not at the next multiple of the interval.
+    interval.checked_sub(elapsed).filter(|wait| !wait.is_zero())
+}
+
+#[cfg(test)]
+mod frame_wait_tests {
+    use super::frame_wait_remaining;
+    use std::time::Duration;
+
+    #[test]
+    fn waits_only_for_the_remaining_frame_budget() {
+        let interval = Duration::from_nanos(6_944_444);
+        assert_eq!(
+            frame_wait_remaining(Duration::ZERO, interval),
+            Some(interval)
+        );
+        assert_eq!(
+            frame_wait_remaining(Duration::from_millis(2), interval),
+            Some(interval - Duration::from_millis(2))
+        );
+    }
+
+    #[test]
+    fn due_and_overdue_frames_do_not_skip_another_refresh() {
+        let interval = Duration::from_nanos(6_944_444);
+        for elapsed in [interval, interval + Duration::from_nanos(1), interval * 3] {
+            assert_eq!(frame_wait_remaining(elapsed, interval), None);
+        }
+        assert_eq!(frame_wait_remaining(Duration::ZERO, Duration::ZERO), None);
+    }
+}
+
 pub struct RouteWindow<'a> {
     pub is_focused: bool,
     pub is_occluded: bool,
@@ -441,26 +475,10 @@ impl<'a> RouteWindow<'a> {
 
         #[cfg(not(target_os = "macos"))]
         {
-            let now = Instant::now();
-            let elapsed = now.duration_since(self.render_timestamp);
-            let vblank = self.vblank_interval;
-
-            // Calculate how many complete frames have elapsed
-            let frames_elapsed = elapsed.as_nanos() / vblank.as_nanos();
-
-            // Calculate when the next frame should occur
-            let next_frame_time = self.render_timestamp
-                + Duration::from_nanos(
-                    (frames_elapsed + 1) as u64 * vblank.as_nanos() as u64,
-                );
-
-            if next_frame_time > now {
-                // Return the time to wait until the next ideal frame time
-                Some(next_frame_time.duration_since(now))
-            } else {
-                // We've missed the target frame time, render immediately
-                None
-            }
+            frame_wait_remaining(
+                Instant::now().saturating_duration_since(self.render_timestamp),
+                self.vblank_interval,
+            )
         }
     }
 

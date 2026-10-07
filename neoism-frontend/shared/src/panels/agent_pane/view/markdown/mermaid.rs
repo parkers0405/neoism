@@ -237,7 +237,17 @@ fn render_mermaid_raw_body<P: AgentMarkdownPane>(
                 );
             }
         }
-        draw_text_clipped(sugarloaf, text_x, line_y, line, &opts, occlusion_rects);
+        crate::panels::agent_pane::text_reveal::begin_line(line);
+        let reveals = crate::panels::agent_pane::text_reveal::ranges(line);
+        super::super::draw::draw_text_revealed_clipped(
+            sugarloaf,
+            text_x,
+            line_y,
+            line,
+            &opts,
+            occlusion_rects,
+            &reveals,
+        );
     }
 }
 

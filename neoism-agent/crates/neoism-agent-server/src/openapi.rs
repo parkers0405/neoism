@@ -1567,6 +1567,21 @@ fn apply_authoritative_contract(document: &mut Value) {
         ),
     );
     add(
+        "/v2/providers/openai/usage",
+        "get",
+        op(
+            "v2.providers.openai.usage",
+            "catalog",
+            json!([credential_workspace()]),
+            None,
+            success(
+                "200",
+                "Scoped OpenAI account usage with per-account errors",
+                r("OpenAiUsage"),
+            ),
+        ),
+    );
+    add(
         "/v2/providers/{provider_id}/connections",
         "get",
         op(
@@ -3747,6 +3762,19 @@ fn authoritative_schemas() -> Value {
         }},
         "CredentialScope": { "type": "object", "additionalProperties": false, "required": ["tenantId"], "properties": { "tenantId": { "type": "string" }, "workspaceId": { "type": "string" } } },
         "ProviderConnectionSummary": { "type": "object", "additionalProperties": false, "required": ["providerId", "connectionId", "label", "scope", "authType", "isDefault"], "properties": { "providerId": { "type": "string" }, "connectionId": { "type": "string" }, "label": { "type": "string" }, "scope": r("CredentialScope"), "authType": { "type": "string", "enum": ["api", "oauth", "wellknown"] }, "isDefault": { "type": "boolean" } } },
+        "OpenAiUsage": { "type": "object", "additionalProperties": false, "required": ["accounts"], "properties": {
+            "accounts": { "type": "array", "items": r("OpenAiAccountUsage") }
+        }},
+        "OpenAiAccountUsage": { "type": "object", "additionalProperties": false, "required": ["connection_id", "label", "is_default", "auth_type", "plan_type", "windows", "error"], "properties": {
+            "connection_id": { "type": "string" }, "label": { "type": "string" }, "is_default": { "type": "boolean" },
+            "auth_type": { "type": "string", "enum": ["api", "oauth", "wellknown"] }, "plan_type": { "type": ["string", "null"] },
+            "windows": { "type": "array", "items": r("OpenAiUsageWindow") }, "error": { "type": ["string", "null"] }
+        }},
+        "OpenAiUsageWindow": { "type": "object", "additionalProperties": false, "required": ["label", "used_percent", "reset_at", "limit_window_seconds"], "properties": {
+            "label": { "type": "string" }, "used_percent": { "type": "number", "minimum": 0, "maximum": 100 },
+            "reset_at": { "type": ["integer", "null"], "minimum": 0, "description": "Upstream Unix timestamp in seconds, not a renewal date" },
+            "limit_window_seconds": { "type": ["integer", "null"], "minimum": 1 }
+        }},
         "ProviderConnectionCreateRequest": { "type": "object", "additionalProperties": false, "required": ["label", "credential"], "properties": { "label": { "type": "string" }, "credential": r("AuthInfo"), "setDefault": { "type": "boolean", "default": false } } },
         "ProviderConnectionRenameRequest": { "type": "object", "additionalProperties": false, "required": ["label"], "properties": { "label": { "type": "string" } } },
         "Skill": { "type": "object", "additionalProperties": false, "required": ["name"], "properties": { "name": { "type": "string" }, "description": { "type": ["string", "null"] }, "path": { "type": "string" } } },
@@ -3915,6 +3943,28 @@ mod tests {
     use super::*;
 
     const ROUTER_SOURCE: &str = include_str!("app_router.rs");
+
+    #[test]
+    fn openai_usage_contract_is_secret_free_and_nullable() {
+        let document = canonical_openapi();
+        let operation = &document["paths"]["/v2/providers/openai/usage"]["get"];
+        assert_eq!(operation["operationId"], "v2.providers.openai.usage");
+        assert_eq!(
+            operation["responses"]["200"]["content"]["application/json"]["schema"]
+                ["$ref"],
+            "#/components/schemas/OpenAiUsage"
+        );
+        let schemas = &document["components"]["schemas"];
+        let account = &schemas["OpenAiAccountUsage"]["properties"];
+        assert_eq!(account["plan_type"]["type"], json!(["string", "null"]));
+        assert_eq!(account["error"]["type"], json!(["string", "null"]));
+        assert!(account.get("access").is_none());
+        assert!(account.get("refresh").is_none());
+        assert!(account.get("key").is_none());
+        let window = &schemas["OpenAiUsageWindow"]["properties"];
+        assert_eq!(window["used_percent"]["maximum"], 100);
+        assert_eq!(window["reset_at"]["type"], json!(["integer", "null"]));
+    }
 
     #[test]
     fn lsp_status_schema_exposes_typescript_runtime() {

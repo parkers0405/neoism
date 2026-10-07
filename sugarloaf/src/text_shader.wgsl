@@ -34,6 +34,7 @@ struct TextInstanceIn {
     @location(5) atlas_pack: vec4<u32>,   // Uint8x4; only .x used
     @location(6) clip_rect:  vec4<f32>,
     @location(7) raster_scale: f32,
+    @location(8) blur_radius: f32,
 };
 
 struct TextVsOut {
@@ -42,6 +43,8 @@ struct TextVsOut {
     @location(1) @interpolate(flat) color: vec4<f32>,
     @location(2) tex_coord: vec2<f32>,
     @location(3) @interpolate(flat) clip_rect: vec4<f32>,
+    @location(4) @interpolate(flat) glyph_bounds: vec4<f32>,
+    @location(5) @interpolate(flat) blur_radius: f32,
 };
 
 @vertex
@@ -57,7 +60,10 @@ fn text_vertex(
     let size    = vec2<f32>(in.glyph_size);
     let scale = select(1.0, in.raster_scale, in.raster_scale > 0.0);
     let origin = in.pos + vec2<f32>(in.bearings) * scale;
-    let quad_px = origin + size * corner * scale;
+    let radius = clamp(in.blur_radius, 0.0, 4.0);
+    let pad = select(0.0, radius + scale, radius > 0.0);
+    let local = size * corner + (corner * 2.0 - vec2<f32>(1.0)) * pad / scale;
+    let quad_px = origin + local * scale;
 
     // Pixel → NDC (y-flip).
     let vp = text_uniforms.viewport.xy;
@@ -68,9 +74,11 @@ fn text_vertex(
 
     var out: TextVsOut;
     out.position  = vec4<f32>(ndc, 0.0, 1.0);
-    out.tex_coord = vec2<f32>(in.glyph_pos) + size * corner;
+    out.tex_coord = vec2<f32>(in.glyph_pos) + local;
     out.atlas = in.atlas_pack.x | select(0u, 2u, in.raster_scale > 0.0);
     out.clip_rect = in.clip_rect;
+    out.glyph_bounds = vec4<f32>(vec2<f32>(in.glyph_pos), vec2<f32>(in.glyph_pos) + size);
+    out.blur_radius = radius / scale;
 
     // Premultiply RGB by alpha. Blend state is
     // `One * src + OneMinusSrcAlpha * dst`.
@@ -92,6 +100,37 @@ fn sample_scaled(atlas: texture_2d<f32>, uv: vec2<f32>) -> vec4<f32> {
     return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
 }
 
+// Zero extension, including every texel in each bilinear footprint.
+fn glyph_fetch(atlas: texture_2d<f32>, p: vec2<i32>, bounds: vec4<f32>) -> vec4<f32> {
+    if (any(p < vec2<i32>(bounds.xy)) || any(p >= vec2<i32>(bounds.zw))) {
+        return vec4<f32>(0.0);
+    }
+    return textureLoad(atlas, p, 0);
+}
+fn glyph_sample(atlas: texture_2d<f32>, uv: vec2<f32>, bounds: vec4<f32>) -> vec4<f32> {
+    let p = uv - vec2<f32>(0.5);
+    let b = vec2<i32>(floor(p));
+    let f = fract(p);
+    return mix(mix(glyph_fetch(atlas, b, bounds), glyph_fetch(atlas, b + vec2<i32>(1, 0), bounds), f.x),
+               mix(glyph_fetch(atlas, b + vec2<i32>(0, 1), bounds), glyph_fetch(atlas, b + vec2<i32>(1, 1), bounds), f.x), f.y);
+}
+// Dense 9x9 binomial kernel paired into 25 bounded bilinear taps, matching
+// GLSL/Metal. Support <=4 physical px; unpaired source spacing <=1 px,
+// preventing sparse translated glyph ghosts. Per-axis weights sum to 256.
+fn glyph_blur(atlas: texture_2d<f32>, in: TextVsOut) -> vec4<f32> {
+    let offsets = array<f32, 5>(-28.0/9.0, -4.0/3.0, 0.0, 4.0/3.0, 28.0/9.0);
+    let weights = array<f32, 5>(9.0, 84.0, 70.0, 84.0, 9.0);
+    var sum = vec4<f32>(0.0);
+    let step_px = in.blur_radius / 4.0;
+    for (var y = 0; y < 5; y++) {
+        for (var x = 0; x < 5; x++) {
+            let offset = vec2<f32>(offsets[x], offsets[y]) * step_px;
+            sum += glyph_sample(atlas, in.tex_coord + offset, in.glyph_bounds) * weights[x] * weights[y];
+        }
+    }
+    return sum / 65536.0;
+}
+
 @fragment
 fn text_fragment(in: TextVsOut) -> @location(0) vec4<f32> {
     if (in.clip_rect.z > 0.0 && in.clip_rect.w > 0.0) {
@@ -105,15 +144,19 @@ fn text_fragment(in: TextVsOut) -> @location(0) vec4<f32> {
         }
     }
 
+    if (in.blur_radius > 0.0) {
+        if ((in.atlas & 1u) == 0u) { return in.color * glyph_blur(atlas_grayscale, in).r; }
+        return glyph_blur(atlas_color, in) * in.color.a;
+    }
     if ((in.atlas & 2u) != 0u) {
         if ((in.atlas & 1u) == 0u) { return in.color * sample_scaled(atlas_grayscale, in.tex_coord).r; }
-        return sample_scaled(atlas_color, in.tex_coord);
+        return sample_scaled(atlas_color, in.tex_coord) * in.color.a;
     }
     let ic = vec2<i32>(in.tex_coord);
     if (in.atlas == ATLAS_GRAYSCALE) {
         let a = textureLoad(atlas_grayscale, ic, 0).r;
         return in.color * a;
     } else {
-        return textureLoad(atlas_color, ic, 0);
+        return textureLoad(atlas_color, ic, 0) * in.color.a;
     }
 }

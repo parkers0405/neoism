@@ -13,6 +13,22 @@ fn conversations_directory_changed(
     pane_directory != authoritative_directory
 }
 
+// An established root is already normalized and validated. Animation/status
+// sync must not re-stat it; deliberate refreshes still validate even an equal
+// path (and joined paths remain opaque through the supplied normalizer).
+fn normalize_root_transition(
+    current: Option<&Path>,
+    candidate: PathBuf,
+    force: bool,
+    normalize: impl FnOnce(PathBuf) -> Option<PathBuf>,
+) -> Option<PathBuf> {
+    if !force && current == Some(candidate.as_path()) {
+        Some(candidate)
+    } else {
+        normalize(candidate)
+    }
+}
+
 impl Screen<'_> {
     pub(crate) fn reconcile_conversations_directory(
         &mut self,
@@ -225,6 +241,14 @@ impl Screen<'_> {
                 );
             }
         }
+        // Workspace = declared directory. A terminal-local `cd` must neither
+        // poll the filesystem each paint nor replace an established root.
+        // The joined host-root override above remains authoritative.
+        if !quick_ssh {
+            if let Some(root) = self.active_workspace_root.as_ref() {
+                return Some(root.clone());
+            }
+        }
         let current = self.context_manager.current();
         if let Some(markdown) = current.markdown.as_ref() {
             return self
@@ -348,8 +372,12 @@ impl Screen<'_> {
         // left the guest's tree permanently empty when it was opened
         // after the join).
         let candidate = root;
-        let Some(root) = self.normalize_workspace_dir_for_current(candidate.clone())
-        else {
+        let Some(root) = normalize_root_transition(
+            self.active_workspace_root.as_deref(),
+            candidate.clone(),
+            force_tree_refresh,
+            |root| self.normalize_workspace_dir_for_current(root),
+        ) else {
             tracing::warn!(
                 target: "neoism::workspace_root",
                 candidate = %candidate.display(),
@@ -1281,7 +1309,68 @@ impl Screen<'_> {
 
 #[cfg(test)]
 mod workspace_panel_owner_tests {
-    use super::{claim_live_panel_owner, conversations_directory_changed};
+    use super::{
+        claim_live_panel_owner, conversations_directory_changed,
+        normalize_root_transition,
+    };
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn workspace_directory_normalization_rejects_invalid_roots() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("file");
+        std::fs::write(&file, "not a directory").unwrap();
+        let normalized =
+            super::Screen::normalize_workspace_root(dir.path().to_path_buf());
+        assert_eq!(
+            super::Screen::normalize_workspace_dir(dir.path().join(".")),
+            Some(normalized)
+        );
+        assert_eq!(super::Screen::normalize_workspace_dir(file), None);
+        assert_eq!(
+            super::Screen::normalize_workspace_dir(dir.path().join("missing")),
+            None
+        );
+    }
+
+    #[test]
+    fn unchanged_root_frames_do_no_normalization_work() {
+        let root = PathBuf::from("declared/root");
+        for _ in 0..100 {
+            assert_eq!(
+                normalize_root_transition(Some(&root), root.clone(), false, |_| {
+                    panic!("unchanged frames must not canonicalize or stat");
+                }),
+                Some(root.clone())
+            );
+        }
+    }
+
+    #[test]
+    fn root_transitions_and_explicit_refresh_validate() {
+        let root = Path::new("declared/root");
+        let mut work = 0;
+        for (current, candidate, force) in [
+            (None, root.to_path_buf(), false),
+            (Some(root), PathBuf::from("other/root"), false),
+            (Some(root), root.to_path_buf(), true),
+        ] {
+            let normalized =
+                normalize_root_transition(current, candidate.clone(), force, |path| {
+                    work += 1;
+                    assert_eq!(path, candidate);
+                    None // Invalid roots, including forced refreshes, remain rejected.
+                });
+            assert_eq!(normalized, None);
+        }
+        assert_eq!(work, 3);
+        assert_eq!(
+            normalize_root_transition(Some(root), PathBuf::from("alias"), false, |_| {
+                Some(root.to_path_buf())
+            }),
+            Some(root.to_path_buf())
+        );
+    }
 
     #[test]
     fn initial_live_panel_is_claimed_by_current_workspace() {

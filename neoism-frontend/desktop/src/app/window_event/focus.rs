@@ -26,6 +26,8 @@ impl Application<'_> {
         route.window.is_focused = focused;
 
         if !focused {
+            #[cfg(feature = "servo-artifacts")]
+            route.window.screen.blur_html_artifact();
             // Platforms are not required to deliver mouse-up after focus or
             // pointer-capture loss. Cancel gestures rather than allowing a
             // later unrelated release to commit a reorder/detach.

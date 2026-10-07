@@ -61,7 +61,14 @@ pub(super) fn draw_scaled_cpu(
                 (a * (1.0 - fy) + b * fy).round().clamp(0.0, 255.0) as u8
             };
             let rgba = if channels == 4 {
-                [channel(0), channel(1), channel(2), channel(3)]
+                let rgba = [channel(0), channel(1), channel(2), channel(3)];
+                if glyph.color[3] == 255 {
+                    rgba
+                } else {
+                    rgba.map(|v| {
+                        ((u32::from(v) * u32::from(glyph.color[3]) + 127) / 255) as u8
+                    })
+                }
             } else {
                 let alpha =
                     (u32::from(channel(0)) * u32::from(glyph.color[3]) + 127) / 255;

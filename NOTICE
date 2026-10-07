@@ -53,6 +53,12 @@ MIT, Copyright (c) 2023 shellRaining.
 OpenCode provider artwork (`neoism-agent/sdk/typescript/packages/gui/src/components/providers/icons.svg`) — MIT, Copyright (c) 2025 opencode. See `neoism-agent/sdk/typescript/packages/gui/src/components/providers/LICENSE.opencode`.
 
 
+Optional browser runtime
+------------------------
+
+Servo (experimental `neoism-servo-runtime` worker) — Mozilla Public License 2.0, Copyright The Servo Project Developers. Servo is fetched as an unmodified, pinned upstream dependency and is not linked into the default desktop build. Distributions including the worker must retain Servo and its dependencies' license notices and provide the corresponding MPL-covered source as required by the license. See https://github.com/servo/servo and neoism-frontend/servo-runtime/Cargo.toml for the source revision.
+
+
 Fonts
 -----
 

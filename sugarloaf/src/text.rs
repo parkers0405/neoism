@@ -40,10 +40,16 @@ pub struct TextInstance {
     pub clip_rect: [f32; 4],
     /// Uniform geometry scale for canvas text; zero preserves normal UI text.
     pub raster_scale: f32,
+    /// Streaming reveal blur radius in physical pixels; zero is the settled path.
+    pub blur_radius: f32,
 }
 
-// 56 bytes (4-aligned); the final float is optional canvas glyph scaling.
-const _: () = assert!(std::mem::size_of::<TextInstance>() == 56);
+// 60 bytes (4-aligned); preserve raster_scale at 52 and blur_radius at 56.
+const _: () = {
+    assert!(std::mem::size_of::<TextInstance>() == 60);
+    assert!(std::mem::offset_of!(TextInstance, raster_scale) == 52);
+    assert!(std::mem::offset_of!(TextInstance, blur_radius) == 56);
+};
 
 mod canvas;
 
@@ -82,13 +88,152 @@ impl Default for DrawOpts {
     }
 }
 
+/// Per-cluster streaming effects. Ranges address UTF-8 bytes in the complete
+/// input string, not characters or fallback-font substrings. Every range that
+/// overlaps a cluster contributes; the smallest opacity (newest birth) wins.
+/// Equal opacities select the larger blur radius. Unmatched clusters are settled.
+/// Opacity is clamped to 0..=1. Radius is in logical pixels, bounded to a dense
+/// four-physical-pixel kernel support on emission (plus bilinear footprint).
+#[derive(Clone, Debug)]
+pub struct TextReveal {
+    pub range: std::ops::Range<usize>,
+    pub opacity: f32,
+    pub blur_radius: f32,
+}
+
+fn normalized_reveal(effect: &TextReveal, scale: f32) -> (f32, f32) {
+    let opacity = if effect.opacity.is_finite() {
+        effect.opacity.clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
+    let radius = effect.blur_radius * scale;
+    let radius = if radius.is_finite() {
+        radius.clamp(0.0, 4.0)
+    } else {
+        0.0
+    };
+    // Canonical positive zero keeps nonnegative float bits numerically ordered.
+    (
+        if opacity == 0.0 { 0.0 } else { opacity },
+        if radius == 0.0 { 0.0 } else { radius },
+    )
+}
+
+type RevealEffects = FxHashMap<u32, (f32, f32)>;
+
+// Birth ranges may arrive unsorted or overlap. Sweep source-ordered unique
+// clusters with a minimum-opacity heap. Each birth enters/exits at most once;
+// O((glyphs + births) log(glyphs + births)), not a per-glyph range scan. Repeated
+// glyphs of a combining/ligature cluster share one computed effect. This work
+// exists only on draw_revealed; normal draw keeps its specialized fast path.
+fn prepare_reveal_effects(
+    runs: &[ShapedRun],
+    reveals: &[TextReveal],
+    scale: f32,
+) -> RevealEffects {
+    use std::cmp::Reverse;
+    use std::collections::BinaryHeap;
+    let mut clusters: Vec<_> = runs
+        .iter()
+        .flat_map(|run| &run.glyphs)
+        .map(|g| (g.cluster, g.cluster_end))
+        .collect();
+    clusters.sort_unstable();
+    clusters.dedup();
+    debug_assert!(clusters.windows(2).all(|pair| pair[0].1 <= pair[1].0));
+    let mut births: Vec<_> = reveals
+        .iter()
+        .filter(|r| r.range.start < r.range.end)
+        .collect();
+    births.sort_unstable_by_key(|r| r.range.start);
+    // Lower opacity first, then larger radius. Sanitized nonnegative float bits
+    // sort numerically, avoiding partial-order/NaN comparisons in the heap.
+    let mut active: BinaryHeap<Reverse<(u32, Reverse<u32>, usize)>> = BinaryHeap::new();
+    let mut next = 0;
+    let mut effects = RevealEffects::default();
+    for (start, end) in clusters {
+        while next < births.len() && births[next].range.start < end as usize {
+            let birth = births[next];
+            let (opacity, radius) = normalized_reveal(birth, scale);
+            active.push(Reverse((
+                opacity.to_bits(),
+                Reverse(radius.to_bits()),
+                birth.range.end,
+            )));
+            next += 1;
+        }
+        while active
+            .peek()
+            .is_some_and(|Reverse((_, _, end))| *end <= start as usize)
+        {
+            active.pop();
+        }
+        let effect = active
+            .peek()
+            .map(|Reverse((opacity, Reverse(radius), _))| {
+                (f32::from_bits(*opacity), f32::from_bits(*radius))
+            })
+            .unwrap_or((1.0, 0.0));
+        effects.insert(start, effect);
+    }
+    effects
+}
+
+// Simple linear reference for testing the sweep and half-open overlap policy.
+#[cfg(test)]
+fn reveal_effect(start: u32, end: u32, reveals: &[TextReveal], scale: f32) -> (f32, f32) {
+    let mut selected = (1.0_f32, 0.0_f32);
+    for effect in reveals {
+        if effect.range.start >= effect.range.end
+            || effect.range.start >= end as usize
+            || effect.range.end <= start as usize
+            || start >= end
+        {
+            continue;
+        }
+        let (opacity, radius) = normalized_reveal(effect, scale);
+        if opacity < selected.0 || (opacity == selected.0 && radius > selected.1) {
+            selected = (opacity, radius);
+        }
+    }
+    selected
+}
+
+// Compute once on cache misses, independent of glyph order (RTL/reordering) or
+// repeated starts (combining marks). Never scan the glyph list per emitted glyph.
+// The last cluster ends at the shaped substring's actual source end, including
+// trailing source bytes without their own glyph. Fallback substrings end at the
+// next run's source start, or the complete input length for the final run.
+fn set_cluster_ends(glyphs: &mut [ShapedGlyph], source_end: u32) {
+    let mut starts: Vec<u32> = glyphs.iter().map(|g| g.cluster).collect();
+    starts.sort_unstable();
+    starts.dedup();
+    for glyph in glyphs {
+        let index = starts
+            .binary_search(&glyph.cluster)
+            .expect("collected cluster start");
+        glyph.cluster_end = starts.get(index + 1).copied().unwrap_or(source_end);
+    }
+}
+
+// Apply offsets only to the returned clone, never the substring-keyed cache.
+fn offset_run_clusters(mut run: ShapedRun, byte_start: usize) -> ShapedRun {
+    if byte_start != 0 {
+        for glyph in &mut run.glyphs {
+            glyph.cluster += byte_start as u32;
+            glyph.cluster_end += byte_start as u32;
+        }
+    }
+    run
+}
+
 //  Shape result — unified across platforms
 
 /// One shaped glyph in a run. Same shape on macOS (CoreText) and
 /// non-macOS (swash) so the emit loop doesn't care which backend
-/// produced it. `cluster` is a UTF-8 byte offset into the run string —
-/// held for a future ligature / multi-cell mapping pass (current emit
-/// just walks glyphs linearly with a pen-x advance).
+/// produced it. Cached `cluster` offsets are local to the shaped substring;
+/// `shape_for` rebases returned clones into the complete input string.
 #[derive(Clone, Copy, Debug)]
 #[allow(dead_code)]
 struct ShapedGlyph {
@@ -97,6 +242,8 @@ struct ShapedGlyph {
     y: f32,
     advance: f32,
     cluster: u32,
+    /// Exclusive source end; local in cache, global in returned runs.
+    cluster_end: u32,
 }
 
 /// A fully-shaped run with everything the emit step needs.
@@ -568,7 +715,37 @@ impl Text {
         let width_px = shaped_text_width(&shaped);
         let mut run_x = x;
         for run in &shaped {
-            self.emit_instances(run_x, y, run, opts);
+            self.emit_instances::<false>(run_x, y, run, opts, None);
+            run_x += shaped_width(run) / self.scale_factor;
+        }
+        width_px / self.scale_factor
+    }
+
+    /// Shape the complete text exactly as `draw`, then apply supplied streaming
+    /// effects per source cluster. Returns the unchanged logical advance.
+    /// CPU rendering keeps text sharp but honors reveal opacity.
+    pub fn draw_revealed(
+        &mut self,
+        x: f32,
+        y: f32,
+        text: &str,
+        opts: &DrawOpts,
+        reveals: &[TextReveal],
+    ) -> f32 {
+        if reveals.is_empty() {
+            return self.draw(x, y, text, opts);
+        }
+        if text.is_empty() {
+            return 0.0;
+        }
+        let Some(shaped) = self.shape_for(text, opts) else {
+            return 0.0;
+        };
+        let width_px = shaped_text_width(&shaped);
+        let effects = prepare_reveal_effects(&shaped, reveals, self.scale_factor);
+        let mut run_x = x;
+        for run in &shaped {
+            self.emit_instances::<true>(run_x, y, run, opts, Some(&effects));
             run_x += shaped_width(run) / self.scale_factor;
         }
         width_px / self.scale_factor
@@ -667,7 +844,7 @@ impl Text {
                             size_u16,
                             style_flags,
                         )?;
-                        runs.push(run);
+                        runs.push(offset_run_clusters(run, run_start));
                     }
                     run_start = byte_ix;
                     current_font_id = Some(font_id);
@@ -685,7 +862,7 @@ impl Text {
                 size_u16,
                 style_flags,
             )?;
-            runs.push(run);
+            runs.push(offset_run_clusters(run, run_start));
         }
 
         Some(runs)
@@ -766,7 +943,7 @@ impl Text {
                             size_u16,
                             style_flags,
                         )?;
-                        runs.push(run);
+                        runs.push(offset_run_clusters(run, run_start));
                     }
                     run_start = byte_ix;
                     current_font_id = Some(font_id);
@@ -784,7 +961,7 @@ impl Text {
                 size_u16,
                 style_flags,
             )?;
-            runs.push(run);
+            runs.push(offset_run_clusters(run, run_start));
         }
 
         Some(runs)
@@ -833,6 +1010,7 @@ impl Text {
                     y: g.y,
                     advance: g.advance,
                     cluster: g.cluster,
+                    cluster_end: 0,
                 })
                 .collect();
             glyphs
@@ -874,12 +1052,15 @@ impl Text {
                         y: g.y,
                         advance: g.advance,
                         cluster: byte_offset,
+                        cluster_end: 0,
                     });
                 }
             });
             glyphs
         };
 
+        let mut glyphs = glyphs;
+        set_cluster_ends(&mut glyphs, text.len() as u32);
         let baseline_px = self.baseline_px_for(font_id, size_bucket, size_u16);
 
         let run = ShapedRun {
@@ -928,7 +1109,14 @@ impl Text {
 
     //  Emit pipeline — rasterize + push TextInstance
 
-    fn emit_instances(&mut self, x: f32, y: f32, run: &ShapedRun, opts: &DrawOpts) {
+    fn emit_instances<const REVEALED: bool>(
+        &mut self,
+        x: f32,
+        y: f32,
+        run: &ShapedRun,
+        opts: &DrawOpts,
+        effects: Option<&RevealEffects>,
+    ) {
         let scale = self.scale_factor;
         // UI text uses pre-rasterized glyph masks. Keep each text run on
         // a stable device-pixel origin so animated Rust overlays don't
@@ -960,12 +1148,21 @@ impl Text {
             }
 
             let atlas_tag = if is_color { 1u8 } else { 0u8 };
-            let instance_color = if is_color {
+            let (opacity, blur_radius) = if REVEALED {
+                effects.expect("revealed effects")[&glyph.cluster]
+            } else {
+                (1.0, 0.0)
+            };
+            let mut instance_color = if is_color {
                 [255u8, 255, 255, 255]
             } else {
                 color
             };
 
+            if REVEALED && opacity != 1.0 {
+                instance_color[3] =
+                    (f32::from(instance_color[3]) * opacity).round() as u8;
+            }
             let foreground = TextInstance {
                 pos: [pen_x + glyph.x, py + glyph.y.max(0.0)],
                 glyph_pos: [slot_x as u32, slot_y as u32],
@@ -976,18 +1173,19 @@ impl Text {
                 _pad: [0; 3],
                 clip_rect,
                 raster_scale: 0.0,
+                blur_radius,
             };
             if opts.extrude && !is_color {
                 let mut far = foreground;
                 far.pos[0] += snap_px(3.0 * scale);
                 far.pos[1] += snap_px(3.0 * scale);
-                far.color = [10, 10, 14, color[3].saturating_mul(5) / 6];
+                far.color = [10, 10, 14, instance_color[3].saturating_mul(5) / 6];
                 self.instances.push(far);
 
                 let mut near = foreground;
                 near.pos[0] += snap_px(1.5 * scale);
                 near.pos[1] += snap_px(1.5 * scale);
-                near.color = [62, 62, 72, color[3]];
+                near.color = [62, 62, 72, instance_color[3]];
                 self.instances.push(near);
             }
             self.instances.push(foreground);
@@ -1378,6 +1576,7 @@ impl Text {
                     ax,
                     ay,
                     inst.clip_rect,
+                    inst.color[3],
                 );
             } else {
                 blit_text_mask(
@@ -1888,6 +2087,10 @@ fn build_text_pipeline_metal(device: &metal::Device) -> metal::RenderPipelineSta
     a.set_format(MTLVertexFormat::Float);
     a.set_buffer_index(0);
     a.set_offset(52);
+    let a = attrs.object_at(8).unwrap();
+    a.set_format(MTLVertexFormat::Float);
+    a.set_buffer_index(0);
+    a.set_offset(56);
 
     let layout = vd.layouts().object_at(0).unwrap();
     layout.set_stride(std::mem::size_of::<TextInstance>() as u64);
@@ -2064,6 +2267,11 @@ fn build_text_pipeline_wgpu(
             format: wgpu::VertexFormat::Float32,
             offset: 52,
             shader_location: 7,
+        },
+        wgpu::VertexAttribute {
+            format: wgpu::VertexFormat::Float32,
+            offset: 56,
+            shader_location: 8,
         },
     ];
     let vbuf = wgpu::VertexBufferLayout {
@@ -2340,7 +2548,7 @@ fn build_ui_text_pipeline_vulkan(
             .name(entry),
     ];
 
-    // Vertex input mirrors `TextInstance` (56 bytes).
+    // Vertex input mirrors `TextInstance` (60 bytes).
     let bindings = [vk::VertexInputBindingDescription::default()
         .binding(0)
         .stride(std::mem::size_of::<TextInstance>() as u32)
@@ -2393,6 +2601,11 @@ fn build_ui_text_pipeline_vulkan(
             .binding(0)
             .format(vk::Format::R32_SFLOAT)
             .offset(52),
+        vk::VertexInputAttributeDescription::default()
+            .location(8)
+            .binding(0)
+            .format(vk::Format::R32_SFLOAT)
+            .offset(56),
     ];
     let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
         .vertex_binding_descriptions(&bindings)
@@ -2603,6 +2816,7 @@ fn blit_text_color(
     ax: usize,
     ay: usize,
     clip_rect: [f32; 4],
+    opacity: u8,
 ) {
     let stride = buf_w as usize;
     let (clip_x0, clip_y0, clip_x1, clip_y1) = cpu_clip_bounds(clip_rect, buf_w, buf_h);
@@ -2633,7 +2847,12 @@ fn blit_text_color(
             if a == 0 {
                 continue;
             }
-            let src = [r, g, b, a];
+            let src = if opacity == 255 {
+                [r, g, b, a]
+            } else {
+                [r, g, b, a]
+                    .map(|v| ((u32::from(v) * u32::from(opacity) + 127) / 255) as u8)
+            };
             let idx = buf_row + (dst_x as usize);
             buf[idx] = blend_premul_over(src, buf[idx]);
         }
@@ -2661,9 +2880,13 @@ fn cpu_clip_bounds(clip_rect: [f32; 4], buf_w: i32, buf_h: i32) -> (i32, i32, i3
 
 #[cfg(test)]
 mod tests {
+    #[cfg(not(target_arch = "wasm32"))]
+    use super::blit_text_color;
     use super::{
-        centered_line_box_baseline_px, instances_ink_bounds_px, snap_clip_rect, DrawOpts,
-        Text, TextInstance, PREFIX_MEASURE_CACHE_ENTRIES, PREFIX_MEASURE_MAX_BYTES,
+        centered_line_box_baseline_px, instances_ink_bounds_px, prepare_reveal_effects,
+        reveal_effect, set_cluster_ends, snap_clip_rect, DrawOpts, ShapedGlyph,
+        ShapedRun, Text, TextInstance, TextReveal, PREFIX_MEASURE_CACHE_ENTRIES,
+        PREFIX_MEASURE_MAX_BYTES,
     };
     use crate::font::{fonts::SugarloafFonts, FontLibrary};
     use std::sync::Arc;
@@ -2734,6 +2957,449 @@ mod tests {
 
         assert!(text.center_instances_in_rect(0, [10.0, 20.0, 20.0, 10.0], true, true));
         assert_eq!(text.instances[0].pos, [36.0, 47.0]);
+    }
+
+    #[test]
+    fn reveal_instance_layout_preserves_existing_offsets() {
+        assert_eq!(std::mem::size_of::<TextInstance>(), 60);
+        assert_eq!(std::mem::offset_of!(TextInstance, raster_scale), 52);
+        assert_eq!(std::mem::offset_of!(TextInstance, blur_radius), 56);
+    }
+
+    #[test]
+    fn reveal_ranges_are_half_open_utf8_bytes_and_newest_overlap_wins() {
+        // é occupies 1..3, crab 3..7; these are byte offsets, not char indices.
+        let source = "aé🦀z";
+        let reveals = [
+            TextReveal {
+                range: 1..3,
+                opacity: 0.25,
+                blur_radius: 2.0,
+            },
+            TextReveal {
+                range: 3..7,
+                opacity: 0.5,
+                blur_radius: 1.0,
+            },
+            TextReveal {
+                range: 7..8,
+                opacity: 0.0,
+                blur_radius: 0.0,
+            },
+        ];
+        let effects: Vec<_> = source
+            .char_indices()
+            .map(|(byte, ch)| {
+                reveal_effect(byte as u32, (byte + ch.len_utf8()) as u32, &reveals, 2.0)
+            })
+            .collect();
+        assert_eq!(effects, [(1.0, 0.0), (0.25, 4.0), (0.5, 2.0), (0.0, 0.0)]);
+        assert_eq!(reveal_effect(8, 9, &reveals, 2.0), (1.0, 0.0));
+        let invalid = [TextReveal {
+            range: 0..1,
+            opacity: f32::NAN,
+            blur_radius: f32::INFINITY,
+        }];
+        assert_eq!(reveal_effect(0, 1, &invalid, 2.0), (1.0, 0.0));
+        let bounded = [TextReveal {
+            range: 0..1,
+            opacity: -2.0,
+            blur_radius: 100.0,
+        }];
+        assert_eq!(reveal_effect(0, 1, &bounded, 2.0), (0.0, 4.0));
+    }
+
+    fn source_glyph(cluster: u32) -> ShapedGlyph {
+        ShapedGlyph {
+            id: 1,
+            x: 0.0,
+            y: 0.0,
+            advance: 1.0,
+            cluster,
+            cluster_end: 0,
+        }
+    }
+
+    fn source_run(glyphs: Vec<ShapedGlyph>) -> ShapedRun {
+        ShapedRun {
+            font_id: 0,
+            size_u16: 14,
+            size_bucket: 56,
+            synthetic_bold: false,
+            synthetic_italic: false,
+            baseline_px: 12,
+            glyphs,
+        }
+    }
+
+    #[test]
+    fn indexed_reveal_sweep_matches_overlap_reference_including_unsorted_ranges() {
+        let mut seed = 7_u32;
+        let mut random = || {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            seed
+        };
+        for _ in 0..100 {
+            let mut glyphs = Vec::new();
+            let mut source_end = 0;
+            for _ in 0..40 {
+                glyphs.push(source_glyph(source_end));
+                glyphs.push(source_glyph(source_end)); // repeated glyphs share effect
+                source_end += 1 + random() % 4;
+            }
+            glyphs.reverse(); // RTL-like visual order
+            set_cluster_ends(&mut glyphs, source_end);
+            let runs = [source_run(glyphs)];
+            let births: Vec<_> = (0..80)
+                .map(|_| {
+                    let start = (random() % (source_end + 20)) as usize;
+                    TextReveal {
+                        range: start..start + (random() % 20) as usize,
+                        opacity: (random() % 5) as f32 / 4.0,
+                        blur_radius: (random() % 10) as f32,
+                    }
+                })
+                .collect();
+            let effects = prepare_reveal_effects(&runs, &births, 1.5);
+            assert_eq!(effects.len(), 40);
+            for glyph in &runs[0].glyphs {
+                assert_eq!(
+                    effects[&glyph.cluster],
+                    reveal_effect(glyph.cluster, glyph.cluster_end, &births, 1.5)
+                );
+            }
+        }
+        let runs = [source_run(vec![ShapedGlyph {
+            cluster_end: 1,
+            ..source_glyph(0)
+        }])];
+        let births = [
+            TextReveal {
+                range: 0..1,
+                opacity: -0.0,
+                blur_radius: -0.0,
+            },
+            TextReveal {
+                range: 0..1,
+                opacity: 0.0,
+                blur_radius: 2.0,
+            },
+        ];
+        assert_eq!(prepare_reveal_effects(&runs, &births, 1.0)[&0], (0.0, 2.0));
+    }
+
+    #[test]
+    fn cluster_bounds_handle_reordering_duplicate_starts_and_source_tail() {
+        // Visual order need not equal source order; repeated starts represent
+        // multiple glyphs in a single source cluster. Last cluster includes all
+        // remaining source, even invisible trailing bytes with no glyph.
+        let mut glyphs = [
+            source_glyph(4),
+            source_glyph(0),
+            source_glyph(2),
+            source_glyph(2),
+        ];
+        set_cluster_ends(&mut glyphs, 9);
+        assert_eq!(
+            glyphs.map(|g| (g.cluster, g.cluster_end)),
+            [(4, 9), (0, 2), (2, 4), (2, 4)]
+        );
+        set_cluster_ends(&mut [], 9);
+    }
+
+    #[test]
+    fn ligature_continuation_selects_newest_overlapping_birth_not_old_base() {
+        // Shaped source "AffiZ": two glyphs for the ffi cluster (e.g. a font
+        // returning a multi-glyph ligature). Byte 3 is the appended continuation.
+        let mut glyphs = [
+            source_glyph(0),
+            source_glyph(1),
+            source_glyph(1),
+            source_glyph(4),
+        ];
+        set_cluster_ends(&mut glyphs, 5);
+        let births = [
+            TextReveal {
+                range: 0..2,
+                opacity: 0.9,
+                blur_radius: 0.25,
+            },
+            TextReveal {
+                range: 2..3,
+                opacity: 0.6,
+                blur_radius: 0.5,
+            },
+            TextReveal {
+                range: 3..4,
+                opacity: 0.2,
+                blur_radius: 2.0,
+            },
+        ];
+        for glyph in &glyphs[1..3] {
+            assert_eq!((glyph.cluster, glyph.cluster_end), (1, 4));
+            assert_eq!(
+                reveal_effect(glyph.cluster, glyph.cluster_end, &births[2..], 1.0),
+                (0.2, 2.0)
+            );
+            assert_eq!(
+                reveal_effect(glyph.cluster, glyph.cluster_end, &births, 1.0),
+                (0.2, 2.0)
+            );
+            let reversed: Vec<_> = births.iter().cloned().rev().collect();
+            assert_eq!(
+                reveal_effect(glyph.cluster, glyph.cluster_end, &reversed, 1.0),
+                (0.2, 2.0)
+            );
+        }
+        let runs = [source_run(glyphs.to_vec())];
+        let newest_only = prepare_reveal_effects(&runs, &births[2..], 1.0);
+        assert_eq!(newest_only[&1], (0.2, 2.0));
+        assert_eq!(newest_only.len(), 3, "repeated cluster evaluated once");
+        let all = prepare_reveal_effects(&runs, &births, 1.0);
+        assert_eq!(all[&1], (0.2, 2.0));
+        assert_eq!(all[&4], (1.0, 0.0));
+        assert_eq!(reveal_effect(4, 5, &births, 1.0), (1.0, 0.0));
+        assert_eq!(reveal_effect(1, 1, &births, 1.0), (1.0, 0.0));
+        let empty = [TextReveal {
+            range: 2..2,
+            opacity: 0.0,
+            blur_radius: 4.0,
+        }];
+        assert_eq!(reveal_effect(1, 4, &empty, 1.0), (1.0, 0.0));
+    }
+
+    #[test]
+    fn paired_blur_kernel_is_dense_normalized_and_has_no_stamped_impulse_gaps() {
+        // Exact optimized kernel used in each shader: adjacent binomial taps
+        // are paired with bilinear sampling, not nine displaced glyph copies.
+        let offsets = [-28.0_f32 / 9.0, -4.0 / 3.0, 0.0, 4.0 / 3.0, 28.0 / 9.0];
+        let weights = [9.0_f32, 84.0, 70.0, 84.0, 9.0];
+        let mut dense = [0.0_f32; 9];
+        for (offset, weight) in offsets.into_iter().zip(weights) {
+            let base = offset.floor() as i32;
+            let f = offset - offset.floor();
+            dense[(base + 4) as usize] += weight * (1.0 - f);
+            dense[(base + 5) as usize] += weight * f;
+        }
+        let expected = [1.0, 8.0, 28.0, 56.0, 70.0, 56.0, 28.0, 8.0, 1.0];
+        for (actual, expected) in dense.into_iter().zip(expected) {
+            assert!((actual - expected).abs() < 0.0001);
+        }
+        assert!((dense.iter().sum::<f32>() - 256.0).abs() < 0.0001);
+        for shader in [
+            include_str!("text_shader.wgsl"),
+            include_str!("grid/shaders/grid_text.frag.glsl"),
+            include_str!("grid/shaders/grid.metal"),
+        ] {
+            assert!(shader.contains("-28.0/9.0, -4.0/3.0, 0.0, 4.0/3.0, 28.0/9.0"));
+            assert!(shader.contains("9.0, 84.0, 70.0, 84.0, 9.0"));
+            assert!(shader.contains("return sum / 65536.0;"));
+        }
+    }
+
+    #[test]
+    fn appended_combining_bytes_reveal_the_complete_existing_cluster() {
+        let (library, _) = FontLibrary::new(SugarloafFonts::default());
+        let mut text = Text::new(&library);
+        let source = "Ae\u{301} ffi";
+        let runs = text.shape_for(source, &DrawOpts::default()).unwrap();
+        // Only the newly appended combining mark bytes, not the old base e.
+        let effects = [TextReveal {
+            range: 2..4,
+            opacity: 0.25,
+            blur_radius: 1.0,
+        }];
+        let prepared = prepare_reveal_effects(&runs, &effects, 1.0);
+        assert_eq!(prepared[&1], (0.25, 1.0));
+        let mut affected = 0;
+        for glyph in runs.iter().flat_map(|r| &r.glyphs) {
+            assert!(source.is_char_boundary(glyph.cluster as usize));
+            if glyph.cluster == 1 {
+                assert_eq!(glyph.cluster_end, 4);
+                assert_eq!(
+                    reveal_effect(glyph.cluster, glyph.cluster_end, &effects, 1.0),
+                    (0.25, 1.0)
+                );
+                affected += 1;
+            } else if glyph.cluster >= 4 {
+                assert_eq!(
+                    reveal_effect(glyph.cluster, glyph.cluster_end, &effects, 1.0),
+                    (1.0, 0.0)
+                );
+            }
+        }
+        assert!(affected > 0);
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn appended_combining_reveal_changes_whole_cluster_emission_not_geometry() {
+        let (library, _) = FontLibrary::new(SugarloafFonts::default());
+        let mut text = Text::new(&library);
+        text.init_cpu();
+        let opts = DrawOpts {
+            color: [80, 120, 160, 200],
+            ..DrawOpts::default()
+        };
+        let source = "Ae\u{301} Z";
+        let advance = text.draw(1.0, 2.0, source, &opts);
+        let ordinary = text.instances.clone();
+        text.instances.clear();
+        let revealed = text.draw_revealed(
+            1.0,
+            2.0,
+            source,
+            &opts,
+            &[TextReveal {
+                range: 2..4,
+                opacity: 0.25,
+                blur_radius: 1.0,
+            }],
+        );
+        assert_eq!(advance, revealed);
+        assert_eq!(ordinary.len(), text.instances.len());
+        let mut changed = 0;
+        for (sharp, reveal) in ordinary.iter().zip(&text.instances) {
+            assert_eq!(sharp.pos, reveal.pos);
+            assert_eq!(sharp.glyph_pos, reveal.glyph_pos);
+            if reveal.blur_radius > 0.0 {
+                assert_eq!(reveal.color[3], 50);
+                changed += 1;
+            } else {
+                assert_eq!(sharp.color, reveal.color);
+            }
+        }
+        assert!(
+            changed > 0,
+            "new mark bytes must reveal the old base cluster"
+        );
+    }
+
+    #[test]
+    fn fallback_clusters_are_global_and_cache_remains_substring_local() {
+        let (library, _) = FontLibrary::new(SugarloafFonts::default());
+        let mut text = Text::new(&library);
+        for preferred in [None, Some(0)] {
+            let opts = DrawOpts {
+                font_id: preferred,
+                ..DrawOpts::default()
+            };
+            let source = "é \u{f07b} café 🦀 z";
+            let runs = text.shape_for(source, &opts).unwrap();
+            assert!(runs.len() >= 2);
+            // Every cached run can be found in the source at its global start.
+            // Re-shaping that suffix as an isolated substring must start at 0.
+            for (index, run) in runs.iter().enumerate() {
+                let expected_end = runs
+                    .get(index + 1)
+                    .map(|r| r.glyphs.iter().map(|g| g.cluster).min().unwrap())
+                    .unwrap_or(source.len() as u32);
+                assert_eq!(
+                    run.glyphs.iter().map(|g| g.cluster_end).max().unwrap(),
+                    expected_end
+                );
+                let first = run.glyphs.first().unwrap().cluster as usize;
+                assert!(source.is_char_boundary(first));
+                let cached = text
+                    .shape_cache
+                    .values()
+                    .find(|cached| {
+                        cached.font_id == run.font_id
+                            && cached.glyphs.len() == run.glyphs.len()
+                            && cached.glyphs.iter().zip(&run.glyphs).all(|(a, b)| {
+                                a.id == b.id
+                                    && a.cluster + first as u32 == b.cluster
+                                    && a.cluster_end + first as u32 == b.cluster_end
+                            })
+                    })
+                    .expect("global offset must not contaminate cached clusters");
+                assert_eq!(cached.glyphs[0].cluster, 0);
+                assert!(run
+                    .glyphs
+                    .iter()
+                    .all(|g| source.is_char_boundary(g.cluster as usize)
+                        && source.is_char_boundary(g.cluster_end as usize)
+                        && g.cluster < g.cluster_end));
+            }
+            let again = text.shape_for(source, &opts).unwrap();
+            assert_eq!(
+                runs.iter()
+                    .flat_map(|r| r.glyphs.iter().map(|g| g.cluster))
+                    .collect::<Vec<_>>(),
+                again
+                    .iter()
+                    .flat_map(|r| r.glyphs.iter().map(|g| g.cluster))
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn revealed_draw_keeps_full_run_geometry_and_settled_instances() {
+        let (library, _) = FontLibrary::new(SugarloafFonts::default());
+        let mut text = Text::new(&library);
+        text.init_cpu();
+        text.set_scale_factor(2.0);
+        let opts = DrawOpts {
+            color: [80, 120, 160, 200],
+            ..DrawOpts::default()
+        };
+        let source = "AV café office";
+        let width = text.draw(1.0, 2.0, source, &opts);
+        let ordinary = text.instances.clone();
+        text.instances.clear();
+        let width_revealed = text.draw_revealed(
+            1.0,
+            2.0,
+            source,
+            &opts,
+            &[TextReveal {
+                range: 3..8,
+                opacity: 0.5,
+                blur_radius: 1.5,
+            }],
+        );
+        assert_eq!(width, width_revealed);
+        assert_eq!(ordinary.len(), text.instances.len());
+        let mut changed = 0;
+        let mut settled = 0;
+        for (a, b) in ordinary.iter().zip(&text.instances) {
+            assert_eq!(a.pos, b.pos);
+            assert_eq!(a.glyph_pos, b.glyph_pos);
+            assert_eq!(a.glyph_size, b.glyph_size);
+            if b.blur_radius > 0.0 {
+                assert_eq!(b.blur_radius, 3.0);
+                assert_eq!(b.color[3], 100);
+                changed += 1;
+            } else {
+                assert_eq!(a.color, b.color);
+                settled += 1;
+            }
+        }
+        assert!(changed > 0 && settled > 0);
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn cpu_color_reveal_modulates_premultiplied_rgba_without_tint() {
+        let mut pixels = [0u32];
+        blit_text_color(
+            &mut pixels,
+            1,
+            1,
+            0,
+            0,
+            1,
+            1,
+            &[100, 60, 20, 200],
+            1,
+            0,
+            0,
+            [0.0; 4],
+            128,
+        );
+        assert_eq!(pixels[0], (50 << 16) | (30 << 8) | 10);
     }
 
     #[test]

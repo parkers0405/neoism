@@ -401,6 +401,7 @@ pub struct Chrome<A: Send + Copy + 'static = ()> {
     pub conversations_visible: bool,
     conversations_panel_enabled: bool,
     details_panel_enabled: bool,
+    streaming_text_animation: bool,
     conversations_resize: Option<(f32, f32)>,
     pending_conversation_open: Option<String>,
     pending_conversation_new:

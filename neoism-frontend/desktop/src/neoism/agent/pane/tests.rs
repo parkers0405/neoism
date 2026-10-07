@@ -4906,6 +4906,61 @@ fn diff_file_toggle_does_not_move_or_reanchor_the_timeline() {
 }
 
 #[test]
+fn read_group_expansion_tracks_source_and_remeasures_after_animation() {
+    let mut pane = NeoismAgentPane::default();
+    pane.messages = vec![NeoismAgentMessage::tool(
+        "Read(src/a.rs)",
+        "output",
+        "completed",
+        "read",
+        NeoismAgentOutputKind::Text,
+        "",
+        Vec::new(),
+    )
+    .with_id("read-a")];
+    pane.set_timeline_metrics([0.0, 100.0, 400.0, 300.0], 900.0, 300.0);
+    pane.register_tool_hit_rect("read-a..".to_string(), [0.0, 150.0, 300.0, 30.0]);
+    for expanding in [true, false] {
+        assert!(pane.toggle_tool_at(10.0, 160.0));
+        assert_eq!(pane.tool_expanded("read-a.."), expanding);
+        assert!(pane.tool_expand_animating("read-a"));
+        assert!(pane.timeline_view_anchor.is_some());
+        let _ = pane.take_timeline_dirty_marks();
+        pane.tool_expand_anims
+            .get_mut("read-a..")
+            .unwrap()
+            .started_at = Instant::now() - TOOL_EXPAND_ANIMATION;
+        let settled = pane.take_timeline_dirty_marks();
+        assert!(settled.ids.contains("read-a"));
+        assert!(!pane.any_tool_expand_animating());
+        assert_eq!(
+            pane.tool_expand_progress("read-a.."),
+            if expanding { 1.0 } else { 0.0 }
+        );
+        assert!(pane.take_timeline_dirty_marks().ids.is_empty());
+    }
+}
+
+#[test]
+fn read_group_child_clicks_anchor_scroll_and_toggle_only_the_selected_read() {
+    let mut pane = NeoismAgentPane::default();
+    pane.set_timeline_metrics([0.0, 100.0, 400.0, 300.0], 900.0, 300.0);
+    pane.timeline_velocity_px_s = 75.0;
+    pane.register_tool_hit_rect(
+        "read-a..::child::123".to_string(),
+        [0.0, 150.0, 300.0, 20.0],
+    );
+    assert!(pane.toggle_tool_at(10.0, 160.0));
+    assert_eq!(pane.selected_tool_group_child("read-a.."), Some("123"));
+    assert!(pane.pending_timeline_anchor.is_some());
+    assert_eq!(pane.timeline_velocity_px_s, 0.0);
+    assert!(!pane.tool_expanded("read-a..::child::123"));
+    assert!(!pane.any_tool_expand_animating());
+    assert!(pane.toggle_tool_at(10.0, 160.0));
+    assert_eq!(pane.selected_tool_group_child("read-a.."), None);
+}
+
+#[test]
 fn markdown_horizontal_scroll_is_block_local_and_geometry_is_frame_local() {
     let mut pane = NeoismAgentPane::default();
     pane.register_markdown_horizontal_scroll_rect(
@@ -5469,4 +5524,25 @@ fn test_permission(selected: usize) -> NeoismAgentPendingPermission {
         selected,
         responding: false,
     }
+}
+
+#[test]
+fn streaming_reveal_ingestion_captures_history_before_live_update_and_skips_replay() {
+    let mut pane = NeoismAgentPane::default();
+    pane.messages = vec![NeoismAgentMessage::assistant("history").with_id("row")];
+    pane.upsert_part_message(
+        NeoismAgentMessage::assistant("history more").with_id("row"),
+    );
+    pane.upsert_part_message(
+        NeoismAgentMessage::assistant("history more").with_id("row"),
+    );
+    let pending = pane.text_reveal.pending("row");
+    assert_eq!(pending.len(), 2);
+    assert_eq!(pending[0].text, "history");
+    assert!(pending[0].at.is_none());
+    assert_eq!(pending[1].text, "history more");
+    assert!(pending[1].at.is_some());
+    pane.set_text_reveal_enabled(false);
+    pane.apply_part_delta(None, Some("row".into()), Some("text".into()), " disabled");
+    assert!(pane.text_reveal.pending("row").is_empty());
 }

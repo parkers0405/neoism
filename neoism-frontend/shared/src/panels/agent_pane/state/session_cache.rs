@@ -538,6 +538,7 @@ impl NeoismAgentPane {
         self.cache_current_session();
         let state = cached.state;
         self.session_id = Some(session_id.to_string());
+        self.text_reveal.scope(self.session_id.as_deref());
         self.parent_session_id = state.parent_id.clone().or(roster_parent);
         self.side_panel
             .set_viewed_session_id(Some(session_id.to_string()));
@@ -693,6 +694,8 @@ impl NeoismAgentPane {
     pub(in crate::panels::agent_pane::state) fn reset_timeline_navigation_for_session_switch(
         &mut self,
     ) {
+        self.text_reveal.clear();
+        self.text_reveal.scope(self.session_id.as_deref());
         self.timeline_velocity_px_s = 0.0;
         self.timeline_last_tick_at = None;
         self.timeline_wheel_target_px = None;

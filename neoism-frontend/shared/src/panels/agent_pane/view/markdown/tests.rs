@@ -598,3 +598,48 @@ fn emphasis_markers_render_semantically_without_leaking_delimiters() {
         |segment| matches!(segment, MarkdownInlineSegment::BoldItalic(text) if text == "both")
     ));
 }
+
+#[test]
+fn reveal_projection_uses_displayed_identity_across_full_body_and_reflow() {
+    let blocks = vec![
+        AssistantMarkdownBlock::Paragraph(vec!["**same** `猫`".into(), "same".into()]),
+        AssistantMarkdownBlock::Heading {
+            level: 2,
+            lines: vec!["[label](https://example.com)".into()],
+        },
+        AssistantMarkdownBlock::Quote(vec!["quote".into()]),
+        AssistantMarkdownBlock::ListItem(AssistantListItem {
+            marker: AssistantListMarker::Ordered("1.".into()),
+            depth: 0,
+            lines: vec!["item".into()],
+        }),
+        AssistantMarkdownBlock::Table {
+            rows: vec![vec!["**cell**\nnext".into()]],
+            column_widths: vec![320.0],
+        },
+        AssistantMarkdownBlock::Code {
+            lang: "rust".into(),
+            lines: Rc::new(vec!["let x = 1;".into()]),
+            copy_target: "copy".into(),
+            content_width: 500.0,
+        },
+    ];
+    let projection = displayed_projection(&blocks, |_| false);
+    assert_eq!(
+        projection.canonical,
+        "same猫samelabelquoteitemcellnextletx=1;"
+    );
+    assert!(!projection.canonical.contains("copy"));
+    let narrow = vec![AssistantMarkdownBlock::Paragraph(vec![
+        "same".into(),
+        "word".into(),
+        "same".into(),
+    ])];
+    let wide = vec![AssistantMarkdownBlock::Paragraph(vec![
+        "same word same".into()
+    ])];
+    assert_eq!(
+        displayed_projection(&narrow, |_| false).canonical,
+        displayed_projection(&wide, |_| false).canonical
+    );
+}

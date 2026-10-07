@@ -132,6 +132,7 @@ pub enum ProviderRouteAction {
     ConnectionsRename,
     ConnectionsDelete,
     ConnectionsSetDefault,
+    OpenAiUsage,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]

@@ -94,7 +94,7 @@ impl Renderer {
     }
 
     pub fn style(&self, selector: &str) -> neoism_lua::StylePatch {
-        self.plugins.styles.resolve(selector)
+        neoism_ui::primitives::surface_background::resolve_style(selector, &self.plugins.styles)
     }
 
     pub fn styled_theme(&self, selector: &str) -> IdeTheme {
@@ -270,6 +270,9 @@ impl Renderer {
         // or the status row is mid-animation — without this, the event
         // loop sleeps between SSE events and the timer / dots / scramble
         // visibly freeze for hundreds of ms at a time.
+        if self.background_effects_animating {
+            return Some("surface_background");
+        }
         if self.neoism_agent_animating {
             return Some("neoism_agent");
         }

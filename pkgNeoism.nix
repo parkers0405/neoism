@@ -23,7 +23,8 @@
   withWayland ? !stdenv.isDarwin,
   wayland,
   ...
-}: let
+}:
+let
   readTOML = f: builtins.fromTOML (builtins.readFile f);
   cargoToml = readTOML ./Cargo.toml;
   neoismToml = readTOML ./neoism-frontend/desktop/Cargo.toml;
@@ -52,62 +53,62 @@
 
   inherit (lib.fileset) unions toSource;
 in
-  rustPlatform.buildRustPackage {
-    inherit (cargoToml.workspace.package) version;
-    name = "neoism";
-    src = toSource {
-      root = ./.;
-      fileset = unions ([
-          ./Cargo.lock
-          ./Cargo.toml
-          ./misc # Extra desktop files
-        ]
-        ++ (map (x: ./. + "/${x}") cargoToml.workspace.members));
-    };
-    cargoLock.lockFile = ./Cargo.lock;
-
-    cargoBuildFlags = "-p neoism";
-
-    buildInputs = rlinkLibs ++ (lib.optionals stdenv.isDarwin [darwin.libutil]);
-    runtimeDependencies = rlinkLibs;
-
-    nativeBuildInputs =
+rustPlatform.buildRustPackage {
+  inherit (cargoToml.workspace.package) version;
+  name = "neoism";
+  src = toSource {
+    root = ./.;
+    fileset = unions (
       [
-        rustPlatform.bindgenHook
+        ./Cargo.lock
+        ./Cargo.toml
+        ./misc # Extra desktop files
       ]
-      ++ lib.optionals stdenv.isLinux [
-        cmake
-        pkg-config
-        autoPatchelfHook
-      ];
+      ++ (map (x: ./. + "/${x}") cargoToml.workspace.members)
+    );
+  };
+  cargoLock.lockFile = ./Cargo.lock;
 
-    postInstall =
-      ''
-        install -D -m 644 misc/neoism.desktop -t \
-                          $out/share/applications
-        install -D -m 644 neoism-frontend/desktop/assets/icons/neoism.png \
-                          $out/share/icons/hicolor/512x512/apps/neoism.png
-      ''
-      + lib.optionalString stdenv.hostPlatform.isDarwin ''
-        mkdir -p $out/Applications/Neoism.app/Contents/MacOS \
-                 $out/Applications/Neoism.app/Contents/Resources
-        sed -e 's/{{VERSION}}/${lib.head (lib.splitString "-" (lib.head (lib.splitString "+" cargoToml.workspace.package.version)))}/g' \
-          -e 's/{{RELEASE_VERSION}}/${cargoToml.workspace.package.version}/g' \
-          misc/macos/Info.plist > $out/Applications/Neoism.app/Contents/Info.plist
-        cp misc/macos/neoism.icns $out/Applications/Neoism.app/Contents/Resources/
-        ln -s $out/bin/neoism $out/Applications/Neoism.app/Contents/MacOS/
-      '';
+  cargoBuildFlags = "-p neoism";
 
-    buildNoDefaultFeatures = true;
-    buildFeatures = (lib.optionals withX11 ["x11"]) ++ (lib.optionals withWayland ["wayland"]);
-    checkType = "debug";
-    meta = {
-      description = neoismToml.package.description;
-      longDescription = neoismToml.package.extended-description;
-      homepage = cargoToml.workspace.package.homepage;
-      license = lib.licenses.mit;
-      platforms = lib.platforms.unix;
-      changelog = "https://github.com/parkers0405/neoism/blob/main/CHANGELOG.md";
-      mainProgram = "neoism";
-    };
-  }
+  buildInputs = rlinkLibs ++ (lib.optionals stdenv.isDarwin [ darwin.libutil ]);
+  runtimeDependencies = rlinkLibs;
+
+  nativeBuildInputs = [
+    rustPlatform.bindgenHook
+  ]
+  ++ lib.optionals stdenv.isLinux [
+    cmake
+    pkg-config
+    autoPatchelfHook
+  ];
+
+  postInstall = ''
+    install -D -m 644 misc/neoism.desktop -t \
+                      $out/share/applications
+    install -D -m 644 neoism-frontend/desktop/assets/icons/neoism.png \
+                      $out/share/icons/hicolor/512x512/apps/neoism.png
+  ''
+  + lib.optionalString stdenv.hostPlatform.isDarwin ''
+    mkdir -p $out/Applications/Neoism.app/Contents/MacOS \
+             $out/Applications/Neoism.app/Contents/Resources
+    sed -e 's/{{VERSION}}/${lib.head (lib.splitString "-" (lib.head (lib.splitString "+" cargoToml.workspace.package.version)))}/g' \
+      -e 's/{{RELEASE_VERSION}}/${cargoToml.workspace.package.version}/g' \
+      misc/macos/Info.plist > $out/Applications/Neoism.app/Contents/Info.plist
+    cp misc/macos/neoism.icns $out/Applications/Neoism.app/Contents/Resources/
+    ln -s $out/bin/neoism $out/Applications/Neoism.app/Contents/MacOS/
+  '';
+
+  buildNoDefaultFeatures = true;
+  buildFeatures = (lib.optionals withX11 [ "x11" ]) ++ (lib.optionals withWayland [ "wayland" ]);
+  checkType = "debug";
+  meta = {
+    description = neoismToml.package.description;
+    longDescription = neoismToml.package.extended-description;
+    homepage = cargoToml.workspace.package.homepage;
+    license = lib.licenses.mit;
+    platforms = lib.platforms.unix;
+    changelog = "https://github.com/parkers0405/neoism/blob/main/CHANGELOG.md";
+    mainProgram = "neoism";
+  };
+}

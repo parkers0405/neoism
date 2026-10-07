@@ -39,6 +39,7 @@ Style fields use snake_case and unknown fields are rejected.
 
 | Field | Type |
 |---|---|
+| `background_effects` | native effect list? (max 4; null inherits, empty list clears) |
 | `visible` | boolean? |
 | `width`, `height`, `min_width`, `max_width`, `min_height`, `max_height` | number? |
 | `padding`, `padding_x`, `padding_y`, `gap`, `row_height` | number? |
@@ -53,6 +54,22 @@ Style fields use snake_case and unknown fields are rejected.
 | `animation_easing`, `icon` | string? |
 
 Selectors inherit from dotted ancestors, broad to specific, while unspecified properties preserve the Rust draw site's default. Stable built-ins are `app`, `chrome.top`, `chrome.bottom`, `buffer-tabs`, `breadcrumbs`, `status`, `status.item`, `composer`, `file-tree`, `file-tree.row`, `file-tree.row.selected`, `file-tree.row.hover`, `file-tree.icon`, `notes-tree`, `notes-tree.row`, `notes-tree.row.selected`, `notes-tree.row.hover`, `notes-tree.icon`, `agent.chat`, `agent.chat.message`, `agent.chat.message.user`, `agent.chat.message.assistant`, `agent.chat.tool`, `agent.chat.tool.result`, `agent.sidebar`, `editor`, `markdown`, `terminal`, `git`, `settings`, `palette`, `finder`, `notification`, and `modal`.
+
+### `neoism.ui.surfaces()` and native background effects
+
+Returns the actual background-effect support registry: `composer.agent`, `chrome.top`, `status`, `editor.code`, `file-tree`. This does not alter `neoism.ui.surface("chrome.actions", ...)` placement semantics, reject existing custom selectors, or promise that every style field is consumed everywhere. `neoism.contract.backgroundEffects` also reports native variants and the effect-list limit.
+
+```lua
+neoism.ui.style("composer.agent", {
+  background = "#000000",
+  background_effects = {{kind = "stars", color = {1,1,1,1}, seed = 17,
+    density = 0.6, speed = 0.6, opacity = 0.85}},
+})
+```
+
+Effect fields use snake_case and strict tagged serde data: `kind` is `stars` or `scanlines`; `color` is four finite RGBA numbers 0..1 (white default), `seed` is u32 (default 0), `density` and `speed` are finite 0..4 (default 1), `opacity` is finite 0..1 (default 1). Unknown fields/variants and invalid numbers reject the candidate. Omitted/null effects inherit; empty lists disable. `speed=0` pauses, zero density/opacity disables. Native budgets cap four effects per patch, 384 primitives per surface, 1536 per window frame. No Lua paint/frame callbacks run. Full footprints, including glow and AA fringe, stay inside supplied rounded geometry; text paints afterward. Frame-scoped animation demand exists only for visible animated primitives and never leaks between windows.
+
+Top-level pack `ui.styles` is the same map/DTO. The accepted pack layer publishes with its look snapshot and clears on deactivation or replacement; rejected pack-apply candidates retain the last working layer. Each field resolves pack → packages → personal overlay, with dotted ancestors broad-to-specific within each layer. The five supported native sites consume background overrides; other style fields are site-specific. The action-strip geometry follows its resolved dock orientation. True terminal backgrounds and web animation lifecycle integration remain deferred.
 
 ## Declarative UI and retained views
 

@@ -2229,6 +2229,7 @@ fn build_image_pipeline(
 /// touching descriptor pools per draw.
 pub struct VulkanImageTexture {
     pub image: VulkanImage,
+    staging: Option<VulkanBuffer>,
     descriptor_pool: vk::DescriptorPool,
     pub descriptor_set: vk::DescriptorSet,
     device: ash::Device,
@@ -2272,84 +2273,6 @@ impl VulkanImageTexture {
             staging_size as u64,
             vk::BufferUsageFlags::TRANSFER_SRC,
         );
-        unsafe {
-            std::ptr::copy_nonoverlapping(
-                pixels.as_ptr(),
-                staging.as_mut_ptr(),
-                staging_size,
-            );
-        }
-
-        // One-shot transfer: barrier → copy → barrier.
-        let img_handle = image.handle();
-        let staging_handle = staging.handle();
-        ctx.submit_oneshot(|cmd| unsafe {
-            let to_dst = vk::ImageMemoryBarrier2::default()
-                .src_stage_mask(vk::PipelineStageFlags2::TOP_OF_PIPE)
-                .src_access_mask(vk::AccessFlags2::empty())
-                .dst_stage_mask(vk::PipelineStageFlags2::COPY)
-                .dst_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
-                .old_layout(vk::ImageLayout::UNDEFINED)
-                .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                .image(img_handle)
-                .subresource_range(
-                    vk::ImageSubresourceRange::default()
-                        .aspect_mask(vk::ImageAspectFlags::COLOR)
-                        .base_mip_level(0)
-                        .level_count(1)
-                        .base_array_layer(0)
-                        .layer_count(1),
-                );
-            let barriers = [to_dst];
-            let dep = vk::DependencyInfo::default().image_memory_barriers(&barriers);
-            device.cmd_pipeline_barrier2(cmd, &dep);
-
-            let region = vk::BufferImageCopy::default()
-                .image_subresource(
-                    vk::ImageSubresourceLayers::default()
-                        .aspect_mask(vk::ImageAspectFlags::COLOR)
-                        .mip_level(0)
-                        .base_array_layer(0)
-                        .layer_count(1),
-                )
-                .image_extent(vk::Extent3D {
-                    width,
-                    height,
-                    depth: 1,
-                });
-            device.cmd_copy_buffer_to_image(
-                cmd,
-                staging_handle,
-                img_handle,
-                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                &[region],
-            );
-
-            let to_read = vk::ImageMemoryBarrier2::default()
-                .src_stage_mask(vk::PipelineStageFlags2::COPY)
-                .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
-                .dst_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER)
-                .dst_access_mask(vk::AccessFlags2::SHADER_READ)
-                .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-                .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                .image(img_handle)
-                .subresource_range(
-                    vk::ImageSubresourceRange::default()
-                        .aspect_mask(vk::ImageAspectFlags::COLOR)
-                        .base_mip_level(0)
-                        .level_count(1)
-                        .base_array_layer(0)
-                        .layer_count(1),
-                );
-            let barriers = [to_read];
-            let dep = vk::DependencyInfo::default().image_memory_barriers(&barriers);
-            device.cmd_pipeline_barrier2(cmd, &dep);
-        });
-        // Staging buffer drops here — submit_oneshot already waited.
 
         // Per-image descriptor pool + set.
         let pool_sizes = [vk::DescriptorPoolSize {
@@ -2388,12 +2311,109 @@ impl VulkanImageTexture {
             device.update_descriptor_sets(&[write], &[]);
         }
 
-        Self {
+        let mut texture = Self {
             image,
+            staging: Some(staging),
             descriptor_pool,
             descriptor_set,
             device,
+        };
+        texture.write_rgba(ctx, pixels, vk::ImageLayout::UNDEFINED);
+        // Static images need no persistent host allocation. The first streaming
+        // update creates reusable staging storage on demand.
+        texture.staging = None;
+        texture
+    }
+
+    /// Update a same-sized streaming image without reallocating its image,
+    /// descriptor set or staging storage. The transfer is still synchronized.
+    pub fn update_rgba(&mut self, ctx: &VulkanContext, pixels: &[u8]) {
+        if self.staging.is_none() {
+            self.staging = Some(ctx.allocate_host_visible_buffer(
+                self.image.width as u64 * self.image.height as u64 * 4,
+                vk::BufferUsageFlags::TRANSFER_SRC,
+            ));
         }
+        self.write_rgba(ctx, pixels, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
+    }
+
+    fn write_rgba(
+        &self,
+        ctx: &VulkanContext,
+        pixels: &[u8],
+        old_layout: vk::ImageLayout,
+    ) {
+        let bytes = self.image.width as usize * self.image.height as usize * 4;
+        assert!(pixels.len() >= bytes, "RGBA image buffer is truncated");
+        let staging = self.staging.as_ref().expect("RGBA upload staging storage");
+        // Each preceding transfer waited for completion before this storage can
+        // be reused; the image barrier also orders prior fragment reads.
+        unsafe {
+            std::ptr::copy_nonoverlapping(pixels.as_ptr(), staging.as_mut_ptr(), bytes);
+        }
+        let range = vk::ImageSubresourceRange::default()
+            .aspect_mask(vk::ImageAspectFlags::COLOR)
+            .level_count(1)
+            .layer_count(1);
+        let initial = old_layout == vk::ImageLayout::UNDEFINED;
+        ctx.submit_oneshot(|cmd| unsafe {
+            let to_dst = vk::ImageMemoryBarrier2::default()
+                .src_stage_mask(if initial {
+                    vk::PipelineStageFlags2::TOP_OF_PIPE
+                } else {
+                    vk::PipelineStageFlags2::FRAGMENT_SHADER
+                })
+                .src_access_mask(if initial {
+                    vk::AccessFlags2::empty()
+                } else {
+                    vk::AccessFlags2::SHADER_READ
+                })
+                .dst_stage_mask(vk::PipelineStageFlags2::COPY)
+                .dst_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+                .old_layout(old_layout)
+                .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .image(self.image.handle())
+                .subresource_range(range);
+            self.device.cmd_pipeline_barrier2(
+                cmd,
+                &vk::DependencyInfo::default().image_memory_barriers(&[to_dst]),
+            );
+            let region = vk::BufferImageCopy::default()
+                .image_subresource(
+                    vk::ImageSubresourceLayers::default()
+                        .aspect_mask(vk::ImageAspectFlags::COLOR)
+                        .layer_count(1),
+                )
+                .image_extent(vk::Extent3D {
+                    width: self.image.width,
+                    height: self.image.height,
+                    depth: 1,
+                });
+            self.device.cmd_copy_buffer_to_image(
+                cmd,
+                staging.handle(),
+                self.image.handle(),
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                &[region],
+            );
+            let to_read = vk::ImageMemoryBarrier2::default()
+                .src_stage_mask(vk::PipelineStageFlags2::COPY)
+                .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+                .dst_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER)
+                .dst_access_mask(vk::AccessFlags2::SHADER_READ)
+                .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .image(self.image.handle())
+                .subresource_range(range);
+            self.device.cmd_pipeline_barrier2(
+                cmd,
+                &vk::DependencyInfo::default().image_memory_barriers(&[to_read]),
+            );
+        });
     }
 }
 

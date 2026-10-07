@@ -3,6 +3,72 @@ use super::*;
 use crate::panels::agent_pane::state::{NeoismAgentMessage, NeoismAgentOutputKind};
 
 #[test]
+fn compact_tool_title_omits_completed_and_parentheses() {
+    let mut message = apply_patch_message("completed", "");
+    message.title = "Read(markdown/html_artifact.rs)".to_string();
+    assert_eq!(message.title_text(), "Read  markdown/html_artifact.rs");
+    message.status = "pending".to_string();
+    assert_eq!(message.title_text(), "Read  markdown/html_artifact.rs");
+}
+
+#[test]
+fn compact_tool_title_keeps_shell_arguments_and_one_line() {
+    let mut message = apply_patch_message("running", "");
+    message.title = "Bash(printf '(two  words)'\nnext command)".to_string();
+    assert_eq!(
+        message.title_text(),
+        "Bash  printf '(two  words)' next command"
+    );
+    message.title.clear();
+    assert_eq!(message.title_text(), "Tool");
+}
+
+#[test]
+fn expanded_tool_details_reserve_nested_indent_and_right_padding() {
+    for scale in [1.0, 2.0] {
+        for width in [160.0, 900.0] {
+            let width = width * scale;
+            assert_eq!(tool_body_wrap_width(width, scale) + 100.0 * scale, width);
+        }
+    }
+}
+
+#[test]
+fn live_edits_keep_diff_cards_without_expanding_the_parent_tool_row() {
+    for tool in [
+        "edit",
+        "Edit",
+        "write",
+        "multiedit",
+        "apply_patch",
+        "ApplyPatch",
+        "patch",
+    ] {
+        assert!(
+            show_tool_diff_cards(tool, "completed", false, false),
+            "{tool}"
+        );
+        assert!(
+            !show_tool_diff_cards(tool, "completed", false, true),
+            "{tool}"
+        );
+        assert!(
+            show_tool_diff_cards(tool, "completed", true, true),
+            "{tool}"
+        );
+    }
+    for tool in ["read", "grep", "bash", "tool_group", "fff_find_files"] {
+        assert!(
+            !show_tool_diff_cards(tool, "completed", false, false),
+            "{tool}"
+        );
+    }
+    for status in ["pending", "running", "streaming"] {
+        assert!(!show_tool_diff_cards("apply_patch", status, false, false));
+    }
+}
+
+#[test]
 fn snapshot_diff_pairs_replacement_rows_by_line_number() {
     let before = "keep\nold one\nold two\ntail\n";
     let after = "keep\nnew one\nnew two\ntail\n";

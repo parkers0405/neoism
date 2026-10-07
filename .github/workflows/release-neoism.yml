@@ -205,6 +205,13 @@ jobs:
           node --test scripts/package-agent-gui.test.mjs
           if [ "$RUNNER_OS" = "Linux" ]; then python3 scripts/test-install.py; fi
 
+      - name: Smoke-test Windows release Lua error recovery
+        if: matrix.goos == 'windows'
+        shell: bash
+        run: |
+          cargo run --release --locked --target ${{ matrix.target }} \
+            -p neoism-lua --features runtime --example release_smoke
+
       - name: Build the stack (release)
         # Unset CI: `fff-search`'s build script demands Zig when CI is set,
         # but it builds fine natively (exactly like the local build).

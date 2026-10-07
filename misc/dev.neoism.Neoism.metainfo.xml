@@ -52,6 +52,12 @@
   </categories>
 
   <releases>
+    <release version="0.7.118" date="2026-10-04">
+      <description>
+        <p>Fixes the Windows release-only Lua startup abort by preserving error unwinding, and adds release-executable Lua regression coverage.</p>
+      </description>
+      <url>https://github.com/parkers0405/neoism/releases/tag/v0.7.118</url>
+    </release>
     <release version="0.7.117" date="2026-10-04">
       <description>
         <p>YOLO stable release: fixes a Windows startup stack overflow during graphics adapter enumeration with an 8 MiB desktop main-thread stack reserve.</p>

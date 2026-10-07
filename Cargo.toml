@@ -41,7 +41,7 @@ exclude = ["neoism-frontend/interactive-artifacts", "neoism-frontend/servo-runti
 resolver = "2"
 
 [workspace.package]
-version = "0.7.117"
+version = "0.7.118"
 authors = ["Parker Settle", "Neoism contributors"]
 edition = "2021"
 license = "MIT"
@@ -57,37 +57,37 @@ readme = "README.md"
 # Note: https://doc.rust-lang.org/cargo/reference/specifying-dependencies.html#multiple-locations
 # Sugarloaf example uses path when used locally, but uses
 # version from crates.io when published.
-teletypewriter = { path = "teletypewriter", version = "0.7.117" }
-neoism-backend = { path = "neoism-backend", version = "0.7.117" }
-neoism-terminal-core = { path = "neoism-terminal-core", version = "0.7.117" }
-neoism-terminal-pty = { path = "neoism-terminal-pty", version = "0.7.117" }
-neoism-terminal-wasm = { path = "neoism-frontend/wasm", version = "0.7.117" }
-neoism-ui = { path = "neoism-frontend/shared", version = "0.7.117" }
-neoism-window = { path = "neoism-window", version = "0.7.117", default-features = false }
-neoism-notifier = { path = "neoism-notifier", version = "0.7.117" }
-neoism-grapheme-width = { path = "neoism-grapheme-width", version = "0.7.117" }
-sugarloaf = { path = "sugarloaf", version = "0.7.117" }
-neoism-agent-core = { path = "neoism-agent/crates/neoism-agent-core", version = "0.7.117" }
-neoism-agent-service-api = { path = "neoism-agent/crates/neoism-agent-service-api", version = "0.7.117" }
-neoism-agent-workspace-search-fff = { path = "neoism-agent/crates/neoism-agent-workspace-search-fff", version = "0.7.117" }
-neoism-agent-neoism-adapter = { path = "neoism-agent/crates/neoism-agent-neoism-adapter", version = "0.7.117" }
-neoism-agent-plugin-api = { path = "neoism-agent/crates/neoism-agent-plugin-api", version = "0.7.117" }
-neoism-agent-builtins = { path = "neoism-agent/crates/neoism-agent-builtins", version = "0.7.117" }
-neoism-agent-server = { path = "neoism-agent/crates/neoism-agent-server", version = "0.7.117" }
-neoism-extensions = { path = "neoism-extensions", version = "0.7.117" }
-neoism-product-docs = { path = "neoism-product-docs", version = "0.7.117" }
-neoism-sync = { path = "neoism-sync", version = "0.7.117" }
-neoism-remarkable = { path = "neoism-remarkable", version = "0.7.117" }
-neoism-neoworld-core = { path = "neoism-neoworld-core", version = "0.7.117" }
-neoism-neoworld = { path = "neoism-neoworld", version = "0.7.117" }
-neoism-lua = { path = "neoism-lua", version = "0.7.117" }
+teletypewriter = { path = "teletypewriter", version = "0.7.118" }
+neoism-backend = { path = "neoism-backend", version = "0.7.118" }
+neoism-terminal-core = { path = "neoism-terminal-core", version = "0.7.118" }
+neoism-terminal-pty = { path = "neoism-terminal-pty", version = "0.7.118" }
+neoism-terminal-wasm = { path = "neoism-frontend/wasm", version = "0.7.118" }
+neoism-ui = { path = "neoism-frontend/shared", version = "0.7.118" }
+neoism-window = { path = "neoism-window", version = "0.7.118", default-features = false }
+neoism-notifier = { path = "neoism-notifier", version = "0.7.118" }
+neoism-grapheme-width = { path = "neoism-grapheme-width", version = "0.7.118" }
+sugarloaf = { path = "sugarloaf", version = "0.7.118" }
+neoism-agent-core = { path = "neoism-agent/crates/neoism-agent-core", version = "0.7.118" }
+neoism-agent-service-api = { path = "neoism-agent/crates/neoism-agent-service-api", version = "0.7.118" }
+neoism-agent-workspace-search-fff = { path = "neoism-agent/crates/neoism-agent-workspace-search-fff", version = "0.7.118" }
+neoism-agent-neoism-adapter = { path = "neoism-agent/crates/neoism-agent-neoism-adapter", version = "0.7.118" }
+neoism-agent-plugin-api = { path = "neoism-agent/crates/neoism-agent-plugin-api", version = "0.7.118" }
+neoism-agent-builtins = { path = "neoism-agent/crates/neoism-agent-builtins", version = "0.7.118" }
+neoism-agent-server = { path = "neoism-agent/crates/neoism-agent-server", version = "0.7.118" }
+neoism-extensions = { path = "neoism-extensions", version = "0.7.118" }
+neoism-product-docs = { path = "neoism-product-docs", version = "0.7.118" }
+neoism-sync = { path = "neoism-sync", version = "0.7.118" }
+neoism-remarkable = { path = "neoism-remarkable", version = "0.7.118" }
+neoism-neoworld-core = { path = "neoism-neoworld-core", version = "0.7.118" }
+neoism-neoworld = { path = "neoism-neoworld", version = "0.7.118" }
+neoism-lua = { path = "neoism-lua", version = "0.7.118" }
 
 # Own dependencies
 anyhow = "1.0"
 async-stream = "0.3"
-copa = { path = "copa", default-features = true, version = "0.7.117" }
-neoism-proc-macros = { path = "neoism-proc-macros", version = "0.7.117" }
-corcovado = { path = "corcovado", version = "0.7.117" }
+copa = { path = "copa", default-features = true, version = "0.7.118" }
+neoism-proc-macros = { path = "neoism-proc-macros", version = "0.7.118" }
+corcovado = { path = "corcovado", version = "0.7.118" }
 raw-window-handle = { version = "0.6.2", features = ["std"] }
 parking_lot = { version = "0.12.5", features = [
     "nightly",
@@ -157,9 +157,9 @@ serde_yaml = "0.9"
 sha2 = "0.10"
 
 # Workspace daemon stack
-neoism-protocol = { path = "neoism-protocol", version = "0.7.117" }
-neoism-workspace-index = { path = "neoism-workspace-index", version = "0.7.117" }
-neoism-workspace-daemon = { path = "neoism-workspace-daemon", version = "0.7.117" }
+neoism-protocol = { path = "neoism-protocol", version = "0.7.118" }
+neoism-workspace-index = { path = "neoism-workspace-index", version = "0.7.118" }
+neoism-workspace-daemon = { path = "neoism-workspace-daemon", version = "0.7.118" }
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.7", features = ["ws"] }
 tower = { version = "0.5", features = ["util"] }
@@ -184,7 +184,11 @@ debug = "full"             # No one needs an undebuggable release binary
 codegen-units = 1
 incremental = false
 lto = true                 # reduces binary size by ~14%
-panic = "abort"            # reduces binary size by ~50% in combination with -Zbuild-std-features=panic_immediate_abort
+# Lua's protected errors use longjmp, which performs SEH unwinding on Windows
+# MSVC. With panic=abort, crossing mlua's C-unwind callbacks aborts the process
+# ("panic in a function that cannot unwind") instead of returning a Lua error.
+# Keep the desktop and the packaged Lua runner on the same unwind-safe profile.
+panic = "unwind"
 
 [profile.dev]
 split-debuginfo = "unpacked"

@@ -15,6 +15,8 @@ pub enum SlashCommandAction {
     /// Open the "Connect a provider" flow (provider list → auth method →
     /// OAuth / API-key entry).
     OpenConnectPicker,
+    /// Read-only Codex account limits panel.
+    OpenUsagePicker,
     ApplyThinking(String),
     OpenThinkingPicker,
     ApplyAgent(String),
@@ -96,6 +98,7 @@ pub fn plan_slash_command(text: &str) -> SlashCommandAction {
             SlashCommandAction::OpenModelPicker,
         ),
         "/connect" => SlashCommandAction::OpenConnectPicker,
+        "/usage" => SlashCommandAction::OpenUsagePicker,
         "/think" | "/reasoning" => first_arg_or_picker(
             &args,
             SlashCommandAction::ApplyThinking,
@@ -227,6 +230,12 @@ fn slash_option_specs() -> &'static [SlashOptionSpec] {
             description: "Connect a provider (OAuth or API key)",
             footer: "modal",
             value: "/connect",
+        },
+        SlashOptionSpec {
+            title: "/usage",
+            description: "View Codex account usage and reset times",
+            footer: "modal",
+            value: "/usage",
         },
         SlashOptionSpec {
             title: "/think",

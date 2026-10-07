@@ -251,6 +251,7 @@ pub struct Renderer {
     /// screen render path sets this every frame after laying out the
     /// agent panels; `needs_redraw` reads it so the event-loop redraws
     /// continuously instead of waiting for the next input event.
+    pub background_effects_animating: bool,
     pub neoism_agent_animating: bool,
     pub theme: IdeTheme,
     /// Multiplier applied to chrome row heights / fonts (file tree,
@@ -500,6 +501,7 @@ impl Renderer {
                 p
             },
             notifications: notifications::Notifications::new(),
+            background_effects_animating: false,
             neoism_agent_animating: false,
             theme: IdeTheme::by_name(&config.appearance.theme),
             // Chrome scale tracks the user's configured font size. The

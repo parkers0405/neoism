@@ -13,6 +13,8 @@ pub(crate) struct FrameCadenceStats {
     total_render: Duration,
     min_render: Option<Duration>,
     max_render: Option<Duration>,
+    frame_intervals: Vec<Duration>,
+    render_durations: Vec<Duration>,
 }
 
 impl FrameCadenceStats {
@@ -29,6 +31,8 @@ impl FrameCadenceStats {
             total_render: Duration::ZERO,
             min_render: None,
             max_render: None,
+            frame_intervals: Vec::with_capacity(300),
+            render_durations: Vec::with_capacity(301),
         }
     }
 
@@ -40,6 +44,9 @@ impl FrameCadenceStats {
 
         let interval = now.saturating_duration_since(last_frame_at);
         self.samples += 1;
+        if tracing::enabled!(target: "neoism::frame_pacing", tracing::Level::INFO) {
+            self.frame_intervals.push(interval);
+        }
         self.total_interval += interval;
         self.min_interval =
             Some(self.min_interval.map_or(interval, |min| min.min(interval)));
@@ -53,6 +60,9 @@ impl FrameCadenceStats {
 
     pub(crate) fn record_render_duration(&mut self, duration: Duration) {
         self.render_samples += 1;
+        if tracing::enabled!(target: "neoism::frame_pacing", tracing::Level::INFO) {
+            self.render_durations.push(duration);
+        }
         self.total_render += duration;
         self.min_render = Some(self.min_render.map_or(duration, |min| min.min(duration)));
         self.max_render = Some(self.max_render.map_or(duration, |max| max.max(duration)));
@@ -88,6 +98,10 @@ impl FrameCadenceStats {
             .as_secs_f64()
             * 1000.0;
 
+        if tracing::enabled!(target: "neoism::frame_pacing", tracing::Level::INFO) {
+            self.frame_intervals.sort_unstable();
+            self.render_durations.sort_unstable();
+        }
         tracing::info!(
             target: "neoism::frame_pacing",
             ?window_id,
@@ -99,6 +113,12 @@ impl FrameCadenceStats {
             avg_render_ms,
             min_render_ms,
             max_render_ms,
+            p95_frame_ms = percentile_ms(&self.frame_intervals, 95),
+            p99_frame_ms = percentile_ms(&self.frame_intervals, 99),
+            p95_render_ms = percentile_ms(&self.render_durations, 95),
+            p99_render_ms = percentile_ms(&self.render_durations, 99),
+            target_exceeded_samples = self.frame_intervals.iter().filter(|&&value| value > target_interval).count(),
+            render_target_exceeded_samples = self.render_durations.iter().filter(|&&value| value > target_interval).count(),
             wait_outside_render_ms,
             samples = self.samples,
             render_samples = self.render_samples,
@@ -117,5 +137,29 @@ impl FrameCadenceStats {
         self.total_render = Duration::ZERO;
         self.min_render = None;
         self.max_render = None;
+        self.frame_intervals.clear();
+        self.render_durations.clear();
+    }
+}
+
+// Nearest-rank percentile of sorted render-start intervals, not compositor
+// presentation times. Idle periods remain in these samples, just as in the mean.
+fn percentile_ms(sorted: &[Duration], percentile: usize) -> f64 {
+    let rank = (sorted.len() * percentile).div_ceil(100).saturating_sub(1);
+    sorted.get(rank).copied().unwrap_or_default().as_secs_f64() * 1000.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cadence_percentiles_include_slow_tail_without_averaging_it_away() {
+        let mut samples = vec![Duration::from_millis(6); 95];
+        samples.extend([Duration::from_millis(20); 5]);
+        assert_eq!(percentile_ms(&samples, 95), 6.0);
+        assert_eq!(percentile_ms(&samples, 99), 20.0);
+        assert_eq!(percentile_ms(&[], 99), 0.0);
+        assert_eq!(percentile_ms(&samples[..1], 99), 6.0);
     }
 }

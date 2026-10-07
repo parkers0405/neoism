@@ -28,6 +28,28 @@ neoism.autocmd("GitChanged", function(event)
 end)
 ```
 
+## Native background effects
+
+`neoism.ui.surfaces()` returns the real native background-effect selectors: `composer.agent`, `chrome.top` (action strip at its resolved dock), `status`, `editor.code`, and `file-tree`. Selectors still accept custom names; unsupported sites simply do not consume effects. This is not a list of universally supported CSS properties, and `neoism.ui.surface("chrome.actions", patch)` retains its separate placement semantics.
+
+```lua
+neoism.ui.style("composer.agent", {
+  background = "#000000",
+  background_effects = {
+    { kind = "stars", color = {1, 1, 1, 1}, seed = 17,
+      density = 0.6, speed = 0.6, opacity = 0.85 },
+  },
+})
+-- Empty list explicitly clears an inherited effect; nil inherits.
+neoism.ui.style("editor.code", { background_effects = {} })
+-- Optional static decoration (no animation demand):
+neoism.ui.style("status", { background_effects = {{kind = "scanlines", speed = 0}} })
+```
+
+`background_effects` uses strict tagged native variants (`stars`, `scanlines`), not Lua graphics or per-frame callbacks. Each accepts optional `color` (four finite RGBA channels 0..1, default white), `seed` (u32, default 0), `density`/`speed` (finite 0..4, default 1), and `opacity` (finite 0..1, default 1). Unknown variants/fields or invalid values reject the runtime. Four effects per style, 384 primitives per surface and 1536 per window frame bound cost. `speed=0` pauses; zero density/opacity disables. Clipping contains full glow/AA footprints inside caller geometry and skips occluded primitives before acquiring redraw demand. No hidden/disabled/fully occluded surface creates idle frames.
+
+Packs may publish identical snake_case patches in top-level `ui.styles`. Field-wise precedence is pack → packages → personal Lua, with dotted ancestor inheritance within layers; omitted/null fields inherit and empty effect arrays clear. Pack styles publish with the accepted look snapshot. Reload replaces that layer from the resolved manifest; selecting no pack clears it. Native consumers apply background overrides at these sites, but other style fields remain site-specific. True terminal background effects and web animation lifecycle integration are deferred.
+
 ## UI
 
 `neoism.ui.style(selector, patch)` styles native Sugarloaf surfaces. Selectors inherit through dotted parents. Stable selectors are `app`, `chrome.top`, `chrome.bottom`, `buffer-tabs`, `breadcrumbs`, `status`, `status.item`, `composer`, `file-tree`, `file-tree.row`, `file-tree.row.selected`, `file-tree.row.hover`, `file-tree.icon`, `notes-tree`, `notes-tree.row`, `notes-tree.row.selected`, `notes-tree.row.hover`, `notes-tree.icon`, `agent.chat`, `agent.chat.message`, `agent.chat.message.user`, `agent.chat.message.assistant`, `agent.chat.tool`, `agent.chat.tool.result`, `agent.sidebar`, `editor`, `markdown`, `terminal`, `git`, `settings`, `palette`, `finder`, `notification`, and `modal`.

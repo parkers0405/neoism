@@ -4,6 +4,9 @@
 //! and typed host actions; Sugarloaf and `neoism-ui` retain ownership of every
 //! frame, layout, animation, input event, and scroll operation.
 
+mod background_effects;
+pub use background_effects::*;
+
 mod types;
 pub use types::*;
 

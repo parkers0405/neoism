@@ -413,7 +413,7 @@ fn message_theme(
         | AgentTimelineMessageKind::System
         | AgentTimelineMessageKind::Compaction => "agent.chat.message",
     };
-    crate::customization::styled_ide_theme(*theme, &plugins.styles.resolve(selector))
+    crate::customization::styled_ide_theme(*theme, &crate::primitives::surface_background::resolve_style(selector, &plugins.styles))
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -1,0 +1,18 @@
+[package]
+name = "neoism-interactive-artifacts"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.92"
+license = "MIT"
+description = "Experimental inline HTML artifact contract and asynchronous Servo worker facade"
+
+[features]
+default = []
+# This feature enables only the IPC facade, never a Servo/native-library dependency.
+servo = ["ipc"]
+ipc = ["dep:serde", "dep:serde_json", "keyboard-types/serde"]
+
+[dependencies]
+keyboard-types = "=0.8.3"
+serde = { version = "1.0", features = ["derive", "rc"], optional = true }
+serde_json = { version = "1.0", optional = true }

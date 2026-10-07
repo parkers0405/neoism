@@ -279,6 +279,8 @@ struct CellTextVertexOut {
     uint   atlas     [[flat]];
     float4 color     [[flat]];
     float4 clip_rect [[flat]];
+    float4 glyph_bounds [[flat]];
+    float blur_radius [[flat]];
     float2 tex_coord;
 };
 
@@ -339,6 +341,8 @@ vertex CellTextVertexOut grid_text_vertex(
     out.tex_coord = float2(in.glyph_pos) + float2(in.glyph_size) * corner;
     out.atlas = uint(in.atlas);
     out.clip_rect = clip_rect;
+    out.glyph_bounds = float4(0.0);
+    out.blur_radius = 0.0;
 
  // Foreground color — u8 → float, convert to output space, then
  // premultiply. Same pipeline as `grid_bg_fragment` so glyph and
@@ -364,8 +368,38 @@ vertex CellTextVertexOut grid_text_vertex(
         color.rgb *= color.a;
     }
 
+    // Preserve grid emoji opacity while the shared fragment honors UI reveals.
+    if (uint(in.atlas) == 1u) color.a = 1.0;
     out.color = color;
     return out;
+}
+
+// Strict zero extension prevents reads from adjacent atlas allocations.
+float4 glyph_fetch(texture2d<float> atlas, int2 p, float4 bounds) {
+    if (any(p < int2(bounds.xy)) || any(p >= int2(bounds.zw))) return float4(0.0);
+    return atlas.read(uint2(p));
+}
+float4 glyph_sample(texture2d<float> atlas, float2 uv, float4 bounds) {
+    float2 p = uv - 0.5;
+    int2 b = int2(floor(p));
+    float2 f = fract(p);
+    return mix(mix(glyph_fetch(atlas, b, bounds), glyph_fetch(atlas, b + int2(1, 0), bounds), f.x),
+               mix(glyph_fetch(atlas, b + int2(0, 1), bounds), glyph_fetch(atlas, b + int2(1, 1), bounds), f.x), f.y);
+}
+// Dense 9x9 binomial cloud paired into 25 bounded bilinear taps, matching
+// GLSL/WGSL. Maximum support is 4 physical px, with <=1 px source spacing.
+float4 glyph_blur(texture2d<float> atlas, CellTextVertexOut in) {
+    constexpr float offsets[5] = {-28.0/9.0, -4.0/3.0, 0.0, 4.0/3.0, 28.0/9.0};
+    constexpr float weights[5] = {9.0, 84.0, 70.0, 84.0, 9.0};
+    float4 sum = float4(0.0);
+    float step_px = in.blur_radius / 4.0;
+    for (int y = 0; y < 5; ++y) {
+        for (int x = 0; x < 5; ++x) {
+            float2 offset = float2(offsets[x], offsets[y]) * step_px;
+            sum += glyph_sample(atlas, in.tex_coord + offset, in.glyph_bounds) * weights[x] * weights[y];
+        }
+    }
+    return sum / 65536.0;
 }
 
 fragment float4 grid_text_fragment(
@@ -382,10 +416,14 @@ fragment float4 grid_text_fragment(
         }
     }
 
+    if (in.blur_radius > 0.0) {
+        if ((in.atlas & 1u) == 0u) { return in.color * glyph_blur(atlas_grayscale, in).r; }
+        return glyph_blur(atlas_color, in) * in.color.a;
+    }
     if ((in.atlas & 2u) != 0u) {
         constexpr sampler smooth_sampler(coord::pixel, address::clamp_to_edge, filter::linear);
         if ((in.atlas & 1u) == 0u) { return in.color * atlas_grayscale.sample(smooth_sampler, in.tex_coord).r; }
-        return atlas_color.sample(smooth_sampler, in.tex_coord);
+        return atlas_color.sample(smooth_sampler, in.tex_coord) * in.color.a;
     }
     constexpr sampler atlas_sampler(
         coord::pixel,
@@ -399,7 +437,7 @@ fragment float4 grid_text_fragment(
         return in.color * a;
     } else {
  // Color atlas: pre-multiplied RGBA directly.
-        return atlas_color.sample(atlas_sampler, in.tex_coord);
+        return atlas_color.sample(atlas_sampler, in.tex_coord) * in.color.a;
     }
 }
 
@@ -425,6 +463,7 @@ struct TextVertexIn {
     uchar   atlas      [[attribute(5)]];
     float4  clip_rect  [[attribute(6)]];
     float   raster_scale [[attribute(7)]];
+    float   blur_radius [[attribute(8)]];
 };
 
 vertex CellTextVertexOut text_vertex(
@@ -441,7 +480,10 @@ vertex CellTextVertexOut text_vertex(
     float2 size    = float2(in.glyph_size);
     float scale = in.raster_scale > 0.0 ? in.raster_scale : 1.0;
     float2 origin = in.pos + float2(in.bearings) * scale;
-    float2 quad_px = origin + size * corner * scale;
+    float radius = clamp(in.blur_radius, 0.0, 4.0);
+    float pad = radius > 0.0 ? radius + scale : 0.0;
+    float2 local = size * corner + (corner * 2.0 - 1.0) * pad / scale;
+    float2 quad_px = origin + local * scale;
 
  // Pixel → NDC (y-flip so `pos.y` grows downward in screen space).
     float2 ndc = float2(
@@ -451,9 +493,11 @@ vertex CellTextVertexOut text_vertex(
 
     CellTextVertexOut out;
     out.position  = float4(ndc, 0.0, 1.0);
-    out.tex_coord = float2(in.glyph_pos) + size * corner;
+    out.tex_coord = float2(in.glyph_pos) + local;
     out.atlas = uint(in.atlas) | (in.raster_scale > 0.0 ? 2u : 0u);
     out.clip_rect = in.clip_rect;
+    out.glyph_bounds = float4(float2(in.glyph_pos), float2(in.glyph_pos) + size);
+    out.blur_radius = radius / scale;
 
  // Premultiplied RGBA. Matches the grid text path's blend model.
     float4 color = float4(in.color) / 255.0;

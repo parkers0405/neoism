@@ -1343,6 +1343,10 @@ fn plugin_system_messages(
         ),
         ("instructions".to_string(), serde_json::json!(instructions)),
         (
+            "htmlArtifactsEnabled".to_string(),
+            Value::Bool(std::env::var("NEOISM_SERVO_ARTIFACTS").as_deref() == Ok("1")),
+        ),
+        (
             "serviceFragments".to_string(),
             serde_json::json!(service_fragments),
         ),

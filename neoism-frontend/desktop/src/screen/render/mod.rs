@@ -285,6 +285,9 @@ impl Screen<'_> {
         is_fullscreen: bool,
         mut before_present: impl FnMut(),
     ) -> Option<crate::context::renderable::WindowUpdate> {
+        #[cfg(feature = "servo-artifacts")]
+        self.begin_html_artifact_frame();
+        self.renderer.background_effects_animating = false;
         let window_id = self.context_manager.window_id();
         crate::app::freeze_watchdog::mark_render_stage(window_id, "screen.render.enter");
 
@@ -389,6 +392,27 @@ impl Screen<'_> {
         // before the status sync so this frame's pill shows the
         // freshest reading.
         self.renderer.fps_counter.tick();
+        let window = self.sugarloaf.window_size();
+        let scale = self.sugarloaf.scale_factor();
+        let mut effect_occlusions =
+            self.renderer
+                .active_text_occlusion_rects(window.width, window.height, scale);
+        effect_occlusions.extend(self.renderer.modal.active_rect(window.width, scale));
+        effect_occlusions.extend(
+            self.renderer
+                .command_palette
+                .active_visual_rect(window.width, scale),
+        );
+        effect_occlusions.extend(self.renderer.finder.active_rect((
+            window.width,
+            window.height,
+            scale,
+        )));
+        effect_occlusions.extend(self.renderer.search.active_rect(window.width, scale));
+        neoism_ui::primitives::surface_background::begin_frame(
+            self.renderer.plugins.clone(),
+            effect_occlusions,
+        );
 
         self.sync_status_and_chrome(&frame_ctx);
 
@@ -456,6 +480,9 @@ impl Screen<'_> {
             is_fullscreen,
             &mut before_present,
         );
+
+        frame_ctx.has_animation |=
+            neoism_ui::primitives::surface_background::finish_frame();
 
         // Mark as dirty if we need continuous rendering (e.g.,
         // indeterminate progress bar, trail cursor animation). UI-only

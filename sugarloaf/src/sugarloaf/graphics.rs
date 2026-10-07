@@ -18,6 +18,27 @@ pub struct GraphicDataEntry {
 }
 
 impl GraphicDataEntry {
+    /// Explicit opt-in for changing frame streams; ordinary assets retain their
+    /// content-derived handles. Identity flows through the normal image cache.
+    pub fn from_stream_graphic_data(
+        data: GraphicData,
+        stream: (u64, u64),
+        generation: (u64, u64),
+    ) -> Self {
+        Self {
+            width: data.display_width.unwrap_or(data.width) as f32,
+            height: data.display_height.unwrap_or(data.height) as f32,
+            transmit_time: data.transmit_time,
+            handle: Handle::from_stream_pixels(
+                data.width as u32,
+                data.height as u32,
+                stream,
+                generation,
+                data.pixels,
+            ),
+        }
+    }
+
     /// Create from a GraphicData, taking ownership of pixel data.
     pub fn from_graphic_data(data: GraphicData) -> Self {
         let display_w = data.display_width.unwrap_or(data.width) as f32;

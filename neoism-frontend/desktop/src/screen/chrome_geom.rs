@@ -89,6 +89,7 @@ impl Screen<'_> {
     ) {
         self.conversations_panel_enabled = config.agent.conversations_panel_enabled;
         self.details_panel_enabled = config.agent.details_panel_enabled;
+        self.streaming_text_animation = config.agent.streaming_text_animation;
         let placement = |value| match value {
             neoism_backend::config::SidebarPlacementPreference::Unified => {
                 neoism_ui::panels::left_sidebar_host::SidebarPlacement::Unified
@@ -127,6 +128,7 @@ impl Screen<'_> {
             for item in grid.contexts_mut().values_mut() {
                 if let Some(agent) = item.context_mut().neoism_agent.as_mut() {
                     agent.set_default_chat_source(config.agent.default_chat_source);
+                    agent.set_text_reveal_enabled(config.agent.streaming_text_animation);
                     if !self.details_panel_enabled {
                         agent.side_panel_mut().set_user_hidden(true);
                     }

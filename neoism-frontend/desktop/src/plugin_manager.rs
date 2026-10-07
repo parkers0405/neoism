@@ -1479,9 +1479,7 @@ pub(crate) fn overlay_snapshot(
     let Some(user) = user else { return combined };
     combined.api_version = user.api_version.max(combined.api_version);
     combined.config_patch = user.config_patch.clone();
-    for (selector, style) in &user.styles.0 {
-        combined.styles.insert(selector.clone(), style.clone());
-    }
+    combined.styles.overlay_layer(&user.styles);
     for command in &user.commands {
         combined.commands.retain(|current| current.id != command.id);
         combined.commands.push(command.clone());
@@ -1548,7 +1546,7 @@ fn combined_snapshot(
     for runtime in active.values() {
         let snapshot = runtime.snapshot();
         for (selector, style) in &snapshot.styles.0 {
-            combined.styles.insert(selector.clone(), style.clone());
+            combined.styles.0.entry(selector.clone()).or_default().overlay(Some(style));
         }
         combined.commands.extend(snapshot.commands.clone());
         combined.keymaps.extend(snapshot.keymaps.clone());
@@ -1657,6 +1655,34 @@ fn check_id<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn personal_style_overlay_is_fieldwise_and_parent_priority_is_preserved() {
+        use neoism_lua::{BackgroundEffect, StylePatch};
+        let mut plugins = PluginSnapshot::empty();
+        plugins.styles.insert("composer.agent", StylePatch {
+            background: Some("#000000".into()),
+            foreground: Some("#aaaaaa".into()),
+            background_effects: Some(vec![BackgroundEffect::Stars(Default::default())]),
+            ..Default::default()
+        });
+        let mut user = PluginSnapshot::empty();
+        user.styles.insert("composer", StylePatch {
+            foreground: Some("#ffffff".into()),
+            ..Default::default()
+        });
+        let inherited = overlay_snapshot(&plugins, Some(&user)).styles.resolve("composer.agent");
+        assert_eq!(inherited.background.as_deref(), Some("#000000"));
+        assert_eq!(inherited.foreground.as_deref(), Some("#ffffff"));
+        assert_eq!(inherited.background_effects.unwrap().len(), 1);
+        user.styles.insert("composer.agent", StylePatch {
+            background_effects: Some(vec![]),
+            ..Default::default()
+        });
+        let cleared = overlay_snapshot(&plugins, Some(&user)).styles.resolve("composer.agent");
+        assert_eq!(cleared.background.as_deref(), Some("#000000"));
+        assert_eq!(cleared.background_effects, Some(vec![]));
+    }
 
     #[test]
     fn command_alias_and_dynamic_completion_remain_exact_owner_scoped() {

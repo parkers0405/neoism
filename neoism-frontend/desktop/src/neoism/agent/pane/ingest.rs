@@ -240,6 +240,12 @@ impl NeoismAgentPane {
                     };
                     if structural || !dirty_indices.is_empty() {
                         self.messages = messages;
+                        self.text_reveal.scope(self.session_id.as_deref());
+                        self.text_reveal.reconcile_history(
+                            self.messages
+                                .iter()
+                                .map(|m| (m.id.as_str(), m.text.as_str())),
+                        );
                         if let Some((prompt, first_live_id)) = optimistic_trace {
                             let end = first_live_id
                                 .as_deref()
@@ -2191,6 +2197,12 @@ impl NeoismAgentPane {
                     // Ignore a revert that finished after the user switched away.
                     if self.session_id.as_deref() == Some(session_id.as_str()) {
                         self.messages = messages;
+                        self.text_reveal.scope(self.session_id.as_deref());
+                        self.text_reveal.reconcile_history(
+                            self.messages
+                                .iter()
+                                .map(|m| (m.id.as_str(), m.text.as_str())),
+                        );
                         self.invalidate_timeline_layout();
                         self.hydrate_runtime_status_for_session(&session_id);
                         self.start_session_updates(&session_id);
@@ -2206,6 +2218,10 @@ impl NeoismAgentPane {
                     if self.session_id.as_deref() == Some(session_id.as_str()) {
                         self.system_message(&title, error);
                     }
+                    changed = true;
+                }
+                Ok(NeoismAgentBackgroundUpdate::UsageCompleted { token, result }) => {
+                    self.finish_usage_request(token, result);
                     changed = true;
                 }
                 Ok(NeoismAgentBackgroundUpdate::ConnectCompleted { token, result }) => {
@@ -2273,6 +2289,7 @@ impl NeoismAgentPane {
     }
 
     pub(crate) fn invalidate_timeline_layout(&mut self) {
+        self.text_reveal.scope(self.session_id.as_deref());
         self.timeline_layout_epoch = self.timeline_layout_epoch.wrapping_add(1);
         self.timeline_dirty_message_ids.clear();
         self.timeline_dirty_message_indices.clear();
@@ -2756,6 +2773,8 @@ impl NeoismAgentPane {
     }
 
     pub(crate) fn reset_timeline_navigation_for_session_switch(&mut self) {
+        self.text_reveal.clear();
+        self.text_reveal.scope(self.session_id.as_deref());
         self.timeline_velocity_px_s = 0.0;
         self.timeline_last_tick_at = None;
         self.timeline_wheel_target_px = None;
@@ -2979,7 +2998,22 @@ impl NeoismAgentPane {
                 .iter()
                 .position(|message| message.id == message_id)
             {
+                let before = (self.text_reveal.should_record(&self.messages[index].id)
+                    && matches!(
+                        self.messages[index].kind,
+                        NeoismAgentMessageKind::Assistant
+                            | NeoismAgentMessageKind::Reasoning
+                    ))
+                .then(|| self.messages[index].text.clone());
                 self.messages[index].text.push_str(delta);
+                if let Some(before) = before {
+                    self.text_reveal.scope(self.session_id.as_deref());
+                    self.text_reveal.record(
+                        &self.messages[index].id,
+                        &before,
+                        &self.messages[index].text,
+                    );
+                }
                 self.mark_timeline_message_dirty_at(index);
                 if self.messages[index].kind == NeoismAgentMessageKind::Reasoning {
                     self.move_previous_assistant_after_reasoning(index);
@@ -3000,7 +3034,22 @@ impl NeoismAgentPane {
                 .iter()
                 .position(|message| message.id == part_id)
             {
+                let before = (self.text_reveal.should_record(&self.messages[index].id)
+                    && matches!(
+                        self.messages[index].kind,
+                        NeoismAgentMessageKind::Assistant
+                            | NeoismAgentMessageKind::Reasoning
+                    ))
+                .then(|| self.messages[index].text.clone());
                 self.messages[index].text.push_str(delta);
+                if let Some(before) = before {
+                    self.text_reveal.scope(self.session_id.as_deref());
+                    self.text_reveal.record(
+                        &self.messages[index].id,
+                        &before,
+                        &self.messages[index].text,
+                    );
+                }
                 self.mark_timeline_message_dirty_at(index);
                 if self.messages[index].kind == NeoismAgentMessageKind::Reasoning {
                     self.move_previous_assistant_after_reasoning(index);
@@ -3027,7 +3076,21 @@ impl NeoismAgentPane {
             .iter()
             .rposition(|message| message.kind == message_kind)
         {
+            let before = (self.text_reveal.should_record(&self.messages[index].id)
+                && matches!(
+                    self.messages[index].kind,
+                    NeoismAgentMessageKind::Assistant | NeoismAgentMessageKind::Reasoning
+                ))
+            .then(|| self.messages[index].text.clone());
             self.messages[index].text.push_str(delta);
+            if let Some(before) = before {
+                self.text_reveal.scope(self.session_id.as_deref());
+                self.text_reveal.record(
+                    &self.messages[index].id,
+                    &before,
+                    &self.messages[index].text,
+                );
+            }
             self.mark_timeline_message_dirty_at(index);
             return;
         }
@@ -3058,7 +3121,26 @@ impl NeoismAgentPane {
         let refresh_background = message.tool == "background_task"
             || message.tool == "background_task_result"
             || is_background_completion_card(&message);
+        self.text_reveal.scope(self.session_id.as_deref());
+        let reveal_id = message.id.clone();
+        let reveal_before = (self.text_reveal.should_record(&reveal_id)
+            && matches!(
+                message.kind,
+                NeoismAgentMessageKind::Assistant | NeoismAgentMessageKind::Reasoning
+            ))
+        .then(|| {
+            self.messages
+                .iter()
+                .find(|m| m.id == reveal_id)
+                .map(|m| m.text.clone())
+                .unwrap_or_default()
+        });
         self.upsert_part_message_inner(message);
+        if let Some(before) = reveal_before {
+            if let Some(row) = self.messages.iter().find(|m| m.id == reveal_id) {
+                self.text_reveal.record(&row.id, &before, &row.text);
+            }
+        }
         if refresh_background {
             self.ensure_background_task_activity_clock();
         }

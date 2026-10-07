@@ -512,6 +512,12 @@ impl NeoismAgentPane {
     }
 
     pub fn animation_reason(&self) -> Option<&'static str> {
+        if self
+            .text_reveal
+            .is_animating_for(self.session_id.as_deref())
+        {
+            return Some("text_reveal");
+        }
         if self.wordmark_click_is_animating() {
             return Some("wordmark");
         }

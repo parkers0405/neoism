@@ -628,12 +628,18 @@ impl Application<'_> {
     }
 
     fn pump_daemon(&mut self, event_loop: &ActiveEventLoop) {
+        let perf_start = tracing::enabled!(target: "neoism::frame_work", tracing::Level::DEBUG)
+            .then(Instant::now);
         self.pump_lua();
+        let lua_us = perf_start
+            .map(|start| start.elapsed().as_micros())
+            .unwrap_or(0);
         self.drain_server_health_results();
         self.drain_ssh_attach_results();
         self.drain_server_switch_results();
         let window_ids = self.window_sessions.keys().copied().collect::<Vec<_>>();
         for window_id in window_ids {
+            let window_start = perf_start.map(|_| Instant::now());
             if let Some(session) = self.window_sessions.get_mut(&window_id) {
                 session.refresh_status();
             }
@@ -709,6 +715,7 @@ impl Application<'_> {
             }
             // Capture the source endpoint BEFORE processing workspace events:
             // an earlier event in this batch can switch the active connection.
+            let drain_start = perf_start.map(|_| Instant::now());
             let (endpoint, connection_key, messages, parked_editors) = self
                 .window_sessions
                 .get(&window_id)
@@ -731,6 +738,11 @@ impl Application<'_> {
                     )
                 })
                 .unwrap_or_default();
+            let drain_us = drain_start
+                .map(|start| start.elapsed().as_micros())
+                .unwrap_or(0);
+            let message_count = messages.len();
+            let parked_editor_count = parked_editors.len();
             for (endpoint, message) in parked_editors {
                 if let DaemonServerMessage::Editor {
                     request_id,
@@ -905,6 +917,27 @@ impl Application<'_> {
             self.queue_dead_ssh_reconnect(window_id);
             self.process_window_server_requests(window_id);
             self.flush_window_outbound(window_id);
+            if let Some(start) = window_start {
+                let elapsed_us = start.elapsed().as_micros();
+                if elapsed_us >= 1_000 {
+                    tracing::debug!(
+                        target: "neoism::frame_work",
+                        ?window_id, elapsed_us, drain_us, message_count, parked_editor_count,
+                        "slow window daemon pump outside render"
+                    );
+                }
+            }
+        }
+        if let Some(start) = perf_start {
+            let elapsed_us = start.elapsed().as_micros();
+            if elapsed_us >= 1_000 {
+                tracing::debug!(
+                    target: "neoism::frame_work",
+                    elapsed_us, lua_us,
+                    windows = self.window_sessions.len(),
+                    "slow application pump outside render"
+                );
+            }
         }
     }
 
@@ -8542,19 +8575,10 @@ impl Application<'_> {
                 }
 
                 if animating && !redraw_pending && !redraw_retry_due {
-                    // Pace pure-animation frames to the refresh rate even
-                    // after an over-budget frame. `wait_until()` returns None
-                    // the moment a frame overruns the vblank interval; without
-                    // clamping we fall through to the immediate redraw below
-                    // and the loop free-runs at 100% CPU — every completed
-                    // frame instantly requests the next. A redraw owner that
-                    // never settles (presence_orbs stays "animating" for as
-                    // long as ANY peer is connected) then pins the main thread
-                    // and freezes every window (they share one event loop).
-                    // This bites on a shared workspace the instant a heavy
-                    // frame (reparse + per-frame presence-orb regeneration)
-                    // tips over budget. Genuine damage (`pending_dirty`) still
-                    // renders immediately.
+                    // Overdue damage is ready now. Pure animation still yields
+                    // briefly so an expensive window cannot monopolize the event
+                    // loop, but must not pay another full refresh interval after
+                    // already missing its deadline.
                     let paced_wait = if pending_dirty {
                         route.window.wait_until()
                     } else {
@@ -8562,7 +8586,7 @@ impl Application<'_> {
                             route
                                 .window
                                 .wait_until()
-                                .unwrap_or(route.window.vblank_interval),
+                                .unwrap_or(Duration::from_millis(1)),
                         )
                     };
                     if let Some(wait) = paced_wait {
@@ -8873,16 +8897,32 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                 }
             }
             RioEventType::Rio(RioEvent::RefreshFileTree) => {
-                for route in self.router.routes.values_mut() {
+                for (target_window_id, route) in &mut self.router.routes {
+                    let perf_start = tracing::enabled!(target: "neoism::frame_work", tracing::Level::DEBUG)
+                        .then(Instant::now);
                     let tree_redraw = matches!(
                         refresh_redraw_action(route.window.screen.refresh_file_tree()),
                         RefreshRedrawAction::Redraw
                     );
+                    let tree_us = perf_start
+                        .map(|start| start.elapsed().as_micros())
+                        .unwrap_or(0);
                     // The fs watcher is rooted at the workspace, which
                     // also houses the notes vault — keep the open Alt+N
                     // panel live on the same signal.
                     let notes_redraw =
                         route.window.screen.refresh_notes_sidebar_if_visible();
+                    if let Some(start) = perf_start {
+                        let elapsed_us = start.elapsed().as_micros();
+                        if elapsed_us >= 1_000 {
+                            tracing::debug!(
+                                target: "neoism::frame_work",
+                                window_id = ?target_window_id, elapsed_us, tree_us,
+                                notes_us = elapsed_us.saturating_sub(tree_us),
+                                "slow filesystem refresh outside render"
+                            );
+                        }
+                    }
                     if tree_redraw || notes_redraw {
                         route.request_redraw();
                     }

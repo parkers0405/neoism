@@ -1,10 +1,28 @@
 use super::*;
 use neoism_ui::panels::agent_pane::view::fx::AgentFxKind;
+use neoism_ui::panels::agent_pane::view::markdown::AssistantMarkdownBlock;
 
 const MAX_MARKDOWN_BLOCKS_CACHE: usize = 4096;
 const MAX_MARKDOWN_SOURCE_BYTES: usize = 32 * 1024 * 1024;
 
 impl NeoismAgentPane {
+    /// Keep the actual allocation alive while its positional paint map is cached.
+    pub(crate) fn retain_reveal_markdown_layout(
+        &self,
+        blocks: &[AssistantMarkdownBlock],
+    ) -> Option<CachedMarkdownBlocks> {
+        self.markdown_blocks_cache
+            .borrow()
+            .values()
+            .find(|(cached, _)| cached.as_ptr() == blocks.as_ptr())
+            .map(|(cached, _)| cached.clone())
+    }
+
+    /// Paint-only streaming reveal, enabled by default.
+    pub fn set_text_reveal_enabled(&mut self, enabled: bool) {
+        self.text_reveal.set_enabled(enabled);
+    }
+
     pub fn with_directory(directory: Option<String>) -> Self {
         let mut pane = Self {
             directory,
@@ -255,6 +273,16 @@ impl NeoismAgentPane {
     }
 
     pub(crate) fn take_timeline_dirty_marks(&mut self) -> TimelineDirtyMarks {
+        // Remeasure once at the settled height, including synthetic read groups.
+        self.tool_expand_anims.retain(|id, animation| {
+            if animation.is_active() {
+                return true;
+            }
+            let source_id = id.split_once("..").map_or(id.as_str(), |(first, _)| first);
+            self.timeline_dirty_message_ids
+                .insert(source_id.to_string());
+            false
+        });
         TimelineDirtyMarks {
             ids: std::mem::take(&mut self.timeline_dirty_message_ids),
             indices: std::mem::take(&mut self.timeline_dirty_message_indices),
@@ -543,6 +571,8 @@ impl NeoismAgentPane {
     }
 
     pub fn clear_tool_hit_rects(&mut self) {
+        self.text_reveal.scope(self.session_id.as_deref());
+        self.text_reveal.begin_frame();
         self.tool_hit_rects.clear();
         self.diff_scroll_rects.clear();
         self.markdown_horizontal_scroll_rects.clear();
@@ -963,7 +993,7 @@ impl NeoismAgentPane {
 
     /// A tool row is archived when it sits before the live-trace window of the
     /// current visit (everything, after a reload). Archived cards render
-    /// header-only until clicked. Synthetic read-group ids ("a..b") resolve
+    /// header-only until clicked. Synthetic read-group ids ("a..") resolve
     /// through their first member.
     pub fn tool_archived(&self, id: &str) -> bool {
         if id.is_empty() {
@@ -999,8 +1029,12 @@ impl NeoismAgentPane {
             return false;
         }
         let child_prefix = format!("{id}:");
+        let group_prefix = format!("{id}..");
         self.tool_expand_anims.iter().any(|(key, animation)| {
-            (key == id || key.starts_with(&child_prefix)) && animation.is_active()
+            (key == id
+                || key.starts_with(&child_prefix)
+                || key.starts_with(&group_prefix))
+                && animation.is_active()
         })
     }
 
@@ -1033,20 +1067,11 @@ impl NeoismAgentPane {
             return false;
         };
 
-        if let Some((group_id, child_id)) = id.split_once("::child::") {
-            let next = (group_id.to_string(), child_id.to_string());
-            if self.selected_tool_group_child.as_ref() == Some(&next) {
-                self.selected_tool_group_child = None;
-            } else {
-                self.selected_tool_group_child = Some(next);
-            }
-            self.invalidate_timeline_layout();
-            return true;
-        }
-
-        let is_diff_file = id
-            .rsplit_once(':')
-            .is_some_and(|(_, section)| section.parse::<usize>().is_ok());
+        let child_target = id.split_once("::child::");
+        let is_diff_file = child_target.is_none()
+            && id
+                .rsplit_once(':')
+                .is_some_and(|(_, section)| section.parse::<usize>().is_ok());
         if is_diff_file {
             if !self.expanded_tool_ids.insert(id.clone()) {
                 self.expanded_tool_ids.remove(&id);
@@ -1066,6 +1091,17 @@ impl NeoismAgentPane {
         self.timeline_velocity_px_s = 0.0;
         self.timeline_last_tick_at = None;
 
+        if let Some((group_id, child_id)) = child_target {
+            let next = (group_id.to_string(), child_id.to_string());
+            if self.selected_tool_group_child.as_ref() == Some(&next) {
+                self.selected_tool_group_child = None;
+            } else {
+                self.selected_tool_group_child = Some(next);
+            }
+            self.invalidate_timeline_layout();
+            return true;
+        }
+
         let expanding = !self.expanded_tool_ids.contains(&id);
         if expanding {
             self.expanded_tool_ids.insert(id.clone());
@@ -1077,6 +1113,9 @@ impl NeoismAgentPane {
             .rsplit_once(':')
             .filter(|(_, section)| section.parse::<usize>().is_ok())
             .map_or(id.as_str(), |(parent, _)| parent);
+        let parent_id = parent_id
+            .split_once("..")
+            .map_or(parent_id, |(first, _)| first);
         if let Some(index) = self
             .messages
             .iter()
@@ -1128,6 +1167,7 @@ impl NeoismAgentPane {
     }
 
     pub fn toggle_mermaid_raw_mode(&mut self, key: u64) -> bool {
+        self.text_reveal.invalidate_projections();
         if !self.mermaid_raw_blocks.insert(key) {
             self.mermaid_raw_blocks.remove(&key);
         }
@@ -1145,6 +1185,7 @@ mod source_picker_tests {
     use super::*;
     use neoism_backend::config::DefaultChatSource;
     use neoism_ui::panels::agent_pane::state::side_panel::ConversationSource;
+    use neoism_ui::panels::agent_pane::view::markdown::AssistantMarkdownBlock;
 
     #[test]
     fn source_chip_is_disabled_and_home_agent_chip_still_opens() {

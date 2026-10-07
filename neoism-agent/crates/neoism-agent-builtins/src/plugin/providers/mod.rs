@@ -52,6 +52,12 @@ impl PluginDefinition for ProvidersPlugin {
         };
         for (id, method, path, action) in [
             (
+                "v2.providers.openai.usage",
+                RouteMethod::Get,
+                "/v2/providers/openai/usage",
+                ProviderRouteAction::OpenAiUsage,
+            ),
+            (
                 "v2.providers.list",
                 RouteMethod::Get,
                 "/v2/providers",

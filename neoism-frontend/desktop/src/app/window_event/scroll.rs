@@ -67,6 +67,12 @@ impl Application<'_> {
             return;
         }
 
+        #[cfg(feature = "servo-artifacts")]
+        if route.window.screen.html_artifact_wheel(&delta) {
+            route.request_redraw();
+            return;
+        }
+
         // If the wheel is over the file tree column, scroll
         // the tree's internal viewport instead of the
         // terminal/editor pane.

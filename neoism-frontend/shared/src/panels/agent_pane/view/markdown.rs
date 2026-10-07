@@ -14,8 +14,7 @@ use crate::panels::agent_pane::selection_model::SelectableCaretStop;
 use crate::panels::agent_pane::state::NeoismAgentPane;
 
 use super::code_block::{
-    diff_line_kind, digit_count, render_code_line_background, render_code_line_text,
-    syntax_lang,
+    diff_line_kind, digit_count, render_code_line_background, syntax_lang,
 };
 use super::draw::{
     draw_rect_clipped, draw_rounded_rect_clipped, draw_text_clipped,
@@ -32,7 +31,10 @@ use crate::widgets::stock_card::{
     measure_stock_card, parse_stock_card, render_stock_card, StockCardSpec,
 };
 
+mod html_artifact;
 mod inline_style;
+pub(crate) use html_artifact::estimated_body_height as estimated_artifact_body_height;
+pub use html_artifact::{HtmlArtifactFrame, HtmlArtifactRequest};
 mod mermaid;
 use inline_style::{
     draw_hover_underline, parsed_markdown_inline_line, plain_token_color, rgba_from_u8,
@@ -246,6 +248,12 @@ pub enum AssistantMarkdownBlock {
         copy_target: String,
         content_width: f32,
     },
+    /// Explicit, completed `neoism-html` fence. The source is inert here;
+    /// only an opt-in host may supply an isolated, rasterized frame.
+    HtmlArtifact {
+        source: String,
+        copy_target: String,
+    },
     Mermaid {
         source: String,
         lines: Vec<String>,
@@ -258,6 +266,37 @@ pub enum AssistantMarkdownBlock {
 }
 
 pub trait AgentMarkdownPane {
+    /// Optional strong owner for the allocation used as paint-layout identity.
+    fn retain_reveal_markdown_layout(
+        &self,
+        _blocks: &[AssistantMarkdownBlock],
+    ) -> Option<Rc<Vec<AssistantMarkdownBlock>>> {
+        None
+    }
+    fn text_reveal_state(
+        &mut self,
+    ) -> Option<&mut crate::panels::agent_pane::text_reveal::TextRevealState> {
+        None
+    }
+
+    /// Read an existing texture without activating the engine. This allows
+    /// clipped/occluded artifacts to keep painting while requests are gated.
+    fn cached_html_artifact_frame(&self, _key: &str) -> Option<HtmlArtifactFrame> {
+        None
+    }
+    /// Opt-in host boundary: source revisions and engine lifecycle belong to
+    /// the host. Upload the frame to Sugarloaf's `image_data` as GraphicData
+    /// before returning its image ID. The host must isolate untrusted HTML
+    /// from privileged APIs. Never evaluate HTML in shared UI code.
+    /// Called only for an actually visible, unsuppressed surface with no
+    /// chrome occlusion intersecting its visible rectangle (not overscan).
+    fn html_artifact_frame(
+        &mut self,
+        _request: HtmlArtifactRequest,
+    ) -> Option<HtmlArtifactFrame> {
+        None
+    }
+
     fn cached_markdown_blocks_for(
         &self,
         text: &str,
@@ -322,6 +361,18 @@ pub trait AgentMarkdownPane {
 }
 
 impl AgentMarkdownPane for NeoismAgentPane {
+    fn retain_reveal_markdown_layout(
+        &self,
+        blocks: &[AssistantMarkdownBlock],
+    ) -> Option<Rc<Vec<AssistantMarkdownBlock>>> {
+        NeoismAgentPane::retain_reveal_markdown_layout(self, blocks)
+    }
+    fn text_reveal_state(
+        &mut self,
+    ) -> Option<&mut crate::panels::agent_pane::text_reveal::TextRevealState> {
+        Some(&mut self.text_reveal)
+    }
+
     fn cached_markdown_blocks_for(
         &self,
         text: &str,
@@ -1006,7 +1057,16 @@ fn draw_markdown_inline_run(
     opts: &DrawOpts,
     occlusion_rects: &[[f32; 4]],
 ) -> f32 {
-    let drawn = draw_text_clipped(sugarloaf, x, y, text, opts, occlusion_rects);
+    let reveals = crate::panels::agent_pane::text_reveal::ranges(text);
+    let drawn = super::draw::draw_text_revealed_clipped(
+        sugarloaf,
+        x,
+        y,
+        text,
+        opts,
+        occlusion_rects,
+        &reveals,
+    );
     drawn.max(measure_markdown_inline_run(sugarloaf, text, opts))
 }
 
@@ -1182,9 +1242,12 @@ pub fn layout_assistant_markdown(
         let raw = raw.as_str();
         if code.as_ref().is_some_and(|(fence, _, _)| fence.closes(raw)) {
             let (_, lang, lines) = code.take().expect("matching fence has open code");
-            blocks.push(markdown_code_or_stock_block_laid_out(
-                sugarloaf, lang, lines, s,
-            ));
+            // EOF deliberately does not take this promotion path.
+            blocks.push(
+                html_artifact::completed_fence(&lang, &lines).unwrap_or_else(|| {
+                    markdown_code_or_stock_block_laid_out(sugarloaf, lang, lines, s)
+                }),
+            );
             continue;
         }
         if let Some((_, _, lines)) = code.as_mut() {
@@ -1940,7 +2003,12 @@ pub fn markdown_block_height<P: AgentMarkdownPane>(
         AssistantMarkdownBlock::Table { rows, .. } => {
             measure_laid_out_table_height(rows, s)
         }
-        AssistantMarkdownBlock::Code { lines, .. } => {
+        AssistantMarkdownBlock::Code { lang, lines, .. } => {
+            // A streaming artifact is inert code, but reserves the same slot as
+            // the completed preview. Do not grow the timeline by raw HTML lines.
+            if lang.trim() == "neoism-html" {
+                return html_artifact::block_height(s);
+            }
             let line_count = lines.len().max(1) as f32;
             (MARKDOWN_CODE_HEADER_H
                 + MARKDOWN_CODE_BODY_TOP_PAD
@@ -1966,6 +2034,7 @@ pub fn markdown_block_height<P: AgentMarkdownPane>(
                     .height
             }
         }
+        AssistantMarkdownBlock::HtmlArtifact { .. } => html_artifact::block_height(s),
         AssistantMarkdownBlock::Stock(spec) => measure_stock_card(spec, 0.0, s),
         AssistantMarkdownBlock::Blank => 8.0 * s,
     }
@@ -2023,6 +2092,8 @@ pub fn render_markdown_blocks<P: AgentMarkdownPane>(
     viewport_clip: [f32; 4],
     occlusion_rects: &[[f32; 4]],
 ) {
+    let _reveal_scope =
+        prepare_text_reveal(sugarloaf, pane, blocks, scroll_namespace, w, theme, s);
     let mut cursor_y = y + 6.0 * s;
     // Cull blocks outside the viewport so a huge message only pays text
     // shaping for what's actually on screen, while still advancing the cursor
@@ -2385,6 +2456,25 @@ pub fn render_markdown_blocks<P: AgentMarkdownPane>(
                     occlusion_rects,
                 );
             }
+            AssistantMarkdownBlock::HtmlArtifact {
+                source,
+                copy_target,
+            } => {
+                html_artifact::render(
+                    sugarloaf,
+                    pane,
+                    source,
+                    copy_target,
+                    scroll_namespace,
+                    block_index,
+                    [text_x, cursor_y, (w - 30.0 * s).max(80.0 * s), block_h],
+                    theme,
+                    s,
+                    suppress_interactions,
+                    intersect_rect(viewport_clip, [x, y, w, max_h]).unwrap_or([0.0; 4]),
+                    occlusion_rects,
+                );
+            }
             AssistantMarkdownBlock::Stock(spec) => {
                 render_stock_card(
                     sugarloaf,
@@ -2484,7 +2574,11 @@ pub(super) fn render_markdown_code_block(
     let end_ix = ((clip_bottom - first_line_y + line_h) / line_h)
         .ceil()
         .max(0.0) as usize;
-    let line_count = lines.len().max(1);
+    let line_count = if lang.trim() == "neoism-html" {
+        lines.len().clamp(1, 14)
+    } else {
+        lines.len().max(1)
+    };
     let start_ix = start_ix.min(line_count);
     let end_ix = end_ix.min(line_count);
     let has_visible_text = start_ix < end_ix;
@@ -2733,7 +2827,8 @@ pub(super) fn render_markdown_code_block(
             &line_num_opts,
             occlusion_rects,
         );
-        render_code_line_text(
+        crate::panels::agent_pane::text_reveal::begin_line(line);
+        super::code_block::render_code_line_text_revealed(
             sugarloaf,
             x + code_left_pad - horizontal_scroll,
             line_y,
@@ -2964,6 +3059,7 @@ fn draw_markdown_inline_line<P: AgentMarkdownPane>(
     viewport_clip: [f32; 4],
     occlusion_rects: &[[f32; 4]],
 ) {
+    crate::panels::agent_pane::text_reveal::begin_line(line);
     if !suppress_interactions {
         // Register the RENDERED text and its drawn width — not the raw
         // Markdown `line` — so the selection geometry matches the glyphs we
@@ -3335,7 +3431,18 @@ fn render_markdown_table<P: AgentMarkdownPane>(
                 cell_opts.color = theme.u8(theme.readable_accent(theme.blue));
             }
             let column_x = content_x + column_widths.iter().take(col).sum::<f32>();
+            let mut reveal_offset = 0;
             for (line_ix, line) in table_cell_lines(cell).iter().enumerate() {
+                crate::panels::agent_pane::text_reveal::alias_line(
+                    cell,
+                    line,
+                    reveal_offset,
+                );
+                reveal_offset += rendered_inline_text(line)
+                    .chars()
+                    .filter(|c| !c.is_whitespace())
+                    .map(char::len_utf8)
+                    .sum::<usize>();
                 let line_y =
                     row_y + TABLE_ROW_PAD_Y * s + line_ix as f32 * TABLE_CELL_LINE_H * s;
                 if line_y + TABLE_CELL_LINE_H * s > y + h {
@@ -3562,3 +3669,114 @@ fn markdown_quote(line: &str) -> Option<&str> {
 
 #[cfg(test)]
 mod tests;
+
+fn displayed_projection(
+    blocks: &[AssistantMarkdownBlock],
+    raw_mermaid: impl Fn(u64) -> bool,
+) -> crate::panels::agent_pane::text_reveal::Projection {
+    use crate::panels::agent_pane::text_reveal::Projection;
+    let mut p = Projection::default();
+    for block in blocks {
+        match block {
+            AssistantMarkdownBlock::Paragraph(lines)
+            | AssistantMarkdownBlock::Quote(lines)
+            | AssistantMarkdownBlock::Heading { lines, .. } => {
+                for line in lines {
+                    p.push(line, &rendered_inline_text(line));
+                }
+            }
+            AssistantMarkdownBlock::ListItem(item) => {
+                for line in &item.lines {
+                    p.push(line, &rendered_inline_text(line));
+                }
+            }
+            AssistantMarkdownBlock::Table { rows, .. } => {
+                for row in rows {
+                    for cell in row {
+                        let display = table_cell_lines(cell)
+                            .iter()
+                            .map(|line| rendered_inline_text(line))
+                            .collect::<String>();
+                        p.push(cell, &display);
+                    }
+                }
+            }
+            AssistantMarkdownBlock::Code { lines, .. } => {
+                for line in lines.iter() {
+                    p.push(line, line);
+                }
+            }
+            AssistantMarkdownBlock::Mermaid {
+                lines,
+                diagram,
+                key,
+                ..
+            } if diagram.is_none() || raw_mermaid(*key) => {
+                for line in lines {
+                    p.push(line, line);
+                }
+            }
+            _ => {} // Generated UI and artifacts are not assistant text.
+        }
+    }
+    p
+}
+fn prepare_text_reveal<P: AgentMarkdownPane>(
+    sugarloaf: &mut Sugarloaf,
+    pane: &mut P,
+    blocks: &[AssistantMarkdownBlock],
+    id: &str,
+    width: f32,
+    theme: &IdeTheme,
+    scale: f32,
+) -> Option<crate::panels::agent_pane::text_reveal::PaintScope> {
+    let pending = pane.text_reveal_state()?.pending(id);
+    let mut live_at = None;
+    for update in pending {
+        if let Some(at) = update.at {
+            // The current revision is already laid out by the timeline. Never
+            // parse/layout intermediate token snapshots or relayout this text.
+            live_at = Some(at);
+        } else {
+            // Only the initial update to existing history needs an old-source
+            // layout. A new live body has an empty, trivially sharp baseline.
+            let projection = if update.text.is_empty() {
+                crate::panels::agent_pane::text_reveal::Projection::default()
+            } else {
+                let baseline = layout_assistant_markdown_cached(
+                    sugarloaf,
+                    pane,
+                    &update.text,
+                    width,
+                    theme,
+                    scale,
+                );
+                displayed_projection(&baseline, |key| pane.mermaid_raw_mode(key))
+            };
+            pane.text_reveal_state()?
+                .apply_projection(id, &projection, None);
+        }
+    }
+    if !pane.text_reveal_state()?.has_body(id) {
+        return None;
+    }
+    let identity = blocks.as_ptr() as usize;
+    let projection = pane
+        .text_reveal_state()?
+        .cached_projection(id, identity)
+        .unwrap_or_else(|| {
+            let mut projection =
+                displayed_projection(blocks, |key| pane.mermaid_raw_mode(key));
+            if let Some(owner) = pane.retain_reveal_markdown_layout(blocks) {
+                projection.retain_layout(owner);
+            }
+            Rc::new(projection)
+        });
+    if let Some(at) = live_at {
+        // Diff once from the previous painted identity to the final displayed
+        // revision. Unchanged prefix/suffix retain their previous timestamps.
+        pane.text_reveal_state()?
+            .apply_projection(id, &projection, Some(at));
+    }
+    Some(pane.text_reveal_state()?.paint(id, identity, projection))
+}

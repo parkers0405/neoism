@@ -84,37 +84,61 @@ pub fn draw_checkbox(
     }
 }
 
-/// Curved connector glyph drawn to the left of each tool sub-line.
-/// Uses the same rounded branch as subagent rows.
+fn tool_symbol(tool: &str) -> &'static str {
+    match tool.to_ascii_lowercase().as_str() {
+        "bash" | "shell" | "terminal" | "exec" => "\u{f120}",
+        "read" | "read_file" | "readfile" | "view" | "cat" => "\u{2192}",
+        "grep" | "glob" | "search" | "find" | "rg" | "tool_group" => "\u{f002}",
+        "edit" | "write" | "apply_patch" | "applypatch" | "patch" | "multiedit" => {
+            "\u{f044}"
+        }
+        "webfetch" | "websearch" => "\u{f0ac}",
+        "task" => "\u{f0e8}",
+        "todowrite" | "todoread" => "\u{f0ae}",
+        _ => "\u{f013}",
+    }
+}
+
+pub(super) fn draw_tool_symbol(
+    sugarloaf: &mut Sugarloaf,
+    rect: [f32; 4],
+    tool: &str,
+    opts: &DrawOpts,
+    occlusion_rects: &[[f32; 4]],
+) {
+    draw_icon_centered_with_occlusion(
+        sugarloaf,
+        rect[0],
+        rect,
+        tool_symbol(tool),
+        opts,
+        occlusion_rects,
+        true,
+    );
+}
+
+/// One curved connector anchors the entire expanded details area.
 pub fn draw_tool_connector(
     sugarloaf: &mut Sugarloaf,
     x: f32,
     y: f32,
-    _is_last: bool,
     opts: &DrawOpts,
     occlusion_rects: &[[f32; 4]],
 ) {
     draw_text_clipped(sugarloaf, x, y, "╰─", opts, occlusion_rects);
 }
 
-pub fn draw_tool_title(
-    sugarloaf: &mut Sugarloaf,
-    x: f32,
-    y: f32,
-    title: &str,
-    opts: &DrawOpts,
-    theme: &IdeTheme,
-    occlusion_rects: &[[f32; 4]],
-) {
-    let Some(open) = title.find('(') else {
-        draw_text_clipped(sugarloaf, x, y, title, opts, occlusion_rects);
-        return;
-    };
-    let (name, rest) = title.split_at(open);
-    draw_text_clipped(sugarloaf, x, y, name, opts, occlusion_rects);
-    let mut rest_opts = *opts;
-    rest_opts.bold = false;
-    rest_opts.color = theme.u8(theme.fg);
-    let name_w = sugarloaf.text_mut().measure(name, opts);
-    draw_text_clipped(sugarloaf, x + name_w, y, rest, &rest_opts, occlusion_rects);
+#[cfg(test)]
+mod tests {
+    use super::tool_symbol;
+
+    #[test]
+    fn tools_use_distinct_symbols_and_mcp_tools_use_a_gear() {
+        assert_eq!(tool_symbol("Read"), "\u{2192}");
+        assert_eq!(tool_symbol("Bash"), "\u{f120}");
+        assert_eq!(tool_symbol("grep"), "\u{f002}");
+        assert_eq!(tool_symbol("apply_patch"), "\u{f044}");
+        assert_eq!(tool_symbol("fff_find_files"), "\u{f013}");
+        assert_eq!(tool_symbol(""), "\u{f013}");
+    }
 }

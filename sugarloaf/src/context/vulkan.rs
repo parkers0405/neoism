@@ -86,6 +86,12 @@ struct VulkanFrameLog {
     spike_us: u128,
 }
 
+impl VulkanFrameLog {
+    fn is_spike(self, first_us: u128, second_us: u128) -> bool {
+        first_us >= self.spike_us || second_us >= self.spike_us
+    }
+}
+
 pub struct VulkanContext {
     // Logical fields for the public surface.
     pub size: SugarloafWindowSize,
@@ -416,18 +422,27 @@ impl VulkanContext {
     /// buffer. Returns `None` if the swapchain needed recreation (caller
     /// should skip this frame).
     pub fn acquire_frame(&mut self) -> Option<VulkanFrame> {
+        // Host-side durations only: these are not GPU execution timings.
+        // slot_wait_us includes ready-slot polling plus any fence wait;
+        // fence_wait_us stays zero when a ready slot avoids wait_for_fences.
+        let slot_wait_start = web_time::Instant::now();
+        let mut fence_wait_us = 0;
         let slot = match self.next_ready_frame_slot() {
             Some(slot) => slot,
             None => {
                 let slot = self.frame_index;
                 let in_flight = self.frames[slot].in_flight;
+                let fence_wait_start = web_time::Instant::now();
                 unsafe {
                     match self.device.wait_for_fences(
                         &[in_flight],
                         true,
                         self.frame_wait_timeout_ns,
                     ) {
-                        Ok(()) => slot,
+                        Ok(()) => {
+                            fence_wait_us = fence_wait_start.elapsed().as_micros();
+                            slot
+                        }
                         Err(vk::Result::TIMEOUT) => {
                             tracing::warn!(
                                 target: "sugarloaf::vulkan",
@@ -442,10 +457,12 @@ impl VulkanContext {
                 }
             }
         };
+        let slot_wait_us = slot_wait_start.elapsed().as_micros();
         self.frame_index = slot;
         self.collect_retired_swapchains();
 
         let sync = &self.frames[slot];
+        let acquire_start = web_time::Instant::now();
         let (image_index, suboptimal) = unsafe {
             match self.swapchain_loader.acquire_next_image(
                 self.swapchain,
@@ -473,6 +490,31 @@ impl VulkanContext {
                 Err(e) => panic!("acquire_next_image failed: {e:?}"),
             }
         };
+        let acquire_us = acquire_start.elapsed().as_micros();
+        let spike = self.frame_log.is_spike(slot_wait_us, acquire_us);
+        if spike {
+            tracing::warn!(
+                target: "sugarloaf::vulkan::frame",
+                slot,
+                image_index,
+                slot_wait_us,
+                fence_wait_us,
+                acquire_us,
+                spike_threshold_us = self.frame_log.spike_us,
+                "Vulkan frame slot wait + swapchain acquire spike"
+            );
+        } else if self.frame_log.enabled {
+            tracing::debug!(
+                target: "sugarloaf::vulkan::frame",
+                slot,
+                image_index,
+                slot_wait_us,
+                fence_wait_us,
+                acquire_us,
+                spike_threshold_us = self.frame_log.spike_us,
+                "Vulkan frame slot wait + swapchain acquire"
+            );
+        }
         if suboptimal {
             self.needs_recreate = true;
         }
@@ -525,9 +567,12 @@ impl VulkanContext {
                 .wait_dst_stage_mask(&wait_stages)
                 .command_buffers(&cmd_buffers)
                 .signal_semaphores(&signal_semaphores);
+            // Measure the CPU's queue_submit call, not asynchronous GPU work.
+            let queue_submit_start = web_time::Instant::now();
             self.device
                 .queue_submit(self.queue, &[submit], sync.in_flight)
                 .expect("queue_submit");
+            let submit_us = queue_submit_start.elapsed().as_micros();
 
             let swapchains = [self.swapchain];
             let image_indices = [frame.image_index];
@@ -551,15 +596,18 @@ impl VulkanContext {
                 Err(e) => panic!("queue_present failed: {e:?}"),
             }
             let present_us = present_start.elapsed().as_micros();
+            // Total also includes command-buffer finalization and CPU setup.
             let submit_total_us = submit_start.elapsed().as_micros();
-            if self.frame_log.enabled || present_us >= self.frame_log.spike_us {
-                if present_us >= self.frame_log.spike_us {
+            let spike = self.frame_log.is_spike(submit_us, present_us);
+            if self.frame_log.enabled || spike {
+                if spike {
                     tracing::warn!(
                         target: "sugarloaf::vulkan::frame",
                         slot = frame.slot,
                         image_index = frame.image_index,
                         present_mode = ?self.present_mode,
                         submit_total_us,
+                        submit_us,
                         present_us,
                         spike_threshold_us = self.frame_log.spike_us,
                         "Vulkan queue_submit + queue_present spike"
@@ -571,6 +619,7 @@ impl VulkanContext {
                         image_index = frame.image_index,
                         present_mode = ?self.present_mode,
                         submit_total_us,
+                        submit_us,
                         present_us,
                         spike_threshold_us = self.frame_log.spike_us,
                         "Vulkan queue_submit + queue_present"
@@ -1576,6 +1625,21 @@ fn env_flag(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frame_log_detects_either_cpu_duration_at_threshold() {
+        let log = VulkanFrameLog {
+            enabled: false,
+            spike_us: 8_000,
+        };
+        assert!(!log.is_spike(7_999, 7_999));
+        // A slow submit (or slot wait) must not be hidden by a fast present
+        // (or acquire), even with per-frame logging disabled.
+        assert!(log.is_spike(8_000, 1));
+        assert!(log.is_spike(1, 8_000));
+        assert!(log.is_spike(9_000, 9_000));
+        assert!(VulkanFrameLog { spike_us: 0, ..log }.is_spike(0, 0));
+    }
 
     #[test]
     fn frame_wait_timeout_follows_high_refresh_without_exceeding_cap() {

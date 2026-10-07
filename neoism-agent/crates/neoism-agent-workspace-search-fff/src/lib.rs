@@ -45,6 +45,7 @@ struct Entry {
     picker: SharedFilePicker,
     generation: u64,
     last_used: u64,
+    watching: bool,
 }
 #[derive(Default)]
 struct RegistryState {
@@ -73,26 +74,34 @@ impl PickerRegistry {
             })?;
             state.clock = state.clock.wrapping_add(1);
             let used = state.clock;
-            if let Some(entry) = state.entries.get_mut(&root) {
+            let watch = state.pins.contains_key(&root) && watch_safe_root(&root);
+            // A watcherless index is a snapshot, not a cache we can safely reuse:
+            // rebuild on every acquisition (including warm) so additions, removals,
+            // renames, metadata and cached content all reflect a new scan. Pinning
+            // an already-warmed root promotes it on its next acquisition.
+            if watch && state.entries.get(&root).is_some_and(|entry| entry.watching) {
+                let entry = state.entries.get_mut(&root).unwrap();
                 entry.last_used = used;
                 (entry.picker.clone(), entry.generation, Vec::new())
             } else {
-                let picker = build_picker(&root)?;
+                let picker = build_picker(&root, watch)?;
                 state.next_generation = state.next_generation.wrapping_add(1);
                 let generation = state.next_generation;
-                state.entries.insert(
+                let replaced = state.entries.insert(
                     root.clone(),
                     Entry {
                         picker: picker.clone(),
                         generation,
                         last_used: used,
+                        watching: watch,
                     },
                 );
-                let evicted = evict_lru(&mut state, self.capacity);
+                let mut evicted = evict_lru(&mut state, self.capacity);
+                evicted.extend(replaced);
                 (picker, generation, evicted)
             }
         };
-        drop(evicted);
+        retire_entries(evicted);
         Ok((root, generation, picker))
     }
     fn with_picker<T>(
@@ -121,7 +130,7 @@ impl PickerRegistry {
                 state.entries.get(&root).is_some_and(|entry| entry.generation == generation)
                     .then(|| state.entries.remove(&root)).flatten()
             });
-            drop(removed);
+            retire_entries(removed);
             anyhow::anyhow!("workspace search engine panicked ({}); narrow the path/pattern or lower the limit", panic_message(payload.as_ref()))
         })
     }
@@ -140,17 +149,21 @@ impl PickerRegistry {
     }
     fn unpin(&self, root: &Path) {
         let removed = if let Ok(mut state) = self.state.lock() {
+            let mut removed = Vec::new();
             if let Some(count) = state.pins.get_mut(root) {
                 *count = count.saturating_sub(1);
                 if *count == 0 {
                     state.pins.remove(root);
+                    // Do not leave a workspace watcher alive in the unpinned LRU.
+                    removed.extend(state.entries.remove(root));
                 }
             }
-            evict_lru(&mut state, self.capacity)
+            removed.extend(evict_lru(&mut state, self.capacity));
+            removed
         } else {
             Vec::new()
         };
-        drop(removed);
+        retire_entries(removed);
     }
     #[cfg(test)]
     fn len(&self) -> usize {
@@ -165,6 +178,21 @@ impl PickerRegistry {
             .lock()
             .map(|s| s.entries.contains_key(&canonical_root(root)))
             .unwrap_or(false)
+    }
+}
+
+// Stop outside the registry mutex: searches can hold the picker lock. Cancel
+// also prevents an initial scan from installing its watcher after retirement.
+fn retire_entries(entries: impl IntoIterator<Item = Entry>) {
+    for entry in entries {
+        if entry.watching {
+            if let Ok(mut guard) = entry.picker.write() {
+                if let Some(picker) = guard.as_mut() {
+                    picker.cancel();
+                    picker.stop_background_monitor();
+                }
+            }
+        }
     }
 }
 
@@ -203,6 +231,8 @@ impl WorkspaceSearchRootPin for PickerRootPin {
 }
 
 /// Instance-owned FFF adapter. Each instance has independent indexes and pins.
+/// Only pinned roots outside Neoism's log tree reuse watched indexes. Other
+/// roots get a fresh watcherless index per acquisition; `warm` is not a pin.
 #[derive(Clone)]
 pub struct FffWorkspaceSearchService {
     registry: Arc<PickerRegistry>,
@@ -844,7 +874,7 @@ impl LineMatcher {
     }
 }
 
-fn build_picker(root: &Path) -> anyhow::Result<SharedFilePicker> {
+fn build_picker(root: &Path, watch: bool) -> anyhow::Result<SharedFilePicker> {
     let shared = SharedFilePicker::default();
     FilePicker::new_with_shared_state(
         shared.clone(),
@@ -854,7 +884,7 @@ fn build_picker(root: &Path) -> anyhow::Result<SharedFilePicker> {
             mode: FFFMode::Ai,
             enable_mmap_cache: env_flag("NEOISM_AGENT_FFF_MMAP"),
             enable_content_indexing: false,
-            watch: true,
+            watch,
             follow_symlinks: false,
             enable_fs_root_scanning: false,
             enable_home_dir_scanning: false,
@@ -978,6 +1008,39 @@ fn discoverable_path(path: &str, include_hidden: bool) -> bool {
         || !components
             .iter()
             .any(|component| component.starts_with('.'))
+}
+// FFF's WatchOptions::ignore filters subscription delivery only, not the
+// indexer's event processing/logging. Until FFF exposes index-level exclusions,
+// roots overlapping our logs must use fresh watcherless snapshots, even pinned.
+fn watch_safe_root(root: &Path) -> bool {
+    !broad_root(root) && neoism_log_dir().is_none_or(|logs| !paths_overlap(root, &logs))
+}
+fn paths_overlap(root: &Path, logs: &Path) -> bool {
+    let root = canonical_root(root);
+    let logs = canonical_root(logs);
+    logs.starts_with(&root) || root.starts_with(&logs)
+}
+fn neoism_log_dir() -> Option<PathBuf> {
+    let config = std::env::var("NEOISM_CONFIG_HOME").ok().map(PathBuf::from);
+    let config = config.or_else(|| {
+        #[cfg(target_os = "windows")]
+        {
+            dirs::home_dir().map(|home| home.join("AppData/Local/neoism"))
+        }
+        #[cfg(target_os = "macos")]
+        {
+            dirs::home_dir().map(|home| home.join(".config/neoism"))
+        }
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+        {
+            std::env::var("XDG_CONFIG_HOME")
+                .ok()
+                .map(PathBuf::from)
+                .or_else(|| dirs::home_dir().map(|home| home.join(".config")))
+                .map(|config| config.join("neoism"))
+        }
+    });
+    config.map(|config| config.join("log"))
 }
 fn broad_root(root: &Path) -> bool {
     let root = canonical_root(root);
@@ -1139,6 +1202,147 @@ mod tests {
         service.warm(&b.0).unwrap();
         assert!(service.registry.contains(&b.0));
     }
+    #[test]
+    fn ad_hoc_indexes_are_watcherless_and_rebuilt_after_edits() {
+        let root = Root::new("fresh");
+        let service = FffWorkspaceSearchService::new();
+        let find = || {
+            service
+                .find_files(&FindFilesRequest {
+                    root: root.0.clone(),
+                    query: "*.txt".into(),
+                    include_hidden: false,
+                    offset: 0,
+                    limit: 20,
+                    control: neoism_agent_service_api::WorkspaceSearchRequestControl::default(),
+                })
+                .unwrap()
+        };
+        let grep = |pattern: &str| {
+            service
+                .grep(&GrepWorkspaceRequest {
+                    root: root.0.clone(),
+                    path: root.0.clone(),
+                    patterns: vec![pattern.into()],
+                    include: None,
+                    excludes: Vec::new(),
+                    include_hidden: false,
+                    case_sensitive: true,
+                    context_lines: 0,
+                    mode: WorkspaceSearchMode::Plain,
+                    limit: 20,
+                    control: neoism_agent_service_api::WorkspaceSearchRequestControl::default(),
+                })
+                .unwrap()
+        };
+        std::fs::write(root.0.join("before.txt"), "old content\n").unwrap();
+        service.warm(&root.0).unwrap();
+        let (_, first, snapshot) = service.registry.picker(&root.0).unwrap();
+        assert!(snapshot.wait_for_scan(INITIAL_SCAN_WAIT));
+        assert!(!snapshot.read().unwrap().as_ref().unwrap().has_watcher());
+        assert!(find().items.iter().any(|item| item.path == "before.txt"));
+        assert!(grep("old content")
+            .items
+            .iter()
+            .any(|item| item.text.contains("old content")));
+        std::fs::write(root.0.join("before.txt"), "new needle content\n").unwrap();
+        assert!(grep("new needle")
+            .items
+            .iter()
+            .any(|item| item.text.contains("new needle")));
+        std::fs::rename(root.0.join("before.txt"), root.0.join("after.txt")).unwrap();
+        std::fs::write(root.0.join("added.txt"), "new file\n").unwrap();
+        let result = find();
+        assert_eq!(result.engine.as_deref(), Some(ENGINE_ID));
+        assert!(result.items.iter().any(|item| item.path == "after.txt"));
+        assert!(result.items.iter().any(|item| item.path == "added.txt"));
+        assert!(!result.items.iter().any(|item| item.path == "before.txt"));
+        std::fs::remove_file(root.0.join("after.txt")).unwrap();
+        assert!(!find().items.iter().any(|item| item.path == "after.txt"));
+        let (_, last, _) = service.registry.picker(&root.0).unwrap();
+        assert_ne!(first, last);
+    }
+
+    #[test]
+    fn pins_promote_snapshots_reuse_workspace_index_and_retire_on_last_drop() {
+        let root = Root::new("watch");
+        let service = FffWorkspaceSearchService::new();
+        let (_, snapshot_generation, snapshot) =
+            service.registry.picker(&root.0).unwrap();
+        assert!(!snapshot.read().unwrap().as_ref().unwrap().has_watcher());
+        let pin = service.pin_root(&root.0).unwrap();
+        let second_pin = service.pin_root(&root.0).unwrap();
+        let (_, generation, watched) = service.registry.picker(&root.0).unwrap();
+        assert_ne!(snapshot_generation, generation);
+        assert!(watched.read().unwrap().as_ref().unwrap().has_watcher());
+        assert_eq!(service.registry.picker(&root.0).unwrap().1, generation);
+        drop(pin);
+        assert_eq!(service.registry.picker(&root.0).unwrap().1, generation);
+        assert!(watched.wait_for_scan(INITIAL_SCAN_WAIT));
+        assert!(watched.wait_for_watcher(INITIAL_SCAN_WAIT));
+        std::fs::write(root.0.join("live.txt"), "live edit\n").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if watched
+                .read()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .get_file_by_path(root.0.join("live.txt"))
+                .is_some()
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "workspace watcher missed a new file"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(service.registry.picker(&root.0).unwrap().1, generation);
+        drop(second_pin);
+        assert!(!service.registry.contains(&root.0));
+        // Even a caller retaining the old shared handle cannot retain its monitor.
+        assert!(!watched.read().unwrap().as_ref().unwrap().is_watcher_ready());
+        let (_, next, snapshot) = service.registry.picker(&root.0).unwrap();
+        assert_ne!(next, generation);
+        assert!(!snapshot.read().unwrap().as_ref().unwrap().has_watcher());
+    }
+
+    #[test]
+    fn releasing_pin_during_initial_scan_cannot_install_watcher_later() {
+        let root = Root::new("unpin-scan");
+        let service = FffWorkspaceSearchService::new();
+        let pin = service.pin_root(&root.0).unwrap();
+        let (_, _, picker) = service.registry.picker(&root.0).unwrap();
+        drop(pin);
+        assert!(!service.registry.contains(&root.0));
+        assert!(picker.wait_for_indexing_complete(INITIAL_SCAN_WAIT));
+        assert!(!picker.read().unwrap().as_ref().unwrap().is_watcher_ready());
+    }
+
+    #[test]
+    fn log_overlap_disables_watching_even_when_pinned() {
+        let root = Root::new("logs");
+        let logs = root.0.join("neoism/log");
+        std::fs::create_dir_all(&logs).unwrap();
+        assert!(paths_overlap(&root.0, &logs));
+        assert!(paths_overlap(&logs, &logs));
+        assert!(paths_overlap(&logs.join("nested"), &logs));
+        assert!(!paths_overlap(&root.0.join("project"), &logs));
+        assert!(!paths_overlap(&root.0.join("neoism/log-other"), &logs));
+        if let Some(logs) = neoism_log_dir() {
+            assert!(!watch_safe_root(&logs));
+            let service = FffWorkspaceSearchService::new();
+            let _pin = service.pin_root(&logs).unwrap();
+            // Do not scan the real log directory in this regression test.
+            assert!(!watch_safe_root(&canonical_root(&logs)));
+        }
+        if let Some(home) = dirs::home_dir() {
+            assert!(!watch_safe_root(&home));
+        }
+    }
+
     #[test]
     fn streaming_is_bounded_and_ignored() {
         let root = Root::new("stream");

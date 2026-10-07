@@ -726,6 +726,7 @@ impl Screen<'_> {
             }
             for item in grid.contexts_mut().values_mut() {
                 if let Some(agent) = item.val.neoism_agent.as_mut() {
+                    agent.set_text_reveal_enabled(self.streaming_text_animation);
                     agent.set_event_wake(agent_event_wake.clone());
                     // An inactive workspace still owns a live subscription. Consume
                     // its bounded batch so reopening it cannot replay a long queue.
@@ -744,6 +745,7 @@ impl Screen<'_> {
                 continue;
             };
             let is_visible = visible_nodes.contains(key);
+            agent.set_text_reveal_enabled(self.streaming_text_animation);
             agent.set_event_wake(agent_event_wake.clone());
             agent.set_local_presence_name(Some(local_presence_name.clone()));
             // Warm the tiny first page while the visible Agent pane is coming
@@ -848,6 +850,21 @@ impl Screen<'_> {
             let animation_reason = agent.animation_reason();
             agent_animating |= animation_reason.is_some();
             agent_animating_reason = agent_animating_reason.or(animation_reason);
+        }
+        #[cfg(feature = "servo-artifacts")]
+        {
+            if self.sync_html_artifacts() {
+                // Projection precedes mailbox sync. Schedule exactly one paced
+                // pass for a first snapshot/notification, not animation ownership.
+                self.context_manager.event_proxy().send_event(
+                    neoism_backend::event::RioEventType::Rio(
+                        neoism_backend::event::RioEvent::RenderRoute(
+                            self.context_manager.current().route_id,
+                        ),
+                    ),
+                    self.context_manager.window_id(),
+                );
+            }
         }
         let details_button_changed = self.renderer.top_bar.is_right_button_visible()
             != active_agent_details_available;

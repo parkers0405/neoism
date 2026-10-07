@@ -110,6 +110,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             conversations_visible: false,
             conversations_panel_enabled: true,
             details_panel_enabled: true,
+            streaming_text_animation: true,
             conversations_resize: None,
             pending_conversation_open: None,
             pending_conversation_new: None,
@@ -473,6 +474,13 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         self.details_panel_enabled
     }
 
+    pub fn set_streaming_text_animation(&mut self, enabled: bool) {
+        self.streaming_text_animation = enabled;
+        if let Some(pane) = self.agent_pane.as_mut() {
+            pane.set_text_reveal_enabled(enabled);
+        }
+    }
+
     pub fn set_agent_panel_preferences(
         &mut self,
         conversations_enabled: bool,
@@ -573,6 +581,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
     /// the catalog is painted by Chrome even when another tab is selected.
     pub fn install_agent_pane(&mut self, pane: NeoismAgentPane) {
         let mut pane = pane;
+        pane.set_text_reveal_enabled(self.streaming_text_animation);
         if !self.details_panel_enabled {
             pane.side_panel_mut().set_user_hidden(true);
         }

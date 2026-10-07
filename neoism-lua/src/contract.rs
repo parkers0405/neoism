@@ -1518,6 +1518,7 @@ pub fn contract_schema() -> Value {
         "handles": ["document", "pane", "tab", "workspace", "selection", "cursor", "range"],
         "events": events,
         "asyncResults": async_results,
+        "backgroundEffects": { "surfaces": crate::BACKGROUND_EFFECT_SURFACES, "variants": ["stars", "scanlines"], "maxEffectsPerStyle": 4, "callbacks": false },
         "platform": crate::platform_capabilities(),
         "security": { "luaOnRenderThread": false, "opaqueHostResources": true, "defaultTier": "sandboxed_lua" }
     })
@@ -2118,8 +2119,17 @@ pub fn generate_lua_api_annotations() -> String {
 ---@field result? unknown
 ---@field error? {{ code: string, message: string }}
 
+---@class NeoismBackgroundEffect Native data, never a Lua paint callback.
+---@field kind 'stars'|'scanlines'
+---@field color? number[] Four finite RGBA channels in 0..1; default white.
+---@field seed? integer Unsigned 32-bit seed; default 0.
+---@field density? number Finite 0..4; default 1, zero disables.
+---@field speed? number Finite 0..4; default 1, zero pauses.
+---@field opacity? number Finite 0..1; default 1, zero disables.
+
 ---@class NeoismUiApi
----@field style fun(selector: string, value: table)
+---@field surfaces fun(): string[] Native background_effects selectors only; not CSS or placement capabilities.
+---@field style fun(selector: string, value: table) background_effects?: NeoismBackgroundEffect[] (max 4); nil inherits, empty list disables.
 ---@field contribute fun(value: table)
 ---@field view fun(id: string, value: table)
 ---@field surface fun(id: string, value: table)

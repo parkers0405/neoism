@@ -215,7 +215,22 @@ impl NeoismAgentPane {
                 .iter()
                 .position(|message| message.id == message_id)
             {
+                let before = (self.text_reveal.should_record(&self.messages[index].id)
+                    && matches!(
+                        self.messages[index].kind,
+                        NeoismAgentMessageKind::Assistant
+                            | NeoismAgentMessageKind::Reasoning
+                    ))
+                .then(|| self.messages[index].text.clone());
                 self.messages[index].text.push_str(delta);
+                if let Some(before) = before {
+                    self.text_reveal.scope(self.session_id.as_deref());
+                    self.text_reveal.record(
+                        &self.messages[index].id,
+                        &before,
+                        &self.messages[index].text,
+                    );
+                }
                 self.mark_timeline_message_dirty_at(index);
                 return;
             }
@@ -233,7 +248,22 @@ impl NeoismAgentPane {
                 .iter()
                 .position(|message| message.id == part_id)
             {
+                let before = (self.text_reveal.should_record(&self.messages[index].id)
+                    && matches!(
+                        self.messages[index].kind,
+                        NeoismAgentMessageKind::Assistant
+                            | NeoismAgentMessageKind::Reasoning
+                    ))
+                .then(|| self.messages[index].text.clone());
                 self.messages[index].text.push_str(delta);
+                if let Some(before) = before {
+                    self.text_reveal.scope(self.session_id.as_deref());
+                    self.text_reveal.record(
+                        &self.messages[index].id,
+                        &before,
+                        &self.messages[index].text,
+                    );
+                }
                 self.mark_timeline_message_dirty_at(index);
                 return;
             }
@@ -257,7 +287,21 @@ impl NeoismAgentPane {
             .iter()
             .rposition(|message| message.kind == message_kind)
         {
+            let before = (self.text_reveal.should_record(&self.messages[index].id)
+                && matches!(
+                    self.messages[index].kind,
+                    NeoismAgentMessageKind::Assistant | NeoismAgentMessageKind::Reasoning
+                ))
+            .then(|| self.messages[index].text.clone());
             self.messages[index].text.push_str(delta);
+            if let Some(before) = before {
+                self.text_reveal.scope(self.session_id.as_deref());
+                self.text_reveal.record(
+                    &self.messages[index].id,
+                    &before,
+                    &self.messages[index].text,
+                );
+            }
             self.mark_timeline_message_dirty_at(index);
             return;
         }
@@ -288,7 +332,26 @@ impl NeoismAgentPane {
         let refresh_background = message.tool == "background_task"
             || message.tool == "background_task_result"
             || is_background_completion_card(&message);
+        self.text_reveal.scope(self.session_id.as_deref());
+        let reveal_id = message.id.clone();
+        let reveal_before = (self.text_reveal.should_record(&reveal_id)
+            && matches!(
+                message.kind,
+                NeoismAgentMessageKind::Assistant | NeoismAgentMessageKind::Reasoning
+            ))
+        .then(|| {
+            self.messages
+                .iter()
+                .find(|m| m.id == reveal_id)
+                .map(|m| m.text.clone())
+                .unwrap_or_default()
+        });
         self.upsert_part_message_inner(message);
+        if let Some(before) = reveal_before {
+            if let Some(row) = self.messages.iter().find(|m| m.id == reveal_id) {
+                self.text_reveal.record(&row.id, &before, &row.text);
+            }
+        }
         if refresh_background {
             self.refresh_background_task_activity_clock();
         }

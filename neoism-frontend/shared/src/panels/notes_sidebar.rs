@@ -1279,12 +1279,12 @@ impl NotesSidebar {
         let row_pad_x = ROW_PADDING_X * self.scale;
         let indent_px = INDENT_PX * self.scale;
         let icon_gap = ICON_GAP * self.scale;
-        let row_style = plugins.map(|plugins| plugins.styles.resolve("notes-tree.row"));
+        let row_style = plugins.map(|plugins| crate::primitives::surface_background::resolve_style("notes-tree.row", &plugins.styles));
         let selected_style =
-            plugins.map(|plugins| plugins.styles.resolve("notes-tree.row.selected"));
+            plugins.map(|plugins| crate::primitives::surface_background::resolve_style("notes-tree.row.selected", &plugins.styles));
         let hover_style =
-            plugins.map(|plugins| plugins.styles.resolve("notes-tree.row.hover"));
-        let icon_style = plugins.map(|plugins| plugins.styles.resolve("notes-tree.icon"));
+            plugins.map(|plugins| crate::primitives::surface_background::resolve_style("notes-tree.row.hover", &plugins.styles));
+        let icon_style = plugins.map(|plugins| crate::primitives::surface_background::resolve_style("notes-tree.icon", &plugins.styles));
         let frame_stroke = (FRAME_STROKE * self.scale).max(2.0);
         let frame_radius = FRAME_RADIUS * self.scale;
         let content_x = x_left + frame_stroke;

@@ -34,6 +34,37 @@ Each pack lives under `~/.config/neoism/packs/<id>/` with a `pack.json` manifest
 
 An `only` root that is not installed rejects the candidate. Missing IDs in `overlay` are harmless. A missing or disabled dependency causes the normal plugin graph failure, so Neoism retains the last working plugin generation rather than activating a partial graph.
 
+## Native surface backgrounds
+
+Packs and Lua use the same retained `StylePatch` data. This example keeps Pastel Dark, explicitly makes the Agent composer black, and adds sparse animated white stars behind its text:
+
+```json
+{
+  "pack": {
+    "name": "Quiet Stars",
+    "theme": "pastel_dark"
+  },
+  "ui": {
+    "styles": {
+      "composer.agent": {
+        "background": "#000000",
+        "background_effects": [
+          { "kind": "stars", "color": [1, 1, 1, 1], "seed": 17, "density": 0.6, "speed": 0.6, "opacity": 0.85 }
+        ]
+      }
+    }
+  }
+}
+```
+
+`ui.styles` is a top-level map with the same snake_case fields as `neoism.ui.style(selector, patch)`. Effects default off. Omitted/null effects inherit; `[]` disables them. Fields merge in priority order: accepted pack, editor packages, personal `init.lua`. Dotted parents inherit broad to specific within each layer. The accepted pack's styles publish with its look snapshot; changing packs or choosing None clears the previous pack layer, while rejected pack-apply candidates keep the last working snapshot.
+
+Native effect surfaces are `composer.agent`, `chrome.top` (the actual action strip, including left/right/bottom docks), `status`, `editor.code`, and `file-tree`. `neoism.ui.surfaces()` reports this list. Stars include analytically contained glow/antialiasing footprints inside the caller's rounded bounds; foreground text and controls paint afterward. A second variant, `scanlines`, paints restrained moving dashes using the same bounded geometry and clipping. These are extensible native variants, not arbitrary Lua graphics or paint callbacks. Unrecognized effects/fields and invalid bounds reject the candidate. Custom style selectors remain allowed but do not create new render surfaces.
+
+Each effect accepts `kind`, RGBA `color` (four finite channels 0..1), unsigned 32-bit `seed`, finite `density` and `speed` (0..4), and finite `opacity` (0..1). Defaults are white, seed 0, density/speed/opacity 1. At most four effects are allowed; native paint is capped at 384 primitives per surface and 1536 per window frame. `speed = 0` pauses animation; zero density/opacity disables paint. Animation demand resets every window frame and exists only for visible painted animated primitives. Hidden, disabled, and fully occluded surfaces add no idle redraw demand.
+
+For personal customization, use `neoism.ui.style("composer.agent", { background_effects = {} })` to disable pack stars, or publish another typed effect list. Background overrides are consumed by these draw sites; other `StylePatch` properties are site-specific, not universal CSS. A true terminal-grid background remains deferred: quads drawn after terminal cells cannot be a genuine background. Desktop owns the effect frame lifecycle; web animation integration is not enabled by this change.
+
 ## User overrides
 
 Activate a pack under `appearance.mashup-pack`. Replace selected plugin fields under `plugins.mashup-overrides`; omitted fields inherit the pack value and an explicit empty array clears a list.

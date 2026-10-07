@@ -53,6 +53,8 @@ pub enum NeoismAgentPickerKind {
     /// Account selection inserted after choosing a model from a provider with
     /// multiple stored connections.
     ModelAccount,
+    /// Read-only Codex account rate-limit windows.
+    Usage,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -110,6 +112,107 @@ impl NeoismAgentPickerOption {
     }
 }
 
+/// Wire payload; unknown backend fields are deliberately accepted.
+#[derive(Clone, Debug, Default, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct NeoismAgentUsagePayload {
+    pub accounts: Vec<NeoismAgentUsageAccount>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct NeoismAgentUsageAccount {
+    pub connection_id: String,
+    pub label: String,
+    pub is_default: bool,
+    pub auth_type: String,
+    pub plan_type: Option<String>,
+    pub windows: Vec<NeoismAgentUsageWindow>,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct NeoismAgentUsageWindow {
+    pub label: String,
+    pub used_percent: f64,
+    pub reset_at: Option<i64>,
+    pub limit_window_seconds: Option<i64>,
+}
+
+impl NeoismAgentUsageAccount {
+    pub fn plan_label(&self) -> String {
+        let plan = self.plan_type.as_deref().unwrap_or("").trim();
+        match plan.to_ascii_lowercase().as_str() {
+            "pro" => "Pro".into(),
+            "plus" => "Plus".into(),
+            "free" => "Free".into(),
+            "business" => "Business".into(),
+            "enterprise" => "Enterprise".into(),
+            "team" => "Team".into(),
+            "edu" => "Edu".into(),
+            _ => match self.auth_type.to_ascii_lowercase().as_str() {
+                "oauth" => "ChatGPT".into(),
+                "api" | "api_key" | "api-key" | "apikey" => "API key".into(),
+                _ => "Plan unavailable".into(),
+            },
+        }
+    }
+}
+
+impl NeoismAgentUsageWindow {
+    pub fn limit_label(&self) -> String {
+        match self.label.trim().to_ascii_lowercase().as_str() {
+            "weekly" => "Weekly limit".into(),
+            "5-hour" => "5-hour limit".into(),
+            "" => "Usage limit".into(),
+            _ => self.label.clone(),
+        }
+    }
+
+    /// Non-finite values mean unavailable, not a full remaining allowance.
+    pub fn remaining_percent(&self) -> Option<f64> {
+        self.used_percent
+            .is_finite()
+            .then(|| 100.0 - self.used_percent.clamp(0.0, 100.0))
+    }
+
+    pub fn reset_label(&self, now_unix: i64) -> String {
+        let Some(reset) = self.reset_at else {
+            return "Reset unavailable".into();
+        };
+        let seconds = reset.saturating_sub(now_unix);
+        if seconds <= 0 {
+            return "Reset due now".into();
+        }
+        let minutes = seconds.saturating_add(59) / 60;
+        let hours = minutes / 60;
+        let relative = if minutes < 60 {
+            format!("Resets in {minutes}m")
+        } else if hours < 24 {
+            format!("Resets in {hours}h {}m", minutes % 60)
+        } else {
+            format!("Resets in {}d {}h", hours / 24, hours % 24)
+        };
+        let (_, month, day) = crate::panels::agent_pane::session_group::civil_from_days(
+            reset.div_euclid(86_400),
+        );
+        let time = reset.rem_euclid(86_400);
+        format!(
+            "{relative} · {month:02}/{day:02}, {:02}:{:02} UTC",
+            time / 3_600,
+            time % 3_600 / 60
+        )
+    }
+}
+
+/// Exact device-pixel usage viewport shared by rendering and host hit testing.
+#[derive(Clone, Copy, Debug)]
+pub struct UsagePickerGeometry {
+    pub rect: [f32; 4],
+    pub body: [f32; 4],
+    pub scale: f32,
+    pub stacked: bool,
+    pub footer_h: f32,
+}
+
 #[derive(Clone, Debug)]
 pub struct NeoismAgentPicker {
     pub kind: NeoismAgentPickerKind,
@@ -149,6 +252,10 @@ pub struct NeoismAgentPicker {
     /// the centered pre-chat surface lowers this so the picker stays
     /// between the composer and the pane chrome.
     visible_row_limit: usize,
+    pub usage_accounts: Vec<NeoismAgentUsageAccount>,
+    pub usage_error: Option<String>,
+    usage_geometry: Option<UsagePickerGeometry>,
+    usage_stacked: bool,
 }
 
 impl NeoismAgentPicker {
@@ -204,7 +311,123 @@ impl NeoismAgentPicker {
             loading: false,
             loading_started: None,
             visible_row_limit: PICKER_VISIBLE_ROWS,
+            usage_accounts: Vec::new(),
+            usage_error: None,
+            usage_geometry: None,
+            usage_stacked: false,
         }
+    }
+
+    pub fn usage_loading() -> Self {
+        let mut picker = Self::new(NeoismAgentPickerKind::Usage, "Codex", Vec::new(), 0);
+        picker.set_loading(true);
+        picker
+    }
+
+    pub fn set_usage_accounts(&mut self, accounts: Vec<NeoismAgentUsageAccount>) {
+        self.usage_accounts = accounts;
+        self.usage_error = None;
+        self.set_loading(false);
+        self.reset_usage_scroll();
+    }
+
+    pub fn set_usage_error(&mut self, error: String) {
+        self.usage_accounts.clear();
+        self.usage_error = Some(error);
+        self.set_loading(false);
+        self.reset_usage_scroll();
+    }
+
+    fn reset_usage_scroll(&mut self) {
+        self.scroll_offset = 0;
+        self.scroll_px = 0.0;
+        self.list_scroll.reset();
+    }
+
+    /// Logical pixels; usage rows have uniform height across all accounts.
+    /// Call `usage_layout` first to establish wide vs stacked geometry.
+    pub fn row_height(&self) -> f32 {
+        if self.kind != NeoismAgentPickerKind::Usage {
+            return PICKER_ROW_HEIGHT;
+        }
+        let windows = self
+            .usage_accounts
+            .iter()
+            .map(|a| {
+                a.windows.len().max(1)
+                    + usize::from(a.error.is_some() && !a.windows.is_empty())
+            })
+            .max()
+            .unwrap_or(1);
+        if self.usage_stacked {
+            62.0 + 60.0 * windows as f32
+        } else {
+            24.0 + 60.0 * windows as f32
+        }
+    }
+
+    /// Compute and cache the actual viewport, including partial account rows.
+    /// Prefer up to three full accounts, bounded by the composer and min_y.
+    pub fn usage_layout(
+        &mut self,
+        input: [f32; 4],
+        scale: f32,
+        max_rows: usize,
+        min_y: f32,
+    ) -> UsagePickerGeometry {
+        let s = scale.clamp(0.5, 3.0);
+        self.usage_stacked = input[2] / s < 420.0;
+        let available = (input[1] - min_y - 6.0 * s).max(0.0);
+        let header_h = (40.0 * s).min(available);
+        let footer_h = if available >= header_h + 60.0 * s {
+            26.0 * s
+        } else {
+            0.0
+        };
+        let preferred = self.row_height()
+            * self.usage_accounts.len().clamp(1, max_rows.clamp(1, 3)) as f32;
+        let body_h = (preferred * s).min((available - header_h - footer_h).max(0.0));
+        let height = header_h + body_h + footer_h;
+        let rect = [
+            input[0],
+            input[1] - height - 6.0 * s,
+            input[2].max(0.0),
+            height,
+        ];
+        let geometry = UsagePickerGeometry {
+            rect,
+            body: [rect[0], rect[1] + header_h, rect[2], body_h],
+            scale: s,
+            stacked: self.usage_stacked,
+            footer_h,
+        };
+        self.usage_geometry = Some(geometry);
+        self.last_rect = Some(rect);
+        self.footer_h_px = footer_h;
+        geometry
+    }
+
+    /// Whole account rows fitting the current viewport (partial rows still render).
+    pub fn max_visible_rows(&self) -> usize {
+        if self.kind == NeoismAgentPickerKind::Usage {
+            self.usage_geometry
+                .map(|g| (g.body[3] / g.scale / self.row_height()).floor() as usize)
+                .unwrap_or(1)
+        } else {
+            self.visible_row_limit
+        }
+    }
+
+    /// Read-only account hit test; continuous animated scroll is included.
+    pub fn usage_account_at(&self, x: f32, y: f32) -> Option<usize> {
+        let g = self.usage_geometry?;
+        let [bx, by, bw, bh] = g.body;
+        if x < bx || x >= bx + bw || y < by || y >= by + bh {
+            return None;
+        }
+        let scroll = self.list_scroll.current().clamp(0.0, self.max_scroll_px());
+        let ix = (((y - by) / g.scale + scroll) / self.row_height()).floor() as usize;
+        (ix < self.usage_accounts.len()).then_some(ix)
     }
 
     pub fn set_loading(&mut self, loading: bool) {
@@ -244,6 +467,10 @@ impl NeoismAgentPicker {
 
     pub fn set_visible_row_limit(&mut self, limit: usize) {
         let limit = limit.clamp(1, PICKER_VISIBLE_ROWS);
+        if self.kind == NeoismAgentPickerKind::Usage {
+            self.visible_row_limit = limit;
+            return; // Usage is bounded by its exact pixel viewport, not option rows.
+        }
         if self.visible_row_limit == limit {
             return;
         }
@@ -263,6 +490,10 @@ impl NeoismAgentPicker {
     }
 
     pub fn move_selection(&mut self, delta: isize) {
+        if self.kind == NeoismAgentPickerKind::Usage {
+            self.scroll_pixels(-(delta as f32) * self.row_height());
+            return;
+        }
         let count = self.filtered_options.len();
         if count == 0 {
             self.selected = 0;
@@ -307,6 +538,9 @@ impl NeoismAgentPicker {
     /// height from the cached rect so the live scale factor doesn't need
     /// to be plumbed through.
     pub fn activate_row_at(&mut self, x: f32, y: f32) -> bool {
+        if self.kind == NeoismAgentPickerKind::Usage {
+            return false;
+        }
         let Some([rx, ry, rw, rh]) = self.last_rect else {
             return false;
         };
@@ -351,6 +585,14 @@ impl NeoismAgentPicker {
     }
 
     pub fn scroll_pixels(&mut self, delta_pixels: f32) -> bool {
+        if self.kind == NeoismAgentPickerKind::Usage {
+            let max = self.max_scroll_px();
+            if max <= 0.0 || delta_pixels == 0.0 {
+                return false;
+            }
+            self.set_scroll_px((self.scroll_px - delta_pixels).clamp(0.0, max));
+            return true;
+        }
         let count = self.filtered_options.len();
         if count <= self.visible_row_limit || delta_pixels == 0.0 {
             return false;
@@ -407,12 +649,12 @@ impl NeoismAgentPicker {
             self.last_list_scroll_frame = Instant::now();
             self.list_scroll.current().max(0.0)
         };
-        let render_top = (anim / PICKER_ROW_HEIGHT).floor().max(0.0);
+        let anim = anim.min(max_px);
+        let row_h = self.row_height();
+        let render_top = (anim / row_h).floor().max(0.0);
         self.scroll_offset = render_top as usize;
-        // `-frac`: the renderer positions row `ix` at
-        // `list_y + (ix - scroll_offset) * row_h + residual * s`, which
-        // reduces to `list_y + ix * row_h - anim * s`.
-        render_top * PICKER_ROW_HEIGHT - anim
+        // Includes the exact fractional scroll used by usage_account_at.
+        render_top * row_h - anim
     }
 
     pub fn tick_cursor(&mut self) -> f32 {
@@ -435,12 +677,21 @@ impl NeoismAgentPicker {
                 || self.cursor_spring.position != 0.0
                 // Loading may outlive a failed request, but shimmer does not
                 // own frames indefinitely.
-                || (self.loading && self.loading_elapsed() < 1.5)
+                || (self.kind != NeoismAgentPickerKind::Usage
+                    && self.loading && self.loading_elapsed() < 1.5)
     }
 
     /// Largest committed pixel scroll that still leaves the last row flush
     /// at the bottom of the visible window.
     fn max_scroll_px(&self) -> f32 {
+        if self.kind == NeoismAgentPickerKind::Usage {
+            let viewport = self
+                .usage_geometry
+                .map(|g| g.body[3] / g.scale)
+                .unwrap_or(self.row_height());
+            return (self.usage_accounts.len() as f32 * self.row_height() - viewport)
+                .max(0.0);
+        }
         let count = self.filtered_options.len();
         let visible = count.min(self.visible_row_limit);
         count.saturating_sub(visible) as f32 * PICKER_ROW_HEIGHT
@@ -627,6 +878,9 @@ impl NeoismAgentPicker {
     }
 
     pub fn set_query(&mut self, query: String) {
+        if self.kind == NeoismAgentPickerKind::Usage {
+            return;
+        }
         // Idempotent guard — same query firing every keystroke as the
         // user navigates the picker would otherwise reset scroll +
         // cursor spring on every frame, snapping the highlight back to

@@ -28,10 +28,12 @@ fn live_read_tool_group_message<M: AgentTimelineMessage>(tools: &[M]) -> M {
     let mut preview_count = 0;
     let mut detail = String::new();
     for tool in tools.iter().take(4) {
-        let label = read_tool_activity_label(tool);
+        let label = read_tool_activity_label(tool).replace(['\n', '\r', '\t'], " ");
         if !preview.is_empty() {
             preview.push('\n');
         }
+        preview.push_str(tool.id());
+        preview.push('\t');
         preview.push_str(&label);
         preview_count += 1;
 
@@ -43,7 +45,7 @@ fn live_read_tool_group_message<M: AgentTimelineMessage>(tools: &[M]) -> M {
         if !detail.is_empty() {
             detail.push('\n');
         }
-        detail.push_str(&label);
+        detail.push_str(tool.id());
         detail.push('\t');
         detail.push_str(&bounded_tool_group_preview(source));
     }
@@ -65,9 +67,9 @@ fn live_read_tool_group_message<M: AgentTimelineMessage>(tools: &[M]) -> M {
         "completed"
     };
     let first_id = tools.first().map(|tool| tool.id()).unwrap_or("tools");
-    let last_id = tools.last().map(|tool| tool.id()).unwrap_or("tools");
+    // The first member owns the group identity even as the live run grows.
     M::tool_group_message(
-        format!("{first_id}..{last_id}"),
+        format!("{first_id}.."),
         format!("Reading/searching {} items", tools.len()),
         preview,
         status.to_string(),

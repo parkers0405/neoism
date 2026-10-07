@@ -57,6 +57,8 @@ layout(location = 0) flat out uint out_atlas;
 layout(location = 1) flat out vec4 out_color;
 layout(location = 2)      out vec2 out_tex_coord;
 layout(location = 3) flat out vec4 out_clip_rect;
+layout(location = 4) flat out vec4 out_glyph_bounds;
+layout(location = 5) flat out float out_blur_radius;
 
 const uint BOOL_IS_CURSOR_GLYPH = 2u;
 
@@ -128,6 +130,8 @@ void main() {
     out_tex_coord = vec2(in_glyph_pos) + size * corner;
     out_atlas = in_atlas;
     out_clip_rect = clip_rect;
+    out_glyph_bounds = vec4(0.0);
+    out_blur_radius = 0.0;
 
     // Foreground color through the same colorspace pipeline as the bg
     // pass. `in_color` is already 0..1 from R8G8B8A8_UNORM.
@@ -151,5 +155,8 @@ void main() {
         color = c;
     }
 
+    // Grid emoji historically ignore the foreground alpha. The shared UI
+    // fragment now uses this channel for reveals, so keep grid color unchanged.
+    if (in_atlas == 1u) color.a = 1.0;
     out_color = color;
 }

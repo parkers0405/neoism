@@ -645,6 +645,13 @@ struct RemoteTerminalCompletion {
 }
 
 pub struct Screen<'screen> {
+    #[cfg(feature = "servo-artifacts")]
+    pub(crate) html_artifacts: Option<bridges::html_artifacts::DesktopHtmlArtifacts>,
+    #[cfg(feature = "servo-artifacts")]
+    html_artifacts_failure: Option<bridges::html_artifacts::ArtifactFailure>,
+    #[cfg(feature = "servo-artifacts")]
+    html_artifact_retry_count: u8,
+
     bindings: crate::bindings::KeyBindings,
     mouse_bindings: Vec<MouseBinding>,
     pub modifiers: Modifiers,
@@ -750,6 +757,7 @@ pub struct Screen<'screen> {
     conversations_sidebar_width: f32,
     conversations_panel_enabled: bool,
     details_panel_enabled: bool,
+    streaming_text_animation: bool,
     git_diff_panel_resize_state: Option<GitDiffPanelResizeState>,
     git_diff_panel_scrollbar_drag: Option<GitDiffPanelScrollbarDragState>,
     // (constant lives just above the field's first use; declared as a
@@ -1809,6 +1817,13 @@ impl Screen<'_> {
             last_chrome_layout_signature: None,
             last_active_terminal_route: None,
             welcome_reveal_pending: true,
+            #[cfg(feature = "servo-artifacts")]
+            html_artifacts: None,
+            #[cfg(feature = "servo-artifacts")]
+            html_artifacts_failure: None,
+            #[cfg(feature = "servo-artifacts")]
+            html_artifact_retry_count: 0,
+
             pending_notebook_executions: Vec::new(),
             pending_python_kernel_retry: None,
             notebook_runtime: crate::notebook_runtime::NotebookRuntimeManager::new(),
@@ -1823,6 +1838,7 @@ impl Screen<'_> {
                 neoism_ui::panels::agent_pane::state::side_panel::SIDE_PANEL_WIDTH,
             conversations_panel_enabled: config.agent.conversations_panel_enabled,
             details_panel_enabled: config.agent.details_panel_enabled,
+            streaming_text_animation: config.agent.streaming_text_animation,
             git_diff_panel_resize_state: None,
             git_diff_panel_scrollbar_drag: None,
             grids: rustc_hash::FxHashMap::default(),

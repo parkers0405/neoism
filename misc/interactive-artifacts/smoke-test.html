@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Neoism interactive artifact smoke test</title>
+<style>
+:root { color-scheme: dark; font: 14px var(--font-sans, system-ui, sans-serif); background: var(--background, #11151b); color: var(--foreground, #e6edf3); }
+* { box-sizing: border-box; }
+body { margin: 0; padding: 20px; }
+header { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+h1 { margin: 0; font-size: 20px; font-weight: 600; }
+.status { color: var(--muted-foreground, #93a5b8); font: 12px var(--font-mono, monospace); }
+.cards { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 18px; }
+.card { min-width: 0; padding: 16px; background: var(--card, #1b2430); color: var(--card-foreground, #e6edf3); border: 1px solid var(--border, #344255); border-radius: var(--radius, 10px); }
+label { display: block; margin-bottom: 8px; color: var(--foreground, #c6d4e1); }
+input, button, select { font: inherit; color: var(--foreground, #e6edf3); background: var(--background, #101820); border: 1px solid var(--input, #52677e); border-radius: var(--radius, 6px); padding: 9px; }
+input { width: 100%; }
+button { cursor: pointer; margin-top: 12px; }
+button:hover { background: var(--accent, #273b50); color: var(--accent-foreground, #e6edf3); }
+output { display: block; min-height: 20px; margin-top: 10px; overflow-wrap: anywhere; color: var(--success, #8bdec1); }
+.track { height: 12px; margin-top: 20px; border-radius: 6px; background: var(--muted, #101820); overflow: hidden; }
+.marker { width: 20%; height: 100%; border-radius: 6px; background: var(--chart-1, #80c7ef); }
+select { width: 100%; }
+@media (max-width: 460px) { .cards { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<header><h1>Live browser surface</h1><span class="status" id="clock">Waiting for JavaScript</span></header>
+<div class="cards">
+<section class="card">
+<label for="text">Keyboard and composition</label>
+<input id="text" placeholder="Type here, including non-ASCII text">
+<button id="count" type="button">Clicks: 0</button>
+<output id="echo" aria-live="polite">Input stays inside the artifact.</output>
+</section>
+<section class="card">
+<label for="choice">Browser popup</label>
+<select id="choice"><option>Ocean</option><option>Forest</option><option>Amber</option></select>
+<div class="track"><div class="marker" id="marker"></div></div>
+<output id="selection">Animation should run without moving the mouse.</output>
+</section>
+</div>
+<script>
+(() => {
+  const text = document.getElementById('text');
+  const echo = document.getElementById('echo');
+  const count = document.getElementById('count');
+  const choice = document.getElementById('choice');
+  const marker = document.getElementById('marker');
+  const clock = document.getElementById('clock');
+  let clicks = 0;
+  count.addEventListener('click', () => { count.textContent = 'Clicks: ' + (++clicks); });
+  text.addEventListener('input', () => { echo.textContent = text.value || 'Input stays inside the artifact.'; });
+  const applyChartColor = () => {
+    const variable = '--chart-' + (choice.selectedIndex + 1);
+    const color = getComputedStyle(document.documentElement).getPropertyValue(variable).trim();
+    marker.style.background = color || ['#80c7ef', '#8bdec1', '#e9b36a'][choice.selectedIndex];
+  };
+  choice.addEventListener('change', () => {
+    applyChartColor();
+    document.getElementById('selection').textContent = 'Selected: ' + choice.value;
+  });
+  window.addEventListener('neoism-theme-changed', applyChartColor);
+  applyChartColor();
+  let frames = 0;
+  const animate = (time) => {
+    marker.style.transform = 'translateX(' + ((Math.sin(time / 800) + 1) * 200) + '%)';
+    if ((frames++ % 15) === 0) clock.textContent = 'JS frames: ' + frames;
+    requestAnimationFrame(animate);
+  };
+  requestAnimationFrame(animate);
+})();
+</script>
+</body>
+</html>

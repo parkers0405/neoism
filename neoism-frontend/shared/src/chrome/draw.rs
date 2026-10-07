@@ -249,6 +249,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                     self.status_line.info().branch.clone(),
                 );
                 if let Some(pane) = self.agent_pane.as_mut() {
+                    pane.set_text_reveal_enabled(self.streaming_text_animation);
                     if narrow_takeover {
                         // The composer is not rendered during takeover, so its
                         // previous frame's caret must not remain globally live.

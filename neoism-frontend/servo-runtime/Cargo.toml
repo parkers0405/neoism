@@ -1,0 +1,27 @@
+[package]
+name = "neoism-servo-runtime"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.92"
+license = "MIT"
+publish = false
+description = "Standalone experimental Servo worker for Neoism interactive artifacts"
+
+# Must remain an independent workspace: Servo links FreeType 0.23 while the
+# parent renderer links 0.20. Optional dependencies would still conflict.
+[workspace]
+resolver = "3"
+
+[dependencies]
+neoism-interactive-artifacts = { path = "../interactive-artifacts", features = ["ipc"] }
+servo = { git = "https://github.com/servo/servo", rev = "1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019", default-features = false, features = ["baked-in-resources", "bundled_freetype"] }
+filedescriptor = "0.8"
+serde = "1.0"
+serde_json = "1.0"
+# Match Servo v0.5.0's release lockfile: rc.5 breaks rsa rc.18's key API.
+pkcs1 = "=0.8.0-rc.4"
+dpi = "0.1"
+euclid = "0.22"
+http = "1.4"
+url = "2.5"
+rustls = { version = "0.23", default-features = false, features = ["std", "aws_lc_rs"] }

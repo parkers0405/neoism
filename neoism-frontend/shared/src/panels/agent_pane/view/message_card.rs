@@ -10,9 +10,7 @@ use super::assistant::{
     render_assistant_text_with, render_reasoning_message_with,
     ASSISTANT_RESPONSE_FOOTER_H, ASSISTANT_TEXT_PAD_LEFT,
 };
-use super::code_block::{
-    render_code_block, warm_code_block_render_cache, AgentCodeMessage, AgentCodePane,
-};
+use super::code_block::{render_code_block, AgentCodeMessage, AgentCodePane};
 use super::draw::{
     draw_rect_clipped, draw_rounded_rect_clipped, draw_text_clipped, opts_with_clip,
     wrap_text,
@@ -1005,20 +1003,12 @@ where
                 .max(1);
             42.0 * s + rows as f32 * TODO_ROW_HEIGHT * s
         }
-        AgentMessageCardKind::Tool
-            if message.output_kind() == AgentMessageCardOutputKind::Code =>
-        {
-            warm_code_block_render_cache(message);
-            measure_code_tool_message_height(AgentToolMessage::text(message), s)
-        }
         AgentMessageCardKind::Tool => {
             let progress = tool_expand_progress.clamp(0.0, 1.0);
             let selected_group_child = AgentMessageCardPane::selected_tool_group_child(
                 pane,
                 AgentToolMessage::id(message),
             );
-            let archived =
-                AgentToolPane::tool_archived(pane, AgentToolMessage::id(message));
             if let Some(collapsed) = measure_tool_message_height(
                 sugarloaf,
                 pane,
@@ -1026,7 +1016,6 @@ where
                 width,
                 s,
                 false,
-                archived,
                 selected_group_child,
             ) {
                 if progress <= 0.001 {
@@ -1039,7 +1028,6 @@ where
                     width,
                     s,
                     true,
-                    archived,
                     selected_group_child,
                 )
                 .unwrap_or(collapsed);
@@ -1123,18 +1111,9 @@ fn user_message_display_text(text: &str, images: &[NeoismAgentImage]) -> String 
     display.replace('\u{1}', "[").trim().to_string()
 }
 
-fn measure_code_tool_message_height(text: &str, s: f32) -> f32 {
-    if text.trim().is_empty() {
-        0.0
-    } else {
-        const MAX_CODE_CARD_LINES: usize = 28;
-        34.0 * s + text.lines().count().max(1).min(MAX_CODE_CARD_LINES) as f32 * 18.0 * s
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{measure_code_tool_message_height, user_message_display_text};
+    use super::user_message_display_text;
     use crate::panels::agent_pane::state::NeoismAgentImage;
 
     fn image() -> NeoismAgentImage {
@@ -1162,24 +1141,6 @@ mod tests {
             user_message_display_text("[image1] what is this?", &[]),
             "[image1] what is this?"
         );
-    }
-
-    #[test]
-    fn code_tool_height_caps_large_blocks() {
-        let text = (0..64)
-            .map(|line| format!("line {line}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        assert_eq!(
-            measure_code_tool_message_height(&text, 1.0),
-            34.0 + 28.0 * 18.0
-        );
-    }
-
-    #[test]
-    fn empty_code_tool_height_stays_zero() {
-        assert_eq!(measure_code_tool_message_height("\n  \n", 1.0), 0.0);
     }
 }
 

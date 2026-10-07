@@ -59,6 +59,7 @@ jupyter-zmq-client = { version = "1", features = ["tokio-runtime"] }
 jupyter-protocol = "2"
 neoism-agent-server = { workspace = true }
 neoism-agent-service-api = { workspace = true }
+neoism-interactive-artifacts = { path = "../interactive-artifacts", optional = true, default-features = false }
 neoism-agent-workspace-search-fff = { workspace = true }
 tokio = { workspace = true }
 corcovado = { workspace = true }
@@ -157,6 +158,9 @@ audio = ["cpal"]
 # Optional reMarkable sync extension (work in progress). Off by default —
 # a normal build links none of `neoism-remarkable` / `neoism-sync`.
 remarkable = ["dep:neoism-remarkable"]
+# Experimental offscreen Servo surfaces; off by default. Explicit builds also
+# require NEOISM_SERVO_ARTIFACTS=1 at runtime.
+servo-artifacts = ["dep:neoism-interactive-artifacts", "neoism-interactive-artifacts/servo"]
 x11 = ["neoism-backend/x11", "neoism-window/x11"]
 wayland = [
     "neoism-backend/wayland",

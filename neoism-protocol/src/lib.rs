@@ -1,4 +1,4 @@
-//! `neoism-protocol` — pure wire-format crate.
+//! `neoism-protocol` — pure, dependency-light wire-format crate.
 //!
 //! This crate intentionally contains no I/O and no async runtime; it just
 //! defines the serializable message shapes shared between the neoism client

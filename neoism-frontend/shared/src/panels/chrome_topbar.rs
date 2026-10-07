@@ -862,8 +862,6 @@ impl ChromeTopBar {
         theme: &IdeTheme,
         style: &neoism_lua::StylePatch,
     ) {
-        let row_h = strip.h;
-
         // Background + hairline border at the bottom edge — matches the
         // breadcrumbs strip so the two rows read as one stacked unit
         // when both are visible.
@@ -872,7 +870,7 @@ impl ChromeTopBar {
             strip.x,
             strip.y,
             strip.w,
-            row_h - 1.0,
+            strip.h,
             crate::customization::color_f32(
                 style.background.as_deref(),
                 theme,
@@ -887,6 +885,10 @@ impl ChromeTopBar {
             DockEdge::Left => Rect::new(strip.x + strip.w - 1.0, strip.y, 1.0, strip.h),
             DockEdge::Right => Rect::new(strip.x, strip.y, 1.0, strip.h),
         };
+        crate::primitives::surface_background::render(
+            sugarloaf, "chrome.top", [strip.x, strip.y, strip.w, strip.h],
+            0.0, self.scale, DEPTH, ORDER_BG, &[ [border.x, border.y, border.w, border.h] ],
+        );
         sugarloaf.rect(
             None,
             border.x,

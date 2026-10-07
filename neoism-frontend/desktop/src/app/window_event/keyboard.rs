@@ -118,6 +118,14 @@ impl Application<'_> {
             "keyboard input received"
         );
 
+        #[cfg(feature = "servo-artifacts")]
+        if key_event.state == ElementState::Released
+            && route.window.screen.html_artifact_key(&key_event)
+        {
+            route.request_redraw();
+            return;
+        }
+
         let consumed_by_route =
             route.has_key_wait(&key_event, &mut self.router.clipboard);
         tracing::trace!(

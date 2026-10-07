@@ -35,6 +35,9 @@ members = [
     "neoism-neoworld",
     "neoism-lua",
 ]
+# Experimental browser packages stay outside normal workspace builds.
+# Servo also requires an independent native dependency graph (FreeType).
+exclude = ["neoism-frontend/interactive-artifacts", "neoism-frontend/servo-runtime"]
 resolver = "2"
 
 [workspace.package]

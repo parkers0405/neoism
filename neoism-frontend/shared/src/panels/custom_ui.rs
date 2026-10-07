@@ -37,7 +37,7 @@ pub fn render(
             continue;
         }
         let selector = item.style.as_deref().unwrap_or(&item.slot);
-        let style = plugins.styles.resolve(selector);
+        let style = crate::primitives::surface_background::resolve_style(selector, &plugins.styles);
         if style.visible == Some(false) || (item.text.is_empty() && item.icon.is_none()) {
             continue;
         }
@@ -98,14 +98,12 @@ pub fn render(
         .filter(|panel| panel.visible)
         .collect::<Vec<_>>();
     panels.sort_by_key(|panel| {
-        plugins
-            .styles
-            .resolve(&format!("panel.{}", panel.id))
+        crate::primitives::surface_background::resolve_style(&format!("panel.{}", panel.id), &plugins.styles)
             .order
             .unwrap_or(0)
     });
     for panel in panels {
-        let style = plugins.styles.resolve(&format!("panel.{}", panel.id));
+        let style = crate::primitives::surface_background::resolve_style(&format!("panel.{}", panel.id), &plugins.styles);
         let candidate_anchor = match panel.location {
             neoism_lua::PanelLocation::Left => layout.left,
             neoism_lua::PanelLocation::Right => layout.right,

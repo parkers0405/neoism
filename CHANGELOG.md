@@ -2,6 +2,17 @@
 
 All notable user-facing changes to Neoism are documented here.
 
+## [0.7.119-nightly.20261007.2] - 2026-10-07
+
+### Fix first-terminal directory following
+
+- Restores workspace and Explorer directory updates when the first/root terminal changes directory. The previous nightly incorrectly returned the cached workspace root before checking the shell's current directory.
+- Keeps split terminals from re-rooting the workspace and preserves joined-workspace host-root behavior.
+- Adds regression coverage for repeated first-terminal directory changes, split-terminal isolation, and missing-cwd fallback.
+- Servo runtime remains excluded from release builds and packaging, with the existing CI dependency guard retained.
+
+This is a real opt-in nightly release. Use `neoism update --nightly`; plain `neoism update` remains on stable.
+
 ## [0.7.119-nightly.20261007.1] - 2026-10-07
 
 ### Native Agent UI and frame pacing

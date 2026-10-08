@@ -38,6 +38,30 @@ Neoism maps Omarchy's semantic background, foreground, accent, ANSI, and syntax 
 
 Future `omarchy-theme-set` changes are watched and applied live. Omarchy replaces its active theme atomically; Neoism follows that replacement without a generated Neoism theme, symlink, restart, or shell hook. The integration is currently native-desktop only because web/Wasm clients cannot read host theme files.
 
+## Backgrounds
+
+On desktop, choose **Backgrounds** from the hamburger menu or search for **Backgrounds** in the command palette. The picker uses the same searchable list and split layout as Themes, with the selected image displayed on the right. Arrow keys browse, Enter or a result click applies, and Escape closes without changing your background. Narrow windows show the list without the preview pane.
+
+Images placed in `~/.config/neoism/bg/` appear alongside wallpaper images declared by installed Mash Up Packs and your currently configured background. Folder images retain the current standalone wallpaper opacity when switching, while pack images retain their declared opacity. The right-hand preview shows the artwork at full opacity so it remains easy to compare. On Windows this folder is under `%LOCALAPPDATA%\neoism\bg`; relocated configuration homes use their own `bg` folder. Selecting a pack's image does not activate that pack or change its theme, font, or panel colors.
+
+You can also configure an image directly, with no active pack:
+
+```jsonc
+{
+  "ui": {
+    "window": {
+      "background-image": {
+        "path": "/absolute/path/to/painting.png",
+        "opacity": 0.35
+      },
+      "background-image-disabled": false
+    }
+  }
+}
+```
+
+Background selection has three states: **Use pack/default** clears the standalone override and lets the active pack supply its wallpaper; **None** suppresses all wallpaper without deactivating the pack; an **image** overrides the pack wallpaper. None is stored as `ui.window.background-image-disabled: true`. Image opacity controls only the wallpaper, independently of whole-window opacity and panel background alpha. Config edits are hot-reloaded and picker changes preserve JSONC comments.
+
 ## Fonts and symbols
 
 Neoism supports a primary font plus fallback/symbol handling used across terminal and chrome. Choose a monospace font with the glyph coverage your shell, status line, and code require. Font size can be changed with platform zoom shortcuts.

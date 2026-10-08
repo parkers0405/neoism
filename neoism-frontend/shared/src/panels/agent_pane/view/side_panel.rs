@@ -453,7 +453,11 @@ pub fn render_side_panel_with_icons<P, I>(
         [px, py, pw, frame_h],
         &FrameConfig {
             outer_color: theme.f32(theme.surface),
-            inner_color: theme.f32(theme.bg),
+            inner_color: crate::primitives::surface_background::base_color(
+                "agent.sidebar",
+                theme,
+                theme.f32(theme.bg),
+            ),
             radius: frame_radius,
             border_thickness: frame_stroke,
             rounded_corners: FrameCorners::Top,
@@ -525,7 +529,11 @@ pub fn render_detail_panel<P: AgentSidePanelPane, I: AgentSidePanelIconHost>(
         rect,
         &FrameConfig {
             outer_color: theme.f32(theme.surface),
-            inner_color: theme.f32(theme.bg),
+            inner_color: crate::primitives::surface_background::base_color(
+                "agent.sidebar",
+                theme,
+                theme.f32(theme.bg),
+            ),
             radius,
             border_thickness: stroke,
             rounded_corners: FrameCorners::Top,
@@ -597,3 +605,12 @@ fn subagent_row_activity(
 
 #[cfg(test)]
 mod tests;
+
+// Child row/button fills retain their state-specific RGB rather than inheriting
+// the sidebar's root background color. Foreground paint never uses this helper.
+fn sidebar_background_opacity(color: [f32; 4]) -> [f32; 4] {
+    crate::customization::apply_background_opacity(
+        &crate::primitives::surface_background::style("agent.sidebar"),
+        color,
+    )
+}

@@ -107,7 +107,7 @@ pub(super) fn definitions(owner: ToolOwner) -> Vec<BuiltinTool> {
         tool(
             ToolOwner::Workspace, owner,
             "read",
-            "Read one file or directory. filePath is required; offset is 1-indexed, the default limit is 2000 lines, and output stops at 50 KB. Call multiple read tools in parallel for independent files. Use grep before reading a large file when you need specific content.",
+            "Read one file or directory. filePath is required; offset is 1-indexed, the default limit is 2000 lines, and content is bounded to 50 KB per page. Use the returned cursor to continue file reads, including within long lines; keep filePath unchanged; a non-empty cursor takes precedence over offset. Omit cursor or pass an empty string for ordinary offset-based reads. Directory reads continue with offset. Call multiple read tools in parallel for independent files. Use grep before reading a large file when you need specific content.",
             json!({
                 "type": "object",
                 "properties": {
@@ -116,7 +116,11 @@ pub(super) fn definitions(owner: ToolOwner) -> Vec<BuiltinTool> {
                         "description": "Absolute path, or a path relative to the workspace."
                     },
                     "offset": { "type": "integer", "minimum": 1 },
-                    "limit": { "type": "integer", "minimum": 1 }
+                    "limit": { "type": "integer", "minimum": 1 },
+                    "cursor": {
+                        "type": "string",
+                        "description": "Opaque nextCursor returned by a previous file read. Omit or pass an empty string when starting a read or using line offsets. A non-empty cursor overrides offset, resumes at the exact byte and line position, and rejects a changed file. Cursors expire on server restart or cache eviction; restart the read if expired."
+                    }
                 },
                 "required": ["filePath"]
             }),
@@ -150,7 +154,7 @@ pub(super) fn definitions(owner: ToolOwner) -> Vec<BuiltinTool> {
         tool(
             ToolOwner::Workspace, owner,
             "grep",
-            "Search file contents. pattern accepts one string or an array of literal alternatives. mode may be auto, plain, regex, or fuzzy. Results are bounded and include file paths and line numbers. Use several independent grep calls in parallel when their results do not depend on each other.",
+            "Search file contents. pattern accepts one string or an array of literal alternatives. mode may be auto, plain, regex, or fuzzy; plain and regex never retry as fuzzy. Results are bounded and include file paths and line numbers. Continue with the returned nextCursor as cursor, keeping the query, scope, and search options unchanged. Use several independent grep calls in parallel when their results do not depend on each other.",
             json!({
                 "type": "object",
                 "properties": {
@@ -165,12 +169,13 @@ pub(super) fn definitions(owner: ToolOwner) -> Vec<BuiltinTool> {
                         ]
                     },
                     "path": { "type": "string" },
-                    "include": { "type": "string" },
+                    "include": { "type": "string", "description": "File glob relative to the workspace root, even when path scopes a subdirectory. For an external search, relative to that directory (or the file's parent)." },
                     "includeHidden": { "type": "boolean", "description": "Include dotfiles and paths containing leading-dot components. Defaults to false; .git and bounded cache exclusions remain excluded." },
-                    "exclude": { "type": "string" },
-                    "limit": { "type": "integer", "minimum": 1 },
-                    "context": { "type": "integer", "minimum": 0 },
-                    "caseSensitive": { "type": "boolean" },
+                    "exclude": { "type": "string", "description": "Excluded file/directory globs using the same root as include. Standard cache/build exclusions still apply." },
+                    "limit": { "type": "integer", "minimum": 1, "description": "Maximum matching lines per page (default 100), excluding context. Output byte/row budgets may return fewer. May change between pages." },
+                    "context": { "type": "integer", "minimum": 0, "maximum": 100, "description": "Lines before and after each match (default 0, maximum 100). Keep unchanged when continuing." },
+                    "cursor": { "type": "string", "description": "Opaque server-issued nextCursor from a previous grep page. Reuse the same query, path, filters, mode, case sensitivity, and context; limit and timeout may change. Cursors expire after five idle minutes, server restart, or cache eviction. A changed search, stale checkpoint, or expired cursor requires restarting without cursor." },
+                    "caseSensitive": { "type": "boolean", "description": "true means case-sensitive; false means case-insensitive, including uppercase patterns. Omit for smart-case (uppercase patterns are case-sensitive)." },
                     "mode": { "type": "string", "enum": ["auto", "plain", "regex", "fuzzy"] },
                     "timeout": { "type": "integer", "minimum": 1000 }
                 },
@@ -628,6 +633,28 @@ fn object_with_required(properties: &[(&str, &str)], required: &[&str]) -> Value
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_advertises_exact_file_continuation() {
+        let tools = definitions(ToolOwner::Workspace);
+        let read = tools.iter().find(|tool| tool.id == "read").unwrap();
+        assert_eq!(read.parameters["properties"]["cursor"]["type"], "string");
+        assert_eq!(read.parameters["required"], json!(["filePath"]));
+        assert!(read
+            .description
+            .contains("cursor takes precedence over offset"));
+        assert!(read.description.contains("pass an empty string"));
+    }
+
+    #[test]
+    fn grep_advertises_query_bound_continuation() {
+        let tools = definitions(ToolOwner::Workspace);
+        let grep = tools.iter().find(|tool| tool.id == "grep").unwrap();
+        assert_eq!(grep.parameters["properties"]["cursor"]["type"], "string");
+        assert_eq!(grep.parameters["required"], json!(["pattern"]));
+        assert!(grep.description.contains("never retry as fuzzy"));
+        assert!(!grep.parameters.to_string().contains("nextFileOffset"));
+    }
 
     #[test]
     fn standard_tool_descriptions_are_product_neutral() {

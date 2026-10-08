@@ -659,6 +659,136 @@ impl Screen<'_> {
         self.mark_dirty();
     }
 
+    pub fn open_background_picker(&mut self) {
+        use neoism_ui::panels::command_palette::PaletteBackgroundEntry;
+        let config = neoism_backend::config::Config::load();
+        let inherited = config
+            .appearance
+            .mashup_pack
+            .as_deref()
+            .and_then(neoism_backend::config::mashup::find_mashup_pack)
+            .and_then(|pack| pack.wallpaper);
+        let mut entries = vec![
+            PaletteBackgroundEntry {
+                id: "inherit".into(),
+                name: "Use pack/default".into(),
+                description: "Use the active Mash Up Pack's background".into(),
+                path: inherited.as_ref().map(|image| image.path.clone()),
+                opacity: inherited.as_ref().map_or(1.0, |image| image.opacity),
+            },
+            PaletteBackgroundEntry {
+                id: "none".into(),
+                name: "None".into(),
+                description:
+                    "Disable the background image without changing the active pack".into(),
+                path: None,
+                opacity: 1.0,
+            },
+        ];
+        entries.extend(
+            neoism_backend::config::background::background_entries(&config)
+                .into_iter()
+                .map(|entry| PaletteBackgroundEntry {
+                    id: entry.image.path.clone(),
+                    name: entry.name,
+                    description: entry.description,
+                    path: Some(entry.image.path),
+                    opacity: entry.image.opacity,
+                }),
+        );
+        let selected = if config.ui.window.background_image_disabled {
+            1
+        } else if config.ui.window.background_image.is_some() {
+            let current =
+                neoism_backend::config::background::resolve_background(&config, None);
+            entries
+                .iter()
+                .position(|entry| {
+                    entry.id != "inherit"
+                        && entry.path.as_deref()
+                            == current.as_ref().map(|image| image.path.as_str())
+                })
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        self.renderer
+            .command_palette
+            .enter_backgrounds_mode(entries);
+        self.renderer.command_palette.select_clicked(selected);
+        self.mark_dirty();
+    }
+
+    /// Wallpaper-only transaction. Never touches pack activation, Lua, or other appearance slots.
+    pub(crate) fn apply_selected_background(&mut self) {
+        use neoism_backend::config::background::{
+            resolve_background, write_background_selection, BackgroundSelection,
+        };
+        let Some(entry) = self.renderer.command_palette.selected_background() else {
+            return;
+        };
+        let selection = match entry.id.as_str() {
+            "inherit" => BackgroundSelection::Inherit,
+            "none" => BackgroundSelection::None,
+            _ => match entry.path {
+                Some(path) => BackgroundSelection::Image(
+                    neoism_backend::sugarloaf::ImageProperties {
+                        path,
+                        opacity: entry.opacity,
+                    },
+                ),
+                None => return,
+            },
+        };
+        let mut config = neoism_backend::config::Config::load();
+        config.ui.window.background_image_disabled =
+            matches!(selection, BackgroundSelection::None);
+        config.ui.window.background_image = match &selection {
+            BackgroundSelection::Image(image) => Some(image.clone()),
+            _ => None,
+        };
+        let pack = config
+            .appearance
+            .mashup_pack
+            .as_deref()
+            .and_then(neoism_backend::config::mashup::find_mashup_pack);
+        let wallpaper = resolve_background(&config, pack.as_ref());
+        let previous = self.sugarloaf.background_image().cloned();
+        let result = match wallpaper.as_ref() {
+            Some(image) => self.sugarloaf.set_background_image(image),
+            None => {
+                self.sugarloaf.clear_background_image();
+                Ok(())
+            }
+        };
+        let result = result.and_then(|()| {
+            write_background_selection(&selection).map_err(|error| {
+                let rollback = match previous.as_ref() {
+                    Some(image) => self.sugarloaf.set_background_image(image),
+                    None => { self.sugarloaf.clear_background_image(); Ok(()) },
+                };
+                match rollback {
+                    Ok(()) => format!("Could not save background: {error}"),
+                    Err(rollback) => format!("Could not save background: {error}; could not restore previous background: {rollback}"),
+                }
+            })
+        });
+        match result {
+            Ok(()) => {
+                self.renderer.command_palette.set_enabled(false);
+                self.renderer.notifications.push(
+                    format!("Applied background: {}", entry.name),
+                    neoism_ui::panels::notifications::NotificationLevel::Info,
+                );
+            }
+            Err(error) => self.renderer.notifications.push(
+                error,
+                neoism_ui::panels::notifications::NotificationLevel::Error,
+            ),
+        }
+        self.mark_dirty();
+    }
+
     pub fn open_mashup_picker(&mut self) {
         crate::mashup::sync_custom_ide_themes();
         self.renderer
@@ -871,6 +1001,11 @@ impl Screen<'_> {
                         .set(neoism_backend::clipboard::ClipboardType::Clipboard, font);
                     self.renderer.command_palette.set_enabled(false);
                     self.mark_dirty();
+                    return true;
+                }
+
+                if self.renderer.command_palette.is_backgrounds_mode() {
+                    self.apply_selected_background();
                     return true;
                 }
 
@@ -1142,6 +1277,9 @@ impl Screen<'_> {
             }
             PaletteAction::ToggleAppearanceTheme => {
                 self.context_manager.toggle_appearance_theme();
+            }
+            PaletteAction::ListBackgrounds => {
+                self.open_background_picker();
             }
             PaletteAction::OpenThemePicker => {
                 self.open_theme_picker();

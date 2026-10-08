@@ -301,7 +301,9 @@ fn sync_composed_terminal_image_overlays(
                     + placement.cell_y_offset as f32,
                 width: placement.pixel_width as f32,
                 height: placement.pixel_height as f32,
-                z_index: placement.z_index,
+                z_index: neoism_backend::sugarloaf::GraphicOverlay::external_z_index(
+                    placement.z_index,
+                ),
                 source_rect: neoism_backend::sugarloaf::GraphicOverlay::FULL_SOURCE_RECT,
             });
         }
@@ -1748,19 +1750,11 @@ impl Screen<'_> {
 
         sugarloaf.set_background_color(Some(renderer.dynamic_background.1));
 
-        // Precedence: an explicit `[window] background-image` in config
-        // is the user's individual override and beats the active Mash
-        // Up Pack's wallpaper slot.
-        let pack_wallpaper = startup_pack
-            .as_ref()
-            .and_then(|pack| pack.wallpaper.as_ref());
-        if let Some(image) = config
-            .ui
-            .window
-            .background_image
-            .as_ref()
-            .or(pack_wallpaper)
-        {
+        let wallpaper = neoism_backend::config::background::resolve_background(
+            config,
+            startup_pack.as_ref(),
+        );
+        if let Some(image) = wallpaper.as_ref() {
             if let Err(message) = sugarloaf.set_background_image(image) {
                 renderer.assistant.set_error(RioError {
                     level: RioErrorLevel::Warning,

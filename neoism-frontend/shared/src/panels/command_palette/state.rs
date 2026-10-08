@@ -56,6 +56,8 @@ pub(super) struct WorkspaceDrag {
 
 /// Command palette UI component (Raycast-style)
 pub struct CommandPalette {
+    pub(super) background_preview:
+        std::cell::RefCell<super::background_preview::BackgroundPreviewCache>,
     pub(super) plugin_commands: Vec<neoism_lua::CommandContribution>,
     pub(super) enabled: bool,
     pub query: String,
@@ -175,6 +177,7 @@ impl Default for CommandPalette {
             server_remove_hits: Vec::new(),
             scroll_offset: 0,
             has_adaptive_theme: false,
+            background_preview: Default::default(),
             mode: PaletteMode::Commands,
             caret_blink_start: Instant::now(),
             last_scroll_time: None,
@@ -529,6 +532,38 @@ impl CommandPalette {
         self.start_open_pop();
     }
 
+    /// Call once per host frame, including frames where the palette is not drawn.
+    pub fn clear_background_preview_overlays(sugarloaf: &mut sugarloaf::Sugarloaf) {
+        super::background_preview::BackgroundPreviewCache::clear(sugarloaf);
+    }
+
+    pub fn is_backgrounds_mode(&self) -> bool {
+        matches!(self.mode, PaletteMode::Backgrounds(_))
+    }
+
+    pub(crate) fn is_appearance_picker(&self) -> bool {
+        matches!(
+            self.mode,
+            PaletteMode::Themes(_)
+                | PaletteMode::Mashups(_)
+                | PaletteMode::Backgrounds(_)
+        )
+    }
+
+    /// Shared split threshold and left-list width for rendering and pointer hits.
+    pub(crate) fn appearance_list_width(&self, input_width: f32) -> Option<f32> {
+        (self.is_appearance_picker() && input_width > 560.0 * self.scale)
+            .then(|| (super::THEME_LIST_WIDTH * self.scale).min(input_width * 0.45))
+    }
+
+    pub fn enter_backgrounds_mode(
+        &mut self,
+        entries: Vec<super::actions::PaletteBackgroundEntry>,
+    ) {
+        self.enter_themes_mode(Vec::new());
+        self.mode = PaletteMode::Backgrounds(entries);
+    }
+
     pub fn enter_themes_mode(&mut self, themes: Vec<String>) {
         self.enabled = true;
         self.mode = PaletteMode::Themes(themes);
@@ -563,6 +598,7 @@ impl CommandPalette {
         self.enabled = true;
         self.mode = PaletteMode::Mashups(packs);
         self.query.clear();
+        self.query_cursor = 0;
         self.selected_index = 0;
         self.scroll_offset = 0;
         self.caret_blink_start = Instant::now();

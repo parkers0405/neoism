@@ -527,7 +527,10 @@ fn mode_bg(mode: Mode, palette: &StatusPalette) -> [f32; 4] {
         Mode::Markdown => palette.cyan,
         Mode::Agent => palette.red,
     };
-    palette.f32(rgb)
+    crate::customization::apply_background_opacity(
+        &crate::primitives::surface_background::style("status"),
+        palette.f32(rgb),
+    )
 }
 
 fn mode_label(mode: Mode) -> &'static str {
@@ -986,7 +989,23 @@ impl StatusLine {
             bg_y,
             background_width,
             strip_h + (y_top - bg_y),
-            palette.f32(palette.bg),
+            crate::primitives::surface_background::base_color(
+                "status",
+                &IdeTheme {
+                    bg: palette.bg,
+                    surface: palette.surface,
+                    muted: palette.muted,
+                    red: palette.red,
+                    green: palette.green,
+                    yellow: palette.yellow,
+                    blue: palette.blue,
+                    magenta: palette.magenta,
+                    cyan: palette.cyan,
+                    black: palette.black,
+                    ..IdeTheme::default()
+                },
+                palette.f32(palette.bg),
+            ),
             DEPTH,
             ORDER_BG,
         );
@@ -1156,7 +1175,10 @@ impl StatusLine {
                 pill_y,
                 cwd_pill_w,
                 pill_h,
-                palette.f32(palette.surface),
+                crate::customization::apply_background_opacity(
+                    &crate::primitives::surface_background::style("status"),
+                    palette.f32(palette.surface),
+                ),
                 corner_radii(Side::Left, radius),
                 DEPTH,
                 ORDER_PILL + 1,
@@ -1167,7 +1189,10 @@ impl StatusLine {
                 pill_y,
                 cwd_icon_section_w,
                 pill_h,
-                palette.f32(palette.red),
+                crate::customization::apply_background_opacity(
+                    &crate::primitives::surface_background::style("status"),
+                    palette.f32(palette.red),
+                ),
                 [0.0, radius, radius, 0.0],
                 DEPTH,
                 ORDER_PILL + 2,
@@ -1205,7 +1230,10 @@ impl StatusLine {
                 pill_y,
                 pill_w,
                 pill_h,
-                palette.f32(palette.surface),
+                crate::customization::apply_background_opacity(
+                    &crate::primitives::surface_background::style("status"),
+                    palette.f32(palette.surface),
+                ),
                 corner_radii(Side::Left, radius),
                 DEPTH,
                 ORDER_PILL_BACK,
@@ -1237,7 +1265,10 @@ impl StatusLine {
                 pill_y,
                 pill_w,
                 pill_h,
-                palette.f32(palette.surface),
+                crate::customization::apply_background_opacity(
+                    &crate::primitives::surface_background::style("status"),
+                    palette.f32(palette.surface),
+                ),
                 corner_radii(Side::Left, radius),
                 DEPTH,
                 ORDER_PILL,
@@ -1333,7 +1364,10 @@ impl StatusLine {
                 kind: DiagnosticPill::Error,
                 glyph: status_glyph("status.error", GLYPH_ERROR),
                 count: self.info.diagnostics.error,
-                bg: palette.f32(palette.red),
+                bg: crate::customization::apply_background_opacity(
+                    &crate::primitives::surface_background::style("status"),
+                    palette.f32(palette.red),
+                ),
                 fg: palette.u8(palette.black),
             });
         }
@@ -1342,7 +1376,10 @@ impl StatusLine {
                 kind: DiagnosticPill::Warn,
                 glyph: status_glyph("status.warn", GLYPH_WARN),
                 count: self.info.diagnostics.warn,
-                bg: palette.f32(palette.yellow),
+                bg: crate::customization::apply_background_opacity(
+                    &crate::primitives::surface_background::style("status"),
+                    palette.f32(palette.yellow),
+                ),
                 fg: palette.u8(palette.black),
             });
         }
@@ -1378,13 +1415,27 @@ impl StatusLine {
             // this filetype). Label is just "LSP" — the color carries
             // the meaning, like Zed's bolt pill.
             let (icon_bg, text_fg) = match status {
-                LspStatus::Active => {
-                    (palette.f32(palette.green), palette.u8(palette.green))
-                }
-                LspStatus::Initializing => {
-                    (palette.f32(palette.yellow), palette.u8(palette.yellow))
-                }
-                LspStatus::Missing => (palette.f32(palette.red), palette.u8(palette.red)),
+                LspStatus::Active => (
+                    crate::customization::apply_background_opacity(
+                        &crate::primitives::surface_background::style("status"),
+                        palette.f32(palette.green),
+                    ),
+                    palette.u8(palette.green),
+                ),
+                LspStatus::Initializing => (
+                    crate::customization::apply_background_opacity(
+                        &crate::primitives::surface_background::style("status"),
+                        palette.f32(palette.yellow),
+                    ),
+                    palette.u8(palette.yellow),
+                ),
+                LspStatus::Missing => (
+                    crate::customization::apply_background_opacity(
+                        &crate::primitives::surface_background::style("status"),
+                        palette.f32(palette.red),
+                    ),
+                    palette.u8(palette.red),
+                ),
             };
             lsp_pill_index = Some(right.len());
             let label = self
@@ -1398,7 +1449,10 @@ impl StatusLine {
                 label: format!(" {label}"),
                 icon_bg,
                 icon_fg: palette.u8(palette.black),
-                text_bg: palette.f32(palette.surface),
+                text_bg: crate::customization::apply_background_opacity(
+                    &crate::primitives::surface_background::style("status"),
+                    palette.f32(palette.surface),
+                ),
                 text_fg,
             });
         }
@@ -1406,9 +1460,15 @@ impl StatusLine {
             right.push(TwoTonePill {
                 icon_glyph: status_glyph("status.lines", GLYPH_LINES),
                 label: format!(" {cur}/{total}"),
-                icon_bg: palette.f32(palette.green),
+                icon_bg: crate::customization::apply_background_opacity(
+                    &crate::primitives::surface_background::style("status"),
+                    palette.f32(palette.green),
+                ),
                 icon_fg: palette.u8(palette.black),
-                text_bg: palette.f32(palette.surface),
+                text_bg: crate::customization::apply_background_opacity(
+                    &crate::primitives::surface_background::style("status"),
+                    palette.f32(palette.surface),
+                ),
                 text_fg: palette.u8(palette.green),
             });
         }
@@ -1421,9 +1481,15 @@ impl StatusLine {
             right.push(TwoTonePill {
                 icon_glyph: status_glyph("status.fps", "FPS"),
                 label: format!(" {fps}"),
-                icon_bg: palette.f32(palette.cyan),
+                icon_bg: crate::customization::apply_background_opacity(
+                    &crate::primitives::surface_background::style("status"),
+                    palette.f32(palette.cyan),
+                ),
                 icon_fg: palette.u8(palette.black),
-                text_bg: palette.f32(palette.surface),
+                text_bg: crate::customization::apply_background_opacity(
+                    &crate::primitives::surface_background::style("status"),
+                    palette.f32(palette.surface),
+                ),
                 text_fg: palette.u8(palette.cyan),
             });
         }
@@ -1437,8 +1503,14 @@ impl StatusLine {
             .map(|branch| {
                 let hover_t = self.branch_hover_progress();
                 let icon_bg = lerp4(
-                    palette.f32(palette.blue),
-                    palette.f32(palette.cyan),
+                    crate::customization::apply_background_opacity(
+                        &crate::primitives::surface_background::style("status"),
+                        palette.f32(palette.blue),
+                    ),
+                    crate::customization::apply_background_opacity(
+                        &crate::primitives::surface_background::style("status"),
+                        palette.f32(palette.cyan),
+                    ),
                     hover_t * 0.7,
                 );
                 let text_fg = lerp_u8(
@@ -1780,7 +1852,10 @@ impl StatusLine {
                     pill_y,
                     pill_w_total,
                     pill_h,
-                    palette.f32(palette.surface),
+                    crate::customization::apply_background_opacity(
+                        &crate::primitives::surface_background::style("status"),
+                        palette.f32(palette.surface),
+                    ),
                     corner_radii(Side::Right, radius),
                     DEPTH,
                     ORDER_PILL_BACK,

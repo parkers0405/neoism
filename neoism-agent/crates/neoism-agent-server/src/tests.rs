@@ -5318,6 +5318,8 @@ struct RecordingWorkspaceSearch {
     pin_calls: AtomicUsize,
     active_roots: Arc<Mutex<std::collections::BTreeMap<PathBuf, usize>>>,
     grep_pins: Mutex<Vec<(PathBuf, usize)>>,
+    grep_requests: Mutex<Vec<neoism_agent_service_api::GrepWorkspaceRequest>>,
+    paged_grep: bool,
 }
 
 struct RecordingRootPin {
@@ -5410,7 +5412,37 @@ impl neoism_agent_service_api::WorkspaceSearchService for RecordingWorkspaceSear
             .copied()
             .unwrap_or(0);
         self.grep_pins.lock().unwrap().push((root, pins));
+        self.grep_requests.lock().unwrap().push(request.clone());
+        if self.paged_grep {
+            let next = request
+                .cursor
+                .is_none()
+                .then(|| "opaque-test-page-2".to_string());
+            return Ok(neoism_agent_service_api::GrepWorkspaceResult {
+                next_cursor: next.clone(),
+                items: vec![neoism_agent_service_api::WorkspaceGrepMatch {
+                    path: "one.txt".into(),
+                    line: if next.is_some() { 2 } else { 4 },
+                    text: "needle".into(),
+                    definition: false,
+                    fuzzy_score: None,
+                    context_before: vec!["before".into()],
+                    context_after: vec!["after".into()],
+                }],
+                files_with_matches: 1,
+                total_files_searched: 1,
+                bounds: neoism_agent_service_api::WorkspaceSearchBounds {
+                    truncated: next.is_some(),
+                    total_at_least: 1,
+                    ..Default::default()
+                },
+                mode: "plain".into(),
+                engine: Some("fake".into()),
+                fallback_reason: None,
+            });
+        }
         Ok(neoism_agent_service_api::GrepWorkspaceResult {
+            next_cursor: None,
             items: Vec::new(),
             files_with_matches: 0,
             total_files_searched: 0,
@@ -5434,6 +5466,135 @@ impl neoism_agent_service_api::WorkspaceSearchService for RecordingWorkspaceSear
             engine: Some("fake".to_string()),
         })
     }
+}
+
+#[tokio::test]
+async fn public_grep_forwards_opaque_cursor_and_counts_matches_not_context() {
+    let root = std::env::temp_dir().join(format!(
+        "neoism-public-grep-{}",
+        Id::ascending(IdKind::Event)
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let search = Arc::new(RecordingWorkspaceSearch {
+        paged_grep: true,
+        ..Default::default()
+    });
+    let state = AppState::open_database_with_services(
+        root.join("agent.db"),
+        services_with_workspace_search(search.clone()),
+    )
+    .await
+    .unwrap();
+    let context = || {
+        tool::ToolContext::new(&root)
+            .with_state(Some(state.clone()))
+            .with_permission_rules(vec![neoism_agent_core::PermissionRule {
+                permission: "grep".into(),
+                pattern: "*".into(),
+                action: neoism_agent_core::PermissionAction::Allow,
+            }])
+    };
+    let first = tool::execute(
+        "grep",
+        context(),
+        json!({"pattern":"needle", "mode":"plain", "context":1, "limit":1}),
+    )
+    .await
+    .unwrap();
+    let metadata = first.metadata.unwrap();
+    assert_eq!(metadata["matches"], 1);
+    assert_eq!(metadata["contextLines"], 2);
+    assert_eq!(metadata["items"][0]["contextBefore"], json!(["before"]));
+    assert_eq!(metadata["items"][0]["contextAfter"], json!(["after"]));
+    assert_eq!(metadata["nextCursor"], "opaque-test-page-2");
+    assert!(first.output.contains("pass cursor=opaque-test-page-2"));
+    assert!(first.output.contains("Context 1: before"));
+    assert!(!first.output.contains("nextFileOffset"));
+    let second = tool::execute("grep", context(), json!({"pattern":"needle", "mode":"plain", "context":1, "limit":1, "cursor":metadata["nextCursor"]})).await.unwrap();
+    assert!(second.metadata.unwrap()["nextCursor"].is_null());
+    assert!(!second.output.contains("More results"));
+    let requests = search.grep_requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[0].cursor.is_none());
+    assert_eq!(requests[1].cursor.as_deref(), Some("opaque-test-page-2"));
+    assert_eq!(
+        requests[1].mode,
+        neoism_agent_service_api::WorkspaceSearchMode::Plain
+    );
+    drop(requests);
+    for pattern in [json!(["a.b"]), json!(["a.b", "[literal]"])] {
+        tool::execute("grep", context(), json!({"pattern": pattern}))
+            .await
+            .unwrap();
+        let requests = search.grep_requests.lock().unwrap();
+        assert_eq!(
+            requests.last().unwrap().mode,
+            neoism_agent_service_api::WorkspaceSearchMode::Plain
+        );
+    }
+    let oversized = tool::execute(
+        "grep",
+        context(),
+        json!({"pattern": "x".repeat(1025), "mode": "fuzzy"}),
+    )
+    .await
+    .unwrap_err();
+    assert!(oversized.to_string().contains("at most 1024 bytes"));
+    assert_eq!(search.grep_requests.lock().unwrap().len(), 4);
+    drop(state);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn public_grep_resolves_explicit_case_policy_before_service_dispatch() {
+    let root = std::env::temp_dir().join(format!(
+        "neoism-public-grep-case-{}",
+        Id::ascending(IdKind::Event)
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let search = Arc::new(RecordingWorkspaceSearch::default());
+    let state = AppState::open_database_with_services(
+        root.join("agent.db"),
+        services_with_workspace_search(search.clone()),
+    )
+    .await
+    .unwrap();
+    for mode in ["plain", "regex", "fuzzy", "auto"] {
+        for pattern in ["WORKSPACE", "workspace"] {
+            for case_option in [Some(false), Some(true), None] {
+                let mut arguments = json!({"pattern":pattern, "mode":mode});
+                if let Some(case) = case_option {
+                    arguments["caseSensitive"] = json!(case);
+                }
+                tool::execute(
+                    "grep",
+                    tool::ToolContext::new(&root)
+                        .with_state(Some(state.clone()))
+                        .with_permission_rules(vec![neoism_agent_core::PermissionRule {
+                            permission: "grep".into(),
+                            pattern: "*".into(),
+                            action: neoism_agent_core::PermissionAction::Allow,
+                        }]),
+                    arguments,
+                )
+                .await
+                .unwrap();
+                assert_eq!(
+                    search
+                        .grep_requests
+                        .lock()
+                        .unwrap()
+                        .last()
+                        .unwrap()
+                        .case_sensitive,
+                    case_option.unwrap_or(pattern == "WORKSPACE"),
+                    "pattern={pattern}, mode={mode}, option={case_option:?}"
+                );
+            }
+        }
+    }
+    drop(state);
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[tokio::test]

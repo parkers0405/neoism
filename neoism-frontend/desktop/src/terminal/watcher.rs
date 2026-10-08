@@ -33,6 +33,7 @@ fn config_update_paths_match(
             || path.starts_with(config_dir.join("plugins"))
             || path.starts_with(config_dir.join("ide-themes"))
             || path.starts_with(config_dir.join("packs"))
+            || path.starts_with(config_dir.join("bg"))
             || omarchy_current_dir.is_some_and(|dir| {
                 path.as_path() == dir.join("theme.name")
                     || path.starts_with(dir.join("theme"))
@@ -147,6 +148,23 @@ mod tests {
         let paths = vec![config_dir.join("config.json")];
 
         assert!(config_update_paths_match(&config_dir, None, &paths));
+    }
+
+    #[test]
+    fn config_watcher_accepts_background_directory_changes() {
+        let config_dir = PathBuf::from("/tmp/neoism");
+        for relative in ["bg", "bg/wallpaper.png", "bg/nested/wallpaper.jpg"] {
+            assert!(config_update_paths_match(
+                &config_dir,
+                None,
+                &[config_dir.join(relative)]
+            ));
+        }
+        assert!(!config_update_paths_match(
+            &config_dir,
+            None,
+            &[config_dir.join("bg-other/wallpaper.png")]
+        ));
     }
 
     #[test]

@@ -437,7 +437,9 @@ impl Renderer {
                             y: origin_y + screen_row as f32 * cell_height,
                             width: p.pixel_width as f32,
                             height: p.pixel_height as f32,
-                            z_index: p.z_index,
+                            z_index: neoism_backend::sugarloaf::GraphicOverlay::external_z_index(
+                                p.z_index,
+                            ),
                             source_rect:
                                 neoism_backend::sugarloaf::GraphicOverlay::FULL_SOURCE_RECT,
                         });
@@ -1667,8 +1669,14 @@ impl Renderer {
                 0.0,
                 guard_y,
                 logical_width,
-                logical_height - guard_y,
-                self.theme.f32(self.theme.bg),
+                // Keep only the breathing/occlusion band. The status widget
+                // owns its full strip, so no duplicate material lives below it.
+                status_y - guard_y,
+                neoism_ui::primitives::surface_background::base_color(
+                    neoism_lua::selector::STATUS,
+                    &status_theme,
+                    self.theme.f32(self.theme.bg),
+                ),
                 0.0,
                 3,
             );

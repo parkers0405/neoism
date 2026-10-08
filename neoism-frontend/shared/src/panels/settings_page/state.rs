@@ -56,7 +56,12 @@ impl SettingRow {
                 });
             }
         }
-        let control = if descriptor.path == "agent.model" {
+        let control = if descriptor.path == "ui.window.background-image" {
+            RowControl::Action {
+                action: "backgrounds:pick",
+                button: "Choose\u{2026}",
+            }
+        } else if descriptor.path == "agent.model" {
             RowControl::Action {
                 action: "open-model",
                 button: "Choose\u{2026}",
@@ -812,6 +817,8 @@ impl NeoismSettingsPane {
             .into_iter()
             .filter(|descriptor| {
                 descriptor.settings_visible
+                    && (!cfg!(target_arch = "wasm32")
+                        || descriptor.path != "ui.window.background-image")
                     && !descriptor.path.split('.').any(|segment| segment == "*")
             })
             .map(SettingRow::from_descriptor)
@@ -1660,5 +1667,27 @@ mod descriptor_tests {
         assert!(!pane.compact_detail());
         pane.set_compact_layout(true);
         assert!(pane.compact_root());
+    }
+}
+
+#[cfg(test)]
+mod background_action_tests {
+    use super::*;
+
+    #[test]
+    fn choose_background_descriptor_uses_existing_run_action_control() {
+        let descriptor: ConfigDescriptor = serde_json::from_value(serde_json::json!({
+            "path": "ui.window.background-image", "label": "Backgrounds", "description": "Choose a wallpaper",
+            "value_kind": "object", "default": null, "extensible": true,
+            "category": "ui", "control": { "kind": "object" }, "settings_visible": true
+        })).unwrap();
+        let row = SettingRow::from_descriptor(descriptor);
+        assert_eq!(
+            row.control,
+            RowControl::Action {
+                action: "backgrounds:pick",
+                button: "Choose\u{2026}"
+            }
+        );
     }
 }

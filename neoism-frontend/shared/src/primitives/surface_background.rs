@@ -73,11 +73,7 @@ pub fn base_color(
     theme: &crate::primitives::IdeTheme,
     fallback: [f32; 4],
 ) -> [f32; 4] {
-    crate::customization::color_f32(
-        style(selector).background.as_deref(),
-        theme,
-        fallback,
-    )
+    crate::customization::background_color(&style(selector), theme, fallback)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

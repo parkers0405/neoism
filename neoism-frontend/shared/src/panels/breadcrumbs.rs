@@ -376,7 +376,11 @@ impl Breadcrumbs {
             y_top,
             width,
             row_h + 1.0,
-            theme.f32(theme.bg),
+            crate::primitives::surface_background::base_color(
+                "breadcrumbs",
+                theme,
+                theme.f32(theme.bg),
+            ),
             DEPTH,
             ORDER_BG,
         );
@@ -560,9 +564,15 @@ impl Breadcrumbs {
                 rect[2],
                 rect[3],
                 if active {
-                    theme.f32_alpha(theme.hover, 0.88)
+                    crate::customization::apply_background_opacity(
+                        &crate::primitives::surface_background::style("breadcrumbs"),
+                        theme.f32_alpha(theme.hover, 0.88),
+                    )
                 } else {
-                    theme.f32(theme.surface)
+                    crate::customization::apply_background_opacity(
+                        &crate::primitives::surface_background::style("breadcrumbs"),
+                        theme.f32(theme.surface),
+                    )
                 },
                 DEPTH,
                 radius,
@@ -679,9 +689,15 @@ impl Breadcrumbs {
                 rect[2],
                 rect[3],
                 if kernel_hovered || kernel.open {
-                    theme.f32_alpha(theme.hover, 0.9)
+                    crate::customization::apply_background_opacity(
+                        &crate::primitives::surface_background::style("breadcrumbs"),
+                        theme.f32_alpha(theme.hover, 0.9),
+                    )
                 } else {
-                    theme.f32(theme.surface)
+                    crate::customization::apply_background_opacity(
+                        &crate::primitives::surface_background::style("breadcrumbs"),
+                        theme.f32(theme.surface),
+                    )
                 },
                 DEPTH,
                 radius,
@@ -745,9 +761,15 @@ impl Breadcrumbs {
                     rect[2],
                     rect[3],
                     if hovered {
-                        theme.f32_alpha(theme.hover, 0.9)
+                        crate::customization::apply_background_opacity(
+                            &crate::primitives::surface_background::style("breadcrumbs"),
+                            theme.f32_alpha(theme.hover, 0.9),
+                        )
                     } else {
-                        theme.f32(theme.surface)
+                        crate::customization::apply_background_opacity(
+                            &crate::primitives::surface_background::style("breadcrumbs"),
+                            theme.f32(theme.surface),
+                        )
                     },
                     DEPTH,
                     radius,
@@ -847,7 +869,10 @@ fn draw_notebook_action_tooltip(
         tooltip_y,
         tooltip_w,
         tooltip_h,
-        theme.f32(theme.surface),
+        crate::customization::apply_background_opacity(
+            &crate::primitives::surface_background::style("breadcrumbs"),
+            theme.f32(theme.surface),
+        ),
         DEPTH,
         5.0 * scale,
         ORDER_BUTTON + 2,

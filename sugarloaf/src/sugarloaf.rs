@@ -25,6 +25,69 @@ use raw_window_handle::{
 };
 use state::SugarState;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BackgroundFileIdentity {
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+    #[cfg(unix)]
+    inode: (u64, u64, i64, i64),
+}
+
+impl BackgroundFileIdentity {
+    #[cfg(not(target_arch = "wasm32"))]
+    fn read(path: &str) -> Option<Self> {
+        let metadata = std::fs::metadata(path).ok()?;
+        Some(Self {
+            len: metadata.len(),
+            modified: metadata.modified().ok(),
+            #[cfg(unix)]
+            inode: {
+                use std::os::unix::fs::MetadataExt;
+                (
+                    metadata.dev(),
+                    metadata.ino(),
+                    metadata.ctime(),
+                    metadata.ctime_nsec(),
+                )
+            },
+        })
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod background_identity_tests {
+    use super::BackgroundFileIdentity;
+
+    #[test]
+    fn same_path_changed_bytes_and_replacement_invalidate_identity() {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "neoism-wallpaper-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("image.png");
+        let name = path.to_str().unwrap();
+        std::fs::write(&path, b"old").unwrap();
+        let first = BackgroundFileIdentity::read(name).unwrap();
+        assert_eq!(BackgroundFileIdentity::read(name).unwrap(), first);
+        std::fs::write(&path, b"longer new bytes").unwrap();
+        let changed = BackgroundFileIdentity::read(name).unwrap();
+        assert_ne!(first, changed);
+        #[cfg(unix)]
+        {
+            let replacement = dir.join("replacement.png");
+            std::fs::write(&replacement, b"same byte count").unwrap();
+            std::fs::rename(replacement, &path).unwrap();
+            assert_ne!(BackgroundFileIdentity::read(name).unwrap(), changed);
+        }
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(BackgroundFileIdentity::read(name), None);
+        std::fs::remove_dir(&dir).unwrap();
+    }
+}
+
 pub struct Sugarloaf<'a> {
     // NOTE: field order is load-bearing for the Vulkan backend. Rust
     // drops struct fields in declaration order, and any field that
@@ -40,6 +103,7 @@ pub struct Sugarloaf<'a> {
     colorspace: Colorspace,
     pub background_color: Option<Color>,
     pub background_image: Option<ImageProperties>,
+    background_image_identity: Option<BackgroundFileIdentity>,
     pub graphics: Graphics,
     #[cfg(all(feature = "wgpu", not(target_arch = "wasm32")))]
     filters_brush: Option<FiltersBrush>,
@@ -343,6 +407,7 @@ impl Sugarloaf<'_> {
             colorspace,
             background_color: Some(Color::BLACK),
             background_image: None,
+            background_image_identity: None,
             renderer,
             graphics: Graphics::default(),
             #[cfg(all(feature = "wgpu", not(target_arch = "wasm32")))]
@@ -406,6 +471,7 @@ impl Sugarloaf<'_> {
             colorspace,
             background_color: Some(Color::BLACK),
             background_image: None,
+            background_image_identity: None,
             renderer,
             graphics: Graphics::default(),
             #[cfg(all(feature = "wgpu", not(target_arch = "wasm32")))]
@@ -795,11 +861,16 @@ impl Sugarloaf<'_> {
         &mut self,
         image: &ImageProperties,
     ) -> Result<(), String> {
-        // Skip if the same image is already configured. Both the path and
-        // the opacity must match — opacity is baked into the alpha channel
-        // at upload time, so an opacity change requires a reload.
+        // Opacity is baked into alpha at upload. File identity also matters:
+        // a watcher may request a reload after replacing bytes at the same path.
+        #[cfg(not(target_arch = "wasm32"))]
+        let identity = BackgroundFileIdentity::read(&image.path);
+        #[cfg(not(target_arch = "wasm32"))]
         if let Some(current) = &self.background_image {
-            if current.path == image.path && current.opacity == image.opacity {
+            if current == image
+                && identity.is_some()
+                && self.background_image_identity == identity
+            {
                 return Ok(());
             }
         }
@@ -856,6 +927,7 @@ impl Sugarloaf<'_> {
                 },
             ));
             self.background_image = Some(image.clone());
+            self.background_image_identity = identity;
             Ok(())
         }
     }
@@ -875,6 +947,7 @@ impl Sugarloaf<'_> {
         }
         self.renderer.set_background_image_pixels(None);
         self.background_image = None;
+        self.background_image_identity = None;
     }
 
     /// Remove content by ID (any type)

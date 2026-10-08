@@ -1426,32 +1426,72 @@ pub fn render_input(
     let box_w = w;
     let box_h = (h - chips_band_h).max(44.0 * s);
     let box_bottom = box_y + box_h;
-    // Skirt: border + hollow fill from the box's midline down to the
-    // island's bottom edge — its top half hides behind the opaque box,
-    // leaving only the side rails and the bottom line around the chips.
-    let skirt_top = box_y + box_h * 0.5;
-    sugarloaf.rounded_rect(
-        None,
-        x,
-        skirt_top,
-        w,
-        (y + h - skirt_top).max(0.0),
-        theme.f32_alpha(theme.border, 0.75),
-        DEPTH,
-        corner_radius,
-        ORDER_PANEL,
+    let background = crate::primitives::surface_background::base_color(
+        "composer.agent",
+        theme,
+        theme.f32(theme.surface),
     );
-    sugarloaf.rounded_rect(
-        None,
-        x + outer_stroke,
-        skirt_top,
-        (w - 2.0 * outer_stroke).max(0.0),
-        (y + h - skirt_top - outer_stroke).max(0.0),
-        theme.f32(theme.bg),
-        DEPTH,
-        (corner_radius - outer_stroke).max(0.0),
-        ORDER_PANEL,
-    );
+    let translucent = background[3] < 1.0;
+    if translucent {
+        // The footer starts below the box: no hidden skirt backing and no
+        // second alpha layer beneath the input's lower half.
+        let skirt = [x, box_bottom, w, (y + h - box_bottom).max(0.0)];
+        let inner = [
+            x + outer_stroke,
+            box_bottom,
+            (w - 2.0 * outer_stroke).max(0.0),
+            (skirt[3] - outer_stroke).max(0.0),
+        ];
+        let r = (corner_radius - outer_stroke).max(0.0);
+        crate::widgets::frame::draw_background_border(
+            sugarloaf,
+            skirt,
+            inner,
+            [0.0, 0.0, corner_radius, corner_radius],
+            [0.0, 0.0, r, r],
+            theme.f32_alpha(theme.border, 0.75),
+            DEPTH,
+            ORDER_PANEL,
+        );
+        sugarloaf.quad(
+            None,
+            inner[0],
+            inner[1],
+            inner[2],
+            inner[3],
+            background,
+            [0.0, 0.0, r, r],
+            DEPTH,
+            ORDER_PANEL,
+        );
+    } else {
+        // Skirt: border + hollow fill from the box's midline down to the
+        // island's bottom edge — its top half hides behind the opaque box,
+        // leaving only the side rails and the bottom line around the chips.
+        let skirt_top = box_y + box_h * 0.5;
+        sugarloaf.rounded_rect(
+            None,
+            x,
+            skirt_top,
+            w,
+            (y + h - skirt_top).max(0.0),
+            theme.f32_alpha(theme.border, 0.75),
+            DEPTH,
+            corner_radius,
+            ORDER_PANEL,
+        );
+        sugarloaf.rounded_rect(
+            None,
+            x + outer_stroke,
+            skirt_top,
+            (w - 2.0 * outer_stroke).max(0.0),
+            (y + h - skirt_top - outer_stroke).max(0.0),
+            theme.f32(theme.bg),
+            DEPTH,
+            (corner_radius - outer_stroke).max(0.0),
+            ORDER_PANEL,
+        );
+    }
     // Bottom band INSIDE the box hosts the square send button; wrapped
     // text never enters it.
     let bottom_reserved = if show_status { 42.0 } else { 38.0 } * s;
@@ -1463,24 +1503,42 @@ pub fn render_input(
     };
     let text_top_pad = (if show_status { 15.0 } else { 11.0 }) * s + image_rail_h;
     let border_w = (FRAME_STROKE * s).max(2.0);
-    sugarloaf.rounded_rect(
-        None,
-        box_x,
-        box_y,
-        box_w,
-        box_h,
-        theme.f32(theme.border),
-        DEPTH,
-        corner_radius,
-        ORDER_PANEL,
-    );
+    if translucent {
+        crate::widgets::frame::draw_background_border(
+            sugarloaf,
+            [box_x, box_y, box_w, box_h],
+            [
+                box_x + border_w,
+                box_y + border_w,
+                (box_w - 2.0 * border_w).max(0.0),
+                (box_h - 2.0 * border_w).max(0.0),
+            ],
+            [corner_radius; 4],
+            [(corner_radius - border_w).max(0.0); 4],
+            theme.f32(theme.border),
+            DEPTH,
+            ORDER_PANEL,
+        );
+    } else {
+        sugarloaf.rounded_rect(
+            None,
+            box_x,
+            box_y,
+            box_w,
+            box_h,
+            theme.f32(theme.border),
+            DEPTH,
+            corner_radius,
+            ORDER_PANEL,
+        );
+    }
     sugarloaf.rounded_rect(
         None,
         box_x + border_w,
         box_y + border_w,
         (box_w - 2.0 * border_w).max(0.0),
         (box_h - 2.0 * border_w).max(0.0),
-        crate::primitives::surface_background::base_color("composer.agent", theme, theme.f32(theme.surface)),
+        background,
         DEPTH,
         (corner_radius - border_w).max(0.0),
         ORDER_PANEL + 1,
@@ -1717,7 +1775,10 @@ pub fn render_input(
         send_y,
         send_side,
         send_side,
-        theme.f32_alpha(theme.fg, button_alpha),
+        crate::customization::apply_background_opacity(
+            &crate::primitives::surface_background::style("composer.agent"),
+            theme.f32_alpha(theme.fg, button_alpha),
+        ),
         DEPTH,
         COMPOSER_CONTROL_RADIUS * s,
         ORDER_TEXT,
@@ -2135,8 +2196,8 @@ fn draw_opencode_activity_scanner(
     cell_w * frame.len() as f32
 }
 
-/// Streaming status row rendered as the last entry of the timeline — it
-/// scrolls with the conversation content like any other message line.
+/// Activity block at the timeline tail, pinned above the composer only while
+/// following. The caller supplies both its row geometry and hard viewport clip.
 #[allow(clippy::too_many_arguments)]
 pub fn render_streaming_status_row(
     sugarloaf: &mut Sugarloaf,
@@ -2148,6 +2209,7 @@ pub fn render_streaming_status_row(
     viewport_clip: [f32; 4],
     occlusion_rects: &[[f32; 4]],
 ) {
+    pane.clear_background_status_rect();
     let [bar_x, bar_y, bar_w, bar_h] = rect;
     if bar_w <= 0.0 || bar_h <= 0.0 {
         pane.clear_background_status_rect();
@@ -2170,11 +2232,6 @@ pub fn render_streaming_status_row(
     let live_phase = now_seconds;
     let queued_count = pane.queued_prompt_count();
     let status_line_h = STREAMING_STATUS_LINE_H * s;
-    let primary_y = if queued_count > 0 || background_count > 0 {
-        bar_y
-    } else {
-        bar_y + (bar_h - status_line_h).max(0.0) * 0.5
-    };
     // Match the input scanner's raw left edge. The animated word is allowed
     // to sway left of that origin, so clipping starts at the viewport rather
     // than at the status row itself.
@@ -2225,6 +2282,7 @@ pub fn render_streaming_status_row(
     // The status row sits immediately above the composer. Anchor the final
     // wrapped line here and grow earlier lines upward through the timeline's
     // reserved status rows; growing downward puts line two behind the island.
+    let primary_y = streaming_status_primary_y(bar_y, label_lines.len(), status_line_h);
     let word_y = primary_y + (status_line_h - word_opts.font_size) * 0.5;
     let word_motion = live_phase * 3.0;
     let word_drift_x = word_motion.sin() * 1.8 * s;
@@ -2336,25 +2394,33 @@ pub fn render_streaming_status_row(
         let mut far_depth_opts = opts;
         far_depth_opts.color = theme.u8(theme.bg);
         far_depth_opts.color[3] = opts.color[3].saturating_mul(5) / 6;
-        let _ = sugarloaf.text_mut().draw(
+        draw_text_clipped(
+            sugarloaf,
             cursor_x + drift + 3.0 * s,
             dot_floor_y - lift + 3.0 * s,
             ".",
             &far_depth_opts,
+            occlusion_rects,
         );
         let mut near_depth_opts = opts;
         near_depth_opts.color = theme.u8(theme.dim);
         near_depth_opts.color[3] = opts.color[3];
-        let _ = sugarloaf.text_mut().draw(
+        draw_text_clipped(
+            sugarloaf,
             cursor_x + drift + 1.5 * s,
             dot_floor_y - lift + 1.5 * s,
             ".",
             &near_depth_opts,
+            occlusion_rects,
         );
-        let _ =
-            sugarloaf
-                .text_mut()
-                .draw(cursor_x + drift, dot_floor_y - lift, ".", &opts);
+        draw_text_clipped(
+            sugarloaf,
+            cursor_x + drift,
+            dot_floor_y - lift,
+            ".",
+            &opts,
+            occlusion_rects,
+        );
         cursor_x += dot_w + 2.0 * s;
     }
 
@@ -2411,7 +2477,7 @@ pub fn render_streaming_status_row(
             clip_rect: Some(text_clip),
             ..DrawOpts::default()
         };
-        let queue_y = primary_y
+        let queue_y = bar_y
             + status_line_h * label_lines.len() as f32
             + (status_line_h - queue_opts.font_size) * 0.5
             - 1.0 * s;
@@ -2438,17 +2504,24 @@ pub fn render_streaming_status_row(
             clip_rect: Some(text_clip),
             ..DrawOpts::default()
         };
-        let bg_y = primary_y
+        let bg_y = bar_y
             + status_line_h * label_lines.len() as f32
             + if queued_count > 0 { status_line_h } else { 0.0 }
             + (status_line_h - bg_opts.font_size) * 0.5
             - 1.0 * s;
-        pane.register_background_status_rect([
-            bar_x + 40.0 * s,
-            bg_y - 8.0 * s,
-            (bar_w - 80.0 * s).max(80.0 * s),
-            status_line_h,
-        ]);
+        let hit_left = (bar_x + 40.0 * s).max(text_clip[0]);
+        let hit_top = (bg_y - 8.0 * s).max(text_clip[1]);
+        let hit_right = (bar_x + bar_w - 40.0 * s).min(text_clip[0] + text_clip[2]);
+        let hit_bottom =
+            (bg_y - 8.0 * s + status_line_h).min(text_clip[1] + text_clip[3]);
+        if hit_right > hit_left && hit_bottom > hit_top {
+            pane.register_background_status_rect([
+                hit_left,
+                hit_top,
+                hit_right - hit_left,
+                hit_bottom - hit_top,
+            ]);
+        }
         draw_text_clipped(
             sugarloaf,
             bar_x + 48.0 * s,
@@ -2460,6 +2533,16 @@ pub fn render_streaming_status_row(
     } else {
         pane.clear_background_status_rect();
     }
+}
+
+/// Last primary line's row origin. Wrapped predecessors grow upward from
+/// here, staying inside the primary block; children start after that block.
+pub(super) fn streaming_status_primary_y(
+    top: f32,
+    primary_lines: usize,
+    line_h: f32,
+) -> f32 {
+    top + primary_lines.saturating_sub(1) as f32 * line_h
 }
 
 /// Number of physical lines occupied by the activity row: the animated
@@ -2479,11 +2562,21 @@ pub(super) fn streaming_status_primary_line_count(
     width: f32,
     s: f32,
 ) -> usize {
+    let pixel_font = crate::primitives::pixel_font_id(sugarloaf);
     let opts = DrawOpts {
-        font_size: 12.0 * s,
+        font_size: if pixel_font.is_some() {
+            12.0 * s
+        } else {
+            14.0 * s
+        },
         bold: true,
-        font_id: crate::primitives::pixel_font_id(sugarloaf),
+        font_id: pixel_font,
         ..DrawOpts::default()
+    };
+    let label = if label.is_empty() {
+        "Background"
+    } else {
+        label
     };
     wrap_streaming_status_label(sugarloaf, label, width, s, &opts)
         .len()
@@ -3385,14 +3478,7 @@ fn wrap_agent_prompt_rows_with(
         cursor = end;
     }
 
-    push_wrapped_prompt_segment(
-        text,
-        cursor,
-        text.len(),
-        max_w,
-        &mut measure,
-        &mut wrap,
-    );
+    push_wrapped_prompt_segment(text, cursor, text.len(), max_w, &mut measure, &mut wrap);
     // Once the last glyph exactly fills a row, the insertion point belongs at
     // column zero of the next visual row. Reserve that empty row immediately
     // instead of waiting for the next typed character to make the caret jump.

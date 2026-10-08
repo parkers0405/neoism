@@ -585,6 +585,9 @@ pub struct StylePatch {
     pub muted: Option<String>,
     pub border_width: Option<f32>,
     pub radius: Option<f32>,
+    /// Background-material alpha multiplier on native surfaces, not whole-widget
+    /// opacity. Foreground and focus indicators are unaffected; finite values
+    /// clamp to 0..=1 and omission/non-finite values preserve the default.
     pub opacity: Option<f32>,
     pub order: Option<i32>,
     pub scroll_multiplier: Option<f32>,

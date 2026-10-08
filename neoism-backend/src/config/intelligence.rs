@@ -353,6 +353,50 @@ pub fn config_descriptors() -> Vec<D> {
             Control::Number,
         ),
         d(
+            "ui.window.background-image",
+            "Backgrounds",
+            "Choose an installed background, inherit the active Mash Up Pack wallpaper, or disable images.",
+            Kind::Object,
+            json!(null),
+            &[],
+            true,
+            C::Ui,
+            Control::Object,
+        ),
+        d(
+            "ui.window.background-image.path",
+            "Background image path",
+            "Explicit wallpaper path. Absolute, ~/home-relative and config-directory-relative paths are supported. An empty path or null image inherits the active pack.",
+            Kind::String,
+            json!(null),
+            &[],
+            true,
+            C::Ui,
+            Control::Text,
+        ),
+        d(
+            "ui.window.background-image.opacity",
+            "Background image opacity",
+            "Image alpha multiplier from 0 (transparent) to 1 (opaque). Independent of window and panel opacity.",
+            Kind::Number,
+            json!(1.0),
+            &[],
+            true,
+            C::Ui,
+            Control::Number,
+        ),
+        d(
+            "ui.window.background-image-disabled",
+            "Disable background images",
+            "Suppress explicit images and pack wallpapers. When false, an explicit image wins; a null image inherits the active pack.",
+            Kind::Boolean,
+            json!(false),
+            &[],
+            false,
+            C::Ui,
+            Control::Toggle,
+        ),
+        d(
             "ui.window.blur",
             "Background blur",
             "Blur behind translucent windows.",
@@ -816,6 +860,22 @@ pub fn config_descriptors() -> Vec<D> {
 }
 
 fn apply_schema_metadata(rows: &mut Vec<D>) {
+    set_kind(
+        rows,
+        "ui.window.background-image",
+        Kind::Object,
+        Control::Object,
+        true,
+    );
+    for os in ["linux", "windows", "macos"] {
+        set_kind(
+            rows,
+            &format!("platform.{os}.window.background-image"),
+            Kind::Object,
+            Control::Object,
+            true,
+        );
+    }
     // `renderer.backend` is intentionally omitted from default serialization,
     // but it is still a supported setting and must not disappear from hints.
     if !rows.iter().any(|row| row.path == "renderer.backend") {
@@ -907,6 +967,7 @@ fn apply_schema_metadata(rows: &mut Vec<D>) {
         }
         for suffix in [
             "window.blur",
+            "window.background-image-disabled",
             "window.macos-use-unified-titlebar",
             "window.macos-use-shadow",
             "window.windows-use-undecorated-shadow",
@@ -978,6 +1039,13 @@ fn apply_schema_metadata(rows: &mut Vec<D>) {
         ("appearance.fonts.weight", 100.0, 900.0, 100.0, "weight"),
         ("appearance.line-height", 0.5, 3.0, 0.05, "x"),
         ("ui.window.opacity", 0.1, 1.0, 0.05, "opacity"),
+        (
+            "ui.window.background-image.opacity",
+            0.0,
+            1.0,
+            0.05,
+            "opacity",
+        ),
         (
             "terminal.cursor.blinking-interval",
             100.0,

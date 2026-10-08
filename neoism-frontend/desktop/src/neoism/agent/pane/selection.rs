@@ -224,6 +224,10 @@ impl NeoismAgentPane {
         if max_scroll <= 0.0 {
             return false;
         }
+        self.cancel_timeline_follow_motion();
+        if delta > 0.0 {
+            self.timeline_follow_bottom = false;
+        }
         let next = (self.timeline_scroll_px + delta).clamp(0.0, max_scroll);
         if (next - self.timeline_scroll_px).abs() < f32::EPSILON {
             return false;

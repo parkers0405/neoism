@@ -5,6 +5,67 @@ use super::layout::{
 };
 use super::*;
 
+// These are ink bounds, not another footer: the word moves ±3.2px and
+// its far echo adds 3.5px; the text renderer allows 14px bottom ink slack.
+const STATUS_TOP_INK: f32 = 4.0;
+const STATUS_BOTTOM_INK: f32 = 14.0;
+
+#[derive(Debug)]
+pub(super) struct ActivityGeometry {
+    pub content_h: f32,
+    pub body_clip: [f32; 4],
+    pub status_rect: [f32; 4],
+}
+
+pub(super) fn activity_geometry(
+    rect: [f32; 4],
+    real_content_h: f32,
+    status_h: f32,
+    gap: f32,
+    s: f32,
+    following: bool,
+    scroll_top: f32,
+) -> ActivityGeometry {
+    let [x, y, w, h] = rect;
+    let h = h.max(0.0);
+    let tail_gap = if real_content_h > 0.0 { gap } else { 0.0 };
+    let top_ink = STATUS_TOP_INK * s;
+    let bottom_ink = STATUS_BOTTOM_INK * s;
+    let content_h = real_content_h
+        + if status_h > 0.0 {
+            tail_gap + top_ink + status_h + bottom_ink
+        } else {
+            0.0
+        };
+    let attached_y = y + real_content_h + tail_gap + top_ink - scroll_top;
+    // On a short viewport preserve the primary activity at the top and clip
+    // overflowing child lines. Never move the whole block under the composer.
+    let status_y = if following {
+        (y + h - bottom_ink - status_h).max(y + top_ink).min(y + h)
+    } else {
+        attached_y
+    };
+    let body_h = if following && status_h > 0.0 {
+        (status_y - top_ink - tail_gap - y).clamp(0.0, h)
+    } else {
+        h
+    };
+    ActivityGeometry {
+        content_h,
+        body_clip: [x, y, w, body_h],
+        status_rect: [
+            x,
+            status_y,
+            w,
+            if following {
+                status_h.min((y + h - status_y).max(0.0))
+            } else {
+                status_h
+            },
+        ],
+    }
+}
+
 pub fn render_timeline_with<P, D>(
     sugarloaf: &mut Sugarloaf,
     pane: &mut P,
@@ -52,13 +113,10 @@ pub fn render_timeline_with<P, D>(
     } else {
         0.0
     };
-    let mut content_h = real_content_h;
-    if status_h > 0.0 {
-        if content_h > 0.0 {
-            content_h += gap;
-        }
-        content_h += status_h;
-    }
+    // One full-content metric includes the footer exactly once. Do not also
+    // subtract its reserve from the metrics viewport (which doubles max-scroll).
+    let content_h =
+        activity_geometry(rect, real_content_h, status_h, gap, s, false, 0.0).content_h;
     pane.set_timeline_metrics(rect, content_h, viewport_h);
     if did_layout_work {
         if let Some((key, screen_offset)) = pane.timeline_view_anchor() {
@@ -103,6 +161,16 @@ pub fn render_timeline_with<P, D>(
     let max_scroll = (content_h - viewport_h).max(0.0);
     let scroll_top = (max_scroll - pane.timeline_scroll_offset()).clamp(0.0, max_scroll);
     let mut draw_scroll_top = scroll_top;
+    let geometry = activity_geometry(
+        rect,
+        real_content_h,
+        status_h,
+        gap,
+        s,
+        pane.timeline_follow_bottom(),
+        snap_px(scroll_top),
+    );
+    let body_viewport_h = geometry.body_clip[3];
     // Only materialise per-row measurements when a virtual surface consumes
     // them. On panes that draw straight from the windowed `layout.rows`, this
     // would be O(total history) work allocated every frame for nothing.
@@ -121,12 +189,19 @@ pub fn render_timeline_with<P, D>(
         Vec::new()
     };
     pane.maybe_request_older_timeline_page(scroll_top, viewport_h);
-    pane.sync_virtual_timeline(rect, w, real_content_h, scroll_top, s, &virtual_rows);
+    pane.sync_virtual_timeline(
+        geometry.body_clip,
+        w,
+        real_content_h,
+        scroll_top,
+        s,
+        &virtual_rows,
+    );
     // Keep scroll/range math fractional, but snap draw-space coordinates to
     // physical pixels. Text-heavy rows (especially code blocks) get visibly
     // soft if their glyph baselines ride half-pixels during inertial scroll.
     let render_scroll_top = snap_px(draw_scroll_top);
-    let viewport_clip = [x, y, w, viewport_h];
+    let viewport_clip = geometry.body_clip;
     // Keep ordinary scroll frames tight, but preserve the wide registration
     // band while selecting text so drag-to-select still works past the edge.
     // The markdown renderer now culls visible lines itself, so normal scroll
@@ -139,7 +214,7 @@ pub fn render_timeline_with<P, D>(
     let visible_range = visible_timeline_row_range(
         &layout.rows,
         draw_scroll_top - register_margin,
-        draw_scroll_top + viewport_h + register_margin,
+        draw_scroll_top + body_viewport_h + register_margin,
     );
     let mut row_range = if pane.has_active_selection() {
         visible_range.clone()
@@ -152,7 +227,7 @@ pub fn render_timeline_with<P, D>(
             &layout.rows,
             virtual_range.clone(),
             draw_scroll_top,
-            draw_scroll_top + viewport_h,
+            draw_scroll_top + body_viewport_h,
         ) {
             union_timeline_row_ranges(virtual_range, visible_range.clone())
         } else {
@@ -165,15 +240,18 @@ pub fn render_timeline_with<P, D>(
         &layout.rows,
         row_range.clone(),
         draw_scroll_top - register_margin,
-        draw_scroll_top + viewport_h + register_margin,
+        draw_scroll_top + body_viewport_h + register_margin,
     ) {
         row_range = visible_range.clone();
     }
     if row_range.is_empty() && !visible_range.is_empty() {
         row_range = visible_range.clone();
     }
-    let anchor_range =
-        visible_timeline_row_range(&layout.rows, scroll_top, scroll_top + viewport_h);
+    let anchor_range = visible_timeline_row_range(
+        &layout.rows,
+        scroll_top,
+        scroll_top + body_viewport_h,
+    );
     if let Some(row) = layout.rows.get(anchor_range.start) {
         if !pane.timeline_view_anchor_matches(row.source_index, pane.messages().len()) {
             let key =
@@ -188,13 +266,13 @@ pub fn render_timeline_with<P, D>(
         && visible_timeline_row_range(
             &layout.rows,
             draw_scroll_top,
-            draw_scroll_top + viewport_h,
+            draw_scroll_top + body_viewport_h,
         )
         .is_empty()
     {
         draw_scroll_top = scroll_top.clamp(0.0, max_scroll);
         pane.sync_virtual_timeline(
-            rect,
+            geometry.body_clip,
             w,
             real_content_h,
             draw_scroll_top,
@@ -204,7 +282,7 @@ pub fn render_timeline_with<P, D>(
         row_range = visible_timeline_row_range(
             &layout.rows,
             draw_scroll_top - register_margin,
-            draw_scroll_top + viewport_h + register_margin,
+            draw_scroll_top + body_viewport_h + register_margin,
         );
     }
     let rendered_row_start = row_range.start;
@@ -248,11 +326,12 @@ pub fn render_timeline_with<P, D>(
         let card_y = snap_px(y + row.top - render_scroll_top);
         let card_bottom = card_y + card_h;
 
-        if card_bottom < y - register_margin || card_y > y + viewport_h + register_margin
+        if card_bottom < y - register_margin
+            || card_y > y + body_viewport_h + register_margin
         {
             continue;
         }
-        if card_bottom >= y && card_y <= y + viewport_h {
+        if card_bottom >= y && card_y <= y + body_viewport_h {
             let kind = row.display_message.as_ref().map(|message| message.kind());
             let kind = kind.or_else(|| {
                 pane.messages()
@@ -342,25 +421,21 @@ pub fn render_timeline_with<P, D>(
         pane.virtual_timeline_visible_source_range(),
     );
 
-    let mut content_y = real_content_h;
-
-    // Streaming status is timeline content, attached to the latest message.
-    // It therefore scrolls with the conversation instead of following the
-    // input bar while the user browses older messages.
+    // Following owns a pinned footer even while its spring has positive lag.
+    // Browsing retains the original content-attached/offscreen semantics.
     if status_h > 0.0 {
-        if content_y > 0.0 {
-            content_y += gap;
-        }
-        let row_y = snap_px(y + content_y - render_scroll_top);
-        if row_y + status_h >= y && row_y <= y + viewport_h {
+        let row_y = geometry.status_rect[1];
+        if row_y + status_h + STATUS_BOTTOM_INK * s >= y
+            && row_y - STATUS_TOP_INK * s < y + viewport_h
+        {
             D::render_streaming_status_row(
                 sugarloaf,
                 pane,
-                [x, row_y, w, status_h],
+                geometry.status_rect,
                 theme,
                 s,
                 now_seconds,
-                viewport_clip,
+                [x, y, w, viewport_h],
                 occlusion_rects,
             );
         }
@@ -414,7 +489,10 @@ fn message_theme(
         | AgentTimelineMessageKind::System
         | AgentTimelineMessageKind::Compaction => "agent.chat.message",
     };
-    crate::customization::styled_ide_theme(*theme, &crate::primitives::surface_background::resolve_style(selector, &plugins.styles))
+    crate::customization::styled_ide_theme(
+        *theme,
+        &crate::primitives::surface_background::resolve_style(selector, &plugins.styles),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]

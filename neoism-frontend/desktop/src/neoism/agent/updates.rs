@@ -1094,7 +1094,7 @@ fn send_event_updates(
                         message: message.clone(),
                         parent_message_id: parent_message_id.clone(),
                     })?;
-                    hydrate_live_images(server, tx, message, move |message| {
+                    hydrate_live_images(server, tx, wake, message, move |message| {
                         AgentSessionUpdate::PartUpdated {
                             message,
                             parent_message_id,
@@ -1132,7 +1132,7 @@ fn send_event_updates(
                         message: message.clone(),
                         parent_message_id: parent_message_id.clone(),
                     })?;
-                    hydrate_live_images(server, tx, message, move |message| {
+                    hydrate_live_images(server, tx, wake, message, move |message| {
                         AgentSessionUpdate::ChildPartUpdated {
                             session_id: child_session_id,
                             message,
@@ -1353,6 +1353,7 @@ fn send_event_updates(
 fn hydrate_live_images(
     server: &str,
     tx: &Sender<AgentSessionUpdate>,
+    wake: &Arc<Mutex<Option<AgentEventWake>>>,
     message: super::pane::NeoismAgentMessage,
     update: impl FnOnce(super::pane::NeoismAgentMessage) -> AgentSessionUpdate
         + Send
@@ -1365,10 +1366,13 @@ fn hydrate_live_images(
     }
     let server = server.to_string();
     let tx = tx.clone();
+    let wake = wake.clone();
     std::thread::spawn(move || {
         let mut message = message;
         super::api::hydrate_generated_images(&server, std::slice::from_mut(&mut message));
-        let _ = tx.send(update(message));
+        if tx.send(update(message)).is_ok() {
+            wake_event_loop(&wake);
+        }
     });
 }
 
@@ -1985,6 +1989,69 @@ mod tests {
             "post-retry deltas must still classify ({} updates drained)",
             updates.len()
         );
+    }
+
+    #[test]
+    fn generated_image_hydration_wakes_parent_and_child_updates() {
+        use std::io::{Read as _, Write as _};
+
+        for child in [false, true] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let server = format!("http://{}", listener.local_addr().unwrap());
+            let responder = std::thread::spawn(move || {
+                let body = "image";
+                let (mut socket, _) = listener.accept().unwrap();
+                let mut request = [0_u8; 2048];
+                let read = socket.read(&mut request).unwrap();
+                assert!(std::str::from_utf8(&request[..read])
+                    .unwrap()
+                    .starts_with("GET /v2/artifacts/art-image/content "));
+                write!(
+                        socket,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    )
+                    .unwrap();
+            });
+            let (tx, rx) = mpsc::channel();
+            let (wake_tx, wake_rx) = mpsc::channel();
+            let wake = Arc::new(Mutex::new(Some(AgentEventWake::for_test(move || {
+                wake_tx.send(()).unwrap();
+            }))));
+            let mut message = NeoismAgentMessage::assistant("").with_id("part-image");
+            message
+                .images
+                .push(neoism_ui::panels::agent_pane::state::NeoismAgentImage {
+                    filename: "generated-image.jpg".to_string(),
+                    url: "/v2/artifacts/art-image/content".to_string(),
+                    mime: "image/jpeg".to_string(),
+                });
+
+            hydrate_live_images(&server, &tx, &wake, message, move |message| {
+                if child {
+                    AgentSessionUpdate::ChildPartUpdated {
+                        session_id: "child".to_string(),
+                        message,
+                        parent_message_id: Some("message".to_string()),
+                    }
+                } else {
+                    AgentSessionUpdate::PartUpdated {
+                        message,
+                        parent_message_id: Some("message".to_string()),
+                    }
+                }
+            });
+
+            wake_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            let message = match rx.try_recv().unwrap() {
+                AgentSessionUpdate::PartUpdated { message, .. } if !child => message,
+                AgentSessionUpdate::ChildPartUpdated { message, .. } if child => message,
+                _ => panic!("unexpected hydrated image update"),
+            };
+            assert_eq!(message.images[0].url, "data:image/jpeg;base64,aW1hZ2U=");
+            responder.join().unwrap();
+        }
     }
 
     #[test]

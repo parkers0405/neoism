@@ -280,6 +280,12 @@ pub(crate) const COMMANDS: &[Command] = &[
         service: CommandService::Neoism,
     },
     Command {
+        title: "Backgrounds",
+        shortcut: "",
+        action: PaletteAction::ListBackgrounds,
+        service: CommandService::Neoism,
+    },
+    Command {
         title: "Shaders",
         shortcut: "",
         action: PaletteAction::OpenShaders,

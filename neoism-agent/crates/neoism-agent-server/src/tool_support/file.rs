@@ -1,7 +1,10 @@
 use anyhow::Context;
 use base64::Engine;
 use serde_json::{json, Value};
-use std::io::{BufRead, BufReader, Read, Seek};
+use std::io::{Read, Seek};
+
+#[path = "read_pagination.rs"]
+mod read_pagination;
 
 struct WriteMutation {
     display: String,
@@ -20,12 +23,10 @@ struct EditMutation {
 use super::args::{required_string, usize_arg};
 use super::paths::{
     directory_entries, display_path, existing_project_path, project_path_for_write,
-    truncate_line,
 };
 use super::{diagnostics, edit_match, format, ToolContext, ToolExecutionResult};
 
 const DEFAULT_READ_LIMIT: usize = 2000;
-const MAX_READ_BYTES: usize = 50 * 1024;
 const MAX_MEDIA_READ_BYTES: usize = 20 * 1024 * 1024;
 
 pub(super) fn read_tool(
@@ -36,13 +37,38 @@ pub(super) fn read_tool(
     let path = existing_project_path(&context, raw_path)?;
     let display = display_path(&context.cwd, &path);
     context.ensure_allowed("read", &display)?;
-    let offset = usize_arg(&arguments, "offset").unwrap_or(1).max(1);
+    let check_cancel = || -> anyhow::Result<()> {
+        if context
+            .cancel
+            .as_ref()
+            .is_some_and(|cancel| cancel.load(std::sync::atomic::Ordering::Relaxed))
+        {
+            anyhow::bail!("read cancelled");
+        }
+        Ok(())
+    };
+    check_cancel()?;
+    let cursor = match arguments.get("cursor") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(token)) if token.trim().is_empty() => None,
+        Some(Value::String(token)) => Some(token.as_str()),
+        Some(_) => anyhow::bail!("cursor must be a string"),
+    };
+    // Model tool calls may include every optional field with empty/default values.
+    // A real cursor is authoritative; a blank cursor leaves line offsets intact.
+    let offset = if cursor.is_some() {
+        1
+    } else {
+        usize_arg(&arguments, "offset").unwrap_or(1).max(1)
+    };
     let limit = usize_arg(&arguments, "limit")
         .unwrap_or(DEFAULT_READ_LIMIT)
         .max(1);
 
     if path.is_dir() {
+        anyhow::ensure!(cursor.is_none(), "directories use offset, not cursor");
         let entries = directory_entries(&path)?;
+        check_cancel()?;
         if offset > entries.len().saturating_add(1) {
             anyhow::bail!(
                 "offset {offset} is out of range for {} ({} entries)",
@@ -92,15 +118,42 @@ pub(super) fn read_tool(
     let metadata = path
         .metadata()
         .with_context(|| format!("failed to inspect {}", path.display()))?;
-    let mut file = std::fs::File::open(&path)
+    anyhow::ensure!(
+        metadata.is_file(),
+        "{} is not a regular file",
+        path.display()
+    );
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    // Avoid blocking on a FIFO swapped in between inspection and open. Verify
+    // the opened handle too, rather than trusting pre-open path metadata.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let mut file = options
+        .open(&path)
         .with_context(|| format!("failed to open {}", path.display()))?;
+    let metadata = file.metadata()?;
+    anyhow::ensure!(
+        metadata.is_file(),
+        "{} is not a regular file",
+        path.display()
+    );
+    let version = read_pagination::version(&path, &metadata);
+    let position = cursor
+        .map(|token| read_pagination::decode(token, &version, metadata.len()))
+        .transpose()?;
     let mut sample = vec![0_u8; 64 * 1024];
     let sample_len = file
         .read(&mut sample)
         .with_context(|| format!("failed to sample {}", path.display()))?;
     sample.truncate(sample_len);
 
+    check_cancel()?;
     if let Some(mime) = supported_media_mime(&sample) {
+        anyhow::ensure!(cursor.is_none(), "media attachments do not support cursor");
         if metadata.len() > MAX_MEDIA_READ_BYTES as u64 {
             anyhow::bail!(
                 "{display} is too large to attach ({} bytes, limit {} bytes)",
@@ -111,8 +164,27 @@ pub(super) fn read_tool(
         file.rewind()
             .with_context(|| format!("failed to rewind {}", path.display()))?;
         let mut bytes = Vec::with_capacity(metadata.len() as usize);
-        file.read_to_end(&mut bytes)
-            .with_context(|| format!("failed to read {}", path.display()))?;
+        let mut buffer = [0u8; 8192];
+        loop {
+            check_cancel()?;
+            let remaining = (MAX_MEDIA_READ_BYTES + 1).saturating_sub(bytes.len());
+            let count = file
+                .read(&mut buffer[..remaining.min(8192)])
+                .with_context(|| format!("failed to read {}", path.display()))?;
+            if count == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&buffer[..count]);
+            anyhow::ensure!(
+                bytes.len() <= MAX_MEDIA_READ_BYTES,
+                "{display} grew beyond the media attachment byte limit"
+            );
+        }
+        anyhow::ensure!(
+            read_pagination::version(&path, &file.metadata()?) == version
+                && read_pagination::version(&path, &path.metadata()?) == version,
+            "{display} changed while being read; retry"
+        );
         let loaded = crate::instruction::nearby(&context.cwd, &path);
         let loaded_paths = loaded
             .iter()
@@ -152,94 +224,78 @@ pub(super) fn read_tool(
     }
     file.rewind()
         .with_context(|| format!("failed to rewind {}", path.display()))?;
-    let mut reader = BufReader::new(file);
-    let mut rendered = Vec::new();
-    let mut preview = Vec::new();
-    let mut rendered_bytes = 0usize;
-    let mut byte_capped = false;
-    let mut line_number = 0usize;
-    let mut has_more = false;
-    let mut raw = Vec::new();
-    loop {
-        raw.clear();
-        let read = reader
-            .read_until(b'\n', &mut raw)
-            .with_context(|| format!("failed to read {}", path.display()))?;
-        if read == 0 {
-            break;
-        }
-        line_number += 1;
-        if line_number < offset {
-            continue;
-        }
-        if rendered.len() >= limit {
-            has_more = true;
-            break;
-        }
-        while raw.last().is_some_and(|byte| matches!(byte, b'\n' | b'\r')) {
-            raw.pop();
-        }
-        let text = std::str::from_utf8(&raw).with_context(|| {
-            format!("{display} is not valid UTF-8 near line {line_number}")
-        })?;
-        let text = truncate_line(&text);
-        let line = format!("{line_number}: {text}");
-        let size = line.len() + usize::from(!rendered.is_empty());
-        if rendered_bytes.saturating_add(size) > MAX_READ_BYTES {
-            byte_capped = true;
-            has_more = true;
-            break;
-        }
-        rendered_bytes += size;
-        if preview.len() < 20 {
-            preview.push(text);
-        }
-        rendered.push(line);
-    }
-    if rendered.is_empty() && offset > line_number.saturating_add(1) {
-        anyhow::bail!(
-            "offset {offset} is out of range for {display} ({line_number} lines)"
-        );
-    }
-    let truncated = has_more;
-    let last = if rendered.is_empty() {
-        offset.saturating_sub(1)
-    } else {
-        offset + rendered.len() - 1
-    };
-    let next = last + 1;
-    let mut output = format!(
-        "<path>{}</path>\n<type>file</type>\n<content>\n{}",
-        path.display(),
-        rendered.join("\n")
-    );
-    if byte_capped {
-        output.push_str(&format!(
-            "\n\n(Output capped at 50 KB. Showing lines {offset}-{last}. Use offset={next} to continue.)"
-        ));
-    } else if has_more {
-        output.push_str(&format!(
-            "\n\n(Showing lines {offset}-{last}. Use offset={next} to continue.)"
-        ));
-    } else {
-        output.push_str(&format!("\n\n(End of file - total {line_number} lines)"));
-    }
-    output.push_str("\n</content>");
+    // Instructions are part of the output budget, not an afterthought: the
+    // central limiter must not discard a long fragment from an ordinary page.
     let loaded = crate::instruction::nearby(&context.cwd, &path);
-    if !loaded.is_empty() {
-        if !output.is_empty() {
-            output.push_str("\n\n");
-        }
-        output.push_str("<system-reminder>\n");
-        output.push_str(
-            &loaded
+    check_cancel()?;
+    let reminder = if loaded.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n\n<system-reminder>\n{}\n</system-reminder>",
+            loaded
                 .iter()
                 .map(|item| item.content.as_str())
                 .collect::<Vec<_>>()
-                .join("\n\n"),
-        );
-        output.push_str("\n</system-reminder>");
+                .join("\n\n")
+        )
+    };
+    let prefix = format!(
+        "<path>{}</path>\n<type>file</type>\n<content>\n",
+        path.display()
+    );
+    let (content_cap, row_cap, instruction_overflow) =
+        read_output_budget(&prefix, raw_path, limit, &reminder)?;
+    // Keep a handle for post-read version validation even though pagination
+    // owns its buffered reader. A changed file must never yield a usable token.
+    let verification = file.try_clone()?;
+    let page = read_pagination::page(
+        file,
+        offset,
+        limit.min(row_cap),
+        position,
+        content_cap,
+        check_cancel,
+    )?;
+    anyhow::ensure!(
+        read_pagination::version(&path, &verification.metadata()?) == version
+            && read_pagination::version(&path, &path.metadata()?) == version,
+        "{display} changed while being read; retry without cursor"
+    );
+    check_cancel()?;
+    let next_cursor = page
+        .more
+        .then(|| read_pagination::encode(&version, &page.next));
+    let continuation = next_cursor.as_ref().map(|token| {
+        json!({
+            "filePath": raw_path,
+            "limit": limit,
+            "cursor": token,
+        })
+    });
+    let mut output = prefix;
+    output.push_str(&page.rendered.join("\n"));
+    if let Some(args) = &continuation {
+        output.push_str(&read_continuation_footer(
+            args,
+            page.next.line,
+            page.byte_capped,
+        ));
+    } else {
+        output.push_str(&format!(
+            "\n\n(End of file - total {} lines)",
+            page.total_lines
+        ));
     }
+    output.push_str("\n</content>");
+    // Exceptionally large instruction bundles still go through the central
+    // artifact limiter intact; never omit instructions or bypass that limiter.
+    output.push_str(&reminder);
+    debug_assert!(
+        instruction_overflow
+            || (output.len() <= super::truncate::MAX_BYTES
+                && output.lines().count() <= super::truncate::MAX_LINES)
+    );
     let loaded_paths = loaded
         .iter()
         .map(|item| item.filepath.clone())
@@ -251,14 +307,80 @@ pub(super) fn read_tool(
         metadata: Some(json!({
             "path": display,
             "type": "file",
-            "lines": (!has_more).then_some(line_number),
-            "offset": offset,
+            "lines": (!page.more).then_some(page.total_lines),
+            "offset": page.start.line,
             "limit": limit,
-            "truncated": truncated,
-            "preview": preview.join("\n"),
+            "truncated": page.more,
+            "byteCapped": page.byte_capped,
+            "rowCapped": page.more && !page.byte_capped && page.rendered.len() == row_cap && row_cap < limit,
+            "instructionOverflow": instruction_overflow,
+            "contentByteBudget": content_cap,
+            "contentRowBudget": row_cap,
+            "byteStart": page.start.byte,
+            "byteEnd": page.next.byte,
+            "startLine": page.start.line,
+            "startColumnBytes": page.start.column,
+            "nextLine": page.next.line,
+            "nextColumnBytes": page.next.column,
+            "partialLine": page.more && page.next.column > 0,
+            "nextCursor": next_cursor,
+            "continuation": continuation,
+            "preview": page.preview.join("\n"),
             "loaded": loaded_paths,
         })),
     })
+}
+
+fn read_continuation_footer(args: &Value, line: usize, byte_capped: bool) -> String {
+    format!(
+        "\n\n({} Continue with read arguments: {}. Continuation may resume within line {}; fragments of the same numbered line concatenate without a newline.)",
+        if byte_capped { "Page byte budget reached." } else { "More content remains." },
+        args, line,
+    )
+}
+
+/// Reserve the actual escaped path, limit, instruction bundle and framing,
+/// plus an upper bound on the cursor/footer (only numeric widths vary). This
+/// costs hundreds of bytes, not half the content budget, for ordinary paths.
+fn read_output_budget(
+    prefix: &str,
+    raw_path: &str,
+    limit: usize,
+    reminder: &str,
+) -> anyhow::Result<(usize, usize, bool)> {
+    // Base64url cursor characters never need JSON escaping. Reserve its exact
+    // fixed length without issuing a dummy capability into the cursor cache.
+    let cursor = "x".repeat(read_pagination::CURSOR_LENGTH);
+    let args = json!({"filePath": raw_path, "limit": limit, "cursor": cursor});
+    let continuation = read_continuation_footer(&args, usize::MAX, true);
+    let eof = format!("\n\n(End of file - total {} lines)", usize::MAX);
+    let footer = if continuation.len() >= eof.len() {
+        continuation
+    } else {
+        eof
+    };
+    let framing = format!("{prefix}{footer}\n</content>");
+    let minimum_content = usize::MAX.to_string().len() + 2 + 4; // label + one UTF-8 scalar
+    let remaining = |suffix: &str| {
+        let envelope = format!("{framing}{suffix}");
+        // Adding N rendered rows adds at most N lines to the empty envelope.
+        (
+            super::truncate::MAX_BYTES.saturating_sub(envelope.len()),
+            super::truncate::MAX_LINES.saturating_sub(envelope.lines().count()),
+        )
+    };
+    let (bytes, rows) = remaining(reminder);
+    if bytes >= minimum_content && rows > 0 {
+        return Ok((bytes, rows, false));
+    }
+    // Nearby instructions can themselves exceed a global budget. Keep them
+    // verbatim and let the central limiter create its recoverable artifact.
+    let (bytes, rows) = remaining("");
+    anyhow::ensure!(
+        bytes >= minimum_content && rows > 0,
+        "read path/framing exceeds output budget; use a shorter filePath"
+    );
+    Ok((bytes, rows, !reminder.is_empty()))
 }
 
 fn supported_media_mime(bytes: &[u8]) -> Option<&'static str> {

@@ -1294,7 +1294,8 @@ impl Application<'_> {
         // Theme picker writes are application-visible through the config file
         // before the watcher necessarily updates `self.config`; resolve and
         // rollback against the latest persisted four-field appearance state.
-        let previous_appearance = neoism_backend::config::Config::load().appearance;
+        let persisted_config = neoism_backend::config::Config::load();
+        let previous_appearance = persisted_config.appearance;
         let transition = neoism_backend::config::mashup::resolve_appearance_transition(
             previous_appearance.mashup_pack.as_deref(),
             previous_appearance.mashup_baseline.as_ref(),
@@ -1310,6 +1311,11 @@ impl Application<'_> {
             .and_then(|id| packs.iter().find(|pack| pack.id == id))
             .cloned();
         let mut candidate_config = self.config.clone();
+        // A wallpaper picker may have committed before the watcher updates the app.
+        candidate_config.ui.window.background_image =
+            persisted_config.ui.window.background_image;
+        candidate_config.ui.window.background_image_disabled =
+            persisted_config.ui.window.background_image_disabled;
         candidate_config.appearance.mashup_pack = transition.mashup_pack;
         candidate_config.appearance.mashup_baseline = transition.mashup_baseline;
         candidate_config.appearance.theme =
@@ -9645,6 +9651,7 @@ fn lua_palette_action(
         "window.fullscreen.toggle" => ToggleFullscreen,
         "theme.toggle" => ToggleAppearanceTheme,
         "theme.pick" => OpenThemePicker,
+        "backgrounds:pick" => ListBackgrounds,
         "shader.pick" => OpenShaders,
         "mashup.pick" => OpenMashupPacks,
         "edit.copy" => Copy,
@@ -9708,7 +9715,15 @@ fn lua_palette_action(
 
 #[cfg(test)]
 mod mashup_transaction_tests {
-    use super::commit_validated_mashup_candidate;
+    use super::{commit_validated_mashup_candidate, lua_palette_action};
+
+    #[test]
+    fn background_named_action_routes_to_the_native_picker() {
+        assert!(matches!(
+            lua_palette_action("backgrounds:pick"),
+            Some(neoism_ui::panels::command_palette::PaletteAction::ListBackgrounds)
+        ));
+    }
 
     #[test]
     fn rejected_candidate_never_enters_visual_commit() {

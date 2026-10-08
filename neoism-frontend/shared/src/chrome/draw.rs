@@ -715,6 +715,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                 &ctx,
             );
         }
+        crate::panels::command_palette::CommandPalette::clear_background_preview_overlays(sugarloaf);
         if let Some(rect) = layout.command_palette {
             self.command_palette.draw(
                 sugarloaf,

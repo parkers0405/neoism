@@ -206,6 +206,7 @@ impl NeoismAgentPane {
         if delta.is_empty() {
             return;
         }
+        self.timeline_live_growth = true;
         if matches!(kind.as_deref(), Some("reasoning" | "thinking")) {
             self.retain_current_turn_trace();
         }
@@ -364,6 +365,7 @@ impl NeoismAgentPane {
     }
 
     pub fn upsert_part_message(&mut self, message: NeoismAgentMessage) {
+        self.timeline_live_growth = true;
         let refresh_background = message.tool == "background_task"
             || message.tool == "background_task_result"
             || is_background_completion_card(&message);

@@ -238,6 +238,14 @@ impl NeoismAgentPane {
                             .map(|(index, _)| index)
                             .collect()
                     };
+                    // Preserve an unpainted live delta through an identical idle
+                    // snapshot; changed transcripts are history, not live arrival.
+                    if !self.timeline_history_position_hydrated
+                        || structural
+                        || !dirty_indices.is_empty()
+                    {
+                        self.prepare_timeline_history_position();
+                    }
                     if structural || !dirty_indices.is_empty() {
                         self.messages = messages;
                         self.text_reveal.scope(self.session_id.as_deref());
@@ -320,11 +328,16 @@ impl NeoismAgentPane {
                         messages = self.compact_inbound_user_texts(messages);
                         messages = self.merge_pending_user_prompts(messages);
                         messages = self.preserve_streamed_response_text(messages);
-                        self.messages = merge_session_snapshot(
+                        let history_changed = messages != self.messages;
+                        let merged = merge_session_snapshot(
                             messages,
                             std::mem::take(&mut self.messages),
                             self.timeline_history.oldest_loaded_cursor.is_some(),
                         );
+                        if !self.timeline_history_position_hydrated || history_changed {
+                            self.prepare_timeline_history_position();
+                        }
+                        self.messages = merged;
                         apply_authoritative_plan(
                             &mut self.messages,
                             self.current_plan_todos.as_ref(),
@@ -2036,6 +2049,11 @@ impl NeoismAgentPane {
                         }
                         self.connection_id = state.connection_id;
                         self.thinking = state.thinking;
+                        if !self.timeline_history_position_hydrated
+                            || merged != self.messages
+                        {
+                            self.prepare_timeline_history_position();
+                        }
                         self.messages = merged;
                         self.timeline_history = timeline_history;
                         self.rebase_current_turn_trace();
@@ -2197,6 +2215,7 @@ impl NeoismAgentPane {
                 }) => {
                     // Ignore a revert that finished after the user switched away.
                     if self.session_id.as_deref() == Some(session_id.as_str()) {
+                        self.prepare_timeline_history_position();
                         self.messages = messages;
                         self.text_reveal.scope(self.session_id.as_deref());
                         self.tool_motion.scope(self.session_id.as_deref());
@@ -2783,6 +2802,10 @@ impl NeoismAgentPane {
         self.timeline_velocity_px_s = 0.0;
         self.timeline_last_tick_at = None;
         self.timeline_wheel_target_px = None;
+        self.timeline_scroll_owner = TimelineScrollOwner::Wheel;
+        self.timeline_viewport_rect = None;
+        self.timeline_history_position_hydrated = false;
+        self.timeline_live_growth = false;
         self.timeline_last_scroll_at = None;
         self.pending_timeline_anchor = None;
         self.timeline_view_anchor = None;
@@ -2987,6 +3010,7 @@ impl NeoismAgentPane {
         if delta.is_empty() {
             return;
         }
+        self.timeline_live_growth = true;
         if let (Some(part_id), Some(message_id)) = (
             part_id.as_deref().filter(|id| !id.is_empty()),
             message_id.as_deref().filter(|id| !id.is_empty()),
@@ -3158,6 +3182,7 @@ impl NeoismAgentPane {
     }
 
     pub(crate) fn upsert_part_message(&mut self, message: NeoismAgentMessage) {
+        self.timeline_live_growth = true;
         let refresh_background = message.tool == "background_task"
             || message.tool == "background_task_result"
             || is_background_completion_card(&message);
@@ -3325,6 +3350,7 @@ impl NeoismAgentPane {
         }
         if message.kind == NeoismAgentMessageKind::Assistant
             && message.text.is_empty()
+            && message.images.is_empty()
             && !message.id.is_empty()
         {
             if let Some(index) = self

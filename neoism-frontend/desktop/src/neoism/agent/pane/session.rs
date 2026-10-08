@@ -343,6 +343,7 @@ impl NeoismAgentPane {
     }
 
     pub(crate) fn mark_timeline_prepend_pending_at_current_height(&mut self) {
+        self.timeline_live_growth = false;
         self.pending_timeline_prepend_height_px = Some(self.timeline_content_height_px);
     }
 
@@ -484,6 +485,12 @@ impl NeoismAgentPane {
             return false;
         };
         if Some(entry.id.as_str()) == self.session_id.as_deref() {
+            self.timeline_live_growth = false;
+            self.clear_timeline_motion();
+            self.pending_timeline_anchor = None;
+            self.timeline_view_anchor = None;
+            self.pending_timeline_prepend_height_px = None;
+            self.pending_timeline_prepend_delta_px = None;
             self.timeline_scroll_px = 0.0;
             self.timeline_follow_bottom = true;
             return self.pending_session_switch.take().is_some();

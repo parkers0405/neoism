@@ -27,12 +27,14 @@ const DEFAULT_EXCLUDES: &[&str] = &[
 ];
 
 pub(super) async fn glob_tool(
-    context: ToolContext,
+    mut context: ToolContext,
     arguments: Value,
 ) -> anyhow::Result<ToolExecutionResult> {
     let timeout_ms = search_timeout_ms(&arguments);
     let cancel = context.cancel.clone();
-    run_search_blocking("glob", timeout_ms, cancel, move || {
+    let worker_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    context.cancel = Some(worker_cancel.clone());
+    run_search_blocking("glob", timeout_ms, cancel, worker_cancel, move || {
         glob_tool_sync(context, arguments, timeout_ms)
     })
     .await
@@ -105,15 +107,31 @@ fn glob_tool_sync(
 }
 
 pub(super) async fn grep_tool(
-    context: ToolContext,
+    mut context: ToolContext,
     arguments: Value,
 ) -> anyhow::Result<ToolExecutionResult> {
     let timeout_ms = search_timeout_ms(&arguments);
     let cancel = context.cancel.clone();
-    run_search_blocking("grep", timeout_ms, cancel, move || {
+    let worker_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    context.cancel = Some(worker_cancel.clone());
+    run_search_blocking("grep", timeout_ms, cancel, worker_cancel, move || {
         grep_tool_sync(context, arguments, timeout_ms)
     })
     .await
+}
+
+/// Resolve the public tri-state option before crossing the boolean service API.
+/// In particular, explicit false must not be overridden by uppercase patterns.
+fn resolved_case_sensitive(arguments: &Value, patterns: &[String]) -> bool {
+    arguments
+        .get("caseSensitive")
+        .and_then(Value::as_bool)
+        .unwrap_or_else(|| {
+            patterns
+                .iter()
+                .flat_map(|p| p.chars())
+                .any(char::is_uppercase)
+        })
 }
 
 fn grep_tool_sync(
@@ -134,23 +152,19 @@ fn grep_tool_sync(
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let excludes = merged_excludes(optional_string(&arguments, "exclude").as_deref());
-    let case_sensitive = arguments
-        .get("caseSensitive")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let mut mode = requested_mode(
-        &arguments,
-        patterns.first().map(String::as_str).unwrap_or(""),
+    let case_sensitive = resolved_case_sensitive(&arguments, &patterns);
+    let mode = if arguments["pattern"].is_array() || patterns.len() > 1 {
+        // Arrays are literal alternatives, including regex metacharacters.
+        WorkspaceSearchMode::Plain
+    } else {
+        requested_mode(&arguments, &patterns[0])
+    };
+    // Reject unsupported fuzzy sizes rather than silently changing semantics.
+    anyhow::ensure!(
+        mode != WorkspaceSearchMode::Fuzzy || patterns[0].len() <= 1024,
+        "fuzzy grep pattern must be at most 1024 bytes; use plain or regex for longer patterns"
     );
-    // Keep oversized fuzzy needles away from implementations whose scorer uses
-    // bounded integer arithmetic.
-    if mode == WorkspaceSearchMode::Fuzzy
-        && patterns.iter().map(String::len).sum::<usize>()
-            + include.as_deref().map_or(0, str::len)
-            > 1024
-    {
-        mode = WorkspaceSearchMode::Plain;
-    }
+    let cursor = optional_string(&arguments, "cursor");
     let result = context
         .services()
         .workspace_search
@@ -164,6 +178,7 @@ fn grep_tool_sync(
             context_lines,
             case_sensitive,
             mode,
+            cursor: cursor.clone(),
             limit,
             control: neoism_agent_service_api::WorkspaceSearchRequestControl {
                 timeout_ms,
@@ -173,13 +188,16 @@ fn grep_tool_sync(
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
     Ok(ToolExecutionResult {
         title: format!("Grep {original_pattern}"),
-        output: render_grep(&result.items, result.files_with_matches, limit),
+        output: render_grep(&result),
         metadata: Some(json!({
             "patterns": patterns, "include": include, "includeHidden": include_hidden, "exclude": excludes.join(" "),
             "mode": result.mode, "engine": result.engine, "matches": result.items.len(),
             "filesWithMatches": result.files_with_matches,
             "totalFilesSearched": result.total_files_searched,
-            "nextFileOffset": result.bounds.next_cursor.unwrap_or(0),
+            "cursor": cursor, "nextCursor": result.next_cursor, "limit": limit,
+            "pagination": "match-cursor", "total": result.bounds.total,
+            "totalAtLeast": result.bounds.total_at_least,
+            "contextLines": result.items.iter().map(|m| m.context_before.len() + m.context_after.len()).sum::<usize>(),
             "truncated": result.bounds.truncated, "timedOut": result.bounds.timed_out,
             "timeout": timeout_ms, "fallbackReason": result.fallback_reason,
             "items": grep_items_json(&result.items),
@@ -191,6 +209,7 @@ async fn run_search_blocking<F>(
     tool: &'static str,
     timeout_ms: u64,
     cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+    worker_cancel: Arc<std::sync::atomic::AtomicBool>,
     operation: F,
 ) -> anyhow::Result<ToolExecutionResult>
 where
@@ -202,14 +221,27 @@ where
     {
         anyhow::bail!("{tool} aborted before start");
     }
+    struct StopWorker(Arc<std::sync::atomic::AtomicBool>);
+    impl Drop for StopWorker {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+    let _stop_worker = StopWorker(worker_cancel.clone());
     let started = Instant::now();
     let join = tokio::task::spawn_blocking(operation);
     let timeout = tokio::time::sleep(Duration::from_millis(timeout_ms));
     tokio::pin!(timeout);
     let result = tokio::select! {
         result = join => result.with_context(|| format!("{tool} worker panicked"))?,
-        _ = &mut timeout => anyhow::bail!("{tool} timed out after {timeout_ms}ms; narrow the path/exclude pattern, lower the limit, or retry with a higher timeout"),
-        _ = process::wait_for_cancel(cancel) => anyhow::bail!("{tool} aborted"),
+        _ = &mut timeout => {
+            worker_cancel.store(true, Ordering::SeqCst);
+            anyhow::bail!("{tool} timed out after {timeout_ms}ms; narrow the path/exclude pattern, lower the limit, or retry with a higher timeout")
+        },
+        _ = process::wait_for_cancel(cancel) => {
+            worker_cancel.store(true, Ordering::SeqCst);
+            anyhow::bail!("{tool} aborted")
+        },
     };
     if perf_logging_enabled() {
         match &result {
@@ -334,17 +366,25 @@ fn file_items_json(items: &[WorkspaceFileMatch]) -> Value {
 fn grep_items_json(items: &[WorkspaceGrepMatch]) -> Value {
     Value::Array(items.iter().map(|item| json!({
     "path": item.path, "line": item.line, "text": item.text, "definition": item.definition, "fuzzyScore": item.fuzzy_score,
+    "contextBefore": item.context_before, "contextAfter": item.context_after,
 })).collect())
 }
 
-fn render_grep(items: &[WorkspaceGrepMatch], files: usize, limit: usize) -> String {
-    if items.is_empty() {
-        return "No files found".into();
-    }
-    let mut output = vec![format!(
-        "Grep: Found {} matches in {files} files",
-        items.len()
-    )];
+fn render_grep(result: &neoism_agent_service_api::GrepWorkspaceResult) -> String {
+    let items = &result.items;
+    let mut output = vec![if items.is_empty() {
+        if result.bounds.truncated {
+            "Grep: No matches in this partial page".into()
+        } else {
+            "Grep: No matches found".into()
+        }
+    } else {
+        format!(
+            "Grep: Found {} matches in {} files (this page)",
+            items.len(),
+            result.files_with_matches
+        )
+    }];
     let mut current = "";
     for item in items {
         if current != item.path {
@@ -354,12 +394,144 @@ fn render_grep(items: &[WorkspaceGrepMatch], files: usize, limit: usize) -> Stri
             current = &item.path;
             output.push(format!("{}:", item.path));
         }
+        for (index, text) in item.context_before.iter().enumerate() {
+            output.push(format!(
+                "  Context {}: {text}",
+                item.line
+                    .saturating_sub((item.context_before.len() - index) as u64)
+            ));
+        }
         let marker = if item.definition { " [def]" } else { "" };
         output.push(format!("  Line {}{marker}: {}", item.line, item.text));
+        for (index, text) in item.context_after.iter().enumerate() {
+            output.push(format!(
+                "  Context {}: {text}",
+                item.line + index as u64 + 1
+            ));
+        }
     }
-    if items.len() >= limit {
-        output.push(String::new());
-        output.push(format!("(Results may be truncated: showing first {limit} matches. Narrow the query or use nextFileOffset metadata.)"));
+    if let Some(cursor) = &result.next_cursor {
+        output.push(format!("(More results: pass cursor={cursor} with the same query/path/options. Limit may change; pages respect match and output budgets.)"));
+    } else if result.bounds.truncated {
+        output.push("(Partial results; no safe continuation cursor. Retry from the input cursor with a higher timeout or narrower scope.)".into());
     }
     output.join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn grep_case_option_explicit_booleans_override_smartcase() {
+        for patterns in [
+            vec!["WORKSPACE".into()],
+            vec!["workspace".into()],
+            vec!["workspace".into(), "OTHER".into()],
+        ] {
+            assert!(!resolved_case_sensitive(
+                &json!({"caseSensitive": false}),
+                &patterns
+            ));
+            assert!(resolved_case_sensitive(
+                &json!({"caseSensitive": true}),
+                &patterns
+            ));
+            assert_eq!(
+                resolved_case_sensitive(&json!({}), &patterns),
+                patterns
+                    .iter()
+                    .flat_map(|p| p.chars())
+                    .any(char::is_uppercase),
+            );
+        }
+    }
+
+    #[test]
+    fn grep_render_preserves_context_and_cursor_advice_below_central_output_caps() {
+        let result = neoism_agent_service_api::GrepWorkspaceResult {
+            next_cursor: Some("opaque-next-page".into()),
+            items: (0..8)
+                .map(|index| WorkspaceGrepMatch {
+                    path: "file.txt".into(),
+                    line: 101 + index,
+                    text: "needle".into(),
+                    definition: false,
+                    fuzzy_score: None,
+                    context_before: vec!["ctx".into(); 100],
+                    context_after: vec!["ctx".into(); 100],
+                })
+                .collect(),
+            files_with_matches: 1,
+            total_files_searched: 1,
+            bounds: neoism_agent_service_api::WorkspaceSearchBounds {
+                truncated: true,
+                ..Default::default()
+            },
+            mode: "plain".into(),
+            engine: Some("fff".into()),
+            fallback_reason: None,
+        };
+        let output = render_grep(&result);
+        assert!(output.len() <= 51_200);
+        assert!(output.lines().count() <= 2_000);
+        assert!(output.contains("Found 8 matches"));
+        assert_eq!(
+            output
+                .lines()
+                .filter(|line| line.starts_with("  Context "))
+                .count(),
+            1_600
+        );
+        assert!(output.contains("pass cursor=opaque-next-page"));
+    }
+
+    #[tokio::test]
+    async fn timeout_and_cancellation_stop_blocking_search_workers() {
+        for timeout in [true, false] {
+            let user_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let worker_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let (worker, finished) = (worker_cancel.clone(), stopped.clone());
+            let user = user_cancel.clone();
+            let trigger = tokio::spawn(async move {
+                if !timeout {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    user.store(true, Ordering::SeqCst);
+                }
+            });
+            let result = run_search_blocking(
+                "grep",
+                if timeout { 10 } else { 1_000 },
+                Some(user_cancel.clone()),
+                worker_cancel,
+                move || {
+                    while !worker.load(Ordering::SeqCst) {
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    finished.store(true, Ordering::SeqCst);
+                    anyhow::bail!("worker aborted")
+                },
+            )
+            .await;
+            trigger.await.unwrap();
+            assert!(result.is_err());
+            for _ in 0..100 {
+                if stopped.load(Ordering::SeqCst) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+            assert!(
+                stopped.load(Ordering::SeqCst),
+                "detached worker must observe stop signal"
+            );
+            if timeout {
+                assert!(
+                    !user_cancel.load(Ordering::SeqCst),
+                    "worker timeout must not poison caller cancellation flag"
+                );
+            }
+        }
+    }
 }

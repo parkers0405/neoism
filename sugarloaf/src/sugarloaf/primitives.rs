@@ -3,7 +3,7 @@
 // This source code is licensed under the MIT license found in the
 // LICENSE file in the root directory of this source tree.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Corner radii for a rounded rectangle.
 /// Each corner can have a different radius.
@@ -88,7 +88,7 @@ pub struct SugarCursor {
     pub order: u8,
 }
 
-#[derive(Clone, Deserialize, Debug, PartialEq)]
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
 pub struct ImageProperties {
     #[serde(default = "String::default")]
     pub path: String,

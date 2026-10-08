@@ -25,10 +25,9 @@ use super::{
     CARET_BLINK_MS, CARET_WIDTH, COPY_ICON_H, COPY_ICON_OFFSET, COPY_ICON_PAGE_H,
     COPY_ICON_PAGE_W, COPY_ICON_RADIUS, COPY_ICON_STROKE, COPY_ICON_W,
     CURSOR_ANIMATION_LENGTH, DEPTH_BG, DEPTH_ELEMENT, INPUT_FONT_SIZE, INPUT_HEIGHT,
-    INPUT_PADDING_X, LIST_SCROLL_ANIMATION_LENGTH, MAX_VISIBLE_RESULTS, OPEN_POP_MS,
-    ORDER, PALETTE_CORNER_RADIUS, PALETTE_PADDING, RESULTS_MARGIN_TOP,
-    RESULTS_PADDING_BOTTOM, RESULT_FONT_SIZE, RESULT_ITEM_HEIGHT, SEPARATOR_HEIGHT,
-    SHORTCUT_FONT_SIZE, THEME_LIST_WIDTH,
+    INPUT_PADDING_X, LIST_SCROLL_ANIMATION_LENGTH, OPEN_POP_MS, ORDER,
+    PALETTE_CORNER_RADIUS, PALETTE_PADDING, RESULTS_MARGIN_TOP, RESULTS_PADDING_BOTTOM,
+    RESULT_FONT_SIZE, RESULT_ITEM_HEIGHT, SEPARATOR_HEIGHT, SHORTCUT_FONT_SIZE,
 };
 
 const MAX_INPUT_ROWS: usize = 5;
@@ -483,6 +482,7 @@ impl CommandPalette {
         dimensions: (f32, f32, f32),
         theme: &IdeTheme,
     ) {
+        super::background_preview::BackgroundPreviewCache::clear(sugarloaf);
         if !self.enabled {
             // Immediate mode: not drawing == not visible.
             self.selected_cursor_rect = None;
@@ -513,12 +513,11 @@ impl CommandPalette {
         let frame_stroke = (file_tree::FRAME_STROKE * s).max(2.0);
         // Measure and cache dynamic input geometry before asking for the modal
         // rect, because the results list and hit testing both depend on it.
-        let preferred_width =
-            if matches!(self.mode, PaletteMode::Themes(_) | PaletteMode::Mashups(_)) {
-                super::THEME_PALETTE_WIDTH
-            } else {
-                super::PALETTE_WIDTH
-            };
+        let preferred_width = if self.is_appearance_picker() {
+            super::THEME_PALETTE_WIDTH
+        } else {
+            super::PALETTE_WIDTH
+        };
         let logical_w = window_width / scale_factor;
         let measured_palette_w =
             (preferred_width * s).min((logical_w - 16.0 * s).max(160.0));
@@ -541,6 +540,7 @@ impl CommandPalette {
                 PaletteMode::Fonts(_) => "Type a font name...",
                 PaletteMode::Themes(_) => "Search themes...",
                 PaletteMode::Mashups(_) => "Search Mash Up Packs...",
+                PaletteMode::Backgrounds(_) => "Search backgrounds...",
                 PaletteMode::Shaders(_) => "Type a shader name...",
                 PaletteMode::Buffers(_) => "Search buffers...",
                 PaletteMode::Workspaces(_) => "Search workspaces...",
@@ -558,6 +558,9 @@ impl CommandPalette {
         let line_h = INPUT_HEIGHT * s;
         self.input_band_height = line_h * (query_rows + error_rows) as f32;
         let input_h = self.input_band_height;
+        // A resize or wrapped query can change the row budget. Keep the real
+        // selection visible in the same viewport used for geometry and drawing.
+        self.clamp_scroll(self.filtered_rows().len());
         let list_scroll_offset = snap_to_device_px(self.tick_list_scroll(), scale_factor);
         let cursor_offset = self.tick_cursor();
 
@@ -591,7 +594,7 @@ impl CommandPalette {
         let input_width = (content_w - pad * 2.0).max(0.0);
         let input_clip = [input_x, input_y, input_width, input_h];
 
-        if matches!(self.mode, PaletteMode::Themes(_) | PaletteMode::Mashups(_)) {
+        if self.is_appearance_picker() {
             stroke_rounded_rect(
                 sugarloaf,
                 input_x + 6.0 * s,
@@ -612,6 +615,7 @@ impl CommandPalette {
             PaletteMode::Fonts(_) => "Type a font name...",
             PaletteMode::Themes(_) => "Search themes...",
             PaletteMode::Mashups(_) => "Search Mash Up Packs...",
+            PaletteMode::Backgrounds(_) => "Search backgrounds...",
             PaletteMode::Shaders(_) => "Type a shader name...",
             PaletteMode::Buffers(_) => "Search buffers...",
             PaletteMode::Workspaces(_) => "Search workspaces...",
@@ -786,21 +790,18 @@ impl CommandPalette {
         );
 
         let results_y = sep_y + SEPARATOR_HEIGHT + margin_top;
-        let visible_rows = filtered
-            .len()
-            .saturating_sub(self.scroll_offset)
-            .min(MAX_VISIBLE_RESULTS);
-        let list_h = visible_rows as f32 * row_h;
-        let list_clip_h = list_h + RESULTS_PADDING_BOTTOM * s;
-        let list_bottom = results_y + list_clip_h;
-        let split_theme_preview =
-            matches!(self.mode, PaletteMode::Themes(_) | PaletteMode::Mashups(_))
-                && input_width > 560.0 * s;
-        let list_width = if split_theme_preview {
-            (THEME_LIST_WIDTH * s).min(input_width * 0.45)
+        let visible_rows = self.visible_row_count();
+        let band_rows = self.result_band_row_count(input_width);
+        let list_h = band_rows as f32 * row_h;
+        let list_clip_h = if band_rows == 0 {
+            0.0
         } else {
-            input_width
+            list_h + RESULTS_PADDING_BOTTOM * s
         };
+        let list_bottom = results_y + list_clip_h;
+        let appearance_list_width = self.appearance_list_width(input_width);
+        let split_theme_preview = appearance_list_width.is_some();
+        let list_width = appearance_list_width.unwrap_or(input_width);
         if split_theme_preview {
             let preview_gap = 14.0 * s;
             let preview_x = input_x + list_width + preview_gap;
@@ -814,7 +815,108 @@ impl CommandPalette {
                 DEPTH_ELEMENT,
                 ORDER,
             );
-            if let Some(name) = self.get_selected_theme() {
+            if let Some(entry) = self.selected_background() {
+                let y = results_y + 5.0 * s;
+                let h = (list_clip_h - 10.0 * s).max(0.0);
+                // Match the actual Themes/Mashups preview card chrome, replacing
+                // only its code sample with a bounded image destination.
+                if preview_width >= 180.0 * s && h >= 120.0 * s {
+                    stroke_rounded_rect(
+                        sugarloaf,
+                        preview_x,
+                        y,
+                        preview_width,
+                        h,
+                        (1.0 * s).max(1.0),
+                        7.0 * s,
+                        theme.f32(theme.border),
+                        theme.f32(theme.bg),
+                        DEPTH_ELEMENT,
+                        ORDER,
+                    );
+                    let pad = 16.0 * s;
+                    let clip = [preview_x + 1.0, y + 1.0, preview_width - 2.0, h - 2.0];
+                    let opts = DrawOpts {
+                        font_size: 13.0 * s,
+                        color: theme.u8(theme.fg),
+                        bold: true,
+                        clip_rect: Some(clip),
+                        ..DrawOpts::default()
+                    };
+                    let detail_opts = DrawOpts {
+                        font_size: 10.0 * s,
+                        color: theme.u8(theme.muted),
+                        clip_rect: Some(clip),
+                        ..DrawOpts::default()
+                    };
+                    let hint = "\u{2191}\u{2193} preview  \u{00b7}  Enter apply";
+                    let hint_w = sugarloaf.overlay_text_mut().measure(hint, &detail_opts);
+                    let title = truncate_to_fit(
+                        &entry.name,
+                        (preview_width - pad * 3.0 - hint_w).max(0.0),
+                        sugarloaf,
+                        &opts,
+                    );
+                    sugarloaf.overlay_text_mut().draw(
+                        preview_x + pad,
+                        y + 13.0 * s,
+                        &title,
+                        &opts,
+                    );
+                    sugarloaf.overlay_text_mut().draw(
+                        (preview_x + preview_width - pad - hint_w).max(preview_x + pad),
+                        y + 15.0 * s,
+                        hint,
+                        &detail_opts,
+                    );
+                    let detail = truncate_to_fit(
+                        &entry.description,
+                        preview_width - pad * 2.0,
+                        sugarloaf,
+                        &detail_opts,
+                    );
+                    sugarloaf.overlay_text_mut().draw(
+                        preview_x + pad,
+                        y + 35.0 * s,
+                        &detail,
+                        &detail_opts,
+                    );
+                    let divider_y = y + 57.0 * s;
+                    sugarloaf.overlay_rect(
+                        preview_x + pad,
+                        divider_y,
+                        preview_width - pad * 2.0,
+                        1.0,
+                        theme.f32(theme.border),
+                        DEPTH_ELEMENT + 0.01,
+                        ORDER,
+                    );
+                    let rect = [
+                        preview_x + pad,
+                        divider_y + pad,
+                        preview_width - pad * 2.0,
+                        (h - 57.0 * s - pad * 2.0).max(0.0),
+                    ];
+                    if !self.background_preview.borrow_mut().draw(
+                        sugarloaf,
+                        &entry,
+                        rect,
+                        scale_factor,
+                    ) {
+                        let label = match entry.id.as_str() {
+                            "inherit" => "Use inherited background",
+                            "none" => "No background image",
+                            _ => "Preview unavailable",
+                        };
+                        sugarloaf.overlay_text_mut().draw(
+                            rect[0],
+                            rect[1],
+                            label,
+                            &detail_opts,
+                        );
+                    }
+                }
+            } else if let Some(name) = self.get_selected_theme() {
                 draw_theme_preview(
                     sugarloaf,
                     preview_x,
@@ -1237,6 +1339,7 @@ impl CommandPalette {
             let display_title = match row {
                 PaletteRow::Theme { name } => theme_display_name(name),
                 PaletteRow::Mashup { entry } => entry.name.clone(),
+                PaletteRow::Background { entry } => entry.name.clone(),
                 _ => row.display_title(),
             };
             let title =
@@ -1427,14 +1530,14 @@ impl CommandPalette {
         drop(filtered);
         self.server_edit_hits = next_server_edit_hits;
         self.server_remove_hits = next_server_remove_hits;
-        let track_height = MAX_VISIBLE_RESULTS as f32 * row_h;
-        let normalized = if total > MAX_VISIBLE_RESULTS {
-            self.scroll_offset as f32 / (total - MAX_VISIBLE_RESULTS) as f32
+        let track_height = list_h;
+        let normalized = if total > visible_rows {
+            self.scroll_offset as f32 / (total - visible_rows) as f32
         } else {
             0.0
         };
         if let Some((thumb_y, thumb_height)) = scrollbar::compute_thumb(
-            MAX_VISIBLE_RESULTS,
+            visible_rows,
             total,
             results_y,
             track_height,

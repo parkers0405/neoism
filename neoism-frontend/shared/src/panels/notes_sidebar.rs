@@ -7,7 +7,7 @@ use sugarloaf::text::DrawOpts;
 use sugarloaf::Sugarloaf;
 
 use crate::animation::CriticallyDampedSpring;
-use crate::customization::{color_f32, color_u8};
+use crate::customization::color_u8;
 use crate::panels::file_tree::icons::{
     icon_for_file, FOLDER_CLOSED_ICON, FOLDER_OPEN_ICON,
 };
@@ -1279,12 +1279,50 @@ impl NotesSidebar {
         let row_pad_x = ROW_PADDING_X * self.scale;
         let indent_px = INDENT_PX * self.scale;
         let icon_gap = ICON_GAP * self.scale;
-        let row_style = plugins.map(|plugins| crate::primitives::surface_background::resolve_style("notes-tree.row", &plugins.styles));
-        let selected_style =
-            plugins.map(|plugins| crate::primitives::surface_background::resolve_style("notes-tree.row.selected", &plugins.styles));
-        let hover_style =
-            plugins.map(|plugins| crate::primitives::surface_background::resolve_style("notes-tree.row.hover", &plugins.styles));
-        let icon_style = plugins.map(|plugins| crate::primitives::surface_background::resolve_style("notes-tree.icon", &plugins.styles));
+        let row_style = Some(
+            plugins
+                .map(|plugins| {
+                    crate::primitives::surface_background::resolve_style(
+                        "notes-tree.row",
+                        &plugins.styles,
+                    )
+                })
+                .unwrap_or_else(|| {
+                    crate::primitives::surface_background::style("notes-tree.row")
+                }),
+        );
+        let selected_style = Some(
+            plugins
+                .map(|plugins| {
+                    crate::primitives::surface_background::resolve_style(
+                        "notes-tree.row.selected",
+                        &plugins.styles,
+                    )
+                })
+                .unwrap_or_else(|| {
+                    crate::primitives::surface_background::style(
+                        "notes-tree.row.selected",
+                    )
+                }),
+        );
+        let hover_style = Some(
+            plugins
+                .map(|plugins| {
+                    crate::primitives::surface_background::resolve_style(
+                        "notes-tree.row.hover",
+                        &plugins.styles,
+                    )
+                })
+                .unwrap_or_else(|| {
+                    crate::primitives::surface_background::style("notes-tree.row.hover")
+                }),
+        );
+        let icon_style = plugins.map(|plugins| {
+            crate::primitives::surface_background::resolve_style(
+                "notes-tree.icon",
+                &plugins.styles,
+            )
+        });
         let frame_stroke = (FRAME_STROKE * self.scale).max(2.0);
         let frame_radius = FRAME_RADIUS * self.scale;
         let content_x = x_left + frame_stroke;
@@ -1295,11 +1333,25 @@ impl NotesSidebar {
         let panel_bottom = content_y + content_h;
         let panel_clip = [content_x, content_y, content_w, content_h];
 
+        let background_style = plugins
+            .map(|plugins| {
+                crate::primitives::surface_background::resolve_style(
+                    "notes-tree",
+                    &plugins.styles,
+                )
+            })
+            .unwrap_or_else(|| {
+                crate::primitives::surface_background::style("notes-tree")
+            });
         draw_frame_top(
             sugarloaf,
             [x_left, y_top, panel_width, panel_height],
             theme.f32(theme.surface),
-            theme.f32(theme.bg),
+            crate::customization::background_color(
+                &background_style,
+                theme,
+                theme.f32(theme.bg),
+            ),
             frame_radius,
             frame_stroke,
         );
@@ -1410,7 +1462,10 @@ impl NotesSidebar {
                     rect[1],
                     rect[2],
                     rect[3],
-                    theme.f32_alpha(theme.hover, 0.5),
+                    crate::customization::apply_background_opacity(
+                        &background_style,
+                        theme.f32_alpha(theme.hover, 0.5),
+                    ),
                     [5.0 * self.scale; 4],
                     DEPTH,
                     ORDER + 2,
@@ -1443,7 +1498,10 @@ impl NotesSidebar {
                     back_rect[1],
                     back_rect[2],
                     back_rect[3],
-                    theme.f32(theme.surface),
+                    crate::customization::apply_background_opacity(
+                        &background_style,
+                        theme.f32(theme.surface),
+                    ),
                     [5.0 * self.scale; 4],
                     DEPTH,
                     ORDER + 1,
@@ -1560,7 +1618,15 @@ impl NotesSidebar {
                     visible_row_y,
                     content_w,
                     visible_row_h,
-                    theme.f32(theme.surface),
+                    crate::customization::background_color(
+                        selected_style.as_ref().unwrap_or(
+                            &crate::primitives::surface_background::style(
+                                "notes-tree.row.selected",
+                            ),
+                        ),
+                        theme,
+                        theme.f32(theme.surface),
+                    ),
                     edge_row_radii(
                         visible_row_y,
                         visible_row_h,
@@ -1752,7 +1818,10 @@ impl NotesSidebar {
             let btn_font = font_size * 0.92;
             let scale = self.scale;
             let blue = theme.u8(theme.blue);
-            let hover = theme.f32_alpha(theme.hover, 0.5);
+            let hover = crate::customization::apply_background_opacity(
+                &background_style,
+                theme.f32_alpha(theme.hover, 0.5),
+            );
             // Pill button: centered, hover-tinted, returns its rect for
             // hit-testing. Shared by both empty-state variants.
             let draw_btn =
@@ -1862,8 +1931,8 @@ impl NotesSidebar {
                 } else {
                     row_style.as_ref()
                 };
-                if let Some(background) =
-                    state_style.and_then(|style| style.background.as_deref())
+                if let Some(style) =
+                    state_style.filter(|style| !is_selected && style.background.is_some())
                 {
                     sugarloaf.quad(
                         None,
@@ -1871,7 +1940,11 @@ impl NotesSidebar {
                         visible_row_y,
                         content_w,
                         visible_row_h,
-                        color_f32(Some(background), theme, theme.f32(theme.surface)),
+                        crate::customization::background_color(
+                            style,
+                            theme,
+                            theme.f32(theme.surface),
+                        ),
                         edge_row_radii(
                             visible_row_y,
                             visible_row_h,
@@ -1896,7 +1969,14 @@ impl NotesSidebar {
                         visible_row_y,
                         content_w,
                         visible_row_h,
-                        theme.f32_alpha(theme.accent, 0.22),
+                        crate::customization::apply_background_opacity(
+                            row_style.as_ref().unwrap_or(
+                                &crate::primitives::surface_background::style(
+                                    "notes-tree.row",
+                                ),
+                            ),
+                            theme.f32_alpha(theme.accent, 0.22),
+                        ),
                         edge_row_radii(
                             visible_row_y,
                             visible_row_h,
@@ -2136,7 +2216,12 @@ impl NotesSidebar {
                 list_y,
                 content_w,
                 list_h,
-                theme.f32_alpha(theme.accent, 0.14),
+                crate::customization::apply_background_opacity(
+                    row_style.as_ref().unwrap_or(
+                        &crate::primitives::surface_background::style("notes-tree.row"),
+                    ),
+                    theme.f32_alpha(theme.accent, 0.14),
+                ),
                 [content_radius; 4],
                 DEPTH,
                 ORDER + 5,
@@ -2156,7 +2241,12 @@ impl NotesSidebar {
                 ly + 3.0 * s,
                 lw,
                 lh,
-                theme.f32_alpha(theme.bg, 0.40),
+                crate::customization::apply_background_opacity(
+                    row_style.as_ref().unwrap_or(
+                        &crate::primitives::surface_background::style("notes-tree.row"),
+                    ),
+                    theme.f32_alpha(theme.bg, 0.40),
+                ),
                 [l.radius; 4],
                 DEPTH,
                 ORDER + 6,
@@ -2167,7 +2257,12 @@ impl NotesSidebar {
                 ly,
                 lw,
                 lh,
-                theme.f32_alpha(theme.surface, 0.94),
+                crate::customization::apply_background_opacity(
+                    row_style.as_ref().unwrap_or(
+                        &crate::primitives::surface_background::style("notes-tree.row"),
+                    ),
+                    theme.f32_alpha(theme.surface, 0.94),
+                ),
                 [l.radius; 4],
                 DEPTH,
                 ORDER + 7,
@@ -2830,17 +2925,36 @@ fn draw_frame_top(
     stroke: f32,
 ) {
     let [x, y, w, h] = rect;
-    sugarloaf.quad(
-        None,
-        x,
-        y,
-        w,
-        h,
-        outer_color,
-        [radius, radius, 0.0, 0.0],
-        DEPTH,
-        ORDER,
-    );
+    if inner_color[3] >= 1.0 {
+        sugarloaf.quad(
+            None,
+            x,
+            y,
+            w,
+            h,
+            outer_color,
+            [radius, radius, 0.0, 0.0],
+            DEPTH,
+            ORDER,
+        );
+    } else {
+        let r = (radius - stroke).max(0.0);
+        crate::widgets::frame::draw_background_border(
+            sugarloaf,
+            rect,
+            [
+                x + stroke,
+                y + stroke,
+                (w - 2.0 * stroke).max(0.0),
+                (h - 2.0 * stroke).max(0.0),
+            ],
+            [radius, radius, 0.0, 0.0],
+            [r, r, 0.0, 0.0],
+            outer_color,
+            DEPTH,
+            ORDER,
+        );
+    }
     sugarloaf.quad(
         None,
         x + stroke,
@@ -2878,6 +2992,51 @@ fn fade_u8(mut color: [u8; 4], alpha: f32) -> [u8; 4] {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tree_row_material_inherits_context_opacity_and_specific_background() {
+        let theme = crate::primitives::IdeTheme::default();
+        // Both trees must resolve root -> row -> selected from the caller's
+        // snapshot; using a global-only helper here would miss these overrides.
+        for selector in ["file-tree", "notes-tree"] {
+            let mut styles = neoism_lua::StyleSheet::default();
+            styles.insert(
+                selector,
+                neoism_lua::StylePatch {
+                    opacity: Some(0.5),
+                    background: Some("#000000".into()),
+                    ..Default::default()
+                },
+            );
+            styles.insert(
+                format!("{selector}.row.selected"),
+                neoism_lua::StylePatch {
+                    background: Some("#ff000080".into()),
+                    ..Default::default()
+                },
+            );
+            let style = crate::primitives::surface_background::resolve_style(
+                &format!("{selector}.row.selected"),
+                &styles,
+            );
+            assert_eq!(
+                crate::customization::background_color(
+                    &style,
+                    &theme,
+                    theme.f32(theme.surface)
+                ),
+                [1.0, 0.0, 0.0, 64.0 / 255.0]
+            );
+            // Overlay tints must keep their own RGB and existing alpha.
+            assert_eq!(
+                crate::customization::apply_background_opacity(
+                    &style,
+                    [0.1, 0.2, 0.3, 0.22]
+                ),
+                [0.1, 0.2, 0.3, 0.11]
+            );
+        }
+    }
+
     #[test]
     fn keyboard_navigation_keeps_the_file_tree_scrolloff_band() {
         let mut sidebar = super::NotesSidebar::default();

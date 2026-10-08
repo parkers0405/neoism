@@ -1,6 +1,10 @@
 use super::*;
 
 impl NeoismAgentPane {
+    pub fn timeline_follow_bottom(&self) -> bool {
+        self.timeline_follow_bottom
+    }
+
     pub fn timeline_view_anchor(&self) -> Option<(TimelineViewAnchorKey, f32)> {
         self.timeline_view_anchor
             .as_ref()
@@ -69,6 +73,49 @@ impl NeoismAgentPane {
         ))
     }
 
+    /// Attribute a changed transcript to history, across all measurement passes.
+    /// Only the first hydration resets position; later refreshes retain manual
+    /// anchors and allow an already-owned live spring to finish settling.
+    pub(super) fn prepare_timeline_history_position(&mut self) {
+        // Every snapshot is history, including refreshes and subsequent pages.
+        // Do not cancel an existing live spring: its final idle lag still settles.
+        self.timeline_live_growth = false;
+        if !self.timeline_history_position_hydrated {
+            self.timeline_history_position_hydrated = true;
+            self.clear_timeline_motion();
+            self.timeline_viewport_rect = None;
+        }
+    }
+
+    /// Stop only automatic follow motion; manual wheel/trackpad physics are unchanged.
+    pub(super) fn cancel_timeline_follow_motion(&mut self) {
+        // An explicit gesture owns the current revision; only a subsequent
+        // live arrival may start automatic motion again.
+        self.timeline_live_growth = false;
+        if self.timeline_scroll_owner == TimelineScrollOwner::FollowBottom {
+            self.timeline_follow_bottom = self.timeline_scroll_px <= 1.0;
+            self.clear_timeline_motion();
+        }
+    }
+
+    pub(crate) fn clear_timeline_motion(&mut self) {
+        self.timeline_scroll_owner = TimelineScrollOwner::Wheel;
+        self.timeline_wheel_target_px = None;
+        self.timeline_velocity_px_s = 0.0;
+        self.timeline_last_tick_at = None;
+    }
+
+    pub(super) fn snap_timeline_follow_if_disabled(&mut self) {
+        if !self.tool_motion.is_enabled()
+            && self.timeline_scroll_owner == TimelineScrollOwner::FollowBottom
+        {
+            if self.timeline_follow_bottom {
+                self.timeline_scroll_px = 0.0;
+            }
+            self.clear_timeline_motion();
+        }
+    }
+
     pub fn set_timeline_metrics(
         &mut self,
         viewport_rect: [f32; 4],
@@ -80,12 +127,20 @@ impl NeoismAgentPane {
             (self.timeline_content_height_px - self.timeline_viewport_height_px).max(0.0);
         let old_scroll_top =
             (old_max_scroll - self.timeline_scroll_px).clamp(0.0, old_max_scroll);
-        let was_following_bottom =
-            self.timeline_follow_bottom && self.timeline_scroll_px <= 1.0;
+        let position_initialized = self.timeline_viewport_rect.is_some();
+        if self.timeline_viewport_rect.is_some_and(|previous| {
+            previous[2] != viewport_rect[2] || previous[3] != viewport_rect[3]
+        }) {
+            // Resize/reflow is geometry, not a newly arrived transcript revision.
+            self.timeline_live_growth = false;
+        }
+        let was_following_bottom = self.timeline_follow_bottom;
+        self.snap_timeline_follow_if_disabled();
         self.timeline_viewport_rect = Some(viewport_rect);
         self.timeline_content_height_px = content_height_px.max(0.0);
         self.timeline_viewport_height_px = viewport_height_px.max(0.0);
         if let Some(anchor) = self.pending_timeline_anchor {
+            self.cancel_timeline_follow_motion();
             let keep_anchor = self.tool_expansion_is_animating();
             self.apply_timeline_anchor(anchor);
             if !keep_anchor {
@@ -94,11 +149,13 @@ impl NeoismAgentPane {
         } else if let Some(prepend_delta) = self.pending_timeline_prepend_delta_px.take()
         {
             let max_scroll = self.max_timeline_scroll();
+            self.cancel_timeline_follow_motion();
             let keep_scroll_top = old_scroll_top + prepend_delta;
             self.timeline_scroll_px =
                 (max_scroll - keep_scroll_top).clamp(0.0, max_scroll);
             self.pending_timeline_prepend_height_px = None;
         } else if let Some(previous_height) = self.pending_timeline_prepend_height_px {
+            self.cancel_timeline_follow_motion();
             let max_scroll = self.max_timeline_scroll();
             let inserted_height =
                 (self.timeline_content_height_px - previous_height).max(0.0);
@@ -121,7 +178,45 @@ impl NeoismAgentPane {
                 self.timeline_velocity_px_s = 0.0;
                 self.timeline_last_tick_at = None;
             } else if was_following_bottom {
-                self.timeline_scroll_px = 0.0;
+                if position_initialized
+                    && self.tool_motion.is_enabled()
+                    && (self.timeline_scroll_owner == TimelineScrollOwner::FollowBottom
+                        || (self.timeline_live_growth
+                            && max_scroll > old_max_scroll
+                            && self.timeline_wheel_target_px.is_none()))
+                {
+                    // Preserve the absolute top without rounding small spring lag
+                    // through a potentially large document-space coordinate.
+                    // History/layout corrections must not add lag to a live
+                    // spring, but its existing lag and final shrink still settle.
+                    let extent_delta = max_scroll - old_max_scroll;
+                    let follow_delta = if self.timeline_live_growth {
+                        extent_delta
+                    } else {
+                        extent_delta.min(0.0)
+                    };
+                    self.timeline_scroll_px = (old_scroll_px.clamp(0.0, old_max_scroll)
+                        + follow_delta)
+                        .clamp(0.0, max_scroll);
+                    if self.timeline_scroll_px > 0.0 {
+                        if self.timeline_scroll_owner != TimelineScrollOwner::FollowBottom
+                        {
+                            self.clear_timeline_motion();
+                        }
+                        self.timeline_scroll_owner = TimelineScrollOwner::FollowBottom;
+                        self.timeline_wheel_target_px = Some(0.0);
+                        self.timeline_last_tick_at.get_or_insert_with(Instant::now);
+                    } else {
+                        self.clear_timeline_motion();
+                    }
+                } else {
+                    self.timeline_scroll_px = 0.0;
+                    if !position_initialized
+                        || self.timeline_scroll_owner == TimelineScrollOwner::FollowBottom
+                    {
+                        self.clear_timeline_motion();
+                    }
+                }
             } else if old_max_scroll > 0.0 {
                 self.timeline_scroll_px =
                     (max_scroll - old_scroll_top).clamp(0.0, max_scroll);
@@ -130,9 +225,13 @@ impl NeoismAgentPane {
             }
         }
         let max_scroll = self.max_timeline_scroll();
-        if let Some(target) = self.timeline_wheel_target_px.as_mut() {
-            *target = (*target + self.timeline_scroll_px - old_scroll_px)
-                .clamp(0.0, max_scroll);
+        if max_scroll <= 0.0 {
+            self.clear_timeline_motion();
+        } else if self.timeline_scroll_owner == TimelineScrollOwner::Wheel {
+            if let Some(target) = self.timeline_wheel_target_px.as_mut() {
+                *target = (*target + self.timeline_scroll_px - old_scroll_px)
+                    .clamp(0.0, max_scroll);
+            }
         }
     }
 
@@ -149,6 +248,7 @@ impl NeoismAgentPane {
     pub(crate) const TIMELINE_TRACKPAD_DECAY_TAU: f32 = 0.28;
     pub(crate) const TIMELINE_TRACKPAD_STOP_PX_S: f32 = 50.0;
     pub fn scroll_timeline_pixels(&mut self, delta_pixels: f32) -> bool {
+        self.cancel_timeline_follow_motion();
         if self.timeline_wheel_target_px.take().is_some() {
             self.timeline_velocity_px_s = 0.0;
         }
@@ -162,6 +262,10 @@ impl NeoismAgentPane {
     }
 
     pub fn scroll_timeline_wheel_pixels(&mut self, delta_pixels: f32) -> bool {
+        self.cancel_timeline_follow_motion();
+        if delta_pixels > 0.0 {
+            self.timeline_follow_bottom = false;
+        }
         if delta_pixels.abs() < f32::EPSILON {
             return false;
         }
@@ -208,6 +312,7 @@ impl NeoismAgentPane {
         decay_tau: f32,
         stop_px_s: f32,
     ) -> bool {
+        self.cancel_timeline_follow_motion();
         let started = crate::neoism::agent::perf::now();
         if delta_pixels.abs() < f32::EPSILON {
             return false;
@@ -282,6 +387,7 @@ impl NeoismAgentPane {
     }
 
     pub fn tick_timeline_scroll(&mut self) -> bool {
+        self.snap_timeline_follow_if_disabled();
         if let Some(mut target) = self.timeline_wheel_target_px {
             let now = Instant::now();
             let dt = self
@@ -292,35 +398,11 @@ impl NeoismAgentPane {
             target = target.clamp(0.0, self.max_timeline_scroll());
             self.timeline_wheel_target_px = Some(target);
 
-            const OMEGA: f32 = 16.0;
-            const MAX_SUBSTEP: f32 = 1.0 / 240.0;
-            let before = self.timeline_scroll_px;
-            let mut remaining = dt;
-            while remaining > 0.0 {
-                let step = remaining.min(MAX_SUBSTEP);
-                let delta = target - self.timeline_scroll_px;
-                let accel =
-                    OMEGA * OMEGA * delta - 2.0 * OMEGA * self.timeline_velocity_px_s;
-                self.timeline_velocity_px_s += accel * step;
-                self.timeline_scroll_px += self.timeline_velocity_px_s * step;
-                remaining -= step;
+            let user_owned = self.timeline_scroll_owner == TimelineScrollOwner::Wheel;
+            self.step_owned_timeline_spring(dt);
+            if user_owned {
+                self.timeline_last_scroll_at = Some(now);
             }
-            self.timeline_scroll_px = self
-                .timeline_scroll_px
-                .clamp(0.0, self.max_timeline_scroll());
-            self.shift_timeline_view_anchor_for_scroll(self.timeline_scroll_px - before);
-            if (target - self.timeline_scroll_px).abs() < 0.5
-                && self.timeline_velocity_px_s.abs() < 30.0
-            {
-                let before_snap = self.timeline_scroll_px;
-                self.timeline_scroll_px = target;
-                self.shift_timeline_view_anchor_for_scroll(target - before_snap);
-                self.timeline_velocity_px_s = 0.0;
-                self.timeline_wheel_target_px = None;
-                self.timeline_last_tick_at = None;
-            }
-            self.timeline_follow_bottom = self.timeline_scroll_px <= 1.0 && target <= 1.0;
-            self.timeline_last_scroll_at = Some(now);
             return true;
         }
         // Velocity-based stop threshold for the precision trackpad path.
@@ -359,6 +441,30 @@ impl NeoismAgentPane {
         }
         self.timeline_last_scroll_at = Some(now);
         true
+    }
+
+    pub(super) fn step_owned_timeline_spring(&mut self, dt: f32) {
+        let Some(target) = self.timeline_wheel_target_px else {
+            return;
+        };
+        let following = self.timeline_scroll_owner == TimelineScrollOwner::FollowBottom;
+        let before = self.timeline_scroll_px;
+        let (position, velocity, settled) = step_timeline_spring(
+            before,
+            self.timeline_velocity_px_s,
+            target,
+            self.max_timeline_scroll(),
+            dt,
+        );
+        self.timeline_scroll_px = position;
+        self.timeline_velocity_px_s = velocity;
+        self.shift_timeline_view_anchor_for_scroll(position - before);
+        if !following {
+            self.timeline_follow_bottom = position <= 1.0 && target <= 1.0;
+        }
+        if settled {
+            self.clear_timeline_motion();
+        }
     }
 
     pub fn timeline_is_inertial(&self) -> bool {
@@ -477,6 +583,7 @@ impl NeoismAgentPane {
         let Some(hit) = self.scrollbar_hit(x, y) else {
             return false;
         };
+        self.cancel_timeline_follow_motion();
         // Page-jump when the user clicks the track outside the thumb so it
         // matches the conventional scrollbar behaviour.
         if hit == ScrollbarHit::Track {
@@ -491,6 +598,8 @@ impl NeoismAgentPane {
         self.timeline_view_anchor = None;
         self.timeline_velocity_px_s = 0.0;
         self.timeline_wheel_target_px = None;
+        self.timeline_last_tick_at = None;
+        self.timeline_follow_bottom = self.timeline_scroll_px <= 1.0;
         true
     }
 

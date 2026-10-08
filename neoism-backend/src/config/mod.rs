@@ -1,3 +1,4 @@
+pub mod background;
 pub mod bell;
 pub mod bindings;
 pub mod colors;
@@ -1069,7 +1070,10 @@ impl Config {
     /// invalid values reject the whole candidate so callers can keep the last
     /// known-good configuration.
     pub fn apply_json_patch(&mut self, patch: &serde_json::Value) -> Result<(), String> {
-        if patch.is_null() {
+        // Style-only init.lua files publish an empty setup patch. This is a
+        // true no-op: do not roundtrip unrelated typed settings (some config
+        // types have different serialization and user-input representations).
+        if patch.is_null() || patch.as_object().is_some_and(|patch| patch.is_empty()) {
             return Ok(());
         }
         if !patch.is_object() {
@@ -1270,8 +1274,16 @@ impl Config {
             if let Some(blur) = window_overwrite.blur {
                 self.ui.window.blur = blur;
             }
+            if let Some(disabled) = window_overwrite.background_image_disabled {
+                self.ui.window.background_image_disabled = disabled;
+            }
             if let Some(bg_image) = &window_overwrite.background_image {
                 self.ui.window.background_image = Some(bg_image.clone());
+                // An image implies re-enabling only when the platform has not
+                // explicitly supplied a disabled flag.
+                if window_overwrite.background_image_disabled.is_none() {
+                    self.ui.window.background_image_disabled = false;
+                }
             }
             if let Some(decorations) = window_overwrite.decorations {
                 self.ui.window.decorations = decorations;
@@ -1427,6 +1439,21 @@ mod tests {
 
     fn parse(json: &str) -> Config {
         deserialize_config(json).expect("config should parse")
+    }
+
+    #[test]
+    fn style_only_lua_empty_config_patch_is_a_noop() {
+        let mut config = parse("{}");
+        config.ui.margin = Margin::new(3.0, 7.0, 11.0, 13.0);
+        let before = serde_json::to_value(&config).unwrap();
+        // This is the config_patch produced by LuaRuntime for an init.lua
+        // containing only neoism.ui.style calls. Both startup and reload must
+        // accept it before publishing the runtime's separate style snapshot.
+        config.apply_json_patch(&serde_json::json!({})).unwrap();
+        assert_eq!(serde_json::to_value(&config).unwrap(), before);
+        config.apply_json_patch(&serde_json::Value::Null).unwrap();
+        assert_eq!(serde_json::to_value(&config).unwrap(), before);
+        assert!(config.apply_json_patch(&serde_json::json!([])).is_err());
     }
 
     #[test]

@@ -43,6 +43,7 @@ pub enum PaletteAction {
     ToggleFullscreen,
     ToggleAppearanceTheme,
     OpenThemePicker,
+    ListBackgrounds,
     OpenShaders,
     OpenMashupPacks,
     Copy,
@@ -599,6 +600,8 @@ pub fn mashup_packs_modal_spec(packs: Vec<PaletteMashupEntry>) -> ModalSpec {
 /// [`CommandPalette::set_host_capabilities`]: super::state::CommandPalette::set_host_capabilities
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PaletteHostCapabilities {
+    /// Native host can enumerate and apply filesystem backgrounds.
+    pub backgrounds: bool,
     /// LSP request/response actions (hover, code action, format,
     /// definition, references, rename, document/workspace symbols)
     /// plus the symbols-fed `GoToSymbol` finder mode.
@@ -627,6 +630,7 @@ impl PaletteHostCapabilities {
     /// catalog.
     pub const fn all() -> Self {
         Self {
+            backgrounds: true,
             lsp_actions: true,
             notebook_kernel: true,
             draw_notes: true,
@@ -642,6 +646,7 @@ impl PaletteHostCapabilities {
     /// filter they drive and the two cannot drift.
     pub const fn web() -> Self {
         Self {
+            backgrounds: false,
             // No LSP request bridge on web yet — hover/rename/etc.
             // and the symbols finder have no data source.
             lsp_actions: false,
@@ -678,6 +683,7 @@ pub(crate) fn command_visible_for_host(
     caps: PaletteHostCapabilities,
 ) -> bool {
     match action {
+        PaletteAction::ListBackgrounds => caps.backgrounds,
         PaletteAction::LspHover
         | PaletteAction::LspCodeAction
         | PaletteAction::LspFormat
@@ -784,6 +790,7 @@ pub(crate) fn command_visible_for_surface(
         | PaletteAction::ToggleFullscreen
         | PaletteAction::ToggleAppearanceTheme
         | PaletteAction::OpenThemePicker
+        | PaletteAction::ListBackgrounds
         | PaletteAction::OpenShaders
         | PaletteAction::OpenMashupPacks
         | PaletteAction::Copy
@@ -820,5 +827,26 @@ pub(crate) fn command_visible_for_surface(
         // must stay exhaustive.
         | PaletteAction::MoveWorkspaceToHost { .. }
         | PaletteAction::Quit => true,
+    }
+}
+
+/// Host-owned background catalog. `inherit` and `none` have no image path.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PaletteBackgroundEntry {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub path: Option<String>,
+    pub opacity: f32,
+}
+
+impl PaletteAction {
+    /// Shared action intent for the host-owned filesystem background picker.
+    /// Hosts still capability-filter before offering or executing this intent.
+    pub fn from_named_action(id: &str) -> Option<Self> {
+        match id {
+            "backgrounds:pick" => Some(Self::ListBackgrounds),
+            _ => None,
+        }
     }
 }

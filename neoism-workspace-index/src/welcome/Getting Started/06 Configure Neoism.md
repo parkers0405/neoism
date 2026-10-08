@@ -76,7 +76,7 @@ Change the shell program to one installed on your machine, or omit the `terminal
 | `developer` | Logging and the FPS counter |
 | `platform` | `windows`, `macos`, and `linux` overrides |
 
-`appearance.theme` selects the IDE-wide theme. `appearance.palette` is a separate terminal color palette file; setting one does not implicitly set the other. Omarchy users can select the live `omarchy` theme described in [[Neoism/Appearance#Follow Omarchy|Appearance]].
+`appearance.theme` selects the IDE-wide theme. `appearance.palette` is a separate terminal color palette file; setting one does not implicitly set the other. Omarchy users can select the live `omarchy` theme described in [[Neoism/Appearance#Follow Omarchy|Appearance]]. On desktop, the **Backgrounds** picker previews images and writes `ui.window.background-image` without requiring a Mash Up Pack; see [[Neoism/Appearance#Backgrounds|Backgrounds]].
 
 ## Configure the agent separately, in the same file
 

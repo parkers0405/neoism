@@ -107,6 +107,7 @@ pub enum TopBarAction {
     /// address) and pushes it into the shared share sheet.
     ShareWithPhone,
     OpenThemes,
+    OpenBackgrounds,
     OpenExtensions,
     OpenNeoWorld,
     /// Magnifying-glass button beside the hamburger — opens the finder.
@@ -129,6 +130,7 @@ enum MenuItem {
     StartWebServer,
     ShareWithPhone,
     Themes,
+    Backgrounds,
     Extensions,
     About,
 }
@@ -138,12 +140,13 @@ impl MenuItem {
     // reachable from the top-right server/workspace corner, so listing it
     // here duplicated the same action. `TopBarAction::OpenWorkspaces`
     // stays defined for those other call sites.
-    const ALL: [MenuItem; 6] = [
+    const ALL: [MenuItem; 7] = [
         MenuItem::About,
         MenuItem::Settings,
         MenuItem::StartWebServer,
         MenuItem::ShareWithPhone,
         MenuItem::Themes,
+        MenuItem::Backgrounds,
         MenuItem::Extensions,
     ];
 
@@ -155,6 +158,9 @@ impl MenuItem {
         MenuItem::ALL
             .into_iter()
             .filter(|item| share_with_phone || *item != MenuItem::ShareWithPhone)
+            .filter(|item| {
+                !cfg!(target_arch = "wasm32") || *item != MenuItem::Backgrounds
+            })
             .collect()
     }
 
@@ -164,6 +170,7 @@ impl MenuItem {
             MenuItem::StartWebServer => "Start Web Server",
             MenuItem::ShareWithPhone => "Share with Phone",
             MenuItem::Themes => "Themes",
+            MenuItem::Backgrounds => "Backgrounds",
             MenuItem::Extensions => "Extensions",
             MenuItem::About => "About",
         }
@@ -185,6 +192,7 @@ impl MenuItem {
             MenuItem::Settings => "\u{f013}",
             MenuItem::StartWebServer => "\u{f0ac}",
             MenuItem::Themes => "\u{f1fc}",
+            MenuItem::Backgrounds => "\u{f03e}",
             MenuItem::ShareWithPhone => "\u{f10b}", // FA mobile
             MenuItem::Extensions => "\u{f12e}",
             MenuItem::About => "\u{f05a}", // FA info-circle
@@ -197,6 +205,7 @@ impl MenuItem {
             MenuItem::StartWebServer => TopBarAction::StartWebServer,
             MenuItem::ShareWithPhone => TopBarAction::ShareWithPhone,
             MenuItem::Themes => TopBarAction::OpenThemes,
+            MenuItem::Backgrounds => TopBarAction::OpenBackgrounds,
             MenuItem::Extensions => TopBarAction::OpenExtensions,
             MenuItem::About => TopBarAction::OpenAbout,
         }
@@ -871,11 +880,7 @@ impl ChromeTopBar {
             strip.y,
             strip.w,
             strip.h,
-            crate::customization::color_f32(
-                style.background.as_deref(),
-                theme,
-                theme.f32(theme.bg),
-            ),
+            crate::customization::background_color(style, theme, theme.f32(theme.bg)),
             DEPTH,
             ORDER_BG,
         );
@@ -886,8 +891,14 @@ impl ChromeTopBar {
             DockEdge::Right => Rect::new(strip.x, strip.y, 1.0, strip.h),
         };
         crate::primitives::surface_background::render(
-            sugarloaf, "chrome.top", [strip.x, strip.y, strip.w, strip.h],
-            0.0, self.scale, DEPTH, ORDER_BG, &[ [border.x, border.y, border.w, border.h] ],
+            sugarloaf,
+            "chrome.top",
+            [strip.x, strip.y, strip.w, strip.h],
+            0.0,
+            self.scale,
+            DEPTH,
+            ORDER_BG,
+            &[[border.x, border.y, border.w, border.h]],
         );
         sugarloaf.rect(
             None,
@@ -913,6 +924,7 @@ impl ChromeTopBar {
             self.hover_menu_btn || self.menu_open,
             self.menu_open,
             theme,
+            style,
         );
         // Explorer sits immediately beside it and keeps its open-state accent.
         self.draw_icon_button(
@@ -922,6 +934,7 @@ impl ChromeTopBar {
             self.hover_panel_btn,
             self.panel_open,
             theme,
+            style,
         );
         self.draw_icon_button(
             sugarloaf,
@@ -930,6 +943,7 @@ impl ChromeTopBar {
             self.hover_notes_btn,
             self.notes_open,
             theme,
+            style,
         );
         self.draw_icon_button(
             sugarloaf,
@@ -938,6 +952,7 @@ impl ChromeTopBar {
             self.hover_conversations_btn,
             self.conversations_open,
             theme,
+            style,
         );
         // Search button — opens the finder (project-wide search).
         self.draw_icon_button(
@@ -947,9 +962,10 @@ impl ChromeTopBar {
             self.hover_search_btn,
             self.search_open,
             theme,
+            style,
         );
         // Standalone server selector at the far-right edge.
-        self.draw_server_button(sugarloaf, theme);
+        self.draw_server_button(sugarloaf, theme, style);
 
         // The active chat's right-details toggle sits beside the server selector.
         if self.right_button_visible {
@@ -960,6 +976,7 @@ impl ChromeTopBar {
                 self.hover_right_btn,
                 self.right_panel_open,
                 theme,
+                style,
             );
         }
         if self.mobile_agent_panel_button_visible {
@@ -970,6 +987,7 @@ impl ChromeTopBar {
                 self.hover_mobile_agent_panel_btn,
                 self.right_panel_open,
                 theme,
+                style,
             );
         }
 
@@ -1135,6 +1153,7 @@ impl ChromeTopBar {
         hovered: bool,
         active: bool,
         theme: &IdeTheme,
+        style: &neoism_lua::StylePatch,
     ) {
         if rect.w <= 0.0 || rect.h <= 0.0 {
             return;
@@ -1146,7 +1165,10 @@ impl ChromeTopBar {
                 rect.y,
                 rect.w,
                 rect.h,
-                theme.f32_alpha(theme.hover, 0.85),
+                crate::customization::apply_background_opacity(
+                    style,
+                    theme.f32_alpha(theme.hover, 0.85),
+                ),
                 DEPTH,
                 ORDER_HOVER,
             );
@@ -1189,7 +1211,12 @@ impl ChromeTopBar {
         let _ = ORDER_ICON;
     }
 
-    fn draw_server_button(&self, sugarloaf: &mut Sugarloaf, theme: &IdeTheme) {
+    fn draw_server_button(
+        &self,
+        sugarloaf: &mut Sugarloaf,
+        theme: &IdeTheme,
+        style: &neoism_lua::StylePatch,
+    ) {
         let rect = self.server_btn_rect;
         if self.hover_server_btn {
             sugarloaf.rect(
@@ -1198,7 +1225,10 @@ impl ChromeTopBar {
                 rect.y,
                 rect.w,
                 rect.h,
-                theme.f32_alpha(theme.hover, 0.85),
+                crate::customization::apply_background_opacity(
+                    style,
+                    theme.f32_alpha(theme.hover, 0.85),
+                ),
                 DEPTH,
                 ORDER_HOVER,
             );

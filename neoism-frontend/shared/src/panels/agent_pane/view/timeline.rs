@@ -317,6 +317,7 @@ pub trait AgentTimelinePane: AgentMarkdownPane {
 
     fn messages(&self) -> &[Self::Message];
     fn timeline_scroll_offset(&self) -> f32;
+    fn timeline_follow_bottom(&self) -> bool;
     fn has_active_selection(&self) -> bool;
     fn has_status_activity(&self) -> bool;
     fn streaming_label(&self) -> String;
@@ -634,6 +635,10 @@ macro_rules! neoism_ui_impl_agent_timeline_pane {
 
             fn messages(&self) -> &[Self::Message] {
                 <$pane>::messages(self)
+            }
+
+            fn timeline_follow_bottom(&self) -> bool {
+                <$pane>::timeline_follow_bottom(self)
             }
 
             fn timeline_scroll_offset(&self) -> f32 {

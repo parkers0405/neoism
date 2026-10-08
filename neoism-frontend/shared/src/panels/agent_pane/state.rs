@@ -42,7 +42,9 @@ use crate::panels::agent_pane::outbound::OutboundAgentCommand;
 use crate::panels::agent_pane::permission_policy::{self, PermissionReplyStart};
 use crate::panels::agent_pane::selection_model::SelectableLine;
 use crate::panels::agent_pane::status_policy;
-use crate::panels::agent_pane::timeline_scroll_policy::ctrl_u_d_scroll_delta;
+use crate::panels::agent_pane::timeline_scroll_policy::{
+    ctrl_u_d_scroll_delta, step_timeline_spring, TimelineScrollOwner,
+};
 
 const CONFIG_CHIP_SETTLE_MS: f32 = 320.0;
 const CONFIG_CHIP_LOADING_TIMEOUT_MS: f32 = 15_000.0;
@@ -707,9 +709,14 @@ pub struct NeoismAgentPane {
     timeline_last_scroll_at: Option<Instant>,
     timeline_velocity_px_s: f32,
     timeline_last_tick_at: Option<Instant>,
-    /// Fixed destination for discrete mouse-wheel notches. Precision trackpad
-    /// input leaves this unset and keeps the existing kinetic path.
+    /// Bottom-relative spring destination: wheel notches use a fixed target;
+    /// automatic follow uses zero. Precision trackpad input leaves this unset.
     timeline_wheel_target_px: Option<f32>,
+    timeline_scroll_owner: TimelineScrollOwner,
+    timeline_history_position_hydrated: bool,
+    /// Geometry belongs to a live arrival, not history/cache/layout hydration.
+    /// Retained across reveal measurement passes; reset by history and navigation.
+    timeline_live_growth: bool,
     /// Per-gesture inertia tuning for precision trackpad input.
     timeline_scroll_decay_tau: f32,
     timeline_scroll_stop_px_s: f32,
@@ -1082,6 +1089,9 @@ impl Default for NeoismAgentPane {
             timeline_velocity_px_s: 0.0,
             timeline_last_tick_at: None,
             timeline_wheel_target_px: None,
+            timeline_scroll_owner: TimelineScrollOwner::Wheel,
+            timeline_history_position_hydrated: false,
+            timeline_live_growth: false,
             timeline_scroll_decay_tau: Self::TIMELINE_TRACKPAD_DECAY_TAU,
             timeline_scroll_stop_px_s: Self::TIMELINE_TRACKPAD_STOP_PX_S,
             timeline_measure_cache: RefCell::new(HashMap::new()),
@@ -1994,6 +2004,11 @@ impl NeoismAgentPane {
         let messages = self.merge_pending_user_prompts(messages);
         let messages = self.preserve_streamed_response_text(messages);
         let messages = self.preserve_background_completion_cards(messages);
+        // An echo of already-arrived live text must not consume its pending
+        // measurement (the final delta can be followed by idle/history before paint).
+        if !self.timeline_history_position_hydrated || messages != self.messages {
+            self.prepare_timeline_history_position();
+        }
         self.messages = messages;
         self.text_reveal.scope(self.session_id.as_deref());
         self.tool_motion.scope(self.session_id.as_deref());
@@ -2067,6 +2082,7 @@ impl NeoismAgentPane {
         if messages.is_empty() {
             return;
         }
+        self.timeline_live_growth = false;
         let previous_height = self.timeline_content_height_px;
         let prepended = messages.len();
         self.messages.splice(0..0, messages);

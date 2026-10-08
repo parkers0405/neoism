@@ -88,8 +88,11 @@ pub struct Window {
     pub opacity: f32,
     #[serde(default = "bool::default")]
     pub blur: bool,
-    #[serde(rename = "background-image", skip_serializing)]
+    #[serde(default, rename = "background-image")]
     pub background_image: Option<ImageProperties>,
+    /// Suppress both explicit images and the active pack's wallpaper.
+    #[serde(default, rename = "background-image-disabled")]
+    pub background_image_disabled: bool,
     #[serde(default = "Decorations::default")]
     pub decorations: Decorations,
     #[serde(default = "bool::default", rename = "macos-use-unified-titlebar")]
@@ -127,6 +130,7 @@ impl Default for Window {
             mode: WindowMode::default(),
             opacity: default_opacity(),
             background_image: None,
+            background_image_disabled: false,
             decorations: Decorations::default(),
             blur: false,
             macos_use_unified_titlebar: false,

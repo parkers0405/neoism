@@ -68,6 +68,7 @@ impl NeoismAgentPane {
     pub fn set_text_reveal_enabled(&mut self, enabled: bool) {
         self.text_reveal.set_enabled(enabled);
         self.tool_motion.set_enabled(enabled);
+        self.snap_timeline_follow_if_disabled();
         if !enabled && !self.tool_expand_anims.is_empty() {
             self.tool_expand_anims.clear();
             self.invalidate_timeline_layout();

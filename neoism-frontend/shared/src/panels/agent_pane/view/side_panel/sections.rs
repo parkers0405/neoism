@@ -870,7 +870,7 @@ fn render_subagent_rows<I: AgentSidePanelIconHost>(
                 visible_y,
                 list_rect[2],
                 visible_h,
-                theme.f32_alpha(theme.surface, 0.55),
+                sidebar_background_opacity(theme.f32_alpha(theme.surface, 0.55)),
                 edge_row_radii(visible_y, visible_h, list_top, list_bottom, inner_radius),
                 DEPTH,
                 ORDER_PANEL + 2,

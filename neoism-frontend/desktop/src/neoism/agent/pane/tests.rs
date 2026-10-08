@@ -1,6 +1,21 @@
 use super::*;
 
 #[test]
+fn running_tool_animation_is_owned_only_by_the_last_visible_paint() {
+    use neoism_ui::panels::agent_pane::view::{
+        timeline::AgentTimelinePane, tool_message::AgentToolPane,
+    };
+    let mut pane = NeoismAgentPane::default();
+    pane.messages
+        .push(NeoismAgentMessage::assistant("Settled conversation"));
+    assert_eq!(pane.animation_reason(), None);
+    AgentToolPane::set_visible_running_tool_active(&mut pane, true);
+    assert_eq!(pane.animation_reason(), Some("running_tool"));
+    AgentTimelinePane::set_visible_running_tool_active(&mut pane, false);
+    assert_eq!(pane.animation_reason(), None);
+}
+
+#[test]
 fn provider_slash_collision_inserts_draft_and_routes_as_prompt() {
     use neoism_ui::panels::agent_pane::state::external_options::ExternalOptions;
     use neoism_ui::panels::agent_pane::state::side_panel::ConversationSource;
@@ -5497,6 +5512,238 @@ fn transcript_selection_uses_exact_proportional_caret_stops() {
     assert_eq!(pane.end_selection().as_deref(), Some("ii"));
 }
 
+#[test]
+fn task_row_click_navigates_from_detail_or_text_for_any_status() {
+    for kind in [
+        NeoismAgentMessageKind::Tool,
+        NeoismAgentMessageKind::Subtask,
+    ] {
+        for status in ["running", "completed", "error", "stopped"] {
+            for detail_has_id in [true, false] {
+                let mut pane = NeoismAgentPane::default();
+                pane.session_id = Some("parent".to_string());
+                let mut message = task_tool_message("child", status).with_id("task-row");
+                message.kind = kind;
+                message.title = "A descriptive title, not a session id".to_string();
+                if detail_has_id {
+                    // Detail metadata wins over an older output marker.
+                    message.text = "task_id: stale-child".to_string();
+                } else {
+                    message.detail.clear();
+                }
+                pane.messages = vec![message];
+                pane.register_tool_hit_rect(
+                    "task-row".to_string(),
+                    [0.0, 0.0, 200.0, 40.0],
+                );
+
+                assert!(!pane.toggle_tool_at(300.0, 10.0));
+                assert_eq!(pane.session_id.as_deref(), Some("parent"));
+                assert!(pane.toggle_tool_at(10.0, 10.0));
+                assert_eq!(pane.session_id.as_deref(), Some("child"));
+                assert!(!pane.tool_expanded("task-row"));
+                assert!(!pane.tool_expand_animating("task-row"));
+            }
+        }
+    }
+}
+
+#[test]
+fn task_row_without_child_id_and_non_task_rows_still_expand() {
+    for is_task in [true, false] {
+        let mut pane = NeoismAgentPane::default();
+        pane.session_id = Some("parent".to_string());
+        let mut message = task_tool_message("child", "completed").with_id("tool-row");
+        if is_task {
+            message.text = "No child session yet".to_string();
+            message.detail = "task_id:   ".to_string();
+        } else {
+            message.tool = "read".to_string();
+        }
+        pane.messages = vec![message];
+        pane.register_tool_hit_rect("tool-row".to_string(), [0.0, 0.0, 200.0, 40.0]);
+
+        for expanded in [true, false] {
+            assert!(pane.toggle_tool_at(10.0, 10.0));
+            assert_eq!(pane.session_id.as_deref(), Some("parent"));
+            assert_eq!(pane.tool_expanded("tool-row"), expanded);
+        }
+    }
+}
+
+#[test]
+fn task_metadata_does_not_change_diff_or_group_child_clicks() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("parent".to_string());
+    pane.messages = vec![task_tool_message("child", "running").with_id("task-row")];
+    pane.register_tool_hit_rect("task-row:0".to_string(), [0.0, 0.0, 200.0, 40.0]);
+    assert!(pane.toggle_tool_at(10.0, 10.0));
+    assert!(pane.tool_expanded("task-row:0"));
+    assert_eq!(pane.session_id.as_deref(), Some("parent"));
+
+    pane.register_tool_hit_rect(
+        "task-row::child::read-1".to_string(),
+        [0.0, 50.0, 200.0, 40.0],
+    );
+    assert!(pane.toggle_tool_at(10.0, 60.0));
+    assert_eq!(pane.selected_tool_group_child("task-row"), Some("read-1"));
+    assert_eq!(pane.session_id.as_deref(), Some("parent"));
+}
+
+/// Historical Task rows are navigation evidence, not running authority.
+#[test]
+fn task_click_restores_pruned_family_before_cold_and_cached_navigation() {
+    for cached in [false, true] {
+        for task_status in ["completed", "running", "error"] {
+            for known_terminal in [false, true] {
+                let mut pane = NeoismAgentPane::default();
+                pane.session_id = Some("root".into());
+                pane.side_panel.ensure_subagent_main_entry("root");
+                for child in ["child", "old-sibling"] {
+                    pane.side_panel
+                        .upsert_subagent(child, "Old worker", "subagent");
+                    pane.side_panel.set_branch_activity_status_from_recovery(
+                        child,
+                        BranchStatus::Completed,
+                    );
+                }
+                assert!(pane.side_panel.prune_expired_completed_subagents());
+                assert_eq!(pane.side_panel.subagents().len(), 1);
+                if !known_terminal {
+                    pane.side_panel
+                        .retain_authoritative_branches(&Default::default());
+                }
+                if cached {
+                    let mut child = CachedAgentSession::live_only();
+                    child.hydrated = true;
+                    pane.session_cache.insert("child".into(), child);
+                }
+                let mut task =
+                    task_tool_message("child", task_status).with_id("old-task");
+                task.title = "Inspect navigation regression".into();
+                pane.messages = vec![task];
+                pane.register_tool_hit_rect("old-task".into(), [0.0, 0.0, 200.0, 40.0]);
+
+                assert!(pane.toggle_tool_at(10.0, 10.0));
+                assert_eq!(pane.session_id.as_deref(), Some("child"));
+                assert_eq!(pane.parent_session_id.as_deref(), Some("root"));
+                assert!(pane.is_subagent_session());
+                let expected = if task_status == "error" && !known_terminal {
+                    BranchStatus::Stopped
+                } else {
+                    BranchStatus::Completed
+                };
+                assert_eq!(
+                    pane.side_panel.branch_activity("child").unwrap().status,
+                    expected
+                );
+                assert!(
+                    pane.side_panel
+                        .branch_activity("child")
+                        .unwrap()
+                        .terminal_locked
+                );
+                assert_eq!(pane.active_subagent_count(), 0);
+                assert_eq!(pane.side_panel.active_child_count(Some("root")), 0);
+                assert_eq!(
+                    pane.side_panel.subagents()[1].title,
+                    "Inspect navigation regression"
+                );
+
+                // Omitted roster and authority snapshots cannot erase the view.
+                for _ in 0..2 {
+                    pane.side_panel
+                        .set_subagents(vec![NeoismAgentSessionEntry::new(
+                            "root",
+                            "main session",
+                            "return",
+                        )]);
+                    pane.side_panel
+                        .retain_authoritative_branches(&Default::default());
+                    pane.side_panel.prune_expired_completed_subagents();
+                    assert_eq!(
+                        pane.side_panel
+                            .subagents()
+                            .iter()
+                            .map(|entry| entry.id.as_str())
+                            .collect::<Vec<_>>(),
+                        vec!["root", "child"],
+                    );
+                    assert_eq!(
+                        pane.side_panel.branch_activity("child").unwrap().status,
+                        expected
+                    );
+                }
+                if cached {
+                    pane.side_panel.set_mode(
+                        crate::neoism::agent::side_panel::SidePanelMode::Subagents,
+                    );
+                    pane.side_panel.set_selected(0);
+                    assert!(pane.activate_side_panel_subagent());
+                } else {
+                    pane.switch_session("root".into());
+                }
+                assert_eq!(pane.session_id.as_deref(), Some("root"));
+                assert!(pane.parent_session_id.is_none());
+                pane.side_panel.prune_expired_completed_subagents();
+                assert_eq!(pane.side_panel.subagents().len(), 1);
+                assert_eq!(pane.active_subagent_count(), 0);
+            }
+        }
+    }
+}
+
+#[test]
+fn task_click_restores_missing_main_and_preserves_known_activity_or_runtime() {
+    for authority in ["missing", "activity", "runtime"] {
+        let mut pane = NeoismAgentPane::default();
+        // Enter from a nested transcript with the roster already discarded.
+        pane.session_id = Some("sibling".into());
+        pane.parent_session_id = Some("root".into());
+        if authority == "activity" {
+            pane.side_panel.set_branch_activity_tool(
+                "child",
+                BranchStatus::WaitingPermission,
+                Some("shell".into()),
+                Some(123),
+            );
+        } else if authority == "runtime" {
+            pane.side_panel.set_subagents(vec![
+                NeoismAgentSessionEntry::new("root", "main session", "return"),
+                NeoismAgentSessionEntry::new("child", "Worker", "subagent")
+                    .with_runtime_status(Some("running".into())),
+            ]);
+        }
+        pane.messages = vec![task_tool_message("child", "error").with_id("task")];
+        pane.register_tool_hit_rect("task".into(), [0.0, 0.0, 200.0, 40.0]);
+        assert!(pane.toggle_tool_at(10.0, 10.0));
+        assert_eq!(pane.parent_session_id.as_deref(), Some("root"));
+        assert_eq!(pane.side_panel.subagents()[0].id, "root");
+        assert_eq!(pane.side_panel.subagents()[1].id, "child");
+        match authority {
+            "activity" => {
+                let activity = pane.side_panel.branch_activity("child").unwrap();
+                assert_eq!(activity.status, BranchStatus::WaitingPermission);
+                assert_eq!(activity.current_tool.as_deref(), Some("shell"));
+                assert_eq!(activity.started_at, Some(123));
+            }
+            "runtime" => {
+                assert_eq!(
+                    pane.side_panel.subagents()[1].runtime_status.as_deref(),
+                    Some("running")
+                );
+                assert_eq!(
+                    pane.side_panel.branch_activity("child").unwrap().status,
+                    BranchStatus::Active,
+                );
+            }
+            _ => assert_eq!(
+                pane.side_panel.branch_activity("child").unwrap().status,
+                BranchStatus::Stopped
+            ),
+        }
+    }
+}
 fn task_tool_message(task_id: &str, status: &str) -> NeoismAgentMessage {
     let mut message = NeoismAgentMessage::tool(
         "Task(child)",
@@ -5545,4 +5792,166 @@ fn streaming_reveal_ingestion_captures_history_before_live_update_and_skips_repl
     pane.set_text_reveal_enabled(false);
     pane.apply_part_delta(None, Some("row".into()), Some("text".into()), " disabled");
     assert!(pane.text_reveal.pending("row").is_empty());
+}
+
+#[test]
+fn tool_motion_live_history_and_selected_body() {
+    let mut pane = NeoismAgentPane::default();
+    let make_row = |status: &str, detail: &str| {
+        let mut row = NeoismAgentMessage::tool(
+            "Read",
+            "request-metadata",
+            status,
+            "read",
+            NeoismAgentOutputKind::Text,
+            "",
+            Vec::new(),
+        );
+        row.id = "motion-row".into();
+        row.detail = detail.into();
+        row
+    };
+    pane.messages.push(make_row("running", "historical output"));
+    assert!(pane
+        .tool_motion_state()
+        .sample("motion-row")
+        .deadline
+        .is_none());
+    pane.upsert_part_message(make_row("running", "historical output more"));
+    assert!(pane
+        .tool_motion_state()
+        .sample("motion-row")
+        .deadline
+        .is_none());
+    let pending = pane.tool_text_reveal_state().pending("motion-row");
+    assert_eq!(pending[0].text, "historical output");
+    assert_eq!(pending[1].text, "historical output more");
+    pane.upsert_part_message(make_row("completed", "final output"));
+    let sample = pane.tool_motion_state().sample("motion-row");
+    assert_eq!(sample.opacity, 1.0);
+    assert_eq!(sample.outgoing_status, Some("running"));
+    assert!(!pane
+        .tool_motion
+        .is_animating_for(pane.session_id.as_deref()));
+    let epoch = pane.timeline_layout_epoch;
+    pane.tool_motion.mark_visible(sample);
+    assert_eq!(
+        pane.timeline_layout_epoch, epoch,
+        "paint-only motion cannot revise layout"
+    );
+    assert_eq!(pane.animation_reason(), Some("tool_motion"));
+    pane.clear_tool_hit_rects();
+    assert_ne!(pane.animation_reason(), Some("tool_motion"));
+    pane.set_text_reveal_enabled(false);
+    assert!(pane
+        .tool_motion_state()
+        .sample("motion-row")
+        .deadline
+        .is_none());
+}
+
+#[test]
+fn tool_motion_expansion_reversal_preserves_current_progress() {
+    let mut pane = NeoismAgentPane::default();
+    pane.register_tool_hit_rect("motion-row".into(), [0.0, 0.0, 100.0, 30.0]);
+    assert!(pane.toggle_tool_at(10.0, 10.0));
+    pane.tool_expand_anims
+        .get_mut("motion-row")
+        .unwrap()
+        .started_at = Instant::now() - Duration::from_millis(70);
+    let before = pane.tool_expand_progress("motion-row");
+    assert!(before > 0.1 && before < 1.0);
+    assert!(pane.toggle_tool_at(10.0, 10.0));
+    let captured = pane.tool_expand_anims["motion-row"].start_progress;
+    assert!((captured - before).abs() < 0.02);
+    assert!((pane.tool_expand_progress("motion-row") - before).abs() < 0.02);
+    pane.tool_expand_anims
+        .get_mut("motion-row")
+        .unwrap()
+        .started_at = Instant::now() - Duration::from_millis(40);
+    let closing = pane.tool_expand_progress("motion-row");
+    assert!(closing < captured);
+    assert!(pane.toggle_tool_at(10.0, 10.0));
+    assert!((pane.tool_expand_anims["motion-row"].start_progress - closing).abs() < 0.02);
+    pane.set_text_reveal_enabled(false);
+    assert_eq!(pane.tool_expand_progress("motion-row"), 1.0);
+    assert!(!pane.tool_expand_animating("motion-row"));
+}
+
+#[test]
+fn tool_motion_actual_group_identity_samples_all_source_members_not_previews() {
+    let mut pane = NeoismAgentPane::default();
+    let row = |id: &str, batch: &str, status: &str| {
+        let mut row = NeoismAgentMessage::tool(
+            "Read file",
+            "output",
+            status,
+            "read",
+            NeoismAgentOutputKind::Text,
+            "",
+            Vec::new(),
+        )
+        .with_id(id.to_string());
+        row.tool_batch_id = Some(batch.into());
+        row
+    };
+    // The first completion is historical/expired; the fifth is outside the
+    // four-member preview but still owns the batch's final completion fade.
+    pane.messages = vec![
+        row("first", "batch", "completed"),
+        row("second", "batch", "completed"),
+        row("third", "batch", "completed"),
+        row("fourth", "batch", "completed"),
+        row("fifth", "batch", "running"),
+        row("unrelated", "next-batch", "running"),
+    ];
+    pane.upsert_part_message(row("fifth", "batch", "completed"));
+    let last = pane.tool_motion_sample("fifth");
+    pane.tool_motion_state()
+        .record("unrelated", Some("streaming"), "completed");
+    let group = pane.tool_motion_sample("first..");
+    assert_eq!(
+        group.opacity, 1.0,
+        "later members cannot re-arrive the group"
+    );
+    assert_eq!(group.offset_y, 0.0);
+    assert_eq!(
+        group.outgoing_status,
+        Some("running"),
+        "next batch must not contribute its streaming label"
+    );
+    assert_eq!(group.deadline, last.deadline);
+    assert!(group.status_progress < 1.0);
+    assert_eq!(
+        pane.tool_motion_sample("first..::child::unrelated")
+            .outgoing_status,
+        Some("streaming")
+    );
+}
+
+#[test]
+fn tool_motion_settled_source_groups_sample_sharp_without_active_ledger() {
+    let mut pane = NeoismAgentPane::default();
+    for i in 0..32 {
+        let mut row = NeoismAgentMessage::tool(
+            "Read file",
+            "history",
+            "completed",
+            "read",
+            NeoismAgentOutputKind::Text,
+            "",
+            Vec::new(),
+        )
+        .with_id(format!("history-{i}"));
+        row.tool_batch_id = Some("batch".into());
+        pane.messages.push(row);
+    }
+    assert!(!pane.tool_motion_state().has_active_motion());
+    let sample = pane.tool_motion_sample("history-0..");
+    assert_eq!(sample.opacity, 1.0);
+    assert_eq!(sample.offset_y, 0.0);
+    assert_eq!(sample.status_progress, 1.0);
+    assert!(sample.outgoing_status.is_none());
+    assert!(sample.deadline.is_none());
+    assert!(!pane.tool_motion_state().has_active_motion());
 }

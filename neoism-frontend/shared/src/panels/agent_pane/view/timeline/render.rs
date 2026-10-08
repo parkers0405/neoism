@@ -21,6 +21,7 @@ pub fn render_timeline_with<P, D>(
 {
     derivations::reset();
     pane.set_visible_user_orb_active(false);
+    pane.set_visible_running_tool_active(false);
     let render_started = web_time::Instant::now();
     let [x, y, w, h] = rect;
     let viewport_h = h.max(0.0);

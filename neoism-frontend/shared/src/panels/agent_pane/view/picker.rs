@@ -196,16 +196,22 @@ pub fn render_usage_picker(
         (g.body[2] - 2.0 * s).max(0.0),
         g.body[3],
     ];
-    let message = if picker.loading {
-        Some("Loading usage…")
-    } else if let Some(error) = picker.usage_error.as_deref() {
+    let message = if let Some(error) = picker.usage_error.as_deref() {
         Some(error)
     } else if count == 0 {
         Some("No Codex accounts connected")
     } else {
         None
     };
-    if let Some(message) = message {
+    if picker.loading {
+        crate::widgets::inline_picker::render_loading_skeleton(
+            sugarloaf,
+            body,
+            theme,
+            s,
+            picker.loading_elapsed(),
+        );
+    } else if let Some(message) = message {
         usage_text(
             sugarloaf,
             message,

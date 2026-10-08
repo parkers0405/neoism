@@ -2,6 +2,20 @@
 
 All notable user-facing changes to Neoism are documented here.
 
+## [0.7.120] - 2026-10-08
+
+### Agent UI, tools, and workspace reliability
+
+- Adds animated tool activity, streamed output reveal, smooth expansion transitions, and motion-aware diff/todo widgets while respecting the animation setting and viewport visibility.
+- Groups adjacent read/search tools only when the server identifies them as part of the same model-response batch, preserving that identity across desktop, daemon, and web history.
+- Makes Task rows open child transcripts and preserves navigation to completed or restored subagents without marking them active.
+- Improves usage-picker loading, usage labels, footer branch fitting, and resize/DPI-dependent chrome and status-bar layout.
+- Fixes scoped indexed search to honor literal directory names, include/exclude filters, search modes, and limits.
+- Promotes the nightly frame-pacing, text-cache, avatar-geometry, streaming-text, tool-row, Codex usage, and Mash Up Pack improvements to stable. Retains the first-terminal directory-following hotfix and split-terminal isolation.
+- Keeps experimental HTML/Servo source available without building or packaging the Servo runtime in the release stack. The CI dependency guard remains enabled.
+
+This is a stable YOLO release, available through plain `neoism update` after all Linux, macOS, and Windows release builds and packaging checks succeed.
+
 ## [0.7.119-nightly.20261007.2] - 2026-10-07
 
 ### Fix first-terminal directory following

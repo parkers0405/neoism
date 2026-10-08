@@ -271,6 +271,51 @@ pub fn render(
     )
 }
 
+/// Shared two-bar loading rows, bounded by the picker body.
+pub(crate) fn render_loading_skeleton(
+    sugarloaf: &mut Sugarloaf,
+    body: [f32; 4],
+    theme: &IdeTheme,
+    scale: f32,
+    elapsed: f32,
+) {
+    let s = scale.clamp(0.5, 3.0);
+    let [x, y, width, height] = body;
+    let row_h = ROW_H * s;
+    let fade_in = (elapsed / 0.18).min(1.0);
+    const SKELETON_WIDTHS: [(f32, f32); SKELETON_ROWS] =
+        [(0.42, 0.68), (0.58, 0.46), (0.36, 0.60)];
+    for (i, (title_frac, desc_frac)) in SKELETON_WIDTHS.iter().enumerate() {
+        let row_y = y + i as f32 * row_h;
+        if row_y + row_h > y + height + 0.5 {
+            break;
+        }
+        let wave = (elapsed / 1.3 * std::f32::consts::TAU - i as f32 * 0.55).sin();
+        let alpha = (0.16 + 0.08 * wave).max(0.04) * fade_in;
+        let avail = (width - 44.0 * s).max(0.0);
+        sugarloaf.overlay_rounded_rect(
+            x + 22.0 * s,
+            row_y + 8.0 * s,
+            avail * title_frac,
+            12.0 * s,
+            theme.f32_alpha(theme.muted, alpha),
+            DEPTH,
+            6.0 * s,
+            ORDER + 2,
+        );
+        sugarloaf.overlay_rounded_rect(
+            x + 22.0 * s,
+            row_y + 26.0 * s,
+            avail * desc_frac,
+            9.0 * s,
+            theme.f32_alpha(theme.muted, alpha * 0.7),
+            DEPTH,
+            4.5 * s,
+            ORDER + 2,
+        );
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn render_limited(
     sugarloaf: &mut Sugarloaf,
@@ -794,43 +839,13 @@ pub fn render_limited(
     // to nothing when a filter (or an empty catalog) yields no rows.
     if view.rows.is_empty() {
         if view.loading {
-            // Shimmering two-bar skeleton rows while the async search runs —
-            // same wave family as the file-tree loading skeleton.
-            let fade_in = (view.loading_elapsed / 0.18).min(1.0);
-            const SKELETON_WIDTHS: [(f32, f32); SKELETON_ROWS] =
-                [(0.42, 0.68), (0.58, 0.46), (0.36, 0.60)];
-            for i in 0..SKELETON_ROWS {
-                let row_y = list_y + i as f32 * row_h;
-                if row_y + row_h > list_bottom + 0.5 {
-                    break;
-                }
-                let wave = (view.loading_elapsed / 1.3 * std::f32::consts::TAU
-                    - i as f32 * 0.55)
-                    .sin();
-                let alpha = (0.16 + 0.08 * wave).max(0.04) * fade_in;
-                let (title_frac, desc_frac) = SKELETON_WIDTHS[i];
-                let avail = (width - 44.0 * s).max(0.0);
-                sugarloaf.overlay_rounded_rect(
-                    x + 22.0 * s,
-                    row_y + 8.0 * s,
-                    avail * title_frac,
-                    12.0 * s,
-                    theme.f32_alpha(theme.muted, alpha),
-                    DEPTH,
-                    6.0 * s,
-                    ORDER + 2,
-                );
-                sugarloaf.overlay_rounded_rect(
-                    x + 22.0 * s,
-                    row_y + 26.0 * s,
-                    avail * desc_frac,
-                    9.0 * s,
-                    theme.f32_alpha(theme.muted, alpha * 0.7),
-                    DEPTH,
-                    4.5 * s,
-                    ORDER + 2,
-                );
-            }
+            render_loading_skeleton(
+                sugarloaf,
+                [x, list_y, width, list_bottom - list_y],
+                theme,
+                s,
+                view.loading_elapsed,
+            );
         } else if let Some(empty_message) = view.empty_message {
             sugarloaf.overlay_text_mut().draw(
                 x + 22.0 * s,

@@ -4,23 +4,33 @@ pub(crate) fn read_tool_group_at<M: AgentTimelineMessage>(
     messages: &[M],
     start_index: usize,
 ) -> Option<(usize, M)> {
-    if !messages
-        .get(start_index)
-        .is_some_and(is_live_groupable_read_tool)
-    {
-        return None;
-    }
-    let mut end = start_index;
-    while messages.get(end).is_some_and(is_live_groupable_read_tool) {
-        end += 1;
-    }
-    if end.saturating_sub(start_index) < LIVE_READ_TOOL_GROUP_MIN {
-        return None;
-    }
+    let end = read_tool_group_end(messages, start_index)?;
     Some((
         end,
         live_read_tool_group_message(&messages[start_index..end]),
     ))
+}
+
+/// Exclusive source boundary of one eligible live read batch, without building a group.
+pub fn read_tool_group_end<M: AgentTimelineMessage>(
+    messages: &[M],
+    start_index: usize,
+) -> Option<usize> {
+    let first = messages.get(start_index)?;
+    if !is_live_groupable_read_tool(first) {
+        return None;
+    }
+    let batch_id = first.tool_batch_id().filter(|id| !id.trim().is_empty())?;
+    let mut end = start_index;
+    while messages.get(end).is_some_and(|message| {
+        is_live_groupable_read_tool(message) && message.tool_batch_id() == Some(batch_id)
+    }) {
+        end += 1;
+    }
+    if end.saturating_sub(start_index) < 2 {
+        return None;
+    }
+    Some(end)
 }
 
 fn live_read_tool_group_message<M: AgentTimelineMessage>(tools: &[M]) -> M {
@@ -132,7 +142,6 @@ fn is_read_like_tool(tool: &str) -> bool {
             | "find"
             | "search"
             | "multigrep"
-            | "toolgroup"
     )
 }
 

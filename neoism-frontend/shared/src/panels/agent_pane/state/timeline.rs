@@ -913,6 +913,7 @@ impl NeoismAgentPane {
 
     pub(in crate::panels::agent_pane) fn invalidate_timeline_layout(&mut self) {
         self.text_reveal.scope(self.session_id.as_deref());
+        self.tool_motion.scope(self.session_id.as_deref());
         self.timeline_layout_epoch = self.timeline_layout_epoch.wrapping_add(1);
         self.timeline_content_revision = self.timeline_content_revision.wrapping_add(1);
         self.timeline_dirty_message_ids.clear();

@@ -390,7 +390,7 @@ pub struct AgentPreferences {
     pub conversations_panel_enabled: bool,
     #[serde(default = "default_bool_true", rename = "details-panel-enabled")]
     pub details_panel_enabled: bool,
-    /// Paint-only blur-to-sharp reveal for newly streamed assistant text.
+    /// Paint-only streaming text reveal and live tool transitions.
     #[serde(default = "default_bool_true", rename = "streaming-text-animation")]
     pub streaming_text_animation: bool,
     /// Keep server-owned keys intact when the application config is serialized.

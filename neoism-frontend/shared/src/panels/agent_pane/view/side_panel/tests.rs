@@ -490,16 +490,60 @@ fn first_seen_completed_subagent_is_hidden_immediately() {
 }
 
 #[test]
-fn viewed_historical_completion_is_not_resurrected() {
-    let mut panel = NeoismAgentSidePanel::default();
-    panel.set_viewed_session_id(Some("done".to_string()));
-    panel.set_subagents(vec![
-        NeoismAgentSessionEntry::new("main", "main session", "return"),
-        NeoismAgentSessionEntry::new("done", "done", "explore")
-            .with_runtime_status(Some("completed".to_string())),
-    ]);
+fn viewed_historical_child_keeps_return_navigation_until_leaving() {
+    for status in ["completed", "stopped"] {
+        for view_before_roster in [true, false] {
+            let mut panel = NeoismAgentSidePanel::default();
+            let roster = || {
+                vec![
+                    NeoismAgentSessionEntry::new("main", "main session", "return"),
+                    NeoismAgentSessionEntry::new("done", "old task", "explore")
+                        .with_runtime_status(Some(status.to_string())),
+                    NeoismAgentSessionEntry::new("sibling", "other old task", "explore")
+                        .with_runtime_status(Some("completed".to_string())),
+                ]
+            };
+            if !view_before_roster {
+                panel.set_subagents(roster());
+                assert_eq!(panel.subagents().len(), 1);
+            }
+            panel.set_viewed_session_id(Some("done".to_string()));
+            panel.set_subagents(roster());
+            assert_eq!(
+                panel
+                    .subagents()
+                    .iter()
+                    .map(|entry| entry.id.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["main", "done"]
+            );
+            assert_eq!(
+                panel.branch_activity("done").unwrap().status,
+                if status == "completed" {
+                    BranchStatus::Completed
+                } else {
+                    BranchStatus::Stopped
+                }
+            );
+            assert!(panel.branch_activity("done").unwrap().terminal_locked);
 
-    assert!(!panel.subagents().iter().any(|entry| entry.id == "done"));
+            panel.retain_authoritative_branches(&std::collections::HashSet::new());
+            panel.set_subagents(vec![NeoismAgentSessionEntry::new(
+                "main",
+                "main session",
+                "return",
+            )]);
+            assert_eq!(panel.subagents().len(), 2);
+            assert_eq!(panel.subagents()[1].id, "done");
+            assert_eq!(panel.subagents()[1].runtime_status.as_deref(), Some(status));
+
+            panel.set_viewed_session_id(Some("main".to_string()));
+            assert_eq!(panel.subagents().len(), 1);
+            panel.set_subagents(roster());
+            assert_eq!(panel.subagents().len(), 1);
+            assert_eq!(panel.subagents()[0].id, "main");
+        }
+    }
 }
 
 #[test]

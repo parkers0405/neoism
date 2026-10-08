@@ -624,6 +624,7 @@ pub(crate) struct DrawOverNote {
 /// originate from a resize event.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ChromeLayoutSignature {
+    window_geometry: [u32; 3],
     route_id: usize,
     reserves_editor_chrome: bool,
     editor_top_bits: u32,
@@ -1656,6 +1657,10 @@ impl Screen<'_> {
 
         let mut renderer = Renderer::new(config);
         renderer.shader_overlay_active = startup_shader_overlay.is_some();
+        renderer.relayout_surfaces(
+            size.width as f32 / scale as f32,
+            size.height as f32 / scale as f32,
+        );
 
         let bindings = crate::bindings::default_key_bindings(config);
 

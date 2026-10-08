@@ -500,7 +500,7 @@ pub(crate) fn render_session_info<I: AgentSidePanelIconHost>(
     let tasks = latest_todos(pane.messages()).to_vec();
     let tasks_h = tasks_section_height(tasks.len(), s);
 
-    // --- Branches ---
+    // --- Agents ---
     // Single header covers both the parent ("main session") and its
     // children. The picker always returns "main session" as row 0; we
     // only render the section when there's at least one *real* child
@@ -513,7 +513,7 @@ pub(crate) fn render_session_info<I: AgentSidePanelIconHost>(
         y += SECTION_GAP * s;
         y = render_section_header(
             sugarloaf,
-            "Branches",
+            "Agents",
             text_x,
             y,
             theme,

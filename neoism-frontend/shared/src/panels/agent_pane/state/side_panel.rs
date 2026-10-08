@@ -845,12 +845,10 @@ pub struct NeoismAgentSidePanel {
     /// shape `fetch_subagent_options` returns. We render the section
     /// only when this list has at least one *non-main* entry.
     subagents: Vec<NeoismAgentSessionEntry>,
-    /// Session whose transcript is currently open in the pane. Completed
-    /// children are retained only when we observed them running while viewed.
+    /// Session whose transcript is currently open in the pane.
     viewed_session_id: Option<String>,
-    /// Ephemeral hold for a viewed child observed live before it finished.
-    /// Never populate this from completed recovery data: doing so would
-    /// resurrect dead sessions after startup or reconnect.
+    /// Keep the viewed child as a return-navigation affordance, even when
+    /// opening a historical completion. Cleared when navigating away.
     retained_viewed_subagent_id: Option<String>,
     subagents_loaded: bool,
     /// Only one branch-tree snapshot may be in flight at a time. The
@@ -1443,33 +1441,17 @@ impl NeoismAgentSidePanel {
 
     pub fn set_viewed_session_id(&mut self, session_id: Option<String>) {
         let session_id = session_id.filter(|id| !id.is_empty());
-        if self.retained_viewed_subagent_id.as_deref() != session_id.as_deref() {
-            self.retained_viewed_subagent_id = None;
-        }
+        self.retained_viewed_subagent_id = session_id
+            .as_ref()
+            .filter(|id| {
+                !self
+                    .subagents
+                    .first()
+                    .is_some_and(|root| root.id == id.as_str())
+            })
+            .cloned();
         self.viewed_session_id = session_id;
-        let Some(viewed) = self.viewed_session_id.as_deref() else {
-            return;
-        };
-        let active = self.branch_activities.get(viewed).is_some_and(|activity| {
-            matches!(
-                activity.status,
-                BranchStatus::Active | BranchStatus::WaitingPermission
-            )
-        }) || self
-            .subagents
-            .iter()
-            .find(|entry| entry.id == viewed)
-            .and_then(|entry| entry.runtime_status.as_deref())
-            .and_then(BranchStatus::from_runtime_status)
-            .is_some_and(|status| {
-                matches!(
-                    status,
-                    BranchStatus::Active | BranchStatus::WaitingPermission
-                )
-            });
-        if active {
-            self.retained_viewed_subagent_id = Some(viewed.to_string());
-        }
+        self.prune_expired_completed_subagents();
     }
 
     /// Record the non-idle status the composer row is displaying this
@@ -1556,8 +1538,8 @@ impl NeoismAgentSidePanel {
     /// A respawned sub-agent reports `Active`/`WaitingPermission`
     /// (which clears `completed_at`) so it stays visible.
     fn subagent_hidden(&self, entry: &NeoismAgentSessionEntry) -> bool {
-        // Keep only a child observed live while its transcript was open.
-        // Merely viewing a historical completed child must not revive it.
+        // Visibility-only exception: opening an old child must leave a way
+        // back to main without reviving that child as an active branch.
         if self.retained_viewed_subagent_id.as_deref() == Some(entry.id.as_str()) {
             return false;
         }
@@ -2278,6 +2260,13 @@ impl NeoismAgentSidePanel {
     }
 
     pub fn set_subagents(&mut self, mut subagents: Vec<NeoismAgentSessionEntry>) {
+        // The roster can arrive after navigation. Once its root is known, do
+        // not retain root lifecycle data under the viewed-child exception.
+        self.retained_viewed_subagent_id = self
+            .viewed_session_id
+            .as_ref()
+            .filter(|id| !subagents.first().is_some_and(|root| root.id == id.as_str()))
+            .cloned();
         let was_subagents = matches!(self.mode, SidePanelMode::Subagents);
         // Recovery snapshots can briefly know only that a child is a generic
         // "subagent", while live task/status events already supplied its real

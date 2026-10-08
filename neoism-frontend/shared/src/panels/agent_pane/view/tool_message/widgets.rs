@@ -10,6 +10,29 @@ pub fn draw_checkbox(
     s: f32,
     viewport_clip: [f32; 4],
 ) {
+    draw_checkbox_painted(
+        sugarloaf,
+        x,
+        y,
+        state,
+        &super::motion::PaintTheme {
+            theme,
+            opacity: 1.0,
+        },
+        s,
+        viewport_clip,
+    );
+}
+
+pub(super) fn draw_checkbox_painted(
+    sugarloaf: &mut Sugarloaf,
+    x: f32,
+    y: f32,
+    state: TodoVisualState,
+    theme: &super::motion::PaintTheme<'_>,
+    s: f32,
+    viewport_clip: [f32; 4],
+) {
     let size = 15.0 * s;
     // Box outline stays in muted/border color regardless of state — the
     // inner check/dot mirrors the terminal chat todo row styling.

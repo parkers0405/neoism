@@ -553,6 +553,7 @@ fn agent_message_new(
         text: text.into(),
         status: String::new(),
         tool: String::new(),
+        tool_batch_id: None,
         output_kind: NeoismAgentOutputKind::Text,
         lang: String::new(),
         line_offset: None,
@@ -1076,6 +1077,38 @@ fn is_compaction_summary_message(parts: &[Value]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tool_batch_mapping_requires_explicit_nonempty_top_level_provenance() {
+        for metadata in [
+            Value::Null,
+            json!({}),
+            json!({"toolBatchID": ""}),
+            json!({"toolBatchID": "  "}),
+            json!({"toolBatchID": 42}),
+        ] {
+            let part = json!({"type": "tool", "tool": "read", "messageID": "external-turn",
+                "metadata": metadata, "state": {"status": "running", "input": {},
+                    "metadata": {"toolBatchID": "not-top-level"}}});
+            assert_eq!(tool_block(&part).tool_batch_id, None);
+        }
+        let part = json!({"type": "tool", "tool": "read", "messageID": "external-turn",
+            "state": {"status": "pending", "input": {}}});
+        assert_eq!(tool_block(&part).tool_batch_id, None);
+    }
+
+    #[test]
+    fn tool_batch_mapping_preserves_provenance_across_statuses() {
+        for status in ["pending", "running", "completed", "error"] {
+            let part = json!({"type": "tool", "tool": "read",
+                "metadata": {"toolBatchID": "msg_native_batch"},
+                "state": {"status": status, "input": {}, "output": "ok", "error": "failed"}});
+            assert_eq!(
+                tool_block(&part).tool_batch_id.as_deref(),
+                Some("msg_native_batch")
+            );
+        }
+    }
 
     #[test]
     fn running_acp_terminal_exposes_bounded_output_in_chat() {
@@ -2394,6 +2427,14 @@ fn tool_block(part: &Value) -> NeoismAgentMessage {
         edit_tool_detail(tool, state).unwrap_or(output.content)
     };
     message.line_offset = output.line_offset;
+    // Only native provider batch provenance is authoritative. Broad external
+    // message/turn IDs do not describe a model-response tool-call batch.
+    message.tool_batch_id = part
+        .get("metadata")
+        .and_then(|metadata| metadata.get("toolBatchID"))
+        .and_then(Value::as_str)
+        .filter(|id| !id.trim().is_empty())
+        .map(str::to_owned);
     message
 }
 

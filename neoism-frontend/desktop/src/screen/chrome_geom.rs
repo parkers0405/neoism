@@ -13,6 +13,20 @@ fn chrome_layout_repair_required<T: PartialEq>(
 }
 
 #[inline]
+fn surface_viewport_is_stale(
+    viewport: neoism_ui::layout::Rect,
+    logical_width: f32,
+    logical_height: f32,
+    chrome_scale: f32,
+) -> bool {
+    // Match the surface solver's snapped viewport, not its docked content area.
+    let scale = chrome_scale.clamp(0.5, 3.0) as f64;
+    let width = ((logical_width as f64 * scale).round() / scale) as f32;
+    let height = ((logical_height as f64 * scale).round() / scale) as f32;
+    viewport != neoism_ui::layout::Rect::new(0.0, 0.0, width, height)
+}
+
+#[inline]
 fn pane_content_rect(slot_rect: [f32; 4], chrome_height: f32) -> [f32; 4] {
     [
         slot_rect[0],
@@ -586,6 +600,7 @@ impl Screen<'_> {
                 "screen.resize.layout_resize",
                 format!("{}x{}", new_size.width, new_size.height),
             );
+            self.update_surface_chrome_margins();
             self.context_manager
                 .resize_all_grids(width, height, &mut self.sugarloaf);
             // The canonical grid layout already resized every terminal/editor.
@@ -593,6 +608,7 @@ impl Screen<'_> {
             // Neovim resize twice for every single OS resize event.
             self.apply_pane_chrome_offsets();
         }
+        self.last_chrome_layout_signature = Some(self.chrome_layout_signature());
         self.mark_dirty();
 
         self
@@ -621,37 +637,11 @@ impl Screen<'_> {
             );
             self.sugarloaf.rescale(new_scale);
         }
-        {
-            let _span = crate::app::freeze_watchdog::global_span(
-                "screen.set_scale.sugarloaf_resize",
-                format!("{}x{}", new_size.width, new_size.height),
-            );
-            self.sugarloaf.resize(new_size.width, new_size.height);
+        // Refresh all pane cell sizes before the single geometry/resize pass.
+        for grid in self.context_manager.contexts_mut() {
+            grid.refresh_cell_dimensions(&mut self.sugarloaf);
         }
-        self.mark_dirty();
-        {
-            let _span = crate::app::freeze_watchdog::global_span(
-                "screen.set_scale.layout_resize",
-                "",
-            );
-            self.resize_all_contexts();
-            self.context_manager
-                .current_grid_mut()
-                .update_dimensions(&mut self.sugarloaf);
-        }
-        let width = new_size.width as f32;
-        let height = new_size.height as f32;
-
-        {
-            let _span = crate::app::freeze_watchdog::global_span(
-                "screen.set_scale.grid_resize",
-                "",
-            );
-            self.context_manager
-                .resize_all_grids(width, height, &mut self.sugarloaf);
-        }
-
-        self
+        self.resize(new_size)
     }
 
     pub(crate) fn apply_context_resize(ctx: &mut context::Context<EventProxy>) -> bool {
@@ -792,8 +782,14 @@ impl Screen<'_> {
         // makes the workspace editor jump underneath its breadcrumb row.
         let reserves_editor_chrome = self.renderer.buffer_tabs.active_shows_breadcrumbs();
         let margins = self.workspace_chrome_margins();
+        let window_size = self.sugarloaf.window_size();
 
         ChromeLayoutSignature {
+            window_geometry: [
+                window_size.width.to_bits(),
+                window_size.height.to_bits(),
+                self.sugarloaf.scale_factor().to_bits(),
+            ],
             route_id: self
                 .context_manager
                 .current_grid()
@@ -817,6 +813,13 @@ impl Screen<'_> {
         let signature = self.chrome_layout_signature();
         let margins = self.workspace_chrome_margins();
         let scale = self.sugarloaf.scale_factor();
+        let window_size = self.sugarloaf.window_size();
+        let viewport_stale = surface_viewport_is_stale(
+            self.renderer.surface_layout.viewport,
+            window_size.width / scale,
+            window_size.height / scale,
+            self.renderer.chrome_scale(),
+        );
         let workspace_reserves_editor_chrome =
             self.renderer.buffer_tabs.active_shows_breadcrumbs();
         let margin_stale = self.context_manager.all_grids().iter().any(|grid| {
@@ -832,7 +835,7 @@ impl Screen<'_> {
         let repair_required = chrome_layout_repair_required(
             self.last_chrome_layout_signature.as_ref(),
             &signature,
-            margin_stale,
+            margin_stale || viewport_stale,
         );
 
         // `None` means "no invariant snapshot yet", not "the constructor
@@ -840,9 +843,8 @@ impl Screen<'_> {
         // correct margins from construction; forcing a full reflow here used
         // to resize every PTY/editor and made an otherwise instant launch do
         // duplicate layout work. Seed the snapshot in-place when the measured
-        // geometry is valid. If an async terminal -> editor transition raced
-        // the first paint, `margin_stale` remains true and still takes the
-        // repair path below.
+        // geometry is valid. A stale viewport or an async terminal -> editor
+        // transition before first paint still takes the repair path below.
         if !repair_required {
             if self.last_chrome_layout_signature.is_none() {
                 self.last_chrome_layout_signature = Some(signature);
@@ -854,12 +856,13 @@ impl Screen<'_> {
             .last_chrome_layout_signature
             .is_some_and(|previous| previous != signature);
 
-        if signature_changed || margin_stale {
+        if signature_changed || margin_stale || viewport_stale {
             tracing::debug!(
                 target: "neoism::chrome_layout",
                 ?signature,
                 signature_changed,
                 margin_stale,
+                viewport_stale,
                 "repairing stale chrome geometry before paint"
             );
             self.reapply_chrome_layout();
@@ -867,8 +870,8 @@ impl Screen<'_> {
         }
     }
 
-    pub(crate) fn reapply_chrome_layout(&mut self) {
-        let started_at = std::time::Instant::now();
+    /// Resolve the current client frame before deriving any grid reservations.
+    fn update_surface_chrome_margins(&mut self) {
         let scale = self.sugarloaf.scale_factor();
         let window_size = self.sugarloaf.window_size();
         self.renderer.relayout_surfaces(
@@ -879,7 +882,6 @@ impl Screen<'_> {
         let left_scaled = left_logical * scale;
         let right_logical = self.renderer.margin.right + self.chrome_x_offset_right();
         let right_scaled = right_logical * scale;
-        self.renderer.terminal_scroll.reset_all();
 
         let margins = self.workspace_chrome_margins();
         let workspace_reserves_editor_chrome =
@@ -898,7 +900,13 @@ impl Screen<'_> {
                 left_scaled,
             ));
         }
+    }
 
+    pub(crate) fn reapply_chrome_layout(&mut self) {
+        let started_at = std::time::Instant::now();
+        self.update_surface_chrome_margins();
+        self.renderer.terminal_scroll.reset_all();
+        let window_size = self.sugarloaf.window_size();
         let width = window_size.width as f32;
         let height = window_size.height as f32;
         self.context_manager
@@ -1308,8 +1316,134 @@ impl Screen<'_> {
 #[cfg(test)]
 mod launch_layout_tests {
     use super::{
-        chrome_layout_repair_required, pane_content_rect, top_aligned_pane_content_rect,
+        chrome_layout_repair_required, pane_content_rect, surface_viewport_is_stale,
+        top_aligned_pane_content_rect, ChromeLayoutSignature,
     };
+
+    #[test]
+    fn resize_and_dpi_transitions_invalidate_the_chrome_signature() {
+        let mut previous = ChromeLayoutSignature {
+            window_geometry: [
+                800.0_f32.to_bits(),
+                600.0_f32.to_bits(),
+                1.0_f32.to_bits(),
+            ],
+            route_id: 0,
+            reserves_editor_chrome: false,
+            editor_top_bits: 0,
+            terminal_top_bits: 0,
+            bottom_bits: 0,
+            buffer_tabs_present: false,
+            pane_tab_strip_count: 0,
+            pane_breadcrumb_count: 0,
+        };
+        for (width, height, scale) in [
+            (1000.0_f32, 800.0_f32, 1.0_f32),
+            (700.0, 500.0, 1.0),
+            (900.0, 500.0, 1.0),
+            (900.0, 500.0, 1.25),
+            (1350.0, 750.0, 1.875),
+            (1800.0, 1000.0, 2.5),
+        ] {
+            let current = ChromeLayoutSignature {
+                window_geometry: [width.to_bits(), height.to_bits(), scale.to_bits()],
+                ..previous
+            };
+            assert!(chrome_layout_repair_required(
+                Some(&previous),
+                &current,
+                false
+            ));
+            assert!(!chrome_layout_repair_required(
+                Some(&current),
+                &current,
+                false
+            ));
+            previous = current;
+        }
+    }
+
+    #[test]
+    fn surface_viewport_repair_tracks_grow_shrink_width_and_fractional_dpi() {
+        use neoism_ui::layout::Rect;
+        use neoism_ui::surface_layout::{
+            resolve_surface_layout, SurfaceItemSize, SurfaceRegistry,
+        };
+
+        let registry = SurfaceRegistry::chrome_defaults(SurfaceItemSize::new(26.0, 26.0));
+        for chrome_scale in [0.8, 1.0, 1.5, 2.0] {
+            let mut viewport = Rect::new(0.0, 0.0, 0.0, 0.0);
+            for (width, height, device_scale) in [
+                (800.0, 600.0, 1.0),
+                (1000.0, 800.0, 1.0),
+                (700.0, 500.0, 1.0),
+                (900.0, 500.0, 1.0),
+                (1001.0, 701.0, 1.25),
+                (1501.0, 901.0, 1.5),
+                (1801.0, 1001.0, 2.0),
+            ] {
+                let logical_width = width / device_scale;
+                let logical_height = height / device_scale;
+                let stale = surface_viewport_is_stale(
+                    viewport,
+                    logical_width,
+                    logical_height,
+                    chrome_scale,
+                );
+                assert!(stale);
+                assert!(chrome_layout_repair_required(None, &0_u8, stale));
+                let layout = resolve_surface_layout(
+                    Rect::new(0.0, 0.0, logical_width, logical_height),
+                    chrome_scale,
+                    &registry,
+                    &neoism_lua::SurfaceLayoutPatch::default(),
+                )
+                .unwrap();
+                viewport = layout.viewport;
+                assert!(!surface_viewport_is_stale(
+                    viewport,
+                    logical_width,
+                    logical_height,
+                    chrome_scale,
+                ));
+                assert!((layout.content.y + layout.content.h - viewport.h).abs() < 0.001);
+            }
+        }
+    }
+
+    #[test]
+    fn docked_chrome_does_not_masquerade_as_a_stale_window() {
+        use neoism_ui::layout::Rect;
+        use neoism_ui::surface_layout::{
+            resolve_surface_layout, SurfaceItemSize, SurfaceRegistry,
+            CHROME_ACTIONS_SURFACE,
+        };
+
+        let registry = SurfaceRegistry::chrome_defaults(SurfaceItemSize::new(26.0, 26.0));
+        let mut patch = neoism_lua::SurfaceLayoutPatch::default();
+        patch.surfaces.insert(
+            CHROME_ACTIONS_SURFACE.into(),
+            neoism_lua::SurfacePatch {
+                dock: Some(neoism_lua::DockEdge::Bottom),
+                thickness: Some(60.0),
+                ..Default::default()
+            },
+        );
+        let layout = resolve_surface_layout(
+            Rect::new(0.0, 0.0, 800.0, 600.0),
+            1.0,
+            &registry,
+            &patch,
+        )
+        .unwrap();
+        assert_eq!(layout.content.y + layout.content.h, 540.0);
+        assert!(!surface_viewport_is_stale(
+            layout.viewport,
+            800.0,
+            600.0,
+            1.0
+        ));
+    }
 
     #[test]
     fn first_frame_seeds_valid_geometry_without_reflow() {

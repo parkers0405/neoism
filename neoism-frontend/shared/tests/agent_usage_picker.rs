@@ -145,7 +145,7 @@ fn narrow_usage_panel_can_scroll_with_less_than_one_account_visible() {
 }
 
 #[test]
-fn usage_labels_are_human_readable_and_static_loading_does_not_animate() {
+fn usage_labels_are_human_readable() {
     let mut a = account(0);
     a.auth_type = "oauth".into();
     for (raw, expected) in [
@@ -175,8 +175,36 @@ fn usage_labels_are_human_readable_and_static_loading_does_not_animate() {
         window.label = raw.into();
         assert_eq!(window.limit_label(), expected);
     }
-    let picker = NeoismAgentPicker::usage_loading();
-    assert!(picker.loading);
+}
+
+#[test]
+fn usage_loading_reserves_skeleton_rows_and_animates_until_completion() {
+    for scale in [0.5, 1.0, 2.0, 3.0] {
+        for width in [240.0, 600.0] {
+            for max_rows in [1, 2, 6] {
+                let mut picker = NeoismAgentPicker::usage_loading();
+                assert!(picker.loading);
+                assert!(picker.is_animating());
+                let g = picker.usage_layout(
+                    [0.0, 500.0 * scale, width * scale, 100.0],
+                    scale,
+                    max_rows,
+                    30.0 * scale,
+                );
+                assert_eq!(g.body[3], 46.0 * max_rows.min(3) as f32 * scale);
+                assert!(g.rect[1] >= 30.0 * scale);
+                assert_eq!(picker.usage_account_at(10.0, g.body[1] + scale), None);
+                picker.set_usage_accounts(vec![account(2)]);
+                assert!(!picker.loading);
+                assert!(!picker.is_animating());
+            }
+        }
+    }
+    let mut picker = NeoismAgentPicker::usage_loading();
+    let g = picker.usage_layout([0.0, 130.0, 240.0, 100.0], 1.0, 6, 30.0);
+    assert!(g.body[3] < 46.0 * 3.0);
+    assert_eq!(g.rect[1], 30.0);
+    picker.set_usage_error("Offline".into());
     assert!(!picker.is_animating());
 }
 

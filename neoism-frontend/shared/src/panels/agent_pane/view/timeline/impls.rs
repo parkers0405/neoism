@@ -34,6 +34,10 @@ impl AgentTimelineMessage for NeoismAgentMessage {
         &self.tool
     }
 
+    fn tool_batch_id(&self) -> Option<&str> {
+        self.tool_batch_id.as_deref()
+    }
+
     fn output_kind(&self) -> AgentTimelineOutputKind {
         match self.output_kind {
             NeoismAgentOutputKind::Text => AgentTimelineOutputKind::Text,
@@ -74,6 +78,7 @@ impl AgentTimelineMessage for NeoismAgentMessage {
             text,
             status,
             tool: "tool_group".to_string(),
+            tool_batch_id: None,
             output_kind: NeoismAgentOutputKind::Text,
             lang: String::new(),
             line_offset: None,
@@ -89,6 +94,10 @@ impl AgentTimelineMessage for NeoismAgentMessage {
 impl AgentTimelinePane for NeoismAgentPane {
     type Message = NeoismAgentMessage;
     type MeasureKey = TimelineMeasureKey;
+
+    fn set_visible_running_tool_active(&mut self, active: bool) {
+        NeoismAgentPane::set_visible_running_tool_active(self, active);
+    }
 
     fn messages(&self) -> &[Self::Message] {
         NeoismAgentPane::messages(self)

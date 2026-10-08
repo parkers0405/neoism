@@ -102,6 +102,17 @@ impl TextRevealState {
         self.bodies.clear();
         self.visible_until.set(None);
     }
+    /// Transfer recent identity without restarting clocks or replacing a canonical entry.
+    /// Callers must scope to the active session before rekeying.
+    pub fn rekey(&mut self, old_id: &str, new_id: &str) {
+        if old_id.is_empty() || new_id.is_empty() || old_id == new_id {
+            return;
+        }
+        if let Some(entry) = self.bodies.remove(old_id) {
+            self.bodies.entry(new_id.to_owned()).or_insert(entry);
+        }
+    }
+
     pub fn scope(&mut self, session: Option<&str>) {
         if self.session.as_deref() != session {
             self.clear();
@@ -544,6 +555,40 @@ pub fn painted_visible(reveals: &[TextReveal]) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn rekey_preserves_tool_output_birth_ages_and_canonical_identity() {
+        let now = Instant::now();
+        let mut state = TextRevealState::default();
+        state.scope(Some("session"));
+        state.record_at("legacy", "", "output", now);
+        state.apply_projection("legacy", &projection(""), None);
+        state.apply_projection("legacy", &projection("output"), Some(now));
+        let pending_at = state.bodies["legacy"].pending.back().unwrap().at;
+        state.rekey("legacy", "canonical");
+        state.record_at(
+            "canonical",
+            "output",
+            "output",
+            now + Duration::from_millis(20),
+        );
+        let body = &state.bodies["canonical"];
+        assert_eq!(body.canonical, "output");
+        assert!(body.has_canonical_baseline);
+        assert_eq!(body.ages[0].range, 0..6);
+        assert_eq!(body.ages[0].at, now);
+        assert_eq!(body.latest, Some(now));
+        assert_eq!(body.pending.back().unwrap().at, pending_at);
+        assert!(!state.bodies.contains_key("legacy"));
+        state.record_at("destination", "", "existing", now);
+        state.rekey("canonical", "destination");
+        assert_eq!(state.bodies["destination"].source, "existing");
+        state.rekey("destination", "");
+        assert!(state.bodies.contains_key("destination"));
+        state.scope(Some("different"));
+        state.rekey("destination", "canonical");
+        assert!(!state.has_body("canonical"));
+    }
+
     use super::*;
     fn projection(text: &str) -> Projection {
         let mut p = Projection::default();

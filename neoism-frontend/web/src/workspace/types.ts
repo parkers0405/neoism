@@ -1086,6 +1086,7 @@ export interface HistoryMessage {
   text?: string;
   status?: string;
   tool?: string;
+  tool_batch_id?: string | null;
   lang?: string;
   line_offset?: number | null;
   detail?: string;

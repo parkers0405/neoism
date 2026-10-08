@@ -17,9 +17,61 @@ impl NeoismAgentPane {
             .map(|(cached, _)| cached.clone())
     }
 
-    /// Paint-only streaming reveal, enabled by default.
+    /// Session-scoped paint-only tool motion for the renderer bridge.
+    pub fn tool_motion_state(
+        &mut self,
+    ) -> &mut crate::panels::agent_pane::tool_motion::ToolMotionState {
+        self.tool_motion.scope(self.session_id.as_deref());
+        &mut self.tool_motion
+    }
+
+    /// Resolve synthetic group membership from the canonical source boundary.
+    /// Renderers sample here, then mark the result visible via tool_motion_state().
+    pub fn tool_motion_sample(
+        &mut self,
+        id: &str,
+    ) -> crate::panels::agent_pane::tool_motion::ToolMotionSample {
+        self.tool_motion.scope(self.session_id.as_deref());
+        if !self.tool_motion.has_active_motion() {
+            return crate::panels::agent_pane::tool_motion::ToolMotionSample::default();
+        }
+        if !id.contains("::child::") {
+            if let Some(first_id) = id.strip_suffix("..") {
+                if let Some(start) =
+                    self.messages.iter().position(|row| row.id == first_id)
+                {
+                    if let Some(end) =
+                        crate::panels::agent_pane::view::timeline::read_tool_group_end(
+                            &self.messages,
+                            start,
+                        )
+                    {
+                        return self.tool_motion.sample_group(
+                            self.messages[start..end].iter().map(|row| row.id.as_str()),
+                        );
+                    }
+                }
+            }
+        }
+        self.tool_motion.sample(id)
+    }
+
+    /// The same reveal owner used by live text and tool-output ingestion.
+    pub fn tool_text_reveal_state(
+        &mut self,
+    ) -> &mut crate::panels::agent_pane::text_reveal::TextRevealState {
+        self.text_reveal.scope(self.session_id.as_deref());
+        &mut self.text_reveal
+    }
+
+    /// Paint-only reveal and motion share the existing animation opt-out.
     pub fn set_text_reveal_enabled(&mut self, enabled: bool) {
         self.text_reveal.set_enabled(enabled);
+        self.tool_motion.set_enabled(enabled);
+        if !enabled && !self.tool_expand_anims.is_empty() {
+            self.tool_expand_anims.clear();
+            self.invalidate_timeline_layout();
+        }
     }
 
     pub fn input(&self) -> &str {

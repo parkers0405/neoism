@@ -440,6 +440,17 @@ fn grep_workspace(
             "indexed search is disabled for home and filesystem roots",
         );
     }
+    let scope_glob = if request.path != request.root {
+        let Ok(relative) = request.path.strip_prefix(&request.root) else {
+            return streaming_grep(request, "search path is outside the workspace index");
+        };
+        Some(format!(
+            "{}/**",
+            globset::escape(&relative.to_string_lossy().replace('\\', "/"))
+        ))
+    } else {
+        None
+    };
     let pattern = request.patterns.first().map(String::as_str).unwrap_or("");
     let requested = grep_mode(request.mode, pattern);
     let query_text = grep_query(
@@ -451,7 +462,12 @@ fn grep_workspace(
         },
     );
     let parser = QueryParser::<AiGrepConfig>::new(AiGrepConfig);
-    let query = parser.parse(&query_text);
+    let mut query = parser.parse(&query_text);
+    // Scope is a root-anchored file filter, never content or fuzzy path text.
+    // Add it after parsing so spaces/glob characters in directory names stay literal.
+    if let Some(scope) = scope_glob.as_deref() {
+        query.constraints.push(fff_search::Constraint::Glob(scope));
+    }
     let options = |mode| GrepSearchOptions {
         page_limit: request.limit,
         mode,
@@ -1098,11 +1114,6 @@ fn mode_label(mode: GrepMode) -> &'static str {
 }
 fn grep_query(request: &GrepWorkspaceRequest, pattern: &str) -> String {
     let mut parts = Vec::new();
-    if request.path != request.root {
-        if let Ok(path) = request.path.strip_prefix(&request.root) {
-            parts.push(path.to_string_lossy().replace('\\', "/"));
-        }
-    }
     if let Some(include) = &request.include {
         parts.push(include.clone());
     }
@@ -1465,6 +1476,107 @@ mod tests {
         assert_eq!(grep.engine.as_deref(), Some(ENGINE_ID));
         assert_eq!(grep.items[0].line, 1);
         assert!(grep.bounds.truncated);
+    }
+
+    #[test]
+    fn scoped_directory_grep_does_not_escape_or_drop_matches() {
+        let root = Root::new("scoped-grep");
+        let scoped = root.0.join("scoped");
+        std::fs::create_dir_all(&scoped).unwrap();
+        std::fs::write(
+            scoped.join("inside.rs"),
+            "const NEEDLE: &str = \"inside\";\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.0.join("outside.rs"),
+            "const NEEDLE: &str = \"outside\";\n",
+        )
+        .unwrap();
+        let service = FffWorkspaceSearchService::new();
+        let grep = service
+            .grep(&GrepWorkspaceRequest {
+                root: root.0.clone(),
+                path: scoped,
+                patterns: vec!["NEEDLE".into()],
+                include: Some("*.rs".into()),
+                include_hidden: false,
+                excludes: DEFAULT_EXCLUDES.iter().map(|item| (*item).into()).collect(),
+                context_lines: 0,
+                case_sensitive: true,
+                mode: WorkspaceSearchMode::Plain,
+                limit: 20,
+                control: Default::default(),
+            })
+            .unwrap();
+
+        assert_eq!(grep.engine.as_deref(), Some(ENGINE_ID));
+        assert_eq!(grep.items.len(), 1);
+        assert_eq!(grep.items[0].path, "scoped/inside.rs");
+        assert_eq!(grep.fallback_reason, None);
+    }
+
+    #[test]
+    fn indexed_scope_preserves_modes_and_literal_directory_names() {
+        for directory in ["scoped", "parent/scoped", "scope with spaces [x] {a,b}"] {
+            let root = Root::new("scope-modes");
+            for relative in [
+                format!("{directory}/inside.rs"),
+                format!("{directory}/nested/deep.rs"),
+                format!("{directory}/skip.rs"),
+                format!("{directory}/skip.txt"),
+                format!("{directory}-sibling/outside.rs"),
+                format!("other/{directory}/outside.rs"),
+                "outside.rs".into(),
+            ] {
+                let path = root.0.join(relative);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, "const NEEDLE: usize = 1;\n").unwrap();
+            }
+            let service = FffWorkspaceSearchService::new();
+            let _pin = service.pin_root(&root.0).unwrap();
+            for (mode, patterns, label) in [
+                (WorkspaceSearchMode::Plain, vec!["NEEDLE".into()], "plain"),
+                (WorkspaceSearchMode::Regex, vec!["NEE[D]LE".into()], "regex"),
+                (WorkspaceSearchMode::Fuzzy, vec!["NEDLE".into()], "fuzzy"),
+                (
+                    WorkspaceSearchMode::Plain,
+                    vec!["NEEDLE".into(), "absent".into()],
+                    "multi",
+                ),
+            ] {
+                for limit in [1, 20] {
+                    let grep = service.grep(&GrepWorkspaceRequest {
+                        root: root.0.clone(),
+                        path: root.0.join(directory),
+                        patterns: patterns.clone(),
+                        include: Some("*.rs".into()),
+                        include_hidden: false,
+                        excludes: vec!["**/skip.rs".into()],
+                        context_lines: 0,
+                        case_sensitive: true,
+                        mode,
+                        limit,
+                        control: neoism_agent_service_api::WorkspaceSearchRequestControl::default(),
+                    }).unwrap();
+                    assert_eq!(grep.engine.as_deref(), Some(ENGINE_ID));
+                    assert_eq!(grep.fallback_reason, None);
+                    assert_eq!(grep.mode, label);
+                    assert_eq!(grep.items.len(), limit.min(2), "{directory} {label}");
+                    assert!(
+                        grep.items.iter().all(|item| {
+                            item.path == format!("{directory}/inside.rs")
+                                || item.path == format!("{directory}/nested/deep.rs")
+                        }),
+                        "{directory} {label}: {:?}",
+                        grep.items
+                    );
+                    if mode == WorkspaceSearchMode::Fuzzy {
+                        assert!(grep.items.iter().all(|item| item.fuzzy_score.is_some()));
+                    }
+                }
+            }
+        }
     }
 
     #[test]

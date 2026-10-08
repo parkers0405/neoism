@@ -388,6 +388,7 @@ pub(crate) fn history_from_agent_message(
         text: message.text,
         status: message.status,
         tool: message.tool,
+        tool_batch_id: message.tool_batch_id,
         lang: message.lang,
         line_offset: message.line_offset.map(|offset| offset as u32),
         detail: message.detail,

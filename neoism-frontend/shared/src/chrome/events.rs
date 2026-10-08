@@ -2569,6 +2569,7 @@ mod tests {
                 text: "Hello".to_string(),
                 status: String::new(),
                 tool: String::new(),
+                tool_batch_id: None,
                 output_kind:
                     crate::panels::agent_pane::state::NeoismAgentOutputKind::Text,
                 lang: String::new(),

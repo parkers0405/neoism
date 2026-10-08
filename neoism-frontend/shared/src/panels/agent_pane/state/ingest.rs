@@ -222,9 +222,21 @@ impl NeoismAgentPane {
                             | NeoismAgentMessageKind::Reasoning
                     ))
                 .then(|| self.messages[index].text.clone());
+                let tool_before = (self.messages[index].kind
+                    == NeoismAgentMessageKind::Tool)
+                    .then(|| {
+                        (
+                            self.messages[index].status.clone(),
+                            self.messages[index].tool_reveal_body().to_owned(),
+                        )
+                    });
                 self.messages[index].text.push_str(delta);
+                if let Some(before) = tool_before {
+                    self.record_live_tool_mutation(index, Some(before));
+                }
                 if let Some(before) = before {
                     self.text_reveal.scope(self.session_id.as_deref());
+                    self.tool_motion.scope(self.session_id.as_deref());
                     self.text_reveal.record(
                         &self.messages[index].id,
                         &before,
@@ -255,9 +267,21 @@ impl NeoismAgentPane {
                             | NeoismAgentMessageKind::Reasoning
                     ))
                 .then(|| self.messages[index].text.clone());
+                let tool_before = (self.messages[index].kind
+                    == NeoismAgentMessageKind::Tool)
+                    .then(|| {
+                        (
+                            self.messages[index].status.clone(),
+                            self.messages[index].tool_reveal_body().to_owned(),
+                        )
+                    });
                 self.messages[index].text.push_str(delta);
+                if let Some(before) = tool_before {
+                    self.record_live_tool_mutation(index, Some(before));
+                }
                 if let Some(before) = before {
                     self.text_reveal.scope(self.session_id.as_deref());
+                    self.tool_motion.scope(self.session_id.as_deref());
                     self.text_reveal.record(
                         &self.messages[index].id,
                         &before,
@@ -293,9 +317,20 @@ impl NeoismAgentPane {
                     NeoismAgentMessageKind::Assistant | NeoismAgentMessageKind::Reasoning
                 ))
             .then(|| self.messages[index].text.clone());
+            let tool_before = (self.messages[index].kind == NeoismAgentMessageKind::Tool)
+                .then(|| {
+                    (
+                        self.messages[index].status.clone(),
+                        self.messages[index].tool_reveal_body().to_owned(),
+                    )
+                });
             self.messages[index].text.push_str(delta);
+            if let Some(before) = tool_before {
+                self.record_live_tool_mutation(index, Some(before));
+            }
             if let Some(before) = before {
                 self.text_reveal.scope(self.session_id.as_deref());
+                self.tool_motion.scope(self.session_id.as_deref());
                 self.text_reveal.record(
                     &self.messages[index].id,
                     &before,
@@ -333,6 +368,24 @@ impl NeoismAgentPane {
             || message.tool == "background_task_result"
             || is_background_completion_card(&message);
         self.text_reveal.scope(self.session_id.as_deref());
+        self.tool_motion.scope(self.session_id.as_deref());
+        let tool_index = (message.kind == NeoismAgentMessageKind::Tool)
+            .then(|| {
+                self.messages
+                    .iter()
+                    .position(|m| !message.id.is_empty() && m.id == message.id)
+                    .or_else(|| self.match_running_tool_part(&message))
+            })
+            .flatten();
+        let tool_before = tool_index.map(|i| {
+            (
+                self.messages[i].id.clone(),
+                self.messages[i].status.clone(),
+                self.messages[i].tool_reveal_body().to_owned(),
+            )
+        });
+        let tool_id = message.id.clone();
+        let is_tool = message.kind == NeoismAgentMessageKind::Tool;
         let reveal_id = message.id.clone();
         let reveal_before = (self.text_reveal.should_record(&reveal_id)
             && matches!(
@@ -347,6 +400,26 @@ impl NeoismAgentPane {
                 .unwrap_or_default()
         });
         self.upsert_part_message_inner(message);
+        if is_tool {
+            let index = self
+                .messages
+                .iter()
+                .position(|m| !tool_id.is_empty() && m.id == tool_id)
+                .or(tool_index);
+            if let Some(index) = index {
+                self.tool_motion.scope(self.session_id.as_deref());
+                self.text_reveal.scope(self.session_id.as_deref());
+                let tool_before = tool_before.map(|(old_id, status, body)| {
+                    let resolved_id = &self.messages[index].id;
+                    if old_id != *resolved_id {
+                        self.tool_motion.rekey(&old_id, resolved_id);
+                        self.text_reveal.rekey(&old_id, resolved_id);
+                    }
+                    (status, body)
+                });
+                self.record_live_tool_mutation(index, tool_before);
+            }
+        }
         if let Some(before) = reveal_before {
             if let Some(row) = self.messages.iter().find(|m| m.id == reveal_id) {
                 self.text_reveal.record(&row.id, &before, &row.text);
@@ -355,6 +428,29 @@ impl NeoismAgentPane {
         if refresh_background {
             self.refresh_background_task_activity_clock();
         }
+    }
+
+    pub(super) fn record_live_tool_mutation(
+        &mut self,
+        index: usize,
+        before: Option<(String, String)>,
+    ) {
+        let row = &self.messages[index];
+        if row.kind != NeoismAgentMessageKind::Tool || row.id.is_empty() {
+            return;
+        }
+        self.tool_motion.scope(self.session_id.as_deref());
+        self.text_reveal.scope(self.session_id.as_deref());
+        self.tool_motion.record(
+            &row.id,
+            before.as_ref().map(|(status, _)| status.as_str()),
+            &row.status,
+        );
+        self.text_reveal.record(
+            &row.id,
+            before.as_ref().map_or("", |(_, body)| body.as_str()),
+            row.tool_reveal_body(),
+        );
     }
 
     fn upsert_part_message_inner(&mut self, message: NeoismAgentMessage) {

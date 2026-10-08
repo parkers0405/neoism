@@ -1815,6 +1815,29 @@ fn render_input_help_strip(
     };
     let baseline_y = y + (h - key_opts.font_size) * 0.5;
 
+    // Reserve the right-hand hints before deciding whether the branch fits.
+    let (slash, command_label) = INPUT_COMMAND_HINT;
+    let (tab, agents) = INPUT_TAB_HINT;
+    let command_label_w = sugarloaf.text_mut().measure(command_label, &label_opts);
+    let slash_w = sugarloaf.text_mut().measure(slash, &key_opts);
+    let agents_w = sugarloaf.text_mut().measure(agents, &label_opts);
+    let tab_w = sugarloaf.text_mut().measure(tab, &key_opts);
+    let inner_gap = 7.0 * s;
+    let group_gap = 26.0 * s;
+    let tab_group_w = tab_w + inner_gap + agents_w;
+    let command_group_w = slash_w + inner_gap + command_label_w;
+    let right_w = if policy.show_tab_hint {
+        tab_group_w + group_gap + command_group_w
+    } else {
+        command_group_w
+    };
+    let right_x = x + (w - right_w).max(0.0);
+    let hint_left = if pane.input_help_visible() && policy.show_command_hint {
+        right_x
+    } else {
+        x + w
+    };
+
     // A settled conversation mirrors New Chat's checkout context. While a run
     // is active, the activity scanner and interrupt hint own this same slot.
     let visible_checkout = visible_footer_checkout_context(policy, checkout_context);
@@ -1826,6 +1849,7 @@ fn render_input_help_strip(
             baseline_y,
             &key_opts,
             &label_opts,
+            hint_left,
             s,
             occlusion_rects,
         )
@@ -1876,23 +1900,6 @@ fn render_input_help_strip(
     if !policy.show_command_hint {
         return;
     }
-    let (slash, command_label) = INPUT_COMMAND_HINT;
-    let (tab, agents) = INPUT_TAB_HINT;
-    let command_label_w = sugarloaf.text_mut().measure(command_label, &label_opts);
-    let slash_w = sugarloaf.text_mut().measure(slash, &key_opts);
-    let agents_w = sugarloaf.text_mut().measure(agents, &label_opts);
-    let tab_w = sugarloaf.text_mut().measure(tab, &key_opts);
-    let inner_gap = 7.0 * s;
-    let group_gap = 26.0 * s;
-    let tab_group_w = tab_w + inner_gap + agents_w;
-    let command_group_w = slash_w + inner_gap + command_label_w;
-    let right_w = if policy.show_tab_hint {
-        tab_group_w + group_gap + command_group_w
-    } else {
-        command_group_w
-    };
-    let right_x = x + (w - right_w).max(0.0);
-
     let groups_fit = right_x >= activity_guard;
     if policy.show_tab_hint && groups_fit {
         draw_text_clipped(
@@ -1944,6 +1951,21 @@ fn visible_footer_checkout_context<'a>(
     checkout_context.filter(|_| !policy.show_activity)
 }
 
+fn checkout_context_width(rect: [f32; 4], hint_left: f32, scale: f32) -> f32 {
+    (hint_left - 12.0 * scale - rect[0]).clamp(0.0, rect[2].max(0.0))
+}
+
+fn checkout_branch_fits(
+    branch_x: f32,
+    branch_width: f32,
+    checkout_right: f32,
+    hint_left: f32,
+    scale: f32,
+) -> bool {
+    let branch_right = branch_x + branch_width;
+    branch_right <= checkout_right && branch_right + 12.0 * scale <= hint_left
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_checkout_context(
     sugarloaf: &mut Sugarloaf,
@@ -1952,11 +1974,12 @@ fn render_checkout_context(
     baseline_y: f32,
     value_opts: &DrawOpts,
     icon_opts: &DrawOpts,
+    hint_left: f32,
     s: f32,
     occlusion_rects: &[[f32; 4]],
 ) -> f32 {
-    let [x, y, w, h] = rect;
-    let max_w = w * 0.58;
+    let [x, y, _, h] = rect;
+    let max_w = checkout_context_width(rect, hint_left, s);
     if max_w <= 0.0 {
         return x;
     }
@@ -1993,24 +2016,34 @@ fn render_checkout_context(
 
     if let Some(branch) = context.branch.as_deref() {
         let glyph = crate::primitives::look::themed_glyph("status.branch", "\u{e725}");
-        draw_text_clipped(
-            sugarloaf,
+        let glyph_w = sugarloaf.text_mut().measure(glyph, &icon_opts);
+        let branch_w = sugarloaf.text_mut().measure(branch, &value_opts);
+        if checkout_branch_fits(
             cursor_x,
-            baseline_y,
-            glyph,
-            &icon_opts,
-            occlusion_rects,
-        );
-        cursor_x += sugarloaf.text_mut().measure(glyph, &icon_opts) + inner_gap;
-        draw_text_clipped(
-            sugarloaf,
-            cursor_x,
-            baseline_y,
-            branch,
-            &value_opts,
-            occlusion_rects,
-        );
-        cursor_x += sugarloaf.text_mut().measure(branch, &value_opts);
+            glyph_w + inner_gap + branch_w,
+            x + max_w,
+            hint_left,
+            s,
+        ) {
+            draw_text_clipped(
+                sugarloaf,
+                cursor_x,
+                baseline_y,
+                glyph,
+                &icon_opts,
+                occlusion_rects,
+            );
+            cursor_x += glyph_w + inner_gap;
+            draw_text_clipped(
+                sugarloaf,
+                cursor_x,
+                baseline_y,
+                branch,
+                &value_opts,
+                occlusion_rects,
+            );
+            cursor_x += branch_w;
+        }
     }
 
     cursor_x.min(x + max_w) + 12.0 * s
@@ -2923,6 +2956,60 @@ mod composer_visual_policy_tests {
     fn help_strip_defines_tab_and_slash_commands() {
         assert_eq!(INPUT_COMMAND_HINT, ("/", "commands"));
         assert_eq!(INPUT_TAB_HINT, ("tab", "agents"));
+    }
+
+    #[test]
+    fn checkout_uses_all_space_before_hints_instead_of_a_percentage_cap() {
+        for s in [0.5, 1.0, 2.0, 3.0] {
+            let rect = [20.0 * s, 100.0 * s, 1000.0 * s, 20.0 * s];
+            let hint_left = 820.0 * s;
+            let available = checkout_context_width(rect, hint_left, s);
+            assert_eq!(available, 788.0 * s);
+            let checkout_right = rect[0] + available;
+            // This whole branch extends beyond the old 58% cutoff but fits.
+            assert!(checkout_branch_fits(
+                620.0 * s,
+                188.0 * s,
+                checkout_right,
+                hint_left,
+                s,
+            ));
+            assert!(!checkout_branch_fits(
+                620.0 * s,
+                188.5 * s,
+                checkout_right,
+                hint_left,
+                s,
+            ));
+            assert_eq!(
+                checkout_context_width(rect, rect[0] + rect[2], s),
+                988.0 * s,
+            );
+            assert_eq!(checkout_context_width(rect, rect[0] + 5.0 * s, s), 0.0);
+        }
+    }
+
+    #[test]
+    fn checkout_branch_is_hidden_unless_the_whole_group_fits() {
+        for s in [0.5, 1.0, 2.0, 3.0] {
+            let fits = |start, width, clip_right, hint_left| {
+                checkout_branch_fits(
+                    start * s,
+                    width * s,
+                    clip_right * s,
+                    hint_left * s,
+                    s,
+                )
+            };
+            assert!(fits(200.0, 88.0, 350.0, 300.0));
+            assert!(!fits(200.0, 88.5, 350.0, 300.0));
+            assert!(fits(200.0, 150.0, 350.0, 400.0));
+            assert!(!fits(200.0, 150.5, 350.0, 400.0));
+            assert!(!fits(320.0, 88.0, 350.0, 400.0));
+            assert!(!fits(200.0, 300.0, 350.0, 400.0));
+            // Without hints, the footer edge is the only hint boundary.
+            assert!(fits(200.0, 150.0, 350.0, 600.0));
+        }
     }
 
     #[test]

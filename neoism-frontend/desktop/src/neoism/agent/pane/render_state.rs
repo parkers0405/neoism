@@ -18,9 +18,62 @@ impl NeoismAgentPane {
             .map(|(cached, _)| cached.clone())
     }
 
-    /// Paint-only streaming reveal, enabled by default.
+    /// Session-scoped paint-only tool motion for the renderer bridge.
+    pub fn tool_motion_state(
+        &mut self,
+    ) -> &mut neoism_ui::panels::agent_pane::tool_motion::ToolMotionState {
+        self.tool_motion.scope(self.session_id.as_deref());
+        &mut self.tool_motion
+    }
+
+    /// Resolve synthetic group membership from the canonical source boundary.
+    /// Renderers sample here, then mark the result visible via tool_motion_state().
+    pub fn tool_motion_sample(
+        &mut self,
+        id: &str,
+    ) -> neoism_ui::panels::agent_pane::tool_motion::ToolMotionSample {
+        self.tool_motion.scope(self.session_id.as_deref());
+        if !self.tool_motion.has_active_motion() {
+            return neoism_ui::panels::agent_pane::tool_motion::ToolMotionSample::default(
+            );
+        }
+        if !id.contains("::child::") {
+            if let Some(first_id) = id.strip_suffix("..") {
+                if let Some(start) =
+                    self.messages.iter().position(|row| row.id == first_id)
+                {
+                    if let Some(end) =
+                        neoism_ui::panels::agent_pane::view::timeline::read_tool_group_end(
+                            &self.messages,
+                            start,
+                        )
+                    {
+                        return self.tool_motion.sample_group(
+                            self.messages[start..end].iter().map(|row| row.id.as_str()),
+                        );
+                    }
+                }
+            }
+        }
+        self.tool_motion.sample(id)
+    }
+
+    /// The same reveal owner used by live text and tool-output ingestion.
+    pub fn tool_text_reveal_state(
+        &mut self,
+    ) -> &mut neoism_ui::panels::agent_pane::text_reveal::TextRevealState {
+        self.text_reveal.scope(self.session_id.as_deref());
+        &mut self.text_reveal
+    }
+
+    /// Paint-only reveal and motion share the existing animation opt-out.
     pub fn set_text_reveal_enabled(&mut self, enabled: bool) {
         self.text_reveal.set_enabled(enabled);
+        self.tool_motion.set_enabled(enabled);
+        if !enabled && !self.tool_expand_anims.is_empty() {
+            self.tool_expand_anims.clear();
+            self.invalidate_timeline_layout();
+        }
     }
 
     pub fn with_directory(directory: Option<String>) -> Self {
@@ -572,7 +625,9 @@ impl NeoismAgentPane {
 
     pub fn clear_tool_hit_rects(&mut self) {
         self.text_reveal.scope(self.session_id.as_deref());
+        self.tool_motion.scope(self.session_id.as_deref());
         self.text_reveal.begin_frame();
+        self.tool_motion.begin_frame();
         self.tool_hit_rects.clear();
         self.diff_scroll_rects.clear();
         self.markdown_horizontal_scroll_rects.clear();
@@ -1080,6 +1135,72 @@ impl NeoismAgentPane {
             return true;
         }
 
+        // Only a Task row itself navigates; diff sections and grouped-child
+        // controls retain their existing expansion/selection behavior.
+        if child_target.is_none() {
+            let task_target = self.messages.iter().find_map(|message| {
+                (message.id == id
+                    && matches!(
+                        message.kind,
+                        NeoismAgentMessageKind::Tool | NeoismAgentMessageKind::Subtask
+                    )
+                    && message.tool == "task")
+                    .then(|| {
+                        neoism_ui::panels::agent_pane::message_policy::task_id_from_text(
+                            &message.detail,
+                            &message.text,
+                        )
+                        .map(|task_id| {
+                            (task_id, message.title.clone(), message.status == "error")
+                        })
+                    })
+                    .flatten()
+            });
+            if let Some((task_id, title, failed)) = task_target {
+                // A Task supplies the family relation even when recovery has
+                // physically pruned its historical child from the roster.
+                let root = self
+                    .side_panel
+                    .subagents()
+                    .first()
+                    .map(|entry| entry.id.clone())
+                    .or_else(|| self.session_tree_root_id.clone())
+                    .or_else(|| self.parent_session_id.clone())
+                    .or_else(|| self.session_id.clone());
+                if let Some(root) = root {
+                    self.side_panel.ensure_subagent_main_entry(root);
+                    self.side_panel.upsert_subagent(&task_id, title, "subagent");
+                    let known_status =
+                        self.side_panel.branch_activity(&task_id).is_some()
+                            || self
+                                .side_panel
+                                .subagents()
+                                .iter()
+                                .find(|entry| entry.id == task_id)
+                                .and_then(|entry| entry.runtime_status.as_deref())
+                                .and_then(BranchStatus::from_runtime_status)
+                                .is_some();
+                    if !known_status {
+                        // Historical pending/running Task text is not live
+                        // authority: navigation must never revive it as active.
+                        self.side_panel.set_branch_activity_status_from_recovery(
+                            task_id.clone(),
+                            if failed {
+                                BranchStatus::Stopped
+                            } else {
+                                BranchStatus::Completed
+                            },
+                        );
+                    }
+                    // Pin before cache activation can prune terminal rows and
+                    // infer whether the target still belongs to this family.
+                    self.side_panel.set_viewed_session_id(Some(task_id.clone()));
+                }
+                self.switch_session(task_id);
+                return true;
+            }
+        }
+
         let anchor_screen_y = self
             .timeline_viewport_rect
             .map(|[_, vy, _, vh]| rect[1].clamp(vy, vy + vh))
@@ -1102,6 +1223,8 @@ impl NeoismAgentPane {
             return true;
         }
 
+        // Capture before flipping the boolean, including an in-flight reversal.
+        let start_progress = self.tool_expand_progress(&id);
         let expanding = !self.expanded_tool_ids.contains(&id);
         if expanding {
             self.expanded_tool_ids.insert(id.clone());
@@ -1134,13 +1257,16 @@ impl NeoismAgentPane {
         } else {
             self.invalidate_timeline_layout();
         }
-        self.tool_expand_anims.insert(
-            id,
-            ToolExpandAnimation {
-                started_at: Instant::now(),
-                expanding,
-            },
-        );
+        if self.tool_motion.is_enabled() {
+            self.tool_expand_anims.insert(
+                id,
+                ToolExpandAnimation {
+                    started_at: Instant::now(),
+                    expanding,
+                    start_progress,
+                },
+            );
+        }
         true
     }
 

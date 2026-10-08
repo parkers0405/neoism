@@ -2666,6 +2666,7 @@ impl From<neoism_ui::panels::agent_pane::state::NeoismAgentMessage>
             }
         };
         out.id = message.id;
+        out.tool_batch_id = message.tool_batch_id;
         // Assistant `status` carries the settled response footer
         // (agent/model/duration). Keep it alongside ordinary tool statuses.
         out.status = status;

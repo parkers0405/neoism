@@ -384,8 +384,12 @@ impl NeoismAgentPicker {
         } else {
             0.0
         };
-        let preferred = self.row_height()
-            * self.usage_accounts.len().clamp(1, max_rows.clamp(1, 3)) as f32;
+        let preferred = if self.loading {
+            PICKER_ROW_HEIGHT * max_rows.clamp(1, 3) as f32
+        } else {
+            self.row_height()
+                * self.usage_accounts.len().clamp(1, max_rows.clamp(1, 3)) as f32
+        };
         let body_h = (preferred * s).min((available - header_h - footer_h).max(0.0));
         let height = header_h + body_h + footer_h;
         let rect = [
@@ -674,11 +678,10 @@ impl NeoismAgentPicker {
 
     pub fn is_animating(&self) -> bool {
         self.list_scroll.is_animating()
-                || self.cursor_spring.position != 0.0
-                // Loading may outlive a failed request, but shimmer does not
-                // own frames indefinitely.
-                || (self.kind != NeoismAgentPickerKind::Usage
-                    && self.loading && self.loading_elapsed() < 1.5)
+            || self.cursor_spring.position != 0.0
+            // Loading may outlive a failed request, but shimmer does not
+            // own frames indefinitely.
+            || (self.loading && self.loading_elapsed() < 1.5)
     }
 
     /// Largest committed pixel scroll that still leaves the last row flush

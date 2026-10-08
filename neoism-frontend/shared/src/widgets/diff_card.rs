@@ -268,6 +268,47 @@ fn fallback_visual_row_count(
 
 /// Paint the card. `clip_top` / `clip_bottom` is the panel viewport in
 /// window-logical coords; rows entirely outside that range are skipped.
+/// Neutral paint parameters preserve all existing Git panel callers. Coordinates
+/// may already be translated by the host; clips and occlusion stay authoritative.
+#[derive(Clone, Copy, Debug)]
+pub struct PaintParams<'a> {
+    pub opacity: f32,
+    pub clip: Option<[f32; 4]>,
+    pub occlusion_rects: &'a [[f32; 4]],
+}
+impl Default for PaintParams<'_> {
+    fn default() -> Self {
+        Self {
+            opacity: 1.0,
+            clip: None,
+            occlusion_rects: &[],
+        }
+    }
+}
+struct PaintTheme<'a> {
+    theme: &'a IdeTheme,
+    opacity: f32,
+}
+impl std::ops::Deref for PaintTheme<'_> {
+    type Target = IdeTheme;
+    fn deref(&self) -> &IdeTheme {
+        self.theme
+    }
+}
+impl PaintTheme<'_> {
+    fn f32(&self, c: u32) -> [f32; 4] {
+        self.f32_alpha(c, 1.0)
+    }
+    fn f32_alpha(&self, c: u32, a: f32) -> [f32; 4] {
+        self.theme.f32_alpha(c, a * self.opacity)
+    }
+    fn u8(&self, c: u32) -> [u8; 4] {
+        self.u8_alpha(c, 1.0)
+    }
+    fn u8_alpha(&self, c: u32, a: f32) -> [u8; 4] {
+        self.theme.u8_alpha(c, a * self.opacity)
+    }
+}
 #[allow(clippy::too_many_arguments)]
 pub fn render(
     sugarloaf: &mut Sugarloaf,
@@ -283,6 +324,121 @@ pub fn render(
     clip_top: f32,
     clip_bottom: f32,
 ) -> CardLayout {
+    render_with_paint(
+        sugarloaf,
+        x,
+        y,
+        width,
+        body_height,
+        spec,
+        scale,
+        theme,
+        depth,
+        base_order,
+        clip_top,
+        clip_bottom,
+        PaintParams::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn render_with_paint(
+    sugarloaf: &mut Sugarloaf,
+    x: f32,
+    y: f32,
+    width: f32,
+    body_height: f32,
+    spec: &CardSpec,
+    scale: f32,
+    theme: &IdeTheme,
+    depth: f32,
+    base_order: u8,
+    clip_top: f32,
+    clip_bottom: f32,
+    paint: PaintParams<'_>,
+) -> CardLayout {
+    let band = [
+        x - 2.0 * scale,
+        clip_top,
+        width + 4.0 * scale,
+        (clip_bottom - clip_top).max(0.0),
+    ];
+    let mut regions = paint.clip.map_or_else(
+        || vec![band],
+        |clip| intersection(band, clip).into_iter().collect(),
+    );
+    for cut in paint.occlusion_rects {
+        regions = regions
+            .into_iter()
+            .flat_map(|r| subtract(r, *cut))
+            .collect();
+    }
+    let painted_theme = PaintTheme {
+        theme,
+        opacity: paint.opacity.clamp(0.0, 1.0),
+    };
+    let mut layout = measure(spec, scale, body_height);
+    for clip in regions {
+        layout = render_painted_region(
+            sugarloaf,
+            x,
+            y,
+            width,
+            body_height,
+            spec,
+            scale,
+            &painted_theme,
+            depth,
+            base_order,
+            clip,
+        );
+    }
+    layout
+}
+
+fn intersection(a: [f32; 4], b: [f32; 4]) -> Option<[f32; 4]> {
+    let left = a[0].max(b[0]);
+    let top = a[1].max(b[1]);
+    let right = (a[0] + a[2]).min(b[0] + b[2]);
+    let bottom = (a[1] + a[3]).min(b[1] + b[3]);
+    (right > left && bottom > top).then_some([left, top, right - left, bottom - top])
+}
+fn subtract(r: [f32; 4], cut: [f32; 4]) -> Vec<[f32; 4]> {
+    let Some(i) = intersection(r, cut) else {
+        return vec![r];
+    };
+    [
+        [r[0], r[1], r[2], i[1] - r[1]],
+        [r[0], i[1] + i[3], r[2], r[1] + r[3] - i[1] - i[3]],
+        [r[0], i[1], i[0] - r[0], i[3]],
+        [i[0] + i[2], i[1], r[0] + r[2] - i[0] - i[2], i[3]],
+    ]
+    .into_iter()
+    .filter(|p| p[2] > 0.0 && p[3] > 0.0)
+    .collect()
+}
+#[allow(clippy::too_many_arguments)]
+fn render_painted_region(
+    sugarloaf: &mut Sugarloaf,
+    x: f32,
+    y: f32,
+    width: f32,
+    body_height: f32,
+    spec: &CardSpec,
+    scale: f32,
+    theme: &PaintTheme<'_>,
+    depth: f32,
+    base_order: u8,
+    region: [f32; 4],
+) -> CardLayout {
+    let clip_top = region[1];
+    let clip_bottom = region[1] + region[3];
+    let clipped_x = |left: f32, width: f32| {
+        let l = left.max(region[0]);
+        (l, ((left + width).min(region[0] + region[2]) - l).max(0.0))
+    };
+    let clip_text =
+        |rect| intersection(rect, region).unwrap_or([region[0], region[1], 0.0, 0.0]);
     let mut layout = measure(spec, scale, body_height);
     let header_h = layout.header_height;
     let body_h = layout.body_height;
@@ -319,9 +475,9 @@ pub fn render(
     if border_visible_h > 0.0 {
         sugarloaf.quad(
             None,
-            border_x,
+            clipped_x(border_x, border_w).0,
             border_visible_y,
-            border_w,
+            clipped_x(border_x, border_w).1,
             border_visible_h,
             theme.f32(theme.border),
             border_radii,
@@ -342,9 +498,9 @@ pub fn render(
     if header_visible_h > 0.0 {
         sugarloaf.quad(
             None,
-            x,
+            clipped_x(x, width).0,
             header_visible_y,
-            width,
+            clipped_x(x, width).1,
             header_visible_h,
             theme.f32(theme.surface),
             header_radii,
@@ -358,7 +514,14 @@ pub fn render(
     // fill. A zero-height text clip can still submit glyphs on some
     // backends, which lets scrolled-off card titles bleed into top chrome.
     if header_visible_h > 0.0 {
-        let header_clip = clip_to_viewport(x, y, width, header_h, clip_top, clip_bottom);
+        let header_clip = clip_text(clip_to_viewport(
+            x,
+            y,
+            width,
+            header_h,
+            clip_top,
+            clip_bottom,
+        ));
         let path_color = if spec.link_target.is_some() {
             theme.blue
         } else {
@@ -443,9 +606,9 @@ pub fn render(
             if underline_bottom > visible_y {
                 sugarloaf.quad(
                     None,
-                    hx,
+                    clipped_x(hx, path_w).0,
                     visible_y,
-                    path_w,
+                    clipped_x(hx, path_w).1,
                     underline_bottom - visible_y,
                     theme.f32(theme.blue),
                     [0.0, 0.0, 0.0, 0.0],
@@ -492,9 +655,9 @@ pub fn render(
     if body_visible_h > 0.0 {
         sugarloaf.quad(
             None,
-            x,
+            clipped_x(x, width).0,
             body_visible_y,
-            width,
+            clipped_x(x, width).1,
             body_visible_h,
             theme.f32(theme.bg),
             body_radii,
@@ -504,7 +667,14 @@ pub fn render(
     }
 
     let line_h = LINE_HEIGHT * scale;
-    let body_clip = clip_to_viewport(x, body_top, width, body_h, clip_top, clip_bottom);
+    let body_clip = clip_text(clip_to_viewport(
+        x,
+        body_top,
+        width,
+        body_h,
+        clip_top,
+        clip_bottom,
+    ));
     let gutter_w = GUTTER_WIDTH * scale;
     let body_inner_x = x + gutter_w + BODY_PAD_X * scale;
     let body_inner_right = x + width - BODY_PAD_X * scale;
@@ -571,9 +741,9 @@ pub fn render(
             if let Some(bg) = bg_color {
                 sugarloaf.rect(
                     None,
-                    x,
+                    clipped_x(x, width).0,
                     visible_y,
-                    width,
+                    clipped_x(x, width).1,
                     visible_h,
                     bg,
                     depth,
@@ -635,7 +805,7 @@ pub fn render(
                 let marker_opts = DrawOpts {
                     font_size: GUTTER_FONT_SIZE * scale,
                     color: theme.u8_alpha(theme.muted, 0.85),
-                    clip_rect: Some(marker_clip),
+                    clip_rect: Some(clip_text(marker_clip)),
                     ..DrawOpts::default()
                 };
                 sugarloaf.text_mut().draw(
@@ -711,7 +881,7 @@ fn draw_syntax_line(
     text_y: f32,
     text: &str,
     lang: Lang,
-    theme: &IdeTheme,
+    theme: &PaintTheme<'_>,
     clip: [f32; 4],
     right_edge: f32,
     scale: f32,
@@ -720,7 +890,11 @@ fn draw_syntax_line(
     let mut cursor_x = start_x;
     let spans = highlighted_diff_line(text, lang);
     for (tok, slice) in spans.iter() {
-        let color = tint.unwrap_or_else(|| syn_color(*tok, theme, false));
+        let color = tint.unwrap_or_else(|| {
+            let mut color = syn_color(*tok, theme, false);
+            color[3] = (color[3] as f32 * theme.opacity).round() as u8;
+            color
+        });
         let opts = DrawOpts {
             font_size: FONT_SIZE * scale,
             color,
@@ -1045,5 +1219,40 @@ mod tests {
         assert_eq!(offsets.len(), lines.len() + 1);
         assert!(counts.diff_wraps > 0);
         assert!(counts.diff_highlights > 0);
+    }
+}
+
+#[cfg(test)]
+mod paint_tests {
+    use super::*;
+    #[test]
+    fn neutral_paint_is_identical_and_fade_covers_syntax_and_chrome() {
+        let theme = IdeTheme::default();
+        let params = PaintParams::default();
+        assert_eq!(params.opacity, 1.0);
+        assert!(params.clip.is_none() && params.occlusion_rects.is_empty());
+        let neutral = PaintTheme {
+            theme: &theme,
+            opacity: params.opacity,
+        };
+        assert_eq!(neutral.u8(theme.fg), theme.u8(theme.fg));
+        assert_eq!(
+            neutral.f32_alpha(theme.green, 0.18),
+            theme.f32_alpha(theme.green, 0.18)
+        );
+        let faded = PaintTheme {
+            theme: &theme,
+            opacity: 0.5,
+        };
+        assert_eq!(faded.f32(theme.border)[3], theme.f32(theme.border)[3] * 0.5);
+        assert_eq!(faded.u8(theme.fg), theme.u8_alpha(theme.fg, 0.5));
+    }
+    #[test]
+    fn overlay_subtraction_preserves_partial_rows() {
+        let regions = subtract([0.0, 0.0, 100.0, 50.0], [30.0, 10.0, 40.0, 20.0]);
+        assert_eq!(regions.iter().map(|r| r[2] * r[3]).sum::<f32>(), 4200.0);
+        assert!(regions
+            .iter()
+            .all(|r| intersection(*r, [30.0, 10.0, 40.0, 20.0]).is_none()));
     }
 }

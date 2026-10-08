@@ -1,9 +1,16 @@
+use super::super::draw::draw_text_revealed_clipped;
 use super::diff::{
     cached_diff_card_view, cached_edit_diff_sections, diag_footer_height,
     diag_footer_rows, diff_body_height, diff_link_target, tool_diff_card_width,
 };
-use super::widgets::{draw_checkbox, draw_tool_connector, draw_tool_symbol};
+use super::motion::{
+    active_glyphs, active_visible, prepare_body_reveal, status_blend, status_width,
+    PaintTheme,
+};
+use super::widgets::{draw_checkbox_painted, draw_tool_connector, draw_tool_symbol};
 use super::*;
+use crate::panels::agent_pane::text_reveal;
+use crate::panels::agent_pane::tool_motion::ToolMotionSample;
 use crate::primitives::truncate_to_fit;
 
 fn tool_message_accent(status: &str, theme: &IdeTheme) -> u32 {
@@ -12,6 +19,13 @@ fn tool_message_accent(status: &str, theme: &IdeTheme) -> u32 {
         "completed" => theme.green,
         _ => theme.yellow,
     }
+}
+
+// Eight discrete stops around a square, with four fading blocks chasing.
+fn tool_spinner_position(now_seconds: f32, trail: usize, s: f32) -> (f32, f32) {
+    let phase = crate::render_policy::loader_animation_frame(now_seconds).phase;
+    let step = (phase * 8.0).floor() - trail as f32;
+    crate::render_policy::loader_orbit_position(step / 8.0, 3.0 * s)
 }
 
 /// Ordinary collapsed calls have a fixed height; edit diffs keep their cards.
@@ -141,9 +155,10 @@ fn measure_tool_group_activity_height(
         };
         if selected_group_child == Some(child_key.as_str()) {
             if let Some(preview) = previews.get(&child_key) {
-                rows += wrap_text(sugarloaf, preview, preview_w, &opts, 4)
-                    .len()
-                    .max(1);
+                rows +=
+                    tool_preview_wrapped_rows(sugarloaf, preview, preview_w, &opts, 4)
+                        .len()
+                        .max(1);
             }
         }
     }
@@ -161,6 +176,7 @@ pub fn render_tool_message(
     message: &impl AgentToolMessage,
     theme: &IdeTheme,
     s: f32,
+    now_seconds: f32,
     viewport_clip: [f32; 4],
     occlusion_rects: &[[f32; 4]],
     prepared_diff_sections: Option<&[ToolDiffSection]>,
@@ -171,19 +187,86 @@ pub fn render_tool_message(
     let Some(message_clip) = intersect_rect([x, y, w, h], viewport_clip) else {
         return h;
     };
-    let suppress_interactions = pane.suppress_tool_interactions();
+    // Sample once. Layout and clipping stay at the original unshifted position.
+    let motion = pane.tool_motion_sample(message.id());
+    let y = y + motion.offset_y * s;
+    let painted_theme = PaintTheme {
+        theme,
+        opacity: motion.opacity,
+    };
+    let theme = &painted_theme;
+    let suppress_interactions =
+        pane.suppress_tool_interactions() || motion.offset_y.abs() > 0.001;
     let accent = tool_message_accent(message.status(), theme);
-    draw_status_dot_text(
-        sugarloaf,
-        x + 3.5 * s,
-        y + 7.0 * s,
-        7.0 * s,
-        theme.u8(accent),
-        (message.status() == "completed").then_some((theme.u8(accent), 0.35)),
-        message_clip,
-        occlusion_rects,
-        s,
-    );
+    let (incoming_alpha, outgoing_alpha) =
+        status_blend(motion.outgoing_status.is_some(), motion.status_progress);
+    let mut indicator_visible = false;
+    for (status, blend, owns_running) in [
+        (message.status(), incoming_alpha, true),
+        (motion.outgoing_status.unwrap_or(""), outgoing_alpha, false),
+    ] {
+        // Incoming ink may be fully transparent now but visible on the next
+        // deadline frame. Outgoing ink at zero blend never returns.
+        if status.is_empty() || (!owns_running && blend <= 0.0) {
+            continue;
+        }
+        if matches!(status, "running" | "streaming") {
+            let mut visible = false;
+            for (trail, alpha) in [1.0, 0.65, 0.4, 0.2].into_iter().enumerate() {
+                let (dx, dy) = tool_spinner_position(now_seconds, trail, s);
+                let square = [
+                    x + 7.0 * s + dx - s,
+                    y + 10.5 * s + dy - s,
+                    2.0 * s,
+                    2.0 * s,
+                ];
+                let unoccluded = !occlusion_rects
+                    .iter()
+                    .any(|cut| intersect_rect(square, *cut).is_some());
+                if unoccluded {
+                    indicator_visible |=
+                        active_visible(motion, square, message_clip, occlusion_rects);
+                }
+                if blend > 0.0
+                    && motion.opacity > 0.0
+                    && intersect_rect(square, message_clip).is_some()
+                    && !occlusion_rects
+                        .iter()
+                        .any(|cut| intersect_rect(square, *cut).is_some())
+                {
+                    draw_rect_clipped(
+                        sugarloaf,
+                        square,
+                        [1.0, 1.0, 1.0, alpha * blend * motion.opacity],
+                        ORDER_TEXT,
+                        message_clip,
+                    );
+                    visible = true;
+                }
+            }
+
+            // Completion tails own a deadline, never normal running ownership.
+            if visible && owns_running {
+                pane.set_visible_running_tool_active(true);
+            }
+        } else {
+            let rect = [x + 3.5 * s, y + 7.0 * s, 7.0 * s, 7.0 * s];
+            let first = sugarloaf.text_mut().instances().len();
+            draw_status_dot_text(
+                sugarloaf,
+                rect[0],
+                rect[1],
+                rect[2],
+                theme.u8_alpha(tool_message_accent(status, theme), blend),
+                None,
+                message_clip,
+                occlusion_rects,
+                s,
+            );
+            indicator_visible |=
+                active_glyphs(motion, sugarloaf, first, message_clip, occlusion_rects);
+        }
+    }
     let Some(title_opts) = opts_with_clip(
         DrawOpts {
             font_size: 15.5 * s,
@@ -197,11 +280,19 @@ pub fn render_tool_message(
     let mut symbol_opts = title_opts;
     symbol_opts.bold = false;
     symbol_opts.color = theme.u8(theme.muted);
+    let first_symbol = sugarloaf.text_mut().instances().len();
     draw_tool_symbol(
         sugarloaf,
         [x + 20.0 * s, y, 18.0 * s, 22.0 * s],
         message.tool(),
         &symbol_opts,
+        occlusion_rects,
+    );
+    let symbol_visible = active_glyphs(
+        motion,
+        sugarloaf,
+        first_symbol,
+        message_clip,
         occlusion_rects,
     );
     // Reserve the lifecycle label before truncating so pending/running cannot
@@ -211,10 +302,20 @@ pub fn render_tool_message(
     status_opts.font_size = 12.0 * s;
     status_opts.bold = false;
     status_opts.color = theme.u8(accent);
-    let status_w = if status.is_empty() {
-        0.0
+    let outgoing = motion.outgoing_status.map(tool_status_label).unwrap_or("");
+    let label_width = |sugarloaf: &mut Sugarloaf, label: &str| {
+        if label.is_empty() {
+            0.0
+        } else {
+            sugarloaf.text_mut().measure(label, &status_opts) + 12.0 * s
+        }
+    };
+    let incoming_w = label_width(sugarloaf, status);
+    let outgoing_w = label_width(sugarloaf, outgoing);
+    let status_w = if motion.outgoing_status.is_some() {
+        status_width(incoming_w, outgoing_w, motion.status_progress)
     } else {
-        sugarloaf.text_mut().measure(status, &status_opts) + 12.0 * s
+        incoming_w
     };
     let title_avail_w = (w - 66.0 * s - status_w).max(0.0);
     let title =
@@ -226,15 +327,35 @@ pub fn render_tool_message(
         let stops = measured_caret_stops(sugarloaf, &title, &title_opts, text_x);
         let title_sel = pane.register_selectable_line_with_caret_stops(
             &title,
-            [
-                text_x,
-                line_y - 3.0 * s,
-                title_w,
-                title_opts.font_size + 8.0 * s,
-            ],
+            intersect_rect(
+                [
+                    text_x,
+                    line_y - 3.0 * s,
+                    title_w,
+                    title_opts.font_size + 8.0 * s,
+                ],
+                message_clip,
+            )
+            .unwrap_or([text_x, line_y, 0.0, 0.0]),
             &stops,
         );
-        if let Some((sel_left, sel_right)) = pane.selectable_line_highlight(title_sel) {
+        if let Some((sel_left, sel_right)) = pane
+            .selectable_line_highlight(title_sel)
+            .filter(|(left, right)| {
+                !occlusion_rects.iter().any(|cut| {
+                    intersect_rect(
+                        [
+                            *left - 2.0,
+                            line_y - 3.0 * s,
+                            (*right - *left + 4.0).max(2.0),
+                            title_opts.font_size + 8.0 * s,
+                        ],
+                        *cut,
+                    )
+                    .is_some()
+                })
+            })
+        {
             draw_rounded_rect_clipped(
                 sugarloaf,
                 [
@@ -250,6 +371,7 @@ pub fn render_tool_message(
             );
         }
     }
+    let first_title = sugarloaf.text_mut().instances().len();
     draw_text_clipped(
         sugarloaf,
         text_x,
@@ -258,19 +380,55 @@ pub fn render_tool_message(
         &title_opts,
         occlusion_rects,
     );
-    if !status.is_empty() {
+    let mut motion_visible = indicator_visible
+        || symbol_visible
+        || active_glyphs(
+            motion,
+            sugarloaf,
+            first_title,
+            message_clip,
+            occlusion_rects,
+        );
+    for (label, blend, width, color) in [
+        (status, incoming_alpha, incoming_w, accent),
+        (
+            outgoing,
+            outgoing_alpha,
+            outgoing_w,
+            tool_message_accent(motion.outgoing_status.unwrap_or(""), theme),
+        ),
+    ] {
+        if label.is_empty() || (label == outgoing && label != status && blend <= 0.0) {
+            continue;
+        }
+        let mut opts = status_opts;
+        opts.color = theme.u8_alpha(color, blend);
+        let label_x = x + w - 24.0 * s - width + 12.0 * s;
+        let first_label = sugarloaf.text_mut().instances().len();
         draw_text_clipped(
             sugarloaf,
-            x + w - 24.0 * s - status_w + 12.0 * s,
+            label_x,
             y + 4.0 * s,
-            status,
-            &status_opts,
+            label,
+            &opts,
+            occlusion_rects,
+        );
+        motion_visible |= active_glyphs(
+            motion,
+            sugarloaf,
+            first_label,
+            message_clip,
             occlusion_rects,
         );
     }
+    if motion_visible {
+        if let Some(state) = pane.tool_motion_state() {
+            state.mark_visible(motion);
+        }
+    }
 
     if message.is_todos_output() {
-        render_tool_todos(
+        render_tool_todos_painted(
             sugarloaf,
             pane,
             x + 30.0 * s,
@@ -282,6 +440,7 @@ pub fn render_tool_message(
             message_clip,
             occlusion_rects,
             suppress_interactions,
+            motion,
         );
         return h;
     }
@@ -317,18 +476,32 @@ pub fn render_tool_message(
         return h;
     }
     if let Some(sections) = diff_sections {
+        let card_progress = if is_streaming_patch_tool_name(message.tool())
+            && motion.outgoing_status.is_some()
+        {
+            motion.status_progress
+        } else {
+            1.0
+        };
+        let card_theme = PaintTheme {
+            theme: theme.theme,
+            opacity: theme.opacity * card_progress,
+        };
+        let card_offset = 3.5 * (1.0 - card_progress) * s;
         render_tool_diff_cards(
             sugarloaf,
             pane,
             message,
             x,
-            y + TOOL_HEADER_HEIGHT * s,
+            y + TOOL_HEADER_HEIGHT * s + card_offset,
             w,
             sections,
-            theme,
+            &card_theme,
             s,
             message_clip,
-            suppress_interactions,
+            suppress_interactions || card_offset.abs() > 0.001 * s,
+            motion,
+            occlusion_rects,
         );
         return h;
     }
@@ -344,6 +517,7 @@ pub fn render_tool_message(
     ) else {
         return h;
     };
+    let first_connector = sugarloaf.text_mut().instances().len();
     draw_tool_connector(
         sugarloaf,
         x + 28.0 * s,
@@ -355,6 +529,18 @@ pub fn render_tool_message(
         &connector_opts,
         occlusion_rects,
     );
+
+    if active_glyphs(
+        motion,
+        sugarloaf,
+        first_connector,
+        message_clip,
+        occlusion_rects,
+    ) {
+        if let Some(state) = pane.tool_motion_state() {
+            state.mark_visible(motion);
+        }
+    }
 
     if message.tool() == "tool_group" {
         render_tool_group_activity(
@@ -370,6 +556,7 @@ pub fn render_tool_message(
             message_clip,
             occlusion_rects,
             suppress_interactions,
+            motion,
         );
         return h;
     }
@@ -399,9 +586,19 @@ pub fn render_tool_message(
     let total_lines = line_count_until(body, max_lines + 1).max(1);
     let mut nested_body_opts = body_opts;
     nested_body_opts.color = theme.u8(theme.muted);
-    let row_bottom_limit = y + h - 3.0 * s;
+    let row_bottom_limit = message_clip[1] + message_clip[3];
+    let _reveal = prepare_body_reveal(
+        sugarloaf,
+        pane,
+        message.id(),
+        wrapped_rows.clone(),
+        wrap_width,
+        &body_opts,
+        max_lines,
+        false,
+    );
     for row in wrapped_rows.iter() {
-        if line_y + body_opts.font_size > row_bottom_limit {
+        if line_y >= row_bottom_limit {
             break;
         }
         let nested = row.nested;
@@ -412,20 +609,66 @@ pub fn render_tool_message(
             &body_opts
         };
         let rendered = row.text.as_str();
+        if motion.deadline.is_some()
+            && active_visible(
+                motion,
+                [
+                    text_x,
+                    line_y,
+                    sugarloaf.text_mut().measure(rendered, text_opts),
+                    text_opts.font_size,
+                ],
+                message_clip,
+                occlusion_rects,
+            )
+        {
+            if let Some(state) = pane.tool_motion_state() {
+                state.mark_visible(motion);
+            }
+        }
+        text_reveal::begin_line(rendered);
+        let reveals = if theme.opacity > 0.0 {
+            text_reveal::ranges(rendered)
+        } else {
+            Vec::new()
+        };
         if !suppress_interactions {
             let line_w = sugarloaf.text_mut().measure(rendered, text_opts).max(12.0);
             let stops = measured_caret_stops(sugarloaf, rendered, text_opts, text_x);
             let sel_index = pane.register_selectable_line_with_caret_stops(
                 rendered,
-                [
-                    text_x,
-                    line_y - 3.0 * s,
-                    line_w,
-                    text_opts.font_size + 8.0 * s,
-                ],
+                intersect_rect(
+                    intersect_rect(
+                        [
+                            text_x,
+                            line_y - 3.0 * s,
+                            line_w,
+                            text_opts.font_size + 8.0 * s,
+                        ],
+                        viewport_clip,
+                    )
+                    .unwrap_or([text_x, line_y, 0.0, 0.0]),
+                    message_clip,
+                )
+                .unwrap_or([text_x, line_y, 0.0, 0.0]),
                 &stops,
             );
-            if let Some((sel_left, sel_right)) = pane.selectable_line_highlight(sel_index)
+            if let Some((sel_left, sel_right)) = pane
+                .selectable_line_highlight(sel_index)
+                .filter(|(left, right)| {
+                    !occlusion_rects.iter().any(|cut| {
+                        intersect_rect(
+                            [
+                                *left - 2.0,
+                                line_y - 3.0 * s,
+                                (*right - *left + 4.0).max(2.0),
+                                text_opts.font_size + 8.0 * s,
+                            ],
+                            *cut,
+                        )
+                        .is_some()
+                    })
+                })
             {
                 draw_rounded_rect_clipped(
                     sugarloaf,
@@ -442,19 +685,21 @@ pub fn render_tool_message(
                 );
             }
         }
-        draw_text_clipped(
+        draw_text_revealed_clipped(
             sugarloaf,
             text_x,
             line_y,
             rendered,
             text_opts,
             occlusion_rects,
+            &reveals,
         );
         line_y += 20.0 * s;
     }
     let extra = total_lines.saturating_sub(max_lines);
-    if extra > 0 && line_y + body_opts.font_size <= row_bottom_limit {
+    if extra > 0 && line_y < row_bottom_limit {
         let hint = format!("... +{extra} lines");
+        let first_hint = sugarloaf.text_mut().instances().len();
         draw_text_clipped(
             sugarloaf,
             body_x,
@@ -463,6 +708,11 @@ pub fn render_tool_message(
             &body_opts,
             occlusion_rects,
         );
+        if active_glyphs(motion, sugarloaf, first_hint, message_clip, occlusion_rects) {
+            if let Some(state) = pane.tool_motion_state() {
+                state.mark_visible(motion);
+            }
+        }
     }
     h
 }
@@ -474,13 +724,14 @@ fn render_tool_group_activity(
     x: f32,
     y: f32,
     w: f32,
-    h: f32,
+    _h: f32,
     message: &impl AgentToolMessage,
-    theme: &IdeTheme,
+    theme: &PaintTheme<'_>,
     s: f32,
     message_clip: [f32; 4],
     occlusion_rects: &[[f32; 4]],
     suppress_interactions: bool,
+    motion: ToolMotionSample,
 ) {
     let Some(body_opts) = opts_with_clip(
         DrawOpts {
@@ -505,13 +756,13 @@ fn render_tool_group_activity(
     let body_x = x + 58.0 * s;
     let row_h = 20.0 * s;
     let mut line_y = y + TOOL_GROUP_BODY_Y * s;
-    let row_bottom_limit = y + h - 3.0 * s;
+    let row_bottom_limit = message_clip[1] + message_clip[3];
     let previews = tool_group_child_previews(message);
     let selected_child = pane
         .selected_tool_group_child(message.id())
         .map(str::to_string);
     for line in message.text().lines().take(TOOL_GROUP_PREVIEW_LINES) {
-        if line_y + body_opts.font_size > row_bottom_limit {
+        if line_y >= row_bottom_limit {
             break;
         }
         let child_key = group_child_key(line);
@@ -534,7 +785,16 @@ fn render_tool_group_activity(
             .as_deref()
             .zip(selected_child.as_deref())
             .is_some_and(|(child, selected)| child == selected);
-        if selected {
+        if selected
+            && !occlusion_rects
+                .iter()
+                .any(|cut| intersect_rect(child_rect, *cut).is_some())
+        {
+            if active_visible(motion, child_rect, message_clip, occlusion_rects) {
+                if let Some(state) = pane.tool_motion_state() {
+                    state.mark_visible(motion);
+                }
+            }
             draw_rounded_rect_clipped(
                 sugarloaf,
                 child_rect,
@@ -544,11 +804,29 @@ fn render_tool_group_activity(
                 message_clip,
             );
         }
+        let label = truncate_chars(label, ((w / (8.0 * s)).floor().max(18.0)) as usize);
+        if motion.deadline.is_some()
+            && active_visible(
+                motion,
+                [
+                    body_x,
+                    line_y,
+                    sugarloaf.text_mut().measure(&label, &body_opts),
+                    body_opts.font_size,
+                ],
+                message_clip,
+                occlusion_rects,
+            )
+        {
+            if let Some(state) = pane.tool_motion_state() {
+                state.mark_visible(motion);
+            }
+        }
         draw_text_clipped(
             sugarloaf,
             body_x,
             line_y,
-            &truncate_chars(label, ((w / (8.0 * s)).floor().max(18.0)) as usize),
+            &label,
             &body_opts,
             occlusion_rects,
         );
@@ -560,19 +838,61 @@ fn render_tool_group_activity(
                 .map(String::as_str)
                 .unwrap_or("No preview available");
             let preview_w = (w - 96.0 * s).max(80.0 * s);
-            for preview_line in wrap_text(sugarloaf, preview, preview_w, &preview_opts, 4)
-            {
-                if line_y + preview_opts.font_size > row_bottom_limit {
+            let rows = tool_preview_wrapped_rows(
+                sugarloaf,
+                preview,
+                preview_w,
+                &preview_opts,
+                4,
+            );
+            let id = child_key.as_deref().unwrap_or(message.id());
+            let _reveal = prepare_body_reveal(
+                sugarloaf,
+                pane,
+                id,
+                rows.clone(),
+                preview_w,
+                &preview_opts,
+                4,
+                true,
+            );
+            for row in rows.iter() {
+                let preview_line = &row.text;
+                if line_y >= row_bottom_limit {
                     break;
                 }
-                draw_text_clipped(
+                text_reveal::begin_line(preview_line);
+                let reveals = if theme.opacity > 0.0 {
+                    text_reveal::ranges(preview_line)
+                } else {
+                    Vec::new()
+                };
+                draw_text_revealed_clipped(
                     sugarloaf,
                     body_x + 18.0 * s,
                     line_y,
-                    &preview_line,
+                    preview_line,
                     &preview_opts,
                     occlusion_rects,
+                    &reveals,
                 );
+                if motion.deadline.is_some()
+                    && active_visible(
+                        motion,
+                        [
+                            body_x + 18.0 * s,
+                            line_y,
+                            sugarloaf.text_mut().measure(preview_line, &preview_opts),
+                            preview_opts.font_size,
+                        ],
+                        message_clip,
+                        occlusion_rects,
+                    )
+                {
+                    if let Some(state) = pane.tool_motion_state() {
+                        state.mark_visible(motion);
+                    }
+                }
                 line_y += row_h;
             }
         }
@@ -593,7 +913,6 @@ fn tool_group_child_previews(message: &impl AgentToolMessage) -> HashMap<String,
 }
 
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 fn render_tool_diff_cards(
     sugarloaf: &mut Sugarloaf,
     pane: &mut impl AgentToolPane,
@@ -602,10 +921,12 @@ fn render_tool_diff_cards(
     y: f32,
     w: f32,
     sections: &[ToolDiffSection],
-    theme: &IdeTheme,
+    theme: &PaintTheme<'_>,
     s: f32,
     viewport_clip: [f32; 4],
     suppress_interactions: bool,
+    motion: ToolMotionSample,
+    occlusion_rects: &[[f32; 4]],
 ) {
     let card_x = x + 30.0 * s;
     let card_w = tool_diff_card_width(w, s);
@@ -642,7 +963,7 @@ fn render_tool_diff_cards(
             visual_row_offsets: Some(view.visual_row_offsets.as_slice()),
             body_scroll,
         };
-        let layout = diff_card::render(
+        let layout = diff_card::render_with_paint(
             sugarloaf,
             card_x,
             card_y,
@@ -655,7 +976,24 @@ fn render_tool_diff_cards(
             ORDER_PANEL,
             clip_top,
             clip_bottom,
+            diff_card::PaintParams {
+                opacity: theme.opacity,
+                clip: Some(viewport_clip),
+                occlusion_rects,
+            },
         );
+        if motion.deadline.is_some()
+            && active_visible(
+                motion,
+                [card_x, card_y, card_w, layout.total_height],
+                viewport_clip,
+                occlusion_rects,
+            )
+        {
+            if let Some(state) = pane.tool_motion_state() {
+                state.mark_visible(motion);
+            }
+        }
         if !suppress_interactions {
             if let Some(rect) = intersect_rect(
                 [card_x, card_y, card_w, layout.total_height],
@@ -690,19 +1028,34 @@ fn render_tool_diff_cards(
                     );
                 }
             }
-            draw_diff_body_scrollbar(
-                sugarloaf,
-                card_x,
-                card_y + diff_card::HEADER_HEIGHT * s,
-                card_w,
-                body_h,
-                body_scroll,
-                full_body_h,
-                s,
-                viewport_clip,
-            );
+            if !occlusion_rects.iter().any(|cut| {
+                intersect_rect(
+                    [
+                        card_x + card_w - 12.0 * s,
+                        card_y + diff_card::HEADER_HEIGHT * s,
+                        12.0 * s,
+                        body_h,
+                    ],
+                    *cut,
+                )
+                .is_some()
+            }) {
+                draw_diff_body_scrollbar(
+                    sugarloaf,
+                    card_x,
+                    card_y + diff_card::HEADER_HEIGHT * s,
+                    card_w,
+                    body_h,
+                    body_scroll,
+                    full_body_h,
+                    s,
+                    viewport_clip,
+                    theme.opacity,
+                );
+            }
         }
         card_y += layout.total_height;
+        let first_diagnostics = sugarloaf.text_mut().instances().len();
         card_y += render_diff_card_diagnostics(
             sugarloaf,
             section,
@@ -712,7 +1065,19 @@ fn render_tool_diff_cards(
             theme,
             s,
             viewport_clip,
+            occlusion_rects,
         );
+        if active_glyphs(
+            motion,
+            sugarloaf,
+            first_diagnostics,
+            viewport_clip,
+            occlusion_rects,
+        ) {
+            if let Some(state) = pane.tool_motion_state() {
+                state.mark_visible(motion);
+            }
+        }
         card_y += 10.0 * s;
     }
 }
@@ -721,8 +1086,8 @@ fn render_tool_diff_cards(
 mod tests {
     use super::{
         diff_body_height, fixed_diff_viewport_height, group_child_key,
-        tool_group_child_previews, tool_message_accent, tool_status_label,
-        ToolMessageParts, TOOL_GROUP_BODY_Y, TOOL_HEADER_HEIGHT,
+        tool_group_child_previews, tool_message_accent, tool_spinner_position,
+        tool_status_label, ToolMessageParts, TOOL_GROUP_BODY_Y, TOOL_HEADER_HEIGHT,
     };
     use crate::primitives::ide_theme::IdeTheme;
 
@@ -778,6 +1143,41 @@ mod tests {
     }
 
     #[test]
+    fn running_indicator_steps_around_a_square_with_a_fading_trail() {
+        let stops = (0..8)
+            .map(|step| tool_spinner_position((step as f32 + 0.25) / 10.8, 0, 1.0))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            stops,
+            vec![
+                (-3.0, -3.0),
+                (0.0, -3.0),
+                (3.0, -3.0),
+                (3.0, 0.0),
+                (3.0, 3.0),
+                (0.0, 3.0),
+                (-3.0, 3.0),
+                (-3.0, 0.0)
+            ]
+        );
+        for step in 0..8 {
+            let now = (step as f32 + 0.25) / 10.8;
+            for trail in 0..4 {
+                let expected = stops[(step + 8 - trail) % 8];
+                assert_eq!(tool_spinner_position(now, trail, 1.0), expected);
+                assert_eq!(
+                    tool_spinner_position(now, trail, 2.0),
+                    (expected.0 * 2.0, expected.1 * 2.0)
+                );
+            }
+            assert_eq!(
+                tool_spinner_position(now, 0, 1.0),
+                tool_spinner_position((step as f32 + 0.75) / 10.8, 0, 1.0)
+            );
+        }
+    }
+
+    #[test]
     fn expanded_diff_keeps_the_collapsed_viewport_height() {
         let preview_rows = 6;
         let collapsed_height = fixed_diff_viewport_height(preview_rows, 1.0);
@@ -804,9 +1204,10 @@ fn render_diff_card_diagnostics(
     x: f32,
     y: f32,
     w: f32,
-    theme: &IdeTheme,
+    theme: &PaintTheme<'_>,
     s: f32,
     viewport_clip: [f32; 4],
+    occlusion_rects: &[[f32; 4]],
 ) -> f32 {
     let rows = diag_footer_rows(section);
     if rows == 0 {
@@ -837,7 +1238,7 @@ fn render_diff_card_diagnostics(
             line_y,
             &truncate_chars(&diag.text, max_chars),
             &opts,
-            &[],
+            occlusion_rects,
         );
         line_y += DIAG_LINE_HEIGHT * s;
     }
@@ -851,7 +1252,7 @@ fn render_diff_card_diagnostics(
             line_y,
             &format!("... +{} more", total - MAX_DIAG_LINES_PER_CARD),
             &opts,
-            &[],
+            occlusion_rects,
         );
     }
     diag_footer_height(section, s)
@@ -868,6 +1269,7 @@ fn draw_diff_body_scrollbar(
     full_body_h: f32,
     s: f32,
     viewport_clip: [f32; 4],
+    opacity: f32,
 ) {
     let visible_rows = ((body_h / (diff_card::LINE_HEIGHT * s)).floor() as usize).max(1);
     let total_rows =
@@ -892,7 +1294,7 @@ fn draw_diff_body_scrollbar(
         bar_x,
         track_top.max(clip_top),
         (track_top + track_h).min(clip_bottom) - track_top.max(clip_top),
-        1.0,
+        opacity,
         0.0,
         ORDER_TEXT + 1,
     );
@@ -901,7 +1303,7 @@ fn draw_diff_body_scrollbar(
         bar_x,
         thumb_y.max(clip_top),
         (thumb_y + thumb_h).min(clip_bottom) - thumb_y.max(clip_top),
-        1.0,
+        opacity,
         false,
         0.0,
         ORDER_TEXT + 1,
@@ -921,6 +1323,40 @@ pub fn render_tool_todos<Todo: AgentToolTodo, P: AgentToolPane>(
     viewport_clip: [f32; 4],
     occlusion_rects: &[[f32; 4]],
     suppress_interactions: bool,
+) {
+    render_tool_todos_painted(
+        sugarloaf,
+        pane,
+        x,
+        y,
+        w,
+        todos,
+        &PaintTheme {
+            theme,
+            opacity: 1.0,
+        },
+        s,
+        viewport_clip,
+        occlusion_rects,
+        suppress_interactions,
+        ToolMotionSample::default(),
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_tool_todos_painted<Todo: AgentToolTodo, P: AgentToolPane>(
+    sugarloaf: &mut Sugarloaf,
+    pane: &mut P,
+    x: f32,
+    y: f32,
+    w: f32,
+    todos: &[Todo],
+    theme: &PaintTheme<'_>,
+    s: f32,
+    viewport_clip: [f32; 4],
+    occlusion_rects: &[[f32; 4]],
+    suppress_interactions: bool,
+    motion: ToolMotionSample,
 ) {
     let Some(opts) = opts_with_clip(
         DrawOpts {
@@ -949,19 +1385,38 @@ pub fn render_tool_todos<Todo: AgentToolTodo, P: AgentToolPane>(
         })
         .sum::<usize>()
         .max(1);
-    draw_rect_clipped(
-        sugarloaf,
-        [
-            x,
-            y - 4.0 * s,
-            1.0 * s,
-            todo_rows as f32 * TODO_ROW_HEIGHT * s,
-        ],
-        theme.f32(theme.border),
-        ORDER_TEXT,
-        viewport_clip,
-    );
+    if !occlusion_rects.iter().any(|cut| {
+        intersect_rect(
+            [x, y - 4.0 * s, s, todo_rows as f32 * TODO_ROW_HEIGHT * s],
+            *cut,
+        )
+        .is_some()
+    }) {
+        if active_visible(
+            motion,
+            [x, y - 4.0 * s, s, todo_rows as f32 * TODO_ROW_HEIGHT * s],
+            viewport_clip,
+            occlusion_rects,
+        ) {
+            if let Some(state) = pane.tool_motion_state() {
+                state.mark_visible(motion);
+            }
+        }
+        draw_rect_clipped(
+            sugarloaf,
+            [
+                x,
+                y - 4.0 * s,
+                1.0 * s,
+                todo_rows as f32 * TODO_ROW_HEIGHT * s,
+            ],
+            theme.f32(theme.border),
+            ORDER_TEXT,
+            viewport_clip,
+        );
+    }
     if todos.is_empty() {
+        let first = sugarloaf.text_mut().instances().len();
         draw_text_clipped(
             sugarloaf,
             x + 18.0 * s,
@@ -970,21 +1425,48 @@ pub fn render_tool_todos<Todo: AgentToolTodo, P: AgentToolPane>(
             &muted,
             occlusion_rects,
         );
+        if active_glyphs(motion, sugarloaf, first, viewport_clip, occlusion_rects) {
+            if let Some(state) = pane.tool_motion_state() {
+                state.mark_visible(motion);
+            }
+        }
         return;
     }
     for todo in todos.iter().take(12) {
         let state = TodoVisualState::from_status(todo.status());
-        draw_checkbox(
-            sugarloaf,
-            x + 16.0 * s,
-            line_y - 1.0 * s,
-            state,
-            theme,
-            s,
-            viewport_clip,
-        );
+        if !occlusion_rects.iter().any(|cut| {
+            intersect_rect([x + 16.0 * s, line_y - 1.0 * s, 16.0 * s, 16.0 * s], *cut)
+                .is_some()
+        }) {
+            // Only the outline strips are guaranteed ink (the center may be blank).
+            let bx = x + 16.0 * s;
+            let by = line_y - 1.0 * s;
+            if [
+                [bx, by, 15.0 * s, s],
+                [bx, by + 15.0 * s, 15.0 * s, s],
+                [bx, by, s, 15.0 * s],
+                [bx + 15.0 * s, by, s, 16.0 * s],
+            ]
+            .into_iter()
+            .any(|r| active_visible(motion, r, viewport_clip, occlusion_rects))
+            {
+                if let Some(state) = pane.tool_motion_state() {
+                    state.mark_visible(motion);
+                }
+            }
+            draw_checkbox_painted(
+                sugarloaf,
+                x + 16.0 * s,
+                line_y - 1.0 * s,
+                state,
+                theme,
+                s,
+                viewport_clip,
+            );
+        }
         let mut text_opts = opts;
         text_opts.color = state.text_color(theme);
+        text_opts.color[3] = (text_opts.color[3] as f32 * theme.opacity).round() as u8;
         text_opts.bold = state.text_bold();
         for line in wrap_todo_text(
             sugarloaf,
@@ -993,6 +1475,23 @@ pub fn render_tool_todos<Todo: AgentToolTodo, P: AgentToolPane>(
             &text_opts,
         ) {
             let text_x = x + 46.0 * s;
+            if motion.deadline.is_some()
+                && active_visible(
+                    motion,
+                    [
+                        text_x,
+                        line_y,
+                        sugarloaf.text_mut().measure(&line, &text_opts),
+                        text_opts.font_size,
+                    ],
+                    viewport_clip,
+                    occlusion_rects,
+                )
+            {
+                if let Some(state) = pane.tool_motion_state() {
+                    state.mark_visible(motion);
+                }
+            }
             if !suppress_interactions {
                 let line_w = sugarloaf.text_mut().measure(&line, &text_opts).max(12.0);
                 let stops = measured_caret_stops(sugarloaf, &line, &text_opts, text_x);
@@ -1006,8 +1505,22 @@ pub fn render_tool_todos<Todo: AgentToolTodo, P: AgentToolPane>(
                     ],
                     &stops,
                 );
-                if let Some((left, right)) =
-                    pane.selectable_line_highlight(selection_index)
+                if let Some((left, right)) = pane
+                    .selectable_line_highlight(selection_index)
+                    .filter(|(left, right)| {
+                        !occlusion_rects.iter().any(|cut| {
+                            intersect_rect(
+                                [
+                                    *left - 2.0,
+                                    line_y - 3.0 * s,
+                                    (*right - *left + 4.0).max(2.0),
+                                    text_opts.font_size + 8.0 * s,
+                                ],
+                                *cut,
+                            )
+                            .is_some()
+                        })
+                    })
                 {
                     draw_rounded_rect_clipped(
                         sugarloaf,

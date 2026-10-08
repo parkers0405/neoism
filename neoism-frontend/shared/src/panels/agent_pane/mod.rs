@@ -26,6 +26,7 @@ pub mod state;
 pub mod status_policy;
 pub mod stream_events;
 pub mod text_reveal;
+pub mod tool_motion;
 pub mod timeline_scroll_policy;
 pub mod usage_policy;
 pub mod view;

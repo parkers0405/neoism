@@ -75,6 +75,8 @@ pub(crate) struct ProviderStreamStepState {
     pub reasoning_parts: HashMap<String, Id>,
     pub tool_parts: HashMap<String, Id>,
     pub executed_tool_calls: HashSet<String>,
+    // One native model response, independent of execution concurrency or timing.
+    tool_batch_id: Id,
     tool_input_snapshots: ToolInputSnapshots,
     tool_tasks: VecDeque<(
         QueuedToolCall,
@@ -101,11 +103,22 @@ impl ProviderStreamStepState {
             reasoning_parts: HashMap::new(),
             tool_parts: HashMap::new(),
             executed_tool_calls: HashSet::new(),
+            tool_batch_id: Id::ascending(IdKind::Message),
             tool_input_snapshots: ToolInputSnapshots::default(),
             tool_tasks: VecDeque::new(),
             tool_semaphore: Arc::new(tokio::sync::Semaphore::new(
                 TOOL_EXECUTION_CONCURRENCY,
             )),
+        }
+    }
+
+    fn stamp_tool_batch(&self, part: &mut Part) {
+        if let Part::Tool(tool) = part {
+            let metadata = tool.metadata.get_or_insert_with(|| json!({}));
+            if !metadata.is_object() {
+                *metadata = json!({ "previous": metadata.take() });
+            }
+            metadata["toolBatchID"] = json!(self.tool_batch_id);
         }
     }
 }
@@ -621,7 +634,7 @@ pub(crate) async fn process_provider_stream_event(
                 .entry(id.clone())
                 .or_insert_with(|| Id::ascending(IdKind::Part))
                 .clone();
-            let part = Part::Tool(ToolPart {
+            let mut part = Part::Tool(ToolPart {
                 id: part_id,
                 session_id: ctx.session_id.clone(),
                 message_id: ctx.assistant_id.clone(),
@@ -633,6 +646,7 @@ pub(crate) async fn process_provider_stream_event(
                 },
                 metadata: None,
             });
+            stream.stamp_tool_batch(&mut part);
             {
                 let mut message = ctx.live_message.lock().await;
                 upsert_part(&mut message.parts, part.clone());
@@ -700,7 +714,7 @@ pub(crate) async fn process_provider_stream_event(
                     .clone();
                 let part = {
                     let mut message = ctx.live_message.lock().await;
-                    set_tool_running(
+                    let mut running = set_tool_running(
                         &mut message.parts,
                         part_id.clone(),
                         ctx.session_id,
@@ -709,6 +723,8 @@ pub(crate) async fn process_provider_stream_event(
                         name.clone(),
                         input.clone(),
                     );
+                    stream.stamp_tool_batch(&mut running);
+                    upsert_part(&mut message.parts, running);
                     let part = set_tool_error(
                         &mut message.parts,
                         part_id.as_str(),
@@ -746,7 +762,7 @@ pub(crate) async fn process_provider_stream_event(
                     .clone();
                 let part = {
                     let mut message = ctx.live_message.lock().await;
-                    set_tool_running(
+                    let mut running = set_tool_running(
                         &mut message.parts,
                         part_id.clone(),
                         ctx.session_id,
@@ -755,6 +771,8 @@ pub(crate) async fn process_provider_stream_event(
                         normalized_name,
                         input,
                     );
+                    stream.stamp_tool_batch(&mut running);
+                    upsert_part(&mut message.parts, running);
                     let part = set_tool_error(
                         &mut message.parts,
                         part_id.as_str(),
@@ -785,7 +803,7 @@ pub(crate) async fn process_provider_stream_event(
             let tool_input = input.clone();
             let part = {
                 let mut message = ctx.live_message.lock().await;
-                let part = set_tool_running(
+                let mut part = set_tool_running(
                     &mut message.parts,
                     part_id.clone(),
                     ctx.session_id,
@@ -794,6 +812,8 @@ pub(crate) async fn process_provider_stream_event(
                     tool_name.clone(),
                     input,
                 );
+                stream.stamp_tool_batch(&mut part);
+                upsert_part(&mut message.parts, part.clone());
                 ctx.state
                     .inner
                     .store
@@ -1127,6 +1147,89 @@ mod tests {
         provider_event_finishes_stream, provider_stream_timeout_is_retryable,
         ProviderStreamEvent, ProviderStreamStepState,
     };
+
+    #[test]
+    fn tool_batch_is_shared_within_response_and_distinct_between_steps() {
+        let first = ProviderStreamStepState::new("openai".into(), "model".into());
+        let second = ProviderStreamStepState::new("openai".into(), "model".into());
+        assert_ne!(first.tool_batch_id, second.tool_batch_id);
+        let mut a = pending_part("a");
+        let mut b = pending_part("b");
+        first.stamp_tool_batch(&mut a);
+        first.stamp_tool_batch(&mut b);
+        let batch = serde_json::json!(first.tool_batch_id);
+        assert_eq!(
+            serde_json::to_value(a).unwrap()["metadata"]["toolBatchID"],
+            batch
+        );
+        assert_eq!(
+            serde_json::to_value(b).unwrap()["metadata"]["toolBatchID"],
+            batch
+        );
+    }
+
+    #[test]
+    fn tool_batch_survives_pending_running_completed_and_error() {
+        use super::{set_tool_completed, set_tool_error, set_tool_running};
+        use serde_json::json;
+        let stream = ProviderStreamStepState::new("openai".into(), "model".into());
+        for with_start in [true, false] {
+            for fails in [true, false] {
+                let super::Part::Tool(mut tool) = pending_part("a") else {
+                    unreachable!()
+                };
+                tool.metadata = Some(json!({"existing": true}));
+                let mut pending = super::Part::Tool(tool.clone());
+                stream.stamp_tool_batch(&mut pending);
+                let mut parts = if with_start { vec![pending] } else { vec![] };
+                if with_start {
+                    let delta = super::append_tool_input_delta(
+                        &mut parts,
+                        tool.id.as_str(),
+                        "{}",
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        serde_json::to_value(delta).unwrap()["metadata"]["toolBatchID"],
+                        json!(stream.tool_batch_id)
+                    );
+                }
+                let mut running = set_tool_running(
+                    &mut parts,
+                    tool.id.clone(),
+                    &tool.session_id,
+                    &tool.message_id,
+                    tool.call_id.clone(),
+                    tool.tool.clone(),
+                    json!({}),
+                );
+                stream.stamp_tool_batch(&mut running);
+                super::upsert_part(&mut parts, running.clone());
+                assert_eq!(
+                    serde_json::to_value(running).unwrap()["metadata"]["toolBatchID"],
+                    json!(stream.tool_batch_id)
+                );
+                let settled = if fails {
+                    set_tool_error(&mut parts, tool.id.as_str(), "failed".into())
+                } else {
+                    set_tool_completed(
+                        &mut parts,
+                        tool.id.as_str(),
+                        "ok".into(),
+                        "done".into(),
+                        json!({"result": true}),
+                    )
+                }
+                .unwrap();
+                let wire = serde_json::to_value(&settled).unwrap();
+                assert_eq!(wire["metadata"]["toolBatchID"], json!(stream.tool_batch_id));
+                if with_start {
+                    assert_eq!(wire["metadata"]["existing"], true);
+                }
+                assert_eq!(serde_json::to_value(&parts[0]).unwrap(), wire);
+            }
+        }
+    }
 
     #[test]
     fn pending_tool_input_updates_publish_accumulated_raw_parts() {

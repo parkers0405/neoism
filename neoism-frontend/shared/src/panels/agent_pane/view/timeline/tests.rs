@@ -25,6 +25,7 @@ fn tool_message(id: &str, tool: &str, title: &str, status: &str) -> NeoismAgentM
         text: format!("{title} preview"),
         status: status.to_string(),
         tool: tool.to_string(),
+        tool_batch_id: None,
         output_kind: NeoismAgentOutputKind::Text,
         lang: String::new(),
         line_offset: None,
@@ -48,6 +49,7 @@ fn text_message(
         text: text.to_string(),
         status: String::new(),
         tool: String::new(),
+        tool_batch_id: None,
         output_kind: NeoismAgentOutputKind::Text,
         lang: String::new(),
         line_offset: None,
@@ -413,12 +415,15 @@ fn stale_live_boundary_past_the_transcript_is_safely_treated_as_settled() {
 }
 
 #[test]
-fn live_read_tools_group_into_one_display_message() {
-    let messages = vec![
+fn live_read_tools_group_only_with_a_shared_batch_identity() {
+    let mut messages = vec![
         tool_message("read-a", "read", "Read(src/a.rs)", "completed"),
         tool_message("grep-b", "grep", "Grep(Thing)", "completed"),
         tool_message("list-c", "list", "List(src)", "running"),
     ];
+    for message in &mut messages {
+        message.tool_batch_id = Some("batch-a".to_string());
+    }
 
     let (end, group) = read_tool_group_at(&messages, 0).expect("group");
 
@@ -438,6 +443,9 @@ fn read_group_identity_survives_append_and_status_updates() {
         tool_message("read-b", "read", "Read(src/same.rs)", "running"),
         tool_message("read-c", "read", "Read(src/c.rs)", "completed"),
     ];
+    for message in &mut messages {
+        message.tool_batch_id = Some("batch-a".to_string());
+    }
     let (_, before) = read_tool_group_at(&messages, 0).unwrap();
     messages[1].status = "completed".to_string();
     messages.push(tool_message(
@@ -446,6 +454,7 @@ fn read_group_identity_survives_append_and_status_updates() {
         "Read(src/d.rs)",
         "completed",
     ));
+    messages[3].tool_batch_id = Some("batch-a".to_string());
     let (_, after) = read_tool_group_at(&messages, 0).unwrap();
     assert_eq!(before.id, after.id);
     assert_eq!(after.status, "completed");
@@ -471,6 +480,9 @@ fn read_group_animation_dirties_its_source_row_without_new_messages() {
         tool_message("read-b", "read", "Read(src/b.rs)", "completed"),
         tool_message("read-c", "read", "Read(src/c.rs)", "completed"),
     ];
+    for message in &mut pane.messages {
+        message.tool_batch_id = Some("batch-a".to_string());
+    }
     let (_, group) = read_tool_group_at(&pane.messages, 0).unwrap();
     pane.register_tool_hit_rect(group.id.clone(), [0.0, 0.0, 300.0, 30.0]);
     assert!(pane.toggle_tool_at(10.0, 10.0));
@@ -484,6 +496,53 @@ fn read_group_animation_dirties_its_source_row_without_new_messages() {
 }
 
 #[test]
+fn adjacent_reads_without_batch_provenance_are_never_bundled() {
+    let mut messages = (0..12)
+        .map(|i| {
+            tool_message(
+                &format!("read-{i}"),
+                "read",
+                "Read(src/lib.rs)",
+                "completed",
+            )
+        })
+        .collect::<Vec<_>>();
+    for batch_id in [None, Some(String::new()), Some("  ".to_string())] {
+        for message in &mut messages {
+            message.tool_batch_id = batch_id.clone();
+        }
+        for index in 0..messages.len() {
+            assert!(read_tool_group_at(&messages, index).is_none());
+        }
+    }
+}
+
+#[test]
+fn two_member_batches_bundle_without_merging_neighboring_batches() {
+    let mut messages = (0..4)
+        .map(|i| {
+            tool_message(
+                &format!("read-{i}"),
+                "read",
+                "Read(src/lib.rs)",
+                "completed",
+            )
+        })
+        .collect::<Vec<_>>();
+    for (index, message) in messages.iter_mut().enumerate() {
+        message.tool_batch_id = Some(format!("batch-{}", index / 2));
+    }
+    let (end, first) = read_tool_group_at(&messages, 0).unwrap();
+    assert_eq!(end, 2);
+    assert_eq!(first.id, "read-0..");
+    let (end, second) = read_tool_group_at(&messages, 2).unwrap();
+    assert_eq!(end, 4);
+    assert_eq!(second.id, "read-2..");
+    messages[1].tool_batch_id = None;
+    assert!(read_tool_group_at(&messages, 0).is_none());
+}
+
+#[test]
 fn live_grouping_keeps_short_or_failed_runs_separate() {
     let short = vec![
         tool_message("read-a", "read", "Read(src/a.rs)", "completed"),
@@ -491,11 +550,17 @@ fn live_grouping_keeps_short_or_failed_runs_separate() {
     ];
     assert!(read_tool_group_at(&short, 0).is_none());
 
-    let failed = vec![
+    let mut failed = vec![
         tool_message("read-a", "read", "Read(src/a.rs)", "completed"),
         tool_message("grep-b", "grep", "Grep(Thing)", "error"),
         tool_message("list-c", "list", "List(src)", "completed"),
     ];
+    for message in &mut failed {
+        message.tool_batch_id = Some("batch-a".to_string());
+    }
+    assert!(read_tool_group_at(&failed, 0).is_none());
+    failed[1].tool = "tool_group".to_string();
+    failed[1].status = "completed".to_string();
     assert!(read_tool_group_at(&failed, 0).is_none());
 }
 

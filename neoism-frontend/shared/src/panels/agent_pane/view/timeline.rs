@@ -26,7 +26,6 @@ use super::{DEPTH, ORDER_CARET, STREAMING_STATUS_LINE_H, USER_MESSAGE_MAX_LINES}
 use crate::primitives::ide_theme::IdeTheme;
 use crate::widgets::scrollbar;
 
-const LIVE_READ_TOOL_GROUP_MIN: usize = 3;
 const TIMELINE_PAGE_SOURCE_LEN: usize = 128;
 
 #[derive(Clone, Debug)]
@@ -280,6 +279,7 @@ pub trait AgentTimelineMessage: Clone {
     fn text(&self) -> &str;
     fn status(&self) -> &str;
     fn tool(&self) -> &str;
+    fn tool_batch_id(&self) -> Option<&str>;
     fn output_kind(&self) -> AgentTimelineOutputKind;
     fn detail(&self) -> &str;
     fn images(&self) -> &[crate::panels::agent_pane::state::NeoismAgentImage];
@@ -458,6 +458,7 @@ pub trait AgentTimelinePane: AgentMarkdownPane {
         false
     }
     fn set_visible_user_orb_active(&mut self, _active: bool) {}
+    fn set_visible_running_tool_active(&mut self, _active: bool) {}
 }
 
 pub trait AgentTimelineDelegate<P: AgentTimelinePane> {
@@ -557,6 +558,10 @@ macro_rules! neoism_ui_impl_agent_timeline_message {
                 &self.tool
             }
 
+            fn tool_batch_id(&self) -> Option<&str> {
+                self.tool_batch_id.as_deref()
+            }
+
             fn output_kind(
                 &self,
             ) -> $crate::panels::agent_pane::view::timeline::AgentTimelineOutputKind {
@@ -605,6 +610,7 @@ macro_rules! neoism_ui_impl_agent_timeline_message {
                     text,
                     status,
                     tool: "tool_group".to_string(),
+                    tool_batch_id: None,
                     output_kind: $output_kind::Text,
                     lang: String::new(),
                     line_offset: None,
@@ -682,6 +688,10 @@ macro_rules! neoism_ui_impl_agent_timeline_pane {
 
             fn visible_user_orb_active(&self) -> bool {
                 <$pane>::visible_user_orb_active(self)
+            }
+
+            fn set_visible_running_tool_active(&mut self, active: bool) {
+                <$pane>::set_visible_running_tool_active(self, active)
             }
 
             fn set_visible_user_orb_active(&mut self, active: bool) {
@@ -999,6 +1009,8 @@ mod read_group;
 mod render;
 #[cfg(test)]
 mod tests;
+
+pub use read_group::read_tool_group_end;
 
 pub use render::{render_timeline_scrollbar_with, render_timeline_with};
 

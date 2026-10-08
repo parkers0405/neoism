@@ -1005,6 +1005,9 @@ pub struct HistoryMessage {
     /// Tool name (for `Tool` / `Subtask` kinds).
     #[serde(default)]
     pub tool: String,
+    /// Server-issued identity of one model response's tool-call batch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_batch_id: Option<String>,
     #[serde(default)]
     pub lang: String,
     #[serde(default)]

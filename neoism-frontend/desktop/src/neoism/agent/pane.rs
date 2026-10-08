@@ -121,6 +121,8 @@ pub struct NeoismAgentMessage {
     pub text: String,
     pub status: String,
     pub tool: String,
+    /// Server-issued identity of one model response's tool-call batch.
+    pub tool_batch_id: Option<String>,
     pub output_kind: NeoismAgentOutputKind,
     pub lang: String,
     pub line_offset: Option<usize>,
@@ -251,6 +253,7 @@ struct TimelineViewAnchor {
 struct ToolExpandAnimation {
     started_at: Instant,
     expanding: bool,
+    start_progress: f32,
 }
 
 #[derive(Clone, Debug)]
@@ -462,15 +465,21 @@ impl ToolExpandAnimation {
         let duration = TOOL_EXPAND_ANIMATION.as_secs_f32().max(0.001);
         let t = (self.started_at.elapsed().as_secs_f32() / duration).clamp(0.0, 1.0);
         let eased = ease_out_cubic(t);
-        if self.expanding {
-            eased
-        } else {
-            1.0 - eased
-        }
+        let target = if self.expanding { 1.0 } else { 0.0 };
+        self.start_progress + (target - self.start_progress) * eased
     }
 }
 
 impl NeoismAgentMessage {
+    /// The exact body selected by tool rendering, not request metadata.
+    pub(crate) fn tool_reveal_body(&self) -> &str {
+        if self.kind == NeoismAgentMessageKind::Tool && !self.detail.trim().is_empty() {
+            &self.detail
+        } else {
+            &self.text
+        }
+    }
+
     pub(super) fn user(text: impl Into<String>) -> Self {
         Self::new(NeoismAgentMessageKind::User, text)
     }
@@ -531,6 +540,7 @@ impl NeoismAgentMessage {
             text: text.into(),
             status: String::new(),
             tool: String::new(),
+            tool_batch_id: None,
             output_kind: NeoismAgentOutputKind::Text,
             lang: String::new(),
             line_offset: None,
@@ -856,6 +866,7 @@ impl Default for NeoismWordmarkState {
 }
 
 pub struct NeoismAgentPane {
+    tool_motion: neoism_ui::panels::agent_pane::tool_motion::ToolMotionState,
     pub(crate) text_reveal: neoism_ui::panels::agent_pane::text_reveal::TextRevealState,
     pub(super) input: String,
     /// Whether the keyboard/help strip below the composer is
@@ -1164,6 +1175,7 @@ pub struct NeoismAgentPane {
     /// the local user's own messages render their own presence orb.
     local_presence_name: Option<String>,
     visible_user_orb_active: bool,
+    visible_running_tool_active: bool,
 }
 
 #[derive(Default)]
@@ -1371,6 +1383,7 @@ impl Default for NeoismAgentPane {
             timeline_scroll_stop_px_s: Self::TIMELINE_TRACKPAD_STOP_PX_S,
             timeline_measure_cache: RefCell::new(HashMap::new()),
             text_reveal: Default::default(),
+            tool_motion: Default::default(),
             markdown_blocks_cache: RefCell::new(HashMap::new()),
             markdown_blocks_tick: std::cell::Cell::new(0),
             markdown_blocks_source_bytes: std::cell::Cell::new(0),
@@ -1417,6 +1430,7 @@ impl Default for NeoismAgentPane {
             perf_frame: AgentPanePerfFrame::default(),
             local_presence_name: None,
             visible_user_orb_active: false,
+            visible_running_tool_active: false,
         }
     }
 }

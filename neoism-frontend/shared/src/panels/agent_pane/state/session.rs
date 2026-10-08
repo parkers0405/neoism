@@ -654,6 +654,7 @@ impl NeoismAgentPane {
         self.new_chat_source = super::side_panel::ConversationSource::Neoism;
         self.session_id = None;
         self.text_reveal.scope(self.session_id.as_deref());
+        self.tool_motion.scope(self.session_id.as_deref());
         self.parent_session_id = None;
         self.side_panel.set_viewed_session_id(None);
         // A fresh chat must not inherit the previous conversation's
@@ -744,6 +745,7 @@ impl NeoismAgentPane {
         let live_only = self.take_live_only_cache(&trimmed);
         self.session_id = Some(trimmed.clone());
         self.text_reveal.scope(self.session_id.as_deref());
+        self.tool_motion.scope(self.session_id.as_deref());
         // Opening a roster child makes this a view-only subagent
         // transcript keyed to the family root (desktop restores the
         // same linkage from its cached SessionState); opening the root

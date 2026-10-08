@@ -94,7 +94,17 @@ impl NeoismAgentPane {
         self.side_panel.catalog_is_animating()
     }
 
+    pub fn set_visible_running_tool_active(&mut self, active: bool) {
+        self.visible_running_tool_active = active;
+    }
+
     pub fn animation_reason(&self) -> Option<&'static str> {
+        if self
+            .tool_motion
+            .is_animating_for(self.session_id.as_deref())
+        {
+            return Some("tool_motion");
+        }
         if self
             .text_reveal
             .is_animating_for(self.session_id.as_deref())
@@ -137,6 +147,9 @@ impl NeoismAgentPane {
         }
         if self.timeline_is_inertial() {
             return Some("timeline_inertia");
+        }
+        if self.visible_running_tool_active {
+            return Some("running_tool");
         }
         if self.visible_user_orb_active() {
             return Some("user_orb");

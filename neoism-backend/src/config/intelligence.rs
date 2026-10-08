@@ -663,8 +663,8 @@ pub fn config_descriptors() -> Vec<D> {
         ),
         d(
             "agent.streaming-text-animation",
-            "Streaming text reveal",
-            "Soften newly streamed text with a short blur-to-sharp fade, without delaying tokens. Disable for reduced motion.",
+            "Streaming reveal animations",
+            "Softly reveal streamed text and tool calls without delaying updates. Disable for reduced motion.",
             Kind::Boolean,
             json!(true),
             &[],

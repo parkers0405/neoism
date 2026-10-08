@@ -95,6 +95,7 @@ thread_local! {
 struct ToolWrapCacheKey {
     body_hash: u64,
     body_len: usize,
+    preview: bool,
     width_bits: u32,
     font_size_bits: u32,
     bold: bool,
@@ -364,6 +365,26 @@ impl AgentToolMessage for NeoismAgentMessage {
 }
 
 pub trait AgentToolPane {
+    fn tool_motion_sample(
+        &mut self,
+        id: &str,
+    ) -> crate::panels::agent_pane::tool_motion::ToolMotionSample {
+        self.tool_motion_state()
+            .map(|state| state.sample(id))
+            .unwrap_or_default()
+    }
+
+    fn tool_motion_state(
+        &mut self,
+    ) -> Option<&mut crate::panels::agent_pane::tool_motion::ToolMotionState> {
+        None
+    }
+    fn tool_text_reveal_state(
+        &mut self,
+    ) -> Option<&mut crate::panels::agent_pane::text_reveal::TextRevealState> {
+        None
+    }
+    fn set_visible_running_tool_active(&mut self, _active: bool) {}
     fn register_tool_hit_rect(&mut self, id: String, rect: [f32; 4]);
     fn selected_tool_group_child(&self, group_id: &str) -> Option<&str>;
     fn tool_expanded(&self, id: &str) -> bool;
@@ -446,6 +467,23 @@ macro_rules! neoism_ui_impl_agent_tool_message {
         }
 
         impl $crate::panels::agent_pane::view::tool_message::AgentToolPane for $pane {
+            fn tool_motion_sample(
+                &mut self,
+                id: &str,
+            ) -> $crate::panels::agent_pane::tool_motion::ToolMotionSample {
+                <$pane>::tool_motion_sample(self, id)
+            }
+
+            fn tool_motion_state(&mut self) -> Option<&mut $crate::panels::agent_pane::tool_motion::ToolMotionState> {
+                Some(<$pane>::tool_motion_state(self))
+            }
+            fn tool_text_reveal_state(&mut self) -> Option<&mut $crate::panels::agent_pane::text_reveal::TextRevealState> {
+                Some(<$pane>::tool_text_reveal_state(self))
+            }
+            fn set_visible_running_tool_active(&mut self, active: bool) {
+                <$pane>::set_visible_running_tool_active(self, active);
+            }
+
             fn register_tool_hit_rect(&mut self, id: String, rect: [f32; 4]) {
                 <$pane>::register_tool_hit_rect(self, id, rect);
             }
@@ -517,6 +555,27 @@ macro_rules! neoism_ui_impl_agent_tool_message {
 }
 
 impl AgentToolPane for NeoismAgentPane {
+    fn tool_motion_sample(
+        &mut self,
+        id: &str,
+    ) -> crate::panels::agent_pane::tool_motion::ToolMotionSample {
+        NeoismAgentPane::tool_motion_sample(self, id)
+    }
+
+    fn tool_motion_state(
+        &mut self,
+    ) -> Option<&mut crate::panels::agent_pane::tool_motion::ToolMotionState> {
+        Some(NeoismAgentPane::tool_motion_state(self))
+    }
+    fn tool_text_reveal_state(
+        &mut self,
+    ) -> Option<&mut crate::panels::agent_pane::text_reveal::TextRevealState> {
+        Some(NeoismAgentPane::tool_text_reveal_state(self))
+    }
+    fn set_visible_running_tool_active(&mut self, active: bool) {
+        NeoismAgentPane::set_visible_running_tool_active(self, active);
+    }
+
     fn register_tool_hit_rect(&mut self, id: String, rect: [f32; 4]) {
         NeoismAgentPane::register_tool_hit_rect(self, id, rect);
     }
@@ -587,6 +646,7 @@ impl AgentToolPane for NeoismAgentPane {
 
 // ---- god-file split: sibling modules; each child is `use super::*;` ----
 mod diff;
+mod motion;
 mod render;
 mod widgets;
 
@@ -643,9 +703,31 @@ fn tool_wrapped_rows(
     opts: &DrawOpts,
     limit: usize,
 ) -> Rc<Vec<ToolWrappedRow>> {
+    cached_tool_wrapped_rows(sugarloaf, body, width, opts, limit, false)
+}
+
+fn tool_preview_wrapped_rows(
+    sugarloaf: &mut Sugarloaf,
+    body: &str,
+    width: f32,
+    opts: &DrawOpts,
+    limit: usize,
+) -> Rc<Vec<ToolWrappedRow>> {
+    cached_tool_wrapped_rows(sugarloaf, body, width, opts, limit, true)
+}
+
+fn cached_tool_wrapped_rows(
+    sugarloaf: &mut Sugarloaf,
+    body: &str,
+    width: f32,
+    opts: &DrawOpts,
+    limit: usize,
+    preview: bool,
+) -> Rc<Vec<ToolWrappedRow>> {
     let key = ToolWrapCacheKey {
         body_hash: hash_value(&body),
         body_len: body.len(),
+        preview,
         width_bits: width.to_bits(),
         font_size_bits: opts.font_size.to_bits(),
         bold: opts.bold,
@@ -657,6 +739,20 @@ fn tool_wrapped_rows(
     }
     super::derivations::bump_tool_wrap();
 
+    if preview {
+        // Preserve the existing group preview's wrapping/indentation exactly.
+        let rows = Rc::new(
+            wrap_text(sugarloaf, body, width, opts, limit)
+                .into_iter()
+                .map(|text| ToolWrappedRow {
+                    text,
+                    nested: false,
+                })
+                .collect(),
+        );
+        TOOL_WRAP_CACHE.with(|cache| cache.borrow_mut().insert(key, Rc::clone(&rows)));
+        return rows;
+    }
     let mut rows = Vec::new();
     for line in body.lines() {
         if rows.len() >= limit {

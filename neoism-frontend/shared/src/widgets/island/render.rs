@@ -236,36 +236,37 @@ impl Island {
             return;
         }
 
-        // Opaque ground for the whole strip. Tabs only paint per-tab
-        // backgrounds when `tab_colors` has an entry, so without this
-        // fill the gaps between tabs are transparent and terminal /
-        // editor content underneath bleeds through (the lamp/emoji
-        // showing inside the tab strip the user reported).
+        // Resolve workspace chrome independently. The host theme remains the
+        // exact legacy fallback (native hosts historically pass chrome.top).
+        let style = crate::primitives::surface_background::style(
+            neoism_lua::selector::WORKSPACE_TABS,
+        );
+        let workspace_theme = crate::customization::styled_ide_theme(*theme, &style);
+        let theme = &workspace_theme;
+        let strip_bg = crate::customization::background_color(
+            &style,
+            theme,
+            theme.f32(theme.surface),
+        );
         let logical_width = window_width / scale_factor;
-        // Vertical origin of the strip — non-zero when the host places
-        // the workspace tabs below the chrome top bar.
         let top = self.top_offset;
-        // Horizontal origin — non-zero when the host insets the tabs to
-        // the content column (right of the file tree).
         let left = self.left_offset;
-        // Chrome zoom (Ctrl +/-): every height + font multiplies by `s`
-        // so the strip zooms with the rest of the app. `h` is the zoomed
-        // strip height; `font` the zoomed label size (sugarloaf applies
-        // the device HiDPI scale on top).
         let s = self.scale;
         let h = ISLAND_HEIGHT * s;
-        // Strip sits on `surface` like the buffer-tab strip; the active
-        // tab drops to `bg` as a rounded card (below).
-        sugarloaf.rect(
-            None,
-            left,
-            top,
-            (logical_width - left).max(0.0),
-            h,
-            theme.f32(theme.surface),
-            0.0,
-            ISLAND_ORDER_BG,
-        );
+        // Opaque defaults retain the original full strip and rounded cards.
+        // Translucent slots paint one material, never a hidden strip below a card.
+        if strip_bg[3] >= 1.0 || num_tabs == 0 {
+            sugarloaf.rect(
+                None,
+                left,
+                top,
+                (logical_width - left).max(0.0),
+                h,
+                strip_bg,
+                0.0,
+                ISLAND_ORDER_BG,
+            );
+        }
 
         // Workspaces use the content column without reserving native window-control space.
         let left_margin = 0.0;
@@ -275,6 +276,19 @@ impl Island {
         let available_width =
             (window_width / scale_factor) - ISLAND_MARGIN_RIGHT - left_margin - left;
         let tab_width = available_width / num_tabs as f32;
+
+        if strip_bg[3] < 1.0 && num_tabs > 0 {
+            sugarloaf.rect(
+                None,
+                left + available_width,
+                top,
+                (logical_width - left - available_width).max(0.0),
+                h,
+                strip_bg,
+                0.0,
+                ISLAND_ORDER_BG,
+            );
+        }
 
         // Starting from the content-column left edge.
         let mut x_position = left + left_margin;
@@ -310,6 +324,18 @@ impl Island {
             // tab or past the left edge (issue #1508).
             let raw_title = self.get_title_for_tab(contexts, tab_index);
             if raw_title.is_empty() {
+                if strip_bg[3] < 1.0 {
+                    sugarloaf.rect(
+                        None,
+                        x_position,
+                        top,
+                        tab_width,
+                        h,
+                        strip_bg,
+                        0.0,
+                        ISLAND_ORDER_BG,
+                    );
+                }
                 x_position += tab_width;
                 continue;
             }
@@ -322,34 +348,63 @@ impl Island {
             // into the `surface` strip (no fill). A user-set tab color
             // wins, painted as the same rounded card.
             let radius = (6.0 * s).min(h * 0.5).min(tab_width * 0.5);
-            let card_bg = self
-                .tab_colors
-                .get(&tab_index)
-                .copied()
-                .or(is_active.then(|| theme.f32(theme.bg)));
-            if let Some(card_bg) = card_bg {
-                sugarloaf.rounded_rect(
+            let card_bg = workspace_tab_material(
+                &style,
+                theme,
+                self.tab_colors.get(&tab_index).copied(),
+                is_active,
+            );
+            if strip_bg[3] < 1.0 && card_bg.is_none() {
+                sugarloaf.rect(
                     None,
                     x_position,
                     top,
                     tab_width,
                     h,
-                    card_bg,
-                    0.05,
-                    radius,
+                    strip_bg,
+                    0.0,
                     ISLAND_ORDER_BG,
                 );
-                // Square off the bottom so only the top corners round.
-                sugarloaf.rect(
-                    None,
-                    x_position,
-                    top + h - radius,
-                    tab_width,
-                    radius,
-                    card_bg,
-                    0.05,
-                    ISLAND_ORDER_BG,
-                );
+            }
+            if let Some(card_bg) = card_bg {
+                if strip_bg[3] < 1.0 && card_bg[3] < 1.0 {
+                    // One top-rounded primitive avoids double alpha at the
+                    // squared bottom (rounded_rect + rect would overlap).
+                    sugarloaf.quad(
+                        None,
+                        x_position,
+                        top,
+                        tab_width,
+                        h,
+                        card_bg,
+                        [radius, radius, 0.0, 0.0],
+                        0.05,
+                        ISLAND_ORDER_BG,
+                    );
+                } else {
+                    sugarloaf.rounded_rect(
+                        None,
+                        x_position,
+                        top,
+                        tab_width,
+                        h,
+                        card_bg,
+                        0.05,
+                        radius,
+                        ISLAND_ORDER_BG,
+                    );
+                    // Square off the bottom so only the top corners round.
+                    sugarloaf.rect(
+                        None,
+                        x_position,
+                        top + h - radius,
+                        tab_width,
+                        radius,
+                        card_bg,
+                        0.05,
+                        ISLAND_ORDER_BG,
+                    );
+                }
             }
 
             // Animated hover highlight — a translucent accent band whose
@@ -379,7 +434,10 @@ impl Island {
                     top,
                     tab_width,
                     h,
-                    theme.f32_alpha(theme.accent, peak * hover_strength),
+                    crate::customization::apply_background_opacity(
+                        &style,
+                        theme.f32_alpha(theme.accent, peak * hover_strength),
+                    ),
                     0.06,
                     ISLAND_ORDER_BG,
                 );
@@ -694,5 +752,68 @@ impl Island {
         let text_x = float_x + (tab_width - text_width) / 2.0;
         let text_y = float_y + (h / 2.0) - (font / 2.0);
         ui.draw(text_x, text_y, &title, &title_opts);
+    }
+}
+
+/// Workspace color overrides retain precedence over the active-card default.
+/// Only material alpha changes; the host's legacy fallback theme stays intact.
+fn workspace_tab_material(
+    style: &neoism_lua::StylePatch,
+    theme: &IdeTheme,
+    custom: Option<[f32; 4]>,
+    active: bool,
+) -> Option<[f32; 4]> {
+    custom
+        .map(|color| crate::customization::apply_background_opacity(style, color))
+        .or_else(|| {
+            active.then(|| {
+                crate::customization::background_color(style, theme, theme.f32(theme.bg))
+            })
+        })
+}
+
+#[cfg(test)]
+mod material_tests {
+    use super::*;
+
+    #[test]
+    fn workspace_defaults_and_color_precedence_are_unchanged() {
+        let theme = IdeTheme::default();
+        let style = neoism_lua::StylePatch::default();
+        let color = [0.2, 0.4, 0.6, 0.8];
+        assert_eq!(workspace_tab_material(&style, &theme, None, false), None);
+        assert_eq!(
+            workspace_tab_material(&style, &theme, None, true),
+            Some(theme.f32(theme.bg))
+        );
+        assert_eq!(
+            workspace_tab_material(&style, &theme, Some(color), true),
+            Some(color)
+        );
+    }
+
+    #[test]
+    fn workspace_alpha_is_applied_once_to_active_and_custom_materials() {
+        let theme = IdeTheme::default();
+        let style = neoism_lua::StylePatch {
+            opacity: Some(0.25),
+            ..Default::default()
+        };
+        assert_eq!(
+            workspace_tab_material(&style, &theme, None, true).unwrap()[3],
+            0.25
+        );
+        assert_eq!(
+            workspace_tab_material(&style, &theme, Some([0.2, 0.4, 0.6, 0.8]), true),
+            Some([0.2, 0.4, 0.6, 0.2])
+        );
+        let transparent = neoism_lua::StylePatch {
+            background: Some("transparent".into()),
+            ..style
+        };
+        assert_eq!(
+            workspace_tab_material(&transparent, &theme, None, true),
+            Some([0.0; 4])
+        );
     }
 }

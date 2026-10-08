@@ -112,6 +112,7 @@ pub(crate) fn palette_action_name(
         A::ToggleFullscreen => "ToggleFullscreen",
         A::ToggleAppearanceTheme => "ToggleAppearanceTheme",
         A::OpenThemePicker => "OpenThemePicker",
+        A::ListBackgrounds => "ListBackgrounds",
         A::OpenShaders => "OpenShaders",
         A::OpenMashupPacks => "OpenMashupPacks",
         A::Copy => "Copy",

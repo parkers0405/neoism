@@ -45,12 +45,13 @@ pub struct PlatformWindow {
     pub opacity: Option<f32>,
     #[serde(default = "Option::default")]
     pub blur: Option<bool>,
-    #[serde(
-        default = "Option::default",
-        rename = "background-image",
-        skip_serializing
-    )]
+    #[serde(default, rename = "background-image")]
     pub background_image: Option<sugarloaf::ImageProperties>,
+    /// Independently enable or disable images without clearing the base path.
+    /// An absent/null image leaves the base image unchanged. An explicit image
+    /// re-enables backgrounds only when this flag is not supplied.
+    #[serde(default, rename = "background-image-disabled")]
+    pub background_image_disabled: Option<bool>,
     #[serde(default = "Option::default")]
     pub decorations: Option<window::Decorations>,
     #[serde(default = "Option::default", rename = "macos-use-unified-titlebar")]

@@ -25,6 +25,7 @@ pub(crate) enum PaletteMode {
     Fonts(Vec<String>),
     Themes(Vec<String>),
     Mashups(Vec<PaletteMashupEntry>),
+    Backgrounds(Vec<super::actions::PaletteBackgroundEntry>),
     Shaders(Vec<PaletteShaderEntry>),
     Buffers(Vec<PaletteBufferEntry>),
     Workspaces(Vec<PaletteWorkspaceEntry>),
@@ -57,6 +58,9 @@ pub(crate) enum PaletteRow<'a> {
     },
     Theme {
         name: &'a str,
+    },
+    Background {
+        entry: &'a super::actions::PaletteBackgroundEntry,
     },
     Mashup {
         entry: &'a PaletteMashupEntry,
@@ -130,6 +134,7 @@ impl<'a> PaletteRow<'a> {
             PaletteRow::Font { family } => family,
             PaletteRow::Theme { name } => name,
             PaletteRow::Mashup { entry } => entry.name.as_str(),
+            PaletteRow::Background { entry } => entry.name.as_str(),
             PaletteRow::Shader { entry } => entry.title.as_str(),
             PaletteRow::Buffer { entry } => entry.title.as_str(),
             PaletteRow::Directory { entry } => {
@@ -167,6 +172,7 @@ impl<'a> PaletteRow<'a> {
             PaletteRow::Font { .. } => "",
             PaletteRow::Theme { .. } => "",
             PaletteRow::Mashup { .. } => "",
+            PaletteRow::Background { .. } => "",
             PaletteRow::Shader { entry } => entry.detail.as_str(),
             PaletteRow::Buffer { entry } => entry.detail.as_str(),
             PaletteRow::Directory { entry } => entry
@@ -206,6 +212,7 @@ impl<'a> PaletteRow<'a> {
             PaletteRow::Font { .. }
             | PaletteRow::Theme { .. }
             | PaletteRow::Mashup { .. }
+            | PaletteRow::Background { .. }
             | PaletteRow::Shader { .. }
             | PaletteRow::Buffer { .. }
             | PaletteRow::Directory { .. }

@@ -126,15 +126,29 @@ pub struct GrepWorkspaceRequest {
     /// A directory or one file. Paths are absolute at this boundary.
     pub path: PathBuf,
     pub patterns: Vec<String>,
+    /// Path filters are workspace-root relative for internal scopes, or relative
+    /// to the external directory itself (an external file's parent) otherwise.
     pub include: Option<String>,
     /// Include leading-dot path components. Exact-file searches are always
     /// honored; this flag controls recursive discovery.
     pub include_hidden: bool,
     pub excludes: Vec<String>,
+    /// Requested lines before and after each match. The bundled implementation
+    /// accepts 0..=100 and rejects larger requests rather than clipping context.
     pub context_lines: usize,
+    /// Authoritative case policy: false ignores case, true respects case.
+    /// Callers wanting smartcase must resolve it before constructing the request.
     pub case_sensitive: bool,
     pub mode: WorkspaceSearchMode,
+    /// Hard maximum of actual matches; output byte/row budgets may produce a
+    /// smaller page. Context is attached to matches, never counted as matches.
     pub limit: usize,
+    /// Opaque, server-issued capability, not an editable position. It may expire
+    /// on restart, cache eviction, or inactivity. Reuse identical scope/query/options except
+    /// limit/timeout, which may change. Continuation resumes inside a file and
+    /// rejects changes to that checkpoint file. Indexed candidate sets are
+    /// retained for a bounded lifetime; traversal otherwise remains a live scan.
+    pub cursor: Option<String>,
     pub control: WorkspaceSearchRequestControl,
 }
 
@@ -145,10 +159,14 @@ pub struct WorkspaceGrepMatch {
     pub text: String,
     pub definition: bool,
     pub fuzzy_score: Option<u16>,
+    /// Context is not counted as matches and travels with its match across pages.
+    pub context_before: Vec<String>,
+    pub context_after: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GrepWorkspaceResult {
+    pub next_cursor: Option<String>,
     pub items: Vec<WorkspaceGrepMatch>,
     pub files_with_matches: usize,
     pub total_files_searched: usize,

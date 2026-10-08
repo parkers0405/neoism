@@ -173,23 +173,37 @@ impl CommandComposer {
         let composer_extra_top = chassis_y - composer_top_y;
         let composer_top_radius = CHASSIS_RADIUS * s;
         let chip_fill = theme.f32(theme.surface);
+        let control_fill = crate::customization::apply_background_opacity(
+            &crate::primitives::surface_background::style("composer.terminal"),
+            chip_fill,
+        );
+        let plate_fill = crate::primitives::surface_background::base_color(
+            "composer.terminal",
+            theme,
+            theme.f32(theme.bg),
+        );
 
         // Edge-to-edge: surface fill sits under the antialiased border
         // so the rounded command corners don't pick up dark fringe
         // pixels. The visual lip can float above the reserved rows,
         // but it no longer costs a whole blank terminal row.
         let _ = focused; // focus signal lives on the chips for now
-        sugarloaf.quad(
-            None,
-            chassis_x,
-            composer_top_y,
-            chassis_w,
-            chassis_inner_h + composer_extra_top,
-            chip_fill,
-            [composer_top_radius, composer_top_radius, 0.0, 0.0],
-            DEPTH,
-            ORDER_CHASSIS_BG,
-        );
+
+        // The legacy chassis backing must not seal a translucent plate.
+        if plate_fill[3] >= 1.0 {
+            sugarloaf.quad(
+                None,
+                chassis_x,
+                composer_top_y,
+                chassis_w,
+                chassis_inner_h + composer_extra_top,
+                chip_fill,
+                [composer_top_radius, composer_top_radius, 0.0, 0.0],
+                DEPTH,
+                ORDER_CHASSIS_BG,
+            );
+        }
+
         let inset = 0.0;
 
         // ── Row geometry ─────────────────────────────────────────────
@@ -263,30 +277,48 @@ impl CommandComposer {
         // visible there; no separate square-ended rail rects.
         let rail_join_overlap = (6.0 * s).max(3.0);
         let command_plate_h = chassis_inner_h + composer_extra_top + rail_join_overlap;
-        sugarloaf.quad(
-            None,
-            chassis_x,
-            command_plate_y,
-            chassis_w,
-            command_plate_h,
-            chip_fill,
-            [command_plate_radius, command_plate_radius, 0.0, 0.0],
-            DEPTH,
-            ORDER_CHASSIS_BORDER,
-        );
-        sugarloaf.quad(
-            None,
+        let plate_outer = [chassis_x, command_plate_y, chassis_w, command_plate_h];
+        let plate_inner = [
             chassis_x + command_plate_stroke,
             command_plate_y + command_plate_stroke,
             (chassis_w - command_plate_stroke * 2.0).max(0.0),
             (command_plate_h - command_plate_stroke).max(0.0),
-            theme.f32(theme.bg),
-            [
-                (command_plate_radius - command_plate_stroke).max(0.0),
-                (command_plate_radius - command_plate_stroke).max(0.0),
-                0.0,
-                0.0,
-            ],
+        ];
+        let plate_outer_radii = [command_plate_radius, command_plate_radius, 0.0, 0.0];
+        let r = (command_plate_radius - command_plate_stroke).max(0.0);
+        let plate_inner_radii = [r, r, 0.0, 0.0];
+        if plate_fill[3] >= 1.0 {
+            sugarloaf.quad(
+                None,
+                plate_outer[0],
+                plate_outer[1],
+                plate_outer[2],
+                plate_outer[3],
+                chip_fill,
+                plate_outer_radii,
+                DEPTH,
+                ORDER_CHASSIS_BORDER,
+            );
+        } else {
+            crate::widgets::frame::draw_background_border(
+                sugarloaf,
+                plate_outer,
+                plate_inner,
+                plate_outer_radii,
+                plate_inner_radii,
+                chip_fill,
+                DEPTH,
+                ORDER_CHASSIS_BORDER,
+            );
+        }
+        sugarloaf.quad(
+            None,
+            plate_inner[0],
+            plate_inner[1],
+            plate_inner[2],
+            plate_inner[3],
+            plate_fill,
+            plate_inner_radii,
             DEPTH,
             ORDER_CHASSIS_BORDER + 1,
         );
@@ -320,6 +352,23 @@ impl CommandComposer {
         // 1px accent ring under the chip when there's text to submit —
         // reads as "armed" without painting a big colored pill.
         if send_active {
+            if control_fill[3] < 1.0 {
+                crate::widgets::frame::draw_background_border(
+                    sugarloaf,
+                    [send_chip_x, chip_y, send_chip_w, chip_h],
+                    [
+                        send_chip_x + s,
+                        chip_y + s,
+                        (send_chip_w - 2.0 * s).max(0.0),
+                        (chip_h - 2.0 * s).max(0.0),
+                    ],
+                    [CHIP_RADIUS * s; 4],
+                    [(CHIP_RADIUS * s - s).max(0.0); 4],
+                    theme.f32_alpha(theme.accent, 0.55),
+                    DEPTH,
+                    ORDER_CHIP_BG,
+                );
+            } else {
             sugarloaf.rounded_rect(
                 None,
                 send_chip_x,
@@ -331,13 +380,14 @@ impl CommandComposer {
                 CHIP_RADIUS * s,
                 ORDER_CHIP_BG,
             );
+            }
             sugarloaf.rounded_rect(
                 None,
                 send_chip_x + 1.0 * s,
                 chip_y + 1.0 * s,
                 (send_chip_w - 2.0 * s).max(0.0),
                 (chip_h - 2.0 * s).max(0.0),
-                chip_fill,
+                control_fill,
                 DEPTH,
                 (CHIP_RADIUS * s - 1.0 * s).max(0.0),
                 ORDER_CHIP_BG + 1,
@@ -349,7 +399,7 @@ impl CommandComposer {
                 chip_y,
                 send_chip_w,
                 chip_h,
-                chip_fill,
+                control_fill,
                 DEPTH,
                 CHIP_RADIUS * s,
                 ORDER_CHIP_BG,
@@ -673,7 +723,12 @@ impl CommandComposer {
                             y - 2.5 * s,
                             w + pill_pad * 2.0,
                             pill_h,
-                            theme.f32_alpha(theme.surface, 0.95),
+                            crate::customization::apply_background_opacity(
+                                &crate::primitives::surface_background::style(
+                                    "composer.terminal",
+                                ),
+                                theme.f32_alpha(theme.surface, 0.95),
+                            ),
                             DEPTH,
                             pill_h * 0.4,
                             ORDER_CHIP_BG,
@@ -735,7 +790,12 @@ impl CommandComposer {
                         highlight_y,
                         span_w + 4.0 * s,
                         highlight_h,
-                        theme.f32_alpha(theme.green, 0.22 * intensity),
+                        crate::customization::apply_background_opacity(
+                            &crate::primitives::surface_background::style(
+                                "composer.terminal",
+                            ),
+                            theme.f32_alpha(theme.green, 0.22 * intensity),
+                        ),
                         DEPTH,
                         3.0 * s,
                         ORDER_CHIP_BG,

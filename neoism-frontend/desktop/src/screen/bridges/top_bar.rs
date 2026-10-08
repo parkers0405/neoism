@@ -61,6 +61,10 @@ impl Screen<'_> {
                 // the row is ever enabled here.
                 false
             }
+            Some(TopBarAction::OpenBackgrounds) => {
+                self.open_background_picker();
+                true
+            }
             Some(TopBarAction::OpenThemes) => {
                 // Mirror Cmd+P → Themes: searchable list + live preview.
                 self.open_theme_picker();
@@ -223,7 +227,10 @@ impl Screen<'_> {
                 self.open_settings_config_tab();
             }
             SettingsAction::RunAction(action) => {
-                if action == "open-model" {
+                if action == "backgrounds:pick" {
+                    self.renderer.settings.close();
+                    self.open_background_picker();
+                } else if action == "open-model" {
                     // Reuse the agent pane's model + provider (connect) picker.
                     self.renderer.settings.close();
                     let _ = self.open_neoism_agent_tab();

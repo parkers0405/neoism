@@ -96,6 +96,14 @@ impl<A: Copy> BufferTabs<A> {
         if !self.visible || available_width <= 0.0 {
             return;
         }
+        let strip_style = crate::primitives::surface_background::style(
+            neoism_lua::selector::BUFFER_TABS,
+        );
+        let strip_background = crate::primitives::surface_background::base_color(
+            "buffer-tabs",
+            theme,
+            theme.f32(theme.surface),
+        );
         if self.tabs.is_empty() {
             // Layout still reserves the strip row while the tab list is
             // (transiently) empty — e.g. the frame right after a tab is
@@ -106,26 +114,11 @@ impl<A: Copy> BufferTabs<A> {
             let strip_radius = (6.0 * self.scale)
                 .min(strip_h * 0.5)
                 .min(available_width * 0.5);
-            sugarloaf.rounded_rect(
-                None,
-                x_left,
-                y_top,
-                available_width,
-                strip_h,
-                theme.f32(theme.surface),
-                consts::DEPTH,
+            draw_strip_background(
+                sugarloaf,
+                [x_left, y_top, available_width, strip_h],
+                strip_background,
                 strip_radius,
-                consts::ORDER_BG,
-            );
-            sugarloaf.rect(
-                None,
-                x_left,
-                y_top + strip_h - strip_radius,
-                available_width,
-                strip_radius,
-                theme.f32(theme.surface),
-                consts::DEPTH,
-                consts::ORDER_BG,
             );
             sugarloaf.rect(
                 None,
@@ -269,27 +262,8 @@ impl<A: Copy> BufferTabs<A> {
         // bottom is squared off so it stays flush with the breadcrumbs /
         // content directly below.
         let strip_radius = (6.0 * scale).min(strip_h * 0.5).min(available_width * 0.5);
-        sugarloaf.rounded_rect(
-            None,
-            x_left,
-            y_top,
-            available_width,
-            strip_h,
-            theme.f32(theme.surface),
-            consts::DEPTH,
-            strip_radius,
-            consts::ORDER_BG,
-        );
-        sugarloaf.rect(
-            None,
-            x_left,
-            y_top + strip_h - strip_radius,
-            available_width,
-            strip_radius,
-            theme.f32(theme.surface),
-            consts::DEPTH,
-            consts::ORDER_BG,
-        );
+        // Draw the strip after deriving the active slot below. Translucent
+        // active cards replace (rather than overlay) that slot's material.
 
         // Hairline along the bottom edge — separates buffer tabs from
         // the breadcrumbs row sitting underneath.
@@ -317,6 +291,50 @@ impl<A: Copy> BufferTabs<A> {
                 d.tear_out_armed,
             )
         });
+        if strip_background[3] >= 1.0 {
+            draw_strip_background(
+                sugarloaf,
+                [x_left, y_top, available_width, strip_h],
+                strip_background,
+                strip_radius,
+            );
+        } else {
+            let active_ix = self.active.min(tab_widths.len().saturating_sub(1));
+            let active_w = tab_widths.get(active_ix).copied().unwrap_or(0.0);
+            let slot_x =
+                x_left + tab_widths.iter().take(active_ix).sum::<f32>() - scroll_x;
+            let (active_x, armed) = match drag_render {
+                Some((ix, local_x, grab, _, armed)) if ix == active_ix => (
+                    (x_left + local_x - grab - scroll_x)
+                        .clamp(strip_left, (strip_right - active_w).max(strip_left)),
+                    armed,
+                ),
+                _ => (slot_x, false),
+            };
+            let cut_left = if armed {
+                strip_right
+            } else {
+                active_x.clamp(strip_left, strip_right)
+            };
+            let cut_right = if armed {
+                strip_right
+            } else {
+                (active_x + active_w).clamp(strip_left, strip_right)
+            };
+            for (x, w) in [
+                (strip_left, cut_left - strip_left),
+                (cut_right, strip_right - cut_right),
+            ] {
+                if w > 0.0 {
+                    draw_strip_background(
+                        sugarloaf,
+                        [x, y_top, w, strip_h],
+                        strip_background,
+                        0.0,
+                    );
+                }
+            }
+        }
         let hover_ix = self.hover.map(tab_hit_index);
         let hover_anim = if let Some(started) = self.hover_anim_started {
             let elapsed_ms = started.elapsed().as_secs_f32() * 1000.0;
@@ -425,38 +443,63 @@ impl<A: Copy> BufferTabs<A> {
             if visible_w > 0.0 {
                 if surface_state != TabSurfaceState::Inactive {
                     let bg = if is_active {
-                        theme.f32(theme.bg)
+                        // Keep the active slot distinct, but never restore an
+                        // opaque pane backing over a translucent strip.
+                        let mut active = theme.f32(theme.bg);
+                        active[3] = strip_background[3];
+                        active
                     } else if is_focused {
-                        theme.f32_alpha(theme.accent, 0.10)
+                        crate::customization::apply_background_opacity(
+                            &strip_style,
+                            theme.f32_alpha(theme.accent, 0.10),
+                        )
                     } else {
-                        theme.f32_alpha(theme.hover, 0.72 * hover_strength)
+                        crate::customization::apply_background_opacity(
+                            &strip_style,
+                            theme.f32_alpha(theme.hover, 0.72 * hover_strength),
+                        )
                     };
                     let order = if is_active { accent_order } else { tab_order };
                     // Fill the exact slot and square its bottom edge. Small
                     // top corners retain editor-tab separation without a
                     // floating pill silhouette.
-                    sugarloaf.rounded_rect(
-                        None,
-                        visible_left,
-                        surface.y,
-                        visible_w,
-                        surface.height,
-                        bg,
-                        consts::DEPTH,
-                        surface.top_radius.min(visible_w * 0.5),
-                        order,
-                    );
-                    if surface.top_radius > 0.0 {
-                        sugarloaf.rect(
+                    if strip_background[3] < 1.0 && bg[3] < 1.0 {
+                        let r = surface.top_radius.min(visible_w * 0.5);
+                        sugarloaf.quad(
                             None,
                             visible_left,
-                            surface.y + surface.height - surface.top_radius,
+                            surface.y,
                             visible_w,
-                            surface.top_radius,
+                            surface.height,
                             bg,
+                            [r, r, 0.0, 0.0],
                             consts::DEPTH,
                             order,
                         );
+                    } else {
+                        sugarloaf.rounded_rect(
+                            None,
+                            visible_left,
+                            surface.y,
+                            visible_w,
+                            surface.height,
+                            bg,
+                            consts::DEPTH,
+                            surface.top_radius.min(visible_w * 0.5),
+                            order,
+                        );
+                        if surface.top_radius > 0.0 {
+                            sugarloaf.rect(
+                                None,
+                                visible_left,
+                                surface.y + surface.height - surface.top_radius,
+                                visible_w,
+                                surface.top_radius,
+                                bg,
+                                consts::DEPTH,
+                                order,
+                            );
+                        }
                     }
                 }
             }
@@ -1042,6 +1085,51 @@ impl<A: Copy> BufferTabs<A> {
             consts::DEPTH,
             scale,
             consts::ORDER_TEXT + 10,
+        );
+    }
+}
+
+/// A single top-rounded quad for translucent fills avoids double-compositing
+/// the bottom squaring rectangle. Keep the original opaque path unchanged.
+fn draw_strip_background(
+    sugarloaf: &mut Sugarloaf,
+    [x, y, w, h]: [f32; 4],
+    color: [f32; 4],
+    radius: f32,
+) {
+    if color[3] < 1.0 {
+        sugarloaf.quad(
+            None,
+            x,
+            y,
+            w,
+            h,
+            color,
+            [radius, radius, 0.0, 0.0],
+            consts::DEPTH,
+            consts::ORDER_BG,
+        );
+    } else {
+        sugarloaf.rounded_rect(
+            None,
+            x,
+            y,
+            w,
+            h,
+            color,
+            consts::DEPTH,
+            radius,
+            consts::ORDER_BG,
+        );
+        sugarloaf.rect(
+            None,
+            x,
+            y + h - radius,
+            w,
+            radius,
+            color,
+            consts::DEPTH,
+            consts::ORDER_BG,
         );
     }
 }

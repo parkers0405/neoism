@@ -22,7 +22,9 @@ use neoism_ui::panels::agent_pane::state::{
     branch_status_from_runtime, task_message_status_from_runtime,
 };
 use neoism_ui::panels::agent_pane::status_policy;
-use neoism_ui::panels::agent_pane::timeline_scroll_policy::ctrl_u_d_scroll_delta;
+use neoism_ui::panels::agent_pane::timeline_scroll_policy::{
+    ctrl_u_d_scroll_delta, step_timeline_spring, TimelineScrollOwner,
+};
 use neoism_ui::panels::agent_pane::usage_policy::{self, UsageSnapshot};
 use neoism_ui::panels::agent_pane::view::timeline::TimelineViewAnchorKey;
 use serde_json::{json, Value};
@@ -1089,9 +1091,14 @@ pub struct NeoismAgentPane {
     timeline_last_scroll_at: Option<Instant>,
     timeline_velocity_px_s: f32,
     timeline_last_tick_at: Option<Instant>,
-    /// Fixed destination for discrete mouse-wheel notches. Precision trackpad
-    /// input leaves this unset and keeps the existing kinetic path.
+    /// Bottom-relative spring destination: wheel notches use a fixed target;
+    /// automatic follow uses zero. Precision trackpad input leaves this unset.
     timeline_wheel_target_px: Option<f32>,
+    timeline_scroll_owner: TimelineScrollOwner,
+    pub(super) timeline_history_position_hydrated: bool,
+    /// Geometry belongs to a live arrival, not history/cache/layout hydration.
+    /// Retained across reveal measurement passes; reset by history and navigation.
+    pub(super) timeline_live_growth: bool,
     /// Per-gesture inertia tuning for precision trackpad input.
     timeline_scroll_decay_tau: f32,
     timeline_scroll_stop_px_s: f32,
@@ -1379,6 +1386,9 @@ impl Default for NeoismAgentPane {
             timeline_velocity_px_s: 0.0,
             timeline_last_tick_at: None,
             timeline_wheel_target_px: None,
+            timeline_scroll_owner: TimelineScrollOwner::Wheel,
+            timeline_history_position_hydrated: false,
+            timeline_live_growth: false,
             timeline_scroll_decay_tau: Self::TIMELINE_TRACKPAD_DECAY_TAU,
             timeline_scroll_stop_px_s: Self::TIMELINE_TRACKPAD_STOP_PX_S,
             timeline_measure_cache: RefCell::new(HashMap::new()),

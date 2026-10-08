@@ -380,23 +380,16 @@ impl Screen<'_> {
         self.sugarloaf
             .set_background_color(Some(self.renderer.dynamic_background.1));
 
-        // Same precedence as startup: explicit `[window]
-        // background-image` beats the active pack's wallpaper slot.
-        let pack_wallpaper = config
+        let pack = config
             .appearance
             .mashup_pack
             .as_deref()
             .map(str::trim)
             .filter(|id| !id.is_empty())
-            .and_then(neoism_backend::config::mashup::find_mashup_pack)
-            .and_then(|pack| pack.wallpaper);
-        if let Some(image) = config
-            .ui
-            .window
-            .background_image
-            .as_ref()
-            .or(pack_wallpaper.as_ref())
-        {
+            .and_then(neoism_backend::config::mashup::find_mashup_pack);
+        let wallpaper =
+            neoism_backend::config::background::resolve_background(config, pack.as_ref());
+        if let Some(image) = wallpaper.as_ref() {
             if let Err(message) = self.sugarloaf.set_background_image(image) {
                 self.renderer.assistant.set_error(RioError {
                     level: RioErrorLevel::Warning,
@@ -1257,14 +1250,10 @@ impl Screen<'_> {
         config: &neoism_backend::config::Config,
         font_library: Option<&neoism_backend::sugarloaf::font::FontLibrary>,
     ) -> Result<(), String> {
-        let wallpaper = config
-            .ui
-            .window
-            .background_image
-            .as_ref()
-            .or_else(|| pack.and_then(|pack| pack.wallpaper.as_ref()));
+        let wallpaper =
+            neoism_backend::config::background::resolve_background(config, pack);
         let previous_wallpaper = self.sugarloaf.background_image().cloned();
-        match wallpaper {
+        match wallpaper.as_ref() {
             Some(image) => self.sugarloaf.set_background_image(image)?,
             None => self.sugarloaf.clear_background_image(),
         }

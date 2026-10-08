@@ -71,28 +71,55 @@ impl GitDiffPanel {
 
         let frame_stroke = (FRAME_STROKE * s).max(2.0);
         let frame_radius = FRAME_RADIUS * s;
-        let inner_radius = (frame_radius - frame_stroke).max(0.0);
 
-        // Frame: surface outer + bg inner — mirrors `file_tree::render`.
-        sugarloaf.quad(
-            None,
-            panel_x,
-            panel_y,
-            target_w,
-            height,
-            theme.f32(theme.surface),
-            [frame_radius, frame_radius, 0.0, 0.0],
-            DEPTH,
-            ORDER_FRAME,
+        let inner_radius = (frame_radius - frame_stroke).max(0.0);
+        let panel_fill = crate::primitives::surface_background::base_color(
+            "git-sidebar",
+            theme,
+            theme.f32(theme.bg),
         );
-        sugarloaf.quad(
-            None,
+        let outer = [panel_x, panel_y, target_w, height];
+        let inner = [
             panel_x + frame_stroke,
             panel_y + frame_stroke,
             (target_w - frame_stroke * 2.0).max(0.0),
             (height - frame_stroke).max(0.0),
-            theme.f32(theme.bg),
-            [inner_radius, inner_radius, 0.0, 0.0],
+        ];
+        let outer_radii = [frame_radius, frame_radius, 0.0, 0.0];
+        let inner_radii = [inner_radius, inner_radius, 0.0, 0.0];
+        // Never put an opaque full-panel backing behind a translucent fill.
+        if panel_fill[3] >= 1.0 {
+            sugarloaf.quad(
+                None,
+                outer[0],
+                outer[1],
+                outer[2],
+                outer[3],
+                theme.f32(theme.surface),
+                outer_radii,
+                DEPTH,
+                ORDER_FRAME,
+            );
+        } else {
+            crate::widgets::frame::draw_background_border(
+                sugarloaf,
+                outer,
+                inner,
+                outer_radii,
+                inner_radii,
+                theme.f32(theme.surface),
+                DEPTH,
+                ORDER_FRAME,
+            );
+        }
+        sugarloaf.quad(
+            None,
+            inner[0],
+            inner[1],
+            inner[2],
+            inner[3],
+            panel_fill,
+            inner_radii,
             DEPTH,
             ORDER_INNER,
         );
@@ -147,7 +174,7 @@ impl GitDiffPanel {
             close_y,
             close_size,
             close_size,
-            theme.f32(theme.hover),
+            git_background_opacity(theme.f32(theme.hover)),
             DEPTH,
             5.0 * s,
             ORDER_ROW_BG,
@@ -215,8 +242,8 @@ impl GitDiffPanel {
         let btn_radius = 6.0 * s;
         if branch_focused {
             let ring = (1.5 * s).max(1.0);
-            sugarloaf.rounded_rect(
-                None,
+            git_border_backing(
+                sugarloaf,
                 btn_x - ring,
                 btn_y - ring,
                 btn_w + ring * 2.0,
@@ -225,12 +252,13 @@ impl GitDiffPanel {
                 DEPTH,
                 btn_radius + ring,
                 ORDER_ROW_BG,
+                ring,
             );
         }
         let btn_bg = if branch_menu_open || branch_focused {
-            theme.f32(theme.hover)
+            git_background_opacity(theme.f32(theme.hover))
         } else {
-            theme.f32(theme.surface)
+            git_background_opacity(theme.f32(theme.surface))
         };
         sugarloaf.rounded_rect(
             None,
@@ -439,29 +467,42 @@ impl GitDiffPanel {
         // then header + body fills draw on top, leaving a 1px stroke
         // around the whole card. Same trick `diff_card::render` uses
         // so the two cards read as a matched pair.
-        sugarloaf.quad(
-            None,
-            card_x - card_stroke,
-            files_card_y - card_stroke,
-            card_w + card_stroke * 2.0,
-            files_card_h + card_stroke * 2.0,
-            theme.f32(theme.border),
-            [
+        if crate::customization::background_opacity(
+            &crate::primitives::surface_background::style("git-sidebar"),
+        ) >= 1.0
+        {
+            sugarloaf.quad(
+                None,
+                card_x - card_stroke,
+                files_card_y - card_stroke,
+                card_w + card_stroke * 2.0,
+                files_card_h + card_stroke * 2.0,
+                theme.f32(theme.border),
+                [card_radius + card_stroke; 4],
+                DEPTH,
+                ORDER_ROW_BG,
+            );
+        } else {
+            git_border_backing(
+                sugarloaf,
+                card_x - card_stroke,
+                files_card_y - card_stroke,
+                card_w + card_stroke * 2.0,
+                files_card_h + card_stroke * 2.0,
+                theme.f32(theme.border),
+                DEPTH,
                 card_radius + card_stroke,
-                card_radius + card_stroke,
-                card_radius + card_stroke,
-                card_radius + card_stroke,
-            ],
-            DEPTH,
-            ORDER_ROW_BG,
-        );
+                ORDER_ROW_BG,
+                card_stroke,
+            );
+        }
         sugarloaf.quad(
             None,
             card_x,
             files_card_y,
             card_w,
             files_header_h,
-            theme.f32(theme.surface),
+            git_background_opacity(theme.f32(theme.surface)),
             [card_radius, card_radius, 0.0, 0.0],
             DEPTH,
             ORDER_ROW_BG + 1,
@@ -472,7 +513,7 @@ impl GitDiffPanel {
             files_card_y + files_header_h,
             card_w,
             files_body_h,
-            theme.f32(theme.bg),
+            git_background_opacity(theme.f32(theme.bg)),
             [0.0, 0.0, card_radius, card_radius],
             DEPTH,
             ORDER_ROW_BG + 1,
@@ -593,7 +634,7 @@ impl GitDiffPanel {
                     sel_visible_y,
                     card_w,
                     sel_visible_h,
-                    theme.f32(theme.hover),
+                    git_background_opacity(theme.f32(theme.hover)),
                     DEPTH,
                     ORDER_LINE_BG,
                 );
@@ -1116,8 +1157,8 @@ impl GitDiffPanel {
                 let card_stroke = (2.0 * s).max(2.0);
                 let focus = (1.5 * s).max(1.0);
                 let off = card_stroke + focus;
-                sugarloaf.rounded_rect(
-                    None,
+                git_border_backing(
+                    sugarloaf,
                     card_x - off,
                     diff_card_y - off,
                     card_w + off * 2.0,
@@ -1126,6 +1167,7 @@ impl GitDiffPanel {
                     DEPTH,
                     card_radius + off,
                     ORDER_ROW_BG,
+                    off,
                 );
             }
 
@@ -1275,8 +1317,8 @@ impl GitDiffPanel {
         } else {
             theme.f32(theme.border)
         };
-        sugarloaf.rounded_rect(
-            None,
+        git_border_backing(
+            sugarloaf,
             box_x - box_stroke,
             box_y - box_stroke,
             box_w + box_stroke * 2.0,
@@ -1285,6 +1327,7 @@ impl GitDiffPanel {
             DEPTH,
             box_radius + box_stroke,
             ORDER_ROW_BG,
+            box_stroke,
         );
         sugarloaf.rounded_rect(
             None,
@@ -1292,7 +1335,7 @@ impl GitDiffPanel {
             box_y,
             box_w,
             box_h,
-            theme.f32(theme.surface),
+            git_background_opacity(theme.f32(theme.surface)),
             DEPTH,
             box_radius,
             ORDER_ROW_BG + 1,
@@ -1406,7 +1449,7 @@ impl GitDiffPanel {
             btn_y,
             commit_btn_w,
             btn_h,
-            theme.f32(theme.accent),
+            git_background_opacity(theme.f32(theme.accent)),
             DEPTH,
             btn_radius,
             ORDER_ROW_BG + 1,
@@ -1447,8 +1490,8 @@ impl GitDiffPanel {
         let stage_text_w = sugarloaf.text_mut().measure(stage_label, &stage_label_opts);
         let stage_btn_w = stage_text_w + btn_pad_x * 2.0;
         let stage_btn_x = commit_btn_x + commit_btn_w + btn_gap;
-        sugarloaf.rounded_rect(
-            None,
+        git_border_backing(
+            sugarloaf,
             stage_btn_x - btn_stroke,
             btn_y - btn_stroke,
             stage_btn_w + btn_stroke * 2.0,
@@ -1457,6 +1500,7 @@ impl GitDiffPanel {
             DEPTH,
             btn_radius + btn_stroke,
             ORDER_ROW_BG,
+            btn_stroke,
         );
         sugarloaf.rounded_rect(
             None,
@@ -1464,7 +1508,7 @@ impl GitDiffPanel {
             btn_y,
             stage_btn_w,
             btn_h,
-            theme.f32(theme.surface),
+            git_background_opacity(theme.f32(theme.surface)),
             DEPTH,
             btn_radius,
             ORDER_ROW_BG + 1,
@@ -1496,7 +1540,7 @@ impl GitDiffPanel {
                 remote_y,
                 remote_w,
                 btn_h,
-                theme.f32(theme.surface),
+                git_background_opacity(theme.f32(theme.surface)),
                 DEPTH,
                 btn_radius,
                 ORDER_ROW_BG + 1,
@@ -1611,7 +1655,7 @@ impl GitDiffPanel {
             menu_y,
             menu_w,
             menu_h,
-            theme.f32(theme.surface),
+            git_background_opacity(theme.f32(theme.surface)),
             [radius, radius, radius, radius],
             DEPTH,
             ORDER_MENU_BG,
@@ -1643,7 +1687,7 @@ impl GitDiffPanel {
             search_y,
             search_w,
             search_h,
-            theme.f32(theme.bg),
+            git_background_opacity(theme.f32(theme.bg)),
             DEPTH,
             search_radius,
             ORDER_MENU_ROW,
@@ -1725,7 +1769,7 @@ impl GitDiffPanel {
                     ry,
                     (menu_w - 6.0 * s).max(0.0),
                     row_h,
-                    theme.f32(theme.hover),
+                    git_background_opacity(theme.f32(theme.hover)),
                     DEPTH,
                     4.0 * s,
                     ORDER_MENU_ROW,
@@ -1820,5 +1864,53 @@ pub(super) fn split_path(path: &str) -> (&str, &str) {
     match path.rfind('/') {
         Some(i) => (&path[i + 1..], &path[..i + 1]),
         None => (path, ""),
+    }
+}
+
+// `git` remains the native theme selector; `git-sidebar` owns panel material.
+// Never substitute the root background RGB for a row/button state color.
+fn git_background_opacity(color: [f32; 4]) -> [f32; 4] {
+    crate::customization::apply_background_opacity(
+        &crate::primitives::surface_background::style("git-sidebar"),
+        color,
+    )
+}
+
+// A filled focus/border backing would seal the material underneath its child.
+// Keep the historical call exactly when opaque, otherwise paint only its ring.
+#[allow(clippy::too_many_arguments)]
+fn git_border_backing(
+    sugarloaf: &mut Sugarloaf,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    color: [f32; 4],
+    depth: f32,
+    radius: f32,
+    order: u8,
+    inset: f32,
+) {
+    if crate::customization::background_opacity(
+        &crate::primitives::surface_background::style("git-sidebar"),
+    ) >= 1.0
+    {
+        sugarloaf.rounded_rect(None, x, y, w, h, color, depth, radius, order);
+    } else {
+        crate::widgets::frame::draw_background_border(
+            sugarloaf,
+            [x, y, w, h],
+            [
+                x + inset,
+                y + inset,
+                (w - 2.0 * inset).max(0.0),
+                (h - 2.0 * inset).max(0.0),
+            ],
+            [radius; 4],
+            [(radius - inset).max(0.0); 4],
+            color,
+            depth,
+            order,
+        );
     }
 }

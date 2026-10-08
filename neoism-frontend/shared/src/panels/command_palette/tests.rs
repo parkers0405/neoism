@@ -2272,3 +2272,237 @@ fn workspace_move_feedback_lifecycle() {
     palette.set_enabled(false);
     assert!(palette.workspace_move_status().is_some());
 }
+
+fn background_entries() -> Vec<super::PaletteBackgroundEntry> {
+    [
+        ("inherit", "Inherit", "Pack wallpaper", None),
+        ("none", "None", "Disable images", None),
+        (
+            "forest",
+            "Forest",
+            "Green trees",
+            Some("/unused/forest.png"),
+        ),
+    ]
+    .into_iter()
+    .map(
+        |(id, name, description, path)| super::PaletteBackgroundEntry {
+            id: id.into(),
+            name: name.into(),
+            description: description.into(),
+            path: path.map(str::to_owned),
+            opacity: 0.7,
+        },
+    )
+    .collect()
+}
+
+#[test]
+fn backgrounds_mode_resets_cursor_filters_and_returns_owned_selection() {
+    let mut palette = CommandPalette::new();
+    palette.set_query("previous long command 🎨".into());
+    palette.enter_backgrounds_mode(background_entries());
+    assert!(palette.is_enabled());
+    assert!(palette.is_backgrounds_mode());
+    assert!(palette.is_appearance_picker());
+    assert_eq!(palette.query_cursor(), 0);
+    assert_eq!(palette.selected_background().unwrap().id, "inherit");
+    palette.move_selection_down();
+    assert_eq!(palette.selected_background().unwrap().id, "none");
+    palette.insert_query_text("trees");
+    assert_eq!(palette.selected_index, 0);
+    let mut selected = palette.selected_background().unwrap();
+    assert_eq!(selected.id, "forest");
+    selected.name.clear();
+    assert_eq!(palette.selected_background().unwrap().name, "Forest");
+    palette.set_enabled(false);
+    assert_eq!(palette.selected_background().unwrap().id, "forest");
+    palette.enter_backgrounds_mode(background_entries());
+    assert!(palette.query.is_empty());
+    assert_eq!(palette.query_cursor(), 0);
+    palette.insert_query_text("no such background");
+    assert!(palette.selected_background().is_none());
+    palette.enter_themes_mode(vec!["pastel_dark".into()]);
+    assert!(!palette.is_backgrounds_mode());
+    assert!(palette.selected_background().is_none());
+}
+
+#[test]
+fn backgrounds_native_only_capability() {
+    use super::actions::command_visible_for_host;
+    assert!(command_visible_for_host(
+        &PaletteAction::ListBackgrounds,
+        super::PaletteHostCapabilities::all()
+    ));
+    assert!(!command_visible_for_host(
+        &PaletteAction::ListBackgrounds,
+        super::PaletteHostCapabilities::web()
+    ));
+}
+
+#[test]
+fn backgrounds_split_geometry_matches_themes() {
+    let mut palette = CommandPalette::new();
+    palette.enter_themes_mode(vec!["pastel_dark".into(); 3]);
+    let theme_rect = palette.active_visual_rect(1200.0, 1.0);
+    palette.enter_backgrounds_mode(background_entries());
+    assert_eq!(palette.active_visual_rect(1200.0, 1.0), theme_rect);
+    palette.enter_backgrounds_mode(Vec::new());
+    assert!(palette.selected_background().is_none());
+}
+
+#[test]
+fn backgrounds_named_action_intent() {
+    assert_eq!(
+        PaletteAction::from_named_action("backgrounds:pick"),
+        Some(PaletteAction::ListBackgrounds)
+    );
+    assert_eq!(
+        PaletteAction::from_named_action("backgrounds:unknown"),
+        None
+    );
+}
+
+#[test]
+fn background_preview_is_not_a_click_target_and_narrow_mode_uses_full_list() {
+    let mut palette = CommandPalette::new();
+    palette.enter_backgrounds_mode(background_entries());
+    for width in [600.0, 1200.0] {
+        let (x, y, w, _) = palette.palette_rect(width, 1.0);
+        let inset = crate::panels::file_tree::FRAME_STROKE.max(2.0);
+        let list = palette.appearance_list_width(w - 2.0 * inset).unwrap();
+        let result_y =
+            y + inset + palette.input_band_height + super::SEPARATOR_HEIGHT + 16.0;
+        assert_eq!(
+            palette.hit_test(x + inset + list + 2.0, result_y, width, 1.0),
+            Ok(None)
+        );
+        assert_eq!(
+            palette.hit_test(x + inset + 10.0, result_y, width, 1.0),
+            Ok(Some(0))
+        );
+    }
+    let (x, y, w, _) = palette.palette_rect(500.0, 1.0);
+    assert!(palette.appearance_list_width(w - 4.0).is_none());
+    assert_eq!(
+        palette.hit_test(
+            x + w - 10.0,
+            y + 2.0 + palette.input_band_height + super::SEPARATOR_HEIGHT + 16.0,
+            500.0,
+            1.0
+        ),
+        Ok(Some(0))
+    );
+}
+
+#[test]
+fn single_background_reserves_full_split_preview_without_clickable_empty_rows() {
+    let mut palette = CommandPalette::new();
+    palette.enter_backgrounds_mode(vec![background_entries().pop().unwrap()]);
+    let (x, y, w, h) = palette.palette_rect(1200.0, 1.0);
+    let inset = crate::panels::file_tree::FRAME_STROKE.max(2.0);
+    assert_eq!(palette.visible_row_count(), 1);
+    assert_eq!(
+        palette.result_band_row_count(w - inset * 2.0),
+        super::MAX_VISIBLE_RESULTS
+    );
+    let preview_height =
+        h - inset * 2.0 - palette.input_band_height - super::SEPARATOR_HEIGHT - 10.0;
+    assert!(
+        preview_height >= 120.0,
+        "one real result must still fit the preview card"
+    );
+    let (_, empty_y) = palette.row_center_coords(1, 1200.0, 1.0);
+    assert!(empty_y < y + h);
+    assert_eq!(
+        palette.hit_test(x + inset + 10.0, empty_y, 1200.0, 1.0),
+        Ok(None)
+    );
+}
+
+#[test]
+fn all_split_appearance_modes_keep_height_while_filtering_to_one_match() {
+    for mode in ["themes", "mashups", "backgrounds"] {
+        let mut palette = CommandPalette::new();
+        match mode {
+            "themes" => palette.enter_themes_mode(vec![
+                "Forest".into(),
+                "Ocean".into(),
+                "Desert".into(),
+            ]),
+            "mashups" => palette.enter_mashups_mode(
+                ["Forest", "Ocean", "Desert"]
+                    .into_iter()
+                    .map(|name| super::PaletteMashupEntry {
+                        id: Some(name.into()),
+                        name: name.into(),
+                        detail: String::new(),
+                        theme: None,
+                        shader_overlay: None,
+                        font_family: None,
+                    })
+                    .collect(),
+            ),
+            _ => palette.enter_backgrounds_mode(background_entries()),
+        }
+        let original = palette.palette_rect(1200.0, 1.0);
+        palette.set_query("Forest".into());
+        assert_eq!(palette.visible_row_count(), 1, "{mode}");
+        assert_eq!(palette.palette_rect(1200.0, 1.0), original, "{mode}");
+        palette.set_query("zzzz-no-match".into());
+        assert_eq!(palette.visible_row_count(), 0, "{mode}");
+        assert_eq!(palette.result_band_row_count(800.0), 0, "{mode}");
+        assert!(palette.palette_rect(1200.0, 1.0).3 < original.3, "{mode}");
+        assert!(palette.selected_background().is_none());
+    }
+}
+
+#[test]
+fn narrow_appearance_picker_retains_natural_result_height() {
+    let mut palette = CommandPalette::new();
+    palette.enter_backgrounds_mode(background_entries());
+    let before = palette.palette_rect(500.0, 1.0);
+    palette.set_query("Forest".into());
+    let after = palette.palette_rect(500.0, 1.0);
+    assert_eq!(palette.visible_row_count(), 1);
+    assert_eq!(palette.result_band_row_count(after.2 - 4.0), 1);
+    assert_eq!(before.3 - after.3, 2.0 * super::RESULT_ITEM_HEIGHT);
+    let (x, y) = palette.row_center_coords(1, 500.0, 1.0);
+    assert_ne!(palette.hit_test(x, y, 500.0, 1.0), Ok(Some(1)));
+}
+
+#[test]
+fn short_appearance_viewport_clamps_body_hits_and_selection_scroll() {
+    let mut palette = CommandPalette::new();
+    palette.enter_themes_mode((0..12).map(|i| format!("theme_{i:02}")).collect());
+    let inset = crate::panels::file_tree::FRAME_STROKE.max(2.0);
+    let fixed = inset * 2.0
+        + palette.input_band_height
+        + super::SEPARATOR_HEIGHT
+        + super::RESULTS_PADDING_BOTTOM;
+    palette.viewport_height =
+        palette.top_anchor + 8.0 + fixed + 2.0 * super::RESULT_ITEM_HEIGHT + 0.5;
+    assert_eq!(palette.viewport_row_limit(), 2);
+    let (_, y, w, h) = palette.palette_rect(1200.0, 1.0);
+    assert_eq!(palette.result_band_row_count(w - inset * 2.0), 2);
+    assert_eq!(palette.visible_row_count(), 2);
+    assert!(y + h <= palette.viewport_height - 8.0);
+    // Bottom padding is not a third row, even when more real matches exist.
+    let (x, _) = palette.row_center_coords(0, 1200.0, 1.0);
+    assert_eq!(
+        palette.hit_test(x, y + h - inset - 0.5, 1200.0, 1.0),
+        Ok(None)
+    );
+    palette.move_selection_down();
+    palette.move_selection_down();
+    assert!(palette.scroll_offset > 0);
+    assert!(palette.selected_index < palette.scroll_offset + 2);
+    palette.set_query("theme_00".into());
+    assert_eq!(palette.visible_row_count(), 1);
+    assert_eq!(palette.palette_rect(1200.0, 1.0).3, h);
+    palette.viewport_height -= 2.0 * super::RESULT_ITEM_HEIGHT;
+    assert_eq!(palette.viewport_row_limit(), 0);
+    assert_eq!(palette.result_band_row_count(w - inset * 2.0), 0);
+    let (x, y) = palette.row_center_coords(0, 1200.0, 1.0);
+    assert_ne!(palette.hit_test(x, y, 1200.0, 1.0), Ok(Some(0)));
+}

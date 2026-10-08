@@ -9,6 +9,162 @@ use super::read_group::read_tool_group_at;
 use super::*;
 
 #[test]
+fn following_activity_pins_despite_positive_lag_and_reserves_body_once() {
+    for s in [0.75, 1.0, 1.5, 2.0] {
+        for primary in [1, 2, 5] {
+            for (queued, background) in [(0, 0), (1, 0), (0, 1), (3, 4)] {
+                let status_h = STREAMING_STATUS_LINE_H
+                    * s
+                    * streaming_status_line_count(primary, queued, background) as f32;
+                let rect = [21.0, 73.0, 440.0 * s, 500.0 * s];
+                let gap = 18.0 * s;
+                let real_h = 1800.0 * s;
+                let base = super::render::activity_geometry(
+                    rect, real_h, status_h, gap, s, true, 0.0,
+                );
+                let max_scroll = base.content_h - rect[3];
+                assert_eq!(base.content_h, real_h + gap + 4.0 * s + status_h + 14.0 * s);
+                for lag in [0.0, 12.0 * s, 150.0 * s, 600.0 * s] {
+                    let scroll = max_scroll - lag;
+                    let g = super::render::activity_geometry(
+                        rect, real_h, status_h, gap, s, true, scroll,
+                    );
+                    assert_eq!(
+                        g.status_rect, base.status_rect,
+                        "lag must not move pinned activity"
+                    );
+                    let ink_top = g.status_rect[1] - 4.0 * s;
+                    let ink_bottom = g.status_rect[1] + status_h + 14.0 * s;
+                    assert!(ink_top >= rect[1]);
+                    assert!((ink_bottom - (rect[1] + rect[3])).abs() < 0.001);
+                    assert!(g.body_clip[1] + g.body_clip[3] <= ink_top);
+                    // Pinning actually moves the word into view, rather than
+                    // leaving it below the composer and merely hiding its ink.
+                    assert!(g.status_rect[1] < rect[1] + rect[3]);
+                    let tail_y = rect[1] + real_h - scroll;
+                    if lag == 0.0 {
+                        assert!(
+                            (tail_y - (g.body_clip[1] + g.body_clip[3])).abs() < 0.001
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn following_activity_short_viewport_bounds_primary_and_clips_children() {
+    for s in [0.75, 1.0, 2.0] {
+        for height in [0.0, 2.0, 18.0, 45.0, 90.0] {
+            let rect = [21.0, 73.0, 240.0 * s, height * s];
+            let status_h = STREAMING_STATUS_LINE_H * s * 8.0;
+            let g = super::render::activity_geometry(
+                rect,
+                1800.0,
+                status_h,
+                18.0 * s,
+                s,
+                true,
+                500.0,
+            );
+            assert!(g.status_rect[1] >= rect[1]);
+            assert!(g.status_rect[1] <= rect[1] + rect[3]);
+            assert!(g.status_rect[1] + g.status_rect[3] <= rect[1] + rect[3]);
+            assert_eq!(g.body_clip[3], 0.0);
+            // All paint is clipped to the current timeline rect, whose bottom
+            // is the actual input-card top; oversized queues never enlarge it.
+            let clipped_bottom =
+                (g.status_rect[1] + status_h + 14.0 * s).min(rect[1] + rect[3]);
+            assert!(clipped_bottom <= rect[1] + rect[3]);
+            if height >= 18.0 {
+                assert!(g.status_rect[1] < rect[1] + rect[3]);
+            }
+        }
+    }
+}
+
+#[test]
+fn activity_uses_current_viewport_and_never_intersects_resized_composer() {
+    for s in [0.75, 1.0, 2.0] {
+        // Simulate composer wrapping upward and pane resize/reposition. There
+        // must be no cached/global bottom edge in activity placement.
+        for (top, composer_top) in [(73.0, 700.0), (120.0, 360.0), (190.0, 240.0)] {
+            let input = [21.0, composer_top, 440.0 * s, 120.0 * s];
+            let viewport = [input[0], top, input[2], composer_top - top];
+            let status_h =
+                STREAMING_STATUS_LINE_H * s * streaming_status_line_count(3, 1, 2) as f32;
+            let g = super::render::activity_geometry(
+                viewport,
+                1800.0,
+                status_h,
+                18.0 * s,
+                s,
+                true,
+                500.0,
+            );
+            assert!(g.status_rect[1] >= top);
+            assert!(g.status_rect[1] + g.status_rect[3] <= input[1]);
+            assert!(g.body_clip[1] + g.body_clip[3] <= input[1]);
+            assert!(g.status_rect[1] < input[1], "primary activity must be positioned above the card, not just clipped away");
+        }
+    }
+}
+
+#[test]
+fn browsing_activity_remains_tail_attached_and_can_be_offscreen() {
+    let rect = [21.0, 73.0, 440.0, 500.0];
+    let a = super::render::activity_geometry(rect, 1800.0, 72.0, 18.0, 1.0, false, 200.0);
+    let b = super::render::activity_geometry(rect, 1800.0, 72.0, 18.0, 1.0, false, 500.0);
+    assert_eq!(a.status_rect[1] - b.status_rect[1], 300.0);
+    assert!(b.status_rect[1] > rect[1] + rect[3]);
+    assert_eq!(a.body_clip, rect);
+    assert_eq!(b.body_clip, rect);
+    let no_activity =
+        super::render::activity_geometry(rect, 1800.0, 0.0, 18.0, 1.0, true, 500.0);
+    assert_eq!(no_activity.content_h, 1800.0);
+    assert_eq!(no_activity.body_clip, rect);
+}
+
+#[test]
+fn wrapped_activity_primary_lines_and_children_fit_the_reserved_block() {
+    use super::super::user_input::streaming_status_primary_y;
+    for s in [0.75, 1.0, 1.5, 2.0] {
+        let line_h = STREAMING_STATUS_LINE_H * s;
+        for primary in [1, 2, 5] {
+            let top = 73.0;
+            let last = streaming_status_primary_y(top, primary, line_h);
+            for ix in 0..primary {
+                let row_y = last - (primary - 1 - ix) as f32 * line_h;
+                assert!((row_y - (top + ix as f32 * line_h)).abs() < 0.001);
+                assert!(row_y >= top);
+                // ±3.2px wave + far 3.5px echo fits in the reserved ink
+                // envelope, even with the 14px fallback font.
+                let glyph_top = row_y + (line_h - 14.0 * s) * 0.5;
+                assert!(glyph_top - 3.2 * s >= top - 4.0 * s);
+                assert!(
+                    glyph_top + 14.0 * s + 6.7 * s
+                        <= top + primary as f32 * line_h + 14.0 * s
+                );
+            }
+            for (queue, bg) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                let lines = streaming_status_line_count(primary, queue, bg);
+                if queue > 0 {
+                    let queue_top = top + primary as f32 * line_h;
+                    assert!(queue_top > last);
+                    assert!(queue_top + line_h <= top + lines as f32 * line_h);
+                }
+                if bg > 0 {
+                    let bg_top = top + (primary + usize::from(queue > 0)) as f32 * line_h;
+                    assert!(bg_top > last);
+                    assert_eq!(bg_top + line_h, top + lines as f32 * line_h);
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn streaming_status_reserves_every_visible_child_line() {
     assert_eq!(streaming_status_line_count(1, 0, 0), 1);
     assert_eq!(streaming_status_line_count(2, 0, 0), 2);

@@ -577,8 +577,24 @@ impl VulkanRenderer {
         }
     }
 
+    /// Reserve the shared buffer before recording any image-layer draws.
+    pub fn reserve_image_instances(&mut self, slot: usize, total_needed: usize) {
+        let stride = std::mem::size_of::<ImageInstance>();
+        if total_needed > self.image_instance_capacity[slot] {
+            let new_cap = total_needed.next_power_of_two().max(16);
+            self.image_instance_buffers[slot] = Some(allocate_host_visible_buffer_raw(
+                &self.device,
+                &self.instance,
+                self.physical_device,
+                (new_cap * stride) as u64,
+                vk::BufferUsageFlags::VERTEX_BUFFER,
+            ));
+            self.image_instance_capacity[slot] = new_cap;
+        }
+    }
+
     /// Draw a batch of image overlays (kitty / sixel placements) for
-    /// one layer (BelowText or AboveText). Each `(descriptor_set,
+    /// one layer (BelowText, AboveText, or LateOverlay). Each `(descriptor_set,
     /// instance)` pair is one image placement — caller has resolved
     /// the per-image descriptor set ahead of time. Writes all
     /// instances into the per-slot ring buffer in order, then issues
@@ -592,9 +608,9 @@ impl VulkanRenderer {
     /// command buffer, writing their instance data into the
     /// per-slot vertex buffer starting at `start_index`.
     ///
-    /// `start_index` lets the caller make two separate calls
-    /// per frame (one for `BelowText`, one for `AboveText`)
-    /// without each clobbering the other's instance data — a
+    /// `start_index` lets the caller make separate calls per frame for
+    /// BelowText, AboveText, and LateOverlay without clobbering one another's
+    /// instance data — a
     /// bug that surfaced as splash letter 0 (`n`) sampling
     /// agent-icon position/size whenever both an agent CLI
     /// AND the splash were active in the same frame.
@@ -633,17 +649,7 @@ impl VulkanRenderer {
         let count = draws.len();
         let stride = std::mem::size_of::<ImageInstance>();
         let total_needed = start_index + count;
-        if total_needed > self.image_instance_capacity[slot] {
-            let new_cap = total_needed.next_power_of_two().max(16);
-            self.image_instance_buffers[slot] = Some(allocate_host_visible_buffer_raw(
-                &self.device,
-                &self.instance,
-                self.physical_device,
-                (new_cap * stride) as u64,
-                vk::BufferUsageFlags::VERTEX_BUFFER,
-            ));
-            self.image_instance_capacity[slot] = new_cap;
-        }
+        self.reserve_image_instances(slot, total_needed);
         let buf = self.image_instance_buffers[slot].as_ref().unwrap();
         unsafe {
             // Write instances at offsets [start_index .. start_index + count].

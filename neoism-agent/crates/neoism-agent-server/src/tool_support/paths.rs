@@ -161,11 +161,3 @@ pub(super) fn external_directory_pattern(path: &Path, directory: bool) -> String
     };
     format!("{}/*", dir.display())
 }
-
-pub(super) fn truncate_line(line: &str) -> String {
-    const MAX: usize = 2000;
-    if line.chars().count() <= MAX {
-        return line.to_string();
-    }
-    line.chars().take(MAX).collect::<String>() + "..."
-}

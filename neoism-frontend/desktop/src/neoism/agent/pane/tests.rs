@@ -639,6 +639,31 @@ fn retry_reset_wipes_partial_text_so_restreams_do_not_double() {
 }
 
 #[test]
+fn generated_image_hydration_updates_the_existing_assistant_card() {
+    let mut pane = NeoismAgentPane::default();
+    let mut message = NeoismAgentMessage::assistant("").with_id("part-image");
+    message
+        .images
+        .push(neoism_ui::panels::agent_pane::state::NeoismAgentImage {
+            filename: "generated-image.jpg".to_string(),
+            url: "/v2/artifacts/art-image/content".to_string(),
+            mime: "image/jpeg".to_string(),
+        });
+    pane.upsert_part_message(message.clone());
+    pane.retry_reset_pending = true;
+
+    message.images[0].url = "data:image/jpeg;base64,aW1hZ2U=".to_string();
+    pane.upsert_part_message(message.clone());
+
+    assert_eq!(pane.messages.len(), 1);
+    assert_eq!(pane.messages[0].images, message.images);
+    assert!(
+        pane.retry_reset_pending,
+        "images must not consume a text retry reset"
+    );
+}
+
+#[test]
 fn late_empty_snapshot_without_retry_never_regresses_streamed_text() {
     let mut pane = NeoismAgentPane::default();
     pane.apply_part_delta(
@@ -5029,7 +5054,7 @@ fn markdown_horizontal_scroll_is_block_local_and_geometry_is_frame_local() {
 fn timeline_growth_preserves_reader_position_when_scrolled_up() {
     let mut pane = NeoismAgentPane::default();
     pane.set_timeline_metrics([10.0, 100.0, 400.0, 300.0], 900.0, 300.0);
-    pane.timeline_scroll_px = 200.0;
+    assert!(pane.scroll_timeline_pixels(200.0));
 
     pane.set_timeline_metrics([10.0, 100.0, 400.0, 300.0], 1100.0, 300.0);
 
@@ -5374,10 +5399,13 @@ fn timeline_growth_keeps_following_stream_at_bottom() {
     let mut pane = NeoismAgentPane::default();
     pane.set_timeline_metrics([10.0, 100.0, 400.0, 300.0], 900.0, 300.0);
     pane.timeline_scroll_px = 0.0;
+    pane.apply_part_delta(None, None, Some("text".into()), "live");
 
     pane.set_timeline_metrics([10.0, 100.0, 400.0, 300.0], 1100.0, 300.0);
 
-    assert_eq!(pane.timeline_scroll_offset(), 0.0);
+    assert_eq!(pane.timeline_scroll_offset(), 200.0);
+    assert!(pane.timeline_follow_bottom);
+    assert_eq!(pane.timeline_wheel_target_px, Some(0.0));
 }
 
 #[test]
@@ -5398,9 +5426,12 @@ fn returning_to_timeline_bottom_restores_following() {
 
     assert!(pane.scroll_timeline_pixels(100.0));
     assert!(pane.scroll_timeline_pixels(-100.0));
+    pane.apply_part_delta(None, None, Some("text".into()), "live after returning");
     pane.set_timeline_metrics([10.0, 100.0, 400.0, 300.0], 1000.0, 300.0);
 
-    assert_eq!(pane.timeline_scroll_offset(), 0.0);
+    assert_eq!(pane.timeline_scroll_offset(), 100.0);
+    assert!(pane.timeline_follow_bottom);
+    assert_eq!(pane.timeline_wheel_target_px, Some(0.0));
 }
 
 #[test]
@@ -5850,6 +5881,146 @@ fn tool_motion_live_history_and_selected_body() {
         .is_none());
 }
 
+fn tool_expansion_view_test_pane(id: &str, row_top: f32) -> NeoismAgentPane {
+    use neoism_ui::panels::agent_pane::view::timeline::TimelineLayoutRow;
+    let mut pane = NeoismAgentPane::default();
+    for name in if id.ends_with("..") {
+        vec!["open-read", "open-read-2"]
+    } else {
+        vec!["open-read"]
+    } {
+        let mut message = NeoismAgentMessage::tool(
+            "Read",
+            "output",
+            "completed",
+            "read",
+            NeoismAgentOutputKind::Text,
+            "",
+            Vec::new(),
+        )
+        .with_id(name);
+        message.tool_batch_id = Some("open-batch".into());
+        pane.messages.push(message);
+    }
+    pane.set_timeline_metrics([0.0, 100.0, 400.0, 300.0], 900.0, 300.0);
+    *pane.timeline_layout_cache.borrow_mut() = Some(TimelineLayoutCache {
+        epoch: pane.timeline_layout_epoch,
+        source_len: pane.messages.len(),
+        width_bucket: 0,
+        scale_bucket: 0,
+        gap_bucket: 0,
+        content_height: 900.0,
+        pages: Vec::new(),
+        estimated_prefix_rows: 0,
+        estimated_suffix_start: 1,
+        rows: vec![TimelineLayoutRow {
+            source_index: 0,
+            source_end_index: pane.messages.len(),
+            top: row_top,
+            height: 30.0,
+            display_text: None,
+            display_message: None,
+            markdown_blocks: None,
+            tool_diff_sections: None,
+            is_edit_tool: false,
+        }],
+    });
+    let header_y = (100.0 + row_top - 600.0).max(100.0);
+    pane.register_tool_hit_rect(id.into(), [0.0, header_y, 300.0, 20.0]);
+    pane
+}
+
+#[test]
+fn tool_expansion_settled_and_stable_frames_keep_the_clicked_header() {
+    for (id, row_top) in [
+        ("open-read", 650.0),
+        ("open-read..", 650.0),
+        ("open-read", 590.0),
+        ("open-read..", 590.0),
+    ] {
+        let mut pane = tool_expansion_view_test_pane(id, row_top);
+        let header_y = (100.0 + row_top - 600.0).max(100.0);
+        assert!(pane.toggle_tool_at(10.0, header_y + 5.0));
+        assert!(!pane.timeline_follow_bottom);
+        let screen_offset = pane.timeline_view_anchor.as_ref().unwrap().screen_offset;
+        assert_eq!(screen_offset, row_top - 600.0);
+        for height in [940.0, 1000.0] {
+            pane.set_timeline_metrics([0.0, 100.0, 400.0, 300.0], height, 300.0);
+            pane.restore_timeline_view_anchor(row_top, screen_offset);
+            assert_eq!(
+                pane.max_timeline_scroll() - pane.timeline_scroll_offset(),
+                600.0
+            );
+        }
+        pane.tool_expand_anims.get_mut(id).unwrap().started_at =
+            Instant::now() - Duration::from_millis(70);
+        assert!(pane.toggle_tool_at(10.0, header_y + 5.0));
+        pane.set_timeline_metrics([0.0, 100.0, 400.0, 300.0], 960.0, 300.0);
+        pane.restore_timeline_view_anchor(row_top, screen_offset);
+        assert_eq!(
+            pane.max_timeline_scroll() - pane.timeline_scroll_offset(),
+            600.0
+        );
+        pane.tool_expand_anims.get_mut(id).unwrap().started_at =
+            Instant::now() - Duration::from_millis(40);
+        assert!(pane.toggle_tool_at(10.0, header_y + 5.0));
+        pane.set_timeline_metrics([0.0, 100.0, 400.0, 300.0], 1020.0, 300.0);
+        pane.restore_timeline_view_anchor(row_top, screen_offset);
+        assert_eq!(
+            pane.max_timeline_scroll() - pane.timeline_scroll_offset(),
+            600.0
+        );
+        pane.tool_expand_anims.get_mut(id).unwrap().started_at =
+            Instant::now() - TOOL_EXPAND_ANIMATION;
+        assert!(pane.take_timeline_dirty_marks().ids.contains("open-read"));
+        pane.set_timeline_metrics([0.0, 100.0, 400.0, 300.0], 1100.0, 300.0);
+        pane.restore_timeline_view_anchor(row_top, screen_offset);
+        assert!(pane.pending_timeline_anchor.is_none());
+        for _ in 0..3 {
+            pane.set_timeline_metrics([0.0, 100.0, 400.0, 300.0], 1100.0, 300.0);
+            assert_eq!(
+                pane.max_timeline_scroll() - pane.timeline_scroll_offset(),
+                600.0
+            );
+            assert!(!pane.timeline_follow_bottom);
+            assert_eq!(pane.timeline_wheel_target_px, None);
+        }
+    }
+}
+
+#[test]
+fn tool_expansion_clears_live_follow_and_keeps_manual_override() {
+    let mut pane = tool_expansion_view_test_pane("open-read", 650.0);
+    pane.timeline_scroll_owner = TimelineScrollOwner::FollowBottom;
+    pane.timeline_wheel_target_px = Some(0.0);
+    pane.timeline_velocity_px_s = -150.0;
+    pane.timeline_last_tick_at = Some(Instant::now());
+    assert!(pane.toggle_tool_at(10.0, 155.0));
+    assert!(!pane.timeline_follow_bottom);
+    assert_eq!(pane.timeline_wheel_target_px, None);
+    assert_eq!(pane.timeline_velocity_px_s, 0.0);
+    assert_eq!(pane.timeline_last_tick_at, None);
+    assert!(!pane.tick_timeline_scroll());
+    pane.set_timeline_metrics([0.0, 100.0, 400.0, 300.0], 980.0, 300.0);
+    assert!(pane.scroll_timeline_pixels(50.0));
+    assert!(pane.pending_timeline_anchor.is_none());
+    pane.tool_expand_anims
+        .get_mut("open-read")
+        .unwrap()
+        .started_at = Instant::now() - TOOL_EXPAND_ANIMATION;
+    pane.take_timeline_dirty_marks();
+    let screen_offset = pane.timeline_view_anchor.as_ref().unwrap().screen_offset;
+    pane.set_timeline_metrics([0.0, 100.0, 400.0, 300.0], 1100.0, 300.0);
+    pane.restore_timeline_view_anchor(650.0, screen_offset);
+    assert_eq!(
+        pane.max_timeline_scroll() - pane.timeline_scroll_offset(),
+        550.0
+    );
+    assert!(!pane.timeline_follow_bottom);
+    assert!(pane.scroll_timeline_pixels(-pane.max_timeline_scroll()));
+    assert!(pane.timeline_follow_bottom);
+}
+
 #[test]
 fn tool_motion_expansion_reversal_preserves_current_progress() {
     let mut pane = NeoismAgentPane::default();
@@ -5954,4 +6125,509 @@ fn tool_motion_settled_source_groups_sample_sharp_without_active_ledger() {
     assert!(sample.outgoing_status.is_none());
     assert!(sample.deadline.is_none());
     assert!(!pane.tool_motion_state().has_active_motion());
+}
+
+// Mirrored in desktop/shared: exercise real pane state with clock-free spring steps.
+fn follow_scroll_apply_test_history(pane: &mut NeoismAgentPane) {
+    pane.event_stream = Some(AgentSessionEventStream::with_updates_for_test(
+        "a",
+        [AgentSessionUpdate::Messages {
+            messages: pane.messages.clone(),
+            oldest_cursor: None,
+        }],
+    ));
+    pane.drain_server_updates();
+}
+
+#[test]
+fn follow_scroll_history_page_refinements_do_not_start_follow_motion() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("a".into());
+    pane.messages = vec![NeoismAgentMessage::assistant("history").with_id("tail")];
+    follow_scroll_apply_test_history(&mut pane);
+    let rect = [0.0, 0.0, 400.0, 300.0];
+    pane.set_timeline_metrics(rect, 700.0, 300.0);
+    pane.timeline_history.loading_older = true;
+    pane.apply_older_timeline_page(
+        "a".into(),
+        vec![NeoismAgentMessage::user("older history").with_id("prefix")],
+        1,
+        64,
+        None,
+        true,
+    );
+    for height in [900.0, 1200.0, 1800.0] {
+        pane.set_timeline_metrics(rect, height, 300.0);
+        assert_eq!(pane.timeline_scroll_offset(), 0.0);
+        assert_eq!(pane.timeline_wheel_target_px, None);
+        assert!(pane.timeline_follow_bottom);
+    }
+}
+
+#[test]
+fn follow_scroll_live_arrival_during_initial_history_fetch_can_overflow() {
+    let mut pane = NeoismAgentPane::default();
+    let rect = [0.0, 0.0, 400.0, 300.0];
+    pane.timeline_history.loading_older = true;
+    pane.set_timeline_metrics(rect, 100.0, 300.0);
+    assert!(!pane.timeline_history_position_hydrated);
+    pane.upsert_part_message(
+        NeoismAgentMessage::assistant("first live reply").with_id("live"),
+    );
+    pane.set_timeline_metrics(rect, 500.0, 300.0);
+    assert_eq!(pane.timeline_scroll_offset(), 200.0);
+    assert_eq!(
+        pane.timeline_scroll_owner,
+        TimelineScrollOwner::FollowBottom
+    );
+    assert!(pane.timeline_follow_bottom);
+}
+
+#[test]
+fn follow_scroll_history_refinements_start_at_bottom_on_every_frame() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("a".into());
+    let rect = [0.0, 0.0, 400.0, 300.0];
+    pane.set_timeline_metrics(rect, 0.0, 300.0);
+    pane.messages = vec![NeoismAgentMessage::assistant("history").with_id("old")];
+    follow_scroll_apply_test_history(&mut pane);
+    for height in [100.0, 500.0, 1400.0, 1300.0, 2400.0] {
+        pane.set_timeline_metrics(rect, height, 300.0);
+        // This is the render.rs first-frame draw coordinate, before any tick.
+        let max_scroll = (height - 300.0_f32).max(0.0);
+        assert_eq!(max_scroll - pane.timeline_scroll_offset(), max_scroll);
+        assert_eq!(pane.timeline_scroll_offset(), 0.0);
+        assert_eq!(pane.timeline_wheel_target_px, None);
+        assert_eq!(pane.timeline_scroll_owner, TimelineScrollOwner::Wheel);
+    }
+    pane.apply_part_delta(Some("old".into()), None, Some("text".into()), " live tail");
+    follow_scroll_apply_test_history(&mut pane); // idle echo before final delta paint
+    pane.set_timeline_metrics(rect, 2500.0, 300.0);
+    assert_eq!(pane.timeline_scroll_offset(), 100.0);
+    assert_eq!(
+        pane.timeline_scroll_owner,
+        TimelineScrollOwner::FollowBottom
+    );
+    assert!(pane.timeline_follow_bottom);
+    // A refresh is history, but may not cancel the final live spring.
+    pane.messages.insert(
+        0,
+        NeoismAgentMessage::user("older history").with_id("older"),
+    );
+    // Deliver a changed snapshot, not an identical echo of the live revision.
+    pane.event_stream = Some(AgentSessionEventStream::with_updates_for_test(
+        "a",
+        [AgentSessionUpdate::Messages {
+            messages: pane.messages.clone(),
+            oldest_cursor: None,
+        }],
+    ));
+    pane.messages.remove(0);
+    pane.drain_server_updates();
+    let lag = pane.timeline_scroll_offset();
+    pane.set_timeline_metrics(rect, 2800.0, 300.0);
+    assert_eq!(pane.timeline_scroll_offset(), lag);
+    for _ in 0..120 {
+        pane.step_owned_timeline_spring(1.0 / 60.0);
+        pane.set_timeline_metrics(rect, 2800.0, 300.0);
+    }
+    assert_eq!(pane.timeline_scroll_offset(), 0.0);
+    assert!(!pane.timeline_is_inertial());
+}
+
+#[test]
+fn follow_scroll_warm_cache_hidden_live_growth_is_history_on_reopen() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("a".into());
+    pane.messages = vec![NeoismAgentMessage::assistant("old").with_id("part")];
+    follow_scroll_apply_test_history(&mut pane);
+    let rect = [0.0, 0.0, 400.0, 300.0];
+    pane.set_timeline_metrics(rect, 900.0, 300.0);
+    pane.apply_part_delta(Some("part".into()), None, Some("text".into()), " live");
+    pane.set_timeline_metrics(rect, 1100.0, 300.0);
+    assert!(pane.timeline_scroll_offset() > 0.0);
+    let mut other = CachedAgentSession::live_only();
+    other.hydrated = true;
+    other.messages = vec![NeoismAgentMessage::assistant("other")];
+    pane.session_cache.insert("b".into(), other);
+    pane.switch_session("b".into());
+    pane.event_stream = Some(AgentSessionEventStream::with_updates_for_test(
+        "b",
+        [AgentSessionUpdate::ChildPartDelta {
+            session_id: "a".into(),
+            message_id: Some("part".into()),
+            part_id: None,
+            kind: Some("text".into()),
+            delta: " hidden tail".into(),
+        }],
+    ));
+    pane.drain_server_updates();
+    pane.switch_session("a".into());
+    assert!(pane.messages[0].text.ends_with("hidden tail"));
+    for height in [100.0, 1200.0, 3200.0, 4000.0] {
+        pane.set_timeline_metrics(rect, height, 300.0);
+        let max_scroll = (height - 300.0_f32).max(0.0);
+        assert_eq!(max_scroll - pane.timeline_scroll_offset(), max_scroll);
+        assert_eq!(pane.timeline_wheel_target_px, None);
+        assert!(!pane.timeline_is_inertial());
+    }
+    pane.scroll_timeline_pixels(150.0);
+    let top = pane.max_timeline_scroll() - pane.timeline_scroll_offset();
+    pane.set_timeline_metrics(rect, 4500.0, 300.0);
+    assert_eq!(
+        pane.max_timeline_scroll() - pane.timeline_scroll_offset(),
+        top
+    );
+    assert!(!pane.timeline_follow_bottom);
+}
+
+fn follow_scroll_test_pane() -> NeoismAgentPane {
+    let mut pane = NeoismAgentPane::default();
+    pane.set_timeline_metrics([0.0, 0.0, 400.0, 300.0], 900.0, 300.0);
+    pane.apply_part_delta(None, None, Some("text".into()), "live");
+    pane.set_timeline_metrics([0.0, 0.0, 400.0, 300.0], 1100.0, 300.0);
+    assert_eq!(pane.timeline_scroll_offset(), 200.0);
+    assert_eq!(
+        pane.timeline_scroll_owner,
+        TimelineScrollOwner::FollowBottom
+    );
+    pane
+}
+
+#[test]
+fn follow_scroll_growth_preserves_absolute_top_velocity_clock_and_latch() {
+    let mut pane = follow_scroll_test_pane();
+    assert_eq!(pane.timeline_wheel_target_px, Some(0.0));
+    let clock = pane.timeline_last_tick_at;
+    pane.step_owned_timeline_spring(1.0 / 60.0);
+    let lag = pane.timeline_scroll_offset();
+    let velocity = pane.timeline_velocity_px_s;
+    assert!(lag > 0.0 && lag < 200.0);
+    assert!(velocity < 0.0);
+    assert!(pane.timeline_follow_bottom);
+    pane.set_timeline_metrics([0.0, 0.0, 400.0, 300.0], 1200.0, 300.0);
+    assert!((pane.timeline_scroll_offset() - lag - 100.0).abs() < 0.001);
+    assert_eq!(pane.timeline_velocity_px_s, velocity);
+    assert_eq!(pane.timeline_last_tick_at, clock);
+    assert_eq!(pane.timeline_wheel_target_px, Some(0.0));
+    assert!(pane.timeline_follow_bottom);
+    assert!(pane.timeline_is_inertial());
+}
+
+#[test]
+fn follow_scroll_established_fit_then_first_overflow_is_not_initial_load() {
+    let mut pane = NeoismAgentPane::default();
+    assert_eq!(pane.timeline_scroll_owner, TimelineScrollOwner::Wheel);
+    pane.set_timeline_metrics([0.0, 0.0, 400.0, 300.0], 200.0, 300.0);
+    assert!(!pane.timeline_is_inertial());
+    pane.apply_part_delta(None, None, Some("text".into()), "live overflow");
+    pane.set_timeline_metrics([0.0, 0.0, 400.0, 300.0], 400.0, 300.0);
+    assert_eq!(pane.timeline_scroll_offset(), 100.0);
+    assert_eq!(
+        pane.timeline_scroll_owner,
+        TimelineScrollOwner::FollowBottom
+    );
+    assert!(pane.timeline_follow_bottom);
+}
+
+#[test]
+fn follow_scroll_large_extent_preserves_fractional_lag_and_settles() {
+    let mut pane = NeoismAgentPane::default();
+    let viewport = [0.0, 0.0, 400.0, 256.0];
+    let height = 67_108_864.0;
+    pane.set_timeline_metrics(viewport, height, 256.0);
+    pane.apply_part_delta(None, None, Some("text".into()), "live");
+    pane.set_timeline_metrics(viewport, height + 128.0, 256.0);
+    assert!(pane.timeline_is_inertial());
+    let mut frames = 0;
+    while pane.timeline_is_inertial() && frames < 120 {
+        pane.step_owned_timeline_spring(1.0 / 60.0);
+        let lag = pane.timeline_scroll_offset();
+        pane.set_timeline_metrics(viewport, height + 128.0, 256.0);
+        assert_eq!(pane.timeline_scroll_offset(), lag);
+        frames += 1;
+    }
+    assert!(
+        frames < 120,
+        "rounding must not keep the follow spring alive"
+    );
+    assert_eq!(pane.timeline_scroll_offset(), 0.0);
+    assert_eq!(pane.timeline_velocity_px_s, 0.0);
+    assert_eq!(pane.timeline_last_tick_at, None);
+}
+
+#[test]
+fn follow_scroll_idle_final_payload_settles_bounded_and_clears_clock() {
+    let mut pane = follow_scroll_test_pane();
+    // No streaming qualification: the final payload/status removal can precede paint.
+    let mut frames = 0;
+    while pane.timeline_is_inertial() && frames < 120 {
+        pane.step_owned_timeline_spring(1.0 / 60.0);
+        pane.set_timeline_metrics([0.0, 0.0, 400.0, 300.0], 1100.0, 300.0);
+        assert!(pane.timeline_follow_bottom);
+        frames += 1;
+    }
+    assert!(frames < 120);
+    assert_eq!(pane.timeline_scroll_offset(), 0.0);
+    assert_eq!(pane.timeline_velocity_px_s, 0.0);
+    assert_eq!(pane.timeline_wheel_target_px, None);
+    assert_eq!(pane.timeline_last_tick_at, None);
+    assert_eq!(pane.timeline_scroll_owner, TimelineScrollOwner::Wheel);
+    assert!(!pane.tick_timeline_scroll());
+}
+
+#[test]
+fn follow_scroll_pixel_halfpage_wheel_and_selection_interrupt() {
+    for input in 0..4 {
+        let mut pane = follow_scroll_test_pane();
+        pane.step_owned_timeline_spring(1.0 / 60.0);
+        let before = pane.timeline_scroll_offset();
+        match input {
+            0 => {
+                assert!(pane.scroll_timeline_pixels(10.0));
+            }
+            1 => {
+                assert!(pane.scroll_timeline_half_page(true));
+            }
+            2 => {
+                assert!(pane.scroll_timeline_wheel_pixels(10.0));
+                assert!(
+                    (pane.timeline_wheel_target_px.unwrap() - before - 10.0).abs()
+                        < 0.001
+                );
+                assert_eq!(pane.timeline_velocity_px_s, 0.0);
+            }
+            _ => {
+                assert!(pane.scroll_for_drag_edge(0.0));
+            }
+        }
+        assert_eq!(pane.timeline_scroll_owner, TimelineScrollOwner::Wheel);
+        assert!(!pane.timeline_follow_bottom);
+        let old = pane.timeline_scroll_offset();
+        pane.set_timeline_metrics([0.0, 0.0, 400.0, 300.0], 1200.0, 300.0);
+        assert!((pane.timeline_scroll_offset() - old - 100.0).abs() < 0.001);
+        assert!(!pane.timeline_follow_bottom);
+    }
+}
+
+#[test]
+fn follow_scroll_negative_manual_wheel_does_not_keep_automatic_ownership() {
+    let mut pane = follow_scroll_test_pane();
+    assert!(pane.scroll_timeline_wheel_pixels(-10.0));
+    assert_eq!(pane.timeline_wheel_target_px, Some(190.0));
+    assert_eq!(pane.timeline_scroll_owner, TimelineScrollOwner::Wheel);
+    assert!(!pane.timeline_follow_bottom);
+    pane.set_timeline_metrics([0.0, 0.0, 400.0, 300.0], 1200.0, 300.0);
+    assert_eq!(pane.timeline_scroll_offset(), 300.0);
+    assert_eq!(pane.timeline_wheel_target_px, Some(290.0));
+}
+
+#[test]
+fn follow_scroll_initial_session_reset_and_historical_position_are_immediate() {
+    let mut pane = NeoismAgentPane::default();
+    pane.set_timeline_metrics([0.0, 0.0, 400.0, 300.0], 1100.0, 300.0);
+    assert_eq!(pane.timeline_scroll_offset(), 0.0);
+    assert!(!pane.timeline_is_inertial());
+    pane.apply_part_delta(None, None, Some("text".into()), "live");
+    pane.set_timeline_metrics([0.0, 0.0, 400.0, 300.0], 1200.0, 300.0);
+    assert!(pane.timeline_is_inertial());
+    pane.reset_timeline_navigation_for_session_switch();
+    pane.timeline_scroll_px = 250.0;
+    pane.timeline_follow_bottom = false;
+    pane.set_timeline_metrics([0.0, 0.0, 400.0, 300.0], 1200.0, 300.0);
+    assert_eq!(pane.timeline_scroll_offset(), 250.0);
+    assert!(!pane.timeline_is_inertial());
+    assert_eq!(pane.timeline_last_tick_at, None);
+    pane.reset_timeline_navigation_for_session_switch();
+    pane.timeline_scroll_px = 0.0;
+    pane.timeline_follow_bottom = true;
+    pane.set_timeline_metrics([0.0, 0.0, 400.0, 300.0], 1500.0, 300.0);
+    assert_eq!(pane.timeline_scroll_offset(), 0.0);
+    assert!(!pane.timeline_is_inertial());
+}
+
+#[test]
+fn follow_scroll_shrink_status_removal_resize_and_zero_range_are_valid() {
+    let mut pane = follow_scroll_test_pane();
+    pane.step_owned_timeline_spring(1.0 / 60.0);
+    let top = pane.max_timeline_scroll() - pane.timeline_scroll_offset();
+    // Remove the final status row while idle, then enlarge the viewport.
+    pane.set_timeline_metrics([0.0, 0.0, 400.0, 300.0], 1070.0, 300.0);
+    assert!(
+        (pane.max_timeline_scroll() - pane.timeline_scroll_offset() - top).abs() < 0.001
+    );
+    assert_eq!(pane.timeline_wheel_target_px, Some(0.0));
+    pane.set_timeline_metrics([0.0, 0.0, 400.0, 500.0], 1070.0, 500.0);
+    assert_eq!(pane.timeline_scroll_offset(), 0.0);
+    assert!(!pane.timeline_is_inertial());
+    assert!(pane.timeline_follow_bottom);
+    pane.apply_part_delta(None, None, Some("text".into()), "live after resize");
+    pane.set_timeline_metrics([0.0, 0.0, 400.0, 500.0], 1200.0, 500.0);
+    assert!(pane.timeline_is_inertial());
+    pane.set_timeline_metrics([0.0, 0.0, 400.0, 500.0], 100.0, 500.0);
+    assert_eq!(pane.timeline_scroll_offset(), 0.0);
+    assert_eq!(pane.timeline_last_tick_at, None);
+    assert_eq!(pane.timeline_wheel_target_px, None);
+    assert!(!pane.timeline_is_inertial());
+}
+
+#[test]
+fn follow_scroll_prepend_and_logical_anchor_take_priority() {
+    let mut pane = follow_scroll_test_pane();
+    pane.pending_timeline_prepend_delta_px = Some(100.0);
+    pane.set_timeline_metrics([0.0, 0.0, 400.0, 300.0], 1200.0, 300.0);
+    assert_eq!(pane.timeline_scroll_offset(), 200.0);
+    assert_eq!(pane.timeline_scroll_owner, TimelineScrollOwner::Wheel);
+    assert!(!pane.timeline_is_inertial());
+    assert!(!pane.timeline_follow_bottom);
+    let mut pane = follow_scroll_test_pane();
+    pane.pending_timeline_anchor = Some(TimelineAnchor {
+        content_y: 500.0,
+        screen_y: 100.0,
+    });
+    pane.set_timeline_metrics([0.0, 0.0, 400.0, 300.0], 1200.0, 300.0);
+    assert_eq!(pane.timeline_scroll_offset(), 500.0);
+    assert_eq!(pane.timeline_scroll_owner, TimelineScrollOwner::Wheel);
+    assert!(!pane.timeline_is_inertial());
+}
+
+#[test]
+fn follow_scroll_animation_optout_snaps_follow_but_preserves_manual_motion() {
+    let mut pane = follow_scroll_test_pane();
+    pane.set_text_reveal_enabled(false);
+    assert_eq!(pane.timeline_scroll_offset(), 0.0);
+    assert!(pane.timeline_follow_bottom);
+    assert!(!pane.timeline_is_inertial());
+    assert_eq!(pane.timeline_last_tick_at, None);
+    pane.set_timeline_metrics([0.0, 0.0, 400.0, 300.0], 1200.0, 300.0);
+    assert_eq!(pane.timeline_scroll_offset(), 0.0);
+    assert!(!pane.timeline_is_inertial());
+    assert!(pane.scroll_timeline_wheel_pixels(40.0));
+    let target = pane.timeline_wheel_target_px;
+    let clock = pane.timeline_last_tick_at;
+    pane.set_text_reveal_enabled(false);
+    assert_eq!(pane.timeline_wheel_target_px, target);
+    assert_eq!(pane.timeline_last_tick_at, clock);
+    assert!(pane.timeline_is_inertial());
+    pane.set_timeline_metrics([0.0, 0.0, 400.0, 300.0], 1300.0, 300.0);
+    assert_eq!(pane.timeline_wheel_target_px, Some(140.0));
+    assert!(!pane.timeline_follow_bottom);
+}
+
+#[test]
+fn follow_scroll_ticks_and_metrics_do_not_impersonate_history_gestures() {
+    let mut pane = follow_scroll_test_pane();
+    pane.session_id = Some("follow-session".to_string());
+    let timestamp = Instant::now() - std::time::Duration::from_secs(10);
+    pane.timeline_last_scroll_at = Some(timestamp);
+    pane.timeline_history.last_requested_session_id = Some("previous-page".to_string());
+    pane.timeline_last_tick_at =
+        Some(Instant::now() - std::time::Duration::from_millis(16));
+    assert!(pane.tick_timeline_scroll());
+    assert_eq!(pane.timeline_last_scroll_at, Some(timestamp));
+    assert_eq!(
+        pane.timeline_history.last_requested_session_id.as_deref(),
+        Some("previous-page")
+    );
+    pane.set_timeline_metrics([0.0, 0.0, 400.0, 300.0], 1200.0, 300.0);
+    assert_eq!(pane.timeline_last_scroll_at, Some(timestamp));
+    assert_eq!(
+        pane.timeline_history.last_requested_session_id.as_deref(),
+        Some("previous-page")
+    );
+    // A visually lagging follower can be near the top, but isn't a history reader.
+    pane.maybe_request_older_timeline_page(0.0, 300.0);
+    assert!(!pane.timeline_history.loading_older);
+    assert_eq!(
+        pane.timeline_history.last_requested_session_id.as_deref(),
+        Some("previous-page")
+    );
+    assert!(pane.timeline_follow_bottom);
+    // User scrolling still timestamps and releases the history latch as before.
+    assert!(pane.scroll_timeline_wheel_pixels(10.0));
+    assert!(pane.timeline_last_scroll_at.unwrap() > timestamp);
+    assert_eq!(pane.timeline_history.last_requested_session_id, None);
+    pane.maybe_request_older_timeline_page(0.0, 300.0);
+    assert!(pane.timeline_history.loading_older);
+}
+
+#[test]
+fn follow_scroll_scrollbar_drag_and_current_session_jump_are_explicit_overrides() {
+    let mut pane = follow_scroll_test_pane();
+    pane.set_scrollbar_geometry(
+        Some([380.0, 0.0, 10.0, 300.0]),
+        Some([380.0, 100.0, 10.0, 80.0]),
+    );
+    assert!(pane.begin_scrollbar_drag(385.0, 120.0));
+    assert_eq!(pane.timeline_scroll_owner, TimelineScrollOwner::Wheel);
+    assert!(!pane.timeline_follow_bottom);
+    assert!(!pane.timeline_is_inertial());
+    assert_eq!(pane.timeline_last_tick_at, None);
+    let mut pane = follow_scroll_test_pane();
+    pane.session_id = Some("current".to_string());
+    pane.side_panel
+        .set_sessions(vec![NeoismAgentSessionEntry::new("current", "Chat", "now")]);
+    pane.side_panel.set_selected(0);
+    assert_eq!(
+        pane.side_panel
+            .selected_session()
+            .map(|entry| entry.id.as_str()),
+        Some("current")
+    );
+    pane.pending_timeline_anchor = Some(TimelineAnchor {
+        content_y: 500.0,
+        screen_y: 100.0,
+    });
+    pane.activate_side_panel_selection();
+    assert_eq!(pane.timeline_scroll_offset(), 0.0);
+    assert_eq!(pane.timeline_scroll_owner, TimelineScrollOwner::Wheel);
+    assert!(pane.timeline_follow_bottom);
+    assert!(!pane.timeline_is_inertial());
+    assert_eq!(pane.timeline_last_tick_at, None);
+    assert!(pane.pending_timeline_anchor.is_none());
+    pane.set_timeline_metrics([0.0, 0.0, 400.0, 300.0], 1800.0, 300.0);
+    assert_eq!(pane.timeline_scroll_offset(), 0.0);
+    assert_eq!(pane.timeline_wheel_target_px, None);
+}
+
+#[test]
+fn follow_scroll_final_tick_does_not_update_user_timestamp() {
+    let mut pane = follow_scroll_test_pane();
+    pane.timeline_scroll_px = 0.2;
+    pane.timeline_velocity_px_s = -5.0;
+    let timestamp = Instant::now() - std::time::Duration::from_secs(10);
+    pane.timeline_last_scroll_at = Some(timestamp);
+    pane.timeline_last_tick_at =
+        Some(Instant::now() - std::time::Duration::from_millis(16));
+    assert!(pane.tick_timeline_scroll());
+    assert!(!pane.timeline_is_inertial());
+    assert_eq!(pane.timeline_scroll_offset(), 0.0);
+    assert_eq!(pane.timeline_last_scroll_at, Some(timestamp));
+    assert_eq!(pane.timeline_last_tick_at, None);
+}
+
+#[test]
+fn follow_scroll_initial_history_hydration_after_empty_paint_is_immediate() {
+    for live_painted in [false, true] {
+        let mut pane = NeoismAgentPane::default();
+        pane.session_id = Some("session".to_string());
+        pane.set_timeline_metrics([0.0, 0.0, 400.0, 300.0], 100.0, 300.0);
+        if live_painted {
+            pane.messages
+                .push(NeoismAgentMessage::assistant("live").with_id("loaded"));
+        }
+        pane.event_stream = Some(AgentSessionEventStream::with_updates_for_test(
+            "session",
+            [AgentSessionUpdate::Messages {
+                messages: vec![NeoismAgentMessage::assistant("history").with_id("loaded")],
+                oldest_cursor: None,
+            }],
+        ));
+        pane.drain_server_updates();
+        assert_eq!(pane.messages.len(), 1);
+        pane.set_timeline_metrics([0.0, 0.0, 400.0, 300.0], 1100.0, 300.0);
+        assert_eq!(pane.timeline_scroll_offset(), 0.0);
+        assert_eq!(pane.timeline_last_tick_at, None);
+        assert!(!pane.timeline_is_inertial());
+    }
 }

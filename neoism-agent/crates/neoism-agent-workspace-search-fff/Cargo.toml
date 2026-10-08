@@ -9,9 +9,12 @@ repository.workspace = true
 anyhow.workspace = true
 dirs = "6"
 dunce.workspace = true
-fff-search.workspace = true
+fff-search = { workspace = true, features = ["definitions"] }
 git2.workspace = true
 globset.workspace = true
 ignore.workspace = true
 neoism-agent-service-api.workspace = true
+# Same scoring dependency/version/features used by FFF's private fuzzy grep.
+neo_frizbee = { version = "0.11.0", features = ["match_end_col"] }
+rand.workspace = true
 regex.workspace = true

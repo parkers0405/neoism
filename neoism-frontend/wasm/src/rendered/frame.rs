@@ -233,21 +233,12 @@ impl ChromeBridge {
             tabs: &island_tabs,
             active_index: self.active_workspace_island_index(),
         };
-        let strip_h = self.workspace_island_height();
+        neoism_ui::primitives::surface_background::begin_frame(
+            self.chrome.plugin_snapshot_arc(),
+            Vec::new(),
+        );
         if let Some(s) = self.rendered.sugarloaf_mut() {
-            if self.chrome.is_terminal_tab_active() && strip_h > 0.0 {
-                let content = self.chrome.surface_layout().content;
-                s.rect(
-                    None,
-                    content.x,
-                    content.y,
-                    content.w,
-                    strip_h,
-                    theme.f32(theme.surface),
-                    0.0,
-                    2,
-                );
-            }
+            // Island owns its backing; a host prefill would seal translucency.
             self.workspace_island.render(
                 s,
                 (
@@ -260,6 +251,9 @@ impl ChromeBridge {
             );
             self.chrome.draw(s, services, time);
         }
+
+        self.surface_background_animating =
+            neoism_ui::primitives::surface_background::finish_frame();
 
         // The workspace catalog can enqueue a refresh during Chrome paint,
         // including while the active tab is a terminal/editor. Do not wait
@@ -415,6 +409,7 @@ impl ChromeBridge {
             neoism_ui::panels::TopBarAction::StartWebServer => "start_web_server",
             neoism_ui::panels::TopBarAction::ShareWithPhone => "share_with_phone",
             neoism_ui::panels::TopBarAction::OpenThemes => "open_themes",
+            neoism_ui::panels::TopBarAction::OpenBackgrounds => "backgrounds:pick",
             neoism_ui::panels::TopBarAction::OpenExtensions => "open_extensions",
             neoism_ui::panels::TopBarAction::OpenNeoWorld => "open_neoworld",
             neoism_ui::panels::TopBarAction::TogglePanel => "toggle_panel",
@@ -501,5 +496,7 @@ impl ChromeBridge {
 
     pub fn animations_active(&self) -> bool {
         self.chrome.animations_active()
+            || self.workspace_island.needs_redraw()
+            || self.surface_background_animating
     }
 }

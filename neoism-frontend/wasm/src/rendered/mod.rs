@@ -1930,6 +1930,7 @@ pub struct ChromeBridge {
     /// replies without dropping them on older chrome paths.
     editor_surfaces: Vec<EditorSurfaceSummary>,
     workspace_island: Island,
+    surface_background_animating: bool,
     workspace_island_tabs: Vec<WorkspaceIslandTabInput>,
     workspace_island_active_id: Option<String>,
     pending_workspace_island_intents: Vec<WorkspaceIslandIntent>,

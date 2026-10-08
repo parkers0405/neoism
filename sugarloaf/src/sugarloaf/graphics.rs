@@ -118,7 +118,9 @@ pub struct GraphicOverlay {
     /// Display dimensions (physical pixels).
     pub width: f32,
     pub height: f32,
-    /// Z-index for layering.
+    /// Z-index for layering. Negative values draw below text; nonnegative
+    /// values draw above normal content. UI producers may explicitly opt into
+    /// the later modal pass with `LATE_OVERLAY_Z_INDEX`.
     pub z_index: i32,
     /// Source rectangle in normalised texture coordinates `[u0, v0, u1, v1]`.
     /// `[0.0, 0.0, 1.0, 1.0]` (the default) draws the whole image; other
@@ -130,6 +132,21 @@ pub struct GraphicOverlay {
 impl GraphicOverlay {
     /// Default source rect — full image.
     pub const FULL_SOURCE_RECT: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
+
+    /// UI-owned images drawn after late overlay material and before overlay labels.
+    /// External producers must pass raw z values through `external_z_index`.
+    pub const LATE_OVERLAY_Z_INDEX: i32 = i32::MAX;
+
+    /// Reserve the UI sentinel at the external-placement adapter, not in the
+    /// protocol model. Preserve every other z value and the positive sign of
+    /// MAX; adapters must retain their existing raw-placement sorting order.
+    pub const fn external_z_index(z: i32) -> i32 {
+        if z == Self::LATE_OVERLAY_Z_INDEX {
+            z - 1
+        } else {
+            z
+        }
+    }
 }
 
 /// Unique identifier for every graphic added to a grid.

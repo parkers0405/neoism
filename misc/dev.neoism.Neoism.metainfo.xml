@@ -52,6 +52,12 @@
   </categories>
 
   <releases>
+    <release version="0.7.121" date="2026-10-08">
+      <description>
+        <p>Stable workspace search and file-reading improvements, Agent scrolling refinements, and background and panel appearance updates. Experimental Servo runtime remains excluded.</p>
+      </description>
+      <url>https://github.com/parkers0405/neoism/releases/tag/v0.7.121</url>
+    </release>
     <release version="0.7.120" date="2026-10-08">
       <description>
         <p>Stable Agent UI, tool presentation, workspace search, and rendering improvements. Includes the first-terminal directory-following fix; experimental Servo runtime remains excluded.</p>

@@ -70,6 +70,7 @@ impl NeoismAgentPane {
     pub fn set_text_reveal_enabled(&mut self, enabled: bool) {
         self.text_reveal.set_enabled(enabled);
         self.tool_motion.set_enabled(enabled);
+        self.snap_timeline_follow_if_disabled();
         if !enabled && !self.tool_expand_anims.is_empty() {
             self.tool_expand_anims.clear();
             self.invalidate_timeline_layout();
@@ -1209,8 +1210,11 @@ impl NeoismAgentPane {
             content_y: self.content_y_for_screen_y(anchor_screen_y),
             screen_y: anchor_screen_y,
         });
-        self.timeline_velocity_px_s = 0.0;
-        self.timeline_last_tick_at = None;
+        // Opening a tool is reader-owned; don't snap back to the live bottom
+        // when the expansion anchor releases on the final frame.
+        self.timeline_follow_bottom = false;
+        self.clear_timeline_motion();
+        self.timeline_view_anchor = None;
 
         if let Some((group_id, child_id)) = child_target {
             let next = (group_id.to_string(), child_id.to_string());
@@ -1248,10 +1252,28 @@ impl NeoismAgentPane {
                 self.timeline_viewport_rect,
                 TimelineViewAnchorKey::for_source(&self.messages, index),
             ) {
-                self.timeline_view_anchor = Some(TimelineViewAnchor {
-                    key,
-                    screen_offset: rect[1] - viewport[1],
-                });
+                let row_top =
+                    self.timeline_layout_cache
+                        .borrow()
+                        .as_ref()
+                        .and_then(|cache| {
+                            cache
+                                .rows
+                                .iter()
+                                .find(|row| {
+                                    row.source_index <= index
+                                        && index < row.source_end_index
+                                })
+                                .map(|row| row.top)
+                        });
+                // A clipped hit rectangle is not the logical row origin.
+                let screen_offset = row_top
+                    .map(|top| {
+                        top - (self.max_timeline_scroll() - self.timeline_scroll_px)
+                    })
+                    .unwrap_or(rect[1] - viewport[1]);
+                self.timeline_view_anchor =
+                    Some(TimelineViewAnchor { key, screen_offset });
             }
             self.mark_timeline_message_and_next_dirty_at(index);
         } else {

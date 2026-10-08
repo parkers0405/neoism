@@ -53,7 +53,36 @@ Style fields use snake_case and unknown fields are rejected.
 | `animation_ms` | non-negative integer? |
 | `animation_easing`, `icon` | string? |
 
-Selectors inherit from dotted ancestors, broad to specific, while unspecified properties preserve the Rust draw site's default. Stable built-ins are `app`, `chrome.top`, `chrome.bottom`, `buffer-tabs`, `breadcrumbs`, `status`, `status.item`, `composer`, `file-tree`, `file-tree.row`, `file-tree.row.selected`, `file-tree.row.hover`, `file-tree.icon`, `notes-tree`, `notes-tree.row`, `notes-tree.row.selected`, `notes-tree.row.hover`, `notes-tree.icon`, `agent.chat`, `agent.chat.message`, `agent.chat.message.user`, `agent.chat.message.assistant`, `agent.chat.tool`, `agent.chat.tool.result`, `agent.sidebar`, `editor`, `markdown`, `terminal`, `git`, `settings`, `palette`, `finder`, `notification`, and `modal`.
+Selectors inherit from dotted ancestors, broad to specific, while unspecified properties preserve the Rust draw site's default. Stable built-ins are `app`, `chrome.top`, `chrome.bottom`, `buffer-tabs`, `workspace-tabs`, `breadcrumbs`, `status`, `status.item`, `composer`, `file-tree`, `file-tree.row`, `file-tree.row.selected`, `file-tree.row.hover`, `file-tree.icon`, `notes-tree`, `notes-tree.row`, `notes-tree.row.selected`, `notes-tree.row.hover`, `notes-tree.icon`, `agent.chat`, `agent.chat.message`, `agent.chat.message.user`, `agent.chat.message.assistant`, `agent.chat.tool`, `agent.chat.tool.result`, `agent.sidebar`, `editor`, `markdown`, `terminal`, `git`, `git-sidebar`, `settings`, `palette`, `finder`, `notification`, and `modal`.
+
+### Translucent native backgrounds
+
+Native panel backgrounds accept `#RRGGBB`, `#RRGGBBAA`, theme color tokens, or `transparent`. `opacity` is a background-material multiplier: finite values clamp to `0..1`, omission or non-finite values preserve the default, and RGBA alpha is multiplied by it once. Labels, icons, controls' foreground, and focus borders remain independently rendered. Use `opacity = 0.25` to retain the default material colors while showing the wallpaper through them, or `background = "transparent"` for a zero-alpha plate. Surface-owned selected/hover fills follow background opacity; it never fades the whole widget. Animated `background_effects` keep their separate effect-option opacity.
+
+```lua
+neoism.ui.style("agent.sidebar", { background = "#10101880" })
+neoism.ui.style("file-tree", { background = "#10101880" })
+neoism.ui.style("notes-tree", { background = "#10101880" })
+neoism.ui.style("git-sidebar", { background = "#10101880" })
+neoism.ui.style("composer.agent", { background = "#101018b3" })
+neoism.ui.style("composer.terminal", { background = "#101018b3" })
+neoism.ui.style("status", { background = "#10101880" })
+```
+
+Supported background sites are `agent.sidebar` (both the left Conversations catalog and right detail rail), `file-tree`, `notes-tree`, `git-sidebar`, `composer.agent`, `composer.terminal`, `buffer-tabs`, `workspace-tabs`, `breadcrumbs`, `chrome.top`, `status`, and `editor.code`. Popups and independently styled nested widgets keep their own material policy; a surface override does not change their foreground or focus indicators.
+
+To lower opacity without changing the current colors:
+
+```lua
+for _, selector in ipairs({
+  "agent.sidebar", "file-tree", "notes-tree", "git-sidebar",
+  "buffer-tabs", "workspace-tabs", "chrome.top",
+}) do
+  neoism.ui.style(selector, { opacity = 0.25 })
+end
+```
+
+The same patches work in a Mash Up Pack's top-level `ui.styles` map and in editor Lua plugins; personal Lua overrides package styles, which override pack styles. Removing an override restores the native default. Background alpha is independent of `ui.window.opacity` and `pack.wallpaper-opacity`. Background transparency does not add a new animated-effect surface to `neoism.ui.surfaces()`.
 
 ### `neoism.ui.surfaces()` and native background effects
 
@@ -69,7 +98,7 @@ neoism.ui.style("composer.agent", {
 
 Effect fields use snake_case and strict tagged serde data: `kind` is `stars` or `scanlines`; `color` is four finite RGBA numbers 0..1 (white default), `seed` is u32 (default 0), `density` and `speed` are finite 0..4 (default 1), `opacity` is finite 0..1 (default 1). Unknown fields/variants and invalid numbers reject the candidate. Omitted/null effects inherit; empty lists disable. `speed=0` pauses, zero density/opacity disables. Native budgets cap four effects per patch, 384 primitives per surface, 1536 per window frame. No Lua paint/frame callbacks run. Full footprints, including glow and AA fringe, stay inside supplied rounded geometry; text paints afterward. Frame-scoped animation demand exists only for visible animated primitives and never leaks between windows.
 
-Top-level pack `ui.styles` is the same map/DTO. The accepted pack layer publishes with its look snapshot and clears on deactivation or replacement; rejected pack-apply candidates retain the last working layer. Each field resolves pack → packages → personal overlay, with dotted ancestors broad-to-specific within each layer. The five supported native sites consume background overrides; other style fields are site-specific. The action-strip geometry follows its resolved dock orientation. True terminal backgrounds and web animation lifecycle integration remain deferred.
+Top-level pack `ui.styles` is the same map/DTO. The accepted pack layer publishes with its look snapshot and clears on deactivation or replacement; rejected pack-apply candidates retain the last working layer. Each field resolves pack → packages → personal overlay, with dotted ancestors broad-to-specific within each layer. The five registered effect sites consume background effects; additional native panels consume RGBA background overrides as described above. Other style fields are site-specific. The action-strip geometry follows its resolved dock orientation. True terminal backgrounds and web animation lifecycle integration remain deferred.
 
 ## Declarative UI and retained views
 

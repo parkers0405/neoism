@@ -103,6 +103,10 @@ impl AgentTimelinePane for NeoismAgentPane {
         NeoismAgentPane::messages(self)
     }
 
+    fn timeline_follow_bottom(&self) -> bool {
+        NeoismAgentPane::timeline_follow_bottom(self)
+    }
+
     fn timeline_scroll_offset(&self) -> f32 {
         NeoismAgentPane::timeline_scroll_offset(self)
     }

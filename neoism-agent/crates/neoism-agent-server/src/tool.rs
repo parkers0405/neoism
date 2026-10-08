@@ -588,8 +588,28 @@ fn sandbox_handler(context: ToolContext, arguments: Value) -> ToolFuture {
     Box::pin(sandbox::sandbox_tool(context, arguments))
 }
 
-fn read_handler(context: ToolContext, arguments: Value) -> ToolFuture {
-    Box::pin(async move { file::read_tool(context, arguments) })
+fn read_handler(mut context: ToolContext, arguments: Value) -> ToolFuture {
+    Box::pin(async move {
+        let cancel = context.cancel.clone();
+        let worker_cancel =
+            Arc::new(AtomicBool::new(cancel.as_ref().is_some_and(|flag| {
+                flag.load(std::sync::atomic::Ordering::SeqCst)
+            })));
+        context.cancel = Some(worker_cancel.clone());
+        struct StopWorker(Arc<AtomicBool>);
+        impl Drop for StopWorker {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        let _stop_worker = StopWorker(worker_cancel);
+        let worker =
+            tokio::task::spawn_blocking(move || file::read_tool(context, arguments));
+        tokio::select! {
+            result = worker => result.map_err(|error| anyhow::anyhow!("read worker failed: {error}"))?,
+            _ = process::wait_for_cancel(cancel) => anyhow::bail!("read aborted"),
+        }
+    })
 }
 
 fn write_handler(context: ToolContext, arguments: Value) -> ToolFuture {

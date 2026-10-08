@@ -36,6 +36,7 @@ pub mod selector {
     pub const APP: &str = "app";
     pub const CHROME_TOP: &str = "chrome.top";
     pub const CHROME_BOTTOM: &str = "chrome.bottom";
+    pub const WORKSPACE_TABS: &str = "workspace-tabs";
     pub const BUFFER_TABS: &str = "buffer-tabs";
     pub const BREADCRUMBS: &str = "breadcrumbs";
     pub const STATUS: &str = "status";

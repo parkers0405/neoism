@@ -864,6 +864,8 @@ impl NeoismAgentPane {
         // contains tool rows would paint leftover titles until the next click.
         self.reset_transient_timeline_interactions();
         self.timeline_history = cached.timeline_history;
+        self.timeline_history_position_hydrated = true;
+        self.clear_timeline_motion();
         self.timeline_scroll_px = 0.0;
         self.timeline_follow_bottom = true;
         self.timeline_content_height_px = cached.timeline_content_height_px;

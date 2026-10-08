@@ -65,6 +65,37 @@ Each effect accepts `kind`, RGBA `color` (four finite channels 0..1), unsigned 3
 
 For personal customization, use `neoism.ui.style("composer.agent", { background_effects = {} })` to disable pack stars, or publish another typed effect list. Background overrides are consumed by these draw sites; other `StylePatch` properties are site-specific, not universal CSS. A true terminal-grid background remains deferred: quads drawn after terminal cells cannot be a genuine background. Desktop owns the effect frame lifecycle; web animation integration is not enabled by this change.
 
+## Translucent panel backgrounds
+
+Use `ui.styles` to tint panel backgrounds without fading their text or controls. A background can be `#RRGGBB`, `#RRGGBBAA` (alpha last), a theme color token, or `transparent`. For example, `#10101880` is a roughly half-opaque dark material over the wallpaper. Set `opacity` to `0.25` instead to keep the existing material colors while lowering background opacity. The multiplier applies to background materials only, including surface-owned selected/hover washes, not text, icons, or focus borders. RGBA alpha and `opacity` multiply; omission keeps defaults. This is independent of window opacity and `pack.wallpaper-opacity`.
+
+```json
+{
+  "pack": {
+    "name": "Painting Glass",
+    "theme": "pastel_dark",
+    "wallpaper": "painting.png",
+    "wallpaper-opacity": 0.35
+  },
+  "ui": {
+    "styles": {
+      "agent.sidebar": { "background": "#10101880" },
+      "file-tree": { "background": "#10101880" },
+      "notes-tree": { "background": "#10101880" },
+      "composer.agent": { "background": "#101018b3" },
+      "chrome.top": { "background": "#10101899" },
+      "status": { "background": "#10101899" }
+    }
+  }
+}
+```
+
+Editor Lua plugins and personal `init.lua` use the same patches through `neoism.ui.style(selector, patch)`. Supported background selectors also include `git-sidebar`, `composer.terminal`, `buffer-tabs`, `workspace-tabs`, `breadcrumbs`, and `editor.code`. `agent.sidebar` controls both the left Conversations panel and the Agent's right detail rail. `workspace-tabs` controls the Workspace Island strip independently of `chrome.top`. Removing a style or changing to a pack without it restores the normal background. Translucent backgrounds do not create extra animated-effect surfaces or change input handling. Popups and independently styled nested widgets retain their own material policy.
+
+## Standalone background overrides
+
+Pack wallpapers remain optional pack assets. The desktop **Backgrounds** picker also lists their images, allowing an image to be selected independently without applying the rest of its pack. A standalone `ui.window.background-image` takes precedence over the active pack's wallpaper. **Use pack/default** clears that override; **None** sets `ui.window.background-image-disabled` to suppress wallpaper without changing the pack's theme, shaders, or styles. See [[Appearance#Backgrounds|Backgrounds]] for the picker and config example.
+
 ## User overrides
 
 Activate a pack under `appearance.mashup-pack`. Replace selected plugin fields under `plugins.mashup-overrides`; omitted fields inherit the pack value and an explicit empty array clears a list.

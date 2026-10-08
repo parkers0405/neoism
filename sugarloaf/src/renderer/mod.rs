@@ -789,8 +789,22 @@ pub struct ImageInstance {
 enum ImageLayer {
     /// z < 0: rendered before the text pipeline.
     BelowText,
-    /// z >= 0: rendered after the text pipeline.
+    /// Ordinary nonnegative z: rendered before late overlay material.
     AboveText,
+    /// UI images: after late overlay material, before overlay labels.
+    LateOverlay,
+}
+
+impl ImageLayer {
+    fn from_z_index(z: i32) -> Self {
+        if z == crate::sugarloaf::graphics::GraphicOverlay::LATE_OVERLAY_Z_INDEX {
+            Self::LateOverlay
+        } else if z < 0 {
+            Self::BelowText
+        } else {
+            Self::AboveText
+        }
+    }
 }
 
 /// A single image draw command for the image pipeline.
@@ -798,6 +812,20 @@ struct ImageDraw {
     image_id: u32,
     instance: ImageInstance,
     layer: ImageLayer,
+}
+
+impl ImageDraw {
+    fn from_overlay(overlay: &crate::sugarloaf::graphics::GraphicOverlay) -> Self {
+        Self {
+            image_id: overlay.image_id,
+            instance: ImageInstance {
+                dest_pos: [overlay.x, overlay.y],
+                dest_size: [overlay.width, overlay.height],
+                source_rect: overlay.source_rect,
+            },
+            layer: ImageLayer::from_z_index(overlay.z_index),
+        }
+    }
 }
 
 /// Decoded background image pixels (RGBA8) waiting to be uploaded to the GPU.
@@ -1579,19 +1607,7 @@ impl Renderer {
             if !self.image_textures.contains_key(&overlay.image_id) {
                 continue;
             }
-            self.image_draws.push(ImageDraw {
-                image_id: overlay.image_id,
-                instance: ImageInstance {
-                    dest_pos: [overlay.x, overlay.y],
-                    dest_size: [overlay.width, overlay.height],
-                    source_rect: overlay.source_rect,
-                },
-                layer: if overlay.z_index < 0 {
-                    ImageLayer::BelowText
-                } else {
-                    ImageLayer::AboveText
-                },
-            });
+            self.image_draws.push(ImageDraw::from_overlay(overlay));
         }
     }
 
@@ -1632,7 +1648,7 @@ impl Renderer {
 
         let stride = mem::size_of::<ImageInstance>();
 
-        for draw in image_draws.iter().filter(|d| d.layer == layer) {
+        for draw in image_draws.iter().filter(move |d| d.layer == layer) {
             let img = match image_textures.get(&draw.image_id) {
                 Some(e) => e,
                 None => continue,
@@ -2529,6 +2545,60 @@ impl Renderer {
                     }
                 }
 
+                if has_images
+                    && image_draws
+                        .iter()
+                        .any(|d| d.layer == ImageLayer::LateOverlay)
+                {
+                    // See BelowText pass above for the rationale; both
+                    // passes share the same indexing into image_draws so
+                    // each placement always reads its own slot.
+                    // Bumped from 64 to accommodate kitty Unicode placeholders
+                    // which can produce up to cols*rows draws per visible image
+                    // (one per placeholder cell with its own source rect).
+                    const MAX_IMAGE_INSTANCES: usize = 1024;
+                    let limit = image_draws.len().min(MAX_IMAGE_INSTANCES);
+                    let stride = std::mem::size_of::<ImageInstance>() as u64;
+
+                    rpass.set_pipeline(&brush.image_pipeline);
+                    rpass.set_bind_group(0, &brush.constant_bind_group, &[]);
+                    for (i, draw) in image_draws.iter().take(limit).enumerate() {
+                        if draw.layer != ImageLayer::LateOverlay {
+                            continue;
+                        }
+                        if let Some(img) = image_textures.get(&draw.image_id) {
+                            if let ImageTexture::Wgpu { view, .. } = &img.gpu {
+                                let bg = ctx.device.create_bind_group(
+                                    &wgpu::BindGroupDescriptor {
+                                        label: None,
+                                        layout: &brush.image_bind_group_layout,
+                                        entries: &[wgpu::BindGroupEntry {
+                                            binding: 0,
+                                            resource: wgpu::BindingResource::TextureView(
+                                                view,
+                                            ),
+                                        }],
+                                    },
+                                );
+                                let offset = i as u64 * stride;
+                                ctx.queue.write_buffer(
+                                    &brush.image_vertex_buffer,
+                                    offset,
+                                    bytemuck::bytes_of(&draw.instance),
+                                );
+                                rpass.set_bind_group(1, &bg, &[]);
+                                rpass.set_vertex_buffer(
+                                    0,
+                                    brush
+                                        .image_vertex_buffer
+                                        .slice(offset..offset + stride),
+                                );
+                                rpass.draw(0..4, 0..1);
+                            }
+                        }
+                    }
+                }
+
                 overlay_text.init_wgpu(&ctx.device, &ctx.queue, ctx.format);
                 overlay_text.render_wgpu(rpass, [ctx.size.width, ctx.size.height]);
             }
@@ -2851,6 +2921,20 @@ impl Renderer {
                     ) {
                         return false;
                     }
+                    if has_images
+                        && !Self::draw_images_metal(
+                            &self.image_draws,
+                            &self.image_textures,
+                            brush,
+                            render_encoder,
+                            ImageLayer::LateOverlay,
+                            &instance_buffer,
+                            &mut instance_offset,
+                            &globals,
+                        )
+                    {
+                        return false;
+                    }
                     overlay_text.init_metal(&context.device, &context.command_queue);
                     overlay_text.render_metal(
                         render_encoder,
@@ -2971,34 +3055,14 @@ impl Renderer {
         // texture lookup needs an immutable borrow on
         // `self.image_textures` which would conflict with the
         // brush's `&mut self`.
-        let below: Vec<(ash::vk::DescriptorSet, ImageInstance)> = self
-            .image_draws
-            .iter()
-            .filter(|d| d.layer == ImageLayer::BelowText)
-            .filter_map(|d| {
-                let entry = self.image_textures.get(&d.image_id)?;
-                if let ImageTexture::Vulkan(tex) = &entry.gpu {
-                    Some((tex.descriptor_set, d.instance))
-                } else {
-                    None
-                }
-            })
-            .collect();
-        let above: Vec<(ash::vk::DescriptorSet, ImageInstance)> = self
-            .image_draws
-            .iter()
-            .filter(|d| d.layer == ImageLayer::AboveText)
-            .filter_map(|d| {
-                let entry = self.image_textures.get(&d.image_id)?;
-                if let ImageTexture::Vulkan(tex) = &entry.gpu {
-                    Some((tex.descriptor_set, d.instance))
-                } else {
-                    None
-                }
-            })
-            .collect();
+        let below: Vec<_> = self.vulkan_image_draws(ImageLayer::BelowText).collect();
+        let above: Vec<_> = self.vulkan_image_draws(ImageLayer::AboveText).collect();
+        let late_count = self.vulkan_image_draws(ImageLayer::LateOverlay).count();
 
         if let RendererType::Vulkan(brush) = &mut self.brush_type {
+            // Allocate once before recording ANY image pass: growing the shared
+            // buffer in a later pass would invalidate earlier recorded bindings.
+            brush.reserve_image_instances(slot, below.len() + above.len() + late_count);
             if let Some(bg) = &self.background_image_texture {
                 if let ImageTexture::Vulkan(tex) = &bg.gpu {
                     brush.render_background_image(
@@ -3027,6 +3091,24 @@ impl Renderer {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    fn vulkan_image_draws(
+        &self,
+        layer: ImageLayer,
+    ) -> impl Iterator<Item = (ash::vk::DescriptorSet, ImageInstance)> + '_ {
+        self.image_draws
+            .iter()
+            .filter(move |d| d.layer == layer)
+            .filter_map(|d| {
+                let entry = self.image_textures.get(&d.image_id)?;
+                if let ImageTexture::Vulkan(tex) = &entry.gpu {
+                    Some((tex.descriptor_set, d.instance))
+                } else {
+                    None
+                }
+            })
+    }
+
     /// Record the late overlay quad pass inside the active Vulkan render
     /// pass. This is intentionally separate from `render_vulkan` so
     /// `Sugarloaf` can place it after the UI text overlay.
@@ -3036,14 +3118,21 @@ impl Renderer {
         cmd: ash::vk::CommandBuffer,
         frame: &crate::context::vulkan::VulkanFrame,
     ) {
-        if self.overlay_instances.is_empty() && self.overlay_vertices.is_empty() {
+        let late: Vec<_> = self.vulkan_image_draws(ImageLayer::LateOverlay).collect();
+        if late.is_empty()
+            && self.overlay_instances.is_empty()
+            && self.overlay_vertices.is_empty()
+        {
             return;
         }
+        let start_index = self.vulkan_image_draws(ImageLayer::BelowText).count()
+            + self.vulkan_image_draws(ImageLayer::AboveText).count();
         let viewport = [frame.extent.width as f32, frame.extent.height as f32];
         let slot = frame.slot;
         if let RendererType::Vulkan(brush) = &mut self.brush_type {
             brush.render_overlay_quads(cmd, slot, viewport, &self.overlay_instances);
             brush.render_overlay_geometry(cmd, slot, viewport, &self.overlay_vertices);
+            brush.render_image_overlays(cmd, slot, viewport, &late, start_index);
         }
     }
 
@@ -3725,6 +3814,93 @@ impl WgpuRenderer {
                 ],
                 label: Some("rich_text::Pipeline uniforms"),
             });
+    }
+}
+
+#[cfg(test)]
+mod image_overlay_tests {
+    use super::{ImageDraw, ImageLayer};
+    use crate::sugarloaf::graphics::GraphicOverlay;
+
+    #[test]
+    fn modal_image_forwards_high_id_physical_bounds_and_uvs() {
+        let overlay = GraphicOverlay {
+            image_id: 0xBC00_0003,
+            x: 900.0,
+            y: 180.0,
+            width: 640.0,
+            height: 320.0,
+            z_index: GraphicOverlay::LATE_OVERLAY_Z_INDEX,
+            source_rect: GraphicOverlay::FULL_SOURCE_RECT,
+        };
+        let draw = ImageDraw::from_overlay(&overlay);
+        assert_eq!(draw.image_id, overlay.image_id);
+        assert_eq!(draw.instance.dest_pos, [900.0, 180.0]);
+        assert_eq!(draw.instance.dest_size, [640.0, 320.0]);
+        assert_eq!(draw.instance.source_rect, GraphicOverlay::FULL_SOURCE_RECT);
+        assert!(draw.layer == ImageLayer::LateOverlay);
+        for z in [0, 1, 100, i32::MAX - 1] {
+            assert!(ImageLayer::from_z_index(z) == ImageLayer::AboveText);
+        }
+        for z in [-1, i32::MIN] {
+            assert!(ImageLayer::from_z_index(z) == ImageLayer::BelowText);
+        }
+    }
+
+    #[test]
+    fn extreme_external_z_stays_above_text_not_above_modal() {
+        let raw_z = i32::MAX;
+        let adapted_z = GraphicOverlay::external_z_index(raw_z);
+        assert_eq!(adapted_z, i32::MAX - 1);
+        assert!(ImageLayer::from_z_index(adapted_z) == ImageLayer::AboveText);
+        assert!(
+            ImageLayer::from_z_index(GraphicOverlay::LATE_OVERLAY_Z_INDEX)
+                == ImageLayer::LateOverlay
+        );
+        for z in [i32::MIN, -1, 0, 1, i32::MAX - 1] {
+            assert_eq!(GraphicOverlay::external_z_index(z), z);
+        }
+    }
+
+    // Source-order guards intentionally cover the real backend entry points:
+    // a layer-mapping test alone cannot catch a pass moved beneath modal material.
+    #[test]
+    fn gpu_modal_images_are_between_material_and_labels() {
+        let source = include_str!("mod.rs").split("#[cfg(test)]").next().unwrap();
+        let wgpu = source
+            .split("pub fn render<'pass>(")
+            .nth(1)
+            .unwrap()
+            .split("pub fn render_overlay<'pass>(")
+            .next()
+            .unwrap();
+        let material = wgpu.find("for cmd in overlay_draw_cmds").unwrap();
+        let image = wgpu[material..].find("ImageLayer::LateOverlay").unwrap() + material;
+        let labels = wgpu[image..].find("overlay_text.render_wgpu").unwrap() + image;
+        assert!(material < image && image < labels);
+        let metal = source.split("pub fn render_metal(").nth(1).unwrap();
+        let material = metal.find("&self.overlay_instances").unwrap();
+        let image = metal.find("ImageLayer::LateOverlay").unwrap();
+        let labels = metal.find("overlay_text.render_metal").unwrap();
+        assert!(material < image && image < labels);
+        let vulkan = source
+            .split("pub fn render_overlay_vulkan(")
+            .nth(1)
+            .unwrap();
+        assert!(
+            vulkan.find("brush.render_overlay_quads").unwrap()
+                < vulkan.find("brush.render_image_overlays").unwrap()
+        );
+        let host = include_str!("../sugarloaf.rs");
+        assert!(
+            host.find("self.renderer.render_overlay_vulkan").unwrap()
+                < host.find("self.overlay_text.render_vulkan").unwrap()
+        );
+        let regular = source.split("pub fn render_vulkan(").nth(1).unwrap();
+        assert!(
+            regular.find("brush.reserve_image_instances").unwrap()
+                < regular.find("brush.render_image_overlays").unwrap()
+        );
     }
 }
 

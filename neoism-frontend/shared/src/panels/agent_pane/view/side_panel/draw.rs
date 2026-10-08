@@ -308,7 +308,9 @@ pub(crate) fn render_sessions_list(
             button_rect[1],
             button_rect[2],
             button_rect[3],
-            theme.f32_alpha(theme.surface, if button_hovered { 0.78 } else { 0.55 }),
+            sidebar_background_opacity(
+                theme.f32_alpha(theme.surface, if button_hovered { 0.78 } else { 0.55 }),
+            ),
             DEPTH,
             radius,
             ORDER_PANEL + 2,
@@ -324,7 +326,9 @@ pub(crate) fn render_sessions_list(
             icon_y,
             icon_side,
             icon_side,
-            theme.f32_alpha(theme.accent, if button_hovered { 0.24 } else { 0.16 }),
+            sidebar_background_opacity(
+                theme.f32_alpha(theme.accent, if button_hovered { 0.24 } else { 0.16 }),
+            ),
             DEPTH,
             5.0 * s,
             ORDER_PANEL + 3,
@@ -503,7 +507,8 @@ pub(crate) fn render_sessions_list(
         let visible_y = row_y.max(list_rect[1]);
         let visible_h = row_bottom.min(list_bottom) - visible_y;
         if visible_h > 0.0 {
-            let bg_color = theme.f32_alpha(theme.surface, 0.55);
+            let bg_color =
+                sidebar_background_opacity(theme.f32_alpha(theme.surface, 0.55));
             sugarloaf.quad(
                 None,
                 list_rect[0],
@@ -643,7 +648,9 @@ pub(crate) fn render_sessions_list(
                     visible_y,
                     list_rect[2],
                     visible_h,
-                    theme.f32_alpha(theme.surface, 0.28 * hover),
+                    sidebar_background_opacity(
+                        theme.f32_alpha(theme.surface, 0.28 * hover),
+                    ),
                     [5.0 * s; 4],
                     DEPTH,
                     ORDER_PANEL + 1,
@@ -722,7 +729,7 @@ pub(crate) fn render_sessions_list(
                         row_y + 2.0 * s,
                         advance + 2.0 * s,
                         row_h - 4.0 * s,
-                        theme.f32_alpha(theme.cyan, 0.16),
+                        sidebar_background_opacity(theme.f32_alpha(theme.cyan, 0.16)),
                         DEPTH,
                         3.0 * s,
                         ORDER_PANEL + 2,
@@ -756,7 +763,7 @@ pub(crate) fn render_sessions_list(
                 visible_y,
                 list_rect[2],
                 visible_h,
-                theme.f32_alpha(theme.surface, 0.28 * hover),
+                sidebar_background_opacity(theme.f32_alpha(theme.surface, 0.28 * hover)),
                 [5.0 * s; 4],
                 DEPTH,
                 ORDER_PANEL + 1,
@@ -907,7 +914,7 @@ pub(crate) fn render_sessions_list(
             badge_y,
             badge,
             badge,
-            theme.f32_alpha(theme.surface, 0.92),
+            sidebar_background_opacity(theme.f32_alpha(theme.surface, 0.92)),
             [badge * 0.5; 4],
             DEPTH,
             ORDER_PANEL + 5,

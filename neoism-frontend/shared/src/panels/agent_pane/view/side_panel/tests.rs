@@ -1408,3 +1408,26 @@ fn conversations_width_clamps_to_supported_drag_range() {
     panel.resize(10_000.0);
     assert_eq!(panel.width(), SIDE_PANEL_MAX_WIDTH);
 }
+
+#[test]
+fn sidebar_material_leaves_default_row_fills_and_foreground_unchanged() {
+    let theme = IdeTheme::default();
+    let mut style = neoism_lua::StylePatch::default();
+    let selected = theme.f32_alpha(theme.surface, 0.55);
+    assert_eq!(
+        crate::customization::apply_background_opacity(&style, selected),
+        selected
+    );
+    style.background = Some("#ff000080".into());
+    style.opacity = Some(0.25);
+    let faded = crate::customization::apply_background_opacity(&style, selected);
+    assert_eq!(&faded[..3], &selected[..3]);
+    assert_eq!(faded[3], selected[3] * 0.25);
+    // Opacity never flows through native text/icon/status colors.
+    style.background = None;
+    let styled = crate::customization::styled_ide_theme(theme, &style);
+    assert_eq!(styled.fg, theme.fg);
+    assert_eq!(styled.muted, theme.muted);
+    assert_eq!(styled.accent, theme.accent);
+    assert_eq!(styled.border, theme.border);
+}

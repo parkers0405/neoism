@@ -2,6 +2,20 @@
 
 All notable user-facing changes to Neoism are documented here.
 
+## [0.7.121] - 2026-10-08
+
+### Search, conversation following, and native appearance
+
+- Adds resumable file reads and query-bound grep pagination with bounded output, Unicode-safe continuation, stale-cursor checks, cancellation, and explicit case/mode handling.
+- Smooths live Agent stream-follow while preserving manual scroll positions, tool-expansion anchors, and interruption by user input; history loading no longer behaves like new live output.
+- Improves activity placement above the composer, wrapped status geometry, background-task interaction, and generated-image hydration.
+- Adds a standalone native background picker with installed backgrounds, explicit images, pack inheritance, previews, and transactional persistence without changing the active Mash Up Pack.
+- Supports translucent panel backgrounds while preserving foreground content, fixes style-only Lua configuration patches, and updates appearance documentation.
+- Fixes modal preview-image layering and Vulkan multi-layer image handling, and improves web animation redraw parity.
+- Adds host-path and emoji-presentation regression coverage. Retains first-terminal directory following, split-terminal isolation, and the release-time Servo exclusion guard.
+
+This is a stable production release, available through plain `neoism update` after all Linux, macOS, and Windows release builds and packaging checks succeed. Experimental Servo runtime is not built or packaged.
+
 ## [0.7.120] - 2026-10-08
 
 ### Agent UI, tools, and workspace reliability

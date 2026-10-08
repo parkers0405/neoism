@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use sugarloaf::text::DrawOpts;
 use sugarloaf::Sugarloaf;
 
-use crate::customization::{color_f32, color_u8};
+use crate::customization::color_u8;
 use crate::primitives::IdeTheme;
 pub(super) use crate::primitives::{
     draw_icon_centered_with_occlusion, draw_text_with_occlusion, edge_left_row_radii,
@@ -154,17 +154,36 @@ fn draw_frame_top(
     // Only the top corners are rounded — matches `FrameCorners::Top`
     // in the native widget.
     let outer_radii = [radius, radius, 0.0, 0.0];
-    sugarloaf.quad(
-        None,
-        x,
-        y,
-        w,
-        h,
-        outer_color,
-        outer_radii,
-        depth,
-        order_outer,
-    );
+    if inner_color[3] >= 1.0 {
+        sugarloaf.quad(
+            None,
+            x,
+            y,
+            w,
+            h,
+            outer_color,
+            outer_radii,
+            depth,
+            order_outer,
+        );
+    } else {
+        let r = (radius - border_thickness).max(0.0);
+        crate::widgets::frame::draw_background_border(
+            sugarloaf,
+            rect,
+            [
+                x + border_thickness,
+                y + border_thickness,
+                (w - 2.0 * border_thickness).max(0.0),
+                (h - border_thickness).max(0.0),
+            ],
+            outer_radii,
+            [r, r, 0.0, 0.0],
+            outer_color,
+            depth,
+            order_outer,
+        );
+    }
     let inner_x = x + border_thickness;
     let inner_y = y + border_thickness;
     let inner_w = (w - border_thickness * 2.0).max(0.0);
@@ -252,11 +271,23 @@ impl FileTree {
         let content_radius = (frame_radius - frame_stroke).max(0.0);
         self.selected_cursor_rect = None;
 
+        let background_style = plugins
+            .map(|plugins| {
+                crate::primitives::surface_background::resolve_style(
+                    "file-tree",
+                    &plugins.styles,
+                )
+            })
+            .unwrap_or_else(|| crate::primitives::surface_background::style("file-tree"));
         draw_frame_top(
             sugarloaf,
             [x_left, y_top, panel_width, panel_height],
             theme.f32(theme.surface),
-            theme.f32(theme.bg),
+            crate::customization::background_color(
+                &background_style,
+                theme,
+                theme.f32(theme.bg),
+            ),
             frame_radius,
             frame_stroke,
             DEPTH,
@@ -343,10 +374,36 @@ impl FileTree {
             self.skeleton_started = None;
         }
 
-        let row_style = plugins.map(|plugins| crate::primitives::surface_background::resolve_style("file-tree.row", &plugins.styles));
-        let selected_style =
-            plugins.map(|plugins| crate::primitives::surface_background::resolve_style("file-tree.row.selected", &plugins.styles));
-        let icon_style = plugins.map(|plugins| crate::primitives::surface_background::resolve_style("file-tree.icon", &plugins.styles));
+        let row_style = Some(
+            plugins
+                .map(|plugins| {
+                    crate::primitives::surface_background::resolve_style(
+                        "file-tree.row",
+                        &plugins.styles,
+                    )
+                })
+                .unwrap_or_else(|| {
+                    crate::primitives::surface_background::style("file-tree.row")
+                }),
+        );
+        let selected_style = Some(
+            plugins
+                .map(|plugins| {
+                    crate::primitives::surface_background::resolve_style(
+                        "file-tree.row.selected",
+                        &plugins.styles,
+                    )
+                })
+                .unwrap_or_else(|| {
+                    crate::primitives::surface_background::style("file-tree.row.selected")
+                }),
+        );
+        let icon_style = plugins.map(|plugins| {
+            crate::primitives::surface_background::resolve_style(
+                "file-tree.icon",
+                &plugins.styles,
+            )
+        });
         if !self.entries.is_empty() && self.selected < self.entries.len() {
             let row_ix = self.selected as isize - self.scroll_top as isize;
             let row_y = content_y + row_ix as f32 * row_h + scroll_offset + cursor_offset;
@@ -360,10 +417,12 @@ impl FileTree {
                     visible_row_y,
                     content_w,
                     visible_row_h,
-                    color_f32(
-                        selected_style
-                            .as_ref()
-                            .and_then(|style| style.background.as_deref()),
+                    crate::customization::background_color(
+                        selected_style.as_ref().unwrap_or(
+                            &crate::primitives::surface_background::style(
+                                "file-tree.row.selected",
+                            ),
+                        ),
                         theme,
                         theme.f32(theme.surface),
                     ),
@@ -579,7 +638,10 @@ impl FileTree {
                         visible_row_y,
                         content_w,
                         visible_row_h,
-                        theme.f32_alpha(theme.yellow, alpha * reveal),
+                        crate::customization::apply_background_opacity(
+                            row_style.as_ref().unwrap_or(&background_style),
+                            theme.f32_alpha(theme.yellow, alpha * reveal),
+                        ),
                         edge_row_radii(
                             visible_row_y,
                             visible_row_h,
@@ -603,7 +665,14 @@ impl FileTree {
                     visible_row_y,
                     content_w,
                     visible_row_h,
-                    theme.f32_alpha(theme.accent, 0.22),
+                    crate::customization::apply_background_opacity(
+                        row_style.as_ref().unwrap_or(
+                            &crate::primitives::surface_background::style(
+                                "file-tree.row",
+                            ),
+                        ),
+                        theme.f32_alpha(theme.accent, 0.22),
+                    ),
                     edge_row_radii(
                         visible_row_y,
                         visible_row_h,
@@ -848,7 +917,12 @@ impl FileTree {
                 content_y,
                 content_w,
                 content_h,
-                theme.f32_alpha(theme.accent, 0.14),
+                crate::customization::apply_background_opacity(
+                    row_style.as_ref().unwrap_or(
+                        &crate::primitives::surface_background::style("file-tree.row"),
+                    ),
+                    theme.f32_alpha(theme.accent, 0.14),
+                ),
                 [content_radius; 4],
                 DEPTH,
                 ORDER + 5,
@@ -868,7 +942,12 @@ impl FileTree {
                 ly + 3.0 * s,
                 lw,
                 lh,
-                theme.f32_alpha(theme.bg, 0.40),
+                crate::customization::apply_background_opacity(
+                    row_style.as_ref().unwrap_or(
+                        &crate::primitives::surface_background::style("file-tree.row"),
+                    ),
+                    theme.f32_alpha(theme.bg, 0.40),
+                ),
                 [l.radius; 4],
                 DEPTH,
                 ORDER + 6,
@@ -879,7 +958,12 @@ impl FileTree {
                 ly,
                 lw,
                 lh,
-                theme.f32_alpha(theme.surface, 0.94),
+                crate::customization::apply_background_opacity(
+                    row_style.as_ref().unwrap_or(
+                        &crate::primitives::surface_background::style("file-tree.row"),
+                    ),
+                    theme.f32_alpha(theme.surface, 0.94),
+                ),
                 [l.radius; 4],
                 DEPTH,
                 ORDER + 7,

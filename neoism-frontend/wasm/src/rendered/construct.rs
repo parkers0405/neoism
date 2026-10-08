@@ -165,6 +165,7 @@ impl ChromeBridge {
             tab_drag_begin_ix: None,
             cached_diagnostics: Vec::new(),
             editor_surfaces: Vec::new(),
+            surface_background_animating: false,
             workspace_island: Island::new(
                 island_theme.f32(island_theme.muted),
                 island_theme.f32(island_theme.fg),

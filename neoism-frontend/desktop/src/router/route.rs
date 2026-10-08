@@ -1395,6 +1395,17 @@ impl Route<'_> {
                             self.request_overlay_redraw();
                             return true;
                         }
+                        if self
+                            .window
+                            .screen
+                            .renderer
+                            .command_palette
+                            .is_backgrounds_mode()
+                        {
+                            self.window.screen.apply_selected_background();
+                            self.request_overlay_redraw();
+                            return true;
+                        }
                         // Snapshot what the palette wants to do FIRST,
                         // before taking a mut-borrow on it, so we can
                         // freely call other `self.window.screen.*`

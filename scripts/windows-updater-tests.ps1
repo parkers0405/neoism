@@ -111,18 +111,25 @@ function Invoke-Msi([string[]]$Arguments) {
     Assert ($script:Registration -eq $script:FixtureInstall) 'Portable update must NEVER invoke MSI install'
     Assert ($Arguments -contains '/L*v') 'MSI verbose log required'
     Assert ($Arguments -contains 'MSIRESTARTMANAGERCONTROL=Disable') 'MSI must not kill unrelated applications'
-    if ($script:SameProduct) {
-        Assert ($Arguments -contains 'REINSTALL=ALL' -and $Arguments -contains 'REINSTALLMODE=vamus') 'Same ProductCode must explicitly repair all features from the verified source'
+    $isRepair = $Arguments -contains 'REINSTALL=ALL'
+    if ($isRepair) {
+        Assert ($script:SameProduct -and $Arguments -contains 'REINSTALLMODE=vamus') 'Repair requires a confirmed candidate ProductCode and explicit feature selection'
+        Assert ($Arguments -contains ('"' + $script:MsiRepairLogPath + '"')) 'Repair must have a distinct verbose log'
     } else {
-        Assert ($Arguments -notcontains 'REINSTALL=ALL' -and $Arguments -notcontains 'REINSTALLMODE=vamus') 'First install/major upgrade must not use repair-only flags'
+        Assert ($Arguments -notcontains 'REINSTALLMODE=vamus') 'Initial install must not use repair-only flags'
         Assert ($Arguments -contains 'REINSTALLMODE=amus') 'Normal installation overwrite mode missing'
     }
-    if ($script:InstallCode -eq 0) {
-        Copy-Item -Path (Join-Path $script:FixturePayload '*') -Destination $script:FixtureInstall -Recurse -Force
-        if ($script:MissingInstalled) { Remove-Item -LiteralPath (Join-Path $script:FixtureInstall 'neoism-agent.exe') }
-        if ($script:CorruptInstalled) { Set-Content -LiteralPath (Join-Path $script:FixtureInstall 'neoism-workspace-daemon.exe') -Value 'wrong' }
+    $exitCode = if ($isRepair -and $null -ne $script:RepairCode) { $script:RepairCode } else { $script:InstallCode }
+    if ($exitCode -eq 0) {
+        # Installing an already registered ProductCode without REINSTALL is a
+        # successful no-op. Production must verify it, then perform one repair.
+        if (-not $script:NormalInstallNoOp -or $isRepair) {
+            Copy-Item -Path (Join-Path $script:FixturePayload '*') -Destination $script:FixtureInstall -Recurse -Force
+            if ($script:MissingInstalled) { Remove-Item -LiteralPath (Join-Path $script:FixtureInstall 'neoism-agent.exe') }
+            if ($script:CorruptInstalled) { Set-Content -LiteralPath (Join-Path $script:FixtureInstall 'neoism-workspace-daemon.exe') -Value 'wrong' }
+        }
     }
-    return $script:InstallCode
+    return $exitCode
 }
 function New-Fixture([string]$Mode) {
     $case = Join-Path $root ([Guid]::NewGuid().ToString('N'))
@@ -153,6 +160,7 @@ function New-Fixture([string]$Mode) {
     $script:InvokingExe = Join-Path $script:FixtureInstall 'neoism.exe'
     $script:Registration = if ($Mode -eq 'managed') { $script:FixtureInstall } else { Join-Path $case 'different managed copy' }
     $script:Relaunch = 1; $script:InstallCode = 0; $script:Launches = 0; $script:SameProduct = $false
+    $script:RepairCode = $null; $script:NormalInstallNoOp = $false
     $script:MissingInstalled = $false; $script:CorruptInstalled = $false; $script:Locked = $false
     $script:FailPortableMove = $false; $script:SawHandoff = $false; $script:MsiCalls = @()
 }
@@ -192,9 +200,25 @@ try {
             Assert (Test-Path -LiteralPath (Join-Path $receipt.rollback_directory 'neoism.exe')) 'Portable rollback originals retained'
         }
     }
+    # Reproduce the field failure: the preflight query says the candidate is
+    # installed, but MSI considers it absent and performs a major upgrade.
     New-Fixture 'managed'; $script:SameProduct = $true
+    Assert ((Invoke-WindowsUpdate) -eq 0) 'Conflicting ProductCode state must use normal installation successfully'
+    Assert ($script:MsiCalls.Count -eq 2 -and $script:MsiCalls[1] -notcontains 'REINSTALL=ALL') 'Conflicting ProductCode state must never preselect repair features'
+    New-Fixture 'managed'; $script:SameProduct = $true; $script:NormalInstallNoOp = $true
     Assert ((Invoke-WindowsUpdate) -eq 0) 'Already installed ProductCode must repair successfully'
     Assert ((Read-Receipt).installation_verified -and $script:Launches -eq 1) 'Repair must verify all installed hashes/versions before relaunch'
+    Assert ($script:MsiCalls.Count -eq 3) 'Same-product update must extract, try normal installation, then repair exactly once'
+    Assert ($script:MsiCalls[1] -notcontains 'REINSTALL=ALL' -and $script:MsiCalls[2] -contains 'REINSTALL=ALL') 'Repair may only follow a verified normal-install no-op'
+    foreach ($code in @(3010, 1641, 1603, 1618)) {
+        New-Fixture 'managed'; $script:SameProduct = $true; $script:NormalInstallNoOp = $true; $script:RepairCode = $code
+        $exit = Invoke-WindowsUpdate
+        $receipt = Read-Receipt
+        $expectedState = if ($code -in @(3010, 1641)) { 'reboot_required' } else { 'failed' }
+        Assert ($exit -ne 0 -and $receipt.state -eq $expectedState) "MSI repair $code must not claim success"
+        Assert ($script:MsiCalls.Count -eq 3) "MSI repair $code must stop after one bounded repair"
+        Assert ($script:Launches -eq 0 -and -not $receipt.installation_verified) "MSI repair $code must not relaunch"
+    }
     foreach ($code in @(3010, 1641, 1603, 1618)) {
         New-Fixture 'managed'; $script:InstallCode = $code
         $exit = Invoke-WindowsUpdate
@@ -202,6 +226,7 @@ try {
         $expectedState = if ($code -in @(3010, 1641)) { 'reboot_required' } else { 'failed' }
         Assert ($exit -ne 0 -and $receipt.state -eq $expectedState) "MSI $code must not claim success"
         Assert ($script:Launches -eq 0 -and -not $receipt.installation_verified) "MSI $code must not relaunch"
+        Assert ($script:MsiCalls.Count -eq 2) "MSI $code must not trigger a repair retry"
         Assert (Test-Path -LiteralPath $TempDir) 'Failure/reboot evidence retained'
     }
     foreach ($failure in @('missing', 'hash', 'version', 'locked', 'cancelled')) {

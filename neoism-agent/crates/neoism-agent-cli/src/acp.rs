@@ -99,7 +99,6 @@ async fn ensure_server(
                 hostname,
                 port,
                 cors: Vec::new(),
-                hosted_attestation: None,
             },
             crate::standalone_services(),
         )

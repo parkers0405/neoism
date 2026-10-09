@@ -29,8 +29,8 @@ pub(crate) async fn move_session(
         false,
     )?;
     let previous_directory = info.directory.clone();
-    if !crate::caller::allows_session_path(
-        state.services().hosted,
+    if !crate::caller::services_allow_session_path(
+        state.services(),
         &info,
         std::path::Path::new(&project_context.directory),
     ) {

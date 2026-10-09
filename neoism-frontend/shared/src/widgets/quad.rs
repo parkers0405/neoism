@@ -6,14 +6,7 @@ use sugarloaf::Sugarloaf;
 
 use crate::primitives::geom::intersect_rect;
 
-/// Draw `rect` as a rounded rect when (within `tolerance`) it is fully
-/// visible inside `clip`; when partially clipped, draw the visible
-/// slice as a sharp-cornered rect instead — sugarloaf's rounded quads
-/// can't be scissored, and the eye doesn't catch the corner change at
-/// chrome scale. Fully-outside rects draw nothing. `tolerance` is the
-/// caller's historical "counts as fully visible" slack (sub-pixel
-/// values behave like exact equality since `intersect_rect` returns
-/// exact copies for contained rects).
+/// Clip the original rounded shape, rather than rounding or squaring its visible slice.
 #[allow(clippy::too_many_arguments)]
 pub fn rounded_rect_clipped(
     sugarloaf: &mut Sugarloaf,
@@ -24,31 +17,16 @@ pub fn rounded_rect_clipped(
     depth: f32,
     radius: f32,
     order: u8,
-    tolerance: f32,
 ) {
-    let Some(visible) = intersect_rect(rect, clip) else {
+    if intersect_rect(rect, clip).is_none() {
         return;
-    };
-    let fully_visible = (visible[0] - rect[0]).abs() < tolerance
-        && (visible[1] - rect[1]).abs() < tolerance
-        && (visible[2] - rect[2]).abs() < tolerance
-        && (visible[3] - rect[3]).abs() < tolerance;
-    if fully_visible {
+    }
+    if let Some(id) = id {
         let [x, y, w, h] = rect;
-        sugarloaf.rounded_rect(id, x, y, w, h, color, depth, radius, order);
-    } else if (visible[0] - rect[0]).abs() < tolerance
-        && (visible[1] - rect[1]).abs() < tolerance
-        && (visible[2] - rect[2]).abs() < tolerance
-    {
-        // Only the bottom is clipped. Preserve the visible top corners by
-        // drawing a rounded visible slice and square-filling its clipped
-        // bottom radius. This is the common card-behind-composer case.
-        let [x, y, w, h] = visible;
-        sugarloaf.rounded_rect(id, x, y, w, h, color, depth, radius, order);
-        let fill_h = radius.min(h);
-        sugarloaf.rect(None, x, y + h - fill_h, w, fill_h, color, depth, order + 1);
+        sugarloaf.rounded_rect(Some(id), x, y, w, h, color, depth, radius, order);
+        let scale = sugarloaf.scale_factor();
+        sugarloaf.set_bounds(id, Some(clip.map(|value| value * scale)));
     } else {
-        let [x, y, w, h] = visible;
-        sugarloaf.rect(id, x, y, w, h, color, depth, order);
+        sugarloaf.quad_clipped(rect, color, [radius; 4], depth, order, clip);
     }
 }

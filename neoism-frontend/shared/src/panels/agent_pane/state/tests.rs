@@ -3138,6 +3138,49 @@ fn duplicate_compaction_end_does_not_idle_a_new_response() {
 }
 
 #[test]
+fn compaction_reasoning_deltas_never_enter_the_summary_card() {
+    for starts_first in [false, true] {
+        let mut pane = NeoismAgentPane::default();
+        pane.ingest_live_part_message(
+            NeoismAgentMessage::compaction("", "summary").with_id("summary-message"),
+        );
+        if starts_first {
+            pane.ingest_live_part_message(
+                NeoismAgentMessage::reasoning("").with_id("reasoning-part"),
+            );
+        }
+        pane.ingest_live_part_delta(
+            Some("summary-message".into()),
+            Some("reasoning-part".into()),
+            Some("reasoning".into()),
+            "**Reviewing context**",
+        );
+        pane.ingest_live_part_delta(
+            Some("summary-message".into()),
+            Some("summary-text".into()),
+            Some("compaction".into()),
+            "## Goal\nContinue work",
+        );
+        assert_eq!(pane.messages.len(), 2);
+        assert_eq!(pane.messages[0].kind, NeoismAgentMessageKind::Reasoning);
+        assert_eq!(pane.messages[1].kind, NeoismAgentMessageKind::Compaction);
+        let summary = pane
+            .messages
+            .iter()
+            .find(|message| message.kind == NeoismAgentMessageKind::Compaction)
+            .unwrap();
+        let reasoning = pane
+            .messages
+            .iter()
+            .find(|message| message.kind == NeoismAgentMessageKind::Reasoning)
+            .unwrap();
+        assert_eq!(summary.text, "## Goal\nContinue work");
+        assert_eq!(reasoning.text, "**Reviewing context**");
+        assert_eq!(reasoning.id, "reasoning-part");
+    }
+}
+
+#[test]
 fn persisted_compaction_is_only_compaction_message_source() {
     let mut pane = NeoismAgentPane::default();
 
@@ -7154,6 +7197,96 @@ fn follow_scroll_warm_cache_hidden_live_growth_is_history_on_reopen() {
         top
     );
     assert!(!pane.timeline_follow_bottom);
+}
+
+#[test]
+fn follow_scroll_reopened_trace_is_not_new_output() {
+    let mut pane = NeoismAgentPane::default();
+    pane.set_session_id(Some("a".into()));
+    let tool = NeoismAgentMessage::tool(
+        "Read file",
+        "",
+        "completed",
+        "read",
+        NeoismAgentOutputKind::Text,
+        "one line",
+        Vec::new(),
+    )
+    .with_id("old-tool");
+    pane.apply_history(vec![
+        NeoismAgentMessage::user("Inspect the project").with_id("prompt"),
+        NeoismAgentMessage::reasoning("Previous reasoning").with_id("reasoning"),
+        tool.clone(),
+        NeoismAgentMessage::assistant("Existing reply").with_id("reply"),
+    ]);
+    let rect = [0.0, 0.0, 400.0, 300.0];
+    pane.set_timeline_metrics(rect, 900.0, 300.0);
+    pane.upsert_part_message(tool.clone().with_id("new-tool"));
+    pane.upsert_part_message(tool.clone().with_id("batched-tool"));
+    assert!(pane.timeline_trace_reveal_pending);
+    pane.set_timeline_metrics(rect, 3180.0, 300.0);
+    assert_eq!(
+        (pane.timeline_scroll_offset(), pane.timeline_wheel_target_px),
+        (0.0, None)
+    );
+    assert!(!pane.timeline_live_growth);
+    pane.set_timeline_metrics(rect, 3200.0, 300.0);
+    assert_eq!(pane.timeline_scroll_offset(), 0.0);
+    pane.upsert_part_message(tool.with_id("next-tool"));
+    pane.set_timeline_metrics(rect, 3248.0, 300.0);
+    assert_eq!(
+        (pane.timeline_scroll_offset(), pane.timeline_wheel_target_px),
+        (48.0, Some(0.0))
+    );
+}
+
+#[test]
+fn follow_scroll_cached_short_tool_and_queued_echo_open_bottom() {
+    let mut pane = NeoismAgentPane::default();
+    pane.set_session_id(Some("a".into()));
+    pane.apply_history(vec![
+        NeoismAgentMessage::assistant("Existing reply").with_id("reply")
+    ]);
+    let rect = [0.0, 0.0, 400.0, 300.0];
+    pane.set_timeline_metrics(rect, 900.0, 300.0);
+    pane.apply_history_to_cache("b", Vec::new(), None);
+    pane.switch_session("b".into());
+    let tool = NeoismAgentMessage::tool(
+        "Read file",
+        "",
+        "completed",
+        "read",
+        NeoismAgentOutputKind::Text,
+        "one line",
+        Vec::new(),
+    )
+    .with_id("short-tool");
+    pane.cache_upsert_part_message("a", tool.clone());
+    let cached = pane.session_cache.get("a").unwrap();
+    assert_eq!(cached.timeline_content_height_px, 900.0);
+    assert!(cached.messages.iter().any(|m| m.id == "short-tool"));
+    pane.switch_session("a".into());
+    assert_eq!(pane.timeline_viewport_rect, None);
+    pane.upsert_part_message(tool.clone());
+    pane.note_streaming(NeoismAgentStreamingState::Idle, None);
+    pane.apply_history(pane.messages.clone());
+    pane.set_timeline_metrics(rect, 948.0, 300.0);
+    assert_eq!(
+        (pane.timeline_scroll_offset(), pane.timeline_wheel_target_px),
+        (0.0, None)
+    );
+    pane.upsert_part_message(tool);
+    pane.set_timeline_metrics(rect, 948.0, 300.0);
+    assert_eq!(
+        (pane.timeline_scroll_offset(), pane.timeline_wheel_target_px),
+        (0.0, None)
+    );
+    pane.apply_part_delta(Some("reply".into()), None, Some("text".into()), " More.");
+    pane.set_timeline_metrics(rect, 972.0, 300.0);
+    assert_eq!(
+        (pane.timeline_scroll_offset(), pane.timeline_wheel_target_px),
+        (24.0, Some(0.0))
+    );
 }
 
 fn follow_scroll_test_pane() -> NeoismAgentPane {

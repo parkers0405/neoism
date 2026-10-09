@@ -2513,7 +2513,7 @@ rl.on("line", (line) => {
                 tenant_id: "local".into(),
                 subject: None,
                 workspace_id: Some("workspace".into()),
-                execution_mode: neoism_agent_plugin_api::PluginExecutionMode::Sandboxed,
+                execution_mode: neoism_agent_plugin_api::PluginExecutionMode::NativeLocal,
                 directory: ".".into(),
                 session_id: None,
                 arguments: json!({}),

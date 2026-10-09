@@ -23,9 +23,7 @@ fn tool_message_accent(status: &str, theme: &IdeTheme) -> u32 {
 
 // Eight discrete stops around a square, with four fading blocks chasing.
 fn tool_spinner_position(now_seconds: f32, trail: usize, s: f32) -> (f32, f32) {
-    let phase = crate::render_policy::loader_animation_frame(now_seconds).phase;
-    let step = (phase * 8.0).floor() - trail as f32;
-    crate::render_policy::loader_orbit_position(step / 8.0, 3.0 * s)
+    super::super::draw::running_square_position(now_seconds, trail, s)
 }
 
 /// Ordinary collapsed calls have a fixed height; edit diffs keep their cards.
@@ -37,6 +35,39 @@ fn tool_status_label(status: &str) -> &str {
         "completed" => "",
         _ => status,
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ToolHeaderIndicator {
+    Continuation,
+    Spinner,
+    Dot,
+}
+
+impl ToolHeaderIndicator {
+    fn owns_running(self, incoming: bool) -> bool {
+        self == Self::Spinner && incoming
+    }
+}
+
+// api_mapping keeps follow-ups as task tools with their original click identity.
+// Only their gutter paint differs; never reinterpret the underlying lifecycle.
+fn tool_header_indicator(tool: &str, title: &str, status: &str) -> ToolHeaderIndicator {
+    if tool == "task" && (title == "Follow-up" || title.starts_with("Follow-up(")) {
+        ToolHeaderIndicator::Continuation
+    } else if matches!(status, "running" | "streaming") {
+        ToolHeaderIndicator::Spinner
+    } else {
+        ToolHeaderIndicator::Dot
+    }
+}
+
+fn tool_header_is_toggleable(
+    tool: &str,
+    has_diff_sections: bool,
+    archived: bool,
+) -> bool {
+    !has_diff_sections || archived || !is_edit_tool_name(tool)
 }
 
 fn fixed_diff_viewport_height(preview_rows: usize, s: f32) -> f32 {
@@ -201,6 +232,31 @@ pub fn render_tool_message(
     let (incoming_alpha, outgoing_alpha) =
         status_blend(motion.outgoing_status.is_some(), motion.status_progress);
     let mut indicator_visible = false;
+    if tool_header_indicator(message.tool(), message.title().trim(), message.status())
+        == ToolHeaderIndicator::Continuation
+    {
+        if let Some(opts) = opts_with_clip(
+            DrawOpts {
+                font_size: 15.5 * s,
+                color: theme.u8(theme.muted),
+                ..DrawOpts::default()
+            },
+            message_clip,
+        ) {
+            let first = sugarloaf.text_mut().instances().len();
+            // Use the existing lifecycle gutter, without changing row geometry.
+            draw_text_clipped(
+                sugarloaf,
+                x + 1.0 * s,
+                y + 2.0 * s,
+                "↳",
+                &opts,
+                occlusion_rects,
+            );
+            indicator_visible |=
+                active_glyphs(motion, sugarloaf, first, message_clip, occlusion_rects);
+        }
+    }
     for (status, blend, owns_running) in [
         (message.status(), incoming_alpha, true),
         (motion.outgoing_status.unwrap_or(""), outgoing_alpha, false),
@@ -210,9 +266,19 @@ pub fn render_tool_message(
         if status.is_empty() || (!owns_running && blend <= 0.0) {
             continue;
         }
-        if matches!(status, "running" | "streaming") {
+        let indicator =
+            tool_header_indicator(message.tool(), message.title().trim(), status);
+        // Suppress incoming lifecycle ink and outgoing spinner tails, but keep
+        // the continuation's arrival/fog and status-label motion.
+        if indicator == ToolHeaderIndicator::Continuation {
+            continue;
+        }
+        if indicator == ToolHeaderIndicator::Spinner {
             let mut visible = false;
-            for (trail, alpha) in [1.0, 0.65, 0.4, 0.2].into_iter().enumerate() {
+            for (trail, alpha) in super::super::draw::RUNNING_SQUARE_ALPHAS
+                .into_iter()
+                .enumerate()
+            {
                 let (dx, dy) = tool_spinner_position(now_seconds, trail, s);
                 let square = [
                     x + 7.0 * s + dx - s,
@@ -246,7 +312,7 @@ pub fn render_tool_message(
             }
 
             // Completion tails own a deadline, never normal running ownership.
-            if visible && owns_running {
+            if visible && indicator.owns_running(owns_running) {
                 pane.set_visible_running_tool_active(true);
             }
         } else {
@@ -464,8 +530,12 @@ pub fn render_tool_message(
             .as_ref()
             .map(|sections| sections.as_slice())
     };
-    // Live edit cards use their per-file toggles rather than a parent toggle.
-    if (diff_sections.is_none() || archived) && !suppress_interactions {
+    // Only live edit cards replace the parent toggle with per-file toggles.
+    // Ordinary tools (e.g. Bash git diff) must retain the header target after
+    // expansion, including when their diff sections were prepared by the timeline.
+    if tool_header_is_toggleable(message.tool(), diff_sections.is_some(), archived)
+        && !suppress_interactions
+    {
         if let Some(header_clip) =
             intersect_rect([x, y, w, TOOL_HEADER_HEIGHT * s], message_clip)
         {
@@ -1090,6 +1160,99 @@ mod tests {
         tool_status_label, ToolMessageParts, TOOL_GROUP_BODY_Y, TOOL_HEADER_HEIGHT,
     };
     use crate::primitives::ide_theme::IdeTheme;
+
+    #[test]
+    fn followup_gutter_is_a_continuation_in_every_lifecycle() {
+        use super::{tool_header_indicator, ToolHeaderIndicator};
+        for status in [
+            "pending",
+            "queued",
+            "running",
+            "streaming",
+            "completed",
+            "error",
+            "cancelled",
+        ] {
+            assert_eq!(
+                tool_header_indicator(
+                    "task",
+                    "Follow-up(@explore · Check parser)",
+                    status
+                ),
+                ToolHeaderIndicator::Continuation,
+                "{status}",
+            );
+        }
+        // The raw projected title is the discriminator, not title_text(), which
+        // removes parentheses for paint. The normal task header target remains.
+        assert!(super::tool_header_is_toggleable("task", false, false));
+    }
+
+    #[test]
+    fn launch_gutter_keeps_its_authoritative_lifecycle() {
+        use super::{tool_header_indicator, ToolHeaderIndicator};
+        for status in ["running", "streaming"] {
+            assert_eq!(
+                tool_header_indicator("task", "Task(@explore · Check parser)", status),
+                ToolHeaderIndicator::Spinner,
+            );
+        }
+        for status in ["pending", "queued", "completed", "error", "cancelled"] {
+            assert_eq!(
+                tool_header_indicator("task", "Task(@explore · Check parser)", status),
+                ToolHeaderIndicator::Dot,
+            );
+        }
+        // A similarly named non-task tool must not lose its lifecycle gutter.
+        assert_eq!(
+            tool_header_indicator("bash", "Follow-up(command)", "running"),
+            ToolHeaderIndicator::Spinner,
+        );
+    }
+
+    #[test]
+    fn followup_never_owns_running_redraw_including_outgoing_tails() {
+        use super::{tool_header_indicator, ToolHeaderIndicator};
+        for incoming in [false, true] {
+            for status in [
+                "pending",
+                "queued",
+                "running",
+                "streaming",
+                "completed",
+                "error",
+            ] {
+                let indicator = tool_header_indicator(
+                    "task",
+                    "Follow-up(@explore · Check parser)",
+                    status,
+                );
+                assert!(!indicator.owns_running(incoming));
+            }
+            assert!(!ToolHeaderIndicator::Dot.owns_running(incoming));
+            assert_eq!(
+                ToolHeaderIndicator::Spinner.owns_running(incoming),
+                incoming
+            );
+        }
+    }
+
+    #[test]
+    fn bash_diff_parent_header_remains_toggleable_after_expansion() {
+        for archived in [false, true] {
+            for tool in ["bash", "read", "grep"] {
+                // The same decision applies to cached and prepared diff sections,
+                // and while an ordinary tool is closing or reversing its animation.
+                assert!(super::tool_header_is_toggleable(tool, false, archived));
+                assert!(super::tool_header_is_toggleable(tool, true, archived));
+            }
+        }
+        for tool in ["edit", "write", "apply_patch", "MultiEdit"] {
+            assert!(!super::tool_header_is_toggleable(tool, true, false));
+            assert!(super::tool_header_is_toggleable(tool, true, true));
+            assert!(super::tool_header_is_toggleable(tool, false, false));
+        }
+    }
 
     #[test]
     fn read_group_children_use_ids_not_duplicate_labels() {

@@ -20,6 +20,8 @@ use tower::ServiceExt;
 
 #[path = "tests_hosting.rs"]
 mod hosting_tests;
+#[path = "tests_workspace_worker.rs"]
+mod workspace_worker_tests;
 
 #[path = "tests_interaction_tools.rs"]
 mod interaction_tool_tests;
@@ -895,42 +897,6 @@ async fn tenant_scoped_search_and_root_pagination_never_cross_tenants() {
         .await
         .unwrap();
     assert_eq!(local_page.items.len(), 2);
-    cleanup_sqlite_files(&path);
-}
-
-#[tokio::test]
-async fn workspace_revisions_are_tenant_scoped_and_compare_and_swap() {
-    let path = std::env::temp_dir().join(format!(
-        "neoism-workspace-revision-{}.sqlite3",
-        Id::ascending(IdKind::Event)
-    ));
-    cleanup_sqlite_files(&path);
-    let store = SessionStore::open(path.clone()).await.unwrap();
-
-    assert!(store
-        .commit_workspace_revision("alpha", "root", None, "a1")
-        .await
-        .unwrap());
-    assert!(store
-        .commit_workspace_revision("beta", "root", None, "b1")
-        .await
-        .unwrap());
-    assert!(!store
-        .commit_workspace_revision("alpha", "root", Some("stale"), "a2")
-        .await
-        .unwrap());
-    assert!(store
-        .commit_workspace_revision("alpha", "root", Some("a1"), "a2")
-        .await
-        .unwrap());
-    assert_eq!(
-        store.workspace_revision("alpha", "root").await.unwrap(),
-        Some("a2".into())
-    );
-    assert_eq!(
-        store.workspace_revision("beta", "root").await.unwrap(),
-        Some("b1".into())
-    );
     cleanup_sqlite_files(&path);
 }
 
@@ -1970,6 +1936,9 @@ async fn v2_root_event_stream_forwards_live_delta_from_child_created_after_conne
     cleanup_sqlite_files(&path);
 }
 
+#[path = "tests_catalog_activity.rs"]
+mod catalog_activity_tests;
+
 #[tokio::test]
 async fn v2_session_catalog_stream_only_forwards_roots_in_the_requested_directory() {
     let path = std::env::temp_dir().join(format!(
@@ -2007,21 +1976,85 @@ async fn v2_session_catalog_stream_only_forwards_roots_in_the_requested_director
     ));
     let root = store_test_session(&neoism_agent_core::new_session_id(), now_millis());
     let root_id = root.id.to_string();
+    state.inner.store.insert_session(&root).await.unwrap();
     state.publish(EventPayload::new(
         event_type::SESSION_CREATED,
         json!({ "sessionID": root.id, "info": root }),
     ));
 
-    let chunk = tokio::time::timeout(Duration::from_secs(2), body.next())
+    let chunk = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let chunk = body.next().await.unwrap().unwrap();
+            if String::from_utf8_lossy(&chunk).contains("session.created") { break chunk; }
+        }
+    })
         .await
-        .expect("root catalogue event should arrive")
-        .expect("catalogue SSE should remain open")
-        .expect("catalogue SSE chunk should be readable");
+        .expect("root catalogue event should arrive");
     let text = String::from_utf8_lossy(&chunk);
     assert!(text.contains("session.created"), "{text}");
     assert!(text.contains(&root_id), "{text}");
     assert!(!text.contains("parentId"), "{text}");
 
+    cleanup_sqlite_files(&path);
+}
+
+#[tokio::test]
+async fn catalog_activity_stream_reprojects_root_running_and_idle() {
+    let path = std::env::temp_dir().join(format!(
+        "neoism-agent-catalog-running-{}.sqlite3",
+        Id::ascending(IdKind::Event)
+    ));
+    cleanup_sqlite_files(&path);
+    let state = AppState::open_database(path.clone()).await.unwrap();
+    let root = store_test_session(&neoism_agent_core::new_session_id(), now_millis());
+    let mut child =
+        store_test_session(&neoism_agent_core::new_session_id(), now_millis());
+    child.parent_id = Some(root.id.clone());
+    let mut foreign =
+        store_test_session(&neoism_agent_core::new_session_id(), now_millis());
+    foreign.directory = "/".into();
+    for session in [&root, &child, &foreign] {
+        state.inner.store.insert_session(session).await.unwrap();
+    }
+    let response = app(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/v2/session-catalog/events?directory=%2Ftmp")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut body = response.into_body().into_data_stream();
+    // The authoritative subscription baseline precedes runtime edges.
+    let baseline = body.next().await.unwrap().unwrap();
+    assert!(String::from_utf8_lossy(&baseline).contains("session.catalog.activity"));
+    for status in ["busy", "idle"] {
+        if status == "busy" {
+            state.inner.statuses.write().await.insert(root.id.to_string(), SessionStatus::Busy { queue: None });
+        } else {
+            state.inner.statuses.write().await.remove(root.id.as_str());
+        }
+        state.publish(EventPayload::new(
+            event_type::SESSION_STATUS,
+            json!({"sessionID": root.id, "status": {"type": status}}),
+        ));
+        let chunk = tokio::time::timeout(Duration::from_secs(2), body.next())
+            .await
+            .expect("root status must reach left catalog")
+            .unwrap()
+            .unwrap();
+        let text = String::from_utf8_lossy(&chunk);
+        assert!(text.contains("session.catalog.activity"), "{text}");
+        assert!(text.contains(root.id.as_str()), "{text}");
+        assert!(text.contains(if status == "busy" { "running" } else { "idle" }), "{text}");
+        assert!(!text.contains(child.id.as_str()), "{text}");
+        assert!(!text.contains(foreign.id.as_str()), "{text}");
+    }
+    drop(body);
+    state.shutdown().await.unwrap();
     cleanup_sqlite_files(&path);
 }
 

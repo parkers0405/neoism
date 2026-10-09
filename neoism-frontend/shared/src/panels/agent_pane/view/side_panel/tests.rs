@@ -1,6 +1,169 @@
 use super::*;
 
 #[test]
+fn passive_catalog_tracks_root_not_keyboard_candidate() {
+    let mut panel = NeoismAgentSidePanel::default();
+    panel.set_sessions(vec![
+        NeoismAgentSessionEntry::new("a", "A", ""),
+        NeoismAgentSessionEntry::new("b", "B", ""),
+    ]);
+    let candidate = panel
+        .sessions()
+        .iter()
+        .position(|row| row.id == "a")
+        .unwrap();
+    let viewed = panel
+        .sessions()
+        .iter()
+        .position(|row| row.id == "b")
+        .unwrap();
+    panel.set_selected(candidate);
+    panel.set_catalog_viewed_root(Some("b"));
+    assert_eq!(panel.catalog_highlight_index(Some("cached")), Some(viewed));
+    assert_eq!(panel.selected_index(), candidate);
+    panel.set_focused(true);
+    assert_eq!(panel.catalog_highlight_index(None), Some(candidate));
+    panel.set_selected(viewed);
+    assert_eq!(panel.catalog_highlight_index(None), Some(viewed));
+}
+
+#[test]
+fn catalog_no_chat_and_missing_root_never_fall_back_to_wrong_row() {
+    let mut panel = NeoismAgentSidePanel::default();
+    panel.set_sessions(vec![NeoismAgentSessionEntry::new("cached", "Cached", "")]);
+    assert!(panel.catalog_highlight_index(Some("cached")).is_some());
+    panel.set_catalog_viewed_root(None);
+    assert_eq!(panel.catalog_viewed_root(Some("cached")), None);
+    assert_eq!(panel.catalog_highlight_index(Some("cached")), None);
+    panel.set_catalog_viewed_root(Some("unloaded"));
+    assert_eq!(panel.catalog_highlight_index(Some("cached")), None);
+}
+
+#[test]
+fn detail_sync_keeps_viewed_historical_child_without_resetting_same_family_scroll() {
+    let mut catalog = NeoismAgentSidePanel::default();
+    catalog.set_viewed_session_id(Some("root".into()));
+    catalog.set_subagents(highlight_family_roster());
+    let mut detail = NeoismAgentSidePanel::default();
+    detail.sync_conversation_details_from_root(&catalog, Some("root"));
+    detail.set_content_scroll_max(500.0);
+    detail.scroll_content_pixels(137.0);
+    catalog.set_viewed_session_id(Some("child".into()));
+    catalog.set_subagents(vec![
+        NeoismAgentSessionEntry::new("root", "Root", ""),
+        NeoismAgentSessionEntry::new("child", "Historical", "")
+            .with_runtime_status(Some("completed".into())),
+    ]);
+    catalog.retain_authoritative_branches(&std::collections::HashSet::new());
+    detail.sync_conversation_details_from_root(&catalog, Some("root"));
+    assert_eq!(detail.content_scroll_px(), 137.0);
+    let child = detail
+        .subagents()
+        .iter()
+        .position(|row| row.id == "child")
+        .unwrap();
+    assert_eq!(detail.detail_highlight_index(Some("child")), Some(child));
+    assert_eq!(
+        detail.branch_activity("child").unwrap().status,
+        BranchStatus::Completed
+    );
+    detail.retain_authoritative_branches(&std::collections::HashSet::new());
+    assert!(detail.subagents().iter().any(|row| row.id == "child"));
+}
+
+fn highlight_family_roster() -> Vec<NeoismAgentSessionEntry> {
+    ["root", "child", "sibling"]
+        .into_iter()
+        .map(|id| {
+            NeoismAgentSessionEntry::new(id, id, "")
+                .with_runtime_status(Some("running".into()))
+        })
+        .collect()
+}
+
+#[test]
+fn passive_detail_tracks_exact_view_and_keyboard_remains_independent() {
+    let mut panel = NeoismAgentSidePanel::default();
+    panel.set_subagents(highlight_family_roster());
+    panel
+        .set_mode(crate::panels::agent_pane::state::side_panel::SidePanelMode::Subagents);
+    panel.set_selected(2);
+    for (viewed, expected) in [
+        (Some("root"), Some(0)),
+        (Some("child"), Some(1)),
+        (Some("sibling"), Some(2)),
+        (Some("unloaded"), None),
+        (None, None),
+    ] {
+        assert_eq!(panel.detail_highlight_index(viewed), expected);
+        assert_eq!(panel.selected_index(), 2);
+    }
+    panel.set_focused(true);
+    assert_eq!(panel.detail_highlight_index(Some("child")), Some(2));
+}
+
+#[test]
+fn detail_same_family_navigation_preserves_viewport_roster_and_candidate() {
+    use crate::panels::agent_pane::state::side_panel::SidePanelMode;
+    let mut catalog = NeoismAgentSidePanel::default();
+    catalog.set_viewed_session_id(Some("root".into()));
+    catalog.set_subagents(highlight_family_roster());
+    let mut detail = NeoismAgentSidePanel::default();
+    detail.sync_conversation_details_from_root(&catalog, Some("root"));
+    detail.set_mode(SidePanelMode::Subagents);
+    detail.set_selected(2);
+    detail.take_reveal_selected_branch();
+    detail.set_content_scroll_max(500.0);
+    detail.scroll_content_pixels(137.0);
+    for viewed in ["child", "sibling", "root"] {
+        catalog.set_viewed_session_id(Some(viewed.into()));
+        detail.sync_conversation_details_from_root(&catalog, Some("root"));
+        assert_eq!(detail.viewed_session_id(), Some(viewed));
+        assert_eq!(detail.content_scroll_px(), 137.0);
+        assert_eq!(detail.selected_index(), 2);
+        assert_eq!(detail.subagents().len(), 3);
+        assert!(!detail.take_reveal_selected_branch());
+    }
+    let mut catalog = NeoismAgentSidePanel::default();
+    catalog.set_viewed_session_id(Some("other".into()));
+    catalog.set_subagents(vec![NeoismAgentSessionEntry::new("other", "Other", "")]);
+    detail.sync_conversation_details_from_root(&catalog, Some("other"));
+    assert_eq!(detail.content_scroll_px(), 0.0);
+    assert_eq!(detail.selected_index(), 0);
+    assert_eq!(detail.subagents().len(), 1);
+}
+
+#[test]
+fn catalog_activity_color_authority_and_legacy_fallback() {
+    use neoism_agent_core::CatalogActivity;
+    let red = [0.8, 0.1, 0.2];
+    let yellow = [0.9, 0.7, 0.1];
+    let mut entry = NeoismAgentSessionEntry::new("root", "Root", "")
+        .with_runtime_status(Some("running".into()));
+    for (activity, expected) in [
+        (CatalogActivity::Running, Some([1.0; 3])),
+        (CatalogActivity::Background, Some(red)),
+        (CatalogActivity::Permission, Some(yellow)),
+        (CatalogActivity::Idle, None),
+    ] {
+        entry.catalog_activity = Some(activity);
+        assert_eq!(draw::catalog_activity_color(&entry, red, yellow), expected);
+        entry.runtime_status = Some("idle".into());
+        assert_eq!(draw::catalog_activity_color(&entry, red, yellow), expected);
+    }
+    entry.catalog_activity = None;
+    for (status, expected) in [
+        ("running", Some([1.0; 3])),
+        ("busy", Some([1.0; 3])),
+        ("idle", None),
+        ("blocked", None),
+    ] {
+        entry.runtime_status = Some(status.into());
+        assert_eq!(draw::catalog_activity_color(&entry, red, yellow), expected);
+    }
+}
+
+#[test]
 fn provider_chooser_and_persisted_root_sources() {
     use crate::panels::agent_pane::state::side_panel::ConversationSource;
     let mut panel = NeoismAgentSidePanel::default();
@@ -535,7 +698,11 @@ fn viewed_historical_child_keeps_return_navigation_until_leaving() {
             )]);
             assert_eq!(panel.subagents().len(), 2);
             assert_eq!(panel.subagents()[1].id, "done");
-            assert_eq!(panel.subagents()[1].runtime_status.as_deref(), Some(status));
+            assert_eq!(
+                panel.subagents()[1].runtime_status.as_deref().and_then(BranchStatus::from_runtime_status),
+                BranchStatus::from_runtime_status(status),
+                "retention must preserve terminal status (including canonical status aliases)"
+            );
 
             panel.set_viewed_session_id(Some("main".to_string()));
             assert_eq!(panel.subagents().len(), 1);
@@ -705,6 +872,30 @@ fn unversioned_poll_none_never_clears_a_live_goal() {
 }
 
 #[test]
+fn square_chase_geometry_is_stepped_white_trail_at_both_scales() {
+    use super::super::draw::{running_square_position, RUNNING_SQUARE_ALPHAS};
+    assert_eq!(RUNNING_SQUARE_ALPHAS, [1.0, 0.65, 0.4, 0.2]);
+    for step in 0..8 {
+        let now = (step as f32 + 0.25) / 10.8;
+        for trail in 0..4 {
+            let expected = crate::render_policy::loader_orbit_position(
+                (step as f32 - trail as f32) / 8.0,
+                3.0,
+            );
+            assert_eq!(running_square_position(now, trail, 1.0), expected);
+            assert_eq!(
+                running_square_position(now, trail, 2.0),
+                (expected.0 * 2.0, expected.1 * 2.0)
+            );
+            assert_eq!(
+                running_square_position(now, trail, 1.0),
+                running_square_position((step as f32 + 0.75) / 10.8, trail, 1.0)
+            );
+        }
+    }
+}
+
+#[test]
 fn running_spinner_predicate_only_lights_active_sessions() {
     let running = NeoismAgentSessionEntry::new("a", "a", "")
         .with_runtime_status(Some("running".to_string()));
@@ -731,7 +922,30 @@ fn running_conversation_keeps_catalog_animation_alive() {
     let mut panel = NeoismAgentSidePanel::default();
     panel.set_sessions(vec![NeoismAgentSessionEntry::new("active", "Active", "")
         .with_runtime_status(Some("running".to_string()))]);
+    assert!(
+        !panel.catalog_is_animating(),
+        "offscreen rows do not own redraws"
+    );
+    panel.note_visible_running_indicator(true);
     assert!(panel.catalog_is_animating());
+    assert!(panel.is_animating());
+    panel.reset_visible_running_indicator();
+    panel.note_visible_running_indicator(false);
+    assert!(
+        !panel.catalog_is_animating(),
+        "occluded rows do not own redraws"
+    );
+    panel.note_visible_running_indicator(true);
+    panel.clear_last_panel_rect();
+    assert!(!panel.catalog_is_animating());
+    panel.note_visible_running_indicator(true);
+    panel.set_user_hidden(true);
+    assert!(!panel.catalog_is_animating());
+    panel.set_user_hidden(false);
+    assert!(
+        !panel.catalog_is_animating(),
+        "showing requires a fresh paint"
+    );
 
     panel.set_sessions(vec![NeoismAgentSessionEntry::new("done", "Done", "")
         .with_runtime_status(Some("completed".to_string()))]);

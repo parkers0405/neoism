@@ -707,6 +707,7 @@ impl NeoismAgentPane {
         self.timeline_viewport_rect = None;
         self.timeline_history_position_hydrated = false;
         self.timeline_live_growth = false;
+        self.timeline_trace_reveal_pending = false;
         self.timeline_last_scroll_at = None;
         self.pending_timeline_anchor = None;
         self.timeline_view_anchor = None;

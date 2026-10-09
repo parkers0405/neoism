@@ -2,7 +2,7 @@ use neoism_agent_core::{
     event_type, AssistantMessage, AssistantPath, CompactionPart, CompletedTime,
     CreatedTime, EventPayload, Id, IdKind, MessageInfo, MessageWithParts, Part, PartTime,
     ProviderGenerationRequest, ProviderMessage, ProviderRole, ProviderStreamEvent,
-    SessionInfo, TextPart, TokenUsage, ToolState, UserMessage,
+    ReasoningPart, SessionInfo, TextPart, TokenUsage, ToolState, UserMessage,
 };
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -209,7 +209,7 @@ async fn run_compaction(
             "reason": reason,
         }),
     ));
-    let assistant_message = compaction_assistant_message(
+    let mut assistant_message = compaction_assistant_message(
         &info,
         &model,
         &compaction_message_id,
@@ -218,8 +218,6 @@ async fn run_compaction(
         started,
     )?;
     let assistant_message_id = message_id(&assistant_message);
-    let assistant_text_part_id = text_part_id(&assistant_message)
-        .ok_or_else(|| ApiError::internal("compaction assistant text part missing"))?;
     state
         .inner
         .store
@@ -243,8 +241,7 @@ async fn run_compaction(
         &model,
         &existing_messages,
         tail_start_message_id.as_deref(),
-        &assistant_message_id,
-        &assistant_text_part_id,
+        &mut assistant_message,
         cancel,
     )
     .await
@@ -264,7 +261,7 @@ async fn run_compaction(
                 state,
                 session_id,
                 &mut info,
-                &assistant_message_id,
+                &mut assistant_message,
                 &message,
             )
             .await?;
@@ -282,22 +279,6 @@ async fn run_compaction(
     info.time.updated = now;
     info.time.compacting = None;
     info.extra.remove("summary");
-    let mut assistant_message = state
-        .inner
-        .store
-        .get_message(session_id, &assistant_message_id)
-        .await?
-        .unwrap_or_else(|| {
-            compaction_assistant_message(
-                &info,
-                &model,
-                &compaction_message_id,
-                &summary,
-                started,
-                now,
-            )
-            .expect("valid compaction assistant fallback")
-        });
     finish_compaction_assistant_message(&mut assistant_message, &summary, now);
     state
         .inner
@@ -448,8 +429,7 @@ async fn generate_model_compaction_summary(
     model: &neoism_agent_core::UserModel,
     messages: &[MessageWithParts],
     tail_start_message_id: Option<&str>,
-    assistant_message_id: &str,
-    assistant_text_part_id: &str,
+    assistant_message: &mut MessageWithParts,
     cancel: &Arc<AtomicBool>,
 ) -> Option<String> {
     if model_compaction_disabled() || messages.is_empty() {
@@ -540,17 +520,19 @@ async fn generate_model_compaction_summary(
     };
     let mut events = stream.events;
     let mut raw = String::new();
+    let mut reasoning_parts = std::collections::BTreeMap::new();
+    let mut failed = false;
     loop {
-        // A user abort sets this flag; stop streaming
-        // immediately and discard the partial summary so we don't commit a
-        // half-finished compaction.
+        // Never commit a half-finished summary after a user abort.
         if cancel.load(Ordering::SeqCst) {
-            return None;
+            failed = true;
+            break;
         }
         let event = tokio::select! {
             biased;
             _ = wait_for_cancellation(cancel.clone()) => {
-                return None;
+                failed = true;
+                break;
             },
             result = timeout(
                 Duration::from_secs(model_compaction_timeout_secs()),
@@ -558,33 +540,31 @@ async fn generate_model_compaction_summary(
             ) => match result {
                 Ok(Some(Ok(event))) => event,
                 Ok(Some(Err(_))) | Ok(None) => break,
-                Err(_) if raw.trim().is_empty() => {
-                    return None;
+                Err(_) => {
+                    failed = raw.trim().is_empty();
+                    break;
                 },
-                Err(_) => break,
             },
         };
-        match event {
-            ProviderStreamEvent::TextDelta { delta, .. } => {
-                if delta.is_empty() {
-                    continue;
-                }
-                raw.push_str(&delta);
-                publish_compaction_text_delta(
-                    state,
-                    session_id,
-                    assistant_message_id,
-                    assistant_text_part_id,
-                    &delta,
-                );
-            }
-            ProviderStreamEvent::Error { .. } if raw.trim().is_empty() => return None,
-            ProviderStreamEvent::Error { .. } => break,
-            _ => {}
+        if matches!(event, ProviderStreamEvent::Error { .. }) {
+            failed = raw.trim().is_empty();
+            break;
         }
+        apply_compaction_stream_event(
+            state,
+            session_id,
+            assistant_message,
+            &mut reasoning_parts,
+            &mut raw,
+            event,
+        );
     }
     crate::execution_activity::end_provider_segment(activity_segment).await;
-    clean_model_compaction_summary(&raw)
+    if failed {
+        None
+    } else {
+        clean_model_compaction_summary(&raw)
+    }
 }
 
 #[cfg(test)]
@@ -934,6 +914,115 @@ fn assistant_parent_id(message: &MessageWithParts) -> Option<String> {
     }
 }
 
+fn apply_compaction_stream_event(
+    state: &AppState,
+    session_id: &str,
+    message: &mut MessageWithParts,
+    reasoning_parts: &mut std::collections::BTreeMap<String, Id>,
+    raw: &mut String,
+    event: ProviderStreamEvent,
+) {
+    let MessageInfo::Assistant(assistant) = &message.info else {
+        return;
+    };
+    let message_id = assistant.id.clone();
+    let session = assistant.session_id.clone();
+    let now = now_millis();
+    let reasoning_id = match &event {
+        ProviderStreamEvent::ReasoningStart { id }
+        | ProviderStreamEvent::ReasoningMetadata { id, .. } => Some(id),
+        ProviderStreamEvent::ReasoningDelta { id, delta } if !delta.is_empty() => {
+            Some(id)
+        }
+        _ => None,
+    };
+    if let Some(id) = reasoning_id {
+        if !reasoning_parts.contains_key(id) {
+            let part_id = Id::ascending(IdKind::Part);
+            let part = Part::Reasoning(ReasoningPart {
+                id: part_id.clone(),
+                session_id: session,
+                message_id: message_id.clone(),
+                text: String::new(),
+                time: PartTime {
+                    start: now,
+                    end: None,
+                },
+                metadata: None,
+            });
+            reasoning_parts.insert(id.clone(), part_id);
+            let before_summary = message
+                .parts
+                .iter()
+                .position(|part| matches!(part, Part::Text(_)))
+                .unwrap_or(message.parts.len());
+            message.parts.insert(before_summary, part.clone());
+            state.publish_live(EventPayload::new(
+                event_type::MESSAGE_PART_UPDATED,
+                json!({ "sessionID": session_id, "part": part, "time": now }),
+            ));
+        }
+    }
+    match event {
+        ProviderStreamEvent::TextDelta { delta, .. } if !delta.is_empty() => {
+            let Some(part_id) = text_part_id(message) else {
+                return;
+            };
+            raw.push_str(&delta);
+            publish_compaction_text_delta(
+                state,
+                session_id,
+                message_id.as_str(),
+                &part_id,
+                &delta,
+            );
+        }
+        ProviderStreamEvent::ReasoningDelta { id, delta } if !delta.is_empty() => {
+            let Some(part_id) = reasoning_parts.get(&id) else {
+                return;
+            };
+            if let Some(Part::Reasoning(part)) = message.parts.iter_mut().find(|part| {
+                matches!(part, Part::Reasoning(reasoning) if &reasoning.id == part_id)
+            }) {
+                part.text.push_str(&delta);
+                state.publish_live(EventPayload::new(
+                    event_type::MESSAGE_PART_DELTA,
+                    json!({
+                        "sessionID": session_id, "messageID": message_id,
+                        "partID": part_id, "partType": "reasoning",
+                        "field": "text", "delta": delta,
+                    }),
+                ));
+            }
+        }
+        event => {
+            let (id, metadata) = match event {
+                ProviderStreamEvent::ReasoningMetadata { id, metadata } => {
+                    (id, Some(metadata))
+                }
+                ProviderStreamEvent::ReasoningEnd { id } => (id, None),
+                _ => return,
+            };
+            let Some(part_id) = reasoning_parts.get(&id) else {
+                return;
+            };
+            if let Some(Part::Reasoning(part)) = message.parts.iter_mut().find(|part| {
+                matches!(part, Part::Reasoning(reasoning) if &reasoning.id == part_id)
+            }) {
+                if let Some(metadata) = metadata {
+                    part.metadata = Some(metadata);
+                } else {
+                    part.time.end.get_or_insert(now);
+                }
+                state.publish_live(EventPayload::new(
+                    event_type::MESSAGE_PART_UPDATED,
+                    json!({ "sessionID": session_id, "part": Part::Reasoning(part.clone()), "time": now }),
+                ));
+            }
+        }
+    }
+}
+
 fn publish_compaction_text_delta(
     state: &AppState,
     session_id: &str,
@@ -983,13 +1072,20 @@ fn finish_compaction_assistant_message(
 ) {
     if let MessageInfo::Assistant(assistant) = &mut message.info {
         assistant.time.completed = Some(now);
+        assistant.finish = Some("stop".to_string());
     }
     for part in &mut message.parts {
-        if let Part::Text(text) = part {
-            text.text = summary.to_string();
-            if let Some(time) = &mut text.time {
-                time.end = Some(now);
+        match part {
+            Part::Text(text) => {
+                text.text = summary.to_string();
+                if let Some(time) = &mut text.time {
+                    time.end = Some(now);
+                }
             }
+            Part::Reasoning(reasoning) => {
+                reasoning.time.end.get_or_insert(now);
+            }
+            _ => {}
         }
     }
 }
@@ -998,31 +1094,30 @@ async fn fail_compaction_assistant_message(
     state: &AppState,
     session_id: &str,
     info: &mut SessionInfo,
-    assistant_message_id: &str,
+    assistant_message: &mut MessageWithParts,
     message: &str,
 ) -> Result<(), ApiError> {
     let now = now_millis();
     info.time.updated = now;
     info.time.compacting = None;
-    if let Some(mut assistant_message) = state
+    finish_compaction_assistant_message(assistant_message, "", now);
+    if let MessageInfo::Assistant(assistant) = &mut assistant_message.info {
+        assistant.finish = Some("error".to_string());
+        assistant.error = Some(json!({ "message": message }));
+    }
+    state
         .inner
         .store
-        .get_message(session_id, assistant_message_id)
-        .await?
-    {
-        if let MessageInfo::Assistant(assistant) = &mut assistant_message.info {
-            assistant.time.completed = Some(now);
-            assistant.finish = Some("error".to_string());
-            assistant.error = Some(json!({ "message": message }));
-        }
-        state
-            .inner
-            .store
-            .update_message(session_id, &assistant_message)
-            .await?;
+        .update_message(session_id, assistant_message)
+        .await?;
+    state.publish(EventPayload::new(
+        event_type::MESSAGE_UPDATED,
+        json!({ "sessionID": session_id, "info": assistant_message.info }),
+    ));
+    for part in &assistant_message.parts {
         state.publish(EventPayload::new(
-            event_type::MESSAGE_UPDATED,
-            json!({ "sessionID": session_id, "info": assistant_message.info }),
+            event_type::MESSAGE_PART_UPDATED,
+            json!({ "sessionID": session_id, "part": compaction_event_part(part), "time": now }),
         ));
     }
     state.inner.store.update_session(info).await?;
@@ -1098,7 +1193,7 @@ fn compaction_assistant_message(
             time: CompletedTime {
                 created: started,
                 streamed: Some(completed),
-                completed: Some(completed),
+                completed: (completed > started).then_some(completed),
             },
             parent_id,
             mode: "compaction".to_string(),
@@ -1111,7 +1206,7 @@ fn compaction_assistant_message(
             tokens: TokenUsage::default(),
             model_id: model.model_id.clone(),
             provider_id: model.provider_id.clone(),
-            finish: Some("stop".to_string()),
+            finish: (completed > started).then(|| "stop".to_string()),
             error: None,
         }),
         parts: vec![
@@ -1405,6 +1500,185 @@ fn plugin_run_system_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn compaction_reasoning_streams_separately_and_survives_completion_or_abort() {
+        for aborted in [false, true] {
+            let root = std::env::temp_dir().join(format!(
+                "neoism-compaction-reasoning-{}",
+                Id::ascending(IdKind::Event)
+            ));
+            std::fs::create_dir_all(&root).unwrap();
+            let state = AppState::open_database(root.join("state.sqlite3"))
+                .await
+                .unwrap();
+            let session_id = neoism_agent_core::new_session_id();
+            let mut info: SessionInfo = serde_json::from_value(json!({
+                "id": session_id, "slug": "reasoning", "projectId": "global",
+                "directory": root.to_string_lossy(), "title": "Compaction reasoning", "version": "test",
+                "time": { "created": 1, "updated": 1, "compacting": 1 }
+            })).unwrap();
+            state.inner.store.insert_session(&info).await.unwrap();
+            let model = default_user_model();
+            let parent_id = Id::ascending(IdKind::Message).to_string();
+            let mut message =
+                compaction_assistant_message(&info, &model, &parent_id, "", 1, 1)
+                    .unwrap();
+            let id = message_id(&message);
+            assert!(
+                matches!(&message.info, MessageInfo::Assistant(assistant) if assistant.time.completed.is_none())
+            );
+            state
+                .inner
+                .store
+                .append_message(session_id.as_str(), &message)
+                .await
+                .unwrap();
+            state.publish(EventPayload::new(
+                event_type::MESSAGE_UPDATED,
+                json!({ "sessionID": session_id, "info": message.info }),
+            ));
+            for part in &message.parts {
+                state.publish(EventPayload::new(
+                    event_type::MESSAGE_PART_UPDATED,
+                    json!({ "sessionID": session_id, "part": compaction_event_part(part) }),
+                ));
+            }
+            let mut events = state.subscribe();
+            let mut reasoning_parts = std::collections::BTreeMap::new();
+            let mut raw = String::new();
+            let provider_events = [
+                ProviderStreamEvent::ReasoningStart { id: "r1".into() },
+                ProviderStreamEvent::ReasoningStart { id: "r1".into() },
+                ProviderStreamEvent::ReasoningDelta {
+                    id: "r1".into(),
+                    delta: "**Reviewing recent work**".into(),
+                },
+                ProviderStreamEvent::ReasoningMetadata {
+                    id: "r1".into(),
+                    metadata: json!({"openai": {"encrypted_content": "opaque"}}),
+                },
+                ProviderStreamEvent::ReasoningEnd { id: "r1".into() },
+                ProviderStreamEvent::ReasoningDelta {
+                    id: "r2".into(),
+                    delta: "**Preserving constraints**".into(),
+                },
+                ProviderStreamEvent::TextDelta {
+                    id: "text".into(),
+                    delta: "## Goal\n- Continue work".into(),
+                },
+            ];
+            for event in provider_events {
+                apply_compaction_stream_event(
+                    &state,
+                    session_id.as_str(),
+                    &mut message,
+                    &mut reasoning_parts,
+                    &mut raw,
+                    event,
+                );
+            }
+            assert_eq!(raw, "## Goal\n- Continue work");
+            assert_eq!(reasoning_parts.len(), 2);
+            let mut visible_reasoning = Vec::new();
+            let mut visible_summary = String::new();
+            while let Ok(event) = events.try_recv() {
+                if event.kind == event_type::MESSAGE_PART_DELTA
+                    && event.properties["partType"] == "reasoning"
+                {
+                    visible_reasoning
+                        .push(event.properties["delta"].as_str().unwrap().to_string());
+                }
+                if event.kind == event_type::SESSION_COMPACTION_DELTA {
+                    visible_summary.push_str(event.properties["text"].as_str().unwrap());
+                }
+            }
+            assert_eq!(
+                visible_reasoning,
+                ["**Reviewing recent work**", "**Preserving constraints**"]
+            );
+            assert_eq!(visible_summary, raw);
+            let (_, baseline) = state.subscribe_with_messages();
+            let live_reasoning = baseline
+                .iter()
+                .filter(|event| {
+                    event.kind == event_type::MESSAGE_PART_UPDATED
+                        && event.properties["part"]["type"] == "reasoning"
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(live_reasoning.len(), 2);
+            assert!(live_reasoning
+                .iter()
+                .all(|event| !event.properties["part"]["text"]
+                    .as_str()
+                    .unwrap()
+                    .is_empty()));
+            // Deltas stay transient: no growing message rewrite per token.
+            let stored = state
+                .inner
+                .store
+                .get_message(session_id.as_str(), &id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(!stored
+                .parts
+                .iter()
+                .any(|part| matches!(part, Part::Reasoning(_))));
+            if aborted {
+                fail_compaction_assistant_message(
+                    &state,
+                    session_id.as_str(),
+                    &mut info,
+                    &mut message,
+                    "compaction cancelled",
+                )
+                .await
+                .unwrap();
+            } else {
+                finish_compaction_assistant_message(&mut message, &raw, now_millis());
+                state
+                    .inner
+                    .store
+                    .update_message(session_id.as_str(), &message)
+                    .await
+                    .unwrap();
+            }
+            let stored = state
+                .inner
+                .store
+                .get_message(session_id.as_str(), &id)
+                .await
+                .unwrap()
+                .unwrap();
+            let reasoning = stored
+                .parts
+                .iter()
+                .filter_map(|part| match part {
+                    Part::Reasoning(part) => Some(part),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(reasoning.len(), 2);
+            assert!(reasoning.iter().all(|part| part.time.end.is_some()));
+            assert_eq!(reasoning[0].text, visible_reasoning[0]);
+            assert_eq!(
+                reasoning[0].metadata.as_ref().unwrap()["openai"]["encrypted_content"],
+                "opaque"
+            );
+            let summary = stored
+                .parts
+                .iter()
+                .find_map(|part| match part {
+                    Part::Text(part) => Some(part.text.as_str()),
+                    _ => None,
+                })
+                .unwrap();
+            assert_eq!(summary, if aborted { "" } else { raw.as_str() });
+            state.shutdown().await.unwrap();
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
 
     #[test]
     fn compaction_text_event_is_explicitly_marked() {

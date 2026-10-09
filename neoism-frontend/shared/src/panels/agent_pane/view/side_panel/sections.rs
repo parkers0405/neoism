@@ -857,9 +857,14 @@ fn render_subagent_rows<I: AgentSidePanelIconHost>(
         }
     }
 
-    if selected < rows_len {
-        let row_ix = selected as isize;
-        let row_y = list_rect[1] + row_ix as f32 * row_h + cursor_offset;
+    let highlighted = pane
+        .side_panel()
+        .detail_highlight_index(pane.session_id_str());
+    if let Some(highlighted) = highlighted {
+        let row_ix = highlighted as isize;
+        let row_y = list_rect[1]
+            + row_ix as f32 * row_h
+            + if focused { cursor_offset } else { 0.0 };
         let row_bottom = row_y + row_h;
         let visible_y = row_y.max(list_top);
         let visible_h = row_bottom.min(list_bottom) - visible_y;
@@ -911,6 +916,7 @@ fn render_subagent_rows<I: AgentSidePanelIconHost>(
         ..DrawOpts::default()
     };
     let current_id = pane.session_id_str().map(str::to_string);
+    let mut running_indicator_visible = false;
     let rows = pane.side_panel().subagents();
 
     // Blinking white dot opacity for Active state — sin sweep keeps
@@ -957,9 +963,8 @@ fn render_subagent_rows<I: AgentSidePanelIconHost>(
             dot_x + dot_diameter + 8.0 * s
         };
 
-        // A running sub-agent wears the terminal's rainbow loader spinner
-        // (the same orbiting pastel trail the running-block chrome uses)
-        // instead of a static dot. Every other state keeps its dot.
+        // Only active branches wear the timeline's white square chase.
+        // Waiting and terminal states retain their existing status dots.
         let is_running_spinner = matches!(
             activity.as_ref().map(|a| a.status),
             Some(BranchStatus::Active)
@@ -1007,16 +1012,19 @@ fn render_subagent_rows<I: AgentSidePanelIconHost>(
             }
             if !is_main_row {
                 if is_running_spinner {
-                    draw_subagent_spinner(
+                    let visible = draw_subagent_spinner(
                         sugarloaf,
                         dot_x,
                         dot_y,
                         dot_diameter,
+                        [1.0; 3],
                         now_seconds,
                         row_clip,
                         s,
                         ORDER_PANEL + 3,
+                        occlusion_rects,
                     );
+                    running_indicator_visible |= visible;
                 } else {
                     draw_status_dot_text(
                         sugarloaf,
@@ -1114,4 +1122,6 @@ fn render_subagent_rows<I: AgentSidePanelIconHost>(
             occlusion_rects,
         );
     }
+    pane.side_panel_mut()
+        .note_visible_running_indicator(running_indicator_visible);
 }

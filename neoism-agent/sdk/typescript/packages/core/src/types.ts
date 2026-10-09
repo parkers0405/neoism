@@ -32,6 +32,9 @@ export type SessionControl = ContractSessionControl;
 export type SessionParticipant = ContractSessionParticipant;
 export type MessageWithParts = Message;
 export type {
+  PackageLifecycleInfo,
+  PackageDiagnostic,
+  HostCapability,
   Part,
   TextPart,
   CompactionPart,

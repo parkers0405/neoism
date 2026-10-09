@@ -1,6 +1,15 @@
 use super::composer::splash_composer_reserved_rows;
 use super::*;
 
+/// Only an actually viewed chat can own the passive catalog highlight.
+fn viewed_catalog_root<'a>(
+    viewed: Option<&str>,
+    root: Option<&'a str>,
+) -> Option<&'a str> {
+    viewed.filter(|id| !id.is_empty())?;
+    root.filter(|id| !id.is_empty())
+}
+
 fn terminal_splash_wants_visible(
     no_command_yet: bool,
     alt_screen: bool,
@@ -887,11 +896,16 @@ impl Renderer {
                     )
                 })
                 .unwrap_or(0.0);
-            let active_agent_id = context_manager
+            let active_agent_root = context_manager
                 .current()
                 .neoism_agent
                 .as_ref()
-                .and_then(|agent| agent.session_id_str())
+                .and_then(|agent| {
+                    viewed_catalog_root(
+                        agent.session_id_str(),
+                        agent.conversation_root_id(),
+                    )
+                })
                 .map(str::to_owned);
             let chrome_scale = self.chrome_scale();
             let mut side_x = frame.x;
@@ -923,13 +937,9 @@ impl Renderer {
                     ),
                     LeftSidebarView::Conversations => {
                         let panel = &mut self.conversations_pane;
-                        if panel.side_panel().viewed_session_id()
-                            != active_agent_id.as_deref()
-                        {
-                            panel
-                                .side_panel_mut()
-                                .set_viewed_session_id(active_agent_id.clone());
-                        }
+                        panel
+                            .side_panel_mut()
+                            .set_catalog_viewed_root(active_agent_root.as_deref());
                         panel.drain_server_updates();
                         neoism_ui::panels::agent_pane::view::side_panel::render_side_panel_with_icons::<
                             _, crate::neoism::view::side_panel::DesktopSidePanelIcons,
@@ -1759,6 +1769,19 @@ impl neoism_ui::panels::buffer_tabs::AgentIconProvider<crate::neoism::icon::Agen
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn catalog_view_maps_child_to_root_and_no_chat_to_none() {
+        assert_eq!(
+            super::viewed_catalog_root(Some("root"), Some("root")),
+            Some("root")
+        );
+        assert_eq!(
+            super::viewed_catalog_root(Some("child"), Some("root")),
+            Some("root")
+        );
+        assert_eq!(super::viewed_catalog_root(None, Some("cached-root")), None);
+        assert_eq!(super::viewed_catalog_root(Some("child"), None), None);
+    }
     use super::{
         modal_uses_late_overlay, settings_uses_late_overlay,
         terminal_splash_wants_visible,

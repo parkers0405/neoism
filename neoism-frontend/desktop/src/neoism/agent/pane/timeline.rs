@@ -122,6 +122,11 @@ impl NeoismAgentPane {
         content_height_px: f32,
         viewport_height_px: f32,
     ) {
+        // A tool can unhide the whole previous turn. Even a batch of live
+        // updates before this paint must not animate that historical disclosure.
+        if std::mem::take(&mut self.timeline_trace_reveal_pending) {
+            self.timeline_live_growth = false;
+        }
         let old_scroll_px = self.timeline_scroll_px;
         let old_max_scroll =
             (self.timeline_content_height_px - self.timeline_viewport_height_px).max(0.0);

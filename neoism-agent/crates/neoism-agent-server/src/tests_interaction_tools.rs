@@ -612,6 +612,7 @@ async fn hosted_session_and_subagent_keep_host_directory_scope() {
         requests_per_minute: None,
         max_in_flight: None,
         resolved: None,
+        worker: None,
     };
     let axum::Json(parent) = crate::session_routes::session_create(
         axum::extract::State(state.clone()),
@@ -627,21 +628,16 @@ async fn hosted_session_and_subagent_keep_host_directory_scope() {
     // The credential's hosted flag identifies the daemon transport, not an
     // external hosted deployment. Guests in a local workspace get native tools.
     assert_eq!(
-        crate::caller::session_execution_policy(state.services().hosted, &parent),
+        crate::caller::session_execution_policy(state.services(), &parent),
         neoism_agent_service_api::ExecutionPolicy::NativeLocal
     );
     assert!(crate::caller::allows_session_path(false, &parent, &outside));
-    let execution = crate::tool::ToolContext::new(&root)
+    crate::tool::ToolContext::new(&root)
         .with_state(Some(state.clone()))
         .with_session_id(Some(parent.id.to_string()))
-        .execution_request(neoism_agent_service_api::ProcessClass::Command, None)
+        .assert_native_execution()
         .await
         .unwrap();
-    assert!(execution.provider.is_none());
-    assert_eq!(
-        execution.workspace.local_path.as_deref(),
-        Some(root.as_path())
-    );
     assert!(crate::caller::allows_session_path(true, &parent, &allowed));
     assert!(!crate::caller::allows_session_path(true, &parent, &outside));
     let child = crate::session_actions::create_subtask_session(
@@ -654,6 +650,14 @@ async fn hosted_session_and_subagent_keep_host_directory_scope() {
     )
     .await
     .unwrap();
+    assert_eq!(
+        crate::caller::session_execution_policy(state.services(), &child),
+        neoism_agent_service_api::ExecutionPolicy::NativeLocal
+    );
+    assert_eq!(
+        crate::execution_activity::root_session_id(&state, &child).await,
+        parent.id.to_string()
+    );
     assert!(crate::caller::allows_session_path(true, &child, &allowed));
     assert!(!crate::caller::allows_session_path(true, &child, &outside));
     assert_eq!(

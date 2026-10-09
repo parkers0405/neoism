@@ -1,0 +1,1204 @@
+{
+  "components": {
+    "schemas": {
+      "Allocation": {
+        "additionalProperties": false,
+        "properties": {
+          "generation": {
+            "maximum": 18446744073709551615,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "launch": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WorkerLaunchDescriptor"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "owner": {
+            "$ref": "#/components/schemas/WorkspaceKey"
+          },
+          "provider": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "type": "string"
+          },
+          "spec": {
+            "$ref": "#/components/schemas/WorkspaceSpec"
+          }
+        },
+        "required": [
+          "owner",
+          "generation",
+          "provider",
+          "spec"
+        ],
+        "type": "object"
+      },
+      "Binding": {
+        "additionalProperties": false,
+        "properties": {
+          "allocation": {
+            "$ref": "#/components/schemas/Allocation"
+          },
+          "last_error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProviderError"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "pending": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Intent"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "retired": {
+            "type": "boolean"
+          },
+          "revision": {
+            "maximum": 18446744073709551615,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MachineStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "allocation",
+          "revision",
+          "retired"
+        ],
+        "type": "object"
+      },
+      "Capabilities": {
+        "additionalProperties": false,
+        "properties": {
+          "cpu_limit": {
+            "type": "boolean"
+          },
+          "disk_limit": {
+            "type": "boolean"
+          },
+          "durable_workspace": {
+            "type": "boolean"
+          },
+          "isolation": {
+            "$ref": "#/components/schemas/IsolationKind"
+          },
+          "memory_limit": {
+            "type": "boolean"
+          },
+          "stop_start": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "isolation",
+          "cpu_limit",
+          "memory_limit",
+          "disk_limit",
+          "durable_workspace",
+          "stop_start"
+        ],
+        "type": "object"
+      },
+      "ConnectionGrant": {
+        "additionalProperties": false,
+        "properties": {
+          "baseUrl": {
+            "format": "uri",
+            "type": "string"
+          },
+          "bearer": {
+            "description": "Opaque short-lived credential. Never log or persist.",
+            "type": "string"
+          },
+          "capabilities": {
+            "$ref": "#/components/schemas/Capabilities"
+          },
+          "expiresAt": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "handle": {
+            "$ref": "#/components/schemas/MachineHandle"
+          },
+          "root": {
+            "type": "string"
+          },
+          "runtimeId": {
+            "type": "string"
+          },
+          "version": {
+            "const": 1,
+            "type": "integer"
+          },
+          "workerGeneration": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "baseUrl",
+          "bearer",
+          "capabilities",
+          "expiresAt",
+          "handle",
+          "root",
+          "runtimeId",
+          "version",
+          "workerGeneration"
+        ],
+        "type": "object"
+      },
+      "EmptyRequest": {
+        "additionalProperties": false,
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "FailureCode": {
+        "enum": [
+          "transport",
+          "timeout",
+          "unauthorized",
+          "not_found",
+          "conflict",
+          "rejected",
+          "unavailable",
+          "protocol",
+          "identity"
+        ],
+        "type": "string"
+      },
+      "HostApiError": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "enum": [
+              "denied",
+              "invalid",
+              "conflict",
+              "expired",
+              "unready",
+              "unavailable"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "code"
+        ],
+        "type": "object"
+      },
+      "HostStatus": {
+        "additionalProperties": false,
+        "properties": {
+          "binding": {
+            "$ref": "#/components/schemas/Binding"
+          },
+          "verification": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Verification"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "binding",
+          "verification"
+        ],
+        "type": "object"
+      },
+      "Intent": {
+        "enum": [
+          "ensure",
+          "start",
+          "stop",
+          "destroy"
+        ],
+        "type": "string"
+      },
+      "IsolationKind": {
+        "enum": [
+          "virtual_machine",
+          "container"
+        ],
+        "type": "string"
+      },
+      "LifecycleRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "expected_handle": {
+            "$ref": "#/components/schemas/MachineHandle"
+          }
+        },
+        "required": [
+          "expected_handle"
+        ],
+        "type": "object"
+      },
+      "MachineHandle": {
+        "additionalProperties": false,
+        "properties": {
+          "generation": {
+            "maximum": 18446744073709551615,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "machine_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "type": "string"
+          },
+          "owner": {
+            "$ref": "#/components/schemas/WorkspaceKey"
+          },
+          "provider": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "owner",
+          "generation",
+          "provider",
+          "machine_id"
+        ],
+        "type": "object"
+      },
+      "MachineState": {
+        "enum": [
+          "provisioning",
+          "starting",
+          "running",
+          "stopping",
+          "stopped",
+          "failed",
+          "destroyed"
+        ],
+        "type": "string"
+      },
+      "MachineStatus": {
+        "additionalProperties": false,
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "ready": {
+                  "const": true
+                }
+              },
+              "required": [
+                "ready"
+              ]
+            },
+            "then": {
+              "properties": {
+                "connection": {
+                  "$ref": "#/components/schemas/WorkerConnection"
+                },
+                "state": {
+                  "const": "running"
+                }
+              },
+              "required": [
+                "connection"
+              ]
+            }
+          },
+          {
+            "else": {
+              "properties": {
+                "connection": {
+                  "type": "null"
+                }
+              }
+            },
+            "if": {
+              "properties": {
+                "state": {
+                  "const": "running"
+                }
+              },
+              "required": [
+                "state"
+              ]
+            }
+          },
+          {
+            "else": {
+              "properties": {
+                "failure": {
+                  "type": "null"
+                }
+              }
+            },
+            "if": {
+              "properties": {
+                "state": {
+                  "const": "failed"
+                }
+              },
+              "required": [
+                "state"
+              ]
+            },
+            "then": {
+              "properties": {
+                "failure": {
+                  "$ref": "#/components/schemas/ProviderError"
+                }
+              },
+              "required": [
+                "failure"
+              ]
+            }
+          }
+        ],
+        "description": "Ready running requires a scoped connection. Connection handle must equal status handle, including tenant, workspace, generation, provider and machine ID. JSON Schema cannot express that equality; use MachineStatus::validate. Optional properties may be absent or null on the wire.",
+        "properties": {
+          "connection": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WorkerConnection"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "failure": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProviderError"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "handle": {
+            "$ref": "#/components/schemas/MachineHandle"
+          },
+          "ready": {
+            "type": "boolean"
+          },
+          "state": {
+            "$ref": "#/components/schemas/MachineState"
+          }
+        },
+        "required": [
+          "handle",
+          "state",
+          "ready"
+        ],
+        "type": "object"
+      },
+      "ProtocolRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "allocation": {
+            "$ref": "#/components/schemas/Allocation"
+          },
+          "handle": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MachineHandle"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "version": {
+            "const": 2,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "version",
+          "allocation"
+        ],
+        "type": "object"
+      },
+      "ProtocolResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "status": {
+            "$ref": "#/components/schemas/MachineStatus"
+          },
+          "version": {
+            "const": 2,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "version",
+          "status"
+        ],
+        "type": "object"
+      },
+      "ProviderError": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "$ref": "#/components/schemas/FailureCode"
+          },
+          "retryable": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "code",
+          "retryable"
+        ],
+        "type": "object"
+      },
+      "Verification": {
+        "additionalProperties": false,
+        "properties": {
+          "at": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "descriptor": {
+            "$ref": "#/components/schemas/WorkerLaunchDescriptor"
+          },
+          "expires_at": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "handle": {
+            "$ref": "#/components/schemas/MachineHandle"
+          },
+          "revision": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "at",
+          "descriptor",
+          "expires_at",
+          "handle",
+          "revision"
+        ],
+        "type": "object"
+      },
+      "WorkerConnection": {
+        "additionalProperties": false,
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "transport": {
+                  "const": "https"
+                }
+              },
+              "required": [
+                "transport"
+              ]
+            },
+            "then": {
+              "properties": {
+                "agent_api_base_url": {
+                  "pattern": "^https://[^/?#@\\s\\\\]+/[^?#\\s\\\\]*$"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "transport": {
+                  "const": "development_loopback_http"
+                }
+              },
+              "required": [
+                "transport"
+              ]
+            },
+            "then": {
+              "properties": {
+                "agent_api_base_url": {
+                  "pattern": "^http://(127\\.[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}|\\[::1\\])(:[0-9]+)?/[^?#\\s\\\\]*$"
+                }
+              }
+            }
+          }
+        ],
+        "properties": {
+          "agent_api_base_url": {
+            "description": "Canonical absolute API base URL ending in /. No credentials, query, fragment, controls, whitespace or backslash. Verified by the trusted provider for this exact handle; not a user-selected URL.",
+            "format": "uri",
+            "maxLength": 2048,
+            "minLength": 1,
+            "type": "string"
+          },
+          "handle": {
+            "$ref": "#/components/schemas/MachineHandle"
+          },
+          "transport": {
+            "$ref": "#/components/schemas/WorkerTransport"
+          },
+          "version": {
+            "enum": [
+              1
+            ],
+            "type": "integer"
+          }
+        },
+        "required": [
+          "version",
+          "handle",
+          "agent_api_base_url",
+          "transport"
+        ],
+        "type": "object"
+      },
+      "WorkerLaunchDescriptor": {
+        "additionalProperties": false,
+        "properties": {
+          "expires_at": {
+            "maximum": 9223372036854775807,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "root": {
+            "description": "Normalized absolute VM POSIX or uppercase drive-root path with forward slashes; no volume root or traversal.",
+            "maxLength": 4096,
+            "minLength": 2,
+            "type": "string"
+          },
+          "runtime_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "type": "string"
+          },
+          "state_root": {
+            "description": "Normalized VM path outside root; validated independently of coordinator filesystem.",
+            "maxLength": 4096,
+            "minLength": 2,
+            "type": "string"
+          },
+          "verification_key": {
+            "maxLength": 43,
+            "minLength": 43,
+            "pattern": "^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$",
+            "type": "string"
+          },
+          "version": {
+            "enum": [
+              1
+            ],
+            "type": "integer"
+          }
+        },
+        "required": [
+          "version",
+          "runtime_id",
+          "root",
+          "state_root",
+          "expires_at",
+          "verification_key"
+        ],
+        "type": "object"
+      },
+      "WorkerTransport": {
+        "enum": [
+          "https",
+          "development_loopback_http"
+        ],
+        "type": "string"
+      },
+      "WorkspaceKey": {
+        "additionalProperties": false,
+        "properties": {
+          "tenant": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9_.:-]+$",
+            "type": "string"
+          },
+          "workspace": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9_.:-]+$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "tenant",
+          "workspace"
+        ],
+        "type": "object"
+      },
+      "WorkspaceSpec": {
+        "additionalProperties": false,
+        "properties": {
+          "disk_gib": {
+            "maximum": 65536,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "image": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "type": "string"
+          },
+          "memory_mib": {
+            "maximum": 4194304,
+            "minimum": 128,
+            "type": "integer"
+          },
+          "region": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "type": "string"
+          },
+          "vcpus": {
+            "maximum": 1024,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "image",
+          "region",
+          "vcpus",
+          "memory_mib",
+          "disk_gib"
+        ],
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "HostBearer": {
+        "scheme": "bearer",
+        "type": "http"
+      }
+    }
+  },
+  "info": {
+    "title": "Neoism Workspace Host API",
+    "version": "1.0.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/v1/workspaces/{workspace}/runtime/connection": {
+      "post": {
+        "operationId": "host.runtime.connection",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EmptyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectionGrant"
+                }
+              }
+            },
+            "description": "Current snapshot (verification is ephemeral) or short-lived connection grant"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostApiError"
+                }
+              }
+            },
+            "description": "Sanitized host error"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostApiError"
+                }
+              }
+            },
+            "description": "Sanitized host error"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostApiError"
+                }
+              }
+            },
+            "description": "Sanitized host error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostApiError"
+                }
+              }
+            },
+            "description": "Sanitized host error"
+          }
+        },
+        "security": [
+          {
+            "HostBearer": []
+          }
+        ]
+      }
+    },
+    "/v1/workspaces/{workspace}/runtime/destroy": {
+      "post": {
+        "operationId": "host.runtime.destroy",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LifecycleRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostStatus"
+                }
+              }
+            },
+            "description": "Current snapshot (verification is ephemeral) or short-lived connection grant"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostApiError"
+                }
+              }
+            },
+            "description": "Sanitized host error"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostApiError"
+                }
+              }
+            },
+            "description": "Sanitized host error"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostApiError"
+                }
+              }
+            },
+            "description": "Sanitized host error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostApiError"
+                }
+              }
+            },
+            "description": "Sanitized host error"
+          }
+        },
+        "security": [
+          {
+            "HostBearer": []
+          }
+        ]
+      }
+    },
+    "/v1/workspaces/{workspace}/runtime/ensure": {
+      "post": {
+        "operationId": "host.runtime.ensure",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EmptyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostStatus"
+                }
+              }
+            },
+            "description": "Current snapshot (verification is ephemeral) or short-lived connection grant"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostApiError"
+                }
+              }
+            },
+            "description": "Sanitized host error"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostApiError"
+                }
+              }
+            },
+            "description": "Sanitized host error"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostApiError"
+                }
+              }
+            },
+            "description": "Sanitized host error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostApiError"
+                }
+              }
+            },
+            "description": "Sanitized host error"
+          }
+        },
+        "security": [
+          {
+            "HostBearer": []
+          }
+        ]
+      }
+    },
+    "/v1/workspaces/{workspace}/runtime/start": {
+      "post": {
+        "operationId": "host.runtime.start",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LifecycleRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostStatus"
+                }
+              }
+            },
+            "description": "Current snapshot (verification is ephemeral) or short-lived connection grant"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostApiError"
+                }
+              }
+            },
+            "description": "Sanitized host error"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostApiError"
+                }
+              }
+            },
+            "description": "Sanitized host error"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostApiError"
+                }
+              }
+            },
+            "description": "Sanitized host error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostApiError"
+                }
+              }
+            },
+            "description": "Sanitized host error"
+          }
+        },
+        "security": [
+          {
+            "HostBearer": []
+          }
+        ]
+      }
+    },
+    "/v1/workspaces/{workspace}/runtime/status": {
+      "get": {
+        "operationId": "host.runtime.status",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostStatus"
+                }
+              }
+            },
+            "description": "Current snapshot (verification is ephemeral) or short-lived connection grant"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostApiError"
+                }
+              }
+            },
+            "description": "Sanitized host error"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostApiError"
+                }
+              }
+            },
+            "description": "Sanitized host error"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostApiError"
+                }
+              }
+            },
+            "description": "Sanitized host error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostApiError"
+                }
+              }
+            },
+            "description": "Sanitized host error"
+          }
+        },
+        "security": [
+          {
+            "HostBearer": []
+          }
+        ]
+      }
+    },
+    "/v1/workspaces/{workspace}/runtime/stop": {
+      "post": {
+        "operationId": "host.runtime.stop",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LifecycleRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostStatus"
+                }
+              }
+            },
+            "description": "Current snapshot (verification is ephemeral) or short-lived connection grant"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostApiError"
+                }
+              }
+            },
+            "description": "Sanitized host error"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostApiError"
+                }
+              }
+            },
+            "description": "Sanitized host error"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostApiError"
+                }
+              }
+            },
+            "description": "Sanitized host error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostApiError"
+                }
+              }
+            },
+            "description": "Sanitized host error"
+          }
+        },
+        "security": [
+          {
+            "HostBearer": []
+          }
+        ]
+      }
+    }
+  }
+}

@@ -13,7 +13,7 @@ use crate::syntax::{Lang, SynTok};
 
 use super::draw::{
     draw_rect_clipped, draw_rounded_rect_clipped, draw_text_clipped,
-    draw_top_rounded_rect_clipped, measure_text_cached, opts_with_clip,
+    draw_top_rounded_rect_clipped, intersect_rect, measure_text_cached, opts_with_clip,
 };
 use super::tool_message::AgentToolPane;
 use super::ORDER_PANEL;
@@ -164,6 +164,10 @@ pub fn render_code_block(
     if h <= 0.0 || message.text().trim().is_empty() {
         return;
     }
+    // Include the existing four-pixel top extension when culling chrome.
+    if intersect_rect([x, y - 4.0 * s, w, h + 4.0 * s], viewport_clip).is_none() {
+        return;
+    }
     // Only show line numbers when the server actually parsed real source
     // positions out of the tool output (e.g. `Line 42: …`). Synthesizing
     // "1, 2, 3" for output that has no underlying line numbers is more
@@ -187,7 +191,7 @@ pub fn render_code_block(
         0.0
     };
     let code_left_pad = body_pad + num_text_w;
-    let Some(opts) = opts_with_clip(
+    let opts = opts_with_clip(
         DrawOpts {
             font_size: 12.5 * s,
             color: theme.u8(theme.fg),
@@ -201,9 +205,7 @@ pub fn render_code_block(
             ..DrawOpts::default()
         },
         viewport_clip,
-    ) else {
-        return;
-    };
+    );
     let num_opts = real_line_offset.and_then(|_| {
         opts_with_clip(
             DrawOpts {
@@ -227,7 +229,10 @@ pub fn render_code_block(
     let internal_scroll = pane.diff_scroll_offset(&scroll_key, max_scroll);
     let suppress_interactions = pane.suppress_tool_interactions();
     if max_scroll > 1.0 && !suppress_interactions {
-        pane.register_diff_scroll_rect(scroll_key, [x, body_y, w, body_h], max_scroll);
+        if let Some(body_hit_rect) = intersect_rect([x, body_y, w, body_h], viewport_clip)
+        {
+            pane.register_diff_scroll_rect(scroll_key, body_hit_rect, max_scroll);
+        }
     }
     let line_offset = (internal_scroll / line_h).floor().max(0.0) as usize;
     let intra_line_offset = internal_scroll - line_offset as f32 * line_h;
@@ -242,9 +247,6 @@ pub fn render_code_block(
     let start_ix = (start_ix + line_offset).min(line_count);
     let end_ix =
         (end_ix + line_offset).min((line_offset + visible_lines + 2).min(line_count));
-    if start_ix >= end_ix {
-        return;
-    }
     // Diff-card style chrome: rounded outer border, subtle header slab,
     // and body surface. The border ring is drawn first, then inset panels.
     draw_rounded_rect_clipped(
@@ -299,7 +301,7 @@ pub fn render_code_block(
     } else {
         message.lang().trim()
     };
-    let Some(header_opts) = opts_with_clip(
+    if let Some(header_opts) = opts_with_clip(
         DrawOpts {
             font_size: 12.0 * s,
             color: theme.u8(theme.syn_type),
@@ -308,31 +310,37 @@ pub fn render_code_block(
             ..DrawOpts::default()
         },
         viewport_clip,
-    ) else {
+    ) {
+        draw_text_clipped(
+            sugarloaf,
+            x + body_pad,
+            y + 7.0 * s,
+            lang_label,
+            &header_opts,
+            occlusion_rects,
+        );
+        let copy_label = "copy";
+        let mut copy_opts = header_opts;
+        copy_opts.color = theme.u8(theme.muted);
+        copy_opts.bold = false;
+        let copy_w = measure_text_cached(sugarloaf, copy_label, &copy_opts);
+        draw_text_clipped(
+            sugarloaf,
+            x + w - body_pad - copy_w,
+            y + 7.0 * s,
+            copy_label,
+            &copy_opts,
+            occlusion_rects,
+        );
+    }
+
+    // Body culling must not discard a visible header or padding surface.
+    let Some(opts) = opts else {
         return;
     };
-    draw_text_clipped(
-        sugarloaf,
-        x + body_pad,
-        y + 7.0 * s,
-        lang_label,
-        &header_opts,
-        occlusion_rects,
-    );
-    let copy_label = "copy";
-    let mut copy_opts = header_opts;
-    copy_opts.color = theme.u8(theme.muted);
-    copy_opts.bold = false;
-    let copy_w = measure_text_cached(sugarloaf, copy_label, &copy_opts);
-    draw_text_clipped(
-        sugarloaf,
-        x + w - body_pad - copy_w,
-        y + 7.0 * s,
-        copy_label,
-        &copy_opts,
-        occlusion_rects,
-    );
-
+    if start_ix >= end_ix {
+        return;
+    }
     let text = message.text();
     for ix in start_ix..end_ix {
         let line = line_ranges
@@ -420,6 +428,40 @@ pub fn diff_line_kind(lang: &str, line: &str) -> Option<DiffLineKind> {
 #[cfg(test)]
 mod tests {
     use super::{diff_line_kind, syntax_span_visible, DiffLineKind};
+
+    #[test]
+    fn code_chrome_culling_is_independent_of_body_clip() {
+        for s in [0.75, 1.0, 1.5, 2.0] {
+            let scaled = |r: [f32; 4]| r.map(|v| v * s);
+            let block = scaled([10.0, 96.0, 200.0, 104.0]);
+            let body = scaled([24.0, 130.0, 172.0, 70.0]);
+            let header = scaled([24.0, 100.0, 172.0, 30.0]);
+            // Header only, top extension only, bottom padding only, body,
+            // and blocks entirely above/below or horizontally offscreen.
+            for (clip, chrome, header_visible, body_visible) in [
+                ([0.0, 100.0, 300.0, 10.0], true, true, false),
+                ([0.0, 96.0, 300.0, 3.0], true, false, false),
+                ([0.0, 198.0, 300.0, 2.0], true, false, true),
+                ([0.0, 145.0, 300.0, 18.0], true, false, true),
+                ([0.0, 200.0, 300.0, 20.0], false, false, false),
+                ([0.0, 60.0, 300.0, 36.0], false, false, false),
+                ([210.0, 100.0, 20.0, 100.0], false, false, false),
+            ] {
+                let clip = scaled(clip);
+                assert_eq!(super::intersect_rect(block, clip).is_some(), chrome);
+                for (rect, expected) in [(header, header_visible), (body, body_visible)] {
+                    let opts = super::opts_with_clip(
+                        sugarloaf::text::DrawOpts {
+                            clip_rect: Some(rect),
+                            ..Default::default()
+                        },
+                        clip,
+                    );
+                    assert_eq!(opts.is_some(), expected, "scale={s}, clip={clip:?}");
+                }
+            }
+        }
+    }
 
     #[test]
     fn diff_styling_requires_a_diff_language() {

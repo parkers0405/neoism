@@ -21,7 +21,30 @@ impl NeoismAgentPane {
         kind: Option<String>,
         delta: &str,
     ) {
+        let compaction_reasoning =
+            matches!(kind.as_deref(), Some("reasoning" | "thinking"))
+                .then(|| message_id.clone().zip(part_id.clone()))
+                .flatten();
         self.apply_part_delta(message_id, part_id, kind.clone(), delta);
+        if let Some((parent, part)) = compaction_reasoning {
+            let card = self.messages.iter().position(|message| {
+                message.id == parent && message.kind == NeoismAgentMessageKind::Compaction
+            });
+            let reasoning = self.messages.iter().position(|message| {
+                message.id == part && message.kind == NeoismAgentMessageKind::Reasoning
+            });
+            if let (Some(card), Some(reasoning)) = (card, reasoning) {
+                if card < reasoning
+                    && !self.messages[card + 1..reasoning]
+                        .iter()
+                        .any(|message| message.kind == NeoismAgentMessageKind::User)
+                {
+                    let summary = self.messages.remove(card);
+                    self.messages.insert(reasoning, summary);
+                    self.invalidate_timeline_layout();
+                }
+            }
+        }
         match kind.as_deref() {
             Some("reasoning" | "thinking") => {
                 self.note_streaming(NeoismAgentStreamingState::Thinking, None);
@@ -211,11 +234,11 @@ impl NeoismAgentPane {
             self.retain_current_turn_trace();
         }
         if let Some(message_id) = message_id.as_deref().filter(|id| !id.is_empty()) {
-            if let Some(index) = self
-                .messages
-                .iter()
-                .position(|message| message.id == message_id)
-            {
+            if let Some(index) = self.messages.iter().position(|message| {
+                message.id == message_id
+                    && (message.kind != NeoismAgentMessageKind::Compaction
+                        || kind.as_deref() == Some("compaction"))
+            }) {
                 let before = (self.text_reveal.should_record(&self.messages[index].id)
                     && matches!(
                         self.messages[index].kind,

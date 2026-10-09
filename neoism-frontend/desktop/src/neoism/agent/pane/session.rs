@@ -251,8 +251,9 @@ impl NeoismAgentPane {
     }
 
     pub fn prepare_detail_panel(&mut self) {
+        let root = self.conversation_root_id().map(str::to_owned);
         self.detail_panel
-            .sync_conversation_details_from(&self.side_panel);
+            .sync_conversation_details_from_root(&self.side_panel, root.as_deref());
     }
 
     pub fn take_catalog_toggle_request(&mut self) -> bool {

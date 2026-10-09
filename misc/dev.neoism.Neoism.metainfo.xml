@@ -52,6 +52,12 @@
   </categories>
 
   <releases>
+    <release version="0.7.122" date="2026-10-09">
+      <description>
+        <p>Stable Agent, cloud workspace-worker, SDK, and rendering improvements. Preserves first-terminal directory following and excludes the experimental Servo runtime.</p>
+      </description>
+      <url>https://github.com/parkers0405/neoism/releases/tag/v0.7.122</url>
+    </release>
     <release version="0.7.121" date="2026-10-08">
       <description>
         <p>Stable workspace search and file-reading improvements, Agent scrolling refinements, and background and panel appearance updates. Experimental Servo runtime remains excluded.</p>

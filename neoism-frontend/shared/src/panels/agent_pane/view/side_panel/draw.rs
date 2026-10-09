@@ -67,68 +67,68 @@ fn render_scramble_text_inner(
     }
 }
 
-/// Paint the running-sub-agent spinner: a square orbit of pastel dots
-/// with a fading trail, occupying the same gutter slot a status dot
-/// would. It reuses the terminal running-block loader's pure helpers
-/// (`loader_*` in `render_policy`) so the side-panel spinner matches the
-/// terminal one's look and cadence (1.35x phase, 12 Hz palette tick).
-/// `now_seconds` is the panel's animation clock; the panel keeps
-/// redraw-ticking while any sub-agent is active (see
-/// `SidePanel::is_animating`), so the orbit stays in motion.
+/// Resolve server authority before the legacy runtime-status fallback.
+pub(super) fn catalog_activity_color(
+    entry: &NeoismAgentSessionEntry,
+    red: [f32; 3],
+    yellow: [f32; 3],
+) -> Option<[f32; 3]> {
+    use neoism_agent_core::CatalogActivity;
+    match entry.catalog_activity {
+        Some(CatalogActivity::Idle) => None,
+        Some(CatalogActivity::Running) => Some([1.0; 3]),
+        Some(CatalogActivity::Background) => Some(red),
+        Some(CatalogActivity::Permission) => Some(yellow),
+        None => session_entry_is_running(entry).then_some([1.0; 3]),
+    }
+}
+
+fn running_square_visible(square: [f32; 4], clip: [f32; 4], cuts: &[[f32; 4]]) -> bool {
+    intersect_rect(square, clip).is_some()
+        && !cuts
+            .iter()
+            .any(|cut| intersect_rect(square, *cut).is_some())
+}
+
+/// Literal timeline running indicator, centered in the sidebar status slot.
+/// Returns true only when a nonoccluded square is painted.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_subagent_spinner(
     sugarloaf: &mut Sugarloaf,
     dot_x: f32,
     dot_y: f32,
     diameter: f32,
+    rgb: [f32; 3],
     now_seconds: f32,
     clip: [f32; 4],
     s: f32,
-    glow_order: u8,
-) {
-    let center_x = dot_x + diameter * 0.5;
-    let center_y = dot_y + diameter * 0.5;
-    let side = (diameter * 1.05).max(8.0 * s);
-    let half = side * 0.5;
-    let dot = (side * 0.4).clamp(2.4 * s, 4.8 * s);
-    let loader_frame = loader_animation_frame(now_seconds);
-    let phase = loader_frame.phase;
-    let tick = loader_frame.tick;
-
-    for (trail, alpha) in [1.0f32, 0.58, 0.32, 0.16].into_iter().enumerate() {
-        let (dx, dy) = loader_orbit_position(phase - trail as f32 * 0.075, half);
-        let x = center_x + dx - dot * 0.5;
-        let y = center_y + dy - dot * 0.5;
-        if intersect_rect([x, y, dot, dot], clip).is_none() {
-            continue;
-        }
-        // Soft halo under the leading dots, same as the terminal loader.
-        if trail <= 1 {
-            let glow = dot * 1.75;
-            sugarloaf.quad(
-                None,
-                center_x + dx - glow * 0.5,
-                center_y + dy - glow * 0.5,
-                glow,
-                glow,
-                loader_pastel_color(tick, trail, alpha * 0.24),
-                [glow * 0.5; 4],
-                DEPTH,
-                glow_order,
+    order: u8,
+    occlusion_rects: &[[f32; 4]],
+) -> bool {
+    let mut visible = false;
+    for (trail, alpha) in super::super::draw::RUNNING_SQUARE_ALPHAS
+        .into_iter()
+        .enumerate()
+    {
+        let (dx, dy) = super::super::draw::running_square_position(now_seconds, trail, s);
+        let square = [
+            dot_x + diameter * 0.5 + dx - s,
+            dot_y + diameter * 0.5 + dy - s,
+            2.0 * s,
+            2.0 * s,
+        ];
+        if running_square_visible(square, clip, occlusion_rects) {
+            super::super::draw::draw_rect_clipped(
+                sugarloaf,
+                square,
+                [rgb[0], rgb[1], rgb[2], alpha],
+                order,
+                clip,
             );
+            visible = true;
         }
-        sugarloaf.quad(
-            None,
-            x,
-            y,
-            dot,
-            dot,
-            loader_pastel_color(tick, trail, alpha),
-            [dot * 0.5; 4],
-            DEPTH,
-            glow_order + 1,
-        );
     }
+    visible
 }
 
 pub(crate) fn push_provider_icon_clipped(
@@ -497,12 +497,20 @@ pub(crate) fn render_sessions_list(
     let frac = scroll_now_px - render_top as f32 * row_h;
     let selected = pane.side_panel().selected_index();
     let focused = pane.side_panel().is_focused();
+    let current_id = pane
+        .side_panel()
+        .catalog_viewed_root(pane.conversation_root_id())
+        .map(str::to_owned);
+    let highlighted = pane
+        .side_panel()
+        .catalog_highlight_index(pane.conversation_root_id());
     let list_bottom = list_rect[1] + list_rect[3];
 
     let sessions_len = pane.side_panel().sessions().len();
-    if selected < sessions_len && !pane.side_panel().new_chat_selected() {
+    if let Some(selected) = highlighted {
         let row_ix = selected as isize - render_top as isize;
-        let row_y = list_rect[1] + row_ix as f32 * row_h - frac + cursor_offset;
+        let row_y = list_rect[1] + row_ix as f32 * row_h - frac
+            + if focused { cursor_offset } else { 0.0 };
         let row_bottom = row_y + row_h;
         let visible_y = row_y.max(list_rect[1]);
         let visible_h = row_bottom.min(list_bottom) - visible_y;
@@ -572,10 +580,6 @@ pub(crate) fn render_sessions_list(
     let dot_gutter = 18.0 * s;
     let dot_diameter = 7.0 * s;
     let title_x = text_x + dot_gutter;
-    let current_id = pane
-        .session_id_str()
-        .or_else(|| pane.side_panel().viewed_session_id())
-        .map(str::to_string);
 
     // Feed the measured monospace column budget back so excerpt chunks wrap
     // to this exact panel width; a change (resize) rebuilds the display list
@@ -601,6 +605,7 @@ pub(crate) fn render_sessions_list(
     let session_hover_scale = pane.side_panel().session_hover_scale();
     let title_hover_elapsed = pane.side_panel().session_title_hover_elapsed();
     let mut title_hover_overflow = false;
+    let mut running_indicator_visible = false;
     let sessions = pane.side_panel().sessions();
     for absolute_ix in start..end {
         let entry = &sessions[absolute_ix];
@@ -749,7 +754,11 @@ pub(crate) fn render_sessions_list(
         }
 
         let is_current = current_id.as_deref() == Some(entry.id.as_str());
-        let running = session_entry_is_running(entry);
+        let activity_color = catalog_activity_color(
+            entry,
+            theme.f32_alpha(theme.red, 1.0)[..3].try_into().unwrap(),
+            theme.f32_alpha(theme.yellow, 1.0)[..3].try_into().unwrap(),
+        );
         let hover = if hovered_session == Some(absolute_ix) {
             session_hover_scale
         } else {
@@ -770,21 +779,22 @@ pub(crate) fn render_sessions_list(
             );
         }
 
-        // Running conversations share the same pastel orbit as active agents
-        // in the details rail. The current-but-idle conversation keeps the
-        // quieter green dot so "open" never reads as "working".
-        if running {
+        // Idle/current conversations retain their quieter green status dot.
+        if let Some(rgb) = activity_color {
             let spinner = 10.0 * s * hover_scale;
-            draw_subagent_spinner(
+            let visible = draw_subagent_spinner(
                 sugarloaf,
                 text_x - (spinner - dot_diameter) * 0.5,
                 row_y + (row_h - spinner) * 0.5,
                 spinner,
+                rgb,
                 now_seconds,
                 list_rect,
                 s,
                 ORDER_PANEL + 2,
+                occlusion_rects,
             );
+            running_indicator_visible |= visible;
         } else if is_current {
             let scaled_dot = dot_diameter * hover_scale;
             let dot_y = row_y + (row_h - scaled_dot) / 2.0;
@@ -902,6 +912,8 @@ pub(crate) fn render_sessions_list(
         );
     }
     pane.side_panel_mut()
+        .note_visible_running_indicator(running_indicator_visible);
+    pane.side_panel_mut()
         .set_session_title_hover_overflow(title_hover_overflow);
 
     if pane.side_panel().session_page_loading() {
@@ -925,10 +937,12 @@ pub(crate) fn render_sessions_list(
             badge_x + (badge - spinner) * 0.5,
             badge_y + (badge - spinner) * 0.5,
             spinner,
+            [1.0; 3],
             now_seconds,
             list_rect,
             s,
             ORDER_PANEL + 6,
+            occlusion_rects,
         );
     }
 }
@@ -953,7 +967,21 @@ fn relative_session_time(updated_ms: u64, now_ms: u64) -> String {
 
 #[cfg(test)]
 mod row_time_tests {
-    use super::relative_session_time;
+    use super::{relative_session_time, running_square_visible};
+
+    #[test]
+    fn running_squares_own_only_visible_nonoccluded_ink() {
+        let square = [4.0, 4.0, 2.0, 2.0];
+        let clip = [0.0, 0.0, 10.0, 10.0];
+        assert!(running_square_visible(square, clip, &[]));
+        assert!(!running_square_visible([20.0, 4.0, 2.0, 2.0], clip, &[]));
+        assert!(!running_square_visible(square, clip, &[clip]));
+        assert!(!running_square_visible(
+            square,
+            clip,
+            &[[5.0, 5.0, 1.0, 1.0]]
+        ));
+    }
 
     #[test]
     fn relative_time_uses_real_timestamp_only() {

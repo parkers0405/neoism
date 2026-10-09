@@ -73,6 +73,8 @@ Native UI, commands, keymaps, events, panels, agent surfaces, trees, tabs, statu
 
 Plugin authors and coding agents should start with the canonical [`plugin architecture and package guide`](docs/plugins.md), then use the complete [`editor plugin API`](docs/editor-plugin-api.md), [`Agent plugin API`](docs/agent-plugins.md), and generated [`Lua annotations`](docs/lua-api.lua). These references cover every exposed tier, manifest field, capability, contribution, lifecycle rule, protocol frame, broker and security boundary.
 
+For standalone Agent, product embedding, and cloud workers, start with the [Agent runtime README](neoism-agent/README.md) and the authoritative [hosted architecture and implementation status](neoism-agent/docs/hosted-control-plane.md).
+
 A first tour: open a project, `Alt+E` for the file tree, `Ctrl+Shift+T` for a terminal, `Alt+A` for an agent, `Alt+P` when you do not know the command.
 
 ## Architecture
@@ -84,6 +86,8 @@ A first tour: open a project, `Alt+E` for the file tree, `Ctrl+Shift+T` for a te
 | `neoism-frontend/web` | TypeScript web host and daemon client |
 | `neoism-workspace-daemon` | PTYs, workspaces, pairing, remote sessions, and shared state |
 | `neoism-agent` | Agent server, CLI, providers, tools, permissions, and memory |
+| [`neoism-cloud-runtime`](neoism-cloud-runtime/README.md) | Provider-neutral whole-workspace lifecycle, durable registry, and v2 infrastructure bridge |
+| [`neoism-cloud-host`](neoism-cloud-host/README.md) | Workspace launch manager, controller signing, readiness verification, connection broker, and policy-injected host API |
 | `neoism-terminal-core` | Terminal parser, grid, selections, and effects model |
 | `sugarloaf` | Native and web GPU rendering |
 | `neoism-protocol` | Wire types shared by clients and the daemon |

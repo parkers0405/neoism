@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 
 const document = JSON.parse(await readStdin());
+const contractSource = process.argv[2] ?? "Neoism Agent";
+const regenerationCommand = process.argv[3] ?? "neoism-agent/scripts/openapi.sh update";
 const schemas = document.components?.schemas ?? {};
 const methods = ["get", "post", "put", "patch", "delete"];
 const operations = [];
@@ -102,8 +104,8 @@ lines.push(
 );
 
 process.stdout.write(
-  "// Generated from the authoritative canonical Neoism Agent OpenAPI document.\n" +
-  "// Run neoism-agent/scripts/openapi.sh update. Do not edit by hand.\n\n" +
+  `// Generated from the authoritative canonical ${contractSource} OpenAPI document.\n` +
+  `// Run ${regenerationCommand}. Do not edit by hand.\n\n` +
   `${lines.join("\n")}\n`,
 );
 

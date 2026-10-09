@@ -255,6 +255,11 @@ async fn status_for_entry_with_directory(
     auth_store: &McpAuthStore,
     state: Option<&AppState>,
 ) -> McpStatus {
+    if state.is_some_and(|state| state.services().shared_control_plane())
+        && matches!(config, McpConfig::Local { .. })
+    {
+        return McpStatus::Disabled;
+    }
     if builtin_service(state, name).is_some() {
         return if is_enabled(config) {
             McpStatus::Connected
@@ -322,6 +327,20 @@ pub(crate) async fn connect_with_state(
     connect_config(directory, name, entry, auth_store, state, snapshot.mcp()?).await
 }
 
+fn require_native_mcp(
+    services: &neoism_agent_service_api::AgentServices,
+    directory: &str,
+) -> anyhow::Result<()> {
+    let policy = crate::workspace_runtime::directory_execution_policy(
+        services,
+        std::path::Path::new(directory),
+    );
+    if !crate::caller::native_execution_allowed(&policy) {
+        anyhow::bail!("local MCP operations are unavailable on the shared control plane or outside the admitted worker root");
+    }
+    Ok(())
+}
+
 async fn connect_config(
     directory: &str,
     name: &str,
@@ -330,6 +349,11 @@ async fn connect_config(
     state: AppState,
     runtime: Arc<McpRuntimeManager>,
 ) -> anyhow::Result<McpStatus> {
+    if matches!(config, McpConfig::Local { .. })
+        || builtin_service(Some(&state), name).is_some()
+    {
+        require_native_mcp(state.services(), directory)?;
+    }
     if !is_enabled(config) {
         let _ = runtime.disconnect(directory, name).await;
         return Ok(McpStatus::Disabled);
@@ -482,6 +506,11 @@ pub(crate) async fn tools_with_snapshot(
 ) -> anyhow::Result<Vec<McpToolInfo>> {
     let mut config = snapshot.config().clone();
     crate::config::inject_builtin_mcp(&mut config, state.services());
+    if matches!(config.mcp.get(name), Some(McpConfig::Local { .. }))
+        || builtin_service(Some(&state), name).is_some()
+    {
+        require_native_mcp(state.services(), directory)?;
+    }
     if let Some(service) = builtin_service(Some(&state), name)
         .filter(|_| config.mcp.get(name).is_some_and(is_enabled))
     {
@@ -534,6 +563,11 @@ async fn resources_with_snapshot(
 ) -> anyhow::Result<Vec<McpResource>> {
     let mut config = snapshot.config().clone();
     crate::config::inject_builtin_mcp(&mut config, state.services());
+    if matches!(config.mcp.get(name), Some(McpConfig::Local { .. }))
+        || builtin_service(Some(&state), name).is_some()
+    {
+        require_native_mcp(state.services(), directory)?;
+    }
     if let Some(service) = builtin_service(Some(&state), name)
         .filter(|_| config.mcp.get(name).is_some_and(is_enabled))
     {
@@ -585,6 +619,11 @@ async fn prompts_with_snapshot(
 ) -> anyhow::Result<Vec<McpPromptInfo>> {
     let mut config = snapshot.config().clone();
     crate::config::inject_builtin_mcp(&mut config, state.services());
+    if matches!(config.mcp.get(name), Some(McpConfig::Local { .. }))
+        || builtin_service(Some(&state), name).is_some()
+    {
+        require_native_mcp(state.services(), directory)?;
+    }
     if let Some(service) = builtin_service(Some(&state), name)
         .filter(|_| config.mcp.get(name).is_some_and(is_enabled))
     {
@@ -676,6 +715,13 @@ pub(crate) async fn call_tool_in_session(
     cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> anyhow::Result<McpToolCallResult> {
     let mut config = snapshot.config().clone();
+    crate::config::inject_builtin_mcp(&mut config, state.services());
+    if matches!(config.mcp.get(client), Some(McpConfig::Local { .. }))
+        || builtin_service(Some(&state), client).is_some()
+        || client == "computer"
+    {
+        require_native_mcp(state.services(), directory)?;
+    }
     let mut revocation_generation = None;
     if client == "computer" {
         // Capture BEFORE enablement: disabling during admission must invalidate
@@ -1008,3 +1054,87 @@ fn sanitize_tool_id(value: &str) -> String {
 #[cfg(test)]
 #[path = "mcp_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod native_gating_tests {
+    #[test]
+    fn no_session_native_mcp_requires_worker_root_and_never_shared_control() {
+        use neoism_agent_service_api::{
+            WorkspaceWorkerBinding, WorkspaceWorkerBootstrap, WorkspaceWorkerSigningKey,
+        };
+        let root = std::env::temp_dir().join(format!(
+            "neoism-mcp-worker-admission-{}",
+            neoism_agent_core::Id::ascending(neoism_agent_core::IdKind::Event)
+        ));
+        std::fs::create_dir_all(root.join("child")).unwrap();
+        let root = std::fs::canonicalize(root).unwrap();
+        let binding = WorkspaceWorkerBinding::new(
+            WorkspaceWorkerBootstrap {
+                version: 1,
+                tenant_id: "tenant".into(),
+                workspace_id: "workspace".into(),
+                runtime_id: "replacement-runtime".into(),
+                runtime_generation: 9,
+                root: root.clone(),
+                expires_at: neoism_agent_service_api::workspace_worker::unix_now()
+                    .unwrap()
+                    + 600,
+            },
+            WorkspaceWorkerSigningKey::new([7u8; 32])
+                .unwrap()
+                .verification_key(),
+        )
+        .unwrap();
+        let services = crate::standard_services().for_workspace_worker(binding);
+        assert!(super::require_native_mcp(&services, &root.to_string_lossy()).is_ok());
+        assert!(super::require_native_mcp(
+            &services,
+            &root.join("child").to_string_lossy()
+        )
+        .is_ok());
+        assert!(super::require_native_mcp(
+            &services,
+            &root.parent().unwrap().to_string_lossy()
+        )
+        .is_err());
+        assert!(super::require_native_mcp(&services, ".").is_err());
+        let shared = crate::standard_services().for_hosted_control_plane();
+        assert!(super::require_native_mcp(&shared, &root.to_string_lossy()).is_err());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn shared_control_plane_rejects_direct_local_connect_before_spawn() {
+        let root = std::env::temp_dir().join(format!(
+            "neoism-mcp-native-gate-{}",
+            neoism_agent_core::Id::ascending(neoism_agent_core::IdKind::Event)
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let services = crate::standard_services().for_hosted_control_plane();
+        let state = crate::state::AppState::open_database_with_services(
+            root.join("state.db"),
+            services,
+        )
+        .await
+        .unwrap();
+        let auth = super::McpAuthStore::local(state.services());
+        let config = serde_json::from_value(serde_json::json!({
+            "type": "local", "command": ["must-not-be-resolved-or-spawned"]
+        }))
+        .unwrap();
+        let result = super::connect_config(
+            &root.to_string_lossy(),
+            "local",
+            &config,
+            &auth,
+            state,
+            std::sync::Arc::new(super::McpRuntimeManager::default()),
+        )
+        .await;
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("shared control plane"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+}

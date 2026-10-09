@@ -1212,6 +1212,33 @@ impl Sugarloaf<'_> {
         );
     }
 
+    /// Draw the original rounded shape with a separate logical-pixel clip.
+    /// This is immediate-mode, like `quad`, and never changes global clip state.
+    #[inline]
+    pub fn quad_clipped(
+        &mut self,
+        rect: [f32; 4],
+        background_color: [f32; 4],
+        corner_radii: [f32; 4],
+        depth: f32,
+        order: u8,
+        clip: [f32; 4],
+    ) {
+        if rect[2] <= 0.0 || rect[3] <= 0.0 || clip[2] <= 0.0 || clip[3] <= 0.0 {
+            return;
+        }
+        let scale = self.state.style.scale_factor;
+        self.renderer.quad_clipped(
+            rect.map(|value| value * scale),
+            background_color,
+            corner_radii.map(|value| value * scale),
+            depth,
+            order,
+            clip.map(|value| value * scale),
+            self.late_overlay_mode,
+        );
+    }
+
     /// Add an image rectangle to content system
     /// - `id: None` - not cached, rendered immediately
     /// - `id: Some(n)` - cached with id n, overwrites existing content

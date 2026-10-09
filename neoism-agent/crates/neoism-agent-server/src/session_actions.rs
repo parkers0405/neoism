@@ -203,6 +203,20 @@ pub(crate) async fn create_subtask_session(
     agent: &str,
     model: Option<UserModel>,
 ) -> Result<SessionInfo, ApiError> {
+    if state
+        .services()
+        .workspace_worker
+        .as_ref()
+        .is_some_and(|worker| {
+            crate::caller::session_tenant(parent) != worker.tenant_id()
+                || parent.workspace_id.as_deref() != Some(worker.workspace_id())
+                || !worker.admits_path(std::path::Path::new(&parent.directory))
+        })
+    {
+        return Err(ApiError::forbidden(
+            "Parent session is outside the worker binding",
+        ));
+    }
     let snapshot = state
         .plugin_snapshot_for_session(&parent.directory, parent.id.as_str())
         .await;

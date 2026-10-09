@@ -60,7 +60,15 @@ impl NeoismAgentPane {
         for update in catalog_updates {
             match update {
                 AgentSessionCatalogUpdate::Reconnected => {
+                    self.side_panel.clear_session_activity_overrides();
                     self.request_side_panel_session_page(None);
+                }
+                AgentSessionCatalogUpdate::Activity {
+                    session_id,
+                    activity,
+                } => {
+                    changed |=
+                        self.side_panel.set_session_activity(&session_id, activity);
                 }
                 AgentSessionCatalogUpdate::Upsert(session) => {
                     self.side_panel.upsert_session(session);
@@ -2336,9 +2344,20 @@ impl NeoismAgentPane {
         // replaced or older pages are prepended. Trace collapses only when
         // the session is left and re-entered, never because
         // a newer prompt was sent.
+        let start = last_user.map_or(0, |index| index + 1);
+        self.timeline_trace_reveal_pending |=
+            self.messages[start..].iter().any(|message| {
+                matches!(
+                    message.kind,
+                    NeoismAgentMessageKind::Reasoning
+                        | NeoismAgentMessageKind::Tool
+                        | NeoismAgentMessageKind::Subtask
+                        | NeoismAgentMessageKind::Compaction
+                )
+            });
         self.timeline_live_trace_anchor =
             last_user.map(|index| self.messages[index].id.clone());
-        self.timeline_live_trace_start = Some(last_user.map_or(0, |index| index + 1));
+        self.timeline_live_trace_start = Some(start);
         self.invalidate_timeline_layout();
     }
 
@@ -2806,6 +2825,7 @@ impl NeoismAgentPane {
         self.timeline_viewport_rect = None;
         self.timeline_history_position_hydrated = false;
         self.timeline_live_growth = false;
+        self.timeline_trace_reveal_pending = false;
         self.timeline_last_scroll_at = None;
         self.pending_timeline_anchor = None;
         self.timeline_view_anchor = None;
@@ -3022,11 +3042,14 @@ impl NeoismAgentPane {
             self.retain_current_turn_trace();
         }
         if let Some(message_id) = message_id.as_deref().filter(|id| !id.is_empty()) {
-            if let Some(index) = self
-                .messages
-                .iter()
-                .position(|message| message.id == message_id)
-            {
+            if let Some(index) = self.messages.iter().position(|message| {
+                message.id == message_id
+                        // Compaction cards are message-keyed, unlike normal
+                        // reasoning/text parts. Never append another part's
+                        // delta to the summary just because it shares a parent.
+                        && (message.kind != NeoismAgentMessageKind::Compaction
+                            || kind.as_deref() == Some("compaction"))
+            }) {
                 let before = (self.text_reveal.should_record(&self.messages[index].id)
                     && matches!(
                         self.messages[index].kind,
@@ -3401,18 +3424,12 @@ impl NeoismAgentPane {
             return;
         }
         if message.kind == NeoismAgentMessageKind::Reasoning {
-            if self
-                .messages
-                .iter()
-                .any(|existing| existing.kind == NeoismAgentMessageKind::Assistant)
-            {
-                self.messages.push(message);
-                self.move_previous_assistant_after_reasoning(
-                    self.messages.len().saturating_sub(1),
-                );
-                self.invalidate_timeline_layout();
-                return;
-            }
+            self.messages.push(message);
+            self.move_previous_assistant_after_reasoning(
+                self.messages.len().saturating_sub(1),
+            );
+            self.invalidate_timeline_layout();
+            return;
         }
         self.messages.push(message);
         self.mark_timeline_message_dirty_at(self.messages.len().saturating_sub(1));
@@ -3420,9 +3437,9 @@ impl NeoismAgentPane {
 
     /// Keep live order consistent with hydrated history. When SSE supplied
     /// the parent assistant-message ids, a delayed reasoning-end event moves
-    /// only that same response's answer; unrelated/older answers remain
-    /// chronological. Older event shapes without grouping retain the narrow
-    /// empty-placeholder fallback.
+    /// only that same response's answer or compaction card; unrelated/older
+    /// answers remain chronological. Older event shapes without grouping retain
+    /// the narrow empty-placeholder fallback.
     pub(crate) fn move_previous_assistant_after_reasoning(&mut self, index: usize) {
         let reasoning_id = self
             .messages
@@ -3539,9 +3556,15 @@ fn move_grouped_assistant_after_reasoning(
         .unwrap_or(0);
     let Some(assistant_index) = messages[turn_start..reasoning_index]
         .iter()
-        .rposition(|message| {
-            message.kind == NeoismAgentMessageKind::Assistant
-                && parent_ids.get(&message.id) == Some(parent_id)
+        .rposition(|message| match message.kind {
+            NeoismAgentMessageKind::Assistant => {
+                parent_ids.get(&message.id) == Some(parent_id)
+            }
+            // A compaction summary is keyed by its assistant message,
+            // not a text part. Its id itself is the grouping identity;
+            // never use a part-parent alias to move a different card.
+            NeoismAgentMessageKind::Compaction => &message.id == parent_id,
+            _ => false,
         })
         .map(|index| turn_start + index)
     else {

@@ -2508,12 +2508,15 @@ async fn run_assistant_step(
         plugin_snapshot,
         &tool_permissions,
         &reply_model.model_id,
-        &crate::caller::session_execution_policy(state.services().hosted, info),
+        &crate::caller::session_execution_policy(state.services(), info),
         &crate::mcp_auth::McpAuthStore::for_session(state.services(), info)
             .map_err(|error| ApiError::forbidden(error.to_string()))?,
     )
     .await?;
-    if !crate::caller::local_collaboration_session(state.services().hosted, info) {
+    if !crate::caller::native_execution_allowed(&crate::caller::session_execution_policy(
+        state.services(),
+        info,
+    )) {
         provider_tools.retain(|tool| {
             !matches!(tool.id.as_str(), "bash" | "background_task")
                 && !crate::agent_tool_registry::tool_contribution(

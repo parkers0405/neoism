@@ -618,11 +618,12 @@ pub(crate) fn display_timeline_message<M: AgentTimelineMessage>(
         AgentTimelineMessageKind::Assistant | AgentTimelineMessageKind::Reasoning
     ) {
         let safe_text = super::super::markdown::safe_canvas_markdown(message.text());
-        if safe_text.trim().is_empty() {
-            // A Markdown HTML comment/declaration is a non-rendering node, not
-            // a tiny text message. Drop the timeline item before both eager
-            // measurement and lazy estimation so it cannot leave a phantom
-            // row or scrollbar height behind.
+        if safe_text.trim().is_empty()
+            && (message.kind() != AgentTimelineMessageKind::Assistant
+                || message.images().is_empty())
+        {
+            // Non-rendering Markdown must not leave a phantom text row, but
+            // assistant image attachments still need a card of their own.
             return None;
         }
         if safe_text.as_ref() != message.text() {
@@ -633,7 +634,7 @@ pub(crate) fn display_timeline_message<M: AgentTimelineMessage>(
         && display_message.kind() == AgentTimelineMessageKind::Assistant
     {
         if let Some(text) = strip_redundant_edit_recap_code(display_message.text()) {
-            if text.trim().is_empty() {
+            if text.trim().is_empty() && display_message.images().is_empty() {
                 return None;
             }
             return Some(display_message.with_text(text));

@@ -23,8 +23,8 @@ mod custom_tool;
 mod edit_smoke_tests;
 mod error;
 mod executable;
+mod catalog_activity;
 mod execution_activity;
-mod execution_provider;
 mod external_acp;
 mod external_agent;
 mod global_routes;
@@ -33,6 +33,7 @@ mod instruction;
 mod interaction;
 pub mod language_server;
 mod local_gui;
+mod local_process;
 mod lsp;
 mod lsp_routes;
 mod management;
@@ -107,6 +108,8 @@ mod v2_routes;
 pub(crate) mod windows_process;
 mod workflow;
 mod workspace_runtime;
+mod workspace_worker;
+pub use workspace_worker::workspace_worker_services;
 
 pub(crate) use agent_tool_registry::{
     available_tools_for_directory, execute_mcp_gateway, provider_tools_for_agent,
@@ -195,9 +198,6 @@ pub fn services_with_workspace_search(
         std::sync::Arc::new(neoism_agent_service_api::StandardExecutableService),
         workspace_search,
     )
-    .with_execution(std::sync::Arc::new(
-        execution_provider::LocalExecutionProvider,
-    ))
 }
 
 pub fn standard_workspace_search(
@@ -209,18 +209,6 @@ pub fn standard_workspace_search(
 /// search. Standalone binaries explicitly inject their chosen search adapter.
 pub fn standard_services() -> neoism_agent_service_api::AgentServices {
     services_with_workspace_search(standard_workspace_search())
-}
-
-fn ensure_local_execution(
-    services: neoism_agent_service_api::AgentServices,
-) -> neoism_agent_service_api::AgentServices {
-    if !services.hosted && !services.execution.available() {
-        services.with_execution(std::sync::Arc::new(
-            execution_provider::LocalExecutionProvider,
-        ))
-    } else {
-        services
-    }
 }
 
 struct UnavailableWorkspaceSearch;
@@ -278,28 +266,11 @@ impl neoism_agent_service_api::WorkspaceSearchService for UnavailableWorkspaceSe
     }
 }
 
-/// The callback is invoked only after exact controller-secret authentication and a bounded body read.
-/// Its implementation must check the live controller before signing. No customer bearer is accepted.
-#[derive(Clone)]
-pub struct HostedAttestation {
-    pub controller_secret: String,
-    pub sign: std::sync::Arc<
-        dyn Fn(
-                Vec<u8>,
-            ) -> std::pin::Pin<
-                Box<dyn std::future::Future<Output = Result<String, ()>> + Send>,
-            > + Send
-            + Sync,
-    >,
-}
-
 #[derive(Clone)]
 pub struct ServerOptions {
     pub hostname: String,
     pub port: u16,
     pub cors: Vec<String>,
-    /// Explicit hosted listener-only controller route. Never populated by standalone launchers.
-    pub hosted_attestation: Option<HostedAttestation>,
 }
 
 impl Default for ServerOptions {
@@ -308,7 +279,6 @@ impl Default for ServerOptions {
             hostname: "127.0.0.1".to_string(),
             port: 4096,
             cors: Vec::new(),
-            hosted_attestation: None,
         }
     }
 }
@@ -319,12 +289,16 @@ pub async fn listen(
 ) -> anyhow::Result<SocketAddr> {
     // Daemon-supervised agents expose installed GUI assets too, without a
     // second backend or any change to API credentials/management policy.
-    let gui = match gui::GuiRoot::discover() {
-        Ok(root) => Some(root),
-        Err(error) if std::env::var_os("NEOISM_AGENT_GUI_ROOT").is_some() => {
-            return Err(error)
+    let gui = if services.workspace_worker.is_some() {
+        None
+    } else {
+        match gui::GuiRoot::discover() {
+            Ok(root) => Some(root),
+            Err(error) if std::env::var_os("NEOISM_AGENT_GUI_ROOT").is_some() => {
+                return Err(error)
+            }
+            Err(_) => None,
         }
-        Err(_) => None,
     };
     listen_with_gui(options, services, gui).await
 }
@@ -335,18 +309,10 @@ pub async fn listen_with_gui(
     services: neoism_agent_service_api::AgentServices,
     gui: Option<gui::GuiRoot>,
 ) -> anyhow::Result<SocketAddr> {
-    let services = ensure_local_execution(services);
-    if options.hosted_attestation.is_some()
-        && (!services.hosted || options.hostname != "127.0.0.1" || gui.is_some())
-    {
-        anyhow::bail!("native attestation requires the hosted loopback listener without standalone GUI");
-    }
-    if options
-        .hosted_attestation
-        .as_ref()
-        .is_some_and(|route| route.controller_secret.len() < 32)
-    {
-        anyhow::bail!("native attestation requires a controller secret");
+    if services.workspace_worker.is_some() && gui.is_some() {
+        anyhow::bail!(
+            "workspace workers expose only the Agent API, not standalone GUI assets"
+        );
     }
     services
         .validate()
@@ -361,6 +327,7 @@ pub async fn listen_with_gui(
         options.port,
     );
     if !address.ip().is_loopback()
+        && services.tenant_resolver.is_none()
         && std::env::var_os("NEOISM_AGENT_TOKEN").is_none()
         && std::env::var_os("NEOISM_AGENT_AUTH_CONFIG").is_none()
         && std::env::var("NEOISM_AGENT_ALLOW_UNAUTHENTICATED_REMOTE").as_deref()
@@ -401,63 +368,28 @@ pub async fn listen_with_gui(
     );
     state.start_session_list_backfill();
     let api = app_router::app_with_cors(state.clone(), &options.cors);
-    // Register after the customer-authenticated router was layered. This exact route
-    // has its own controller-only auth, not an exemption in Neoism's caller policy.
-    let api = if let Some(attestation) = options.hosted_attestation {
-        api.route(
-            "/v1/hosted/attest",
-            axum::routing::post(
-                move |headers: axum::http::HeaderMap, body: axum::body::Body| {
-                    let attestation = attestation.clone();
-                    async move {
-                        use axum::{http::StatusCode, response::IntoResponse};
-                        let denied = || StatusCode::UNAUTHORIZED.into_response();
-                        let expected =
-                            format!("Bearer {}", attestation.controller_secret);
-                        let supplied = headers
-                            .get(axum::http::header::AUTHORIZATION)
-                            .map(|v| v.as_bytes())
-                            .unwrap_or_default();
-                        if supplied.len() != expected.len()
-                            || supplied
-                                .iter()
-                                .zip(expected.as_bytes())
-                                .fold(0u8, |d, (a, b)| d | (a ^ b))
-                                != 0
-                        {
-                            return denied();
-                        }
-                        let bytes = match axum::body::to_bytes(body, 4096).await {
-                            Ok(bytes) => bytes,
-                            Err(_) => {
-                                return StatusCode::PAYLOAD_TOO_LARGE.into_response()
-                            }
-                        };
-                        match (attestation.sign)(bytes.to_vec()).await {
-                            Ok(signature) => (
-                                StatusCode::OK,
-                                axum::Json(serde_json::json!({"signature":signature})),
-                            )
-                                .into_response(),
-                            Err(()) => StatusCode::FORBIDDEN.into_response(),
-                        }
-                    }
-                },
-            ),
-        )
-    } else {
-        api
-    };
     let app = match gui {
         Some(root) => gui::with_gui(api, root.for_listener(actual)),
         None => api,
     };
-    let result = axum::serve(
+    let server = std::future::IntoFuture::into_future(axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .await;
-    state.shutdown().await?;
+    ));
+    let result = if let Some(worker) = &state.services().workspace_worker {
+        tokio::select! {
+            result = server => result,
+            result = workspace_worker::wait_for_shutdown(worker) => {
+                result?;
+                Ok(())
+            },
+        }
+    } else {
+        server.await
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(30), state.shutdown())
+        .await
+        .map_err(|_| anyhow::anyhow!("agent shutdown exceeded its deadline"))??;
     tracing::warn!(
         target: "neoism_agent::perf",
         listen_addr = %actual,

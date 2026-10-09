@@ -26,12 +26,92 @@ pub(crate) struct PreviewRequest {
 
 /// A process-local ACP session, never a Neoism session. Its ID is deliberately
 /// not returned: the provider process is terminated when this request ends.
+/// Request-level native admission: profile/path gating is separate from live
+/// authentication, which the parent router supplies in CallerClaims.
+pub(super) fn admitted_request_directory(
+    state: &AppState,
+    claims: Option<&crate::caller::CallerClaims>,
+    directory: Option<String>,
+    headers: &HeaderMap,
+) -> Result<String, ApiError> {
+    if state.services().shared_control_plane() {
+        return Err(ApiError::forbidden(
+            "native ACP is unavailable on shared control",
+        ));
+    }
+    let directory = if directory.is_none() && !headers.contains_key("x-neoism-directory")
+    {
+        state
+            .services()
+            .workspace_worker
+            .as_ref()
+            .map(|worker| worker.root().to_string_lossy().into_owned())
+            .unwrap_or_else(|| crate::resolve_directory(None, headers))
+    } else {
+        crate::resolve_directory(directory, headers)
+    };
+    let cwd = crate::windows_process::canonicalize_path(std::path::Path::new(&directory))
+        .map_err(|_| ApiError::bad_request("Workspace directory does not exist"))?;
+    if !cwd.is_dir() {
+        return Err(ApiError::bad_request(
+            "Workspace directory is not a directory",
+        ));
+    }
+    if !crate::caller::native_execution_allowed(
+        &crate::workspace_runtime::directory_execution_policy(state.services(), &cwd),
+    ) {
+        return Err(ApiError::forbidden(
+            "native ACP directory is outside the worker root",
+        ));
+    }
+    if let Some(worker) = &state.services().workspace_worker {
+        let claims = claims.ok_or_else(|| {
+            ApiError::forbidden("worker ACP requires an authenticated caller")
+        })?;
+        if claims.tenant_id != worker.tenant_id()
+            || claims.workspace_id.as_deref() != Some(worker.workspace_id())
+            || !claims.worker.as_ref().is_some_and(|binding| {
+                binding.runtime_id() == worker.runtime_id()
+                    && binding.runtime_generation() == worker.runtime_generation()
+                    && binding.root() == worker.root()
+            })
+        {
+            return Err(ApiError::forbidden(
+                "ACP caller does not match this worker deployment",
+            ));
+        }
+    } else if claims.is_some_and(|claims| {
+        claims.hosted || claims.tenant_id != "local" || claims.workspace_id.is_some()
+    }) {
+        return Err(ApiError::forbidden(
+            "native ACP requires the local operator or admitted worker",
+        ));
+    }
+    let cwd = cwd.to_string_lossy().into_owned();
+    if claims.is_some_and(|claims| !crate::caller::allows_directory(claims, &cwd)) {
+        return Err(ApiError::forbidden(
+            "ACP directory is outside the caller scope",
+        ));
+    }
+    Ok(cwd)
+}
+
 async fn ephemeral(
     state: &AppState,
     runtime: ExternalRuntime,
     directory: &str,
     choices: BTreeMap<String, String>,
 ) -> Result<ExternalOptionsResponse, ApiError> {
+    if !crate::caller::native_execution_allowed(
+        &crate::workspace_runtime::directory_execution_policy(
+            state.services(),
+            std::path::Path::new(directory),
+        ),
+    ) {
+        return Err(ApiError::forbidden(
+            "native ACP options are unavailable for this directory",
+        ));
+    }
     let (client, mut events) = AcpClient::spawn(
         runtime
             .acp_config(directory, state.services())
@@ -152,32 +232,12 @@ async fn preview_inner(
             ))
         }
     };
-    if state.services().hosted
-        || claims.as_ref().is_some_and(|Extension(claims)| {
-            claims.hosted || claims.tenant_id != "local" || claims.workspace_id.is_some()
-        })
-    {
-        return Err(ApiError::forbidden(
-            "Host-native ACP options require the local operator",
-        ));
-    }
-    let directory = crate::resolve_directory(query.directory, &headers);
-    let cwd = crate::windows_process::canonicalize_path(std::path::Path::new(&directory))
-        .map_err(|_| ApiError::bad_request("Workspace directory does not exist"))?;
-    if !cwd.is_dir() {
-        return Err(ApiError::bad_request(
-            "Workspace directory is not a directory",
-        ));
-    }
-    let cwd = cwd.to_string_lossy().into_owned();
-    if claims
-        .as_ref()
-        .is_some_and(|Extension(claims)| !crate::caller::allows_directory(claims, &cwd))
-    {
-        return Err(ApiError::forbidden(
-            "Workspace directory is outside the caller's scope",
-        ));
-    }
+    let cwd = admitted_request_directory(
+        &state,
+        claims.as_ref().map(|Extension(claims)| claims),
+        query.directory,
+        &headers,
+    )?;
     if choices.len() > 256 {
         return Err(ApiError::bad_request("Too many ACP options"));
     }
@@ -774,16 +834,19 @@ fn scope(
     claims: Option<&crate::caller::CallerClaims>,
     session: &SessionInfo,
 ) -> Result<ExternalRuntime, ApiError> {
-    if state.services().hosted
-        || claims.is_some_and(|claims| {
-            claims.hosted
-                || claims.tenant_id != "local"
-                || claims.workspace_id.is_some()
-                || !crate::caller::allows_session(claims, session)
-        })
+    admitted_request_directory(
+        state,
+        claims,
+        Some(session.directory.clone()),
+        &HeaderMap::new(),
+    )?;
+    if claims.is_some_and(|claims| !crate::caller::allows_session(claims, session))
+        || !crate::caller::native_execution_allowed(
+            &crate::caller::session_execution_policy(state.services(), session),
+        )
     {
         return Err(ApiError::forbidden(
-            "Host-native ACP options require the local operator and authorized session",
+            "native ACP options require an admitted session",
         ));
     }
     let runtime = root_runtime(session)
@@ -881,6 +944,14 @@ async fn control(
     runtime: ExternalRuntime,
     choice: Option<&SetExternalOptionRequest>,
 ) -> Result<ExternalOptionsResponse, ApiError> {
+    if !crate::caller::native_execution_allowed(&crate::caller::session_execution_policy(
+        state.services(),
+        session,
+    )) {
+        return Err(ApiError::forbidden(
+            "native ACP options are disabled for this session",
+        ));
+    }
     let (client, mut events) = AcpClient::spawn(
         runtime
             .acp_config(&session.directory, state.services())
@@ -1023,3 +1094,128 @@ pub(crate) async fn external_options_set(
 #[cfg(all(test, unix))]
 #[path = "options_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod worker_admission_tests {
+    use super::*;
+    use neoism_agent_service_api::{
+        ActorType, TenantQuotas, WorkspaceWorkerBinding, WorkspaceWorkerBootstrap,
+        WorkspaceWorkerCredentialClaims, WorkspaceWorkerSigningKey,
+        WorkspaceWorkerTenantResolver,
+    };
+
+    #[tokio::test]
+    async fn hosted_worker_acp_admission_is_scoped_and_disabled_sessions_stay_disabled() {
+        let container = std::env::temp_dir().join(format!(
+            "neoism-worker-acp-scope-{}",
+            neoism_agent_core::new_session_id()
+        ));
+        let root = container.join("workspace");
+        std::fs::create_dir_all(root.join("child")).unwrap();
+        let root = std::fs::canonicalize(root).unwrap();
+        let now = neoism_agent_service_api::workspace_worker::unix_now().unwrap();
+        let key = WorkspaceWorkerSigningKey::new([5u8; 32]).unwrap();
+        let binding = WorkspaceWorkerBinding::new(
+            WorkspaceWorkerBootstrap {
+                version: 1,
+                tenant_id: "tenant".into(),
+                workspace_id: "workspace".into(),
+                runtime_id: "runtime".into(),
+                runtime_generation: 8,
+                root: root.clone(),
+                expires_at: now + 600,
+            },
+            key.verification_key(),
+        )
+        .unwrap();
+        let services = crate::standard_services()
+            .with_tenant_resolver(Arc::new(WorkspaceWorkerTenantResolver::new(
+                binding.clone(),
+            )))
+            .with_provider_credentials(Arc::new(
+                neoism_agent_service_api::WorkspaceWorkerProviderCredentialStore::new(
+                    binding.clone(),
+                    container.join("provider.json"),
+                )
+                .unwrap(),
+            ))
+            .with_mcp_credentials(Arc::new(
+                neoism_agent_service_api::WorkspaceWorkerMcpCredentialStore::new(
+                    binding.clone(),
+                    container.join("mcp.json"),
+                )
+                .unwrap(),
+            ))
+            .for_workspace_worker(binding);
+        let state =
+            AppState::open_database_with_services(container.join("state.db"), services)
+                .await
+                .unwrap();
+        let token = key
+            .issue(&WorkspaceWorkerCredentialClaims {
+                version: 1,
+                tenant_id: "tenant".into(),
+                workspace_id: "workspace".into(),
+                runtime_id: "runtime".into(),
+                runtime_generation: 8,
+                subject: "member".into(),
+                actor_type: ActorType::Human,
+                directory_prefix: root.clone(),
+                scopes: vec!["agent:use".into()],
+                quotas: TenantQuotas::default(),
+                issued_at: now,
+                expires_at: now + 60,
+            })
+            .unwrap();
+        let claims = state
+            .inner
+            .caller_policy
+            .authenticate_request(Some(&token))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(claims.hosted);
+        assert_eq!(
+            admitted_request_directory(&state, Some(&claims), None, &HeaderMap::new())
+                .unwrap(),
+            root.to_string_lossy()
+        );
+        assert!(admitted_request_directory(
+            &state,
+            Some(&claims),
+            Some(root.join("child").to_string_lossy().into_owned()),
+            &HeaderMap::new()
+        )
+        .is_ok());
+        assert!(admitted_request_directory(
+            &state,
+            Some(&claims),
+            Some(root.parent().unwrap().to_string_lossy().into_owned()),
+            &HeaderMap::new()
+        )
+        .is_err());
+        assert!(
+            admitted_request_directory(&state, None, None, &HeaderMap::new()).is_err()
+        );
+        let request =
+            serde_json::from_value(json!({"externalProvider": "opencode"})).unwrap();
+        let mut session = crate::session_routes::create_session_in_directory(
+            &state,
+            &root.to_string_lossy(),
+            request,
+            BTreeMap::new(),
+        )
+        .await
+        .unwrap();
+        assert!(scope(&state, Some(&claims), &session).is_ok());
+        session.extra.insert(
+            crate::caller::EXECUTION_POLICY_EXTRA_KEY.into(),
+            serde_json::to_value(neoism_agent_service_api::ExecutionPolicy::Disabled)
+                .unwrap(),
+        );
+        assert!(scope(&state, Some(&claims), &session).is_err());
+        state.shutdown().await.unwrap();
+        drop(state);
+        let _ = std::fs::remove_dir_all(container);
+    }
+}

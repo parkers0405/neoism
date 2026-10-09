@@ -1,0 +1,29 @@
+# Development-only image for exercising a host-native debug build. Not a portable release image.
+# native-libs is the complete ldd closure of the staged Agent and Lua-runner binaries.
+FROM archlinux:latest AS agent-worker-development
+RUN pacman -Sy --noconfirm --needed ca-certificates curl git jq openssh \
+    && pacman -Scc --noconfirm
+COPY worker-artifacts/native-libs/ /usr/lib/
+COPY worker-artifacts/neoism-agent /usr/local/bin/neoism-agent
+COPY worker-artifacts/neoism-agent-lua-runner /usr/local/bin/neoism-agent-lua-runner
+COPY packaging/cloud-worker/entrypoint.sh /usr/local/bin/worker-entrypoint
+COPY packaging/cloud-worker/healthcheck.sh /usr/local/bin/worker-healthcheck
+RUN groupadd --gid 10001 neoism \
+    && useradd --uid 10001 --gid 10001 --home-dir /var/lib/neoism/home --no-create-home --shell /bin/bash neoism \
+    && mkdir -p /workspace /var/lib/neoism/home /var/lib/neoism/config /var/lib/neoism/state /var/lib/neoism/cache /var/lib/neoism/data \
+    && chown -R 10001:10001 /workspace /var/lib/neoism \
+    && chmod 0755 /usr/local/bin/neoism-agent /usr/local/bin/neoism-agent-lua-runner /usr/local/bin/worker-entrypoint /usr/local/bin/worker-healthcheck
+ENV HOME=/var/lib/neoism/home \
+    XDG_CONFIG_HOME=/var/lib/neoism/config \
+    XDG_STATE_HOME=/var/lib/neoism/state \
+    XDG_CACHE_HOME=/var/lib/neoism/cache \
+    XDG_DATA_HOME=/var/lib/neoism/data \
+    NEOISM_AGENT_STATE_DIR=/var/lib/neoism/state/neoism-agent \
+    TERM=xterm-256color SHELL=/bin/bash
+USER 10001:10001
+WORKDIR /workspace
+EXPOSE 4096
+STOPSIGNAL SIGTERM
+HEALTHCHECK --interval=5s --timeout=3s --start-period=5s --retries=3 CMD ["/usr/local/bin/worker-healthcheck"]
+# The development provider supplies Docker's init process, outside the image.
+ENTRYPOINT ["/bin/bash", "/usr/local/bin/worker-entrypoint"]

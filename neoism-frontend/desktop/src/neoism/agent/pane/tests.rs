@@ -1,6 +1,55 @@
 use super::*;
 
 #[test]
+fn left_catalog_activity_without_a_chat_stream() {
+    use neoism_agent_core::CatalogActivity;
+    let mut pane = NeoismAgentPane::default();
+    pane.side_panel
+        .set_sessions(vec![NeoismAgentSessionEntry::new("root", "Main chat", "")]);
+    assert!(pane.event_stream.is_none());
+    for (activity, expected) in [
+        ("running", CatalogActivity::Running),
+        ("background", CatalogActivity::Background),
+        ("permission", CatalogActivity::Permission),
+        ("idle", CatalogActivity::Idle),
+    ] {
+        let envelope = serde_json::json!({
+            "id": "evt-activity", "sequence": 1, "source": "session",
+            "schemaVersion": "1.0.0", "timestamp": 1,
+            "type": "session.catalog.activity", "subject": {"kind": "session", "id": "root"},
+            "data": {"sessionID": "root", "activity": activity}
+        });
+        pane.session_catalog_stream =
+            Some(AgentSessionCatalogStream::with_events_for_test([envelope]));
+        assert!(pane.drain_live_session_updates());
+        let row = pane
+            .side_panel
+            .sessions()
+            .iter()
+            .find(|row| row.id == "root")
+            .unwrap();
+        assert_eq!(row.catalog_activity, Some(expected));
+        assert!(row.runtime_status.is_none());
+        assert!(pane.event_stream.is_none());
+        pane.session_catalog_stream = Some(
+            AgentSessionCatalogStream::with_events_for_test([
+                serde_json::json!({"type":"session.status", "properties":{"sessionID":"root", "status":{"type":"idle"}}}),
+            ]),
+        );
+        assert!(!pane.drain_live_session_updates());
+        assert_eq!(
+            pane.side_panel
+                .sessions()
+                .iter()
+                .find(|row| row.id == "root")
+                .unwrap()
+                .catalog_activity,
+            Some(expected)
+        );
+    }
+}
+
+#[test]
 fn running_tool_animation_is_owned_only_by_the_last_visible_paint() {
     use neoism_ui::panels::agent_pane::view::{
         timeline::AgentTimelinePane, tool_message::AgentToolPane,
@@ -4706,6 +4755,152 @@ fn streamed_final_part_inserts_after_existing_reasoning() {
 }
 
 #[test]
+fn live_compaction_reasoning_start_deltas_end_keep_summary_separate() {
+    let mut pane = NeoismAgentPane::default();
+    // The card uses the message id, without an entry in the part-parent map.
+    pane.upsert_part_message(
+        NeoismAgentMessage::compaction("", "summary").with_id("msg-summary"),
+    );
+    pane.remember_live_part_parent("reason-1", Some("msg-summary"));
+    pane.upsert_part_message(NeoismAgentMessage::reasoning("").with_id("reason-1"));
+    assert_eq!(pane.messages[0].id, "reason-1");
+    assert_eq!(pane.messages[1].id, "msg-summary");
+
+    for delta in ["Identify ", "the goal"] {
+        pane.apply_part_delta(
+            Some("msg-summary".into()),
+            Some("reason-1".into()),
+            Some("reasoning".into()),
+            delta,
+        );
+    }
+    assert_eq!(pane.messages[0].text, "Identify the goal");
+    assert!(pane.messages[1].text.is_empty());
+    // End/upsert must keep the same order and identity, not duplicate rows.
+    pane.upsert_part_message(
+        NeoismAgentMessage::reasoning("Identify the goal").with_id("reason-1"),
+    );
+    // A second reasoning part can begin with a delta before its start/upsert.
+    pane.apply_part_delta(
+        Some("msg-summary".into()),
+        Some("reason-2".into()),
+        Some("reasoning".into()),
+        "Preserve state",
+    );
+    pane.upsert_part_message(
+        NeoismAgentMessage::reasoning("Preserve state").with_id("reason-2"),
+    );
+    pane.apply_part_delta(
+        Some("msg-summary".into()),
+        Some("summary-text".into()),
+        Some("compaction".into()),
+        "## Goal",
+    );
+    pane.upsert_part_message(
+        NeoismAgentMessage::compaction("## Goal", "summary").with_id("msg-summary"),
+    );
+    assert_eq!(
+        pane.messages
+            .iter()
+            .map(|message| message.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["reason-1", "reason-2", "msg-summary"]
+    );
+    assert_eq!(pane.messages[0].text, "Identify the goal");
+    assert_eq!(pane.messages[1].text, "Preserve state");
+    assert_eq!(pane.messages[2].text, "## Goal");
+    assert_eq!(pane.messages[2].kind, NeoismAgentMessageKind::Compaction);
+}
+
+#[test]
+fn live_compaction_reasoning_late_parent_repairs_only_its_card() {
+    let mut pane = NeoismAgentPane::default();
+    pane.upsert_part_message(
+        NeoismAgentMessage::compaction("Summary", "summary").with_id("msg-summary"),
+    );
+    pane.upsert_part_message(
+        NeoismAgentMessage::reasoning("Thought").with_id("reason-1"),
+    );
+    assert_eq!(pane.messages[0].id, "msg-summary");
+    pane.remember_live_part_parent("reason-1", Some("msg-summary"));
+    assert_eq!(pane.messages[0].id, "reason-1");
+    assert_eq!(pane.messages[1].id, "msg-summary");
+}
+
+#[test]
+fn live_compaction_reasoning_does_not_move_unrelated_groups() {
+    let mut pane = NeoismAgentPane::default();
+    pane.remember_live_part_parent("answer-other", Some("msg-other"));
+    pane.upsert_part_message(
+        NeoismAgentMessage::assistant("Other answer").with_id("answer-other"),
+    );
+    // Even misleading part-parent metadata cannot make another message-keyed
+    // compaction card a member of this reasoning's group.
+    pane.remember_live_part_parent("msg-other-summary", Some("msg-summary"));
+    pane.upsert_part_message(
+        NeoismAgentMessage::compaction("Other summary", "summary")
+            .with_id("msg-other-summary"),
+    );
+    pane.upsert_part_message(
+        NeoismAgentMessage::compaction("Own summary", "summary").with_id("msg-summary"),
+    );
+    pane.remember_live_part_parent("tool-other", Some("msg-other"));
+    pane.upsert_part_message(
+        NeoismAgentMessage::tool(
+            "Bash",
+            "",
+            "completed",
+            "bash",
+            NeoismAgentOutputKind::Text,
+            "",
+            Vec::new(),
+        )
+        .with_id("tool-other"),
+    );
+    pane.remember_live_part_parent("reason-1", Some("msg-summary"));
+    pane.upsert_part_message(
+        NeoismAgentMessage::reasoning("Own thought").with_id("reason-1"),
+    );
+    assert_eq!(
+        pane.messages
+            .iter()
+            .map(|message| message.id.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "answer-other",
+            "msg-other-summary",
+            "tool-other",
+            "reason-1",
+            "msg-summary"
+        ]
+    );
+    // Reasoning for a different message must not move the compaction card.
+    pane.remember_live_part_parent("reason-unrelated", Some("msg-no-card"));
+    pane.upsert_part_message(
+        NeoismAgentMessage::reasoning("Unrelated").with_id("reason-unrelated"),
+    );
+    assert_eq!(pane.messages[4].id, "msg-summary");
+    assert_eq!(pane.messages[5].id, "reason-unrelated");
+}
+
+#[test]
+fn live_compaction_reasoning_does_not_cross_user_turn_boundary() {
+    let mut pane = NeoismAgentPane::default();
+    pane.upsert_part_message(
+        NeoismAgentMessage::compaction("Prior summary", "summary").with_id("msg-summary"),
+    );
+    pane.messages
+        .push(NeoismAgentMessage::user("New request").with_id("user-next"));
+    pane.remember_live_part_parent("reason-late", Some("msg-summary"));
+    pane.upsert_part_message(
+        NeoismAgentMessage::reasoning("Late thought").with_id("reason-late"),
+    );
+    assert_eq!(pane.messages[0].id, "msg-summary");
+    assert_eq!(pane.messages[1].id, "user-next");
+    assert_eq!(pane.messages[2].id, "reason-late");
+}
+
+#[test]
 fn delayed_reasoning_end_uses_its_assistant_message_group_order() {
     let mut pane = NeoismAgentPane::default();
     pane.remember_live_part_parent("text-1", Some("assistant-message-1"));
@@ -6279,6 +6474,123 @@ fn follow_scroll_warm_cache_hidden_live_growth_is_history_on_reopen() {
         top
     );
     assert!(!pane.timeline_follow_bottom);
+}
+
+#[test]
+fn follow_scroll_reopened_trace_is_not_new_output() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("a".into());
+    let tool = NeoismAgentMessage::tool(
+        "Read file",
+        "",
+        "completed",
+        "read",
+        NeoismAgentOutputKind::Text,
+        "one line",
+        Vec::new(),
+    )
+    .with_id("old-tool");
+    pane.messages = vec![
+        NeoismAgentMessage::user("Inspect the project").with_id("prompt"),
+        NeoismAgentMessage::reasoning("Previous reasoning").with_id("reasoning"),
+        tool.clone(),
+        NeoismAgentMessage::assistant("Existing reply").with_id("reply"),
+    ];
+    follow_scroll_apply_test_history(&mut pane);
+    let rect = [0.0, 0.0, 400.0, 300.0];
+    pane.set_timeline_metrics(rect, 900.0, 300.0);
+    pane.upsert_part_message(tool.clone().with_id("new-tool"));
+    // A second event before paint must not overwrite disclosure provenance.
+    pane.upsert_part_message(tool.clone().with_id("batched-tool"));
+    assert!(pane.timeline_trace_reveal_pending);
+    pane.set_timeline_metrics(rect, 3180.0, 300.0);
+    assert_eq!(
+        (pane.timeline_scroll_offset(), pane.timeline_wheel_target_px),
+        (0.0, None)
+    );
+    assert!(!pane.timeline_live_growth);
+    pane.set_timeline_metrics(rect, 3200.0, 300.0);
+    assert_eq!(pane.timeline_scroll_offset(), 0.0);
+    pane.upsert_part_message(tool.with_id("next-tool"));
+    pane.set_timeline_metrics(rect, 3248.0, 300.0);
+    assert_eq!(
+        (pane.timeline_scroll_offset(), pane.timeline_wheel_target_px),
+        (48.0, Some(0.0))
+    );
+}
+
+#[test]
+fn follow_scroll_cached_short_tool_and_queued_echo_open_bottom() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("a".into());
+    pane.messages =
+        vec![NeoismAgentMessage::assistant("Existing reply").with_id("reply")];
+    follow_scroll_apply_test_history(&mut pane);
+    let rect = [0.0, 0.0, 400.0, 300.0];
+    pane.set_timeline_metrics(rect, 900.0, 300.0);
+    let mut other = CachedAgentSession::live_only();
+    other.hydrated = true;
+    pane.session_cache.insert("b".into(), other);
+    pane.switch_session("b".into());
+    let tool = NeoismAgentMessage::tool(
+        "Read file",
+        "",
+        "completed",
+        "read",
+        NeoismAgentOutputKind::Text,
+        "one line",
+        Vec::new(),
+    )
+    .with_id("short-tool");
+    pane.event_stream = Some(AgentSessionEventStream::with_updates_for_test(
+        "a",
+        [AgentSessionUpdate::PartUpdated {
+            message: tool.clone(),
+            parent_message_id: Some("reply".into()),
+        }],
+    ));
+    pane.drain_live_session_updates();
+    let cached = pane.session_cache.get("a").unwrap();
+    assert_eq!(cached.timeline_content_height_px, 900.0);
+    assert!(cached.messages.iter().any(|m| m.id == "short-tool"));
+    pane.switch_session("a".into());
+    assert_eq!(pane.timeline_viewport_rect, None);
+    let echo = pane.messages.clone();
+    pane.event_stream = Some(AgentSessionEventStream::with_updates_for_test(
+        "a",
+        [
+            AgentSessionUpdate::PartUpdated {
+                message: tool.clone(),
+                parent_message_id: Some("reply".into()),
+            },
+            AgentSessionUpdate::SessionIdle,
+            AgentSessionUpdate::Messages {
+                messages: echo,
+                oldest_cursor: None,
+            },
+        ],
+    ));
+    pane.drain_server_updates();
+    pane.set_timeline_metrics(rect, 948.0, 300.0);
+    assert_eq!(
+        (pane.timeline_scroll_offset(), pane.timeline_wheel_target_px),
+        (0.0, None)
+    );
+    // Replay after the first returned frame does flag live provenance, but
+    // unchanged geometry does NOT reproduce scroll motion.
+    pane.upsert_part_message(tool);
+    pane.set_timeline_metrics(rect, 948.0, 300.0);
+    assert_eq!(
+        (pane.timeline_scroll_offset(), pane.timeline_wheel_target_px),
+        (0.0, None)
+    );
+    // A genuinely fresh visible delta must retain the existing smooth follow.
+    pane.apply_part_delta(Some("reply".into()), None, Some("text".into()), " More.");
+    pane.set_timeline_metrics(rect, 972.0, 300.0);
+    assert_eq!(
+        (pane.timeline_scroll_offset(), pane.timeline_wheel_target_px),
+        (24.0, Some(0.0))
+    );
 }
 
 fn follow_scroll_test_pane() -> NeoismAgentPane {

@@ -20,6 +20,7 @@ pub(crate) async fn build_host(
     directory: &str,
 ) -> Result<PluginHostBuild, PluginHostError> {
     let services = state.services();
+    require_worker_root(services, directory)?;
     let host = PluginHost::default();
     let snapshot = crate::config::snapshot(services, directory).map_err(|error| {
         PluginHostError::Registration(format!("invalid configuration: {error}"))
@@ -48,6 +49,7 @@ pub(crate) async fn build_default_host(
     state: &crate::state::AppState,
     directory: &str,
 ) -> Result<PluginHostBuild, PluginHostError> {
+    require_worker_root(state.services(), directory)?;
     build_host_with_config(
         state,
         directory,
@@ -58,6 +60,23 @@ pub(crate) async fn build_default_host(
         PluginHost::default(),
     )
     .await
+}
+
+fn require_worker_root(
+    services: &neoism_agent_service_api::AgentServices,
+    directory: &str,
+) -> Result<(), PluginHostError> {
+    if let Some(worker) = &services.workspace_worker {
+        worker
+            .validate()
+            .map_err(|error| PluginHostError::Registration(error.to_string()))?;
+        if std::fs::canonicalize(directory).ok().as_deref() != Some(worker.root()) {
+            return Err(PluginHostError::Registration(
+                "plugin host must use the immutable worker root".into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn first_party_legacy_prefix(plugin_id: &str) -> Option<&'static str> {
@@ -146,14 +165,18 @@ async fn build_host_with_config(
             )]),
         ));
     }
-    if enabled_in(&config, neoism_agent_builtins::plugin::semantic::ID) {
+    if !services.shared_control_plane()
+        && enabled_in(&config, neoism_agent_builtins::plugin::semantic::ID)
+    {
         plugins.push(Box::new(
             neoism_agent_builtins::plugin::SemanticPlugin::new(std::sync::Arc::new(
                 plugin_adapters::Semantic(state.clone()),
             )),
         ));
     }
-    if enabled_in(&config, neoism_agent_builtins::plugin::workflows::ID) {
+    if !services.shared_control_plane()
+        && enabled_in(&config, neoism_agent_builtins::plugin::workflows::ID)
+    {
         plugins.push(Box::new(
             neoism_agent_builtins::plugin::WorkflowsPlugin::new(std::sync::Arc::new(
                 plugin_adapters::Workflows(state.clone()),
@@ -167,7 +190,9 @@ async fn build_host_with_config(
             )),
         ));
     }
-    if enabled_in(&config, neoism_agent_builtins::plugin::lsp::ID) {
+    if !services.shared_control_plane()
+        && enabled_in(&config, neoism_agent_builtins::plugin::lsp::ID)
+    {
         plugins.push(Box::new(neoism_agent_builtins::plugin::LspPlugin::new(
             std::sync::Arc::new(plugin_adapters::Lsp(state.clone())),
         )));
@@ -177,12 +202,16 @@ async fn build_host_with_config(
             std::sync::Arc::new(plugin_adapters::Mcp(state.clone())),
         )));
     }
-    if enabled_in(&config, neoism_agent_builtins::plugin::pty::ID) {
+    if !services.shared_control_plane()
+        && enabled_in(&config, neoism_agent_builtins::plugin::pty::ID)
+    {
         plugins.push(Box::new(neoism_agent_builtins::plugin::PtyPlugin::new(
             std::sync::Arc::new(plugin_adapters::Pty(state.clone())),
         )));
     }
-    if enabled_in(&config, neoism_agent_builtins::plugin::workspace_tools::ID) {
+    if !services.shared_control_plane()
+        && enabled_in(&config, neoism_agent_builtins::plugin::workspace_tools::ID)
+    {
         plugins.push(Box::new(
             neoism_agent_builtins::plugin::WorkspaceToolsPlugin::new(
                 std::sync::Arc::new(plugin_adapters::WorkspaceTools(state.clone())),
@@ -210,7 +239,9 @@ async fn build_host_with_config(
             )),
         ));
     }
-    if enabled_in(&config, neoism_agent_builtins::plugin::skills::ID) {
+    if !services.shared_control_plane()
+        && enabled_in(&config, neoism_agent_builtins::plugin::skills::ID)
+    {
         plugins.push(Box::new(neoism_agent_builtins::plugin::SkillsPlugin::new(
             config.clone(),
             discovery_roots.clone(),
@@ -230,7 +261,9 @@ async fn build_host_with_config(
     if enabled_in(&config, neoism_agent_builtins::plugin::websearch::ID) {
         plugins.push(Box::new(neoism_agent_builtins::plugin::WebsearchPlugin));
     }
-    if enabled_in(&config, neoism_agent_builtins::plugin::vcs::ID) {
+    if !services.shared_control_plane()
+        && enabled_in(&config, neoism_agent_builtins::plugin::vcs::ID)
+    {
         plugins.push(Box::new(neoism_agent_builtins::plugin::VcsPlugin::new(
             services.clone(),
         )));
@@ -240,7 +273,8 @@ async fn build_host_with_config(
             std::sync::Arc::new(plugin_adapters::Goals(state.clone())),
         )));
     }
-    if enabled_in(&config, neoism_agent_builtins::plugin::workspace_tools::ID)
+    if !services.shared_control_plane()
+        && enabled_in(&config, neoism_agent_builtins::plugin::workspace_tools::ID)
         && enabled_in(&config, neoism_agent_builtins::plugin::custom_tools::ID)
     {
         let custom_tools = crate::custom_tool::load(services, directory);
@@ -252,12 +286,16 @@ async fn build_host_with_config(
             ));
         }
     }
-    let configured_plugins = crate::plugin::configured_agent_plugins(
-        services,
-        &configured_plugins,
-        &plugin_discovery_roots,
-        directory,
-    );
+    let configured_plugins = if services.shared_control_plane() {
+        Vec::new()
+    } else {
+        crate::plugin::configured_agent_plugins(
+            services,
+            &configured_plugins,
+            &plugin_discovery_roots,
+            directory,
+        )
+    };
     let lifecycle = std::sync::Arc::new(WorkspaceLifecycle::default());
     let root = std::path::PathBuf::from(directory);
     let mut registrations = plugins
@@ -767,5 +805,50 @@ mod host_service_tests {
         assert_eq!(std::fs::read(outside.join("secret")).unwrap(), b"secret");
 
         let _ = std::fs::remove_dir_all(base);
+    }
+}
+
+#[cfg(test)]
+mod native_gating_tests {
+    #[tokio::test]
+    async fn shared_control_plane_never_registers_native_plugins() {
+        let root = std::env::temp_dir().join(format!(
+            "neoism-native-gates-{}",
+            neoism_agent_core::Id::ascending(neoism_agent_core::IdKind::Event)
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let services = crate::standard_services().for_hosted_control_plane();
+        let state = crate::state::AppState::open_database_with_services(
+            root.join("state.db"),
+            services,
+        )
+        .await
+        .unwrap();
+        let build = super::build_default_host(&state, &root.to_string_lossy())
+            .await
+            .unwrap();
+        let snapshot = build.installed.snapshot();
+        for id in [
+            neoism_agent_builtins::plugin::lsp::ID,
+            neoism_agent_builtins::plugin::pty::ID,
+            neoism_agent_builtins::plugin::vcs::ID,
+            neoism_agent_builtins::plugin::workspace_tools::ID,
+            neoism_agent_builtins::plugin::custom_tools::ID,
+            neoism_agent_builtins::plugin::workflows::ID,
+        ] {
+            assert!(
+                !snapshot.manifests.iter().any(|manifest| manifest.id == id),
+                "registered {id}"
+            );
+        }
+        assert!(snapshot
+            .manifests
+            .iter()
+            .any(|manifest| manifest.id == neoism_agent_builtins::plugin::mcp::ID));
+        assert!(snapshot
+            .manifests
+            .iter()
+            .any(|manifest| manifest.id == neoism_agent_builtins::plugin::providers::ID));
+        let _ = std::fs::remove_dir_all(root);
     }
 }

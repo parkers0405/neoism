@@ -1329,6 +1329,50 @@ impl NeoismAgentPane {
 }
 
 #[cfg(test)]
+mod bash_diff_toggle_tests {
+    use super::*;
+
+    #[test]
+    fn bash_diff_parent_and_file_targets_stay_independent_on_second_click() {
+        let mut pane = NeoismAgentPane::default();
+        let header = [0.0, 0.0, 400.0, 30.0];
+        let file = [30.0, 30.0, 370.0, 120.0];
+        assert!(!pane.tool_expanded("bash-diff"));
+        assert!(!pane.tool_expanded("bash-diff:0"));
+        pane.register_tool_hit_rect("bash-diff".into(), header);
+        assert!(pane.toggle_tool_at(10.0, 10.0));
+        assert!(pane.tool_expanded("bash-diff"));
+
+        // Next frame: the shared renderer retains the ordinary parent header
+        // before registering the independent per-file target below it.
+        pane.tool_hit_rects.clear();
+        pane.register_tool_hit_rect("bash-diff".into(), header);
+        pane.register_tool_hit_rect("bash-diff:0".into(), file);
+        let anchor = pane.pending_timeline_anchor;
+        assert!(pane.toggle_tool_at(40.0, 40.0));
+        assert!(pane.tool_expanded("bash-diff:0"));
+        assert!(pane.tool_expanded("bash-diff"));
+        assert_eq!(
+            pane.pending_timeline_anchor.map(|a| (a.content_y, a.screen_y)),
+            anchor.map(|a| (a.content_y, a.screen_y)),
+        );
+        assert!(!pane.tool_expand_anims.contains_key("bash-diff:0"));
+        assert!(pane.toggle_tool_at(10.0, 10.0));
+        assert!(!pane.tool_expanded("bash-diff"));
+        assert!(pane.tool_expanded("bash-diff:0"));
+        assert!(!pane.tool_expand_anims["bash-diff"].expanding);
+        assert!(!pane.timeline_follow_bottom);
+        assert!(pane.pending_timeline_anchor.is_some());
+        let closing = pane.tool_expand_progress("bash-diff");
+        assert!(pane.toggle_tool_at(10.0, 10.0));
+        assert!(pane.tool_expand_anims["bash-diff"].expanding);
+        assert!(
+            (pane.tool_expand_anims["bash-diff"].start_progress - closing).abs() < 0.02
+        );
+    }
+}
+
+#[cfg(test)]
 mod source_picker_tests {
     use super::*;
     use neoism_backend::config::DefaultChatSource;

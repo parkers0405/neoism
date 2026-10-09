@@ -387,6 +387,10 @@ impl Drop for AgentSessionEventStream {
 pub(super) enum AgentSessionCatalogUpdate {
     Reconnected,
     Upsert(NeoismAgentSessionEntry),
+    Activity {
+        session_id: String,
+        activity: neoism_agent_core::CatalogActivity,
+    },
     Delete(String),
 }
 
@@ -399,6 +403,27 @@ pub(crate) struct AgentSessionCatalogStream {
 }
 
 impl AgentSessionCatalogStream {
+    #[cfg(test)]
+    pub(super) fn with_events_for_test(events: impl IntoIterator<Item = Value>) -> Self {
+        let (tx, rx) = mpsc::channel();
+        let mut decoder = SseDecoder::default();
+        for envelope in events {
+            let data = format!("data: {envelope}\n\n");
+            for event in decoder.feed(data.as_bytes()) {
+                if let Some(update) = session_catalog_update_from_event(&event) {
+                    tx.send(update).unwrap();
+                }
+            }
+        }
+        Self {
+            server: "test".into(),
+            directory: "/tmp".into(),
+            rx,
+            stop: Arc::new(AtomicBool::new(false)),
+            wake: Arc::new(Mutex::new(None)),
+        }
+    }
+
     pub(super) fn matches(&self, server: &str, directory: &str) -> bool {
         self.server == server && self.directory == directory
     }
@@ -478,6 +503,33 @@ pub(super) fn start_session_catalog_stream(
     }
 }
 
+fn session_catalog_update_from_event(event: &Value) -> Option<AgentSessionCatalogUpdate> {
+    let kind = event.get("type").and_then(Value::as_str)?;
+    let properties = event.get("properties")?;
+    if kind == neoism_agent_core::event_type::SESSION_CATALOG_ACTIVITY {
+        let session_id = properties.get("sessionID").and_then(Value::as_str)?;
+        let activity =
+            serde_json::from_value(properties.get("activity")?.clone()).ok()?;
+        Some(AgentSessionCatalogUpdate::Activity {
+            session_id: session_id.to_owned(),
+            activity,
+        })
+    } else if kind == neoism_agent_core::event_type::SESSION_STATUS {
+        // A root idle edge is not whole-family idle authority.
+        None
+    } else if kind == neoism_agent_core::event_type::SESSION_DELETED {
+        properties
+            .get("sessionID")
+            .and_then(Value::as_str)
+            .map(|id| AgentSessionCatalogUpdate::Delete(id.to_owned()))
+    } else {
+        properties
+            .get("info")
+            .and_then(|info| session_entry(info, &HashMap::new()))
+            .map(AgentSessionCatalogUpdate::Upsert)
+    }
+}
+
 fn read_session_catalog_stream(
     mut connection: EventStreamConnection,
     tx: &Sender<AgentSessionCatalogUpdate>,
@@ -488,22 +540,7 @@ fn read_session_catalog_stream(
     let mut sse = SseDecoder::default();
     let mut process = |bytes: &[u8]| -> bool {
         for event in sse.feed(bytes) {
-            let kind = event
-                .get("type")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let properties = event.get("properties").unwrap_or(&Value::Null);
-            let update = if kind == neoism_agent_core::event_type::SESSION_DELETED {
-                properties
-                    .get("sessionID")
-                    .and_then(Value::as_str)
-                    .map(|id| AgentSessionCatalogUpdate::Delete(id.to_string()))
-            } else {
-                properties
-                    .get("info")
-                    .and_then(|info| session_entry(info, &HashMap::new()))
-                    .map(AgentSessionCatalogUpdate::Upsert)
-            };
+            let update = session_catalog_update_from_event(&event);
             if let Some(update) = update {
                 if tx.send(update).is_err() {
                     return false;

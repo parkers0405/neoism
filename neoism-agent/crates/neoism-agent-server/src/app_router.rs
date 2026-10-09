@@ -54,6 +54,7 @@ pub(crate) fn app_with_cors(state: AppState, allowed_origins: &[String]) -> Rout
         .route("/v2/hosting/associate", post(crate::hosting::associate))
         .route("/v2/directories", get(crate::directory_routes::list))
         .route("/v2/health", get(global_health))
+        .route("/v2/runtime", get(crate::global_routes::runtime_info))
         .route("/v2/meta", get(v2_meta))
         .route("/v2/identity", get(crate::identity::get))
         .route("/v2/openapi.json", get(canonical_openapi_doc))
@@ -1000,6 +1001,56 @@ async fn authenticate_request(
         };
         audit_tenant = Some(claims.tenant_id.clone());
         audit_subject = Some(claims.subject.clone());
+        if state.services().workspace_worker.is_some() {
+            if !worker_scope_allows(&claims, &request) {
+                return auth_error(
+                    StatusCode::FORBIDDEN,
+                    "auth.worker_scope",
+                    "The worker credential does not permit this operation",
+                );
+            }
+            if request.uri().path() == "/v2/events"
+                && request_session_id(request.uri()).is_none()
+                && state
+                    .services()
+                    .workspace_worker
+                    .as_ref()
+                    .is_some_and(|worker| {
+                        claims.directory_prefixes.first().is_none_or(|prefix| {
+                            std::fs::canonicalize(prefix).ok().as_deref()
+                                != Some(worker.root())
+                        })
+                    })
+            {
+                return auth_error(
+                    StatusCode::FORBIDDEN,
+                    "auth.event_scope",
+                    "Directory-restricted worker streams must select a session",
+                );
+            }
+            if requires_directory_scope(request.uri().path())
+                && request_directory(&request).is_none()
+            {
+                let Some(prefix) = claims.directory_prefixes.first() else {
+                    return auth_error(
+                        StatusCode::FORBIDDEN,
+                        "auth.directory_scope",
+                        "The worker credential has no directory scope",
+                    );
+                };
+                let root = match axum::http::HeaderValue::from_str(prefix) {
+                    Ok(root) => root,
+                    Err(_) => {
+                        return auth_error(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "worker.invalid_root",
+                            "The worker directory cannot be represented as a header",
+                        )
+                    }
+                };
+                request.headers_mut().insert("x-neoism-directory", root);
+            }
+        }
         // Installation scope authorizes the adapter's real storage root, not
         // an optional project directory used by older clients for config lookup.
         let requested_directory = if installation_resource_request(&request) {
@@ -1028,6 +1079,17 @@ async fn authenticate_request(
         );
         if claims.hosted
             && !peer_provider_auth
+            && !(state.services().workspace_worker.is_some()
+                && (request
+                    .uri()
+                    .path()
+                    .starts_with("/v2/plugins/dev.neoism.workflows")
+                    || claims.resolved.as_ref().is_some_and(|resolved| {
+                        resolved
+                            .scopes
+                            .iter()
+                            .any(|scope| scope == "workspace:admin")
+                    })))
             && matches!(
                 operation_class(&request),
                 OperationClass::HostedUnsupported
@@ -1354,6 +1416,33 @@ fn installation_resource_request(request: &Request<Body>) -> bool {
         .any(|(key, value)| key == "scope" && value == "installation")
 }
 
+fn worker_scope_allows(
+    claims: &crate::caller::CallerClaims,
+    request: &Request<Body>,
+) -> bool {
+    let Some(resolved) = &claims.resolved else {
+        return false;
+    };
+    let has = |required: &str| resolved.scopes.iter().any(|scope| scope == required);
+    if has("workspace:admin") {
+        return true;
+    }
+    let path = request.uri().path();
+    if hosted_restricted_path(path)
+        && !path.starts_with("/v2/plugins/dev.neoism.workflows")
+    {
+        return false;
+    }
+    if matches!(
+        *request.method(),
+        Method::GET | Method::HEAD | Method::OPTIONS
+    ) {
+        has("agent:read") || has("agent:use")
+    } else {
+        has("agent:use")
+    }
+}
+
 fn request_directory(request: &Request<Body>) -> Option<String> {
     // An explicit query is the route input and must never be hidden by a
     // transport-added default directory header. Both are still checked against
@@ -1469,6 +1558,7 @@ fn requires_directory_scope(path: &str) -> bool {
         && !path.starts_with("/v2/events")
         && !path.starts_with("/v2/audit")
         && !path.starts_with("/v2/meta")
+        && path != "/v2/runtime"
         && !path.starts_with("/v2/openapi")
         && !path.starts_with("/v2/capabilities")
         // This handler resolves and authorizes its canonical path itself,
@@ -1611,6 +1701,7 @@ mod hosted_plugin_authorization_tests {
             requests_per_minute: None,
             max_in_flight: None,
             resolved: None,
+            worker: None,
         }
     }
 

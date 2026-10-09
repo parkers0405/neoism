@@ -169,6 +169,11 @@ impl ChromeBridge {
             parsed,
             AgentServerMessage::ThreadUpdated { .. }
                 | AgentServerMessage::ThreadDeleted { .. }
+                // Refresh on lifecycle edges, never individual token/tool deltas.
+                // This also updates background conversations outside the session gate.
+                | AgentServerMessage::MessageStart { .. }
+                | AgentServerMessage::SessionIdle { .. }
+                | AgentServerMessage::StreamingState { .. }
         ) {
             self.send_agent_envelope(&AgentClientMessage::ListThreads {
                 directory: self.agent_state.default_directory.clone(),
@@ -1376,7 +1381,10 @@ impl ChromeBridge {
     /// Session currently displayed by the shared web agent pane. The JS tab
     /// host persists this on its unique tab before changing surfaces.
     pub fn agent_session_id(&self) -> Option<String> {
-        self.agent_state.session_id.clone()
+        self.chrome.agent_pane.as_ref().map_or_else(
+            || self.agent_state.session_id.clone(),
+            |pane| pane.session_id_str().map(str::to_owned),
+        )
     }
 
     /// Restore a conversation represented by a web buffer tab. AgentPane's

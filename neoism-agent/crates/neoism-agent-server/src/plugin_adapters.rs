@@ -307,6 +307,7 @@ fn route_caller_claims(
             requests_per_minute: None,
             max_in_flight: None,
             resolved: None,
+            worker: None,
         })
     })
 }

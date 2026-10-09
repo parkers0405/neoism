@@ -693,6 +693,13 @@ pub enum AgentServerMessage {
         pinned: Option<bool>,
     },
 
+    /// Authoritative whole-family activity for a root catalog row, including
+    /// roots other than the conversation currently open in the client.
+    CatalogActivity {
+        session_id: String,
+        activity: String,
+    },
+
     // -- Edit proposals -----------------------------------------------
     /// The agent proposed a file edit. The chrome shows a diff card
     /// and waits for [`AgentClientMessage::ApplyEdit`] /
@@ -976,7 +983,10 @@ pub struct ThreadSummary {
     /// Number of stored messages — handy for "empty session" hints.
     #[serde(default)]
     pub message_count: u32,
-    /// Whether the session is currently running a turn.
+    /// Whole-family catalog activity: idle, running, background, or permission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_activity: Option<String>,
+    /// Legacy running flag; `catalog_activity` is authoritative when present.
     #[serde(default)]
     pub busy: bool,
     /// Whether the session is pinned to the top of the session list.

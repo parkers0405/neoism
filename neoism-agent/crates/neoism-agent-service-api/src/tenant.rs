@@ -21,15 +21,10 @@ pub struct TenantQuotas {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(tag = "mode", rename_all = "kebab-case")]
+#[serde(tag = "mode", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum ExecutionPolicy {
     Disabled,
     NativeLocal,
-    Sandboxed {
-        provider: String,
-        idle_ttl_seconds: u64,
-        max_lifetime_seconds: u64,
-    },
 }
 
 impl Default for ExecutionPolicy {
@@ -49,6 +44,12 @@ pub struct ResolvedTenant {
     #[serde(default)]
     pub directory_prefixes: Vec<String>,
     pub workspace_id: Option<String>,
+    #[serde(default)]
+    pub runtime_id: Option<String>,
+    #[serde(default)]
+    pub runtime_generation: Option<u64>,
+    #[serde(default)]
+    pub expires_at: Option<i64>,
     #[serde(default)]
     pub quotas: TenantQuotas,
     #[serde(default)]

@@ -1,10 +1,145 @@
 use super::*;
 
+#[cfg(test)]
+mod config_reload_tests {
+    use super::*;
+    use neoism_ui::panels::left_sidebar_host::{LeftSidebarView, SidebarPlacement};
+
+    #[test]
+    fn config_reload_preserves_each_live_sidebar_and_its_focus_and_width() {
+        let config = neoism_backend::config::Config::default();
+        for view in LeftSidebarView::ALL {
+            let mut previous = Renderer::new(&config);
+            previous.set_left_sidebar_visibility(view, true, true);
+            previous.left_sidebar_host.set_unified_width(420.0);
+            previous.notes_sidebar.set_width(380.0);
+            previous
+                .conversations_pane
+                .side_panel_mut()
+                .set_width(390.0);
+            let mut renderer = Renderer::new(&config);
+            renderer.preserve_left_sidebar_from(&mut previous);
+
+            assert_eq!(renderer.resolved_left_sidebar_views(), vec![view]);
+            assert_eq!(renderer.left_sidebar_host.active_unified(), Some(view));
+            assert_eq!(renderer.left_sidebar_host.focused(), Some(view));
+            assert!(renderer.left_sidebar_view_focused(view));
+            assert_eq!(renderer.left_sidebar_host.unified_width(), 420.0);
+            assert_eq!(renderer.notes_sidebar.width(), 380.0);
+            assert_eq!(renderer.conversations_pane.side_panel().width(), 390.0);
+        }
+    }
+
+    #[test]
+    fn config_reload_keeps_closed_sidebars_closed() {
+        let config = neoism_backend::config::Config::default();
+        let mut previous = Renderer::new(&config);
+        for view in LeftSidebarView::ALL {
+            previous.set_left_sidebar_visibility(view, false, false);
+        }
+        let mut renderer = Renderer::new(&config);
+        renderer.preserve_left_sidebar_from(&mut previous);
+        assert!(renderer.resolved_left_sidebar_views().is_empty());
+    }
+
+    #[test]
+    fn config_reload_honors_new_sidebar_placement() {
+        let mut config = neoism_backend::config::Config::default();
+        let mut previous = Renderer::new(&config);
+        previous.set_left_sidebar_visibility(LeftSidebarView::Notes, true, true);
+        config.ui.left_sidebar.notes =
+            neoism_backend::config::SidebarPlacementPreference::Independent;
+        let mut renderer = Renderer::new(&config);
+        renderer.preserve_left_sidebar_from(&mut previous);
+        assert_eq!(
+            renderer.left_sidebar_host.placement(LeftSidebarView::Notes),
+            SidebarPlacement::Independent
+        );
+        assert_eq!(renderer.left_sidebar_host.active_unified(), None);
+        assert_eq!(
+            renderer.resolved_left_sidebar_views(),
+            vec![LeftSidebarView::Notes]
+        );
+        assert!(renderer.notes_sidebar.is_focused());
+    }
+
+    #[test]
+    fn unchanged_lua_visibility_defaults_preserve_session_toggles() {
+        for (selector, view) in [
+            (neoism_lua::selector::FILE_TREE, LeftSidebarView::Files),
+            (neoism_lua::selector::NOTES_TREE, LeftSidebarView::Notes),
+            (
+                neoism_lua::selector::AGENT_SIDEBAR,
+                LeftSidebarView::Conversations,
+            ),
+        ] {
+            let config = neoism_backend::config::Config::default();
+            let mut renderer = Renderer::new(&config);
+            let mut snapshot = neoism_lua::PluginSnapshot::default();
+            snapshot.styles.0.insert(
+                selector.into(),
+                neoism_lua::StylePatch {
+                    visible: Some(false),
+                    ..Default::default()
+                },
+            );
+            renderer.set_plugin_snapshot(std::sync::Arc::new(snapshot.clone()));
+            renderer.set_left_sidebar_visibility(view, true, true);
+            // A rebuilt renderer inherits both the live state and the old defaults.
+            let mut rebuilt = Renderer::new(&config);
+            rebuilt.preserve_left_sidebar_from(&mut renderer);
+            rebuilt.plugins = renderer.plugins.clone();
+            rebuilt.set_plugin_snapshot(std::sync::Arc::new(snapshot.clone()));
+            assert_eq!(rebuilt.resolved_left_sidebar_views(), vec![view]);
+            assert!(rebuilt.left_sidebar_view_focused(view));
+
+            snapshot.styles.0.get_mut(selector).unwrap().visible = Some(true);
+            rebuilt.set_plugin_snapshot(std::sync::Arc::new(snapshot.clone()));
+            snapshot.styles.0.get_mut(selector).unwrap().visible = Some(false);
+            rebuilt.set_plugin_snapshot(std::sync::Arc::new(snapshot));
+            assert!(!rebuilt.left_sidebar_requests().visible(view));
+        }
+    }
+}
+
 impl Renderer {
+    pub(crate) fn preserve_left_sidebar_from(&mut self, previous: &mut Self) {
+        use neoism_ui::panels::left_sidebar_host::LeftSidebarView;
+
+        let placements =
+            LeftSidebarView::ALL.map(|view| self.left_sidebar_host.placement(view));
+        self.file_tree = std::mem::take(&mut previous.file_tree);
+        self.notes_sidebar = std::mem::take(&mut previous.notes_sidebar);
+        self.conversations_visible = previous.conversations_visible;
+        self.conversations_pane = std::mem::take(&mut previous.conversations_pane);
+        self.left_sidebar_host = std::mem::take(&mut previous.left_sidebar_host);
+        // Keep the live view, width and focus, then reconcile actual config changes.
+        self.left_sidebar_host.set_placements(
+            placements[0],
+            placements[1],
+            placements[2],
+        );
+        self.reconcile_left_sidebar_host();
+        if let Some(active) = self.left_sidebar_host.active_unified() {
+            self.hide_other_unified_sidebars(active);
+        }
+    }
+
     pub fn set_plugin_snapshot(
         &mut self,
         snapshot: std::sync::Arc<neoism_lua::PluginSnapshot>,
     ) {
+        use neoism_ui::panels::left_sidebar_host::LeftSidebarView;
+
+        let sidebar_styles = [
+            (neoism_lua::selector::FILE_TREE, LeftSidebarView::Files),
+            (neoism_lua::selector::NOTES_TREE, LeftSidebarView::Notes),
+            (
+                neoism_lua::selector::AGENT_SIDEBAR,
+                LeftSidebarView::Conversations,
+            ),
+        ]
+        .map(|(selector, view)| (selector, view, self.style(selector).visible));
         self.plugins = snapshot;
         self.command_palette
             .set_plugin_commands(self.plugins.commands.clone());
@@ -15,13 +150,6 @@ impl Renderer {
         if let Some(width) = tree.width {
             self.file_tree.set_width(width);
         }
-        if let Some(visible) = tree.visible {
-            self.set_left_sidebar_visibility(
-                neoism_ui::panels::left_sidebar_host::LeftSidebarView::Files,
-                visible,
-                false,
-            );
-        }
         let notes = self.style(neoism_lua::selector::NOTES_TREE);
         if let Some(font_size) = notes.font_size {
             self.notes_sidebar
@@ -29,13 +157,6 @@ impl Renderer {
         }
         if let Some(width) = notes.width {
             self.notes_sidebar.set_width(width);
-        }
-        if let Some(visible) = notes.visible {
-            self.set_left_sidebar_visibility(
-                neoism_ui::panels::left_sidebar_host::LeftSidebarView::Notes,
-                visible,
-                false,
-            );
         }
         if let Some(visible) = self.style(neoism_lua::selector::CHROME_TOP).visible {
             self.top_bar.set_visible(visible);
@@ -84,17 +205,21 @@ impl Renderer {
             self.notifications
                 .set_scale((font_size / 14.0).clamp(0.5, 3.0));
         }
-        if let Some(visible) = self.style(neoism_lua::selector::AGENT_SIDEBAR).visible {
-            self.set_left_sidebar_visibility(
-                neoism_ui::panels::left_sidebar_host::LeftSidebarView::Conversations,
-                visible,
-                false,
-            );
+        // An unchanged Lua default must not undo a sidebar the user toggled.
+        for (selector, view, previous_visible) in sidebar_styles {
+            if let Some(visible) = self.style(selector).visible {
+                if Some(visible) != previous_visible {
+                    self.set_left_sidebar_visibility(view, visible, false);
+                }
+            }
         }
     }
 
     pub fn style(&self, selector: &str) -> neoism_lua::StylePatch {
-        neoism_ui::primitives::surface_background::resolve_style(selector, &self.plugins.styles)
+        neoism_ui::primitives::surface_background::resolve_style(
+            selector,
+            &self.plugins.styles,
+        )
     }
 
     pub fn styled_theme(&self, selector: &str) -> IdeTheme {

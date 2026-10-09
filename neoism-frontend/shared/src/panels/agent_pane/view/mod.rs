@@ -22,6 +22,55 @@ pub mod tool_message;
 pub mod user_input;
 pub mod wordmark;
 
+/// Primary chat copy stays near-white even when a dark palette's `fg` or
+/// `white` token is grey. Keep the theme's dark foreground on light palettes.
+fn primary_text_color(theme: &IdeTheme) -> u32 {
+    if !theme.is_dark() {
+        return theme.fg;
+    }
+    let channel = |shift: u32| ((theme.fg >> shift) & 0xff).max(0xee);
+    (channel(16) << 16) | (channel(8) << 8) | channel(0)
+}
+
+#[cfg(test)]
+mod primary_text_tests {
+    use super::primary_text_color;
+    use crate::primitives::ide_theme::{IdeTheme, IdeThemeName};
+
+    #[test]
+    fn dark_themes_have_opaque_near_white_primary_text() {
+        for name in IdeThemeName::ALL {
+            let theme = IdeTheme::by_name(name.as_str());
+            assert!(theme.is_dark());
+            let color = theme.u8(primary_text_color(&theme));
+            assert!(color[..3].iter().all(|channel| *channel >= 0xee));
+            assert_eq!(color[3], 255);
+        }
+    }
+
+    #[test]
+    fn custom_dark_foregrounds_do_not_depend_on_white_token() {
+        let mut theme = IdeTheme::default();
+        for white in [theme.fg, 0x808080] {
+            theme.white = white;
+            theme.fg = 0xabb2bf;
+            assert_eq!(primary_text_color(&theme), 0xeeeeee);
+        }
+        theme.fg = 0xf5faff;
+        assert_eq!(primary_text_color(&theme), theme.fg);
+    }
+
+    #[test]
+    fn light_themes_keep_their_dark_foreground() {
+        let theme = IdeTheme {
+            bg: 0xfafafa,
+            fg: 0x202020,
+            ..IdeTheme::default()
+        };
+        assert_eq!(primary_text_color(&theme), theme.fg);
+    }
+}
+
 pub(super) const WORDMARK_PNG: &[u8] =
     include_bytes!("../../../../assets/splash/neoism-wordmark.png");
 pub(super) const WORDMARK_IMAGE_ID: u32 = 0xA0DE_1001;

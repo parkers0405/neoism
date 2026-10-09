@@ -125,7 +125,6 @@ pub fn ensure_agent_server_started_with_services(
                     hostname: hostname.clone(),
                     port,
                     cors: Vec::new(),
-                    hosted_attestation: None,
                 };
                 // Isolate a listen-task panic from this process-local supervisor.
                 // Only INITIAL readiness has a deadline; never timeout a healthy

@@ -1,6 +1,117 @@
 use super::*;
 
 #[test]
+fn future_reasoning_models_get_summaries_without_name_gates() {
+    for model in ["future-reasoner", "gpt-6.1-sol", "openai/gpt-6.1-sol"] {
+        let body = responses_request_body(model, Some("high"), &[], &[]);
+        assert_eq!(
+            body["reasoning"],
+            json!({"effort":"high", "summary":"auto"}),
+            "{model}"
+        );
+    }
+    for model in ["gpt-4.1", "future-chat", "gpt-5-chat-latest", "gpt-5-pro"] {
+        assert!(
+            responses_request_body(model, None, &[], &[])
+                .get("reasoning")
+                .is_none(),
+            "{model}"
+        );
+    }
+    assert_eq!(
+        responses_request_body("gpt-5.5", Some("none"), &[], &[])["reasoning"],
+        json!({"effort":"none"})
+    );
+}
+
+fn summary_deltas(events: &[ProviderStreamEvent]) -> Vec<(String, String)> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            ProviderStreamEvent::ReasoningDelta { id, delta } => {
+                Some((id.clone(), delta.clone()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn final_only_summary_done_events_backfill_multiple_indices_once() {
+    let mut parser = ResponsesSseParser::default();
+    let mut events = parser.push_line(r#"data: {"type":"response.reasoning_summary_text.done","item_id":"rs","summary_index":0,"text":"First"}"#).unwrap();
+    events.extend(parser.push_line(r#"data: {"type":"response.reasoning_summary_part.done","item_id":"rs","summary_index":1,"part":{"type":"summary_text","text":"Second"}}"#).unwrap());
+    let item = json!({"id":"rs", "type":"reasoning", "summary":[{"type":"summary_text","text":"First"},{"type":"summary_text","text":"Second"}]});
+    events.extend(
+        parser
+            .push_line(&format!(
+                "data: {}",
+                json!({"type":"response.output_item.done","item":item})
+            ))
+            .unwrap(),
+    );
+    events.extend(
+        parser
+            .push_line(&format!(
+                "data: {}",
+                json!({"type":"response.completed","response":{"output":[item]}})
+            ))
+            .unwrap(),
+    );
+    assert_eq!(
+        summary_deltas(&events),
+        vec![
+            ("rs:0".into(), "First".into()),
+            ("rs:1".into(), "Second".into())
+        ]
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, ProviderStreamEvent::ReasoningEnd { .. }))
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn completed_snapshots_backfill_missing_suffix_and_final_only_parts() {
+    let mut parser = ResponsesSseParser::default();
+    let mut events = parser.push_line(r#"data: {"type":"response.reasoning_summary_text.delta","item_id":"rs","summary_index":0,"delta":"Check"}"#).unwrap();
+    events.extend(parser.push_line(r#"data: {"type":"response.reasoning_summary_text.done","item_id":"rs","summary_index":0,"text":"Checking files"}"#).unwrap());
+    events.extend(parser.push_line(r#"data: {"type":"response.completed","response":{"output":[{"id":"rs","type":"reasoning","summary":[{"type":"summary_text","text":"Checking files"},{"type":"summary_text","text":"Done"}],"encrypted_content":"SECRET"}]}}"#).unwrap());
+    assert_eq!(
+        summary_deltas(&events),
+        vec![
+            ("rs:0".into(), "Check".into()),
+            ("rs:0".into(), "ing files".into()),
+            ("rs:1".into(), "Done".into())
+        ]
+    );
+}
+
+#[test]
+fn encrypted_only_snapshots_never_become_visible_text() {
+    let mut parser = ResponsesSseParser::default();
+    let item = json!({"id":"rs", "type":"reasoning", "summary":[], "encrypted_content":"SECRET"});
+    let events = parser
+        .push_line(&format!(
+            "data: {}",
+            json!({"type":"response.output_item.done","item":item})
+        ))
+        .unwrap();
+    assert!(summary_deltas(&events).is_empty());
+    assert!(events.iter().any(|event| matches!(event, ProviderStreamEvent::ReasoningMetadata { metadata, .. } if metadata["openai"]["encryptedContent"] == "SECRET")));
+    assert!(parser
+        .push_line(&format!(
+            "data: {}",
+            json!({"type":"response.output_item.done","item":item})
+        ))
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
 fn builds_streaming_responses_request_body() {
     let body = responses_request_body(
         "gpt-5.3-codex",

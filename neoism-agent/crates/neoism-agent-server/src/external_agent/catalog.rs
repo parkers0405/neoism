@@ -248,13 +248,6 @@ pub(crate) async fn external_catalog(
     headers: HeaderMap,
     claims: Option<Extension<crate::caller::CallerClaims>>,
 ) -> Result<Json<ExternalCatalogResponse>, ApiError> {
-    // A process-wide CLI credential store cannot safely enumerate a hosted
-    // tenant's native history, regardless of the ACP adapter's cwd filtering.
-    if state.services().hosted {
-        return Err(ApiError::forbidden(
-            "Native ACP history is available only on the local host",
-        ));
-    }
     let runtime = match query.provider.as_str() {
         "opencode" => ExternalRuntime::OpenCode,
         "claude" => ExternalRuntime::Claude,
@@ -265,31 +258,17 @@ pub(crate) async fn external_catalog(
             ))
         }
     };
-    let directory = crate::resolve_directory(query.directory, &headers);
-    let cwd = crate::windows_process::canonicalize_path(Path::new(&directory))
-        .map_err(|_| ApiError::bad_request("Workspace directory does not exist"))?;
-    if !cwd.is_dir() {
-        return Err(ApiError::bad_request(
-            "Workspace directory is not a directory",
-        ));
-    }
-    let cwd_text = cwd.to_string_lossy().into_owned();
-    if claims.as_ref().is_some_and(|Extension(claims)| {
-        !crate::caller::allows_directory(claims, &cwd_text)
-    }) {
-        return Err(ApiError::forbidden(
-            "Workspace directory is outside the caller's scope",
-        ));
-    }
+    let cwd_text = super::options::admitted_request_directory(
+        &state,
+        claims.as_ref().map(|Extension(claims)| claims),
+        query.directory,
+        &headers,
+    )?;
+    let cwd = PathBuf::from(&cwd_text);
     let tenant = claims
         .as_ref()
         .map(|Extension(claims)| claims.tenant_id.as_str())
         .unwrap_or("local");
-    if claims.as_ref().is_some_and(|Extension(claims)| {
-        claims.hosted || claims.tenant_id != "local" || claims.workspace_id.is_some()
-    }) {
-        return Err(ApiError::forbidden("Host-native ACP history is not isolated by workspace identity; use the local operator"));
-    }
     let (client, _events) = AcpClient::spawn(
         runtime
             .acp_config(&cwd_text, state.services())
@@ -532,6 +511,7 @@ mod catalog_rpc_tests {
             requests_per_minute: None,
             max_in_flight: None,
             resolved: None,
+            worker: None,
         };
         let query = |dir: &Path| {
             Query(ExternalCatalogQuery {
@@ -648,6 +628,16 @@ async fn load_native_replay(
     cwd: &str,
     external_id: &str,
 ) -> Result<HistoricalReplay, ApiError> {
+    if !crate::caller::native_execution_allowed(
+        &crate::workspace_runtime::directory_execution_policy(
+            state.services(),
+            Path::new(cwd),
+        ),
+    ) {
+        return Err(ApiError::forbidden(
+            "native ACP replay is unavailable for this directory",
+        ));
+    }
     let (client, mut events) = AcpClient::spawn(
         runtime
             .acp_config(cwd, state.services())
@@ -798,6 +788,20 @@ pub(crate) async fn external_import(
         .into_iter()
         .find(|session| matching_native_root(session, &entry, tenant))
     {
+        if claims.as_ref().is_some_and(|Extension(claims)| {
+            !crate::caller::allows_session(claims, &existing)
+        }) || state
+            .services()
+            .workspace_worker
+            .as_ref()
+            .is_some_and(|worker| {
+                !crate::caller::worker_session_admitted(worker, &existing)
+            })
+        {
+            return Err(ApiError::forbidden(
+                "Existing ACP root is outside the caller workspace",
+            ));
+        }
         if existing.extra["externalAgent"]["sourceHost"] != native_host_id() {
             return Err(ApiError::conflict("An ACP root for this provider session belongs to another host or has unverified origin"));
         }

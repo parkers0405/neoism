@@ -15,6 +15,35 @@ use crate::error::ApiError;
 use crate::state::AppState;
 use crate::{mcp, mcp_auth, resolve_directory, InstanceQuery};
 
+fn scoped_directory(
+    state: &AppState,
+    directory: Option<String>,
+    headers: &HeaderMap,
+) -> Result<String, ApiError> {
+    let directory = if directory.is_none() && !headers.contains_key("x-neoism-directory")
+    {
+        state
+            .services()
+            .workspace_worker
+            .as_ref()
+            .map(|worker| worker.root().to_string_lossy().into_owned())
+            .unwrap_or_else(|| resolve_directory(None, headers))
+    } else {
+        resolve_directory(directory, headers)
+    };
+    if state
+        .services()
+        .workspace_worker
+        .as_ref()
+        .is_some_and(|worker| !worker.admits_path(std::path::Path::new(&directory)))
+    {
+        return Err(ApiError::forbidden(
+            "MCP directory is outside the worker root",
+        ));
+    }
+    Ok(directory)
+}
+
 fn auth_store(
     state: &AppState,
     claims: Option<&crate::caller::CallerClaims>,
@@ -63,7 +92,7 @@ pub(crate) async fn mcp_status(
     Query(query): Query<InstanceQuery>,
     headers: HeaderMap,
 ) -> Result<Json<BTreeMap<String, McpStatus>>, ApiError> {
-    let directory = resolve_directory(query.directory, &headers);
+    let directory = scoped_directory(&state, query.directory, &headers)?;
     let plugins = state.refreshed_plugin_snapshot(&directory).await;
     let store = auth_store(&state, claims.as_deref())?;
     Ok(Json(
@@ -77,7 +106,7 @@ pub(crate) async fn mcp_catalog(
     Query(query): Query<InstanceQuery>,
     headers: HeaderMap,
 ) -> Result<Json<BTreeMap<String, McpCatalogEntry>>, ApiError> {
-    let directory = resolve_directory(query.directory, &headers);
+    let directory = scoped_directory(&state, query.directory, &headers)?;
     let plugins = state.refreshed_plugin_snapshot(&directory).await;
     let store = auth_store(&state, claims.as_deref())?;
     Ok(Json(
@@ -90,6 +119,13 @@ pub(crate) async fn mcp_add(
     claims: Option<Extension<crate::caller::CallerClaims>>,
     Json(request): Json<McpAddRequest>,
 ) -> Result<Json<BTreeMap<String, McpStatus>>, ApiError> {
+    if state.services().shared_control_plane()
+        && matches!(&request.config, neoism_agent_core::McpConfig::Local { .. })
+    {
+        return Err(ApiError::forbidden(
+            "Local MCP processes are unavailable on the shared control plane",
+        ));
+    }
     let mut status = BTreeMap::new();
     let store = auth_store(&state, claims.as_deref())?;
     let entry_status =
@@ -106,7 +142,7 @@ pub(crate) async fn mcp_config_patch(
     headers: HeaderMap,
     Json(request): Json<McpConfigPatch>,
 ) -> Result<Json<McpCatalogEntry>, ApiError> {
-    let directory = resolve_directory(query.directory, &headers);
+    let directory = scoped_directory(&state, query.directory, &headers)?;
     let builtin_default = state
         .services()
         .builtin_mcp(&name)
@@ -155,7 +191,7 @@ pub(crate) async fn mcp_auth_start(
     Query(query): Query<McpAuthStartQuery>,
     headers: HeaderMap,
 ) -> Result<Json<McpAuthStartResponse>, ApiError> {
-    let directory = resolve_directory(query.directory, &headers);
+    let directory = scoped_directory(&state, query.directory, &headers)?;
     let plugins = state.refreshed_plugin_snapshot(&directory).await;
     let store = auth_store(&state, claims.as_deref())?;
     Ok(Json(
@@ -179,7 +215,7 @@ pub(crate) async fn mcp_auth_callback(
     headers: HeaderMap,
     Json(request): Json<CodeRequest>,
 ) -> Result<Json<McpStatus>, ApiError> {
-    let directory = resolve_directory(query.directory, &headers);
+    let directory = scoped_directory(&state, query.directory, &headers)?;
     let plugins = state.refreshed_plugin_snapshot(&directory).await;
     let store = auth_store(&state, claims.as_deref())?;
     Ok(Json(
@@ -246,7 +282,7 @@ pub(crate) async fn mcp_auth_authenticate(
     Query(query): Query<InstanceQuery>,
     headers: HeaderMap,
 ) -> Result<Json<McpStatus>, ApiError> {
-    let directory = resolve_directory(query.directory, &headers);
+    let directory = scoped_directory(&state, query.directory, &headers)?;
     let plugins = state.refreshed_plugin_snapshot(&directory).await;
     let store = auth_store(&state, claims.as_deref())?;
     Ok(Json(
@@ -263,7 +299,7 @@ pub(crate) async fn mcp_auth_remove(
     Path(name): Path<String>,
     headers: HeaderMap,
 ) -> Result<Json<McpAuthRemoveResponse>, ApiError> {
-    let directory = resolve_directory(query.directory, &headers);
+    let directory = scoped_directory(&state, query.directory, &headers)?;
     let plugins = state.refreshed_plugin_snapshot(&directory).await;
     let remote = plugins.config().mcp.get(&name).ok_or_else(|| {
         ApiError::bad_request(format!("MCP server {name} is not configured"))
@@ -295,7 +331,7 @@ pub(crate) async fn mcp_connect(
     Query(query): Query<InstanceQuery>,
     headers: HeaderMap,
 ) -> Result<Json<bool>, ApiError> {
-    let directory = resolve_directory(query.directory, &headers);
+    let directory = scoped_directory(&state, query.directory, &headers)?;
     let store = auth_store(&state, claims.as_deref())?;
     let status = mcp::connect_with_state(&directory, &name, &store, state)
         .await
@@ -309,7 +345,7 @@ pub(crate) async fn mcp_disconnect(
     Query(query): Query<InstanceQuery>,
     headers: HeaderMap,
 ) -> Result<Json<bool>, ApiError> {
-    let directory = resolve_directory(query.directory, &headers);
+    let directory = scoped_directory(&state, query.directory, &headers)?;
     Ok(Json(mcp::disconnect(&state, &directory, &name).await?))
 }
 
@@ -320,7 +356,7 @@ pub(crate) async fn mcp_tools(
     Query(query): Query<InstanceQuery>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<McpToolInfo>>, ApiError> {
-    let directory = resolve_directory(query.directory, &headers);
+    let directory = scoped_directory(&state, query.directory, &headers)?;
     let store = auth_store(&state, claims.as_deref())?;
     Ok(Json(
         mcp::tools_with_state(&directory, &name, &store, state)
@@ -337,7 +373,7 @@ pub(crate) async fn mcp_tool_call(
     headers: HeaderMap,
     Json(arguments): Json<Value>,
 ) -> Result<Json<McpToolCallResult>, ApiError> {
-    let directory = resolve_directory(query.directory, &headers);
+    let directory = scoped_directory(&state, query.directory, &headers)?;
     let store = auth_store(&state, claims.as_deref())?;
     Ok(Json(
         mcp::call_tool_with_state(
@@ -355,7 +391,7 @@ pub(crate) async fn mcp_resources(
     Query(query): Query<InstanceQuery>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<McpResource>>, ApiError> {
-    let directory = resolve_directory(query.directory, &headers);
+    let directory = scoped_directory(&state, query.directory, &headers)?;
     let store = auth_store(&state, claims.as_deref())?;
     Ok(Json(
         mcp::resources_with_state(&directory, &name, &store, state)
@@ -371,7 +407,7 @@ pub(crate) async fn mcp_prompts(
     Query(query): Query<InstanceQuery>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<McpPromptInfo>>, ApiError> {
-    let directory = resolve_directory(query.directory, &headers);
+    let directory = scoped_directory(&state, query.directory, &headers)?;
     let store = auth_store(&state, claims.as_deref())?;
     Ok(Json(
         mcp::prompts_with_state(&directory, &name, &store, state)

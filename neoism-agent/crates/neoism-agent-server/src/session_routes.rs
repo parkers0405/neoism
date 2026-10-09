@@ -108,7 +108,21 @@ async fn session_create_inner(
         external_provider: None,
         external_options: None,
     });
-    let directory = resolve_directory(query.directory, &headers);
+    let directory = if query.directory.is_none()
+        && !headers.contains_key("x-neoism-directory")
+        && state.services().workspace_worker.is_some()
+    {
+        state
+            .services()
+            .workspace_worker
+            .as_ref()
+            .unwrap()
+            .root()
+            .to_string_lossy()
+            .into_owned()
+    } else {
+        resolve_directory(query.directory, &headers)
+    };
     let mut extra = BTreeMap::new();
     let creating_actor = claims
         .as_ref()
@@ -149,13 +163,15 @@ async fn session_create_inner(
         );
         extra.insert(
             crate::caller::EXECUTION_POLICY_EXTRA_KEY.to_string(),
-            serde_json::to_value(
-                if !state.services().hosted && claims.workspace_id.is_some() {
-                    neoism_agent_service_api::ExecutionPolicy::NativeLocal
-                } else {
-                    claims.execution_policy()
-                },
-            )
+            serde_json::to_value(if state.services().shared_control_plane() {
+                neoism_agent_service_api::ExecutionPolicy::Disabled
+            } else if state.services().workspace_worker.is_some()
+                || (!state.services().hosted && claims.workspace_id.is_some())
+            {
+                neoism_agent_service_api::ExecutionPolicy::NativeLocal
+            } else {
+                claims.execution_policy()
+            })
             .map_err(|error| ApiError::internal(error.to_string()))?,
         );
         extra.insert(
@@ -182,6 +198,7 @@ async fn session_create_inner(
         }
         bind_authenticated_workspace(&mut request, &claims)?;
         if request.external_provider.is_some()
+            && state.services().workspace_worker.is_none()
             && (claims.hosted
                 || claims.tenant_id != "local"
                 || claims.workspace_id.is_some())
@@ -250,6 +267,47 @@ async fn create_session_in_directory_inner(
     mut extra: BTreeMap<String, Value>,
     pending_import: Option<Value>,
 ) -> Result<SessionInfo, ApiError> {
+    if let Some(worker) = &state.services().workspace_worker {
+        if !worker.admits_path(FsPath::new(directory)) {
+            return Err(ApiError::forbidden(
+                "Session directory is outside the worker root",
+            ));
+        }
+        if request
+            .workspace_id
+            .as_deref()
+            .is_some_and(|id| id != worker.workspace_id())
+            || extra
+                .get(crate::caller::TENANT_EXTRA_KEY)
+                .and_then(Value::as_str)
+                .is_some_and(|tenant| tenant != worker.tenant_id())
+        {
+            return Err(ApiError::forbidden(
+                "Session does not match the worker binding",
+            ));
+        }
+        request.workspace_id = Some(worker.workspace_id().to_string());
+        extra.insert(
+            crate::caller::TENANT_EXTRA_KEY.into(),
+            json!(worker.tenant_id()),
+        );
+        // Keep a narrower authenticated scope; worker admission must not widen it.
+        extra
+            .entry(crate::caller::DIRECTORY_PREFIXES_EXTRA_KEY.into())
+            .or_insert_with(|| json!([worker.root()]));
+        extra.remove(crate::caller::HOST_LOCAL_ACCESS_KEY);
+        extra.insert(
+            crate::caller::EXECUTION_POLICY_EXTRA_KEY.into(),
+            serde_json::to_value(neoism_agent_service_api::ExecutionPolicy::NativeLocal)
+                .map_err(|error| ApiError::internal(error.to_string()))?,
+        );
+    } else if state.services().shared_control_plane() {
+        extra.insert(
+            crate::caller::EXECUTION_POLICY_EXTRA_KEY.into(),
+            serde_json::to_value(neoism_agent_service_api::ExecutionPolicy::Disabled)
+                .map_err(|error| ApiError::internal(error.to_string()))?,
+        );
+    }
     if pending_import.is_some()
         && (request.external_provider.is_none() || request.parent_id.is_some())
     {
@@ -268,7 +326,7 @@ async fn create_session_in_directory_inner(
         }
         None => None,
     };
-    if external.is_some() && state.services().hosted {
+    if external.is_some() && state.services().shared_control_plane() {
         return Err(ApiError::forbidden(
             "ACP chats use host-owned provider credentials and are unavailable in hosted workspaces",
         ));
@@ -286,6 +344,7 @@ async fn create_session_in_directory_inner(
         ));
     }
     if external.is_some()
+        && state.services().workspace_worker.is_none()
         && (request.workspace_id.is_some()
             || extra
                 .get(crate::caller::TENANT_EXTRA_KEY)
@@ -341,6 +400,16 @@ async fn create_session_in_directory_inner(
     }
     let project_context = project::discover(state.services(), directory);
     let directory = project_context.directory.clone();
+    if state
+        .services()
+        .workspace_worker
+        .as_ref()
+        .is_some_and(|worker| !worker.admits_path(FsPath::new(&directory)))
+    {
+        return Err(ApiError::forbidden(
+            "Discovered project is outside the worker root",
+        ));
+    }
     let snapshot = state.plugin_snapshot(&directory).await;
     let loaded_config = snapshot.config();
     let agents = crate::plugins::agent_catalog(&snapshot, &directory)?;
@@ -353,6 +422,20 @@ async fn create_session_in_directory_inner(
             .await?
             .ok_or_else(|| ApiError::not_found("Parent session not found"))?;
         let parent_tenant = crate::caller::session_tenant(&parent);
+        if state
+            .services()
+            .workspace_worker
+            .as_ref()
+            .is_some_and(|worker| {
+                parent_tenant != worker.tenant_id()
+                    || parent.workspace_id.as_deref() != Some(worker.workspace_id())
+                    || !worker.admits_path(FsPath::new(&parent.directory))
+            })
+        {
+            return Err(ApiError::forbidden(
+                "Parent session is outside the worker binding",
+            ));
+        }
         let local_continuation = request.workspace_id.is_none()
             && extra
                 .get(crate::caller::TENANT_EXTRA_KEY)
@@ -456,11 +539,15 @@ async fn create_session_in_directory_inner(
     };
 
     state.inner.store.insert_session(&info).await?;
-    if let Err(error) = state
-        .activate_session_agent_packages(&info.directory, info.id.as_str())
-        .await
-    {
-        tracing::warn!(%error, session_id = %info.id, "session Agent package candidate rejected");
+    // Session-scoped package activation is another native process launch path;
+    // workspace-host registration filtering alone does not cover it.
+    if !state.services().shared_control_plane() {
+        if let Err(error) = state
+            .activate_session_agent_packages(&info.directory, info.id.as_str())
+            .await
+        {
+            tracing::warn!(%error, session_id = %info.id, "session Agent package candidate rejected");
+        }
     }
     if pending_import.is_none() {
         state.publish(EventPayload::new(
@@ -474,14 +561,15 @@ async fn create_session_in_directory_inner(
 pub(crate) async fn session_get(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
-) -> Result<Json<SessionInfo>, ApiError> {
+) -> Result<Json<crate::catalog_activity::CatalogSessionInfo>, ApiError> {
     let info = state
         .inner
         .store
         .get_session(&session_id)
         .await?
         .ok_or_else(|| ApiError::not_found("Session not found"))?;
-    Ok(Json(info))
+    let mut projected = crate::catalog_activity::project(&state, vec![info]).await?;
+    Ok(Json(projected.remove(0)))
 }
 
 pub(crate) async fn session_delete(
@@ -577,6 +665,20 @@ pub(crate) async fn session_update(
             &directory,
             false,
         )?;
+        if state
+            .services()
+            .workspace_worker
+            .as_ref()
+            .is_some_and(|worker| {
+                !worker.admits_path(FsPath::new(&project_context.directory))
+                    || crate::caller::session_tenant(&info) != worker.tenant_id()
+                    || info.workspace_id.as_deref() != Some(worker.workspace_id())
+            })
+        {
+            return Err(ApiError::forbidden(
+                "Session directory is outside the worker binding",
+            ));
+        }
         if claims.as_ref().is_some_and(|Extension(claims)| {
             !crate::caller::allows_directory(claims, &project_context.directory)
         }) {
@@ -634,6 +736,7 @@ pub(crate) async fn session_directory_options(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
     Query(query): Query<SessionDirectoryQuery>,
+    claims: Option<Extension<crate::caller::CallerClaims>>,
 ) -> Result<Json<Vec<String>>, ApiError> {
     let info = state
         .inner
@@ -650,12 +753,34 @@ pub(crate) async fn session_directory_options(
             "workspace filesystem tools are disabled",
         ));
     }
-    let current = PathBuf::from(info.directory);
-    let search_root = directory_search_root(&current);
+    let current = PathBuf::from(&info.directory);
+    let search_root = if state.services().workspace_worker.is_some() {
+        let claims =
+            claims
+                .as_ref()
+                .map(|Extension(claims)| claims)
+                .ok_or_else(|| {
+                    ApiError::forbidden(
+                        "worker directory search requires authenticated scope",
+                    )
+                })?;
+        if !crate::caller::allows_session(claims, &info) {
+            return Err(ApiError::forbidden(
+                "session is outside the caller's worker scope",
+            ));
+        }
+        let prefix = claims
+            .directory_prefixes
+            .first()
+            .ok_or_else(|| ApiError::forbidden("worker directory scope is missing"))?;
+        PathBuf::from(prefix)
+    } else {
+        directory_search_root(&current)
+    };
     let needle = query.query.unwrap_or_default();
     let limit = query.limit.unwrap_or(256).clamp(1, 1_000);
     let search = state.services().workspace_search.clone();
-    let options = tokio::task::spawn_blocking(move || {
+    let mut options = tokio::task::spawn_blocking(move || {
         workspace_directory_options(
             search.as_ref(),
             &search_root,
@@ -666,6 +791,14 @@ pub(crate) async fn session_directory_options(
     })
     .await
     .map_err(|error| ApiError::internal(format!("directory search failed: {error}")))??;
+    if let Some(worker) = &state.services().workspace_worker {
+        options.retain(|path| {
+            worker.admits_path(FsPath::new(path))
+                && claims.as_ref().is_some_and(|Extension(claims)| {
+                    crate::caller::allows_directory(claims, path)
+                })
+        });
+    }
     Ok(Json(options))
 }
 
@@ -695,6 +828,13 @@ pub(crate) fn resolve_session_directory(
     } else {
         PathBuf::from(current).join(expanded)
     };
+    if services
+        .workspace_worker
+        .as_ref()
+        .is_some_and(|worker| !worker.admits_path(&candidate))
+    {
+        return Err(ApiError::forbidden("Directory is outside the worker root"));
+    }
     if create {
         std::fs::create_dir_all(&candidate).map_err(|error| {
             ApiError::bad_request(format!(
@@ -1206,6 +1346,7 @@ mod directory_tests {
     fn authenticated_workspace_is_authoritative_for_session_creation() {
         let workspace_id = "3c3f94da-6409-463d-a132-e03f1a0920d4".to_string();
         let claims = crate::caller::CallerClaims {
+            worker: None,
             subject: "actor".into(),
             workspace_id: Some(workspace_id.to_string()),
             tenant_id: "tenant".into(),

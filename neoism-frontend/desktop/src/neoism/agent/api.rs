@@ -2387,6 +2387,43 @@ fn session_option_input(
     Some(SessionOptionInput { option, updated_ms })
 }
 
+#[cfg(test)]
+#[test]
+fn catalog_activity_json_deserializes_canonical_enum() {
+    use neoism_agent_core::CatalogActivity;
+    for (wire, expected) in [
+        ("idle", CatalogActivity::Idle),
+        ("running", CatalogActivity::Running),
+        ("background", CatalogActivity::Background),
+        ("permission", CatalogActivity::Permission),
+    ] {
+        let row = session_entry(
+            &serde_json::json!({"id":"root", "catalogActivity":wire, "status":"busy"}),
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(row.catalog_activity, Some(expected));
+    }
+    for value in [
+        serde_json::Value::Null,
+        serde_json::json!("invalid"),
+        serde_json::json!(true),
+    ] {
+        let row = session_entry(
+            &serde_json::json!({"id":"root", "catalogActivity":value}),
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(row.catalog_activity, None);
+    }
+    assert_eq!(
+        session_entry(&serde_json::json!({"id":"root"}), &HashMap::new())
+            .unwrap()
+            .catalog_activity,
+        None
+    );
+}
+
 /// Flat side-panel entry for one session.
 pub(super) fn session_entry(
     session: &Value,
@@ -2413,6 +2450,7 @@ pub(super) fn session_entry(
             .with_source_key(session.pointer("/externalAgent/sourceKey").or_else(|| session.pointer("/extra/externalAgent/sourceKey")).and_then(Value::as_str).map(str::to_owned))
             .with_updated_ms(session_updated_at(session))
             .with_pinned(session_pinned(session))
+            .with_catalog_activity(session.get("catalogActivity").and_then(|value| serde_json::from_value(value.clone()).ok()))
             .with_runtime_status(session_running_status(session, statuses)),
     )
 }

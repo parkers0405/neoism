@@ -706,10 +706,11 @@ fn strip_version(source: &str) -> Cow<'_, str> {
     Cow::Borrowed(source)
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(feature = "wgpu", target_os = "macos")))]
 mod tests {
     use super::*;
 
+    #[cfg(feature = "wgpu")]
     #[test]
     fn compiles_bundled_shaders() {
         for (path, source) in [

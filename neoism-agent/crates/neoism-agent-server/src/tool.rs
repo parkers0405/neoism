@@ -45,8 +45,6 @@ mod paths;
 pub(crate) mod process;
 #[path = "tool_registry.rs"]
 mod registry;
-#[path = "tool_support/sandbox.rs"]
-mod sandbox;
 #[path = "tool_support/shell_scan.rs"]
 pub(crate) mod shell_scan;
 #[path = "tool_support/truncate.rs"]
@@ -195,8 +193,8 @@ impl ToolContext {
                 .await?
                 .ok_or_else(|| anyhow::anyhow!("session {session_id} not found"))?;
             let cwd = crate::windows_process::canonicalize_path(&self.cwd)?;
-            if !crate::caller::allows_session_path(
-                state.services().hosted,
+            if !crate::caller::services_allow_session_path(
+                state.services(),
                 &session,
                 &cwd,
             ) {
@@ -211,7 +209,7 @@ impl ToolContext {
 
     pub(crate) fn authorize_path(&self, path: &std::path::Path) -> anyhow::Result<()> {
         if self.session_scope.as_ref().is_some_and(|session| {
-            !crate::caller::allows_session_path(self.services().hosted, session, path)
+            !crate::caller::services_allow_session_path(&self.services(), session, path)
         }) {
             anyhow::bail!(
                 "path {} is outside this tenant's authorized directories",
@@ -252,125 +250,25 @@ impl ToolContext {
             .unwrap_or_else(crate::standard_services)
     }
 
-    pub(crate) async fn execution_request(
-        &self,
-        process_class: neoism_agent_service_api::ProcessClass,
-        timeout_ms: Option<u64>,
-    ) -> anyhow::Result<neoism_agent_service_api::ExecutionRequest> {
-        let (tenant_id, subject, root_id, session_id, policy) =
-            if let (Some(state), Some(session_id)) =
-                (self.state.as_ref(), self.session_id.as_ref())
-            {
-                let session = state
-                    .inner
-                    .store
-                    .get_session(session_id)
-                    .await?
-                    .ok_or_else(|| anyhow::anyhow!("session not found"))?;
-                let root_id =
-                    crate::execution_activity::root_session_id(state, &session).await;
-                (
-                    crate::caller::session_tenant(&session).to_string(),
-                    session
-                        .extra
-                        .get(crate::caller::CREATED_BY_EXTRA_KEY)
-                        .and_then(Value::as_str)
-                        .unwrap_or("local")
-                        .to_string(),
-                    root_id,
-                    session_id.clone(),
-                    crate::caller::session_execution_policy(
-                        state.services().hosted,
-                        &session,
-                    ),
-                )
-            } else {
-                (
-                    "local".to_string(),
-                    "local".to_string(),
-                    "local".to_string(),
-                    "local".to_string(),
-                    neoism_agent_service_api::ExecutionPolicy::NativeLocal,
-                )
-            };
-        let workspace_revision = if matches!(
-            policy,
-            neoism_agent_service_api::ExecutionPolicy::Sandboxed { .. }
-        ) {
-            if let Some(state) = self.state.as_ref() {
-                if state.services().execution.external_workspace_revisions() {
-                    state
-                        .services()
-                        .execution
-                        .workspace_revision(&tenant_id, &root_id)
-                        .await?
-                } else {
-                    state
-                        .inner
-                        .store
-                        .workspace_revision(&tenant_id, &root_id)
-                        .await?
-                }
-            } else {
-                None
-            }
+    pub(crate) async fn assert_native_execution(&self) -> anyhow::Result<()> {
+        let services = self.services();
+        let policy = if let (Some(state), Some(session_id)) =
+            (self.state.as_ref(), self.session_id.as_ref())
+        {
+            let session = state
+                .inner
+                .store
+                .get_session(session_id)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("session {session_id} not found"))?;
+            crate::caller::session_execution_policy(&services, &session)
         } else {
-            None
+            crate::workspace_runtime::directory_execution_policy(&services, &self.cwd)
         };
-        let (provider, workspace, idle_ttl_seconds, max_lifetime_seconds, network) =
-            match policy {
-                neoism_agent_service_api::ExecutionPolicy::Disabled => {
-                    anyhow::bail!("execution is disabled for this session")
-                }
-                neoism_agent_service_api::ExecutionPolicy::NativeLocal => (
-                    None,
-                    neoism_agent_service_api::WorkspaceMaterialization {
-                        revision: None,
-                        local_path: Some(self.cwd.clone()),
-                        remote_locator: None,
-                    },
-                    0,
-                    0,
-                    neoism_agent_service_api::NetworkPolicy::Allow,
-                ),
-                neoism_agent_service_api::ExecutionPolicy::Sandboxed {
-                    provider,
-                    idle_ttl_seconds,
-                    max_lifetime_seconds,
-                } => (
-                    Some(provider),
-                    neoism_agent_service_api::WorkspaceMaterialization {
-                        revision: workspace_revision,
-                        local_path: None,
-                        remote_locator: Some(root_id.clone()),
-                    },
-                    idle_ttl_seconds,
-                    max_lifetime_seconds,
-                    neoism_agent_service_api::NetworkPolicy::Deny,
-                ),
-            };
-        Ok(neoism_agent_service_api::ExecutionRequest {
-            scope: neoism_agent_service_api::ExecutionScope {
-                tenant_id,
-                subject,
-                root_id,
-                session_id,
-                execution_id: neoism_agent_core::Id::ascending(
-                    neoism_agent_core::IdKind::Event,
-                )
-                .to_string(),
-            },
-            provider,
-            process_class,
-            workspace,
-            limits: neoism_agent_service_api::ResourceLimits {
-                timeout_ms,
-                ..Default::default()
-            },
-            network,
-            idle_ttl_seconds,
-            max_lifetime_seconds,
-        })
+        if !crate::caller::native_execution_allowed(&policy) {
+            anyhow::bail!("native execution is disabled for this session");
+        }
+        Ok(())
     }
 
     pub(crate) fn session_id(&self) -> Option<&str> {
@@ -582,10 +480,6 @@ pub(crate) fn standard_output_schema() -> Value {
 
 fn bash_handler(context: ToolContext, arguments: Value) -> ToolFuture {
     Box::pin(bash::bash_tool(context, arguments))
-}
-
-fn sandbox_handler(context: ToolContext, arguments: Value) -> ToolFuture {
-    Box::pin(sandbox::sandbox_tool(context, arguments))
 }
 
 fn read_handler(mut context: ToolContext, arguments: Value) -> ToolFuture {

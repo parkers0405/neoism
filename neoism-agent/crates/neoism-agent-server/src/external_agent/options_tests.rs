@@ -432,6 +432,7 @@ async fn preview_rejects_scoped_claims_before_launch() {
         requests_per_minute: None,
         max_in_flight: None,
         resolved: None,
+        worker: None,
     };
     let denied = preview(
         State(state.clone()),
@@ -471,6 +472,7 @@ async fn preview_rejects_scoped_claims_before_launch() {
         requests_per_minute: None,
         max_in_flight: None,
         resolved: None,
+        worker: None,
     };
     std::fs::create_dir_all(root.join("isolated")).unwrap();
     let denied = preview(
@@ -535,6 +537,7 @@ async fn preview_rejects_scoped_claims_before_launch() {
             requests_per_minute: None,
             max_in_flight: None,
             resolved: None,
+            worker: None,
         })),
     )
     .await;
@@ -718,6 +721,7 @@ async fn options_http_confirms_complete_state_and_reapplies_after_reload() {
             requests_per_minute: None,
             max_in_flight: None,
             resolved: None,
+            worker: None,
         };
         assert!(scope(&state, Some(&scoped), &info).is_err());
         let hosted = crate::caller::CallerClaims {

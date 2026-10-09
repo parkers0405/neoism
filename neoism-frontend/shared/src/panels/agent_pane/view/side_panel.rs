@@ -23,9 +23,6 @@ use crate::primitives::ide_theme::IdeTheme;
 use crate::primitives::{
     draw_text_with_occlusion, edge_row_radii, snap_to_device_px, truncate_to_fit,
 };
-use crate::render_policy::{
-    loader_animation_frame, loader_orbit_position, loader_pastel_color,
-};
 use crate::widgets::frame::{draw_frame, FrameConfig, FrameCorners};
 
 use super::draw::{
@@ -134,6 +131,9 @@ pub trait AgentSidePanelPane {
 
     fn messages(&self) -> &[Self::Message];
     fn session_id_str(&self) -> Option<&str>;
+    fn conversation_root_id(&self) -> Option<&str> {
+        self.session_id_str()
+    }
 }
 
 pub trait AgentSidePanelIconHost {
@@ -258,6 +258,10 @@ macro_rules! neoism_ui_impl_agent_side_panel {
                 <$pane>::messages(self)
             }
 
+            fn conversation_root_id(&self) -> Option<&str> {
+                <$pane>::conversation_root_id(self)
+            }
+
             fn session_id_str(&self) -> Option<&str> {
                 <$pane>::session_id_str(self)
             }
@@ -368,6 +372,10 @@ impl AgentSidePanelPane for NeoismAgentPane {
         NeoismAgentPane::messages(self)
     }
 
+    fn conversation_root_id(&self) -> Option<&str> {
+        NeoismAgentPane::conversation_root_id(self)
+    }
+
     fn session_id_str(&self) -> Option<&str> {
         NeoismAgentPane::session_id_str(self)
     }
@@ -429,6 +437,7 @@ pub fn render_side_panel_with_icons<P, I>(
     P: AgentSidePanelPane,
     I: AgentSidePanelIconHost,
 {
+    pane.side_panel_mut().reset_visible_running_indicator();
     let _icons_ready = I::register_agent_icons(sugarloaf);
     // The catalog has no Usage target. The independent detail rail registers
     // one only while usage is present.
@@ -516,6 +525,7 @@ pub fn render_detail_panel<P: AgentSidePanelPane, I: AgentSidePanelIconHost>(
     pane.maybe_refresh_side_panel_subagents();
     pane.prepare_detail_panel();
     pane.swap_detail_panel();
+    pane.side_panel_mut().reset_visible_running_indicator();
     let [x, y, w, h] = rect;
     pane.side_panel_mut()
         .set_mode(crate::panels::agent_pane::state::side_panel::SidePanelMode::Subagents);

@@ -550,6 +550,18 @@ pub(crate) fn apply_agent_event_to_pane(
             pane.question_reply_failed(&request_id, error);
         }
 
+        AgentServerMessage::CatalogActivity {
+            session_id,
+            activity,
+        } => {
+            if let Ok(activity) =
+                serde_json::from_value(serde_json::Value::String(activity))
+            {
+                pane.side_panel_mut()
+                    .set_session_activity(&session_id, activity);
+            }
+        }
+
         // -- Session metadata acks -------------------------------
         AgentServerMessage::ThreadUpdated { .. } => {
             // Rename / pin ack. The bridge already fired a
@@ -1259,7 +1271,8 @@ pub(crate) fn agent_event_session_id(
         // and their ack must reach the catalog-refresh trigger even
         // when the target isn't the active session. QuestionReplyFailed
         // and PermissionReplyFailed carry no session id at all.
-        AgentServerMessage::ThreadUpdated { .. }
+        AgentServerMessage::CatalogActivity { .. }
+        | AgentServerMessage::ThreadUpdated { .. }
         | AgentServerMessage::QuestionReplyFailed { .. }
         | AgentServerMessage::PermissionReplyFailed { .. }
         | AgentServerMessage::Disabled { .. }
@@ -1405,16 +1418,12 @@ pub(crate) fn session_entries_from_catalog(
 ) -> Vec<neoism_ui::panels::agent_pane::state::side_panel::NeoismAgentSessionEntry> {
     use neoism_ui::panels::agent_pane::state::side_panel::NeoismAgentSessionEntry;
 
-    // Flat entries (no header rows — the side panel injects date-group
-    // headers itself), carrying the raw timestamp + pin flag. A busy
-    // session surfaces `running` so the home list paints the live
-    // status dot — the web analogue of desktop's
-    // `session_running_status` (api.rs), which only ever reports
-    // "running" for home rows and never terminalizes idle sessions.
+    // Family activity is separate from branch lifecycle status. Older daemon
+    // snapshots without it retain the existing busy-flag fallback.
     threads
         .iter()
         .map(|thread| {
-            NeoismAgentSessionEntry::new(
+            let mut entry = NeoismAgentSessionEntry::new(
                 &thread.session_id,
                 if thread.title.trim().is_empty() {
                     "untitled session"
@@ -1431,7 +1440,11 @@ pub(crate) fn session_entries_from_catalog(
             })
             .with_updated_ms(thread.updated_at)
             .with_pinned(thread.pinned)
-            .with_runtime_status(thread.busy.then(|| "running".to_string()))
+            .with_runtime_status(thread.busy.then(|| "running".to_string()));
+            entry.catalog_activity = thread.catalog_activity.as_ref().and_then(|activity| {
+                serde_json::from_value(serde_json::Value::String(activity.clone())).ok()
+            });
+            entry
         })
         .collect()
 }

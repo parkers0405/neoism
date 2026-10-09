@@ -564,6 +564,36 @@ pub(crate) struct PersistedEvent {
 }
 
 impl AppState {
+    fn default_runtime_tenant(&self) -> &str {
+        self.services()
+            .workspace_worker
+            .as_ref()
+            .map(|worker| worker.tenant_id())
+            .unwrap_or("local")
+    }
+
+    fn runtime_key_for_request(
+        &self,
+        tenant_id: &str,
+        directory: &str,
+    ) -> Result<crate::workspace_runtime::TenantRuntimeKey, String> {
+        if let Some(worker) = &self.services().workspace_worker {
+            if !self.services().hosted
+                || tenant_id != worker.tenant_id()
+                || !worker.admits_path(std::path::Path::new(directory))
+            {
+                return Err("runtime request is outside the worker tenant/root".into());
+            }
+            return Ok(crate::workspace_runtime::TenantRuntimeKey {
+                tenant_id: worker.tenant_id().into(),
+                root: worker.root().to_owned(),
+            });
+        }
+        Ok(crate::workspace_runtime::TenantRuntimeKey::new(
+            tenant_id, directory,
+        ))
+    }
+
     pub(crate) async fn activate_scoped_agent_packages(
         &self,
         directory: &str,
@@ -571,6 +601,81 @@ impl AppState {
         configured: &BTreeMap<String, neoism_agent_core::PluginConfig>,
         grants: neoism_agent_plugin_api::CapabilityGrants,
     ) -> Result<Arc<neoism_agent_plugin_api::RegistrySnapshot>, String> {
+        // Plugin-server launch is not protected by brokered ProcessSpawn grants.
+        // Reject before package discovery or factory construction.
+        if self.services().shared_control_plane() {
+            return Err("native scoped plugins are unavailable on shared control".into());
+        }
+        if let Some(worker) = &self.services().workspace_worker {
+            if !self.services().hosted
+                || !worker.admits_path(std::path::Path::new(directory))
+            {
+                return Err("scoped plugin directory is outside the worker root".into());
+            }
+            match &runtime {
+                neoism_agent_plugin_api::RuntimeScope::Workspace(workspace)
+                | neoism_agent_plugin_api::RuntimeScope::Session { workspace, .. } => {
+                    if !worker.admits_path(&workspace.root)
+                        || (workspace.id != worker.workspace_id()
+                            && crate::workspace_runtime::canonical_location(
+                                &workspace.id,
+                            ) != crate::workspace_runtime::canonical_location(
+                                directory,
+                            ))
+                        || crate::workspace_runtime::canonical_location(directory)
+                            != crate::workspace_runtime::canonical_location(
+                                &workspace.root.to_string_lossy(),
+                            )
+                    {
+                        return Err(
+                            "scoped plugin workspace is outside its admitted directory"
+                                .into(),
+                        );
+                    }
+                }
+                _ => {
+                    if crate::workspace_runtime::canonical_location(directory)
+                        != worker.root()
+                    {
+                        return Err(
+                            "ambient worker plugins must use the bound root".into()
+                        );
+                    }
+                }
+            }
+            if let neoism_agent_plugin_api::RuntimeScope::Session { session_id, .. } =
+                &runtime
+            {
+                let session = self
+                    .inner
+                    .store
+                    .get_session(session_id)
+                    .await
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| "scoped plugin session not found".to_string())?;
+                if !crate::caller::worker_session_admitted(worker, &session)
+                    || crate::workspace_runtime::canonical_location(directory)
+                        != crate::workspace_runtime::canonical_location(
+                            &session.directory,
+                        )
+                    || !crate::caller::native_execution_allowed(
+                        &crate::caller::session_execution_policy(
+                            self.services(),
+                            &session,
+                        ),
+                    )
+                    || !crate::caller::services_allow_session_path(
+                        self.services(),
+                        &session,
+                        std::path::Path::new(directory),
+                    )
+                {
+                    return Err(
+                        "scoped plugin session is outside the worker scope".into()
+                    );
+                }
+            }
+        }
         self.inner
             .scoped_plugin_runtimes
             .activate_packages(
@@ -595,6 +700,12 @@ impl AppState {
         directory: &str,
         session_id: &str,
     ) -> Result<Arc<neoism_agent_plugin_api::RegistrySnapshot>, String> {
+        if self.services().shared_control_plane() {
+            return Err(
+                "native session packages are unavailable on shared control".into()
+            );
+        }
+        self.runtime_key_for_request(self.default_runtime_tenant(), directory)?;
         let config_snapshot = crate::config::snapshot(self.services(), directory)
             .map_err(|error| error.to_string())?;
         let (config, _) =
@@ -640,14 +751,30 @@ impl AppState {
     ) -> anyhow::Result<()> {
         if let Some(store) = self.inner.services.artifacts.as_ref() {
             anyhow::ensure!(
-                tenant_id == "local" || store.shared(),
+                tenant_id == "local"
+                    || store.shared()
+                    || self
+                        .inner
+                        .services
+                        .workspace_worker
+                        .as_ref()
+                        .is_some_and(|worker| worker.tenant_id() == tenant_id
+                            && worker.validate().is_ok()),
                 "hosted artifacts require a shared artifact store"
             );
             store.put(tenant_id, artifact_id, bytes).await?;
             return Ok(());
         }
         anyhow::ensure!(
-            tenant_id == "local" || self.inner.services.tenant_resolver.is_none(),
+            tenant_id == "local"
+                || self.inner.services.tenant_resolver.is_none()
+                || self
+                    .inner
+                    .services
+                    .workspace_worker
+                    .as_ref()
+                    .is_some_and(|worker| worker.tenant_id() == tenant_id
+                        && worker.validate().is_ok()),
             "hosted artifacts require an injected shared artifact store"
         );
         tokio::fs::write(self.inner.artifact_root.join(artifact_id), bytes).await?;
@@ -663,7 +790,15 @@ impl AppState {
             return Ok(store.get(tenant_id, artifact_id).await?);
         }
         anyhow::ensure!(
-            tenant_id == "local" || self.inner.services.tenant_resolver.is_none(),
+            tenant_id == "local"
+                || self.inner.services.tenant_resolver.is_none()
+                || self
+                    .inner
+                    .services
+                    .workspace_worker
+                    .as_ref()
+                    .is_some_and(|worker| worker.tenant_id() == tenant_id
+                        && worker.validate().is_ok()),
             "hosted artifacts require an injected shared artifact store"
         );
         match tokio::fs::read(self.inner.artifact_root.join(artifact_id)).await {
@@ -683,7 +818,15 @@ impl AppState {
             return Ok(());
         }
         anyhow::ensure!(
-            tenant_id == "local" || self.inner.services.tenant_resolver.is_none(),
+            tenant_id == "local"
+                || self.inner.services.tenant_resolver.is_none()
+                || self
+                    .inner
+                    .services
+                    .workspace_worker
+                    .as_ref()
+                    .is_some_and(|worker| worker.tenant_id() == tenant_id
+                        && worker.validate().is_ok()),
             "hosted artifacts require an injected shared artifact store"
         );
         match tokio::fs::remove_file(self.inner.artifact_root.join(artifact_id)).await {
@@ -820,13 +963,13 @@ impl AppState {
             Arc::new(neoism_agent_builtins::ProviderPlatform::new(
                 services.provider_credentials.clone(),
             ));
-        let caller_policy = if services.hosted {
-            crate::caller::CallerPolicy::for_hosted(
-                services
-                    .tenant_resolver
-                    .clone()
-                    .expect("validated hosted resolver"),
+        let caller_policy = if let Some(worker) = &services.workspace_worker {
+            crate::caller::CallerPolicy::for_workspace_worker(
+                services.tenant_resolver.clone(),
+                worker.clone(),
             )
+        } else if services.hosted {
+            crate::caller::CallerPolicy::for_hosted(services.tenant_resolver.clone())
         } else {
             crate::caller::CallerPolicy::from_env_with_resolver(
                 services.tenant_resolver.clone(),
@@ -957,23 +1100,23 @@ impl AppState {
                 {
                     tracing::warn!(%error, "failed to heartbeat execution activity owner");
                 }
-                if let Err(error) = store
-                    .reconcile_stale_execution_segments(
-                        now.saturating_sub(15_000),
-                        &owner_id,
-                    )
-                    .await
-                {
-                    tracing::warn!(%error, "failed to reconcile stale execution activity segments");
+                let mut repaired = std::collections::HashSet::new();
+                match store.reconcile_stale_execution_segment_roots(now.saturating_sub(15_000), &owner_id).await {
+                    Ok(roots) => repaired.extend(roots),
+                    Err(error) => tracing::warn!(%error, "failed to reconcile stale execution activity segments"),
                 }
-                if let Err(error) = store
-                    .reconcile_stale_execution_subtasks(
-                        now.saturating_sub(15_000),
-                        &owner_id,
-                    )
-                    .await
-                {
-                    tracing::warn!(%error, "failed to reconcile stale execution subtask owners");
+                match store.reconcile_stale_execution_subtask_roots(now.saturating_sub(15_000), &owner_id).await {
+                    Ok(roots) => repaired.extend(roots),
+                    Err(error) => tracing::warn!(%error, "failed to reconcile stale execution subtask owners"),
+                }
+                if !repaired.is_empty() {
+                    if let Some(inner) = weak_state.upgrade() {
+                        let state = AppState { inner };
+                        for root in repaired {
+                            crate::execution_activity::finish_if_quiescent(&state, &root).await;
+                            crate::execution_activity::publish_snapshot(&state, &root).await;
+                        }
+                    }
                 }
                 tokio::select! {
                     _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {},
@@ -1093,7 +1236,7 @@ impl AppState {
         &self,
         directory: &str,
     ) -> crate::workspace_runtime::PluginGenerationLease {
-        self.try_plugin_snapshot_for_tenant("local", directory)
+        self.try_plugin_snapshot_for_tenant(self.default_runtime_tenant(), directory)
             .await
             .unwrap_or_else(|error| {
                 tracing::error!(%error, %directory, "failed to construct plugin generation");
@@ -1106,22 +1249,24 @@ impl AppState {
         tenant_id: &str,
         directory: &str,
     ) -> Result<crate::workspace_runtime::PluginGenerationLease, String> {
-        let generation = if tenant_id == "local" {
-            if let Some(generation) =
-                crate::workspace_runtime::active_generation(directory)
-            {
+        let key = self.runtime_key_for_request(tenant_id, directory)?;
+        let root = key.root.to_string_lossy();
+        let instance_scopes =
+            tenant_id == "local" || self.services().workspace_worker.is_some();
+        let generation = if instance_scopes {
+            if let Some(generation) = crate::workspace_runtime::active_generation(&root) {
                 generation
             } else {
-                self.try_workspace_runtime_for_tenant(tenant_id, directory)
+                self.try_workspace_runtime_for_tenant(tenant_id, &root)
                     .await?
                     .snapshot()
             }
         } else {
-            self.try_workspace_runtime_for_tenant(tenant_id, directory)
+            self.try_workspace_runtime_for_tenant(tenant_id, &root)
                 .await?
                 .snapshot()
         };
-        if tenant_id == "local" {
+        if instance_scopes && !self.services().shared_control_plane() {
             Ok(generation.with_lower_priority_scopes(
                 self.inner.scoped_plugin_runtimes.ambient_snapshots().await,
             ))
@@ -1135,7 +1280,7 @@ impl AppState {
         directory: &str,
         session_id: &str,
     ) -> crate::workspace_runtime::PluginGenerationLease {
-        self.try_plugin_snapshot_for_session_tenant("local", directory, session_id)
+        self.try_plugin_snapshot_for_session_tenant(self.default_runtime_tenant(), directory, session_id)
             .await
             .unwrap_or_else(|error| {
                 tracing::error!(%error, %directory, %session_id, "failed to construct session plugin generation");
@@ -1149,16 +1294,43 @@ impl AppState {
         directory: &str,
         session_id: &str,
     ) -> Result<crate::workspace_runtime::PluginGenerationLease, String> {
+        // Validate logical session scope before any lazy native runtime initialization.
+        let scope_directory = if let Some(worker) = &self.services().workspace_worker {
+            self.runtime_key_for_request(tenant_id, directory)?;
+            let session = self
+                .inner
+                .store
+                .get_session(session_id)
+                .await
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "plugin session not found".to_string())?;
+            if !crate::caller::worker_session_admitted(worker, &session)
+                || crate::workspace_runtime::canonical_location(directory)
+                    != crate::workspace_runtime::canonical_location(&session.directory)
+                || !crate::caller::services_allow_session_path(
+                    self.services(),
+                    &session,
+                    std::path::Path::new(directory),
+                )
+            {
+                return Err("plugin session is outside the worker scope".into());
+            }
+            session.directory
+        } else {
+            directory.to_string()
+        };
         let snapshot = self
             .try_plugin_snapshot_for_tenant(tenant_id, directory)
             .await?;
-        if tenant_id != "local" {
+        if self.services().shared_control_plane()
+            || (tenant_id != "local" && self.services().workspace_worker.is_none())
+        {
             return Ok(snapshot);
         }
         let runtime = neoism_agent_plugin_api::RuntimeScope::Session {
             workspace: neoism_agent_plugin_api::WorkspaceIdentity {
-                id: directory.to_string(),
-                root: std::path::PathBuf::from(directory),
+                id: scope_directory.clone(),
+                root: std::path::PathBuf::from(scope_directory),
             },
             session_id: session_id.to_string(),
         };
@@ -1172,10 +1344,22 @@ impl AppState {
         &self,
         directory: &str,
     ) -> crate::workspace_runtime::PluginGenerationLease {
-        if let Some(generation) = crate::workspace_runtime::active_generation(directory) {
-            return generation.with_lower_priority_scopes(
-                self.inner.scoped_plugin_runtimes.ambient_snapshots().await,
-            );
+        let key = match self
+            .runtime_key_for_request(self.default_runtime_tenant(), directory)
+        {
+            Ok(key) => key,
+            Err(_) => return crate::workspace_runtime::closed_snapshot(),
+        };
+        if let Some(generation) =
+            crate::workspace_runtime::active_generation(&key.root.to_string_lossy())
+        {
+            return if self.services().shared_control_plane() {
+                generation
+            } else {
+                generation.with_lower_priority_scopes(
+                    self.inner.scoped_plugin_runtimes.ambient_snapshots().await,
+                )
+            };
         }
         let runtime = match self.try_workspace_runtime(directory).await {
             Ok(runtime) => runtime,
@@ -1184,9 +1368,13 @@ impl AppState {
         let _ = crate::workspace_runtime::refresh_plugins(&runtime, self).await;
         let snapshot = runtime.published_snapshot();
         self.reconcile_workspace_plugins(&runtime, &snapshot).await;
-        snapshot.with_lower_priority_scopes(
-            self.inner.scoped_plugin_runtimes.ambient_snapshots().await,
-        )
+        if self.services().shared_control_plane() {
+            snapshot
+        } else {
+            snapshot.with_lower_priority_scopes(
+                self.inner.scoped_plugin_runtimes.ambient_snapshots().await,
+            )
+        }
     }
 
     /// Publish persisted configuration before replying to a mutation. Unlike a
@@ -1224,7 +1412,7 @@ impl AppState {
         &self,
         directory: &str,
     ) -> Result<Arc<crate::workspace_runtime::WorkspaceRuntime>, String> {
-        self.try_workspace_runtime_for_tenant("local", directory)
+        self.try_workspace_runtime_for_tenant(self.default_runtime_tenant(), directory)
             .await
     }
 
@@ -1233,10 +1421,11 @@ impl AppState {
         tenant_id: &str,
         directory: &str,
     ) -> Result<Arc<crate::workspace_runtime::WorkspaceRuntime>, String> {
+        let key = self.runtime_key_for_request(tenant_id, directory)?;
         let (runtime, evicted) = self
             .inner
             .workspace_runtimes
-            .acquire_for_tenant(tenant_id, directory, self)
+            .acquire_for_tenant(&key.tenant_id, &key.root.to_string_lossy(), self)
             .await?;
         for stale in evicted {
             self.inner.workspace_plugin_generations.lock().await.remove(
@@ -1281,7 +1470,10 @@ impl AppState {
             plugins.contains(neoism_agent_builtins::plugin::semantic::ID)
         });
         drop(generations);
-        if runtime.tenant_id == "local" {
+        if !self.services().shared_control_plane()
+            && (runtime.tenant_id == "local"
+                || self.services().workspace_worker.is_some())
+        {
             if let Ok(config_snapshot) =
                 crate::config::snapshot(self.services(), &runtime.root.to_string_lossy())
             {
@@ -1366,6 +1558,17 @@ impl AppState {
     pub async fn shutdown(
         &self,
     ) -> Result<(), neoism_agent_plugin_api::PluginRuntimeError> {
+        if self.inner.services.workspace_worker.is_some() {
+            for run in self
+                .inner
+                .session_coordinator
+                .active_runs()
+                .await
+                .into_values()
+            {
+                run.cancel.store(true, Ordering::SeqCst);
+            }
+        }
         self.inner
             .execution_lease_control
             .stopping
@@ -2099,25 +2302,6 @@ impl SessionStore {
             "#,
                 Vec::new(),
             )
-            .await?;
-        self.db
-            .execute_transaction(vec![
-                (
-                    r#"CREATE TABLE IF NOT EXISTS workspace_revisions (
-                        tenant_id TEXT NOT NULL,
-                        root_id TEXT NOT NULL,
-                        revision TEXT NOT NULL,
-                        updated INTEGER NOT NULL,
-                        PRIMARY KEY (tenant_id, root_id)
-                    )"#
-                    .to_string(),
-                    Vec::new(),
-                ),
-                (
-                    "INSERT OR IGNORE INTO schema_migrations (version, name, applied_at) VALUES (7, 'workspace-revisions', ?)".to_string(),
-                    vec![int(store_i64(crate::now_millis()))],
-                ),
-            ])
             .await?;
         self.db
             .execute(
@@ -3913,6 +4097,14 @@ impl SessionStore {
         stale_before: u64,
         live_owner_instance_id: &str,
     ) -> anyhow::Result<usize> {
+        Ok(self.reconcile_stale_execution_segment_roots(stale_before, live_owner_instance_id).await?.len())
+    }
+
+    async fn reconcile_stale_execution_segment_roots(
+        &self,
+        stale_before: u64,
+        live_owner_instance_id: &str,
+    ) -> anyhow::Result<Vec<String>> {
         let rows = self
             .db
             .fetch_all(
@@ -3927,7 +4119,7 @@ impl SessionStore {
                 vec![text(live_owner_instance_id), int(store_i64(stale_before))],
             )
             .await?;
-        let mut reconciled = 0;
+        let mut reconciled = Vec::new();
         for row in rows {
             let segment = row.get_str("segment_id")?;
             let root = row.get_str("root_session_id")?;
@@ -3957,7 +4149,7 @@ impl SessionStore {
                     ),
                 ])
                 .await?;
-            reconciled += usize::from(results.get(1).copied().unwrap_or(0) > 0);
+            if results.get(1).copied().unwrap_or(0) > 0 { reconciled.push(root); }
         }
         Ok(reconciled)
     }
@@ -3967,10 +4159,18 @@ impl SessionStore {
         stale_before: u64,
         live_owner_instance_id: &str,
     ) -> anyhow::Result<usize> {
+        Ok(self.reconcile_stale_execution_subtask_roots(stale_before, live_owner_instance_id).await?.len())
+    }
+
+    async fn reconcile_stale_execution_subtask_roots(
+        &self,
+        stale_before: u64,
+        live_owner_instance_id: &str,
+    ) -> anyhow::Result<Vec<String>> {
         let rows = self
             .db
             .fetch_all(
-                r#"SELECT task.execution_id, task.child_session_id
+                r#"SELECT task.execution_id, task.child_session_id, task.root_session_id
                    FROM execution_subtasks task
                    LEFT JOIN execution_activity_owners owner
                      ON owner.owner_instance_id = task.owner_instance_id
@@ -3980,7 +4180,7 @@ impl SessionStore {
                 vec![text(live_owner_instance_id), int(store_i64(stale_before))],
             )
             .await?;
-        let mut reconciled = 0;
+        let mut reconciled = Vec::new();
         for row in rows {
             let execution_id = row.get_str("execution_id")?;
             let child_session_id = row.get_str("child_session_id")?;
@@ -3997,7 +4197,7 @@ impl SessionStore {
                     ),
                 ])
                 .await?;
-            reconciled += usize::from(results.first().copied().unwrap_or(0) > 0);
+            if results.first().copied().unwrap_or(0) > 0 { reconciled.push(row.get_str("root_session_id")?); }
         }
         Ok(reconciled)
     }
@@ -4911,46 +5111,6 @@ impl SessionStore {
         Ok(())
     }
 
-    pub(crate) async fn workspace_revision(
-        &self,
-        tenant_id: &str,
-        root_id: &str,
-    ) -> anyhow::Result<Option<String>> {
-        self.db
-            .fetch_optional(
-                "SELECT revision FROM workspace_revisions WHERE tenant_id = ? AND root_id = ?",
-                vec![text(tenant_id), text(root_id)],
-            )
-            .await?
-            .map(|row| row.get_str("revision"))
-            .transpose()
-    }
-
-    pub(crate) async fn commit_workspace_revision(
-        &self,
-        tenant_id: &str,
-        root_id: &str,
-        expected: Option<&str>,
-        revision: &str,
-    ) -> anyhow::Result<bool> {
-        let changed = if let Some(expected) = expected {
-            self.db
-                .execute(
-                    "UPDATE workspace_revisions SET revision = ?, updated = ? WHERE tenant_id = ? AND root_id = ? AND revision = ?",
-                    vec![text(revision), int(store_i64(crate::now_millis())), text(tenant_id), text(root_id), text(expected)],
-                )
-                .await?
-        } else {
-            self.db
-                .execute(
-                    "INSERT OR IGNORE INTO workspace_revisions (tenant_id, root_id, revision, updated) VALUES (?, ?, ?, ?)",
-                    vec![text(tenant_id), text(root_id), text(revision), int(store_i64(crate::now_millis()))],
-                )
-                .await?
-        };
-        Ok(changed > 0)
-    }
-
     pub(crate) async fn get_artifact(
         &self,
         scope: TenantQueryScope<'_>,
@@ -5763,4 +5923,147 @@ fn like_excerpt(content: &str, start: usize, len: usize) -> String {
         excerpt.push_str(" ... ");
     }
     excerpt.replace('\n', " ")
+}
+
+#[cfg(test)]
+mod worker_plugin_lookup_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn worker_convenience_lookup_registers_agents_and_shares_bound_root_for_subdirectories(
+    ) {
+        use neoism_agent_service_api::{
+            WorkspaceWorkerBinding, WorkspaceWorkerBootstrap, WorkspaceWorkerSigningKey,
+            WorkspaceWorkerTenantResolver,
+        };
+        let container = std::env::temp_dir().join(format!(
+            "neoism-worker-agent-lookup-{}",
+            neoism_agent_core::new_session_id()
+        ));
+        let root = container.join("workspace");
+        std::fs::create_dir_all(root.join("child")).unwrap();
+        let root = std::fs::canonicalize(root).unwrap();
+        let child = root.join("child");
+        let binding = WorkspaceWorkerBinding::new(
+            WorkspaceWorkerBootstrap {
+                version: 1,
+                tenant_id: "bound-tenant".into(),
+                workspace_id: "bound-workspace".into(),
+                runtime_id: "current-runtime".into(),
+                runtime_generation: 4,
+                root: root.clone(),
+                expires_at: neoism_agent_service_api::workspace_worker::unix_now()
+                    .unwrap()
+                    + 600,
+            },
+            WorkspaceWorkerSigningKey::new([6u8; 32])
+                .unwrap()
+                .verification_key(),
+        )
+        .unwrap();
+        let services = crate::standard_services()
+            .with_tenant_resolver(Arc::new(WorkspaceWorkerTenantResolver::new(
+                binding.clone(),
+            )))
+            .with_provider_credentials(Arc::new(
+                neoism_agent_service_api::WorkspaceWorkerProviderCredentialStore::new(
+                    binding.clone(),
+                    container.join("provider-auth.json"),
+                )
+                .unwrap(),
+            ))
+            .with_mcp_credentials(Arc::new(
+                neoism_agent_service_api::WorkspaceWorkerMcpCredentialStore::new(
+                    binding.clone(),
+                    container.join("mcp-auth.json"),
+                )
+                .unwrap(),
+            ))
+            .for_workspace_worker(binding);
+        let state =
+            AppState::open_database_with_services(container.join("state.db"), services)
+                .await
+                .unwrap();
+        let root_runtime = state
+            .workspace_runtime(&root.to_string_lossy())
+            .await
+            .unwrap();
+        let child_runtime = state
+            .workspace_runtime(&child.to_string_lossy())
+            .await
+            .unwrap();
+        assert!(Arc::ptr_eq(&root_runtime, &child_runtime));
+        assert_eq!(root_runtime.tenant_id, "bound-tenant");
+        assert_eq!(root_runtime.root, root);
+        assert!(state
+            .try_workspace_runtime_for_tenant("local", &root.to_string_lossy())
+            .await
+            .is_err());
+        assert!(state
+            .workspace_runtime(&root.parent().unwrap().to_string_lossy())
+            .await
+            .is_err());
+        for (directory, agent) in [(&root, "build"), (&child, "explore")] {
+            let snapshot = state.plugin_snapshot(&directory.to_string_lossy()).await;
+            let agents =
+                crate::plugins::agent_catalog(&snapshot, &directory.to_string_lossy())
+                    .unwrap();
+            assert!(
+                agents.get(agent).is_some(),
+                "missing worker agent source for {agent}"
+            );
+            drop(snapshot);
+            let request =
+                serde_json::from_value(serde_json::json!({"agent": agent})).unwrap();
+            let session = crate::session_routes::create_session_in_directory(
+                &state,
+                &directory.to_string_lossy(),
+                request,
+                BTreeMap::new(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(session.directory, directory.to_string_lossy());
+            assert_eq!(session.workspace_id.as_deref(), Some("bound-workspace"));
+            assert_eq!(crate::caller::session_tenant(&session), "bound-tenant");
+            let snapshot = state
+                .plugin_snapshot_for_session(&session.directory, session.id.as_str())
+                .await;
+            assert!(crate::plugins::agent_catalog(&snapshot, &session.directory)
+                .unwrap()
+                .get(agent)
+                .is_some());
+        }
+        assert_eq!(state.inner.workspace_runtimes.runtimes().await.len(), 1);
+        state.shutdown().await.unwrap();
+        drop(state);
+        let _ = std::fs::remove_dir_all(container);
+    }
+
+    #[tokio::test]
+    async fn shared_control_rejects_scoped_packages_before_discovery() {
+        let root = std::env::temp_dir().join(format!(
+            "neoism-shared-scoped-denial-{}",
+            neoism_agent_core::new_session_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let state = AppState::open_database_with_services(
+            root.join("state.db"),
+            crate::standard_services().for_hosted_control_plane(),
+        )
+        .await
+        .unwrap();
+        let result = state
+            .activate_scoped_agent_packages(
+                "/must-not-be-discovered",
+                neoism_agent_plugin_api::RuntimeScope::Global,
+                &BTreeMap::new(),
+                neoism_agent_plugin_api::CapabilityGrants::default(),
+            )
+            .await;
+        assert!(result.err().unwrap().contains("shared control"));
+        state.shutdown().await.unwrap();
+        drop(state);
+        let _ = std::fs::remove_dir_all(root);
+    }
 }

@@ -2117,7 +2117,11 @@ pub fn render_markdown_blocks<P: AgentMarkdownPane>(
     } else {
         theme.fg
     };
-    let body_color = if body_muted { reasoning_dim } else { theme.fg };
+    let body_color = if body_muted {
+        reasoning_dim
+    } else {
+        super::primary_text_color(theme)
+    };
     // Reasoning blocks render in italic so the "inner monologue" reads
     // distinctly from the assistant's final answer. `body_muted` is the
     // reasoning signal — render_assistant_text passes false.
@@ -2125,7 +2129,7 @@ pub fn render_markdown_blocks<P: AgentMarkdownPane>(
     let body_text_color = if body_muted {
         theme.u8_alpha(reasoning_dim, 0.6)
     } else {
-        theme.u8(theme.fg)
+        theme.u8(body_color)
     };
     let Some(opts) = opts_with_clip(
         DrawOpts {
@@ -2562,35 +2566,24 @@ pub(super) fn render_markdown_code_block(
     if h <= 0.0 {
         return;
     }
+    // Chrome belongs to the whole block, not to its visible source lines.
+    let visible_block_clip = intersect_rect([x, y, w, h], viewport_clip);
+    if visible_block_clip.is_none() {
+        return;
+    }
     let header_h = MARKDOWN_CODE_HEADER_H * s;
     let body_top = y + header_h;
     let first_line_y = body_top + MARKDOWN_CODE_BODY_TOP_PAD * s;
     let line_h = MARKDOWN_CODE_LINE_H * s;
-    let clip_top = viewport_clip[1];
-    let clip_bottom = viewport_clip[1] + viewport_clip[3];
-    let start_ix = ((clip_top - first_line_y - line_h) / line_h)
-        .floor()
-        .max(0.0) as usize;
-    let end_ix = ((clip_bottom - first_line_y + line_h) / line_h)
-        .ceil()
-        .max(0.0) as usize;
     let line_count = if lang.trim() == "neoism-html" {
         lines.len().clamp(1, 14)
     } else {
         lines.len().max(1)
     };
-    let start_ix = start_ix.min(line_count);
-    let end_ix = end_ix.min(line_count);
-    let has_visible_text = start_ix < end_ix;
-    if !has_visible_text
-        && y + h > viewport_clip[1]
-        && y < viewport_clip[1] + viewport_clip[3]
-    {
-        return;
-    }
+    let (start_ix, end_ix) =
+        visible_line_range(first_line_y, line_h, line_count, viewport_clip);
     let radius = 10.0 * s;
     let border_w = 1.0_f32.max(s);
-    let visible_block_clip = intersect_rect([x, y, w, h], viewport_clip);
     draw_rounded_rect_clipped(
         sugarloaf,
         [x, y, w, h],
@@ -3125,14 +3118,8 @@ fn draw_markdown_inline_line<P: AgentMarkdownPane>(
             MarkdownInlineSegment::Bold(text) => {
                 let mut bold = *opts;
                 bold.bold = true;
-                // Brighter-than-`fg` white emphasises bold text on dark themes;
-                // on a light theme white is invisible, so lean on the (already
-                // dark) foreground — the bold weight carries the emphasis.
-                bold.color = theme.u8(if theme.is_dark() {
-                    theme.white
-                } else {
-                    theme.fg
-                });
+                // Weight carries emphasis; the palette's `white` may be darker
+                // than the inherited primary text (or invisible on light themes).
                 x += draw_markdown_inline_run(
                     sugarloaf,
                     x,
@@ -3158,11 +3145,6 @@ fn draw_markdown_inline_line<P: AgentMarkdownPane>(
                 let mut emphasis_opts = *opts;
                 emphasis_opts.bold = true;
                 emphasis_opts.italic = true;
-                emphasis_opts.color = theme.u8(if theme.is_dark() {
-                    theme.white
-                } else {
-                    theme.fg
-                });
                 x += draw_markdown_inline_run(
                     sugarloaf,
                     x,
@@ -3665,6 +3647,39 @@ fn markdown_list_item(line: &str) -> Option<(AssistantListMarker, usize, &str)> 
 
 fn markdown_quote(line: &str) -> Option<&str> {
     line.trim_start().strip_prefix('>').map(str::trim)
+}
+
+#[cfg(test)]
+mod code_culling_tests {
+    use super::*;
+
+    #[test]
+    fn markdown_code_chrome_culling_is_independent_of_visible_lines() {
+        for s in [0.75, 1.0, 1.5, 2.0] {
+            let scaled = |r: [f32; 4]| r.map(|v| v * s);
+            let y = 100.0 * s;
+            let header_h = MARKDOWN_CODE_HEADER_H * s;
+            let first_line_y = y + header_h + MARKDOWN_CODE_BODY_TOP_PAD * s;
+            let line_h = MARKDOWN_CODE_LINE_H * s;
+            // Deliberately ample bottom padding exercises an empty visible
+            // line range while the rounded block still intersects the viewport.
+            let block = scaled([10.0, 100.0, 200.0, 100.0]);
+            let body = scaled([24.0, 130.0, 172.0, 70.0]);
+            for (clip, chrome, body_visible, text_range) in [
+                ([0.0, 100.0, 300.0, 5.0], true, false, false),
+                ([0.0, 195.0, 300.0, 5.0], true, true, false),
+                ([0.0, 140.0, 300.0, 18.0], true, true, true),
+                ([0.0, 200.0, 300.0, 20.0], false, false, false),
+                ([0.0, 60.0, 300.0, 20.0], false, false, false),
+            ] {
+                let clip = scaled(clip);
+                assert_eq!(intersect_rect(block, clip).is_some(), chrome);
+                assert_eq!(intersect_rect(body, clip).is_some(), body_visible);
+                let (start, end) = visible_line_range(first_line_y, line_h, 1, clip);
+                assert_eq!(start < end, text_range, "scale={s}, clip={clip:?}");
+            }
+        }
+    }
 }
 
 #[cfg(test)]

@@ -136,7 +136,11 @@ pub(crate) async fn available_tools_for_directory(
         state,
         &directory,
         &snapshot,
-        &neoism_agent_service_api::ExecutionPolicy::NativeLocal,
+        &if state.services().hosted {
+            neoism_agent_service_api::ExecutionPolicy::Disabled
+        } else {
+            neoism_agent_service_api::ExecutionPolicy::NativeLocal
+        },
         &mcp_auth::McpAuthStore::local(state.services()),
     )
     .await
@@ -173,14 +177,6 @@ async fn available_tools_for_snapshot(
             }
             "bash" | "background_task"
                 if !crate::caller::native_execution_allowed(execution) =>
-            {
-                continue
-            }
-            "sandbox_exec"
-                if !matches!(
-                    execution,
-                    neoism_agent_service_api::ExecutionPolicy::Sandboxed { .. }
-                ) =>
             {
                 continue
             }

@@ -276,4 +276,5 @@ assert.equal(ptyRequests[0].headers["X-OpenCode-Ticket"], "1");
 assert.equal(ptyRequests[1].path, "/v2/plugins/dev.neoism.pty/pty%2F1/connect");
 assert.deepEqual(ptyRequests[1].query, { ticket: "once", cursor: 4 });
 
+await import("./http-token.test.mjs");
 console.log("sdk consumer tests passed");

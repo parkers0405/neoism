@@ -34,6 +34,12 @@ await client.operations.request("v2.sessions.prompt", {
 });
 ```
 
+## Cloud workspace clients
+
+`HostWorkspaceClient` exposes application-authorized workspace status, ensure, start, stop, destroy and connection brokerage. `connectWorkspaceWorker` returns a normal Agent client after verifying the current worker's identity, generation and declared root, and refreshes short-lived grants for HTTP/SSE. It does not implicitly ensure/start a worker. The separate infrastructure-only `CloudRuntimeClient` talks to the v2 lifecycle bridge; do not give browser clients infrastructure credentials or signing seeds.
+
+The generic host flow and real Docker development backend are implemented and tested; production VM providers and gateway/TLS remain deployment integrations. See [[Server and API]] and the source [cloud SDK guide](https://github.com/parkers0405/neoism/blob/main/neoism-agent/sdk/typescript/CLOUD.md), [workspace host](https://github.com/parkers0405/neoism/blob/main/neoism-cloud-host/README.md), and authoritative [hosted architecture/status](https://github.com/parkers0405/neoism/blob/main/neoism-agent/docs/hosted-control-plane.md).
+
 ## Optional capabilities
 
 Plugin-owned features are typed but never assumed to exist. Use capability

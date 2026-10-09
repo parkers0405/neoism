@@ -1,3 +1,5 @@
+export * from "./host.js";
+export * from "./cloud.js";
 export * from "./client.js";
 export * from "./extensions.js";
 export * from "./transport.js";

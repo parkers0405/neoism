@@ -618,8 +618,23 @@ impl NeoismAgentPane {
     }
 
     pub fn prepare_detail_panel(&mut self) {
+        let root = self.conversation_root_id().map(str::to_owned);
         self.detail_panel
-            .sync_conversation_details_from(&self.side_panel);
+            .sync_conversation_details_from_root(&self.side_panel, root.as_deref());
+    }
+
+    /// Owning conversation, not the exact child whose transcript is open.
+    pub fn conversation_root_id(&self) -> Option<&str> {
+        self.session_id.as_deref()?;
+        if self.parent_session_id.is_some() {
+            self.side_panel
+                .subagents()
+                .first()
+                .map(|row| row.id.as_str())
+                .or(self.parent_session_id.as_deref())
+        } else {
+            self.session_id.as_deref()
+        }
     }
 
     pub fn take_catalog_toggle_request(&mut self) -> bool {

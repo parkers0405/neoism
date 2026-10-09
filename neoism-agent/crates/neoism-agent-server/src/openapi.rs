@@ -535,11 +535,11 @@ pub fn canonical_openapi() -> Value {
     }}));
     paths.insert("/v2/session-catalog/events".into(), json!({ "get": {
         "tags": ["events"], "operationId": "v2.sessionCatalog.subscribe",
-        "description": "Live root-session create, update, and delete events scoped to one authorized workspace directory.",
+        "description": "Authorized root metadata events and canonical session.catalog.activity family projections. Subscribe-before-read activity baselines are emitted initially and on reconnect. Runtime edges re-read authority; raw session.status events are not forwarded. Lag or credential expiry closes the stream.",
         "parameters": [
             { "name": "directory", "in": "query", "required": true, "schema": { "type": "string" } }
         ],
-        "responses": { "200": { "description": "Root-session catalogue event stream", "content": { "text/event-stream": { "schema": { "type": "string" } } } } }
+        "responses": { "200": { "description": "Authorized root metadata and session.catalog.activity projections; initial/reconnect activity baseline follows subscription, runtime edges re-read authority, and lag/credential expiry closes the stream", "content": { "text/event-stream": { "schema": { "type": "string" } } } } }
     }}));
     paths.insert("/v2/artifacts".into(), json!({
         "get": { "tags": ["artifacts"], "operationId": "v2.artifacts.list", "parameters": [
@@ -928,6 +928,21 @@ fn apply_authoritative_contract(document: &mut Value) {
         ),
     );
     add(
+        "/v2/runtime",
+        "get",
+        op(
+            "v2.runtime.get",
+            "system",
+            json!([]),
+            None,
+            success(
+                "200",
+                "Deployment and workspace worker identity",
+                r("RuntimeInfo"),
+            ),
+        ),
+    );
+    add(
         "/v2/capabilities",
         "get",
         op(
@@ -955,6 +970,17 @@ fn apply_authoritative_contract(document: &mut Value) {
                 "Plugin manifests",
                 json!({ "type": "array", "items": r("PluginManifest") }),
             ),
+        ),
+    );
+    add(
+        "/v2/plugins/lifecycle",
+        "get",
+        op(
+            "v2.plugins.lifecycle",
+            "plugins",
+            json!([directory()]),
+            None,
+            success("200", "Plugin package activation and permissions", json!({ "type": "array", "items": r("PackageLifecycleInfo") })),
         ),
     );
     add(
@@ -1007,7 +1033,7 @@ fn apply_authoritative_contract(document: &mut Value) {
             "events",
             json!([directory()]),
             None,
-            json!({ "200": { "description": "Root-session catalogue event stream", "content": {
+            json!({ "200": { "description": "Authorized root metadata and session.catalog.activity projections; initial/reconnect activity baseline follows subscription, runtime edges re-read authority, and lag/credential expiry closes the stream", "content": {
                 "text/event-stream": { "schema": { "type": "string" } }
             } } }),
         ),
@@ -3229,7 +3255,9 @@ fn canonical_schemas() -> Value {
         "UserModel": { "type": "object", "additionalProperties": false, "required": ["providerId", "modelId"], "properties": { "providerId": { "type": "string" }, "modelId": { "type": "string" }, "connectionId": { "type": "string" }, "variant": { "type": "string" } } },
         "PermissionRule": { "type": "object", "additionalProperties": false, "required": ["permission", "pattern", "action"], "properties": { "permission": { "type": "string" }, "pattern": { "type": "string" }, "action": { "type": "string" } } },
         "SessionTime": { "type": "object", "additionalProperties": false, "required": ["created", "updated"], "properties": { "created": { "type": "integer", "minimum": 0 }, "updated": { "type": "integer", "minimum": 0 }, "compacting": { "type": "integer", "minimum": 0 }, "archived": { "type": "integer" } } },
+        "CatalogActivity": { "type": "string", "enum": ["idle", "running", "background", "permission"], "description": "Transient family activity: permission > running > background > idle; never persisted." },
         "Session": { "type": "object", "additionalProperties": true, "required": ["id", "slug", "projectId", "directory", "title", "version", "time"], "properties": {
+            "catalogActivity": { "$ref": "#/components/schemas/CatalogActivity", "readOnly": true },
             "id": { "type": "string" }, "slug": { "type": "string" }, "projectId": { "type": "string" }, "workspaceId": { "type": "string" }, "directory": { "type": "string" },
             "path": { "type": "string" }, "parentId": { "type": "string" }, "title": { "type": "string" }, "agent": { "type": "string" }, "model": { "$ref": "#/components/schemas/ModelRef" },
             "version": { "type": "string" }, "time": { "$ref": "#/components/schemas/SessionTime" }, "permission": { "type": "array", "items": { "$ref": "#/components/schemas/PermissionRule" } }
@@ -3566,6 +3594,11 @@ fn event_data_schema(event_type: &str) -> Value {
                 "sessionID": { "type": "string" }, "epoch": { "type": "object", "additionalProperties": true }
             }})
         }
+        _ if event_type == et::SESSION_CATALOG_ACTIVITY => {
+            json!({ "type": "object", "additionalProperties": false, "required": ["sessionID", "activity"], "properties": {
+                "sessionID": { "type": "string" }, "activity": r("CatalogActivity")
+            }})
+        }
         _ if event_type == et::SESSION_CREATED || event_type == et::SESSION_UPDATED => {
             json!({ "type": "object", "additionalProperties": false, "required": ["sessionID", "info"], "properties": {
                 "sessionID": { "type": "string" }, "info": r("Session")
@@ -3694,8 +3727,26 @@ fn authoritative_schemas() -> Value {
         "OpenApiDocument": { "type": "object", "additionalProperties": true, "required": ["openapi", "info", "paths"], "properties": {
             "openapi": { "type": "string" }, "info": { "type": "object", "additionalProperties": true }, "paths": { "type": "object", "additionalProperties": true }
         }},
-        "HealthResponse": { "type": "object", "additionalProperties": false, "required": ["healthy", "version", "providerCredentialStore"], "properties": {
-            "healthy": { "type": "boolean", "const": true }, "version": { "type": "string" }, "executablePath": { "type": "string" }, "providerCredentialStore": { "type": "string" }
+        "HealthResponse": { "type": "object", "additionalProperties": false, "required": ["healthy", "version", "providerCredentialStore", "tenantResolver", "deployment", "executionAvailable", "artifactStore", "artifactStoreShared", "hostedControlPlane"], "properties": {
+            "healthy": { "type": "boolean" }, "version": { "type": "string" }, "executablePath": { "type": "string" }, "providerCredentialStore": { "type": "string" },
+            "tenantResolver": { "type": "string" }, "deployment": { "type": "string", "enum": ["local", "shared-control-plane", "workspace-worker"] }, "executionAvailable": { "type": "boolean" },
+            "artifactStore": { "type": "string" }, "artifactStoreShared": { "type": "boolean" }, "hostedControlPlane": { "type": "boolean" }
+        }},
+        "PackageLifecycleInfo": { "type": "object", "additionalProperties": false, "required": ["packageId", "state", "source", "revision", "scope", "requestedCapabilities", "grantedCapabilities", "leaseActive", "diagnostics"], "properties": {
+            "packageId": { "type": "string" }, "state": { "type": "string", "enum": ["discovered", "incompatible", "permission-required", "trusted", "enabled", "loading", "active", "degraded", "failed", "disabled", "update-available", "restoring"] },
+            "source": { "type": "string", "enum": ["user", "workspace"] }, "revision": { "type": "string" }, "scope": { "type": "string", "enum": ["global", "user", "workspace", "session"] }, "scopeId": { "type": "string" },
+            "requestedCapabilities": { "type": "array", "items": r("HostCapability") }, "grantedCapabilities": { "type": "array", "items": r("HostCapability") }, "retainedRevision": { "type": "string" }, "leaseActive": { "type": "boolean" },
+            "diagnostics": { "type": "array", "items": r("PackageDiagnostic") }
+        }},
+        "HostCapability": { "type": "string", "enum": ["config-read", "config-write", "workspace-read", "workspace-write", "event-publish", "network", "process-spawn", "task-spawn", "secret-use", "secret-read", "prompt-read", "message-read", "response-transform", "provider-access", "policy-invoke"] },
+        "PackageDiagnostic": { "type": "object", "additionalProperties": false, "required": ["code", "message"], "properties": {
+            "code": { "type": "string" }, "message": { "type": "string" }, "action": { "type": "string" }
+        }},
+        "RuntimeInfo": { "type": "object", "additionalProperties": false, "required": ["deployment", "executionAvailable"], "properties": {
+            "deployment": { "type": "string", "enum": ["local", "shared-control-plane", "workspace-worker"] }, "executionAvailable": { "type": "boolean" }, "worker": r("WorkspaceWorkerInfo")
+        }},
+        "WorkspaceWorkerInfo": { "type": "object", "additionalProperties": false, "required": ["version", "tenantId", "workspaceId", "runtimeId", "runtimeGeneration", "root", "expiresAt"], "properties": {
+            "version": { "type": "integer", "const": 1 }, "tenantId": { "type": "string" }, "workspaceId": { "type": "string" }, "runtimeId": { "type": "string" }, "runtimeGeneration": { "type": "integer", "minimum": 1 }, "root": { "type": "string" }, "expiresAt": { "type": "integer" }
         }},
         "CompactionConfig": {
             "type": "object",

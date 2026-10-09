@@ -11,7 +11,7 @@
     "contract:print": "cargo run --quiet --manifest-path ../../../Cargo.toml -p neoism-agent -- openapi",
     "contract:check": "bash ../../scripts/openapi.sh check",
     "contract:update": "bash ../../scripts/openapi.sh update",
-    "test": "npm run build && node ../../scripts/generate-contract.test.mjs && node scripts/plugin-host.test.mjs && node scripts/sdk.test.mjs",
+    "test": "npm run build && node ../../scripts/generate-contract.test.mjs && node scripts/plugin-host.test.mjs && node scripts/sdk.test.mjs && node scripts/cloud.test.mjs && node scripts/http-token.test.mjs && node scripts/host.test.mjs",
     "typecheck": "tsc -b --pretty false && tsc -p tsconfig.examples.json --pretty false",
     "gui:dev": "npm run dev -w @neoism/gui",
     "gui:build": "npm run build && npm run build -w @neoism/gui",

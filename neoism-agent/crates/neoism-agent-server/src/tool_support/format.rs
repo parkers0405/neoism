@@ -19,6 +19,12 @@ pub(super) fn format_paths(
     config: Option<&Value>,
     paths: impl IntoIterator<Item = PathBuf>,
 ) -> Vec<String> {
+    // Follow-up formatting is execution, not merely model-visible discovery.
+    if !crate::caller::native_execution_allowed(
+        &crate::workspace_runtime::directory_execution_policy(services, cwd),
+    ) {
+        return Vec::new();
+    }
     let Some(config) = config.filter(formatting_enabled) else {
         return Vec::new();
     };
@@ -32,6 +38,13 @@ pub(super) fn format_paths(
         } else {
             cwd.join(path)
         };
+        if services
+            .workspace_worker
+            .as_ref()
+            .is_some_and(|worker| !worker.admits_path(&path))
+        {
+            continue;
+        }
         if !path.is_file() || !seen.insert(path.clone()) {
             continue;
         }
@@ -377,4 +390,22 @@ fn project_mentions(cwd: &Path, names: &[&str], needles: &[&str]) -> bool {
             .map(|content| needles.iter().any(|needle| content.contains(needle)))
             .unwrap_or(false)
     })
+}
+
+#[cfg(test)]
+mod native_gating_tests {
+    #[test]
+    fn shared_control_skips_format_followup_before_inspecting_paths() {
+        let services = crate::standard_services().for_hosted_control_plane();
+        let paths = std::iter::from_fn(|| -> Option<std::path::PathBuf> {
+            panic!("shared formatter must not inspect any path")
+        });
+        assert!(super::format_paths(
+            &services,
+            std::path::Path::new("."),
+            Some(&serde_json::Value::Bool(true)),
+            paths
+        )
+        .is_empty());
+    }
 }

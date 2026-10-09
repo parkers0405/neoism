@@ -67,14 +67,36 @@ async fn execute_tool_call_with_env_and_cancel(
             .map_err(|error| error.to_string())?,
         None => None,
     };
+    if session_id.is_some() && session.is_none() {
+        return Err("tool session not found".into());
+    }
     let execution = session
         .as_ref()
-        .map(|session| crate::caller::session_execution_policy(services.hosted, session))
-        .unwrap_or(neoism_agent_service_api::ExecutionPolicy::NativeLocal);
+        .map(|session| crate::caller::session_execution_policy(&services, session))
+        .unwrap_or_else(|| {
+            crate::workspace_runtime::directory_execution_policy(
+                &services,
+                std::path::Path::new(directory),
+            )
+        });
     let mcp_auth = match session.as_ref() {
         Some(session) => crate::mcp_auth::McpAuthStore::for_session(&services, session)
             .map_err(|error| error.to_string())?,
-        None => crate::mcp_auth::McpAuthStore::local(&services),
+        None => {
+            if let Some(worker) = &services.workspace_worker {
+                crate::mcp_auth::McpAuthStore::from_services(
+                    &services,
+                    neoism_agent_service_api::CredentialScope {
+                        tenant_id: worker.tenant_id().into(),
+                        workspace_id: Some(worker.workspace_id().into()),
+                    },
+                    true,
+                )
+                .map_err(|error| error.to_string())?
+            } else {
+                crate::mcp_auth::McpAuthStore::local(&services)
+            }
+        }
     };
     let contribution = crate::agent_tool_registry::tool_contribution(snapshot, tool_name);
     if contribution
@@ -109,7 +131,7 @@ async fn execute_tool_call_with_env_and_cancel(
     if contribution.is_some_and(|item| {
         item.plugin_id == neoism_agent_builtins::plugin::custom_tools::ID
     }) {
-        ensure_native_process_tool(state, session_id, tool_name).await?;
+        ensure_native_process_tool(state, session_id, Some(directory), tool_name).await?;
         let result = crate::custom_tool::execute(
             &services,
             directory,
@@ -139,10 +161,7 @@ async fn execute_tool_call_with_env_and_cancel(
     let runtime = snapshot.runtime_tools.get(tool_name).cloned();
     let runtime = runtime.ok_or_else(|| format!("unknown tool {tool_name}"))?;
     if matches!(tool_name, "bash" | "background_task") {
-        ensure_native_process_tool(state, session_id, tool_name).await?;
-    }
-    if tool_name == "sandbox_exec" {
-        ensure_sandbox_process_tool(state, session_id).await?;
+        ensure_native_process_tool(state, session_id, Some(directory), tool_name).await?;
     }
     let definition = runtime.definition();
     if let Some(permission) = definition.permission {
@@ -175,9 +194,6 @@ async fn execute_tool_call_with_env_and_cancel(
                 }
                 neoism_agent_service_api::ExecutionPolicy::NativeLocal => {
                     neoism_agent_plugin_api::PluginExecutionMode::NativeLocal
-                }
-                neoism_agent_service_api::ExecutionPolicy::Sandboxed { .. } => {
-                    neoism_agent_plugin_api::PluginExecutionMode::Sandboxed
                 }
             },
             directory: directory.to_string(),
@@ -212,10 +228,25 @@ async fn execute_tool_call_with_env_and_cancel(
 async fn ensure_native_process_tool(
     state: &AppState,
     session_id: Option<&Id>,
+    directory: Option<&str>,
     tool_name: &str,
 ) -> Result<(), String> {
     let Some(session_id) = session_id else {
-        return Ok(());
+        let policy = directory
+            .map(|directory| {
+                crate::workspace_runtime::directory_execution_policy(
+                    state.services(),
+                    std::path::Path::new(directory),
+                )
+            })
+            .unwrap_or(neoism_agent_service_api::ExecutionPolicy::Disabled);
+        return if crate::caller::native_execution_allowed(&policy) {
+            Ok(())
+        } else {
+            Err(format!(
+                "native process tool {tool_name} requires an admitted directory/session"
+            ))
+        };
     };
     let session = state
         .inner
@@ -224,43 +255,20 @@ async fn ensure_native_process_tool(
         .await
         .map_err(|error| error.to_string())?
         .ok_or_else(|| format!("session {session_id} not found"))?;
-    if !crate::caller::local_collaboration_session(state.services().hosted, &session) {
-        return Err(format!(
-            "native process tool {tool_name} is unavailable for tenant-scoped sessions; use sandbox_exec"
-        ));
-    }
-    let policy =
-        crate::caller::session_execution_policy(state.services().hosted, &session);
-    if crate::caller::native_execution_allowed(&policy) {
+    let policy = crate::caller::session_execution_policy(state.services(), &session);
+    let scoped = directory.is_none_or(|directory| {
+        crate::caller::services_allow_session_path(
+            state.services(),
+            &session,
+            std::path::Path::new(directory),
+        )
+    });
+    if crate::caller::native_execution_allowed(&policy) && scoped {
         return Ok(());
     }
     Err(format!(
-        "native process tool {tool_name} is unavailable for this session; use an approved remote sandbox MCP"
+        "native process tool {tool_name} is unavailable for this session/directory"
     ))
-}
-
-async fn ensure_sandbox_process_tool(
-    state: &AppState,
-    session_id: Option<&Id>,
-) -> Result<(), String> {
-    let Some(session_id) = session_id else {
-        return Err("sandbox execution requires a tenant session".to_string());
-    };
-    let session = state
-        .inner
-        .store
-        .get_session(session_id.as_str())
-        .await
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "session not found".to_string())?;
-    if matches!(
-        crate::caller::session_execution_policy(state.services().hosted, &session),
-        neoism_agent_service_api::ExecutionPolicy::Sandboxed { .. }
-    ) {
-        Ok(())
-    } else {
-        Err("sandbox_exec is unavailable for this session".to_string())
-    }
 }
 
 fn log_tool_perf(
@@ -375,8 +383,8 @@ async fn execute_stateful_tool_call(
                 Err(error) => return Err(error.to_string()),
             };
             let destination = project_context.directory;
-            if !crate::caller::allows_session_path(
-                state.services().hosted,
+            if !crate::caller::services_allow_session_path(
+                state.services(),
                 &info,
                 std::path::Path::new(&destination),
             ) {
@@ -561,7 +569,7 @@ async fn execute_stateful_tool_call(
             }))
         }
         "background_task" => {
-            ensure_native_process_tool(state, Some(session_id), tool_name).await?;
+            ensure_native_process_tool(state, Some(session_id), None, tool_name).await?;
             let result = crate::background_job::start_background_task_tool(
                 state,
                 snapshot.clone(),

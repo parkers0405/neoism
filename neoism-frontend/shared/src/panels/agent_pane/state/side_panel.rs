@@ -169,6 +169,8 @@ pub struct NeoismAgentSessionEntry {
     pub external_preview: Option<ExternalSessionPreview>,
     pub agent_kind: Option<AgentKind>,
     pub runtime_status: Option<String>,
+    /// Server-owned whole-family authority, independent of branch status.
+    pub catalog_activity: Option<neoism_agent_core::CatalogActivity>,
     /// Raw `time.updated` unix-ms — buckets the entry under a date-group
     /// header in home mode. `0` for untracked / non-session rows.
     pub updated_ms: u64,
@@ -217,6 +219,7 @@ impl NeoismAgentSessionEntry {
             external_preview: None,
             agent_kind: None,
             runtime_status: None,
+            catalog_activity: None,
             updated_ms: 0,
             pinned: false,
             is_header: false,
@@ -237,6 +240,7 @@ impl NeoismAgentSessionEntry {
             external_preview: None,
             agent_kind: None,
             runtime_status: None,
+            catalog_activity: None,
             updated_ms: 0,
             pinned: false,
             is_header: true,
@@ -258,6 +262,7 @@ impl NeoismAgentSessionEntry {
             external_preview: None,
             agent_kind: None,
             runtime_status: None,
+            catalog_activity: None,
             updated_ms: 0,
             pinned: false,
             is_header: false,
@@ -293,6 +298,14 @@ impl NeoismAgentSessionEntry {
 
     pub fn with_agent_kind(mut self, agent_kind: Option<AgentKind>) -> Self {
         self.agent_kind = agent_kind;
+        self
+    }
+
+    pub fn with_catalog_activity(
+        mut self,
+        activity: Option<neoism_agent_core::CatalogActivity>,
+    ) -> Self {
+        self.catalog_activity = activity;
         self
     }
 
@@ -791,6 +804,8 @@ pub struct NeoismAgentSidePanel {
     /// pinned-first / newest-day-first, filtered by `session_query`, with
     /// cyan date-group header rows injected.
     all_sessions: Vec<NeoismAgentSessionEntry>,
+    /// Live catalog edges take precedence over in-flight list snapshots.
+    session_activity_overrides: HashMap<String, neoism_agent_core::CatalogActivity>,
     external_sessions: Vec<NeoismAgentSessionEntry>,
     external_importing_key: Option<String>,
     external_errors: Vec<(ConversationSource, String)>,
@@ -823,6 +838,7 @@ pub struct NeoismAgentSidePanel {
     session_search_rect: Option<[f32; 4]>,
     sessions: Vec<NeoismAgentSessionEntry>,
     session_catalog_state: SessionCatalogState,
+    visible_running_indicator: bool,
     /// Opaque keyset cursor returned by the session catalogue. `None` means
     /// the successful page was final.
     session_next_cursor: Option<String>,
@@ -847,6 +863,9 @@ pub struct NeoismAgentSidePanel {
     subagents: Vec<NeoismAgentSessionEntry>,
     /// Session whose transcript is currently open in the pane.
     viewed_session_id: Option<String>,
+    /// None means legacy/unbound; Some(None) is authoritative no-chat context.
+    catalog_viewed_root: Option<Option<String>>,
+    detail_family_root: Option<String>,
     /// Keep the viewed child as a return-navigation affordance, even when
     /// opening a historical completion. Cleared when navigating away.
     retained_viewed_subagent_id: Option<String>,
@@ -931,6 +950,7 @@ impl Default for NeoismAgentSidePanel {
             last_row_origin_y: 0.0,
             selected_cursor_rect: None,
             all_sessions: Vec::new(),
+            session_activity_overrides: HashMap::new(),
             external_sessions: Vec::new(),
             external_importing_key: None,
             external_errors: Vec::new(),
@@ -950,10 +970,13 @@ impl Default for NeoismAgentSidePanel {
             session_refresh_attempts: 0,
             sessions: Vec::new(),
             session_catalog_state: SessionCatalogState::Initial,
+            visible_running_indicator: false,
             sessions_loading_started: Instant::now(),
             last_sessions_refresh: None,
             subagents: Vec::new(),
             viewed_session_id: None,
+            catalog_viewed_root: None,
+            detail_family_root: None,
             retained_viewed_subagent_id: None,
             subagents_loaded: false,
             subagent_refresh_in_flight: false,
@@ -1065,7 +1088,20 @@ impl NeoismAgentSidePanel {
     }
 
     pub fn sync_conversation_details_from(&mut self, catalog: &Self) {
-        let conversation_changed = self.viewed_session_id != catalog.viewed_session_id;
+        let root = catalog.subagents.first().map(|row| row.id.as_str());
+        self.sync_conversation_details_from_root(catalog, root);
+    }
+
+    pub fn sync_conversation_details_from_root(
+        &mut self,
+        catalog: &Self,
+        root: Option<&str>,
+    ) {
+        let previous_root = self
+            .detail_family_root
+            .as_deref()
+            .or_else(|| self.subagents.first().map(|row| row.id.as_str()));
+        let conversation_changed = previous_root != root;
         if conversation_changed {
             self.subagents.clear();
             self.branch_activities.clear();
@@ -1073,9 +1109,13 @@ impl NeoismAgentSidePanel {
             self.content_scroll_px = 0.0;
             self.reveal_selected_branch = false;
             self.selected = 0;
-            self.viewed_session_id
-                .clone_from(&catalog.viewed_session_id);
         }
+        self.detail_family_root = root.map(str::to_owned);
+        self.viewed_session_id
+            .clone_from(&catalog.viewed_session_id);
+        // Pin the new exact view before merging/pruning the family roster.
+        self.retained_viewed_subagent_id
+            .clone_from(&catalog.retained_viewed_subagent_id);
         if conversation_changed || self.subagents != catalog.subagents {
             self.set_subagents(catalog.subagents.clone());
         }
@@ -1215,6 +1255,7 @@ impl NeoismAgentSidePanel {
     pub fn set_user_hidden(&mut self, hidden: bool) {
         self.user_hidden = hidden;
         if hidden {
+            self.reset_visible_running_indicator();
             self.focused = false;
             self.selected_cursor_rect = None;
         }
@@ -1225,6 +1266,7 @@ impl NeoismAgentSidePanel {
     pub fn toggle_visibility(&mut self) {
         self.user_hidden = !self.user_hidden;
         if self.user_hidden {
+            self.reset_visible_running_indicator();
             self.focused = false;
             self.selected_cursor_rect = None;
         }
@@ -1398,6 +1440,7 @@ impl NeoismAgentSidePanel {
 
     pub fn invalidate_session_catalog(&mut self) {
         self.all_sessions.clear();
+        self.session_activity_overrides.clear();
         self.sessions.clear();
         self.session_next_cursor = None;
         self.session_requested_cursor = None;
@@ -1433,6 +1476,43 @@ impl NeoismAgentSidePanel {
 
     pub fn subagents(&self) -> &[NeoismAgentSessionEntry] {
         &self.subagents
+    }
+
+    /// Bind the catalog to the focused buffer's owning root. Explicit None
+    /// clears passive paint; it never falls back to cached pane/session data.
+    pub fn set_catalog_viewed_root(&mut self, root: Option<&str>) {
+        self.catalog_viewed_root =
+            Some(root.filter(|id| !id.is_empty()).map(str::to_owned));
+    }
+
+    pub fn catalog_viewed_root<'a>(
+        &'a self,
+        legacy_root: Option<&'a str>,
+    ) -> Option<&'a str> {
+        match &self.catalog_viewed_root {
+            Some(root) => root.as_deref(),
+            None => legacy_root,
+        }
+    }
+
+    /// Paint policy only: never changes the keyboard candidate or viewport.
+    pub fn catalog_highlight_index(&self, legacy_root: Option<&str>) -> Option<usize> {
+        if self.focused {
+            return (!self.new_chat_selected && self.selected < self.sessions.len())
+                .then_some(self.selected);
+        }
+        let root = self.catalog_viewed_root(legacy_root)?;
+        self.sessions
+            .iter()
+            .position(|row| !row.is_header && !row.is_excerpt && row.id == root)
+    }
+
+    pub fn detail_highlight_index(&self, viewed: Option<&str>) -> Option<usize> {
+        if self.focused {
+            return (self.selected < self.subagents.len()).then_some(self.selected);
+        }
+        let viewed = viewed?;
+        self.subagents.iter().position(|row| row.id == viewed)
     }
 
     pub fn viewed_session_id(&self) -> Option<&str> {
@@ -1733,6 +1813,7 @@ impl NeoismAgentSidePanel {
     /// the panel. Also drops focus — a panel that isn't on screen
     /// shouldn't keep keyboard focus.
     pub fn clear_last_panel_rect(&mut self) {
+        self.reset_visible_running_indicator();
         self.last_panel_rect = None;
         self.last_row_hit_rect = None;
         self.focused = false;
@@ -1778,15 +1859,54 @@ impl NeoismAgentSidePanel {
         self.set_session_page(sessions, None, None);
     }
 
+    /// Update the left catalog in place, independently of the chat/detail pane.
+    pub fn set_session_activity(
+        &mut self,
+        session_id: &str,
+        activity: neoism_agent_core::CatalogActivity,
+    ) -> bool {
+        let mut changed = self
+            .session_activity_overrides
+            .insert(session_id.to_owned(), activity)
+            != Some(activity);
+        for entry in self.all_sessions.iter_mut().chain(self.sessions.iter_mut()) {
+            if entry.id == session_id && entry.catalog_activity != Some(activity) {
+                entry.catalog_activity = Some(activity);
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    pub fn clear_session_activity_overrides(&mut self) {
+        self.session_activity_overrides.clear();
+    }
+
+    fn apply_session_activity_override(&self, entry: &mut NeoismAgentSessionEntry) {
+        if let Some(activity) = self.session_activity_overrides.get(&entry.id) {
+            entry.catalog_activity = Some(*activity);
+        }
+    }
+
     /// Apply one live catalogue mutation without discarding continuation pages
     /// or moving the user's selection to a different session after re-sorting.
-    pub fn upsert_session(&mut self, session: NeoismAgentSessionEntry) {
+    pub fn upsert_session(&mut self, mut session: NeoismAgentSessionEntry) {
+        self.apply_session_activity_override(&mut session);
         let selected_id = self.selected_session().map(|entry| entry.id.clone());
         if let Some(existing) = self
             .all_sessions
             .iter_mut()
             .find(|existing| existing.id == session.id)
         {
+            if session.catalog_activity.is_none() {
+                session.catalog_activity = existing.catalog_activity;
+            }
+            // Metadata-only rename/title events are not an idle edge.
+            if session.runtime_status.is_none()
+                && !self.session_activity_overrides.contains_key(&session.id)
+            {
+                session.runtime_status.clone_from(&existing.runtime_status);
+            }
             *existing = session;
         } else {
             self.all_sessions.push(session);
@@ -1808,7 +1928,8 @@ impl NeoismAgentSidePanel {
             .selected_session()
             .map(|entry| entry.stable_identity().to_owned());
         let viewport_anchor = self.session_viewport_anchor();
-        for session in sessions {
+        for mut session in sessions {
+            self.apply_session_activity_override(&mut session);
             if let Some(existing) = self
                 .all_sessions
                 .iter_mut()
@@ -1831,6 +1952,7 @@ impl NeoismAgentSidePanel {
     }
 
     pub fn remove_session(&mut self, session_id: &str) {
+        self.session_activity_overrides.remove(session_id);
         let selected_id = self
             .selected_session()
             .filter(|entry| entry.id != session_id)
@@ -1967,10 +2089,13 @@ impl NeoismAgentSidePanel {
     /// continuation pages append by id while preserving the viewport.
     pub fn set_session_page(
         &mut self,
-        sessions: Vec<NeoismAgentSessionEntry>,
+        mut sessions: Vec<NeoismAgentSessionEntry>,
         requested_cursor: Option<&str>,
         next_cursor: Option<String>,
     ) {
+        for session in &mut sessions {
+            self.apply_session_activity_override(session);
+        }
         let was_home = matches!(self.mode, SidePanelMode::Sessions);
         let catalog_was_empty =
             self.all_sessions.is_empty() && self.external_sessions.is_empty();
@@ -2487,37 +2612,18 @@ impl NeoismAgentSidePanel {
         !self.subagent_refresh_in_flight && !self.subagents_loaded
     }
 
-    /// Whether any tracked sub-agent is still active.
-    fn has_active_subagents(&self) -> bool {
-        let branch_active = self.branch_activities.values().any(|activity| {
-            matches!(
-                activity.status,
-                BranchStatus::Active | BranchStatus::WaitingPermission
-            )
-        });
-        branch_active
+    /// Preserve the existing waiting-permission blink ownership.
+    fn has_waiting_subagents(&self) -> bool {
+        self.branch_activities
+            .values()
+            .any(|activity| activity.status == BranchStatus::WaitingPermission)
             || self.subagents.iter().any(|entry| {
                 entry
                     .runtime_status
                     .as_deref()
                     .and_then(BranchStatus::from_runtime_status)
-                    .is_some_and(|status| {
-                        matches!(
-                            status,
-                            BranchStatus::Active | BranchStatus::WaitingPermission
-                        )
-                    })
+                    == Some(BranchStatus::WaitingPermission)
             })
-    }
-
-    fn has_running_sessions(&self) -> bool {
-        self.sessions.iter().any(|entry| {
-            entry
-                .runtime_status
-                .as_deref()
-                .and_then(BranchStatus::from_runtime_status)
-                .is_some_and(|status| matches!(status, BranchStatus::Active))
-        })
     }
 
     /// Claim the next branch-tree refresh. Returns a generation token that
@@ -3250,6 +3356,15 @@ impl NeoismAgentSidePanel {
         self.cursor_spring.position
     }
 
+    /// Each sidebar paint starts a fresh, independent redraw claim.
+    pub fn reset_visible_running_indicator(&mut self) {
+        self.visible_running_indicator = false;
+    }
+
+    pub fn note_visible_running_indicator(&mut self, visible: bool) {
+        self.visible_running_indicator |= visible;
+    }
+
     pub fn is_animating(&self) -> bool {
         let sessions_loading = matches!(self.mode, SidePanelMode::Sessions)
             && !self.user_hidden
@@ -3257,17 +3372,17 @@ impl NeoismAgentSidePanel {
             && (matches!(self.session_catalog_state, SessionCatalogState::Loading)
                 || self.session_page_loading);
         self.scroll.is_animating()
-                || self.cursor_spring.position != 0.0
-                || sessions_loading
-                || (self.semantic_searching && self.semantic_search_elapsed() < 1.5)
-                // Running sub-agents and conversation rows paint the rainbow
-                // loader spinner, so they must keep the host redrawing.
-                || self.has_active_subagents()
-                || self.has_running_sessions()
-                || (self.session_hover_target && self.session_title_hover_overflow)
-                || (self.session_hover_target && self.session_hover_scale < 0.998)
-                || (!self.session_hover_target && self.session_hover_scale > 0.002)
-                        || self.usage_scramble_elapsed_ms().is_some()
+            || self.cursor_spring.position != 0.0
+            || sessions_loading
+            || (self.semantic_searching && self.semantic_search_elapsed() < 1.5)
+            // Waiting retains its existing blink owner; active indicators own
+            // frames only after painting visible, nonoccluded ink.
+            || self.has_waiting_subagents()
+            || (!self.user_hidden && self.visible_running_indicator)
+            || (self.session_hover_target && self.session_title_hover_overflow)
+            || (self.session_hover_target && self.session_hover_scale < 0.998)
+            || (!self.session_hover_target && self.session_hover_scale > 0.002)
+            || self.usage_scramble_elapsed_ms().is_some()
     }
 
     pub fn catalog_is_animating(&self) -> bool {
@@ -3279,7 +3394,7 @@ impl NeoismAgentSidePanel {
             && (self.scroll.is_animating()
                 || self.cursor_spring.position != 0.0
                 || sessions_loading
-                || self.has_running_sessions()
+                || (!self.user_hidden && self.visible_running_indicator)
                 || (self.session_hover_target && self.session_hover_scale < 0.998)
                 || (!self.session_hover_target && self.session_hover_scale > 0.002)
                 || (self.session_hover_target && self.session_title_hover_overflow))
@@ -3323,6 +3438,145 @@ impl NeoismAgentSidePanel {
             return None;
         }
         Some(row)
+    }
+}
+
+#[cfg(test)]
+mod catalog_activity_tests {
+    use super::*;
+
+    #[test]
+    fn left_catalog_activity_all_variants_pages_and_invalidation() {
+        use neoism_agent_core::CatalogActivity;
+        for activity in [
+            CatalogActivity::Running,
+            CatalogActivity::Background,
+            CatalogActivity::Permission,
+            CatalogActivity::Idle,
+        ] {
+            let mut panel = NeoismAgentSidePanel::default();
+            panel.set_sessions(vec![root()]);
+            panel.set_session_activity("main", activity);
+            panel.set_session_activity("paged", activity);
+            panel.set_session_page(
+                vec![NeoismAgentSessionEntry::new("paged", "Paged", "")],
+                Some("cursor"),
+                None,
+            );
+            assert_eq!(
+                panel
+                    .all_sessions
+                    .iter()
+                    .find(|row| row.id == "paged")
+                    .unwrap()
+                    .catalog_activity,
+                Some(activity)
+            );
+            panel.upsert_session(root());
+            assert_eq!(
+                panel
+                    .all_sessions
+                    .iter()
+                    .find(|row| row.id == "main")
+                    .unwrap()
+                    .catalog_activity,
+                Some(activity)
+            );
+            panel.invalidate_session_catalog();
+            panel.set_sessions(vec![root()]);
+            assert_eq!(panel.all_sessions[0].catalog_activity, None);
+        }
+    }
+
+    fn root() -> NeoismAgentSessionEntry {
+        NeoismAgentSessionEntry::new("main", "Main conversation", "")
+    }
+
+    #[test]
+    fn left_catalog_activity_updates_without_detail_branches_or_reflow() {
+        let mut panel = NeoismAgentSidePanel::default();
+        panel.set_sessions(vec![
+            root(),
+            NeoismAgentSessionEntry::new("other", "Other", ""),
+        ]);
+        panel.selected = panel
+            .sessions
+            .iter()
+            .position(|row| row.id == "main")
+            .unwrap();
+        panel.scroll_px = 42.0;
+        let selected = panel.selected;
+        let identities: Vec<_> =
+            panel.sessions.iter().map(|row| row.id.clone()).collect();
+        assert!(panel.subagents.is_empty());
+        assert!(panel
+            .set_session_activity("main", neoism_agent_core::CatalogActivity::Running));
+        assert_eq!(
+            panel.selected_session().unwrap().catalog_activity,
+            Some(neoism_agent_core::CatalogActivity::Running)
+        );
+        assert_eq!(panel.selected, selected);
+        assert_eq!(panel.scroll_px, 42.0);
+        assert_eq!(
+            panel
+                .sessions
+                .iter()
+                .map(|row| row.id.clone())
+                .collect::<Vec<_>>(),
+            identities
+        );
+        assert!(!panel
+            .set_session_activity("main", neoism_agent_core::CatalogActivity::Running));
+        assert!(
+            panel.set_session_activity("main", neoism_agent_core::CatalogActivity::Idle)
+        );
+        assert_eq!(
+            panel.selected_session().unwrap().catalog_activity,
+            Some(neoism_agent_core::CatalogActivity::Idle)
+        );
+    }
+
+    #[test]
+    fn left_catalog_activity_survives_metadata_and_late_snapshots() {
+        let mut panel = NeoismAgentSidePanel::default();
+        panel.set_sessions(vec![root()]);
+        panel.set_session_activity("main", neoism_agent_core::CatalogActivity::Running);
+        panel.upsert_session(NeoismAgentSessionEntry::new("main", "Renamed", ""));
+        panel.reconcile_session_head(vec![root()], None);
+        panel.set_session_page(vec![root()], None, None);
+        assert_eq!(
+            panel.all_sessions[0].catalog_activity,
+            Some(neoism_agent_core::CatalogActivity::Running)
+        );
+        panel.set_session_activity("main", neoism_agent_core::CatalogActivity::Idle);
+        let stale = root()
+            .with_runtime_status(Some("running".into()))
+            .with_catalog_activity(Some(neoism_agent_core::CatalogActivity::Running));
+        panel.upsert_session(stale.clone());
+        panel.reconcile_session_head(vec![stale.clone()], None);
+        panel.set_session_page(vec![stale], None, None);
+        assert_eq!(
+            panel.all_sessions[0].catalog_activity,
+            Some(neoism_agent_core::CatalogActivity::Idle)
+        );
+    }
+
+    #[test]
+    fn left_catalog_activity_before_row_and_reconnect_recovery() {
+        let mut panel = NeoismAgentSidePanel::default();
+        panel.set_session_activity("main", neoism_agent_core::CatalogActivity::Running);
+        panel.upsert_session(root());
+        assert_eq!(
+            panel.all_sessions[0].catalog_activity,
+            Some(neoism_agent_core::CatalogActivity::Running)
+        );
+        panel.clear_session_activity_overrides();
+        panel.reconcile_session_head(vec![root()], None);
+        assert!(panel.all_sessions[0].runtime_status.is_none());
+        panel.set_session_activity("main", neoism_agent_core::CatalogActivity::Running);
+        panel.remove_session("main");
+        panel.set_sessions(vec![root()]);
+        assert!(panel.all_sessions[0].runtime_status.is_none());
     }
 }
 

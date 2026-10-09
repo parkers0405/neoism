@@ -714,10 +714,14 @@ fn task_session_id_from_part(part: &Value) -> Option<String> {
         return None;
     }
     let state = part.get("state").unwrap_or(&Value::Null);
-    for metadata in [state.get("metadata"), part.get("metadata")]
-        .into_iter()
-        .flatten()
-    {
+    resolved_task_session_id(state, part.get("metadata")).map(str::to_owned)
+}
+
+fn resolved_task_session_id<'a>(
+    state: &'a Value,
+    part_metadata: Option<&'a Value>,
+) -> Option<&'a str> {
+    for metadata in [state.get("metadata"), part_metadata].into_iter().flatten() {
         if let Some(session_id) = metadata
             .get("sessionId")
             .or_else(|| metadata.get("sessionID"))
@@ -725,14 +729,13 @@ fn task_session_id_from_part(part: &Value) -> Option<String> {
             .and_then(Value::as_str)
             .filter(|id| !id.is_empty())
         {
-            return Some(session_id.to_string());
+            return Some(session_id);
         }
     }
     state
         .get("output")
         .and_then(Value::as_str)
         .and_then(|output| task_ids_from_completion_text(output).next())
-        .map(str::to_string)
 }
 
 fn task_ids_from_completion_text(text: &str) -> impl Iterator<Item = &str> {
@@ -827,6 +830,14 @@ fn message_blocks_with_start(
     }
 
     if role == "assistant" && is_compaction_summary_message(parts) {
+        // Keep normal reasoning part identities on snapshot/reconnect. The
+        // summary remains one message-keyed card, after the reasoning trace;
+        // only text parts contribute to its body.
+        let mut blocks = parts
+            .iter()
+            .filter(|part| part.get("type").and_then(Value::as_str) == Some("reasoning"))
+            .filter_map(part_block)
+            .collect::<Vec<_>>();
         let text = parts
             .iter()
             .filter(|part| part.get("type").and_then(Value::as_str) == Some("text"))
@@ -841,7 +852,8 @@ fn message_blocks_with_start(
                 })
                 .and_then(assistant_error_message)
             {
-                return vec![agent_message_system("Agent error", error)];
+                blocks.push(agent_message_system("Agent error", error));
+                return blocks;
             }
         }
         let mut block = NeoismAgentMessage::compaction(text, "summary");
@@ -855,7 +867,8 @@ fn message_blocks_with_start(
                 .unwrap_or_default()
                 .to_string(),
         };
-        return vec![block];
+        blocks.push(block);
+        return blocks;
     }
 
     let mut blocks = parts.iter().filter_map(part_block).collect::<Vec<_>>();
@@ -1077,6 +1090,121 @@ fn is_compaction_summary_message(parts: &[Value]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn task_projection_part(id: &str, requested: Option<&str>) -> Value {
+        json!({"id": id, "type": "tool", "tool": "task", "state": {
+            "status": "pending", "input": {"task_id": requested,
+                "subagent_type": "explore", "description": "Check parser"}
+        }})
+    }
+
+    #[test]
+    fn task_projection_launch_and_provisional_followup() {
+        for requested in [None, Some(""), Some("  "), Some("ses-child")] {
+            let part = task_projection_part("prt-pending", requested);
+            let block = part_block(&part).unwrap();
+            let name = if requested == Some("ses-child") {
+                "Follow-up"
+            } else {
+                "Task"
+            };
+            assert_eq!(block.title, format!("{name}(@explore · Check parser)"));
+            assert_eq!(tool_title("task", &part["state"]), block.title);
+            assert_eq!(block.id, "prt-pending");
+            assert_eq!(block.tool, "task");
+            assert_eq!(block.status, "pending");
+        }
+    }
+
+    #[test]
+    fn task_projection_continuation_live_history_and_click_identity() {
+        for runtime in ["queued", "running", "completed"] {
+            let mut part = task_projection_part("prt-followup", Some("ses-child"));
+            let output =
+                format!("task_id: ses-child\nstatus: {runtime}\nresult unchanged");
+            part["state"]["status"] = json!("completed");
+            part["state"]["output"] = json!(output);
+            part["state"]["metadata"] =
+                json!({"sessionId": "ses-child", "agent": "explore", "status": runtime});
+            let live = part_block(&part).unwrap();
+            let history = message_blocks(&json!({
+                "info": canonical_assistant_info(json!({})), "parts": [part]
+            }));
+            let historical = history.iter().find(|block| block.id == live.id).unwrap();
+            assert_eq!(live.title, "Follow-up(@explore · Check parser)");
+            assert_eq!(historical.title, live.title);
+            assert_eq!(historical.detail, live.detail);
+            assert_eq!(historical.status, runtime);
+            assert_eq!(live.status, runtime);
+            assert_eq!(live.tool, "task");
+            assert_eq!(live.detail, output);
+            assert_eq!(
+                crate::panels::agent_pane::message_policy::task_id_from_text(
+                    &live.detail,
+                    &live.text
+                ),
+                Some("ses-child".to_owned())
+            );
+        }
+    }
+
+    #[test]
+    fn task_projection_resolved_identity_overrides_missing_id_fallback() {
+        for source in ["state", "part", "output"] {
+            for resolved in ["ses-child", "ses-new"] {
+                let mut part = task_projection_part("prt-resolved", Some("ses-child"));
+                part["state"]["status"] = json!("completed");
+                part["state"]["output"] =
+                    json!(format!("task_id: {resolved}\nstatus: running"));
+                if source != "output" {
+                    // Metadata is authoritative even if an older output disagrees.
+                    part["state"]["output"] =
+                        json!("task_id: ses-stale\nstatus: running");
+                    let metadata = json!({"sessionId": resolved, "agent": "build"});
+                    if source == "state" {
+                        part["state"]["metadata"] = metadata;
+                    } else {
+                        part["metadata"] = metadata;
+                    }
+                }
+                let block = part_block(&part).unwrap();
+                let name = if resolved == "ses-child" {
+                    "Follow-up"
+                } else {
+                    "Task"
+                };
+                let agent = if source == "output" {
+                    "explore"
+                } else {
+                    "build"
+                };
+                assert_eq!(block.title, format!("{name}(@{agent} · Check parser)"));
+                assert_eq!(task_session_id_from_part(&part).as_deref(), Some(resolved));
+                assert_eq!(block.id, "prt-resolved");
+                assert_eq!(block.tool, "task");
+                assert_eq!(block.status, "running");
+                assert_eq!(block.detail, part["state"]["output"].as_str().unwrap());
+            }
+        }
+    }
+
+    #[test]
+    fn task_projection_keeps_launch_and_continuation_as_chronological_parts() {
+        let launch = task_projection_part("prt-launch", None);
+        let followup = task_projection_part("prt-followup", Some("ses-child"));
+        let history = message_blocks(&json!({
+            "info": canonical_assistant_info(json!({})), "parts": [launch, followup]
+        }));
+        let tasks: Vec<_> = history
+            .iter()
+            .filter(|block| block.tool == "task")
+            .collect();
+        assert_eq!(tasks.len(), 2);
+        assert_eq!(tasks[0].id, "prt-launch");
+        assert_eq!(tasks[1].id, "prt-followup");
+        assert!(tasks[0].title.starts_with("Task("));
+        assert!(tasks[1].title.starts_with("Follow-up("));
+    }
 
     #[test]
     fn tool_batch_mapping_requires_explicit_nonempty_top_level_provenance() {
@@ -2018,6 +2146,108 @@ mod tests {
         assert_eq!(blocks[0].text, "## Goal\n- Preserve state");
     }
 
+    fn compaction_with_reasoning_fixture(overrides: Value) -> Value {
+        json!({
+            "info": canonical_assistant_info(overrides),
+            "parts": [
+                { "id": "prt-marker", "type": "compaction", "messageID": "msg-summary", "summary": true },
+                {
+                    "id": "reason-1", "type": "reasoning", "messageID": "msg-summary",
+                    "text": "Identify the current goal",
+                    "metadata": { "openai": { "itemId": "rs_1", "encryptedContent": "opaque-1" } }
+                },
+                {
+                    "id": "reason-2", "type": "reasoning", "messageID": "msg-summary",
+                    "text": "Preserve the remaining work"
+                }
+            ]
+        })
+    }
+
+    fn assert_compaction_reasoning(blocks: &[NeoismAgentMessage]) {
+        assert_eq!(blocks[0].id, "reason-1");
+        assert_eq!(blocks[1].id, "reason-2");
+        for block in &blocks[..2] {
+            assert_eq!(block.kind, NeoismAgentMessageKind::Reasoning);
+            assert_eq!(block.title, "Thinking");
+        }
+        assert_eq!(blocks[0].text, "Identify the current goal");
+        assert_eq!(blocks[1].text, "Preserve the remaining work");
+    }
+
+    #[test]
+    fn assistant_compaction_reasoning_only_ongoing_preserves_trace() {
+        let message = compaction_with_reasoning_fixture(json!({ "id": "msg-summary" }));
+        let blocks = message_blocks(&message);
+
+        assert_eq!(blocks.len(), 3);
+        assert_compaction_reasoning(&blocks);
+        assert_eq!(blocks[2].id, "msg-summary");
+        assert_eq!(blocks[2].kind, NeoismAgentMessageKind::Compaction);
+        assert!(blocks[2].text.is_empty());
+        // Snapshot and live mapping use exactly the same reasoning identities
+        // and body, even with parent identity and opaque provider metadata.
+        assert_eq!(blocks[0], part_block(&message["parts"][1]).unwrap());
+        assert_eq!(blocks[1], part_block(&message["parts"][2]).unwrap());
+    }
+
+    #[test]
+    fn assistant_compaction_finished_summary_follows_reasoning() {
+        let mut message = compaction_with_reasoning_fixture(json!({
+            "id": "msg-summary", "time": { "created": 0, "completed": 1000 }
+        }));
+        let parts = message["parts"].as_array_mut().unwrap();
+        // Text may be stored before reasoning; it still forms just one card
+        // after the trace, without absorbing reasoning text.
+        parts.insert(
+            1,
+            json!({ "id": "text-1", "type": "text", "text": "## Goal" }),
+        );
+        parts.push(json!({ "id": "text-2", "type": "text", "text": "- Preserve state" }));
+        let blocks = message_blocks_from_response(&[message], true);
+
+        assert_eq!(blocks.len(), 3);
+        assert_compaction_reasoning(&blocks);
+        assert_eq!(blocks[2].id, "msg-summary");
+        assert_eq!(blocks[2].kind, NeoismAgentMessageKind::Compaction);
+        assert_eq!(blocks[2].text, "## Goal\n- Preserve state");
+    }
+
+    #[test]
+    fn assistant_compaction_failed_preserves_reasoning_before_error() {
+        let message = compaction_with_reasoning_fixture(json!({
+            "id": "msg-summary", "error": { "message": "compaction failed" }
+        }));
+        let blocks = message_blocks(&message);
+
+        assert_eq!(blocks.len(), 3);
+        assert_compaction_reasoning(&blocks);
+        assert_eq!(blocks[2].kind, NeoismAgentMessageKind::System);
+        assert_eq!(blocks[2].title, "Agent error");
+        assert_eq!(blocks[2].text, "compaction failed");
+    }
+
+    #[test]
+    fn assistant_compaction_does_not_invent_encrypted_reasoning_text() {
+        let message = json!({
+            "info": canonical_assistant_info(json!({ "id": "msg-summary" })),
+            "parts": [
+                { "id": "prt-marker", "type": "compaction", "summary": true },
+                {
+                    "id": "reason-encrypted", "type": "reasoning", "messageID": "msg-summary",
+                    "metadata": { "openai": { "encryptedContent": "opaque-only" } }
+                },
+                { "id": "text-1", "type": "text", "text": "Summary only" }
+            ]
+        });
+        let blocks = message_blocks(&message);
+
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].id, "msg-summary");
+        assert_eq!(blocks[0].kind, NeoismAgentMessageKind::Compaction);
+        assert_eq!(blocks[0].text, "Summary only");
+    }
+
     #[test]
     fn live_compaction_marker_and_summary_share_one_identity_and_kind() {
         let marker = part_block(&json!({
@@ -2398,15 +2628,19 @@ fn tool_block(part: &Value) -> NeoismAgentMessage {
     if output_kind == NeoismAgentOutputKind::Todos && output.content.is_empty() {
         todos = todos_from_state(state);
     }
-    let title = if let Some(path) = output.path.as_deref() {
-        let base = tool_title(tool, state);
-        if base.contains('(') {
-            base
-        } else {
-            format!("{base}({})", short_path(path))
-        }
+    let base_title = if tool == "task" {
+        task_tool_title(state, part.get("metadata"))
     } else {
         tool_title(tool, state)
+    };
+    let title = if let Some(path) = output.path.as_deref() {
+        if base_title.contains('(') {
+            base_title.clone()
+        } else {
+            format!("{base_title}({})", short_path(path))
+        }
+    } else {
+        base_title.clone()
     };
     let mut message = agent_message_tool(
         title,
@@ -2416,7 +2650,7 @@ fn tool_block(part: &Value) -> NeoismAgentMessage {
         output_kind,
         output
             .lang
-            .unwrap_or_else(|| infer_lang_from_title(&tool_title(tool, state))),
+            .unwrap_or_else(|| infer_lang_from_title(&base_title)),
         todos,
     );
     message.detail = if status == "error" {
@@ -2543,7 +2777,48 @@ fn format_cost_micros(micros: u64) -> String {
 
 const TOOL_TITLE_TARGET_MAX_CHARS: usize = 96;
 
+fn task_tool_title(state: &Value, part_metadata: Option<&Value>) -> String {
+    let input = state.get("input").unwrap_or(&Value::Null);
+    let requested = input
+        .get("task_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty());
+    let resolved = resolved_task_session_id(state, part_metadata);
+    // Before resolution the input is provisional. A nonexistent requested ID
+    // can fall back to a new child: authoritative metadata/output must win.
+    let continuation =
+        requested.is_some_and(|id| resolved.is_none_or(|child| child == id));
+    let name = if continuation { "Follow-up" } else { "Task" };
+    let agent = [state.get("metadata"), part_metadata]
+        .into_iter()
+        .flatten()
+        .find_map(|metadata| metadata.get("agent").and_then(Value::as_str))
+        .or_else(|| input.get("subagent_type").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|agent| !agent.is_empty());
+    let description = input
+        .get("description")
+        .and_then(Value::as_str)
+        .filter(|description| !description.trim().is_empty())
+        .or_else(|| state.get("title").and_then(Value::as_str))
+        .filter(|description| !description.trim().is_empty());
+    let target = match (agent, description) {
+        (Some(agent), Some(description)) => format!("@{agent} · {description}"),
+        (Some(agent), None) => format!("@{agent}"),
+        (None, Some(description)) => description.to_owned(),
+        (None, None) => return name.to_owned(),
+    };
+    format!(
+        "{name}({})",
+        truncate_line(&target, TOOL_TITLE_TARGET_MAX_CHARS)
+    )
+}
+
 fn tool_title(tool: &str, state: &Value) -> String {
+    if tool == "task" {
+        return task_tool_title(state, None);
+    }
     let name = tool_name(tool);
     let input = state.get("input").unwrap_or(&Value::Null);
     let path = input

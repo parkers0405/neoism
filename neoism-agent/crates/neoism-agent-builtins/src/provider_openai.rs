@@ -514,13 +514,228 @@ fn merge_provider_options(body: &mut Value, options: &BTreeMap<String, Value>) {
         ) {
             continue;
         }
+        if key == "reasoning" {
+            if let (Some(defaults), Some(overrides)) = (
+                object.get_mut(key).and_then(Value::as_object_mut),
+                value.as_object(),
+            ) {
+                defaults.extend(overrides.clone());
+                if overrides.get("effort").and_then(Value::as_str) == Some("none")
+                    && !overrides.contains_key("summary")
+                {
+                    defaults.remove("summary");
+                }
+                continue;
+            }
+        }
         object.insert(key.clone(), value.clone());
     }
+}
+
+fn responses_body(request: &ProviderGenerationRequest) -> Value {
+    let model = request
+        .api
+        .as_ref()
+        .map(|api| api.id.as_str())
+        .filter(|id| !id.is_empty())
+        .unwrap_or(&request.model_id);
+    let mut body = responses_request_body_with_text_verbosity(
+        model,
+        request.variant.as_deref(),
+        &request.messages,
+        &request.tools,
+        request.text_verbosity,
+    );
+    let supported = request.api.as_ref().and_then(|api| api.reasoning) != Some(false);
+    if !supported {
+        body.as_object_mut().unwrap().remove("reasoning");
+        body.as_object_mut().unwrap().remove("include");
+    }
+    if let Some(session_id) = request.session_id.as_deref().filter(|id| !id.is_empty()) {
+        body["prompt_cache_key"] = Value::String(session_id.to_string());
+    }
+    merge_provider_options(&mut body, &request.options);
+    // The request projects catalog/API support, not the full model metadata.
+    // A positive capability can request the server's default reasoning summary
+    // without inventing an effort that a future model might not support.
+    if supported
+        && request.api.as_ref().and_then(|api| api.reasoning) == Some(true)
+        && body.get("reasoning").is_none()
+        && !request.options.contains_key("reasoning")
+    {
+        body["reasoning"] = json!({"summary": "auto"});
+    }
+    if supported {
+        if let Some(reasoning) = body.get_mut("reasoning").and_then(Value::as_object_mut)
+        {
+            if reasoning.get("effort").and_then(Value::as_str) == Some("none") {
+                if !request
+                    .options
+                    .get("reasoning")
+                    .and_then(Value::as_object)
+                    .is_some_and(|options| options.contains_key("summary"))
+                {
+                    reasoning.remove("summary");
+                }
+            } else if reasoning.get("effort").and_then(Value::as_str).is_some()
+                || request.api.as_ref().and_then(|api| api.reasoning) == Some(true)
+            {
+                reasoning.entry("summary").or_insert(json!("auto"));
+            }
+        }
+    }
+    // Effort compatibility does not veto readable summaries. Drop only our
+    // generated effort; explicit provider options remain authoritative.
+    if request.api.as_ref().and_then(|api| api.reasoning_effort) == Some(false)
+        && !request
+            .options
+            .get("reasoning")
+            .and_then(Value::as_object)
+            .is_some_and(|options| options.contains_key("effort"))
+    {
+        if let Some(reasoning) = body.get_mut("reasoning").and_then(Value::as_object_mut)
+        {
+            reasoning.remove("effort");
+            if reasoning.is_empty() {
+                body.as_object_mut().unwrap().remove("reasoning");
+            }
+        }
+    }
+    if !request.options.contains_key("include") {
+        if supported && body.get("reasoning").is_some_and(Value::is_object) {
+            body["include"] = json!(["reasoning.encrypted_content"]);
+        } else {
+            body.as_object_mut().unwrap().remove("include");
+        }
+    }
+    body
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn summary_capability_is_independent_of_effort_compatibility() {
+        let mut request: ProviderGenerationRequest = serde_json::from_value(json!({
+            "providerId":"openai", "modelId":"future-reasoner", "variant":"high", "messages":[],
+            "api":{"id":"future-reasoner","url":"","npm":"@ai-sdk/openai", "reasoning":true,"reasoningEffort":false}
+        })).unwrap();
+        assert_eq!(
+            responses_body(&request)["reasoning"],
+            json!({"summary":"auto"})
+        );
+        request.variant = None;
+        assert_eq!(
+            responses_body(&request)["reasoning"],
+            json!({"summary":"auto"})
+        );
+        request.variant = Some("none".into());
+        assert!(responses_body(&request).get("reasoning").is_none());
+        request.variant = Some("high".into());
+        request
+            .options
+            .insert("reasoning".into(), json!({"effort":"low","summary":null}));
+        assert_eq!(
+            responses_body(&request)["reasoning"],
+            json!({"effort":"low","summary":null})
+        );
+        request.options.clear();
+        request.api.as_mut().unwrap().reasoning = Some(false);
+        assert!(responses_body(&request).get("reasoning").is_none());
+    }
+
+    #[test]
+    fn effort_compatibility_is_not_a_model_reasoning_capability() {
+        let mut request: ProviderGenerationRequest = serde_json::from_value(json!({
+            "providerId":"openai", "modelId":"future-chat", "messages":[],
+            "api":{"id":"future-chat","url":"","npm":"@ai-sdk/openai", "reasoningEffort":true}
+        })).unwrap();
+        assert!(responses_body(&request).get("reasoning").is_none());
+        request.api.as_mut().unwrap().reasoning = Some(false);
+        request.variant = Some("high".into());
+        assert!(responses_body(&request).get("reasoning").is_none());
+    }
+
+    #[test]
+    fn responses_options_preserve_summary_defaults_and_explicit_overrides() {
+        let mut request: ProviderGenerationRequest = serde_json::from_value(json!({
+            "providerId":"openai", "modelId":"future-reasoner", "variant":"high", "messages":[]
+        })).unwrap();
+        request
+            .options
+            .insert("reasoning".into(), json!({"effort":"low"}));
+        assert_eq!(
+            responses_body(&request)["reasoning"],
+            json!({"effort":"low","summary":"auto"})
+        );
+        request.variant = None;
+        assert_eq!(
+            responses_body(&request)["reasoning"],
+            json!({"effort":"low","summary":"auto"})
+        );
+        for summary in [json!("concise"), json!(null)] {
+            request.options.insert(
+                "reasoning".into(),
+                json!({"effort":"high","summary":summary}),
+            );
+            assert_eq!(responses_body(&request)["reasoning"]["summary"], summary);
+        }
+        request.model_id = "gpt-5.5".into();
+        request
+            .options
+            .insert("reasoning".into(), json!({"effort":"none"}));
+        assert_eq!(
+            responses_body(&request)["reasoning"],
+            json!({"effort":"none"})
+        );
+        for disabled in [json!(null), json!(false)] {
+            request.options.insert("reasoning".into(), disabled.clone());
+            assert_eq!(responses_body(&request)["reasoning"], disabled);
+        }
+        request.options.clear();
+        request.variant = Some("high".into());
+        request.api = Some(neoism_agent_core::ProviderApiInfo {
+            id: "openai/gpt-6.1-sol".into(),
+            reasoning_effort: Some(false),
+            reasoning: Some(false),
+            ..Default::default()
+        });
+        assert!(responses_body(&request).get("reasoning").is_none());
+        request.api.as_mut().unwrap().reasoning_effort = None;
+        request.api.as_mut().unwrap().reasoning = Some(true);
+        assert_eq!(responses_body(&request)["model"], "openai/gpt-6.1-sol");
+        assert_eq!(responses_body(&request)["reasoning"]["summary"], "auto");
+        request.variant = None;
+        assert_eq!(
+            responses_body(&request)["reasoning"],
+            json!({"summary":"auto"})
+        );
+        assert_eq!(
+            responses_body(&request)["include"],
+            json!(["reasoning.encrypted_content"])
+        );
+        request.model_id = "arbitrary-next-reasoner".into();
+        request.api.as_mut().unwrap().id = request.model_id.clone();
+        assert_eq!(
+            responses_body(&request)["reasoning"],
+            json!({"summary":"auto"})
+        );
+        request
+            .options
+            .insert("reasoning".into(), json!({"summary":"detailed"}));
+        assert_eq!(
+            responses_body(&request)["reasoning"],
+            json!({"summary":"detailed"})
+        );
+        request
+            .options
+            .insert("reasoning".into(), json!({"effort":"none"}));
+        assert_eq!(
+            responses_body(&request)["reasoning"],
+            json!({"effort":"none"})
+        );
+    }
 
     #[test]
     fn codex_model_catalog_only_lists_visible_slugs() {
@@ -601,17 +816,7 @@ fn openai_api_key_responses_stream(
 
         let endpoint = std::env::var("NEOISM_AGENT_OPENAI_RESPONSES_URL")
             .unwrap_or_else(|_| "https://api.openai.com/v1/responses".to_string());
-        let mut body = responses_request_body_with_text_verbosity(
-            request.model_id.clone(),
-            request.variant.as_deref(),
-            &request.messages,
-            &request.tools,
-            request.text_verbosity,
-        );
-        if let Some(session_id) = request.session_id.as_deref().filter(|id| !id.is_empty()) {
-            body["prompt_cache_key"] = Value::String(session_id.to_string());
-        }
-        merge_provider_options(&mut body, &request.options);
+        let body = responses_body(&request);
         let mut request_builder = client
             .client
             .post(&endpoint)
@@ -679,17 +884,7 @@ fn openai_oauth_responses_stream(
 
         let endpoint = std::env::var("NEOISM_AGENT_OPENAI_CODEX_RESPONSES_URL")
             .unwrap_or_else(|_| CODEX_RESPONSES_ENDPOINT.to_string());
-        let mut body = responses_request_body_with_text_verbosity(
-            request.model_id.clone(),
-            request.variant.as_deref(),
-            &request.messages,
-            &request.tools,
-            request.text_verbosity,
-        );
-        if let Some(session_id) = request.session_id.as_deref().filter(|id| !id.is_empty()) {
-            body["prompt_cache_key"] = Value::String(session_id.to_string());
-        }
-        merge_provider_options(&mut body, &request.options);
+        let body = responses_body(&request);
         let mut request_builder = client
             .client
             .post(&endpoint)

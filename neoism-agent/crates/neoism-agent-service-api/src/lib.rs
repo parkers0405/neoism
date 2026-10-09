@@ -17,16 +17,22 @@ use serde_json::Value;
 pub mod artifacts;
 pub mod background_process;
 pub mod daemon_credential;
-pub mod execution;
+pub mod worker_credentials;
+pub mod workspace_worker;
+pub use worker_credentials::{
+    WorkspaceWorkerMcpCredentialStore, WorkspaceWorkerProviderCredentialStore,
+};
+pub use workspace_worker::{
+    validate_worker_vm_path, worker_vm_path_contains, AuthorizedWorkerAccess,
+    IssuedWorkerCredential, WorkspaceWorkerBinding, WorkspaceWorkerBootstrap,
+    WorkspaceWorkerCredentialClaims, WorkspaceWorkerCredentialIssuer,
+    WorkspaceWorkerSigningKey, WorkspaceWorkerTenantResolver,
+    WorkspaceWorkerVerificationKey,
+};
 pub mod mcp_credentials;
 pub mod provider_credentials;
 pub mod tenant;
 pub use artifacts::ArtifactBlobStore;
-pub use execution::{
-    DisabledExecutionProvider, ExecResult, ExecutionLease, ExecutionProcess,
-    ExecutionProvider, ExecutionRequest, ExecutionScope, NetworkPolicy, ProcessChunk,
-    ProcessClass, ProcessSpec, ResourceLimits, WorkspaceCommit, WorkspaceMaterialization,
-};
 pub use mcp_credentials::{
     LocalMcpCredentialStore, McpConnectionRef, McpCredential, McpCredentialStore,
     McpOAuthAttempt, McpOAuthClientRegistration, McpOAuthTokens,
@@ -851,7 +857,8 @@ pub struct AgentServices {
     pub provider_credentials: Arc<dyn ProviderCredentialStore>,
     pub mcp_credentials: Arc<dyn McpCredentialStore>,
     pub tenant_resolver: Option<Arc<dyn TenantResolver>>,
-    pub execution: Arc<dyn ExecutionProvider>,
+    /// Host-injected immutable admission profile; never sourced from /config.
+    pub workspace_worker: Option<Arc<WorkspaceWorkerBinding>>,
     pub artifacts: Option<Arc<dyn ArtifactBlobStore>>,
     pub documentation: Option<Arc<dyn DocumentationService>>,
     pub memory: Option<Arc<dyn MemoryService>>,
@@ -879,7 +886,7 @@ impl AgentServices {
             provider_credentials,
             mcp_credentials,
             tenant_resolver: None,
-            execution: Arc::new(DisabledExecutionProvider),
+            workspace_worker: None,
             artifacts: None,
             documentation: None,
             memory: None,
@@ -931,9 +938,16 @@ impl AgentServices {
         self
     }
 
-    pub fn with_execution(mut self, execution: Arc<dyn ExecutionProvider>) -> Self {
-        self.execution = execution;
+    /// Register a controller-provisioned worker. Inject a resolver and scoped
+    /// credential stores before calling validate(); there is no local auth fallback.
+    pub fn for_workspace_worker(mut self, binding: WorkspaceWorkerBinding) -> Self {
+        self.workspace_worker = Some(Arc::new(binding));
+        self.hosted = true;
         self
+    }
+
+    pub fn shared_control_plane(&self) -> bool {
+        self.hosted && self.workspace_worker.is_none()
     }
 
     pub fn with_artifacts(mut self, artifacts: Arc<dyn ArtifactBlobStore>) -> Self {
@@ -949,6 +963,11 @@ impl AgentServices {
     }
 
     pub fn validate(&self) -> Result<(), ServiceError> {
+        if self.workspace_worker.is_some() && !self.hosted {
+            return Err(ServiceError::new(
+                "workspace workers require strict hosted authentication",
+            ));
+        }
         if !self.hosted {
             return Ok(());
         }
@@ -967,15 +986,19 @@ impl AgentServices {
                 "hosted control planes require tenant-scoped MCP credentials",
             ));
         }
-        if self.execution.backend_name() == "local-native"
-            || (!self.execution.available()
-                && self.execution.backend_name() != "disabled")
+        if let Some(worker) = &self.workspace_worker {
+            worker.validate()?;
+        }
+        if self.shared_control_plane()
+            && self.provider_credentials.backend_name() == "workspace-worker-local"
         {
             return Err(ServiceError::new(
-                "hosted control planes require a non-native execution provider or explicitly disabled execution",
+                "worker-local credentials cannot serve a shared control plane",
             ));
         }
-        if !self.artifacts.as_ref().is_some_and(|store| store.shared()) {
+        if self.shared_control_plane()
+            && !self.artifacts.as_ref().is_some_and(|store| store.shared())
+        {
             return Err(ServiceError::new(
                 "hosted control planes require a shared artifact store",
             ));

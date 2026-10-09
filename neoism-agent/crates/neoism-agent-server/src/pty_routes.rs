@@ -35,6 +35,11 @@ pub(crate) async fn pty_create(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Result<Json<PtyInfo>, ApiError> {
+    if state.services().shared_control_plane() {
+        return Err(ApiError::forbidden(
+            "PTYs are unavailable on the shared control plane",
+        ));
+    }
     let request = serde_json::from_value::<pty::PtyCreateRequest>(body)
         .map_err(|error| ApiError::bad_request(error.to_string()))?;
     let shell = pty::discover_shells()
@@ -42,7 +47,17 @@ pub(crate) async fn pty_create(
         .find(|shell| shell.acceptable)
         .map(|shell| shell.path)
         .unwrap_or_else(pty::fallback_shell);
-    let directory = resolve_directory(query.directory, &headers);
+    let directory =
+        if query.directory.is_none() && !headers.contains_key("x-neoism-directory") {
+            state
+                .services()
+                .workspace_worker
+                .as_ref()
+                .map(|worker| worker.root().to_string_lossy().into_owned())
+                .unwrap_or_else(|| resolve_directory(None, &headers))
+        } else {
+            resolve_directory(query.directory, &headers)
+        };
     let runtime = state
         .workspace_runtime(&directory)
         .await
@@ -56,6 +71,16 @@ pub(crate) async fn pty_create(
         shell,
         now_millis(),
     );
+    if state
+        .services()
+        .workspace_worker
+        .as_ref()
+        .is_some_and(|worker| !worker.admits_path(std::path::Path::new(&info.cwd)))
+    {
+        return Err(ApiError::forbidden(
+            "PTY directory is outside the worker root",
+        ));
+    }
     if let Some(program) = info.command.first_mut() {
         let resolved = resolve_pty_command(state.services(), program, &info.cwd)
             .map_err(|error| ApiError::bad_request(error.to_string()))?;

@@ -636,6 +636,21 @@ fn append_estimated_rows<P>(
     }
 }
 
+// Headless regression seam: run the production lazy row builder, including
+// visibility, grouping, display projection, height estimates and row packing.
+// This does not stand in for GPU-backed exact text measurement.
+#[cfg(test)]
+pub(super) fn estimated_timeline_rows_for_test(
+    pane: &NeoismAgentPane,
+    width: f32,
+    s: f32,
+    gap: f32,
+) -> Vec<TimelineLayoutRow<NeoismAgentMessage>> {
+    let mut rows = Vec::new();
+    append_estimated_rows(pane, width, s, gap, &mut rows);
+    rows
+}
+
 /// Cheap off-screen height estimate. Deliberately conservative (under-counts
 /// rich content like code/diffs/images) so the exact region only ever grows —
 /// visible rows are always exactly measured; this feeds the scrollbar only.
@@ -665,13 +680,20 @@ where
         };
         return 24.0 * s + image_h + lines as f32 * 19.0 * s;
     }
+    let image_h = if message.kind() == AgentTimelineMessageKind::Assistant
+        && !message.images().is_empty()
+    {
+        164.0 * s
+    } else {
+        0.0
+    };
     let base = 34.0 * s;
     if text.trim().is_empty() {
-        // Mirror the eager path, which skips empty non-user text kinds.
-        return 0.0;
+        return image_h;
     }
     let chars_per_line = ((width / (7.0 * s)) as usize).max(24);
     base + super::super::markdown::estimated_artifact_body_height(text, chars_per_line, s)
+        + image_h
 }
 
 pub(super) fn patch_start_row<M>(

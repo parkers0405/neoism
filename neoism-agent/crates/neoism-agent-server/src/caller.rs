@@ -26,6 +26,7 @@ pub(crate) struct CallerClaims {
     pub(crate) requests_per_minute: Option<u32>,
     pub(crate) max_in_flight: Option<u32>,
     pub(crate) resolved: Option<neoism_agent_service_api::ResolvedTenant>,
+    pub(crate) worker: Option<Arc<neoism_agent_service_api::WorkspaceWorkerBinding>>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -63,6 +64,7 @@ pub(crate) struct CallerPolicy {
     usage: Arc<UsageTracker>,
     tenant_resolver: Option<Arc<dyn neoism_agent_service_api::TenantResolver>>,
     strict_hosted: bool,
+    worker: Option<Arc<neoism_agent_service_api::WorkspaceWorkerBinding>>,
 }
 
 /// The canonical daemon-token file shared by every Neoism process on this
@@ -113,10 +115,19 @@ impl CallerPolicy {
     }
 
     pub(crate) fn for_hosted(
-        tenant_resolver: Arc<dyn neoism_agent_service_api::TenantResolver>,
+        tenant_resolver: Option<Arc<dyn neoism_agent_service_api::TenantResolver>>,
     ) -> Self {
-        let mut policy = Self::from_env_with_resolver(Some(tenant_resolver));
+        let mut policy = Self::from_env_with_resolver(tenant_resolver);
         policy.strict_hosted = true;
+        policy
+    }
+
+    pub(crate) fn for_workspace_worker(
+        tenant_resolver: Option<Arc<dyn neoism_agent_service_api::TenantResolver>>,
+        binding: Arc<neoism_agent_service_api::WorkspaceWorkerBinding>,
+    ) -> Self {
+        let mut policy = Self::for_hosted(tenant_resolver);
+        policy.worker = Some(binding);
         policy
     }
 
@@ -140,6 +151,7 @@ impl CallerPolicy {
             usage: Arc::new(UsageTracker::default()),
             tenant_resolver,
             strict_hosted: false,
+            worker: None,
         }
     }
 
@@ -154,6 +166,18 @@ impl CallerPolicy {
         {
             return self.authenticate(supplied);
         }
+        let worker_claims = self
+            .worker
+            .as_ref()
+            .map(|worker| {
+                worker
+                    .verify(
+                        supplied
+                            .ok_or_else(|| "missing worker bearer token".to_string())?,
+                    )
+                    .map_err(|e| e.to_string())
+            })
+            .transpose()?;
         if let (Some(resolver), Some(token)) = (&self.tenant_resolver, supplied) {
             if let Some(resolved) = resolver
                 .resolve(token)
@@ -166,6 +190,11 @@ impl CallerPolicy {
                     return Err(
                         "tenant resolver returned an empty tenant or subject".into()
                     );
+                }
+                if let (Some(worker), Some(signed)) = (&self.worker, &worker_claims) {
+                    worker
+                        .validate_resolved(signed, &resolved)
+                        .map_err(|e| e.to_string())?;
                 }
                 let quotas = resolved.quotas.clone();
                 return Ok(Some(CallerClaims {
@@ -181,6 +210,7 @@ impl CallerPolicy {
                     requests_per_minute: quotas.requests_per_minute,
                     max_in_flight: quotas.max_in_flight,
                     resolved: Some(resolved),
+                    worker: self.worker.clone(),
                 }));
             }
         }
@@ -194,6 +224,9 @@ impl CallerPolicy {
         &self,
         supplied: Option<&str>,
     ) -> Result<Option<CallerClaims>, String> {
+        if self.strict_hosted {
+            return Err("hosted authentication requires the injected resolver".into());
+        }
         if supplied.is_some_and(|token| {
             token.starts_with(neoism_agent_service_api::daemon_credential::PREFIX)
         }) {
@@ -247,6 +280,7 @@ impl CallerPolicy {
                 requests_per_minute: None,
                 max_in_flight: None,
                 resolved: None,
+                worker: None,
             }));
         }
         if let Some(config) = self.hosted_config.as_ref().map_err(Clone::clone)?.as_ref()
@@ -275,6 +309,7 @@ impl CallerPolicy {
                 requests_per_minute: token.requests_per_minute,
                 max_in_flight: token.max_in_flight,
                 resolved: None,
+                worker: None,
             }));
         }
         let Some(expected) = self.local_token.as_deref() else {
@@ -295,6 +330,7 @@ impl CallerPolicy {
                 requests_per_minute: None,
                 max_in_flight: None,
                 resolved: None,
+                worker: None,
             }))
             .ok_or_else(|| "invalid bearer token".to_string())
     }
@@ -303,22 +339,39 @@ impl CallerPolicy {
         &self,
         claims: &CallerClaims,
     ) -> Result<RequestGuard, &'static str> {
+        if let Some(worker) = &self.worker {
+            if worker.validate().is_err()
+                || !claims.resolved.as_ref().is_some_and(|r| {
+                    r.expires_at.is_some_and(|expiry| {
+                        neoism_agent_service_api::workspace_worker::unix_now()
+                            .is_ok_and(|now| expiry > now)
+                    })
+                })
+            {
+                return Err("worker identity or credential has expired");
+            }
+        }
         self.usage.begin_request(claims)
     }
 }
 
 impl CallerClaims {
     pub(crate) fn execution_policy(&self) -> neoism_agent_service_api::ExecutionPolicy {
-        self.resolved
-            .as_ref()
-            .map(|resolved| resolved.execution.clone())
-            .unwrap_or_else(|| {
-                if self.hosted {
-                    neoism_agent_service_api::ExecutionPolicy::Disabled
-                } else {
-                    neoism_agent_service_api::ExecutionPolicy::NativeLocal
-                }
-            })
+        use neoism_agent_service_api::ExecutionPolicy;
+        if self.hosted {
+            return if self.worker.as_ref().is_some_and(|w| w.validate().is_ok())
+                && self.resolved.as_ref().is_some_and(|r| {
+                    r.expires_at.is_some_and(|expiry| {
+                        neoism_agent_service_api::workspace_worker::unix_now()
+                            .is_ok_and(|now| expiry > now)
+                    })
+                }) {
+                ExecutionPolicy::NativeLocal
+            } else {
+                ExecutionPolicy::Disabled
+            };
+        }
+        ExecutionPolicy::NativeLocal
     }
 
     pub(crate) fn actor_type_label(&self) -> &'static str {
@@ -383,35 +436,79 @@ pub(crate) fn allows_session_path(
     path.starts_with(std::path::Path::new(&session.directory))
 }
 
+/// The explicit serialized policy is parsed before any local collaboration
+/// override. Unknown/removed modes and malformed values always fail closed.
 pub(crate) fn session_execution_policy(
-    hosted: bool,
+    services: &neoism_agent_service_api::AgentServices,
     session: &neoism_agent_core::SessionInfo,
 ) -> neoism_agent_service_api::ExecutionPolicy {
     use neoism_agent_service_api::ExecutionPolicy;
-    // Historical joined sessions persisted Disabled from daemon credentials
-    // marked hosted; their local workspace binding is the source of truth.
-    if local_collaboration_session(hosted, session) {
-        return ExecutionPolicy::NativeLocal;
-    }
-    let policy = session
-        .extra
-        .get(EXECUTION_POLICY_EXTRA_KEY)
-        .cloned()
-        .and_then(|value| serde_json::from_value(value).ok());
-    // A hosted tenant name or stale native-local policy must never grant
-    // native tools. Only an explicitly selected isolating sandbox can run.
-    match policy {
-        Some(ExecutionPolicy::Sandboxed {
-            provider,
-            idle_ttl_seconds,
-            max_lifetime_seconds,
-        }) if hosted => ExecutionPolicy::Sandboxed {
-            provider,
-            idle_ttl_seconds,
-            max_lifetime_seconds,
+    let policy = match session.extra.get(EXECUTION_POLICY_EXTRA_KEY) {
+        Some(value) => match serde_json::from_value::<ExecutionPolicy>(value.clone()) {
+            Ok(policy) => Some(policy),
+            Err(_) => return ExecutionPolicy::Disabled,
         },
-        _ => ExecutionPolicy::Disabled,
+        None => None,
+    };
+    if services.shared_control_plane() {
+        return ExecutionPolicy::Disabled;
     }
+    if let Some(worker) = &services.workspace_worker {
+        return if services.hosted
+            && policy == Some(ExecutionPolicy::NativeLocal)
+            && worker_session_admitted(worker, session)
+        {
+            ExecutionPolicy::NativeLocal
+        } else {
+            ExecutionPolicy::Disabled
+        };
+    }
+    if local_collaboration_session(services.hosted, session) {
+        ExecutionPolicy::NativeLocal
+    } else {
+        policy.unwrap_or(ExecutionPolicy::Disabled)
+    }
+}
+
+pub(crate) fn worker_session_admitted(
+    worker: &neoism_agent_service_api::WorkspaceWorkerBinding,
+    session: &neoism_agent_core::SessionInfo,
+) -> bool {
+    let workspace = session.workspace_id.as_ref().map(ToString::to_string);
+    worker.admits_session(
+        session_tenant(session),
+        workspace.as_deref(),
+        std::path::Path::new(&session.directory),
+    )
+}
+
+/// Worker-aware path gate for parent route/tool integration. Do not use the
+/// legacy local-collaboration path gate directly in worker runtimes.
+pub(crate) fn services_allow_session_path(
+    services: &neoism_agent_service_api::AgentServices,
+    session: &neoism_agent_core::SessionInfo,
+    path: &std::path::Path,
+) -> bool {
+    if let Some(worker) = &services.workspace_worker {
+        if !services.hosted || !worker_session_admitted(worker, session) {
+            return false;
+        }
+        if let Some(prefixes) = session
+            .extra
+            .get(DIRECTORY_PREFIXES_EXTRA_KEY)
+            .and_then(serde_json::Value::as_array)
+            .filter(|p| !p.is_empty())
+        {
+            return prefixes
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .any(|prefix| {
+                    worker.admits_scoped_path(std::path::Path::new(prefix), path)
+                });
+        }
+        return worker.admits_scoped_path(std::path::Path::new(&session.directory), path);
+    }
+    allows_session_path(services.hosted, session, path)
 }
 
 pub(crate) fn native_execution_allowed(
@@ -526,6 +623,18 @@ impl Drop for RequestGuard {
 }
 
 pub(crate) fn allows_directory(claims: &CallerClaims, directory: &str) -> bool {
+    if let Some(worker) = &claims.worker {
+        if !worker.admits_path(std::path::Path::new(directory))
+            || !claims.resolved.as_ref().is_some_and(|r| {
+                r.expires_at.is_some_and(|expiry| {
+                    neoism_agent_service_api::workspace_worker::unix_now()
+                        .is_ok_and(|now| expiry > now)
+                })
+            })
+        {
+            return false;
+        }
+    }
     if claims.directory_prefixes.is_empty() {
         return true;
     }
@@ -550,6 +659,11 @@ pub(crate) fn allows_session(
     claims: &CallerClaims,
     session: &neoism_agent_core::SessionInfo,
 ) -> bool {
+    if let Some(worker) = &claims.worker {
+        if !worker_session_admitted(worker, session) {
+            return false;
+        }
+    }
     if !claims.hosted
         && claims.workspace_id.is_none()
         && claims.tenant_id == "local"
@@ -589,6 +703,12 @@ pub(crate) fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
 mod tests {
     use super::*;
 
+    fn test_services(hosted: bool) -> neoism_agent_service_api::AgentServices {
+        let mut services = crate::standard_services();
+        services.hosted = hosted;
+        services
+    }
+
     #[test]
     fn workspace_name_cannot_elevate_a_disabled_session() {
         let session: neoism_agent_core::SessionInfo =
@@ -602,56 +722,11 @@ mod tests {
                 "version": "test",
                 "time": { "created": 1, "updated": 1 },
                 "neoismTenantId": "workspace:workspace-a",
-                "neoismExecutionPolicy": "disabled"
+                "neoismExecutionPolicy": {"mode":"disabled"}
             }))
             .unwrap();
         assert_eq!(
-            session_execution_policy(true, &session),
-            neoism_agent_service_api::ExecutionPolicy::Disabled
-        );
-    }
-
-    #[test]
-    fn hosted_workspace_name_cannot_override_sandbox_policy() {
-        let mut session: neoism_agent_core::SessionInfo =
-            serde_json::from_value(serde_json::json!({
-                "id": "ses_guest",
-                "slug": "guest",
-                "projectId": "project",
-                "workspaceId": "workspace-a",
-                "directory": "/tmp",
-                "title": "guest",
-                "version": "test",
-                "time": { "created": 1, "updated": 1 },
-                "neoismTenantId": "workspace:workspace-a",
-                "neoismCreatedBy": "device:guest",
-                "neoismExecutionPolicy": "native-local"
-            }))
-            .unwrap();
-        assert!(!local_collaboration_session(true, &session));
-        let sandbox = neoism_agent_service_api::ExecutionPolicy::Sandboxed {
-            provider: "tenant-sandbox".into(),
-            idle_ttl_seconds: 60,
-            max_lifetime_seconds: 300,
-        };
-        session.extra.insert(
-            EXECUTION_POLICY_EXTRA_KEY.into(),
-            serde_json::to_value(&sandbox).unwrap(),
-        );
-        assert_eq!(session_execution_policy(true, &session), sandbox);
-        // A hosted workspace name cannot grant native capabilities even with
-        // the same tenant/binding as a local daemon workspace.
-        assert!(!allows_session_path(
-            true,
-            &session,
-            std::path::Path::new("/elsewhere")
-        ));
-        session.extra.insert(
-            EXECUTION_POLICY_EXTRA_KEY.into(),
-            serde_json::json!("native-local"),
-        );
-        assert_eq!(
-            session_execution_policy(true, &session),
+            session_execution_policy(&test_services(true), &session),
             neoism_agent_service_api::ExecutionPolicy::Disabled
         );
     }
@@ -664,13 +739,13 @@ mod tests {
                 "workspaceId": "workspace-a", "directory": "/tmp", "title": "guest",
                 "version": "test", "time": { "created": 1, "updated": 1 },
                 "neoismTenantId": "workspace:workspace-a",
-                "neoismCreatedBy": "device:guest", "neoismExecutionPolicy": "disabled",
+                "neoismCreatedBy": "device:guest", "neoismExecutionPolicy": {"mode":"disabled"},
                 "neoismDirectoryPrefixes": ["/tmp"]
             }))
             .unwrap();
         assert!(local_collaboration_session(false, &session));
         assert_eq!(
-            session_execution_policy(false, &session),
+            session_execution_policy(&test_services(false), &session),
             neoism_agent_service_api::ExecutionPolicy::NativeLocal
         );
         assert!(allows_session_path(
@@ -680,7 +755,7 @@ mod tests {
         ));
         assert!(!local_collaboration_session(true, &session));
         assert_eq!(
-            session_execution_policy(true, &session),
+            session_execution_policy(&test_services(true), &session),
             neoism_agent_service_api::ExecutionPolicy::Disabled
         );
         assert!(!allows_session_path(
@@ -688,6 +763,205 @@ mod tests {
             &session,
             std::path::Path::new("/external")
         ));
+    }
+
+    fn worker_fixture() -> (
+        neoism_agent_service_api::WorkspaceWorkerBinding,
+        neoism_agent_service_api::WorkspaceWorkerSigningKey,
+        neoism_agent_service_api::WorkspaceWorkerCredentialClaims,
+        neoism_agent_core::SessionInfo,
+    ) {
+        use neoism_agent_service_api::*;
+        let root = std::env::temp_dir().join(format!(
+            "caller-worker-{}",
+            neoism_agent_core::Id::ascending(neoism_agent_core::IdKind::Audit)
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let root = std::fs::canonicalize(root).unwrap();
+        let now = workspace_worker::unix_now().unwrap();
+        let key = WorkspaceWorkerSigningKey::new([9u8; 32]).unwrap();
+        let binding = WorkspaceWorkerBinding::new(
+            WorkspaceWorkerBootstrap {
+                version: 1,
+                tenant_id: "tenant-a".into(),
+                workspace_id: "ws-a".into(),
+                runtime_id: "runtime-new".into(),
+                runtime_generation: 5,
+                root: root.clone(),
+                expires_at: now + 600,
+            },
+            key.verification_key(),
+        )
+        .unwrap();
+        let signed = WorkspaceWorkerCredentialClaims {
+            version: 1,
+            tenant_id: "tenant-a".into(),
+            workspace_id: "ws-a".into(),
+            runtime_id: "runtime-new".into(),
+            runtime_generation: 5,
+            subject: "actor-a".into(),
+            actor_type: ActorType::Human,
+            directory_prefix: root.clone(),
+            scopes: vec![],
+            quotas: TenantQuotas::default(),
+            issued_at: now,
+            expires_at: now + 120,
+        };
+        let session = serde_json::from_value(serde_json::json!({
+            "id":"ses_worker", "slug":"worker", "projectId":"project", "workspaceId":"ws-a",
+            "directory":root, "title":"worker", "version":"test", "time":{"created":1,"updated":1},
+            "neoismTenantId":"tenant-a", "neoismExecutionPolicy":{"mode":"native-local"}
+        })).unwrap();
+        (binding, key, signed, session)
+    }
+
+    #[tokio::test]
+    async fn worker_credentials_reject_wrong_tenant_workspace_generation_and_expiry() {
+        use neoism_agent_service_api::*;
+        let (binding, key, signed, session) = worker_fixture();
+        let policy = CallerPolicy::for_workspace_worker(
+            Some(Arc::new(WorkspaceWorkerTenantResolver::new(
+                binding.clone(),
+            ))),
+            Arc::new(binding.clone()),
+        );
+        let claims = policy
+            .authenticate_request(Some(&key.issue(&signed).unwrap()))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(allows_session(&claims, &session));
+        assert_eq!(claims.execution_policy(), ExecutionPolicy::NativeLocal);
+        for kind in 0..4 {
+            let mut wrong = signed.clone();
+            match kind {
+                0 => wrong.tenant_id = "tenant-b".into(),
+                1 => wrong.workspace_id = "ws-b".into(),
+                2 => wrong.runtime_generation = 4,
+                _ => {
+                    wrong.issued_at -= 200;
+                    wrong.expires_at = signed.issued_at - 1;
+                }
+            }
+            assert!(policy
+                .authenticate_request(Some(&key.issue(&wrong).unwrap()))
+                .await
+                .is_err());
+        }
+        assert!(policy.authenticate_request(None).await.is_err());
+        assert!(policy.authenticate(Some("local-token")).is_err());
+        let mut expired = claims;
+        expired.resolved.as_mut().unwrap().expires_at = Some(signed.issued_at - 1);
+        assert!(policy.begin_request(&expired).is_err());
+        assert!(!allows_session(&expired, &session));
+        let _ = std::fs::remove_dir_all(binding.root());
+    }
+
+    struct WorkerMismatchResolver(neoism_agent_service_api::ResolvedTenant);
+    impl neoism_agent_service_api::TenantResolver for WorkerMismatchResolver {
+        fn resolve<'a>(
+            &'a self,
+            _: &'a str,
+        ) -> neoism_agent_service_api::ServiceFuture<
+            'a,
+            Result<
+                Option<neoism_agent_service_api::ResolvedTenant>,
+                neoism_agent_service_api::ServiceError,
+            >,
+        > {
+            Box::pin(async move { Ok(Some(self.0.clone())) })
+        }
+    }
+    #[tokio::test]
+    async fn custom_resolver_cannot_bypass_worker_signature_or_actor_claims() {
+        let (binding, key, signed, _) = worker_fixture();
+        let mut wrong = signed.resolved_tenant();
+        wrong.subject = "other-actor".into();
+        let policy = CallerPolicy::for_workspace_worker(
+            Some(Arc::new(WorkerMismatchResolver(wrong))),
+            Arc::new(binding.clone()),
+        );
+        assert!(policy
+            .authenticate_request(Some(&key.issue(&signed).unwrap()))
+            .await
+            .is_err());
+        assert!(policy
+            .authenticate_request(Some("unsigned-token"))
+            .await
+            .is_err());
+        let _ = std::fs::remove_dir_all(binding.root());
+    }
+
+    #[test]
+    fn logical_worker_sessions_survive_runtime_replacement_but_shared_cannot_elevate() {
+        use neoism_agent_service_api::ExecutionPolicy;
+        let (binding, _, _, mut session) = worker_fixture();
+        let worker_services = test_services(false).for_workspace_worker(binding.clone());
+        // No runtime identity in durable session extras. Even stale machine-only
+        // metadata is irrelevant: live credentials, not sessions, bind a runtime.
+        session
+            .extra
+            .insert("neoismRuntimeGeneration".into(), serde_json::json!(1));
+        assert_eq!(
+            session_execution_policy(&worker_services, &session),
+            ExecutionPolicy::NativeLocal
+        );
+        assert_eq!(
+            session_execution_policy(&test_services(true), &session),
+            ExecutionPolicy::Disabled
+        );
+        assert!(services_allow_session_path(
+            &worker_services,
+            &session,
+            &binding.root().join("new.txt")
+        ));
+        assert!(!services_allow_session_path(
+            &worker_services,
+            &session,
+            binding.root().parent().unwrap()
+        ));
+        session
+            .extra
+            .insert(TENANT_EXTRA_KEY.into(), serde_json::json!("other"));
+        assert_eq!(
+            session_execution_policy(&worker_services, &session),
+            ExecutionPolicy::Disabled
+        );
+        session
+            .extra
+            .insert(TENANT_EXTRA_KEY.into(), serde_json::json!("tenant-a"));
+        session.workspace_id = Some("other".into());
+        assert_eq!(
+            session_execution_policy(&worker_services, &session),
+            ExecutionPolicy::Disabled
+        );
+        session.workspace_id = Some("ws-a".into());
+        session.extra.remove(EXECUTION_POLICY_EXTRA_KEY);
+        assert_eq!(
+            session_execution_policy(&worker_services, &session),
+            ExecutionPolicy::Disabled
+        );
+        session
+            .extra
+            .insert(TENANT_EXTRA_KEY.into(), serde_json::json!("local"));
+        assert_eq!(
+            session_execution_policy(&test_services(false), &session),
+            ExecutionPolicy::NativeLocal
+        );
+        for invalid in [
+            serde_json::json!("native-local"),
+            serde_json::json!({"mode":"sandboxed"}),
+            serde_json::json!({"mode":"unknown"}),
+        ] {
+            session
+                .extra
+                .insert(EXECUTION_POLICY_EXTRA_KEY.into(), invalid);
+            assert_eq!(
+                session_execution_policy(&test_services(false), &session),
+                ExecutionPolicy::Disabled
+            );
+        }
+        let _ = std::fs::remove_dir_all(binding.root());
     }
 
     #[test]
@@ -726,6 +1000,7 @@ mod tests {
             usage: Arc::new(UsageTracker::default()),
             tenant_resolver: None,
             strict_hosted: false,
+            worker: None,
         };
         std::env::set_var("XDG_RUNTIME_DIR", &runtime);
         let verified = policy.authenticate(Some(&credential));
@@ -776,6 +1051,7 @@ mod tests {
             requests_per_minute: None,
             max_in_flight: None,
             resolved: None,
+            worker: None,
         }
     }
 
@@ -819,11 +1095,10 @@ mod tests {
                             max_sessions: Some(12),
                             ..Default::default()
                         },
-                        execution: neoism_agent_service_api::ExecutionPolicy::Sandboxed {
-                            provider: "vercel".into(),
-                            idle_ttl_seconds: 300,
-                            max_lifetime_seconds: 3600,
-                        },
+                        execution: neoism_agent_service_api::ExecutionPolicy::NativeLocal,
+                        runtime_id: None,
+                        runtime_generation: None,
+                        expires_at: None,
                     }
                 }))
             })
@@ -842,16 +1117,31 @@ mod tests {
         assert_eq!(claims.tenant_id, "company-a");
         assert_eq!(claims.subject, "user-a");
         assert_eq!(claims.max_sessions, Some(12));
-        assert!(matches!(
+        assert_eq!(
             claims.execution_policy(),
-            neoism_agent_service_api::ExecutionPolicy::Sandboxed { ref provider, .. }
-                if provider == "vercel"
-        ));
+            neoism_agent_service_api::ExecutionPolicy::Disabled
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_hosted_resolver_denies_all_authentication_without_panicking() {
+        let mut policy = CallerPolicy::for_hosted(None);
+        policy.local_token = Some("local-secret".into());
+        policy.daemon_key = Some(Arc::from(b"daemon-secret".as_slice()));
+        assert!(policy.authenticate_request(None).await.is_err());
+        assert!(policy
+            .authenticate_request(Some("local-secret"))
+            .await
+            .is_err());
+        assert!(policy
+            .authenticate_request(Some("daemon-secret"))
+            .await
+            .is_err());
     }
 
     #[tokio::test]
     async fn hosted_requests_never_fall_back_to_local_or_daemon_auth() {
-        let mut policy = CallerPolicy::for_hosted(Arc::new(TestTenantResolver));
+        let mut policy = CallerPolicy::for_hosted(Some(Arc::new(TestTenantResolver)));
         policy.local_token = Some("local-secret".into());
         assert!(policy.authenticate_request(None).await.is_err());
         assert!(policy

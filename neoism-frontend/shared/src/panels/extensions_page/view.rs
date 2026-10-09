@@ -1736,7 +1736,7 @@ fn draw_rounded_rect_clipped(
     clip: [f32; 4],
 ) {
     crate::widgets::quad::rounded_rect_clipped(
-        sugarloaf, clip, None, rect, color, DEPTH, radius, order, 0.5,
+        sugarloaf, clip, None, rect, color, DEPTH, radius, order,
     );
 }
 

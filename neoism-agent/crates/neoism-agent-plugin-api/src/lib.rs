@@ -163,7 +163,6 @@ pub struct PluginToolInvocation {
 pub enum PluginExecutionMode {
     Disabled,
     NativeLocal,
-    Sandboxed,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

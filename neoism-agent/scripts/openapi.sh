@@ -40,3 +40,6 @@ case "$mode" in
     exit 2
     ;;
 esac
+
+bash "$root/neoism-agent/scripts/cloud-runtime.sh" "$mode"
+bash "$root/neoism-agent/scripts/cloud-host.sh" "$mode"

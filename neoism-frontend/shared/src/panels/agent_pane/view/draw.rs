@@ -8,6 +8,19 @@ use super::DEPTH;
 use crate::panels::agent_pane::selection_model::SelectableCaretStop;
 use crate::primitives::draw_text_with_occlusion;
 
+/// Shared running indicator geometry: eight stepped stops, four white squares.
+pub(crate) const RUNNING_SQUARE_ALPHAS: [f32; 4] = [1.0, 0.65, 0.4, 0.2];
+
+pub(crate) fn running_square_position(
+    now_seconds: f32,
+    trail: usize,
+    s: f32,
+) -> (f32, f32) {
+    let phase = crate::render_policy::loader_animation_frame(now_seconds).phase;
+    let step = (phase * 8.0).floor() - trail as f32;
+    crate::render_policy::loader_orbit_position(step / 8.0, 3.0 * s)
+}
+
 const TEXT_MEASURE_CACHE_LIMIT: usize = 8192;
 const CARET_STOP_CACHE_LIMIT: usize = 8192;
 const CARET_STOP_CACHE_POINTS_LIMIT: usize = 262_144;
@@ -407,7 +420,7 @@ pub fn draw_rounded_rect_clipped(
     clip: [f32; 4],
 ) {
     crate::widgets::quad::rounded_rect_clipped(
-        sugarloaf, clip, None, rect, color, DEPTH, radius, order, 0.01,
+        sugarloaf, clip, None, rect, color, DEPTH, radius, order,
     );
 }
 
@@ -419,23 +432,10 @@ pub fn draw_top_rounded_rect_clipped(
     order: u8,
     clip: [f32; 4],
 ) {
-    let Some(visible) = intersect_rect(rect, clip) else {
+    if intersect_rect(rect, clip).is_none() {
         return;
-    };
-    if same_rect(visible, rect) {
-        let [x, y, w, h] = rect;
-        sugarloaf.rounded_rect(None, x, y, w, h, color, DEPTH, radius, order);
-        draw_rect_clipped(
-            sugarloaf,
-            [x, y + h - radius, w, radius],
-            color,
-            order + 1,
-            clip,
-        );
-    } else {
-        let [x, y, w, h] = visible;
-        sugarloaf.rect(None, x, y, w, h, color, DEPTH, order);
     }
+    sugarloaf.quad_clipped(rect, color, [radius, radius, 0.0, 0.0], DEPTH, order, clip);
 }
 
 pub fn intersect_rect(a: [f32; 4], b: [f32; 4]) -> Option<[f32; 4]> {

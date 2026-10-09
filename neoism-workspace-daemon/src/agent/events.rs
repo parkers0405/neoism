@@ -20,6 +20,22 @@ pub(crate) fn start_event_stream(inner: &Arc<AgentInner>, session_id: &str) {
         .insert(session_id.to_string(), handle);
 }
 
+pub(crate) fn start_catalog_event_stream(inner: &Arc<AgentInner>, directory: &str) {
+    let key = format!("catalog:{directory}");
+    let mut handles = inner.stream_handles.lock();
+    if handles.contains_key(&key) {
+        return;
+    }
+    let inner = inner.clone();
+    let task_key = key.clone();
+    let directory = directory.to_owned();
+    let handle = tokio::spawn(async move {
+        run_event_stream_inner(inner.clone(), String::new(), Some(directory)).await;
+        inner.stream_handles.lock().remove(&task_key);
+    });
+    handles.insert(key, handle);
+}
+
 pub(crate) fn stop_event_stream(inner: &Arc<AgentInner>, session_id: &str) {
     if let Some(handle) = inner.stream_handles.lock().remove(session_id) {
         handle.abort();
@@ -27,12 +43,29 @@ pub(crate) fn stop_event_stream(inner: &Arc<AgentInner>, session_id: &str) {
 }
 
 pub(crate) async fn run_event_stream(inner: Arc<AgentInner>, session_id: String) {
+    run_event_stream_inner(inner, session_id, None).await;
+}
+
+async fn run_event_stream_inner(
+    inner: Arc<AgentInner>,
+    session_id: String,
+    directory: Option<String>,
+) {
     use futures::StreamExt;
-    let url = format!(
-        "{}/v2/events?sessionId={}&tail=true",
-        inner.agent_server,
-        percent_encode(&session_id),
-    );
+    let catalog = directory.is_some();
+    let url = if let Some(directory) = directory {
+        format!(
+            "{}/v2/session-catalog/events?directory={}",
+            inner.agent_server,
+            percent_encode(&directory)
+        )
+    } else {
+        format!(
+            "{}/v2/events?sessionId={}&tail=true",
+            inner.agent_server,
+            percent_encode(&session_id)
+        )
+    };
     let mut retry_delay = std::time::Duration::from_millis(250);
     let mut connected_once = false;
     loop {
@@ -46,8 +79,9 @@ pub(crate) async fn run_event_stream(inner: Arc<AgentInner>, session_id: String)
         {
             Ok(resp) if resp.status().is_success() => resp,
             Ok(resp) => {
-                emit_error(
+                report_stream_error(
                     &inner.tx,
+                    catalog,
                     format!("agent-server SSE {url}: HTTP {}", resp.status()),
                 );
                 tokio::time::sleep(retry_delay).await;
@@ -55,7 +89,11 @@ pub(crate) async fn run_event_stream(inner: Arc<AgentInner>, session_id: String)
                 continue;
             }
             Err(err) => {
-                emit_error(&inner.tx, format!("agent-server SSE {url}: {err}"));
+                report_stream_error(
+                    &inner.tx,
+                    catalog,
+                    format!("agent-server SSE {url}: {err}"),
+                );
                 tokio::time::sleep(retry_delay).await;
                 retry_delay = (retry_delay * 2).min(std::time::Duration::from_secs(5));
                 continue;
@@ -63,7 +101,7 @@ pub(crate) async fn run_event_stream(inner: Arc<AgentInner>, session_id: String)
         };
 
         retry_delay = std::time::Duration::from_millis(250);
-        if connected_once {
+        if connected_once && !catalog {
             push_session_running_state(inner.clone(), session_id.clone()).await;
             push_runtime_snapshot(inner.clone(), session_id.clone()).await;
             push_todo_snapshot(inner.clone(), session_id.clone()).await;
@@ -73,6 +111,9 @@ pub(crate) async fn run_event_stream(inner: Arc<AgentInner>, session_id: String)
         let mut stream = resp.bytes_stream();
         let mut buf = String::new();
         loop {
+            if inner.tx.is_closed() {
+                return;
+            }
             let chunk = match tokio::time::timeout(
                 std::time::Duration::from_secs(45),
                 stream.next(),
@@ -81,13 +122,18 @@ pub(crate) async fn run_event_stream(inner: Arc<AgentInner>, session_id: String)
             {
                 Ok(Some(Ok(chunk))) => chunk,
                 Ok(Some(Err(err))) => {
-                    emit_error(&inner.tx, format!("agent-server SSE stream: {err}"));
+                    report_stream_error(
+                        &inner.tx,
+                        catalog,
+                        format!("agent-server SSE stream: {err}"),
+                    );
                     break;
                 }
                 Ok(None) => break,
                 Err(_) => {
-                    emit_error(
+                    report_stream_error(
                         &inner.tx,
+                        catalog,
                         format!("agent-server SSE {url}: no bytes for 45s"),
                     );
                     break;
@@ -103,17 +149,75 @@ pub(crate) async fn run_event_stream(inner: Arc<AgentInner>, session_id: String)
                             continue;
                         }
                         if let Ok(value) = serde_json::from_str::<Value>(payload) {
-                            forward_agent_server_event(
-                                &inner.tx,
-                                &session_id,
-                                normalize_v2_event(value),
-                            );
+                            let event = normalize_v2_event(value);
+                            if catalog {
+                                forward_catalog_event(&inner.tx, event);
+                            } else {
+                                forward_agent_server_event(&inner.tx, &session_id, event);
+                            }
                         }
                     }
                 }
             }
         }
         tokio::time::sleep(retry_delay).await;
+    }
+}
+
+fn report_stream_error(
+    tx: &UnboundedSender<AgentServerMessage>,
+    catalog: bool,
+    error: String,
+) {
+    if catalog {
+        tracing::debug!(%error, "session catalog stream reconnecting");
+    } else {
+        emit_error(tx, error);
+    }
+}
+
+fn forward_catalog_event(tx: &UnboundedSender<AgentServerMessage>, event: Value) {
+    let kind = event
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if kind == "session.catalog.activity" {
+        let properties = event.get("properties").unwrap_or(&Value::Null);
+        if let (Some(session_id), Some(activity)) = (
+            properties.get("sessionID").and_then(Value::as_str),
+            properties.get("activity").and_then(Value::as_str),
+        ) {
+            if matches!(activity, "idle" | "running" | "background" | "permission") {
+                let _ = tx.send(AgentServerMessage::CatalogActivity {
+                    session_id: session_id.to_owned(),
+                    activity: activity.to_owned(),
+                });
+            }
+        }
+    } else if matches!(
+        kind,
+        "session.created" | "session.updated" | "session.deleted"
+    ) {
+        let properties = event.get("properties").unwrap_or(&Value::Null);
+        let info = properties.get("info").unwrap_or(&Value::Null);
+        if let Some(session_id) = properties
+            .get("sessionID")
+            .or_else(|| info.get("id"))
+            .and_then(Value::as_str)
+        {
+            let message = if kind == "session.deleted" {
+                AgentServerMessage::ThreadDeleted {
+                    session_id: session_id.to_owned(),
+                }
+            } else {
+                AgentServerMessage::ThreadUpdated {
+                    session_id: session_id.to_owned(),
+                    title: info.get("title").and_then(Value::as_str).map(str::to_owned),
+                    pinned: info.get("pinned").and_then(Value::as_bool),
+                }
+            };
+            let _ = tx.send(message);
+        }
     }
 }
 
@@ -1038,6 +1142,53 @@ pub(crate) fn usage_from_value(value: Option<&Value>) -> Option<Usage> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn catalog_activity_is_global_and_does_not_forward_parent_idle_as_family_idle() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        for activity in ["running", "background", "permission", "idle"] {
+            forward_catalog_event(
+                &tx,
+                normalize_v2_event(json!({
+                    "type": "session.catalog.activity",
+                    "data": {"sessionID": "another-root", "activity": activity}
+                })),
+            );
+            assert!(
+                matches!(rx.try_recv().unwrap(), AgentServerMessage::CatalogActivity {
+                session_id, activity: received
+            } if session_id == "another-root" && received == activity)
+            );
+        }
+        forward_catalog_event(
+            &tx,
+            json!({"type": "session.status", "properties": {
+                "sessionID": "another-root", "status": {"type": "idle"}
+            }}),
+        );
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn catalog_activity_proxy_retains_metadata_but_rejects_unknown_activity() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        forward_catalog_event(
+            &tx,
+            json!({"type": "session.updated", "properties": {
+                "sessionID": "root", "info": {"id": "root", "title": "Renamed"}
+            }}),
+        );
+        assert!(
+            matches!(rx.try_recv().unwrap(), AgentServerMessage::ThreadUpdated { session_id, .. } if session_id == "root")
+        );
+        forward_catalog_event(
+            &tx,
+            json!({"type": "session.catalog.activity", "properties": {
+                "sessionID": "root", "activity": "unknown"
+            }}),
+        );
+        assert!(rx.try_recv().is_err());
+    }
 
     fn provider_state(
         rx: &mut tokio::sync::mpsc::UnboundedReceiver<AgentServerMessage>,

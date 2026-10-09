@@ -220,10 +220,10 @@ async fn resolve_artifact(
                 id: artifact.id.clone(),
                 uri: format!("artifact://{}", artifact.id),
                 title: artifact.filename,
-                tool: "sandbox_exec".into(),
+                tool: "tool-output".into(),
                 path: format!("artifact://{}", artifact.id),
                 byte_count: artifact.size,
-                summary: format!("{} bytes of sandbox command output", artifact.size),
+                summary: format!("{} bytes of tool output", artifact.size),
             });
         }
     }

@@ -2,6 +2,20 @@
 
 All notable user-facing changes to Neoism are documented here.
 
+## [0.7.122] - 2026-10-09
+
+### Workspace workers, Agent activity, and rendering
+
+- Adds cloud workspace-worker lifecycle libraries, generation fencing, reconciliation, signed bootstrap credentials, and authenticated readiness/connection grants. Cloud host/runtime deployment and production worker-image validation remain separate infrastructure responsibilities; this release does not launch a public hosted service.
+- Adds cloud host/runtime OpenAPI contracts, TypeScript clients, refreshed-token HTTP namespaces, worker CLI support, and integration documentation.
+- Replaces the per-tool execution-provider abstraction with workspace-worker/controller execution. Rust embedders using `ExecutionProvider`, `with_execution`, or `HostedAttestation` must migrate to the worker APIs.
+- Improves root/child catalog activity, Task follow-up context, scoped connectors, viewed-conversation highlighting, and split-pane focus across desktop, daemon, and web.
+- Updates OpenAI/Responses reasoning compatibility and Codex subscription-limit handling without increasing smaller model ceilings.
+- Fixes generated-image rows with empty or filtered text, compaction reasoning presentation, reopened tool-trace scrolling, Agent text contrast, sidebar state during configuration reload, footer layout, and rounded-card clipping.
+- Includes renderer batching, CPU rendering, and font fixes. Preserves first-terminal directory following, split-terminal isolation, and release-time Servo exclusion.
+
+This is a stable production release, available through plain `neoism update` after the full platform matrix passes. Experimental Servo runtime is not built or packaged.
+
 ## [0.7.121] - 2026-10-08
 
 ### Search, conversation following, and native appearance

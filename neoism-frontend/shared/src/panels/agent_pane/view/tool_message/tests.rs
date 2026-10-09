@@ -12,6 +12,22 @@ fn compact_tool_title_omits_completed_and_parentheses() {
 }
 
 #[test]
+fn compact_task_followup_title_uses_the_same_header_spacing() {
+    let mut message = apply_patch_message("pending", "");
+    message.tool = "task".to_owned();
+    for status in ["pending", "queued", "running", "completed"] {
+        message.status = status.to_owned();
+        for name in ["Task", "Follow-up"] {
+            message.title = format!("{name}(@explore · Check parser (edge cases))");
+            assert_eq!(
+                message.title_text(),
+                format!("{name}  @explore · Check parser (edge cases)")
+            );
+        }
+    }
+}
+
+#[test]
 fn compact_tool_title_keeps_shell_arguments_and_one_line() {
     let mut message = apply_patch_message("running", "");
     message.title = "Bash(printf '(two  words)'\nnext command)".to_string();

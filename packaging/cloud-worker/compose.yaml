@@ -1,0 +1,45 @@
+# Run inside a dedicated VM for exactly one tenant/workspace, not on a shared
+# untrusted-tools host. The application gateway is deployed separately.
+services:
+  worker:
+    image: ${WORKER_IMAGE:-neoism-agent-worker:local}
+    user: "10001:10001"
+    read_only: true
+    privileged: false
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 256
+    mem_limit: 4g
+    cpus: "2.0"
+    stop_grace_period: 30s
+    restart: "no"
+    environment:
+      NEOISM_AGENT_WORKER_BOOTSTRAP: /run/neoism-worker/bootstrap.json
+      NEOISM_AGENT_WORKER_VERIFICATION_KEY_FILE: /run/neoism-worker/verification.key
+    volumes:
+      - type: bind
+        source: ${WORKSPACE_DIR:?set absolute WORKSPACE_DIR}
+        target: /workspace
+      - type: bind
+        source: ${STATE_DIR:?set absolute STATE_DIR}
+        target: /var/lib/neoism
+      - type: bind
+        source: ${WORKER_BOOTSTRAP_FILE:?set absolute WORKER_BOOTSTRAP_FILE}
+        target: /run/neoism-worker/bootstrap.json
+        read_only: true
+      - type: bind
+        source: ${WORKER_VERIFICATION_KEY_FILE:?set absolute WORKER_VERIFICATION_KEY_FILE}
+        target: /run/neoism-worker/verification.key
+        read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=256m,mode=1777
+      - /run:rw,nosuid,nodev,noexec,size=16m,mode=755
+    ports:
+      - "127.0.0.1:4096:4096"
+    networks: [worker-egress]
+
+# Outbound connectivity supports model APIs and application gateway integration.
+# Enforce destination policy at the VM/firewall/gateway, not with this network name.
+networks:
+  worker-egress:
+    driver: bridge

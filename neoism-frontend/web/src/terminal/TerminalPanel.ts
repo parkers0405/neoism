@@ -5267,6 +5267,8 @@ export class TerminalPanel {
 
   private activatePaneExternalId(externalId: number, openEditorBuffer: boolean): void {
     this.syncActiveTabModified();
+    this.rememberActiveAgentSession();
+    const previousTabIndex = this.activeTabIndex;
     const state = this.paneTabState.get(externalId);
     const tabIndex = state?.activeTabIndex;
     const editorTabBound =
@@ -5295,7 +5297,11 @@ export class TerminalPanel {
       this.activeTabIndex = tabIndex;
       this.wasmAdapter?.setActiveTab?.(tabIndex);
       const tab = this.bufferTabs[tabIndex];
-      if (openEditorBuffer && tab?.kind === "file" && tab.path) {
+      if (tab?.kind === "neoism-agent") {
+        if (this.activeTabIndex !== previousTabIndex || tab.agentSessionId) {
+          this.activateAgentTab(tab);
+        }
+      } else if (openEditorBuffer && tab?.kind === "file" && tab.path) {
         this.openFileTabContent(tab.path);
       } else {
         this.bindEditorSurfaceForTab(externalId, tabIndex);
@@ -5310,7 +5316,11 @@ export class TerminalPanel {
       this.activeTabIndex = fallback;
       this.wasmAdapter?.setActiveTab?.(fallback);
       const tab = this.bufferTabs[fallback];
-      if (openEditorBuffer && tab?.kind === "file" && tab.path) {
+      if (tab?.kind === "neoism-agent") {
+        if (this.activeTabIndex !== previousTabIndex || tab.agentSessionId) {
+          this.activateAgentTab(tab);
+        }
+      } else if (openEditorBuffer && tab?.kind === "file" && tab.path) {
         this.openFileTabContent(tab.path);
       } else {
         this.bindEditorSurfaceForTab(externalId, fallback);
@@ -5703,7 +5713,9 @@ export class TerminalPanel {
 
   private activateAgentTab(tab: WebBufferTab): void {
     if (tab.agentSessionId) {
-      this.wasmAdapter?.agentSwitchThread?.(tab.agentSessionId);
+      if (this.wasmAdapter?.agentSessionId?.() !== tab.agentSessionId) {
+        this.wasmAdapter?.agentSwitchThread?.(tab.agentSessionId);
+      }
     } else {
       const directory = this.wasmAdapter?.fileTreeWorkspaceRoot?.() ?? null;
       this.wasmAdapter?.agentNewThread?.(directory);

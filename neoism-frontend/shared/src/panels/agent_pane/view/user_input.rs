@@ -1242,7 +1242,7 @@ pub fn render_user_message<P: AgentMarkdownPane>(
     let Some(opts) = opts_with_clip(
         DrawOpts {
             font_size: 13.5 * s,
-            color: theme.u8(theme.fg),
+            color: theme.u8(super::primary_text_color(theme)),
             ..DrawOpts::default()
         },
         viewport_clip,

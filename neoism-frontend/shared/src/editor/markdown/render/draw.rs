@@ -52,9 +52,6 @@ pub(crate) fn draw_rounded_rect_clipped(
     depth: f32,
     order: u8,
 ) {
-    // Historical semantics here were exact fully-inside; sub-epsilon
-    // tolerance matches it (intersect returns exact copies when
-    // contained).
     crate::widgets::quad::rounded_rect_clipped(
         sugarloaf,
         clip,
@@ -64,7 +61,6 @@ pub(crate) fn draw_rounded_rect_clipped(
         depth,
         radius,
         order,
-        f32::EPSILON,
     );
 }
 

@@ -46,6 +46,15 @@ fn top_aligned_pane_content_rect(
 }
 use neoism_ui::chrome_policy::{workspace_chrome_margins, WorkspaceChromeMetrics};
 
+#[inline]
+fn reload_font_size(previous_configured: f32, configured: f32, live: f32) -> f32 {
+    if (previous_configured - configured).abs() > f32::EPSILON {
+        configured
+    } else {
+        live
+    }
+}
+
 impl Screen<'_> {
     pub fn take_plugin_commands(&mut self) -> Vec<String> {
         std::mem::take(&mut self.pending_plugin_commands)
@@ -72,6 +81,13 @@ impl Screen<'_> {
         snapshot: std::sync::Arc<neoism_lua::PluginSnapshot>,
     ) {
         self.renderer.set_plugin_snapshot(snapshot);
+        if !self.conversations_panel_enabled {
+            self.renderer.set_left_sidebar_visibility(
+                neoism_ui::panels::left_sidebar_host::LeftSidebarView::Conversations,
+                false,
+                false,
+            );
+        }
         if let Some(width) = self
             .renderer
             .style(neoism_lua::selector::AGENT_SIDEBAR)
@@ -104,36 +120,6 @@ impl Screen<'_> {
         self.conversations_panel_enabled = config.agent.conversations_panel_enabled;
         self.details_panel_enabled = config.agent.details_panel_enabled;
         self.streaming_text_animation = config.agent.streaming_text_animation;
-        let placement = |value| match value {
-            neoism_backend::config::SidebarPlacementPreference::Unified => {
-                neoism_ui::panels::left_sidebar_host::SidebarPlacement::Unified
-            }
-            neoism_backend::config::SidebarPlacementPreference::Independent => {
-                neoism_ui::panels::left_sidebar_host::SidebarPlacement::Independent
-            }
-        };
-        self.renderer.left_sidebar_host.set_placements(
-            placement(config.ui.left_sidebar.file_tree),
-            placement(config.ui.left_sidebar.notes),
-            placement(config.ui.left_sidebar.conversations),
-        );
-        self.renderer.reconcile_left_sidebar_host();
-        if let Some(active) = self.renderer.left_sidebar_host.active_unified() {
-            self.renderer.hide_other_unified_sidebars(active);
-        }
-        if !self.conversations_panel_enabled {
-            self.renderer.set_left_sidebar_visibility(
-                neoism_ui::panels::left_sidebar_host::LeftSidebarView::Conversations,
-                false,
-                false,
-            );
-            self.workspace_conversations_visibility
-                .values_mut()
-                .for_each(|visible| *visible = false);
-            self.workspace_active_left_sidebar.retain(|_, view| {
-                *view != neoism_ui::panels::left_sidebar_host::LeftSidebarView::Conversations
-            });
-        }
         self.renderer.code_git_blame = config.editor.git_blame;
         self.renderer.code_git_blame_delay_ms = config.editor.git_blame_delay_ms;
         self.renderer.code_git_blame_hide_on_scroll =
@@ -157,6 +143,13 @@ impl Screen<'_> {
             }
         }
         let previous_style = self.sugarloaf.style();
+        // Session zoom survives unrelated reloads; an edited font-size setting
+        // deliberately replaces it and becomes the new Ctrl+0 baseline.
+        let font_size = reload_font_size(
+            previous_style.font_size,
+            config.appearance.fonts.size,
+            self.renderer.zoom_font_size(),
+        );
         let grid_text_geometry_changed = should_update_font_library
             || (previous_style.font_size - config.appearance.fonts.size).abs()
                 > f32::EPSILON
@@ -193,8 +186,7 @@ impl Screen<'_> {
         let s = self.sugarloaf.style_mut();
         s.font_size = config.appearance.fonts.size;
         s.line_height = config.appearance.line_height;
-        self.sugarloaf
-            .set_default_persistent_font_size(config.appearance.fonts.size);
+        self.sugarloaf.set_default_persistent_font_size(font_size);
 
         #[cfg(feature = "wgpu")]
         self.sugarloaf
@@ -229,7 +221,6 @@ impl Screen<'_> {
         let config_theme =
             neoism_ui::primitives::ide_theme::IdeTheme::by_name(&config.appearance.theme);
         let old_island = self.renderer.island.take();
-        let old_file_tree = std::mem::take(&mut self.renderer.file_tree);
         let old_buffer_tabs = std::mem::take(&mut self.renderer.buffer_tabs);
         let old_pane_tabs = std::mem::take(&mut self.renderer.pane_tabs);
         let old_pane_breadcrumbs = std::mem::take(&mut self.renderer.pane_breadcrumbs);
@@ -238,8 +229,8 @@ impl Screen<'_> {
         let old_plugins = self.renderer.plugins.clone();
         tracing::info!(
             target: "neoism::config_reload",
-            file_tree_visible = old_file_tree.is_visible(),
-            file_tree_root = ?old_file_tree.root(),
+            file_tree_visible = self.renderer.file_tree.is_visible(),
+            file_tree_root = ?self.renderer.file_tree.root(),
             buffer_tab_count = old_buffer_tabs.tabs().len(),
             pane_tab_strip_count = old_pane_tabs.len(),
             "rebuilding renderer while preserving chrome"
@@ -250,17 +241,31 @@ impl Screen<'_> {
         // it — the setting applies and the panel stays up.
         let old_settings = std::mem::take(&mut self.renderer.settings);
         let mut renderer = Renderer::new(config);
-        let chrome_scale = renderer.chrome_scale();
-        renderer.file_tree = old_file_tree;
+        renderer.preserve_left_sidebar_from(&mut self.renderer);
         renderer.buffer_tabs = old_buffer_tabs;
         renderer.pane_tabs = old_pane_tabs;
         renderer.pane_breadcrumbs = old_pane_breadcrumbs;
         renderer.breadcrumbs = old_breadcrumbs;
         renderer.status_line = old_status_line;
+        // Seed the previous defaults so republishing them preserves session toggles.
+        renderer.plugins = old_plugins.clone();
         renderer.set_plugin_snapshot(old_plugins);
         renderer.settings = old_settings;
-        renderer.set_chrome_scale(chrome_scale);
+        renderer.set_zoom_font_size(font_size);
         self.renderer = renderer;
+        if !self.conversations_panel_enabled {
+            self.renderer.set_left_sidebar_visibility(
+                neoism_ui::panels::left_sidebar_host::LeftSidebarView::Conversations,
+                false,
+                false,
+            );
+            self.workspace_conversations_visibility
+                .values_mut()
+                .for_each(|visible| *visible = false);
+            self.workspace_active_left_sidebar.retain(|_, view| {
+                *view != neoism_ui::panels::left_sidebar_host::LeftSidebarView::Conversations
+            });
+        }
         self.renderer.set_ide_theme(config_theme);
         self.context_manager.config.ide_theme = config_theme.name.as_str().to_string();
         if let Some(mut island) = old_island {
@@ -332,10 +337,8 @@ impl Screen<'_> {
             // Update font size and line height BEFORE update_dimensions
             for current_context in context_grid.contexts_mut().values_mut() {
                 let current_context = current_context.context_mut();
-                self.sugarloaf.set_text_font_size(
-                    &current_context.rich_text_id,
-                    config.appearance.fonts.size,
-                );
+                self.sugarloaf
+                    .set_text_font_size(&current_context.rich_text_id, font_size);
                 self.sugarloaf.set_text_line_height(
                     &current_context.rich_text_id,
                     current_context.dimension.line_height,
@@ -1305,9 +1308,22 @@ impl Screen<'_> {
 #[cfg(test)]
 mod launch_layout_tests {
     use super::{
-        chrome_layout_repair_required, pane_content_rect, surface_viewport_is_stale,
-        top_aligned_pane_content_rect, ChromeLayoutSignature,
+        chrome_layout_repair_required, pane_content_rect, reload_font_size,
+        surface_viewport_is_stale, top_aligned_pane_content_rect, ChromeLayoutSignature,
     };
+
+    #[test]
+    fn config_reload_preserves_zoom_when_configured_size_is_unchanged() {
+        for live in [6.0, 12.0, 14.0, 24.0, 100.0] {
+            assert_eq!(reload_font_size(14.0, 14.0, live), live);
+        }
+    }
+
+    #[test]
+    fn config_reload_applies_an_explicit_font_size_change() {
+        assert_eq!(reload_font_size(14.0, 18.0, 24.0), 18.0);
+        assert_eq!(reload_font_size(18.0, 12.0, 24.0), 12.0);
+    }
 
     #[test]
     fn resize_and_dpi_transitions_invalidate_the_chrome_signature() {

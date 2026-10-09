@@ -166,12 +166,36 @@ pub(crate) async fn handle_list_threads(
     limit: Option<u32>,
     cursor: Option<String>,
 ) {
+    if let Some(directory) = directory
+        .as_deref()
+        .filter(|directory| !directory.is_empty())
+    {
+        super::events::start_catalog_event_stream(&inner, directory);
+    }
     let filtered_dir = directory.as_deref().filter(|d| !d.is_empty());
     let take = limit.unwrap_or(24).max(1) as usize;
     let path = session_list_path(filtered_dir, take, cursor.as_deref());
     match http_get_json(&inner, &path).await {
         Ok(value) => {
-            let threads = thread_summaries_from_sessions(&value, take);
+            let mut threads = thread_summaries_from_sessions(&value, take);
+            if filtered_dir.is_none() {
+                let directories: std::collections::HashSet<_> = threads
+                    .iter()
+                    .filter_map(|thread| thread.directory.as_deref())
+                    .filter(|directory| !directory.is_empty())
+                    .collect();
+                for directory in directories {
+                    super::events::start_catalog_event_stream(&inner, directory);
+                }
+            }
+            if threads
+                .iter()
+                .any(|thread| thread.catalog_activity.is_none())
+            {
+                if let Some(statuses) = fetch_session_statuses(&inner).await {
+                    apply_thread_busy_statuses(&mut threads, &statuses);
+                }
+            }
             let next_cursor = value
                 .get("cursor")
                 .and_then(|cursor| cursor.get("next"))
@@ -188,6 +212,35 @@ pub(crate) async fn handle_list_threads(
                 message: err.to_string(),
             });
         }
+    }
+}
+
+/// One bounded status snapshot per catalog request (not one per row).
+async fn fetch_session_statuses(inner: &AgentInner) -> Option<Value> {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        http_get_json(inner, "/v2/sessions/status"),
+    )
+    .await
+    .ok()?
+    .ok()
+}
+
+fn status_is_running(status: &Value) -> bool {
+    matches!(
+        status.get("type").and_then(Value::as_str),
+        Some("created" | "active" | "busy" | "running")
+    )
+}
+
+fn apply_thread_busy_statuses(threads: &mut [ThreadSummary], statuses: &Value) {
+    for thread in threads {
+        if thread.catalog_activity.is_some() {
+            continue;
+        }
+        thread.busy = statuses
+            .get(&thread.session_id)
+            .is_some_and(status_is_running);
     }
 }
 
@@ -271,6 +324,13 @@ pub(crate) fn thread_summary_from_session(session: &Value) -> Option<ThreadSumma
             .filter(|provider| matches!(*provider, "opencode" | "claude" | "codex"))
             .map(str::to_string)
     };
+    let catalog_activity = session
+        .get("catalogActivity")
+        .and_then(Value::as_str)
+        .filter(|activity| {
+            matches!(*activity, "idle" | "running" | "background" | "permission")
+        })
+        .map(str::to_owned);
     Some(ThreadSummary {
         session_id,
         title,
@@ -280,7 +340,8 @@ pub(crate) fn thread_summary_from_session(session: &Value) -> Option<ThreadSumma
         external_provider,
         updated_at,
         message_count: 0,
-        busy: false,
+        busy: catalog_activity.as_deref() == Some("running"),
+        catalog_activity,
         pinned,
     })
 }
@@ -1523,7 +1584,7 @@ pub(crate) async fn push_session_running_state(
     inner: Arc<AgentInner>,
     session_id: String,
 ) {
-    let Ok(value) = http_get_json(&inner, "/v2/sessions/status").await else {
+    let Some(value) = fetch_session_statuses(&inner).await else {
         return;
     };
     let Some(status) = value.get(&session_id) else {
@@ -1539,13 +1600,7 @@ pub(crate) fn running_state_message(
     session_id: String,
     status: &Value,
 ) -> Option<AgentServerMessage> {
-    if !matches!(
-        status
-            .get("type")
-            .and_then(Value::as_str)
-            .unwrap_or_default(),
-        "created" | "active" | "busy" | "running"
-    ) {
+    if !status_is_running(status) {
         return None;
     }
     // A status snapshot proves only that a run is live. Preserve its queue
@@ -2077,6 +2132,76 @@ pub(crate) async fn handle_set_pinned(
 #[cfg(test)]
 mod canonical_route_tests {
     use super::{running_state_message, session_list_path};
+
+    #[test]
+    fn catalog_activity_survives_parent_idle_and_legacy_busy_snapshots() {
+        let sessions = serde_json::json!({"items": [
+            {"id": "child-active", "catalogActivity": "running"},
+            {"id": "background-only", "catalogActivity": "background"},
+            {"id": "permission", "catalogActivity": "permission"},
+            {"id": "finished", "catalogActivity": "idle"}
+        ]});
+        let mut threads = super::thread_summaries_from_sessions(&sessions, 24);
+        super::apply_thread_busy_statuses(
+            &mut threads,
+            &serde_json::json!({
+                "child-active": {"type": "idle"}, "background-only": {"type": "busy"},
+                "permission": {"type": "busy"}, "finished": {"type": "busy"}
+            }),
+        );
+        for (id, activity) in [
+            ("child-active", "running"),
+            ("background-only", "background"),
+            ("permission", "permission"),
+            ("finished", "idle"),
+        ] {
+            let thread = threads
+                .iter()
+                .find(|thread| thread.session_id == id)
+                .unwrap();
+            assert_eq!(thread.catalog_activity.as_deref(), Some(activity));
+            assert_eq!(thread.busy, activity == "running");
+        }
+    }
+
+    #[test]
+    fn catalog_busy_comes_only_from_current_status_snapshot() {
+        let sessions = serde_json::json!({"items": [
+            {"id": "active", "busy": true},
+            {"id": "waiting", "busy": true},
+            {"id": "done", "busy": true},
+            {"id": "missing", "busy": true}
+        ]});
+        let mut threads = super::thread_summaries_from_sessions(&sessions, 24);
+        assert!(threads.iter().all(|thread| !thread.busy));
+        let statuses = serde_json::json!({
+            "active": {"type": "busy"}, "waiting": {"type": "blocked"},
+            "done": {"type": "completed"}
+        });
+        super::apply_thread_busy_statuses(&mut threads, &statuses);
+        for thread in &threads {
+            assert_eq!(thread.busy, thread.session_id == "active");
+        }
+        for status in ["created", "active", "busy", "running"] {
+            assert!(super::status_is_running(
+                &serde_json::json!({"type": status})
+            ));
+        }
+        for status in [
+            "idle",
+            "blocked",
+            "waiting",
+            "completed",
+            "stopped",
+            "retry",
+        ] {
+            assert!(!super::status_is_running(
+                &serde_json::json!({"type": status})
+            ));
+        }
+        super::apply_thread_busy_statuses(&mut threads, &serde_json::json!({}));
+        assert!(threads.iter().all(|thread| !thread.busy));
+    }
     use neoism_protocol::agent::AgentServerMessage;
     use serde_json::json;
 

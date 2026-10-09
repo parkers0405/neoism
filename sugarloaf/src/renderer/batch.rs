@@ -14,6 +14,9 @@ use crate::DrawableChar;
 use crate::UnderlineShape;
 use bytemuck::{Pod, Zeroable};
 
+#[cfg(test)]
+mod tests;
+
 #[allow(dead_code)]
 #[derive(Default, Clone, Copy)]
 pub struct RunUnderline {
@@ -1049,7 +1052,27 @@ impl BatchManager {
         corner_radii: [f32; 4],
         order: u8,
     ) {
-        let cr = self.clip_rect;
+        self.quad_clipped(
+            rect,
+            depth,
+            background_color,
+            corner_radii,
+            order,
+            self.clip_rect,
+        );
+    }
+
+    /// Preserve the shape's bounds and apply clipping only to its fragments.
+    #[inline]
+    pub fn quad_clipped(
+        &mut self,
+        rect: &Rect,
+        depth: f32,
+        background_color: &[f32; 4],
+        corner_radii: [f32; 4],
+        order: u8,
+        cr: [f32; 4],
+    ) {
         for batch in self.active.iter_mut() {
             if batch.order == order
                 && batch.rounded_rect(

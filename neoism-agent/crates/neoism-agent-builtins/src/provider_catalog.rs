@@ -449,6 +449,7 @@ fn claude_code_provider() -> ProviderInfo {
                     tool_call: Some(true),
                     stream_usage: None,
                     reasoning_effort: None,
+                    reasoning: None,
                 },
                 family: Some("claude".to_string()),
                 capabilities: ProviderCapabilities {
@@ -620,6 +621,7 @@ fn from_models_dev_model(
             tool_call: Some(model.tool_call),
             stream_usage: None,
             reasoning_effort: None,
+            reasoning: None,
         },
         family: model.family.clone(),
         capabilities: ProviderCapabilities {
@@ -693,6 +695,7 @@ fn local_model(
             tool_call: Some(config.tool_call.unwrap_or(false)),
             stream_usage: Some(stream_usage),
             reasoning_effort: Some(reasoning_effort),
+            reasoning: None,
         },
         family: config.family,
         capabilities: ProviderCapabilities {
@@ -939,8 +942,10 @@ pub fn generation_metadata(
         &mut cost,
         codex_oauth,
     );
+    let mut api = model_info.api.clone();
+    api.reasoning = Some(model_info.capabilities.reasoning);
     GenerationMetadata {
-        api: Some(model_info.api.clone()),
+        api: Some(api),
         auth_env: provider.env.clone(),
         limit: Some(limit),
         cost: Some(cost),
@@ -970,30 +975,36 @@ fn apply_codex_openai_effective_metadata(
     cost: &mut ModelCost,
     codex_oauth: bool,
 ) {
-    if provider_id != "openai"
-        || !codex_oauth
-        || !uses_codex_subscription_limits(model_id, limit)
-    {
+    if provider_id != "openai" || !codex_oauth {
         return;
     }
-    // The public catalog describes API limits, not the Codex product's
-    // default window. Use the explicit Codex ceiling; Copilot metadata may
-    // lower it, but must never raise it to an opt-in/API-sized window.
+    // Subscription limits belong to the selected service, not a model-name
+    // whitelist. New models must not inherit platform API windows on Codex.
+    // Preserve any smaller known model limits; these are conservative ceilings.
     let catalog_limit = codex_catalog_limit(providers, model_id);
     let catalog = catalog_limit.as_ref();
-    limit.context = catalog
-        .map(|catalog| catalog.context.min(CODEX_OPENAI_CONTEXT_LIMIT))
-        .unwrap_or(CODEX_OPENAI_CONTEXT_LIMIT);
-    limit.input = Some(
+    limit.context = limit.context.min(
         catalog
-            .and_then(|catalog| catalog.input)
-            .map(|input| input.min(CODEX_OPENAI_INPUT_LIMIT))
-            .unwrap_or(CODEX_OPENAI_INPUT_LIMIT),
+            .map(|catalog| catalog.context.min(CODEX_OPENAI_CONTEXT_LIMIT))
+            .unwrap_or(CODEX_OPENAI_CONTEXT_LIMIT),
+    );
+    limit.input = Some(
+        limit.input.unwrap_or(limit.context).min(limit.context).min(
+            catalog
+                .and_then(|catalog| catalog.input)
+                .map(|input| input.min(CODEX_OPENAI_INPUT_LIMIT))
+                .unwrap_or(CODEX_OPENAI_INPUT_LIMIT),
+        ),
     );
     limit.output = catalog
         .map(|catalog| catalog.output.min(CODEX_OPENAI_OUTPUT_LIMIT))
         .filter(|output| *output > 0)
-        .unwrap_or(CODEX_OPENAI_OUTPUT_LIMIT);
+        .unwrap_or(CODEX_OPENAI_OUTPUT_LIMIT)
+        .min(if limit.output > 0 {
+            limit.output
+        } else {
+            CODEX_OPENAI_OUTPUT_LIMIT
+        });
     *cost = ModelCost::default();
 }
 
@@ -1004,15 +1015,6 @@ fn codex_catalog_limit(providers: &[ProviderInfo], model_id: &str) -> Option<Mod
         .and_then(|provider| provider.models.get(model_id))
         .map(|model| model.limit.clone())
         .filter(|limit| limit.context > 0)
-}
-
-fn uses_codex_subscription_limits(model_id: &str, limit: &ModelLimit) -> bool {
-    model_id.starts_with("gpt-5.4")
-        || model_id.starts_with("gpt-5.5")
-        || model_id.starts_with("gpt-5.6")
-        || model_id == "gpt-6"
-        || model_id.starts_with("gpt-6-")
-        || (model_id.contains("codex") && limit.context > CODEX_OPENAI_CONTEXT_LIMIT)
 }
 
 fn apply_default_headers(api: &ProviderApiInfo, headers: &mut BTreeMap<String, String>) {
@@ -1227,6 +1229,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn generation_metadata_forwards_reasoning_capability_without_effort_compatibility() {
+        let providers = parse_models(
+            r#"{"openai":{"id":"openai","name":"OpenAI","models":{
+            "future-reasoner":{"id":"future-reasoner","name":"Future", "reasoning":true, "release_date":"2026-01-01", "limit":{"context":128000,"output":4096}},
+            "future-chat":{"id":"future-chat","name":"Chat", "reasoning":false, "release_date":"2026-01-01", "limit":{"context":128000,"output":4096}}
+        }}}"#,
+        )
+        .unwrap();
+        for (id, capability) in [("future-reasoner", true), ("future-chat", false)] {
+            let model = UserModel {
+                provider_id: "openai".into(),
+                model_id: id.into(),
+                connection_id: None,
+                variant: None,
+            };
+            let metadata = generation_metadata(&providers, &model, false);
+            let api = metadata.api.unwrap();
+            assert_eq!(api.reasoning, Some(capability));
+            assert_eq!(api.reasoning_effort, None);
+        }
+    }
+
+    #[test]
     fn generation_metadata_uses_model_api_options_headers_and_default_headers() {
         let providers = parse_models(
             r#"{
@@ -1344,19 +1369,23 @@ mod tests {
             .iter_mut()
             .find(|provider| provider.id == "openai")
             .unwrap();
-        for id in ["gpt-6", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna"] {
+        let future_ids = [
+            "gpt-6",
+            "gpt-6-astra",
+            "gpt-6-sol",
+            "gpt-6-luna",
+            "gpt-6.1-sol",
+            "openai/gpt-6.1-sol",
+            "gpt-42.7-next",
+            "future-reasoner",
+        ];
+        for id in future_ids {
             let mut model = openai.models["gpt-5.6-sol"].clone();
             model.id = id.into();
             model.name = id.into();
             openai.models.insert(id.into(), model);
         }
-        for id in [
-            "gpt-5.6-sol",
-            "gpt-6",
-            "gpt-6-astra",
-            "gpt-6-sol",
-            "gpt-6-luna",
-        ] {
+        for id in std::iter::once("gpt-5.6-sol").chain(future_ids) {
             for oauth in [true, false] {
                 let model = UserModel {
                     provider_id: "openai".into(),
@@ -1389,6 +1418,47 @@ mod tests {
                 // never the API's million-token context.
                 assert_eq!(trigger, if oauth { 176_800 } else { 682_500 });
             }
+        }
+    }
+
+    #[test]
+    fn codex_service_ceilings_never_increase_smaller_model_limits() {
+        for input in [None, Some(96_000)] {
+            let mut limit = ModelLimit {
+                context: 128_000,
+                input,
+                output: 4_096,
+            };
+            let mut cost = ModelCost::default();
+            apply_codex_openai_effective_metadata(
+                &[],
+                "openai",
+                "unknown-future-model",
+                &mut limit,
+                &mut cost,
+                true,
+            );
+            assert_eq!(limit.context, 128_000);
+            assert_eq!(limit.input, Some(input.unwrap_or(128_000)));
+            assert_eq!(limit.output, 4_096);
+        }
+        for (provider, oauth) in [("openai", false), ("other", true)] {
+            let mut limit = ModelLimit {
+                context: 1_050_000,
+                input: Some(922_000),
+                output: 128_000,
+            };
+            let mut cost = ModelCost::default();
+            apply_codex_openai_effective_metadata(
+                &[],
+                provider,
+                "unknown-future-model",
+                &mut limit,
+                &mut cost,
+                oauth,
+            );
+            assert_eq!(limit.context, 1_050_000);
+            assert_eq!(limit.input, Some(922_000));
         }
     }
 

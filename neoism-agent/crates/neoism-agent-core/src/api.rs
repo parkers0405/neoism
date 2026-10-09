@@ -479,6 +479,9 @@ pub struct ProviderApiInfo {
     pub stream_usage: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<bool>,
+    /// Model reasoning capability, independent of effort-parameter compatibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]

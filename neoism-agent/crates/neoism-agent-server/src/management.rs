@@ -286,7 +286,16 @@ fn authorize(state: &AppState, claims: Option<&CallerClaims>) -> Result<()> {
         return Err(ManagementError::Disabled);
     }
     let claims = claims.ok_or(ManagementError::AuthenticationRequired)?;
-    if claims.hosted {
+    if claims.hosted
+        && (state.services().shared_control_plane()
+            || claims.worker.is_none()
+            || !claims.resolved.as_ref().is_some_and(|resolved| {
+                resolved
+                    .scopes
+                    .iter()
+                    .any(|scope| scope == "workspace:admin")
+            }))
+    {
         return Err(ManagementError::HostedUnsupported);
     }
     Ok(())
@@ -2195,6 +2204,7 @@ mod tests {
             requests_per_minute: None,
             max_in_flight: None,
             resolved: None,
+            worker: None,
         };
         (state, router, claims, workspace)
     }
@@ -2635,6 +2645,7 @@ mod tests {
             requests_per_minute: None,
             max_in_flight: None,
             resolved: None,
+            worker: None,
         };
         let body = || {
             serde_json::from_value::<SkillWriteRequest>(serde_json::json!({
@@ -2753,6 +2764,7 @@ mod tests {
             requests_per_minute: None,
             max_in_flight: None,
             resolved: None,
+            worker: None,
         };
         let query = ManagementQuery {
             directory: Some(workspace.to_string_lossy().into_owned()),

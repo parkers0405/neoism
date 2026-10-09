@@ -15,6 +15,9 @@ pub(crate) struct ResponsesSseParser {
     text_started: bool,
     reasoning_started: bool,
     reasoning_summary_parts: BTreeSet<String>,
+    reasoning_summary_text: BTreeMap<String, String>,
+    ended_reasoning_summary_parts: BTreeSet<String>,
+    emitted_reasoning_items: BTreeSet<String>,
     active_reasoning_item_id: Option<String>,
     tool_calls: BTreeMap<String, ResponsesToolCallState>,
     emitted_tool_items: BTreeSet<String>,
@@ -233,7 +236,34 @@ impl ResponsesSseParser {
                     ),
                     string_field(&value, &["delta", "text"]),
                 ) {
-                    events.push(ProviderStreamEvent::ReasoningDelta { id, delta });
+                    if !self.ended_reasoning_summary_parts.contains(&id) {
+                        self.reasoning_summary_text
+                            .entry(id.clone())
+                            .or_default()
+                            .push_str(&delta);
+                        events.push(ProviderStreamEvent::ReasoningDelta { id, delta });
+                    }
+                }
+            }
+            "response.reasoning_summary_text.done"
+            | "response.reasoning_summary_part.done" => {
+                if let Some(id) = reasoning_summary_part_id(
+                    &value,
+                    self.active_reasoning_item_id.as_deref(),
+                ) {
+                    let text = value.get("text").and_then(Value::as_str).or_else(|| {
+                        value
+                            .get("part")
+                            .filter(|part| {
+                                part.get("type").and_then(Value::as_str)
+                                    == Some("summary_text")
+                            })
+                            .and_then(|part| part.get("text"))
+                            .and_then(Value::as_str)
+                    });
+                    if let Some(text) = text {
+                        events.extend(self.backfill_reasoning_summary(id, text));
+                    }
                 }
             }
             "response.completed" | "response.incomplete" => {
@@ -364,10 +394,44 @@ impl ResponsesSseParser {
     }
 
     fn start_reasoning_summary_id(&mut self, id: String) -> Option<ProviderStreamEvent> {
-        if !self.reasoning_summary_parts.insert(id.clone()) {
+        if self.ended_reasoning_summary_parts.contains(&id)
+            || !self.reasoning_summary_parts.insert(id.clone())
+        {
             return None;
         }
         Some(ProviderStreamEvent::ReasoningStart { id })
+    }
+
+    fn backfill_reasoning_summary(
+        &mut self,
+        id: String,
+        text: &str,
+    ) -> Vec<ProviderStreamEvent> {
+        if text.is_empty() || self.ended_reasoning_summary_parts.contains(&id) {
+            return Vec::new();
+        }
+        // Snapshots are cumulative. Only append a missing suffix; a divergent
+        // snapshot cannot safely replace text already shown to the user.
+        let previous = self
+            .reasoning_summary_text
+            .get(&id)
+            .map(String::as_str)
+            .unwrap_or("");
+        let Some(delta) = text
+            .strip_prefix(previous)
+            .filter(|delta| !delta.is_empty())
+        else {
+            return Vec::new();
+        };
+        let delta = delta.to_string();
+        let mut events = Vec::new();
+        if let Some(start) = self.start_reasoning_summary_id(id.clone()) {
+            events.push(start);
+        }
+        self.reasoning_summary_text
+            .insert(id.clone(), text.to_string());
+        events.push(ProviderStreamEvent::ReasoningDelta { id, delta });
+        events
     }
 
     fn finish_reasoning_item(&mut self, item: &Value) -> Vec<ProviderStreamEvent> {
@@ -377,6 +441,36 @@ impl ResponsesSseParser {
         let Some(item_id) = tool_item_id(item) else {
             return Vec::new();
         };
+        if !self.emitted_reasoning_items.insert(item_id.clone()) {
+            return Vec::new();
+        }
+        let mut events = Vec::new();
+        if let Some(summary) = item.get("summary").and_then(Value::as_array) {
+            for (index, part) in summary.iter().enumerate() {
+                if part.get("type").and_then(Value::as_str) == Some("summary_text") {
+                    if let Some(text) = part.get("text").and_then(Value::as_str) {
+                        events.extend(self.backfill_reasoning_summary(
+                            format!("{item_id}:{index}"),
+                            text,
+                        ));
+                    }
+                }
+            }
+        }
+        // Encrypted state is replay metadata only, never visible summary text.
+        if item
+            .get("encrypted_content")
+            .and_then(Value::as_str)
+            .is_some()
+            && !self
+                .reasoning_summary_parts
+                .iter()
+                .any(|id| id.starts_with(&format!("{item_id}:")))
+        {
+            if let Some(start) = self.start_reasoning_summary_id(format!("{item_id}:0")) {
+                events.push(start);
+            }
+        }
         let prefix = format!("{item_id}:");
         let finished = self
             .reasoning_summary_parts
@@ -386,11 +480,11 @@ impl ResponsesSseParser {
             .collect::<Vec<_>>();
         for part_id in &finished {
             self.reasoning_summary_parts.remove(part_id);
+            self.ended_reasoning_summary_parts.insert(part_id.clone());
         }
         if self.active_reasoning_item_id.as_deref() == Some(&item_id) {
             self.active_reasoning_item_id = None;
         }
-        let mut events = Vec::new();
         if let (Some(id), Some(encrypted_content)) = (
             finished.first(),
             item.get("encrypted_content").and_then(Value::as_str),
@@ -416,6 +510,8 @@ impl ResponsesSseParser {
     fn finish_all_reasoning_summary_parts(&mut self) -> Vec<ProviderStreamEvent> {
         self.active_reasoning_item_id = None;
         let finished = std::mem::take(&mut self.reasoning_summary_parts);
+        self.ended_reasoning_summary_parts
+            .extend(finished.iter().cloned());
         finished
             .into_iter()
             .map(|id| ProviderStreamEvent::ReasoningEnd { id })
@@ -694,7 +790,9 @@ fn responses_reasoning_options(model_id: &str, variant: Option<&str>) -> Option<
     } else if responses_model_uses_default_gpt5_reasoning(model_id) {
         reasoning.insert("effort".to_string(), Value::String("medium".to_string()));
     }
-    if responses_model_supports_reasoning_summary(model_id) {
+    if reasoning.get("effort").and_then(Value::as_str) != Some("none")
+        && (!reasoning.is_empty() || responses_model_supports_reasoning_summary(model_id))
+    {
         reasoning.insert("summary".to_string(), Value::String("auto".to_string()));
     }
     if reasoning.is_empty() {

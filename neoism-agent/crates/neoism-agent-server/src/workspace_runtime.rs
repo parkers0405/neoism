@@ -15,6 +15,28 @@ tokio::task_local! {
     static ACTIVE_PLUGIN_GENERATION: PluginGenerationLease;
 }
 
+/// Native admission for subsystem entry points without a logical session.
+/// HTTP callers still require live worker authentication at the parent router.
+/// This gate never infers authority from `hosted` alone or from a session's
+/// deployment metadata: shared control is disabled, workers need an admitted path.
+pub(crate) fn directory_execution_policy(
+    services: &neoism_agent_service_api::AgentServices,
+    directory: &Path,
+) -> neoism_agent_service_api::ExecutionPolicy {
+    use neoism_agent_service_api::ExecutionPolicy;
+    if services.shared_control_plane() {
+        return ExecutionPolicy::Disabled;
+    }
+    if let Some(worker) = &services.workspace_worker {
+        return if services.hosted && worker.admits_path(directory) {
+            ExecutionPolicy::NativeLocal
+        } else {
+            ExecutionPolicy::Disabled
+        };
+    }
+    ExecutionPolicy::NativeLocal
+}
+
 const IDLE_TTL: Duration = Duration::from_secs(60 * 60);
 const CONFIG_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 const PLUGIN_LIFECYCLE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -337,6 +359,14 @@ impl PluginGenerationLease {
     pub(crate) fn lsp(
         &self,
     ) -> Result<crate::lsp::LspRuntime, neoism_agent_plugin_api::PluginRuntimeError> {
+        if !crate::caller::native_execution_allowed(&directory_execution_policy(
+            &self.inner.services,
+            &self.inner.root,
+        )) {
+            return Err(neoism_agent_plugin_api::PluginRuntimeError::new(
+                "native LSP is unavailable for this runtime",
+            ));
+        }
         Ok((*self.inner.state_with_shutdown(
             neoism_agent_builtins::plugin::lsp::ID,
             || {
@@ -378,6 +408,14 @@ impl PluginGenerationLease {
         Arc<crate::pty::PtyWorkspaceRuntime>,
         neoism_agent_plugin_api::PluginRuntimeError,
     > {
+        if !crate::caller::native_execution_allowed(&directory_execution_policy(
+            &self.inner.services,
+            &self.inner.root,
+        )) {
+            return Err(neoism_agent_plugin_api::PluginRuntimeError::new(
+                "native PTY is unavailable for this runtime",
+            ));
+        }
         self.inner.state_with_shutdown(
             neoism_agent_builtins::plugin::pty::ID,
             Default::default,
@@ -1348,6 +1386,18 @@ impl WorkspaceRuntimeRegistry {
             return Err("workspace runtime registry is shut down".into());
         }
         let services = state.services();
+        if let Some(worker) = &services.workspace_worker {
+            worker.validate().map_err(|error| error.to_string())?;
+            let requested = std::fs::canonicalize(directory).map_err(|error| {
+                format!("worker runtime root is inaccessible: {error}")
+            })?;
+            if tenant_id != worker.tenant_id() || requested != worker.root() {
+                return Err(
+                    "worker runtime must use its admitted tenant and immutable root"
+                        .into(),
+                );
+            }
+        }
         let key = TenantRuntimeKey::new(tenant_id, directory);
         let root = key.root.clone();
         let now = Instant::now();
@@ -1446,13 +1496,17 @@ impl WorkspaceRuntimeRegistry {
             root.clone(),
         );
         let next_generation = generation.snapshot.generation.saturating_add(1);
-        let search_root_pin = match services.workspace_search.pin_root(&root) {
-            Ok(pin) => Some(pin),
-            Err(error) => {
-                // Some injected services deliberately have no persistent index.
-                // Do not make workspace/plugin startup depend on that capability.
-                tracing::debug!(%error, root = %root.display(), "workspace search root pin unavailable");
-                None
+        let search_root_pin = if services.shared_control_plane() {
+            None
+        } else {
+            match services.workspace_search.pin_root(&root) {
+                Ok(pin) => Some(pin),
+                Err(error) => {
+                    // Some injected services deliberately have no persistent index.
+                    // Do not make workspace/plugin startup depend on that capability.
+                    tracing::debug!(%error, root = %root.display(), "workspace search root pin unavailable");
+                    None
+                }
             }
         };
         let runtime = Arc::new(WorkspaceRuntime {
@@ -1826,6 +1880,36 @@ pub(crate) fn canonical_location(directory: &str) -> PathBuf {
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
+
+    #[test]
+    fn shared_control_rejects_native_lsp_and_pty_before_resource_allocation() {
+        let snapshot = Arc::new(neoism_agent_plugin_api::RegistrySnapshot::empty());
+        let installed = Arc::new(neoism_agent_plugin_api::InstalledPlugins::empty(
+            snapshot.clone(),
+        ));
+        let generation = PluginGeneration::build(
+            snapshot,
+            installed,
+            Arc::new(neoism_agent_core::AgentConfigDocument::default()),
+            Arc::new(WorkspaceLifecycle::default()),
+            crate::standard_services().for_hosted_control_plane(),
+            PathBuf::new(),
+        );
+        let lease = PluginGenerationLease::try_new(generation.clone()).unwrap();
+        assert!(lease
+            .lsp()
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("native LSP"));
+        assert!(lease
+            .pty()
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("native PTY"));
+        assert!(generation.lifecycle.states.lock().unwrap().is_empty());
+    }
 
     fn test_generation(generation: u64) -> Arc<PluginGeneration> {
         let mut snapshot = neoism_agent_plugin_api::RegistrySnapshot::empty();

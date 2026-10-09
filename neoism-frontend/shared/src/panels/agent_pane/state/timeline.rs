@@ -342,6 +342,11 @@ impl NeoismAgentPane {
         content_height_px: f32,
         viewport_height_px: f32,
     ) {
+        // A tool can unhide the whole previous turn. Even a batch of live
+        // updates before this paint must not animate that historical disclosure.
+        if std::mem::take(&mut self.timeline_trace_reveal_pending) {
+            self.timeline_live_growth = false;
+        }
         let old_scroll_px = self.timeline_scroll_px;
         let old_max_scroll =
             (self.timeline_content_height_px - self.timeline_viewport_height_px).max(0.0);
@@ -1051,9 +1056,20 @@ impl NeoismAgentPane {
         // replaced or older pages are prepended. Trace collapses only when
         // the session is left and re-entered, never because
         // a newer prompt was sent.
+        let start = last_user.map_or(0, |index| index + 1);
+        self.timeline_trace_reveal_pending |=
+            self.messages[start..].iter().any(|message| {
+                matches!(
+                    message.kind,
+                    NeoismAgentMessageKind::Reasoning
+                        | NeoismAgentMessageKind::Tool
+                        | NeoismAgentMessageKind::Subtask
+                        | NeoismAgentMessageKind::Compaction
+                )
+            });
         self.timeline_live_trace_anchor =
             last_user.map(|index| self.messages[index].id.clone());
-        self.timeline_live_trace_start = Some(last_user.map_or(0, |index| index + 1));
+        self.timeline_live_trace_start = Some(start);
         // Rows hidden in the settled projection may now be visible, including
         // progress text that arrived before the first tool/reasoning item.
         self.invalidate_timeline_layout();

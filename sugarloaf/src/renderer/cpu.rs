@@ -16,6 +16,9 @@ use rustc_hash::FxHashMap;
 use std::hash::Hasher;
 use wide::{u32x4, u32x8};
 
+#[cfg(test)]
+mod tests;
+
 #[derive(Default)]
 pub struct CpuCache {
     glyphs: FxHashMap<GlyphKey, CachedGlyph>,

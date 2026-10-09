@@ -77,6 +77,13 @@ pub(crate) async fn v2_capabilities(
         version: "1.0.0".into(),
         enabled: !claims.as_ref().is_some_and(|Extension(c)| {
             c.hosted
+                && !(state.services().workspace_worker.is_some()
+                    && c.resolved.as_ref().is_some_and(|resolved| {
+                        resolved
+                            .scopes
+                            .iter()
+                            .any(|scope| scope == "workspace:admin")
+                    }))
                 && !c.workspace_id.as_deref().is_some_and(|workspace_id| {
                     c.tenant_id == format!("workspace:{workspace_id}")
                 })
@@ -111,34 +118,27 @@ pub(crate) async fn v2_capabilities(
         .as_ref()
         .map(|Extension(claims)| claims.execution_policy())
         .unwrap_or(neoism_agent_service_api::ExecutionPolicy::NativeLocal);
-    let execution_backend = state.services().execution.backend_name().to_string();
     capabilities.push(CapabilityInfo {
         id: "neoism.execution.native".into(),
         version: "1.0.0".into(),
-        enabled: matches!(
-            execution,
-            neoism_agent_service_api::ExecutionPolicy::NativeLocal
-        ),
+        enabled: !state.services().shared_control_plane()
+            && state.services().workspace_worker.as_ref().is_none_or(|worker| worker.validate().is_ok())
+            && matches!(execution, neoism_agent_service_api::ExecutionPolicy::NativeLocal),
         disableable: false,
-        source: execution_backend.clone(),
+        source: "runtime".into(),
         plugin_id: None,
         api_prefix: None,
-        reason: Some("Native execution is never a fallback for hosted sessions".into()),
+        reason: Some("Processes execute only in the local runtime or its admitted workspace worker".into()),
     });
     capabilities.push(CapabilityInfo {
-        id: "neoism.execution.sandbox".into(),
+        id: "neoism.workspace.worker".into(),
         version: "1.0.0".into(),
-        enabled: matches!(
-            execution,
-            neoism_agent_service_api::ExecutionPolicy::Sandboxed { .. }
-        ) && state.services().execution.available(),
+        enabled: state.services().workspace_worker.is_some(),
         disableable: false,
-        source: execution_backend,
+        source: "runtime".into(),
         plugin_id: None,
         api_prefix: None,
-        reason: Some(
-            "Sandbox leases are acquired lazily on the first process operation".into(),
-        ),
+        reason: Some("One isolated runtime owns one logical workspace".into()),
     });
     capabilities.push(CapabilityInfo {
         id: "neoism.sessions.control".into(),
@@ -160,7 +160,7 @@ pub(crate) async fn v2_capabilities(
     capabilities.push(CapabilityInfo {
         id: "neoism.artifacts.shared".into(),
         version: "1.0.0".into(),
-        enabled: !state.services().hosted || shared_artifacts,
+        enabled: !state.services().shared_control_plane() || shared_artifacts,
         disableable: false,
         source: state
             .services()
@@ -178,12 +178,12 @@ pub(crate) async fn v2_capabilities(
     capabilities.push(CapabilityInfo {
         id: "neoism.workflows.hosted".into(),
         version: "1.0.0".into(),
-        enabled: !claims.as_ref().is_some_and(|Extension(c)| c.hosted),
+        enabled: !state.services().shared_control_plane(),
         disableable: false,
         source: "server".into(),
         plugin_id: Some("dev.neoism.workflows".into()),
         api_prefix: Some("/v2/plugins/dev.neoism.workflows".into()),
-        reason: Some("Hosted workflows remain unavailable until scheduling and recovery are tenant-owned".into()),
+        reason: Some("Workflows run inside local runtimes and single-workspace workers, not shared control planes".into()),
     });
     if state.management_enabled() {
         capabilities.push(CapabilityInfo {
@@ -286,6 +286,12 @@ pub(crate) async fn v2_events(
     let explicit_cursor = query.since.or(header_cursor);
     let page_size = query.limit.unwrap_or(1_000).clamp(1, 5_000);
     let session_id = query.session_id;
+    let credential_expiry = state.services().workspace_worker.as_ref().and_then(|_| {
+        claims
+            .as_ref()
+            .and_then(|Extension(claims)| claims.resolved.as_ref())
+            .and_then(|resolved| resolved.expires_at)
+    });
     let tenant_id = claims.and_then(|Extension(claims)| {
         (claims.hosted || claims.tenant_id != "local").then_some(claims.tenant_id)
     });
@@ -475,7 +481,26 @@ pub(crate) async fn v2_events(
             }
         }
     };
+    let stream =
+        futures::StreamExt::take_until(stream, worker_stream_expiry(credential_expiry));
     Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(10)))
+}
+
+async fn worker_stream_expiry(expires_at: Option<i64>) {
+    if let Some(expires_at) = expires_at {
+        loop {
+            let now = (crate::now_millis() / 1000) as i64;
+            if now >= expires_at {
+                return;
+            }
+            tokio::time::sleep(Duration::from_secs(
+                expires_at.saturating_sub(now).min(60) as u64,
+            ))
+            .await;
+        }
+    } else {
+        std::future::pending::<()>().await;
+    }
 }
 
 /// Root-session lifecycle events for one authorized workspace directory.
@@ -490,10 +515,19 @@ pub(crate) async fn v2_session_catalog_events(
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let directory = resolve_directory(query.directory, &headers);
     let claims = claims.map(|Extension(claims)| claims);
+    let credential_expiry = state.services().workspace_worker.as_ref().and_then(|_| {
+        claims
+            .as_ref()
+            .and_then(|claims| claims.resolved.as_ref())
+            .and_then(|resolved| resolved.expires_at)
+    });
     let mut receiver = state.subscribe();
     let stream = async_stream::stream! {
+        let Ok(mut catalog) = crate::catalog_activity::CatalogProjection::load(&state).await else { return };
+        let Ok(baseline) = catalog.baseline(&state, &directory, claims.as_ref()).await else { return };
+        for event in baseline { yield Ok(v2_live_sse_event(event)); }
         loop {
-            let mut event = match receiver.recv().await {
+            let event = match receiver.recv().await {
                 Ok(event) => event,
                 Err(broadcast::error::RecvError::Lagged(skipped)) => {
                     tracing::warn!(skipped, "session catalogue subscriber lagged; closing stream for recovery");
@@ -501,46 +535,14 @@ pub(crate) async fn v2_session_catalog_events(
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
             };
-            if !matches!(
-                event.kind.as_str(),
-                neoism_agent_core::event_type::SESSION_CREATED
-                    | neoism_agent_core::event_type::SESSION_UPDATED
-                    | neoism_agent_core::event_type::SESSION_DELETED
-            ) {
-                continue;
+            let Ok(projected) = catalog.project_event(&state, event, &directory, claims.as_ref()).await else { break };
+            for projected in projected {
+                yield Ok(v2_live_sse_event(projected));
             }
-            let Some(info) = event
-                .properties
-                .get("info")
-                .cloned()
-                .and_then(|info| serde_json::from_value::<SessionInfo>(info).ok())
-            else {
-                continue;
-            };
-            let mut hydrated = [info];
-            if state
-                .inner
-                .store
-                .hydrate_host_associations(&mut hydrated)
-                .await
-                .is_err()
-            {
-                continue;
-            }
-            let [info] = hydrated;
-            if info.parent_id.is_some() || info.directory != directory {
-                continue;
-            }
-            if claims
-                .as_ref()
-                .is_some_and(|claims| !crate::caller::allows_session(claims, &info))
-            {
-                continue;
-            }
-            event.properties["info"] = serde_json::to_value(&info).unwrap_or(Value::Null);
-            yield Ok(v2_live_sse_event(event));
         }
     };
+    let stream =
+        futures::StreamExt::take_until(stream, worker_stream_expiry(credential_expiry));
     Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(10)))
 }
 
@@ -798,7 +800,7 @@ pub(crate) async fn v2_session_list(
     State(state): State<AppState>,
     Query(query): Query<SessionListQuery>,
     claims: Option<Extension<crate::caller::CallerClaims>>,
-) -> Result<Json<Page<SessionInfo>>, ApiError> {
+) -> Result<Json<Page<crate::catalog_activity::CatalogSessionInfo>>, ApiError> {
     if query.roots.as_deref() == Some("true") {
         let cursor = query
             .cursor
@@ -876,7 +878,7 @@ pub(crate) async fn v2_session_list(
             }
         }
         return Ok(Json(Page {
-            items: page.items,
+            items: crate::catalog_activity::project(&state, page.items).await?,
             cursor: PageCursor {
                 previous: None,
                 next: page.next_cursor,
@@ -890,7 +892,7 @@ pub(crate) async fn v2_session_list(
     }
     filter_sessions(&mut sessions, &query);
     Ok(Json(Page {
-        items: sessions,
+        items: crate::catalog_activity::project(&state, sessions).await?,
         cursor: PageCursor::default(),
     }))
 }
@@ -1029,6 +1031,7 @@ mod authenticated_author_tests {
             requests_per_minute: None,
             max_in_flight: None,
             resolved: None,
+            worker: None,
         };
         bind_authenticated_author(&mut request, &claims);
         assert_eq!(request.author.as_deref(), Some("piss-desktop"));
@@ -1062,6 +1065,7 @@ mod authenticated_author_tests {
             requests_per_minute: None,
             max_in_flight: None,
             resolved: None,
+            worker: None,
         };
         bind_authenticated_author(&mut request, &claims);
         assert_eq!(request.author.as_deref(), Some("hosted:authenticated"));
@@ -1095,6 +1099,7 @@ mod authenticated_author_tests {
             requests_per_minute: None,
             max_in_flight: None,
             resolved: None,
+            worker: None,
         };
         bind_authenticated_author(&mut request, &claims);
         assert_eq!(request.author.as_deref(), Some("device:authenticated"));

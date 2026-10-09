@@ -121,6 +121,13 @@ pub(crate) async fn start_task_tool(
         }
     }
     if crate::external_agent::is_external_agent(&agent_name) {
+        if !crate::caller::native_execution_allowed(
+            &crate::caller::session_execution_policy(state.services(), &parent),
+        ) {
+            return Err(
+                "external native subagents are unavailable for this session".into()
+            );
+        }
         return crate::external_agent::execute_external_task(
             state,
             &parent,

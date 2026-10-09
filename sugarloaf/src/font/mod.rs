@@ -1150,9 +1150,19 @@ impl FontLibraryData {
         }
     }
 
+    #[cfg(any(target_arch = "wasm32", test))]
+    fn load_bundled_styles(&mut self) {
+        let spec = SugarloafFonts::default();
+        for face in [spec.regular, spec.italic, spec.bold, spec.bold_italic] {
+            self.insert(load_fallback_from_memory(&face));
+        }
+    }
+
     #[cfg(target_arch = "wasm32")]
     pub fn load(&mut self, _font_spec: SugarloafFonts) -> Vec<SugarloafFont> {
-        self.insert(FontData::from_slice(FONT_CASCADIAMONO_NF_REGULAR).unwrap());
+        // Style matching needs distinct faces; a regular-only library silently
+        // drops bold/italic requirements when resolving a glyph.
+        self.load_bundled_styles();
 
         vec![]
     }
@@ -2076,6 +2086,31 @@ fn load_from_font_source(path: &PathBuf) -> Option<SharedData> {
 #[cfg(test)]
 mod bundled_icon_tests {
     use super::*;
+
+    #[test]
+    fn bundled_emphasis_resolves_to_real_bold_faces() {
+        let mut library = FontLibraryData::default();
+        library.load_bundled_styles();
+        for (style, weight, expected_id) in [
+            (Style::Normal, Weight::NORMAL, 0),
+            (Style::Italic, Weight::NORMAL, 1),
+            (Style::Normal, Weight::BOLD, 2),
+            (Style::Italic, Weight::BOLD, 3),
+        ] {
+            let span = SpanStyle {
+                font_attrs: crate::Attributes::new(crate::Stretch::NORMAL, weight, style),
+                ..SpanStyle::default()
+            };
+            let (id, _) = library.find_best_font_match_strict('B', &span).unwrap();
+            assert_eq!(id, expected_id);
+            let face = library.get(&id);
+            assert_eq!(face.style, style);
+            if weight == Weight::BOLD {
+                assert!(face.weight >= Weight(700));
+                assert!(face.weight > library.get(&0).weight);
+            }
+        }
+    }
 
     /// Shared chrome uses these glyphs for the folder button, rounded toolbar
     /// buttons, menu rows, and file types. The browser has no system cascade,

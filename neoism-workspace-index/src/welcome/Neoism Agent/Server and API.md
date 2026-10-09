@@ -52,9 +52,11 @@ With no token configured, the server is open on loopback for local use. Three cr
 |---|---|
 | `NEOISM_AGENT_TOKEN` | A single bearer token for the local server. |
 | Daemon-signed credentials | The workspace daemon signs per-client claims (workspace, tenant, directory prefixes). |
-| `NEOISM_AGENT_AUTH_CONFIG` | Hosted token file: per-token tenants, directory scopes, rate and concurrency quotas. |
+| `NEOISM_AGENT_AUTH_CONFIG` | Local/trusted token file: per-token tenants, directory scopes, rate and concurrency quotas. |
 
-Hosted callers get hard boundaries: session ownership checks on every session-scoped route (validated against route descriptors, never guessed from the path), directory-prefix enforcement, config and credential routes blocked, and an audit log entry per authenticated request (`/v2/audit`).
+Authenticated callers get application-level admission checks: session ownership checks on session-scoped routes (validated against route descriptors, never guessed from the path), directory-prefix enforcement, restricted config and credential access, and authenticated-request audit entries (`/v2/audit`). Token tenants and directory prefixes are not VM isolation or an OS filesystem jail. They do not make a native shared-process deployment safe for mutually untrusted tenants.
+
+For strict shared hosting, embed the server with authoritative tenant resolution, scoped credential/blob stores and `for_hosted_control_plane()`. That shared process is execution-disabled. The application separately admits a whole Agent worker in one isolated VM per logical workspace, using the host manager/broker and production infrastructure provider. Worker startup pairs immutable bootstrap with a 32-byte public verifier; private signing seeds remain controller-only. Authenticated `GET /v2/runtime` reports worker version, root and runtime identity/generation for broker verification. Worker scopes authorize API operations, not OS isolation among agents sharing the VM. See [[The Neoism Agent]], [[SDK]], and the authoritative [hosted architecture/status guide](https://github.com/parkers0405/neoism/blob/main/neoism-agent/docs/hosted-control-plane.md).
 
 ## Run it standalone
 
@@ -69,25 +71,13 @@ Point any SDK or HTTP client at it. The desktop's embedded server is the same bi
 
 ## Embedding the agent in a product
 
-A backend that drives the agent per tenant (a SaaS assistant, a bot, a
-pipeline) runs one loop per conversation:
+A backend that drives the agent (a SaaS assistant, a bot, a pipeline) runs one loop per conversation. For local/trusted integrations, `NEOISM_AGENT_AUTH_CONFIG` can restrict token access to tenant directories. For mutually untrusted hosted execution, use the strict shared control plane and separately admitted whole workspace workers described above; directory metadata alone is not execution isolation.
 
-1. Connect with a bearer token. For multi-tenant deployments, use
-   `NEOISM_AGENT_AUTH_CONFIG` with one token per tenant, a
-   `directoryPrefixes` jail, and per-tenant rate and concurrency quotas.
-2. Create or reuse a session rooted in the tenant's directory
-   (`sessions.create({ directory })`). Instructions and configuration are
-   discovered upward from that directory, so shared rules live at the base
-   and per-tenant overrides in the tenant folder.
-3. Subscribe to `/v2/events` with the session id and `tail: true`
-   **before** prompting, so nothing slips between the two. The SDK
-   subscription reconnects automatically and resumes from its sequence
-   cursor.
-4. Prompt with a caller-generated `messageId` — retrying the same prompt
-   after a network failure is idempotent, never a duplicate turn.
-5. Stream tokens from `message.part.delta`, watch typed tool and
-   step-finish parts (token counts and cost for billing), and finish when
-   `session.status` reports idle for the session.
+1. Connect with a bearer token. Locally, a configured token can carry `directoryPrefixes` and rate/concurrency quotas. In cloud mode, use the application's host broker to obtain a short-lived credential for the current authorized worker.
+2. Create or reuse a session rooted in an admitted directory (`sessions.create({ directory })`). Instructions and configuration are discovered upward from that directory; multiple project folders and Git worktrees remain on the same workspace VM, not separate machines.
+3. Subscribe to `/v2/events` with the session id and `tail: true` **before** prompting, so nothing slips between the two. The SDK subscription reconnects automatically and resumes from its sequence cursor.
+4. Prompt with a caller-generated `messageId` — retrying the same prompt after a network failure is idempotent, never a duplicate turn.
+5. Stream tokens from `message.part.delta`, watch typed tool and step-finish parts (token counts and cost for billing), and finish when `session.status` reports idle for the session.
 
 The complete, runnable version of this loop is
 `sdk/typescript/examples/headless.ts` in the repository.

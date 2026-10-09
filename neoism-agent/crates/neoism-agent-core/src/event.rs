@@ -66,6 +66,7 @@ pub mod event_type {
     pub const SESSION_CREATED: &str = "session.created";
     pub const SESSION_DELETED: &str = "session.deleted";
     pub const SESSION_ERROR: &str = "session.error";
+    pub const SESSION_CATALOG_ACTIVITY: &str = "session.catalog.activity";
     pub const SESSION_EXECUTION_UPDATED: &str = "session.execution.updated";
     pub const SESSION_BACKGROUND_TASKS_UPDATED: &str = "session.background_tasks.updated";
     pub const SESSION_BACKGROUND_TASK_COMPLETED: &str =
@@ -108,6 +109,7 @@ pub mod event_type {
         SESSION_CREATED,
         SESSION_DELETED,
         SESSION_ERROR,
+        SESSION_CATALOG_ACTIVITY,
         SESSION_EXECUTION_UPDATED,
         SESSION_BACKGROUND_TASKS_UPDATED,
         SESSION_BACKGROUND_TASK_COMPLETED,

@@ -726,7 +726,6 @@ fn draw_rounded_rect_clipped(
         depth,
         radius,
         order,
-        0.5,
     );
 }
 

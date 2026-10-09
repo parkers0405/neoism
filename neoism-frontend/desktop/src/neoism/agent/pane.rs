@@ -1099,6 +1099,8 @@ pub struct NeoismAgentPane {
     /// Geometry belongs to a live arrival, not history/cache/layout hydration.
     /// Retained across reveal measurement passes; reset by history and navigation.
     pub(super) timeline_live_growth: bool,
+    /// A reopened trace reveals old rows; baseline that disclosure before following new output.
+    pub(super) timeline_trace_reveal_pending: bool,
     /// Per-gesture inertia tuning for precision trackpad input.
     timeline_scroll_decay_tau: f32,
     timeline_scroll_stop_px_s: f32,
@@ -1389,6 +1391,7 @@ impl Default for NeoismAgentPane {
             timeline_scroll_owner: TimelineScrollOwner::Wheel,
             timeline_history_position_hydrated: false,
             timeline_live_growth: false,
+            timeline_trace_reveal_pending: false,
             timeline_scroll_decay_tau: Self::TIMELINE_TRACKPAD_DECAY_TAU,
             timeline_scroll_stop_px_s: Self::TIMELINE_TRACKPAD_STOP_PX_S,
             timeline_measure_cache: RefCell::new(HashMap::new()),

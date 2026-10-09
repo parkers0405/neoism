@@ -47,6 +47,12 @@ pub(crate) async fn execute_external_task(
     background: bool,
     cancel: Option<Arc<AtomicBool>>,
 ) -> Result<tool::ToolExecutionResult, String> {
+    if !crate::caller::native_execution_allowed(&crate::caller::session_execution_policy(
+        state.services(),
+        parent,
+    )) {
+        return Err("external native agents are unavailable for this session".into());
+    }
     let runtime = ExternalRuntime::resolve(agent_name)
         .ok_or_else(|| format!("Unknown external agent type: {agent_name}"))?;
     let continuing = task_id.is_some();
@@ -208,6 +214,10 @@ pub(super) async fn create_external_subtask_session(
         crate::execution_activity::EXECUTION_ID_KEY,
         crate::execution_activity::EXECUTION_ROOT_KEY,
         crate::caller::TENANT_EXTRA_KEY,
+        crate::caller::DIRECTORY_PREFIXES_EXTRA_KEY,
+        crate::caller::EXECUTION_POLICY_EXTRA_KEY,
+        crate::caller::CREATED_BY_EXTRA_KEY,
+        crate::caller::QUOTAS_EXTRA_KEY,
     ] {
         if let Some(value) = parent.extra.get(key) {
             extra.insert(key.to_string(), value.clone());
@@ -329,6 +339,14 @@ pub(crate) async fn append_external_root_prompt(
     request: neoism_agent_core::PromptRequest,
     create_reply: bool,
 ) -> Result<MessageWithParts, ApiError> {
+    if !crate::caller::native_execution_allowed(&crate::caller::session_execution_policy(
+        state.services(),
+        session,
+    )) {
+        return Err(ApiError::forbidden(
+            "native ACP is unavailable for this session",
+        ));
+    }
     let runtime = super::root_runtime(session)
         .ok_or_else(|| ApiError::bad_request("Invalid external root"))?;
     if matches!(
@@ -472,6 +490,14 @@ async fn run_external_subtask_prompt_with_cancel(
         .get_session(child_id)
         .await?
         .ok_or_else(|| ApiError::not_found(format!("session {child_id} not found")))?;
+    if !crate::caller::native_execution_allowed(&crate::caller::session_execution_policy(
+        state.services(),
+        &child,
+    )) {
+        return Err(ApiError::forbidden(
+            "external native agents are unavailable for this session",
+        ));
+    }
     let run = start_session_run(state, &child.id)
         .await
         .map_err(|_| ApiError::conflict("Session is already running"))?;

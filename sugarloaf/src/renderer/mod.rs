@@ -2021,6 +2021,34 @@ impl Renderer {
         );
     }
 
+    /// Submit an immediate clipped quad to the normal or late overlay pass.
+    #[inline]
+    #[allow(clippy::too_many_arguments)]
+    pub fn quad_clipped(
+        &mut self,
+        rect: [f32; 4],
+        background_color: [f32; 4],
+        corner_radii: [f32; 4],
+        depth: f32,
+        order: u8,
+        clip: [f32; 4],
+        overlay: bool,
+    ) {
+        let compositor = if overlay {
+            &mut self.overlay_comp
+        } else {
+            &mut self.comp
+        };
+        compositor.batches.quad_clipped(
+            &Rect::from(rect),
+            depth,
+            &background_color,
+            corner_radii,
+            order,
+            clip,
+        );
+    }
+
     #[inline]
     #[allow(clippy::too_many_arguments)]
     pub fn add_image_rect(

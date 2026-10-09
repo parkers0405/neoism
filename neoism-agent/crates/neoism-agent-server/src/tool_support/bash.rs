@@ -1,13 +1,11 @@
 #[cfg(not(windows))]
 use std::collections::HashMap;
-use std::process::Stdio;
 #[cfg(not(windows))]
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
 use serde_json::{json, Value};
-use tokio::process::Command;
 #[cfg(not(windows))]
 use tokio::sync::Mutex;
 
@@ -70,19 +68,22 @@ impl LoginShellEnvironment {
 
 #[cfg(not(windows))]
 async fn capture_login_env(shell: String) -> HashMap<String, String> {
-    let captured = Command::new(&shell)
-        .arg("-lc")
-        .arg("env")
-        .kill_on_drop(true)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-        .await;
+    let captured = crate::local_process::run(
+        crate::local_process::ProcessSpec {
+            executable: shell,
+            args: vec!["-lc".into(), "env".into()],
+            cwd: None,
+            env: Default::default(),
+            stdin: None,
+            timeout_ms: Some(10_000),
+        },
+        None,
+    )
+    .await;
     let Ok(output) = captured else {
         return HashMap::new();
     };
-    if !output.status.success() {
+    if output.status != 0 || output.truncated {
         return HashMap::new();
     }
     let mut env = parse_env(&String::from_utf8_lossy(&output.stdout));
@@ -133,6 +134,7 @@ pub(super) async fn bash_tool(
     context: ToolContext,
     arguments: Value,
 ) -> anyhow::Result<ToolExecutionResult> {
+    context.assert_native_execution().await?;
     let command = required_string(&arguments, "command")?.to_string();
     let cwd = if let Some(workdir) = optional_string(&arguments, "workdir") {
         existing_project_path(&context, &workdir)?
@@ -183,19 +185,7 @@ pub(super) async fn bash_tool(
     env.extend(context.env.clone());
     env.insert("TERM".into(), "xterm-256color".into());
     env.insert("NEOISM_TERMINAL".into(), "1".into());
-    let mut request = context
-        .execution_request(
-            neoism_agent_service_api::ProcessClass::Command,
-            Some(timeout_ms),
-        )
-        .await?;
-    if request.provider.is_none() {
-        // The local lease must cover the workdir already approved by path and permission checks.
-        request.workspace.local_path = Some(cwd.clone());
-    }
-    let services = context.services();
-    let lease = services.execution.acquire(request).await?;
-    let spec = neoism_agent_service_api::ProcessSpec {
+    let spec = crate::local_process::ProcessSpec {
         executable: shell.clone(),
         args: runtime.command_args(&command, false),
         cwd: Some(cwd.clone()),
@@ -203,13 +193,7 @@ pub(super) async fn bash_tool(
         stdin: None,
         timeout_ms: Some(timeout_ms),
     };
-    let result = tokio::select! {
-        result = lease.exec(spec) => result.map_err(anyhow::Error::from)?,
-        _ = process::wait_for_cancel(context.cancel.clone()) => {
-            let _ = lease.terminate().await;
-            anyhow::bail!("{} command aborted", runtime.display_name());
-        }
-    };
+    let result = crate::local_process::run(spec, context.cancel.clone()).await?;
     let capture_truncated = result.truncated;
     let stdout = String::from_utf8_lossy(&result.stdout);
     let stderr = String::from_utf8_lossy(&result.stderr);
@@ -267,6 +251,81 @@ pub(super) async fn bash_tool(
 #[cfg(all(test, not(windows)))]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicBool;
+
+    fn local_context(root: &std::path::Path) -> ToolContext {
+        ToolContext::new(root).with_permission_rules(vec![
+            neoism_agent_core::PermissionRule {
+                permission: "*".into(),
+                pattern: "*".into(),
+                action: neoism_agent_core::PermissionAction::Allow,
+            },
+        ])
+    }
+
+    #[tokio::test]
+    async fn local_bash_preserves_workdir_environment_and_metadata() {
+        let root = std::env::temp_dir().join(format!(
+            "neoism-bash-local-{}",
+            neoism_agent_core::Id::ascending(neoism_agent_core::IdKind::Event)
+        ));
+        let workdir = root.join("child");
+        std::fs::create_dir_all(&workdir).unwrap();
+        let context =
+            local_context(&root).with_env(std::collections::BTreeMap::from([(
+                "NEOISM_BASH_TEST".into(),
+                "local-value".into(),
+            )]));
+        let result = bash_tool(
+            context,
+            json!({
+                "command": "printf '%s\\n' \"$NEOISM_BASH_TEST\"; pwd",
+                "workdir": "child", "description": "local regression", "timeout": 5000
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(result.output.contains("local-value"));
+        assert!(result
+            .output
+            .contains(&workdir.to_string_lossy().to_string()));
+        assert_eq!(result.title, "local regression");
+        assert_eq!(result.metadata.as_ref().unwrap()["exit"], 0);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn local_bash_nonzero_exit_retains_output() {
+        let error = bash_tool(
+            local_context(&std::env::temp_dir()),
+            json!({
+                "command": "printf failure-output; exit 7", "timeout": 5000
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("failure-output"));
+        assert!(error.to_string().contains("7"));
+    }
+
+    #[tokio::test]
+    async fn local_bash_reports_timeout_and_cancellation() {
+        let error = bash_tool(
+            local_context(&std::env::temp_dir()),
+            json!({
+                "command": "sleep 30", "timeout": 50
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("timed out"));
+        let context = local_context(&std::env::temp_dir())
+            .with_cancel(Some(Arc::new(AtomicBool::new(true))));
+        let error = bash_tool(context, json!({ "command": "sleep 30" }))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("aborted"));
+    }
 
     #[tokio::test]
     async fn login_environment_cache_stays_single_entry_when_shell_changes() {

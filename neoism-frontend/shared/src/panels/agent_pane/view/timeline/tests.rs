@@ -8,6 +8,127 @@ use super::read_group::read_tool_group_at;
 
 use super::*;
 
+fn trace_reveal_tool(id: &str, batch: &str) -> NeoismAgentMessage {
+    let mut message = NeoismAgentMessage::tool(
+        "Read file",
+        "one line",
+        "completed",
+        "read",
+        crate::panels::agent_pane::state::NeoismAgentOutputKind::Text,
+        "one line",
+        Vec::new(),
+    )
+    .with_id(id);
+    message.tool_batch_id = Some(batch.into());
+    message
+}
+
+fn trace_reveal_extent(
+    pane: &NeoismAgentPane,
+) -> (f32, Vec<TimelineLayoutRow<NeoismAgentMessage>>) {
+    let rows = super::layout::estimated_timeline_rows_for_test(pane, 400.0, 1.0, 18.0);
+    let body = rows.last().map_or(0.0, |row| row.top + row.height);
+    let geometry = super::render::activity_geometry(
+        [0.0, 0.0, 400.0, 300.0],
+        body,
+        0.0,
+        18.0,
+        1.0,
+        false,
+        0.0,
+    );
+    (geometry.content_h, rows)
+}
+
+#[test]
+fn same_chat_repro_short_tool_must_not_charge_revealed_old_trace() {
+    let mut pane = NeoismAgentPane::default();
+    pane.set_session_id(Some("a".into()));
+    let mut history = vec![
+        NeoismAgentMessage::user("Inspect the project").with_id("prompt"),
+        NeoismAgentMessage::reasoning("Previous reasoning line\n".repeat(60))
+            .with_id("old-reasoning"),
+    ];
+    // Twenty old two-member batches become twenty synthetic first_id.. rows.
+    // They belong to the same turn but arrived in history, not this live event.
+    for batch in 0..20 {
+        for member in 0..2 {
+            history.push(trace_reveal_tool(
+                &format!("old-{batch}-{member}"),
+                &format!("batch-{batch}"),
+            ));
+        }
+    }
+    history.push(
+        NeoismAgentMessage::assistant("Existing answer line\n".repeat(30))
+            .with_id("answer"),
+    );
+    pane.apply_history(history);
+    let (old_extent, old_rows) = trace_reveal_extent(&pane);
+    assert_eq!(old_rows.len(), 2); // prompt and answer, collapsed trace
+    assert_eq!(pane.timeline_live_trace_start(), None);
+    let rect = [0.0, 0.0, 400.0, 300.0];
+    pane.set_timeline_metrics(rect, old_extent, 300.0);
+    assert_eq!(pane.timeline_scroll_offset(), 0.0);
+    assert_eq!(pane.timeline_scrollbar_state().unwrap().0, 0.0);
+    let epoch = pane.timeline_layout_epoch();
+
+    // Remain in this chat. One new, short completed read; no navigation,
+    // paging, resize, delta text, history echo or activity/footer transition.
+    pane.upsert_part_message(trace_reveal_tool("new-tool", "new-batch"));
+    assert_eq!(pane.timeline_live_trace_start(), Some(1));
+    assert!(pane.timeline_layout_epoch() > epoch);
+    let (new_extent, new_rows) = trace_reveal_extent(&pane);
+    assert_eq!(new_rows.len(), 24); // 2 texts + reasoning + 20 groups + new tool
+    assert!(new_rows.iter().any(|row| row
+        .display_message
+        .as_ref()
+        .is_some_and(|m| m.id == "old-0-0..")));
+    pane.set_timeline_metrics(rect, new_extent, 300.0);
+    let offset = pane.timeline_scroll_offset();
+    eprintln!("same-chat short tool: rows {}->{} extent {}->{} delta={} offset={} scrollbar={:?}",
+        old_rows.len(), new_rows.len(), old_extent, new_extent,
+        new_extent - old_extent, offset, pane.timeline_scrollbar_state());
+    assert_eq!(
+        offset, 0.0,
+        "old trace disclosure must open at bottom immediately"
+    );
+    assert!(!pane.timeline_is_inertial());
+    assert!(pane.timeline_follow_bottom());
+    assert!(!pane.tick_timeline_scroll());
+    // Subsequent genuinely new output still uses the existing follow spring.
+    pane.upsert_part_message(trace_reveal_tool("next-tool", "next-batch"));
+    let (next_extent, _) = trace_reveal_extent(&pane);
+    pane.set_timeline_metrics(rect, next_extent, 300.0);
+    assert_eq!(pane.timeline_scroll_offset(), 48.0);
+    assert!(pane.timeline_is_inertial());
+}
+
+#[test]
+fn same_chat_repro_open_trace_group_creation_keeps_extent_continuous() {
+    let mut pane = NeoismAgentPane::default();
+    pane.set_session_id(Some("a".into()));
+    pane.apply_history(vec![
+        NeoismAgentMessage::user("Inspect the project").with_id("prompt"),
+        NeoismAgentMessage::assistant("Existing answer line\n".repeat(30))
+            .with_id("answer"),
+    ]);
+    pane.upsert_part_message(trace_reveal_tool("read-a", "batch"));
+    let (old_extent, _) = trace_reveal_extent(&pane);
+    let rect = [0.0, 0.0, 400.0, 300.0];
+    pane.set_timeline_metrics(rect, old_extent, 300.0);
+    pane.upsert_part_message(trace_reveal_tool("read-b", "batch"));
+    let (new_extent, rows) = trace_reveal_extent(&pane);
+    assert!(rows.iter().any(|row| row
+        .display_message
+        .as_ref()
+        .is_some_and(|m| m.id == "read-a..")));
+    pane.set_timeline_metrics(rect, new_extent, 300.0);
+    assert_eq!(new_extent, old_extent);
+    assert_eq!(pane.timeline_scroll_offset(), 0.0);
+    assert!(!pane.timeline_is_inertial());
+}
+
 #[test]
 fn following_activity_pins_despite_positive_lag_and_reserves_body_once() {
     for s in [0.75, 1.0, 1.5, 2.0] {
@@ -214,6 +335,96 @@ fn text_message(
         usage: None,
         author: None,
         images: Vec::new(),
+    }
+}
+
+fn generated_image_message(url: &str) -> NeoismAgentMessage {
+    crate::panels::agent_pane::api_mapping::part_block(&serde_json::json!({
+        "type": "file",
+        "id": "part-image",
+        "messageId": "message-image",
+        "sessionId": "session-image",
+        "mime": "image/jpeg",
+        "url": url,
+        "filename": "generated-image.jpg"
+    }))
+    .unwrap()
+}
+
+#[test]
+fn generated_image_rows_survive_live_and_settled_timeline_filters() {
+    for url in [
+        "/v2/artifacts/art-image/content",
+        "data:image/jpeg;base64,aW1hZ2U=",
+    ] {
+        for text in ["", "<!-- hidden metadata -->"] {
+            let mut image = generated_image_message(url);
+            image.text = text.to_string();
+            let messages = vec![
+                text_message(
+                    "commentary",
+                    NeoismAgentMessageKind::Assistant,
+                    "Generating.",
+                ),
+                tool_message(
+                    "tool-image",
+                    "generate_image",
+                    "GenerateImage",
+                    "completed",
+                ),
+                image,
+            ];
+            for live_trace_start in [None, Some(0)] {
+                let visibility = timeline_message_visibility(&messages, live_trace_start);
+                assert!(visibility[2]);
+                let displayed =
+                    super::render::display_timeline_message(&messages[2], false).expect(
+                        "generated image must reach card measurement and rendering",
+                    );
+                assert_eq!(displayed.kind, NeoismAgentMessageKind::Assistant);
+                assert!(displayed.text.trim().is_empty());
+                assert_eq!(displayed.images, messages[2].images);
+                for scale in [1.0, 2.0] {
+                    assert_eq!(
+                        estimate_message_height(&displayed, 900.0, scale),
+                        164.0 * scale
+                    );
+                }
+            }
+            let text_only =
+                text_message("empty", NeoismAgentMessageKind::Assistant, text);
+            assert!(super::render::display_timeline_message(&text_only, false).is_none());
+        }
+    }
+}
+
+#[test]
+fn generated_image_survives_empty_edit_recap_stripping() {
+    let mut message = generated_image_message("data:image/jpeg;base64,aW1hZ2U=");
+    message.text = "```rust\nfn example() {}\n```".to_string();
+    let displayed = super::render::display_timeline_message(&message, true)
+        .expect("recap stripping must not discard an attached image");
+    assert!(displayed.text.is_empty());
+    assert_eq!(displayed.images, message.images);
+    assert_eq!(estimate_message_height(&displayed, 900.0, 1.0), 164.0);
+
+    message.images.clear();
+    assert!(super::render::display_timeline_message(&message, true).is_none());
+}
+
+#[test]
+fn generated_image_estimates_include_text_and_image_height() {
+    let mut message = generated_image_message("data:image/jpeg;base64,aW1hZ2U=");
+    message.text = "A fox spirit beneath cherry blossoms.".to_string();
+    let text_only =
+        text_message("text", NeoismAgentMessageKind::Assistant, &message.text);
+    for width in [160.0, 900.0] {
+        for scale in [1.0, 2.0] {
+            assert_eq!(
+                estimate_message_height(&message, width, scale),
+                estimate_message_height(&text_only, width, scale) + 164.0 * scale
+            );
+        }
     }
 }
 

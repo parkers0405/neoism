@@ -1,6 +1,6 @@
 # The Neoism Agent
 
-Neoism Agent is Neoism's local AI runtime. It is not a hosted chat page embedded in the terminal. It owns model connections, conversations, tool execution, permissions, subagents, skills, MCP clients, compaction, and durable session history for the workspace.
+Neoism Agent is Neoism's AI runtime, used locally and as the same standalone engine in cloud workspace workers. It is not a hosted chat page embedded in the terminal. It owns model connections, conversations, tool execution, permissions, subagents, skills, MCP clients, compaction, and durable session history for the workspace.
 
 Open an agent pane with `Alt+A`, or choose **New Agent** from the command palette. A pane may start with the model picker when no usable model has been selected. After a model is available, enter a request just as you would in a terminal composer.
 
@@ -22,6 +22,21 @@ The agent is a versioned HTTP server with a plugin-first core:
 - **One event bus.** Every event — token deltas, part snapshots, status, permissions — is delivered over SSE in strict publish order, as a typed union.
 - **Plugin-first.** Providers, tools, MCP, LSP, PTY, VCS, and workflows are plugins in per-workspace generations that reload live on config changes. Third-party plugins install from npm and register tools and hooks through the same runtime. See [[Plugins]].
 - **Durable by default.** State changes and their events commit in one transaction to the local store; runs, queues, and execution activity survive restarts.
+
+## Cloud workers and self-hosting
+
+A headless application can self-host the same engine without the editor or workspace daemon:
+
+```text
+Application / pipeline / SDK
+  -> application policy + workspace host broker
+  -> whole-workspace infrastructure provider
+  -> one workspace VM: Agent runtime + agents + project folders
+```
+
+One logical workspace shares one computer across multiple agents, sessions, repositories and Git worktrees; cloning a project does not allocate another VM. The declared workspace directory remains authoritative, while session/terminal cwd stays local. Whole-worker isolation is established by the infrastructure provider, not by per-tool remote execution or directory scopes. A shared tenant-aware control plane stays execution-disabled and routes authorized execution to the admitted worker.
+
+The generic launch manager, controller signing, authenticated readiness, lifecycle and connection broker are implemented, with a passed real Docker development end-to-end run. Docker is an opt-in container backend with CPU/memory limits but no enforced disk budget, not a production VM guarantee. The application owns accounts, membership/private-workspace policy, billing and production gateway/TLS; private signing seeds stay outside workers and guest user filesystems are never implicitly mounted. See [[Server and API]], [[SDK]], and the authoritative source [hosted architecture and status guide](https://github.com/parkers0405/neoism/blob/main/neoism-agent/docs/hosted-control-plane.md).
 
 ## A turn
 

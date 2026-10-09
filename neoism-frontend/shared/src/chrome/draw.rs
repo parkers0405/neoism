@@ -715,7 +715,9 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                 &ctx,
             );
         }
-        crate::panels::command_palette::CommandPalette::clear_background_preview_overlays(sugarloaf);
+        crate::panels::command_palette::CommandPalette::clear_background_preview_overlays(
+            sugarloaf,
+        );
         if let Some(rect) = layout.command_palette {
             self.command_palette.draw(
                 sugarloaf,
@@ -1007,8 +1009,19 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             );
         }
 
+        let agent_buffer_in_view = matches!(
+            self.buffer_tabs.target_at(self.active_tab_index),
+            Some(crate::panels::buffer_tabs::BufferTabTarget::NeoismAgent(_))
+        );
         if let (Some(rect), Some(pane)) = (layout.conversations, self.agent_pane.as_mut())
         {
+            let viewed_root = if agent_buffer_in_view {
+                pane.conversation_root_id().map(str::to_owned)
+            } else {
+                None
+            };
+            pane.side_panel_mut()
+                .set_catalog_viewed_root(viewed_root.as_deref());
             crate::panels::agent_pane::view::side_panel::render_side_panel_with_icons::<
                 _,
                 crate::panels::agent_pane::view::side_panel::SharedAgentSidePanelIcons,

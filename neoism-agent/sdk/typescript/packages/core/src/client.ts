@@ -3,6 +3,7 @@ import {
   createContractClient,
   type ContractClient,
   type OperationInput,
+  type RuntimeInfo,
   type OperationResponse,
 } from "./generated/contract.js";
 import type {
@@ -16,6 +17,7 @@ import type {
   MessageWithParts,
   Page,
   PluginManifest,
+  PackageLifecycleInfo,
   PromptRequest,
   PermissionRequest,
   QuestionRequest,
@@ -35,6 +37,7 @@ export interface NeoismClient {
   /** Complete generated V2 surface, keyed by canonical operation ID. */
   readonly operations: ContractClient;
   readonly health: { get(): Promise<OperationResponse<"v2.health">> };
+  readonly runtime: { get(input?: { signal?: AbortSignal }): Promise<RuntimeInfo> };
   readonly meta: { get(): Promise<ApiMeta> };
   readonly config: {
     defaults(directory?: string): Promise<OperationResponse<"v2.config.defaults">>;
@@ -49,6 +52,7 @@ export interface NeoismClient {
   };
   readonly plugins: {
     list(directory?: string): Promise<PluginManifest[]>;
+    lifecycle(directory?: string): Promise<PackageLifecycleInfo[]>;
     get(id: string, directory?: string): Promise<PluginManifest>;
     use<TClient>(plugin: PluginSdk<TClient>, options?: PluginUseOptions): Promise<TClient>;
     tryUse<TClient>(plugin: PluginSdk<TClient>, options?: PluginUseOptions): Promise<TClient | undefined>;
@@ -189,6 +193,7 @@ export function createNeoismClient(transport: NeoismTransport): NeoismClient {
     transport,
     operations,
     health: { get: () => operations.request("v2.health", {}) },
+    runtime: { get: (input = {}) => operations.request("v2.runtime.get", input) },
     meta: { get: () => operations.request("v2.meta.get", {}) },
     config: {
       defaults: (directory) => operations.request("v2.config.defaults", { query: clean({ directory }) }),
@@ -208,6 +213,7 @@ export function createNeoismClient(transport: NeoismTransport): NeoismClient {
     },
     plugins: {
       list: (directory) => operations.request("v2.plugins.list", { query: clean({ directory }) }),
+      lifecycle: (directory) => operations.request("v2.plugins.lifecycle", { query: clean({ directory }) }),
       get: (id, directory) => operations.request("v2.plugins.get", { path: { plugin_id: id }, query: clean({ directory }) }),
       async use<TClient>(plugin: PluginSdk<TClient>, options: PluginUseOptions = {}) {
         const capabilities = await operations.request("v2.capabilities.list", {

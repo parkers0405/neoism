@@ -14,6 +14,7 @@ export type AuthInfo = ({ key: string; metadata?: unknown; type: "api"; }) | ({ 
 export type BackgroundJobStopResponse = { jobId: string; status: "stopping"; };
 export type CacheUsage = { read: number; write: number; };
 export type Capability = { apiPrefix?: string; disableable: boolean; enabled: boolean; id: string; pluginId?: string; reason?: string; source: string; version: string; };
+export type CatalogActivity = "idle" | "running" | "background" | "permission";
 export type ClaimSessionControlRequest = { expectedRevision?: number; leaseSeconds?: number; };
 export type CodeRequest = { code: string; };
 export type Command = { agent?: string; description?: string; model?: string; name: string; subtask?: boolean; template?: string; };
@@ -25,10 +26,10 @@ export type ConfigDiagnostic = { level: "error" | "warning"; message: string; pa
 export type ConfigDocument = { compaction?: CompactionConfig; [key: string]: unknown; };
 export type ConfigProvidersResult = { default: { [key: string]: string; }; providers: Array<Provider>; };
 export type ConfigValidation = { diagnostics: Array<ConfigDiagnostic>; ok: boolean; };
-export type CreateSessionRequest = { agent?: string; model?: ModelRef; parentId?: string; permission?: Array<PermissionRule>; title?: string; workspaceId?: string; };
+export type CreateSessionRequest = { agent?: string; externalOptions?: { [key: string]: string; }; externalProvider?: "opencode" | "claude" | "codex"; model?: ModelRef; parentId?: string; permission?: Array<PermissionRule>; title?: string; workspaceId?: string; };
 export type CredentialScope = { tenantId: string; workspaceId?: string; };
 export type EmptyObject = Record<string, unknown>;
-export type Event = (EventMessagePartUpdated) | (EventMessagePartRemoved) | (EventMessagePartDelta) | (EventMessageUpdated) | (EventMessageRemoved) | (EventMcpToolsChanged) | (EventLspUpdated) | (EventPermissionAsked) | (EventPermissionReplied) | (EventQuestionAsked) | (EventQuestionRejected) | (EventQuestionReplied) | (EventPtyCreated) | (EventPtyUpdated) | (EventPtyDeleted) | (EventPtyExited) | (EventSessionNextCompactionStarted) | (EventSessionNextCompactionDelta) | (EventSessionNextCompactionEnded) | (EventSessionCompacted) | (EventSessionContextUpdated) | (EventSessionCreated) | (EventSessionDeleted) | (EventSessionError) | (EventSessionExecutionUpdated) | (EventSessionBackgroundTasksUpdated) | (EventSessionBackgroundTaskCompleted) | (EventSessionQueueUpdated) | (EventSessionPromptAdmitted) | (EventSessionMoved) | (EventSessionStatus) | (EventSessionSubtaskCompleted) | (EventSessionUpdated) | (EventTodoUpdated) | (EventWorkflowUpdated) | (EventWorkflowRunUpdated);
+export type Event = (EventMessagePartUpdated) | (EventMessagePartRemoved) | (EventMessagePartDelta) | (EventMessageUpdated) | (EventMessageRemoved) | (EventMcpToolsChanged) | (EventLspUpdated) | (EventPermissionAsked) | (EventPermissionReplied) | (EventQuestionAsked) | (EventQuestionRejected) | (EventQuestionReplied) | (EventPtyCreated) | (EventPtyUpdated) | (EventPtyDeleted) | (EventPtyExited) | (EventSessionNextCompactionStarted) | (EventSessionNextCompactionDelta) | (EventSessionNextCompactionEnded) | (EventSessionCompacted) | (EventSessionContextUpdated) | (EventSessionCreated) | (EventSessionDeleted) | (EventSessionError) | (EventSessionCatalogActivity) | (EventSessionExecutionUpdated) | (EventSessionBackgroundTasksUpdated) | (EventSessionBackgroundTaskCompleted) | (EventSessionQueueUpdated) | (EventSessionPromptAdmitted) | (EventSessionMoved) | (EventSessionStatus) | (EventSessionSubtaskCompleted) | (EventSessionUpdated) | (EventTodoUpdated) | (EventWorkflowUpdated) | (EventWorkflowRunUpdated);
 export type EventEnvelope = { data: unknown; id: string; schemaVersion: string; sequence: number; source: string; subject?: EventSubject; timestamp: number; type: string; };
 export type EventLspUpdated = { data: Record<string, unknown>; id: string; schemaVersion: string; sequence: number; source: string; subject?: EventSubject; timestamp: number; type: "lsp.updated"; };
 export type EventMcpToolsChanged = { data: { directory: string; server: string; }; id: string; schemaVersion: string; sequence: number; source: string; subject?: EventSubject; timestamp: number; type: "mcp.tools.changed"; };
@@ -48,6 +49,7 @@ export type EventQuestionRejected = { data: { info?: (QuestionRequest) | (null);
 export type EventQuestionReplied = { data: { info?: (QuestionRequest) | (null); reply: { answers: Array<Array<string>>; }; requestID: string; }; id: string; schemaVersion: string; sequence: number; source: string; subject?: EventSubject; timestamp: number; type: "question.replied"; };
 export type EventSessionBackgroundTaskCompleted = { data: { command: string; cwd: string; exitCode: (number) | (null); jobID: string; parentSessionID: string; result: string; sessionID: string; status: string; taskID: string; title: string; }; id: string; schemaVersion: string; sequence: number; source: string; subject?: EventSubject; timestamp: number; type: "session.background_task.completed"; };
 export type EventSessionBackgroundTasksUpdated = { data: { backgroundJobsEpoch: string; backgroundJobsRevision: number; runningBackgroundTasks: Array<{ jobID: string; sessionID: string; startedAt: number; }>; sessionID: string; }; id: string; schemaVersion: string; sequence: number; source: string; subject?: EventSubject; timestamp: number; type: "session.background_tasks.updated"; };
+export type EventSessionCatalogActivity = { data: { activity: CatalogActivity; sessionID: string; }; id: string; schemaVersion: string; sequence: number; source: string; subject?: EventSubject; timestamp: number; type: "session.catalog.activity"; };
 export type EventSessionCompacted = { data: { info: Session; sessionID: string; summary: { kind: string; messageID: string; text: string; throughMessageID: string; updated: number; }; }; id: string; schemaVersion: string; sequence: number; source: string; subject?: EventSubject; timestamp: number; type: "session.compacted"; };
 export type EventSessionContextUpdated = { data: { epoch: { [key: string]: unknown; }; sessionID: string; }; id: string; schemaVersion: string; sequence: number; source: string; subject?: EventSubject; timestamp: number; type: "session.context.updated"; };
 export type EventSessionCreated = { data: { info: Session; sessionID: string; }; id: string; schemaVersion: string; sequence: number; source: string; subject?: EventSubject; timestamp: number; type: "session.created"; };
@@ -75,7 +77,8 @@ export type ForkSessionRequest = { messageId?: string; };
 export type GoalResearchNote = { captured: number; content: string; source: string; };
 export type GoalResearchRequest = { url: string; };
 export type GoalResponse = { goal: (SessionGoal) | (null); researchEnabled: boolean; };
-export type HealthResponse = { executablePath?: string; healthy: true; providerCredentialStore: string; version: string; };
+export type HealthResponse = { artifactStore: string; artifactStoreShared: boolean; deployment: "local" | "shared-control-plane" | "workspace-worker"; executablePath?: string; executionAvailable: boolean; healthy: boolean; hostedControlPlane: boolean; providerCredentialStore: string; tenantResolver: string; version: string; };
+export type HostCapability = "config-read" | "config-write" | "workspace-read" | "workspace-write" | "event-publish" | "network" | "process-spawn" | "task-spawn" | "secret-use" | "secret-read" | "prompt-read" | "message-read" | "response-transform" | "provider-access" | "policy-invoke";
 export type ImportSessionRequest = { bundle: SessionBundle; targetWorkspaceRoot: string; };
 export type ImportSessionResponse = { sessionId: string; };
 export type LspCallHierarchyCall = { direction: string; item: LspCallHierarchyItem; language?: string | null; ranges: Array<LspRange>; };
@@ -88,9 +91,10 @@ export type LspInlayHint = { character: number; kind?: string | null; label: str
 export type LspLocation = { language?: string | null; path: string; range?: (LspRange) | (null); };
 export type LspPosition = { character: number; line: number; };
 export type LspRange = { end: LspPosition; start: LspPosition; };
+export type LspRuntimeInfo = { path: string | null; source: "yarn_sdk" | "configured" | "language_server_default" | "missing_yarn_sdk"; version: string | null; };
 export type LspShutdownResponse = { shutdown: true; };
 export type LspSignatureHelp = { path: string; signatures: Array<{ [key: string]: unknown; }>; [key: string]: unknown; };
-export type LspStatus = { command: Array<string>; command_source: string; id: string; language: string; name: string; status: "available" | "connected" | "error"; [key: string]: unknown; };
+export type LspStatus = { command: Array<string>; command_source: string; id: string; language: string; name: string; runtime?: (LspRuntimeInfo) | (null); status: "available" | "connected" | "error"; [key: string]: unknown; };
 export type LspTouchRequest = { directory?: string; file: string; text?: string | null; };
 export type ManagedRepository = { createdAt: number; gitRef?: string; id: string; name: string; path: string; remoteUrl?: string; revision: string; updatedAt: number; workspaceId: string; };
 export type ManagedRepositoryMetadata = { gitRef?: string; remoteUrl?: string; };
@@ -116,7 +120,12 @@ export type MessageInfo = { id: string; role: "user" | "assistant"; sessionId: s
 export type MessageList = Array<Message>;
 export type MessagePage = { cursor: PageCursor; items: Array<Message>; };
 export type ModelRef = { connectionId?: string; id: string; providerId: string; variant?: string; };
+export type OpenAiAccountUsage = { auth_type: "api" | "oauth" | "wellknown"; connection_id: string; error: string | null; is_default: boolean; label: string; plan_type: string | null; windows: Array<OpenAiUsageWindow>; };
+export type OpenAiUsage = { accounts: Array<OpenAiAccountUsage>; };
+export type OpenAiUsageWindow = { label: string; limit_window_seconds: number | null; reset_at: number | null; used_percent: number; };
 export type OpenApiDocument = { info: { [key: string]: unknown; }; openapi: string; paths: { [key: string]: unknown; }; [key: string]: unknown; };
+export type PackageDiagnostic = { action?: string; code: string; message: string; };
+export type PackageLifecycleInfo = { diagnostics: Array<PackageDiagnostic>; grantedCapabilities: Array<HostCapability>; leaseActive: boolean; packageId: string; requestedCapabilities: Array<HostCapability>; retainedRevision?: string; revision: string; scope: "global" | "user" | "workspace" | "session"; scopeId?: string; source: "user" | "workspace"; state: "discovered" | "incompatible" | "permission-required" | "trusted" | "enabled" | "loading" | "active" | "degraded" | "failed" | "disabled" | "update-available" | "restoring"; };
 export type PageCursor = { next?: string; previous?: string; };
 export type Part = (TextPart) | (CompactionPart) | (AgentPart) | (SubtaskPart) | (ReasoningPart) | (ToolPart) | (StepStartPart) | (StepFinishPart) | (FilePart);
 export type PartEnvelope = { data: unknown; id: string; kind: string; schemaVersion: string; };
@@ -155,9 +164,10 @@ export type RepositoryExistingRequest = { id?: string; kind: "existing"; name?: 
 export type RepositoryUpdateRequest = { expectedRevision?: string; name?: string; };
 export type ResourceScope = "installation" | "workspace";
 export type RevertRequest = { messageId?: string; partId?: string; };
+export type RuntimeInfo = { deployment: "local" | "shared-control-plane" | "workspace-worker"; executionAvailable: boolean; worker?: WorkspaceWorkerInfo; };
 export type SemanticSearchHit = { created: number; distance: number; excerpt: string; messageId: string; role: string; sessionId: string; };
 export type SemanticSearchResponse = { available: boolean; hits: Array<SemanticSearchHit>; };
-export type Session = { agent?: string; directory: string; id: string; model?: ModelRef; parentId?: string; path?: string; permission?: Array<PermissionRule>; projectId: string; slug: string; time: SessionTime; title: string; version: string; workspaceId?: string; [key: string]: unknown; };
+export type Session = { agent?: string; catalogActivity?: CatalogActivity; directory: string; id: string; model?: ModelRef; parentId?: string; path?: string; permission?: Array<PermissionRule>; projectId: string; slug: string; time: SessionTime; title: string; version: string; workspaceId?: string; [key: string]: unknown; };
 export type SessionBundle = { messages: Array<Message>; queuedPrompts: Array<QueuedPromptBundleItem>; session: Session; version: number; workspaceRoot?: string; };
 export type SessionCommandRequest = { agent?: string; arguments?: string; command: string; messageId?: string; model?: UserModel; };
 export type SessionControl = { actorType: "human" | "service-account"; controllerSubject: string; leaseExpiresAt: number; revision: number; sessionId: string; updated: number; };
@@ -225,6 +235,7 @@ export type WorkflowSchedule = { at?: string; date?: string; frequency: string; 
 export type WorkflowView = { activationID?: string | null; active: boolean; definition: WorkflowDefinition; lastScheduledAt?: number | null; revision?: string; sourceHash: string; sourcePath: string; writable?: boolean; };
 export type WorkspaceCreateRequest = { createDirectory?: boolean; id?: string; name?: string; root: string; };
 export type WorkspaceUpdateRequest = { expectedRevision?: string; name?: string; root?: string; };
+export type WorkspaceWorkerInfo = { expiresAt: number; root: string; runtimeGeneration: number; runtimeId: string; tenantId: string; version: 1; workspaceId: string; };
 
 export interface ApiOperations {
   "v2.agents.get": { method: "GET"; path: "/v2/agents/{name}"; input: { path: { name: string; }; query?: { directory?: string; }; headers?: { "X-Neoism-Directory"?: string; }; signal?: AbortSignal; }; responses: { "200": Agent; }; response: Agent; };
@@ -243,6 +254,10 @@ export interface ApiOperations {
   "v2.config.validate": { method: "GET"; path: "/v2/config/validate"; input: { query?: { directory?: string; }; headers?: { "X-Neoism-Directory"?: string; }; signal?: AbortSignal; }; responses: { "200": ConfigValidation; }; response: ConfigValidation; };
   "v2.directories.list": { method: "GET"; path: "/v2/directories"; input: { query?: { path?: string; }; signal?: AbortSignal; }; responses: { "200": { entries: Array<{ name: string; path: string; }>; parent: string | null; path: string; }; }; response: { entries: Array<{ name: string; path: string; }>; parent: string | null; path: string; }; };
   "v2.events.subscribe": { method: "GET"; path: "/v2/events"; input: { query?: { since?: number; tail?: boolean; limit?: number; sessionId?: string; }; headers?: { "Last-Event-ID"?: number; }; signal?: AbortSignal; }; responses: { "200": string; }; response: string; };
+  "v2.executionActivity.events": { method: "GET"; path: "/v2/execution-activity/events"; input: { signal?: AbortSignal; }; responses: { "200": string; }; response: string; };
+  "v2.executionActivity.list": { method: "GET"; path: "/v2/execution-activity"; input: { signal?: AbortSignal; }; responses: { "200": Array<{ executionId: string; finished: boolean; revision: number; rootSessionId: string; }>; }; response: Array<{ executionId: string; finished: boolean; revision: number; rootSessionId: string; }>; };
+  "v2.external.options.preview": { method: "GET"; path: "/v2/external/options/preview"; input: { query: { provider: "opencode" | "claude" | "codex"; directory?: string; }; headers?: { "X-Neoism-Directory"?: string; }; signal?: AbortSignal; }; responses: { "200": { availableCommands: Array<{ [key: string]: unknown; }>; catalogStale?: boolean; configOptions: Array<{ [key: string]: unknown; }>; externalSessionId: null; modeFallback: boolean; provider: "opencode" | "claude" | "codex"; selectedOptions: { [key: string]: string; }; }; }; response: { availableCommands: Array<{ [key: string]: unknown; }>; catalogStale?: boolean; configOptions: Array<{ [key: string]: unknown; }>; externalSessionId: null; modeFallback: boolean; provider: "opencode" | "claude" | "codex"; selectedOptions: { [key: string]: string; }; }; };
+  "v2.external.options.previewSelected": { method: "POST"; path: "/v2/external/options/preview"; input: { query: { provider: "opencode" | "claude" | "codex"; directory?: string; }; headers?: { "X-Neoism-Directory"?: string; }; body: { selectedOptions: { [key: string]: string; }; }; signal?: AbortSignal; }; responses: { "200": { availableCommands: Array<{ [key: string]: unknown; }>; catalogStale?: boolean; configOptions: Array<{ [key: string]: unknown; }>; externalSessionId: null; modeFallback: boolean; provider: "opencode" | "claude" | "codex"; selectedOptions: { [key: string]: string; }; }; }; response: { availableCommands: Array<{ [key: string]: unknown; }>; catalogStale?: boolean; configOptions: Array<{ [key: string]: unknown; }>; externalSessionId: null; modeFallback: boolean; provider: "opencode" | "claude" | "codex"; selectedOptions: { [key: string]: string; }; }; };
   "v2.health": { method: "GET"; path: "/v2/health"; input: { signal?: AbortSignal; }; responses: { "200": HealthResponse; }; response: HealthResponse; };
   "v2.identity.get": { method: "GET"; path: "/v2/identity"; input: { signal?: AbortSignal; }; responses: { "200": { configuredName: string | null; systemName: string | null; }; }; response: { configuredName: string | null; systemName: string | null; }; };
   "v2.interactions.permissions.list": { method: "GET"; path: "/v2/interactions/permissions"; input: { query?: { sessionId?: string; }; signal?: AbortSignal; }; responses: { "200": Array<PermissionRequest>; }; response: Array<PermissionRequest>; };
@@ -286,6 +301,7 @@ export interface ApiOperations {
   "v2.plugins.goals.get": { method: "GET"; path: "/v2/plugins/dev.neoism.goals/{session_id}"; input: { path: { session_id: string; }; signal?: AbortSignal; }; responses: { "200": GoalResponse; }; response: GoalResponse; };
   "v2.plugins.goals.research": { method: "POST"; path: "/v2/plugins/dev.neoism.goals/{session_id}/research"; input: { path: { session_id: string; }; body: GoalResearchRequest; signal?: AbortSignal; }; responses: { "200": GoalResponse; }; response: GoalResponse; };
   "v2.plugins.goals.set": { method: "POST"; path: "/v2/plugins/dev.neoism.goals/{session_id}"; input: { path: { session_id: string; }; body?: SetGoalRequest; signal?: AbortSignal; }; responses: { "200": GoalResponse; }; response: GoalResponse; };
+  "v2.plugins.lifecycle": { method: "GET"; path: "/v2/plugins/lifecycle"; input: { query?: { directory?: string; }; headers?: { "X-Neoism-Directory"?: string; }; signal?: AbortSignal; }; responses: { "200": Array<PackageLifecycleInfo>; }; response: Array<PackageLifecycleInfo>; };
   "v2.plugins.list": { method: "GET"; path: "/v2/plugins"; input: { query?: { directory?: string; }; headers?: { "X-Neoism-Directory"?: string; }; signal?: AbortSignal; }; responses: { "200": Array<PluginManifest>; }; response: Array<PluginManifest>; };
   "v2.plugins.lsp.codeActions": { method: "GET"; path: "/v2/plugins/dev.neoism.lsp/code-actions"; input: { query: { directory?: string; file: string; line: number; character: number; }; headers?: { "X-Neoism-Directory"?: string; }; signal?: AbortSignal; }; responses: { "200": Array<UnknownValue>; }; response: Array<UnknownValue>; };
   "v2.plugins.lsp.definition": { method: "GET"; path: "/v2/plugins/dev.neoism.lsp/definition"; input: { query: { directory?: string; file: string; line: number; character: number; }; headers?: { "X-Neoism-Directory"?: string; }; signal?: AbortSignal; }; responses: { "200": Array<LspLocation>; }; response: Array<LspLocation>; };
@@ -359,6 +375,8 @@ export interface ApiOperations {
   "v2.providers.list": { method: "GET"; path: "/v2/providers"; input: { query?: { directory?: string; }; headers?: { "X-Neoism-Directory"?: string; }; signal?: AbortSignal; }; responses: { "200": ProviderListResult; }; response: ProviderListResult; };
   "v2.providers.oauth.authorize": { method: "POST"; path: "/v2/providers/{provider_id}/oauth/authorize"; input: { path: { provider_id: string; }; query?: { workspaceId?: string; }; body: ProviderAuthorizeRequest; signal?: AbortSignal; }; responses: { "200": (ProviderAuthAuthorization) | (null); }; response: (ProviderAuthAuthorization) | (null); };
   "v2.providers.oauth.callback": { method: "POST"; path: "/v2/providers/{provider_id}/oauth/callback"; input: { path: { provider_id: string; }; query?: { workspaceId?: string; }; body: ProviderCallbackRequest; signal?: AbortSignal; }; responses: { "200": boolean; }; response: boolean; };
+  "v2.providers.openai.usage": { method: "GET"; path: "/v2/providers/openai/usage"; input: { query?: { workspaceId?: string; }; signal?: AbortSignal; }; responses: { "200": OpenAiUsage; }; response: OpenAiUsage; };
+  "v2.runtime.get": { method: "GET"; path: "/v2/runtime"; input: { signal?: AbortSignal; }; responses: { "200": RuntimeInfo; }; response: RuntimeInfo; };
   "v2.sessionCatalog.subscribe": { method: "GET"; path: "/v2/session-catalog/events"; input: { query?: { directory?: string; }; headers?: { "X-Neoism-Directory"?: string; }; signal?: AbortSignal; }; responses: { "200": string; }; response: string; };
   "v2.sessions.abort": { method: "POST"; path: "/v2/sessions/{session_id}/abort"; input: { path: { session_id: string; }; signal?: AbortSignal; }; responses: { "200": boolean; }; response: boolean; };
   "v2.sessions.children": { method: "GET"; path: "/v2/sessions/{session_id}/children"; input: { path: { session_id: string; }; signal?: AbortSignal; }; responses: { "200": SessionPage; }; response: SessionPage; };
@@ -373,6 +391,10 @@ export interface ApiOperations {
   "v2.sessions.diff": { method: "GET"; path: "/v2/sessions/{session_id}/diff"; input: { path: { session_id: string; }; signal?: AbortSignal; }; responses: { "200": Array<VcsFileDiff>; }; response: Array<VcsFileDiff>; };
   "v2.sessions.directoryOptions": { method: "GET"; path: "/v2/sessions/{session_id}/directory-options"; input: { path: { session_id: string; }; query?: { query?: string; limit?: number; }; signal?: AbortSignal; }; responses: { "200": Array<string>; }; response: Array<string>; };
   "v2.sessions.export": { method: "POST"; path: "/v2/sessions/export"; input: { body: ExportSessionsRequest; signal?: AbortSignal; }; responses: { "200": ExportSessionsResponse; }; response: ExportSessionsResponse; };
+  "v2.sessions.external.catalog": { method: "GET"; path: "/v2/sessions/external/catalog"; input: { query: { provider: "opencode" | "claude" | "codex"; directory?: string; }; headers?: { "X-Neoism-Directory"?: string; }; signal?: AbortSignal; }; responses: { "200": { cwd: string; importSupported: boolean; importUnavailableReason?: string; provider: string; sessions: Array<{ [key: string]: unknown; }>; }; }; response: { cwd: string; importSupported: boolean; importUnavailableReason?: string; provider: string; sessions: Array<{ [key: string]: unknown; }>; }; };
+  "v2.sessions.external.import": { method: "POST"; path: "/v2/sessions/external/import"; input: { query?: { directory?: string; }; headers?: { "X-Neoism-Directory"?: string; }; body: { externalSessionId: string; provider: "opencode" | "claude" | "codex"; }; signal?: AbortSignal; }; responses: { "200": Session; }; response: Session; };
+  "v2.sessions.external.options.get": { method: "GET"; path: "/v2/sessions/{session_id}/external/options"; input: { path: { session_id: string; }; signal?: AbortSignal; }; responses: { "200": { availableCommands: Array<{ [key: string]: unknown; }>; configOptions: Array<{ [key: string]: unknown; }>; externalSessionId: string | null; modeFallback: boolean; provider: string; replayError?: string; selectedOptions: { [key: string]: string; }; }; }; response: { availableCommands: Array<{ [key: string]: unknown; }>; configOptions: Array<{ [key: string]: unknown; }>; externalSessionId: string | null; modeFallback: boolean; provider: string; replayError?: string; selectedOptions: { [key: string]: string; }; }; };
+  "v2.sessions.external.options.set": { method: "POST"; path: "/v2/sessions/{session_id}/external/options"; input: { path: { session_id: string; }; body: { configId: string; value: string; }; signal?: AbortSignal; }; responses: { "200": { [key: string]: unknown; }; }; response: { [key: string]: unknown; }; };
   "v2.sessions.fork": { method: "POST"; path: "/v2/sessions/{session_id}/fork"; input: { path: { session_id: string; }; body?: ForkSessionRequest; signal?: AbortSignal; }; responses: { "200": Session; }; response: Session; };
   "v2.sessions.get": { method: "GET"; path: "/v2/sessions/{session_id}"; input: { path: { session_id: string; }; signal?: AbortSignal; }; responses: { "200": Session; }; response: Session; };
   "v2.sessions.import": { method: "POST"; path: "/v2/sessions/import"; input: { body: ImportSessionRequest; signal?: AbortSignal; }; responses: { "200": ImportSessionResponse; }; response: ImportSessionResponse; };
@@ -439,6 +461,10 @@ export const operationDescriptors = {
   "v2.config.validate": {"method":"GET","path":"/v2/config/validate","transport":"http","response":"json","responses":{"200":["application/json"]}},
   "v2.directories.list": {"method":"GET","path":"/v2/directories","transport":"http","response":"json","responses":{"200":["application/json"]}},
   "v2.events.subscribe": {"method":"GET","path":"/v2/events","transport":"sse","responses":{"200":["text/event-stream"]}},
+  "v2.executionActivity.events": {"method":"GET","path":"/v2/execution-activity/events","transport":"sse","responses":{"200":["text/event-stream"]}},
+  "v2.executionActivity.list": {"method":"GET","path":"/v2/execution-activity","transport":"http","response":"json","responses":{"200":["application/json"]}},
+  "v2.external.options.preview": {"method":"GET","path":"/v2/external/options/preview","transport":"http","response":"json","responses":{"200":["application/json"]}},
+  "v2.external.options.previewSelected": {"method":"POST","path":"/v2/external/options/preview","transport":"http","requestMediaType":"application/json","response":"json","responses":{"200":["application/json"]}},
   "v2.health": {"method":"GET","path":"/v2/health","transport":"http","response":"json","responses":{"200":["application/json"]}},
   "v2.identity.get": {"method":"GET","path":"/v2/identity","transport":"http","response":"json","responses":{"200":["application/json"]}},
   "v2.interactions.permissions.list": {"method":"GET","path":"/v2/interactions/permissions","transport":"http","response":"json","responses":{"200":["application/json"]}},
@@ -482,6 +508,7 @@ export const operationDescriptors = {
   "v2.plugins.goals.get": {"method":"GET","path":"/v2/plugins/dev.neoism.goals/{session_id}","transport":"http","response":"json","responses":{"200":["application/json"]}},
   "v2.plugins.goals.research": {"method":"POST","path":"/v2/plugins/dev.neoism.goals/{session_id}/research","transport":"http","requestMediaType":"application/json","response":"json","responses":{"200":["application/json"]}},
   "v2.plugins.goals.set": {"method":"POST","path":"/v2/plugins/dev.neoism.goals/{session_id}","transport":"http","requestMediaType":"application/json","response":"json","responses":{"200":["application/json"]}},
+  "v2.plugins.lifecycle": {"method":"GET","path":"/v2/plugins/lifecycle","transport":"http","response":"json","responses":{"200":["application/json"]}},
   "v2.plugins.list": {"method":"GET","path":"/v2/plugins","transport":"http","response":"json","responses":{"200":["application/json"]}},
   "v2.plugins.lsp.codeActions": {"method":"GET","path":"/v2/plugins/dev.neoism.lsp/code-actions","transport":"http","response":"json","responses":{"200":["application/json"]}},
   "v2.plugins.lsp.definition": {"method":"GET","path":"/v2/plugins/dev.neoism.lsp/definition","transport":"http","response":"json","responses":{"200":["application/json"]}},
@@ -555,6 +582,8 @@ export const operationDescriptors = {
   "v2.providers.list": {"method":"GET","path":"/v2/providers","transport":"http","response":"json","responses":{"200":["application/json"]}},
   "v2.providers.oauth.authorize": {"method":"POST","path":"/v2/providers/{provider_id}/oauth/authorize","transport":"http","requestMediaType":"application/json","response":"json","responses":{"200":["application/json"]}},
   "v2.providers.oauth.callback": {"method":"POST","path":"/v2/providers/{provider_id}/oauth/callback","transport":"http","requestMediaType":"application/json","response":"json","responses":{"200":["application/json"]}},
+  "v2.providers.openai.usage": {"method":"GET","path":"/v2/providers/openai/usage","transport":"http","response":"json","responses":{"200":["application/json"]}},
+  "v2.runtime.get": {"method":"GET","path":"/v2/runtime","transport":"http","response":"json","responses":{"200":["application/json"]}},
   "v2.sessionCatalog.subscribe": {"method":"GET","path":"/v2/session-catalog/events","transport":"sse","responses":{"200":["text/event-stream"]}},
   "v2.sessions.abort": {"method":"POST","path":"/v2/sessions/{session_id}/abort","transport":"http","response":"json","responses":{"200":["application/json"]}},
   "v2.sessions.children": {"method":"GET","path":"/v2/sessions/{session_id}/children","transport":"http","response":"json","responses":{"200":["application/json"]}},
@@ -569,6 +598,10 @@ export const operationDescriptors = {
   "v2.sessions.diff": {"method":"GET","path":"/v2/sessions/{session_id}/diff","transport":"http","response":"json","responses":{"200":["application/json"]}},
   "v2.sessions.directoryOptions": {"method":"GET","path":"/v2/sessions/{session_id}/directory-options","transport":"http","response":"json","responses":{"200":["application/json"]}},
   "v2.sessions.export": {"method":"POST","path":"/v2/sessions/export","transport":"http","requestMediaType":"application/json","response":"json","responses":{"200":["application/json"]}},
+  "v2.sessions.external.catalog": {"method":"GET","path":"/v2/sessions/external/catalog","transport":"http","response":"json","responses":{"200":["application/json"]}},
+  "v2.sessions.external.import": {"method":"POST","path":"/v2/sessions/external/import","transport":"http","requestMediaType":"application/json","response":"json","responses":{"200":["application/json"]}},
+  "v2.sessions.external.options.get": {"method":"GET","path":"/v2/sessions/{session_id}/external/options","transport":"http","response":"json","responses":{"200":["application/json"]}},
+  "v2.sessions.external.options.set": {"method":"POST","path":"/v2/sessions/{session_id}/external/options","transport":"http","requestMediaType":"application/json","response":"json","responses":{"200":["application/json"]}},
   "v2.sessions.fork": {"method":"POST","path":"/v2/sessions/{session_id}/fork","transport":"http","requestMediaType":"application/json","response":"json","responses":{"200":["application/json"]}},
   "v2.sessions.get": {"method":"GET","path":"/v2/sessions/{session_id}","transport":"http","response":"json","responses":{"200":["application/json"]}},
   "v2.sessions.import": {"method":"POST","path":"/v2/sessions/import","transport":"http","requestMediaType":"application/json","response":"json","responses":{"200":["application/json"]}},

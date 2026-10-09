@@ -555,7 +555,7 @@ async fn try_finish_subtask_for_child(
     Ok(Some((root, execution_id.to_string(), family_revision)))
 }
 
-async fn publish_snapshot(state: &AppState, root: &str) {
+pub(crate) async fn publish_snapshot(state: &AppState, root: &str) {
     let Ok(runtime) = state.inner.store.get_session_runtime_snapshot(root).await else {
         return;
     };

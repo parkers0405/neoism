@@ -20,8 +20,8 @@ use tokio::sync::RwLock;
 use crate::auth_store::AuthStore;
 use crate::provider::ProviderRegistry;
 use crate::provider_catalog::{
-    connect_provider_catalog, default_model_ids, generation_metadata, openai_codex_oauth,
-    usable_provider_catalog, ProviderCatalog,
+    connect_provider_catalog, default_model_ids, generation_metadata,
+    usable_provider_catalog, OpenAiModelAccess, ProviderCatalog,
 };
 use crate::ProviderOAuthPending;
 
@@ -86,7 +86,15 @@ impl ProviderPlatform {
                 let raw = self.catalog.providers().await?;
                 let connected = self.registry.connected_ids(&raw).await?;
                 let openai_access = self.registry.openai_model_access(&auth).await?;
-                let all = connect_provider_catalog(&raw, &connected, &openai_access);
+                let effective = self
+                    .catalog
+                    .providers_for_access(&openai_access, true)
+                    .await?;
+                let all = connect_provider_catalog(
+                    &effective,
+                    &connected,
+                    &OpenAiModelAccess::Api,
+                );
                 Ok(serde_json::to_value(ProviderListResult {
                     default: default_model_ids(&all),
                     connected,
@@ -97,7 +105,15 @@ impl ProviderPlatform {
                 let raw = self.catalog.providers().await?;
                 let connected = self.registry.connected_ids(&raw).await?;
                 let openai_access = self.registry.openai_model_access(&auth).await?;
-                let providers = usable_provider_catalog(&raw, &connected, &openai_access);
+                let effective = self
+                    .catalog
+                    .providers_for_access(&openai_access, true)
+                    .await?;
+                let providers = usable_provider_catalog(
+                    &effective,
+                    &connected,
+                    &OpenAiModelAccess::Api,
+                );
                 Ok(serde_json::to_value(ConfigProvidersResult {
                     default: default_model_ids(&providers),
                     providers,
@@ -338,12 +354,25 @@ impl ProviderService for ProviderPlatform {
         model: &'a UserModel,
     ) -> PluginFuture<'a, ProviderModelMetadata> {
         Box::pin(async move {
-            let providers = self.catalog.providers().await.map_err(runtime_error)?;
             let scoped = self
                 .auth
                 .scoped(CredentialScope::local(), model.connection_id.clone());
-            let metadata =
-                generation_metadata(&providers, model, openai_codex_oauth(&scoped).await);
+            let access = if model.provider_id == "openai" {
+                self.registry
+                    .openai_model_access(&scoped)
+                    .await
+                    .map_err(runtime_error)?
+            } else {
+                OpenAiModelAccess::Api
+            };
+            // Resolve once from the raw API catalog + explicit config + selected
+            // account metadata. Do not reapply the conservative OAuth fallback.
+            let providers = self
+                .catalog
+                .providers_for_access(&access, false)
+                .await
+                .map_err(runtime_error)?;
+            let metadata = generation_metadata(&providers, model);
             Ok(ProviderModelMetadata {
                 api: metadata.api,
                 auth_env: metadata.auth_env,
@@ -510,6 +539,79 @@ mod tests {
     use super::{runtime_error, ProviderAuthorizeRequest, ProviderCallbackRequest};
     use crate::provider_error::ProviderError;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn codex_limit_auth_follows_selected_connection_not_default_account() {
+        use super::*;
+        use neoism_agent_service_api::{
+            CreateProviderConnection, LocalProviderCredentialStore, ProviderCredential,
+            ProviderCredentialStore,
+        };
+        let path = std::env::temp_dir()
+            .join(format!("neoism-limit-auth-{}.json", opaque_attempt_id()));
+        let store = Arc::new(LocalProviderCredentialStore::new(path.clone()));
+        let scope = CredentialScope::local();
+        let oauth = store
+            .create(CreateProviderConnection {
+                provider_id: "openai".into(),
+                label: "Subscription".into(),
+                scope: scope.clone(),
+                credential: ProviderCredential::OAuth {
+                    access: "synthetic-access".into(),
+                    refresh: "synthetic-refresh".into(),
+                    expires: u64::MAX,
+                    account_id: Some("synthetic-account".into()),
+                    enterprise_url: None,
+                },
+                set_default: true,
+            })
+            .await
+            .unwrap();
+        let api = store
+            .create(CreateProviderConnection {
+                provider_id: "openai".into(),
+                label: "Platform".into(),
+                scope: scope.clone(),
+                credential: ProviderCredential::Api {
+                    key: "synthetic-key".into(),
+                    metadata: None,
+                },
+                set_default: false,
+            })
+            .await
+            .unwrap();
+        let platform = ProviderPlatform::new(store.clone());
+        let selected_api = platform
+            .auth
+            .scoped(scope.clone(), Some(api.connection_id.clone()));
+        let selected_oauth = platform
+            .auth
+            .scoped(scope.clone(), Some(oauth.connection_id.clone()));
+        assert!(crate::provider_catalog::openai_codex_oauth(&platform.auth).await);
+        assert!(!crate::provider_catalog::openai_codex_oauth(&selected_api).await);
+        assert!(crate::provider_catalog::openai_codex_oauth(&selected_oauth).await);
+        assert!(matches!(
+            platform
+                .registry
+                .openai_model_access(&selected_api)
+                .await
+                .unwrap(),
+            OpenAiModelAccess::Api
+        )); // API selection must not fetch subscription metadata.
+        store
+            .set_default(
+                &ProviderConnectionRef {
+                    provider_id: "openai".into(),
+                    connection_id: api.connection_id,
+                },
+                &scope,
+            )
+            .await
+            .unwrap();
+        assert!(!crate::provider_catalog::openai_codex_oauth(&platform.auth).await);
+        assert!(crate::provider_catalog::openai_codex_oauth(&selected_oauth).await);
+        let _ = std::fs::remove_file(path);
+    }
 
     #[tokio::test]
     async fn openai_usage_preserves_scoped_accounts_and_uses_exact_auth() {

@@ -2,6 +2,17 @@
 
 All notable user-facing changes to Neoism are documented here.
 
+## [0.7.123] - 2026-10-10
+
+### Codex model-specific context limits
+
+- Replaces the blanket 272k Codex OAuth ceiling with selected-account, model-specific discovery metadata. Each model automatically uses its advertised maximum context, falling back to its advertised default and then a conservative 272k window when metadata is unavailable.
+- Resolves usable input from the advertised effective context percentage, preserving smaller explicit user limits. Models advertising 872k total context and 95% allowance resolve to 828,400 input tokens before the server's existing additional reserve.
+- Keeps picker and generation/compaction limits consistent with the selected authentication connection and actual wire model ID, without borrowing API or Copilot context limits.
+- Bounds explicit automatic-compaction thresholds to the known usable budget and adds malformed-metadata, alias/mode, auth-path, and input-budget regression coverage.
+
+These capacities are backed by model discovery metadata and local tests, not live near-limit request validation. API-key model limits remain separate. First-terminal directory following and release-time Servo exclusion are preserved.
+
 ## [0.7.122] - 2026-10-09
 
 ### Workspace workers, Agent activity, and rendering

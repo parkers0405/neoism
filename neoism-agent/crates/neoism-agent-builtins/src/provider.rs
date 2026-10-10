@@ -99,7 +99,7 @@ impl ProviderRegistry {
         let Some(auth @ AuthInfo::OAuth { .. }) = auth_store.get("openai").await? else {
             return Ok(OpenAiModelAccess::Api);
         };
-        match self.openai.codex_model_ids(auth_store, auth).await {
+        match self.openai.codex_models(auth_store, auth).await {
             Ok(ids) => Ok(OpenAiModelAccess::Codex(ids)),
             Err(error) => {
                 tracing::warn!(%error, "failed to load account-specific Codex model catalog");

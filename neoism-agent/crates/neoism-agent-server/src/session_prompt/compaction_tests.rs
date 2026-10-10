@@ -1,5 +1,58 @@
 use super::*;
 
+#[test]
+fn codex_upstream_allowance_keeps_additional_conservative_server_reserve() {
+    // These are resolved account-metadata limits, not a backend validation claim.
+    // Input already includes the upstream 95% allowance. Without authoritative
+    // overlap provenance, retain the server's additional conservative reserve.
+    // The output value below is a fixture, not verified Codex output metadata.
+    for (context, input, expected_safe) in [
+        (872_000, 828_400, 808_400),
+        (800_000, 760_000, 740_000),
+        (400_000, 380_000, 360_000),
+        (272_000, 258_400, 238_400),
+        (872_000, 100_000, 80_000),
+    ] {
+        let limit = ModelLimit {
+            context,
+            input: Some(input),
+            output: 128_000,
+        };
+        let safe = usable_context_tokens_with(&limit, 32_000, None);
+        assert_eq!(
+            safe, expected_safe,
+            "server adds its existing 20k reserve to the upstream allowance"
+        );
+        assert_eq!(
+            compaction_threshold_with_override(100_000, Some(safe), Some(u64::MAX)),
+            safe
+        );
+        assert_eq!(
+            compaction_threshold_with_override(100_000, Some(safe), Some(50_000)),
+            50_000
+        );
+        assert_eq!(
+            compaction_threshold_with_override(100_000, Some(safe), Some(0)),
+            0,
+            "zero remains the disabled sentinel"
+        );
+        assert_eq!(
+            compaction_threshold_with_override(100_000, Some(safe), None),
+            100_000
+        );
+        let policy = neoism_agent_core::CompactionConfig::default();
+        assert_eq!(
+            policy.threshold(context, safe),
+            ((context as f64 * 0.65) as u64).min(safe)
+        );
+        assert_eq!(
+            usable_context_tokens_with(&limit, 32_000, Some(0)),
+            input,
+            "server does not apply the upstream percentage a second time"
+        );
+    }
+}
+
 struct OverflowProvider {
     inner: Arc<dyn neoism_agent_plugin_api::ProviderService>,
     calls: Arc<std::sync::atomic::AtomicUsize>,

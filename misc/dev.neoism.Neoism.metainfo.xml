@@ -52,6 +52,12 @@
   </categories>
 
   <releases>
+    <release version="0.7.123" date="2026-10-10">
+      <description>
+        <p>Fixes Codex OAuth context limits using selected-account model maxima and effective input headroom, with consistent compaction budgeting.</p>
+      </description>
+      <url>https://github.com/parkers0405/neoism/releases/tag/v0.7.123</url>
+    </release>
     <release version="0.7.122" date="2026-10-09">
       <description>
         <p>Stable Agent, cloud workspace-worker, SDK, and rendering improvements. Preserves first-terminal directory following and excludes the experimental Servo runtime.</p>

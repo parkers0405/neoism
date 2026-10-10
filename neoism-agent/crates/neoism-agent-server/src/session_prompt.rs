@@ -1497,6 +1497,9 @@ fn usable_context_tokens(limit: &ModelLimit) -> u64 {
     )
 }
 
+// Provider input may already include an upstream allowance (e.g. Codex 95%).
+// This existing reserve is an additional conservative server policy. Without
+// authoritative overlap provenance, neither deduction substitutes for the other.
 fn usable_context_tokens_with(
     limit: &ModelLimit,
     output_cap: u64,
@@ -2429,6 +2432,20 @@ fn compaction_trigger_tokens(
         })
 }
 
+// An explicit trigger may delay compaction only within the model's computed
+// safety budget. Unknown capacity has no metadata-backed bound; retain the
+// existing fallback behavior. Zero remains the explicit disable sentinel.
+fn compaction_threshold_with_override(
+    threshold: u64,
+    usable: Option<u64>,
+    override_tokens: Option<u64>,
+) -> u64 {
+    match override_tokens {
+        Some(tokens) => usable.map(|budget| tokens.min(budget)).unwrap_or(tokens),
+        None => threshold,
+    }
+}
+
 fn estimated_request_tokens(request: &ProviderGenerationRequest) -> u64 {
     // Use the same modality-aware estimate for first-request fallback and tail retention.
     // Serializing the entire request counted screenshot base64 as text, causing
@@ -2546,10 +2563,17 @@ async fn run_assistant_step(
         .ok()
         .and_then(|metadata| metadata.limit);
     let threshold = compaction_trigger_tokens(&policy, limit.as_ref());
-    let threshold = auto_compaction_threshold_override().unwrap_or(threshold);
-    let enabled = policy.enabled()
-        && !auto_compaction_disabled()
-        && auto_compaction_threshold_override() != Some(0);
+    let override_tokens = auto_compaction_threshold_override();
+    let threshold = compaction_threshold_with_override(
+        threshold,
+        limit
+            .as_ref()
+            .filter(|limit| limit.context > 0)
+            .map(usable_context_tokens),
+        override_tokens,
+    );
+    let enabled =
+        policy.enabled() && !auto_compaction_disabled() && override_tokens != Some(0);
     let mut request = build_provider_generation_request(
         state,
         provider,

@@ -19,11 +19,23 @@ use crate::provider::provider_api_supported;
 
 const DEFAULT_SOURCE: &str = "https://models.dev";
 const CACHE_TTL: Duration = Duration::from_secs(5 * 60);
-// OpenAI Codex's bundled models-manager/models.json declares a 272k
-// default context for GPT-6; the larger max_context_window is opt-in.
+// Conservative fallback from Codex's bundled models-manager/models.json.
+// Only account-scoped /models metadata can authorize a larger window;
+// platform API and Copilot catalogs are not subscription-limit authorities.
 const CODEX_OPENAI_CONTEXT_LIMIT: u64 = 272_000;
-const CODEX_OPENAI_INPUT_LIMIT: u64 = 272_000;
-const CODEX_OPENAI_OUTPUT_LIMIT: u64 = 128_000;
+// Conservative upstream allowance when the optional percentage is missing or
+// invalid. Account metadata currently advertises 95; never assume 100 instead.
+const CODEX_EFFECTIVE_CONTEXT_PERCENT: u64 = 95;
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct CodexModelMetadata {
+    #[serde(default, deserialize_with = "optional_metadata_u64")]
+    pub context_window: Option<u64>,
+    #[serde(default, deserialize_with = "optional_metadata_u64")]
+    pub max_context_window: Option<u64>,
+    #[serde(default, deserialize_with = "optional_metadata_u64")]
+    pub effective_context_window_percent: Option<u64>,
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct GenerationMetadata {
@@ -35,17 +47,19 @@ pub struct GenerationMetadata {
     pub headers: BTreeMap<String, String>,
 }
 
+// A malformed optional limit must not discard the whole authenticated catalog
+// (or the other valid fields). Strings, negatives, floats and overflow are absent.
+fn optional_metadata_u64<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<u64>, D::Error> {
+    Ok(Value::deserialize(deserializer)?.as_u64())
+}
+
 #[derive(Clone, Debug, Default)]
 pub enum OpenAiModelAccess {
     #[default]
     Api,
-    Codex(BTreeSet<String>),
-}
-
-impl OpenAiModelAccess {
-    pub fn uses_codex(&self) -> bool {
-        matches!(self, Self::Codex(_))
-    }
+    Codex(BTreeMap<String, CodexModelMetadata>),
 }
 
 #[derive(Clone)]
@@ -85,6 +99,20 @@ impl ProviderCatalog {
             discovered: Arc::new(RwLock::new(BTreeMap::new())),
             discovery_gate: Arc::new(Mutex::new(())),
         }
+    }
+
+    pub async fn providers_for_access(
+        &self,
+        access: &OpenAiModelAccess,
+        restrict_to_listed: bool,
+    ) -> anyhow::Result<Vec<ProviderInfo>> {
+        let raw = self.providers().await?;
+        Ok(effective_catalog_with_config(
+            &raw,
+            access,
+            &self.configured,
+            restrict_to_listed,
+        ))
     }
 
     pub async fn providers(&self) -> anyhow::Result<Vec<ProviderInfo>> {
@@ -814,26 +842,47 @@ pub fn effective_provider_catalog(
     providers: &[ProviderInfo],
     openai_access: &OpenAiModelAccess,
 ) -> Vec<ProviderInfo> {
+    effective_catalog_with_config(providers, openai_access, &BTreeMap::new(), true)
+}
+
+fn effective_catalog_with_config(
+    providers: &[ProviderInfo],
+    access: &OpenAiModelAccess,
+    configured: &BTreeMap<String, ProviderConfig>,
+    restrict_to_listed: bool,
+) -> Vec<ProviderInfo> {
     let mut output = providers.to_vec();
-    let snapshot = output.clone();
     for provider in &mut output {
         if provider.id != "openai" {
             continue;
         }
-        if let OpenAiModelAccess::Codex(model_ids) = openai_access {
-            provider.models.retain(|id, model| {
-                model_ids.contains(id) || model_ids.contains(model.id.as_str())
-            });
-        }
-        for model in provider.models.values_mut() {
-            apply_codex_openai_effective_metadata(
-                &snapshot,
-                provider.id.as_str(),
-                model.id.as_str(),
-                &mut model.limit,
-                &mut model.cost,
-                openai_access.uses_codex(),
-            );
+        if let OpenAiModelAccess::Codex(models) = access {
+            if restrict_to_listed {
+                // Match the actual wire ID, not a picker alias or variant label.
+                provider
+                    .models
+                    .retain(|_, model| models.contains_key(&model.api.id));
+            }
+            for (key, model) in &mut provider.models {
+                let explicit = configured
+                    .get("openai")
+                    .and_then(|config| {
+                        config.models.get(key).or_else(|| {
+                            // Catalog mode entries use <wire-id>-<mode>. They
+                            // must not bypass a lower limit on their base model.
+                            // Do not spread limits across unrelated aliases.
+                            key.strip_prefix(model.api.id.as_str())
+                                .filter(|suffix| suffix.starts_with('-'))
+                                .and_then(|_| config.models.get(&model.api.id))
+                        })
+                    })
+                    .and_then(|config| config.limit.as_ref());
+                apply_codex_limit(&mut model.limit, models.get(&model.api.id), explicit);
+                if let Some(explicit) = explicit {
+                    model.limit.output = model.limit.output.min(explicit.output);
+                }
+                model.cost = ModelCost::default();
+            }
         }
     }
     output
@@ -905,10 +954,12 @@ pub fn provider_connectable(provider: &ProviderInfo) -> bool {
         .any(|model| model_supported_in_picker(&provider.id, model))
 }
 
+/// Read generation metadata from an already auth-resolved provider catalog.
+/// Auth/account limit resolution belongs to providers_for_access, not a second
+/// clamp here: picker and generation must consume the same resolved capacity.
 pub fn generation_metadata(
     providers: &[ProviderInfo],
     model: &UserModel,
-    codex_oauth: bool,
 ) -> GenerationMetadata {
     let Some(provider) = providers
         .iter()
@@ -921,9 +972,14 @@ pub fn generation_metadata(
         candidates.push(format!("{}-{variant}", model.model_id));
     }
     candidates.push(model.model_id.clone());
-    let model_info = candidates
-        .iter()
-        .find_map(|candidate| provider.models.get(candidate));
+    let model_info = candidates.iter().find_map(|candidate| {
+        provider.models.get(candidate).or_else(|| {
+            provider
+                .models
+                .values()
+                .find(|info| info.id == *candidate || info.api.id == *candidate)
+        })
+    });
     let Some(model_info) = model_info else {
         return GenerationMetadata {
             auth_env: provider.env.clone(),
@@ -932,23 +988,13 @@ pub fn generation_metadata(
     };
     let mut headers = model_info.headers.clone();
     apply_default_headers(&model_info.api, &mut headers);
-    let mut limit = model_info.limit.clone();
-    let mut cost = model_info.cost.clone();
-    apply_codex_openai_effective_metadata(
-        providers,
-        model.provider_id.as_str(),
-        model.model_id.as_str(),
-        &mut limit,
-        &mut cost,
-        codex_oauth,
-    );
     let mut api = model_info.api.clone();
     api.reasoning = Some(model_info.capabilities.reasoning);
     GenerationMetadata {
         api: Some(api),
         auth_env: provider.env.clone(),
-        limit: Some(limit),
-        cost: Some(cost),
+        limit: Some(model_info.limit.clone()),
+        cost: Some(model_info.cost.clone()),
         options: model_info.options.clone(),
         headers,
     }
@@ -956,10 +1002,10 @@ pub fn generation_metadata(
 
 /// Whether OpenAI requests will use the Codex ChatGPT-subscription service:
 /// `OpenAiRuntime::stream` sends every request over the OAuth Responses path
-/// whenever the stored auth is OAuth, regardless of any API key. Codex enforces
-/// far smaller context windows than the platform API for the same model ids
-/// (GPT-6 defaults to 272k vs 1.05M), so limit resolution must follow the same
-/// dispatch rule the runtime uses.
+/// whenever the stored auth is OAuth, regardless of any API key. Codex account
+/// metadata and platform API windows differ, so limit resolution must follow
+/// the same dispatch rule the runtime uses.
+#[cfg(test)]
 pub async fn openai_codex_oauth(auth_store: &crate::auth_store::AuthStore) -> bool {
     matches!(
         auth_store.get("openai").await,
@@ -967,54 +1013,43 @@ pub async fn openai_codex_oauth(auth_store: &crate::auth_store::AuthStore) -> bo
     )
 }
 
-fn apply_codex_openai_effective_metadata(
-    providers: &[ProviderInfo],
-    provider_id: &str,
-    model_id: &str,
+fn apply_codex_limit(
     limit: &mut ModelLimit,
-    cost: &mut ModelCost,
-    codex_oauth: bool,
+    metadata: Option<&CodexModelMetadata>,
+    explicit: Option<&ModelLimit>,
 ) {
-    if provider_id != "openai" || !codex_oauth {
-        return;
-    }
-    // Subscription limits belong to the selected service, not a model-name
-    // whitelist. New models must not inherit platform API windows on Codex.
-    // Preserve any smaller known model limits; these are conservative ceilings.
-    let catalog_limit = codex_catalog_limit(providers, model_id);
-    let catalog = catalog_limit.as_ref();
-    limit.context = limit.context.min(
-        catalog
-            .map(|catalog| catalog.context.min(CODEX_OPENAI_CONTEXT_LIMIT))
-            .unwrap_or(CODEX_OPENAI_CONTEXT_LIMIT),
-    );
+    // Codex is authoritative: use this account model's maximum automatically,
+    // then its advertised context, then the conservative bundled fallback.
+    // Never inherit the platform API catalog's context or input capacity.
+    let ceiling = metadata
+        .and_then(|m| {
+            m.max_context_window
+                .filter(|n| *n > 0)
+                .or(m.context_window.filter(|n| *n > 0))
+        })
+        .unwrap_or(CODEX_OPENAI_CONTEXT_LIMIT);
+    limit.context = explicit
+        .map(|configured| configured.context.min(ceiling))
+        .unwrap_or(ceiling);
+    let percent = metadata
+        .and_then(|m| m.effective_context_window_percent)
+        .filter(|n| (1..=100).contains(n))
+        .unwrap_or(CODEX_EFFECTIVE_CONTEXT_PERCENT);
+    // Multiply in u128 before flooring: saturating u64 multiplication would
+    // incorrectly shrink a large valid context, and unchecked multiplication
+    // would wrap. With percent <= 100 the result always fits u64.
+    let effective_input = ((limit.context as u128 * percent as u128) / 100) as u64;
     limit.input = Some(
-        limit.input.unwrap_or(limit.context).min(limit.context).min(
-            catalog
-                .and_then(|catalog| catalog.input)
-                .map(|input| input.min(CODEX_OPENAI_INPUT_LIMIT))
-                .unwrap_or(CODEX_OPENAI_INPUT_LIMIT),
-        ),
+        explicit
+            .and_then(|configured| configured.input)
+            .unwrap_or(effective_input)
+            .min(effective_input),
     );
-    limit.output = catalog
-        .map(|catalog| catalog.output.min(CODEX_OPENAI_OUTPUT_LIMIT))
-        .filter(|output| *output > 0)
-        .unwrap_or(CODEX_OPENAI_OUTPUT_LIMIT)
-        .min(if limit.output > 0 {
-            limit.output
-        } else {
-            CODEX_OPENAI_OUTPUT_LIMIT
-        });
-    *cost = ModelCost::default();
-}
-
-fn codex_catalog_limit(providers: &[ProviderInfo], model_id: &str) -> Option<ModelLimit> {
-    providers
-        .iter()
-        .find(|provider| provider.id == "github-copilot")
-        .and_then(|provider| provider.models.get(model_id))
-        .map(|model| model.limit.clone())
-        .filter(|limit| limit.context > 0)
+    // This percentage is the upstream allowance, not Neoism's server reserve.
+    // session_prompt retains its existing additional conservative reserve. No
+    // provenance field exists to prove these policies overlap; do not remove it.
+    // /models advertises no output maximum. Preserve the real catalog/config
+    // value (including unknown=0); never invent an output cap to fake headroom.
 }
 
 fn apply_default_headers(api: &ProviderApiInfo, headers: &mut BTreeMap<String, String>) {
@@ -1184,6 +1219,21 @@ struct ModelsDevModelProvider {
 
 #[cfg(test)]
 mod tests {
+    fn metadata_for_auth(
+        providers: &[ProviderInfo],
+        model: &UserModel,
+        oauth: bool,
+    ) -> GenerationMetadata {
+        let access = if oauth {
+            codex_access(providers)
+        } else {
+            OpenAiModelAccess::Api
+        };
+        let effective =
+            effective_catalog_with_config(providers, &access, &BTreeMap::new(), false);
+        generation_metadata(&effective, model)
+    }
+
     #[tokio::test]
     async fn configured_local_models_are_keyless_and_override_discovery_defaults() {
         let mut models = BTreeMap::new();
@@ -1244,7 +1294,7 @@ mod tests {
                 connection_id: None,
                 variant: None,
             };
-            let metadata = generation_metadata(&providers, &model, false);
+            let metadata = metadata_for_auth(&providers, &model, false);
             let api = metadata.api.unwrap();
             assert_eq!(api.reasoning, Some(capability));
             assert_eq!(api.reasoning_effort, None);
@@ -1286,7 +1336,7 @@ mod tests {
             variant: None,
         };
 
-        let metadata = generation_metadata(&providers, &model, false);
+        let metadata = metadata_for_auth(&providers, &model, false);
 
         assert_eq!(
             metadata.api.as_ref().map(|api| api.npm.as_str()),
@@ -1304,7 +1354,473 @@ mod tests {
     }
 
     #[test]
-    fn generation_metadata_uses_copilot_codex_limits_for_openai_oauth_models() {
+    fn codex_account_maximum_is_default_and_explicit_config_only_lowers_it() {
+        let mut raw = parse_codex_limit_fixture();
+        let openai = raw.iter_mut().find(|p| p.id == "openai").unwrap();
+        let mut sol = openai.models["gpt-5.6-sol"].clone();
+        sol.id = "sol-alias".into();
+        sol.api.id = "gpt-6.1-sol".into();
+        openai.models.insert("sol-alias".into(), sol);
+        let access = OpenAiModelAccess::Codex(BTreeMap::from([(
+            "gpt-6.1-sol".into(),
+            CodexModelMetadata {
+                context_window: Some(272_000),
+                max_context_window: Some(872_000),
+                effective_context_window_percent: Some(95),
+            },
+        )]));
+        for (requested, expected) in [
+            (None, 872_000),
+            (Some(800_000), 800_000),
+            (Some(1_050_000), 872_000),
+            (Some(128_000), 128_000),
+        ] {
+            let mut configured = BTreeMap::new();
+            let mut providers = raw.clone();
+            if let Some(context) = requested {
+                // Exercise the actual config parser and apply_model_config path.
+                let config: ProviderConfig = serde_json::from_value(serde_json::json!({
+                    "models": {"sol-alias": {"id": "gpt-6.1-sol",
+                        "limit": {"context": context, "input": if context == 128_000 { Some(100_000) } else { None }, "output": 4096}}}
+                }))
+                .unwrap();
+                let model_config = &config.models["sol-alias"];
+                let model = providers
+                    .iter_mut()
+                    .find(|p| p.id == "openai")
+                    .unwrap()
+                    .models
+                    .get_mut("sol-alias")
+                    .unwrap();
+                apply_model_config(
+                    model,
+                    "openai",
+                    "sol-alias",
+                    "",
+                    "@ai-sdk/openai",
+                    ProviderAuthMode::Required,
+                    true,
+                    true,
+                    model_config,
+                );
+                configured.insert("openai".into(), config);
+            }
+            let effective =
+                effective_catalog_with_config(&providers, &access, &configured, true);
+            let openai = effective.iter().find(|p| p.id == "openai").unwrap();
+            assert_eq!(
+                openai.models.len(),
+                1,
+                "wire ID must gate alias availability"
+            );
+            let selected = &openai.models["sol-alias"];
+            assert_eq!(selected.limit.context, expected);
+            assert_eq!(
+                selected.limit.input,
+                Some(if requested == Some(128_000) {
+                    100_000
+                } else {
+                    (expected as u128 * 95 / 100) as u64
+                })
+            );
+            assert_eq!(
+                selected.limit.output,
+                if requested.is_some() { 4096 } else { 128_000 }
+            );
+            let user = UserModel {
+                provider_id: "openai".into(),
+                model_id: "sol-alias".into(),
+                connection_id: Some("selected-account".into()),
+                variant: None,
+            };
+            let generation = generation_metadata(&effective, &user);
+            assert_eq!(generation.api.unwrap().id, "gpt-6.1-sol");
+            let wire_user = UserModel {
+                model_id: "gpt-6.1-sol".into(),
+                ..user.clone()
+            };
+            assert_eq!(
+                generation_metadata(&effective, &wire_user)
+                    .limit
+                    .unwrap()
+                    .context,
+                expected
+            );
+
+            let limit = generation.limit.unwrap();
+            assert_eq!(
+                limit.context, expected,
+                "generation must not double-clamp effective catalog"
+            );
+            assert_eq!(limit.input, selected.limit.input);
+            let threshold = neoism_agent_core::CompactionConfig::default()
+                .threshold(limit.context, limit.context);
+            assert_eq!(threshold, (expected as f64 * 0.65) as u64);
+        }
+        let api = effective_catalog_with_config(
+            &raw,
+            &OpenAiModelAccess::Api,
+            &BTreeMap::new(),
+            true,
+        );
+        assert_eq!(
+            api.iter().find(|p| p.id == "openai").unwrap().models["sol-alias"]
+                .limit
+                .context,
+            1_050_000
+        );
+        assert_eq!(
+            raw.iter().find(|p| p.id == "openai").unwrap().models["sol-alias"]
+                .limit
+                .context,
+            1_050_000,
+            "account resolution must not mutate the shared API cache"
+        );
+    }
+
+    #[test]
+    fn codex_account_model_maxima_agree_in_picker_generation_and_compaction() {
+        let raw = parse_codex_limit_fixture();
+        for (sol_max, terra_max, terra_context) in
+            [(872_000, Some(400_000), 200_000), (512_000, None, 128_000)]
+        {
+            let access = OpenAiModelAccess::Codex(BTreeMap::from([
+                (
+                    "gpt-5.6-sol".into(),
+                    CodexModelMetadata {
+                        context_window: Some(272_000),
+                        max_context_window: Some(sol_max),
+                        effective_context_window_percent: Some(95),
+                    },
+                ),
+                (
+                    "gpt-5.6-terra".into(),
+                    CodexModelMetadata {
+                        context_window: Some(terra_context),
+                        max_context_window: terra_max,
+                        effective_context_window_percent: Some(95),
+                    },
+                ),
+            ]));
+            let picker = effective_provider_catalog(&raw, &access);
+            let generation =
+                effective_catalog_with_config(&raw, &access, &BTreeMap::new(), false);
+            for (id, expected) in [
+                ("gpt-5.6-sol", sol_max),
+                ("gpt-5.6-terra", terra_max.unwrap_or(terra_context)),
+            ] {
+                let selected =
+                    &picker.iter().find(|p| p.id == "openai").unwrap().models[id];
+                let model = UserModel {
+                    provider_id: "openai".into(),
+                    model_id: id.into(),
+                    connection_id: Some("selected-account".into()),
+                    variant: None,
+                };
+                let limit = generation_metadata(&generation, &model).limit.unwrap();
+                assert_eq!(selected.limit.context, expected);
+                assert_eq!(limit.context, expected);
+                assert_eq!(limit.input, Some((expected as u128 * 95 / 100) as u64));
+                assert_eq!(selected.limit.input, limit.input);
+                assert_eq!(
+                    neoism_agent_core::CompactionConfig::default().threshold(
+                        limit.context,
+                        limit.input.unwrap().saturating_sub(20_000)
+                    ),
+                    (expected as f64 * 0.65) as u64
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn codex_uses_each_models_own_maximum_then_context_then_fallback() {
+        for (metadata, expected) in [
+            (
+                CodexModelMetadata {
+                    context_window: Some(272_000),
+                    max_context_window: Some(872_000),
+                    effective_context_window_percent: Some(95),
+                },
+                872_000,
+            ),
+            (
+                CodexModelMetadata {
+                    context_window: Some(200_000),
+                    max_context_window: Some(400_000),
+                    effective_context_window_percent: None,
+                },
+                400_000,
+            ),
+            (
+                CodexModelMetadata {
+                    context_window: Some(128_000),
+                    max_context_window: None,
+                    effective_context_window_percent: None,
+                },
+                128_000,
+            ),
+            (
+                CodexModelMetadata {
+                    context_window: Some(128_000),
+                    max_context_window: Some(0),
+                    effective_context_window_percent: None,
+                },
+                128_000,
+            ),
+            (CodexModelMetadata::default(), 272_000),
+        ] {
+            for api_context in [64_000, 1_050_000] {
+                let mut limit = ModelLimit {
+                    context: api_context,
+                    input: Some(32_000),
+                    output: 4096,
+                };
+                apply_codex_limit(&mut limit, Some(&metadata), None);
+                assert_eq!(
+                    limit.context, expected,
+                    "API context is not a Codex authority"
+                );
+                assert_eq!(
+                    limit.input,
+                    Some((expected as u128 * 95 / 100) as u64),
+                    "input comes from the upstream allowance, not API input"
+                );
+                assert_eq!(limit.output, 4096);
+            }
+        }
+    }
+
+    #[test]
+    fn codex_catalog_mode_cannot_bypass_lower_base_model_limits() {
+        let mut raw = parse_codex_limit_fixture();
+        let openai = raw.iter_mut().find(|p| p.id == "openai").unwrap();
+        let mut high = openai.models["gpt-5.6-sol"].clone();
+        high.id = "gpt-5.6-sol-high".into();
+        openai.models.insert(high.id.clone(), high);
+        let configured = BTreeMap::from([(
+            "openai".into(),
+            serde_json::from_value(serde_json::json!({"models": {"gpt-5.6-sol": {
+                "limit": {"context":800000,"input":600000,"output":4096}
+            }}}))
+            .unwrap(),
+        )]);
+        let access = OpenAiModelAccess::Codex(BTreeMap::from([(
+            "gpt-5.6-sol".into(),
+            CodexModelMetadata {
+                context_window: Some(272_000),
+                max_context_window: Some(872_000),
+                effective_context_window_percent: Some(95),
+            },
+        )]));
+        let resolved = effective_catalog_with_config(&raw, &access, &configured, true);
+        let model = UserModel {
+            provider_id: "openai".into(),
+            model_id: "gpt-5.6-sol".into(),
+            connection_id: None,
+            variant: Some("high".into()),
+        };
+        let limit = generation_metadata(&resolved, &model).limit.unwrap();
+        assert_eq!(
+            (limit.context, limit.input, limit.output),
+            (800_000, Some(600_000), 4096)
+        );
+    }
+
+    #[test]
+    fn codex_percent_bounds_and_large_context_arithmetic_are_safe() {
+        for (percent, effective_percent) in [
+            (None, 95),
+            (Some(0), 95),
+            (Some(101), 95),
+            (Some(u64::MAX), 95),
+            (Some(1), 1),
+            (Some(95), 95),
+            (Some(100), 100),
+        ] {
+            for context in [101, 272_000, 872_000, u64::MAX] {
+                let mut limit = ModelLimit {
+                    context: 1_050_000,
+                    input: None,
+                    output: 4096,
+                };
+                apply_codex_limit(
+                    &mut limit,
+                    Some(&CodexModelMetadata {
+                        context_window: Some(272_000),
+                        max_context_window: Some(context),
+                        effective_context_window_percent: percent,
+                    }),
+                    None,
+                );
+                assert_eq!(
+                    limit.context, context,
+                    "even max < default remains authoritative"
+                );
+                assert_eq!(
+                    limit.input,
+                    Some((context as u128 * effective_percent as u128 / 100) as u64)
+                );
+                assert!(limit.input.unwrap() <= context);
+            }
+        }
+    }
+
+    #[test]
+    fn codex_percent_applies_to_lower_context_but_not_twice_to_lower_input() {
+        let metadata = CodexModelMetadata {
+            context_window: Some(272_000),
+            max_context_window: Some(872_000),
+            effective_context_window_percent: Some(95),
+        };
+        for (context, input, expected_context, expected_input) in [
+            (800_000, None, 800_000, 760_000),
+            (800_000, Some(600_000), 800_000, 600_000),
+            (800_000, Some(790_000), 800_000, 760_000),
+            (1_050_000, Some(900_000), 872_000, 828_400),
+            (128_000, Some(100_000), 128_000, 100_000),
+        ] {
+            let explicit = ModelLimit {
+                context,
+                input,
+                output: 4096,
+            };
+            let mut limit = explicit.clone();
+            apply_codex_limit(&mut limit, Some(&metadata), Some(&explicit));
+            assert_eq!(
+                (limit.context, limit.input, limit.output),
+                (expected_context, Some(expected_input), 4096)
+            );
+        }
+    }
+
+    #[test]
+    fn codex_invalid_default_or_maximum_falls_back_field_by_field() {
+        for (json, expected_context) in [
+            (
+                serde_json::json!({"context_window":272000,"max_context_window":128000}),
+                128_000,
+            ),
+            (
+                serde_json::json!({"context_window":0,"max_context_window":872000}),
+                872_000,
+            ),
+            (
+                serde_json::json!({"context_window":"bad","max_context_window":872000}),
+                872_000,
+            ),
+            (
+                serde_json::json!({"context_window":128000,"max_context_window":0}),
+                128_000,
+            ),
+            (
+                serde_json::json!({"context_window":128000,"max_context_window":-1}),
+                128_000,
+            ),
+            (
+                serde_json::json!({"context_window":128000,"max_context_window":"bad"}),
+                128_000,
+            ),
+            (
+                serde_json::json!({"context_window":0,"max_context_window":0}),
+                272_000,
+            ),
+            (
+                serde_json::json!({"context_window":{},"max_context_window":null}),
+                272_000,
+            ),
+        ] {
+            let metadata: CodexModelMetadata = serde_json::from_value(json).unwrap();
+            let mut limit = ModelLimit {
+                context: 1_050_000,
+                input: Some(922_000),
+                output: 0,
+            };
+            apply_codex_limit(&mut limit, Some(&metadata), None);
+            assert_eq!(limit.context, expected_context);
+            assert_eq!(limit.input, Some(expected_context * 95 / 100));
+            assert_eq!(limit.output, 0, "no output metadata is invented");
+        }
+    }
+
+    #[test]
+    fn codex_missing_metadata_cannot_authorize_larger_override_or_invent_output() {
+        let explicit = ModelLimit {
+            context: 800_000,
+            input: None,
+            output: 0,
+        };
+        for metadata in [
+            None,
+            Some(CodexModelMetadata::default()),
+            Some(CodexModelMetadata {
+                context_window: None,
+                max_context_window: Some(872_000),
+                effective_context_window_percent: Some(200),
+            }),
+        ] {
+            let mut limit = explicit.clone();
+            apply_codex_limit(&mut limit, metadata.as_ref(), None);
+            assert_eq!(
+                limit.context,
+                if metadata
+                    .as_ref()
+                    .and_then(|m| m.max_context_window)
+                    .is_some()
+                {
+                    872_000
+                } else {
+                    272_000
+                }
+            );
+            assert_eq!(
+                limit.input,
+                Some((limit.context as u128 * 95 / 100) as u64),
+                "fallback percentage remains conservative"
+            );
+            assert_eq!(limit.output, 0, "unknown output must remain unknown");
+            let mut limit = explicit.clone();
+            apply_codex_limit(&mut limit, metadata.as_ref(), Some(&explicit));
+            assert_eq!(
+                limit.context,
+                if metadata
+                    .as_ref()
+                    .and_then(|m| m.max_context_window)
+                    .is_some()
+                {
+                    800_000
+                } else {
+                    272_000
+                }
+            );
+        }
+        // Smaller explicit user limits are never enlarged by account metadata.
+        let mut small = ModelLimit {
+            context: 64_000,
+            input: Some(32_000),
+            output: 2048,
+        };
+        apply_codex_limit(
+            &mut small,
+            Some(&CodexModelMetadata {
+                context_window: Some(272_000),
+                max_context_window: Some(872_000),
+                effective_context_window_percent: Some(95),
+            }),
+            Some(&ModelLimit {
+                context: 64_000,
+                input: Some(32_000),
+                output: 2048,
+            }),
+        );
+        assert_eq!(
+            (small.context, small.input, small.output),
+            (64_000, Some(32_000), 2048)
+        );
+    }
+
+    #[test]
+    fn generation_metadata_uses_conservative_codex_limits_for_openai_oauth_models() {
         let providers = parse_codex_limit_fixture();
         let model = UserModel {
             provider_id: "openai".to_string(),
@@ -1313,12 +1829,12 @@ mod tests {
             variant: None,
         };
 
-        let metadata = generation_metadata(&providers, &model, true);
+        let metadata = metadata_for_auth(&providers, &model, true);
         let limit = metadata.limit.expect("limit");
         let cost = metadata.cost.expect("cost");
 
         assert_eq!(limit.context, 272_000);
-        assert_eq!(limit.input, Some(272_000));
+        assert_eq!(limit.input, Some(258_400));
         assert_eq!(limit.output, 128_000);
         assert_eq!(cost.input, 0.0);
         assert_eq!(cost.output, 0.0);
@@ -1327,7 +1843,7 @@ mod tests {
     }
 
     #[test]
-    fn effective_provider_catalog_uses_copilot_codex_limits_for_ui_models() {
+    fn effective_provider_catalog_uses_conservative_codex_limits_for_ui_models() {
         let fixture = parse_codex_limit_fixture();
         let providers = effective_provider_catalog(&fixture, &codex_access(&fixture));
         let openai = providers
@@ -1337,7 +1853,7 @@ mod tests {
         let model = openai.models.get("gpt-5.5").expect("gpt-5.5 model");
 
         assert_eq!(model.limit.context, 272_000);
-        assert_eq!(model.limit.input, Some(272_000));
+        assert_eq!(model.limit.input, Some(258_400));
         assert_eq!(model.limit.output, 128_000);
         assert_eq!(model.cost.input, 0.0);
         assert_eq!(model.cost.output, 0.0);
@@ -1355,7 +1871,7 @@ mod tests {
         for model_id in ["gpt-5.6", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"] {
             let model = openai.models.get(model_id).expect("gpt-5.6 family model");
             assert_eq!(model.limit.context, 272_000, "{model_id}");
-            assert_eq!(model.limit.input, Some(272_000), "{model_id}");
+            assert_eq!(model.limit.input, Some(258_400), "{model_id}");
             assert_eq!(model.limit.output, 128_000, "{model_id}");
             assert_eq!(model.cost.input, 0.0, "{model_id}");
             assert_eq!(model.cost.output, 0.0, "{model_id}");
@@ -1382,6 +1898,7 @@ mod tests {
         for id in future_ids {
             let mut model = openai.models["gpt-5.6-sol"].clone();
             model.id = id.into();
+            model.api.id = id.into();
             model.name = id.into();
             openai.models.insert(id.into(), model);
         }
@@ -1393,7 +1910,7 @@ mod tests {
                     connection_id: None,
                     variant: None,
                 };
-                let metadata = generation_metadata(&providers, &model, oauth);
+                let metadata = metadata_for_auth(&providers, &model, oauth);
                 let limit = metadata.limit.unwrap();
                 let access = if oauth {
                     codex_access(&providers)
@@ -1408,7 +1925,7 @@ mod tests {
                     .models[id];
                 assert_eq!(visible.limit.context, limit.context, "{id}, oauth={oauth}");
                 assert_eq!(limit.context, if oauth { 272_000 } else { 1_050_000 });
-                assert_eq!(limit.input, Some(if oauth { 272_000 } else { 922_000 }));
+                assert_eq!(limit.input, Some(if oauth { 258_400 } else { 922_000 }));
                 assert_eq!(metadata.cost.unwrap().input == 0.0, oauth);
                 let trigger = neoism_agent_core::CompactionConfig::default().threshold(
                     limit.context,
@@ -1429,36 +1946,11 @@ mod tests {
                 input,
                 output: 4_096,
             };
-            let mut cost = ModelCost::default();
-            apply_codex_openai_effective_metadata(
-                &[],
-                "openai",
-                "unknown-future-model",
-                &mut limit,
-                &mut cost,
-                true,
-            );
+            let explicit = limit.clone();
+            apply_codex_limit(&mut limit, None, Some(&explicit));
             assert_eq!(limit.context, 128_000);
-            assert_eq!(limit.input, Some(input.unwrap_or(128_000)));
+            assert_eq!(limit.input, Some(input.unwrap_or(121_600)));
             assert_eq!(limit.output, 4_096);
-        }
-        for (provider, oauth) in [("openai", false), ("other", true)] {
-            let mut limit = ModelLimit {
-                context: 1_050_000,
-                input: Some(922_000),
-                output: 128_000,
-            };
-            let mut cost = ModelCost::default();
-            apply_codex_openai_effective_metadata(
-                &[],
-                provider,
-                "unknown-future-model",
-                &mut limit,
-                &mut cost,
-                oauth,
-            );
-            assert_eq!(limit.context, 1_050_000);
-            assert_eq!(limit.input, Some(922_000));
         }
     }
 
@@ -1601,7 +2093,10 @@ mod tests {
         let providers = parse_codex_limit_fixture();
         let visible = effective_provider_catalog(
             &providers,
-            &OpenAiModelAccess::Codex(BTreeSet::from(["gpt-5.6-sol".to_string()])),
+            &OpenAiModelAccess::Codex(BTreeMap::from([(
+                "gpt-5.6-sol".to_string(),
+                CodexModelMetadata::default(),
+            )])),
         );
         let openai = visible
             .iter()
@@ -1664,7 +2159,13 @@ mod tests {
             .iter()
             .find(|provider| provider.id == "openai")
             .into_iter()
-            .flat_map(|provider| provider.models.keys().cloned())
+            .flat_map(|provider| {
+                provider
+                    .models
+                    .keys()
+                    .cloned()
+                    .map(|id| (id, CodexModelMetadata::default()))
+            })
             .collect();
         OpenAiModelAccess::Codex(model_ids)
     }

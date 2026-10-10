@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -48,7 +48,7 @@ struct CodexModelsCache {
     identity: String,
     fetched_at: Instant,
     ttl: Duration,
-    model_ids: BTreeSet<String>,
+    models: BTreeMap<String, crate::provider_catalog::CodexModelMetadata>,
 }
 
 #[derive(Clone)]
@@ -95,30 +95,32 @@ impl OpenAiClient {
         })
     }
 
-    pub(super) async fn codex_model_ids(
+    pub(super) async fn codex_models(
         &self,
         auth_store: &AuthStore,
         auth: AuthInfo,
-    ) -> anyhow::Result<BTreeSet<String>> {
+    ) -> anyhow::Result<BTreeMap<String, crate::provider_catalog::CodexModelMetadata>>
+    {
         let (access, account_id) =
             openai_oauth_credentials(&self.client, auth_store, auth).await?;
-        let identity = account_id
-            .as_ref()
-            .map(|id| format!("account:{id}"))
-            .unwrap_or_else(|| format!("token:{access}"));
+        let endpoint = std::env::var("NEOISM_AGENT_OPENAI_CODEX_MODELS_URL")
+            .unwrap_or_else(|_| CODEX_MODELS_ENDPOINT.to_string());
+        let client_version = std::env::var("NEOISM_AGENT_OPENAI_CODEX_CLIENT_VERSION")
+            .unwrap_or_else(|_| CODEX_MODELS_CLIENT_VERSION.to_string());
+        let identity = codex_cache_identity(
+            &access,
+            account_id.as_deref(),
+            &endpoint,
+            &client_version,
+        );
         let mut cache = self.codex_models.lock().await;
         if let Some(cached) = cache.as_ref().filter(|cached| {
             cached.identity == identity && cached.fetched_at.elapsed() < cached.ttl
         }) {
-            return Ok(cached.model_ids.clone());
+            return Ok(cached.models.clone());
         }
 
         let fetched = async {
-            let endpoint = std::env::var("NEOISM_AGENT_OPENAI_CODEX_MODELS_URL")
-                .unwrap_or_else(|_| CODEX_MODELS_ENDPOINT.to_string());
-            let client_version =
-                std::env::var("NEOISM_AGENT_OPENAI_CODEX_CLIENT_VERSION")
-                    .unwrap_or_else(|_| CODEX_MODELS_CLIENT_VERSION.to_string());
             let mut request = self
                 .client
                 .get(endpoint)
@@ -145,7 +147,7 @@ impl OpenAiClient {
                 }
                 body.extend_from_slice(&chunk);
             }
-            listed_codex_model_ids(&body)
+            listed_codex_models(&body)
         }
         .await;
         let (model_ids, ttl) = match fetched {
@@ -155,7 +157,7 @@ impl OpenAiClient {
                     identity,
                     fetched_at: Instant::now(),
                     ttl: CODEX_MODELS_FAILURE_TTL,
-                    model_ids: BTreeSet::new(),
+                    models: BTreeMap::new(),
                 });
                 return Err(error);
             }
@@ -164,10 +166,27 @@ impl OpenAiClient {
             identity,
             fetched_at: Instant::now(),
             ttl,
-            model_ids: model_ids.clone(),
+            models: model_ids.clone(),
         });
         Ok(model_ids)
     }
+}
+
+// Never reuse authenticated discovery across credentials, accounts, or endpoints.
+// Hash rather than retain the bearer token in the cache key.
+fn codex_cache_identity(
+    access: &str,
+    account: Option<&str>,
+    endpoint: &str,
+    version: &str,
+) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hash = Sha256::new();
+    for value in [access, account.unwrap_or(""), endpoint, version] {
+        hash.update((value.len() as u64).to_le_bytes());
+        hash.update(value.as_bytes());
+    }
+    format!("{:x}", hash.finalize())
 }
 
 #[derive(Deserialize)]
@@ -180,16 +199,20 @@ struct CodexModelEntry {
     slug: String,
     #[serde(default)]
     visibility: String,
+    #[serde(flatten)]
+    metadata: crate::provider_catalog::CodexModelMetadata,
 }
 
-fn listed_codex_model_ids(body: &[u8]) -> anyhow::Result<BTreeSet<String>> {
+fn listed_codex_models(
+    body: &[u8],
+) -> anyhow::Result<BTreeMap<String, crate::provider_catalog::CodexModelMetadata>> {
     let response: CodexModelsResponse = serde_json::from_slice(body)
         .context("failed to decode OpenAI Codex models response")?;
     Ok(response
         .models
         .into_iter()
         .filter(|model| model.visibility == "list")
-        .map(|model| model.slug)
+        .map(|model| (model.slug, model.metadata))
         .collect())
 }
 
@@ -739,7 +762,7 @@ mod tests {
 
     #[test]
     fn codex_model_catalog_only_lists_visible_slugs() {
-        let ids = listed_codex_model_ids(
+        let ids = listed_codex_models(
             br#"{"models":[
                 {"slug":"gpt-codex","visibility":"list"},
                 {"slug":"gpt-hidden","visibility":"hide"},
@@ -748,7 +771,77 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(ids, BTreeSet::from(["gpt-codex".to_string()]));
+        assert_eq!(
+            ids.keys().map(String::as_str).collect::<Vec<_>>(),
+            vec!["gpt-codex"]
+        );
+        assert!(ids["gpt-codex"].context_window.is_none());
+    }
+
+    #[test]
+    fn codex_alias_sends_the_same_wire_id_used_for_account_limits() {
+        let mut request: ProviderGenerationRequest = serde_json::from_value(json!({
+            "providerId": "openai", "modelId": "sol-alias", "messages": []
+        }))
+        .unwrap();
+        request.api = Some(neoism_agent_core::ProviderApiInfo {
+            id: "gpt-6.1-sol".into(),
+            ..Default::default()
+        });
+        assert_eq!(responses_body(&request)["model"], "gpt-6.1-sol");
+        assert_eq!(request.model_id, "sol-alias");
+    }
+
+    #[test]
+    fn codex_catalog_preserves_optional_account_limits() {
+        let models = listed_codex_models(
+            br#"{"models":[
+            {"slug":"gpt-6.1-sol","visibility":"list","context_window":272000,
+             "max_context_window":872000,"effective_context_window_percent":95},
+            {"slug":"missing","visibility":"list"},
+            {"slug":"null","visibility":"list","context_window":null}
+        ]}"#,
+        )
+        .unwrap();
+        let sol = &models["gpt-6.1-sol"];
+        assert_eq!(sol.context_window, Some(272_000));
+        assert_eq!(sol.max_context_window, Some(872_000));
+        assert_eq!(sol.effective_context_window_percent, Some(95));
+        assert!(models["missing"].max_context_window.is_none());
+        assert!(models["null"].context_window.is_none());
+    }
+
+    #[test]
+    fn codex_catalog_malformed_optional_numbers_do_not_drop_valid_models() {
+        let models = listed_codex_models(br#"{"models":[
+            {"slug":"valid","visibility":"list","context_window":272000,"max_context_window":872000,"effective_context_window_percent":95},
+            {"slug":"bad-percent","visibility":"list","context_window":272000,"max_context_window":872000,"effective_context_window_percent":"95"},
+            {"slug":"bad-window","visibility":"list","context_window":128000,"max_context_window":1.5,"effective_context_window_percent":false},
+            {"slug":"overflow","visibility":"list","context_window":-1,"max_context_window":18446744073709551616,"effective_context_window_percent":[]}
+        ]}"#).unwrap();
+        assert_eq!(models.len(), 4);
+        assert_eq!(models["valid"].effective_context_window_percent, Some(95));
+        assert_eq!(models["bad-percent"].max_context_window, Some(872_000));
+        assert_eq!(models["bad-percent"].effective_context_window_percent, None);
+        assert_eq!(models["bad-window"].context_window, Some(128_000));
+        assert_eq!(models["bad-window"].max_context_window, None);
+        assert_eq!(models["overflow"].context_window, None);
+        assert_eq!(models["overflow"].max_context_window, None);
+    }
+
+    #[test]
+    fn codex_cache_identity_is_auth_account_and_source_specific() {
+        let key = codex_cache_identity("synthetic-a", Some("account-a"), "url-a", "v1");
+        for (token, account, url, version) in [
+            ("synthetic-b", Some("account-a"), "url-a", "v1"),
+            ("synthetic-a", Some("account-b"), "url-a", "v1"),
+            ("synthetic-a", None, "url-a", "v1"),
+            ("synthetic-a", Some("account-a"), "url-b", "v1"),
+            ("synthetic-a", Some("account-a"), "url-a", "v2"),
+        ] {
+            assert_ne!(key, codex_cache_identity(token, account, url, version));
+        }
+        assert!(!key.contains("synthetic"));
     }
 
     #[test]

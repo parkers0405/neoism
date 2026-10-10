@@ -3,6 +3,20 @@ use super::*;
 use crate::panels::agent_pane::state::{NeoismAgentMessage, NeoismAgentOutputKind};
 
 #[test]
+fn mcp_header_identity_is_stable_across_status_and_reveal_details() {
+    let mut message = apply_patch_message("pending", "");
+    message.tool = "execute".to_owned();
+    message.title = "Docs Search".to_owned();
+    for status in ["pending", "running", "completed", "error"] {
+        message.status = status.to_owned();
+        for detail in ["", "SECRET_ARGUMENTS", "SECRET_OUTPUT", "SECRET_ERROR"] {
+            message.detail = detail.to_owned();
+            assert_eq!(message.title_text(), "Docs Search");
+        }
+    }
+}
+
+#[test]
 fn compact_tool_title_omits_completed_and_parentheses() {
     let mut message = apply_patch_message("completed", "");
     message.title = "Read(markdown/html_artifact.rs)".to_string();

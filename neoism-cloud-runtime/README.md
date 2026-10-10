@@ -11,7 +11,7 @@ The parent workspace registers:
 "neoism-cloud-runtime"
 
 # [workspace.dependencies]
-neoism-cloud-runtime = { path = "neoism-cloud-runtime", version = "0.7.123" }
+neoism-cloud-runtime = { path = "neoism-cloud-runtime", version = "0.7.124" }
 
 # consuming crate's [dependencies]
 neoism-cloud-runtime.workspace = true

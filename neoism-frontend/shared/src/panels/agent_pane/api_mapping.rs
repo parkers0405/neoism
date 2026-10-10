@@ -1091,6 +1091,167 @@ fn is_compaction_summary_message(parts: &[Value]) -> bool {
 mod tests {
     use super::*;
 
+    #[test]
+    fn mcp_headers_are_identity_only_across_statuses() {
+        for status in ["pending", "running", "completed", "error"] {
+            let part = json!({"type": "tool", "tool": "execute", "state": {
+                "status": status,
+                "input": {"action": "call", "tool": "docs.search", "query": "SECRET_QUERY",
+                    "description": "SECRET_DESCRIPTION", "arguments": {"token": "SECRET_ARG"}},
+                "title": "SECRET_TITLE", "output": "<path>/SECRET_OUTPUT</path><content>answer</content>",
+                "error": "SECRET_ERROR"
+            }});
+            let block = tool_block(&part);
+            assert_eq!(block.title, "Docs Search", "{status}");
+            assert_eq!(block.status, status);
+        }
+    }
+
+    #[test]
+    fn mcp_headers_prefer_structured_success_and_error_metadata() {
+        let mut part = json!({"tool": "mcp__old__search", "state": {
+            "status": "completed", "input": {"action": "call", "tool": "wrong.search"},
+            "metadata": {"mcp": {"client": "docs", "tool": "search", "runtimeId": "mcp__wrong__tool"}}
+        }, "metadata": {"toolResult": {"mcp": {"client": "error", "tool": "lookup"}}}});
+        assert_eq!(tool_block(&part).title, "Docs Search");
+        part["state"]["metadata"] = Value::Null;
+        part["state"]["status"] = json!("error");
+        assert_eq!(tool_block(&part).title, "Error Lookup");
+        part["metadata"]["toolResult"]["mcp"] = json!({"runtimeId": "mcp__docs__search"});
+        assert_eq!(tool_block(&part).title, "Docs Search");
+    }
+
+    #[test]
+    fn mcp_headers_discovery_direct_and_malformed_fallback() {
+        for (tool, input, expected) in [
+            (
+                "execute",
+                json!({"action": "search", "query": "SECRET"}),
+                "Find Tools",
+            ),
+            (
+                "execute",
+                json!({"action": "search", "namespace": "docs"}),
+                "Find Docs Tools",
+            ),
+            (
+                "execute",
+                json!({"action": "search", "namespace": "bad(code)"}),
+                "Find Tools",
+            ),
+            (
+                "mcp__docs__search",
+                json!({"query": "SECRET"}),
+                "Docs Search",
+            ),
+            (
+                "execute",
+                json!({"action": "call", "tool": "mcp__docs__search"}),
+                "Docs Search",
+            ),
+            (
+                "execute",
+                json!({"action": "call", "tool": "mcp__bad"}),
+                "Execute",
+            ),
+            (
+                "execute",
+                json!({"action": "call", "tool": {"name": "docs.search"}}),
+                "Execute",
+            ),
+            (
+                "execute",
+                json!({"action": "call", "tool": "run(secret)"}),
+                "Execute",
+            ),
+            (
+                "execute",
+                json!({"code": "SECRET_CODE", "command": "SECRET_CMD", "path": "SECRET_PATH"}),
+                "Execute",
+            ),
+        ] {
+            let part = json!({"tool": tool, "state": {"status": "completed", "input": input,
+                "output": "<path>/SECRET_PATH</path><content>answer</content>"}});
+            assert_eq!(tool_block(&part).title, expected);
+        }
+    }
+
+    #[test]
+    fn mcp_headers_humanize_any_service_without_semantic_or_brand_tables() {
+        for (service, identifier, expected) in [
+            ("docs", "search", "Docs Search"),
+            ("firecrawl", "firecrawl_search", "Firecrawl Search"),
+            ("my_service", "my_service_get_item", "My Service Get Item"),
+            ("my_service", "MY_SERVICE_get_item", "My Service Get Item"),
+            (
+                "my_service",
+                "my_service2_get_item",
+                "My Service My Service2 Get Item",
+            ),
+            (
+                "new-service",
+                "get.item_details",
+                "New Service Get Item Details",
+            ),
+            (
+                "unknownService",
+                "unknownServiceGetHTTPResponse",
+                "Unknown Service Get Http Response",
+            ),
+            ("api", "HTTPServer_getURL", "Api Http Server Get Url"),
+            ("gmail", "list_messages", "Gmail List Messages"),
+            ("supabase", "execute_sql", "Supabase Execute Sql"),
+            ("computer", "windows", "Computer Windows"),
+            ("étude", "getÉlément", "Étude Get Élément"),
+            ("文档", "查找_项目", "文档 查找 项目"),
+            ("𐐨_service", "get_item", "𐐀 Service Get Item"),
+        ] {
+            for status in ["pending", "running", "completed", "error"] {
+                let state = json!({"status": status, "input": {"action": "call", "tool": format!("{service}.{identifier}"),
+                    "description": "SECRET_DESCRIPTION", "query": "SECRET_QUERY"},
+                    "title": "SECRET_TITLE", "output": "<path>/SECRET_PATH</path><content>answer</content>"});
+                assert_eq!(tool_title("execute", &state), expected);
+                assert_eq!(
+                    tool_title(&format!("mcp__{service}__{identifier}"), &state),
+                    expected
+                );
+                let mut part = json!({"tool": "execute", "state": state});
+                part["state"]["metadata"] =
+                    json!({"mcp": {"client": service, "tool": identifier}});
+                assert_eq!(tool_block(&part).title, expected);
+            }
+        }
+        assert_eq!(
+            mcp_discovery_title(Some("firecrawl")),
+            "Find Firecrawl Tools"
+        );
+        assert_eq!(
+            mcp_discovery_title(Some("new_service")),
+            "Find New Service Tools"
+        );
+    }
+
+    #[test]
+    fn mcp_headers_sanitize_controls_and_bound_unicode_identity() {
+        assert_eq!(
+            tool_title(
+                "execute",
+                &json!({"input": {"action": "call", "tool": "文档.查\n询\u{202e}\u{0000}"}})
+            ),
+            "文档 查 询"
+        );
+        let title = tool_title(
+            "execute",
+            &json!({"input": {"action": "call", "tool": format!("docs.{}", "文".repeat(10000))}}),
+        );
+        assert!(title.chars().count() <= TOOL_TITLE_TARGET_MAX_CHARS + 1);
+        assert!(title.ends_with('…') && !title.contains('\u{fffd}'));
+        assert_eq!(
+            tool_title("read", &json!({"input": {"path": "a.rs"}})),
+            "Read(a.rs)"
+        );
+    }
+
     fn task_projection_part(id: &str, requested: Option<&str>) -> Value {
         json!({"id": id, "type": "tool", "tool": "task", "state": {
             "status": "pending", "input": {"task_id": requested,
@@ -2628,13 +2789,18 @@ fn tool_block(part: &Value) -> NeoismAgentMessage {
     if output_kind == NeoismAgentOutputKind::Todos && output.content.is_empty() {
         todos = todos_from_state(state);
     }
-    let base_title = if tool == "task" {
+    // Explicit identity/discovery/fallback branch: humanized labels have no
+    // parentheses, and must never acquire a path from tool output.
+    let mcp_title = mcp_tool_title(tool, state, part.get("metadata"));
+    let base_title = if let Some(title) = &mcp_title {
+        title.clone()
+    } else if tool == "task" {
         task_tool_title(state, part.get("metadata"))
     } else {
         tool_title(tool, state)
     };
     let title = if let Some(path) = output.path.as_deref() {
-        if base_title.contains('(') {
+        if mcp_title.is_some() || base_title.contains('(') {
             base_title.clone()
         } else {
             format!("{base_title}({})", short_path(path))
@@ -2815,7 +2981,183 @@ fn task_tool_title(state: &Value, part_metadata: Option<&Value>) -> String {
     )
 }
 
+// Identity fields only: never inspect arguments, prose, output, or executable code.
+// Bound by Unicode scalar count, not bytes; neutralize whitespace/control spoofing.
+fn mcp_identity(value: &str) -> Option<String> {
+    let mut result = String::new();
+    for (index, ch) in value.trim().chars().enumerate() {
+        if index == TOOL_TITLE_TARGET_MAX_CHARS {
+            result.push('…');
+            break;
+        }
+        if ch.is_alphanumeric() || matches!(ch, '_' | '-' | '.') {
+            result.push(ch);
+        } else if ch.is_whitespace()
+            || ch.is_control()
+            || matches!(ch, '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{206f}' | '\u{feff}')
+        {
+            result.push('_');
+        } else {
+            return None;
+        }
+    }
+    (!result.is_empty()).then_some(result)
+}
+
+fn mcp_bound_label(label: &str) -> String {
+    let mut chars = label.chars();
+    let mut bounded: String = chars.by_ref().take(TOOL_TITLE_TARGET_MAX_CHARS).collect();
+    if chars.next().is_some() {
+        bounded.push('…');
+    }
+    bounded
+}
+
+// Universal identifier humanization; no service/brand or semantic lookup table.
+fn mcp_words(identity: &str) -> Vec<String> {
+    let chars: Vec<char> = identity.chars().collect();
+    let mut spaced = String::new();
+    for (i, &ch) in chars.iter().enumerate() {
+        if matches!(ch, '_' | '-' | '.') {
+            spaced.push(' ');
+        } else {
+            if i > 0
+                && ch.is_uppercase()
+                && (chars[i - 1].is_lowercase()
+                    || chars[i - 1].is_numeric()
+                    || (chars[i - 1].is_uppercase()
+                        && chars.get(i + 1).is_some_and(|next| next.is_lowercase())))
+            {
+                spaced.push(' ');
+            }
+            spaced.push(ch);
+        }
+    }
+    spaced
+        .split_whitespace()
+        .map(|word| {
+            let lower = word.to_lowercase();
+            let mut chars = lower.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect()
+}
+
+fn mcp_label(client: &str, tool: &str) -> Option<String> {
+    let service = mcp_words(client);
+    let mut words = mcp_words(tool);
+    if service.is_empty() || words.is_empty() {
+        return None;
+    }
+    if words.len() >= service.len()
+        && words
+            .iter()
+            .zip(&service)
+            .all(|(word, prefix)| word.to_lowercase() == prefix.to_lowercase())
+    {
+        words.drain(..service.len());
+    }
+    Some(mcp_bound_label(
+        &service
+            .into_iter()
+            .chain(words)
+            .collect::<Vec<_>>()
+            .join(" "),
+    ))
+}
+
+fn mcp_runtime_identity(runtime: &str) -> Option<(String, String)> {
+    let (client, tool) = runtime.strip_prefix("mcp__")?.split_once("__")?;
+    Some((mcp_identity(client)?, mcp_identity(tool)?))
+}
+
+fn mcp_call_identity(target: &str) -> Option<(String, String)> {
+    if target.starts_with("mcp__") {
+        return mcp_runtime_identity(target);
+    }
+    let (client, tool) = target.split_once('.')?;
+    Some((mcp_identity(client)?, mcp_identity(tool)?))
+}
+
+fn mcp_discovery_title(namespace: Option<&str>) -> String {
+    namespace
+        .and_then(mcp_identity)
+        .map(|namespace| mcp_words(&namespace))
+        .filter(|words| !words.is_empty())
+        .map(|words| mcp_bound_label(&format!("Find {} Tools", words.join(" "))))
+        .unwrap_or_else(|| "Find Tools".to_owned())
+}
+
+fn mcp_tool_title(
+    tool: &str,
+    state: &Value,
+    part_metadata: Option<&Value>,
+) -> Option<String> {
+    let error_mcp = part_metadata
+        .and_then(|metadata| metadata.get("toolResult"))
+        .and_then(|result| result.get("mcp"));
+    for mcp in [
+        state
+            .get("metadata")
+            .and_then(|metadata| metadata.get("mcp")),
+        error_mcp,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let identity = mcp
+            .get("client")
+            .and_then(Value::as_str)
+            .and_then(mcp_identity)
+            .zip(
+                mcp.get("tool")
+                    .and_then(Value::as_str)
+                    .and_then(mcp_identity),
+            );
+        let title = identity
+            .and_then(|(client, tool)| mcp_label(&client, &tool))
+            .or_else(|| {
+                mcp.get("runtimeId")
+                    .and_then(Value::as_str)
+                    .and_then(mcp_runtime_identity)
+                    .and_then(|(client, tool)| mcp_label(&client, &tool))
+            });
+        if title.is_some() {
+            return title;
+        }
+    }
+    let input = state.get("input").unwrap_or(&Value::Null);
+    if tool == "execute" {
+        return Some(match input.get("action").and_then(Value::as_str) {
+            Some("call") => input
+                .get("tool")
+                .and_then(Value::as_str)
+                .and_then(mcp_call_identity)
+                .and_then(|(client, tool)| mcp_label(&client, &tool))
+                .unwrap_or_else(|| "Execute".to_owned()),
+            Some("search") => {
+                mcp_discovery_title(input.get("namespace").and_then(Value::as_str))
+            }
+            _ => "Execute".to_owned(),
+        });
+    }
+    if tool.starts_with("mcp__") {
+        return Some(
+            mcp_runtime_identity(tool)
+                .and_then(|(client, tool)| mcp_label(&client, &tool))
+                .unwrap_or_else(|| "Execute".to_owned()),
+        );
+    }
+    None
+}
+
 fn tool_title(tool: &str, state: &Value) -> String {
+    if let Some(title) = mcp_tool_title(tool, state, None) {
+        return title;
+    }
     if tool == "task" {
         return task_tool_title(state, None);
     }

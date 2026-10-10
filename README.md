@@ -92,6 +92,10 @@ A first tour: open a project, `Alt+E` for the file tree, `Ctrl+Shift+T` for a te
 | `sugarloaf` | Native and web GPU rendering |
 | `neoism-protocol` | Wire types shared by clients and the daemon |
 
+## Contributors
+
+- [Logan Settle (@LoganSettle)](https://github.com/LoganSettle) - Windows MSI upgrade and repair fixes.
+
 Neoism is open source under the [MIT License](LICENSE). See [NOTICE](NOTICE) for third-party attribution.
 
 Join the [Neoism Discord](https://discord.gg/FF2KUFMRd).

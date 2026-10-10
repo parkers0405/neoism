@@ -52,6 +52,12 @@
   </categories>
 
   <releases>
+    <release version="0.7.124" date="2026-10-10">
+      <description>
+        <p>Fixes Windows MSI major upgrades and adds readable service-and-tool timeline titles. Credits contributor Logan Settle.</p>
+      </description>
+      <url>https://github.com/parkers0405/neoism/releases/tag/v0.7.124</url>
+    </release>
     <release version="0.7.123" date="2026-10-10">
       <description>
         <p>Fixes Codex OAuth context limits using selected-account model maxima and effective input headroom, with consistent compaction budgeting.</p>

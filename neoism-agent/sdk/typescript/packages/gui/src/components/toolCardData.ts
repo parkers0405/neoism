@@ -6,6 +6,85 @@ export const string = (v: unknown): string => typeof v === "string" ? v : "";
 export const field = (v: unknown, ...keys: string[]) => keys.map(k => string(object(v)[k])).find(Boolean) || "";
 export const clean = (v: unknown, cap = 240) => stripTerminalControls(string(v).slice(0, cap));
 export const toolName = (p: CardPart) => p.type === "subtask" ? "task" : p.tool.toLowerCase().replace(/^.*[.:/]/, "");
+/** Identity-only MCP labels. Never parse streamed code, arguments, descriptions, or output. */
+function mcpIdentity(value: unknown): string | undefined {
+    if (typeof value !== "string") return undefined;
+    let result = "", count = 0;
+    for (const ch of value.trim()) {
+        if (count++ === 96) { result += "…"; break; }
+        if (/^[\p{L}\p{N}_.-]$/u.test(ch)) result += ch;
+        else if (/^[\s\p{Cc}\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]$/u.test(ch)) result += "_";
+        else return undefined;
+    }
+    return result || undefined;
+}
+type McpIdentity = [string, string];
+function mcpRuntimeIdentity(value: unknown): McpIdentity | undefined {
+    if (typeof value !== "string" || !value.startsWith("mcp__")) return undefined;
+    const split = value.indexOf("__", 5);
+    if (split < 0) return undefined;
+    const client = mcpIdentity(value.slice(5, split)), tool = mcpIdentity(value.slice(split + 2));
+    return client && tool ? [client, tool] : undefined;
+}
+function mcpCallIdentity(value: unknown): McpIdentity | undefined {
+    if (typeof value !== "string") return undefined;
+    if (value.startsWith("mcp__")) return mcpRuntimeIdentity(value);
+    const split = value.indexOf(".");
+    if (split < 0) return undefined;
+    const client = mcpIdentity(value.slice(0, split)), tool = mcpIdentity(value.slice(split + 1));
+    return client && tool ? [client, tool] : undefined;
+}
+/** Universal title casing, including camel/acronym boundaries; no brand or semantic tables. */
+function mcpWords(identity: string): string[] {
+    const chars = Array.from(identity), spaced: string[] = [];
+    const upper = (ch = "") => /^\p{Lu}$/u.test(ch);
+    const lower = (ch = "") => /^\p{Ll}$/u.test(ch);
+    for (let i = 0; i < chars.length; i++) {
+        const ch = chars[i];
+        if (/^[_.-]$/.test(ch)) spaced.push(" ");
+        else {
+            if (i > 0 && upper(ch) && (lower(chars[i - 1]) || /^\p{N}$/u.test(chars[i - 1]) || (upper(chars[i - 1]) && lower(chars[i + 1])))) spaced.push(" ");
+            spaced.push(ch);
+        }
+    }
+    return spaced.join("").split(/\s+/u).filter(Boolean).map(word => {
+        const chars = Array.from(word.toLowerCase());
+        return chars[0].toUpperCase() + chars.slice(1).join("");
+    });
+}
+function mcpBoundLabel(label: string): string {
+    const chars = Array.from(label);
+    return chars.slice(0, 96).join("") + (chars.length > 96 ? "…" : "");
+}
+function mcpLabel(identity: McpIdentity | undefined): string | undefined {
+    if (!identity) return undefined;
+    const service = mcpWords(identity[0]);
+    let tool = mcpWords(identity[1]);
+    if (!service.length || !tool.length) return undefined;
+    if (tool.length >= service.length && service.every((word, i) => word.toLowerCase() === tool[i].toLowerCase())) tool = tool.slice(service.length);
+    return mcpBoundLabel([...service, ...tool].join(" "));
+}
+export function mcpToolTitle(part: CardPart): string | undefined {
+    if (part.type !== "tool") return undefined;
+    const state = object(part.state);
+    for (const mcp of [object(object(state.metadata).mcp), object(object(object(part.metadata).toolResult).mcp)]) {
+        const client = mcpIdentity(mcp.client), tool = mcpIdentity(mcp.tool);
+        const title = mcpLabel(client && tool ? [client, tool] : undefined) || mcpLabel(mcpRuntimeIdentity(mcp.runtimeId));
+        if (title) return title;
+    }
+    const input = object(state.input);
+    if (part.tool === "execute") {
+        if (input.action === "call") return mcpLabel(mcpCallIdentity(input.tool)) || "Execute";
+        if (input.action === "search") {
+            const namespace = mcpIdentity(input.namespace);
+            const words = namespace ? mcpWords(namespace) : [];
+            return words.length ? mcpBoundLabel(`Find ${words.join(" ")} Tools`) : "Find Tools";
+        }
+        return "Execute";
+    }
+    if (part.tool.startsWith("mcp__")) return mcpLabel(mcpRuntimeIdentity(part.tool)) || "Execute";
+    return undefined;
+}
 export const isFileTool = (name: string) => /^(edit|replace_text|replacetext|apply_patch|write|write_file|multiedit)$/.test(name);
 export function cardData(part: CardPart) {
     const state = object(part.state);

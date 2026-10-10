@@ -2,6 +2,17 @@
 
 All notable user-facing changes to Neoism are documented here.
 
+## [0.7.124] - 2026-10-10
+
+### Windows updates and readable tool activity
+
+- Includes Logan Settle's Windows MSI upgrade fix: normal installation selects features before a single bounded repair fallback, with payload verification, separate repair logs, and reboot/failure safeguards.
+- Replaces generic MCP execution headers with readable service-and-tool titles such as `Firecrawl Search`. A generic formatter handles new services, duplicate prefixes, and identifier separators without company-specific rules; arguments and output are not exposed in headers.
+- Applies the same title policy across shared/native/WASM and React timelines, with status, discovery, and malformed-input regression coverage.
+- Adds Logan Settle's contributor credit and preserves his original commit authorship. Removes historical Claude co-author trailers from the default branch without changing source trees or published release tags.
+
+This is a stable production release. First-terminal directory following and Codex model-specific budgeting are preserved; experimental Servo runtime remains excluded.
+
 ## [0.7.123] - 2026-10-10
 
 ### Codex model-specific context limits

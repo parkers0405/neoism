@@ -2,7 +2,7 @@ import { memo, useMemo, useState, type ReactNode } from "react";
 import { Code2 } from "lucide-react";
 import { ToolActivityIcon } from "./ToolActivityIcon";
 import { duration } from "./chatSupport";
-import { cardData, clean, field, fileChanges, isFileTool, prettyPreview, taskActivityStatus, taskIdentity, toolName, type TaskChildStatus, type CardPart, type FileChange } from "./toolCardData";
+import { cardData, mcpToolTitle, clean, field, fileChanges, isFileTool, prettyPreview, taskActivityStatus, taskIdentity, toolName, type TaskChildStatus, type CardPart, type FileChange } from "./toolCardData";
 import { stripTerminalControls } from "./runtimeMessages";
 import { isTodoTool } from "../todoHelpers";
 import { EditDiagnostics } from "./EditDiagnostics";
@@ -163,8 +163,9 @@ export function FileEditCard({ part }: ToolPartProps) {
 function CommonToolCard({ part }: ToolPartProps) {
     const name = toolName(part), { input, state, title, status, error } = cardData(part);
     const [expanded, setExpanded] = useState(false);
-    const verb = /bash|shell|terminal/.test(name) ? "Bash" : /grep/.test(name) ? "Grep" : /search/.test(name) ? "Search" : /glob/.test(name) ? "Glob" : /list/.test(name) ? "List" : /read/.test(name) ? "Read" : /fetch|web/.test(name) ? "Fetch" : title;
-    const summary = field(input, "command", "cmd", "filePath", "path", "pattern", "query", "url", "description") || (title !== verb && title !== (part.type === "tool" ? part.tool : "") ? title : "");
+    const mcpTitle = mcpToolTitle(part);
+    const verb = mcpTitle ?? (/bash|shell|terminal/.test(name) ? "Bash" : /grep/.test(name) ? "Grep" : /search/.test(name) ? "Search" : /glob/.test(name) ? "Glob" : /list/.test(name) ? "List" : /read/.test(name) ? "Read" : /fetch|web/.test(name) ? "Fetch" : title);
+    const summary = mcpTitle !== undefined ? "" : field(input, "command", "cmd", "filePath", "path", "pattern", "query", "url", "description") || (title !== verb && title !== (part.type === "tool" ? part.tool : "") ? title : "");
     const elapsed = duration(state.time);
     return <section className={`tc-card tc-ordinary${expanded ? " tc-expanded" : ""}`} data-tool-status={status}>
         <button type="button" className="tc-header tc-tool-toggle" aria-expanded={expanded} onClick={() => setExpanded(v => !v)}>
@@ -184,6 +185,7 @@ function CommonToolCard({ part }: ToolPartProps) {
 /** PartView integration: case "tool": case "subtask": return <ToolPart part={part} ...callbacks />. */
 export const ToolPart = memo(function ToolPart(props: ToolPartProps) {
     if (isTodoTool(props.part) && props.part.type === "tool" && props.part.state.status === "completed") return null;
+    if (mcpToolTitle(props.part) !== undefined) return <CommonToolCard {...props} />;
     const name = toolName(props.part);
     return name === "task" || name === "task_result" || name === "subtask" ? <TaskToolCard {...props} /> : isFileTool(name) ? <FileEditCard {...props} /> : <CommonToolCard {...props} />;
 });

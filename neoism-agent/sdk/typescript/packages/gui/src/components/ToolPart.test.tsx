@@ -6,8 +6,94 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { ToolPart } from "./ToolPart";
 import { readFileSync } from "node:fs";
 const toolStyles = readFileSync("src/components/tool-cards.css", "utf8");
-import { fileChanges, parsePatch, prettyPreview, taskIdentity, type CardPart } from "./toolCardData";
+import { mcpToolTitle, fileChanges, parsePatch, prettyPreview, taskIdentity, type CardPart } from "./toolCardData";
 const tool = (name: string, state: Record<string, unknown>): CardPart => ({ id: "p", messageId: "m", sessionId: "parent", callId: "c", type: "tool", tool: name, state } as CardPart);
+it.each(["pending", "running", "completed", "error"])("keeps MCP %s headers identity-only through reveal toggles", status => {
+    const part = tool("execute", { status, input: {action: "call", tool: "docs.search", query: "SECRET_QUERY", description: "SECRET_DESCRIPTION", arguments: {token: "SECRET_ARGUMENT"}}, title: "SECRET_TITLE", output: "SECRET_OUTPUT", ...(status === "error" ? {error: "SECRET_ERROR"} : {}) });
+    act(() => root.render(<ToolPart part={part} />));
+    const header = el.querySelector<HTMLButtonElement>(".tc-tool-toggle")!;
+    expect(header.textContent).toBe(`Docs Search ${status}`);
+    expect(header.textContent).not.toContain("SECRET");
+    expect(header.querySelector(".tc-argument")).toBeNull();
+    act(() => header.click());
+    expect(header.textContent).toBe(`Docs Search ${status}`);
+    if (status === "completed") expect(el.querySelector("pre")?.textContent).toBe("SECRET_OUTPUT");
+    if (status === "error") expect(el.querySelector("pre")?.textContent).toBe("SECRET_ERROR");
+    act(() => header.click());
+    expect(header.textContent).toBe(`Docs Search ${status}`);
+});
+it("prefers structured MCP success/error metadata over input and runtime IDs", () => {
+    const part = tool("mcp__old__search", {status: "completed", input: {action: "call", tool: "wrong.search"}, metadata: {mcp: {client: "docs", tool: "search", runtimeId: "mcp__wrong__tool"}}});
+    part.metadata = {toolResult: {mcp: {client: "error", tool: "lookup"}}};
+    expect(mcpToolTitle(part)).toBe("Docs Search");
+    const failed = {...part, state: {status: "error", input: {action: "call", tool: "wrong.search"}}} as CardPart;
+    expect(mcpToolTitle(failed)).toBe("Error Lookup");
+    failed.metadata = {toolResult: {mcp: {runtimeId: "mcp__docs__search"}}};
+    expect(mcpToolTitle(failed)).toBe("Docs Search");
+});
+it("bounds Unicode MCP identities, neutralizes controls and never evaluates malformed payloads", () => {
+    expect(mcpToolTitle(tool("execute", {input: {action: "call", tool: "文档.查\n询\u202e\u0000"}}))).toBe("文档 查 询");
+    const title = mcpToolTitle(tool("execute", {input: {action: "call", tool: `docs.${"文".repeat(10000)}`}}))!;
+    expect(Array.from(title).length).toBeLessThanOrEqual(97);
+    expect(title.endsWith("…")).toBe(true);
+    for (const input of [{}, {action: "call", tool: {}}, {action: "call", tool: "run(secret)"}, {action: "call", tool: "mcp__bad"}, {code: "throw SECRET", query: "SECRET", description: "SECRET"}]) {
+        expect(mcpToolTitle(tool("execute", {input}))).toBe("Execute");
+    }
+    expect(mcpToolTitle(tool("execute", {input: {action: "search", query: "SECRET"}}))).toBe("Find Tools");
+    expect(mcpToolTitle(tool("execute", {input: {action: "search", namespace: "docs"}}))).toBe("Find Docs Tools");
+    expect(mcpToolTitle(tool("execute", {input: {action: "search", namespace: "bad(code)"}}))).toBe("Find Tools");
+    expect(mcpToolTitle(tool("mcp__docs__read", {input: {query: "SECRET"}}))).toBe("Docs Read");
+    expect(mcpToolTitle(tool("execute", {input: {action: "call", tool: "mcp__docs__search"}}))).toBe("Docs Search");
+    expect(mcpToolTitle(tool("read", {}))).toBeUndefined();
+});
+it.each([
+    ["docs", "search", "Docs Search"],
+    ["firecrawl", "firecrawl_search", "Firecrawl Search"],
+    ["my_service", "my_service_get_item", "My Service Get Item"],
+    ["my_service", "MY_SERVICE_get_item", "My Service Get Item"],
+    ["my_service", "my_service2_get_item", "My Service My Service2 Get Item"],
+    ["new-service", "get.item_details", "New Service Get Item Details"],
+    ["unknownService", "unknownServiceGetHTTPResponse", "Unknown Service Get Http Response"],
+    ["api", "HTTPServer_getURL", "Api Http Server Get Url"],
+    ["gmail", "list_messages", "Gmail List Messages"],
+    ["supabase", "execute_sql", "Supabase Execute Sql"],
+    ["computer", "windows", "Computer Windows"],
+    ["étude", "getÉlément", "Étude Get Élément"],
+    ["文档", "查找_项目", "文档 查找 项目"],
+    ["𐐨_service", "get_item", "𐐀 Service Get Item"],
+])("humanizes %s.%s universally as %s without brand or semantic tables", (service, identifier, expected) => {
+    for (const status of ["pending", "running", "completed", "error"]) {
+        const state = {status, input: {action: "call", tool: `${service}.${identifier}`, query: "SECRET_QUERY", description: "SECRET_DESCRIPTION"}, title: "SECRET_TITLE", output: "SECRET_OUTPUT"};
+        expect(mcpToolTitle(tool("execute", state))).toBe(expected);
+        expect(mcpToolTitle(tool(`mcp__${service}__${identifier}`, state))).toBe(expected);
+        const part = tool("execute", {...state, metadata: {mcp: {client: service, tool: identifier}}});
+        act(() => root.render(<ToolPart part={part} />));
+        const header = el.querySelector<HTMLButtonElement>(".tc-tool-toggle")!;
+        expect(header.textContent).toBe(`${expected} ${status}`);
+        act(() => header.click());
+        expect(header.textContent).toBe(`${expected} ${status}`);
+    }
+});
+it.each([
+    [{action: "search", query: "SECRET"}, "Find Tools"],
+    [{action: "search", namespace: "firecrawl", query: "SECRET"}, "Find Firecrawl Tools"],
+    [{action: "search", namespace: "new_service"}, "Find New Service Tools"],
+    [{action: "call", tool: "---.___", description: "SECRET"}, "Execute"],
+    [{action: "call", tool: "bareTool", description: "SECRET"}, "Execute"],
+])("keeps discovery/fallback headers safe through expansion", (input, expected) => {
+    act(() => root.render(<ToolPart part={tool("execute", {status: "completed", input, output: "SECRET_OUTPUT"})} />));
+    const header = el.querySelector<HTMLButtonElement>(".tc-tool-toggle")!;
+    expect(header.textContent).toBe(`${expected} completed`);
+    act(() => header.click());
+    expect(header.textContent).toBe(`${expected} completed`);
+    expect(header.textContent).not.toContain("SECRET");
+});
+
+it("routes direct MCP file-tool names through the MCP common header", () => {
+    act(() => root.render(<ToolPart part={tool("mcp__docs__write", {status: "running", input: {path: "SECRET_PATH", description: "SECRET_DESCRIPTION"}})} />));
+    expect(el.querySelector(".tc-header")?.textContent).toBe("Docs Write running");
+});
+
 // Shapes emitted by snapshot.rs::add_metadata_snapshots/file_patch_metadata and tool_tests.rs.
 const rustPatch = { status: "completed", input: { patchText: "*** Begin Patch\n*** Update File: TASK.md\n@@\n-before\n+after\n+again\n*** End Patch" }, metadata: {
     files: [{ relativePath: "TASK.md", filePath: "TASK.md", type: "update", additions: 999, patch: "--- a/TASK.md\n+++ b/TASK.md\n@@ -1,3 +1,4 @@\n one\n-before\n+after\n+again\n three" }],

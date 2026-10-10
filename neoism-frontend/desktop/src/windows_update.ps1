@@ -138,6 +138,7 @@ function Write-UpdateResult([string]$State, [string]$Message) {
         target = $script:Target; msi_exit_code = $script:MsiExitCode
         installation_verified = $script:InstallationVerified
         log = $script:LogPath; msi_log = $script:MsiLogPath
+        msi_repair_log = $script:MsiRepairLogPath
         extract_msi_log = Join-Path (Split-Path $ResultPath) 'extract-msi.log'
         rollback_directory = $script:BackupDir
     }
@@ -325,6 +326,7 @@ function Invoke-WindowsUpdate {
     $script:BackupDir = $null
     $script:LogPath = Join-Path (Split-Path $ResultPath) 'helper.log'
     $script:MsiLogPath = Join-Path (Split-Path $ResultPath) 'install-msi.log'
+    $script:MsiRepairLogPath = Join-Path (Split-Path $ResultPath) 'repair-msi.log'
     $lock = $null; $updater = $null; $gui = $null
     try {
         $updater = Get-TrackedProcess $UpdaterPid $InvokingExe
@@ -376,17 +378,11 @@ function Invoke-WindowsUpdate {
         if ((Get-UpdateFileHash $MsiPath) -ne $msiHash) { throw 'Staged MSI changed after verification' }
         if ($script:Target.mode -eq 'managed') {
             Write-UpdateResult 'applying' 'Windows Installer is upgrading the registered stack'
-            # REINSTALLMODE alone does not select installed features for repair:
-            # https://learn.microsoft.com/windows/win32/msi/reinstallmode
             $arguments = @('/i', ('"' + $MsiPath + '"'), '/qn', '/norestart', 'REBOOT=ReallySuppress', 'MSIRESTARTMANAGERCONTROL=Disable', ('INSTALLFOLDER="' + $script:Target.directory + '"'), '/L*v', ('"' + $script:MsiLogPath + '"'))
-            if (Test-MsiProductInstalled $MsiPath) {
-                # Re-cache this verified package and force every installed feature.
-                $arguments += @('REINSTALL=ALL', 'REINSTALLMODE=vamus')
-            } else {
-                # A first install/new ProductCode (major upgrade) must select its
-                # features normally, never REINSTALL=ALL or the re-cache 'v' flag.
-                $arguments += 'REINSTALLMODE=amus'
-            }
+            # Always let MSI select features normally first. Product registration
+            # can be stale or split during a same-version major upgrade, making a
+            # preflight ProductCode query unsafe for selecting repair semantics.
+            $arguments += 'REINSTALLMODE=amus'
             $script:MsiExitCode = Invoke-Msi $arguments
             $outcome = Get-MsiOutcome $script:MsiExitCode
             if ($outcome -eq 'reboot_required') {
@@ -396,6 +392,24 @@ function Invoke-WindowsUpdate {
             if ($outcome -ne 'succeeded') { throw "Windows Installer failed (code $script:MsiExitCode); see $script:MsiLogPath" }
             $registered = Get-RegisteredInstallDir
             if (-not $registered -or -not (Test-SamePath $registered $script:Target.directory)) { throw 'MSI installed into an unexpected/unregistered directory; not relaunching' }
+            try {
+                Assert-InstalledPayload $script:Target.directory $manifest $ExpectedVersion
+            } catch {
+                if (-not (Test-MsiProductInstalled $MsiPath)) { throw }
+                Write-UpdateResult 'applying' 'Normal installation was a no-op; Windows Installer is repairing the verified package'
+                # REINSTALLMODE alone does not select installed features for repair:
+                # https://learn.microsoft.com/windows/win32/msi/reinstallmode
+                $repairArguments = @('/i', ('"' + $MsiPath + '"'), '/qn', '/norestart', 'REBOOT=ReallySuppress', 'MSIRESTARTMANAGERCONTROL=Disable', ('INSTALLFOLDER="' + $script:Target.directory + '"'), 'REINSTALL=ALL', 'REINSTALLMODE=vamus', '/L*v', ('"' + $script:MsiRepairLogPath + '"'))
+                $script:MsiExitCode = Invoke-Msi $repairArguments
+                $repairOutcome = Get-MsiOutcome $script:MsiExitCode
+                if ($repairOutcome -eq 'reboot_required') {
+                    Write-UpdateResult 'reboot_required' 'Windows Installer repair requires a reboot. No success or relaunch until replacement is verified after reboot.'
+                    return 2
+                }
+                if ($repairOutcome -ne 'succeeded') { throw "Windows Installer repair failed (code $script:MsiExitCode); see $script:MsiRepairLogPath" }
+                $registered = Get-RegisteredInstallDir
+                if (-not $registered -or -not (Test-SamePath $registered $script:Target.directory)) { throw 'MSI repair changed the installation registration unexpectedly; not relaunching' }
+            }
         } else {
             Install-PortablePayload $payload $script:Target.directory $manifest
         }

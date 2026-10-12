@@ -2,6 +2,19 @@
 
 All notable user-facing changes to Neoism are documented here.
 
+## [0.7.125] - 2026-10-12
+
+### Transcript stability, draft scrolling, and provider correctness
+
+- Improves logical reader anchors and lazy timeline measurement so historical height corrections do not masquerade as live output or cause false follow-bottom motion. Includes desktop, shared, and WASM handling.
+- Adds independent wheel-scrolling viewports for multiline Agent drafts and terminal composers, preserving manual positions while restoring caret visibility after edits and navigation.
+- Fixes Anthropic initial thinking content and thinking-token updates, groups parallel tool results before accompanying media, and preserves replay/compaction ordering.
+- Clarifies native-first file-tool guidance while retaining shell fallbacks when native tools cannot perform an operation.
+- Adds experimental inline Chromium artifact source and a browser-neutral worker facade, with content-height reporting, fitted geometry, theme preservation, input/focus routing, and stale-frame barriers. Live CEF rendering requires a separately installed matching worker and runtime; this release does not package or validate CEF across platforms.
+- Retains experimental Servo source improvements without building or packaging Servo. Preserves first-terminal directory following, model-specific Codex budgets, readable MCP labels, and Logan Settle's Windows upgrade fix and contribution credit.
+
+This is a stable production release. Browser-engine workers remain separate experimental components; the ordinary platform packages do not contain them.
+
 ## [0.7.124] - 2026-10-10
 
 ### Windows updates and readable tool activity

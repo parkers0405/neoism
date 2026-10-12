@@ -105,7 +105,7 @@ impl Application<'_> {
             _ => (),
         }
 
-        #[cfg(feature = "servo-artifacts")]
+        #[cfg(feature = "cef-artifacts")]
         if route
             .window
             .screen
@@ -1008,7 +1008,7 @@ impl Application<'_> {
             return;
         }
 
-        #[cfg(feature = "servo-artifacts")]
+        #[cfg(feature = "cef-artifacts")]
         if route.window.screen.html_artifact_pointer(None) {
             route.request_redraw();
             return;
@@ -1551,7 +1551,7 @@ impl Application<'_> {
             None => return,
         };
 
-        #[cfg(feature = "servo-artifacts")]
+        #[cfg(feature = "cef-artifacts")]
         route.window.screen.leave_html_artifact();
 
         route.window.screen.mouse.inside_window = false;

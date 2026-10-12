@@ -6110,7 +6110,7 @@ fn tool_expansion_view_test_pane(id: &str, row_top: f32) -> NeoismAgentPane {
         estimated_suffix_start: 1,
         rows: vec![TimelineLayoutRow {
             source_index: 0,
-            source_end_index: pane.messages.len(),
+            source_end_index: pane.messages.len() - 1,
             top: row_top,
             height: 30.0,
             display_text: None,
@@ -6123,6 +6123,36 @@ fn tool_expansion_view_test_pane(id: &str, row_top: f32) -> NeoismAgentPane {
     let header_y = (100.0 + row_top - 600.0).max(100.0);
     pane.register_tool_hit_rect(id.into(), [0.0, header_y, 300.0, 20.0]);
     pane
+}
+
+#[test]
+fn tool_expansion_clipped_single_source_uses_logical_row_origin() {
+    let mut pane = tool_expansion_view_test_pane("open-read", 590.0);
+    assert!(pane.toggle_tool_at(10.0, 105.0));
+    let screen_offset = pane.timeline_view_anchor.as_ref().unwrap().screen_offset;
+    // The hit rectangle starts at the viewport edge, but the row starts above it.
+    assert_eq!(screen_offset, -10.0);
+    assert!(pane.tool_expand_animating("open-read"));
+    pane.set_timeline_metrics([0.0, 100.0, 400.0, 300.0], 940.0, 300.0);
+    pane.restore_timeline_view_anchor(590.0, screen_offset);
+    assert_eq!(
+        pane.max_timeline_scroll() - pane.timeline_scroll_offset(),
+        600.0
+    );
+}
+
+#[test]
+fn tool_expansion_grouped_last_source_uses_logical_row_origin() {
+    let mut pane = tool_expansion_view_test_pane("open-read..", 590.0);
+    pane.clear_tool_hit_rects();
+    // Exercise a hit attributed to the last source covered by the grouped row.
+    pane.register_tool_hit_rect("open-read-2".into(), [0.0, 100.0, 300.0, 20.0]);
+    assert!(pane.toggle_tool_at(10.0, 105.0));
+    assert_eq!(
+        pane.timeline_view_anchor.as_ref().unwrap().screen_offset,
+        -10.0
+    );
+    assert!(pane.tool_expand_animating("open-read-2"));
 }
 
 #[test]
@@ -6181,6 +6211,37 @@ fn tool_expansion_settled_and_stable_frames_keep_the_clicked_header() {
             assert_eq!(pane.timeline_wheel_target_px, None);
         }
     }
+}
+
+#[test]
+fn live_follow_budget_excludes_history_remeasurement_but_keeps_spring() {
+    let mut pane = NeoismAgentPane::default();
+    let rect = [0.0, 0.0, 400.0, 300.0];
+    pane.set_timeline_metrics(rect, 1000.0, 300.0);
+    pane.timeline_live_growth = true;
+    pane.set_timeline_metrics_with_live_growth(rect, 31_024.0, 300.0, Some(24.0));
+    assert_eq!(pane.timeline_scroll_px, 24.0);
+    assert_eq!(
+        pane.timeline_scroll_owner,
+        TimelineScrollOwner::FollowBottom
+    );
+    assert_eq!(pane.timeline_wheel_target_px, Some(0.0));
+    pane.set_timeline_metrics_with_live_growth(rect, 41_024.0, 300.0, Some(0.0));
+    assert_eq!(pane.timeline_scroll_px, 24.0);
+    assert!(pane.timeline_is_inertial());
+    assert!(pane.timeline_follow_bottom());
+}
+
+#[test]
+fn geometry_only_rebuild_during_live_revision_does_not_start_follow_spring() {
+    let mut pane = NeoismAgentPane::default();
+    let rect = [0.0, 0.0, 400.0, 300.0];
+    pane.set_timeline_metrics(rect, 1000.0, 300.0);
+    pane.timeline_live_growth = true;
+    pane.set_timeline_metrics_with_live_growth(rect, 31_000.0, 300.0, Some(0.0));
+    assert_eq!(pane.timeline_scroll_px, 0.0);
+    assert!(!pane.timeline_is_inertial());
+    assert!(pane.timeline_follow_bottom());
 }
 
 #[test]

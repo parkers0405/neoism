@@ -66,7 +66,7 @@ impl SystemContextService for WorkspaceContext {
             "Use bash for project commands"
         };
         let mut content = format!(
-            "You are an interactive coding agent running in a real workspace.\nWorkspace directory: {directory}\nYou can inspect and modify this workspace with tools. grep searches file contents and glob finds files with fuzzy path and query constraints. Search before reading large files, and issue independent searches or reads together so they execute in parallel. read also lists directories. {editing} {shell}, and ask before risky or unclear actions. Keep CLI responses concise and directly useful."
+            "You are an interactive coding agent running in a real workspace.\nWorkspace directory: {directory}\nYou can inspect and modify this workspace with tools. grep searches file contents and glob finds files with fuzzy path and query constraints. Search before reading large files, and issue independent searches or reads together so they execute in parallel. read also lists directories. {editing} {shell}, and ask before risky or unclear actions. Keep CLI responses concise and directly useful.\n\n## Native file tools first\n\nIMPORTANT: bash and background_task are for terminal operations such as git, builds, tests, package managers, and docker. DO NOT use shell commands for file operations when a dedicated tool supports the operation.\n- File discovery: use glob, not find, ls, or Get-ChildItem.\n- Content search: use grep, not shell grep, rg, or Select-String.\n- Read files and list directories: use read, not cat, head, tail, sed, or Get-Content.\n- File mutations: use the selected native mutation tool, not shell redirection or scripts. {editing}\n- Fall back to shell only when the required native tool is unavailable or cannot support the operation. A familiar shell command or combining file operations into one pipeline is not a reason to bypass native tools. This rule applies to primary agents and subagents alike."
         );
         for key in ["instructions", "serviceFragments"] {
             for fragment in request
@@ -118,8 +118,49 @@ impl SystemContextService for WorkspaceContext {
 }
 
 #[cfg(test)]
-mod artifact_guidance_tests {
+mod tests {
     use super::*;
+
+    #[test]
+    fn workspace_context_always_routes_file_operations_to_native_tools() {
+        for editing in ["edit", "apply_patch"] {
+            let request = ServiceRequest {
+                workspace_id: None,
+                directory: Some("/workspace".into()),
+                options: BTreeMap::from([
+                    ("editingTool".into(), serde_json::json!(editing)),
+                    (
+                        "instructions".into(),
+                        serde_json::json!(["Custom agent instructions"]),
+                    ),
+                ]),
+            };
+            let sections = WorkspaceContext.sections(&request).expect("valid context");
+            let workspace = sections
+                .iter()
+                .find(|section| section.id == "workspace")
+                .unwrap();
+            for required in [
+                "Native file tools first",
+                "bash and background_task are for terminal operations",
+                "File discovery: use glob",
+                "Content search: use grep",
+                "Read files and list directories: use read",
+                "File mutations: use the selected native mutation tool",
+                "required native tool is unavailable or cannot support the operation",
+                "primary agents and subagents alike",
+                "Custom agent instructions",
+            ] {
+                assert!(workspace.content.contains(required), "missing {required}");
+            }
+            let mutation_rule = if editing == "apply_patch" {
+                "Use apply_patch with a patchText V4A envelope for every file mutation."
+            } else {
+                "Use edit for targeted replacements and write only for brand-new files or intentional full replacements."
+            };
+            assert!(workspace.content.contains(mutation_rule));
+        }
+    }
 
     #[test]
     fn artifact_guidance_requires_explicit_boolean_opt_in() {

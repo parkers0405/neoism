@@ -342,6 +342,21 @@ impl NeoismAgentPane {
         content_height_px: f32,
         viewport_height_px: f32,
     ) {
+        self.set_timeline_metrics_with_live_growth(
+            viewport_rect,
+            content_height_px,
+            viewport_height_px,
+            None,
+        );
+    }
+
+    pub fn set_timeline_metrics_with_live_growth(
+        &mut self,
+        viewport_rect: [f32; 4],
+        content_height_px: f32,
+        viewport_height_px: f32,
+        live_growth_px: Option<f32>,
+    ) {
         // A tool can unhide the whole previous turn. Even a batch of live
         // updates before this paint must not animate that historical disclosure.
         if std::mem::take(&mut self.timeline_trace_reveal_pending) {
@@ -408,6 +423,7 @@ impl NeoismAgentPane {
                     && (self.timeline_scroll_owner == TimelineScrollOwner::FollowBottom
                         || (self.timeline_live_growth
                             && max_scroll > old_max_scroll
+                            && live_growth_px.is_none_or(|growth| growth > 0.0)
                             && self.timeline_wheel_target_px.is_none()))
                 {
                     // Preserve the absolute top without rounding small spring lag
@@ -415,8 +431,9 @@ impl NeoismAgentPane {
                     // History/layout corrections must not add lag to a live
                     // spring, but its existing lag and final shrink still settle.
                     let extent_delta = max_scroll - old_max_scroll;
-                    let follow_delta = if self.timeline_live_growth {
-                        extent_delta
+                    let follow_delta = if self.timeline_live_growth && extent_delta > 0.0
+                    {
+                        extent_delta.min(live_growth_px.unwrap_or(extent_delta).max(0.0))
                     } else {
                         extent_delta.min(0.0)
                     };

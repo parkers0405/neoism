@@ -423,6 +423,9 @@ pub trait AgentUserInputPane {
     fn cursor_byte(&self) -> usize;
     fn set_cursor_rect(&mut self, rect: Option<[f32; 4]>);
     fn set_input_wrap_rows(&mut self, rows: Vec<InputWrapRow>);
+    fn input_viewport_mut(
+        &mut self,
+    ) -> &mut crate::panels::agent_pane::input_viewport::InputViewport;
     fn clear_usage_chip_rect(&mut self);
     fn register_usage_chip_rect(&mut self, rect: [f32; 4]);
     fn clear_composer_control_rect(&mut self);
@@ -548,6 +551,10 @@ macro_rules! neoism_ui_impl_agent_user_input {
                 >,
             ) {
                 <$pane>::set_input_wrap_rows(self, rows);
+            }
+
+            fn input_viewport_mut(&mut self) -> &mut $crate::panels::agent_pane::input_viewport::InputViewport {
+                <$pane>::input_viewport_mut(self)
             }
 
             fn clear_usage_chip_rect(&mut self) {
@@ -793,6 +800,12 @@ impl AgentUserInputPane for NeoismAgentPane {
 
     fn set_input_wrap_rows(&mut self, rows: Vec<InputWrapRow>) {
         NeoismAgentPane::set_input_wrap_rows(self, rows);
+    }
+
+    fn input_viewport_mut(
+        &mut self,
+    ) -> &mut crate::panels::agent_pane::input_viewport::InputViewport {
+        NeoismAgentPane::input_viewport_mut(self)
     }
 
     fn clear_usage_chip_rect(&mut self) {
@@ -1649,22 +1662,23 @@ pub fn render_input(
         wrapped_rows.clone()
     });
 
-    // The box only shows `max_visible_lines` rows at once. Scroll so the
-    // caret's row is always one of them — otherwise pressing Up into a
-    // row above the window moves the (invisible) cursor while the text
-    // stays put, which is exactly the "cursor going up is screwed up"
-    // report. The window is anchored on the caret, not pinned to the
-    // bottom, so it follows the cursor in both directions.
+    // Manual wheel scrolling survives redraws until the draft/caret changes.
     let caret_row = if input_text.is_empty() {
         0
     } else {
         visual_row_index(&wrapped_rows, pane.cursor_byte())
             .unwrap_or(wrapped_rows.len().saturating_sub(1))
     };
-    let max_offset = wrapped_rows.len().saturating_sub(max_visible_lines);
-    let visible_line_offset = caret_row
-        .saturating_sub(max_visible_lines.saturating_sub(1))
-        .min(max_offset);
+    let cursor_byte = pane.cursor_byte();
+    let visible_line_offset = pane.input_viewport_mut().update(
+        &input_text,
+        cursor_byte,
+        caret_row,
+        wrapped_rows.len(),
+        max_visible_lines,
+        [text_x, text_y, text_w, max_visible_lines as f32 * line_h],
+        line_h,
+    );
     let visible_rows = &wrapped_rows[visible_line_offset..];
     for (ix, wrapped) in visible_rows.iter().take(max_visible_lines).enumerate() {
         draw_agent_prompt_text(
@@ -1678,7 +1692,10 @@ pub fn render_input(
         );
     }
 
-    if active {
+    if active
+        && caret_row >= visible_line_offset
+        && caret_row < visible_line_offset + max_visible_lines
+    {
         // Place the caret from the SAME rows the movement logic walks,
         // so the painted caret and the logical cursor never disagree.
         let caret_x_in_row = wrapped_rows

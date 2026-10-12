@@ -285,7 +285,7 @@ impl Screen<'_> {
         is_fullscreen: bool,
         mut before_present: impl FnMut(),
     ) -> Option<crate::context::renderable::WindowUpdate> {
-        #[cfg(feature = "servo-artifacts")]
+        #[cfg(feature = "cef-artifacts")]
         self.begin_html_artifact_frame();
         self.renderer.background_effects_animating = false;
         let window_id = self.context_manager.window_id();

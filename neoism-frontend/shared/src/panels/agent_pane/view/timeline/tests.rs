@@ -445,7 +445,7 @@ fn artifact_estimates_and_multi_message_prefixes_ignore_html_source_length() {
         .iter()
         .map(|m| estimate_message_height(m, 900.0, 1.0))
         .collect();
-    assert_eq!(heights, [354.0, 43.0, 674.0]);
+    assert_eq!(heights, [194.0, 43.0, 354.0]);
     let mut top = 0.0;
     let rows = heights
         .iter()
@@ -458,15 +458,112 @@ fn artifact_estimates_and_multi_message_prefixes_ignore_html_source_length() {
         .collect::<Vec<_>>();
     assert_eq!(
         rows.iter().map(|r| r.top).collect::<Vec<_>>(),
-        [0.0, 372.0, 433.0]
+        [0.0, 212.0, 273.0]
     );
     let cache = lazy_cache(rows, 0, 3);
-    assert_eq!(cache.content_height, 1107.0);
+    assert_eq!(cache.content_height, 627.0);
     let measurements =
         super::layout::timeline_virtual_row_measurements(&cache.rows, 18.0);
     assert_eq!(
         measurements.iter().map(|m| m.height).sum::<f32>(),
         cache.content_height
+    );
+}
+
+#[test]
+fn estimated_hidden_artifact_rows_keep_learned_height_and_invalidate_geometry() {
+    use super::super::markdown::{html_artifact_source_hash, HtmlArtifactLayout};
+    struct LearnedPane {
+        text: String,
+        blocks: Rc<Vec<AssistantMarkdownBlock>>,
+        metric: HtmlArtifactLayout,
+    }
+    impl AgentMarkdownPane for LearnedPane {
+        fn cached_markdown_blocks_for(
+            &self,
+            text: &str,
+            width: f32,
+            scale: f32,
+        ) -> Option<Rc<Vec<AssistantMarkdownBlock>>> {
+            (text == self.text && width == 852.0 && scale == 1.0)
+                .then(|| self.blocks.clone())
+        }
+        fn store_markdown_blocks_for(
+            &self,
+            _: &str,
+            _: f32,
+            _: f32,
+            _: Rc<Vec<AssistantMarkdownBlock>>,
+        ) {
+        }
+        fn register_selectable_line(&mut self, _: &str, _: [f32; 4]) -> usize {
+            0
+        }
+        fn selectable_line_highlight(&self, _: usize) -> Option<(f32, f32)> {
+            None
+        }
+        fn register_link_hit_rect(&mut self, _: String, _: [f32; 4]) {}
+        fn link_hovered(&self, _: &str) -> bool {
+            false
+        }
+        fn mermaid_raw_mode(&self, _: u64) -> bool {
+            false
+        }
+        fn html_artifact_height(
+            &self,
+            key: &str,
+            source: &str,
+            width: f32,
+            scale: f32,
+        ) -> Option<f32> {
+            (key == "markdown:a:html:1" && self.metric.matches(source, width, scale))
+                .then_some(self.metric.height)
+        }
+    }
+    let source = "<p>hello</p>";
+    let text = format!("prose\n```neoism-html\n{source}\n```");
+    let mut pane = LearnedPane {
+        text: text.clone(),
+        blocks: Rc::new(vec![
+            AssistantMarkdownBlock::Paragraph(Vec::new()),
+            AssistantMarkdownBlock::HtmlArtifact {
+                source: source.into(),
+                copy_target: String::new(),
+            },
+        ]),
+        metric: HtmlArtifactLayout {
+            source_hash: html_artifact_source_hash(source),
+            width: 852.0,
+            scale: 1.0,
+            height: 48.0,
+        },
+    };
+    let message = text_message("a", NeoismAgentMessageKind::Assistant, &text);
+    for height in [48.0, 520.0] {
+        pane.metric.height = height;
+        // No measurement cache or source-line estimate can reset the footprint.
+        for _ in 0..3 {
+            assert_eq!(
+                super::layout::estimate_message_height_with_pane(
+                    &pane, &message, 900.0, 1.0
+                ),
+                height + 39.0
+            );
+        }
+    }
+    pane.metric.source_hash = html_artifact_source_hash("old source");
+    assert_eq!(
+        super::layout::estimate_message_height_with_pane(&pane, &message, 900.0, 1.0),
+        199.0
+    );
+    assert_eq!(
+        super::layout::estimate_message_height_with_pane(&pane, &message, 901.0, 1.0),
+        estimate_message_height(&message, 901.0, 1.0)
+    );
+    let other = text_message("b", NeoismAgentMessageKind::Assistant, &text);
+    assert_eq!(
+        super::layout::estimate_message_height_with_pane(&pane, &other, 900.0, 1.0),
+        199.0
     );
 }
 
@@ -1272,4 +1369,276 @@ fn lazy_cache_rebuilds_when_scroll_nears_estimated_suffix() {
     assert!(!super::layout::lazy_cache_covers_viewport_for_test(
         &cache, 20.0, 100.0
     ));
+}
+
+#[test]
+fn lazy_rebuild_keeps_reader_window_when_streaming_suffix_estimates_change() {
+    let rows = (0..200)
+        .map(|index| layout_row(index, index as f32 * 60.0, 48.0))
+        .collect::<Vec<_>>();
+    let viewport = 300.0;
+    let max_scroll = rows.last().unwrap().top + 48.0 - viewport;
+    // The reader is partway into row 80. Exact patch cards later in the
+    // transcript made the previous bottom-distance much larger than estimates.
+    for suffix_correction in [0.0, 6000.0, 30_000.0, 50_000.0] {
+        let offset = max_scroll + suffix_correction - (rows[80].top + 27.0);
+        let (top, index) = super::layout::lazy_window_position(
+            &rows,
+            max_scroll,
+            offset,
+            Some((80, -27.0)),
+        );
+        assert_eq!(index, Some(80));
+        assert_eq!(top, rows[80].top + 27.0);
+        if suffix_correction > 0.0 {
+            assert_ne!((max_scroll - offset).max(0.0), top);
+        }
+    }
+}
+
+#[test]
+fn lazy_reader_window_includes_tall_clipped_group_and_falls_back_if_removed() {
+    let mut rows = vec![
+        layout_row(0, 0.0, 48.0),
+        layout_row(1, 60.0, 30.0),
+        layout_row(4, 108.0, 48.0),
+    ];
+    rows[1].source_end_index = 3;
+    // A grouped patch card can be far taller than its estimated header.
+    assert_eq!(
+        super::layout::lazy_window_position(&rows, 100.0, 25.0, Some((3, -1500.0))),
+        (1560.0, Some(1)),
+    );
+    assert_eq!(
+        super::layout::lazy_window_position(&rows, 100.0, 25.0, Some((9, -20.0))),
+        (75.0, None),
+    );
+}
+
+#[test]
+fn historical_refinement_and_live_patch_only_animate_live_tail_growth() {
+    let old = lazy_cache(
+        vec![layout_row(0, 0.0, 100.0), layout_row(1, 120.0, 200.0)],
+        1,
+        2,
+    );
+    let baseline = super::layout::measured_tail_baseline(&old, 1);
+    assert_eq!(
+        baseline,
+        Some(super::layout::MeasuredTailBaseline::Row {
+            source: 1,
+            height: 200.0
+        })
+    );
+    let new = lazy_cache(
+        vec![layout_row(0, 0.0, 30_100.0), layout_row(1, 30_120.0, 224.0)],
+        0,
+        2,
+    );
+    let growth = super::layout::measured_tail_growth(&new, baseline);
+    assert_eq!(growth, 24.0);
+
+    let mut pane = NeoismAgentPane::default();
+    pane.apply_history(vec![NeoismAgentMessage::assistant("live").with_id("tail")]);
+    let rect = [0.0, 0.0, 400.0, 100.0];
+    pane.set_timeline_metrics(rect, old.content_height, 100.0);
+    pane.apply_part_delta(Some("tail".into()), None, None, " more");
+    pane.set_timeline_metrics_with_live_growth(
+        rect,
+        new.content_height,
+        100.0,
+        Some(growth),
+    );
+    assert_eq!(pane.timeline_scroll_offset(), 24.0);
+    assert!(pane.timeline_follow_bottom());
+    assert!(pane.timeline_is_inertial());
+
+    // A geometry-only pass during the same live revision neither increases the
+    // spring's existing lag nor cancels its ordinary settling animation.
+    pane.set_timeline_metrics_with_live_growth(
+        rect,
+        new.content_height + 10_000.0,
+        100.0,
+        Some(0.0),
+    );
+    assert_eq!(pane.timeline_scroll_offset(), 24.0);
+    assert!(pane.timeline_is_inertial());
+}
+
+#[test]
+fn unmeasured_history_is_not_live_growth_and_quiet_rebuild_does_not_start_spring() {
+    let old = lazy_cache(
+        vec![layout_row(0, 0.0, 100.0), layout_row(1, 120.0, 30.0)],
+        0,
+        1,
+    );
+    assert_eq!(super::layout::measured_tail_baseline(&old, 1), None);
+    let new = lazy_cache(
+        vec![layout_row(0, 0.0, 100.0), layout_row(1, 120.0, 20_000.0)],
+        0,
+        2,
+    );
+    assert_eq!(super::layout::measured_tail_growth(&new, None), 0.0);
+
+    let mut pane = NeoismAgentPane::default();
+    pane.apply_history(vec![NeoismAgentMessage::assistant("live").with_id("tail")]);
+    let rect = [0.0, 0.0, 400.0, 100.0];
+    pane.set_timeline_metrics(rect, old.content_height, 100.0);
+    pane.apply_part_delta(Some("tail".into()), None, None, " more");
+    pane.set_timeline_metrics_with_live_growth(
+        rect,
+        new.content_height,
+        100.0,
+        Some(0.0),
+    );
+    assert_eq!(pane.timeline_scroll_offset(), 0.0);
+    assert!(!pane.timeline_is_inertial());
+}
+
+#[test]
+fn paginated_reader_keeps_viewport_during_repeated_streaming_rebuilds() {
+    let messages = (0..200)
+        .map(|index| {
+            NeoismAgentMessage::assistant("history").with_id(format!("row-{index}"))
+        })
+        .collect::<Vec<_>>();
+    let mut pane = NeoismAgentPane::default();
+    pane.apply_history(messages);
+    let rect = [0.0, 0.0, 400.0, 300.0];
+    let body_height = 12_000.0;
+    let old_top = 4800.0 + 27.0;
+    pane.set_timeline_metrics(rect, body_height, 300.0);
+    pane.scroll_timeline_pixels(body_height - 300.0 - old_top);
+    pane.set_timeline_view_anchor(
+        TimelineViewAnchorKey::for_source(pane.messages(), 80),
+        -27.0,
+    );
+    for (iteration, suffix_height) in
+        [20_000.0, 40_000.0, 25_000.0].into_iter().enumerate()
+    {
+        pane.scroll_timeline_wheel_pixels(10.0);
+        let (key, screen_offset) = pane.timeline_view_anchor().unwrap();
+        pane.apply_part_delta(Some("row-199".into()), None, None, " more");
+        let source = resolve_timeline_view_anchor(pane.messages(), &key).unwrap();
+        let estimated = (0..200)
+            .map(|index| layout_row(index, index as f32 * 60.0, 48.0))
+            .collect::<Vec<_>>();
+        let (_, row) = super::layout::lazy_window_position(
+            &estimated,
+            body_height - 300.0,
+            pane.timeline_scroll_offset(),
+            Some((source, screen_offset)),
+        );
+        assert_eq!(row, Some(80));
+
+        // Historical refinement above and live growth below occur together.
+        let prefix_shift = iteration as f32 * 6000.0;
+        let new_height = body_height + prefix_shift + suffix_height;
+        pane.set_timeline_metrics_with_live_growth(rect, new_height, 300.0, Some(24.0));
+        pane.restore_timeline_view_anchor(4800.0 + prefix_shift, screen_offset);
+        let new_top = new_height - 300.0 - pane.timeline_scroll_offset();
+        assert_eq!((4800.0 + prefix_shift) - new_top, screen_offset);
+        assert!(!pane.timeline_follow_bottom());
+        assert!(pane.timeline_is_inertial());
+    }
+}
+
+#[test]
+fn nonempty_source_history_with_no_visible_rows_keeps_empty_growth_baseline() {
+    let mut cache = lazy_cache(Vec::new(), 0, 0);
+    cache.source_len = 1; // blank assistant placeholder, not an empty transcript
+    assert!(super::layout::reusable_timeline_cache(
+        &cache, 1, 100, 4, 72, 1
+    ));
+    assert!(!super::layout::reusable_timeline_cache(
+        &cache, 1, 200, 4, 72, 1
+    ));
+    let baseline = super::layout::measured_tail_baseline(&cache, 0);
+    let filled = lazy_cache(vec![layout_row(0, 0.0, 900.0)], 0, 1);
+    let growth = super::layout::measured_tail_growth(&filled, baseline);
+    assert_eq!(growth, 900.0);
+
+    let mut pane = NeoismAgentPane::default();
+    pane.apply_history(vec![NeoismAgentMessage::assistant("").with_id("live")]);
+    let rect = [0.0, 0.0, 400.0, 300.0];
+    pane.set_timeline_metrics(rect, 0.0, 300.0);
+    pane.apply_part_delta(Some("live".into()), None, None, "first visible live output");
+    pane.set_timeline_metrics_with_live_growth(rect, 900.0, 300.0, Some(growth));
+    assert_eq!(pane.timeline_scroll_offset(), 600.0);
+    assert!(pane.timeline_is_inertial());
+}
+
+#[test]
+fn exact_empty_suffix_and_hidden_trailing_source_preserve_live_append_animation() {
+    let empty = lazy_cache(Vec::new(), 0, 0);
+    let first = lazy_cache(vec![layout_row(0, 0.0, 900.0)], 0, 1);
+    let baseline = super::layout::measured_tail_baseline(&empty, 0);
+    assert_eq!(super::layout::measured_tail_growth(&first, baseline), 900.0);
+
+    let mut hidden_tail = lazy_cache(vec![layout_row(0, 0.0, 200.0)], 0, 1);
+    hidden_tail.source_len = 3;
+    // Production append repair begins at the old last source, which is hidden.
+    let baseline = super::layout::measured_tail_baseline(&hidden_tail, 2);
+    let appended = lazy_cache(
+        vec![layout_row(0, 0.0, 30_200.0), layout_row(3, 30_218.0, 60.0)],
+        0,
+        2,
+    );
+    assert_eq!(
+        super::layout::measured_tail_growth(&appended, baseline),
+        78.0
+    );
+
+    let mut pane = NeoismAgentPane::default();
+    let rect = [0.0, 0.0, 400.0, 300.0];
+    pane.set_timeline_metrics(rect, 0.0, 300.0);
+    pane.upsert_part_message(
+        NeoismAgentMessage::assistant("first live output").with_id("live"),
+    );
+    pane.set_timeline_metrics_with_live_growth(rect, 900.0, 300.0, Some(900.0));
+    assert_eq!(pane.timeline_scroll_offset(), 600.0);
+    assert!(pane.timeline_is_inertial());
+}
+
+#[test]
+fn earlier_dirty_estimates_do_not_suppress_already_measured_live_tail() {
+    let old = lazy_cache(
+        vec![
+            layout_row(0, 0.0, 30.0),
+            layout_row(1, 48.0, 100.0),
+            layout_row(2, 166.0, 200.0),
+        ],
+        1,
+        3,
+    );
+    // A historical/artifact row is dirty alongside the streamed tail. Repair
+    // starts at source 0, but animation has a separate exact boundary at row 1.
+    let baseline = super::layout::measured_tail_baseline(&old, 0);
+    let new = lazy_cache(
+        vec![
+            layout_row(0, 0.0, 30_030.0),
+            layout_row(1, 30_048.0, 100.0),
+            layout_row(2, 30_166.0, 224.0),
+        ],
+        0,
+        3,
+    );
+    assert_eq!(super::layout::measured_tail_growth(&new, baseline), 24.0);
+}
+
+#[test]
+fn measured_tail_growth_keeps_appended_live_rows_but_rejects_changed_group_boundary() {
+    let old = lazy_cache(vec![layout_row(0, 0.0, 200.0)], 0, 1);
+    let baseline = super::layout::measured_tail_baseline(&old, 0);
+    let appended = lazy_cache(
+        vec![layout_row(0, 0.0, 200.0), layout_row(1, 218.0, 60.0)],
+        0,
+        2,
+    );
+    assert_eq!(
+        super::layout::measured_tail_growth(&appended, baseline),
+        78.0
+    );
+    let changed = lazy_cache(vec![layout_row(1, 0.0, 400.0)], 0, 1);
+    assert_eq!(super::layout::measured_tail_growth(&changed, baseline), 0.0);
 }

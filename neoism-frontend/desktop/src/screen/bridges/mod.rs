@@ -9,7 +9,7 @@ pub mod extensions;
 pub mod file_tree;
 pub mod finder;
 pub mod git_diff;
-#[cfg(feature = "servo-artifacts")]
+#[cfg(feature = "cef-artifacts")]
 pub(crate) mod html_artifacts;
 pub mod markdown;
 pub mod neoworld;

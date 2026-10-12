@@ -606,6 +606,21 @@ impl NeoismAgentPane {
             || !self.particle_bursts.is_empty()
     }
 
+    pub fn input_viewport_mut(
+        &mut self,
+    ) -> &mut neoism_ui::panels::agent_pane::input_viewport::InputViewport {
+        &mut self.input_viewport
+    }
+
+    pub fn scroll_input_at(&mut self, x: f32, y: f32, pixels: f32) -> bool {
+        if self.prompt_picker_rect.is_some_and(|rect| {
+            x >= rect[0] && x < rect[0] + rect[2] && y >= rect[1] && y < rect[1] + rect[3]
+        }) {
+            return true;
+        }
+        self.input_viewport.scroll_at(x, y, pixels)
+    }
+
     pub fn set_input_wrap_rows(
         &mut self,
         rows: Vec<neoism_ui::panels::agent_pane::input_controller::InputWrapRow>,
@@ -1262,7 +1277,7 @@ impl NeoismAgentPane {
                                 .iter()
                                 .find(|row| {
                                     row.source_index <= index
-                                        && index < row.source_end_index
+                                        && index <= row.source_end_index
                                 })
                                 .map(|row| row.top)
                         });

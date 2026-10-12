@@ -1,4 +1,4 @@
-//! Desktop-owned HTML artifact worker adapter. No Servo/window dependency crosses
+//! Desktop-owned HTML artifact worker adapter. No browser/window dependency crosses
 //! the host API; requests and frame snapshots are reconciled on the UI thread.
 use super::super::Screen;
 use neoism_backend::event::{RioEvent, RioEventType};
@@ -11,9 +11,9 @@ use neoism_window::keyboard::{Key, KeyCode, NamedKey, PhysicalKey};
 use std::collections::{HashMap, HashSet};
 
 // Each Screen owns a worker connection. The callback only schedules a UI pump.
-#[cfg(feature = "servo-artifacts")]
+#[cfg(feature = "cef-artifacts")]
 pub(crate) struct DesktopHtmlArtifacts {
-    host: neoism_interactive_artifacts::servo_host::Host,
+    host: neoism_interactive_artifacts::worker_host::Host,
     slots: std::collections::HashMap<String, DesktopHtmlSlot>,
     next_image: u32,
     stream: u64,
@@ -30,7 +30,7 @@ pub(crate) struct DesktopHtmlArtifacts {
     wake_enabled: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
-#[cfg(feature = "servo-artifacts")]
+#[cfg(feature = "cef-artifacts")]
 struct DesktopHtmlSlot {
     route: usize,
     owner: String,
@@ -38,6 +38,8 @@ struct DesktopHtmlSlot {
     last_used: u64,
     sequence: u64,
     awaiting_frame: bool,
+    snapshot: Option<neoism_ui::panels::agent_pane::view::markdown::HtmlArtifactFrame>,
+    layout: Option<neoism_ui::panels::agent_pane::view::markdown::HtmlArtifactLayout>,
     source: String,
     html: String,
     revision: u64,
@@ -45,6 +47,7 @@ struct DesktopHtmlSlot {
     viewport: [f32; 4],
     visible_rect: [f32; 4],
     scale: f32,
+    ui_scale: f32,
     css_scale: f32,
     theme: neoism_interactive_artifacts::Theme,
     styles: ArtifactStyles,
@@ -58,7 +61,7 @@ pub(crate) struct ArtifactFailure {
 }
 
 /// Map the resolved renderer palette, not a theme name or a canned web palette.
-/// Shadcn-style input means control border; accent means the hover surface.
+/// Input means control border; artifact accent means brand color, not hover gray.
 fn artifact_styles(
     palette: &IdeTheme,
     sans: &str,
@@ -79,14 +82,14 @@ fn artifact_styles(
             input: palette.border,
             primary: palette.accent,
             primary_foreground: contrast_foreground(palette.accent, palette),
-            accent: palette.hover,
-            accent_foreground: palette.fg,
+            accent: palette.accent,
+            accent_foreground: contrast_foreground(palette.accent, palette),
             destructive: palette.red,
             destructive_foreground: contrast_foreground(palette.red, palette),
             success: palette.green,
             warning: palette.yellow,
             info: palette.blue,
-            chart_1: palette.blue,
+            chart_1: palette.accent,
             chart_2: palette.cyan,
             chart_3: palette.green,
             chart_4: palette.yellow,
@@ -199,8 +202,7 @@ fn local_point(point: [f32; 2], viewport: [f32; 4], os_scale: f32) -> [f32; 2] {
 /// never become a GPU upload. IPC request-generation matching is also the Host's
 /// responsibility; this API exposes document revision and frame sequence only.
 fn frame_pixels(frame: &ArtifactFrame, slot: &DesktopHtmlSlot) -> Option<Vec<u8>> {
-    let expected =
-        raster_viewport(slot.viewport, slot.scale, slot.css_scale / slot.scale)?;
+    let expected = raster_viewport(slot.viewport, slot.scale, slot.ui_scale)?;
     if frame.revision == 0
         || frame.revision != slot.revision
         || frame.sequence == 0
@@ -250,6 +252,43 @@ fn unpremultiply_rgba(pixels: &mut [u8]) {
     }
 }
 
+/// Clip the full surface, not the visible scroll slice. Straight RGB stays intact
+/// while coverage modulates alpha, so rounded corners reveal the chat backdrop.
+fn round_artifact_corners(pixels: &mut [u8], width: u32, height: u32, radius: f32) {
+    let (width, height) = (width as usize, height as usize);
+    if !radius.is_finite()
+        || radius <= 0.0
+        || width == 0
+        || height == 0
+        || width.checked_mul(height).and_then(|n| n.checked_mul(4)) != Some(pixels.len())
+    {
+        return;
+    }
+    let radius = radius.min(width.min(height) as f32 * 0.5);
+    for y in 0..radius.ceil() as usize {
+        for x in 0..radius.ceil() as usize {
+            let dx = (radius - x as f32 - 0.5).max(0.0);
+            let dy = (radius - y as f32 - 0.5).max(0.0);
+            let coverage = (radius + 0.5 - (dx * dx + dy * dy).sqrt()).clamp(0.0, 1.0);
+            if coverage >= 1.0 {
+                continue;
+            }
+            for (px, py) in [
+                (x, y),
+                (width - 1 - x, y),
+                (x, height - 1 - y),
+                (width - 1 - x, height - 1 - y),
+            ] {
+                let i = (py * width + px) * 4;
+                pixels[i + 3] = (pixels[i + 3] as f32 * coverage).round() as u8;
+                if pixels[i + 3] == 0 {
+                    pixels[i..i + 3].fill(0);
+                }
+            }
+        }
+    }
+}
+
 // Only the first image publication needs another projection pass. Already
 // projected overlays reference the same image ID and see fresh pixels now.
 fn needs_snapshot_projection(visible: bool, previously_available: bool) -> bool {
@@ -259,6 +298,42 @@ fn needs_snapshot_projection(visible: bool, previously_available: bool) -> bool 
 static NEXT_STREAM: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 impl DesktopHtmlSlot {
+    fn update_layout(
+        &mut self,
+        metrics: &neoism_interactive_artifacts::ArtifactLayoutMetrics,
+    ) -> bool {
+        use neoism_ui::panels::agent_pane::view::markdown::{
+            html_artifact_source_hash, HtmlArtifactLayout,
+        };
+        if !self.visible
+            || metrics.revision != self.revision
+            || !metrics.height.is_finite()
+            || metrics.height <= 0.0
+            || metrics.height > 8192.0
+            || !self.css_scale.is_finite()
+            || self.css_scale <= 0.0
+            || self.css_scale > 8.0
+            || !self.scale.is_finite()
+            || self.scale <= 0.0
+        {
+            return false;
+        }
+        let height = metrics
+            .height
+            .ceil()
+            .clamp(32.0, (4096.0 / self.css_scale).floor().min(640.0));
+        let layout = HtmlArtifactLayout {
+            source_hash: html_artifact_source_hash(&self.html),
+            width: self.viewport[2],
+            scale: self.ui_scale,
+            height,
+        };
+        if self.layout == Some(layout) {
+            return false;
+        }
+        self.layout = Some(layout);
+        true
+    }
     /// Screen translation, clipping and reactivation do not change the engine
     /// framebuffer. Compare raster dimensions, not floating timeline geometry.
     fn update_geometry(
@@ -268,12 +343,12 @@ impl DesktopHtmlSlot {
         os_scale: f32,
         ui_scale: f32,
     ) -> bool {
-        let previous =
-            raster_viewport(self.viewport, self.scale, self.css_scale / self.scale);
+        let previous = raster_viewport(self.viewport, self.scale, self.ui_scale);
         let next = raster_viewport(viewport, os_scale, ui_scale);
         self.viewport = viewport;
         self.visible_rect = visible_rect;
         self.scale = os_scale;
+        self.ui_scale = ui_scale;
         self.css_scale = ui_scale * os_scale;
         let resized = previous != next;
         if resized {
@@ -297,12 +372,8 @@ impl DesktopHtmlSlot {
             key,
             html: self.html.clone(),
             revision: self.revision,
-            viewport: raster_viewport(
-                self.viewport,
-                self.scale,
-                self.css_scale / self.scale,
-            )
-            .expect("validated artifact viewport"),
+            viewport: raster_viewport(self.viewport, self.scale, self.ui_scale)
+                .expect("validated artifact viewport"),
             visible: self.visible,
             theme: self.theme,
             styles: self.styles.clone(),
@@ -311,6 +382,15 @@ impl DesktopHtmlSlot {
 }
 
 impl Screen<'_> {
+    fn set_html_artifact_failure_status(&mut self, failed: bool) {
+        for grid in self.context_manager.all_grids_mut() {
+            for item in grid.contexts_mut().values_mut() {
+                if let Some(agent) = item.val.neoism_agent.as_mut() {
+                    agent.html_artifact_failed = failed;
+                }
+            }
+        }
+    }
     fn resolved_html_artifact_styles(&self) -> (Theme, ArtifactStyles) {
         let palette = self.renderer.styled_theme(neoism_lua::selector::AGENT_CHAT);
         let theme = if palette.is_dark() {
@@ -336,7 +416,7 @@ impl Screen<'_> {
             .font_family
             .clone()
             .or_else(neoism_ui::primitives::look::markdown_font_family)
-            .unwrap_or_else(|| font_mono.clone());
+            .unwrap_or_else(|| "sans-serif".into());
         let radius = style
             .radius
             .filter(|r| r.is_finite())
@@ -351,6 +431,7 @@ impl Screen<'_> {
     /// Clear all queues, not just painted panes. Hidden grids and a frame with
     /// zero Agent panels must not replay a request from a previous draw pass.
     pub(crate) fn begin_html_artifact_frame(&mut self) {
+        self.set_html_artifact_failure_status(self.html_artifacts_failure.is_some());
         // Do not project old-palette snapshots into a new-theme draw pass while
         // waiting for asynchronous worker paint. Source/JS state stays intact.
         let stale_styles = self.html_artifacts.as_ref().is_some_and(|browser| {
@@ -379,13 +460,15 @@ impl Screen<'_> {
         use neoism_backend::sugarloaf::{
             ColorType, GraphicData, GraphicDataEntry, GraphicId,
         };
-        use neoism_ui::panels::agent_pane::view::markdown::HtmlArtifactFrame;
+        use neoism_ui::panels::agent_pane::view::markdown::{
+            html_artifact_source_hash, HtmlArtifactFrame,
+        };
         use neoism_ui::panels::notifications::NotificationLevel;
         use std::sync::{
             atomic::{AtomicBool, Ordering},
             Arc,
         };
-        let enabled = std::env::var("NEOISM_SERVO_ARTIFACTS").as_deref() == Ok("1");
+        let enabled = neoism_interactive_artifacts::worker_host::html_artifacts_enabled();
         let window_scale = self.sugarloaf.scale_factor();
         let (theme, styles) = self.resolved_html_artifact_styles();
         let mut requests = Vec::new();
@@ -430,12 +513,13 @@ impl Screen<'_> {
                 for slot in browser.slots.values() {
                     self.sugarloaf.image_data.remove(&slot.image);
                 }
-                // Drop closes this window's worker; a later opt-in starts a fresh one.
+                // Drop closes this window's worker; re-enabling starts a fresh one.
             }
             self.html_artifacts_failure = None;
             self.html_artifact_retry_count = 0;
             return false;
         }
+        let mut did_retry = false;
         if let Some(failure) = &self.html_artifacts_failure {
             // Only an edit to a failed source retries, not viewport/scroll changes.
             let edited = requests.iter().any(|(key, _, _, request)| {
@@ -447,6 +531,8 @@ impl Screen<'_> {
             if edited && self.html_artifact_retry_count < 2 {
                 self.html_artifact_retry_count += 1;
                 self.html_artifacts_failure = None;
+                did_retry = true;
+                self.set_html_artifact_failure_status(false);
             } else {
                 return false;
             }
@@ -465,7 +551,7 @@ impl Screen<'_> {
                     );
                 }
             });
-            match neoism_interactive_artifacts::servo_host::Host::new(wake) {
+            match neoism_interactive_artifacts::worker_host::Host::new(wake) {
                 Ok(host) => {
                     self.html_artifacts = Some(DesktopHtmlArtifacts {
                         host,
@@ -492,6 +578,7 @@ impl Screen<'_> {
                             .map(|(key, _, _, r)| (key, r.html))
                             .collect(),
                     });
+                    self.set_html_artifact_failure_status(true);
                     self.renderer.notifications.push(format!("HTML artifact worker unavailable: {error}. Edit the HTML to retry (up to twice), or reopen the window."), NotificationLevel::Error);
                     tracing::warn!(?error, "HTML artifact worker unavailable");
                     return true;
@@ -546,6 +633,7 @@ impl Screen<'_> {
                 }
             }
         }
+        let mut focused_source_replaced = false;
         for (key, owner, route, request) in requests {
             let is_new = !browser.slots.contains_key(&key);
             if is_new {
@@ -563,6 +651,7 @@ impl Screen<'_> {
                         viewport: request.viewport,
                         visible_rect: request.visible_rect,
                         scale: window_scale,
+                        ui_scale: request.scale,
                         css_scale: request.scale * window_scale,
                         theme,
                         styles: styles.clone(),
@@ -570,6 +659,8 @@ impl Screen<'_> {
                         last_used: browser.clock,
                         sequence: 0,
                         awaiting_frame: true,
+                        snapshot: None,
+                        layout: None,
                     },
                 );
             }
@@ -590,6 +681,9 @@ impl Screen<'_> {
                 source_changed || visibility_changed || resized || style_changed;
             if source_changed {
                 slot.awaiting_frame = true;
+                slot.snapshot = None;
+                slot.layout = None;
+                focused_source_replaced |= browser.focused.as_ref() == Some(&key);
             }
             if source_changed {
                 browser.next_revision = browser
@@ -612,18 +706,24 @@ impl Screen<'_> {
                 }
             }
         }
-        if browser.focused.as_ref().is_some_and(|key| {
-            browser
-                .slots
-                .get(key)
-                .is_none_or(|slot| slot.awaiting_frame)
-        }) {
+        // A content-fit resize must not move typing back into the composer.
+        if focused_source_replaced
+            || browser
+                .focused
+                .as_ref()
+                .is_some_and(|key| !browser.slots.contains_key(key))
+        {
             browser.blur();
         }
-        let mut changed = false;
+        let mut changed = did_retry;
         if browser.error.is_none() {
             match browser.host.pump() {
                 Ok(output) => {
+                    for metrics in output.layout_metrics {
+                        if let Some(slot) = browser.slots.get_mut(&metrics.key) {
+                            changed |= slot.update_layout(&metrics);
+                        }
+                    }
                     for diagnostic in output.diagnostics {
                         // Bound diagnostic memory and display each distinct warning once.
                         if browser.diagnostics.len() < 16
@@ -640,11 +740,26 @@ impl Screen<'_> {
                         let Some(slot) = browser.slots.get_mut(&frame.key) else {
                             continue;
                         };
-                        let Some(pixels) = frame_pixels(&frame, slot) else {
+                        let Some(mut pixels) = frame_pixels(&frame, slot) else {
                             continue;
                         };
+                        round_artifact_corners(
+                            &mut pixels,
+                            frame.width,
+                            frame.height,
+                            slot.styles.radius.max(8.0) * slot.css_scale,
+                        );
                         slot.sequence = frame.sequence;
+                        changed |= slot.visible && slot.awaiting_frame;
                         slot.awaiting_frame = false;
+                        slot.snapshot = Some(HtmlArtifactFrame {
+                            image_id: slot.image,
+                            width: frame.width,
+                            height: frame.height,
+                            source_hash: html_artifact_source_hash(&slot.html),
+                            viewport: [slot.viewport[2], slot.viewport[3]],
+                            scale: slot.ui_scale,
+                        });
                         changed |= needs_snapshot_projection(
                             slot.visible,
                             self.sugarloaf.image_data.contains_key(&slot.image),
@@ -687,6 +802,7 @@ impl Screen<'_> {
             }
             self.html_artifacts_failure = Some(ArtifactFailure { sources });
             self.html_artifacts = None;
+            self.set_html_artifact_failure_status(true);
             self.renderer.notifications.push(format!("HTML artifact worker stopped: {error}. Edit the HTML to retry (up to twice), or reopen the window."), NotificationLevel::Error);
             tracing::warn!(%error, "HTML artifact worker stopped");
             return true;
@@ -698,19 +814,28 @@ impl Screen<'_> {
                 };
                 let session = agent.session_id_str().unwrap_or("draft").to_owned();
                 let owner = owner_key(item.val.route_id, &session);
+                let mut layout_changed = false;
                 for slot in browser.slots.values().filter(|slot| slot.owner == owner) {
-                    if let Some(image) = self.sugarloaf.image_data.get(&slot.image) {
-                        let source_key =
-                            format!("{}:{}:{}", session.len(), session, slot.source);
-                        agent.html_artifact_frames.insert(
-                            source_key,
-                            HtmlArtifactFrame {
-                                image_id: slot.image,
-                                width: image.width as u32,
-                                height: image.height as u32,
-                            },
-                        );
+                    let source_key =
+                        format!("{}:{}:{}", session.len(), session, slot.source);
+                    if let Some(layout) = slot.layout {
+                        if agent.html_artifact_layouts.get(&source_key) != Some(&layout) {
+                            agent
+                                .html_artifact_layouts
+                                .insert(source_key.clone(), layout);
+                            layout_changed = true;
+                        }
                     }
+                    if self.sugarloaf.image_data.contains_key(&slot.image) {
+                        if let Some(snapshot) = slot.snapshot {
+                            agent.html_artifact_frames.insert(source_key, snapshot);
+                        }
+                    }
+                }
+                if layout_changed {
+                    // The renderer restores the logical reader anchor after relayout.
+                    agent.invalidate_timeline_layout();
+                    changed = true;
                 }
             }
         }
@@ -718,7 +843,7 @@ impl Screen<'_> {
     }
 }
 
-#[cfg(feature = "servo-artifacts")]
+#[cfg(feature = "cef-artifacts")]
 impl DesktopHtmlArtifacts {
     fn send(&mut self, key: &str, input: neoism_interactive_artifacts::ArtifactInput) {
         if self.error.is_some() {
@@ -756,10 +881,10 @@ impl DesktopHtmlArtifacts {
     }
 }
 
-#[cfg(feature = "servo-artifacts")]
+#[cfg(feature = "cef-artifacts")]
 impl Screen<'_> {
     fn html_artifact_modal_blocked(&self) -> bool {
-        std::env::var("NEOISM_SERVO_ARTIFACTS").as_deref() != Ok("1")
+        std::env::var("NEOISM_HTML_ARTIFACTS").as_deref() == Ok("0")
             || self.renderer.modal.is_active()
             || self.renderer.settings.is_active()
             || self.renderer.file_browser.is_active()
@@ -842,7 +967,17 @@ impl Screen<'_> {
                 return None;
             }
             let r = slot.visible_rect;
-            (x >= r[0] && y >= r[1] && x < r[0] + r[2] && y < r[1] + r[3])
+            let radius = (slot.styles.radius.max(8.0) * slot.ui_scale)
+                .min(slot.viewport[2].min(slot.viewport[3]) * 0.5);
+            let px = x - slot.viewport[0];
+            let py = y - slot.viewport[1];
+            let dx = px - px.clamp(radius, slot.viewport[2] - radius);
+            let dy = py - py.clamp(radius, slot.viewport[3] - radius);
+            (x >= r[0]
+                && y >= r[1]
+                && x < r[0] + r[2]
+                && y < r[1] + r[3]
+                && dx * dx + dy * dy <= radius * radius)
                 .then(|| key.clone())
         })
     }
@@ -1189,6 +1324,8 @@ mod tests {
             last_used,
             sequence: 0,
             awaiting_frame: false,
+            snapshot: None,
+            layout: None,
             source: "markdown:body:html:0".into(),
             html: "<button>state</button>".into(),
             revision: 7,
@@ -1196,6 +1333,7 @@ mod tests {
             viewport: [10.0, 20.0, 2.0, 2.0],
             visible_rect: [0.0; 4],
             scale: 1.0,
+            ui_scale: 1.0,
             css_scale: 1.0,
             theme: Theme::Dark,
             styles: ArtifactStyles::default(),
@@ -1216,6 +1354,154 @@ mod tests {
             ]
             .into(),
         }
+    }
+
+    #[test]
+    fn rounded_preview_edges_are_transparent_without_changing_interior_color() {
+        let mut pixels = vec![255u8; 20 * 12 * 4];
+        round_artifact_corners(&mut pixels, 20, 12, 4.0);
+        let alpha = |x: usize, y: usize| pixels[(y * 20 + x) * 4 + 3];
+        for (x, y) in [(0, 0), (19, 0), (0, 11), (19, 11)] {
+            assert_eq!(alpha(x, y), 0);
+        }
+        assert!(alpha(2, 0) > 0 && alpha(2, 0) < 255);
+        assert_eq!(alpha(10, 0), 255);
+        assert_eq!(alpha(10, 6), 255);
+        assert_eq!(&pixels[(2 * 4)..(2 * 4 + 3)], &[255, 255, 255]);
+    }
+
+    #[test]
+    fn rounded_edges_preserve_existing_alpha_and_small_frames() {
+        let mut pixels = [120u8, 80, 40, 128].repeat(20 * 12);
+        round_artifact_corners(&mut pixels, 20, 12, 4.0);
+        assert_eq!(
+            &pixels[(6 * 20 + 10) * 4..(6 * 20 + 10) * 4 + 4],
+            &[120, 80, 40, 128]
+        );
+        assert!(pixels[2 * 4 + 3] < 128);
+        for (width, height) in [(1, 1), (1, 2), (2, 2), (3, 3)] {
+            let mut small = vec![255u8; width * height * 4];
+            round_artifact_corners(&mut small, width as u32, height as u32, 64.0);
+        }
+        let mut malformed = [255u8; 3];
+        round_artifact_corners(&mut malformed, 20, 12, 4.0);
+        assert_eq!(malformed, [255; 3]);
+    }
+
+    #[test]
+    fn fitted_height_and_snapshot_survive_scroll_but_not_resize_mapping() {
+        use neoism_ui::panels::agent_pane::view::markdown::{
+            html_artifact_source_hash, HtmlArtifactFrame,
+        };
+        let mut view = slot("owner", 1);
+        view.visible = true;
+        view.viewport = [10.0, 20.0, 500.0, 160.0];
+        let metrics = neoism_interactive_artifacts::ArtifactLayoutMetrics {
+            key: "view".into(),
+            revision: 7,
+            height: 72.4,
+        };
+        assert!(view.update_layout(&metrics));
+        let layout = view.layout.unwrap();
+        assert_eq!(layout.height, 73.0);
+        view.snapshot = Some(HtmlArtifactFrame {
+            image_id: view.image,
+            width: 500,
+            height: 160,
+            source_hash: html_artifact_source_hash(&view.html),
+            viewport: [500.0, 160.0],
+            scale: 1.0,
+        });
+        view.visible = false;
+        assert!(!view.update_layout(&metrics));
+        assert_eq!(view.layout, Some(layout));
+        view.visible = true;
+        assert!(!view.update_geometry(
+            [10.0, -70.0, 500.0, 160.0],
+            [10.0, 0.0, 500.0, 90.0],
+            1.0,
+            1.0
+        ));
+        assert!(view
+            .snapshot
+            .unwrap()
+            .matches(&view.html, [500.0, 160.0], 1.0));
+        assert_eq!(view.layout, Some(layout));
+        assert!(view.update_geometry(
+            [10.0, 20.0, 500.0, 73.0],
+            [10.0, 20.0, 500.0, 73.0],
+            1.0,
+            1.0
+        ));
+        assert!(view.awaiting_frame);
+        assert!(!view
+            .snapshot
+            .unwrap()
+            .matches(&view.html, [500.0, 73.0], 1.0));
+        assert!(!view
+            .snapshot
+            .unwrap()
+            .matches("new source", [500.0, 160.0], 1.0));
+    }
+
+    #[test]
+    fn fitted_metrics_reject_invalid_values_and_respect_raster_cap() {
+        let mut view = slot("owner", 1);
+        view.visible = true;
+        let mut metrics = neoism_interactive_artifacts::ArtifactLayoutMetrics {
+            key: "view".into(),
+            revision: 7,
+            height: 2000.0,
+        };
+        assert!(view.update_layout(&metrics));
+        assert_eq!(view.layout.unwrap().height, 640.0);
+        view.css_scale = 8.0;
+        view.ui_scale = 4.0;
+        view.scale = 2.0;
+        assert!(view.update_layout(&metrics));
+        assert_eq!(view.layout.unwrap().height, 512.0);
+        let accepted = view.layout;
+        for height in [f32::NAN, f32::INFINITY, -1.0, 0.0, 8193.0] {
+            metrics.height = height;
+            assert!(!view.update_layout(&metrics));
+            assert_eq!(view.layout, accepted);
+        }
+        metrics.height = 50.0;
+        metrics.revision = 6;
+        assert!(!view.update_layout(&metrics));
+        assert_eq!(view.layout, accepted);
+    }
+
+    #[test]
+    fn pane_keeps_learned_height_after_layout_invalidation() {
+        use neoism_ui::panels::agent_pane::view::markdown::{
+            html_artifact_source_hash, AgentMarkdownPane, HtmlArtifactLayout,
+        };
+        let mut pane = crate::neoism::agent::NeoismAgentPane::default();
+        let key = "markdown:answer:html:0";
+        let source = "<button>live</button>";
+        pane.html_artifact_layouts.insert(
+            format!("5:draft:{key}"),
+            HtmlArtifactLayout {
+                source_hash: html_artifact_source_hash(source),
+                width: 500.0,
+                scale: 1.25,
+                height: 80.0,
+            },
+        );
+        assert_eq!(
+            pane.html_artifact_height(key, source, 500.0, 1.25),
+            Some(80.0)
+        );
+        pane.invalidate_timeline_layout();
+        pane.html_artifact_frames.clear();
+        assert_eq!(
+            pane.html_artifact_height(key, source, 500.0, 1.25),
+            Some(80.0)
+        );
+        assert_eq!(pane.html_artifact_height(key, "edited", 500.0, 1.25), None);
+        assert_eq!(pane.html_artifact_height(key, source, 520.0, 1.25), None);
+        assert_eq!(pane.html_artifact_height(key, source, 500.0, 1.5), None);
     }
 
     #[test]
@@ -1243,7 +1529,9 @@ mod tests {
         assert_eq!(vars["--foreground"], "#213243");
         assert_eq!(vars["--card"], "#e2d9cb");
         assert_eq!(vars["--popover"], "#e2d9cb");
-        assert_eq!(vars["--accent"], "#d0c7bb");
+        assert_eq!(vars["--accent"], "#8a4f18");
+        assert_eq!(vars["--accent-surface"], "#8a4f1820");
+        assert_eq!(vars["--ring"], "#8a4f18");
         assert_eq!(vars["--primary"], "#8a4f18");
         assert_eq!(vars["--muted"], "#c8bfaa");
         assert_eq!(vars["--muted-foreground"], "#675e51");
@@ -1254,7 +1542,7 @@ mod tests {
             ("--warning", light.yellow),
             ("--info", light.blue),
             ("--destructive", light.red),
-            ("--chart-1", light.blue),
+            ("--chart-1", light.accent),
             ("--chart-2", light.cyan),
             ("--chart-3", light.green),
             ("--chart-4", light.yellow),

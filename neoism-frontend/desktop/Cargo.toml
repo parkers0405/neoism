@@ -153,14 +153,14 @@ workspace = true
 features = ["wgpu"]
 
 [features]
-default = ["wayland", "x11", "wgpu"]
+default = ["wayland", "x11", "wgpu", "cef-artifacts"]
 audio = ["cpal"]
 # Optional reMarkable sync extension (work in progress). Off by default —
 # a normal build links none of `neoism-remarkable` / `neoism-sync`.
 remarkable = ["dep:neoism-remarkable"]
-# Experimental offscreen Servo surfaces; off by default. Explicit builds also
-# require NEOISM_SERVO_ARTIFACTS=1 at runtime.
-servo-artifacts = ["dep:neoism-interactive-artifacts", "neoism-interactive-artifacts/servo"]
+# Live Chromium surfaces use only the small IPC facade in the desktop build.
+# The separately packaged CEF worker is never linked into this dependency graph.
+cef-artifacts = ["dep:neoism-interactive-artifacts", "neoism-interactive-artifacts/host"]
 x11 = ["neoism-backend/x11", "neoism-window/x11"]
 wayland = [
     "neoism-backend/wayland",

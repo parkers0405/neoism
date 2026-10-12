@@ -188,6 +188,28 @@ pub(crate) fn remote_pty_passthrough_target(is_remote_pty: bool) -> Option<bool>
     is_remote_pty.then_some(false)
 }
 
+impl crate::screen::Screen<'_> {
+    /// Composer wheel ownership precedes terminal scrollback, including edges.
+    pub(crate) fn handle_command_composer_wheel(
+        &mut self,
+        delta: &neoism_window::event::MouseScrollDelta,
+    ) -> bool {
+        if self.ctx().current().has_non_terminal_surface() {
+            return false;
+        }
+        let (x, y) = self.mouse_logical_for_hit_test();
+        let pixels = match delta {
+            neoism_window::event::MouseScrollDelta::LineDelta(_, lines) => {
+                -*lines * self.renderer.command_composer.text_line_height()
+            }
+            neoism_window::event::MouseScrollDelta::PixelDelta(pos) => {
+                -pos.y as f32 / self.sugarloaf.scale_factor().max(0.01)
+            }
+        };
+        self.renderer.command_composer.scroll_text_at(x, y, pixels)
+    }
+}
+
 impl Renderer {
     /// Paint parked composers for inactive terminal splits. The active
     /// composer is stateful because it owns completion/caret animation; these

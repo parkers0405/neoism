@@ -6,7 +6,7 @@ use crate::panels::agent_pane::view::draw::{
 use crate::panels::agent_pane::view::OVERLAY_PANEL_ID;
 
 /// All rectangles are `[x, y, width, height]` in shared draw coordinates.
-/// `viewport` is the full fixed HTML surface;
+/// `viewport` is the full resolved HTML surface;
 /// `visible_rect` is its intersection with the timeline/card clip. `scale`
 /// is the shared UI scale, not Sugarloaf's OS pixel scale factor.
 /// `key` is stable across source edits; hosts must track HTML revisions separately.
@@ -19,20 +19,85 @@ pub struct HtmlArtifactRequest {
     pub scale: f32,
 }
 
-/// A host-uploaded Sugarloaf GraphicData image. Width/height are raster pixels;
-/// the full image is mapped onto the fixed viewport, independent of its size.
-/// The host owns image IDs, replacement, engine isolation, and resource cleanup.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// A host-uploaded raster and the accepted snapshot geometry (draw pixels).
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HtmlArtifactFrame {
     pub image_id: u32,
     pub width: u32,
     pub height: u32,
+    pub source_hash: u64,
+    pub viewport: [f32; 2],
+    pub scale: f32,
 }
 
-const VIEWPORT_HEIGHT: f32 = 320.0;
+/// Learned content height in unscaled CSS pixels; width is shared draw width.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HtmlArtifactLayout {
+    pub source_hash: u64,
+    pub width: f32,
+    pub scale: f32,
+    pub height: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HtmlArtifactStatus {
+    Pending,
+    Disabled,
+    Failed,
+}
+
+/// Stable FNV-1a fingerprint, shared by host and renderer; not cryptographic.
+pub fn html_artifact_source_hash(source: &str) -> u64 {
+    source
+        .as_bytes()
+        .iter()
+        .fold(0xcbf29ce484222325, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+        })
+}
+
+fn same_dimension(a: f32, b: f32) -> bool {
+    a.is_finite() && b.is_finite() && a > 0.0 && b > 0.0 && (a - b).abs() < 0.5
+}
+
+impl HtmlArtifactLayout {
+    pub fn matches(&self, source: &str, width: f32, scale: f32) -> bool {
+        self.source_hash == html_artifact_source_hash(source)
+            && self.scale == scale
+            && same_dimension(self.width, width)
+    }
+}
+
+impl HtmlArtifactFrame {
+    pub fn matches(&self, source: &str, viewport: [f32; 2], scale: f32) -> bool {
+        self.width > 0
+            && self.height > 0
+            && self.source_hash == html_artifact_source_hash(source)
+            && self.scale == scale
+            && same_dimension(self.viewport[0], viewport[0])
+            && same_dimension(self.viewport[1], viewport[1])
+    }
+}
+
+const INITIAL_HEIGHT: f32 = 160.0;
 
 pub(super) fn block_height(scale: f32) -> f32 {
-    VIEWPORT_HEIGHT * scale
+    INITIAL_HEIGHT * scale
+}
+
+pub(super) fn resolved_height(
+    pane: &impl AgentMarkdownPane,
+    namespace: &str,
+    block_index: usize,
+    source: &str,
+    width: f32,
+    scale: f32,
+) -> f32 {
+    pane.html_artifact_height(&artifact_key(namespace, block_index), source, width, scale)
+        .filter(|height| height.is_finite() && *height > 0.0)
+        .unwrap_or(INITIAL_HEIGHT)
+        .clamp(32.0, 640.0)
+        * scale
 }
 
 /// Cheap timeline projection: count surrounding text normally, but never count
@@ -112,6 +177,23 @@ fn request_visible_rect(
     Some(visible)
 }
 
+fn image_piece(viewport: [f32; 4], clip: [f32; 4]) -> Option<ImagePiece> {
+    if viewport[2] <= 0.0 || viewport[3] <= 0.0 {
+        return None;
+    }
+    let visible = intersect_rect(viewport, clip)?;
+    let [x, y, w, h] = visible;
+    Some(ImagePiece {
+        rect: visible,
+        source_rect: [
+            (x - viewport[0]) / viewport[2],
+            (y - viewport[1]) / viewport[3],
+            (x + w - viewport[0]) / viewport[2],
+            (y + h - viewport[1]) / viewport[3],
+        ],
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn render(
     sugarloaf: &mut Sugarloaf,
@@ -127,30 +209,8 @@ pub(super) fn render(
     clip: [f32; 4],
     occlusions: &[[f32; 4]],
 ) {
-    let [x, y, w, _] = rect;
-    let viewport = [x, y, w, block_height(scale)];
-    // Backgrounds follow the same occlusion policy as image/text painting.
-    if let Some(visible) = intersect_rect(rect, clip) {
-        let mut pieces = vec![ImagePiece {
-            rect: visible,
-            source_rect: [0.0, 0.0, 1.0, 1.0],
-        }];
-        for occlusion in occlusions {
-            pieces = pieces
-                .into_iter()
-                .flat_map(|piece| subtract_image_piece(piece, *occlusion))
-                .collect();
-        }
-        for piece in pieces {
-            draw_rect_clipped(
-                sugarloaf,
-                piece.rect,
-                theme.f32(theme.panel_bg()),
-                ORDER_PANEL,
-                clip,
-            );
-        }
-    }
+    let [x, _, _, _] = rect;
+    let viewport = rect;
     // Activation/input remain visibility-gated, but clipping or a transient
     // occlusion must not replace an already painted artifact with fallback text.
     let key = artifact_key(namespace, block_index);
@@ -158,35 +218,33 @@ pub(super) fn render(
     let frame = request_visible_rect(viewport, clip, suppressed, occlusions)
         .and_then(|visible_rect| {
             pane.html_artifact_frame(HtmlArtifactRequest {
-                key,
+                key: key.clone(),
                 html: source.to_owned(),
                 viewport,
                 visible_rect,
                 scale,
             })
         })
-        .or(cached)
-        .filter(|frame| frame.width > 0 && frame.height > 0);
+        .filter(|frame| frame.matches(source, [viewport[2], viewport[3]], scale))
+        .or_else(|| {
+            cached
+                .filter(|frame| frame.matches(source, [viewport[2], viewport[3]], scale))
+        });
     if let Some(frame) = frame {
-        if let Some(visible) = intersect_rect(viewport, clip) {
-            let [vx, vy, vw, vh] = visible;
-            let uv = [
-                (vx - viewport[0]) / viewport[2],
-                (vy - viewport[1]) / viewport[3],
-                (vx + vw - viewport[0]) / viewport[2],
-                (vy + vh - viewport[1]) / viewport[3],
-            ];
+        if let Some(piece) = image_piece(viewport, clip) {
             push_image_overlay_clipped(
                 sugarloaf,
                 OVERLAY_PANEL_ID,
                 frame.image_id,
-                visible,
-                uv,
+                piece.rect,
+                piece.source_rect,
                 8,
                 sugarloaf.scale_factor(),
                 occlusions,
             );
         }
+    } else if pane.html_artifact_status(&key) == HtmlArtifactStatus::Pending {
+        render_pending(sugarloaf, viewport, theme, scale, clip, occlusions);
     } else if let Some(body_clip) = intersect_rect(viewport, clip) {
         if let Some(opts) = opts_with_clip(
             DrawOpts {
@@ -200,7 +258,7 @@ pub(super) fn render(
                 sugarloaf,
                 x + 14.0 * scale,
                 viewport[1] + 18.0 * scale,
-                "Experimental HTML preview unavailable",
+                "HTML preview unavailable",
                 &opts,
                 occlusions,
             );
@@ -230,6 +288,50 @@ pub(super) fn render(
                 copy_label,
                 &opts,
                 occlusions,
+            );
+        }
+    }
+}
+
+/// Static loading marks only: no animation, source text or actionable chrome.
+pub(super) fn render_pending(
+    sugarloaf: &mut Sugarloaf,
+    rect: [f32; 4],
+    theme: &IdeTheme,
+    scale: f32,
+    clip: [f32; 4],
+    occlusions: &[[f32; 4]],
+) {
+    let Some(clip) = intersect_rect(rect, clip) else {
+        return;
+    };
+    for (row, fraction) in [0.55, 0.8, 0.65].into_iter().enumerate() {
+        let bar = [
+            rect[0] + 14.0 * scale,
+            rect[1] + (18.0 + row as f32 * 20.0) * scale,
+            ((rect[2] - 28.0 * scale) * fraction).max(0.0),
+            6.0 * scale,
+        ];
+        let Some(visible) = intersect_rect(bar, clip) else {
+            continue;
+        };
+        let mut pieces = vec![ImagePiece {
+            rect: visible,
+            source_rect: [0.0, 0.0, 1.0, 1.0],
+        }];
+        for occlusion in occlusions {
+            pieces = pieces
+                .into_iter()
+                .flat_map(|piece| subtract_image_piece(piece, *occlusion))
+                .collect();
+        }
+        for piece in pieces {
+            draw_rect_clipped(
+                sugarloaf,
+                piece.rect,
+                theme.f32_alpha(theme.muted, 0.12),
+                ORDER_PANEL,
+                clip,
             );
         }
     }

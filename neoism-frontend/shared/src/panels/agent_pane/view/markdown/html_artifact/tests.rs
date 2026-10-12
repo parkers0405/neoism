@@ -1,8 +1,28 @@
 use super::*;
 
 #[derive(Default)]
-struct Pane;
+struct Pane {
+    layout: Option<(String, HtmlArtifactLayout)>,
+    status: Option<HtmlArtifactStatus>,
+}
 impl AgentMarkdownPane for Pane {
+    fn html_artifact_status(&self, _: &str) -> HtmlArtifactStatus {
+        self.status.unwrap_or(HtmlArtifactStatus::Disabled)
+    }
+    fn html_artifact_height(
+        &self,
+        key: &str,
+        source: &str,
+        width: f32,
+        scale: f32,
+    ) -> Option<f32> {
+        self.layout
+            .as_ref()
+            .filter(|(identity, layout)| {
+                identity == key && layout.matches(source, width, scale)
+            })
+            .map(|(_, layout)| layout.height)
+    }
     fn cached_markdown_blocks_for(
         &self,
         _: &str,
@@ -130,37 +150,42 @@ fn long_source_completion_keeps_the_same_headerless_slot() {
     let complete = fence_block(&format!("```neoism-html\n{source}```"));
     for scale in [0.75, 1.0, 1.5, 2.0] {
         assert_eq!(
-            markdown_block_height(&incomplete, 500.0, &Pane, scale),
-            320.0 * scale
+            markdown_block_height(&incomplete, 500.0, &Pane::default(), scale),
+            160.0 * scale
         );
         assert_eq!(
-            markdown_block_height(&complete, 500.0, &Pane, scale),
-            320.0 * scale
+            markdown_block_height(&complete, 500.0, &Pane::default(), scale),
+            160.0 * scale
         );
         // Availability is host draw state, not a property of measured blocks.
         assert_eq!(
-            measure_markdown_blocks(&[complete.clone()], 500.0, &Pane, scale),
-            334.0 * scale
+            measure_markdown_blocks(&[complete.clone()], 500.0, &Pane::default(), scale),
+            174.0 * scale
         );
         assert_eq!(
             estimated_body_height(&format!("```neoism-html\n{source}```"), 80, scale),
-            320.0 * scale
+            160.0 * scale
         );
         assert_eq!(
             estimated_body_height(&format!("```neoism-html\n{source}"), 80, scale),
-            320.0 * scale
+            160.0 * scale
         );
     }
 }
 
 #[test]
-fn fixed_viewport_and_measurement_agree_at_all_scales() {
+fn initial_viewport_and_measurement_agree_at_all_scales() {
     let block = fence_block("```neoism-html\n<p>hello</p>\n```");
     for scale in [0.75, 1.0, 1.5, 2.0] {
-        let h = markdown_block_height(&block, 500.0, &Pane, scale);
-        assert_eq!(h, 320.0 * scale);
+        let h = markdown_block_height(&block, 500.0, &Pane::default(), scale);
+        assert_eq!(h, 160.0 * scale);
         assert_eq!(
-            measure_markdown_blocks(std::slice::from_ref(&block), 500.0, &Pane, scale),
+            measure_markdown_blocks(
+                std::slice::from_ref(&block),
+                500.0,
+                &Pane::default(),
+                scale
+            ),
             h + 14.0 * scale
         );
     }
@@ -174,7 +199,7 @@ fn identity_is_namespace_and_index_not_source_revision() {
     );
     assert_ne!(artifact_key("thread:a", 7), artifact_key("thread:b", 7));
     assert_ne!(artifact_key("thread:a", 7), artifact_key("thread:a", 8));
-    let mut pane = Pane;
+    let mut pane = Pane::default();
     assert_eq!(
         pane.html_artifact_frame(HtmlArtifactRequest {
             key: artifact_key("thread:part", 7),
@@ -185,6 +210,161 @@ fn identity_is_namespace_and_index_not_source_revision() {
         }),
         None
     );
+}
+
+#[test]
+fn learned_height_measurement_matches_render_cursor_and_retains_identity() {
+    let source = "<p>hello</p>";
+    let block = fence_block(&format!("```neoism-html\n{source}\n```"));
+    for scale in [0.75, 1.0, 2.0] {
+        for (css, bounded) in [(12.0, 32.0), (48.0, 48.0), (520.0, 520.0), (900.0, 640.0)]
+        {
+            // A preceding ordinary paragraph must count toward the artifact key.
+            let blocks =
+                vec![AssistantMarkdownBlock::Paragraph(Vec::new()), block.clone()];
+            let pane = Pane {
+                layout: Some((
+                    artifact_key("part:a", 1),
+                    HtmlArtifactLayout {
+                        source_hash: html_artifact_source_hash(source),
+                        width: 500.0 - 30.0 * scale,
+                        scale,
+                        height: css,
+                    },
+                )),
+                ..Pane::default()
+            };
+            let render_height = markdown_block_height_namespaced(
+                &block, 500.0, &pane, scale, "part:a", 1,
+            );
+            assert_eq!(render_height, bounded * scale);
+            assert_eq!(
+                measure_markdown_blocks_namespaced(
+                    &blocks, 500.0, &pane, scale, "part:a"
+                ),
+                (8.0 + 19.0 + 6.0 + bounded + 6.0) * scale
+            );
+            // Hidden/offscreen passes are read-only and retain the learned metric.
+            for _ in 0..3 {
+                assert_eq!(
+                    markdown_block_height_namespaced(
+                        &block, 500.0, &pane, scale, "part:a", 1
+                    ),
+                    render_height
+                );
+            }
+            assert_eq!(
+                markdown_block_height_namespaced(
+                    &block, 501.0, &pane, scale, "part:a", 1
+                ),
+                INITIAL_HEIGHT * scale
+            );
+            assert_eq!(
+                markdown_block_height_namespaced(
+                    &block, 500.0, &pane, scale, "part:b", 1
+                ),
+                INITIAL_HEIGHT * scale
+            );
+            assert_eq!(
+                markdown_block_height_namespaced(
+                    &block, 500.0, &pane, scale, "part:a", 0
+                ),
+                INITIAL_HEIGHT * scale
+            );
+            assert_eq!(
+                resolved_height(
+                    &pane,
+                    "part:a",
+                    1,
+                    "changed",
+                    500.0 - 30.0 * scale,
+                    scale
+                ),
+                INITIAL_HEIGHT * scale
+            );
+        }
+    }
+}
+
+#[test]
+fn snapshot_compatibility_rejects_obsolete_source_size_scale_and_tiny_raster() {
+    let frame = HtmlArtifactFrame {
+        image_id: 1,
+        width: 100,
+        height: 160,
+        source_hash: html_artifact_source_hash("source"),
+        viewport: [100.0, 160.0],
+        scale: 1.0,
+    };
+    assert!(frame.matches("source", [100.25, 160.25], 1.0));
+    for dims in [
+        [100.5, 160.0],
+        [100.0, 160.5],
+        [200.0, 160.0],
+        [100.0, 32.0],
+        [0.0, 160.0],
+        [f32::NAN, 160.0],
+    ] {
+        assert!(!frame.matches("source", dims, 1.0));
+    }
+    assert!(!frame.matches("changed", frame.viewport, 1.0));
+    assert!(!frame.matches("source", frame.viewport, 1.0001));
+    assert!(!HtmlArtifactFrame { width: 0, ..frame }.matches(
+        "source",
+        frame.viewport,
+        1.0
+    ));
+    let layout = HtmlArtifactLayout {
+        source_hash: frame.source_hash,
+        width: 100.0,
+        scale: 1.0,
+        height: 48.0,
+    };
+    assert!(layout.matches("source", 100.25, 1.0));
+    assert!(!layout.matches("source", 100.5, 1.0));
+    assert!(!layout.matches("changed", 100.0, 1.0));
+    assert!(!layout.matches("source", 100.0, 1.0001));
+}
+
+#[test]
+fn clipped_uvs_are_translation_invariant_and_use_resolved_height() {
+    for height in [32.0, 160.0, 640.0] {
+        let piece = image_piece(
+            [10.0, 100.0, 200.0, height],
+            [60.0, 100.0 + height * 0.25, 100.0, height * 0.5],
+        )
+        .unwrap();
+        assert_eq!(piece.source_rect, [0.25, 0.25, 0.75, 0.75]);
+        let translated = image_piece(
+            [10.0, -200.0, 200.0, height],
+            [60.0, -200.0 + height * 0.25, 100.0, height * 0.5],
+        )
+        .unwrap();
+        assert_eq!(piece.source_rect, translated.source_rect);
+    }
+}
+
+#[test]
+fn pending_and_unavailable_are_distinct_without_affecting_placeholder_height() {
+    assert_eq!(
+        Pane::default().html_artifact_status("key"),
+        HtmlArtifactStatus::Disabled
+    );
+    for status in [
+        HtmlArtifactStatus::Pending,
+        HtmlArtifactStatus::Failed,
+        HtmlArtifactStatus::Disabled,
+    ] {
+        let pane = Pane {
+            status: Some(status),
+            ..Pane::default()
+        };
+        assert_eq!(pane.html_artifact_status("key"), status);
+        assert_eq!(
+            resolved_height(&pane, "part", 0, "source", 100.0, 1.0),
+            160.0
+        );
+    }
 }
 
 #[test]

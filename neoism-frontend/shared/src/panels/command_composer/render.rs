@@ -138,12 +138,9 @@ impl CommandComposer {
         // blinking. Tracking text/cursor changes is cheap enough to do
         // every frame.
         let cursor_byte = input.cursor_byte();
-        if input.text().len() != self.last_text_len
-            || cursor_byte != self.last_cursor_byte
-        {
+        let input_changed = self.observe_input(input.text(), cursor_byte);
+        if input_changed {
             self.last_caret_seen = now;
-            self.last_text_len = input.text().len();
-            self.last_cursor_byte = cursor_byte;
         }
         match self.last_shell_kind {
             None => {
@@ -369,17 +366,17 @@ impl CommandComposer {
                     ORDER_CHIP_BG,
                 );
             } else {
-            sugarloaf.rounded_rect(
-                None,
-                send_chip_x,
-                chip_y,
-                send_chip_w,
-                chip_h,
-                theme.f32_alpha(theme.accent, 0.55),
-                DEPTH,
-                CHIP_RADIUS * s,
-                ORDER_CHIP_BG,
-            );
+                sugarloaf.rounded_rect(
+                    None,
+                    send_chip_x,
+                    chip_y,
+                    send_chip_w,
+                    chip_h,
+                    theme.f32_alpha(theme.accent, 0.55),
+                    DEPTH,
+                    CHIP_RADIUS * s,
+                    ORDER_CHIP_BG,
+                );
             }
             sugarloaf.rounded_rect(
                 None,
@@ -555,25 +552,21 @@ impl CommandComposer {
             COMPOSER_WRAP_HARD_LIMIT,
         );
         let cursor_line_global = line_for_byte(&wrapped_lines, cursor_byte);
-        let mut visible_line_count = max_input_lines.min(wrapped_lines.len().max(1));
-        let mut first_visible_line = cursor_line_global
-            .saturating_add(1)
-            .saturating_sub(visible_line_count);
-        // Scrolled window: the top chassis row (chevron prompt + run
-        // chip) becomes chrome-only — the prompt hides, text starts
-        // one display slot down, and continuation rows never collide
-        // with the chip. Costs one visible row while scrolled.
+        self.text_line_height = line_step;
+        let (first_visible_line, visible_line_count) = self.text_viewport.layout(
+            wrapped_lines.len(),
+            max_input_lines,
+            cursor_line_global,
+            input_changed,
+        );
+        // While scrolled, the prompt/run slot remains chrome-only.
         let window_at_top = first_visible_line == 0 || max_input_lines <= 1;
         let row_slot_offset: usize = if window_at_top { 0 } else { 1 };
-        if !window_at_top {
-            visible_line_count = max_input_lines.saturating_sub(1).max(1);
-            first_visible_line = cursor_line_global
-                .saturating_add(1)
-                .saturating_sub(visible_line_count);
-        }
         let last_visible_line =
             (first_visible_line + visible_line_count).min(wrapped_lines.len());
         let lines = wrapped_lines[first_visible_line..last_visible_line].to_vec();
+        let cursor_in_view = cursor_line_global >= first_visible_line
+            && cursor_line_global < last_visible_line;
         let cursor_line = cursor_line_global.saturating_sub(first_visible_line);
         if window_at_top {
             if let Some(label) = prompt_label {
@@ -600,7 +593,11 @@ impl CommandComposer {
             .map(|line| line.start)
             .unwrap_or(0)
             .min(cursor_byte);
-        let cursor_before = &raw_text[cursor_line_start..cursor_byte];
+        let cursor_before = if cursor_in_view {
+            &raw_text[cursor_line_start..cursor_byte]
+        } else {
+            ""
+        };
         let cursor_style = style_at(&spans, cursor_byte).unwrap_or(classification.arg);
         let cursor_opts = draw_opts_for_style(
             font_size,
@@ -672,7 +669,7 @@ impl CommandComposer {
             suggestion_x = text_x;
             suggestion_y = body_y;
         }
-        if !suggestion.is_empty() && cursor_byte == raw_text.len() {
+        if cursor_in_view && !suggestion.is_empty() && cursor_byte == raw_text.len() {
             let line = lines.last().copied().unwrap_or(WrappedLine {
                 start: 0,
                 end: 0,
@@ -832,7 +829,9 @@ impl CommandComposer {
         let caret_y = chip_y
             + (chip_h - caret_h) * 0.5
             + (row_slot_offset + cursor_line) as f32 * line_step;
-        let caret_rect = if focused {
+        let caret_rect = if !cursor_in_view {
+            None
+        } else if focused {
             if !trail_cursor_will_paint {
                 let blink_ms = if cursor_blink_interval_ms == 0 {
                     CARET_BLINK_FALLBACK_MS
@@ -1011,6 +1010,12 @@ impl CommandComposer {
         let frame = ComposerFrame {
             chassis_rect: [chassis_x, chassis_y, chassis_w, chassis_inner_h],
             caret_rect,
+            text_viewport_rect: [
+                inner_left,
+                group_top,
+                inner_right - inner_left,
+                row_split,
+            ],
             send_chip_rect: [send_chip_x, chip_y, send_chip_w, chip_h],
         };
         self.last_frame = frame;

@@ -28,7 +28,7 @@ use url::Url;
 const PRESENTATION_INTERVAL: Duration = Duration::from_nanos(33_333_334);
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
 static NEXT_DOCUMENT: AtomicU64 = AtomicU64::new(1);
-const CSP: &str = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'none'; font-src 'none'; media-src 'none'; connect-src 'none'; frame-src 'none'; child-src 'none'; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+const CSP: &str = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; font-src 'none'; media-src 'none'; connect-src 'none'; frame-src 'none'; child-src 'none'; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
 #[derive(Clone)]
 struct Waker(Arc<dyn Fn() + Send + Sync>);
@@ -64,6 +64,13 @@ impl DocumentDelegate {
     }
     fn serve(&self, load: servo::WebResourceLoad) {
         let request = load.request();
+        // Servo draws inline <svg> by serializing it to a data: URL image. data: carries
+        // its bytes in the URL and cannot touch the network, so let it load natively
+        // (dropping the load without intercepting = DoNotIntercept). CSP img-src data:
+        // still gates which elements may use it.
+        if request.url.scheme() == "data" {
+            return;
+        }
         let allowed = request.method == http::Method::GET
             && request.url == self.url
             && request.is_for_main_frame
@@ -171,6 +178,9 @@ impl servo::ServoDelegate for EngineDelegate {
     }
     fn load_web_resource(&self, load: servo::WebResourceLoad) {
         // Worker/unassociated loads must not escape the view-level deny policy.
+        if load.request().url.scheme() == "data" {
+            return;
+        }
         let response = servo::WebResourceResponse::new(load.request().url.clone());
         load.intercept(response).cancel();
     }
@@ -238,6 +248,18 @@ impl Host {
             dom_testing_html_input_element_select_files_enabled: false,
             network_local_directory_listing_enabled: false,
             network_http_cache_disabled: true,
+            // Servo ships modern layout behind off-by-default prefs. Model-authored
+            // pages lean on grid, container queries, color-mix/alpha colors and
+            // variable fonts; without these a grid dashboard collapses to stacked blocks.
+            layout_grid_enabled: true,
+            layout_columns_enabled: true,
+            layout_container_queries_enabled: true,
+            layout_css_alpha_color_function_enabled: true,
+            layout_css_attr_enabled: true,
+            layout_css_progress_function_enabled: true,
+            layout_variable_fonts_enabled: true,
+            layout_writing_mode_enabled: true,
+            dom_offscreen_canvas_enabled: true,
             ..servo::Preferences::default()
         };
         let opts = servo::Opts {

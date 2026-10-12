@@ -11,7 +11,7 @@ impl Application<'_> {
             None => return,
         };
 
-        #[cfg(feature = "servo-artifacts")]
+        #[cfg(feature = "cef-artifacts")]
         if route.window.screen.html_artifact_ime(&ime) {
             route.request_redraw();
             return;

@@ -648,11 +648,11 @@ struct RemoteTerminalCompletion {
 }
 
 pub struct Screen<'screen> {
-    #[cfg(feature = "servo-artifacts")]
+    #[cfg(feature = "cef-artifacts")]
     pub(crate) html_artifacts: Option<bridges::html_artifacts::DesktopHtmlArtifacts>,
-    #[cfg(feature = "servo-artifacts")]
+    #[cfg(feature = "cef-artifacts")]
     html_artifacts_failure: Option<bridges::html_artifacts::ArtifactFailure>,
-    #[cfg(feature = "servo-artifacts")]
+    #[cfg(feature = "cef-artifacts")]
     html_artifact_retry_count: u8,
 
     bindings: crate::bindings::KeyBindings,
@@ -1816,11 +1816,11 @@ impl Screen<'_> {
             last_chrome_layout_signature: None,
             last_active_terminal_route: None,
             welcome_reveal_pending: true,
-            #[cfg(feature = "servo-artifacts")]
+            #[cfg(feature = "cef-artifacts")]
             html_artifacts: None,
-            #[cfg(feature = "servo-artifacts")]
+            #[cfg(feature = "cef-artifacts")]
             html_artifacts_failure: None,
-            #[cfg(feature = "servo-artifacts")]
+            #[cfg(feature = "cef-artifacts")]
             html_artifact_retry_count: 0,
 
             pending_notebook_executions: Vec::new(),

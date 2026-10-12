@@ -1,22 +1,38 @@
-# Experimental interactive HTML artifacts
+# Live interactive HTML artifacts
 
-The first integration targets the native agent chat. A completed fence with the exact `neoism-html` info string reserves a 320-pixel browser viewport (before UI scaling). Ordinary `html` fences remain source code. Markdown-file embedding is not wired yet.
+Native agent chat renders completed `neoism-html` fences as live Chromium pages inline. Ordinary `html` fences remain source code. The CEF worker replaces the desktop's previous Servo worker; the Servo workspace is retained but is no longer built or selected by this feature. Markdown-file embeds and the web frontend are not wired yet.
 
-## Opt-in
+## Build and enable
 
-The experimental integration is parked and **off by default**. Normal main-app/debug builds do not include the Servo host, and both browser packages are excluded from normal workspace builds. All implementation and cached worker artifacts remain available for future work.
+Normal desktop defaults include `cef-artifacts`, which links only the small browser-neutral IPC client, not Chromium. The worker is an independent workspace at `neoism-frontend/cef-runtime` and uses prebuilt CEF binaries. It has its own cached target directory; native debug desktop builds prepare it automatically, while release distributions package it separately.
 
-To resume explicitly, build the desktop with `--features servo-artifacts`, build the independent worker, and launch with `NEOISM_SERVO_ARTIFACTS=1`. The runtime locates `neoism-servo-runtime` beside the desktop executable, through `NEOISM_SERVO_RUNTIME`, or (debug only) in this checkout's `neoism-frontend/servo-runtime/target/debug`. The environment flag alone cannot enable a desktop compiled without the feature.
+For Linux debug builds on a machine with CEF installed, `cargo build -p neoism` also prepares the separate worker automatically, and `./target/debug/neoism` renders artifacts without feature or launch flags. The automatic worker build has its own target directory and reuses cached outputs. Cross-compiles and release packaging remain separate. A missing CEF distribution produces an actionable build warning rather than downloading a large browser silently.
 
-The agent server must inherit `NEOISM_SERVO_ARTIFACTS=1` to include the built-in artifact/CSS-variable instructions in model context. An already-running external server does not acquire a new environment variable from the desktop. The guidance follows the existing system-prompt plugin lifecycle and does not enable browser execution by itself.
+On a new Linux development machine, install the matching prebuilt CEF distribution once:
 
-The worker is an independent workspace at `neoism-frontend/servo-runtime`. This keeps Servo's native FreeType dependency separate from Sugarloaf's font stack. Its compilation check is `cargo check --manifest-path neoism-frontend/servo-runtime/Cargo.toml`; the desktop workspace retains its existing toolchain.
+```sh
+cargo install export-cef-dir --version 154.5.0 --locked
+export-cef-dir "$HOME/.local/share/cef"
+```
 
-This is an experimental, policy-restricted browser host, not an established security boundary. The initial Servo embedding runs in a separate worker process without a verified OS sandbox. Only enable it for HTML you trust. Process separation and network/resource restrictions do not protect against browser-engine vulnerabilities or hostile JavaScript exhausting CPU or memory.
+This downloads Chromium binaries; it does not compile Chromium. The unpacked distribution on this machine is about 1.5GB. Do not use `--force` over an existing install unless replacing it intentionally.
+
+For an explicitly selected CEF distribution:
+
+```sh
+NEOISM_CEF_DIR="$HOME/.local/share/cef" cargo build -p neoism
+./target/debug/neoism
+```
+
+`bash misc/interactive-artifacts/build-cef.sh` can still build just the worker. The debug launcher automatically finds the standard `$HOME/.local/share/cef` install; custom locations use `NEOISM_CEF_DIR` or `CEF_PATH`.
+
+The host locates `neoism-cef-runtime` beside the desktop executable, through `NEOISM_CEF_RUNTIME`, or, in debug builds, in `neoism-frontend/cef-runtime/target/debug`. `NEOISM_CEF_DIR` / `CEF_PATH` supplies separate CEF libraries/resources during development. See the worker README for binary installation and platform prerequisites.
+
+Artifact instructions in the native server context require explicit `NEOISM_HTML_ARTIFACTS=1`; without it, ordinary releases do not advertise an uninstalled worker. `NEOISM_HTML_ARTIFACTS=0` disables instructions and desktop rendering. An already-running external server must be restarted after changing that override. Normal builds with custom `--no-default-features` must explicitly include `--features cef-artifacts`.
+
+The native desktop automatically enables page execution only if its existing worker lookup resolves to a file. This presence check is cached until app restart and does not verify launchability or sandbox readiness. `NEOISM_HTML_ARTIFACTS=1` forces an attempt, retaining unavailable-worker diagnostics and fresh worker lookup on edit-to-retry; `=0` turns execution off. The default facade remains enabled, but the separately installed Linux-only worker is not packaged in ordinary platform releases; cross-platform runtime support is not complete. The worker requests Chromium sandboxing unless a development-only override disables it; failures must not silently downgrade security. Process separation, CSP and navigation restrictions are not an audited security boundary. Only enable content you trust until containment is verified.
 
 ## Chat syntax
-
-A completed assistant-message block can contain a self-contained HTML document:
 
 ````markdown
 ```neoism-html
@@ -36,64 +52,36 @@ button.addEventListener('click', () => {
 ```
 ````
 
-Incomplete streaming fences remain inert code until their matching closing fence arrives, show at most 14 source lines, and reserve the same fixed-height slot as the final preview. The source is retained. Rendered previews have no extra header; the copy-source action is available inside the unavailable fallback only.
+Incomplete streaming fences remain inert until the closing fence arrives and display a skeleton instead of HTML source. Completed previews have no extra browser window, browser chrome or forced panel backdrop. They are actual browser documents, not screenshot attachments or CDP screencasts. The initial skeleton is 160 CSS pixels high; the host then fits the surface to its measured content, bounded to 32-640 CSS pixels (and the raster allocation limit). Taller documents scroll internally. Default body margins and backgrounds are zero/transparent; authored styling is preserved.
 
-## Theme compatibility
+Outer corners use an antialiased transparency mask, revealing the surrounding chat rather than painting an extra border or card. Rounded hit testing uses the same full-surface geometry, never the temporary scroll slice.
 
-Artifacts should use the selected app theme's CSS variables instead of hardcoded colors. The host supplies the actual palette, including custom theme and chat-style overrides, and updates it without reloading the document. Color variables contain complete CSS colors, so use `var(--background)` directly rather than wrapping it in `hsl(...)`. CSS-based content follows the variables automatically; JavaScript-rendered charts should re-read computed values when `neoism-theme-changed` fires on `window`.
+For design alternatives, emit several labeled completed fences. Each becomes an independent live page. A dedicated variants picker and model-side screenshot/console preview tool are not implemented by the engine swap.
 
-Use `--background` and `--foreground` for the page, `--card` and `--card-foreground` for surfaces, `--muted` and `--muted-foreground` for secondary content, `--border` and `--input` for boundaries, and `--primary`/`--primary-foreground` or `--accent`/`--accent-foreground` for emphasis. Status colors are `--success`, `--warning`, `--destructive`, `--destructive-foreground` and `--info`; chart series use `--chart-1` through `--chart-6`. Typography and rounding use `--font-sans`, `--font-mono` and `--radius`.
+## Theme and layout
 
-```css
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: var(--font-sans);
-}
-.chart-series { fill: var(--chart-1); }
-```
+The host supplies 42 validated CSS variables based on the selected app theme, including custom chat style overrides. Colors are complete CSS colors: use `var(--foreground)`, not `hsl(var(--foreground))`. `--accent` now means the brand accent rather than a gray hover surface. `--font-sans` uses the selected chat family or a sans-serif fallback, not the terminal font by default.
 
-```javascript
-function redrawChart() {
-  const style = getComputedStyle(document.documentElement);
-  const seriesColor = style.getPropertyValue('--chart-1').trim();
-  // Redraw canvas/chart-library content with seriesColor.
-}
-window.addEventListener('neoism-theme-changed', redrawChart);
-```
+Page colors: `--background`, `--foreground`. Surfaces: `--card`, `--card-foreground`, `--popover`, `--popover-foreground`, `--secondary`, `--secondary-foreground`. Muted/boundaries: `--muted`, `--muted-foreground`, `--border`, `--input`, `--ring`. Emphasis: `--primary`, `--primary-foreground`, `--accent`, `--accent-foreground`, `--accent-surface`, `--accent-surface-foreground`. Status: `--success`, `--success-foreground`, `--success-surface`, `--warning`, `--warning-foreground`, `--warning-surface`, `--destructive`, `--destructive-foreground`, `--destructive-surface`, `--info`, `--info-foreground`, `--info-surface`. Code: `--code-background`, `--code-foreground`. Charts: `--chart-1` through `--chart-6`. Typography/rounding: `--font-sans`, `--font-mono`, `--radius`.
 
-The theme channel changes presentation only. It does not grant access to filesystem, credentials, agent tools or the daemon. Theme updates must preserve form values, chart zoom and other JavaScript state. Font variables carry selected family names, not font binaries: the family must be available to the worker, and bundled/custom-font parity still needs runtime validation.
+Theme changes update the live document without reloading it. For canvas/chart-library rendering, re-read computed variables and redraw on `neoism-theme-changed`, preserving form values, selection, filters and zoom. The theme channel is presentation-only and does not expose filesystem, credentials, agent tools or the daemon.
 
-## Smoke test
-
-`smoke-test.html` is self-contained and uses no external resources. Its contents are intended for a completed `neoism-html` assistant-message fence. This fixture does not itself publish an artifact or enable arbitrary HTML-file previews.
-
-Check that button clicks increment the count, typing stays out of the composer, animation runs without pointer movement, and the select popup behaves correctly. Resize the pane and confirm the click count survives. Scroll the chat and verify clipping and hit targets agree. Click outside the artifact and confirm normal chat input resumes. Test non-ASCII input and IME separately; basic text input is not proof of complete composition support. Switch sessions and close the pane to check lifecycle cleanup.
+Use a fluid layout. Avoid an outer card, border or banner title unless the user explicitly wants a full-screen mockup. Give inset panels padding and rounded corners. Keep charts at fixed pixel heights and avoid `100vh` / `height:100%` on the root. Exact remote asset restrictions are documented in the worker README.
 
 ## Architecture
 
-Shared Rust code owns block parsing, fixed layout, clipping and artifact requests. The desktop host owns Servo instances and input. Servo paints into owned RGBA frames; Sugarloaf's existing image-overlay path composites those frames into the native interface. The initial CPU frame transport avoids requiring a new wgpu version or forcing the desktop onto the wgpu backend. Accelerated transport can replace frame delivery later without changing the chat block contract.
+Shared Rust code owns fence parsing, timeline layout, clipping and artifact requests. The desktop owns focus, input forwarding and a nonblocking IPC host. The separate CEF worker owns Chromium documents. CEF's off-screen paint callback supplies premultiplied BGRA; the worker converts it to RGBA for the existing Sugarloaf image-overlay path. No browser engine or conflicting native dependency graph is linked into the desktop.
 
-The initial resource policy uses synthetic document origins, denies external resource requests and privileged application access, and does not expose a general tool/daemon bridge. These restrictions must remain separate from any future OS sandbox work.
-
-## Performance
-
-Continuously animated artifacts publish at most 30 frames per second. Static input changes remain event-driven rather than waiting for an animation interval. Logically hidden documents are throttled inside Servo while their dedicated compositor scenes remain intact, preserving state without recreating the white-frame scroll regression.
-
-The real-worker llvmpipe benchmark reduced publication from 122.66 to 26.67 FPS, visible CPU time from 3.09 to 1.79 seconds over a 1.5-second sample, and hidden CPU time from 0.23 to 0.02 seconds over a 1.2-second sample. Static input stayed within roughly 16-27 milliseconds. These are controlled worker measurements, not a whole-app benchmark.
-
-Desktop presentation is frame-driven: accepted frames share a pending notification, unchanged status and successful control writes do not wake the GUI, and static previews do not own continuous window animation. Opaque rows copy without channel division, and externally revisioned stream handles do not hash full pixel buffers. Static assets retain their content-derived identity.
-
-Native Vulkan updates reuse same-sized image, descriptor and staging resources. Transfers are still synchronous; fully frame-integrated asynchronous uploads remain further work. Ordinary static images do not retain a staging allocation after their first upload.
+Requests and frame delivery are bounded and generation-checked. Latest-frame mailboxes coalesce notifications, rejecting stale, hidden and destroyed views. Same-source geometry/theme changes preserve browser state. Static previews do not keep the desktop in a continuous redraw loop. CPU pixel transport is the initial path; accelerated texture delivery can be added without changing the chat block contract.
 
 ## Verification
 
-The debug desktop and actual worker are built. The real-worker harness at `neoism-frontend/servo-runtime/tests/live_worker.py` passes on the default Mesa adapter and forced llvmpipe: actual RGBA pixels, button clicks, text input, autonomous animation, theme/resize state retention, waking from static idle, zero local-network requests, protocol-safe stdout and clean shutdown. The user also confirmed that the preview renders in Neoism. This does not replace validation of the surrounding timeline, scrolling, focus and platform-specific input.
+The facade's 27 unit tests, 17 desktop bridge tests, 12 shared artifact tests and conditional model-guidance test pass. `cargo check -p neoism --features cef-artifacts` and the debug desktop build also pass. The prior standalone CEF feasibility spike exercised live 60fps animation, real mouse click handling and Chromium rendering of grid/SVG/gradients. These spike timings are not a whole-app benchmark. The integrated worker additionally passes six unit tests and the full sandbox-default live regression: native select dropdowns, dragging, keyboard shortcuts, stale-frame checks, theme/resize preservation, and clean shutdown. The host launches it without any CEF or artifact environment flags, and the opt-in online regression confirms pinned Chart.js loads and executes from jsDelivr. Actual whole-GUI latency and cross-platform behavior are not established by these tests.
 
-The default shared/desktop build and `cargo check -p neoism --features servo-artifacts` pass. Focused tests pass: twelve artifact-filtered shared tests, thirty-four shared timeline tests, twenty IPC/theme/host contract tests, ten desktop geometry/frame/lifecycle/theme tests, and one conditional agent-guidance test. The fixture's click, input, animation and state-preserving theme-update JavaScript handlers also pass a lightweight Node check.
+The manual UI fixture is `smoke-test.html`. Check real button clicks, typing without composer leakage, autonomous animation, select menus, state-preserving resize/theme updates, clipping while scrolling the chat, focus returning to the composer, and session/window cleanup. Test non-ASCII input and IME separately: ordinary text input does not prove complete composition support.
 
-The broader shared test command currently encounters an unrelated `PanelContext` initializer missing `plugins` in `shared/tests/file_tree.rs`; the artifact tests were run with `--lib` to avoid compiling that integration test.
+Release bundles must retain the upstream CEF/Chromium license files and third-party notices with the distributed browser libraries.
 
-## Not yet release-ready
+## Remaining shipping work
 
-The independent engine worker passes `cargo check --locked --all-targets` on Rust 1.92, three isolated theme-script contract tests, and the actual rendering/input harness on Mesa and llvmpipe. Cross-platform behavior, native IME candidate/selection feedback, native controls/popups, bundled-font parity and an effective OS sandbox remain unverified or unsupported. Automatic height, durable publication/preview tools, Markdown-file embeds and accelerated texture transport are subsequent integration work. The experimental opt-in remains required.
+Durable render/preview tools, a dedicated variants selection UI, download-on-first-use packaging, cross-platform validation, native IME candidate placement and verified sandbox containment remain separate work. The engine replacement does not claim those are finished.

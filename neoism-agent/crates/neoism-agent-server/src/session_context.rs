@@ -1397,6 +1397,12 @@ fn message_id(message: &MessageWithParts) -> String {
     }
 }
 
+// The server can run remotely and cannot infer the client's worker capability.
+// Until capability negotiation exists, only explicit opt-in advertises HTML.
+fn html_artifact_guidance_enabled(flag: Option<&str>) -> bool {
+    flag == Some("1")
+}
+
 fn plugin_system_messages(
     plugins: &neoism_agent_plugin_api::RegistrySnapshot,
     info: &SessionInfo,
@@ -1439,7 +1445,9 @@ fn plugin_system_messages(
         ("instructions".to_string(), serde_json::json!(instructions)),
         (
             "htmlArtifactsEnabled".to_string(),
-            Value::Bool(std::env::var("NEOISM_SERVO_ARTIFACTS").as_deref() == Ok("1")),
+            Value::Bool(html_artifact_guidance_enabled(
+                std::env::var("NEOISM_HTML_ARTIFACTS").ok().as_deref(),
+            )),
         ),
         (
             "serviceFragments".to_string(),
@@ -1500,6 +1508,14 @@ fn plugin_run_system_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn html_artifact_guidance_requires_explicit_opt_in() {
+        for flag in [None, Some("0"), Some(""), Some("true"), Some("2")] {
+            assert!(!html_artifact_guidance_enabled(flag));
+        }
+        assert!(html_artifact_guidance_enabled(Some("1")));
+    }
 
     #[tokio::test]
     async fn compaction_reasoning_streams_separately_and_survives_completion_or_abort() {

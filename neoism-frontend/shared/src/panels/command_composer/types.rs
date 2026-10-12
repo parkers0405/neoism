@@ -80,6 +80,8 @@ pub struct ComposerFrame {
     #[allow(dead_code)]
     pub chassis_rect: [f32; 4],
     pub caret_rect: Option<[f32; 4]>,
+    /// Painted text band, in host logical pixels; owns wheel input at edges too.
+    pub text_viewport_rect: [f32; 4],
     /// Send chip rect — reserved for upcoming hit-test work
     /// (clicking the chip to submit the buffered command).
     #[allow(dead_code)]

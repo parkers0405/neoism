@@ -28,6 +28,7 @@ mod render;
 mod scrollbar;
 mod shell_badge;
 mod state;
+mod text_viewport;
 mod types;
 mod update;
 mod util;

@@ -1,0 +1,20 @@
+[package]
+name = "neoism-cef-runtime"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+license = "MIT"
+publish = false
+description = "Standalone Chromium (CEF) worker for Neoism live HTML artifacts"
+
+# Independent workspace: CEF links its own native libs and must not touch the
+# desktop dependency graph. Talks to the host over the artifact IPC protocol.
+[workspace]
+resolver = "3"
+
+[dependencies]
+neoism-interactive-artifacts = { path = "../interactive-artifacts", features = ["ipc"] }
+cef = { version = "154.5.0", default-features = false }
+filedescriptor = "0.8"
+serde = "1.0"
+serde_json = "1.0"

@@ -1,6 +1,38 @@
 use super::*;
 
 #[test]
+fn input_wheel_scrolls_draft_without_changing_text_or_cursor() {
+    let mut pane = NeoismAgentPane::default();
+    let draft = (0..12)
+        .map(|row| format!("line {row}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    pane.input = draft.clone();
+    pane.cursor_byte = draft.len();
+    let rect = [10.0, 20.0, 200.0, 110.0];
+    pane.input_viewport_mut()
+        .update(&draft, draft.len(), 11, 12, 5, rect, 22.0);
+    assert!(pane.scroll_input_at(40.0, 40.0, 66.0));
+    assert_eq!(pane.input, draft);
+    assert_eq!(pane.cursor_byte, draft.len());
+    assert_eq!(
+        pane.input_viewport_mut()
+            .update(&draft, draft.len(), 11, 12, 5, rect, 22.0),
+        4
+    );
+    // A prompt picker covering the draft owns the gesture, without scrolling it.
+    pane.set_prompt_picker_rect(Some(rect));
+    assert!(pane.scroll_input_at(40.0, 40.0, 66.0));
+    assert_eq!(
+        pane.input_viewport_mut()
+            .update(&draft, draft.len(), 11, 12, 5, rect, 22.0),
+        4
+    );
+    pane.set_prompt_picker_rect(None);
+    assert!(!pane.scroll_input_at(40.0, 150.0, 66.0));
+}
+
+#[test]
 fn running_tool_animation_is_owned_only_by_the_last_visible_paint() {
     use crate::panels::agent_pane::view::{
         timeline::AgentTimelinePane, tool_message::AgentToolPane,
@@ -6720,7 +6752,7 @@ fn tool_expansion_view_test_pane(id: &str, row_top: f32) -> NeoismAgentPane {
         pages: Vec::new(),
         rows: vec![TimelineLayoutRow {
             source_index: 0,
-            source_end_index: pane.messages.len(),
+            source_end_index: pane.messages.len() - 1,
             top: row_top,
             height: 30.0,
             display_text: None,
@@ -6733,6 +6765,30 @@ fn tool_expansion_view_test_pane(id: &str, row_top: f32) -> NeoismAgentPane {
     let header_y = (100.0 + row_top - 600.0).max(100.0);
     pane.register_tool_hit_rect(id.into(), [0.0, header_y, 300.0, 20.0]);
     pane
+}
+
+#[test]
+fn tool_expansion_clipped_single_source_uses_logical_row_origin() {
+    let mut pane = tool_expansion_view_test_pane("open-read", 590.0);
+    assert!(pane.toggle_tool_at(10.0, 105.0));
+    let screen_offset = pane.timeline_view_anchor.as_ref().unwrap().screen_offset;
+    // The hit rectangle starts at the viewport edge, but the row starts above it.
+    assert_eq!(screen_offset, -10.0);
+    assert!(pane.tool_expand_animating("open-read"));
+    pane.set_timeline_metrics([0.0, 100.0, 400.0, 300.0], 940.0, 300.0);
+    pane.restore_timeline_view_anchor(590.0, screen_offset);
+    assert_eq!(pane.max_timeline_scroll() - pane.timeline_scroll_offset(), 600.0);
+}
+
+#[test]
+fn tool_expansion_grouped_last_source_uses_logical_row_origin() {
+    let mut pane = tool_expansion_view_test_pane("open-read..", 590.0);
+    pane.clear_tool_hit_rects();
+    // Exercise a hit attributed to the last source covered by the grouped row.
+    pane.register_tool_hit_rect("open-read-2".into(), [0.0, 100.0, 300.0, 20.0]);
+    assert!(pane.toggle_tool_at(10.0, 105.0));
+    assert_eq!(pane.timeline_view_anchor.as_ref().unwrap().screen_offset, -10.0);
+    assert!(pane.tool_expand_animating("open-read-2"));
 }
 
 #[test]

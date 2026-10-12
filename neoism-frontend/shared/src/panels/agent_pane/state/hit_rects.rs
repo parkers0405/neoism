@@ -553,7 +553,7 @@ impl NeoismAgentPane {
             ) {
                 let row_top = self.timeline_layout_cache.borrow().as_ref().and_then(|cache| {
                     cache.rows.iter().find(|row| {
-                        row.source_index <= index && index < row.source_end_index
+                        row.source_index <= index && index <= row.source_end_index
                     }).map(|row| row.top)
                 });
                 // A clipped hit rectangle is not the logical row origin.

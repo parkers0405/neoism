@@ -118,7 +118,7 @@ impl Application<'_> {
             "keyboard input received"
         );
 
-        #[cfg(feature = "servo-artifacts")]
+        #[cfg(feature = "cef-artifacts")]
         if key_event.state == ElementState::Released
             && route.window.screen.html_artifact_key(&key_event)
         {

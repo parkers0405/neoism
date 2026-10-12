@@ -18,6 +18,16 @@ use crate::input::InputBuffer;
 use crate::primitives::IdeTheme;
 
 impl CommandComposer {
+    pub(super) fn observe_input(&mut self, text: &str, cursor: usize) -> bool {
+        if text == self.last_text && cursor == self.last_cursor_byte {
+            return false;
+        }
+        self.last_text.clear();
+        self.last_text.push_str(text);
+        self.last_cursor_byte = cursor;
+        true
+    }
+
     pub fn set_scale(&mut self, scale: f32) {
         self.scale = scale.clamp(SCALE_MIN, SCALE_MAX);
     }
@@ -168,6 +178,36 @@ impl CommandComposer {
             text,
         ) as f32
             * cell_height_logical
+    }
+
+    /// Route wheel input by the last painted text band. Positive pixels go down.
+    /// Return ownership, including short drafts and either bounded edge.
+    pub fn scroll_text_at(&mut self, x: f32, y: f32, pixels: f32) -> bool {
+        let [left, top, width, height] = self.last_frame.text_viewport_rect;
+        if !self.visible
+            || !pixels.is_finite()
+            || pixels == 0.0
+            || width <= 0.0
+            || height <= 0.0
+            || x < left
+            || x >= left + width
+            || y < top
+            || y >= top + height
+            || !x.is_finite()
+            || !y.is_finite()
+        {
+            return false;
+        }
+        let [chip_x, chip_y, chip_w, chip_h] = self.last_frame.send_chip_rect;
+        if x >= chip_x && x < chip_x + chip_w && y >= chip_y && y < chip_y + chip_h {
+            return false;
+        }
+        self.text_viewport.scroll(pixels, self.text_line_height);
+        true
+    }
+
+    pub fn text_line_height(&self) -> f32 {
+        self.text_line_height.max(1.0)
     }
 
     pub fn last_frame(&self) -> ComposerFrame {
@@ -350,5 +390,43 @@ impl CommandComposer {
         self.completion_cursor_spring
             .update(dt, COMPLETION_CURSOR_ANIMATION_LENGTH);
         self.completion_cursor_spring.position
+    }
+}
+
+#[cfg(test)]
+mod text_scroll_tests {
+    use super::*;
+
+    #[test]
+    fn same_length_edits_and_cursor_changes_restore_caret_view() {
+        let mut composer = CommandComposer::new();
+        assert!(composer.observe_input("old draft", 9));
+        composer.text_viewport.layout(30, 10, 29, true);
+        composer.text_viewport.scroll(-100.0, 10.0);
+        assert!(!composer.observe_input("old draft", 9));
+        assert!(composer.observe_input("new draft", 9));
+        assert_eq!(composer.text_viewport.layout(30, 10, 29, true), (21, 9));
+        assert!(composer.observe_input("new draft", 0));
+        assert_eq!(composer.text_viewport.layout(30, 10, 0, true), (0, 10));
+    }
+
+    #[test]
+    fn wheel_hit_test_uses_text_band_and_consumes_bounded_edges() {
+        let mut composer = CommandComposer::new();
+        composer.last_frame.text_viewport_rect = [20.0, 40.0, 100.0, 50.0];
+        composer.text_line_height = 10.0;
+        composer.text_viewport.layout(20, 5, 0, true);
+        assert!(!composer.scroll_text_at(19.0, 50.0, 10.0));
+        assert!(!composer.scroll_text_at(30.0, 90.0, 10.0));
+        assert!(!composer.scroll_text_at(f32::NAN, 50.0, 10.0));
+        assert!(!composer.scroll_text_at(30.0, 50.0, 0.0));
+        assert!(!composer.scroll_text_at(30.0, 50.0, f32::NAN));
+        assert!(composer.scroll_text_at(20.0, 40.0, -100.0));
+        assert_eq!(composer.text_viewport.first, 0);
+        assert!(composer.scroll_text_at(30.0, 50.0, 1000.0));
+        assert_eq!(composer.text_viewport.first, 16);
+        assert!(composer.scroll_text_at(30.0, 50.0, 1000.0));
+        composer.set_visible(false);
+        assert!(!composer.scroll_text_at(30.0, 50.0, -10.0));
     }
 }

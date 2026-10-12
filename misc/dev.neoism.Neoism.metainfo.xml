@@ -52,6 +52,12 @@
   </categories>
 
   <releases>
+    <release version="0.7.125" date="2026-10-12">
+      <description>
+        <p>Improves Agent timeline stability, multiline composer scrolling, Anthropic reasoning and tool media, and browser-artifact integration.</p>
+      </description>
+      <url>https://github.com/parkers0405/neoism/releases/tag/v0.7.125</url>
+    </release>
     <release version="0.7.124" date="2026-10-10">
       <description>
         <p>Fixes Windows MSI major upgrades and adds readable service-and-tool timeline titles. Credits contributor Logan Settle.</p>

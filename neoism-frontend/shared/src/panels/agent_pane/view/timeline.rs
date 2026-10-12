@@ -65,13 +65,10 @@ pub struct TimelineLayoutCache<M> {
     pub rows: Vec<TimelineLayoutRow<M>>,
     /// Lazy (viewport-only) measurement bookkeeping: the number of leading
     /// rows whose heights are cheap *estimates* rather than exact measurements
-    /// (rows `[0..estimated_prefix_rows]`). Always 0 on the eager path. Because
-    /// scroll is distance-from-bottom, an estimated prefix shifts every row's
-    /// `top` and `content_height` by the same cumulative error, which cancels
-    /// in `card_y = y + row.top - scroll_top` — so visible (exact-suffix) rows
-    /// stay put; only the scrollbar thumb is approximate. See the reuse check
-    /// in `timeline_layout` which rebuilds before an estimated row can scroll
-    /// into the viewport.
+    /// (rows `[0..estimated_prefix_rows]`). Always 0 on the eager path. A
+    /// rebuild locates the exact window by the reader's logical anchor, not by
+    /// reusing a bottom-distance from differently measured geometry. Anchor
+    /// restoration keeps the exact visible rows stationary as estimates change.
     pub estimated_prefix_rows: usize,
     /// First row after the exact-measured window (`rows.len()` when the
     /// suffix is fully exact). Rows `[estimated_prefix_rows..estimated_suffix_start]`
@@ -331,6 +328,7 @@ pub trait AgentTimelinePane: AgentMarkdownPane {
         viewport_rect: [f32; 4],
         content_height_px: f32,
         viewport_height_px: f32,
+        live_growth_px: f32,
     );
     fn sync_virtual_timeline(
         &mut self,
@@ -674,12 +672,14 @@ macro_rules! neoism_ui_impl_agent_timeline_pane {
                 viewport_rect: [f32; 4],
                 content_height_px: f32,
                 viewport_height_px: f32,
+                live_growth_px: f32,
             ) {
-                <$pane>::set_timeline_metrics(
+                <$pane>::set_timeline_metrics_with_live_growth(
                     self,
                     viewport_rect,
                     content_height_px,
                     viewport_height_px,
+                    Some(live_growth_px),
                 );
             }
 

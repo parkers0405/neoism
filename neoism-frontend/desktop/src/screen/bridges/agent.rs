@@ -851,7 +851,7 @@ impl Screen<'_> {
             agent_animating |= animation_reason.is_some();
             agent_animating_reason = agent_animating_reason.or(animation_reason);
         }
-        #[cfg(feature = "servo-artifacts")]
+        #[cfg(feature = "cef-artifacts")]
         {
             if self.sync_html_artifacts() {
                 // Projection precedes mailbox sync. Schedule exactly one paced

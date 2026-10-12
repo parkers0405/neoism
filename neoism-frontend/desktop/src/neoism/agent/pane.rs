@@ -989,10 +989,17 @@ pub struct NeoismAgentPane {
     /// options, kept so semantic hits can be merged in without refetching.
     pub(crate) session_picker_base: Vec<NeoismAgentPickerOption>,
     cursor_rect: Option<[f32; 4]>,
-    #[cfg(feature = "servo-artifacts")]
+    #[cfg(feature = "cef-artifacts")]
     pub(crate) html_artifact_requests:
         Vec<neoism_ui::panels::agent_pane::view::markdown::HtmlArtifactRequest>,
-    #[cfg(feature = "servo-artifacts")]
+    #[cfg(feature = "cef-artifacts")]
+    pub(crate) html_artifact_layouts: std::collections::HashMap<
+        String,
+        neoism_ui::panels::agent_pane::view::markdown::HtmlArtifactLayout,
+    >,
+    #[cfg(feature = "cef-artifacts")]
+    pub(crate) html_artifact_failed: bool,
+    #[cfg(feature = "cef-artifacts")]
     pub(crate) html_artifact_frames: std::collections::HashMap<
         String,
         neoism_ui::panels::agent_pane::view::markdown::HtmlArtifactFrame,
@@ -1017,6 +1024,7 @@ pub struct NeoismAgentPane {
     /// `input_wrap_len` guards against a frame of staleness after the
     /// text changes.
     input_wrap_rows: Vec<neoism_ui::panels::agent_pane::input_controller::InputWrapRow>,
+    input_viewport: neoism_ui::panels::agent_pane::input_viewport::InputViewport,
     input_wrap_len: usize,
     /// Sticky caret x carried between consecutive Up/Down presses so a
     /// run of vertical moves keeps aiming at the column it started in.
@@ -1319,9 +1327,13 @@ impl Default for NeoismAgentPane {
             semantic_unavailable: false,
             session_picker_base: Vec::new(),
             cursor_rect: None,
-            #[cfg(feature = "servo-artifacts")]
+            #[cfg(feature = "cef-artifacts")]
             html_artifact_requests: Vec::new(),
-            #[cfg(feature = "servo-artifacts")]
+            #[cfg(feature = "cef-artifacts")]
+            html_artifact_layouts: std::collections::HashMap::new(),
+            #[cfg(feature = "cef-artifacts")]
+            html_artifact_failed: false,
+            #[cfg(feature = "cef-artifacts")]
             html_artifact_frames: std::collections::HashMap::new(),
 
             fx_requested: None,
@@ -1331,6 +1343,8 @@ impl Default for NeoismAgentPane {
             particle_bursts: Vec::new(),
             cursor_byte: 0,
             input_wrap_rows: Vec::new(),
+            input_viewport:
+                neoism_ui::panels::agent_pane::input_viewport::InputViewport::default(),
             input_wrap_len: 0,
             input_goal_x: None,
             input_attachments: Vec::new(),

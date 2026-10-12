@@ -868,6 +868,13 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                 }
             }
 
+            if key == PanelKey::CommandComposer {
+                if let UiEvent::Wheel { dy, mode, .. } = event {
+                    if self.scroll_command_composer_at(wheel_px, wheel_py, *dy, *mode) {
+                        return;
+                    }
+                }
+            }
             let top_bar_menu_was_open =
                 key == PanelKey::TopBar && self.top_bar.is_menu_open();
             self.dispatch_to(key, event, &mut ctx);
@@ -1586,6 +1593,21 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         false
     }
 
+    fn scroll_command_composer_at(&mut self, x: f32, y: f32, dy: f32, mode: WheelMode) -> bool {
+        let Some(rect) = self.layout.command_composer else {
+            return false;
+        };
+        if !rect.contains(x, y) {
+            return false;
+        }
+        let pixels = match mode {
+            WheelMode::Pixel => dy,
+            WheelMode::Line => dy * self.command_composer.text_line_height(),
+            WheelMode::Page => dy * rect.h,
+        };
+        self.command_composer.scroll_text_at(x, y, pixels)
+    }
+
     /// Position-owned wheel routing used by canvas hosts before dispatching
     /// to the active editor/agent/terminal surface. Returning `true` means the
     /// chrome region owns the event, not merely that its bounded offset moved.
@@ -1614,6 +1636,9 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             return true;
         }
 
+        if self.scroll_command_composer_at(x, y, dy, mode) {
+            return true;
+        }
         let tabs = self.layout.buffer_tabs;
         let horizontal = dx.abs() > 0.5 || (shift && dy.abs() > 0.5);
         if horizontal && tabs.contains(x, y) {

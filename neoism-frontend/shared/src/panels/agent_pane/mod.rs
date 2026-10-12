@@ -13,6 +13,7 @@ pub mod bridge_policy;
 pub mod command_controller;
 pub mod icon;
 pub mod input_controller;
+pub mod input_viewport;
 pub mod interaction_policy;
 pub mod message_policy;
 pub mod outbound;

@@ -67,7 +67,7 @@ impl Application<'_> {
             return;
         }
 
-        #[cfg(feature = "servo-artifacts")]
+        #[cfg(feature = "cef-artifacts")]
         if route.window.screen.html_artifact_wheel(&delta) {
             route.request_redraw();
             return;
@@ -105,6 +105,12 @@ impl Application<'_> {
         // Wheel over a `.neodraw` canvas pans/zooms it instead of
         // scrolling the terminal/editor beneath.
         if route.window.screen.handle_draw_wheel(&delta) {
+            route.request_redraw();
+            return;
+        }
+
+        // The composer's painted viewport owns wheel input, even at its edges.
+        if route.window.screen.handle_command_composer_wheel(&delta) {
             route.request_redraw();
             return;
         }

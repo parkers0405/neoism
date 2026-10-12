@@ -636,6 +636,7 @@ pub struct NeoismAgentPane {
     /// `input_wrap_len` guards against a frame of staleness after the
     /// text changes.
     input_wrap_rows: Vec<InputWrapRow>,
+    input_viewport: super::input_viewport::InputViewport,
     input_wrap_len: usize,
     /// Sticky caret x carried between consecutive Up/Down presses so a
     /// run of vertical moves keeps aiming at the column it started in
@@ -1035,6 +1036,7 @@ impl Default for NeoismAgentPane {
             cursor_rect: None,
             cursor_byte: 0,
             input_wrap_rows: Vec::new(),
+            input_viewport: super::input_viewport::InputViewport::default(),
             input_wrap_len: 0,
             input_goal_x: None,
             input_attachments: Vec::new(),

@@ -1,10 +1,10 @@
-//! Versioned, length-bounded pipe protocol shared with the standalone Servo worker.
+//! Versioned, length-bounded pipe protocol shared with standalone browser workers.
 //! JSON controls/metadata followed by binary RGBA packets. No GPU handles or host bridge.
 use crate::{ArtifactDocument, ArtifactInput, Viewport, MAX_FRAME_BYTES};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::io::{self, Read, Write};
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 pub const MAX_JSON_BYTES: usize = 32 * 1024 * 1024;
 const JSON: u32 = 1;
 const RGBA: u32 = 2;
@@ -72,6 +72,12 @@ pub enum Output {
         version: u32,
     },
     Frame(FrameMetadata),
+    ContentHeight {
+        key: String,
+        generation: u64,
+        revision: u64,
+        height: f32,
+    },
     Status {
         animating: bool,
         diagnostics: Vec<String>,

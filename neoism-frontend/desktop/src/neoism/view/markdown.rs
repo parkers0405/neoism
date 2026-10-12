@@ -17,25 +17,54 @@ impl AgentMarkdownPane for NeoismAgentPane {
         Some(&mut self.text_reveal)
     }
 
-    #[cfg(feature = "servo-artifacts")]
+    #[cfg(feature = "cef-artifacts")]
+    fn html_artifact_height(
+        &self,
+        key: &str,
+        source: &str,
+        width: f32,
+        scale: f32,
+    ) -> Option<f32> {
+        let session = self.session_id_str().unwrap_or("draft");
+        let source_key = format!("{}:{}:{key}", session.len(), session);
+        let layout = self.html_artifact_layouts.get(&source_key)?;
+        layout
+            .matches(source, width, scale)
+            .then_some(layout.height)
+    }
+    #[cfg(feature = "cef-artifacts")]
+    fn html_artifact_status(
+        &self,
+        _key: &str,
+    ) -> neoism_ui::panels::agent_pane::view::markdown::HtmlArtifactStatus {
+        use neoism_ui::panels::agent_pane::view::markdown::HtmlArtifactStatus;
+        if std::env::var("NEOISM_HTML_ARTIFACTS").as_deref() == Ok("0") {
+            HtmlArtifactStatus::Disabled
+        } else if self.html_artifact_failed {
+            HtmlArtifactStatus::Failed
+        } else {
+            HtmlArtifactStatus::Pending
+        }
+    }
+    #[cfg(feature = "cef-artifacts")]
     fn cached_html_artifact_frame(
         &self,
         key: &str,
     ) -> Option<neoism_ui::panels::agent_pane::view::markdown::HtmlArtifactFrame> {
-        if std::env::var("NEOISM_SERVO_ARTIFACTS").as_deref() != Ok("1") {
+        if std::env::var("NEOISM_HTML_ARTIFACTS").as_deref() == Ok("0") {
             return None;
         }
         let session = self.session_id_str().unwrap_or("draft");
         let source_key = format!("{}:{}:{key}", session.len(), session);
         self.html_artifact_frames.get(&source_key).copied()
     }
-    #[cfg(feature = "servo-artifacts")]
+    #[cfg(feature = "cef-artifacts")]
     fn html_artifact_frame(
         &mut self,
         request: neoism_ui::panels::agent_pane::view::markdown::HtmlArtifactRequest,
     ) -> Option<neoism_ui::panels::agent_pane::view::markdown::HtmlArtifactFrame> {
-        // Never instantiate an unsandboxed engine just because a model emitted HTML.
-        if std::env::var("NEOISM_SERVO_ARTIFACTS").as_deref() != Ok("1") {
+        // Explicit opt-out never launches a browser just because HTML arrived.
+        if std::env::var("NEOISM_HTML_ARTIFACTS").as_deref() == Ok("0") {
             return None;
         }
         if self.html_artifact_requests.len() >= 8 {

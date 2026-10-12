@@ -175,7 +175,40 @@ impl Screen<'_> {
                 }
             }
         };
-        if let Some(agent) = self.context_manager.current_mut().neoism_agent.as_mut() {
+        let input_occluded = self.renderer.modal.is_active()
+            || self
+                .renderer
+                .context_menu
+                .rect()
+                .is_some_and(|rect| Self::rect_contains(rect, mouse_x, mouse_y))
+            || (self.renderer.diagnostics_popup.is_visible()
+                && self
+                    .renderer
+                    .diagnostics_popup
+                    .contains_point(mouse_x, mouse_y))
+            || self
+                .renderer
+                .finder
+                .active_rect((size.width as f32, size.height as f32, scale_factor))
+                .is_some_and(|rect| Self::rect_contains(rect, mouse_x, mouse_y))
+            || self
+                .renderer
+                .command_palette
+                .active_rect(size.width as f32, scale_factor)
+                .is_some_and(|rect| Self::rect_contains(rect, mouse_x, mouse_y));
+        // Overlays route before the host's normal hovered-split selection.
+        let hovered_node = {
+            let grid = self.context_manager.current_grid();
+            grid.find_context_at_position(self.mouse.x as f32, self.mouse.y as f32)
+                .unwrap_or(grid.current)
+        };
+        if let Some(agent) = self
+            .context_manager
+            .current_grid_mut()
+            .contexts_mut()
+            .get_mut(&hovered_node)
+            .and_then(|item| item.context_mut().neoism_agent.as_mut())
+        {
             if agent.picker_contains_point(mouse_x, mouse_y) {
                 let pixels = Self::vertical_overlay_scroll_pixels(delta, 34.0);
                 agent.scroll_picker_pixels(pixels);
@@ -193,6 +226,18 @@ impl Screen<'_> {
                 let pixels = Self::vertical_overlay_scroll_pixels(delta, row_h);
                 let rows = agent.side_panel().last_panel_height_rows();
                 agent.scroll_side_panel_pixels(pixels, rows);
+                self.mark_dirty();
+                return true;
+            }
+            let input_pixels = match delta {
+                neoism_window::event::MouseScrollDelta::LineDelta(_, y) => {
+                    *y * agent.input_viewport_mut().row_height() * 3.0
+                }
+                neoism_window::event::MouseScrollDelta::PixelDelta(pos) => {
+                    pos.y as f32 / scale_factor
+                }
+            };
+            if !input_occluded && agent.scroll_input_at(mouse_x, mouse_y, input_pixels) {
                 self.mark_dirty();
                 return true;
             }

@@ -34,7 +34,10 @@ use crate::widgets::stock_card::{
 mod html_artifact;
 mod inline_style;
 pub(crate) use html_artifact::estimated_body_height as estimated_artifact_body_height;
-pub use html_artifact::{HtmlArtifactFrame, HtmlArtifactRequest};
+pub use html_artifact::{
+    html_artifact_source_hash, HtmlArtifactFrame, HtmlArtifactLayout,
+    HtmlArtifactRequest, HtmlArtifactStatus,
+};
 mod mermaid;
 use inline_style::{
     draw_hover_underline, parsed_markdown_inline_line, plain_token_color, rgba_from_u8,
@@ -276,6 +279,21 @@ pub trait AgentMarkdownPane {
     fn text_reveal_state(
         &mut self,
     ) -> Option<&mut crate::panels::agent_pane::text_reveal::TextRevealState> {
+        None
+    }
+
+    fn html_artifact_status(&self, _key: &str) -> HtmlArtifactStatus {
+        HtmlArtifactStatus::Disabled
+    }
+    /// Retained learned CSS height, only when source/draw width/UI scale match.
+    /// Metric updates must invalidate timeline layout and preserve its scroll anchor.
+    fn html_artifact_height(
+        &self,
+        _key: &str,
+        _source: &str,
+        _width: f32,
+        _scale: f32,
+    ) -> Option<f32> {
         None
     }
 
@@ -1988,6 +2006,17 @@ pub fn markdown_block_height<P: AgentMarkdownPane>(
     pane: &P,
     s: f32,
 ) -> f32 {
+    markdown_block_height_namespaced(block, width, pane, s, "", 0)
+}
+
+pub fn markdown_block_height_namespaced<P: AgentMarkdownPane>(
+    block: &AssistantMarkdownBlock,
+    width: f32,
+    pane: &P,
+    s: f32,
+    namespace: &str,
+    block_index: usize,
+) -> f32 {
     match block {
         AssistantMarkdownBlock::Paragraph(lines) => lines.len().max(1) as f32 * 19.0 * s,
         AssistantMarkdownBlock::Heading { level, lines } => {
@@ -2034,7 +2063,16 @@ pub fn markdown_block_height<P: AgentMarkdownPane>(
                     .height
             }
         }
-        AssistantMarkdownBlock::HtmlArtifact { .. } => html_artifact::block_height(s),
+        AssistantMarkdownBlock::HtmlArtifact { source, .. } => {
+            html_artifact::resolved_height(
+                pane,
+                namespace,
+                block_index,
+                source,
+                (width - 30.0 * s).max(80.0 * s),
+                s,
+            )
+        }
         AssistantMarkdownBlock::Stock(spec) => measure_stock_card(spec, 0.0, s),
         AssistantMarkdownBlock::Blank => 8.0 * s,
     }
@@ -2046,13 +2084,24 @@ pub fn measure_markdown_blocks<P: AgentMarkdownPane>(
     pane: &P,
     s: f32,
 ) -> f32 {
+    measure_markdown_blocks_namespaced(blocks, width, pane, s, "")
+}
+
+pub fn measure_markdown_blocks_namespaced<P: AgentMarkdownPane>(
+    blocks: &[AssistantMarkdownBlock],
+    width: f32,
+    pane: &P,
+    s: f32,
+    namespace: &str,
+) -> f32 {
     if blocks.is_empty() {
         return 0.0;
     }
     let mut height = 8.0 * s;
     for (index, block) in blocks.iter().enumerate() {
-        height += markdown_block_height(block, width, pane, s)
-            + markdown_block_gap(block, blocks.get(index + 1), s);
+        height +=
+            markdown_block_height_namespaced(block, width, pane, s, namespace, index)
+                + markdown_block_gap(block, blocks.get(index + 1), s);
     }
     height.max(22.0 * s)
 }
@@ -2173,7 +2222,14 @@ pub fn render_markdown_blocks<P: AgentMarkdownPane>(
     }
 
     for (block_index, block) in blocks.iter().enumerate() {
-        let block_h = markdown_block_height(block, w, pane, s);
+        let block_h = markdown_block_height_namespaced(
+            block,
+            w,
+            pane,
+            s,
+            scroll_namespace,
+            block_index,
+        );
         let block_top = cursor_y;
         let next_cursor = block_top
             + block_h
@@ -2388,6 +2444,19 @@ pub fn render_markdown_blocks<P: AgentMarkdownPane>(
                 copy_target,
                 content_width,
             } => {
+                if lang.trim() == "neoism-html" {
+                    html_artifact::render_pending(
+                        sugarloaf,
+                        [text_x, cursor_y, (w - 30.0 * s).max(80.0 * s), block_h],
+                        theme,
+                        s,
+                        intersect_rect(viewport_clip, [x, y, w, max_h])
+                            .unwrap_or([0.0; 4]),
+                        occlusion_rects,
+                    );
+                    cursor_y = next_cursor;
+                    continue;
+                }
                 let scroll_key =
                     format!("markdown:{scroll_namespace}:code:{block_index}");
                 render_markdown_code_block(

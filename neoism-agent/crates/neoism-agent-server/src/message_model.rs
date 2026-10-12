@@ -260,11 +260,18 @@ fn assistant_provider_messages(
         message.reasoning = reasoning;
         messages.push(message);
     }
-    messages.extend(
-        tool_parts
-            .into_iter()
-            .flat_map(|part| tool_result_messages(part, options)),
-    );
+    // Keep a batch's results together; media must not split the tool exchange.
+    let mut media = Vec::new();
+    for part in tool_parts {
+        for message in tool_result_messages(part, options) {
+            if matches!(message.role, ProviderRole::Tool) {
+                messages.push(message);
+            } else {
+                media.push(message);
+            }
+        }
+    }
+    messages.extend(media);
     messages
 }
 
@@ -870,6 +877,72 @@ mod tests {
             messages[2].attachments[0].filename.as_deref(),
             Some("shot.png")
         );
+    }
+
+    #[test]
+    fn parallel_tool_results_precede_media_in_replay_and_compaction() {
+        let session_id = Id::ascending(IdKind::Session);
+        let message_id = Id::ascending(IdKind::Message);
+        let history =
+            vec![MessageWithParts {
+            info: assistant_info(message_id.clone(), session_id.clone()),
+            parts: (0..3).map(|index| Part::Tool(ToolPart {
+                id: Id::ascending(IdKind::Part),
+                session_id: session_id.clone(),
+                message_id: message_id.clone(),
+                tool: "read".to_string(),
+                call_id: format!("call_{index}"),
+                state: match index {
+                    0 => ToolState::Completed {
+                        input: serde_json::json!({ "path": "shot.png" }),
+                        output: "Image read successfully".to_string(),
+                        metadata: serde_json::json!({
+                            "attachments": [{
+                                "mime": "image/png",
+                                "url": "data:image/png;base64,abc",
+                                "filename": "shot.png"
+                            }]
+                        }),
+                        title: "Read shot.png".to_string(),
+                        time: PartTime { start: 1, end: Some(2) },
+                    },
+                    1 => ToolState::Error {
+                        input: serde_json::json!({ "path": "missing.png" }),
+                        error: "File not found".to_string(),
+                        time: PartTime { start: 1, end: Some(2) },
+                    },
+                    _ => ToolState::Running {
+                        input: serde_json::json!({ "path": "interrupted.png" }),
+                        time: PartTime { start: 1, end: None },
+                    },
+                },
+                metadata: None,
+            })).collect(),
+        }];
+        for messages in [
+            provider_messages(&history),
+            provider_messages_for_model(&history, "anthropic", "claude-sonnet-4"),
+            compaction_provider_messages(&history),
+        ] {
+            assert_eq!(messages[0].tool_calls.len(), 3);
+            for index in 0..3 {
+                let result = &messages[index + 1];
+                assert!(matches!(result.role, ProviderRole::Tool));
+                assert_eq!(
+                    result.tool_call_id.as_deref(),
+                    Some(messages[0].tool_calls[index].id.as_str())
+                );
+                assert_eq!(result.tool_error.unwrap_or(false), index != 0);
+            }
+            assert_eq!(messages[3].content, "Tool execution was interrupted");
+        }
+        let messages = provider_messages(&history);
+        assert_eq!(messages.len(), 5);
+        assert_eq!(
+            messages[4].attachments[0].filename.as_deref(),
+            Some("shot.png")
+        );
+        assert_eq!(compaction_provider_messages(&history).len(), 4);
     }
 
     #[test]

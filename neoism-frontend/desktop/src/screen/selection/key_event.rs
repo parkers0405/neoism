@@ -190,7 +190,7 @@ impl Screen<'_> {
             return;
         }
 
-        #[cfg(feature = "servo-artifacts")]
+        #[cfg(feature = "cef-artifacts")]
         if self.html_artifact_key(key) {
             self.mark_dirty();
             return;

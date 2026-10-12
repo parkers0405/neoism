@@ -150,6 +150,30 @@ impl ArtifactStyles {
             font_stack(&self.font_mono, "monospace"),
         );
         vars.insert("--radius".into(), format!("{}px", self.radius));
+        // T3/shadcn-compatible aliases derived from the same validated palette.
+        // Keep the wire schema fixed: these are CSS tokens, not new IPC fields.
+        for (name, color) in [
+            ("--secondary", self.colors.muted),
+            ("--secondary-foreground", self.colors.foreground),
+            ("--ring", self.colors.primary),
+            ("--code-background", self.colors.card),
+            ("--code-foreground", self.colors.foreground),
+            ("--accent-surface-foreground", self.colors.accent),
+            ("--success-foreground", self.colors.success),
+            ("--warning-foreground", self.colors.warning),
+            ("--info-foreground", self.colors.info),
+        ] {
+            vars.insert(name.into(), format!("#{color:06x}"));
+        }
+        for (name, color) in [
+            ("--accent-surface", self.colors.accent),
+            ("--success-surface", self.colors.success),
+            ("--warning-surface", self.colors.warning),
+            ("--destructive-surface", self.colors.destructive),
+            ("--info-surface", self.colors.info),
+        ] {
+            vars.insert(name.into(), format!("#{color:06x}20"));
+        }
         Ok(vars)
     }
 }
@@ -180,10 +204,16 @@ mod tests {
         let mut styles = ArtifactStyles::default();
         styles.colors.background = 0x00010f;
         styles.colors.primary = 0xabcdef;
+        styles.colors.accent = 0xabcdef;
         let vars = styles.css_variables().unwrap();
         assert_eq!(vars["--background"], "#00010f");
         assert_eq!(vars["--primary"], "#abcdef");
-        assert_eq!(vars.len(), 28);
+        assert_eq!(vars.len(), 42);
+        assert_eq!(vars["--secondary"], vars["--muted"]);
+        assert_eq!(vars["--ring"], "#abcdef");
+        assert_eq!(vars["--accent-surface"], "#abcdef20");
+        assert_eq!(vars["--accent-surface-foreground"], "#abcdef");
+        assert_eq!(vars["--code-background"], vars["--card"]);
         assert!(!vars.keys().any(|name| name.starts_with("--neoism-")));
         styles.colors.background = 0xff000000;
         assert_eq!(

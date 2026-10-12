@@ -181,7 +181,7 @@ pub(crate) fn timeline_layout<P, D>(
     s: f32,
     gap: f32,
     viewport_h: f32,
-) -> (TimelineLayoutCache<P::Message>, bool)
+) -> (TimelineLayoutCache<P::Message>, bool, f32)
 where
     P: AgentTimelinePane,
     D: AgentTimelineDelegate<P>,
@@ -258,58 +258,144 @@ where
                     );
                 }
                 pane.set_measured_timeline_prepend(cache.content_height, prepend_height);
-                return (cache, true);
+                return (cache, true, 0.0);
             }
         }
     }
     let offset = pane.timeline_scroll_offset();
     let cache = pane.take_timeline_layout_cache().filter(|cache| {
-        cache.epoch == epoch
-            && cache.width_bucket == width_bucket
-            && cache.scale_bucket == scale_bucket
-            && cache.gap_bucket == gap_bucket
-            && cache.source_len <= source_len
-            && (cache.source_len == 0 || !cache.rows.is_empty())
-            // Lazy: drop the cache (forcing a rebuild with a fresh window) once
-            // the viewport scrolls up toward the estimated prefix, so exact rows
-            // are laid out before they become visible.
-            && (!lazy || lazy_cache_covers_viewport(cache, offset, viewport_h))
-    });
-
-    if let Some(mut cache) = cache {
-        mark_changed_artifact_rows(&cache, pane.messages(), &mut dirty);
-        let needs_patch = cache.source_len != source_len
-            || !dirty.ids.is_empty()
-            || !dirty.indices.is_empty();
-        if !needs_patch
-            || patch_timeline_layout::<P, D>(
-                sugarloaf, pane, &mut cache, dirty, width, theme, s, gap,
-            )
-        {
-            if source_len == 0 || !cache.rows.is_empty() {
-                return (cache, needs_patch);
-            }
-        }
-    }
-
-    (
-        build_timeline_layout::<P, D>(
-            sugarloaf,
-            pane,
-            width,
-            theme,
-            s,
-            gap,
+        reusable_timeline_cache(
+            cache,
             epoch,
             width_bucket,
             scale_bucket,
             gap_bucket,
-            lazy,
-            viewport_h,
-            offset,
-        ),
-        true,
-    )
+            source_len,
+        )
+    });
+    let mut live_baseline = None;
+    if let Some(mut cache) = cache {
+        mark_changed_artifact_rows(&cache, pane.messages(), &mut dirty);
+        live_baseline = dirty_start_source(pane, &cache, &dirty)
+            .and_then(|source| measured_tail_baseline(&cache, source));
+        let covers_viewport =
+            !lazy || lazy_cache_covers_viewport(&cache, offset, viewport_h);
+        let needs_patch = cache.source_len != source_len
+            || !dirty.ids.is_empty()
+            || !dirty.indices.is_empty();
+        if covers_viewport
+            && (!needs_patch
+                || patch_timeline_layout::<P, D>(
+                    sugarloaf, pane, &mut cache, dirty, width, theme, s, gap,
+                ))
+        {
+            let growth = measured_tail_growth(&cache, live_baseline);
+            return (cache, needs_patch, growth);
+        }
+    }
+
+    let layout = build_timeline_layout::<P, D>(
+        sugarloaf,
+        pane,
+        width,
+        theme,
+        s,
+        gap,
+        epoch,
+        width_bucket,
+        scale_bucket,
+        gap_bucket,
+        lazy,
+        viewport_h,
+        offset,
+    );
+    let growth = measured_tail_growth(&layout, live_baseline);
+    (layout, true, growth)
+}
+
+pub(super) fn reusable_timeline_cache<M>(
+    cache: &TimelineLayoutCache<M>,
+    epoch: u64,
+    width_bucket: i32,
+    scale_bucket: i32,
+    gap_bucket: i32,
+    source_len: usize,
+) -> bool {
+    // Nonempty source history can legitimately have no visible rows (blank
+    // placeholders or filtered tools). Keep its exact empty growth baseline.
+    cache.epoch == epoch
+        && cache.width_bucket == width_bucket
+        && cache.scale_bucket == scale_bucket
+        && cache.gap_bucket == gap_bucket
+        && cache.source_len <= source_len
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum MeasuredTailBaseline {
+    Row { source: usize, height: f32 },
+    Empty { source: usize },
+}
+
+// Compare only an already-measured dirty suffix. Refining older estimates must
+// not become spring lag just because a live update arrived in the same frame.
+pub(super) fn measured_tail_baseline<M>(
+    cache: &TimelineLayoutCache<M>,
+    source: usize,
+) -> Option<MeasuredTailBaseline> {
+    if cache.estimated_suffix_start != cache.rows.len() {
+        return None;
+    }
+    let index = cache
+        .rows
+        .partition_point(|row| row.source_end_index < source);
+    // Layout repair may begin in an estimated prefix while the already-measured
+    // live tail grows. Its first exact row is still a valid growth boundary.
+    let index = index.max(cache.estimated_prefix_rows);
+    match cache.rows.get(index) {
+        Some(row) => Some(MeasuredTailBaseline::Row {
+            source: row.source_index,
+            height: cache.content_height - row.top,
+        }),
+        None => Some(MeasuredTailBaseline::Empty { source }),
+    }
+}
+
+pub(super) fn measured_tail_growth<M>(
+    cache: &TimelineLayoutCache<M>,
+    baseline: Option<MeasuredTailBaseline>,
+) -> f32 {
+    match baseline {
+        Some(MeasuredTailBaseline::Row { source, height }) => {
+            match measured_tail_baseline(cache, source) {
+                Some(MeasuredTailBaseline::Row {
+                    source: new_source,
+                    height: new_height,
+                }) if source == new_source => (new_height - height).max(0.0),
+                _ => 0.0,
+            }
+        }
+        Some(MeasuredTailBaseline::Empty { source })
+            if cache.estimated_suffix_start == cache.rows.len() =>
+        {
+            let index = cache
+                .rows
+                .partition_point(|row| row.source_end_index < source);
+            let Some(row) = cache.rows.get(index) else {
+                return 0.0;
+            };
+            if index < cache.estimated_prefix_rows || row.source_index < source {
+                return 0.0;
+            }
+            // A first visible append can follow hidden/zero-height sources.
+            // Charge its leading gap too, but not any earlier remeasurement.
+            let top = index.checked_sub(1).map_or(0.0, |previous| {
+                let previous = &cache.rows[previous];
+                previous.top + previous.height
+            });
+            (cache.content_height - top).max(0.0)
+        }
+        _ => 0.0,
+    }
 }
 
 /// Reconcile artifact source transitions even if an ingest path missed a dirty
@@ -485,12 +571,26 @@ where
     // low (rich content under-counts), which only ever grows the exact region.
     let overscan = (viewport_h * 2.0).max(600.0 * s);
     let max_scroll = (est_content_h - viewport_h).max(0.0);
-    let scroll_top = (max_scroll - offset).clamp(0.0, max_scroll);
+    let anchor = (!pane.timeline_follow_bottom())
+        .then(|| pane.timeline_view_anchor())
+        .flatten()
+        .and_then(|(key, screen_offset)| {
+            resolve_timeline_view_anchor(pane.messages(), &key)
+                .map(|source| (source, screen_offset))
+        });
+    let (scroll_top, anchor_row) = lazy_window_position(rows, max_scroll, offset, anchor);
     let window_top = (scroll_top - overscan).max(0.0);
     let window_bottom = scroll_top + viewport_h + overscan;
-    let exact_start_row = rows.partition_point(|row| row.top + row.height < window_top);
-    let exact_end_row = exact_start_row
+    let mut exact_start_row =
+        rows.partition_point(|row| row.top + row.height < window_top);
+    let mut exact_end_row = exact_start_row
         + rows[exact_start_row..].partition_point(|row| row.top <= window_bottom);
+    if let Some(index) = anchor_row {
+        // A reader may be deep inside a tall card whose estimate is only a
+        // header. Keep that card exact even if its intra-row offset exceeds it.
+        exact_start_row = exact_start_row.min(index);
+        exact_end_row = exact_end_row.max(index + 1);
+    }
     if exact_start_row == 0 && exact_end_row >= rows.len() {
         rows.clear();
         let height = append_timeline_rows::<P, D>(
@@ -549,6 +649,24 @@ where
     (content_height, exact_start_row, exact_end)
 }
 
+// Bottom-distance from an exact cache cannot locate a window in fresh estimates:
+// the unmeasured suffix may differ by thousands of pixels. Use the reader's
+// logical row instead, then restore its viewport-relative position after layout.
+pub(super) fn lazy_window_position<M>(
+    rows: &[TimelineLayoutRow<M>],
+    max_scroll: f32,
+    offset: f32,
+    anchor: Option<(usize, f32)>,
+) -> (f32, Option<usize>) {
+    if let Some((source, screen_offset)) = anchor {
+        let index = rows.partition_point(|row| row.source_end_index < source);
+        if let Some(row) = rows.get(index).filter(|row| row.source_index <= source) {
+            return ((row.top - screen_offset).max(0.0), Some(index));
+        }
+    }
+    ((max_scroll - offset).clamp(0.0, max_scroll), None)
+}
+
 /// Pass-1 estimate loop for lazy layout: mirrors `append_timeline_rows`'
 /// grouping exactly but assigns each row a cheap estimated height (no sugarloaf
 /// measurement, no markdown/diff prep). Only the retained prefix's rows keep
@@ -584,7 +702,8 @@ fn append_estimated_rows<P>(
                 source_end_exclusive,
                 message: group_message,
             } => {
-                let height = estimate_message_height(&group_message, width, s);
+                let height =
+                    estimate_message_height_with_pane(pane, &group_message, width, s);
                 if height > 0.0 {
                     if appended_any || !rows.is_empty() {
                         content_y += gap;
@@ -607,7 +726,7 @@ fn append_estimated_rows<P>(
                 source_index = source_end_exclusive;
             }
             NextTimelineItem::Message { message } => {
-                let height = estimate_message_height(&message, width, s);
+                let height = estimate_message_height_with_pane(pane, &message, width, s);
                 if height <= 0.0 {
                     source_index += 1;
                     continue;
@@ -649,6 +768,57 @@ pub(super) fn estimated_timeline_rows_for_test(
     let mut rows = Vec::new();
     append_estimated_rows(pane, width, s, gap, &mut rows);
     rows
+}
+
+/// Previously laid-out artifacts retain their identity and learned footprint even
+/// when lazy rebuilding moves their row outside the exact measurement window.
+pub(super) fn estimate_message_height_with_pane<
+    P: AgentMarkdownPane,
+    M: AgentTimelineMessage,
+>(
+    pane: &P,
+    message: &M,
+    width: f32,
+    s: f32,
+) -> f32 {
+    let text = message.text();
+    if text.contains("neoism-html")
+        && matches!(
+            message.kind(),
+            AgentTimelineMessageKind::Assistant
+                | AgentTimelineMessageKind::Reasoning
+                | AgentTimelineMessageKind::Compaction
+        )
+    {
+        let body_width = (width - 48.0 * s).max(80.0 * s);
+        if let Some(blocks) = pane.cached_markdown_blocks_for(text, body_width, s) {
+            let body = super::super::markdown::measure_markdown_blocks_namespaced(
+                &blocks,
+                body_width + 30.0 * s,
+                pane,
+                s,
+                message.id(),
+            );
+            let extra = match message.kind() {
+                AgentTimelineMessageKind::Assistant => {
+                    let image = if message.images().is_empty() {
+                        0.0
+                    } else {
+                        164.0 * s
+                    };
+                    image
+                        + if message.status().trim().is_empty() {
+                            0.0
+                        } else {
+                            super::super::assistant::ASSISTANT_RESPONSE_FOOTER_H * s
+                        }
+                }
+                _ => 42.0 * s,
+            };
+            return body + extra;
+        }
+    }
+    estimate_message_height(message, width, s)
 }
 
 /// Cheap off-screen height estimate. Deliberately conservative (under-counts

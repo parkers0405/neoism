@@ -261,6 +261,29 @@ where
         );
     }
 
+    fn measure_markdown_text_namespaced(
+        sugarloaf: &mut Sugarloaf,
+        pane: &P,
+        text: &str,
+        width: f32,
+        theme: &IdeTheme,
+        s: f32,
+        namespace: &str,
+    ) -> f32 {
+        if !text.contains("neoism-html") {
+            return Self::measure_markdown_text(sugarloaf, pane, text, width, theme, s);
+        }
+        let blocks =
+            layout_assistant_markdown_cached(sugarloaf, pane, text, width, theme, s);
+        super::markdown::measure_markdown_blocks_namespaced(
+            &blocks,
+            width + 30.0 * s,
+            pane,
+            s,
+            namespace,
+        )
+    }
+
     fn measure_markdown_text(
         sugarloaf: &mut Sugarloaf,
         pane: &P,
@@ -928,7 +951,7 @@ where
             let text_h = if AgentToolMessage::text(message).trim().is_empty() {
                 0.0
             } else {
-                let markdown_h = D::measure_markdown_text(
+                let markdown_h = D::measure_markdown_text_namespaced(
                     sugarloaf,
                     pane,
                     AgentToolMessage::text(message),
@@ -938,6 +961,7 @@ where
                     (width - 30.0 * s - ASSISTANT_TEXT_PAD_LEFT * s).max(80.0 * s),
                     theme,
                     s,
+                    AgentToolMessage::id(message),
                 );
                 if AgentToolMessage::status(message).trim().is_empty() {
                     markdown_h
@@ -951,13 +975,14 @@ where
             if AgentToolMessage::text(message).trim().is_empty() {
                 return 0.0;
             }
-            let markdown_h = D::measure_markdown_text(
+            let markdown_h = D::measure_markdown_text_namespaced(
                 sugarloaf,
                 pane,
                 AgentToolMessage::text(message),
                 (width - 48.0 * s).max(80.0 * s),
                 theme,
                 s,
+                AgentToolMessage::id(message),
             );
             if markdown_h <= 0.0 {
                 return 0.0;
@@ -1051,13 +1076,14 @@ where
             if AgentToolMessage::text(message).trim().is_empty() {
                 34.0 * s
             } else {
-                let markdown_h = D::measure_markdown_text(
+                let markdown_h = D::measure_markdown_text_namespaced(
                     sugarloaf,
                     pane,
                     AgentToolMessage::text(message),
                     (width - 30.0 * s - ASSISTANT_TEXT_PAD_LEFT * s).max(80.0 * s),
                     theme,
                     s,
+                    AgentToolMessage::id(message),
                 );
                 42.0 * s + markdown_h
             }

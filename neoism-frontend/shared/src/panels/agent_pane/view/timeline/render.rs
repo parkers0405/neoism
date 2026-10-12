@@ -88,7 +88,7 @@ pub fn render_timeline_with<P, D>(
     let viewport_h = h.max(0.0);
     let gap = 18.0 * s;
     let layout_started = web_time::Instant::now();
-    let (layout, did_layout_work) =
+    let (layout, did_layout_work, live_growth_px) =
         timeline_layout::<P, D>(sugarloaf, pane, w, theme, s, gap, viewport_h);
     let layout_elapsed_us = web_time::Instant::now()
         .saturating_duration_since(layout_started)
@@ -117,7 +117,7 @@ pub fn render_timeline_with<P, D>(
     // subtract its reserve from the metrics viewport (which doubles max-scroll).
     let content_h =
         activity_geometry(rect, real_content_h, status_h, gap, s, false, 0.0).content_h;
-    pane.set_timeline_metrics(rect, content_h, viewport_h);
+    pane.set_timeline_metrics(rect, content_h, viewport_h, live_growth_px);
     if did_layout_work {
         if let Some((key, screen_offset)) = pane.timeline_view_anchor() {
             if let Some(row) = resolve_timeline_view_anchor(pane.messages(), &key)
@@ -567,7 +567,10 @@ where
     let selected_group_child = pane.selected_tool_group_child(message.id());
     let key =
         pane.timeline_measure_key(message, width, s, tool_expanded, selected_group_child);
-    if !tool_expand_animating {
+    // Artifact metrics are host-fed independently of message text. Layout dirty
+    // marks must remeasure them rather than revive a pre-metric cached height.
+    let cacheable = !tool_expand_animating && !message.text().contains("neoism-html");
+    if cacheable {
         if let Some(height) = pane.cached_timeline_measure(&key) {
             return height;
         }
@@ -582,7 +585,7 @@ where
         tool_expanded,
         tool_expand_progress,
     );
-    if !tool_expand_animating {
+    if cacheable {
         pane.store_timeline_measure(key, height);
     }
     height

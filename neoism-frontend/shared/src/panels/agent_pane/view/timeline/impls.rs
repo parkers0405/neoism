@@ -140,12 +140,14 @@ impl AgentTimelinePane for NeoismAgentPane {
         viewport_rect: [f32; 4],
         content_height_px: f32,
         viewport_height_px: f32,
+        live_growth_px: f32,
     ) {
-        NeoismAgentPane::set_timeline_metrics(
+        NeoismAgentPane::set_timeline_metrics_with_live_growth(
             self,
             viewport_rect,
             content_height_px,
             viewport_height_px,
+            Some(live_growth_px),
         );
     }
 

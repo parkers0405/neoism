@@ -1,40 +1,45 @@
-# Desktop integration contract (worker architecture)
+# Live HTML artifact IPC
 
-Package: `neoism-interactive-artifacts`; optional feature: `servo` enables **IPC proxy only**, never a Servo/native-library dependency. Parent registers this crate and desktop feature wiring. The actual engine lives in the independent workspace `neoism-frontend/servo-runtime`; it must stay excluded from the root dependency graph because its FreeType links differ from Sugarloaf's.
+`neoism-interactive-artifacts` is the browser-neutral document, input, theme and frame contract. Its optional `host` feature adds a nonblocking native worker facade; `ipc` exposes only the bounded pipe protocol. Neither feature links CEF, Servo, wgpu or a windowing library.
+
+## Desktop host
 
 ```rust
-use neoism_interactive_artifacts::{ArtifactDocument, ArtifactInput, Viewport};
-use neoism_interactive_artifacts::servo_host::Host;
-let mut host = Host::new(std::sync::Arc::new(|| { /* enqueue event-loop proxy wake */ }))?;
-host.reconcile(ArtifactDocument {
-    key: "thread:part".into(), html: "<button>Hello</button>".into(),
-    revision: 1, viewport: Viewport { width: 640, height: 320, scale: 1.0 },
-    visible: true, theme: neoism_interactive_artifacts::Theme::Dark,
-    styles: neoism_interactive_artifacts::ArtifactStyles::default(),
-})?;
-let update = host.pump()?; // drains received frames, never waits for worker I/O
-for frame in update.frames {
-    // key, revision, sequence, width, height, stride,
-    // rgba: Arc<[u8]> — owned top-down RGBA8, premultiplied alpha
-}
-host.input("thread:part", ArtifactInput::PointerMove { x: 20.0, y: 30.0 })?;
-host.destroy("thread:part");
-host.shutdown();
-# Ok::<(), neoism_interactive_artifacts::Error>(())
+use neoism_interactive_artifacts::worker_host::Host;
 ```
 
-**Helper packaging:** `Host::new` launches the explicit path in `NEOISM_SERVO_RUNTIME`, or `neoism-servo-runtime` (`.exe` on Windows) beside the Neoism executable. Debug builds also locate the separately built worker in this checkout's `neoism-frontend/servo-runtime/target/debug`, so cleaning the desktop target does not require another path setting. No PATH search, auto-download, auto-build, shell or local HTTP server. Missing/nonexecutable helpers produce an immediate actionable error. Engine startup, crash and protocol failures arrive asynchronously as persistent `Err(Error::Backend(...))` from `pump`; ordinary diagnostics remain in `PumpOutput::diagnostics`. Parent must visibly gate host creation behind experimental opt-in; the Host passes `--stdio --experimental` to the worker only after the caller has chosen to construct it.
+`Host::new(waker)` launches `neoism-cef-runtime` and returns without waiting for Chromium startup. The executable comes from `NEOISM_CEF_RUNTIME`, the Neoism executable directory, or, in debug builds, `../cef-runtime/target/debug`. There is no shell invocation, PATH search, automatic compilation or GUI-thread pipe I/O. `NEOISM_CEF_DIR` or `CEF_PATH` supplies an optional native-library directory for the child without modifying the desktop's loader environment.
 
-`ArtifactDocument::styles` is a required typed snapshot of the selected renderer palette, fonts and radius; see [API_THEME.md](API_THEME.md). Pass the actual selected `ArtifactStyles`, not merely a light/dark default. The initial parser-blocking bootstrap installs CSS variables and default body background/foreground/sans font before author scripts. Live styles/theme changes update root properties without navigation or JS-state loss, and dispatch `window` event `neoism-theme-changed`; canvas charts should re-read computed `--chart-1` through `--chart-6` on that event. Root inline `colorScheme` overrides normal authored `:root` color-scheme rules. Latest desired styles received during loading are committed after the real synthetic-origin document completes; evaluations against a missing/wrong root are retried.
+The native desktop automatically enables artifacts only when the existing worker lookup resolves to a file (cached until app restart). `NEOISM_HTML_ARTIFACTS=1` bypasses that capability gate and permits unavailable-worker diagnostics; each launch/retry resolves the worker path again. `NEOISM_HTML_ARTIFACTS=0` disables them. Server-side artifact guidance requires explicit `=1`, independently of desktop automatic activation. The worker is invoked with `--stdio --experimental` but Chromium sandboxing stays enabled unless the separate development-only sandbox override is explicitly set. Its application policy and any OS sandbox are separate from the IPC contract; `Host::sandbox_status()` conservatively does not claim verified sandbox protection.
 
-`reconcile` creates missing keys, updates styles/theme/viewport/visibility in place, and replaces synthetic documents only on changed source revision. Reusing a revision with changed HTML is rejected. Identical requests are no-ops. Requests use bounded nonblocking queues: backpressure returns `Error::Backend` asking for retry on the next tick, not a GUI-thread pipe wait. `destroy` removes local state immediately; full-queue worker destroys are retained and retried. Do not reuse revisions for different documents.
+Debug builds also discover the standard `$HOME/.local/share/cef` install automatically. Linux debug desktop compilation prepares the independent worker; no compilation happens inside `Host::new`.
 
-`pump` drains received snapshots and diagnostics only. The worker independently pumps on wakes and 16ms animation ticks, waiting for events while static/hidden. The wake callback can run on reader/writer threads and must only enqueue GUI work, not call Host reentrantly. Host remains thread-affine. `PumpOutput { frames, animating, diagnostics }` contains changed visible frames only; retain the latest upload until replaced or destroyed. `snapshot(key)` clones the latest frame drained by `pump`. Late frames from destroyed keys, old revisions or obsolete viewport sizes are discarded. An internal generation changes on theme/viewport/scale/revision/visibility updates and destroy/recreate, so even equal-key/equal-revision/equal-size old packets are rejected. Worker frame sequences are monotonic across WebView replacements; public API fields stay unchanged. No native GPU handles escape.
+## Documents and frames
 
-Input variants: `PointerMove { x, y }`, `PointerButton { x, y, button: PointerButton, state: ButtonState }`, `PointerLeave`, `Wheel { x, y, delta_x, delta_y, unit: WheelUnit }`, `Key(KeyboardEvent)`, `Ime(CompositionEvent)`, `ImeDismissed`, `Focus(bool)`. Re-exported keyboard-types types do not depend on neoism-window. Pointer coordinates and wheel pixel deltas are view-local physical pixels; scale is physical pixels per CSS pixel. Wheel deltas follow DOM sign: positive scrolls right/down (the worker converts to Servo's opposite sign). IME forwards true start/update/end events; native candidate UI and input-method enable/selection feedback are not implemented yet.
+`reconcile(ArtifactDocument)` creates or updates a document. The document carries a key, HTML, source revision, viewport, visibility, appearance and validated `ArtifactStyles`. Same-revision updates preserve live state; different source requires a new revision. Geometry, visibility and theme changes must not reload the page.
 
-`destroy(key) -> bool`; `shutdown(self)` consumes the facade. Drop closes the request queue and schedules background process reaping: 500ms grace, then kill/wait. No GUI-thread join or Servo teardown wait. The worker itself contains one process-lifetime Servo instance. A new facade can launch a new worker after shutdown.
+`Viewport` is physical width/height plus physical pixels per CSS pixel. Viewports and HTML sizes are bounded before engine work. The host assigns request generations independently of source revisions, rejecting obsolete geometry, theme, destroyed/recreated keys and hidden-frame replies.
 
-Runtime remains **experimental, not sandboxed**. `Host::sandbox_status()` reports `os_sandbox: false`, `in_process: false`: process separation avoids native-library collisions and lets the frontend terminate the engine, but does not restrict worker filesystem/network privileges or provide audited exploit containment. Documents use unique synthetic HTTPS `.invalid` origins; interception serves only exact initial registered document GETs. All other intercepted requests are cancelled; navigation, popups, permissions and clipboard access are denied. CSP denies connections, external resources, child frames, workers and forms. No privileged bridge, file URLs, arbitrary JS evaluation API or dynamic-height channel. Fixed 320px-high viewports and theme via CSS `prefers-color-scheme` are supported.
+`pump()` drains the latest-per-key frame mailbox and diagnostics. Frames contain tightly packed, top-down, premultiplied RGBA8 pixels. The desktop unpremultiplies them when importing into Sugarloaf. Continuous worker painting must not own an unconditional desktop redraw loop: accepted frame damage wakes the GUI, and notifications coalesce until drained.
 
-Verification and native packaging details: README.md and ../servo-runtime/README.md.
+Pipe packets have a bounded length prefix. JSON controls and frame metadata are followed by binary RGBA packets. Frame layouts, generations and packet lengths are checked before pixel allocation. Startup/crash/protocol errors become persistent `Error::Backend` values; ordinary console diagnostics appear in `PumpOutput::diagnostics`.
+
+## Input
+
+Input includes pointer movement/buttons/leave, wheel, focus, keyboard events, native composition events and composition dismissal. Pointer coordinates and pixel wheel deltas are view-local physical pixels. Wheel deltas follow DOM convention: positive means right/down. The engine adapter handles the browser-specific scale and sign conversion.
+
+Keyboard types are re-exported from `keyboard-types`, not the windowing crate. Forward composition start/update/end rather than duplicating a committed string as ordinary key input. Native candidate-window placement and platform-specific text selection feedback require separate validation.
+
+## Lifecycle
+
+`destroy(key)` releases one document; `shutdown(self)` consumes the facade. Drop queues graceful shutdown and schedules a background reaper with a 500ms grace period. No engine teardown or pipe-thread join blocks the GUI. Each newly constructed facade launches an independent worker.
+
+The CEF worker lives in the independent `../cef-runtime` workspace. The previous `../servo-runtime` remains parked for reference and is not selected by the desktop. The browser binary is built and packaged independently, so normal desktop compilation does not compile Chromium.
+
+See [README.md](README.md), [API_THEME.md](API_THEME.md), and [../cef-runtime/README.md](../cef-runtime/README.md).
+
+### Intrinsic content height (worker protocol v2)
+
+`PumpOutput.layout_metrics: Vec<ArtifactLayoutMetrics>` carries latest-per-key `ArtifactLayoutMetrics { key: String, revision: u64, height: f32 }`. Height is in unscaled browser CSS pixels, independent of the physical viewport and scale. The worker wire output is `ContentHeight { key: String, generation: u64, revision: u64, height: f32 }`. The host only accepts finite positive heights at most 8192, matching the current desired revision and generation, for visible live keys. Changed accepted metrics wake the GUI; repeated static measurements do not. Geometry/source transactions and destroy clear pending metrics and reset deduplication, allowing a new-width/revision transaction to report the same height again. Frames and metrics are separate mailboxes: either arrival order is supported.
+
+Cache intrinsic heights in the caller by source revision + layout width + scale, not fitted height. Keep the caller cache across hidden state, never reuse it for a new width, and resize the worker to the final fitted physical viewport. The host does not automatically reapply old layout metrics. Protocol v1 workers are incompatible; the required handshake is `Hello { version: 2 }`. Theme wire schemas and tokens are unchanged.

@@ -4,12 +4,12 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.92"
 license = "MIT"
-description = "Experimental inline HTML artifact contract and asynchronous Servo worker facade"
+description = "Inline HTML artifact contract and asynchronous browser worker facade"
 
 [features]
 default = []
-# This feature enables only the IPC facade, never a Servo/native-library dependency.
-servo = ["ipc"]
+# Only the IPC facade, never a browser/native-library dependency.
+host = ["ipc"]
 ipc = ["dep:serde", "dep:serde_json", "keyboard-types/serde"]
 
 [dependencies]

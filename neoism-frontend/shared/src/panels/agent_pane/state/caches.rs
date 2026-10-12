@@ -529,6 +529,21 @@ impl NeoismAgentPane {
         self.cursor_rect = rect;
     }
 
+    pub fn input_viewport_mut(
+        &mut self,
+    ) -> &mut super::super::input_viewport::InputViewport {
+        &mut self.input_viewport
+    }
+
+    pub fn scroll_input_at(&mut self, x: f32, y: f32, pixels: f32) -> bool {
+        if self.prompt_picker_rect.is_some_and(|rect| {
+            x >= rect[0] && x < rect[0] + rect[2] && y >= rect[1] && y < rect[1] + rect[3]
+        }) {
+            return true;
+        }
+        self.input_viewport.scroll_at(x, y, pixels)
+    }
+
     pub fn set_input_wrap_rows(&mut self, rows: Vec<InputWrapRow>) {
         self.input_wrap_len = self.input.len();
         self.input_wrap_rows = rows;

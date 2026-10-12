@@ -1,5 +1,5 @@
 //! Platform-neutral contract for experimental inline HTML artifacts.
-//! The real native Servo engine is available only with the `servo` feature.
+//! Browser engines run in separately packaged worker processes.
 #![forbid(unsafe_code)]
 
 pub use keyboard_types::{
@@ -11,8 +11,8 @@ use std::sync::Arc;
 pub mod theme;
 pub use theme::{ArtifactColors, ArtifactStyles, StyleError};
 
-#[cfg(all(feature = "servo", not(target_arch = "wasm32")))]
-pub mod servo_host;
+#[cfg(all(feature = "host", not(target_arch = "wasm32")))]
+pub mod worker_host;
 
 #[cfg(all(feature = "ipc", not(target_arch = "wasm32")))]
 pub mod ipc;
@@ -198,7 +198,7 @@ impl ArtifactInput {
 }
 
 /// Immutable owned top-down RGBA8 snapshot; rows are tightly packed.
-/// WebRender output uses premultiplied alpha. No native GPU handles cross this API.
+/// Browser output uses premultiplied alpha. No native GPU handles cross this API.
 #[cfg_attr(feature = "ipc", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Debug)]
 pub struct ArtifactFrame {
@@ -210,9 +210,17 @@ pub struct ArtifactFrame {
     pub stride: usize,
     pub rgba: Arc<[u8]>,
 }
+/// Intrinsic authored content height in unscaled browser CSS pixels.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ArtifactLayoutMetrics {
+    pub key: String,
+    pub revision: u64,
+    pub height: f32,
+}
 #[derive(Default, Debug)]
 pub struct PumpOutput {
     pub frames: Vec<ArtifactFrame>,
+    pub layout_metrics: Vec<ArtifactLayoutMetrics>,
     pub animating: bool,
     pub diagnostics: Vec<String>,
 }
@@ -229,8 +237,8 @@ pub struct SandboxStatus {
 pub const SANDBOX_STATUS: SandboxStatus = SandboxStatus {
     os_sandbox: false,
     in_process: false,
-    resource_policy: "Exact synthetic document GET only; all other intercepted loads cancelled; navigation, permissions, clipboard and popups denied; restrictive CSP",
-    limitations: "Experimental trusted-content only. Separate process, but no OS sandbox, memory/CPU quotas or audited engine-exploit containment. CSP and interception coverage are not an audited security boundary.",
+    resource_policy: "Isolated synthetic documents; no privileged application bridge. Resource and navigation policy is enforced by the separately packaged browser worker.",
+    limitations: "Experimental trusted-content only. Worker sandbox effectiveness has not been verified by the host. No memory/CPU quotas or audited engine-exploit containment; process separation alone is not a security boundary.",
 };
 
 #[cfg(test)]

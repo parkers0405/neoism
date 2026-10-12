@@ -1808,6 +1808,9 @@ impl ChromeBridge {
             pane.scroll_side_panel_pixels(delta_pixels, rows);
             return true;
         }
+        if pane.scroll_input_at(x, y, delta_pixels) {
+            return true;
+        }
         if pane.timeline_contains_point(x, y) {
             // Diff/code cards scroll internally when the cursor is
             // over them; their sign is flipped vs the timeline
@@ -1872,6 +1875,9 @@ impl ChromeBridge {
         if pane.side_panel().contains_point(x, y) {
             let rows = pane.side_panel().last_panel_height_rows();
             pane.scroll_side_panel_pixels(wheel.pixels, rows);
+            return true;
+        }
+        if pane.scroll_input_at(x, y, wheel.pixels) {
             return true;
         }
         if !pane.timeline_contains_point(x, y) {

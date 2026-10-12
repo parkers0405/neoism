@@ -26,9 +26,9 @@ pub(super) fn definitions(owner: ToolOwner) -> Vec<BuiltinTool> {
             ToolOwner::Workspace, owner,
             "bash",
             if cfg!(windows) {
-                "Run a PowerShell command. The tool is named bash for compatibility; this Windows host is PowerShell (pwsh.exe if available). Use curl.exe, not curl."
+                "Run a PowerShell command. The tool is named bash for compatibility; this Windows host is PowerShell (pwsh.exe if available). Use curl.exe, not curl.\n\nIMPORTANT: This tool is for terminal operations such as git, builds, tests, package managers, and docker. DO NOT use it for file discovery, searching, reading, or editing when a dedicated tool supports the operation. File search: use glob, not find, ls, or Get-ChildItem. Content search: use grep, not shell grep, rg, or Select-String. Read files and list directories: use read, not cat, head, tail, sed, or Get-Content. File mutations: use the selected native mutation tool (apply_patch, or edit/write), not shell redirection or scripts. Fall back to shell only when the required native tool is unavailable or cannot support the operation."
             } else {
-                "Run shell commands"
+                "Run shell commands.\n\nIMPORTANT: This tool is for terminal operations such as git, builds, tests, package managers, and docker. DO NOT use it for file discovery, searching, reading, or editing when a dedicated tool supports the operation. File search: use glob, not find or ls. Content search: use grep, not shell grep or rg. Read files and list directories: use read, not cat, head, tail, or sed. File mutations: use the selected native mutation tool (apply_patch, or edit/write), not shell redirection or scripts. Fall back to shell only when the required native tool is unavailable or cannot support the operation."
             },
             object_required(
                 &[
@@ -44,7 +44,7 @@ pub(super) fn definitions(owner: ToolOwner) -> Vec<BuiltinTool> {
         tool(
             ToolOwner::Workspace, owner,
             "background_task",
-            "Start a long-running shell command in the background and return a job_id immediately",
+            "Start a long-running terminal command (builds, tests, servers, etc.) in the background and return a job_id immediately. Follow the same native-file-tools-first rule as bash: use glob for file discovery, grep for content search, read for files/directories, and the selected native mutation tool for edits. Do not use background commands to bypass these tools; fall back to shell only when the required native tool is unavailable or cannot support the operation.",
             json!({
                 "type": "object",
                 "properties": {
@@ -91,7 +91,7 @@ pub(super) fn definitions(owner: ToolOwner) -> Vec<BuiltinTool> {
         tool(
             ToolOwner::Workspace, owner,
             "read",
-            "Read one file or directory. filePath is required; offset is 1-indexed, the default limit is 2000 lines, and content is bounded to 50 KB per page. Use the returned cursor to continue file reads, including within long lines; keep filePath unchanged; a non-empty cursor takes precedence over offset. Omit cursor or pass an empty string for ordinary offset-based reads. Directory reads continue with offset. Call multiple read tools in parallel for independent files. Use grep before reading a large file when you need specific content.",
+            "Read one file or directory. Use this tool instead of shell cat, head, tail, sed, ls, or Get-Content for reading files and listing directories. filePath is required; offset is 1-indexed, the default limit is 2000 lines, and content is bounded to 50 KB per page. Use the returned cursor to continue file reads, including within long lines; keep filePath unchanged; a non-empty cursor takes precedence over offset. Omit cursor or pass an empty string for ordinary offset-based reads. Directory reads continue with offset. Call multiple read tools in parallel for independent files. Use grep before reading a large file when you need specific content.",
             json!({
                 "type": "object",
                 "properties": {
@@ -138,7 +138,7 @@ pub(super) fn definitions(owner: ToolOwner) -> Vec<BuiltinTool> {
         tool(
             ToolOwner::Workspace, owner,
             "grep",
-            "Search file contents. pattern accepts one string or an array of literal alternatives. mode may be auto, plain, regex, or fuzzy; plain and regex never retry as fuzzy. Results are bounded and include file paths and line numbers. Continue with the returned nextCursor as cursor, keeping the query, scope, and search options unchanged. Use several independent grep calls in parallel when their results do not depend on each other.",
+            "Search file contents. Use this tool instead of shell grep, rg, or Select-String for content search. pattern accepts one string or an array of literal alternatives. mode may be auto, plain, regex, or fuzzy; plain and regex never retry as fuzzy. Results are bounded and include file paths and line numbers. Continue with the returned nextCursor as cursor, keeping the query, scope, and search options unchanged. Use several independent grep calls in parallel when their results do not depend on each other.",
             json!({
                 "type": "object",
                 "properties": {
@@ -170,7 +170,7 @@ pub(super) fn definitions(owner: ToolOwner) -> Vec<BuiltinTool> {
         tool(
             ToolOwner::Workspace, owner,
             "glob",
-            "Find files with fuzzy path search and query constraints. pattern is a filename, path fragment, or glob expression. Keep broad queries short and scope with path when possible.",
+            "Find files with fuzzy path search and query constraints. Use this tool instead of shell find, ls, or Get-ChildItem for file discovery. pattern is a filename, path fragment, or glob expression. Keep broad queries short and scope with path when possible.",
             json!({
                 "type": "object",
                 "properties": {
@@ -617,6 +617,52 @@ fn object_with_required(properties: &[(&str, &str)], required: &[&str]) -> Value
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shell_tools_advertise_native_file_tools_first() {
+        let tools = definitions(ToolOwner::Workspace);
+        let bash = tools.iter().find(|tool| tool.id == "bash").unwrap();
+        for required in [
+            "IMPORTANT:",
+            "terminal operations",
+            "DO NOT use it for file discovery",
+            "File search: use glob",
+            "Content search: use grep",
+            "Read files and list directories: use read",
+            "selected native mutation tool (apply_patch, or edit/write)",
+            "required native tool is unavailable or cannot support the operation",
+        ] {
+            assert!(bash.description.contains(required), "missing {required}");
+        }
+        if cfg!(windows) {
+            assert!(bash.description.contains("PowerShell"));
+            assert!(bash.description.contains("curl.exe"));
+            assert!(bash.description.contains("Get-ChildItem"));
+            assert!(bash.description.contains("Select-String"));
+        }
+        let background = tools
+            .iter()
+            .find(|tool| tool.id == "background_task")
+            .unwrap();
+        for required in [
+            "native-file-tools-first",
+            "glob for file discovery",
+            "grep for content search",
+            "read for files/directories",
+            "selected native mutation tool",
+            "Do not use background commands to bypass these tools",
+        ] {
+            assert!(
+                background.description.contains(required),
+                "missing {required}"
+            );
+        }
+        for (id, forbidden) in [("glob", "find"), ("grep", "rg"), ("read", "cat")] {
+            let tool = tools.iter().find(|tool| tool.id == id).unwrap();
+            assert!(tool.description.contains("Use this tool instead of shell"));
+            assert!(tool.description.contains(forbidden));
+        }
+    }
 
     #[test]
     fn read_advertises_exact_file_continuation() {

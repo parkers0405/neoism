@@ -157,12 +157,33 @@ fn anthropic_body(request: &ProviderGenerationRequest) -> Value {
         .filter_map(|message| non_empty_text(&message.content))
         .collect::<Vec<_>>()
         .join("\n\n");
-    let messages = request
+    let mut messages: Vec<Value> = Vec::new();
+    for message in request
         .messages
         .iter()
         .filter(|message| !matches!(message.role, ProviderRole::System))
-        .map(anthropic_message)
-        .collect::<Vec<_>>();
+    {
+        let converted = anthropic_message(message);
+        if let Some(previous) = messages
+            .last_mut()
+            .filter(|previous| previous["role"] == converted["role"])
+        {
+            let blocks = converted["content"].as_array().unwrap().iter().cloned();
+            let content = previous["content"].as_array_mut().unwrap();
+            if matches!(message.role, ProviderRole::Tool) {
+                // Anthropic requires every batch result before any text/media.
+                let end = content
+                    .iter()
+                    .take_while(|block| block["type"] == "tool_result")
+                    .count();
+                content.splice(end..end, blocks);
+            } else {
+                content.extend(blocks);
+            }
+        } else {
+            messages.push(converted);
+        }
+    }
     let mut body = json!({
         "model": request.api.as_ref().map(|api| api.id.as_str()).unwrap_or(&request.model_id),
         "max_tokens": request
@@ -340,6 +361,7 @@ struct AnthropicSseParser {
     finish: Option<String>,
     input_tokens: u64,
     output_tokens: u64,
+    reasoning_tokens: u64,
     cache_read_tokens: u64,
     cache_write_tokens: u64,
 }
@@ -404,7 +426,18 @@ impl AnthropicSseParser {
                     );
                 }
                 AnthropicContentBlock::Thinking { thinking } => {
-                    let _ = thinking;
+                    if let Some(thinking) = thinking.filter(|text| !text.is_empty()) {
+                        if !self.reasoning_started {
+                            events.push(ProviderStreamEvent::ReasoningStart {
+                                id: "reasoning".to_string(),
+                            });
+                            self.reasoning_started = true;
+                        }
+                        events.push(ProviderStreamEvent::ReasoningDelta {
+                            id: "reasoning".to_string(),
+                            delta: thinking,
+                        });
+                    }
                     self.blocks.insert(
                         index,
                         AnthropicBlock {
@@ -504,6 +537,12 @@ impl AnthropicSseParser {
                     if let Some(tokens) = usage.output_tokens {
                         self.output_tokens = tokens;
                     }
+                    if let Some(tokens) = usage
+                        .output_tokens_details
+                        .and_then(|details| details.thinking_tokens)
+                    {
+                        self.reasoning_tokens = tokens;
+                    }
                     if let Some(tokens) = usage.cache_read_input_tokens {
                         self.cache_read_tokens = tokens;
                     }
@@ -542,7 +581,7 @@ impl AnthropicSseParser {
                 .saturating_add(self.cache_read_tokens)
                 .saturating_add(self.cache_write_tokens),
             output_tokens,
-            reasoning_tokens: 0,
+            reasoning_tokens: self.reasoning_tokens,
             cache_read_tokens: self.cache_read_tokens,
             cache_write_tokens: self.cache_write_tokens,
         });
@@ -554,7 +593,7 @@ impl AnthropicSseParser {
                 .saturating_add(self.cache_read_tokens)
                 .saturating_add(self.cache_write_tokens),
             output_tokens,
-            reasoning_tokens: 0,
+            reasoning_tokens: self.reasoning_tokens,
             cache_read_tokens: self.cache_read_tokens,
             cache_write_tokens: self.cache_write_tokens,
         });
@@ -606,8 +645,14 @@ struct AnthropicMessageDelta {
 struct AnthropicUsage {
     input_tokens: Option<u64>,
     output_tokens: Option<u64>,
+    output_tokens_details: Option<AnthropicOutputTokensDetails>,
     cache_creation_input_tokens: Option<u64>,
     cache_read_input_tokens: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicOutputTokensDetails {
+    thinking_tokens: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -709,6 +754,89 @@ mod tests {
     }
 
     #[test]
+    fn anthropic_body_groups_parallel_results_before_interleaved_media() {
+        let mut media = ProviderMessage::text(ProviderRole::User, "First screenshot");
+        media.attachments.push(ProviderAttachment {
+            mime: "image/png".to_string(),
+            url: "data:image/png;base64,abc".to_string(),
+            filename: Some("chrome.png".to_string()),
+        });
+        let request =
+            crate::provider_transform::normalize_request(ProviderGenerationRequest {
+                session_id: None,
+                connection_id: None,
+                tenant_id: None,
+                workspace_id: None,
+                provider_id: "anthropic".to_string(),
+                model_id: "claude-sonnet-4".to_string(),
+                variant: None,
+                text_verbosity: None,
+                api: None,
+                auth_env: Vec::new(),
+                messages: vec![
+                    ProviderMessage::text(ProviderRole::User, "Compare screenshots"),
+                    ProviderMessage::assistant_tool_call(
+                        "Reading screenshots",
+                        ["toolu_1", "toolu_2", "toolu_3"]
+                            .into_iter()
+                            .map(|id| ProviderToolCall {
+                                id: id.to_string(),
+                                name: "read".to_string(),
+                                input: json!({ "path": "shot.png" }),
+                            })
+                            .collect(),
+                    ),
+                    ProviderMessage::tool_result(
+                        "toolu_1",
+                        "read",
+                        "Image read successfully",
+                        false,
+                    ),
+                    media,
+                    ProviderMessage::tool_result(
+                        "toolu_2",
+                        "read",
+                        "File not found",
+                        true,
+                    ),
+                    ProviderMessage::tool_result(
+                        "toolu_3",
+                        "read",
+                        "Tool execution was interrupted",
+                        true,
+                    ),
+                    ProviderMessage::text(ProviderRole::User, "hello?"),
+                    ProviderMessage::text(ProviderRole::Assistant, "Recovered"),
+                ],
+                tools: Vec::new(),
+                options: BTreeMap::new(),
+                headers: BTreeMap::new(),
+            });
+        let body = anthropic_body(&request);
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[1]["content"][0]["text"], "Reading screenshots");
+        let calls = messages[1]["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|block| block["type"] == "tool_use")
+            .collect::<Vec<_>>();
+        assert_eq!(calls.len(), 3);
+        assert_eq!(messages[2]["role"], "user");
+        let results = messages[2]["content"].as_array().unwrap();
+        for (index, call) in calls.iter().enumerate() {
+            assert_eq!(results[index]["type"], "tool_result");
+            assert_eq!(results[index]["tool_use_id"], call["id"]);
+            assert_eq!(results[index]["is_error"], index != 0);
+        }
+        assert_eq!(results[3]["text"], "First screenshot");
+        assert_eq!(results[4]["type"], "image");
+        assert_eq!(results[5]["text"], "hello?");
+        assert_eq!(messages[3]["content"][0]["text"], "Recovered");
+    }
+
+    #[test]
     fn anthropic_body_enables_thinking_for_reasoning_variant() {
         let request = ProviderGenerationRequest {
             session_id: None,
@@ -744,7 +872,10 @@ mod tests {
             r#"data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"read","input":{}}}"#,
             r#"data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"path\":\"TASK.md\"}"}}"#,
             r#"data: {"type":"content_block_stop","index":1}"#,
-            r#"data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":7}}"#,
+            r#"data: {"type":"content_block_start","index":2,"content_block":{"type":"thinking","thinking":""}}"#,
+            r#"data: {"type":"content_block_delta","index":2,"delta":{"type":"thinking_delta","thinking":"Let me check."}}"#,
+            r#"data: {"type":"content_block_stop","index":2}"#,
+            r#"data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":7,"output_tokens_details":{"thinking_tokens":5}}}"#,
         ] {
             events.extend(parser.push_line(line).unwrap());
         }
@@ -756,12 +887,109 @@ mod tests {
             ProviderStreamEvent::ToolCall { name, input, .. }
                 if name == "read" && input["path"] == "TASK.md"
         )));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, ProviderStreamEvent::ReasoningStart { .. })));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ProviderStreamEvent::ReasoningDelta { delta, .. }
+                if delta == "Let me check."
+        )));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, ProviderStreamEvent::ReasoningEnd { .. })));
+        assert!(matches!(
+            &events[events.len() - 2],
+            ProviderStreamEvent::FinishStep {
+                output_tokens: 7,
+                reasoning_tokens: 5,
+                ..
+            }
+        ));
         assert!(matches!(
             events.last().unwrap(),
             ProviderStreamEvent::Finish {
                 output_tokens: 7,
+                reasoning_tokens: 5,
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn anthropic_parser_preserves_initial_thinking() {
+        let mut parser = AnthropicSseParser::default();
+        let mut events = Vec::new();
+        for line in [
+            r#"data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"First"}}"#,
+            r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" second"}}"#,
+            r#"data: {"type":"content_block_stop","index":0}"#,
+        ] {
+            events.extend(parser.push_line(line).unwrap());
+        }
+        events.extend(parser.finish().unwrap());
+        assert!(matches!(
+            events[0],
+            ProviderStreamEvent::ReasoningStart { .. }
+        ));
+        assert!(matches!(
+            &events[1],
+            ProviderStreamEvent::ReasoningDelta { delta, .. } if delta == "First"
+        ));
+        assert!(matches!(
+            &events[2],
+            ProviderStreamEvent::ReasoningDelta { delta, .. } if delta == " second"
+        ));
+        assert!(matches!(
+            events[3],
+            ProviderStreamEvent::ReasoningEnd { .. }
+        ));
+    }
+
+    #[test]
+    fn anthropic_parser_thinking_usage_is_independent_of_visible_text() {
+        for (details, expected) in [
+            (json!({ "thinking_tokens": 5 }), 5),
+            (json!({ "thinking_tokens": 0 }), 0),
+            (json!({}), 0),
+            (Value::Null, 0),
+        ] {
+            let mut parser = AnthropicSseParser::default();
+            let mut usage = json!({ "output_tokens": 12 });
+            if !details.is_null() {
+                usage["output_tokens_details"] = details;
+            }
+            let line = format!(
+                "data: {}",
+                json!({ "type": "message_delta", "usage": usage })
+            );
+            parser.push_line(&line).unwrap();
+            // Later partial usage must not erase the final thinking breakdown.
+            parser
+                .push_line(
+                    r#"data: {"type":"message_delta","usage":{"output_tokens":12}}"#,
+                )
+                .unwrap();
+            let events = parser.finish().unwrap();
+            assert_eq!(events.len(), 2);
+            for event in events {
+                match event {
+                    ProviderStreamEvent::FinishStep {
+                        output_tokens,
+                        reasoning_tokens,
+                        ..
+                    }
+                    | ProviderStreamEvent::Finish {
+                        output_tokens,
+                        reasoning_tokens,
+                        ..
+                    } => {
+                        assert_eq!(output_tokens, 12);
+                        assert_eq!(reasoning_tokens, expected);
+                    }
+                    _ => panic!("unexpected content event without visible thinking"),
+                }
+            }
+        }
     }
 }

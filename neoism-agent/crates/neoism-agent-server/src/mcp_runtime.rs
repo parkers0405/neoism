@@ -5,8 +5,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context};
 use neoism_agent_core::{
-    event_type, EventPayload, McpPromptInfo, McpResource, McpStatus, McpToolCallResult,
-    McpToolInfo,
+    event_type, EventPayload, McpPromptInfo, McpResource, McpStatus, McpToolInfo,
 };
 use serde_json::{json, Value};
 
@@ -348,7 +347,7 @@ impl McpRuntimeManager {
         name: &str,
         tool: &str,
         arguments: Value,
-    ) -> anyhow::Result<McpToolCallResult> {
+    ) -> anyhow::Result<super::SessionMcpResult> {
         let runtime = {
             let clients = self.clients.read().expect("mcp runtime lock poisoned");
             clients

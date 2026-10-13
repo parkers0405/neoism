@@ -1,6 +1,6 @@
 use super::*;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub(crate) enum ServiceClientMessage {
     Files {
         request_id: u64,

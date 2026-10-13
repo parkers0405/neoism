@@ -3,6 +3,118 @@ use super::*;
 use crate::panels::agent_pane::state::{NeoismAgentMessage, NeoismAgentOutputKind};
 
 #[test]
+fn timeline_diff_rows_do_not_wrap_when_the_pane_narrows() {
+    let long = "very_long_identifier_".repeat(80);
+    let section = snapshot_section_from_text(
+        "src/lib.rs".to_string(),
+        &format!("old_{long}\nkeep_{long}\n"),
+        &format!("new_{long}\nkeep_{long}\n"),
+    );
+    for scale in [1.0, 2.0] {
+        let narrow =
+            super::diff::cached_diff_card_view(&section, 120.0 * scale, scale, false);
+        let wide =
+            super::diff::cached_diff_card_view(&section, 900.0 * scale, scale, false);
+        assert_eq!(narrow.visual_rows, section.lines.len());
+        assert_eq!(narrow.preview_visual_rows, wide.preview_visual_rows);
+        assert_eq!(
+            narrow.visual_row_offsets.as_slice(),
+            &(0..=section.lines.len()).collect::<Vec<_>>()
+        );
+        assert_eq!(narrow.rows[0].text, section.lines[0].text);
+    }
+}
+
+#[test]
+fn timeline_diff_show_more_keeps_the_preview_height() {
+    let after = (0..60)
+        .map(|i| format!("line_{i}_{}\n", "x".repeat(400)))
+        .collect::<String>();
+    let section = snapshot_section_from_text("src/lib.rs".to_string(), "", &after);
+    let preview = super::diff::cached_diff_card_view(&section, 120.0, 1.0, false);
+    let expanded = super::diff::cached_diff_card_view(&section, 120.0, 1.0, true);
+    assert_eq!(preview.visual_rows, COLLAPSED_DIFF_ROWS + 1);
+    assert!(preview
+        .rows
+        .last()
+        .unwrap()
+        .text
+        .contains("click to expand"));
+    assert_eq!(expanded.visual_rows, section.lines.len());
+    assert_eq!(expanded.preview_visual_rows, preview.preview_visual_rows);
+}
+
+#[test]
+fn diff_horizontal_scroll_uses_fenced_controls_without_toggling_the_card() {
+    let mut pane = NeoismAgentPane::default();
+    pane.register_tool_hit_rect("edit:0".to_string(), [20.0, 100.0, 300.0, 120.0]);
+    for (index, y) in [(0, 100.0), (1, 240.0)] {
+        pane.code_scroll_pane()
+            .unwrap()
+            .register_markdown_horizontal_scroll_rect(
+                format!("diff:edit:{index}"),
+                [20.0, y, 300.0, 120.0],
+                240.0,
+            );
+    }
+    assert_eq!(
+        pane.scroll_markdown_horizontal_at(40.0, 140.0, 75.0),
+        Some(true)
+    );
+    let scroll_pane = pane.code_scroll_pane().unwrap();
+    assert_eq!(
+        scroll_pane.markdown_horizontal_scroll_offset("diff:edit:0", 240.0),
+        75.0
+    );
+    assert_eq!(
+        scroll_pane.markdown_horizontal_scroll_offset("diff:edit:1", 240.0),
+        0.0
+    );
+    assert_eq!(
+        scroll_pane.markdown_horizontal_scroll_offset("diff:edit:0", 50.0),
+        50.0
+    );
+    scroll_pane.register_markdown_horizontal_scrollbar(
+        "diff:edit:0".to_string(),
+        [20.0, 200.0, 300.0, 16.0],
+        [20.0, 200.0, 100.0, 16.0],
+        240.0,
+    );
+    assert!(pane.begin_markdown_horizontal_scrollbar_drag(50.0, 208.0));
+    assert!(pane.drag_markdown_horizontal_scrollbar_to(150.0));
+    assert!(!pane.tool_expanded("edit:0"));
+    assert!(pane.end_markdown_horizontal_scrollbar_drag());
+    assert!(pane.toggle_tool_at(30.0, 160.0));
+    assert!(pane.tool_expanded("edit:0"));
+}
+
+#[test]
+fn composition_sections_update_without_losing_source_or_becoming_edit_diffs() {
+    use crate::panels::agent_pane::api_mapping::part_block;
+    let mut part = serde_json::json!({"id":"compose", "type":"tool", "tool":"compose",
+        "state":{"status":"running", "input":{"code":"return 42;"}},
+        "metadata":{"composition":{"toolCalls":[{"path":"docs.write", "status":"running", "input":{}}]}}});
+    let live = part_block(&part).unwrap();
+    let sections = cached_edit_diff_sections(&live).unwrap();
+    assert_eq!(sections.len(), 3);
+    assert!(sections[0].lines[0].text.contains("[running]"));
+    assert_eq!(sections[2].lines[0].text.trim_start(), "return 42;");
+    assert!(sections
+        .iter()
+        .all(|s| s.additions == 0 && s.deletions == 0 && s.link_target.is_empty()));
+    assert!(show_tool_diff_cards("compose", "running", true, false));
+    assert!(!show_tool_diff_cards("compose", "running", false, false));
+    part["state"]["status"] = serde_json::json!("error");
+    part["metadata"]["composition"]["toolCalls"][0]["status"] =
+        serde_json::json!("completed");
+    let failed = part_block(&part).unwrap();
+    let updated = cached_edit_diff_sections(&failed).unwrap();
+    assert!(updated[0].lines[0].text.contains("[completed]"));
+    assert_eq!(updated[2].fingerprint, sections[2].fingerprint);
+    assert!(!is_edit_tool_name("compose"));
+}
+
+#[test]
 fn mcp_header_identity_is_stable_across_status_and_reveal_details() {
     let mut message = apply_patch_message("pending", "");
     message.tool = "execute".to_owned();

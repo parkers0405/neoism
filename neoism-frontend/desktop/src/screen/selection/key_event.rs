@@ -40,6 +40,18 @@ impl Screen<'_> {
 
         let mods = self.modifiers.state();
 
+        // An open Git popup takes input before global shortcuts or chrome
+        // focus navigation can act on controls behind it.
+        if self.renderer.git_diff_panel.is_focused()
+            && self.renderer.git_diff_panel.actions_menu_is_open()
+        {
+            if key.state == ElementState::Pressed {
+                self.handle_git_diff_panel_key(key);
+                self.mark_dirty();
+            }
+            return;
+        }
+
         if self.handle_plugin_keymap(key, mods) {
             return;
         }

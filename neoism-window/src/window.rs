@@ -1879,12 +1879,23 @@ pub enum ImePurpose {
 /// An opaque token used to activate the [`Window`].
 ///
 /// [`Window`]: crate::window::Window
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(PartialEq, Eq, Clone)]
 pub struct ActivationToken {
     pub(crate) _token: String,
 }
 
+impl std::fmt::Debug for ActivationToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ActivationToken([redacted])")
+    }
+}
+
 impl ActivationToken {
+    /// Wrap an opaque token supplied by a launcher (does not request new authority).
+    pub fn from_raw(token: String) -> Self {
+        Self::_new(token)
+    }
+
     pub(crate) fn _new(_token: String) -> Self {
         Self { _token }
     }

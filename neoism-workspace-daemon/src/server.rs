@@ -13,6 +13,8 @@
 //! pre-existing websocket auth path (`?token=` against `NEOISM_DAEMON_TOKEN`)
 //! is unchanged. We document each addition with the route comment above.
 
+pub mod fast;
+
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf as StdPathBuf;
@@ -387,7 +389,14 @@ async fn agent_proxy_inner(
         target.push('?');
         target.push_str(&query);
     }
-    let client = reqwest::Client::new();
+    // Only owned temporary hosts opt in. Normal remote upstreams retain their
+    // existing environment proxy/redirect behavior.
+    let client = if std::env::var("NEOISM_FAST_SERVER").as_deref() == Ok("1") {
+        match reqwest::Client::builder().no_proxy().redirect(reqwest::redirect::Policy::none()).build() {
+            Ok(client) => client,
+            Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        }
+    } else { reqwest::Client::new() };
     let method = match reqwest::Method::from_bytes(method.as_str().as_bytes()) {
         Ok(method) => method,
         Err(_) => return StatusCode::METHOD_NOT_ALLOWED.into_response(),

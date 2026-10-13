@@ -45,9 +45,110 @@ use crate::server_registry::ServerRegistry;
 /// Result of an off-thread server-switch dial, completed by the pump.
 struct PendingServerSwitch {
     window_id: WindowId,
+    generation: u64,
     daemon_url: String,
     server_id: Option<String>,
     result: Result<DesktopDaemonConnection, String>,
+}
+
+#[derive(Clone)]
+struct ServerSwitchRequest {
+    generation: u64,
+    endpoint: String,
+    server_id: Option<String>,
+    credential: Option<String>,
+}
+
+impl ServerSwitchRequest {
+    fn matches_target(
+        &self,
+        endpoint: &str,
+        server_id: Option<&str>,
+        credential: Option<&str>,
+    ) -> bool {
+        self.endpoint == endpoint
+            && self.server_id.as_deref() == server_id
+            && self.credential.as_deref() == credential
+    }
+}
+
+impl PendingServerSwitch {
+    fn is_current(&self, requests: &HashMap<WindowId, ServerSwitchRequest>) -> bool {
+        requests.get(&self.window_id).is_some_and(|request| {
+            request.generation == self.generation
+                && request.endpoint == self.daemon_url
+                && request.server_id == self.server_id
+        })
+    }
+}
+
+#[cfg(test)]
+mod server_switch_tests {
+    use super::*;
+
+    #[test]
+    fn canceled_and_superseded_dials_cannot_restore_a_departed_server() {
+        let window_id = unsafe { WindowId::dummy() };
+        let pending = PendingServerSwitch {
+            window_id,
+            generation: 1,
+            daemon_url: "wss://fast.example/session".into(),
+            server_id: Some("fast-test".into()),
+            result: Err("test".into()),
+        };
+        let request = ServerSwitchRequest {
+            generation: 1,
+            endpoint: pending.daemon_url.clone(),
+            server_id: pending.server_id.clone(),
+            credential: None,
+        };
+        let mut requests = HashMap::from([(window_id, request.clone())]);
+        assert!(pending.is_current(&requests));
+        requests.remove(&window_id);
+        assert!(!pending.is_current(&requests));
+        requests.insert(
+            window_id,
+            ServerSwitchRequest {
+                generation: 2,
+                ..request.clone()
+            },
+        );
+        assert!(!pending.is_current(&requests));
+        assert_eq!(requests.get(&window_id).unwrap().generation, 2);
+        requests.insert(
+            window_id,
+            ServerSwitchRequest {
+                endpoint: "ws://localhost/session".into(),
+                ..request
+            },
+        );
+        assert!(!pending.is_current(&requests));
+    }
+
+    #[test]
+    fn explicit_invite_identity_and_credential_cannot_coalesce_with_a_saved_dial() {
+        let request = ServerSwitchRequest {
+            generation: 1,
+            endpoint: "wss://fast.example/session".into(),
+            server_id: Some("saved-id".into()),
+            credential: Some("saved-credential".into()),
+        };
+        assert!(request.matches_target(
+            &request.endpoint,
+            Some("saved-id"),
+            Some("saved-credential")
+        ));
+        assert!(!request.matches_target(
+            &request.endpoint,
+            Some("fast-id"),
+            Some("saved-credential")
+        ));
+        assert!(!request.matches_target(
+            &request.endpoint,
+            Some("saved-id"),
+            Some("invite-password")
+        ));
+    }
 }
 
 /// Result of the SSH bootstrap/tunnel phase. Daemon websocket dialing stays
@@ -233,9 +334,13 @@ fn lua_autocmd_needs_urgent_composer_publish(event: &str) -> bool {
 #[cfg(target_os = "linux")]
 pub(crate) mod agent_tray;
 pub mod bell;
+mod connection_recovery;
 pub mod daemon_pump;
+mod fast_server_sessions;
 pub mod freeze_watchdog;
 pub mod ime;
+mod invite_activation;
+mod invite_join;
 pub mod messenger;
 pub mod scheduler;
 pub mod user_event_dispatch;
@@ -264,6 +369,14 @@ pub struct Application<'a> {
     /// returns home.
     home_daemon_endpoint: Option<String>,
     server_registry: ServerRegistry,
+    fast_hosts: HashMap<String, crate::fast_servers::FastHost>,
+    ended_fast_hosts: HashSet<String>,
+    fast_host_tx: mpsc::Sender<fast_server_sessions::PendingFastHost>,
+    fast_host_rx: mpsc::Receiver<fast_server_sessions::PendingFastHost>,
+    fast_host_pending: HashSet<WindowId>,
+    invite_join: invite_join::InviteJoinState,
+    invite_activation: HashMap<String, neoism_backend::event::InviteActivationToken>,
+    invite_activation_targets: HashMap<WindowId, String>,
     bootstrap_server_id: Option<String>,
     server_health: HashMap<String, neoism_ui::panels::ServerIndicatorStatus>,
     server_health_inflight: HashSet<String>,
@@ -275,7 +388,8 @@ pub struct Application<'a> {
     /// "connecting" instead of freezing.
     server_switch_tx: mpsc::Sender<PendingServerSwitch>,
     server_switch_rx: mpsc::Receiver<PendingServerSwitch>,
-    server_switch_inflight: HashSet<WindowId>,
+    server_switch_inflight: HashMap<WindowId, ServerSwitchRequest>,
+    server_switch_generation: u64,
     ssh_attach_tx: mpsc::Sender<PendingSshAttach>,
     ssh_attach_rx: mpsc::Receiver<PendingSshAttach>,
     ssh_attach_inflight: HashSet<WindowId>,
@@ -420,6 +534,7 @@ impl Application<'_> {
                     )
                     .expect("fallback server registry path must be readable")
                 });
+        let (fast_host_tx, fast_host_rx) = mpsc::channel();
         let (server_health_tx, server_health_rx) = mpsc::channel();
         let (server_switch_tx, server_switch_rx) = mpsc::channel();
         let (ssh_attach_tx, ssh_attach_rx) = mpsc::channel();
@@ -476,6 +591,14 @@ impl Application<'_> {
             window_profile_seq: 0,
             home_daemon_endpoint,
             server_registry,
+            fast_hosts: HashMap::new(),
+            ended_fast_hosts: HashSet::new(),
+            fast_host_tx,
+            fast_host_rx,
+            fast_host_pending: HashSet::new(),
+            invite_join: invite_join::InviteJoinState::default(),
+            invite_activation: HashMap::new(),
+            invite_activation_targets: HashMap::new(),
             bootstrap_server_id: initial_server_id,
             server_health: HashMap::new(),
             server_health_inflight: HashSet::new(),
@@ -483,7 +606,8 @@ impl Application<'_> {
             server_health_rx,
             server_switch_tx,
             server_switch_rx,
-            server_switch_inflight: HashSet::new(),
+            server_switch_inflight: HashMap::new(),
+            server_switch_generation: 0,
             ssh_attach_tx,
             ssh_attach_rx,
             ssh_attach_inflight: HashSet::new(),
@@ -628,15 +752,19 @@ impl Application<'_> {
     }
 
     fn pump_daemon(&mut self, event_loop: &ActiveEventLoop) {
-        let perf_start = tracing::enabled!(target: "neoism::frame_work", tracing::Level::DEBUG)
-            .then(Instant::now);
+        let perf_start =
+            tracing::enabled!(target: "neoism::frame_work", tracing::Level::DEBUG)
+                .then(Instant::now);
         self.pump_lua();
         let lua_us = perf_start
             .map(|start| start.elapsed().as_micros())
             .unwrap_or(0);
         self.drain_server_health_results();
+        self.drain_fast_host_results();
+        self.reap_stopped_fast_hosts();
         self.drain_ssh_attach_results();
         self.drain_server_switch_results();
+        self.refresh_temporary_server_statuses();
         let window_ids = self.window_sessions.keys().copied().collect::<Vec<_>>();
         for window_id in window_ids {
             let window_start = perf_start.map(|_| Instant::now());
@@ -712,6 +840,24 @@ impl Application<'_> {
                     .renderer
                     .top_bar
                     .set_server_status(status);
+                let temporary = route
+                    .window
+                    .screen
+                    .context_manager
+                    .current_adopted_workspace_endpoint()
+                    .and_then(|endpoint| {
+                        self.server_registry
+                            .servers()
+                            .iter()
+                            .find(|server| server.endpoint == endpoint)
+                    })
+                    .is_some_and(|server| self.server_registry.is_temporary(&server.id));
+                route
+                    .window
+                    .screen
+                    .renderer
+                    .top_bar
+                    .set_server_temporary(temporary);
             }
             // Capture the source endpoint BEFORE processing workspace events:
             // an earlier event in this batch can switch the active connection.
@@ -744,6 +890,37 @@ impl Application<'_> {
             let message_count = messages.len();
             let parked_editor_count = parked_editors.len();
             for (endpoint, message) in parked_editors {
+                let ended = match &message {
+                    DaemonServerMessage::Workspace {
+                        message: WorkspaceServerMessage::HostEnded { reason },
+                        ..
+                    } => Some(reason.as_str()),
+                    DaemonServerMessage::Workspace {
+                        message:
+                            WorkspaceServerMessage::HelloAck {
+                                accepted: false,
+                                reason,
+                                ..
+                            },
+                        ..
+                    } => Some(
+                        reason
+                            .as_deref()
+                            .unwrap_or("Server authentication was rejected"),
+                    ),
+                    _ => None,
+                };
+                if let Some(reason) = ended {
+                    self.leave_server_connection(window_id, &endpoint);
+                    if let Some(route) = self.router.routes.get_mut(&window_id) {
+                        route.window.screen.renderer.notifications.push(
+                            reason,
+                            neoism_ui::panels::notifications::NotificationLevel::Warn,
+                        );
+                        route.request_redraw();
+                    }
+                    continue;
+                }
                 if let DaemonServerMessage::Editor {
                     request_id,
                     message,
@@ -916,6 +1093,7 @@ impl Application<'_> {
             // drained normally.
             self.queue_dead_ssh_reconnect(window_id);
             self.process_window_server_requests(window_id);
+            self.update_connection_recovery(window_id);
             self.flush_window_outbound(window_id);
             if let Some(start) = window_start {
                 let elapsed_us = start.elapsed().as_micros();
@@ -928,6 +1106,7 @@ impl Application<'_> {
                 }
             }
         }
+        self.process_pending_invites(event_loop);
         if let Some(start) = perf_start {
             let elapsed_us = start.elapsed().as_micros();
             if elapsed_us >= 1_000 {
@@ -6986,6 +7165,9 @@ impl Application<'_> {
             server_request,
             ssh_attach_request,
             add_request,
+            fast_add_request,
+            fast_invite_request,
+            recovery_request,
             edit_request,
             edit_submit,
             remove_request,
@@ -7002,6 +7184,9 @@ impl Application<'_> {
                 route.window.screen.take_server_connect(),
                 route.window.screen.take_ssh_workspace_attach(),
                 route.window.screen.take_server_add(),
+                route.window.screen.take_fast_server_add(),
+                route.window.screen.take_fast_server_invite(),
+                route.window.screen.take_server_recovery(),
                 route.window.screen.take_server_edit(),
                 route.window.screen.take_server_edit_submit(),
                 route.window.screen.take_server_remove(),
@@ -7022,6 +7207,20 @@ impl Application<'_> {
         }
         for workspace_id in workspace_unsubscriptions {
             self.persist_workspace_unsubscription(window_id, workspace_id);
+        }
+
+        if let Some((host, target, name, password)) = fast_add_request {
+            self.add_fast_server(window_id, host, target, name, password);
+        }
+        if let Some(server_id) = fast_invite_request {
+            self.copy_fast_server_invite(window_id, &server_id);
+        }
+        if let Some((endpoint, leave, discard)) = recovery_request {
+            if leave {
+                self.leave_server_connection_with_discard(window_id, &endpoint, discard);
+            } else {
+                self.retry_server_connection(window_id, &endpoint);
+            }
         }
 
         if let Some(server_id) = server_request {
@@ -7118,7 +7317,16 @@ impl Application<'_> {
             }
         }
 
-        if let Some(server_id) = remove_request {
+        if let Some(server) = remove_request
+            .as_deref()
+            .filter(|id| self.server_registry.is_temporary(id))
+            .and_then(|id| self.server_registry.server(id).cloned())
+        {
+            self.leave_server_connection(window_id, &server.endpoint);
+            self.open_server_manager(window_id);
+        }
+
+        if let Some(server_id) = remove_request.filter(|id| !id.starts_with("fast-")) {
             let active = self
                 .window_sessions
                 .get(&window_id)
@@ -7360,6 +7568,8 @@ impl Application<'_> {
                 .clone()
                 .unwrap_or_else(|| "local daemon".to_string()),
             local: true,
+            temporary: false,
+            hosted: false,
             status: if local_active {
                 active_status
             } else {
@@ -7372,8 +7582,14 @@ impl Application<'_> {
             neoism_ui::panels::command_palette::PaletteServerEntry {
                 id: server.id.clone(),
                 name: server.name.clone(),
-                address: server.endpoint.clone(),
+                address: self
+                    .fast_hosts
+                    .get(&server.id)
+                    .map(|host| host.public_url.clone())
+                    .unwrap_or_else(|| server.endpoint.clone()),
                 local: false,
+                temporary: self.server_registry.is_temporary(&server.id),
+                hosted: self.server_registry.is_temporary_host(&server.id),
                 status: if active {
                     active_status
                 } else {
@@ -7399,7 +7615,7 @@ impl Application<'_> {
 
     fn probe_saved_servers(&mut self, active_id: Option<&str>) {
         for server in self.server_registry.servers().to_vec() {
-            if server.agent_api {
+            if server.agent_api || self.server_registry.is_temporary(&server.id) {
                 continue;
             }
             if active_id == Some(server.id.as_str())
@@ -7559,6 +7775,71 @@ impl Application<'_> {
         event_loop: &ActiveEventLoop,
         message: WorkspaceServerMessage,
     ) {
+        if self
+            .window_sessions
+            .get(&source_window_id)
+            .is_some_and(|session| session.host_ended())
+            && !matches!(
+                &message,
+                WorkspaceServerMessage::HostEnded { .. }
+                    | WorkspaceServerMessage::HelloAck { .. }
+            )
+        {
+            return;
+        }
+        let ended_reason = match &message {
+            WorkspaceServerMessage::HostEnded { reason } => Some(reason.as_str()),
+            WorkspaceServerMessage::HelloAck {
+                accepted: false,
+                reason,
+                ..
+            } => Some(
+                reason
+                    .as_deref()
+                    .unwrap_or("Server authentication was rejected"),
+            ),
+            _ => None,
+        };
+        if let Some(reason) = ended_reason {
+            let endpoint = self
+                .window_sessions
+                .get(&source_window_id)
+                .filter(|session| !session.is_home(self.home_daemon_endpoint.as_deref()))
+                .map(|session| session.connection.endpoint().to_string());
+            if let Some(endpoint) = endpoint {
+                // Close while adopted identities are still bound; ingest's
+                // legacy detach would otherwise hide the grids from teardown.
+                if let Some(session) = self.window_sessions.get_mut(&source_window_id) {
+                    session.mark_host_ended();
+                }
+                let left = self.leave_server_connection(source_window_id, &endpoint);
+                if let Some(route) = self.router.routes.get_mut(&source_window_id) {
+                    if left {
+                        let title = if matches!(
+                            &message,
+                            WorkspaceServerMessage::HelloAck { .. }
+                        ) {
+                            "Server connection rejected"
+                        } else {
+                            "Session ended"
+                        };
+                        route
+                            .window
+                            .screen
+                            .renderer
+                            .modal
+                            .open_message(title, reason);
+                    } else {
+                        route.window.screen.renderer.notifications.push(
+                            reason,
+                            neoism_ui::panels::notifications::NotificationLevel::Warn,
+                        );
+                    }
+                    route.request_redraw();
+                }
+                return;
+            }
+        }
         let hosts = match &message {
             WorkspaceServerMessage::HostWorkspaceTree { hosts, .. }
             | WorkspaceServerMessage::HostList { hosts } => hosts.as_slice(),
@@ -7994,6 +8275,28 @@ impl Application<'_> {
         token: Option<String>,
         server_id: Option<String>,
     ) {
+        let supersedes_pending =
+            self.server_switch_inflight
+                .get(&window_id)
+                .is_some_and(|request| {
+                    !request.matches_target(
+                        daemon_url,
+                        server_id.as_deref(),
+                        token.as_deref(),
+                    )
+                });
+        if supersedes_pending {
+            self.server_switch_inflight.remove(&window_id);
+            if self.window_sessions.get(&window_id).is_some_and(|session| {
+                session.connection.endpoint() == daemon_url
+                    && session.active_server_id == server_id
+                    && (token.is_none() || token.as_deref() == session.connection.token())
+            }) {
+                // Selecting the current server cancels a dial without touching
+                // its buffers, so unsaved edits must not prevent cancellation.
+                return;
+            }
+        }
         let is_ssh_attach = self
             .pending_ssh_workspaces
             .get(&window_id)
@@ -8014,6 +8317,18 @@ impl Application<'_> {
             }
             return;
         }
+        if self
+            .server_switch_inflight
+            .get(&window_id)
+            .is_some_and(|request| {
+                request.matches_target(daemon_url, server_id.as_deref(), token.as_deref())
+            })
+        {
+            return;
+        }
+        // A new selection invalidates the previous dial, including selecting an
+        // already-active or parked endpoint while that dial is still running.
+        self.server_switch_inflight.remove(&window_id);
         if self.window_sessions.get(&window_id).is_some_and(|session| {
             session.connection.endpoint() == daemon_url
                 && token.is_none()
@@ -8030,21 +8345,38 @@ impl Application<'_> {
             .get_mut(&window_id)
             .and_then(|session| session.parked_connections.remove(daemon_url));
         if let Some(connection) = parked {
-            if matches!(
+            let open = matches!(
                 connection.status(),
                 crate::daemon_client::DaemonClientStatus::Open
-            ) {
+            );
+            if open && (token.is_none() || token.as_deref() == connection.token()) {
                 self.complete_server_switch(window_id, connection, server_id);
                 return;
             }
-            // Stale (daemon restarted while we were away) — dial.
+            if open {
+                // A corrected invite credential needs its own authentication;
+                // retain the working connection until that dial succeeds.
+                if let Some(session) = self.window_sessions.get_mut(&window_id) {
+                    session
+                        .parked_connections
+                        .insert(daemon_url.to_string(), connection);
+                }
+            }
         }
         // Dial off-thread: the handshake blocks up to its timeout, and a
         // dead endpoint would freeze the UI for the whole wait. The pump
         // completes the swap in `drain_server_switch_results`.
-        if !self.server_switch_inflight.insert(window_id) {
-            return;
-        }
+        self.server_switch_generation = self.server_switch_generation.wrapping_add(1);
+        let generation = self.server_switch_generation;
+        self.server_switch_inflight.insert(
+            window_id,
+            ServerSwitchRequest {
+                generation,
+                endpoint: daemon_url.to_string(),
+                server_id: server_id.clone(),
+                credential: token.clone(),
+            },
+        );
         if let Some(id) = server_id.as_deref() {
             let status = neoism_ui::panels::ServerIndicatorStatus::Connecting;
             self.server_health.insert(id.to_string(), status);
@@ -8061,7 +8393,7 @@ impl Application<'_> {
         let tx = self.server_switch_tx.clone();
         let event_proxy = self.event_proxy.clone();
         let daemon_url = daemon_url.to_string();
-        std::thread::Builder::new()
+        let spawn = std::thread::Builder::new()
             .name(format!("neoism-server-switch-{window_id:?}"))
             .spawn(move || {
                 let result = DesktopDaemonConnection::connect_with_token(
@@ -8072,6 +8404,7 @@ impl Application<'_> {
                 .map_err(|error| error.to_string());
                 let _ = tx.send(PendingServerSwitch {
                     window_id,
+                    generation,
                     daemon_url,
                     server_id,
                     result,
@@ -8079,8 +8412,14 @@ impl Application<'_> {
                 event_proxy.send_event(RioEventType::Rio(RioEvent::Render), unsafe {
                     neoism_window::window::WindowId::dummy()
                 });
-            })
-            .ok();
+            });
+        if let Err(error) = spawn {
+            self.server_switch_inflight.remove(&window_id);
+            self.fast_server_error(
+                window_id,
+                format!("Could not start server connection: {error}"),
+            );
+        }
     }
 
     fn drain_server_switch_results(&mut self) {
@@ -8093,16 +8432,46 @@ impl Application<'_> {
                 std::cell::RefCell::new(std::collections::HashSet::new());
         }
         while let Ok(pending) = self.server_switch_rx.try_recv() {
+            if !pending.is_current(&self.server_switch_inflight) {
+                continue;
+            }
             let PendingServerSwitch {
                 window_id,
+                generation: _,
                 daemon_url,
                 server_id,
                 result,
             } = pending;
             self.server_switch_inflight.remove(&window_id);
+            let is_ssh_attach = self
+                .pending_ssh_workspaces
+                .get(&window_id)
+                .is_some_and(|pending| pending.daemon_url == daemon_url);
+            if result.is_ok() && !is_ssh_attach {
+                if let Some(route) = self.router.routes.get_mut(&window_id) {
+                    if route.window.screen.has_unsaved_server_buffers() {
+                        route.window.screen.renderer.notifications.push(
+                            "Server switch canceled: changes were made while connecting. Save before switching servers.",
+                            neoism_ui::panels::notifications::NotificationLevel::Warn,
+                        );
+                        route.request_redraw();
+                        self.invite_join_failed(window_id, &daemon_url);
+                        continue;
+                    }
+                }
+            }
+            if server_id.as_deref().is_some_and(|id| {
+                id.starts_with("fast-") && !self.server_registry.is_temporary(id)
+            }) {
+                continue;
+            }
             let connection = match result {
                 Ok(connection) => connection,
                 Err(error) => {
+                    if self.is_invite_join_attempt(window_id, &daemon_url) {
+                        self.invite_join_failed(window_id, &daemon_url);
+                        continue;
+                    }
                     if self
                         .pending_ssh_workspaces
                         .get(&window_id)
@@ -8203,11 +8572,16 @@ impl Application<'_> {
         connection: DesktopDaemonConnection,
         server_id: Option<String>,
     ) {
-        // The window may have closed while the dial was in flight.
         if !self.router.routes.contains_key(&window_id) {
             return;
         }
+        self.invite_join_succeeded(window_id, connection.endpoint());
         if let Some(id) = server_id.as_deref() {
+            self.server_registry.refresh_temp_credential(
+                id,
+                connection.endpoint(),
+                connection.token(),
+            );
             let status = neoism_ui::panels::ServerIndicatorStatus::Online;
             self.server_health.insert(id.to_string(), status);
             if let Some(route) = self.router.routes.get_mut(&window_id) {
@@ -8226,19 +8600,35 @@ impl Application<'_> {
         let outgoing = self.window_sessions.remove(&window_id);
         let home_endpoint = self.home_daemon_endpoint.clone();
         let switching_home = home_endpoint.as_deref() == Some(connection.endpoint());
-        let (profile_id, parked_connections, pending_peer_adopt) = match outgoing {
-            Some(mut old) => {
-                let profile_id = old.profile_id.clone();
-                let pending_peer_adopt = old.pending_peer_adopt.take();
-                let mut parked = std::mem::take(&mut old.parked_connections);
-                if old.connection.endpoint() != connection.endpoint() {
-                    old.connection.set_parked(true);
-                    parked.insert(old.connection.endpoint().to_string(), old.connection);
+        let (profile_id, parked_connections, pending_peer_adopt, connection_recovery) =
+            match outgoing {
+                Some(mut old) => {
+                    let profile_id = old.profile_id.clone();
+                    let pending_peer_adopt = old.pending_peer_adopt.take();
+                    let mut parked = std::mem::take(&mut old.parked_connections);
+                    if !old.host_ended()
+                        && old.connection.endpoint() != connection.endpoint()
+                    {
+                        old.connection.set_parked(true);
+                        parked.insert(
+                            old.connection.endpoint().to_string(),
+                            old.connection,
+                        );
+                    }
+                    (
+                        profile_id,
+                        parked,
+                        pending_peer_adopt,
+                        std::mem::take(&mut old.connection_recovery),
+                    )
                 }
-                (profile_id, parked, pending_peer_adopt)
-            }
-            None => (self.next_window_profile_id(), HashMap::new(), None),
-        };
+                None => (
+                    self.next_window_profile_id(),
+                    HashMap::new(),
+                    None,
+                    HashMap::new(),
+                ),
+            };
         let mut session = WindowServerSession::new(profile_id, connection, server_id);
         // A foreign server needs an initial adopt so the window lands in one
         // of its workspaces. Returning to the parked HOME connection does
@@ -8257,6 +8647,7 @@ impl Application<'_> {
         session.needs_initial_workspace_adopt =
             !switching_home && session.pending_peer_adopt.is_none();
         session.parked_connections = parked_connections;
+        session.connection_recovery = connection_recovery;
         self.window_sessions.insert(window_id, session);
         self.attach_session_to_window(window_id);
         // Do not broadcast this connection's agent endpoint across the
@@ -8739,6 +9130,7 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
             }
         }
 
+        self.process_pending_invites(event_loop);
         // Schedule title updates every 2s
         let timer_id = TimerId::new(Topic::UpdateTitles, 0);
         if !self.scheduler.scheduled(timer_id) {
@@ -9199,6 +9591,31 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
             RioEventType::Rio(RioEvent::ColorRequest(route_id, index, format)) => {
                 self.apply_color_request(window_id, route_id, index, format);
             }
+            RioEventType::Rio(RioEvent::OpenInviteUris { uris, activation }) => {
+                let mut subject = None;
+                for uri in uris {
+                    let accepted = self.handle_invite_uri(uri);
+                    if subject.is_none() {
+                        subject = accepted;
+                    }
+                }
+                if let Some(endpoint) = subject {
+                    if let Some(token) = activation {
+                        if self.invite_activation.len() < invite_join::MAX_PENDING + 1
+                            || self.invite_activation.contains_key(&endpoint)
+                        {
+                            self.invite_activation.insert(endpoint.clone(), token);
+                        }
+                    }
+                    self.process_pending_invites(event_loop);
+                    // Repeated delivery may raise only its own active prompt.
+                    if let Some(window) =
+                        self.invite_join.active_window_for_endpoint(&endpoint)
+                    {
+                        self.queue_invite_activation(window, &endpoint);
+                    }
+                }
+            }
             RioEventType::Rio(RioEvent::CreateWindow(working_dir_override)) => {
                 self.apply_create_window(event_loop, working_dir_override);
             }
@@ -9312,6 +9729,13 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
         let mut editor_paths: Vec<PathBuf> = Vec::new();
         let mut other_urls: Vec<String> = Vec::new();
         for raw in urls {
+            if raw
+                .get(..7)
+                .is_some_and(|scheme| scheme.eq_ignore_ascii_case("neoism:"))
+            {
+                let _ = self.handle_invite_uri(raw);
+                continue;
+            }
             let file_path = url::Url::parse(&raw)
                 .ok()
                 .filter(|u| u.scheme() == "file")
@@ -9323,6 +9747,7 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
             }
         }
 
+        self.process_pending_invites(active_event_loop);
         if !editor_paths.is_empty() {
             // Prefer the focused window, else any live window. On a cold
             // start from a Finder double-click the URLs can arrive before
@@ -9422,6 +9847,9 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
         window_id: WindowId,
         event: WindowEvent,
     ) {
+        if matches!(&event, WindowEvent::Destroyed) {
+            self.invite_activation_targets.remove(&window_id);
+        }
         self.pump_daemon(event_loop);
         // Ignore all events we do not care about.
         if Self::skip_window_event(&event) {
@@ -9517,6 +9945,8 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
             }
             WindowEvent::RedrawRequested => {
                 self.handle_redraw_requested(event_loop, window_id);
+                // The surface has presented before using one-shot launcher authority.
+                self.apply_invite_activation(window_id);
             }
             _ => {}
         }
@@ -9609,6 +10039,14 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
     // This is irreversible - if this event is emitted, it is guaranteed to be the last event that gets emitted.
     // You generally want to treat this as an “do on quit” event.
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        // process::exit skips Drop; temporary hosts must be stopped explicitly.
+        for host in self.fast_hosts.values_mut() {
+            host.stop_and_wait();
+        }
+        self.fast_hosts.clear();
+        while let Ok(pending) = self.fast_host_rx.try_recv() {
+            drop(pending);
+        }
         // SAFETY: The clipboard must be dropped before the event loop, so
         // replace it with a safe no-op placeholder.
         self.router.clipboard = Clipboard::new_nop();

@@ -20,6 +20,8 @@ Neoism's built-in inventory includes:
 
 MCP servers are exposed through one `execute` discovery/call gateway so their schemas do not flood every model request. Neoism Desktop preinstalls its vault-backed Notes MCP; standalone Agent hosts do not receive Notes unless their product supplies it. The effective tool list is filtered by global and per-agent `tools` maps.
 
+The built-in `compose` tool combines eligible native and MCP calls in a confined Rust-interpreted program. It can sequence dependent operations, run independent calls concurrently, and filter results before returning them to the model. Direct tools remain available. See [[Tool Composition]].
+
 ```jsonc
 {
   "agent": {

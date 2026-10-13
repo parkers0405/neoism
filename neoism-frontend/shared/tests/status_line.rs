@@ -96,6 +96,7 @@ fn with_ctx(theme: &ChromeTheme, f: impl FnOnce(&mut PanelContext)) {
         services,
         theme,
         time: Duration::ZERO,
+        plugins: None,
     };
     f(&mut ctx);
 }

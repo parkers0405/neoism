@@ -566,6 +566,22 @@ impl Window {
         xdg_activation_token.commit();
     }
 
+    /// Use the already-bound global and surface; no State or window-state lock
+    /// is necessary, and in particular this must not re-enter either mutex.
+    pub fn activate_with_token(
+        &self,
+        token: &crate::window::ActivationToken,
+    ) -> Result<(), NotSupportedError> {
+        let activation = self
+            .xdg_activation
+            .as_ref()
+            .ok_or_else(NotSupportedError::new)?;
+        activation.activate(token._token.clone(), self.surface());
+        // Wake dispatch so the protocol request is flushed even while idle.
+        self.event_loop_awakener.ping();
+        Ok(())
+    }
+
     pub fn request_activation_token(
         &self,
     ) -> Result<AsyncRequestSerial, NotSupportedError> {

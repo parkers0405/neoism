@@ -144,7 +144,7 @@ impl<'a> PaletteRow<'a> {
             PaletteRow::WorkspaceCreate => "+ New Workspace",
             PaletteRow::Workspace { entry } => entry.title.as_str(),
             PaletteRow::Server { entry } => entry.name.as_str(),
-            PaletteRow::ServerAdd => "+ Add server",
+            PaletteRow::ServerAdd => "+ Add Server",
             PaletteRow::ServerCreate => "+ Create server",
             PaletteRow::Ex { name, .. } => name,
             PaletteRow::Search { term } => term,

@@ -5,7 +5,9 @@ use anyhow::Context;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use flate2::{read::GzDecoder, write::GzEncoder, Compression};
-use neoism_agent_core::{MessageWithParts, Part, ToolState};
+#[cfg(test)]
+use neoism_agent_core::ToolState;
+use neoism_agent_core::{MessageWithParts, Part};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -347,51 +349,70 @@ pub(crate) async fn collect_from_revert_items_hydrated(
         }
     }
     for artifact_id in artifact_ids {
-        let artifact = state
-            .inner
-            .store
-            .get_artifact(
-                crate::state::TenantQueryScope::Tenant(tenant_id),
-                &artifact_id,
-            )
-            .await?
-            .ok_or_else(|| {
-                anyhow::anyhow!("snapshot artifact {artifact_id} is missing")
-            })?;
-        anyhow::ensure!(
-            artifact.session_id.as_deref() == Some(session_id),
-            "snapshot artifact {artifact_id} belongs to another session"
+        snapshots.extend(
+            hydrate_snapshot_artifact(state, tenant_id, session_id, &artifact_id).await?,
         );
-        let compressed = state
-            .get_artifact_blob(tenant_id, &artifact_id)
-            .await?
-            .ok_or_else(|| {
-                anyhow::anyhow!("snapshot artifact {artifact_id} content is missing")
-            })?;
-        let mut decoder = GzDecoder::new(compressed.as_slice()).take(
-            MAX_SNAPSHOT_BUNDLE_BYTES
-                .saturating_add(1)
-                .try_into()
-                .unwrap_or(u64::MAX),
-        );
-        let mut encoded = Vec::new();
-        decoder.read_to_end(&mut encoded)?;
-        anyhow::ensure!(
-            encoded.len() <= MAX_SNAPSHOT_BUNDLE_BYTES,
-            "snapshot artifact {artifact_id} exceeds the decoded safety limit"
-        );
-        snapshots.extend(serde_json::from_slice::<Vec<FileSnapshot>>(&encoded)?);
     }
     Ok(snapshots)
+}
+
+pub(crate) async fn hydrate_snapshot_artifact(
+    state: &crate::state::AppState,
+    tenant_id: &str,
+    session_id: &str,
+    artifact_id: &str,
+) -> anyhow::Result<Vec<FileSnapshot>> {
+    let artifact = state
+        .inner
+        .store
+        .get_artifact(
+            crate::state::TenantQueryScope::Tenant(tenant_id),
+            &artifact_id,
+        )
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("snapshot artifact {artifact_id} is missing"))?;
+    anyhow::ensure!(
+        artifact.session_id.as_deref() == Some(session_id),
+        "snapshot artifact {artifact_id} belongs to another session"
+    );
+    let compressed = state
+        .get_artifact_blob(tenant_id, &artifact_id)
+        .await?
+        .ok_or_else(|| {
+            anyhow::anyhow!("snapshot artifact {artifact_id} content is missing")
+        })?;
+    let mut decoder = GzDecoder::new(compressed.as_slice()).take(
+        MAX_SNAPSHOT_BUNDLE_BYTES
+            .saturating_add(1)
+            .try_into()
+            .unwrap_or(u64::MAX),
+    );
+    let mut encoded = Vec::new();
+    decoder.read_to_end(&mut encoded)?;
+    anyhow::ensure!(
+        encoded.len() <= MAX_SNAPSHOT_BUNDLE_BYTES,
+        "snapshot artifact {artifact_id} exceeds the decoded safety limit"
+    );
+    Ok(serde_json::from_slice::<Vec<FileSnapshot>>(&encoded)?)
 }
 
 fn collect_snapshot_artifact_id(part: &Part, artifact_ids: &mut BTreeSet<String>) {
     let Part::Tool(tool) = part else {
         return;
     };
-    let ToolState::Completed { metadata, .. } = &tool.state else {
+    let Some(metadata) = crate::message_model::tool_state_metadata(tool) else {
         return;
     };
+    for artifact in metadata
+        .get("snapshotArtifacts")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if let Some(id) = artifact.get("id").and_then(Value::as_str) {
+            artifact_ids.insert(id.to_string());
+        }
+    }
     if let Some(id) = metadata
         .get("snapshotArtifact")
         .and_then(|artifact| artifact.get("id"))
@@ -424,7 +445,7 @@ fn collect_diff_paths(part: &Part, paths: &mut BTreeSet<String>) {
     let Part::Tool(tool) = part else {
         return;
     };
-    let ToolState::Completed { metadata, .. } = &tool.state else {
+    let Some(metadata) = crate::message_model::tool_state_metadata(tool) else {
         return;
     };
     for diff in metadata
@@ -497,7 +518,7 @@ fn collect_from_part(part: &Part, snapshots: &mut Vec<FileSnapshot>) {
     let Part::Tool(tool) = part else {
         return;
     };
-    let ToolState::Completed { metadata, .. } = &tool.state else {
+    let Some(metadata) = crate::message_model::tool_state_metadata(tool) else {
         return;
     };
     let Some(value) = metadata.get("snapshots").cloned() else {

@@ -109,6 +109,22 @@ pub(crate) async fn ask_permission_for_tool(
     input: &Value,
     error: &str,
 ) -> Result<Vec<PermissionRule>, String> {
+    ask_permission_for_tool_cancellable(
+        state, session_id, message_id, call_id, tool_name, input, error, None,
+    )
+    .await
+}
+
+pub(crate) async fn ask_permission_for_tool_cancellable(
+    state: &AppState,
+    session_id: &Id,
+    message_id: &Id,
+    call_id: &str,
+    tool_name: &str,
+    input: &Value,
+    error: &str,
+    cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+) -> Result<Vec<PermissionRule>, String> {
     let (permission, patterns) = parse_permission_required_error(error)
         .ok_or_else(|| format!("permission request could not be parsed: {error}"))?;
     let clipboard = permission == "computer_clipboard";
@@ -143,6 +159,7 @@ pub(crate) async fn ask_permission_for_tool(
         request.id.clone(),
         PermissionPending {
             request: request.clone(),
+            cancel: cancel.clone(),
             sender,
         },
     );
@@ -152,13 +169,54 @@ pub(crate) async fn ask_permission_for_tool(
         .write()
         .await
         .insert(request.id.clone(), request.clone());
+    // Abort-on-drop leaf supervision may drop this future before its select
+    // branch runs. Synchronous best-effort map cleanup leaves no live waiter;
+    // pending.cancel independently prevents late approval side effects.
+    struct WaiterCleanup<'a> {
+        state: &'a AppState,
+        id: &'a str,
+    }
+    impl Drop for WaiterCleanup<'_> {
+        fn drop(&mut self) {
+            if let Ok(mut waiters) = self.state.inner.permission_waiters.try_write() {
+                waiters.remove(self.id);
+            }
+            if let Ok(mut permissions) = self.state.inner.permissions.try_write() {
+                permissions.remove(self.id);
+            }
+        }
+    }
+    let _waiter_cleanup = WaiterCleanup {
+        state,
+        id: &request.id,
+    };
     state.publish(EventPayload::new(
         event_type::PERMISSION_ASKED,
-        permission_request_payload(state, &request).await,
+        json!(request),
     ));
-    receiver
-        .await
-        .map_err(|_| "permission request was closed".to_string())?
+    if let Some(cancel) = cancel {
+        tokio::select! {
+            biased;
+            _ = crate::session_loop::wait_for_cancellation(cancel) => {
+                // Pending entries carry the cancellation flag, so late replies
+                // cannot grant permissions even while durable cleanup is pending.
+                state.inner.permission_waiters.write().await.remove(&request.id);
+                state.inner.permissions.write().await.remove(&request.id);
+                // Map cleanup must not depend on durable-store responsiveness.
+                let _ = tokio::time::timeout(std::time::Duration::from_millis(100),
+                    state.inner.store.resolve_interaction(&request.id, "cancelled",
+                        json!({"cancelled": true}))).await;
+                state.publish(EventPayload::new(event_type::PERMISSION_REPLIED,
+                    json!({"sessionID": session_id, "requestID": request.id, "reply": "reject"})));
+                Err("permission request aborted".into())
+            }
+            result = receiver => result.map_err(|_| "permission request was closed".to_string())?,
+        }
+    } else {
+        receiver
+            .await
+            .map_err(|_| "permission request was closed".to_string())?
+    }
 }
 
 pub(crate) async fn permission_request_payload(

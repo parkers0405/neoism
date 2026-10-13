@@ -321,6 +321,7 @@ pub struct RouteWindow<'a> {
     pub vblank_interval: Duration,
     vblank_refresh_rate_millihertz: Option<u32>,
     frame_cadence: FrameCadenceStats,
+    pub has_rendered_frame: bool,
     pub winit_window: Window,
     current_mouse_cursor: CursorIcon,
     cursor_visible: bool,
@@ -422,6 +423,7 @@ impl<'a> RouteWindow<'a> {
     }
 
     pub fn finish_frame_cadence(&mut self, now: Instant) {
+        self.has_rendered_frame = true;
         self.frame_cadence
             .record_render_duration(now.saturating_duration_since(self.render_timestamp));
         self.frame_cadence.maybe_log(
@@ -594,6 +596,7 @@ impl<'a> RouteWindow<'a> {
             vblank_interval: monitor_vblank_interval,
             vblank_refresh_rate_millihertz: refresh_rate_millihertz,
             frame_cadence: FrameCadenceStats::new(now),
+            has_rendered_frame: false,
             render_timestamp: now,
             last_animation_frame_at: now,
             is_focused: true,

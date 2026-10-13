@@ -29,6 +29,8 @@ pub struct WindowServerSession {
     /// its remote panes, so connections are parked and restored when their
     /// workspace tab becomes active again.
     pub parked_connections: HashMap<String, DesktopDaemonConnection>,
+    /// Endpoint-scoped outage state survives parking and restoring links.
+    pub(crate) connection_recovery: HashMap<String, super::connection_recovery::OutageTracker>,
     /// Set when the host ended the shared session (its daemon shut down
     /// or it stopped sharing). Forces the status pill to `Offline`
     /// instead of the perpetual `Reconnecting` the still-backing-off
@@ -54,6 +56,7 @@ impl WindowServerSession {
             pending_peer_adopt: None,
             needs_initial_workspace_adopt: false,
             parked_connections: HashMap::new(),
+            connection_recovery: HashMap::new(),
             host_ended: false,
             host_daemon_urls: HashMap::new(),
             workspace_homes: HashMap::new(),
@@ -66,6 +69,11 @@ impl WindowServerSession {
     /// over" state instead of an endless retry against a dead host.
     pub fn mark_host_ended(&mut self) {
         self.host_ended = true;
+        self.connection_recovery.remove(self.connection.endpoint());
+    }
+
+    pub(crate) fn host_ended(&self) -> bool {
+        self.host_ended
     }
 
     pub fn refresh_status(&mut self) {

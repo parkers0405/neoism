@@ -26,6 +26,9 @@ struct Cli {
     /// Skip snapshot load/save entirely.
     #[arg(long)]
     ephemeral: bool,
+    /// Owned temporary host: terminate descendants when its desktop parent exits.
+    #[arg(long)]
+    temporary_parent_pid: Option<u32>,
     /// Directory for daemon state.json snapshots.
     #[arg(long, value_name = "DIR")]
     state_dir: Option<PathBuf>,
@@ -66,6 +69,9 @@ mod version_tests {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
+    if let Some(parent) = cli.temporary_parent_pid {
+        neoism_workspace_daemon::temporary::watch_parent(parent)?;
+    }
 
     if cli.background {
         daemonize_background()?;

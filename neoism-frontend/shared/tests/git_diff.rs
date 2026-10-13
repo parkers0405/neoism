@@ -142,6 +142,7 @@ impl<G: GitService> Harness<G> {
             services,
             theme: &self.theme,
             time: Duration::from_millis(0),
+            plugins: None,
         };
         f(&mut ctx)
     }

@@ -128,6 +128,51 @@ impl Screen<'_> {
         let alt = mods.alt_key();
         let plain = !mods.alt_key() && !mods.control_key() && !mods.super_key();
 
+        // The actions dropdown owns every key while open, including shortcuts
+        // that would otherwise act on the editor/terminal behind the panel.
+        if self.renderer.git_diff_panel.actions_menu_is_open() {
+            match &key.logical_key {
+                Key::Named(NamedKey::ArrowDown | NamedKey::ArrowRight) => {
+                    self.renderer.git_diff_panel.actions_menu_move(1);
+                }
+                Key::Named(NamedKey::ArrowUp | NamedKey::ArrowLeft) => {
+                    self.renderer.git_diff_panel.actions_menu_move(-1);
+                }
+                Key::Named(NamedKey::Tab) => {
+                    self.renderer.git_diff_panel.actions_menu_move(if shift {
+                        -1
+                    } else {
+                        1
+                    });
+                }
+                Key::Named(NamedKey::PageDown) => {
+                    self.renderer.git_diff_panel.actions_menu_move(5);
+                }
+                Key::Named(NamedKey::PageUp) => {
+                    self.renderer.git_diff_panel.actions_menu_move(-5);
+                }
+                Key::Named(NamedKey::Enter | NamedKey::Space) => {
+                    self.renderer.git_diff_panel.actions_menu_activate();
+                }
+                Key::Named(NamedKey::Escape) => {
+                    self.renderer.git_diff_panel.close_actions_menu();
+                    // Opening actions moves focus into the commit section.
+                    self.renderer.git_diff_panel.focus_commit_box(true);
+                }
+                _ => {}
+            }
+            return true;
+        }
+        if matches!(&key.logical_key, Key::Named(NamedKey::F4))
+            || (alt
+                && !ctrl
+                && matches!(&key.logical_key, Key::Named(NamedKey::ArrowDown))
+                && self.renderer.git_diff_panel.commit_box_focused())
+        {
+            self.renderer.git_diff_panel.open_actions_menu();
+            return true;
+        }
+
         // Branch dropdown owns keyboard input while open: Up/Down move
         // the highlight, Enter switches, Escape closes, typed characters
         // filter the list.
@@ -422,6 +467,25 @@ impl Screen<'_> {
         }
         let (mouse_x, mouse_y) = self.mouse_logical_for_hit_test();
         let hit = self.renderer.git_diff_panel.hit_test(mouse_x, mouse_y);
+        if self.renderer.git_diff_panel.actions_menu_is_open() {
+            if self
+                .renderer
+                .git_diff_panel
+                .actions_menu_contains(mouse_x, mouse_y)
+            {
+                // Disabled rows and padding are Inside, not underlying cards.
+                if let crate::editor::git_diff_panel::PanelHit::ActionMenuRow(slot) = hit
+                {
+                    self.renderer.git_diff_panel.activate_action_row(slot);
+                }
+                self.mark_dirty();
+                return true;
+            }
+            if !matches!(hit, crate::editor::git_diff_panel::PanelHit::ActionsButton) {
+                self.renderer.git_diff_panel.close_actions_menu();
+                self.mark_dirty();
+            }
+        }
         // A click anywhere that isn't a branch-dropdown element closes the
         // dropdown first (so the click then acts on the panel underneath).
         if self.renderer.git_diff_panel.branch_menu_is_open()
@@ -465,13 +529,8 @@ impl Screen<'_> {
                 self.mark_dirty();
                 true
             }
-            crate::editor::git_diff_panel::PanelHit::RemoteButton(slot) => {
-                match slot {
-                    0 => self.renderer.git_diff_panel.fetch(),
-                    1 => self.renderer.git_diff_panel.pull(),
-                    2 => self.renderer.git_diff_panel.push(),
-                    _ => {}
-                }
+            crate::editor::git_diff_panel::PanelHit::ActionMenuRow(slot) => {
+                self.renderer.git_diff_panel.activate_action_row(slot);
                 self.mark_dirty();
                 true
             }
@@ -518,13 +577,10 @@ impl Screen<'_> {
                 self.mark_dirty();
                 true
             }
-            crate::editor::git_diff_panel::PanelHit::StageAllButton => {
+            crate::editor::git_diff_panel::PanelHit::ActionsButton => {
                 self.renderer.git_diff_panel.set_focused(true);
                 self.renderer.file_tree.set_focused(false);
-                // Reversible: unstages everything when all files are
-                // already staged, stages the unstaged ones otherwise —
-                // matches the button's computed label.
-                self.renderer.git_diff_panel.stage_all_toggle();
+                self.renderer.git_diff_panel.toggle_actions_menu();
                 self.mark_dirty();
                 true
             }

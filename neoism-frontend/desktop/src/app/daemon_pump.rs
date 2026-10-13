@@ -70,6 +70,18 @@ impl DesktopDaemonConnection {
         let editor_only = Arc::new(AtomicBool::new(false));
         let editor_only_task = Arc::clone(&editor_only);
         let runtime_handle = runtime.handle().clone();
+        let status_event_proxy = event_proxy.clone();
+        let mut status_wake_rx = status_rx.clone();
+        // Failed reconnect dials have no inbound frames. Wake the window pump
+        // on runner transitions so recovery grace advances during idle backoff.
+        runtime_handle.spawn(async move {
+            while status_wake_rx.changed().await.is_ok() {
+                status_event_proxy
+                    .send_event(RioEventType::Rio(RioEvent::Render), unsafe {
+                        neoism_window::window::WindowId::dummy()
+                    });
+            }
+        });
 
         runtime_handle.spawn(async move {
             while let Some(message) = rx.recv().await {
@@ -135,6 +147,10 @@ impl DesktopDaemonConnection {
         self.handle.recycle_if_stale(max_idle)
     }
 
+    pub fn request_reconnect(&self) -> bool {
+        self.handle.request_reconnect()
+    }
+
     pub fn runtime_handle(&self) -> tokio::runtime::Handle {
         self.runtime_handle.clone()
     }
@@ -197,8 +213,8 @@ impl DesktopDaemonConnection {
         });
     }
 
-    /// Parked connections still own background editors. Drain only editor
-    /// replies and discard every other family. PTY routes are explicitly
+    /// Parked connections still own background editors. Drain editor replies
+    /// and HostEnded lifecycle pushes; discard other families. PTY routes are explicitly
     /// reattached with retained backlog when this connection becomes active;
     /// retaining their live output here makes the parked queue grow forever.
     pub fn drain_editor_messages(&self) -> Vec<DaemonServerMessage> {
@@ -232,12 +248,29 @@ fn take_editor_messages(
 ) -> Vec<DaemonServerMessage> {
     queue
         .drain(..)
-        .filter(|message| matches!(message, DaemonServerMessage::Editor { .. }))
+        .filter(|message| accepts_inbound(true, message))
         .collect()
 }
 
 fn accepts_inbound(editor_only: bool, message: &DaemonServerMessage) -> bool {
-    !editor_only || matches!(message, DaemonServerMessage::Editor { .. })
+    !editor_only
+        || matches!(
+            message,
+            DaemonServerMessage::Editor { .. }
+                | DaemonServerMessage::Workspace {
+                    message:
+                        neoism_protocol::workspace::WorkspaceServerMessage::HostEnded { .. },
+                    ..
+                }
+                | DaemonServerMessage::Workspace {
+                    message:
+                        neoism_protocol::workspace::WorkspaceServerMessage::HelloAck {
+                            accepted: false,
+                            ..
+                        },
+                    ..
+                }
+        )
 }
 
 #[cfg(test)]
@@ -245,6 +278,65 @@ mod tests {
     use super::*;
     use neoism_protocol::editor::EditorServerMessage;
     use neoism_protocol::pty::ServerMessage as PtyServerMessage;
+
+    #[test]
+    fn parked_drain_retains_host_ended_but_discards_pty_output() {
+        let ended = DaemonServerMessage::Workspace {
+            request_id: 0,
+            message: neoism_protocol::workspace::WorkspaceServerMessage::HostEnded {
+                reason: "Host stopped sharing".into(),
+            },
+        };
+        let pty = DaemonServerMessage::Pty {
+            request_id: 1,
+            message: PtyServerMessage::PtyOutput {
+                session_id: "parked-shell".into(),
+                bytes: vec![b'x'; 32 * 1024],
+                offset: Some(0),
+            },
+        };
+        assert!(accepts_inbound(true, &ended));
+        assert!(!accepts_inbound(true, &pty));
+        let mut queue = VecDeque::from([pty, ended]);
+        let retained = take_editor_messages(&mut queue);
+        assert!(queue.is_empty());
+        assert_eq!(retained.len(), 1);
+        assert!(matches!(
+            retained[0],
+            DaemonServerMessage::Workspace {
+                message: neoism_protocol::workspace::WorkspaceServerMessage::HostEnded { .. },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn parked_drain_retains_rejection_but_not_successful_hello_ack() {
+        let hello = |accepted| DaemonServerMessage::Workspace {
+            request_id: 0,
+            message: neoism_protocol::workspace::WorkspaceServerMessage::HelloAck {
+                accepted,
+                reason: None,
+                peer_identity: None,
+                connected_host_id: None,
+            },
+        };
+        assert!(accepts_inbound(true, &hello(false)));
+        assert!(!accepts_inbound(true, &hello(true)));
+        let mut queue = VecDeque::from([hello(true), hello(false)]);
+        let retained = take_editor_messages(&mut queue);
+        assert_eq!(retained.len(), 1);
+        assert!(matches!(
+            retained[0],
+            DaemonServerMessage::Workspace {
+                message: neoism_protocol::workspace::WorkspaceServerMessage::HelloAck {
+                    accepted: false,
+                    ..
+                },
+                ..
+            }
+        ));
+    }
 
     #[test]
     fn parked_drain_drops_stale_pty_frames_instead_of_growing_forever() {

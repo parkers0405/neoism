@@ -1,4 +1,7 @@
 use super::super::draw::draw_text_revealed_clipped;
+use super::super::markdown::{
+    render_markdown_horizontal_scrollbar, sticky_markdown_horizontal_scrollbar_track,
+};
 use super::diff::{
     cached_diff_card_view, cached_edit_diff_sections, diag_footer_height,
     diag_footer_rows, diff_body_height, diff_link_target, tool_diff_card_width,
@@ -15,7 +18,7 @@ use crate::primitives::truncate_to_fit;
 
 fn tool_message_accent(status: &str, theme: &IdeTheme) -> u32 {
     match status {
-        "error" => theme.red,
+        "error" | "interrupted" => theme.red,
         "completed" => theme.green,
         _ => theme.yellow,
     }
@@ -211,6 +214,7 @@ pub fn render_tool_message(
     viewport_clip: [f32; 4],
     occlusion_rects: &[[f32; 4]],
     prepared_diff_sections: Option<&[ToolDiffSection]>,
+    mouse: Option<(f32, f32)>,
 ) -> f32 {
     if h <= 0.0 {
         return 0.0;
@@ -572,6 +576,7 @@ pub fn render_tool_message(
             suppress_interactions || card_offset.abs() > 0.001 * s,
             motion,
             occlusion_rects,
+            mouse,
         );
         return h;
     }
@@ -997,6 +1002,7 @@ fn render_tool_diff_cards(
     suppress_interactions: bool,
     motion: ToolMotionSample,
     occlusion_rects: &[[f32; 4]],
+    mouse: Option<(f32, f32)>,
 ) {
     let card_x = x + 30.0 * s;
     let card_w = tool_diff_card_width(w, s);
@@ -1019,6 +1025,22 @@ fn render_tool_diff_cards(
         } else {
             0.0
         };
+        let code_width = diff_card::body_text_width(card_w, s);
+        let content_width = view.content_width.get().unwrap_or_else(|| {
+            let width = diff_card::content_width(
+                sugarloaf,
+                view.rows.as_slice(),
+                s,
+                Lang::from_path(&section.path),
+            );
+            view.content_width.set(Some(width));
+            width
+        });
+        let max_horizontal_scroll = (content_width + 8.0 * s - code_width).max(0.0);
+        let horizontal_key = format!("diff:{card_key}");
+        let horizontal_scroll = pane.code_scroll_pane().map_or(0.0, |pane| {
+            pane.markdown_horizontal_scroll_offset(&horizontal_key, max_horizontal_scroll)
+        });
         let link_target = diff_link_target(&section.link_target);
         let link_hovered = !suppress_interactions
             && link_target.is_some_and(|target| pane.link_hovered(target));
@@ -1032,6 +1054,7 @@ fn render_tool_diff_cards(
             diff_lines: view.rows.as_slice(),
             visual_row_offsets: Some(view.visual_row_offsets.as_slice()),
             body_scroll,
+            horizontal_scroll: Some(horizontal_scroll),
         };
         let layout = diff_card::render_with_paint(
             sugarloaf,
@@ -1122,6 +1145,60 @@ fn render_tool_diff_cards(
                     viewport_clip,
                     theme.opacity,
                 );
+            }
+        }
+        if max_horizontal_scroll > 1.0 {
+            if let Some(scroll_pane) = pane.code_scroll_pane() {
+                let body_rect = [
+                    card_x,
+                    card_y + diff_card::HEADER_HEIGHT * s,
+                    card_w,
+                    body_h,
+                ];
+                if let Some(visible_body) = intersect_rect(body_rect, viewport_clip) {
+                    if !suppress_interactions {
+                        scroll_pane.register_markdown_horizontal_scroll_rect(
+                            horizontal_key.clone(),
+                            visible_body,
+                            max_horizontal_scroll,
+                        );
+                    }
+                    let track = sticky_markdown_horizontal_scrollbar_track(
+                        visible_body,
+                        card_x + (diff_card::GUTTER_WIDTH + diff_card::BODY_PAD_X) * s,
+                        code_width,
+                        s,
+                    )
+                    .filter(|rect| {
+                        !occlusion_rects
+                            .iter()
+                            .any(|cut| intersect_rect(*rect, *cut).is_some())
+                    });
+                    let visible = scroll_pane
+                        .markdown_horizontal_scrollbar_visible(&horizontal_key)
+                        || mouse.is_some_and(|(mx, my)| {
+                            mx >= visible_body[0]
+                                && mx <= visible_body[0] + visible_body[2]
+                                && my >= visible_body[1]
+                                && my <= visible_body[1] + visible_body[3]
+                        });
+                    render_markdown_horizontal_scrollbar(
+                        sugarloaf,
+                        scroll_pane,
+                        &horizontal_key,
+                        track,
+                        code_width,
+                        code_width + max_horizontal_scroll,
+                        horizontal_scroll,
+                        mouse,
+                        visible,
+                        suppress_interactions,
+                        theme.theme,
+                        s,
+                        viewport_clip,
+                        theme.opacity,
+                    );
+                }
             }
         }
         card_y += layout.total_height;

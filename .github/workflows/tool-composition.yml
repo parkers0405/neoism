@@ -1,0 +1,45 @@
+name: Tool Composition
+
+on:
+  pull_request:
+    paths:
+      - "neoism-agent/crates/neoism-agent-composition/**"
+      - "neoism-agent/crates/neoism-agent-server/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/tool-composition.yml"
+  push:
+    branches: [main]
+    paths:
+      - "neoism-agent/crates/neoism-agent-composition/**"
+      - "neoism-agent/crates/neoism-agent-server/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/tool-composition.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tool-composition-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  runtime:
+    name: Rust interpreter (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.92.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: tool-composition
+      - name: Check the built-in runtime
+        run: cargo check --locked -p neoism-agent-composition --all-targets
+      - name: Test confinement, limits, and tool composition
+        run: cargo test --locked -p neoism-agent-composition

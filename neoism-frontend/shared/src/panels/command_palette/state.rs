@@ -64,6 +64,7 @@ pub struct CommandPalette {
     pub selected_index: usize,
     pub(super) hovered_index: Option<usize>,
     pub(super) server_edit_hits: Vec<([f32; 4], String)>,
+    pub(super) server_invite_hits: Vec<([f32; 4], String)>,
     pub(super) server_remove_hits: Vec<([f32; 4], String)>,
     pub(super) scroll_offset: usize,
     pub has_adaptive_theme: bool,
@@ -174,6 +175,7 @@ impl Default for CommandPalette {
             selected_index: 0,
             hovered_index: None,
             server_edit_hits: Vec::new(),
+            server_invite_hits: Vec::new(),
             server_remove_hits: Vec::new(),
             scroll_offset: 0,
             has_adaptive_theme: false,
@@ -659,6 +661,25 @@ impl CommandPalette {
         self.last_scroll_time = None;
         self.reset_motion();
         self.start_open_pop();
+    }
+
+    pub fn remove_server_entry(&mut self, server_id: &str) {
+        if let PaletteMode::Servers(servers) = &mut self.mode {
+            servers.retain(|server| server.id != server_id);
+            self.selected_index =
+                self.selected_index.min(servers.len().saturating_sub(1));
+        }
+    }
+
+    /// Whether a row control should use temporary Leave/Stop lifecycle rather
+    /// than the saved-address deletion confirmation.
+    pub fn server_is_temporary(&self, id: &str) -> bool {
+        match &self.mode {
+            PaletteMode::Servers(servers) => servers
+                .iter()
+                .any(|entry| entry.id == id && entry.temporary),
+            _ => false,
+        }
     }
 
     pub fn update_server_status(

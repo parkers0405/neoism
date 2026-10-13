@@ -284,7 +284,7 @@ fn thread_summary_serializes_only_persisted_acp_root_provider() {
 
 #[test]
 fn todo_snapshot_maps_persisted_acp_plan_for_web_reconnect() {
-    let todos = super::todo_items_from_response(&json!([
+    let todos = super::handlers::todo_items_from_response(&json!([
         {"content": "first", "status": "completed", "priority": "high"},
         {"content": "second", "status": "in_progress", "priority": "medium"}
     ]));

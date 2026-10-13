@@ -42,8 +42,9 @@ impl GitDiffPanel {
             self.selected_cursor_rect = None;
             self.commit_box_rect = Rect::ZERO;
             self.commit_button_rect = Rect::ZERO;
-            self.stage_all_rect = Rect::ZERO;
-            self.remote_button_rects = [Rect::ZERO; 3];
+            self.actions_button_rect = Rect::ZERO;
+            self.actions_menu_rect = Rect::ZERO;
+            self.actions_menu_row_rects.clear();
             self.divider_rect = Rect::ZERO;
             self.branch_button_rect = Rect::ZERO;
             self.branch_menu_rect = Rect::ZERO;
@@ -395,7 +396,7 @@ impl GitDiffPanel {
             + (diff_card::BODY_TOP_PAD + diff_card::BODY_BOTTOM_PAD) * s;
         let files_card_y = body_top;
         // Reserve the bottom band for the commit region (branch line +
-        // message box + Commit / Stage All). The message box grows with
+        // message box + Commit / Git actions). The message box grows with
         // the number of lines in the commit message (Shift+Enter inserts
         // newlines), so the reserved band height is computed from the
         // current message, capped at `COMMIT_INPUT_MAX_LINES`.
@@ -415,8 +416,7 @@ impl GitDiffPanel {
             + 6.0 * s
             + commit_box_h
             + 8.0 * s
-            + COMMIT_BUTTON_HEIGHT * s * 2.0
-            + 6.0 * s;
+            + COMMIT_BUTTON_HEIGHT * s;
         let commit_area_y = (content_bottom - frame_stroke - commit_area_h).max(body_top);
         let min_files_h = files_header_h + row_h * 2.0;
         let max_files_h =
@@ -1181,6 +1181,7 @@ impl GitDiffPanel {
                 diff_lines: lines.as_slice(),
                 visual_row_offsets: Some(visual_row_offsets.as_slice()),
                 body_scroll: effective_scroll,
+                horizontal_scroll: None,
             };
             let _ = diff_card::render(
                 sugarloaf,
@@ -1432,9 +1433,14 @@ impl GitDiffPanel {
 
         // Commit — filled accent button.
         let commit_label = "Commit";
+        let commit_enabled = self.git_action_enabled(super::types::GitAction::Commit);
         let commit_label_opts = DrawOpts {
             font_size: COMMIT_FONT_SIZE * s,
-            color: theme.u8(theme.bg),
+            color: theme.u8(if commit_enabled {
+                theme.bg
+            } else {
+                theme.muted
+            }),
             bold: true,
             ..DrawOpts::default()
         };
@@ -1449,7 +1455,11 @@ impl GitDiffPanel {
             btn_y,
             commit_btn_w,
             btn_h,
-            git_background_opacity(theme.f32(theme.accent)),
+            git_background_opacity(theme.f32(if commit_enabled {
+                theme.accent
+            } else {
+                theme.surface
+            })),
             DEPTH,
             btn_radius,
             ORDER_ROW_BG + 1,
@@ -1470,31 +1480,19 @@ impl GitDiffPanel {
             h: btn_h,
         };
 
-        // Stage All / Unstage All — outline button. Reversible toggle:
-        // when every file is already staged it reads "Unstage All" and
-        // its click unstages; otherwise it reads "Stage All" and stages
-        // the unstaged files. Computed from the cloned `files` snapshot
-        // so the label matches the same state the click handler sees.
-        let all_staged = !files.is_empty() && files.iter().all(|f| f.staged);
-        let stage_label = if all_staged {
-            "Unstage All"
+        // Compact actions trigger; the primary Commit action stays one click away.
+        let actions_x = commit_btn_x + commit_btn_w + btn_gap;
+        let actions_w = (box_x + box_w - actions_x).max(0.0).min(156.0 * s);
+        let actions_bg = if self.actions_menu_is_open() {
+            theme.hover
         } else {
-            "Stage All"
+            theme.surface
         };
-        let stage_label_opts = DrawOpts {
-            font_size: COMMIT_FONT_SIZE * s,
-            color: theme.u8(theme.dim),
-            bold: true,
-            ..DrawOpts::default()
-        };
-        let stage_text_w = sugarloaf.text_mut().measure(stage_label, &stage_label_opts);
-        let stage_btn_w = stage_text_w + btn_pad_x * 2.0;
-        let stage_btn_x = commit_btn_x + commit_btn_w + btn_gap;
         git_border_backing(
             sugarloaf,
-            stage_btn_x - btn_stroke,
+            actions_x - btn_stroke,
             btn_y - btn_stroke,
-            stage_btn_w + btn_stroke * 2.0,
+            actions_w + btn_stroke * 2.0,
             btn_h + btn_stroke * 2.0,
             theme.f32(theme.border),
             DEPTH,
@@ -1504,68 +1502,47 @@ impl GitDiffPanel {
         );
         sugarloaf.rounded_rect(
             None,
-            stage_btn_x,
+            actions_x,
             btn_y,
-            stage_btn_w,
+            actions_w,
             btn_h,
-            git_background_opacity(theme.f32(theme.surface)),
+            git_background_opacity(theme.f32(actions_bg)),
             DEPTH,
             btn_radius,
             ORDER_ROW_BG + 1,
         );
-        let _ = sugarloaf.text_mut().draw(
-            stage_btn_x + btn_pad_x,
+        let actions_opts = DrawOpts {
+            font_size: COMMIT_FONT_SIZE * s,
+            color: theme.u8(theme.fg),
+            clip_rect: Some([actions_x, btn_y, actions_w, btn_h]),
+            ..DrawOpts::default()
+        };
+        sugarloaf.text_mut().draw(
+            actions_x + btn_pad_x,
             btn_text_y,
-            stage_label,
-            &DrawOpts {
-                clip_rect: Some([stage_btn_x, btn_y, stage_btn_w, btn_h]),
-                ..stage_label_opts
-            },
+            "Git actions",
+            &actions_opts,
         );
-        self.stage_all_rect = Rect {
-            x: stage_btn_x,
+        sugarloaf.text_mut().draw(
+            actions_x + actions_w - btn_pad_x - 10.0 * s,
+            btn_text_y,
+            chevron_down_glyph(),
+            &actions_opts,
+        );
+        self.actions_button_rect = Rect {
+            x: actions_x,
             y: btn_y,
-            w: stage_btn_w,
+            w: actions_w,
             h: btn_h,
         };
-
-        // Remote operations stay visible even when there are no local changes.
-        let remote_y = btn_y + btn_h + 6.0 * s;
-        let remote_w = (box_w - btn_gap * 2.0) / 3.0;
-        for (slot, label) in ["Fetch", "Pull", "Push"].iter().enumerate() {
-            let x = box_x + slot as f32 * (remote_w + btn_gap);
-            sugarloaf.rounded_rect(
-                None,
-                x,
-                remote_y,
-                remote_w,
-                btn_h,
-                git_background_opacity(theme.f32(theme.surface)),
-                DEPTH,
-                btn_radius,
-                ORDER_ROW_BG + 1,
-            );
-            let opts = DrawOpts {
-                font_size: COMMIT_FONT_SIZE * s,
-                color: theme.u8(theme.dim),
-                bold: true,
-                clip_rect: Some([x, remote_y, remote_w, btn_h]),
-                ..DrawOpts::default()
-            };
-            let text_w = sugarloaf.text_mut().measure(label, &opts);
-            sugarloaf.text_mut().draw(
-                x + (remote_w - text_w) / 2.0,
-                remote_y + (btn_h - COMMIT_FONT_SIZE * s) / 2.0,
-                label,
-                &opts,
-            );
-            self.remote_button_rects[slot] = Rect {
-                x,
-                y: remote_y,
-                w: remote_w,
-                h: btn_h,
-            };
-        }
+        self.draw_actions_menu(
+            sugarloaf,
+            s,
+            content_x,
+            chrome_top,
+            content_bottom,
+            theme,
+        );
 
         // Branch dropdown overlays everything else when open.
         self.draw_branch_menu(
@@ -1576,6 +1553,127 @@ impl GitDiffPanel {
             frame_stroke,
             theme,
         );
+    }
+
+    fn draw_actions_menu(
+        &mut self,
+        sugarloaf: &mut Sugarloaf,
+        s: f32,
+        content_x: f32,
+        top: f32,
+        bottom: f32,
+        theme: &IdeTheme,
+    ) {
+        self.actions_menu_row_rects.clear();
+        if !self.actions_menu_is_open() {
+            self.actions_menu_rect = Rect::ZERO;
+            return;
+        }
+        self.refresh_actions_menu();
+        let pad = 6.0 * s;
+        let row_h = 28.0 * s;
+        let btn = self.actions_button_rect;
+        let left = content_x + pad;
+        let viewport_w = (self.panel_rect.x + self.panel_rect.w - left - pad).max(0.0);
+        let menu_w = (viewport_w - 16.0).max(0.0).min(270.0 * s);
+        let visible = ((btn.y - top - 12.0 * s - pad * 2.0) / row_h)
+            .floor()
+            .max(1.0) as usize;
+        self.actions_menu.content_mut().set_max_visible(visible);
+        let menu_h =
+            pad * 2.0 + self.actions_menu.content().visible_count() as f32 * row_h;
+        self.actions_menu
+            .set_anchor(crate::widgets::popover::PopoverAnchor::Rect([
+                btn.x - left,
+                btn.y - top,
+                btn.w,
+                btn.h,
+            ]));
+        let [x, y] = self
+            .actions_menu
+            .resolve_position((menu_w, menu_h), (viewport_w, bottom - top));
+        let menu_x = left + x;
+        let menu_y = top + y;
+        self.actions_menu_rect = Rect {
+            x: menu_x,
+            y: menu_y,
+            w: menu_w,
+            h: menu_h,
+        };
+        let stroke = (1.0 * s).max(1.0);
+        let radius = 8.0 * s;
+        sugarloaf.overlay_rounded_rect(
+            menu_x - stroke,
+            menu_y - stroke,
+            menu_w + stroke * 2.0,
+            menu_h + stroke * 2.0,
+            theme.f32(theme.border),
+            DEPTH,
+            radius + stroke,
+            ORDER_MENU_BG,
+        );
+        // Opaque popup backing prevents covered file/diff text bleeding through.
+        let mut surface = theme.f32(theme.surface);
+        surface[3] = 1.0;
+        sugarloaf.overlay_rounded_rect(
+            menu_x,
+            menu_y,
+            menu_w,
+            menu_h,
+            surface,
+            DEPTH,
+            radius,
+            ORDER_MENU_BG,
+        );
+        let selected = self.actions_menu.content().selected_index();
+        for (visible_row, (slot, item)) in
+            self.actions_menu.content().visible_items().enumerate()
+        {
+            let ry = menu_y + pad + visible_row as f32 * row_h;
+            let rect = Rect {
+                x: menu_x + pad,
+                y: ry,
+                w: menu_w - pad * 2.0,
+                h: row_h,
+            };
+            if slot == selected && item.enabled {
+                sugarloaf.overlay_rounded_rect(
+                    rect.x,
+                    rect.y,
+                    rect.w,
+                    rect.h,
+                    theme.f32(theme.hover),
+                    DEPTH,
+                    4.0 * s,
+                    ORDER_MENU_ROW,
+                );
+            }
+            // Separate local-change, remote and repository actions without extra chrome.
+            if slot == 4 || slot == 7 {
+                sugarloaf.overlay_rect(
+                    rect.x + 6.0 * s,
+                    ry,
+                    (rect.w - 12.0 * s).max(0.0),
+                    stroke,
+                    theme.f32(theme.border),
+                    DEPTH,
+                    ORDER_MENU_ROW,
+                );
+            }
+            let opts = DrawOpts {
+                font_size: COMMIT_FONT_SIZE * s,
+                color: theme.u8(if item.enabled { theme.fg } else { theme.muted }),
+                clip_rect: Some(rect.as_array()),
+                ..DrawOpts::default()
+            };
+            sugarloaf.overlay_text_mut().draw(
+                rect.x + 8.0 * s,
+                ry + (row_h - COMMIT_FONT_SIZE * s) / 2.0,
+                &item.label,
+                &opts,
+            );
+            self.actions_menu_row_rects.push((slot, rect));
+        }
     }
 
     /// Draw the branch-selector dropdown (search box + branch rows) when

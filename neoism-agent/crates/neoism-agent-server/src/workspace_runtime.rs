@@ -289,6 +289,19 @@ impl AsRef<neoism_agent_plugin_api::RegistrySnapshot> for PluginGenerationLease 
 }
 
 impl PluginGenerationLease {
+    #[cfg(test)]
+    pub(crate) fn test_with_runtime_tool(
+        &self,
+        id: &str,
+        tool: Arc<dyn neoism_agent_plugin_api::RuntimeTool>,
+    ) -> Self {
+        let mut registry = (**self).clone();
+        registry.runtime_tools.insert(id.to_string(), tool);
+        let mut lease = self.clone();
+        lease.snapshot = Arc::new(registry);
+        lease
+    }
+
     fn try_new(inner: Arc<PluginGeneration>) -> Option<Self> {
         if inner.retiring.load(Ordering::Acquire) {
             return None;

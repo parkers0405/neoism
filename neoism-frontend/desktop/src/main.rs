@@ -22,8 +22,11 @@ mod discord_presence;
 mod editor;
 #[cfg(not(target_arch = "wasm32"))]
 mod embedded_daemon;
+#[cfg(not(target_arch = "wasm32"))]
+mod fast_servers;
 mod host;
 mod input;
+mod invite_links;
 mod ipc;
 mod layout;
 mod lua_async;
@@ -105,6 +108,13 @@ fn emit_neoism_osc(action: &str, payload: Option<&str>) -> io::Result<()> {
 
 fn run_neoism_terminal_command() -> Result<bool, Box<dyn std::error::Error>> {
     let args = std::env::args_os().skip(1).collect::<Vec<_>>();
+    // Protocol delivery must never enter the terminal file-creation shortcut.
+    if args
+        .iter()
+        .any(|arg| arg.to_str().is_some_and(cli::is_neoism_uri))
+    {
+        return Ok(false);
+    }
     let is_cd_command = args.first().and_then(|arg| arg.to_str()) == Some("cd");
 
     if std::env::var_os("NEOISM").as_deref() != Some(std::ffi::OsStr::new("1")) {
@@ -1585,74 +1595,93 @@ fn self_update(
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    if native_extension::maybe_run_host()? {
-        return Ok(());
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    if neoism_desktop::notes_mcp::maybe_run()? {
-        return Ok(());
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    if let Some(result) = service_process::maybe_run_internal_service() {
-        return result;
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    #[cfg(all(debug_assertions, not(target_arch = "wasm32")))]
-    configure_debug_service_isolation()?;
-
-    #[cfg(target_os = "macos")]
-    if run_macos_update_helper()? {
-        return Ok(());
-    }
-
-    #[cfg(windows)]
-    if let Some(exit_code) = background_process::run_background_command() {
-        std::process::exit(exit_code);
-    }
-
-    #[cfg(windows)]
-    panic::attach_handler();
-
-    // When linked with the windows subsystem windows won't automatically attach
-    // to the console of the parent process, so we do it explicitly. This fails
-    // silently if the parent has no console.
-    #[cfg(windows)]
-    unsafe {
-        AttachConsole(ATTACH_PARENT_PROCESS);
-    }
-
-    if run_self_update_command()? {
-        return Ok(());
-    }
-
-    if run_workspace_notes_command()? {
-        return Ok(());
-    }
-
+    // Protocol invocations are a restricted entry point, not generic CLI
+    // requests. Inspect all operands before even internal/terminal dispatch;
+    // -e and other greedy options must not swallow a URI into a command.
     let raw_args = std::env::args_os().skip(1).collect::<Vec<_>>();
-    if let Some(result) = neoism_agent_server::auth_cli::maybe_run(
-        &raw_args,
-        || {
-            let server = agent_server::configured_server();
-            if let Err(error) = agent_server::ensure_started_for_request(&server) {
-                eprintln!("{error}");
-            }
-        },
-        neoism_agent_neoism_adapter::neoism_services(),
-    ) {
-        return result.map_err(Into::into);
+    let protocol_options = cli::protocol_launch_options(&raw_args);
+    #[cfg(all(debug_assertions, not(target_arch = "wasm32")))]
+    if protocol_options.is_some() {
+        configure_debug_service_isolation()?;
+    }
+    if protocol_options.is_none() {
+        if native_extension::maybe_run_host()? {
+            return Ok(());
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if neoism_desktop::notes_mcp::maybe_run()? {
+            return Ok(());
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(result) = service_process::maybe_run_internal_service() {
+            return result;
+        }
+
+        #[cfg(all(debug_assertions, not(target_arch = "wasm32")))]
+        configure_debug_service_isolation()?;
+
+        #[cfg(target_os = "macos")]
+        if run_macos_update_helper()? {
+            return Ok(());
+        }
+
+        #[cfg(windows)]
+        if let Some(exit_code) = background_process::run_background_command() {
+            std::process::exit(exit_code);
+        }
+
+        #[cfg(windows)]
+        panic::attach_handler();
+
+        // When linked with the windows subsystem windows won't automatically attach
+        // to the console of the parent process, so we do it explicitly. This fails
+        // silently if the parent has no console.
+        #[cfg(windows)]
+        unsafe {
+            AttachConsole(ATTACH_PARENT_PROCESS);
+        }
+
+        if run_self_update_command()? {
+            return Ok(());
+        }
+
+        if run_workspace_notes_command()? {
+            return Ok(());
+        }
+
+        if let Some(result) = neoism_agent_server::auth_cli::maybe_run(
+            &raw_args,
+            || {
+                let server = agent_server::configured_server();
+                if let Err(error) = agent_server::ensure_started_for_request(&server) {
+                    eprintln!("{error}");
+                }
+            },
+            neoism_agent_neoism_adapter::neoism_services(),
+        ) {
+            return result.map_err(Into::into);
+        }
+
+        if run_neoism_terminal_command()? {
+            return Ok(());
+        }
     }
 
-    if run_neoism_terminal_command()? {
-        return Ok(());
-    }
-
-    // Load command line options.
-    let args = cli::Cli::parse();
+    // A raw protocol launch bypasses Clap entirely: all dangerous overrides
+    // and non-URI operands have already been discarded.
+    let args = protocol_options.unwrap_or_else(cli::Cli::parse);
     let terminal_options = &args.window_options.terminal_options;
-    let mut initial_open_paths = terminal_options.open_paths.clone();
-    initial_open_paths.extend(terminal_options.paths.clone());
+    let (initial_open_paths, initial_uris) = cli::classify_open_arguments(
+        terminal_options
+            .open_paths
+            .clone()
+            .into_iter()
+            .chain(terminal_options.paths.clone()),
+    );
+
+    let initial_activation = (!initial_uris.is_empty())
+        .then(cli::capture_invite_activation)
+        .flatten();
 
     let can_forward_to_running_instance = args.daemon_url.is_none()
         && args.ssh_host.is_none()
@@ -1691,7 +1720,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             })
             .collect();
-        if ipc::request_new_window_with_options(ipc_working_dir, ipc_open_paths)? {
+        let delivered = if initial_uris.is_empty() {
+            ipc::request_new_window_with_options(ipc_working_dir, ipc_open_paths)?
+        } else {
+            let window = (terminal_options.new_window || !initial_open_paths.is_empty())
+                .then_some((ipc_working_dir, ipc_open_paths));
+            ipc::request_open_invite_uris(
+                initial_uris.clone(),
+                window,
+                initial_activation.clone(),
+            )?
+        };
+        if delivered {
             return Ok(());
         }
     }
@@ -1932,6 +1972,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         lua_runtime,
         lua_host,
     );
+    if !initial_uris.is_empty() {
+        event::EventProxy::new(window_event_loop.create_proxy()).send_event(
+            event::RioEventType::Rio(event::RioEvent::OpenInviteUris {
+                uris: initial_uris,
+                activation: initial_activation,
+            }),
+            unsafe { neoism_window::window::WindowId::dummy() },
+        );
+    }
     let _ = application.run(window_event_loop);
 
     #[cfg(windows)]

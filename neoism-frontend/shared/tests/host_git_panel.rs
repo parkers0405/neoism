@@ -49,6 +49,18 @@ impl GitDiffIo for HostIo {
         self.record("branches");
         vec![]
     }
+    fn fetch(&self, _: &Path) -> Result<(), String> {
+        self.record("fetch");
+        Ok(())
+    }
+    fn pull(&self, _: &Path) -> Result<(), String> {
+        self.record("pull");
+        Ok(())
+    }
+    fn push(&self, _: &Path) -> Result<(), String> {
+        self.record("push");
+        Ok(())
+    }
     fn checkout(&self, _: &Path, _: &str) -> Result<(), String> {
         self.record("checkout");
         Ok(())

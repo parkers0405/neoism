@@ -15,9 +15,12 @@ subtle = "2.5"
 url.workspace = true
 uuid.workspace = true
 dirs = "6"
+tempfile = "3"
+libc.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.60", features = ["Win32_System_Threading"] }
+dunce.workspace = true
+windows-sys = { version = "0.60", features = ["Win32_System_Threading", "Win32_Foundation", "Win32_System_JobObjects", "Win32_Security"] }
 
 [dev-dependencies]
 tokio.workspace = true

@@ -7,6 +7,134 @@ use neoism_terminal_core::crosswords::pos::Direction;
 use neoism_ui::panels::command_palette::PaletteAction;
 use neoism_window::keyboard::{Key, ModifiersState};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ServerFormMode { Host, Join }
+
+#[derive(Clone, Debug)]
+pub(crate) struct ServerFormDraft {
+    pub(crate) mode: ServerFormMode,
+    pub(crate) fast: bool,
+    pub(crate) invite: bool,
+    name: String,
+    password: String,
+    directory: String,
+    address: String,
+    link: String,
+}
+
+impl ServerFormDraft {
+    fn new(directory: String, host: bool, fast: bool) -> Self {
+        Self { mode: if host { ServerFormMode::Host } else { ServerFormMode::Join },
+            fast, invite: false, name: String::new(), password: String::new(),
+            directory, address: String::new(), link: String::new() }
+    }
+
+    fn capture(&mut self, values: Vec<(String, String)>) {
+        for (id, value) in values {
+            match id.as_str() {
+                "name" => self.name = value,
+                "token" => self.password = value,
+                "create_dir" | "fast_host_dir" => self.directory = value,
+                "address" => self.address = value,
+                "fast_join_address" | "fast_invite_address" => self.link = value,
+                _ => {},
+            }
+        }
+    }
+
+    fn switch_mode(&mut self, host: bool) -> bool {
+        if self.invite { return false; }
+        self.mode = if host { ServerFormMode::Host } else { ServerFormMode::Join };
+        true
+    }
+
+    fn toggle_fast(&mut self, checked: bool) -> bool {
+        if self.invite { return false; }
+        self.fast = checked;
+        true
+    }
+
+    pub(crate) fn accepts(&self, values: &[(String, String)]) -> bool {
+        let expected = match (self.mode, self.fast, self.invite) {
+            (ServerFormMode::Join, true, true) => "fast_invite_address",
+            (_, _, true) => return false,
+            (ServerFormMode::Host, true, false) => "fast_host_dir",
+            (ServerFormMode::Join, true, false) => "fast_join_address",
+            (ServerFormMode::Host, false, false) => "create_dir",
+            (ServerFormMode::Join, false, false) => "address",
+        };
+        let targets: Vec<_> = values.iter().filter(|(id, _)| matches!(id.as_str(),
+            "fast_invite_address" | "fast_host_dir" | "fast_join_address" | "create_dir" | "address")).collect();
+        targets.len() == 1 && targets[0].0 == expected
+    }
+}
+
+#[cfg(test)]
+mod server_form_tests {
+    use super::*;
+
+    fn values(id: &str, value: &str) -> Vec<(String, String)> {
+        vec![(id.into(), value.into())]
+    }
+
+    #[test]
+    fn transport_keeps_independent_targets_and_raw_credentials() {
+        let mut draft = ServerFormDraft::new("/workspace".into(), false, false);
+        draft.capture(vec![("address".into(), "ws://saved/session".into()),
+            ("name".into(), "Desk".into()), ("token".into(), "  secret  ".into())]);
+        assert!(draft.toggle_fast(true));
+        assert!(draft.link.is_empty());
+        draft.capture(values("fast_join_address", "https://fast.example/#neoism-fast=cap"));
+        assert!(draft.switch_mode(true));
+        assert_eq!(draft.directory, "/workspace");
+        draft.capture(values("fast_host_dir", "/other"));
+        assert!(draft.toggle_fast(false));
+        assert_eq!(draft.directory, "/other");
+        assert!(draft.switch_mode(false));
+        assert_eq!(draft.address, "ws://saved/session");
+        assert_eq!(draft.password, "  secret  ");
+        assert_eq!(draft.name, "Desk");
+        assert!(draft.toggle_fast(true));
+        assert_eq!(draft.link, "https://fast.example/#neoism-fast=cap");
+    }
+
+    #[test]
+    fn invite_lock_rejects_transport_mode_and_bad_discriminators() {
+        let mut draft = ServerFormDraft::new("/workspace".into(), false, true);
+        draft.invite = true;
+        draft.link = "invalid invite#cap".into();
+        assert!(!draft.switch_mode(true));
+        assert!(!draft.toggle_fast(false));
+        assert_eq!(draft.mode, ServerFormMode::Join);
+        assert!(draft.fast);
+        assert!(draft.accepts(&values("fast_invite_address", "")));
+        for id in ["address", "create_dir", "fast_host_dir", "fast_join_address"] {
+            assert!(!draft.accepts(&values(id, "")));
+        }
+        let mut mixed = values("fast_invite_address", "invalid");
+        mixed.extend(values("address", "ws://saved"));
+        assert!(!draft.accepts(&mixed));
+        assert!(!draft.accepts(&[]));
+        assert_eq!(draft.link, "invalid invite#cap");
+    }
+
+    #[test]
+    fn ctrl_tab_uses_typed_mode_not_widget_selection_and_keeps_transport() {
+        let mut draft = ServerFormDraft::new("/workspace".into(), false, false);
+        assert_eq!(draft.mode, ServerFormMode::Join);
+        assert!(!draft.fast);
+        assert!(draft.switch_mode(draft.mode == ServerFormMode::Join));
+        assert_eq!(draft.mode, ServerFormMode::Host);
+        assert!(draft.accepts(&values("create_dir", "")));
+        assert!(!draft.accepts(&values("address", "")));
+        assert!(draft.toggle_fast(true));
+        assert!(draft.switch_mode(draft.mode == ServerFormMode::Join));
+        assert_eq!(draft.mode, ServerFormMode::Join);
+        assert!(draft.fast);
+        assert!(draft.accepts(&values("fast_join_address", "")));
+    }
+}
+
 fn unquote_cd_target(target: &str) -> &str {
     let target = target.trim();
     if target.len() >= 2 {
@@ -223,6 +351,7 @@ impl Screen<'_> {
         token: String,
     ) {
         use neoism_ui::widgets::modal::{ModalFormField, ModalFormSpec};
+        self.server_form_draft = None;
         self.renderer.modal.open_form(ModalFormSpec {
             title: "Edit server".into(),
             fields: vec![
@@ -259,86 +388,83 @@ impl Screen<'_> {
         });
     }
 
-    pub(crate) fn open_add_server_prompt(&mut self) {
-        use neoism_ui::widgets::modal::{ModalFormField, ModalFormSpec};
+    /// Prefill the existing masked Fast Join form without stripping its
+    /// capability fragment. No connection is made until explicit submission.
+    pub(crate) fn open_fast_invite_prompt(&mut self, link: String, name: String) {
+        self.begin_server_form(false, true);
+        let draft = self.server_form_draft.as_mut().unwrap();
+        draft.invite = true;
+        draft.link = link;
+        draft.name = name;
+        self.render_server_form();
+    }
 
+    fn begin_server_form(&mut self, host: bool, fast: bool) {
+        let directory = self.workspace_root_for_new_shell()
+            .map(|root| root.display().to_string()).unwrap_or_default();
+        self.server_form_draft = Some(ServerFormDraft::new(directory, host, fast));
+        self.render_server_form();
+    }
+
+    pub(crate) fn switch_server_form_mode(&mut self, host: bool) {
+        let values = self.renderer.modal.form_values();
+        let Some(draft) = self.server_form_draft.as_mut() else { return; };
+        draft.capture(values);
+        if draft.switch_mode(host) { self.render_server_form(); }
+    }
+
+    pub(crate) fn toggle_server_form_fast(&mut self, checked: bool) {
+        let values = self.renderer.modal.form_values();
+        let Some(draft) = self.server_form_draft.as_mut() else { return; };
+        draft.capture(values);
+        if draft.toggle_fast(checked) {
+            self.render_server_form();
+            // The switch precedes the first field; keep keyboard and mouse
+            // activation focused on it after the form builder resets focus.
+            self.renderer.modal.focus_previous_form_field();
+        }
+    }
+
+    pub(crate) fn cycle_server_form_mode(&mut self) {
+        if let Some(draft) = &self.server_form_draft {
+            self.switch_server_form_mode(draft.mode == ServerFormMode::Join);
+        }
+    }
+
+    fn render_server_form(&mut self) {
+        use neoism_ui::widgets::modal::{ModalFormField, ModalFormSpec};
+        let Some(draft) = self.server_form_draft.as_ref() else { return; };
+        let host = draft.mode == ServerFormMode::Host;
+        let needs_password = draft.fast && (host || (draft.invite && !crate::invite_links::validate_invite_link(&draft.link)
+            .is_ok_and(|join| join.token.is_some())));
+        let (id, label, value, placeholder) = if host {
+            (if draft.fast { "fast_host_dir" } else { "create_dir" }, "Project folder", draft.directory.clone(), "~/code/myproject")
+        } else if draft.fast {
+            (if draft.invite { "fast_invite_address" } else { "fast_join_address" }, "Server link", draft.link.clone(), "Paste the Fast Server invite link")
+        } else {
+            ("address", "Server address", draft.address.clone(), "ws://192.168.1.20:7981/session")
+        };
         self.renderer.modal.open_form(ModalFormSpec {
-            title: "Add server".to_string(),
+            title: "Add Server".into(),
             fields: vec![
-                ModalFormField {
-                    id: "address".into(),
-                    label: "Server address".into(),
-                    value: String::new(),
-                    placeholder: "ws://192.168.1.20:7981/session".into(),
-                    secret: false,
-                },
-                ModalFormField {
-                    id: "name".into(),
-                    label: "Server name (optional)".into(),
-                    value: String::new(),
-                    placeholder: "Home workstation".into(),
-                    secret: false,
-                },
-                ModalFormField {
-                    id: "token".into(),
-                    label: "Password (optional)".into(),
-                    value: String::new(),
-                    placeholder: "password".into(),
-                    secret: true,
-                },
+                ModalFormField { id: id.into(), label: label.into(), value, placeholder: placeholder.into(), secret: false },
+                ModalFormField { id: "name".into(), label: "Server name (optional)".into(), value: draft.name.clone(), placeholder: "Team server".into(), secret: false },
+                ModalFormField { id: "token".into(), label: if needs_password { "Password (required)" } else { "Password (optional)" }.into(), value: draft.password.clone(), placeholder: "password".into(), secret: true },
             ],
-            submit_label: "Join server".into(),
+            submit_label: if host { "Host server" } else { "Join server" }.into(),
         });
-        self.renderer.modal.set_form_tabs(
-            vec!["Join server".to_string(), "Create server".to_string()],
-            0,
-        );
+        self.renderer.modal.set_form_tabs(vec!["Host".into(), "Join".into()], if host { 0 } else { 1 });
+        self.renderer.modal.set_form_tabs_enabled(!draft.invite);
+        self.renderer.modal.set_form_switch("Fast tunnel", draft.fast, !draft.invite);
         self.mark_dirty();
     }
 
-    /// The CREATE half of the Create/Join pair: pick a folder, get a
-    /// server hosting it from this machine, and auto-join. Submission
-    /// lands in the `ServerFormSubmit` arm (the `create_dir` field is
-    /// the discriminator) → `create_and_join_local_server`.
-    pub(crate) fn open_create_server_prompt(&mut self) {
-        use neoism_ui::widgets::modal::{ModalFormField, ModalFormSpec};
+    pub(crate) fn open_add_server_prompt(&mut self) {
+        self.begin_server_form(false, false);
+    }
 
-        let default_dir = self
-            .workspace_root_for_new_shell()
-            .map(|root| root.display().to_string())
-            .unwrap_or_default();
-        self.renderer.modal.open_form(ModalFormSpec {
-            title: "Add server".to_string(),
-            fields: vec![
-                ModalFormField {
-                    id: "create_dir".into(),
-                    label: "Project folder".into(),
-                    value: default_dir,
-                    placeholder: "~/code/myproject".into(),
-                    secret: false,
-                },
-                ModalFormField {
-                    id: "name".into(),
-                    label: "Server name (optional)".into(),
-                    value: String::new(),
-                    placeholder: "Team server".into(),
-                    secret: false,
-                },
-                ModalFormField {
-                    id: "token".into(),
-                    label: "Password (optional)".into(),
-                    value: String::new(),
-                    placeholder: "password".into(),
-                    secret: true,
-                },
-            ],
-            submit_label: "Create & join".into(),
-        });
-        self.renderer.modal.set_form_tabs(
-            vec!["Join server".to_string(), "Create server".to_string()],
-            1,
-        );
-        self.mark_dirty();
+    pub(crate) fn open_create_server_prompt(&mut self) {
+        self.begin_server_form(true, false);
     }
 
     /// Create-and-join: spawn this machine's own daemon (+ agent, when
@@ -827,11 +953,9 @@ impl Screen<'_> {
             .server_action_at(mouse_x, mouse_y)
         {
             match action {
-                PaletteAction::EditServer { id } => {
-                    self.request_server_edit(id);
-                    self.renderer.command_palette.set_enabled(false);
-                }
-                PaletteAction::RemoveServer { id } => {
+                PaletteAction::RemoveServer { id }
+                    if !self.renderer.command_palette.server_is_temporary(&id) =>
+                {
                     use neoism_ui::widgets::modal::{
                         ModalAction, ModalButton, ModalSpec,
                     };
@@ -849,7 +973,15 @@ impl Screen<'_> {
                         blocking: true,
                     });
                 }
-                _ => {}
+                action => {
+                    // Share the normal action dispatcher: in particular Copy
+                    // invite must queue its request, and temporary Leave/Stop
+                    // must not show the saved-address deletion warning above.
+                    if !matches!(action, PaletteAction::CopyFastServerInvite { .. }) {
+                        self.renderer.command_palette.set_enabled(false);
+                    }
+                    self.execute_palette_action(action, clipboard);
+                }
             }
             self.mark_dirty();
             return true;
@@ -1484,6 +1616,9 @@ impl Screen<'_> {
             }
             PaletteAction::AddServer => {
                 self.open_add_server_prompt();
+            }
+            PaletteAction::CopyFastServerInvite { id } => {
+                self.request_fast_server_invite(id);
             }
             PaletteAction::CreateServer => {
                 self.open_create_server_prompt();

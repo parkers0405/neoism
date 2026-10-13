@@ -810,6 +810,10 @@ impl ChromeBridge {
             #[serde(default)]
             local: bool,
             #[serde(default)]
+            temporary: bool,
+            #[serde(default)]
+            hosted: bool,
+            #[serde(default)]
             status: String,
             #[serde(default)]
             active: bool,
@@ -824,6 +828,8 @@ impl ChromeBridge {
                 name: row.name,
                 address: row.address,
                 local: row.local,
+                temporary: row.temporary,
+                hosted: row.hosted,
                 status: match row.status.as_str() {
                     "online" => ServerIndicatorStatus::Online,
                     "connecting" => ServerIndicatorStatus::Connecting,

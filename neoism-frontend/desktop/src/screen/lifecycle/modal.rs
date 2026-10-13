@@ -35,14 +35,15 @@ impl Screen<'_> {
             return true;
         }
 
-        // Mode slider (today only the server modal's Join ↔ Create):
-        // switching reopens the other form, keeping the modal up.
-        if let Some(tab) = self.renderer.modal.form_tab_hit(mouse_x, mouse_y) {
-            if tab == 0 {
-                self.open_add_server_prompt();
-            } else {
-                self.open_create_server_prompt();
+        if self.renderer.modal.form_switch_hit(mouse_x, mouse_y) {
+            if let Some(checked) = self.renderer.modal.activate_form_switch() {
+                self.toggle_server_form_fast(checked);
             }
+            self.mark_dirty();
+            return true;
+        }
+        if let Some(tab) = self.renderer.modal.form_tab_hit(mouse_x, mouse_y) {
+            self.switch_server_form_mode(tab == 0);
             self.mark_dirty();
             return true;
         }
@@ -711,9 +712,78 @@ impl Screen<'_> {
                     }
                     return;
                 }
+                let has_server_target = values.iter().any(|(id, _)| matches!(id.as_str(),
+                    "fast_invite_address" | "fast_host_dir" | "fast_join_address" | "create_dir" | "address"));
+                let locked_invite = self.server_form_draft.as_ref().is_some_and(|draft| draft.invite);
+                if locked_invite || (has_server_target && !values.iter().any(|(id, _)| id == "server_id")) {
+                    if self.server_form_draft.as_ref().is_none_or(|draft| !draft.accepts(&values)) {
+                        self.renderer.notifications.push(
+                            "Server form mode does not match the submitted fields",
+                            neoism_ui::panels::notifications::NotificationLevel::Warn,
+                        );
+                        return;
+                    }
+                }
+                let password = values.iter().find(|(id, _)| id == "token")
+                    .map(|(_, password)| password.clone()).filter(|password| !password.is_empty());
+                // Native invitation forms never fall through to host or saved
+                // server paths. Validation failure keeps the masked form open.
+                if values.iter().any(|(id, _)| id == "fast_invite_address") {
+                    let link = value("fast_invite_address").unwrap_or_default();
+                    let password = values.iter().find(|(id, _)| id == "token")
+                        .map(|(_, password)| password.clone()).filter(|password| !password.is_empty());
+                    let valid = crate::invite_links::validate_invite_link(&link).and_then(|join| {
+                        if join.token.is_none() && password.is_none() {
+                            Err("Enter the host's password before joining".into())
+                        } else {
+                            crate::fast_servers::normalize_fast_join(link.clone(), password.clone())
+                        }
+                    });
+                    if let Err(error) = valid {
+                        self.renderer.notifications.push(error, neoism_ui::panels::notifications::NotificationLevel::Warn);
+                        return;
+                    }
+                    self.renderer.modal.close();
+                    self.request_fast_invite_join(link, value("name"), password);
+                    return;
+                }
+                // Fast Server submissions must never fall through to saved
+                // server registration, even when the required target is empty.
+                if let Some((field_id, _)) = values
+                    .iter()
+                    .find(|(id, _)| id == "fast_host_dir" || id == "fast_join_address")
+                {
+                    let host = field_id == "fast_host_dir";
+                    let Some(target) = value(field_id) else {
+                        self.renderer.notifications.push(
+                            if host {
+                                "Project folder is required"
+                            } else {
+                                "Server address is required"
+                            },
+                            neoism_ui::panels::notifications::NotificationLevel::Warn,
+                        );
+                        return;
+                    };
+                    if host && password.is_none() {
+                        self.renderer.notifications.push(
+                            "Password is required to host a Fast Server",
+                            neoism_ui::panels::notifications::NotificationLevel::Warn,
+                        );
+                        return;
+                    }
+                    self.renderer.modal.close();
+                    self.request_fast_server_add(host, target, value("name"), password.clone());
+                    self.request_server_manager();
+                    return;
+                }
                 // Create-server form: `create_dir` is the discriminator
                 // (no address — we spawn the server ourselves and join).
-                if let Some(dir) = value("create_dir") {
+                if values.iter().any(|(id, _)| id == "create_dir") {
+                    let Some(dir) = value("create_dir") else {
+                        self.renderer.notifications.push("Project folder is required", neoism_ui::panels::notifications::NotificationLevel::Warn);
+                        return;
+                    };
                     self.renderer.modal.close();
                     self.create_and_join_local_server(dir, value("name"), value("token"));
                     // Land back on the Servers list so the new entry
@@ -743,6 +813,18 @@ impl Screen<'_> {
                 // Back to the Servers list rather than closing the
                 // whole flow — join status shows right there.
                 self.request_server_manager();
+            }
+            ModalAction::ServerReconnectRetry { endpoint } => {
+                self.renderer.modal.close();
+                self.request_server_recovery(endpoint, false);
+            }
+            ModalAction::ServerReconnectDiscard { endpoint } => {
+                self.renderer.modal.close();
+                self.request_server_recovery_discard(endpoint);
+            }
+            ModalAction::ServerReconnectLeave { endpoint } => {
+                self.renderer.modal.close();
+                self.request_server_recovery(endpoint, true);
             }
             ModalAction::ServerRemoveConfirm { id } => {
                 self.renderer.modal.close();

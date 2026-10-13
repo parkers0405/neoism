@@ -2932,13 +2932,14 @@ pub(super) fn render_markdown_code_block(
             theme,
             s,
             viewport_clip,
+            1.0,
         );
     }
 }
 
 const MARKDOWN_HORIZONTAL_SCROLLBAR_H: f32 = 16.0;
 
-fn sticky_markdown_horizontal_scrollbar_track(
+pub(super) fn sticky_markdown_horizontal_scrollbar_track(
     visible_block: [f32; 4],
     x: f32,
     width: f32,
@@ -2984,11 +2985,11 @@ fn markdown_horizontal_scrollbar_geometry(
     })
 }
 
-/// A theme-aware hover scrollbar shared by fenced code and tables. It sticks
+/// A theme-aware hover scrollbar shared by fenced code, diffs, and tables. It sticks
 /// to the bottom of the block's visible intersection, so long content remains
 /// controllable above the fixed composer without permanently covering text.
 #[allow(clippy::too_many_arguments)]
-fn render_markdown_horizontal_scrollbar<P: AgentMarkdownPane>(
+pub(super) fn render_markdown_horizontal_scrollbar<P: AgentMarkdownPane + ?Sized>(
     sugarloaf: &mut Sugarloaf,
     pane: &mut P,
     scroll_key: &str,
@@ -3002,6 +3003,7 @@ fn render_markdown_horizontal_scrollbar<P: AgentMarkdownPane>(
     theme: &IdeTheme,
     s: f32,
     viewport_clip: [f32; 4],
+    opacity: f32,
 ) {
     if !visible {
         return;
@@ -3033,7 +3035,7 @@ fn render_markdown_horizontal_scrollbar<P: AgentMarkdownPane>(
                 track[2],
                 (track[3] - 4.0 * s).max(1.0),
             ],
-            theme.f32_alpha(theme.panel_bg(), 0.94),
+            theme.f32_alpha(theme.panel_bg(), 0.94 * opacity),
             4.0 * s,
             ORDER_PANEL + 4,
             viewport_clip,
@@ -3043,7 +3045,7 @@ fn render_markdown_horizontal_scrollbar<P: AgentMarkdownPane>(
         draw_rounded_rect_clipped(
             sugarloaf,
             geometry.rail,
-            theme.f32_alpha(theme.border, 0.72),
+            theme.f32_alpha(theme.border, 0.72 * opacity),
             geometry.rail[3] * 0.5,
             ORDER_PANEL + 5,
             viewport_clip,
@@ -3060,7 +3062,7 @@ fn render_markdown_horizontal_scrollbar<P: AgentMarkdownPane>(
         visual_thumb,
         theme.f32_alpha(
             if hovered { theme.accent } else { theme.fg },
-            if hovered { 0.96 } else { 0.78 },
+            (if hovered { 0.96 } else { 0.78 }) * opacity,
         ),
         geometry.rail[3] * 0.5,
         ORDER_PANEL + 6,
@@ -3543,6 +3545,7 @@ fn render_markdown_table<P: AgentMarkdownPane>(
             theme,
             s,
             viewport_clip,
+            1.0,
         );
     }
 }

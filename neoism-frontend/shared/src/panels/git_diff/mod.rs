@@ -39,6 +39,8 @@
 //! paints a frame + inner card, then splits the inner area into the
 //! files column on the left and the hunks column on the right.
 
+#[cfg(test)]
+mod actions_tests;
 mod parse;
 mod render;
 mod slim;
@@ -107,7 +109,7 @@ pub(crate) const COMMIT_INPUT_HEIGHT: f32 = 30.0;
 /// Max lines the multiline commit box grows to before it stops taller
 /// (further lines still type; the box just caps its drawn height).
 pub(crate) const COMMIT_INPUT_MAX_LINES: usize = 6;
-/// Commit / Stage All button height (pre-scale).
+/// Commit / Git actions button height (pre-scale).
 pub(crate) const COMMIT_BUTTON_HEIGHT: f32 = 26.0;
 /// Font size for the commit box + buttons (pre-scale).
 pub(crate) const COMMIT_FONT_SIZE: f32 = 12.0;

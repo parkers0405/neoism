@@ -146,7 +146,7 @@ pub(crate) async fn available_tools_for_directory(
     .await
 }
 
-async fn available_tools_for_snapshot(
+pub(crate) async fn available_tools_for_snapshot(
     state: &AppState,
     directory: &str,
     snapshot: &crate::workspace_runtime::PluginGenerationLease,
@@ -249,7 +249,7 @@ fn require_hosted_mcp_catalogs(
     Ok(())
 }
 
-pub(crate) async fn provider_tools_for_agent(
+pub(crate) async fn composition_tools_for_agent(
     state: &AppState,
     directory: &str,
     snapshot: &crate::workspace_runtime::PluginGenerationLease,
@@ -261,26 +261,52 @@ pub(crate) async fn provider_tools_for_agent(
     let tools =
         available_tools_for_snapshot(state, directory, snapshot, execution, auth_store)
             .await?;
-    // Hosted gateways cannot invent a tool the native turn did not advertise.
-    // If an authorized, configured remote MCP catalog is unavailable, do not
-    // spend a model request with an empty map and then reject its tool call.
     if state.services().hosted && tool_contribution(snapshot, MCP_GATEWAY_TOOL).is_some()
     {
         require_hosted_mcp_catalogs(&snapshot.config().mcp, permissions, &tools)?;
     }
-    if tools
+    let ids = tools.iter().map(|tool| tool.id.clone()).collect::<Vec<_>>();
+    let disabled = permission::disabled(&ids, permissions);
+    let gateway_disabled = disabled.contains(MCP_GATEWAY_TOOL);
+    Ok(tools
+        .into_iter()
+        .filter(|tool| !disabled.contains(&tool.id))
+        .filter(|tool| !tool.id.starts_with("mcp__") || !gateway_disabled)
+        .filter(|tool| tool_allowed_for_model(&tool.id, model_id))
+        .filter(|tool| {
+            crate::caller::native_execution_allowed(execution)
+                || !tool_contribution(snapshot, &tool.id).is_some_and(|item| {
+                    item.plugin_id == neoism_agent_builtins::plugin::custom_tools::ID
+                })
+        })
+        .collect())
+}
+
+pub(crate) async fn provider_tools_for_agent(
+    state: &AppState,
+    directory: &str,
+    snapshot: &crate::workspace_runtime::PluginGenerationLease,
+    permissions: &[PermissionRule],
+    model_id: &str,
+    execution: &neoism_agent_service_api::ExecutionPolicy,
+    auth_store: &mcp_auth::McpAuthStore,
+) -> Result<Vec<ToolListItem>, ApiError> {
+    let mut visible = composition_tools_for_agent(
+        state,
+        directory,
+        snapshot,
+        permissions,
+        model_id,
+        execution,
+        auth_store,
+    )
+    .await?;
+    if visible
         .iter()
         .any(|tool| matches!(tool.id.as_str(), "grep" | "glob"))
     {
         tool::warm_search(state.services(), std::path::Path::new(directory));
     }
-    let ids = tools.iter().map(|tool| tool.id.clone()).collect::<Vec<_>>();
-    let disabled = permission::disabled(&ids, permissions);
-    let mut visible = tools
-        .into_iter()
-        .filter(|tool| !disabled.contains(&tool.id))
-        .filter(|tool| tool_allowed_for_model(&tool.id, model_id))
-        .collect::<Vec<_>>();
     let mcp = visible
         .extract_if(.., |tool| tool.id.starts_with("mcp__"))
         .collect::<Vec<_>>();
@@ -832,17 +858,20 @@ fn mcp_search_result(
 
 fn mcp_canonical_path(tool: &McpToolInfo) -> String {
     let runtime_id = mcp::tool_runtime_id(&tool.client, &tool.name);
-    mcp_path(&runtime_id)
-        .map(|(namespace, name)| {
-            let name = namespace
-                .strip_prefix("neoism_")
-                .and_then(|domain| name.strip_prefix(domain))
-                .and_then(|name| name.strip_prefix('_'))
-                .filter(|name| !name.is_empty())
-                .unwrap_or(&name);
-            format!("{namespace}.{name}")
-        })
+    composition_mcp_path(&runtime_id)
         .unwrap_or_else(|| format!("{}.{}", tool.client, tool.name))
+}
+
+pub(crate) fn composition_mcp_path(runtime_id: &str) -> Option<String> {
+    mcp_path(runtime_id).map(|(namespace, name)| {
+        let name = namespace
+            .strip_prefix("neoism_")
+            .and_then(|domain| name.strip_prefix(domain))
+            .and_then(|name| name.strip_prefix('_'))
+            .filter(|name| !name.is_empty())
+            .unwrap_or(&name);
+        format!("{namespace}.{name}")
+    })
 }
 
 fn mcp_path_matches(tool: &McpToolInfo, path: &str) -> bool {

@@ -162,6 +162,9 @@ pub struct CardSpec<'a> {
     /// Caller-managed body scroll offset (logical pixels). 0 means
     /// the first hunk sits flush below the header.
     pub body_scroll: f32,
+    /// None wraps as before; Some(offset) keeps one row per line and scrolls
+    /// only the code column (logical pixels), leaving the gutter fixed.
+    pub horizontal_scroll: Option<f32>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -187,6 +190,39 @@ pub fn measure(_spec: &CardSpec, scale: f32, available_body_height: f32) -> Card
 pub fn body_text_width(card_width: f32, scale: f32) -> f32 {
     let gutter_w = GUTTER_WIDTH * scale;
     (card_width - gutter_w - BODY_PAD_X * 2.0 * scale).max(0.0)
+}
+
+/// Full code-column width in logical pixels, using the same expanded text,
+/// syntax token boundaries and font styles as no-wrap rendering.
+pub fn content_width(
+    sugarloaf: &mut Sugarloaf,
+    diff_lines: &[DiffLine],
+    scale: f32,
+    lang: Lang,
+) -> f32 {
+    diff_lines.iter().fold(0.0_f32, |widest, line| {
+        let fragments = wrapped_fragments(&line.text, usize::MAX);
+        let text = &fragments[0].text;
+        let opts = code_font_opts(scale, line.kind == DiffLineKind::Hunk);
+        let width = if line.kind == DiffLineKind::Hunk {
+            sugarloaf.text_mut().measure(text, &opts)
+        } else {
+            highlighted_diff_line(text, lang)
+                .iter()
+                .map(|(_, slice)| sugarloaf.text_mut().measure(slice, &opts))
+                .sum()
+        };
+        widest.max(width)
+    })
+}
+
+fn code_font_opts(scale: f32, hunk: bool) -> DrawOpts {
+    DrawOpts {
+        font_size: FONT_SIZE * scale,
+        bold: !hunk,
+        italic: hunk,
+        ..DrawOpts::default()
+    }
 }
 
 pub fn visual_row_count(diff_lines: &[DiffLine], body_width: f32, scale: f32) -> usize {
@@ -257,7 +293,11 @@ fn fallback_visual_row_count(
     diff_lines: &[DiffLine],
     body_width: f32,
     scale: f32,
+    nowrap: bool,
 ) -> usize {
+    if nowrap {
+        return diff_lines.len().max(1);
+    }
     let max_chars = wrap_chars_for_width(body_width, scale);
     diff_lines
         .iter()
@@ -680,7 +720,18 @@ fn render_painted_region(
     let body_inner_right = x + width - BODY_PAD_X * scale;
 
     let body_text_w = body_text_width(width, scale);
-    let max_chars = wrap_chars_for_width(body_text_w, scale);
+    let nowrap = spec.horizontal_scroll.is_some();
+    let horizontal_scroll = spec.horizontal_scroll.unwrap_or(0.0).max(0.0);
+    let code_clip = if nowrap {
+        clip_text([body_inner_x, body_top, body_text_w, body_h])
+    } else {
+        body_clip
+    };
+    let max_chars = if nowrap {
+        usize::MAX
+    } else {
+        wrap_chars_for_width(body_text_w, scale)
+    };
     let scroll = spec.body_scroll.max(0.0);
     let row_top_bound = body_top.max(clip_top);
     let row_bot_bound = (body_top + body_h).min(clip_bottom);
@@ -697,15 +748,26 @@ fn render_painted_region(
     let total_visual_rows = spec
         .visual_row_offsets
         .and_then(|offsets| offsets.last().copied())
-        .unwrap_or_else(|| fallback_visual_row_count(spec.diff_lines, body_text_w, scale))
+        .unwrap_or_else(|| {
+            fallback_visual_row_count(spec.diff_lines, body_text_w, scale, nowrap)
+        })
         .max(1);
     let logical_start = spec
         .visual_row_offsets
         .map(|offsets| first_diff_line_for_visual_row(offsets, first_visible_visual))
-        .unwrap_or(0);
+        .unwrap_or_else(|| {
+            if nowrap {
+                first_visible_visual.min(spec.diff_lines.len())
+            } else {
+                0
+            }
+        });
 
-    let mut visual_row_ix =
-        visual_row_start_for_line(spec.visual_row_offsets, logical_start);
+    let mut visual_row_ix = if nowrap && spec.visual_row_offsets.is_none() {
+        logical_start
+    } else {
+        visual_row_start_for_line(spec.visual_row_offsets, logical_start)
+    };
     for line in &spec.diff_lines[logical_start..] {
         let fragments = wrapped_fragments(&line.text, max_chars);
         if visual_row_ix + fragments.len() <= first_visible_visual {
@@ -791,8 +853,9 @@ fn render_painted_region(
             // add + context rows get syntax highlighting so the code reads
             // like a buffer rather than a wall of monochrome diff text.
             let text_y = snap_text_y(row_y + (line_h - FONT_SIZE * scale) / 2.0);
-            let fragment_x =
-                body_inner_x + fragment.indent_cols as f32 * FONT_SIZE * scale * 0.58;
+            let fragment_x = body_inner_x
+                + fragment.indent_cols as f32 * FONT_SIZE * scale * 0.58
+                - horizontal_scroll;
             if fragment_ix > 0 {
                 let marker_clip = clip_to_viewport(
                     x,
@@ -818,12 +881,21 @@ fn render_painted_region(
             match line.kind {
                 DiffLineKind::Hunk => {
                     let opts = DrawOpts {
-                        font_size: FONT_SIZE * scale,
                         color: theme.u8(theme.muted),
-                        italic: true,
-                        clip_rect: Some(body_clip),
-                        ..DrawOpts::default()
+                        clip_rect: Some(code_clip),
+                        ..code_font_opts(scale, true)
                     };
+                    if nowrap {
+                        if code_clip[2] > 0.0 && code_clip[3] > 0.0 {
+                            sugarloaf.text_mut().draw(
+                                fragment_x,
+                                text_y,
+                                &fragment.text,
+                                &opts,
+                            );
+                        }
+                        continue;
+                    }
                     let body_budget = (body_inner_right - fragment_x).max(0.0);
                     let fit =
                         truncate_to_fit(&fragment.text, body_budget, sugarloaf, &opts);
@@ -842,9 +914,10 @@ fn render_painted_region(
                         &fragment.text,
                         spec.lang,
                         theme,
-                        body_clip,
+                        code_clip,
                         body_inner_right,
                         scale,
+                        nowrap,
                         Some(theme.u8(theme.red)),
                     );
                 }
@@ -856,9 +929,10 @@ fn render_painted_region(
                         &fragment.text,
                         spec.lang,
                         theme,
-                        body_clip,
+                        code_clip,
                         body_inner_right,
                         scale,
+                        nowrap,
                         None,
                     );
                 }
@@ -885,8 +959,12 @@ fn draw_syntax_line(
     clip: [f32; 4],
     right_edge: f32,
     scale: f32,
+    nowrap: bool,
     tint: Option<[u8; 4]>,
 ) {
+    if clip[2] <= 0.0 || clip[3] <= 0.0 {
+        return;
+    }
     let mut cursor_x = start_x;
     let spans = highlighted_diff_line(text, lang);
     for (tok, slice) in spans.iter() {
@@ -896,12 +974,24 @@ fn draw_syntax_line(
             color
         });
         let opts = DrawOpts {
-            font_size: FONT_SIZE * scale,
             color,
-            bold: true,
             clip_rect: Some(clip),
-            ..DrawOpts::default()
+            ..code_font_opts(scale, false)
         };
+        if nowrap {
+            // Measure whole cached tokens to advance over offscreen content,
+            // but only submit intersecting tokens. Never shorten a token: the
+            // code-column clip, not an ellipsis, hides horizontal overflow.
+            if cursor_x >= clip[0] + clip[2] {
+                return;
+            }
+            let measured = sugarloaf.text_mut().measure(slice, &opts);
+            if cursor_x + measured > clip[0] {
+                sugarloaf.text_mut().draw(cursor_x, text_y, slice, &opts);
+            }
+            cursor_x += measured;
+            continue;
+        }
         if cursor_x >= right_edge {
             return;
         }
@@ -947,6 +1037,13 @@ fn wrapped_fragments(text: &str, max_chars: usize) -> Rc<Vec<WrappedFragment>> {
 
 fn wrap_fragments_uncached(text: &str, max_chars: usize) -> Vec<WrappedFragment> {
     let max_chars = max_chars.max(1);
+    // Sentinel shares the wrap cache without running the lossy wrap splitter.
+    if max_chars == usize::MAX {
+        return vec![WrappedFragment {
+            text: expand_tabs(text),
+            indent_cols: 0,
+        }];
+    }
     if text.is_empty() {
         return vec![WrappedFragment {
             text: String::new(),
@@ -985,6 +1082,22 @@ fn wrap_fragments_uncached(text: &str, max_chars: usize) -> Vec<WrappedFragment>
         first = false;
     }
     out
+}
+
+fn expand_tabs(text: &str) -> String {
+    let mut expanded = String::with_capacity(text.len());
+    let mut cols = 0usize;
+    for ch in text.chars() {
+        if ch == '\t' {
+            let spaces = 4 - cols % 4;
+            expanded.extend(std::iter::repeat(' ').take(spaces));
+            cols += spaces;
+        } else {
+            expanded.push(ch);
+            cols += 1;
+        }
+    }
+    expanded
 }
 
 fn display_columns(text: &str) -> usize {
@@ -1139,6 +1252,52 @@ fn clip_to_viewport(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nowrap_is_one_lossless_tab_expanded_row() {
+        let text = format!("\tα\t{}  \t", "long_identifier".repeat(1000));
+        let rows = wrapped_fragments(&text, usize::MAX);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].indent_cols, 0);
+        assert_eq!(rows[0].text, expand_tabs(&text));
+        assert!(!rows[0].text.contains('\t'));
+        assert!(!rows[0].text.contains('…'));
+        assert_eq!(rows[0].text.chars().count(), display_columns(&text));
+        assert_eq!(expand_tabs("a\tb\t\t尾\t"), "a   b       尾   ");
+        assert_eq!(wrapped_fragments("", usize::MAX).len(), 1);
+        assert!(Rc::ptr_eq(&rows, &wrapped_fragments(&text, usize::MAX)));
+        let spans = highlighted_diff_line(&rows[0].text, Lang::Rust);
+        assert_eq!(
+            spans.iter().map(|(_, s)| s.as_str()).collect::<String>(),
+            rows[0].text
+        );
+    }
+
+    #[test]
+    fn nowrap_fallback_count_matches_logical_offsets() {
+        let lines: Vec<_> = ["", "\tvery_long_line", "tail  "]
+            .into_iter()
+            .map(|text| DiffLine {
+                text: text.into(),
+                kind: DiffLineKind::Context,
+                line_number: None,
+                old_line_number: None,
+                new_line_number: None,
+            })
+            .collect();
+        let offsets: Vec<_> = (0..=lines.len()).collect();
+        assert_eq!(fallback_visual_row_count(&lines, 1.0, 1.0, true), 3);
+        assert_eq!(fallback_visual_row_count(&[], 1.0, 1.0, true), 1);
+        for row in 0..lines.len() {
+            assert_eq!(first_diff_line_for_visual_row(&offsets, row), row);
+            assert_eq!(visual_row_start_for_line(Some(&offsets), row), row);
+        }
+        let syntax = code_font_opts(2.0, false);
+        let hunk = code_font_opts(2.0, true);
+        assert!(syntax.bold && !syntax.italic);
+        assert!(hunk.italic && !hunk.bold);
+        assert_eq!(syntax.font_size, FONT_SIZE * 2.0);
+    }
 
     #[test]
     fn wrapped_marker_clip_stays_within_visible_row() {

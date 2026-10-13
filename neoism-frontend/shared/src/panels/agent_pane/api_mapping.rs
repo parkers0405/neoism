@@ -1,3 +1,6 @@
+#[path = "composition.rs"]
+mod composition;
+
 use std::collections::HashMap;
 
 use neoism_agent_core::{AssistantMessage, MessageInfo};
@@ -2754,6 +2757,28 @@ fn tool_block(part: &Value) -> NeoismAgentMessage {
         .and_then(Value::as_str)
         .unwrap_or("pending");
     let display_status = task_runtime_status(tool, state).unwrap_or(status);
+    if tool == "compose" {
+        // Do not serialize generic input/output first: composition values can be
+        // enormous, and the bounded projection is the only visible detail.
+        let (title, preview, detail) = composition::presentation(part);
+        let mut message = agent_message_tool(
+            title,
+            preview,
+            display_status,
+            tool,
+            NeoismAgentOutputKind::Text,
+            "javascript",
+            Vec::new(),
+        );
+        message.detail = detail;
+        message.tool_batch_id = part
+            .get("metadata")
+            .and_then(|metadata| metadata.get("toolBatchID"))
+            .and_then(Value::as_str)
+            .filter(|id| !id.trim().is_empty())
+            .map(str::to_owned);
+        return message;
+    }
     let mut todos = if is_todo_tool(tool) {
         todos_from_state(state)
     } else {

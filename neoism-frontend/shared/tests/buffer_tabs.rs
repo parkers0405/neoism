@@ -298,6 +298,7 @@ fn with_ctx<R>(f: impl FnOnce(&mut PanelContext) -> R) -> R {
         },
         theme: &theme,
         time: std::time::Duration::ZERO,
+        plugins: None,
     };
     f(&mut ctx)
 }

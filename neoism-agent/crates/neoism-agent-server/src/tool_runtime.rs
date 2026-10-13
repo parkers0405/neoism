@@ -14,8 +14,8 @@ use crate::project_routes::project_info;
 use crate::session_actions::append_child_subtask_prompt;
 use crate::state::{AppState, QuestionPending};
 use crate::{
-    ask_permission_for_tool, execute_mcp_gateway, now_millis,
-    parse_permission_required_error, permission, plugin, tool,
+    execute_mcp_gateway, now_millis, parse_permission_required_error, permission, plugin,
+    tool,
 };
 
 #[cfg(test)]
@@ -308,14 +308,35 @@ async fn execute_stateful_tool_call(
     session_id: &Id,
     message_id: &Id,
     _call_id: &str,
+    directory: &str,
     permissions: &[PermissionRule],
     tool_name: &str,
     input: Value,
     env: BTreeMap<String, String>,
     cancel: Option<Arc<AtomicBool>>,
     snapshot: &crate::workspace_runtime::PluginGenerationLease,
+    progress: Option<crate::tool_composition::ProgressSink>,
 ) -> Result<Option<tool::ToolExecutionResult>, String> {
     match tool_name {
+        "compose" => {
+            let code = string_arg(&input, "code")
+                .ok_or_else(|| "compose requires code".to_string())?;
+            crate::ensure_tool_permission(permissions, "compose", "*")
+                .map_err(|error| error.to_string())?;
+            return crate::tool_composition::run(
+                state,
+                session_id,
+                message_id,
+                directory,
+                permissions,
+                &code,
+                snapshot.clone(),
+                cancel,
+                progress,
+            )
+            .await
+            .map(Some);
+        }
         "move_chat" => {
             let directory = string_arg(&input, "directory")
                 .filter(|value| !value.trim().is_empty())
@@ -1161,6 +1182,7 @@ pub(crate) async fn run_child_task_prompt_with_cancel(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub(crate) async fn execute_tool_call_in_generation(
     state: &AppState,
     session_id: &Id,
@@ -1172,145 +1194,189 @@ pub(crate) async fn execute_tool_call_in_generation(
     input: Value,
     snapshot: crate::workspace_runtime::PluginGenerationLease,
 ) -> Result<tool::ToolExecutionResult, String> {
-    let started = crate::perf::now();
-    let input_bytes = input.to_string().len();
-    if crate::agent_tool_registry::tool_contribution(&snapshot, tool_name).is_none() {
-        return Err(format!("unknown or disabled tool {tool_name}"));
-    }
-    let workspace_directory = crate::workspace_runtime::canonical_location(directory)
-        .to_string_lossy()
-        .into_owned();
-    let directory = workspace_directory.as_str();
-    let mut one_time_rules = Vec::new();
-    let session = state
-        .inner
-        .store
-        .get_session(session_id.as_str())
-        .await
-        .map_err(|error| error.to_string())?;
-    let unattended = session
-        .as_ref()
-        .is_some_and(|session| session.extra.contains_key("workflowRunID"));
-    let tenant_id = session
-        .as_ref()
-        .map(|session| crate::caller::session_tenant(session).to_string())
-        .unwrap_or_else(|| "local".to_string());
-    let project_id = session
-        .as_ref()
-        .map(|session| session.project_id.clone())
-        .unwrap_or_else(|| project_info(state, directory.to_string()).id);
-    let approval_scope = (tenant_id, project_id);
-    // Invocation hooks are part of one logical tool call. Approval may resume
-    // permission evaluation, but it must never rerun hooks or regenerate the
-    // environment and thereby duplicate plugin side effects.
-    let ctx = plugin::ToolExecutionContext {
-        tool_id: tool_name.to_string(),
-        directory: directory.to_string(),
-        session_id: Some(session_id.to_string()),
-        message_id: Some(message_id.to_string()),
-        call_id: Some(call_id.to_string()),
-    };
-    let mut hooked_input = input;
-    plugin::tool_execute_before(&snapshot, &ctx, &mut hooked_input)
-        .map_err(|error| error.to_string())?;
-    let mut env = BTreeMap::new();
-    let is_custom_tool = crate::agent_tool_registry::tool_contribution(
-        &snapshot, tool_name,
+    execute_tool_call_scoped(
+        state,
+        session_id,
+        message_id,
+        directory,
+        permissions,
+        call_id,
+        tool_name,
+        input,
+        snapshot,
+        Default::default(),
     )
-    .is_some_and(|contribution| {
-        contribution.plugin_id == neoism_agent_builtins::plugin::custom_tools::ID
-    });
-    if tool_name == "bash" || tool_name == "background_task" || is_custom_tool {
-        plugin::shell_env(
-            &snapshot,
-            &plugin::ShellEnvContext {
-                cwd: directory.to_string(),
-                session_id: Some(session_id.to_string()),
-                call_id: Some(call_id.to_string()),
-            },
-            &mut env,
-        )
-        .map_err(|error| error.to_string())?;
-    }
-    let cancel = state
-        .inner
-        .session_coordinator
-        .active_run(session_id.as_str())
-        .await
-        .map(|run| run.cancel);
-    for _ in 0..4 {
-        let mut effective = permissions.clone();
-        effective.extend(
-            state
-                .inner
-                .permission_approvals
-                .read()
-                .await
-                .get(&approval_scope)
-                .cloned()
-                .unwrap_or_default(),
-        );
-        effective.extend(one_time_rules.clone());
-        let execution = match execute_stateful_tool_call(
-            state,
-            session_id,
-            message_id,
-            call_id,
-            &effective,
-            tool_name,
-            hooked_input.clone(),
-            env.clone(),
-            cancel.clone(),
-            &snapshot,
-        )
-        .await
-        {
-            Ok(Some(result)) => Ok(result),
-            Ok(None) => {
-                execute_tool_call_with_env_and_cancel(
-                    state,
-                    Some(session_id),
-                    directory,
-                    effective,
-                    tool_name,
-                    hooked_input.clone(),
-                    env.clone(),
-                    cancel.clone(),
-                    &snapshot,
-                )
-                .await
-            }
-            Err(error) => Err(error),
+    .await
+}
+
+// Boxing this boundary makes compose -> child -> dispatcher recursion explicitly Send.
+pub(crate) fn execute_tool_call_scoped<'a>(
+    state: &'a AppState,
+    session_id: &'a Id,
+    message_id: &'a Id,
+    directory: &'a str,
+    permissions: Vec<PermissionRule>,
+    call_id: &'a str,
+    tool_name: &'a str,
+    input: Value,
+    snapshot: crate::workspace_runtime::PluginGenerationLease,
+    scope: crate::tool_composition::CallScope,
+) -> futures::future::BoxFuture<'a, Result<tool::ToolExecutionResult, String>> {
+    Box::pin(async move {
+        let started = crate::perf::now();
+        let input_bytes = input.to_string().len();
+        if crate::agent_tool_registry::tool_contribution(&snapshot, tool_name).is_none() {
+            return Err(format!("unknown or disabled tool {tool_name}"));
+        }
+        let workspace_directory = crate::workspace_runtime::canonical_location(directory)
+            .to_string_lossy()
+            .into_owned();
+        let directory = workspace_directory.as_str();
+        let mut one_time_rules = Vec::new();
+        let session = state
+            .inner
+            .store
+            .get_session(session_id.as_str())
+            .await
+            .map_err(|error| error.to_string())?;
+        let unattended = session
+            .as_ref()
+            .is_some_and(|session| session.extra.contains_key("workflowRunID"));
+        let tenant_id = session
+            .as_ref()
+            .map(|session| crate::caller::session_tenant(session).to_string())
+            .unwrap_or_else(|| "local".to_string());
+        let project_id = session
+            .as_ref()
+            .map(|session| session.project_id.clone())
+            .unwrap_or_else(|| project_info(state, directory.to_string()).id);
+        let approval_scope = (tenant_id, project_id);
+        // Invocation hooks are part of one logical tool call. Approval may resume
+        // permission evaluation, but it must never rerun hooks or regenerate the
+        // environment and thereby duplicate plugin side effects.
+        let ctx = plugin::ToolExecutionContext {
+            tool_id: tool_name.to_string(),
+            directory: directory.to_string(),
+            session_id: Some(session_id.to_string()),
+            message_id: Some(message_id.to_string()),
+            call_id: Some(call_id.to_string()),
         };
-        match execution {
-            Ok(mut result) => {
-                plugin::tool_execute_after(&snapshot, &ctx, &mut result)
-                    .map_err(|error| error.to_string())?;
-                if let Some(session) = session.as_ref() {
-                    apply_central_metadata_bounds(state, session, &mut result).await?;
+        let mut hooked_input = input;
+        plugin::tool_execute_before(&snapshot, &ctx, &mut hooked_input)
+            .map_err(|error| error.to_string())?;
+        if let Some((validator, mcp_path)) = &scope.validation {
+            let child_input = if let Some(path) = mcp_path {
+                if hooked_input["action"] != "call" || hooked_input["tool"] != *path {
+                    return Err("composition hook changed the captured MCP target".into());
                 }
-                apply_central_output_truncation(&mut result)?;
-                publish_lsp_updated_if_needed(state, &result);
-                tracing::info!(
-                    target: "neoism_agent::perf",
-                    session_id = %session_id,
-                    message_id = %message_id,
-                    call_id,
-                    tool = tool_name,
-                    directory,
-                    input_bytes,
-                    output_bytes = result.output.len(),
-                    metadata_bytes = result.metadata.as_ref().map(|value| value.to_string().len()),
-                    elapsed_ms = crate::perf::elapsed_ms(started),
-                    "stateful tool execution completed"
-                );
-                return Ok(result);
+                &hooked_input["arguments"]
+            } else {
+                &hooked_input
+            };
+            validator
+                .validate(child_input)
+                .map_err(|error| format!("invalid hooked child input: {error}"))?;
+        }
+        let mut env = BTreeMap::new();
+        let is_custom_tool =
+            crate::agent_tool_registry::tool_contribution(&snapshot, tool_name)
+                .is_some_and(|contribution| {
+                    contribution.plugin_id
+                        == neoism_agent_builtins::plugin::custom_tools::ID
+                });
+        if tool_name == "bash" || tool_name == "background_task" || is_custom_tool {
+            plugin::shell_env(
+                &snapshot,
+                &plugin::ShellEnvContext {
+                    cwd: directory.to_string(),
+                    session_id: Some(session_id.to_string()),
+                    call_id: Some(call_id.to_string()),
+                },
+                &mut env,
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        let session_cancel = state
+            .inner
+            .session_coordinator
+            .active_run(session_id.as_str())
+            .await
+            .map(|run| run.cancel);
+        let cancel_bridge = crate::tool_composition::CancellationBridge::new(
+            scope.cancel.clone(),
+            session_cancel,
+        );
+        let cancel = cancel_bridge.flag();
+        for _ in 0..4 {
+            if cancel
+                .as_ref()
+                .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::SeqCst))
+            {
+                return Err("tool call aborted".into());
             }
-            Err(error) => {
-                let Some((permission, patterns)) =
-                    parse_permission_required_error(&error)
-                else {
-                    tracing::warn!(
+            let mut effective = permissions.clone();
+            effective.extend(
+                state
+                    .inner
+                    .permission_approvals
+                    .read()
+                    .await
+                    .get(&approval_scope)
+                    .cloned()
+                    .unwrap_or_default(),
+            );
+            effective.extend(one_time_rules.clone());
+            let execution = match execute_stateful_tool_call(
+                state,
+                session_id,
+                message_id,
+                call_id,
+                directory,
+                &effective,
+                tool_name,
+                hooked_input.clone(),
+                env.clone(),
+                cancel.clone(),
+                &snapshot,
+                scope.progress.clone(),
+            )
+            .await
+            {
+                Ok(Some(result)) => Ok(result),
+                Ok(None) => {
+                    execute_tool_call_with_env_and_cancel(
+                        state,
+                        Some(session_id),
+                        directory,
+                        effective,
+                        tool_name,
+                        hooked_input.clone(),
+                        env.clone(),
+                        cancel.clone(),
+                        &snapshot,
+                    )
+                    .await
+                }
+                Err(error) => Err(error),
+            };
+            match execution {
+                Ok(mut result) => {
+                    // Preserve known leaf effects before after-hooks, including
+                    // hooks that fail or outlive composition's cleanup budget.
+                    if let Some(effects) = &scope.effects {
+                        effects.record(call_id, result.metadata.as_ref()).await;
+                    }
+                    plugin::tool_execute_after(&snapshot, &ctx, &mut result)
+                        .map_err(|error| error.to_string())?;
+                    if !scope.child {
+                        if let Some(session) = session.as_ref() {
+                            apply_central_metadata_bounds(state, session, &mut result)
+                                .await?;
+                        }
+                    }
+                    apply_central_output_truncation(&mut result)?;
+                    publish_lsp_updated_if_needed(state, &result);
+                    tracing::info!(
                         target: "neoism_agent::perf",
                         session_id = %session_id,
                         message_id = %message_id,
@@ -1318,54 +1384,76 @@ pub(crate) async fn execute_tool_call_in_generation(
                         tool = tool_name,
                         directory,
                         input_bytes,
+                        output_bytes = result.output.len(),
+                        metadata_bytes = result.metadata.as_ref().map(|value| value.to_string().len()),
                         elapsed_ms = crate::perf::elapsed_ms(started),
-                        error = %error,
-                        "stateful tool execution failed"
+                        "stateful tool execution completed"
                     );
-                    return Err(error);
-                };
-                if unattended {
-                    return Err(crate::permission_runtime::permission_denied(
-                        permission,
-                        patterns.first().cloned().unwrap_or_else(|| "*".to_string()),
-                    )
-                    .to_string());
+                    return Ok(result);
                 }
-                // `dangerouslySkipPermissions` converts every ASK into an
-                // automatic one-time allow. Explicit DENY rules never reach
-                // this branch (they fail with "is denied", which does not
-                // parse as a permission-required error), so agent-level
-                // denies — e.g. `task` for sub-agents — keep denying even
-                // in skip-permissions mode.
-                // Clipboard replacement requires its own human grant even when
-                // ordinary tool prompts are globally skipped.
-                if permission != "computer_clipboard"
-                    && dangerously_skip_permissions_enabled(snapshot.config())
-                {
-                    one_time_rules.extend(patterns.into_iter().map(|pattern| {
-                        PermissionRule {
-                            permission: permission.clone(),
-                            pattern,
-                            action: PermissionAction::Allow,
-                        }
-                    }));
-                    continue;
+                Err(error) => {
+                    let Some((permission, patterns)) =
+                        parse_permission_required_error(&error)
+                    else {
+                        tracing::warn!(
+                            target: "neoism_agent::perf",
+                            session_id = %session_id,
+                            message_id = %message_id,
+                            call_id,
+                            tool = tool_name,
+                            directory,
+                            input_bytes,
+                            elapsed_ms = crate::perf::elapsed_ms(started),
+                            error = %error,
+                            "stateful tool execution failed"
+                        );
+                        return Err(error);
+                    };
+                    if unattended {
+                        return Err(crate::permission_runtime::permission_denied(
+                            permission,
+                            patterns.first().cloned().unwrap_or_else(|| "*".to_string()),
+                        )
+                        .to_string());
+                    }
+                    // `dangerouslySkipPermissions` converts every ASK into an
+                    // automatic one-time allow. Explicit DENY rules never reach
+                    // this branch (they fail with "is denied", which does not
+                    // parse as a permission-required error), so agent-level
+                    // denies — e.g. `task` for sub-agents — keep denying even
+                    // in skip-permissions mode.
+                    // Clipboard replacement requires its own human grant even when
+                    // ordinary tool prompts are globally skipped.
+                    if permission != "computer_clipboard"
+                        && dangerously_skip_permissions_enabled(snapshot.config())
+                    {
+                        one_time_rules.extend(patterns.into_iter().map(|pattern| {
+                            PermissionRule {
+                                permission: permission.clone(),
+                                pattern,
+                                action: PermissionAction::Allow,
+                            }
+                        }));
+                        continue;
+                    }
+                    let grant =
+                        crate::permission_runtime::ask_permission_for_tool_cancellable(
+                            state,
+                            session_id,
+                            message_id,
+                            call_id,
+                            tool_name,
+                            &hooked_input,
+                            &error,
+                            cancel.clone(),
+                        )
+                        .await?;
+                    one_time_rules.extend(grant);
                 }
-                let grant = ask_permission_for_tool(
-                    state,
-                    session_id,
-                    message_id,
-                    call_id,
-                    tool_name,
-                    &hooked_input,
-                    &error,
-                )
-                .await?;
-                one_time_rules.extend(grant);
             }
         }
-    }
-    Err("permission approval did not satisfy the tool call".to_string())
+        Err("permission approval did not satisfy the tool call".to_string())
+    })
 }
 
 async fn apply_central_metadata_bounds(

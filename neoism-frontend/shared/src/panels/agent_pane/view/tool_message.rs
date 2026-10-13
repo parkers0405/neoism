@@ -2,7 +2,7 @@ use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use serde_json::Value;
 use std::borrow::Cow;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
@@ -148,6 +148,7 @@ pub(crate) struct ToolDiffCardView {
     visual_row_offsets: Rc<Vec<usize>>,
     visual_rows: usize,
     preview_visual_rows: usize,
+    content_width: Cell<Option<f32>>,
 }
 
 struct ToolDiffCardViewCache {
@@ -365,6 +366,12 @@ impl AgentToolMessage for NeoismAgentMessage {
 }
 
 pub trait AgentToolPane {
+    /// Diff cards use the same horizontal viewport state and controls as fences.
+    fn code_scroll_pane(
+        &mut self,
+    ) -> Option<&mut dyn super::markdown::AgentMarkdownPane> {
+        None
+    }
     fn tool_motion_sample(
         &mut self,
         id: &str,
@@ -467,6 +474,10 @@ macro_rules! neoism_ui_impl_agent_tool_message {
         }
 
         impl $crate::panels::agent_pane::view::tool_message::AgentToolPane for $pane {
+            fn code_scroll_pane(&mut self) -> Option<&mut dyn $crate::panels::agent_pane::view::markdown::AgentMarkdownPane> {
+                Some(self)
+            }
+
             fn tool_motion_sample(
                 &mut self,
                 id: &str,
@@ -555,6 +566,12 @@ macro_rules! neoism_ui_impl_agent_tool_message {
 }
 
 impl AgentToolPane for NeoismAgentPane {
+    fn code_scroll_pane(
+        &mut self,
+    ) -> Option<&mut dyn super::markdown::AgentMarkdownPane> {
+        Some(self)
+    }
+
     fn tool_motion_sample(
         &mut self,
         id: &str,

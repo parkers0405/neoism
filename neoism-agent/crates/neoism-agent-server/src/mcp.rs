@@ -701,6 +701,27 @@ pub(crate) async fn call_tool_with_snapshot(
         std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     )
     .await
+    .map(|result| result.result)
+}
+
+/// Session gateway result preserves protocol structuredContent without changing
+/// the shared public MCP result type (whose current wire model omits it).
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+pub(crate) struct SessionMcpResult {
+    #[serde(flatten)]
+    pub result: McpToolCallResult,
+    #[serde(
+        rename = "structuredContent",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub structured_content: Option<Value>,
+}
+impl std::ops::Deref for SessionMcpResult {
+    type Target = McpToolCallResult;
+    fn deref(&self) -> &Self::Target {
+        &self.result
+    }
 }
 
 pub(crate) async fn call_tool_in_session(
@@ -713,7 +734,7 @@ pub(crate) async fn call_tool_in_session(
     snapshot: &crate::workspace_runtime::PluginGenerationLease,
     session_authorized: bool,
     cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
-) -> anyhow::Result<McpToolCallResult> {
+) -> anyhow::Result<SessionMcpResult> {
     let mut config = snapshot.config().clone();
     crate::config::inject_builtin_mcp(&mut config, state.services());
     if matches!(config.mcp.get(client), Some(McpConfig::Local { .. }))
@@ -776,47 +797,50 @@ pub(crate) async fn call_tool_in_session(
                 )
                 .await?
         };
-        return Ok(McpToolCallResult {
-            content: result
-                .content
-                .into_iter()
-                .map(|content| match content {
-                    neoism_agent_service_api::BuiltinMcpContent::Image {
-                        data,
-                        mime_type,
-                        annotations,
-                    } => McpContent::Image {
-                        data,
-                        mime_type,
-                        annotations,
-                    },
-                    neoism_agent_service_api::BuiltinMcpContent::Text {
-                        text,
-                        annotations,
-                    } => McpContent::Text { text, annotations },
-                    neoism_agent_service_api::BuiltinMcpContent::Resource {
-                        resource,
-                        annotations,
-                    } => McpContent::Resource {
-                        resource,
-                        annotations,
-                    },
-                    neoism_agent_service_api::BuiltinMcpContent::ResourceLink {
-                        uri,
-                        name,
-                        description,
-                        mime_type,
-                        annotations,
-                    } => McpContent::ResourceLink {
-                        uri,
-                        name,
-                        description,
-                        mime_type,
-                        annotations,
-                    },
-                })
-                .collect(),
-            is_error: result.is_error,
+        return Ok(SessionMcpResult {
+            structured_content: None,
+            result: McpToolCallResult {
+                content: result
+                    .content
+                    .into_iter()
+                    .map(|content| match content {
+                        neoism_agent_service_api::BuiltinMcpContent::Image {
+                            data,
+                            mime_type,
+                            annotations,
+                        } => McpContent::Image {
+                            data,
+                            mime_type,
+                            annotations,
+                        },
+                        neoism_agent_service_api::BuiltinMcpContent::Text {
+                            text,
+                            annotations,
+                        } => McpContent::Text { text, annotations },
+                        neoism_agent_service_api::BuiltinMcpContent::Resource {
+                            resource,
+                            annotations,
+                        } => McpContent::Resource {
+                            resource,
+                            annotations,
+                        },
+                        neoism_agent_service_api::BuiltinMcpContent::ResourceLink {
+                            uri,
+                            name,
+                            description,
+                            mime_type,
+                            annotations,
+                        } => McpContent::ResourceLink {
+                            uri,
+                            name,
+                            description,
+                            mime_type,
+                            annotations,
+                        },
+                    })
+                    .collect(),
+                is_error: result.is_error,
+            },
         });
     }
     ensure_connected_with_snapshot(

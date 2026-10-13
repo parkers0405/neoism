@@ -90,6 +90,16 @@ pub(crate) async fn permission_reply(
     let mut sends = Vec::new();
 
     if let Some(pending) = pending {
+        if pending.sender.is_closed()
+            || pending
+                .cancel
+                .as_ref()
+                .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::SeqCst))
+        {
+            state.publish(EventPayload::new(event_type::PERMISSION_REPLIED,
+                json!({"sessionID": pending.request.session_id, "requestID": request_id, "reply": "reject"})));
+            return Ok(Json(true));
+        }
         publish.push((pending.request.clone(), reply_kind.clone()));
         match reply_kind.as_str() {
             "reject" => {
@@ -137,6 +147,13 @@ pub(crate) async fn permission_reply(
                 let approval_scope = (tenant_id.clone(), project_id.clone());
                 let approvals = {
                     let mut approval_map = state.inner.permission_approvals.write().await;
+                    if pending.sender.is_closed()
+                        || pending.cancel.as_ref().is_some_and(|flag| {
+                            flag.load(std::sync::atomic::Ordering::SeqCst)
+                        })
+                    {
+                        return Ok(Json(true));
+                    }
                     let approvals = approval_map.entry(approval_scope).or_default();
                     approvals.extend(grants.clone());
                     approvals.clone()

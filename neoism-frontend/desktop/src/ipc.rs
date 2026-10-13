@@ -17,6 +17,8 @@ use std::path::PathBuf;
 #[cfg(any(unix, windows))]
 use std::time::Duration;
 
+use neoism_backend::event::InviteActivationToken;
+
 pub const NEW_WINDOW_ARG: &str = "--new-window";
 // On unix this overrides the socket path; on Windows it overrides the full
 // pipe name (both are used by tests to isolate instances).
@@ -41,8 +43,14 @@ impl Drop for ExternalCommandListener {
 }
 
 #[cfg(any(unix, windows))]
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, serde::Serialize, serde::Deserialize, Eq, PartialEq)]
 enum ExternalCommand {
+    OpenInviteUris {
+        uris: Vec<String>,
+        window: Option<(Option<PathBuf>, Vec<PathBuf>)>,
+        #[serde(default)]
+        activation: Option<InviteActivationToken>,
+    },
     NewWindow {
         working_dir: Option<PathBuf>,
         open_paths: Vec<PathBuf>,
@@ -53,6 +61,10 @@ enum ExternalCommand {
 impl ExternalCommand {
     fn parse(line: &str) -> Option<Self> {
         let line = line.trim_end_matches(['\r', '\n']);
+        if let Some(json) = line.strip_prefix("open-invite-uris\t") {
+            let command: Self = serde_json::from_str(json).ok()?;
+            return matches!(command, Self::OpenInviteUris { .. }).then_some(command);
+        }
         let Some(rest) = line.strip_prefix("new-window") else {
             return None;
         };
@@ -79,6 +91,10 @@ impl ExternalCommand {
 
     fn wire_name(self) -> String {
         match self {
+            Self::OpenInviteUris { .. } => format!(
+                "open-invite-uris\t{}",
+                serde_json::to_string(&self).expect("IPC serialization")
+            ),
             Self::NewWindow {
                 working_dir,
                 open_paths,
@@ -99,6 +115,70 @@ impl ExternalCommand {
             }
         }
     }
+}
+
+#[cfg(any(unix, windows))]
+impl std::fmt::Debug for ExternalCommand {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::OpenInviteUris { uris, .. } => f
+                .debug_struct("OpenInviteUris")
+                .field("count", &uris.len())
+                .finish(),
+            Self::NewWindow {
+                working_dir,
+                open_paths,
+            } => f
+                .debug_struct("NewWindow")
+                .field("working_dir", working_dir)
+                .field("open_paths", open_paths)
+                .finish(),
+        }
+    }
+}
+
+/// Deliver opaque URIs, optionally preserving an accompanying new-window/file request.
+pub fn request_open_invite_uris(
+    uris: Vec<String>,
+    window: Option<(Option<std::path::PathBuf>, Vec<std::path::PathBuf>)>,
+    activation: Option<InviteActivationToken>,
+) -> std::io::Result<bool> {
+    #[cfg(any(unix, windows))]
+    {
+        request_command(ExternalCommand::OpenInviteUris {
+            uris,
+            window,
+            activation,
+        })
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (uris, window, activation);
+        Ok(false)
+    }
+}
+
+#[cfg(any(unix, windows))]
+fn dispatch_invite_command(
+    event_proxy: &EventProxy,
+    uris: Vec<String>,
+    window: Option<(Option<PathBuf>, Vec<PathBuf>)>,
+    activation: Option<InviteActivationToken>,
+) {
+    let id = unsafe { neoism_window::window::WindowId::dummy() };
+    if let Some((working_dir, open_paths)) = window {
+        event_proxy.send_event(
+            RioEventType::Rio(RioEvent::CreateWindowWithOptions {
+                working_dir,
+                open_paths,
+            }),
+            id,
+        );
+    }
+    event_proxy.send_event(
+        RioEventType::Rio(RioEvent::OpenInviteUris { uris, activation }),
+        id,
+    );
 }
 
 #[cfg(any(unix, windows))]
@@ -239,6 +319,29 @@ fn request_command(command: ExternalCommand) -> io::Result<bool> {
 }
 
 #[cfg(windows)]
+fn allow_invite_server_foreground(
+    client: &tokio::net::windows::named_pipe::NamedPipeClient,
+) {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::System::Pipes::GetNamedPipeServerProcessId;
+    use windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow;
+
+    // Only authorize the peer of the connected pipe, never a PID supplied by
+    // argv or the URL. Keep the client alive while querying its borrowed handle.
+    // Foreground permission is best-effort: Windows can still deny the grant.
+    unsafe {
+        let mut server_pid = 0;
+        if GetNamedPipeServerProcessId(client.as_raw_handle().cast(), &mut server_pid)
+            != 0
+            && server_pid != 0
+            && server_pid != u32::MAX
+        {
+            let _ = AllowSetForegroundWindow(server_pid);
+        }
+    }
+}
+
+#[cfg(windows)]
 fn request_command(command: ExternalCommand) -> io::Result<bool> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::windows::named_pipe::ClientOptions;
@@ -269,6 +372,11 @@ fn request_command(command: ExternalCommand) -> io::Result<bool> {
             }
         };
 
+        // The launcher owns the browser's foreground gesture. Transfer its
+        // permission before sending bytes that can dispatch the invite event.
+        if matches!(&command, ExternalCommand::OpenInviteUris { .. }) {
+            allow_invite_server_foreground(&client);
+        }
         let mut request = command.wire_name().into_bytes();
         request.push(b'\n');
         tokio::time::timeout(Duration::from_millis(500), client.write_all(&request))
@@ -392,6 +500,14 @@ fn handle_stream(stream: &mut UnixStream, event_proxy: &EventProxy) -> io::Resul
             );
             stream.write_all(b"ok\n")?;
         }
+        Some(ExternalCommand::OpenInviteUris {
+            uris,
+            window,
+            activation,
+        }) => {
+            dispatch_invite_command(event_proxy, uris, window, activation);
+            stream.write_all(b"ok\n")?;
+        }
         None => {
             stream.write_all(b"err unknown-command\n")?;
         }
@@ -424,6 +540,14 @@ async fn handle_stream(
                 }),
                 unsafe { neoism_window::window::WindowId::dummy() },
             );
+            stream.write_all(b"ok\n").await?;
+        }
+        Some(ExternalCommand::OpenInviteUris {
+            uris,
+            window,
+            activation,
+        }) => {
+            dispatch_invite_command(event_proxy, uris, window, activation);
             stream.write_all(b"ok\n").await?;
         }
         None => {
@@ -576,9 +700,78 @@ fn is_missing_listener(err: &io::Error) -> bool {
     )
 }
 
+#[cfg(test)]
+#[path = "app/invite_activation.rs"]
+mod activation_api_compile;
+
 #[cfg(all(test, any(unix, windows)))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invite_protocol_and_serde_round_trip_without_logging_secrets() {
+        let command = ExternalCommand::OpenInviteUris {
+            activation: InviteActivationToken::new("browser-secret-token".into()),
+            uris: vec![
+                "neoism://join?invite=https%3A%2F%2Ffast.example%2Fx%23secret".into(),
+                "NEOISM:invalid\n\tsecret".into(),
+            ],
+            window: Some((
+                Some(PathBuf::from("/tmp/work")),
+                vec![PathBuf::from("/tmp/a.md")],
+            )),
+        };
+        let wire = command.clone().wire_name();
+        assert!(!wire.contains('\n'));
+        assert_eq!(
+            ExternalCommand::parse(&format!("{wire}\n")),
+            Some(command.clone())
+        );
+        assert_eq!(
+            serde_json::from_str::<ExternalCommand>(
+                &serde_json::to_string(&command).unwrap()
+            )
+            .unwrap(),
+            command
+        );
+        assert!(!format!("{command:?}").contains("secret"));
+        assert!(!format!(
+            "{:?}",
+            RioEvent::OpenInviteUris {
+                uris: vec!["secret".into()],
+                activation: InviteActivationToken::new("browser-secret-token".into()),
+            }
+        )
+        .contains("secret"));
+        assert!(ExternalCommand::parse("open-invite-uris\t{bad}").is_none());
+    }
+
+    #[test]
+    fn invite_activation_is_bounded_redacted_and_backwards_compatible() {
+        assert!(InviteActivationToken::new(String::new()).is_none());
+        assert!(InviteActivationToken::new("a".repeat(4097)).is_none());
+        assert!(InviteActivationToken::new("opaque\nsecret".into()).is_none());
+        assert!(InviteActivationToken::new("a".repeat(4096)).is_some());
+        let token = InviteActivationToken::new("opaque-secret".into()).unwrap();
+        assert!(!format!("{token:?}").contains("opaque-secret"));
+        assert_eq!(serde_json::to_string(&token).unwrap(), "\"opaque-secret\"");
+        for value in [String::new(), "x".repeat(4097), "x\0y".into()] {
+            let json = serde_json::json!({"OpenInviteUris": {
+                "uris": ["neoism:invalid"], "window": null, "activation": value
+            }});
+            assert!(
+                ExternalCommand::parse(&format!("open-invite-uris\t{json}")).is_none()
+            );
+        }
+        let legacy = "open-invite-uris\t{\"OpenInviteUris\":{\"uris\":[\"neoism:invalid\"],\"window\":null}}";
+        assert!(matches!(
+            ExternalCommand::parse(legacy),
+            Some(ExternalCommand::OpenInviteUris {
+                activation: None,
+                ..
+            })
+        ));
+    }
 
     #[test]
     fn parses_new_window_command() {

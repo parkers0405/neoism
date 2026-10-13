@@ -2,6 +2,18 @@
 
 All notable user-facing changes to Neoism are documented here.
 
+## [0.7.126-nightly.20261013.1] - 2026-10-13
+
+### Tool composition, server invites, and Git controls
+
+- Adds a bounded Rust tool-composition interpreter with Oxc parsing, native/MCP dispatch, schema validation, permissions, cancellation, and visible call traces. Includes cross-platform interpreter CI and integration/confinement tests.
+- Adds temporary Fast Host servers, authenticated invite/deep-link workflows, TLS forwarding, connection recovery, leave handling, and a unified server modal. Fast Host is not a sandbox: guests' shells and agents execute with the host user's access. Only invite trusted participants and review provider/MCP credential exposure before hosting.
+- Adds Git actions dropdown controls and improves panel/diff scrolling, Agent diff presentation, and modal/palette interaction.
+- Improves Linux startup activation and registers invite URI handling in desktop and Windows installation metadata.
+- Preserves first-terminal directory following, per-model Codex budgets, readable MCP titles, and Logan Settle's Windows fix and contributor credit. Keeps the cleaned contributor history and browser-worker packaging boundaries intact.
+
+This is a real opt-in nightly release with platform artifacts, not a dry run. Use `neoism update --nightly`; stable Latest remains v0.7.125. Servo and CEF browser workers are not built or packaged in this release. Native cross-platform hosting behavior remains subject to platform validation.
+
 ## [0.7.125] - 2026-10-12
 
 ### Transcript stability, draft scrolling, and provider correctness

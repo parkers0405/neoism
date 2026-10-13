@@ -1,0 +1,17 @@
+[package]
+name = "neoism-agent-composition"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+oxc_allocator = "=0.95.0"
+oxc_ast = "=0.95.0"
+oxc_parser = { version = "=0.95.0", default-features = false }
+oxc_span = "=0.95.0"
+oxc_syntax = "=0.95.0"
+serde.workspace = true
+serde_json.workspace = true
+futures.workspace = true
+tokio.workspace = true

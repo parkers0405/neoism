@@ -1,4 +1,5 @@
 pub mod server_registry;
+pub mod fast_hosting;
 
 use std::collections::BTreeMap;
 use std::env;

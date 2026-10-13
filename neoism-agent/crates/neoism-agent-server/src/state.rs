@@ -98,6 +98,7 @@ impl Drop for InnerState {
 
 pub(crate) struct PermissionPending {
     pub(crate) request: PermissionRequestInfo,
+    pub(crate) cancel: Option<Arc<AtomicBool>>,
     pub(crate) sender: oneshot::Sender<Result<Vec<PermissionRule>, String>>,
 }
 

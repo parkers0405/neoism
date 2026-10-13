@@ -1,7 +1,8 @@
 [Desktop Entry]
 Type=Application
 TryExec=neoism
-Exec=neoism
+Exec=neoism %U
+MimeType=x-scheme-handler/neoism;text/markdown;application/json;application/x-yaml;text/x-rust;text/x-python;application/javascript;text/x-go;text/x-c;text/x-c++;application/x-shellscript;application/toml;text/html;text/css;text/plain;application/x-ipynb+json;
 Icon=neoism
 Terminal=false
 Categories=System;TerminalEmulator;Development;

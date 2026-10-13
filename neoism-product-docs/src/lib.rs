@@ -48,6 +48,7 @@ pub static BUNDLED_DOCS: &[BundledDoc] = docs![
     "Neoism Agent/Attachments.md",
     "Neoism Agent/Compaction.md",
     "Neoism Agent/Tools and Background Tasks.md",
+    "Neoism Agent/Tool Composition.md",
     "Neoism Agent/Memory.md",
     "Neoism Agent/Formatters, LSP, and References.md",
     "Neoism Agent/Troubleshooting.md",
@@ -78,6 +79,38 @@ pub fn title(doc: &BundledDoc) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tool_composition_is_bundled_and_linked() {
+        let page = bundled_doc("Neoism Agent/Tool Composition.md").unwrap();
+        assert_eq!(title(page), "Tool Composition");
+        for required in [
+            "Windows, macOS, and Linux",
+            "compose",
+            "Rust interpreter",
+            "Every child call",
+            "not automatically repeated or rolled back",
+            "Unsupported syntax is rejected before tool effects",
+            "String.indexOf",
+            "Array.push",
+            "String(error)",
+            "these aliases do not import duplicate payloads",
+        ] {
+            assert!(
+                page.body.contains(required),
+                "missing composition guidance: {required}"
+            );
+        }
+        for path in [
+            "Neoism Agent/The Neoism Agent.md",
+            "Neoism Agent/Tools and Background Tasks.md",
+        ] {
+            assert!(bundled_doc(path)
+                .unwrap()
+                .body
+                .contains("[[Tool Composition]]"));
+        }
+    }
 
     #[test]
     fn typesafe_mode_setup_and_privacy_are_bundled() {

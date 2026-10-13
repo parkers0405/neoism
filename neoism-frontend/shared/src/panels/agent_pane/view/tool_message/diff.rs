@@ -12,6 +12,38 @@ fn edit_diff_sections(message: &impl AgentToolMessage) -> Option<Vec<ToolDiffSec
     if message.defer_live_edit_diff() {
         return None;
     }
+    // Reuse the existing neutral structured cards and their per-section toggles.
+    // Stable section slots preserve source expansion while live children change.
+    if message.tool() == "compose" {
+        let value = serde_json::from_str::<Value>(message.detail()).ok()?;
+        if value["neoismToolDetail"] != "composition" {
+            return None;
+        }
+        let sections = [
+            ("Tool calls", "calls"),
+            ("Selected output", "result"),
+            ("Program source.js", "source"),
+        ]
+        .into_iter()
+        .map(|(label, key)| {
+            let text = value[key].as_str().filter(|s| !s.is_empty()).unwrap_or("—");
+            let rows = text
+                .lines()
+                .map(|text| ParsedDiffRow {
+                    kind: DiffLineKind::Context,
+                    old_line: None,
+                    new_line: None,
+                    text: text.to_owned(),
+                })
+                .collect();
+            let mut section = section_from_rows(label.to_owned(), rows);
+            section.link_target.clear();
+            section.fingerprint = hash_value(&(section.fingerprint, label));
+            section
+        })
+        .collect();
+        return Some(sections);
+    }
     if !is_edit_tool_message(message) && !looks_like_patch(message.detail()) {
         return None;
     }
@@ -812,6 +844,13 @@ fn diff_line_from_row(row: ParsedDiffRow) -> DiffLine {
 fn visible_diff_lines(section: &ToolDiffSection, expanded: bool) -> Cow<'_, [DiffLine]> {
     let max_rows = if expanded {
         EXPANDED_DIFF_ROWS
+    } else if section.link_target.is_empty() {
+        // Compact live viewports; expansion uses the existing card scrollbar.
+        match section.path.as_str() {
+            "Program source.js" => 2,
+            "Tool calls" => 6,
+            _ => 4,
+        }
     } else {
         COLLAPSED_DIFF_ROWS
     };
@@ -854,7 +893,7 @@ pub(crate) fn cached_diff_card_view(
 ) -> Rc<ToolDiffCardView> {
     let body_width = diff_card::body_text_width(card_w, s);
     let key = ToolDiffCardViewKey {
-        section_fingerprint: section.fingerprint,
+        section_fingerprint: hash_value(&(section.fingerprint, &section.path)),
         body_width_bits: body_width.to_bits(),
         scale_bits: s.to_bits(),
         expanded,
@@ -864,24 +903,21 @@ pub(crate) fn cached_diff_card_view(
     }
 
     let preview_rows = visible_diff_lines_owned(section, false);
-    let preview_visual_rows = diff_card::visual_row_count(&preview_rows, body_width, s);
+    let preview_visual_rows = preview_rows.len().max(1);
     let rows = if expanded {
         Rc::new(visible_diff_lines_owned(section, true))
     } else {
         Rc::new(preview_rows)
     };
-    let visual_row_offsets = Rc::new(diff_card::warm_render_cache(
-        rows.as_slice(),
-        body_width,
-        s,
-        Lang::from_path(&section.path),
-    ));
-    let visual_rows = visual_row_offsets.last().copied().unwrap_or(0).max(1);
+    // Timeline diffs keep one row per source line, independent of pane width.
+    let visual_row_offsets = Rc::new((0..=rows.len()).collect::<Vec<_>>());
+    let visual_rows = rows.len().max(1);
     let view = Rc::new(ToolDiffCardView {
         rows,
         visual_row_offsets,
         visual_rows,
         preview_visual_rows,
+        content_width: Cell::new(None),
     });
     TOOL_DIFF_CARD_VIEW_CACHE.with(|cache| cache.borrow_mut().insert(key, view.clone()));
     view

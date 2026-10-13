@@ -124,8 +124,13 @@ pub struct GitDiffPanel {
     /// Bottom commit-region hit rects, populated by `render`.
     pub(super) commit_box_rect: Rect,
     pub(super) commit_button_rect: Rect,
-    pub(super) stage_all_rect: Rect,
-    pub(super) remote_button_rects: [Rect; 3],
+    pub(super) actions_button_rect: Rect,
+    pub(super) actions_menu: crate::widgets::popover::Popover<
+        crate::widgets::menu::Menu<super::types::GitAction>,
+    >,
+    pub(super) actions_menu_rect: Rect,
+    pub(super) actions_menu_scroll_accumulator: f32,
+    pub(super) actions_menu_row_rects: Vec<(usize, Rect)>,
 
     // ── Tree file list ───────────────────────────────────────────────
     /// Collapsed directory nodes (repo-relative dir paths, no trailing
@@ -212,8 +217,13 @@ impl GitDiffPanel {
             commit_focused: false,
             commit_box_rect: Rect::ZERO,
             commit_button_rect: Rect::ZERO,
-            stage_all_rect: Rect::ZERO,
-            remote_button_rects: [Rect::ZERO; 3],
+            actions_button_rect: Rect::ZERO,
+            actions_menu: crate::widgets::popover::Popover::new(
+                crate::widgets::menu::Menu::new(),
+            ),
+            actions_menu_rect: Rect::ZERO,
+            actions_menu_scroll_accumulator: 0.0,
+            actions_menu_row_rects: Vec::new(),
             collapsed_dirs: HashSet::new(),
             visual_rows: Vec::new(),
             folder_row_rects: Vec::new(),

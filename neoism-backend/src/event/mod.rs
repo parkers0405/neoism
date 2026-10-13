@@ -56,6 +56,42 @@ pub enum ClickState {
 // them from `neoism_terminal_core::damage::{LineDamage,
 // TerminalDamage}` — no compatibility re-export here.
 
+/// Browser-supplied startup authority. Never format the opaque credential.
+/// This travels only over the desktop's private IPC, not daemon/remote APIs.
+#[derive(Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(transparent)]
+pub struct InviteActivationToken(String);
+
+impl InviteActivationToken {
+    pub const MAX_BYTES: usize = 4096;
+
+    pub fn new(token: String) -> Option<Self> {
+        (!token.is_empty()
+            && token.len() <= Self::MAX_BYTES
+            && !token.chars().any(char::is_control))
+        .then_some(Self(token))
+    }
+
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+impl std::fmt::Debug for InviteActivationToken {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str("InviteActivationToken([redacted])")
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for InviteActivationToken {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let token = <String as serde::Deserialize>::deserialize(deserializer)?;
+        Self::new(token).ok_or_else(|| {
+            serde::de::Error::custom("invalid startup activation token")
+        })
+    }
+}
+
 #[derive(Clone)]
 pub enum RioEvent {
     PrepareRender(u64),
@@ -87,6 +123,12 @@ pub enum RioEvent {
     CreateWindowWithOptions {
         working_dir: Option<std::path::PathBuf>,
         open_paths: Vec<std::path::PathBuf>,
+    },
+    /// Opaque protocol URLs. The app queues these until a window exists and
+    /// validates them; never interpret them as filesystem paths or log secrets.
+    OpenInviteUris {
+        uris: Vec<String>,
+        activation: Option<InviteActivationToken>,
     },
     CloseWindow,
     CreateNativeTab(Option<String>),
@@ -331,6 +373,7 @@ impl Debug for RioEvent {
                 f,
                 "CreateWindowWithOptions(working_dir={working_dir:?}, open_paths={open_paths:?})"
             ),
+            RioEvent::OpenInviteUris { .. } => write!(f, "OpenInviteUris"),
             RioEvent::CloseWindow => write!(f, "CloseWindow"),
             RioEvent::CreateNativeTab(_) => write!(f, "CreateNativeTab"),
             RioEvent::SelectNativeTabByIndex(tab_index) => {

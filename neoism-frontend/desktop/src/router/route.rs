@@ -775,26 +775,38 @@ impl Route<'_> {
                         self.request_overlay_redraw();
                         return true;
                     }
-                    // Ctrl+Tab flips the server modal's Join ↔ Create
-                    // slider (must sit above the plain-Tab field walk).
+                    // Both pointer tabs and Ctrl+Tab use the Screen draft transition.
                     Key::Named(NamedKey::Tab)
                         if blocking
                             && self.window.screen.modifiers.state().control_key()
                             && self.window.screen.renderer.modal.form_tab_count() > 0 =>
                     {
-                        if self.window.screen.renderer.modal.form_active_tab() == 0 {
-                            self.window.screen.open_create_server_prompt();
-                        } else {
-                            self.window.screen.open_add_server_prompt();
-                        }
+                        self.window.screen.cycle_server_form_mode();
                         self.request_overlay_redraw();
                         return true;
                     }
-                    Key::Named(NamedKey::Tab) if blocking && modal_has_input => {
-                        if self.window.screen.renderer.modal.focus_next_form_field() {
+                    Key::Named(NamedKey::Tab) if blocking => {
+                        let backwards = self.window.screen.modifiers.state().shift_key();
+                        let moved = if backwards {
+                            self.window.screen.renderer.modal.focus_previous_form_field()
+                        } else {
+                            self.window.screen.renderer.modal.focus_next_form_field()
+                        };
+                        if moved {
                             self.request_overlay_redraw();
                             return true;
                         }
+                    }
+                    key if blocking
+                        && self.window.screen.renderer.modal.form_switch_focused()
+                        && (is_enter_key(key) || matches!(key, Key::Named(NamedKey::Space))
+                            || matches!(key, Key::Character(text) if text.as_str() == " ")) =>
+                    {
+                        if let Some(checked) = self.window.screen.renderer.modal.activate_form_switch() {
+                            self.window.screen.toggle_server_form_fast(checked);
+                        }
+                        self.request_overlay_redraw();
+                        return true;
                     }
                     Key::Named(NamedKey::ArrowUp) if blocking => {
                         // Forms walk fields ↔ buttons; plain modals keep

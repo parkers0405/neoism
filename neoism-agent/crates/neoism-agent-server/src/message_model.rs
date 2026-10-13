@@ -461,7 +461,7 @@ fn tool_output_path(part: &ToolPart) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
-fn tool_state_metadata(part: &ToolPart) -> Option<&Value> {
+pub(crate) fn tool_state_metadata(part: &ToolPart) -> Option<&Value> {
     match &part.state {
         ToolState::Completed { metadata, .. } => Some(metadata),
         ToolState::Pending { .. } | ToolState::Running { .. } => None,

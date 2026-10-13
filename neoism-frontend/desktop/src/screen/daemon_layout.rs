@@ -211,6 +211,13 @@ impl Screen<'_> {
                 .workspace_buffer_tabs
                 .values()
                 .any(|tabs| tabs.has_modified_server_tabs())
+            || self.context_manager.all_grids().iter().any(|grid| {
+                self.context_manager
+                    .adopted_workspace_identity_for_route(grid.current().route_id)
+                    .is_some_and(|(endpoint, _)| {
+                        self.has_unsaved_server_workspaces(endpoint)
+                    })
+            })
     }
 
     pub fn attach_daemon_client(
@@ -402,6 +409,76 @@ impl Screen<'_> {
         &mut self,
     ) -> Option<(String, Option<String>, Option<String>)> {
         self.pending_server_add.take()
+    }
+
+    pub(crate) fn request_fast_invite_join(
+        &mut self, link: String, name: Option<String>, password: Option<String>,
+    ) {
+        self.pending_fast_invite_join = Some((link, name, password));
+    }
+
+    pub(crate) fn take_fast_invite_join(
+        &mut self,
+    ) -> Option<(String, Option<String>, Option<String>)> {
+        self.pending_fast_invite_join.take()
+    }
+
+    /// Stable ownership, not the currently active daemon's transient cache.
+    pub(crate) fn fast_invite_workspace_index(&self, endpoint: &str) -> Option<usize> {
+        self.context_manager.all_grids().iter().enumerate().find_map(|(index, grid)| {
+            self.context_manager.adopted_workspace_identity_for_route(grid.current().route_id)
+                .filter(|(owner, _)| *owner == endpoint).map(|_| index)
+        })
+    }
+
+    pub(crate) fn fast_invite_ui_busy(&self) -> bool {
+        self.renderer.modal.is_active()
+            || self.renderer.command_palette.is_enabled()
+            || self.context_manager.all_grids().iter().any(|grid| {
+                grid.contexts().values().any(|item| {
+                    item.context().neoism_agent.as_ref().is_some_and(|agent| {
+                        agent.pending_permission().is_some() || agent.pending_question().is_some()
+                    })
+                })
+            })
+    }
+
+    /// Queue a temporary server request for the App-owned host/join flow.
+    /// `host` selects a project directory; otherwise the value is a join address.
+    pub fn request_fast_server_add(
+        &mut self,
+        host: bool,
+        address_or_directory: String,
+        name: Option<String>,
+        token: Option<String>,
+    ) {
+        self.pending_fast_server_add = Some((host, address_or_directory, name, token));
+    }
+
+    pub fn take_fast_server_add(
+        &mut self,
+    ) -> Option<(bool, String, Option<String>, Option<String>)> {
+        self.pending_fast_server_add.take()
+    }
+
+    pub fn request_fast_server_invite(&mut self, id: String) {
+        self.pending_fast_server_invite = Some(id);
+    }
+
+    pub fn take_fast_server_invite(&mut self) -> Option<String> {
+        self.pending_fast_server_invite.take()
+    }
+
+    pub fn request_server_recovery(&mut self, endpoint: String, leave: bool) {
+        self.pending_server_recovery = Some((endpoint, leave, false));
+    }
+
+    pub fn request_server_recovery_discard(&mut self, endpoint: String) {
+        self.pending_server_recovery = Some((endpoint, true, true));
+    }
+
+    pub fn take_server_recovery(&mut self) -> Option<(String, bool, bool)> {
+        self.pending_server_recovery.take()
     }
 
     pub fn request_server_edit(&mut self, id: String) {

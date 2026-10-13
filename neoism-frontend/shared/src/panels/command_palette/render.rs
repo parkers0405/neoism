@@ -15,7 +15,7 @@ use crate::panels::file_tree;
 use crate::primitives::{draw_overlay_icon_centered, IdeTheme};
 use crate::widgets::scrollbar;
 
-use super::actions::PaletteMashupEntry;
+use super::actions::{PaletteAction, PaletteMashupEntry};
 use super::commands::CommandService;
 use super::fuzzy::{ease_out_back, ease_out_cubic, snap_to_device_px, truncate_to_fit};
 use super::modes::{PaletteMode, PaletteRow};
@@ -31,6 +31,19 @@ use super::{
 };
 
 const MAX_INPUT_ROWS: usize = 5;
+
+/// Controls may straddle the scrolling list boundary. Use the same visible
+/// bounds for their background and hit target, never the input/footer bands.
+pub(super) fn clipped_server_control_rect(
+    rect: [f32; 4],
+    clip: [f32; 4],
+) -> Option<[f32; 4]> {
+    let left = rect[0].max(clip[0]);
+    let top = rect[1].max(clip[1]);
+    let right = (rect[0] + rect[2]).min(clip[0] + clip[2]);
+    let bottom = (rect[1] + rect[3]).min(clip[1] + clip[3]);
+    (right > left && bottom > top).then_some([left, top, right - left, bottom - top])
+}
 
 /// Greedy measured soft wrapping over grapheme boundaries. Whitespace is a
 /// preferred break, but an overlong token still wraps instead of overflowing.
@@ -489,6 +502,7 @@ impl CommandPalette {
             return;
         }
         self.server_edit_hits.clear();
+        self.server_invite_hits.clear();
         self.server_remove_hits.clear();
 
         let (window_width, window_height, scale_factor) = dimensions;
@@ -951,6 +965,7 @@ impl CommandPalette {
         let list_clip = [input_x, results_y, input_width, list_clip_h];
         let mut next_selected_cursor_rect = None;
         let mut next_server_edit_hits = Vec::new();
+        let mut next_server_invite_hits = Vec::new();
         let mut next_server_remove_hits = Vec::new();
 
         // 5D-drag: the host header currently under the cursor during an
@@ -1187,7 +1202,12 @@ impl CommandPalette {
                 PaletteRow::Server { entry } => {
                     let (dot, color) = match entry.status {
                         crate::panels::ServerIndicatorStatus::Online => {
-                            ("\u{25cf}", theme.u8(theme.green))
+                            let color = if entry.temporary {
+                                theme.magenta
+                            } else {
+                                theme.green
+                            };
+                            ("\u{25cf}", theme.u8(color))
                         }
                         crate::panels::ServerIndicatorStatus::Connecting => {
                             ("\u{25cf}", theme.u8(theme.yellow))
@@ -1298,14 +1318,17 @@ impl CommandPalette {
                 0.0
             };
             let server_actions = match row {
-                PaletteRow::Server { entry } if !entry.local => Some(entry.id.clone()),
+                PaletteRow::Server { entry } if !entry.local => Some(entry.controls()),
                 _ => None,
             };
-            let server_action_reserve = if server_actions.is_some() {
-                132.0 * s
-            } else {
-                0.0
-            };
+            let server_action_reserve = server_actions
+                .as_ref()
+                .map(|controls| {
+                    (controls.iter().map(|(_, width, _)| width).sum::<f32>()
+                        + 6.0 * controls.len() as f32)
+                        * s
+                })
+                .unwrap_or(0.0);
             let title_budget = (input_width
                 - input_pad_x * 2.0
                 - row_indent
@@ -1432,22 +1455,27 @@ impl CommandPalette {
                     );
                 }
             }
-            if let Some(server_id) = server_actions {
+            if let Some(controls) = server_actions {
                 let chip_h = 24.0 * s;
-                let remove_w = 66.0 * s;
-                let edit_w = 52.0 * s;
                 let gap = 6.0 * s;
-                let remove_x = input_x + input_width - input_pad_x - remove_w;
-                let edit_x = remove_x - gap - edit_w;
+                let mut x =
+                    input_x + input_width - input_pad_x - server_action_reserve + gap;
                 let chip_y = item_y + (row_h - chip_h) * 0.5;
-                for (x, w, label) in
-                    [(edit_x, edit_w, "Edit"), (remove_x, remove_w, "Remove")]
-                {
+                for (label, width, action) in controls {
+                    let w = width * s;
+                    let Some(rect) =
+                        clipped_server_control_rect([x, chip_y, w, chip_h], list_clip)
+                    else {
+                        x += w + gap;
+                        continue;
+                    };
+                    // The overlay rounded primitive has no scissor argument;
+                    // constrain its geometry to the same visible hit bounds.
                     sugarloaf.overlay_rounded_rect(
-                        x,
-                        chip_y,
-                        w,
-                        chip_h,
+                        rect[0],
+                        rect[1],
+                        rect[2],
+                        rect[3],
                         theme.f32_alpha(theme.surface, 0.94),
                         DEPTH_ELEMENT + 0.03,
                         5.0 * s,
@@ -1466,11 +1494,20 @@ impl CommandPalette {
                         label,
                         &opts,
                     );
+                    match action {
+                        PaletteAction::EditServer { id } => {
+                            next_server_edit_hits.push((rect, id))
+                        }
+                        PaletteAction::RemoveServer { id } => {
+                            next_server_remove_hits.push((rect, id))
+                        }
+                        PaletteAction::CopyFastServerInvite { id } => {
+                            next_server_invite_hits.push((rect, id))
+                        }
+                        _ => unreachable!("server row control"),
+                    }
+                    x += w + gap;
                 }
-                next_server_edit_hits
-                    .push(([edit_x, chip_y, edit_w, chip_h], server_id.clone()));
-                next_server_remove_hits
-                    .push(([remove_x, chip_y, remove_w, chip_h], server_id));
             }
             if let Some(((text, _), opts)) =
                 move_hint.as_ref().zip(move_hint_opts.as_ref())
@@ -1529,6 +1566,7 @@ impl CommandPalette {
         let total = filtered.len();
         drop(filtered);
         self.server_edit_hits = next_server_edit_hits;
+        self.server_invite_hits = next_server_invite_hits;
         self.server_remove_hits = next_server_remove_hits;
         let track_height = list_h;
         let normalized = if total > visible_rows {

@@ -197,6 +197,7 @@ impl<F: FilesService> Harness<F> {
             services,
             theme: &self.theme,
             time: Duration::from_millis(0),
+            plugins: None,
         };
         f(&mut ctx)
     }

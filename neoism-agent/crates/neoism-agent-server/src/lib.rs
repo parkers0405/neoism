@@ -101,6 +101,7 @@ mod state;
 mod sync;
 mod tool;
 mod tool_routes;
+mod tool_composition;
 mod tool_runtime;
 mod tool_selection;
 mod utility_runtime;

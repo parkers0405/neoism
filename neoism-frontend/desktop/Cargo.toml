@@ -109,6 +109,9 @@ neoism-lua = { workspace = true, features = ["runtime"] }
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["server", "tokio", "http1", "service"] }
 tokio-tungstenite = { version = "0.24", features = ["connect", "rustls-tls-webpki-roots"] }
+opentunnel = "=0.5.1"
+axum = { workspace = true }
+subtle = "2.5"
 tower-service = "0.3"
 
 [target.'cfg(all(not(target_os = "macos"), not(target_os = "windows")))'.dependencies]
@@ -122,6 +125,8 @@ ahash = { version = "0.8.11", default-features = false, features = ["std"] }
 dunce = { workspace = true }
 tinyvec = { version = "1.8.1", features = ["alloc"] }
 windows-sys = { version = "0.60.2", features = [
+    "Win32_System_Pipes",
+    "Win32_System_Registry",
     "Win32_System_Console",
     "Win32_System_Com",
     "Win32_Foundation",

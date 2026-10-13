@@ -29,7 +29,6 @@ use crate::session_loop::{
 };
 use crate::session_retry;
 use crate::state::AppState;
-use crate::tool_runtime::execute_tool_call_in_generation;
 use crate::tool_selection::normalize_provider_tool_name;
 
 const TOOL_EXECUTION_CONCURRENCY: usize = 10;
@@ -1038,12 +1037,16 @@ fn spawn_tool_call(
     let name = call.name.clone();
     let input = call.input.clone();
     let plugin_snapshot = ctx.plugin_snapshot.clone();
+    let progress = (name == "compose").then(|| crate::tool_composition::ProgressSink {
+        message: ctx.live_message.clone(),
+        part_id: call.part_id.to_string(),
+    });
     tokio::spawn(async move {
         let _permit = semaphore
             .acquire_owned()
             .await
             .map_err(|_| "tool execution concurrency gate closed".to_string())?;
-        execute_tool_call_in_generation(
+        crate::tool_runtime::execute_tool_call_scoped(
             &state,
             &session_id,
             &assistant_id,
@@ -1053,6 +1056,10 @@ fn spawn_tool_call(
             &name,
             input,
             plugin_snapshot,
+            crate::tool_composition::CallScope {
+                progress,
+                ..Default::default()
+            },
         )
         .await
     })

@@ -137,6 +137,33 @@ impl Rect {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum GitAction {
+    Commit,
+    StageAll,
+    UnstageAll,
+    ToggleStageSelected,
+    Fetch,
+    Pull,
+    Push,
+    SwitchBranch,
+    Refresh,
+}
+
+impl GitAction {
+    pub(super) const ALL: [Self; 9] = [
+        Self::Commit,
+        Self::StageAll,
+        Self::UnstageAll,
+        Self::ToggleStageSelected,
+        Self::Fetch,
+        Self::Pull,
+        Self::Push,
+        Self::SwitchBranch,
+        Self::Refresh,
+    ];
+}
+
 #[derive(Clone, Copy, Debug)]
 pub enum PanelHit {
     Outside,
@@ -153,7 +180,8 @@ pub enum PanelHit {
     /// `visual_rows` so the caller can resolve the directory path.
     FolderToggle(usize),
     FolderCheckbox(usize),
-    RemoteButton(usize),
+    ActionsButton,
+    ActionMenuRow(usize),
     /// Click landed on the top branch selector button — caller opens
     /// (or closes) the branch dropdown.
     BranchButton,
@@ -167,8 +195,6 @@ pub enum PanelHit {
     CommitBox,
     /// Click landed on the Commit button.
     CommitButton,
-    /// Click landed on the Stage All button.
-    StageAllButton,
 }
 
 /// Keyboard-focus section inside the panel. Alt+Up/Down step between

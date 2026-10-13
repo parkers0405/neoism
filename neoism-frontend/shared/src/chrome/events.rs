@@ -989,6 +989,15 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         let alt = key.modifiers.contains(Modifiers::ALT);
         let meta = key.modifiers.contains(Modifiers::META);
 
+        // An open git actions menu is modal even if another sidebar retained
+        // a stale focus flag. Do not let its keys reach other chrome handlers.
+        if self.git_diff_panel.is_focused()
+            && self.git_diff_panel.actions_menu_is_open()
+            && self.handle_side_panel_key(key)
+        {
+            return true;
+        }
+
         if self.conversations_visible && !alt && !meta {
             if let Some(pane) = self.agent_pane.as_mut() {
                 if pane.side_panel().is_focused() {
@@ -1841,6 +1850,18 @@ impl<A: Send + Copy + 'static> Chrome<A> {
 
         if self.git_diff_panel.is_visible() {
             let hit = self.git_diff_panel.hit_test(*x, *y);
+            if self.git_diff_panel.actions_menu_is_open() {
+                if self.git_diff_panel.actions_menu_contains(*x, *y) {
+                    // Disabled rows/padding must not focus or activate cards below.
+                    if let GitPanelHit::ActionMenuRow(slot) = hit {
+                        self.git_diff_panel.activate_action_row(slot);
+                    }
+                    return true;
+                }
+                if !matches!(hit, GitPanelHit::ActionsButton) {
+                    self.git_diff_panel.close_actions_menu();
+                }
+            }
             // A click outside the branch dropdown closes it first.
             if self.git_diff_panel.branch_menu_is_open()
                 && !matches!(
@@ -1895,26 +1916,21 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                     self.git_diff_panel.commit();
                     return true;
                 }
-                GitPanelHit::StageAllButton => {
+                GitPanelHit::ActionsButton => {
                     self.git_diff_panel.set_focused(true);
                     if let Some(tree) = self.file_tree.as_mut() {
                         tree.set_focused(false);
                     }
                     self.blur(PanelKey::FileTree);
-                    self.git_diff_panel.stage_all_toggle();
+                    self.git_diff_panel.toggle_actions_menu();
                     return true;
                 }
                 GitPanelHit::FolderCheckbox(visual_ix) => {
                     self.git_diff_panel.toggle_folder_stage(visual_ix);
                     return true;
                 }
-                GitPanelHit::RemoteButton(slot) => {
-                    match slot {
-                        0 => self.git_diff_panel.fetch(),
-                        1 => self.git_diff_panel.pull(),
-                        2 => self.git_diff_panel.push(),
-                        _ => {}
-                    }
+                GitPanelHit::ActionMenuRow(slot) => {
+                    self.git_diff_panel.activate_action_row(slot);
                     return true;
                 }
                 GitPanelHit::FolderToggle(visual_ix) => {
@@ -2005,14 +2021,140 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         &mut self,
         key: &crate::event::KeyDescriptor,
     ) -> bool {
-        let plain = !key.modifiers.contains(Modifiers::CTRL)
-            && !key.modifiers.contains(Modifiers::ALT)
-            && !key.modifiers.contains(Modifiers::META);
-        if !plain {
-            return false;
-        }
+        let ctrl = key.modifiers.intersects(Modifiers::CTRL | Modifiers::META);
+        let alt = key.modifiers.contains(Modifiers::ALT);
+        let shift = key.modifiers.contains(Modifiers::SHIFT);
+        let plain = !ctrl && !alt;
         if self.git_diff_panel.is_focused() {
+            // Dropdown input takes precedence even over modified shortcuts.
+            if self.git_diff_panel.actions_menu_is_open() {
+                match &key.logical {
+                    LogicalKey::Named(NamedKey::ArrowDown | NamedKey::ArrowRight) => {
+                        self.git_diff_panel.actions_menu_move(1);
+                    }
+                    LogicalKey::Named(NamedKey::ArrowUp | NamedKey::ArrowLeft) => {
+                        self.git_diff_panel.actions_menu_move(-1);
+                    }
+                    LogicalKey::Named(NamedKey::Tab) => {
+                        self.git_diff_panel
+                            .actions_menu_move(if shift { -1 } else { 1 });
+                    }
+                    LogicalKey::Named(NamedKey::PageDown) => {
+                        self.git_diff_panel.actions_menu_move(5);
+                    }
+                    LogicalKey::Named(NamedKey::PageUp) => {
+                        self.git_diff_panel.actions_menu_move(-5);
+                    }
+                    LogicalKey::Named(NamedKey::Enter | NamedKey::Space) => {
+                        self.git_diff_panel.actions_menu_activate();
+                    }
+                    LogicalKey::Named(NamedKey::Escape) => {
+                        self.git_diff_panel.close_actions_menu();
+                        // Opening actions moves focus into the commit section.
+                        self.git_diff_panel.focus_commit_box(true);
+                    }
+                    _ => {}
+                }
+                return true;
+            }
+            if matches!(&key.logical, LogicalKey::Named(NamedKey::Function(4)))
+                || (alt
+                    && !ctrl
+                    && matches!(&key.logical, LogicalKey::Named(NamedKey::ArrowDown))
+                    && self.git_diff_panel.commit_box_focused())
+            {
+                self.git_diff_panel.open_actions_menu();
+                return true;
+            }
+            if self.git_diff_panel.branch_menu_is_open() {
+                match &key.logical {
+                    LogicalKey::Named(NamedKey::Enter) => {
+                        self.git_diff_panel.branch_menu_activate();
+                    }
+                    LogicalKey::Named(NamedKey::Escape) => {
+                        self.git_diff_panel.close_branch_menu();
+                    }
+                    LogicalKey::Named(NamedKey::ArrowDown) if !alt => {
+                        self.git_diff_panel.branch_menu_move(1);
+                    }
+                    LogicalKey::Named(NamedKey::ArrowUp) if !alt => {
+                        self.git_diff_panel.branch_menu_move(-1);
+                    }
+                    LogicalKey::Named(NamedKey::Backspace) => {
+                        self.git_diff_panel.branch_filter_backspace();
+                    }
+                    LogicalKey::Named(NamedKey::Space) if plain => {
+                        self.git_diff_panel.branch_filter_insert(" ");
+                    }
+                    LogicalKey::Character(s) if plain => {
+                        self.git_diff_panel.branch_filter_insert(s.as_str());
+                    }
+                    _ if plain => {}
+                    _ => return false,
+                }
+                return true;
+            }
+            if self.git_diff_panel.commit_box_focused() {
+                match &key.logical {
+                    LogicalKey::Named(NamedKey::Enter) if shift => {
+                        self.git_diff_panel.commit_input_insert("\n");
+                    }
+                    LogicalKey::Named(NamedKey::Enter) => {
+                        self.git_diff_panel.commit();
+                    }
+                    LogicalKey::Named(NamedKey::Escape) => {
+                        self.git_diff_panel.focus_commit_box(false);
+                    }
+                    LogicalKey::Named(NamedKey::Backspace) => {
+                        self.git_diff_panel.commit_input_backspace();
+                    }
+                    LogicalKey::Named(NamedKey::Space) if plain => {
+                        self.git_diff_panel.commit_input_insert(" ");
+                    }
+                    LogicalKey::Character(s) if plain => {
+                        self.git_diff_panel.commit_input_insert(s.as_str());
+                    }
+                    _ if plain => {}
+                    _ => return false,
+                }
+                return true;
+            }
+            if ctrl && matches!(&key.logical, LogicalKey::Named(NamedKey::Enter)) {
+                self.git_diff_panel.commit();
+                return true;
+            }
+            if !plain {
+                return false;
+            }
             match &key.logical {
+                LogicalKey::Named(NamedKey::Enter | NamedKey::Space)
+                    if self.git_diff_panel.branch_section_focused() =>
+                {
+                    self.git_diff_panel.toggle_branch_menu();
+                    return true;
+                }
+                LogicalKey::Named(NamedKey::Space) => {
+                    self.git_diff_panel.clear_pending();
+                    self.git_diff_panel.toggle_stage_selected();
+                    return true;
+                }
+                LogicalKey::Character(s) if s.as_str() == "c" => {
+                    self.git_diff_panel.clear_pending();
+                    self.git_diff_panel.focus_commit_box(true);
+                    return true;
+                }
+                LogicalKey::Named(NamedKey::ArrowUp)
+                    if self.git_diff_panel.diff_section_focused() =>
+                {
+                    self.git_diff_panel.scroll_diff_keys(false);
+                    return true;
+                }
+                LogicalKey::Named(NamedKey::ArrowDown)
+                    if self.git_diff_panel.diff_section_focused() =>
+                {
+                    self.git_diff_panel.scroll_diff_keys(true);
+                    return true;
+                }
                 LogicalKey::Named(NamedKey::ArrowUp) => {
                     self.git_diff_panel.select_prev();
                     return true;
@@ -2022,7 +2164,10 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                     return true;
                 }
                 LogicalKey::Named(NamedKey::Enter) => {
-                    if let Some((path, _root)) =
+                    self.git_diff_panel.clear_pending();
+                    if self.git_diff_panel.checkbox_column_focused() {
+                        self.git_diff_panel.toggle_stage_selected();
+                    } else if let Some((path, _root)) =
                         self.git_diff_panel.selected_file_target()
                     {
                         self.git_diff_panel.set_focused(false);
@@ -2036,8 +2181,12 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                     self.relayout();
                     return true;
                 }
+                LogicalKey::Character(_) => return true,
                 _ => {}
             }
+            return false;
+        }
+        if !plain {
             return false;
         }
         if self.notes_sidebar.is_visible() && self.notes_sidebar.is_focused() {
@@ -2287,6 +2436,96 @@ mod tests {
         let mut chrome = Chrome::<()>::new();
         chrome.install_file_tree(tree);
         chrome
+    }
+
+    fn git_panel_key(
+        logical: LogicalKey,
+        modifiers: Modifiers,
+    ) -> crate::event::KeyDescriptor {
+        crate::event::KeyDescriptor {
+            physical: crate::event::PhysicalKey(0),
+            logical,
+            state: KeyState::Pressed,
+            modifiers,
+            repeat: false,
+        }
+    }
+
+    #[test]
+    fn git_actions_menu_owns_keys_and_escape_restores_commit_input() {
+        let mut chrome = Chrome::<()>::new();
+        assert!(chrome.toggle_git_diff_panel());
+        chrome.git_diff_panel.focus_commit_box(true);
+        let opener =
+            git_panel_key(LogicalKey::Named(NamedKey::ArrowDown), Modifiers::ALT);
+        assert!(chrome.handle_side_panel_key(&opener));
+        assert!(chrome.git_diff_panel.actions_menu_is_open());
+        assert!(!chrome.git_diff_panel.commit_box_focused());
+
+        for logical in [
+            LogicalKey::Named(NamedKey::ArrowDown),
+            LogicalKey::Named(NamedKey::ArrowUp),
+            LogicalKey::Named(NamedKey::Tab),
+            LogicalKey::Named(NamedKey::PageDown),
+            LogicalKey::Named(NamedKey::PageUp),
+            LogicalKey::Character("q".into()),
+        ] {
+            assert!(
+                chrome.handle_side_panel_key(&git_panel_key(logical, Modifiers::CTRL))
+            );
+            assert!(chrome.git_diff_panel.actions_menu_is_open());
+        }
+        assert!(chrome.handle_side_panel_key(&git_panel_key(
+            LogicalKey::Named(NamedKey::Escape),
+            Modifiers::empty(),
+        )));
+        assert!(!chrome.git_diff_panel.actions_menu_is_open());
+        assert!(chrome.git_diff_panel.commit_box_focused());
+        assert!(chrome.git_diff_panel.is_visible());
+    }
+
+    #[test]
+    fn git_f4_opens_actions_and_commit_and_branch_input_own_keys() {
+        let mut chrome = Chrome::<()>::new();
+        assert!(chrome.toggle_git_diff_panel());
+        chrome.git_diff_panel.focus_files_section();
+        assert!(chrome.handle_side_panel_key(&git_panel_key(
+            LogicalKey::Named(NamedKey::Function(4)),
+            Modifiers::empty(),
+        )));
+        assert!(chrome.git_diff_panel.actions_menu_is_open());
+        assert!(chrome.handle_side_panel_key(&git_panel_key(
+            LogicalKey::Named(NamedKey::Escape),
+            Modifiers::empty(),
+        )));
+        for logical in [
+            LogicalKey::Character("message".into()),
+            LogicalKey::Named(NamedKey::Space),
+            LogicalKey::Named(NamedKey::Backspace),
+        ] {
+            assert!(
+                chrome.handle_side_panel_key(&git_panel_key(logical, Modifiers::empty()))
+            );
+            assert!(chrome.git_diff_panel.commit_box_focused());
+        }
+        assert!(chrome.handle_side_panel_key(&git_panel_key(
+            LogicalKey::Named(NamedKey::Enter),
+            Modifiers::SHIFT,
+        )));
+        assert_eq!(chrome.git_diff_panel.commit_input_text(), "message\n");
+        assert!(chrome.git_diff_panel.is_visible());
+        chrome.git_diff_panel.open_branch_menu();
+        assert!(chrome.handle_side_panel_key(&git_panel_key(
+            LogicalKey::Character("branch".into()),
+            Modifiers::empty(),
+        )));
+        assert!(chrome.git_diff_panel.branch_menu_is_open());
+        assert!(chrome.handle_side_panel_key(&git_panel_key(
+            LogicalKey::Named(NamedKey::Escape),
+            Modifiers::empty(),
+        )));
+        assert!(!chrome.git_diff_panel.branch_menu_is_open());
+        assert!(chrome.git_diff_panel.is_visible());
     }
 
     fn use_independent_left_sidebars(chrome: &mut Chrome<()>) {

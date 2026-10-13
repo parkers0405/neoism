@@ -45,6 +45,10 @@ pub trait WindowExtStartupNotify {
     ///
     /// The token will be delivered inside
     fn request_activation_token(&self) -> Result<AsyncRequestSerial, NotSupportedError>;
+
+    /// Consume launcher authority to activate an existing surface. Success means
+    /// the request was sent, not that the compositor granted focus. No token is minted.
+    fn activate_with_token(&self, token: &ActivationToken) -> Result<(), NotSupportedError>;
 }
 
 pub trait WindowAttributesExtStartupNotify {
@@ -69,6 +73,10 @@ impl EventLoopExtStartupNotify for ActiveEventLoop {
 }
 
 impl WindowExtStartupNotify for Window {
+    fn activate_with_token(&self, token: &ActivationToken) -> Result<(), NotSupportedError> {
+        self.window.activate_with_token(token)
+    }
+
     fn request_activation_token(&self) -> Result<AsyncRequestSerial, NotSupportedError> {
         self.window.request_activation_token()
     }
@@ -96,4 +104,17 @@ pub fn reset_activation_token_env() {
 pub fn set_activation_token_env(token: ActivationToken) {
     env::set_var(X11_VAR, &token._token);
     env::set_var(WAYLAND_VAR, token._token);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn existing_window_activation_api_and_token_redaction() {
+        let _: fn(&Window, &ActivationToken) -> Result<(), NotSupportedError> =
+            WindowExtStartupNotify::activate_with_token;
+        let token = ActivationToken::from_raw("launcher-secret".into());
+        assert!(!format!("{token:?}").contains("launcher-secret"));
+    }
 }

@@ -461,6 +461,21 @@ impl DaemonClientHandle {
         true
     }
 
+    /// Wake the existing reconnect runner; never create a second connection.
+    /// A terminal Closed status (including explicit HostEnded) cannot be retried.
+    pub fn request_reconnect(&self) -> bool {
+        if matches!(
+            *self.status.borrow(),
+            DaemonClientStatus::Open | DaemonClientStatus::Closed
+        ) {
+            return false;
+        }
+        self.recycle_tx.send_modify(|revision| {
+            *revision = revision.wrapping_add(1);
+        });
+        true
+    }
+
     /// Register correlation before a fast localhost daemon can reply.
     pub async fn send_editor_with_request_id(
         &self,
@@ -780,7 +795,18 @@ impl ClientRunner {
 
         loop {
             let _ = self.status_tx.send(DaemonClientStatus::Connecting);
-            let result = match connect_endpoint(&self.options.endpoint).await {
+            let dial = tokio::select! {
+                result = connect_endpoint(&self.options.endpoint) => result,
+                changed = self.recycle_rx.changed() => {
+                    if changed.is_err() {
+                        let _ = self.status_tx.send(DaemonClientStatus::Closed);
+                        return;
+                    }
+                    // Cancel an in-flight dial and retry in this same runner.
+                    continue;
+                }
+            };
+            let result = match dial {
                 Ok(SocketConnection::Tcp(ws)) => {
                     tracing::info!(target: "neoism::nvim_trace", "[nvim-trace] CLIENT connected (tcp) → socket loop");
                     self.run_socket(ws, &mut pending).await
@@ -2085,6 +2111,30 @@ mod tests {
             handle,
             in_rx,
         )
+    }
+
+    #[tokio::test]
+    async fn manual_retry_wakes_existing_backoff_runner() {
+        let (mut runner, handle, _) =
+            delivery_test_client(DaemonClientStatus::BackingOff);
+        assert!(handle.request_reconnect());
+        let mut pending = VecDeque::new();
+        let stopped = tokio::time::timeout(
+            Duration::from_millis(100),
+            runner.collect_during_backoff(Duration::from_secs(60), &mut pending),
+        ).await.expect("manual retry must interrupt backoff");
+        assert!(!stopped);
+        assert!(pending.is_empty());
+        assert_eq!(*runner.recycle_rx.borrow(), 1);
+    }
+
+    #[test]
+    fn manual_retry_does_not_restart_terminal_host_ended_or_open_link() {
+        for status in [DaemonClientStatus::Closed, DaemonClientStatus::Open] {
+            let (runner, handle, _) = delivery_test_client(status);
+            assert!(!handle.request_reconnect());
+            assert!(!runner.recycle_rx.has_changed().unwrap());
+        }
     }
 
     #[test]

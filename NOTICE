@@ -53,6 +53,12 @@ MIT, Copyright (c) 2023 shellRaining.
 OpenCode provider artwork (`neoism-agent/sdk/typescript/packages/gui/src/components/providers/icons.svg`) — MIT, Copyright (c) 2025 opencode. See `neoism-agent/sdk/typescript/packages/gui/src/components/providers/LICENSE.opencode`.
 
 
+Tool Composition parser
+-----------------------
+
+Oxc 0.95.0 (Rust JavaScript parser) - MIT License, Copyright (c) 2024-present VoidZero Inc. & Contributors; Copyright (c) 2023 Boshen. Oxc parses Tool Composition source; Neoism's bounded interpreter and tool dispatcher are first-party Rust code. See misc/licenses/oxc.txt for the upstream license.
+
+
 Optional browser runtime
 ------------------------
 

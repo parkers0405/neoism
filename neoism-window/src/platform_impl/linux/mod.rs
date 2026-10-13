@@ -383,6 +383,13 @@ impl Window {
         x11_or_wayland!(match self; Window(w) => w.request_inner_size(size))
     }
 
+    pub(crate) fn activate_with_token(
+        &self,
+        token: &ActivationToken,
+    ) -> Result<(), NotSupportedError> {
+        x11_or_wayland!(match self; Window(w) => w.activate_with_token(token))
+    }
+
     #[inline]
     pub(crate) fn request_activation_token(
         &self,

@@ -23,6 +23,8 @@ mod hosting_tests;
 #[path = "tests_workspace_worker.rs"]
 mod workspace_worker_tests;
 
+#[path = "tests_composition.rs"]
+mod composition_tests;
 #[path = "tests_interaction_tools.rs"]
 mod interaction_tool_tests;
 

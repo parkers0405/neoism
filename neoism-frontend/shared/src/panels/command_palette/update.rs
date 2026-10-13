@@ -415,11 +415,15 @@ impl CommandPalette {
 
     pub fn server_action_at(&self, x: f32, y: f32) -> Option<PaletteAction> {
         let contains = |rect: [f32; 4]| {
-            x >= rect[0]
-                && x <= rect[0] + rect[2]
-                && y >= rect[1]
-                && y <= rect[1] + rect[3]
+            x >= rect[0] && x < rect[0] + rect[2] && y >= rect[1] && y < rect[1] + rect[3]
         };
+        if let Some((_, id)) = self
+            .server_invite_hits
+            .iter()
+            .find(|(rect, _)| contains(*rect))
+        {
+            return Some(PaletteAction::CopyFastServerInvite { id: id.clone() });
+        }
         if let Some((_, id)) = self
             .server_edit_hits
             .iter()

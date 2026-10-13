@@ -214,6 +214,7 @@ where
         viewport_clip: [f32; 4],
         occlusion_rects: &[[f32; 4]],
         prepared_diff_sections: Option<&[ToolDiffSection]>,
+        mouse: Option<(f32, f32)>,
     ) -> f32 {
         render_tool_message(
             sugarloaf,
@@ -229,6 +230,7 @@ where
             viewport_clip,
             occlusion_rects,
             prepared_diff_sections,
+            mouse,
         )
     }
 
@@ -702,6 +704,7 @@ where
                 viewport_clip,
                 occlusion_rects,
                 tool_diff_sections,
+                mouse,
             );
         }
         AgentMessageCardKind::Compaction => {

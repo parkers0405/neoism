@@ -116,6 +116,9 @@ pub enum PaletteAction {
         id: String,
     },
     AddServer,
+    CopyFastServerInvite {
+        id: String,
+    },
     /// Host a server from THIS machine for a chosen folder and
     /// auto-join it — the create half of the Create/Join pair.
     CreateServer,
@@ -297,8 +300,52 @@ pub struct PaletteServerEntry {
     pub name: String,
     pub address: String,
     pub local: bool,
+    /// Temporary session; only the online status dot changes its appearance.
+    pub temporary: bool,
+    /// This temporary server is hosted by this app, rather than joined.
+    pub hosted: bool,
     pub status: crate::panels::ServerIndicatorStatus,
     pub active: bool,
+}
+
+impl PaletteServerEntry {
+    /// Row controls, not status tags. Temporary peers cannot be edited or
+    /// durably deleted; RemoveServer delegates their Leave/Stop lifecycle to App.
+    pub(super) fn controls(&self) -> Vec<(&'static str, f32, PaletteAction)> {
+        if self.local {
+            return Vec::new();
+        }
+        let remove = PaletteAction::RemoveServer {
+            id: self.id.clone(),
+        };
+        if self.temporary {
+            if self.hosted {
+                vec![
+                    (
+                        "Copy invite",
+                        88.0,
+                        PaletteAction::CopyFastServerInvite {
+                            id: self.id.clone(),
+                        },
+                    ),
+                    ("Stop hosting", 96.0, remove),
+                ]
+            } else {
+                vec![("Leave", 56.0, remove)]
+            }
+        } else {
+            vec![
+                (
+                    "Edit",
+                    52.0,
+                    PaletteAction::EditServer {
+                        id: self.id.clone(),
+                    },
+                ),
+                ("Remove", 66.0, remove),
+            ]
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -814,6 +861,7 @@ pub(crate) fn command_visible_for_surface(
         | PaletteAction::EditServer { .. }
         | PaletteAction::RemoveServer { .. }
         | PaletteAction::AddServer
+        | PaletteAction::CopyFastServerInvite { .. }
         | PaletteAction::CreateServer
         | PaletteAction::CreateWorkspace
         | PaletteAction::LeaveWorkspace

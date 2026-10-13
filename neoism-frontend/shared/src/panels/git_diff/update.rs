@@ -8,7 +8,7 @@ use crate::widgets::diff_card;
 
 use super::state::GitDiffPanel;
 use super::types::{
-    FileChange, FocusSection, PanelData, PanelHit, ScrollbarKind, VisualRow,
+    FileChange, FocusSection, PanelData, PanelHit, Rect, ScrollbarKind, VisualRow,
     VisualRowKind,
 };
 use super::{
@@ -112,6 +112,7 @@ impl GitDiffPanel {
     pub fn set_focused(&mut self, f: bool) {
         self.focused = f && self.visible;
         if !self.focused {
+            self.close_actions_menu();
             self.clear_pending();
         }
     }
@@ -399,7 +400,7 @@ impl GitDiffPanel {
     }
 
     pub fn begin_divider_drag(&mut self, x: f32, y: f32) -> bool {
-        self.divider_dragging = self.visible && self.divider_rect.contains(x, y);
+        self.divider_dragging = self.is_hovering_divider(x, y);
         self.divider_dragging
     }
 
@@ -421,7 +422,9 @@ impl GitDiffPanel {
     }
 
     pub fn is_hovering_divider(&self, x: f32, y: f32) -> bool {
-        self.visible && self.divider_rect.contains(x, y)
+        self.visible
+            && !self.actions_menu_contains(x, y)
+            && self.divider_rect.contains(x, y)
     }
 
     /// Returns the (path, repo_root) of the currently-selected file so
@@ -520,6 +523,7 @@ impl GitDiffPanel {
         self.section = FocusSection::Files;
         self.checkbox_focused = false;
         self.branch_menu_open = false;
+        self.close_actions_menu();
         self.branch_filter.clear();
         self.clear_pending();
         self.refresh(repo_root, branch);
@@ -542,6 +546,7 @@ impl GitDiffPanel {
         self.focused = false;
         self.commit_focused = false;
         self.branch_menu_open = false;
+        self.close_actions_menu();
         self.open_started_at = None;
         self.clear_pending();
     }
@@ -736,6 +741,7 @@ impl GitDiffPanel {
         if focus {
             self.focused = true;
             self.section = FocusSection::Commit;
+            self.close_actions_menu();
             self.close_branch_menu();
         }
     }
@@ -946,6 +952,164 @@ impl GitDiffPanel {
         self.visible && self.focused && self.checkbox_focused
     }
 
+    // The same availability check drives menu rows and execution, so a stale
+    // popup cannot start an operation after a host refresh changes the state.
+    pub(super) fn git_action_enabled(&self, action: super::types::GitAction) -> bool {
+        use super::types::GitAction;
+        let Ok(data) = self.data.lock() else {
+            return false;
+        };
+        if self.io.is_none() || data.repo_root.is_none() || data.loading {
+            return false;
+        }
+        match action {
+            GitAction::Commit => {
+                !self.commit_input.text().trim().is_empty()
+                    && data.files.iter().any(|f| f.staged)
+            }
+            GitAction::StageAll => data.files.iter().any(|f| !f.staged),
+            GitAction::UnstageAll => data.files.iter().any(|f| f.staged),
+            GitAction::ToggleStageSelected => data.files.get(self.selected).is_some(),
+            _ => true,
+        }
+    }
+
+    pub(super) fn git_action_label(
+        &self,
+        action: super::types::GitAction,
+    ) -> &'static str {
+        use super::types::GitAction;
+        match action {
+            GitAction::Commit => "Commit",
+            GitAction::StageAll => "Stage all changes",
+            GitAction::UnstageAll => "Unstage all changes",
+            GitAction::ToggleStageSelected => {
+                if self
+                    .data
+                    .lock()
+                    .ok()
+                    .is_some_and(|d| d.files.get(self.selected).is_some_and(|f| f.staged))
+                {
+                    "Unstage selected file"
+                } else {
+                    "Stage selected file"
+                }
+            }
+            GitAction::Fetch => "Fetch",
+            GitAction::Pull => "Pull (fast-forward only)",
+            GitAction::Push => "Push",
+            GitAction::SwitchBranch => "Switch branch...",
+            GitAction::Refresh => "Refresh",
+        }
+    }
+
+    pub fn actions_menu_is_open(&self) -> bool {
+        self.visible && self.actions_menu.is_interactive()
+    }
+
+    pub fn actions_menu_contains(&self, mx: f32, my: f32) -> bool {
+        self.actions_menu_is_open() && self.actions_menu_rect.contains(mx, my)
+    }
+
+    pub fn open_actions_menu(&mut self) {
+        if !self.visible {
+            return;
+        }
+        self.close_branch_menu();
+        self.focused = true;
+        self.section = FocusSection::Commit;
+        self.commit_focused = false;
+        self.clear_pending();
+        self.refresh_actions_menu();
+        self.actions_menu.open_instant();
+    }
+
+    pub(super) fn refresh_actions_menu(&mut self) {
+        let items: Vec<_> = super::types::GitAction::ALL
+            .into_iter()
+            .map(|action| {
+                let mut item = crate::widgets::menu::MenuItem::new(
+                    self.git_action_label(action),
+                    action,
+                );
+                item.enabled = self.git_action_enabled(action);
+                item
+            })
+            .collect();
+        let changed = self
+            .actions_menu
+            .content()
+            .items()
+            .iter()
+            .zip(&items)
+            .any(|(old, new)| old.enabled != new.enabled || old.label != new.label)
+            || self.actions_menu.content().len() != items.len();
+        if changed {
+            let selected = self.actions_menu.content().selected_index();
+            self.actions_menu.content_mut().set_items(items);
+            self.actions_menu.content_mut().set_selected_index(selected);
+        }
+    }
+
+    pub fn close_actions_menu(&mut self) {
+        self.actions_menu.close_instant();
+        self.actions_menu_scroll_accumulator = 0.0;
+        self.actions_menu_rect = Rect::ZERO;
+        self.actions_menu_row_rects.clear();
+    }
+
+    pub fn toggle_actions_menu(&mut self) {
+        if self.actions_menu_is_open() {
+            self.close_actions_menu();
+        } else {
+            self.open_actions_menu();
+        }
+    }
+
+    pub fn actions_menu_move(&mut self, delta: i32) {
+        self.actions_menu.content_mut().move_selection(delta);
+    }
+
+    pub fn actions_menu_activate(&mut self) {
+        let action = self.actions_menu.content().selected_action().copied();
+        if let Some(action) = action {
+            self.run_git_action(action);
+        }
+    }
+
+    pub fn activate_action_row(&mut self, slot: usize) {
+        if self.actions_menu.content_mut().set_selected_index(slot) {
+            self.actions_menu_activate();
+        }
+    }
+
+    fn run_git_action(&mut self, action: super::types::GitAction) {
+        use super::types::GitAction;
+        if !self.git_action_enabled(action) {
+            return;
+        }
+        self.close_actions_menu();
+        match action {
+            GitAction::Commit => self.commit(),
+            GitAction::StageAll => self.stage_all(),
+            GitAction::UnstageAll => self.unstage_all(),
+            GitAction::ToggleStageSelected => self.toggle_stage_selected(),
+            GitAction::Fetch => self.fetch(),
+            GitAction::Pull => self.pull(),
+            GitAction::Push => self.push(),
+            GitAction::SwitchBranch => self.open_branch_menu(),
+            GitAction::Refresh => {
+                let target = self.data.lock().ok().map(|mut d| {
+                    d.last_refresh = None;
+                    (d.repo_root.clone(), d.branch.clone())
+                });
+                if let Some((root, branch)) = target {
+                    self.refresh(root, branch);
+                }
+            }
+        }
+    }
+
     // ── Branch dropdown ──────────────────────────────────────────────
 
     pub fn branch_menu_is_open(&self) -> bool {
@@ -959,6 +1123,7 @@ impl GitDiffPanel {
         if !self.visible {
             return;
         }
+        self.close_actions_menu();
         self.branch_menu_open = true;
         self.section = FocusSection::Branch;
         self.commit_focused = false;
@@ -1176,6 +1341,9 @@ impl GitDiffPanel {
             }
             return;
         }
+        if !self.git_action_enabled(super::types::GitAction::Commit) {
+            return;
+        }
         // The staged files vanish from the list after a commit, so
         // reset the selection to avoid pointing past the new list.
         self.selected = 0;
@@ -1286,6 +1454,14 @@ impl GitDiffPanel {
         if !self.visible || !self.panel_rect.contains(mx, my) {
             return PanelHit::Outside;
         }
+        if self.actions_menu_is_open() && self.actions_menu_rect.contains(mx, my) {
+            for (slot, rect) in &self.actions_menu_row_rects {
+                if rect.contains(mx, my) {
+                    return PanelHit::ActionMenuRow(*slot);
+                }
+            }
+            return PanelHit::Inside;
+        }
         // Branch dropdown overlays the cards while open — its rows +
         // search box take priority over everything they cover.
         if self.branch_menu_open {
@@ -1309,13 +1485,8 @@ impl GitDiffPanel {
         if self.commit_button_rect.contains(mx, my) {
             return PanelHit::CommitButton;
         }
-        if self.stage_all_rect.contains(mx, my) {
-            return PanelHit::StageAllButton;
-        }
-        for (slot, rect) in self.remote_button_rects.iter().enumerate() {
-            if rect.contains(mx, my) {
-                return PanelHit::RemoteButton(slot);
-            }
+        if self.actions_button_rect.contains(mx, my) {
+            return PanelHit::ActionsButton;
         }
         if self.commit_box_rect.contains(mx, my) {
             return PanelHit::CommitBox;
@@ -1443,6 +1614,14 @@ impl GitDiffPanel {
         if !self.visible || !self.panel_rect.contains(mx, my) {
             return false;
         }
+        if self.actions_menu_contains(mx, my) {
+            self.actions_menu.content_mut().scroll_pixels(
+                delta,
+                28.0 * self.scale,
+                &mut self.actions_menu_scroll_accumulator,
+            );
+            return true;
+        }
         // Diff card sits below the files card — route wheel events to
         // whichever card the mouse is over so the user can scroll the
         // file list and the diff independently.
@@ -1459,6 +1638,9 @@ impl GitDiffPanel {
     pub fn scroll_touch_at(&mut self, mx: f32, my: f32, finger_delta: f32) -> bool {
         if !self.visible || !self.panel_rect.contains(mx, my) {
             return false;
+        }
+        if self.actions_menu_contains(mx, my) {
+            return self.scroll_at(mx, my, finger_delta);
         }
         if self.diff_card_rect.contains(mx, my) {
             self.scroll_diff_pixels(finger_delta);
@@ -1599,7 +1781,7 @@ impl GitDiffPanel {
     /// the kind so the screen layer can route a drag to the right
     /// scroll axis.
     pub fn scrollbar_hit(&self, mx: f32, my: f32) -> Option<ScrollbarKind> {
-        if !self.visible {
+        if !self.visible || self.actions_menu_contains(mx, my) {
             return None;
         }
         if super::render::hit_scrollbar_thumb(&self.files_scrollbar_thumb_rect, mx, my) {

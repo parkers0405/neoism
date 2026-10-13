@@ -713,6 +713,8 @@ fn servers_mode_filters_and_emits_connection_actions() {
             name: "Local Server".into(),
             address: "local daemon".into(),
             local: true,
+            temporary: false,
+            hosted: false,
             status: crate::panels::ServerIndicatorStatus::Online,
             active: true,
         },
@@ -721,6 +723,8 @@ fn servers_mode_filters_and_emits_connection_actions() {
             name: "Home Workstation".into(),
             address: "wss://home.example/session".into(),
             local: false,
+            temporary: false,
+            hosted: false,
             status: crate::panels::ServerIndicatorStatus::Unknown,
             active: false,
         },
@@ -738,6 +742,132 @@ fn servers_mode_filters_and_emits_connection_actions() {
         palette.get_selected_action(),
         Some(PaletteAction::SelectServer { id: "home".into() })
     );
+}
+
+#[test]
+fn servers_picker_has_one_unified_add_action() {
+    let mut palette = CommandPalette::new();
+    palette.enter_servers_mode(Vec::new());
+    let rows = palette.filtered_rows();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].1.action(), Some(PaletteAction::AddServer));
+    assert_eq!(rows[0].1.title(), "+ Add Server");
+    assert!(rows[0].1.is_selectable());
+    drop(rows);
+    palette.selected_index = 0;
+    assert_eq!(
+        palette.get_selected_action(),
+        Some(PaletteAction::AddServer)
+    );
+}
+
+#[test]
+fn temporary_server_rows_keep_normal_titles_addresses_and_selection() {
+    let entry = PaletteServerEntry {
+        id: "temporary-peer".into(),
+        name: "Team server".into(),
+        address: "https://peer.example".into(),
+        local: false,
+        temporary: true,
+        hosted: false,
+        status: crate::panels::ServerIndicatorStatus::Online,
+        active: true,
+    };
+    let joined_controls = entry.controls();
+    assert_eq!(joined_controls.len(), 1);
+    assert_eq!(joined_controls[0].0, "Leave");
+    assert_eq!(
+        joined_controls[0].2,
+        PaletteAction::RemoveServer {
+            id: entry.id.clone()
+        }
+    );
+    let mut hosted = entry.clone();
+    hosted.hosted = true;
+    let hosted_controls = hosted.controls();
+    assert_eq!(hosted_controls.len(), 2);
+    assert_eq!(hosted_controls[0].0, "Copy invite");
+    assert_eq!(
+        hosted_controls[0].2,
+        PaletteAction::CopyFastServerInvite {
+            id: entry.id.clone()
+        }
+    );
+    assert_eq!(hosted_controls[1].0, "Stop hosting");
+    assert!(!hosted_controls
+        .iter()
+        .any(|(_, _, action)| matches!(action, PaletteAction::EditServer { .. })));
+    let row = PaletteRow::Server { entry: &entry };
+    assert_eq!(row.display_title(), "Team server");
+    assert_eq!(row.shortcut(), "https://peer.example");
+    assert_eq!(
+        row.action(),
+        Some(PaletteAction::SelectServer {
+            id: entry.id.clone()
+        })
+    );
+    let mut palette = CommandPalette::new();
+    palette.enter_servers_mode(vec![entry]);
+    palette.set_query("peer.example".into());
+    assert_eq!(palette.filtered_rows().len(), 1);
+}
+
+#[test]
+fn server_controls_cannot_be_clicked_outside_the_list() {
+    use super::render::clipped_server_control_rect;
+    let clip = [0.0, 100.0, 300.0, 80.0];
+    let top = clipped_server_control_rect([10.0, 88.0, 88.0, 24.0], clip).unwrap();
+    let bottom = clipped_server_control_rect([110.0, 168.0, 96.0, 24.0], clip).unwrap();
+    assert_eq!(top, [10.0, 100.0, 88.0, 12.0]);
+    assert_eq!(bottom, [110.0, 168.0, 96.0, 12.0]);
+    assert_eq!(
+        clipped_server_control_rect([10.0, 76.0, 88.0, 24.0], clip),
+        None
+    );
+    assert_eq!(
+        clipped_server_control_rect([10.0, 180.0, 88.0, 24.0], clip),
+        None
+    );
+    let mut palette = CommandPalette::new();
+    palette.server_invite_hits = vec![(top, "host".into())];
+    palette.server_remove_hits = vec![(bottom, "host".into())];
+    assert_eq!(palette.server_action_at(20.0, 99.0), None);
+    assert_eq!(palette.server_action_at(120.0, 180.0), None);
+    assert_eq!(palette.server_action_at(120.0, 190.0), None);
+    assert_eq!(
+        palette.server_action_at(20.0, 101.0),
+        Some(PaletteAction::CopyFastServerInvite { id: "host".into() })
+    );
+    assert_eq!(
+        palette.server_action_at(120.0, 179.0),
+        Some(PaletteAction::RemoveServer { id: "host".into() })
+    );
+}
+
+#[test]
+fn temporary_row_removal_bypasses_saved_address_confirmation_policy() {
+    let mut palette = CommandPalette::new();
+    let entry = PaletteServerEntry {
+        id: "peer".into(),
+        name: "Peer".into(),
+        address: "https://peer.example".into(),
+        local: false,
+        temporary: true,
+        hosted: false,
+        status: crate::panels::ServerIndicatorStatus::Online,
+        active: false,
+    };
+    palette.enter_servers_mode(vec![entry.clone()]);
+    assert!(palette.server_is_temporary("peer"));
+    assert!(!palette.server_is_temporary("unknown"));
+    let mut host = entry.clone();
+    host.hosted = true;
+    palette.enter_servers_mode(vec![host]);
+    assert!(palette.server_is_temporary("peer"));
+    let mut saved = entry;
+    saved.temporary = false;
+    palette.enter_servers_mode(vec![saved]);
+    assert!(!palette.server_is_temporary("peer"));
 }
 
 #[test]
@@ -767,6 +897,11 @@ fn every_server_row_keeps_its_edit_and_remove_actions() {
     assert_eq!(
         palette.server_action_at(60.0, 45.0),
         Some(PaletteAction::RemoveServer { id: "work".into() })
+    );
+    palette.server_invite_hits = vec![([10.0, 60.0, 30.0, 10.0], "host".into())];
+    assert_eq!(
+        palette.server_action_at(20.0, 65.0),
+        Some(PaletteAction::CopyFastServerInvite { id: "host".into() })
     );
     assert_eq!(palette.server_action_at(100.0, 100.0), None);
 }

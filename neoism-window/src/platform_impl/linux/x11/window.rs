@@ -1934,6 +1934,17 @@ impl UnownedWindow {
     pub fn set_ime_purpose(&self, _purpose: ImePurpose) {}
 
     #[inline]
+    pub fn activate_with_token(
+        &self,
+        token: &crate::window::ActivationToken,
+    ) -> Result<(), crate::error::NotSupportedError> {
+        // Complete the launcher's startup notification as during creation.
+        // X11 focus is best effort; the WM still decides whether to raise us.
+        let _ = self.xconn.remove_activation_token(self.xwindow, &token._token);
+        self.focus_window();
+        Ok(())
+    }
+
     pub fn focus_window(&self) {
         let atoms = self.xconn.atoms();
         let state_atom = atoms[WM_STATE];

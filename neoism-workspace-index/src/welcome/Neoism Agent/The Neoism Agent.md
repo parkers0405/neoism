@@ -67,7 +67,7 @@ Neoism also uses hidden internal agents for tasks such as title generation, summ
 
 The native runtime includes shell, file, patch, search, web, notes, skill, LSP, question, planning, and subagent tools. MCP servers can add more tools, resources, and prompts. Tool availability is filtered by global configuration, the selected agent, and permission rules.
 
-See [[Tools and Background Tasks]], [[Permissions]], [[Skills]], and [[MCP Servers]].
+See [[Tools and Background Tasks]], [[Tool Composition]], [[Permissions]], [[Skills]], and [[MCP Servers]].
 
 ## Local data and external data
 

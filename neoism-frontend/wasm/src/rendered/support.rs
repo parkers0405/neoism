@@ -87,6 +87,7 @@ pub(crate) fn palette_action_name(
         A::EditServer { .. } => "EditServer",
         A::RemoveServer { .. } => "RemoveServer",
         A::AddServer => "AddServer",
+        A::CopyFastServerInvite { .. } => "CopyFastServerInvite",
         A::CreateServer => "CreateServer",
         A::GoToSymbol => "GoToSymbol",
         A::TabCreate => "TabCreate",

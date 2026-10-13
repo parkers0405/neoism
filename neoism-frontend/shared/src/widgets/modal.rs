@@ -20,6 +20,8 @@ const META_FONT_SIZE: f32 = 11.0;
 const ACTION_FONT_SIZE: f32 = 13.0;
 const ACTION_ROW_HEIGHT: f32 = 32.0;
 const INPUT_ROW_HEIGHT: f32 = 34.0;
+const FORM_SWITCH_ROW_HEIGHT: f32 = 36.0;
+const FORM_SWITCH_FOCUS: usize = usize::MAX;
 const MARKDOWN_INPUT_HEIGHT: f32 = 180.0;
 const INPUT_FONT_SIZE: f32 = 13.0;
 const BODY_LINE_HEIGHT: f32 = 19.0;
@@ -234,6 +236,15 @@ pub enum ModalAction {
     },
     NotesVaultPromptAdd,
     ServerFormSubmit,
+    ServerReconnectRetry {
+        endpoint: String,
+    },
+    ServerReconnectDiscard {
+        endpoint: String,
+    },
+    ServerReconnectLeave {
+        endpoint: String,
+    },
     ServerRemoveConfirm {
         id: String,
     },
@@ -379,6 +390,7 @@ impl ModalAction {
             ModalAction::FileTreePromptDelete { .. }
                 | ModalAction::FileTreeDelete { .. }
                 | ModalAction::EpubDeleteAnnotation { .. }
+                | ModalAction::ServerReconnectDiscard { .. }
         )
     }
 }
@@ -437,6 +449,14 @@ pub struct ModalFormSpec {
     pub submit_label: String,
 }
 
+/// Optional modal-level boolean control; text fields remain unchanged.
+#[derive(Clone, Debug)]
+struct ModalFormSwitch {
+    label: String,
+    checked: bool,
+    enabled: bool,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BodyLineKind {
     Text,
@@ -458,6 +478,7 @@ struct BodyLine {
 enum ModalHoverTarget {
     Close,
     Tab(usize),
+    Switch,
     Input,
     Field(usize),
     Action(usize),
@@ -485,6 +506,43 @@ impl BodyLine {
     }
 }
 
+/// One form layout shared by paint, hit testing, scrolling and focus reveal.
+#[derive(Clone, Copy, Debug)]
+struct FormGeometry {
+    panel: [f32; 4],
+    body: [f32; 4],
+    actions: [f32; 4],
+    action_row_height: f32,
+    switch: Option<[f32; 4]>,
+    switch_in_body: bool,
+    scale: f32,
+    pad: f32,
+    gap: f32,
+    content_height: f32,
+    fields_start: f32,
+}
+
+impl FormGeometry {
+    fn max_scroll(self) -> f32 {
+        (self.content_height - self.body[3]).max(0.0)
+    }
+    fn field_row(self, ordinal: usize, scroll: f32) -> [f32; 4] {
+        [
+            self.body[0],
+            self.body[1] + self.fields_start + ordinal as f32 * 64.0 * self.scale
+                - scroll,
+            self.body[2],
+            54.0 * self.scale,
+        ]
+    }
+    fn field_input(self, ordinal: usize, scroll: f32) -> [f32; 4] {
+        let mut row = self.field_row(ordinal, scroll);
+        row[1] += 20.0 * self.scale;
+        row[3] = INPUT_ROW_HEIGHT * self.scale;
+        row
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct UniversalModal {
     active: bool,
@@ -500,6 +558,11 @@ pub struct UniversalModal {
     form_tabs: Vec<String>,
     form_active_tab: usize,
     form_tab_rects: Vec<[f32; 4]>,
+    form_tabs_enabled: bool,
+    form_switch: Option<ModalFormSwitch>,
+    form_switch_rect: Option<[f32; 4]>,
+    form_scroll: f32,
+    form_reveal_pending: bool,
     /// Caret position in CHARS within the focused input (single input or
     /// focused form field). Reset to end-of-value on open and focus change.
     input_caret: usize,
@@ -566,6 +629,29 @@ pub enum ModalHostAction {
     Generic { id: String, value: String },
 }
 
+fn draw_form_rect(
+    sugarloaf: &mut Sugarloaf,
+    rect: [f32; 4],
+    clip: [f32; 4],
+    color: [f32; 4],
+    radius: f32,
+    order: u8,
+) {
+    if let Some(r) = crate::primitives::geom::intersect_rect(rect, clip) {
+        sugarloaf.rounded_rect(
+            None,
+            r[0],
+            r[1],
+            r[2],
+            r[3],
+            color,
+            DEPTH_ELEMENT,
+            radius.min(r[2] * 0.5).min(r[3] * 0.5),
+            order,
+        );
+    }
+}
+
 impl Default for UniversalModal {
     fn default() -> Self {
         Self {
@@ -580,6 +666,11 @@ impl Default for UniversalModal {
             form_tabs: Vec::new(),
             form_active_tab: 0,
             form_tab_rects: Vec::new(),
+            form_tabs_enabled: true,
+            form_switch: None,
+            form_switch_rect: None,
+            form_scroll: 0.0,
+            form_reveal_pending: true,
             input_caret: 0,
             markdown_input: false,
             markdown_pane: None,
@@ -618,7 +709,11 @@ impl UniversalModal {
     }
 
     pub fn set_scale(&mut self, scale: f32) {
-        self.scale = scale.clamp(0.5, 3.0);
+        let scale = scale.clamp(0.5, 3.0);
+        if self.scale != scale {
+            self.form_reveal_pending = true;
+        }
+        self.scale = scale;
     }
 
     pub fn set_top_anchor(&mut self, top: f32) {
@@ -636,6 +731,11 @@ impl UniversalModal {
         self.form_tabs.clear();
         self.form_tab_rects.clear();
         self.form_active_tab = 0;
+        self.form_tabs_enabled = true;
+        self.form_switch = None;
+        self.form_switch_rect = None;
+        self.form_scroll = 0.0;
+        self.form_reveal_pending = true;
         self.submitted_form = None;
         self.selected_index = 0;
         self.scroll_offset = 0;
@@ -660,6 +760,15 @@ impl UniversalModal {
         self.meta = spec.meta;
         self.input = spec.input;
         self.form = None;
+        self.form_tabs.clear();
+        self.form_tab_rects.clear();
+        self.form_active_tab = 0;
+        self.form_tabs_enabled = true;
+        self.form_switch = None;
+        self.form_switch_rect = None;
+        self.form_scroll = 0.0;
+        self.form_reveal_pending = true;
+        self.submitted_form = None;
         self.buttons = if spec.buttons.is_empty() {
             vec![ModalButton::new("Close", "Esc", ModalAction::Close)]
         } else {
@@ -729,6 +838,11 @@ impl UniversalModal {
         self.form_tabs.clear();
         self.form_tab_rects.clear();
         self.form_active_tab = 0;
+        self.form_tabs_enabled = true;
+        self.form_switch = None;
+        self.form_switch_rect = None;
+        self.form_scroll = 0.0;
+        self.form_reveal_pending = true;
         self.form_focus = self
             .form
             .as_ref()
@@ -799,6 +913,17 @@ impl UniversalModal {
         } else {
             false
         }
+    }
+
+    pub fn active_server_recovery_endpoint(&self) -> Option<&str> {
+        if !self.active {
+            return None;
+        }
+        self.buttons.iter().find_map(|button| match &button.action {
+            ModalAction::ServerReconnectRetry { endpoint }
+            | ModalAction::ServerReconnectLeave { endpoint } => Some(endpoint.as_str()),
+            _ => None,
+        })
     }
 
     pub fn active_title(&self) -> Option<&str> {
@@ -1105,12 +1230,24 @@ impl UniversalModal {
 
     pub fn pointer_kind(&self) -> ModalPointerKind {
         match self.hovered_target {
+            Some(ModalHoverTarget::Tab(_)) if !self.form_tabs_enabled => {
+                ModalPointerKind::Default
+            }
+            Some(ModalHoverTarget::Switch)
+                if !self
+                    .form_switch
+                    .as_ref()
+                    .is_some_and(|switch| switch.enabled) =>
+            {
+                ModalPointerKind::Default
+            }
             Some(ModalHoverTarget::Input | ModalHoverTarget::Field(_)) => {
                 ModalPointerKind::Text
             }
             Some(
                 ModalHoverTarget::Close
                 | ModalHoverTarget::Tab(_)
+                | ModalHoverTarget::Switch
                 | ModalHoverTarget::Action(_),
             ) => ModalPointerKind::Pointer,
             None => ModalPointerKind::Default,
@@ -1133,8 +1270,11 @@ impl UniversalModal {
         if self.close_rect.is_some_and(contains) {
             return Some(ModalHoverTarget::Close);
         }
-        if let Some(index) = self.form_tab_rects.iter().position(|rect| contains(*rect)) {
+        if let Some(index) = self.form_tab_hit(x, y) {
             return Some(ModalHoverTarget::Tab(index));
+        }
+        if self.form_switch_hit(x, y) {
+            return Some(ModalHoverTarget::Switch);
         }
         if let Some((index, _)) = self
             .form_field_hit_rects
@@ -1148,6 +1288,9 @@ impl UniversalModal {
             return Some(ModalHoverTarget::Input);
         }
         match self.hit_test(x, y, window_width, scale_factor) {
+            Ok(Some(index)) if self.form.is_some() && index >= self.buttons.len() => {
+                Some(ModalHoverTarget::Field(index - self.buttons.len()))
+            }
             Ok(Some(index)) if index < self.buttons.len() => {
                 Some(ModalHoverTarget::Action(index))
             }
@@ -1197,12 +1340,122 @@ impl UniversalModal {
         true
     }
 
+    /// Non-consuming, unmasked draft snapshot. May contain secrets: never log it.
+    pub fn form_values(&self) -> Vec<(String, String)> {
+        self.form
+            .as_ref()
+            .map(|form| {
+                form.fields
+                    .iter()
+                    .map(|field| (field.id.clone(), field.value.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn set_form_switch(
+        &mut self,
+        label: impl Into<String>,
+        checked: bool,
+        enabled: bool,
+    ) {
+        if self.form.is_none() {
+            return;
+        }
+        self.form_switch = Some(ModalFormSwitch {
+            label: label.into(),
+            checked,
+            enabled,
+        });
+        if !enabled && self.form_focus == FORM_SWITCH_FOCUS {
+            self.form_focus = self
+                .form
+                .as_ref()
+                .and_then(|form| {
+                    form.fields.iter().position(|field| !field.label.is_empty())
+                })
+                .unwrap_or_else(|| {
+                    self.form.as_ref().map_or(0, |form| form.fields.len())
+                });
+            self.input_caret = self.focused_input_chars();
+            self.request_form_reveal();
+        }
+    }
+
+    pub fn form_switch_checked(&self) -> Option<bool> {
+        self.form_switch.as_ref().map(|switch| switch.checked)
+    }
+
+    /// Logical coordinates, like `form_tab_hit`; disabled rows are not interactive.
+    pub fn form_switch_hit(&self, x: f32, y: f32) -> bool {
+        self.active
+            && self
+                .form_switch
+                .as_ref()
+                .is_some_and(|switch| switch.enabled)
+            && self.form_switch_rect.is_some_and(|rect| {
+                x >= rect[0]
+                    && x <= rect[0] + rect[2]
+                    && y >= rect[1]
+                    && y <= rect[1] + rect[3]
+            })
+    }
+
+    pub fn form_switch_focused(&self) -> bool {
+        self.active
+            && self.form_focus == FORM_SWITCH_FOCUS
+            && self
+                .form_switch
+                .as_ref()
+                .is_some_and(|switch| switch.enabled)
+    }
+
+    /// Focus and toggle the control, returning the NEW value for host dispatch.
+    pub fn activate_form_switch(&mut self) -> Option<bool> {
+        if !self.active {
+            return None;
+        }
+        let switch = self.form_switch.as_mut()?;
+        if !switch.enabled {
+            return None;
+        }
+        switch.checked = !switch.checked;
+        let checked = switch.checked;
+        self.form_focus = FORM_SWITCH_FOCUS;
+        self.input_caret = 0;
+        self.request_form_reveal();
+        Some(checked)
+    }
+
+    pub fn set_form_tabs_enabled(&mut self, enabled: bool) {
+        self.form_tabs_enabled = enabled;
+    }
+
+    pub fn form_tabs_enabled(&self) -> bool {
+        self.form_tabs_enabled
+    }
+
+    pub fn set_form_description(&mut self, description: impl Into<String>) {
+        if self.form.is_some() {
+            self.body = description.into();
+        }
+    }
+
     /// Attach a segmented mode slider to the OPEN form (call right
     /// after `open_form`). `open_form` clears it, so plain forms never
     /// inherit another modal's tabs.
     pub fn set_form_tabs(&mut self, tabs: Vec<String>, active: usize) {
         self.form_active_tab = active.min(tabs.len().saturating_sub(1));
         self.form_tabs = tabs;
+    }
+
+    /// Change the selected segment without rebuilding the form; obeys the lock.
+    pub fn set_form_active_tab(&mut self, index: usize) -> bool {
+        if !self.active || !self.form_tabs_enabled || index >= self.form_tabs.len() {
+            return false;
+        }
+        self.form_active_tab = index;
+        true
     }
 
     pub fn form_tab_count(&self) -> usize {
@@ -1220,35 +1473,68 @@ impl UniversalModal {
         self.form_tab_rects
             .iter()
             .position(|rect| {
-                x >= rect[0]
+                rect[2] > 0.0
+                    && rect[3] > 0.0
+                    && x >= rect[0]
                     && x <= rect[0] + rect[2]
                     && y >= rect[1]
                     && y <= rect[1] + rect[3]
             })
-            .filter(|_| self.active)
+            .filter(|_| self.active && self.form_tabs_enabled)
     }
 
     pub fn focus_next_form_field(&mut self) -> bool {
+        self.focus_form_control(false)
+    }
+
+    pub fn focus_previous_form_field(&mut self) -> bool {
+        self.focus_form_control(true)
+    }
+
+    fn focus_form_control(&mut self, backwards: bool) -> bool {
         let Some(form) = self.form.as_ref() else {
             return false;
         };
-        if form.fields.is_empty() {
+        if form.fields.is_empty() && self.form_switch.is_none() {
             return false;
         }
-        for offset in 1..=form.fields.len() {
-            let index = (self.form_focus + offset) % form.fields.len();
-            if !form.fields[index].label.is_empty() {
-                self.form_focus = index;
-                self.input_caret = self.focused_input_chars();
-                return true;
-            }
+        let mut controls = Vec::new();
+        controls.extend(
+            form.fields
+                .iter()
+                .enumerate()
+                .filter(|(_, field)| !field.label.is_empty())
+                .map(|(index, _)| index),
+        );
+        if self
+            .form_switch
+            .as_ref()
+            .is_some_and(|switch| switch.enabled)
+        {
+            controls.push(FORM_SWITCH_FOCUS);
         }
+        // Preserve plain text forms' historical field-only Tab cycle.
+        if self.form_switch.is_some() {
+            controls.push(form.fields.len());
+        }
+        if controls.is_empty() {
+            return true;
+        }
+        let next = match controls.iter().position(|index| *index == self.form_focus) {
+            Some(index) if backwards => (index + controls.len() - 1) % controls.len(),
+            Some(index) => (index + 1) % controls.len(),
+            None if backwards => controls.len() - 1,
+            None => 0,
+        };
+        self.form_focus = controls[next];
+        self.input_caret = self.focused_input_chars();
+        self.request_form_reveal();
         true
     }
 
     /// Vertical navigation for FORM modals: Down walks the fields top
-    /// to bottom, steps onto the button row after the last field, then
-    /// moves within the buttons; Up reverses back into the fields.
+    /// to bottom, then the enabled switch, then the button row; Down
+    /// moves within the buttons and Up reverses that visible order.
     /// `form_focus == fields.len()` is the buttons zone — every
     /// focused-input accessor already returns None there, so typing
     /// simply goes nowhere until focus returns to a field. Returns
@@ -1256,65 +1542,76 @@ impl UniversalModal {
     /// navigation). Hidden fields (empty labels) are skipped, matching
     /// Tab's `focus_next_form_field`.
     pub fn form_focus_move(&mut self, down: bool) -> bool {
-        let labels: Vec<bool> = match self.form.as_ref() {
-            Some(form) => form
-                .fields
-                .iter()
-                .map(|field| !field.label.is_empty())
-                .collect(),
-            None => return false,
+        let moved = self.form_focus_move_inner(down);
+        if moved {
+            self.request_form_reveal();
+        }
+        moved
+    }
+
+    fn form_focus_move_inner(&mut self, down: bool) -> bool {
+        let Some(form) = self.form.as_ref() else {
+            return false;
         };
-        let count = labels.len();
-        if count == 0 {
+        let count = form.fields.len();
+        let fields: Vec<usize> = form
+            .fields
+            .iter()
+            .enumerate()
+            .filter(|(_, field)| !field.label.is_empty())
+            .map(|(index, _)| index)
+            .collect();
+        let switch_enabled = self
+            .form_switch
+            .as_ref()
+            .is_some_and(|switch| switch.enabled);
+        if count == 0 && self.form_switch.is_none() {
             return false;
         }
-        if down {
-            if self.form_focus < count {
-                let mut next = self.form_focus + 1;
-                while next < count && !labels[next] {
-                    next += 1;
-                }
-                self.form_focus = next;
-                if next < count {
-                    self.input_caret = self.focused_input_chars();
-                }
-            } else {
-                self.move_selection_down();
+        if self.form_switch_focused() {
+            if down {
+                self.form_focus = count;
+            } else if let Some(last) = fields.last() {
+                self.form_focus = *last;
             }
         } else if self.form_focus >= count {
-            if self.selected_index > 0 {
+            if down {
+                self.move_selection_down();
+            } else if self.selected_index > 0 {
                 self.move_selection_up();
-            } else {
-                let mut prev = count;
-                while prev > 0 {
-                    prev -= 1;
-                    if labels[prev] {
-                        break;
-                    }
-                }
-                self.form_focus = prev;
-                self.input_caret = self.focused_input_chars();
+            } else if switch_enabled {
+                self.form_focus = FORM_SWITCH_FOCUS;
+            } else if let Some(last) = fields.last() {
+                self.form_focus = *last;
             }
-        } else {
-            let mut index = self.form_focus;
-            while index > 0 {
-                index -= 1;
-                if labels[index] {
-                    self.form_focus = index;
-                    self.input_caret = self.focused_input_chars();
-                    break;
-                }
-            }
+        } else if down {
+            self.form_focus = fields
+                .iter()
+                .copied()
+                .find(|index| *index > self.form_focus)
+                .unwrap_or(if switch_enabled {
+                    FORM_SWITCH_FOCUS
+                } else {
+                    count
+                });
+        } else if let Some(previous) = fields
+            .iter()
+            .rev()
+            .copied()
+            .find(|index| *index < self.form_focus)
+        {
+            self.form_focus = previous;
         }
+        self.input_caret = self.focused_input_chars();
         true
     }
 
     /// True while a form's focus sits on the button row — the renderer
     /// highlights the selected button instead of a field caret.
     pub fn form_buttons_focused(&self) -> bool {
-        self.form
-            .as_ref()
-            .is_some_and(|form| self.form_focus >= form.fields.len())
+        self.form.as_ref().is_some_and(|form| {
+            self.form_focus >= form.fields.len() && self.form_focus != FORM_SWITCH_FOCUS
+        })
     }
 
     pub fn move_selection_up(&mut self) {
@@ -1568,6 +1865,18 @@ impl UniversalModal {
     }
 
     pub fn scroll_body_page(&mut self, down: bool) {
+        if let Some(geometry) = self.form_geometry(MODAL_WIDTH * self.scale + 100.0, 1.0)
+        {
+            self.scroll_form_by(
+                geometry,
+                if down {
+                    geometry.body[3]
+                } else {
+                    -geometry.body[3]
+                },
+            );
+            return;
+        }
         let rows = if down {
             self.body_row_budget() as i32
         } else {
@@ -1609,8 +1918,22 @@ impl UniversalModal {
             return false;
         }
         let (x, y, w, h) = self.modal_rect(window_width, scale_factor);
-        if mouse_x < x || mouse_x > x + w || mouse_y < y || mouse_y > y + h {
+        if self.form.is_none()
+            && (mouse_x < x || mouse_x > x + w || mouse_y < y || mouse_y > y + h)
+        {
             return false;
+        }
+        if self.form.is_some() {
+            let geometry = self.form_geometry(window_width, scale_factor).unwrap();
+            // Consume outside wheel too: the blocking form owns input.
+            if mouse_x >= geometry.body[0]
+                && mouse_x <= geometry.body[0] + geometry.body[2]
+                && mouse_y >= geometry.body[1]
+                && mouse_y <= geometry.body[1] + geometry.body[3]
+            {
+                self.scroll_form_by(geometry, -delta_pixels);
+            }
+            return true;
         }
         if delta_pixels == 0.0 {
             return true;
@@ -1646,7 +1969,209 @@ impl UniversalModal {
         }
     }
 
+    fn form_geometry(
+        &self,
+        window_width: f32,
+        scale_factor: f32,
+    ) -> Option<FormGeometry> {
+        let form = self.form.as_ref()?;
+        let viewport_w = (window_width / scale_factor).max(1.0);
+        let viewport_h = self.viewport_height.max(1.0);
+        let count = form
+            .fields
+            .iter()
+            .filter(|field| !field.label.is_empty())
+            .count();
+        let description_rows = self
+            .body_lines()
+            .iter()
+            .map(|line| line.row_span)
+            .sum::<usize>()
+            .max(1);
+        let description = description_rows as f32 * BODY_LINE_HEIGHT
+            + if self.meta.is_empty() { 0.0 } else { 20.0 };
+        let switch_height = if self.form_switch.is_some() {
+            FORM_SWITCH_ROW_HEIGHT
+        } else {
+            0.0
+        };
+        let actions = self.buttons.len() as f32 * ACTION_ROW_HEIGHT;
+        let natural = (MODAL_PADDING * 2.0
+            + TITLE_HEIGHT
+            + 12.0
+            + switch_height
+            + description
+            + count as f32 * 64.0
+            + 19.0
+            + actions)
+            * self.scale;
+        let compact = natural > viewport_h - 24.0 * self.scale;
+        // Compact spacing first, then bounded scale adaptation (never tiny text).
+        let s = if compact {
+            self.scale.min(((viewport_h - 8.0) / 207.0).max(0.75))
+        } else {
+            self.scale
+        };
+        let minimal = viewport_h < 120.0;
+        let pad = if minimal {
+            2.0
+        } else if compact {
+            6.0
+        } else {
+            MODAL_PADDING
+        } * s;
+        let gap = if minimal {
+            1.0
+        } else if compact {
+            4.0
+        } else {
+            12.0
+        } * s;
+        // Preserve every button row, shortening padding rather than its text.
+        let action_row_height = if minimal { 24.0 } else { ACTION_ROW_HEIGHT } * s;
+        let actions_height = self.buttons.len() as f32 * action_row_height;
+        let margin = (if compact { 4.0 } else { 12.0 } * s)
+            .min(viewport_h * 0.02)
+            .min(viewport_w * 0.05);
+        let width = (MODAL_WIDTH * s).min((viewport_w - 2.0 * margin).max(1.0));
+        let max_height = (viewport_h - 2.0 * margin).max(1.0);
+        let footer_gap = if minimal {
+            2.0 * s
+        } else if compact {
+            5.0 * s
+        } else {
+            18.0 * s + SEPARATOR_HEIGHT
+        };
+        let footer_height = pad + footer_gap + actions_height;
+        let header_height = pad + TITLE_HEIGHT * s + gap;
+        // Extremely short windows keep title/actions pinned and put the switch
+        // AFTER the last field in the scrollable body, never in its prefix.
+        let switch_in_body =
+            header_height + switch_height * s + footer_height + 54.0 * s > max_height;
+        let pinned_switch = if switch_in_body {
+            0.0
+        } else {
+            switch_height * s
+        };
+        let fields_start = description * s;
+        let fields_end = fields_start + count as f32 * 64.0 * s;
+        let content_height = fields_end
+            + if switch_in_body {
+                switch_height * s
+            } else {
+                0.0
+            };
+        let height = (header_height + pinned_switch + content_height + footer_height)
+            .min(max_height);
+        let x = (viewport_w - width) * 0.5;
+        let y = self
+            .top_anchor
+            .min((viewport_h - height - margin).max(margin));
+        // On pathological sub-title-sized viewports every area is still bounded.
+        let footer_h = footer_height.min((height - header_height.min(height)).max(0.0));
+        let actions_y = y + height - footer_h + footer_gap;
+        let action_h = actions_height.min((y + height - pad - actions_y).max(0.0));
+        let body_y = (y + header_height).min(y + height - footer_h);
+        let body_h = (y + height - footer_h - pinned_switch - body_y).max(0.0);
+        let body = [x + pad, body_y, (width - 2.0 * pad).max(0.0), body_h];
+        let switch = self.form_switch.as_ref().map(|_| {
+            [
+                body[0],
+                if switch_in_body {
+                    body_y + fields_end
+                } else {
+                    body_y + body_h
+                },
+                body[2],
+                28.0 * s,
+            ]
+        });
+        Some(FormGeometry {
+            panel: [x, y, width, height],
+            body,
+            actions: [body[0], actions_y.min(y + height), body[2], action_h],
+            action_row_height,
+            switch,
+            switch_in_body,
+            scale: s,
+            pad,
+            gap,
+            content_height,
+            fields_start,
+        })
+    }
+
+    fn scroll_form_by(&mut self, geometry: FormGeometry, pixels: f32) {
+        self.form_scroll = (self.form_scroll + pixels).clamp(0.0, geometry.max_scroll());
+        self.form_reveal_pending = false;
+        self.form_field_hit_rects.clear();
+        self.input_hit_rects.clear();
+        if geometry.switch_in_body {
+            self.form_switch_rect = None;
+        }
+    }
+
+    fn request_form_reveal(&mut self) {
+        if let Some(geometry) = self.form_geometry(MODAL_WIDTH * self.scale + 100.0, 1.0)
+        {
+            self.reveal_form_focus(geometry);
+            if geometry.switch_in_body {
+                self.form_switch_rect = None;
+            }
+        }
+        self.form_reveal_pending = true;
+        self.form_field_hit_rects.clear();
+        self.input_hit_rects.clear();
+    }
+
+    fn reveal_form_focus(&mut self, geometry: FormGeometry) {
+        let target = if self.form_switch_focused() && geometry.switch_in_body {
+            geometry
+                .switch
+                .map(|rect| (rect[1] - geometry.body[1], rect[3]))
+        } else {
+            self.form.as_ref().and_then(|form| {
+                let ordinal = form
+                    .fields
+                    .iter()
+                    .take(self.form_focus.min(form.fields.len()))
+                    .filter(|field| !field.label.is_empty())
+                    .count();
+                form.fields
+                    .get(self.form_focus)
+                    .filter(|field| !field.label.is_empty())
+                    .map(|_| {
+                        (
+                            geometry.fields_start
+                                + ordinal as f32 * 64.0 * geometry.scale,
+                            54.0 * geometry.scale,
+                        )
+                    })
+            })
+        };
+        if let Some((mut top, mut height)) = target {
+            if height > geometry.body[3] && !self.form_switch_focused() {
+                // If the label+input cannot fit, prioritize the editable input.
+                top += 20.0 * geometry.scale;
+                height = INPUT_ROW_HEIGHT * geometry.scale;
+            }
+            if height > geometry.body[3] {
+                self.form_scroll = top + height - geometry.body[3];
+            } else if top < self.form_scroll {
+                self.form_scroll = top;
+            } else if top + height > self.form_scroll + geometry.body[3] {
+                self.form_scroll = top + height - geometry.body[3];
+            }
+        }
+        self.form_scroll = self.form_scroll.clamp(0.0, geometry.max_scroll());
+        self.form_reveal_pending = false;
+    }
+
     fn modal_rect(&self, window_width: f32, scale_factor: f32) -> (f32, f32, f32, f32) {
+        if let Some(geometry) = self.form_geometry(window_width, scale_factor) {
+            let [x, y, w, h] = geometry.panel;
+            return (x, y, w, h);
+        }
         let s = self.scale;
         let viewport_w = (window_width / scale_factor).max(1.0);
         let margin = (12.0 * s).min(viewport_w * 0.05);
@@ -1667,18 +2192,6 @@ impl UniversalModal {
         } else {
             0.0
         };
-        let form_h = self
-            .form
-            .as_ref()
-            .map(|form| {
-                form.fields
-                    .iter()
-                    .filter(|field| !field.label.is_empty())
-                    .count() as f32
-                    * (INPUT_ROW_HEIGHT + 30.0)
-                    * s
-            })
-            .unwrap_or(0.0);
         let actions_h = self.visible_action_count() as f32 * ACTION_ROW_HEIGHT * s;
         let height = MODAL_PADDING * s
             + TITLE_HEIGHT * s
@@ -1687,7 +2200,6 @@ impl UniversalModal {
             + meta_h
             + busy_h
             + input_h
-            + form_h
             + 14.0 * s
             + SEPARATOR_HEIGHT
             + 4.0 * s
@@ -1703,6 +2215,10 @@ impl UniversalModal {
     }
 
     fn actions_y(&self, modal_y: f32) -> f32 {
+        if let Some(geometry) = self.form_geometry(MODAL_WIDTH * self.scale + 100.0, 1.0)
+        {
+            return modal_y + geometry.actions[1] - geometry.panel[1];
+        }
         let s = self.scale;
         let body_lines = self.visible_body_line_count() as f32;
         let meta_h = if self.meta.is_empty() { 0.0 } else { 20.0 * s };
@@ -1720,18 +2236,6 @@ impl UniversalModal {
         } else {
             0.0
         };
-        let form_h = self
-            .form
-            .as_ref()
-            .map(|form| {
-                form.fields
-                    .iter()
-                    .filter(|field| !field.label.is_empty())
-                    .count() as f32
-                    * (INPUT_ROW_HEIGHT + 30.0)
-                    * s
-            })
-            .unwrap_or(0.0);
         modal_y
             + MODAL_PADDING * s
             + TITLE_HEIGHT * s
@@ -1740,7 +2244,6 @@ impl UniversalModal {
             + meta_h
             + busy_h
             + input_h
-            + form_h
             + 14.0 * s
             + SEPARATOR_HEIGHT
             + 4.0 * s
@@ -1757,45 +2260,43 @@ impl UniversalModal {
         if mouse_x < x || mouse_x > x + w || mouse_y < y || mouse_y > y + h {
             return Err(());
         }
-        if !self.form_field_hit_rects.is_empty() {
-            if let Some((index, _)) =
-                self.form_field_hit_rects.iter().find(|(_, rect)| {
-                    mouse_x >= rect[0]
-                        && mouse_x <= rect[0] + rect[2]
-                        && mouse_y >= rect[1]
-                        && mouse_y <= rect[1] + rect[3]
-                })
-            {
-                return Ok(Some(self.buttons.len() + index));
-            }
-        } else if let Some(form) = self.form.as_ref() {
-            let mut field_y = y
-                + MODAL_PADDING * self.scale
-                + TITLE_HEIGHT * self.scale
-                + 12.0 * self.scale;
-            for (index, field) in form.fields.iter().enumerate() {
-                if field.label.is_empty() {
-                    continue;
-                }
-                field_y += 20.0 * self.scale;
-                let input_h = if self.markdown_input {
-                    MARKDOWN_INPUT_HEIGHT * self.scale
-                } else {
-                    INPUT_ROW_HEIGHT * self.scale
-                };
-                let field_x = x + MODAL_PADDING * self.scale;
-                let field_w = w - MODAL_PADDING * self.scale * 2.0;
-                if mouse_x >= field_x
-                    && mouse_x <= field_x + field_w
-                    && mouse_y >= field_y
-                    && mouse_y <= field_y + input_h
+        if let Some(geometry) = self.form_geometry(window_width, scale_factor) {
+            let contains = |rect: [f32; 4]| {
+                mouse_x >= rect[0]
+                    && mouse_x <= rect[0] + rect[2]
+                    && mouse_y >= rect[1]
+                    && mouse_y <= rect[1] + rect[3]
+                    && rect[2] > 0.0
+                    && rect[3] > 0.0
+            };
+            if contains(geometry.body) {
+                let mut ordinal = 0;
+                for (index, field) in
+                    self.form.as_ref().unwrap().fields.iter().enumerate()
                 {
-                    return Ok(Some(self.buttons.len() + index));
+                    if field.label.is_empty() {
+                        continue;
+                    }
+                    if let Some(rect) = crate::primitives::geom::intersect_rect(
+                        geometry.field_input(ordinal, self.form_scroll),
+                        geometry.body,
+                    ) {
+                        if contains(rect) {
+                            return Ok(Some(self.buttons.len() + index));
+                        }
+                    }
+                    ordinal += 1;
                 }
-                field_y += input_h + 10.0 * self.scale;
             }
+            if contains(geometry.actions) {
+                let row = ((mouse_y - geometry.actions[1]) / geometry.action_row_height)
+                    as usize;
+                if row < self.buttons.len() {
+                    return Ok(Some(row));
+                }
+            }
+            return Ok(None);
         }
-
         let actions_y = self.actions_y(y);
         if mouse_y < actions_y {
             return Ok(None);
@@ -1831,9 +2332,178 @@ impl UniversalModal {
         {
             self.form_focus = index;
             self.input_caret = self.focused_input_chars();
+            self.request_form_reveal();
             true
         } else {
             false
+        }
+    }
+
+    fn draw_form_body(
+        &mut self,
+        sugarloaf: &mut Sugarloaf,
+        theme: &IdeTheme,
+        geometry: FormGeometry,
+    ) {
+        let s = geometry.scale;
+        let clip = geometry.body;
+        let x = clip[0];
+        let mut y = clip[1] - self.form_scroll;
+        let lines = self.body_lines();
+        let opts = DrawOpts {
+            font_size: BODY_FONT_SIZE * s,
+            color: theme.u8(theme.dim),
+            clip_rect: Some(clip),
+            ..DrawOpts::default()
+        };
+        if lines.is_empty() {
+            sugarloaf
+                .text_mut()
+                .draw(x, y, "No details available.", &opts);
+            y += BODY_LINE_HEIGHT * s;
+        } else {
+            for line in lines {
+                // Form descriptions share the same clipped text viewport as fields.
+                let opts = DrawOpts {
+                    bold: line.kind == BodyLineKind::Heading,
+                    ..opts
+                };
+                let text = if line.kind == BodyLineKind::Bullet {
+                    format!("• {}", line.text)
+                } else {
+                    line.text.clone()
+                };
+                sugarloaf.text_mut().draw(x, y, &text, &opts);
+                y += BODY_LINE_HEIGHT * s * line.row_span as f32;
+            }
+        }
+        if !self.meta.is_empty() {
+            sugarloaf.text_mut().draw(
+                x,
+                y,
+                &self.meta,
+                &DrawOpts {
+                    color: theme.u8(theme.muted),
+                    ..opts
+                },
+            );
+        }
+        let Some(form) = self.form.as_ref() else {
+            return;
+        };
+        let mut ordinal = 0;
+        for (index, field) in form.fields.iter().enumerate() {
+            if field.label.is_empty() {
+                continue;
+            }
+            let row = geometry.field_row(ordinal, self.form_scroll);
+            let input = geometry.field_input(ordinal, self.form_scroll);
+            ordinal += 1;
+            let Some(hit) = crate::primitives::geom::intersect_rect(input, clip) else {
+                continue;
+            };
+            sugarloaf.text_mut().draw(
+                x,
+                row[1],
+                &field.label,
+                &DrawOpts {
+                    font_size: 12.0 * s,
+                    color: theme.u8(theme.muted),
+                    clip_rect: Some(clip),
+                    ..DrawOpts::default()
+                },
+            );
+            draw_form_rect(
+                sugarloaf,
+                input,
+                clip,
+                theme.f32(theme.surface),
+                5.0 * s,
+                ORDER,
+            );
+            let hover = self.hover_intensity(ModalHoverTarget::Field(index));
+            if hover > 0.0 && index != self.form_focus {
+                draw_form_rect(
+                    sugarloaf,
+                    input,
+                    clip,
+                    theme.f32_alpha(theme.accent, hover * 0.08),
+                    5.0 * s,
+                    ORDER + 1,
+                );
+            }
+            self.form_field_hit_rects.push((index, hit));
+            self.input_hit_rects.push(hit);
+            let value = if field.value.is_empty() {
+                field.placeholder.clone()
+            } else if field.secret {
+                "•".repeat(field.value.chars().count())
+            } else {
+                field.value.clone()
+            };
+            let opts = DrawOpts {
+                font_size: INPUT_FONT_SIZE * s,
+                color: theme.u8(if field.value.is_empty() {
+                    theme.muted
+                } else {
+                    theme.fg
+                }),
+                clip_rect: Some(hit),
+                ..DrawOpts::default()
+            };
+            sugarloaf.text_mut().draw(
+                x + 12.0 * s,
+                input[1] + (input[3] - INPUT_FONT_SIZE * s) * 0.5,
+                &value,
+                &opts,
+            );
+            if index == self.form_focus {
+                draw_form_rect(
+                    sugarloaf,
+                    [x, input[1], 2.0 * s, input[3]],
+                    clip,
+                    theme.f32(theme.accent),
+                    0.0,
+                    ORDER + 1,
+                );
+                let chars = self.input_caret.min(field.value.chars().count());
+                let caret_text = if field.secret {
+                    "•".repeat(chars)
+                } else {
+                    field.value.chars().take(chars).collect::<String>()
+                };
+                let caret_x =
+                    x + 12.0 * s + sugarloaf.text_mut().measure(&caret_text, &opts);
+                let caret_h = (INPUT_FONT_SIZE + 6.0) * s;
+                draw_form_rect(
+                    sugarloaf,
+                    [
+                        caret_x,
+                        input[1] + (input[3] - caret_h) * 0.5,
+                        INPUT_FONT_SIZE * 0.55 * s,
+                        caret_h,
+                    ],
+                    hit,
+                    theme.f32_alpha(theme.accent, 0.55),
+                    0.0,
+                    ORDER + 2,
+                );
+            }
+        }
+        if geometry.max_scroll() > 0.0 && clip[3] > 0.0 {
+            let thumb_h = (clip[3] * clip[3] / geometry.content_height)
+                .max(12.0 * s)
+                .min(clip[3]);
+            let thumb_y =
+                clip[1] + (clip[3] - thumb_h) * self.form_scroll / geometry.max_scroll();
+            draw_form_rect(
+                sugarloaf,
+                [clip[0] + clip[2] - 3.0 * s, thumb_y, 3.0 * s, thumb_h],
+                clip,
+                theme.f32_alpha(theme.muted, 0.55),
+                1.5 * s,
+                ORDER + 3,
+            );
         }
     }
 
@@ -1847,13 +2517,36 @@ impl UniversalModal {
             return;
         }
         let (window_width, window_height, scale_factor) = dimensions;
-        self.viewport_height = (window_height / scale_factor).max(1.0);
+        let viewport_height = (window_height / scale_factor).max(1.0);
+        if self.viewport_height != viewport_height {
+            self.form_reveal_pending = true;
+        }
+        self.viewport_height = viewport_height;
         self.clamp_body_scroll();
         self.input_hit_rects.clear();
         self.form_field_hit_rects.clear();
-        let s = self.scale;
-        let pad = MODAL_PADDING * s;
-        let radius = MODAL_CORNER_RADIUS * s;
+        let form_geometry = self.form_geometry(window_width, scale_factor);
+        if let Some(geometry) = form_geometry {
+            self.form_scroll = self.form_scroll.clamp(0.0, geometry.max_scroll());
+            if self.form_reveal_pending {
+                self.reveal_form_focus(geometry);
+            }
+        }
+        let s = form_geometry.map_or(self.scale, |geometry| geometry.scale);
+        let pad = form_geometry.map_or(MODAL_PADDING * s, |geometry| geometry.pad);
+        let server_form = self.form.as_ref().is_some_and(|form| {
+            form.fields.iter().any(|field| {
+                matches!(
+                    field.id.as_str(),
+                    "address" | "create_dir" | "fast_host_dir" | "fast_join_address"
+                )
+            })
+        });
+        let radius = if server_form {
+            12.0 * s
+        } else {
+            MODAL_CORNER_RADIUS * s
+        };
         let (x, y, w, h) = self.modal_rect(window_width, scale_factor);
         let body_lines = self.visible_body_lines();
         let text_clip = [
@@ -1908,15 +2601,26 @@ impl UniversalModal {
         sugarloaf
             .text_mut()
             .draw(text_x, text_y, title.as_str(), &title_opts);
-        let close_size = 36.0 * s;
+        let close_size = if form_geometry.is_some() {
+            TITLE_HEIGHT
+        } else {
+            36.0
+        } * s;
         let close = [
             x + w - close_size - 6.0 * s,
-            y + 6.0 * s,
+            y + if form_geometry.is_some() {
+                pad
+            } else {
+                6.0 * s
+            },
             close_size,
             close_size,
         ];
+        let close = crate::primitives::geom::intersect_rect(close, [x, y, w, h])
+            .unwrap_or([x, y, 0.0, 0.0]);
         self.close_rect = self.dismissible.then_some(close);
         let close_opts = DrawOpts {
+            clip_rect: Some(close),
             font_size: 18.0 * s,
             color: if self.hovered_target == Some(ModalHoverTarget::Close) {
                 theme.u8(theme.fg)
@@ -1941,8 +2645,18 @@ impl UniversalModal {
                 );
             }
             sugarloaf.text_mut().draw(
-                close[0] + 11.0 * s,
-                close[1] + 8.0 * s,
+                close[0]
+                    + if form_geometry.is_some() {
+                        3.0 * s
+                    } else {
+                        11.0 * s
+                    },
+                close[1]
+                    + if form_geometry.is_some() {
+                        3.0 * s
+                    } else {
+                        8.0 * s
+                    },
                 "×",
                 &close_opts,
             );
@@ -1974,13 +2688,26 @@ impl UniversalModal {
                 let tab_w = widths[index];
                 let active = index == self.form_active_tab;
                 let hover = self.hover_intensity(ModalHoverTarget::Tab(index));
+                let Some(tab_rect) = crate::primitives::geom::intersect_rect(
+                    [tab_x, tab_y, tab_w, tab_h],
+                    [x, y, w, h],
+                ) else {
+                    self.form_tab_rects.push([0.0; 4]);
+                    tab_x += tab_w + gap;
+                    continue;
+                };
                 sugarloaf.rounded_rect(
                     None,
-                    tab_x,
-                    tab_y,
-                    tab_w,
-                    tab_h,
-                    if active {
+                    tab_rect[0],
+                    tab_rect[1],
+                    tab_rect[2],
+                    tab_rect[3],
+                    if !self.form_tabs_enabled {
+                        theme.f32_alpha(
+                            if active { theme.accent } else { theme.hover },
+                            0.12,
+                        )
+                    } else if active {
                         theme.f32_alpha(theme.accent, 0.30)
                     } else {
                         theme.f32_alpha(theme.hover, 0.35 + hover * 0.55)
@@ -1990,7 +2717,9 @@ impl UniversalModal {
                     ORDER + 2,
                 );
                 let label_opts = DrawOpts {
-                    color: if active {
+                    color: if !self.form_tabs_enabled {
+                        theme.u8(theme.dim)
+                    } else if active {
                         theme.u8(theme.fg)
                     } else {
                         theme.u8(theme.muted)
@@ -2003,12 +2732,143 @@ impl UniversalModal {
                     label,
                     &label_opts,
                 );
-                self.form_tab_rects.push([tab_x, tab_y, tab_w, tab_h]);
+                if let Some(rect) = crate::primitives::geom::intersect_rect(
+                    [tab_x, tab_y, tab_w, tab_h],
+                    [x, y, w, h],
+                ) {
+                    self.form_tab_rects.push(rect);
+                }
                 tab_x += tab_w + gap;
             }
         }
 
-        text_y += TITLE_HEIGHT * s + 12.0 * s;
+        text_y +=
+            TITLE_HEIGHT * s + form_geometry.map_or(12.0 * s, |geometry| geometry.gap);
+        self.form_switch_rect = None;
+        if let Some(switch) = self.form_switch.as_ref() {
+            let text_clip = form_geometry
+                .filter(|geometry| geometry.switch_in_body)
+                .map_or(text_clip, |geometry| geometry.body);
+            if let Some(geometry) = form_geometry {
+                text_y = geometry.switch.map_or(text_y, |rect| rect[1])
+                    - if geometry.switch_in_body {
+                        self.form_scroll
+                    } else {
+                        0.0
+                    };
+            }
+            let row = [text_x, text_y, text_w, 28.0 * s];
+            self.form_switch_rect =
+                crate::primitives::geom::intersect_rect(row, text_clip);
+            let focused = self.form_switch_focused();
+            let hover = if switch.enabled {
+                self.hover_intensity(ModalHoverTarget::Switch)
+            } else {
+                0.0
+            };
+            // SettingsPage's 40×22 pill and 16px round knob, clipped to the modal.
+            let mut draw = |rect: [f32; 4], color: [f32; 4], radius: f32, order: u8| {
+                if let Some(r) = crate::primitives::geom::intersect_rect(rect, text_clip)
+                {
+                    sugarloaf.rounded_rect(
+                        None,
+                        r[0],
+                        r[1],
+                        r[2],
+                        r[3],
+                        color,
+                        DEPTH_ELEMENT,
+                        radius.min(r[2] * 0.5).min(r[3] * 0.5),
+                        order,
+                    );
+                }
+            };
+            if focused || hover > 0.0 {
+                draw(
+                    row,
+                    theme.f32_alpha(
+                        theme.accent,
+                        if focused { 0.18 } else { hover * 0.08 },
+                    ),
+                    6.0 * s,
+                    ORDER + 1,
+                );
+            }
+            let tx = text_x + text_w - 40.0 * s;
+            let ty = text_y + 3.0 * s;
+            if focused {
+                draw(
+                    [tx - 2.0 * s, ty - 2.0 * s, 44.0 * s, 26.0 * s],
+                    theme.f32(theme.accent),
+                    13.0 * s,
+                    ORDER + 2,
+                );
+            }
+            draw(
+                [tx, ty, 40.0 * s, 22.0 * s],
+                theme.f32(if !switch.enabled {
+                    theme.surface
+                } else if switch.checked {
+                    theme.accent
+                } else {
+                    theme.border
+                }),
+                11.0 * s,
+                ORDER + 3,
+            );
+            let kx = tx + if switch.checked { 21.0 * s } else { 3.0 * s };
+            draw(
+                [kx, ty + 3.0 * s, 16.0 * s, 16.0 * s],
+                theme.f32(if !switch.enabled {
+                    theme.muted
+                } else if switch.checked {
+                    theme.fg
+                } else {
+                    theme.dim
+                }),
+                8.0 * s,
+                ORDER + 4,
+            );
+            let opts = DrawOpts {
+                font_size: INPUT_FONT_SIZE * s,
+                color: theme.u8(if switch.enabled {
+                    theme.fg
+                } else {
+                    theme.muted
+                }),
+                clip_rect: crate::primitives::geom::intersect_rect(
+                    [text_x, text_y, (text_w - 52.0 * s).max(0.0), 28.0 * s],
+                    text_clip,
+                ),
+                ..DrawOpts::default()
+            };
+            if opts.clip_rect.is_some() {
+                let label = truncate_to_fit(
+                    &switch.label,
+                    (text_w - 52.0 * s).max(0.0),
+                    sugarloaf,
+                    &opts,
+                );
+                sugarloaf.text_mut().draw(
+                    text_x + 6.0 * s,
+                    text_y + 7.0 * s,
+                    &label,
+                    &opts,
+                );
+            }
+        }
+        if let Some(geometry) = form_geometry {
+            self.draw_form_body(sugarloaf, theme, geometry);
+            self.draw_modal_actions(
+                sugarloaf,
+                theme,
+                [x, y, w, h],
+                (s, pad),
+                form_geometry,
+                server_form,
+            );
+            return;
+        }
         let body_view_y = text_y;
         let body_view_h = self.visible_body_line_count() as f32 * BODY_LINE_HEIGHT * s;
         let body_clip = [text_x, body_view_y, text_w, body_view_h];
@@ -2269,136 +3129,56 @@ impl UniversalModal {
             }
         }
 
-        if let Some(form) = self.form.as_ref() {
-            for (index, field) in form.fields.iter().enumerate() {
-                if field.label.is_empty() {
-                    continue;
-                }
-                let label_opts = DrawOpts {
-                    font_size: 12.0 * s,
-                    color: theme.u8(theme.muted),
-                    ..DrawOpts::default()
-                };
-                sugarloaf
-                    .text_mut()
-                    .draw(text_x, text_y, &field.label, &label_opts);
-                text_y += 20.0 * s;
-                let input_h = INPUT_ROW_HEIGHT * s;
-                sugarloaf.rounded_rect(
-                    None,
-                    text_x,
-                    text_y,
-                    w - pad * 2.0,
-                    input_h,
-                    theme.f32(theme.surface),
-                    DEPTH_ELEMENT,
-                    5.0 * s,
-                    ORDER,
-                );
-                let hover = self.hover_intensity(ModalHoverTarget::Field(index));
-                if hover > 0.0 && index != self.form_focus {
-                    sugarloaf.rounded_rect(
-                        None,
-                        text_x,
-                        text_y,
-                        w - pad * 2.0,
-                        input_h,
-                        theme.f32_alpha(theme.accent, hover * 0.08),
-                        DEPTH_ELEMENT + 0.01,
-                        5.0 * s,
-                        ORDER + 1,
-                    );
-                }
-                self.input_hit_rects
-                    .push([text_x, text_y, w - pad * 2.0, input_h]);
-                self.form_field_hit_rects
-                    .push((index, [text_x, text_y, w - pad * 2.0, input_h]));
-                let value = if field.value.is_empty() {
-                    field.placeholder.clone()
-                } else if field.secret {
-                    "•".repeat(field.value.chars().count())
-                } else {
-                    field.value.clone()
-                };
-                let opts = DrawOpts {
-                    font_size: INPUT_FONT_SIZE * s,
-                    color: if field.value.is_empty() {
-                        theme.u8(theme.muted)
-                    } else {
-                        theme.u8(theme.fg)
-                    },
-                    ..DrawOpts::default()
-                };
-                sugarloaf.text_mut().draw(
-                    text_x + 12.0 * s,
-                    text_y + (input_h - INPUT_FONT_SIZE * s) / 2.0,
-                    &value,
-                    &opts,
-                );
-                if index == self.form_focus {
-                    sugarloaf.rect(
-                        None,
-                        text_x,
-                        text_y,
-                        2.0 * s,
-                        input_h,
-                        theme.f32(theme.accent),
-                        DEPTH_ELEMENT + 0.02,
-                        ORDER + 1,
-                    );
-                    // The caret sits after `input_caret` chars of the
-                    // rendered value (masked for secret fields), not at
-                    // the end — arrow keys move it through the text.
-                    let caret_chars = self.input_caret.min(field.value.chars().count());
-                    let caret_text = if field.secret {
-                        "•".repeat(caret_chars)
-                    } else {
-                        field.value.chars().take(caret_chars).collect::<String>()
-                    };
-                    let caret_x = text_x
-                        + 12.0 * s
-                        + sugarloaf.text_mut().measure(caret_text.as_str(), &opts);
-                    // Thick BLOCK caret — same silhouette as the editor
-                    // cursor everywhere else. Translucent so the glyph
-                    // it sits on stays readable (the old hairline drew
-                    // straight through the text).
-                    let caret_h = (INPUT_FONT_SIZE + 6.0) * s;
-                    sugarloaf.rect(
-                        None,
-                        caret_x,
-                        text_y + (input_h - caret_h) * 0.5,
-                        INPUT_FONT_SIZE * 0.55 * s,
-                        caret_h,
-                        theme.f32_alpha(theme.accent, 0.55),
-                        DEPTH_ELEMENT + 0.03,
-                        ORDER + 2,
-                    );
-                }
-                text_y += input_h + 10.0 * s;
-            }
-        }
-
-        let sep_y = self.actions_y(y) - 4.0 * s - SEPARATOR_HEIGHT;
-        sugarloaf.rect(
+        self.draw_modal_actions(
+            sugarloaf,
+            theme,
+            [x, y, w, h],
+            (s, pad),
             None,
-            x + pad,
-            sep_y,
-            w - pad * 2.0,
-            SEPARATOR_HEIGHT,
+            server_form,
+        );
+    }
+
+    fn draw_modal_actions(
+        &self,
+        sugarloaf: &mut Sugarloaf,
+        theme: &IdeTheme,
+        panel: [f32; 4],
+        metrics: (f32, f32),
+        form_geometry: Option<FormGeometry>,
+        server_form: bool,
+    ) {
+        let [x, y, w, h] = panel;
+        let (s, pad) = metrics;
+        let actions_y = form_geometry
+            .map_or_else(|| self.actions_y(y), |geometry| geometry.actions[1]);
+        let sep_y =
+            form_geometry.map_or(actions_y - 4.0 * s - SEPARATOR_HEIGHT, |geometry| {
+                (actions_y - 4.0 * s - SEPARATOR_HEIGHT)
+                    .max(geometry.body[1] + geometry.body[3])
+            });
+        draw_form_rect(
+            sugarloaf,
+            [x + pad, sep_y, w - pad * 2.0, SEPARATOR_HEIGHT],
+            panel,
             theme.f32(theme.border),
-            DEPTH_ELEMENT,
+            0.0,
             ORDER,
         );
 
         let row_x = x + pad;
         let row_w = w - pad * 2.0;
-        let row_h = ACTION_ROW_HEIGHT * s;
-        let action_clip = [
-            row_x,
-            self.actions_y(y),
-            row_w,
-            self.visible_action_count() as f32 * row_h,
-        ];
+        let row_h = form_geometry
+            .map_or(ACTION_ROW_HEIGHT * s, |geometry| geometry.action_row_height);
+        let action_clip = form_geometry.map_or(
+            [
+                row_x,
+                actions_y,
+                row_w,
+                self.visible_action_count() as f32 * row_h,
+            ],
+            |geometry| geometry.actions,
+        );
         let hint_opts = DrawOpts {
             font_size: META_FONT_SIZE * s,
             color: theme.u8(theme.muted),
@@ -2406,6 +3186,12 @@ impl UniversalModal {
             ..DrawOpts::default()
         };
 
+        let painted_row = |row_y: f32| {
+            crate::primitives::geom::intersect_rect(
+                [row_x, row_y, row_w, row_h],
+                action_clip,
+            )
+        };
         for (display_idx, button) in self
             .buttons
             .iter()
@@ -2414,7 +3200,10 @@ impl UniversalModal {
             .enumerate()
         {
             let actual_idx = self.scroll_offset + display_idx;
-            let row_y = self.actions_y(y) + display_idx as f32 * row_h;
+            let row_y = actions_y + display_idx as f32 * row_h;
+            let Some(painted) = painted_row(row_y) else {
+                continue;
+            };
             // In a FORM, the button highlight only shows once focus has
             // actually walked onto the button row — while typing in a
             // field, a pre-lit "Enter" reads as focused when it isn't.
@@ -2425,10 +3214,10 @@ impl UniversalModal {
             if selected {
                 sugarloaf.rounded_rect(
                     None,
-                    row_x,
-                    row_y,
-                    row_w,
-                    row_h,
+                    painted[0],
+                    painted[1],
+                    painted[2],
+                    painted[3],
                     if destructive {
                         theme.f32_alpha(theme.red, 0.14)
                     } else {
@@ -2443,10 +3232,10 @@ impl UniversalModal {
             if hover > 0.0 {
                 sugarloaf.rounded_rect(
                     None,
-                    row_x,
-                    row_y,
-                    row_w,
-                    row_h,
+                    painted[0],
+                    painted[1],
+                    painted[2],
+                    painted[3],
                     if destructive {
                         theme.f32_alpha(theme.red, 0.08 + hover * 0.12)
                     } else {
@@ -2502,16 +3291,18 @@ impl UniversalModal {
             }
         }
 
-        sugarloaf.rect(
-            None,
-            x,
-            y,
-            3.0 * s,
-            h,
-            theme.f32(theme.accent),
-            DEPTH_ELEMENT,
-            ORDER,
-        );
+        if !server_form {
+            sugarloaf.rect(
+                None,
+                x,
+                y,
+                3.0 * s,
+                h,
+                theme.f32(theme.accent),
+                DEPTH_ELEMENT,
+                ORDER,
+            );
+        }
     }
 
     fn draw_body_line(
@@ -2846,6 +3637,406 @@ mod tests {
         assert_eq!(pane.lines.len(), 31);
     }
 
+    fn switch_test_form() -> ModalFormSpec {
+        ModalFormSpec {
+            title: "Add Server".into(),
+            fields: vec![
+                ModalFormField {
+                    id: "id".into(),
+                    label: String::new(),
+                    value: "hidden".into(),
+                    placeholder: String::new(),
+                    secret: true,
+                },
+                ModalFormField {
+                    id: "address".into(),
+                    label: "Address".into(),
+                    value: "host".into(),
+                    placeholder: String::new(),
+                    secret: false,
+                },
+                ModalFormField {
+                    id: "password".into(),
+                    label: "Password".into(),
+                    value: "secret".into(),
+                    placeholder: String::new(),
+                    secret: true,
+                },
+            ],
+            submit_label: "Join".into(),
+        }
+    }
+
+    #[test]
+    fn form_switch_focus_cycle_and_arrows_skip_hidden_fields() {
+        let mut modal = UniversalModal::new();
+        modal.open_form(switch_test_form());
+        modal.set_form_switch("Fast tunnel", false, true);
+        let draft = modal.form_values();
+        assert_eq!(modal.form_focus, 1);
+        modal.focus_next_form_field();
+        assert_eq!(modal.form_focus, 2);
+        modal.focus_next_form_field();
+        assert!(modal.form_switch_focused());
+        assert!(!modal.form_buttons_focused());
+        modal.push_input("ignored");
+        assert_eq!(modal.form_values(), draft);
+        assert_eq!(modal.activate_form_switch(), Some(true));
+        assert!(modal.take_submitted_form().is_none());
+        modal.focus_next_form_field();
+        assert!(modal.form_buttons_focused());
+        modal.focus_previous_form_field();
+        assert!(modal.form_switch_focused());
+        modal.focus_previous_form_field();
+        assert_eq!(modal.form_focus, 2);
+        modal.focus_previous_form_field();
+        assert_eq!(modal.form_focus, 1);
+        modal.form_focus_move(true);
+        assert_eq!(modal.form_focus, 2);
+        modal.form_focus_move(true);
+        assert!(modal.form_switch_focused());
+        modal.form_focus_move(true);
+        assert!(modal.form_buttons_focused());
+        modal.form_focus_move(false);
+        assert!(modal.form_switch_focused());
+        modal.form_focus_move(false);
+        assert_eq!(modal.form_focus, 2);
+        modal.form_focus_move(false);
+        assert_eq!(modal.form_focus, 1);
+        assert_eq!(modal.form_values(), draft);
+        modal.set_form_switch("Fast tunnel", true, false);
+        modal.focus_next_form_field();
+        assert_eq!(modal.form_focus, 2);
+        modal.focus_next_form_field();
+        assert!(modal.form_buttons_focused());
+        modal.focus_previous_form_field();
+        assert_eq!(modal.form_focus, 2);
+        modal.form_focus_move(true);
+        assert!(modal.form_buttons_focused());
+        modal.form_focus_move(false);
+        assert_eq!(modal.form_focus, 2);
+    }
+
+    #[test]
+    fn form_switch_and_tab_locks_reject_activation_and_pointer() {
+        let mut modal = UniversalModal::new();
+        assert_eq!(modal.activate_form_switch(), None);
+        modal.open_form(switch_test_form());
+        modal.set_form_tabs(vec!["Host".into(), "Join".into()], 1);
+        modal.form_tab_rects = vec![[10.0, 10.0, 40.0, 22.0], [60.0, 10.0, 40.0, 22.0]];
+        modal.set_form_switch("Fast tunnel", false, true);
+        modal.form_switch_rect = Some([10.0, 40.0, 100.0, 28.0]);
+        assert!(modal.form_switch_hit(20.0, 50.0));
+        assert_eq!(modal.activate_form_switch(), Some(true));
+        modal.set_form_switch("Fast tunnel", true, false);
+        modal.set_form_tabs_enabled(false);
+        assert_eq!(modal.form_switch_checked(), Some(true));
+        assert_eq!(modal.activate_form_switch(), None);
+        assert!(!modal.form_switch_hit(20.0, 50.0));
+        assert!(!modal.form_switch_focused());
+        assert_eq!(modal.form_tab_hit(20.0, 20.0), None);
+        assert!(!modal.set_form_active_tab(0));
+        assert_eq!(modal.form_active_tab(), 1);
+        modal.focus_previous_form_field();
+        assert!(!modal.form_switch_focused());
+        modal.pointer_move(20.0, 50.0, 1200.0, 1.0);
+        assert_eq!(modal.pointer_kind(), ModalPointerKind::Default);
+    }
+
+    fn long_scroll_form() -> ModalFormSpec {
+        let mut spec = switch_test_form();
+        for index in 0..8 {
+            spec.fields.push(ModalFormField {
+                id: format!("extra-{index}"),
+                label: format!("Field {index}"),
+                value: String::new(),
+                placeholder: String::new(),
+                secret: false,
+            });
+        }
+        spec
+    }
+
+    fn assert_rect_inside(rect: [f32; 4], panel: [f32; 4]) {
+        let epsilon = 0.01;
+        assert!(rect[0] >= panel[0] - epsilon && rect[1] >= panel[1] - epsilon);
+        assert!(rect[0] + rect[2] <= panel[0] + panel[2] + epsilon);
+        assert!(rect[1] + rect[3] <= panel[1] + panel[3] + epsilon);
+    }
+
+    #[test]
+    fn short_form_geometry_bounds_fields_switch_and_full_footer_at_all_scales() {
+        for height in [100.0, 150.0, 180.0, 240.0, 320.0, 480.0] {
+            for scale in [0.75, 1.0, 2.0, 3.0] {
+                let mut modal = UniversalModal::new();
+                modal.set_scale(scale);
+                modal.viewport_height = height;
+                modal.open_form(long_scroll_form());
+                modal.set_form_description(
+                    "First line\nSecond line\nThird line\nFourth line",
+                );
+                modal.set_form_tabs(vec!["Host".into(), "Join".into()], 1);
+                modal.set_form_switch("Fast tunnel", true, true);
+                let geometry = modal.form_geometry(900.0, 1.5).unwrap();
+                assert!(geometry.panel[1] >= 0.0);
+                assert!(geometry.panel[1] + geometry.panel[3] <= height + 0.01);
+                assert!(geometry.scale >= 0.75 && geometry.scale <= scale);
+                assert_rect_inside(geometry.body, geometry.panel);
+                assert_rect_inside(geometry.actions, geometry.panel);
+                assert!(
+                    (geometry.actions[3] - 2.0 * geometry.action_row_height).abs() < 0.01
+                );
+                if let Some(mut switch) = geometry.switch {
+                    let clip = if geometry.switch_in_body {
+                        geometry.body
+                    } else {
+                        geometry.panel
+                    };
+                    if geometry.switch_in_body {
+                        switch[1] -= modal.form_scroll;
+                    }
+                    if let Some(visible) =
+                        crate::primitives::geom::intersect_rect(switch, clip)
+                    {
+                        assert_rect_inside(visible, geometry.panel);
+                    }
+                }
+                for ordinal in 0..10 {
+                    if let Some(rect) = crate::primitives::geom::intersect_rect(
+                        geometry.field_input(ordinal, modal.form_scroll),
+                        geometry.body,
+                    ) {
+                        assert_rect_inside(rect, geometry.panel);
+                        let hit = modal.hit_test(
+                            rect[0] + rect[2] * 0.5,
+                            rect[1] + rect[3] * 0.5,
+                            900.0,
+                            1.5,
+                        );
+                        assert_eq!(hit, Ok(Some(modal.buttons.len() + ordinal + 1)));
+                    }
+                }
+                for index in 0..2 {
+                    let row_y = geometry.actions[1]
+                        + (index as f32 + 0.5) * geometry.action_row_height;
+                    assert_eq!(
+                        modal.hit_test(geometry.actions[0] + 10.0, row_y, 900.0, 1.5),
+                        Ok(Some(index))
+                    );
+                }
+                // Padding inside the capped panel is not an outside-dismiss hit.
+                assert_eq!(
+                    modal.hit_test(
+                        geometry.panel[0] + 1.0,
+                        geometry.body[1] + 1.0,
+                        900.0,
+                        1.5
+                    ),
+                    Ok(None)
+                );
+                assert_eq!(
+                    modal.hit_test(geometry.panel[0] - 1.0, geometry.body[1], 900.0, 1.5),
+                    Err(())
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn form_tab_and_arrow_navigation_reveal_fields_without_moving_pinned_controls() {
+        let mut modal = UniversalModal::new();
+        modal.viewport_height = 240.0;
+        modal.set_scale(3.0);
+        modal.open_form(long_scroll_form());
+        modal.set_form_switch("Fast tunnel", true, true);
+        let geometry = modal.form_geometry(1200.0, 1.0).unwrap();
+        assert!(!geometry.switch_in_body);
+        let pinned = (geometry.switch, geometry.actions);
+        for ordinal in 0..10 {
+            modal.request_form_reveal();
+            let row = geometry.field_row(ordinal, modal.form_scroll);
+            assert_rect_inside(row, geometry.body);
+            if ordinal < 9 {
+                modal.focus_next_form_field();
+            }
+        }
+        assert!(modal.form_scroll > 0.0);
+        modal.focus_next_form_field();
+        assert!(modal.form_switch_focused());
+        modal.focus_next_form_field();
+        assert!(modal.form_buttons_focused());
+        modal.focus_previous_form_field();
+        assert!(modal.form_switch_focused());
+        modal.focus_previous_form_field();
+        assert_eq!(modal.form_focus, 10);
+        for ordinal in (0..9).rev() {
+            modal.form_focus_move(false);
+            assert_rect_inside(
+                geometry.field_row(ordinal, modal.form_scroll),
+                geometry.body,
+            );
+        }
+        modal.activate_form_switch();
+        assert!(modal.form_switch_focused());
+        let after = modal.form_geometry(1200.0, 1.0).unwrap();
+        assert_eq!((after.switch, after.actions), pinned);
+        modal.set_form_switch("Fast tunnel", true, false);
+        assert!(!modal.form_switch_focused());
+        assert_eq!(modal.activate_form_switch(), None);
+    }
+
+    #[test]
+    fn form_wheel_clamps_consumes_outside_and_preserves_footer_and_lock_state() {
+        let mut modal = UniversalModal::new();
+        modal.viewport_height = 180.0;
+        modal.open_form(long_scroll_form());
+        modal.set_form_switch("Fast tunnel", true, false);
+        modal.set_form_tabs(vec!["Host".into(), "Join".into()], 1);
+        modal.set_form_tabs_enabled(false);
+        let geometry = modal.form_geometry(1200.0, 1.0).unwrap();
+        let x = geometry.body[0] + 10.0;
+        let y = geometry.body[1] + 10.0;
+        assert!(modal.scroll_at(x, y, 1200.0, 1.0, -100000.0));
+        assert_eq!(modal.form_scroll, geometry.max_scroll());
+        assert!(!modal.form_reveal_pending);
+        assert!(modal.scroll_at(-100.0, -100.0, 1200.0, 1.0, 100.0));
+        assert_eq!(modal.form_scroll, geometry.max_scroll());
+        assert!(modal.scroll_at(x, geometry.actions[1] + 10.0, 1200.0, 1.0, 100.0));
+        assert_eq!(modal.form_scroll, geometry.max_scroll());
+        assert!(modal.scroll_at(x, y, 1200.0, 1.0, 100000.0));
+        assert_eq!(modal.form_scroll, 0.0);
+        modal.scroll_body_page(true);
+        assert!(modal.form_scroll > 0.0);
+        assert_eq!(modal.form_active_tab(), 1);
+        assert!(!modal.form_tabs_enabled());
+        assert_eq!(modal.form_switch_checked(), Some(true));
+        assert_eq!(modal.activate_form_switch(), None);
+        assert_eq!(
+            modal.form_geometry(1200.0, 1.0).unwrap().actions,
+            geometry.actions
+        );
+    }
+
+    #[test]
+    fn tiny_form_scroll_suffix_reveals_last_option_and_skips_it_when_locked() {
+        let mut modal = UniversalModal::new();
+        modal.viewport_height = 120.0;
+        modal.set_scale(3.0);
+        modal.open_form(long_scroll_form());
+        modal.set_form_switch("Fast tunnel", true, true);
+        let draft = modal.form_values();
+        let geometry = modal.form_geometry(1200.0, 1.0).unwrap();
+        assert!(geometry.switch_in_body);
+        assert_rect_inside(geometry.actions, geometry.panel);
+        let switch = geometry.switch.unwrap();
+        let last = geometry.field_row(9, 0.0);
+        assert!(switch[1] >= last[1] + last[3]);
+        assert!(
+            (switch[1] - geometry.body[1] + FORM_SWITCH_ROW_HEIGHT * geometry.scale
+                - geometry.content_height)
+                .abs()
+                < 0.01
+        );
+        modal.form_focus = modal.form.as_ref().unwrap().fields.len() - 1;
+        modal.request_form_reveal();
+        let field_scroll = modal.form_scroll;
+        assert!(field_scroll > 0.0);
+        modal.focus_next_form_field();
+        assert!(modal.form_switch_focused());
+        assert!(modal.form_scroll > field_scroll);
+        let visible_switch = [
+            switch[0],
+            switch[1] - modal.form_scroll,
+            switch[2],
+            switch[3],
+        ];
+        assert_rect_inside(visible_switch, geometry.body);
+        modal.form_switch_rect = Some(visible_switch);
+        assert!(modal.form_switch_hit(visible_switch[0] + 10.0, visible_switch[1] + 10.0));
+        assert_eq!(modal.activate_form_switch(), Some(false));
+        assert!(modal.form_scroll > 0.0);
+        assert!(modal.take_submitted_form().is_none());
+        assert_eq!(modal.form_values(), draft);
+        modal.focus_next_form_field();
+        assert!(modal.form_buttons_focused());
+        modal.form_focus_move(false);
+        assert!(modal.form_switch_focused());
+        modal.form_focus_move(false);
+        assert_eq!(modal.form_focus, 10);
+        assert!(modal.form_scroll < geometry.max_scroll());
+        modal.set_form_switch("Fast tunnel", true, false);
+        modal.focus_next_form_field();
+        assert!(modal.form_buttons_focused());
+        modal.focus_previous_form_field();
+        assert_eq!(modal.form_focus, 10);
+    }
+
+    #[test]
+    fn form_switch_geometry_reserves_scaled_row_and_uses_logical_hits() {
+        for scale in [0.75, 1.0, 2.0] {
+            let mut modal = UniversalModal::new();
+            modal.set_scale(scale);
+            modal.viewport_height = 1440.0;
+            modal.open_form(switch_test_form());
+            let (_, y, _, height) = modal.modal_rect(2400.0, 2.0);
+            let actions = modal.actions_y(y);
+            modal.set_form_switch("Fast tunnel", false, true);
+            let (x, new_y, width, new_height) = modal.modal_rect(2400.0, 2.0);
+            assert!((new_height - height - FORM_SWITCH_ROW_HEIGHT * scale).abs() < 0.001);
+            assert!(
+                (modal.actions_y(new_y) - actions - FORM_SWITCH_ROW_HEIGHT * scale).abs()
+                    < 0.001
+            );
+            let geometry = modal.form_geometry(2400.0, 2.0).unwrap();
+            assert!(!geometry.switch_in_body);
+            let switch = geometry.switch.unwrap();
+            let row_y = switch[1];
+            let last = geometry.field_row(1, 0.0);
+            assert!(row_y >= last[1] + last[3]);
+            assert!((row_y - (geometry.body[1] + geometry.body[3])).abs() < 0.01);
+            assert!(row_y + switch[3] <= geometry.actions[1]);
+            assert_rect_inside(switch, geometry.panel);
+            assert_rect_inside(geometry.actions, geometry.panel);
+            modal.form_switch_rect = Some(switch);
+            assert!(modal.form_switch_hit(x + width * 0.5, row_y + 10.0 * scale));
+            assert!(!modal.form_switch_hit(x - 1.0, row_y));
+            modal.pointer_move(x + width * 0.5, row_y + 10.0 * scale, 2400.0, 2.0);
+            assert_eq!(modal.pointer_kind(), ModalPointerKind::Pointer);
+            let field_y = geometry.field_input(0, 0.0)[1];
+            assert_eq!(
+                modal.hit_test(x + width * 0.5, field_y + 10.0 * scale, 2400.0, 2.0),
+                Ok(Some(modal.buttons.len() + 1))
+            );
+        }
+    }
+
+    #[test]
+    fn form_drafts_preserve_secrets_and_switch_locks_reset_on_every_open() {
+        let mut modal = UniversalModal::new();
+        modal.open_form(switch_test_form());
+        assert!(modal
+            .form_values()
+            .contains(&("password".into(), "secret".into())));
+        assert_eq!(modal.form_values(), modal.form_values());
+        assert!(modal.take_submitted_form().is_none());
+        modal.set_form_switch("Fast tunnel", true, false);
+        modal.set_form_tabs_enabled(false);
+        modal.open_message("Other modal", "Details");
+        assert_eq!(modal.form_switch_checked(), None);
+        assert!(modal.form_tabs_enabled());
+        assert_eq!(modal.form_tab_count(), 0);
+        assert!(modal.form_values().is_empty());
+        modal.open_form(switch_test_form());
+        modal.set_form_switch("Fast tunnel", true, false);
+        modal.set_form_tabs_enabled(false);
+        modal.close();
+        assert_eq!(modal.form_switch_checked(), None);
+        assert!(modal.form_tabs_enabled());
+        modal.open_form(switch_test_form());
+        assert_eq!(modal.form_switch_checked(), None);
+        assert!(modal.form_tabs_enabled());
+    }
+
     #[test]
     fn server_form_skips_hidden_id_and_submits_structured_values() {
         let mut modal = UniversalModal::new();
@@ -2910,7 +4101,7 @@ mod tests {
             submit_label: "Add server".into(),
         });
         let (x, y, _, _) = modal.modal_rect(1200.0, 1.0);
-        let field_y = y + MODAL_PADDING + TITLE_HEIGHT + 12.0 + 20.0;
+        let field_y = y + MODAL_PADDING + TITLE_HEIGHT + 12.0 + BODY_LINE_HEIGHT + 20.0;
         let field_hit =
             modal.hit_test(x + MODAL_PADDING + 20.0, field_y + 10.0, 1200.0, 1.0);
         assert_eq!(field_hit, Ok(Some(modal.buttons.len())));
@@ -2938,19 +4129,19 @@ mod tests {
         assert_eq!(modal.selected_action(), Some(ModalAction::Close));
         assert!(modal.focus_form_hit(modal.buttons.len()));
 
-        modal.form_field_hit_rects = vec![
-            (0, [x + 20.0, 200.0, 300.0, 40.0]),
-            (1, [x + 20.0, 260.0, 300.0, 40.0]),
-        ];
+        let geometry = modal.form_geometry(1200.0, 1.0).unwrap();
+        let second = geometry.field_input(1, modal.form_scroll);
+        let hit_x = second[0] + 20.0;
+        let hit_y = second[1] + 10.0;
         assert_eq!(
-            modal.hit_test(x + 40.0, 280.0, 1200.0, 1.0),
+            modal.hit_test(hit_x, hit_y, 1200.0, 1.0),
             Ok(Some(modal.buttons.len() + 1))
         );
         assert!(modal.focus_form_hit(modal.buttons.len() + 1));
         assert_eq!(modal.form_focus, 1);
-        assert!(modal.pointer_move(x + 40.0, 280.0, 1200.0, 1.0));
+        assert!(modal.pointer_move(hit_x, hit_y, 1200.0, 1.0));
         assert_eq!(modal.pointer_kind(), ModalPointerKind::Text);
-        assert!(!modal.pointer_move(x + 40.0, 280.0, 1200.0, 1.0));
+        assert!(!modal.pointer_move(hit_x, hit_y, 1200.0, 1.0));
         assert!(modal.pointer_leave());
         assert_eq!(modal.pointer_kind(), ModalPointerKind::Default);
 

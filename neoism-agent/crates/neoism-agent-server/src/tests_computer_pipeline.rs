@@ -73,13 +73,14 @@ async fn failed_computer_batch_recovery_image_reaches_provider_with_error_status
         )).await.unwrap();
         assert_eq!(result.is_error(), failed);
         assert_eq!(
-            result.metadata.as_ref().unwrap()["mcp"]["result"]["isError"],
+            result.metadata.as_ref().unwrap()["mcp"]["resultSummary"]["isError"],
             failed
         );
         if preflight {
-            let payload =
-                &result.metadata.as_ref().unwrap()["mcp"]["result"]["content"][0]["text"];
-            let value: Value = serde_json::from_str(payload.as_str().unwrap()).unwrap();
+            // Raw protocol content is intentionally stripped after artifact
+            // externalization; formatted text remains the selected tool output.
+            let payload = result.output.split_once('\n').map(|(_, text)| text).unwrap_or(&result.output);
+            let value: Value = serde_json::from_str(payload).unwrap();
             assert_eq!(value["status"], "failed");
             assert_eq!(value["completed"], 0);
             assert_eq!(value["clipboard"], "unchanged");
@@ -125,7 +126,9 @@ async fn failed_computer_batch_recovery_image_reaches_provider_with_error_status
         } else {
             "recovery-frame"
         }));
-        assert_eq!(tool.attachments.len(), usize::from(image));
+        // Tool-role messages stay text-only; media follows as a User message.
+        assert!(tool.attachments.is_empty());
+        assert_eq!(provider.iter().map(|m| m.attachments.len()).sum::<usize>(), usize::from(image));
         if image {
             let media = provider
                 .iter()
@@ -133,9 +136,19 @@ async fn failed_computer_batch_recovery_image_reaches_provider_with_error_status
                 .unwrap();
             assert_eq!(media.attachments.len(), 1);
             assert_eq!(media.attachments[0].mime, "image/png");
-            assert!(media.attachments[0]
-                .url
-                .starts_with("data:image/png;base64,iVBOR"));
+            assert!(media.attachments[0].url.starts_with("/v2/artifacts/"));
+            let response = app(state.clone())
+                .oneshot(request(Method::GET, &media.attachments[0].url, None))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
+            assert!(
+                bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
+                "persisted recovery attachment must still resolve to its PNG bytes"
+            );
         }
         let compacted = crate::message_model::compaction_provider_messages(&[stored]);
         assert!(compacted.iter().all(|m| m.attachments.is_empty()));

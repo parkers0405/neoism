@@ -24,6 +24,8 @@ neoism-agent-core.workspace = true
 neoism-agent-service-api.workspace = true
 neoism-agent-plugin-api.workspace = true
 neoism-agent-builtins.workspace = true
+neoism-agent-composition.workspace = true
+jsonschema = { version = "0.33", default-features = false }
 notify = "8.2.0"
 rand.workspace = true
 reqwest.workspace = true

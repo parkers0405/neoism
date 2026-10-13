@@ -219,6 +219,10 @@ pub(crate) fn set_tool_completed(
                 let start = tool_state_start(&tool.state).unwrap_or_else(now_millis);
                 let metadata =
                     stable_tool_metadata(metadata, &tool.tool, &title, &output);
+                if let Some(composition) = metadata.get("composition") {
+                    tool.metadata.get_or_insert_with(|| json!({}))["composition"] =
+                        composition.clone();
+                }
                 if let Some(Value::Object(metadata)) = &mut tool.metadata {
                     metadata.remove("toolResult");
                 }
@@ -301,6 +305,9 @@ pub(crate) fn set_tool_execution_result(
                 let outer = tool.metadata.get_or_insert_with(|| json!({}));
                 if !outer.is_object() {
                     *outer = json!({"previous":outer.take()});
+                }
+                if let Some(composition) = metadata.get("composition") {
+                    outer["composition"] = composition.clone();
                 }
                 outer["toolResult"] = metadata;
                 return Some(Part::Tool(tool.clone()));

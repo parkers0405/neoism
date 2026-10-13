@@ -1625,7 +1625,7 @@ pub(crate) fn running_state_message(
     })
 }
 
-fn todo_items_from_response(value: &Value) -> Vec<TodoItem> {
+pub(super) fn todo_items_from_response(value: &Value) -> Vec<TodoItem> {
     value
         .as_array()
         .into_iter()

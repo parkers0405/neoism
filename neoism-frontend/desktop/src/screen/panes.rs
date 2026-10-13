@@ -33,6 +33,7 @@ fn strip_ref_to_key(
 }
 
 mod buffer_tabs_input;
+mod server_leave;
 mod close_focus;
 mod cross_window_dnd;
 mod grid_workspace;

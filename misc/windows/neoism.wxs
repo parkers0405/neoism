@@ -84,9 +84,19 @@
             <RegistryValue Type="string" Value="&quot;[INSTALLFOLDER]neoism.exe&quot; &quot;%1&quot;" />
           </RegistryKey>
         </RegistryKey>
+        <RegistryKey Root="HKCU" Key="Software\Classes\neoism">
+          <RegistryValue Type="string" Value="URL:Neoism Invite" />
+          <RegistryValue Name="URL Protocol" Type="string" Value="" />
+          <RegistryKey Key="shell\open\command">
+            <RegistryValue Type="string" Value="&quot;[INSTALLFOLDER]neoism.exe&quot; &quot;%1&quot;" />
+          </RegistryKey>
+        </RegistryKey>
         <RegistryKey Root="HKCU" Key="Software\Neoism\Capabilities">
           <RegistryValue Name="ApplicationName" Type="string" Value="Neoism" />
           <RegistryValue Name="ApplicationDescription" Type="string" Value="Terminal, code editor, and notes workspace" />
+          <RegistryKey Key="URLAssociations">
+            <RegistryValue Name="neoism" Type="string" Value="neoism" />
+          </RegistryKey>
           <RegistryKey Key="FileAssociations">
             <RegistryValue Name=".md" Type="string" Value="Neoism.Document" />
             <RegistryValue Name=".markdown" Type="string" Value="Neoism.Document" />

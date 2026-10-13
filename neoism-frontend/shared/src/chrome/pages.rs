@@ -893,8 +893,46 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             LogicalKey::Named(NamedKey::End) if blocking && has_input => {
                 self.modal.input_caret_to_end();
             }
-            LogicalKey::Named(NamedKey::Tab) if blocking && has_input => {
-                let _ = self.modal.focus_next_form_field();
+            LogicalKey::Named(NamedKey::Tab)
+                if blocking && mods.contains(Modifiers::CTRL) =>
+            {
+                let count = self.modal.form_tab_count();
+                if count > 0 && self.modal.form_tabs_enabled() {
+                    let current = self.modal.form_active_tab();
+                    let index = if mods.contains(Modifiers::SHIFT) {
+                        (current + count - 1) % count
+                    } else {
+                        (current + 1) % count
+                    };
+                    if self.modal.set_form_active_tab(index) {
+                        self.modal.queue_host_action(ModalHostAction::Generic {
+                            id: "form-tab".into(),
+                            value: index.to_string(),
+                        });
+                    }
+                }
+            }
+            LogicalKey::Named(NamedKey::Tab) if blocking && has_input && plain_mods => {
+                if mods.contains(Modifiers::SHIFT) {
+                    let _ = self.modal.focus_previous_form_field();
+                } else {
+                    let _ = self.modal.focus_next_form_field();
+                }
+            }
+            LogicalKey::Named(NamedKey::Enter | NamedKey::Space)
+                if blocking && self.modal.form_switch_focused() =>
+            {
+                if plain_mods {
+                    self.activate_chrome_form_switch();
+                }
+            }
+            LogicalKey::Character(text)
+                if blocking
+                    && plain_mods
+                    && text == " "
+                    && self.modal.form_switch_focused() =>
+            {
+                self.activate_chrome_form_switch();
             }
             LogicalKey::Named(NamedKey::ArrowUp) if blocking => {
                 // Forms walk fields ↔ buttons; plain modals keep the
@@ -963,9 +1001,18 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         }
     }
 
+    /// Emit a non-closing control change; the host owns transport-dependent drafts.
+    fn activate_chrome_form_switch(&mut self) {
+        if let Some(checked) = self.modal.activate_form_switch() {
+            self.modal.queue_host_action(ModalHostAction::Generic {
+                id: "form-switch".into(),
+                value: checked.to_string(),
+            });
+        }
+    }
+
     /// Pointer routing for the chrome modal — desktop
-    /// `Screen::handle_modal_click` transliterated (minus the server
-    /// modal's Join ↔ Create slider, which is not chrome-hosted yet).
+    /// `Screen::handle_modal_click` transliterated.
     fn handle_chrome_modal_click(&mut self, x: f32, y: f32) {
         let blocking = self.modal.is_blocking();
         if self.modal.close_button_hit(x, y) {
@@ -974,6 +1021,19 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             } else {
                 self.modal.close();
                 self.relayout();
+            }
+            return;
+        }
+        if self.modal.form_switch_hit(x, y) {
+            self.activate_chrome_form_switch();
+            return;
+        }
+        if let Some(index) = self.modal.form_tab_hit(x, y) {
+            if self.modal.set_form_active_tab(index) {
+                self.modal.queue_host_action(ModalHostAction::Generic {
+                    id: "form-tab".into(),
+                    value: index.to_string(),
+                });
             }
             return;
         }
@@ -1298,6 +1358,99 @@ fn validate_child_name(input: &str) -> Result<String, String> {
 #[cfg(test)]
 mod connection_gate_tests {
     use super::*;
+
+    #[test]
+    fn form_switch_keys_emit_control_changes_without_submitting() {
+        use crate::event::{KeyState, PhysicalKey};
+        let mut chrome = Chrome::<()>::new();
+        chrome.modal.open_form(ModalFormSpec {
+            title: "Add Server".into(),
+            fields: vec![crate::widgets::modal::ModalFormField {
+                id: "password".into(),
+                label: "Password".into(),
+                value: "secret".into(),
+                placeholder: String::new(),
+                secret: true,
+            }],
+            submit_label: "Join".into(),
+        });
+        chrome.modal.set_form_switch("Fast tunnel", false, true);
+        let key = |logical, modifiers| KeyDescriptor {
+            physical: PhysicalKey(0),
+            logical,
+            state: KeyState::Pressed,
+            modifiers,
+            repeat: false,
+        };
+        chrome.handle_chrome_modal_key(&key(
+            LogicalKey::Named(NamedKey::Tab),
+            Modifiers::empty(),
+        ));
+        assert!(chrome.modal.form_switch_focused());
+        for logical in [
+            LogicalKey::Named(NamedKey::Enter),
+            LogicalKey::Named(NamedKey::Space),
+            LogicalKey::Character(" ".into()),
+        ] {
+            chrome.handle_chrome_modal_key(&key(logical, Modifiers::empty()));
+            assert!(chrome.modal.is_active());
+            assert!(chrome.modal.take_submitted_form().is_none());
+        }
+        assert_eq!(
+            chrome.modal.take_host_actions(),
+            vec![
+                ModalHostAction::Generic {
+                    id: "form-switch".into(),
+                    value: "true".into()
+                },
+                ModalHostAction::Generic {
+                    id: "form-switch".into(),
+                    value: "false".into()
+                },
+                ModalHostAction::Generic {
+                    id: "form-switch".into(),
+                    value: "true".into()
+                },
+            ]
+        );
+        assert_eq!(
+            chrome.modal.form_values(),
+            vec![("password".into(), "secret".into())]
+        );
+        chrome.handle_chrome_modal_key(&key(
+            LogicalKey::Named(NamedKey::Tab),
+            Modifiers::empty(),
+        ));
+        assert!(chrome.modal.form_buttons_focused());
+        chrome.handle_chrome_modal_key(&key(
+            LogicalKey::Named(NamedKey::Tab),
+            Modifiers::SHIFT,
+        ));
+        assert!(chrome.modal.form_switch_focused());
+        chrome.handle_chrome_modal_key(&key(
+            LogicalKey::Named(NamedKey::ArrowUp),
+            Modifiers::empty(),
+        ));
+        assert!(!chrome.modal.form_switch_focused());
+        assert!(!chrome.modal.form_buttons_focused());
+        chrome.handle_chrome_modal_key(&key(
+            LogicalKey::Named(NamedKey::ArrowDown),
+            Modifiers::empty(),
+        ));
+        assert!(chrome.modal.form_switch_focused());
+        assert!(chrome.modal.take_submitted_form().is_none());
+        assert!(chrome.modal.take_host_actions().is_empty());
+        chrome
+            .modal
+            .set_form_tabs(vec!["Host".into(), "Join".into()], 1);
+        chrome.modal.set_form_tabs_enabled(false);
+        chrome.handle_chrome_modal_key(&key(
+            LogicalKey::Named(NamedKey::Tab),
+            Modifiers::CTRL,
+        ));
+        assert_eq!(chrome.modal.form_active_tab(), 1);
+        assert!(chrome.modal.take_host_actions().is_empty());
+    }
 
     #[test]
     fn connection_gate_is_host_dismissed_and_retry_keeps_canvas_gate_open() {

@@ -24,6 +24,13 @@ pub(super) fn definitions(owner: ToolOwner) -> Vec<BuiltinTool> {
     vec![
         tool(
             ToolOwner::Workspace, owner,
+            "compose",
+            crate::tool_composition::DESCRIPTION,
+            object_required(&[("code", "string")], &["code"]),
+            stateful_handler,
+        ),
+        tool(
+            ToolOwner::Workspace, owner,
             "bash",
             if cfg!(windows) {
                 "Run a PowerShell command. The tool is named bash for compatibility; this Windows host is PowerShell (pwsh.exe if available). Use curl.exe, not curl.\n\nIMPORTANT: This tool is for terminal operations such as git, builds, tests, package managers, and docker. DO NOT use it for file discovery, searching, reading, or editing when a dedicated tool supports the operation. File search: use glob, not find, ls, or Get-ChildItem. Content search: use grep, not shell grep, rg, or Select-String. Read files and list directories: use read, not cat, head, tail, sed, or Get-Content. File mutations: use the selected native mutation tool (apply_patch, or edit/write), not shell redirection or scripts. Fall back to shell only when the required native tool is unavailable or cannot support the operation."

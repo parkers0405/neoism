@@ -255,6 +255,7 @@ pub struct ChromeTopBar {
     hover_mobile_agent_panel_btn: bool,
     hover_menu_item: Option<usize>,
     server_status: ServerIndicatorStatus,
+    server_temporary: bool,
     /// Connected remote peers, pushed by the host each frame (cheap: a
     /// handful at most). Rendered as a stacked orb cluster beside the
     /// server selector; empty when nobody else is connected.
@@ -303,6 +304,7 @@ impl ChromeTopBar {
             hover_mobile_agent_panel_btn: false,
             hover_menu_item: None,
             server_status: ServerIndicatorStatus::Unknown,
+            server_temporary: false,
             peers: Vec::new(),
             peer_rects: Vec::new(),
             hover_peer: None,
@@ -382,6 +384,10 @@ impl ChromeTopBar {
     /// side panel) so the button can paint in its active accent style.
     pub fn set_right_panel_open(&mut self, open: bool) {
         self.right_panel_open = open;
+    }
+
+    pub fn set_server_temporary(&mut self, temporary: bool) {
+        self.server_temporary = temporary;
     }
 
     pub fn set_server_status(&mut self, status: ServerIndicatorStatus) {
@@ -1294,7 +1300,13 @@ impl ChromeTopBar {
 
         let dot = 5.0 * scale;
         let dot_color = match self.server_status {
-            ServerIndicatorStatus::Online => theme.green,
+            ServerIndicatorStatus::Online => {
+                if self.server_temporary {
+                    theme.magenta
+                } else {
+                    theme.green
+                }
+            }
             ServerIndicatorStatus::Connecting => theme.yellow,
             ServerIndicatorStatus::Offline => theme.red,
             ServerIndicatorStatus::Unknown => theme.dim,
@@ -1485,6 +1497,15 @@ impl Panel for ChromeTopBar {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn temporary_server_indicator_defaults_off_and_can_be_reset() {
+        let mut bar = super::ChromeTopBar::new();
+        assert!(!bar.server_temporary);
+        bar.set_server_temporary(true);
+        assert!(bar.server_temporary);
+        bar.set_server_temporary(false);
+        assert!(!bar.server_temporary);
+    }
     use super::*;
 
     fn paint_strip(bar: &mut ChromeTopBar, strip: Rect) {

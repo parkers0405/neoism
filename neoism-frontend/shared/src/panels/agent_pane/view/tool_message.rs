@@ -253,6 +253,8 @@ pub trait AgentToolMessage {
     fn status(&self) -> &str;
     fn tool(&self) -> &str;
     fn detail(&self) -> &str;
+    fn composition_children(&self) -> &[NeoismAgentMessage] { &[] }
+    fn composition_child(&self) -> bool { false }
 
     /// Growing apply_patch / edit snapshots rebuild a full highlighted card
     /// on every `part.updated`. Keep those as a header until the tool
@@ -352,6 +354,9 @@ impl AgentToolMessage for NeoismAgentMessage {
     fn detail(&self) -> &str {
         &self.detail
     }
+
+    fn composition_children(&self) -> &[NeoismAgentMessage] { &self.composition_children }
+    fn composition_child(&self) -> bool { self.composition_child }
 
     fn is_todos_output(&self) -> bool {
         matches!(
@@ -463,6 +468,9 @@ macro_rules! neoism_ui_impl_agent_tool_message {
             fn detail(&self) -> &str {
                 &self.detail
             }
+
+            fn composition_children(&self) -> &[$crate::panels::agent_pane::state::NeoismAgentMessage] { &self.composition_children }
+            fn composition_child(&self) -> bool { self.composition_child }
 
             fn is_todos_output(&self) -> bool {
                 matches!(self.output_kind, $output_kind::Todos)
@@ -663,7 +671,7 @@ impl AgentToolPane for NeoismAgentPane {
 
 // ---- god-file split: sibling modules; each child is `use super::*;` ----
 mod diff;
-mod motion;
+pub(super) mod motion;
 mod render;
 mod widgets;
 

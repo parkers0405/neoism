@@ -39,29 +39,12 @@ impl DesktopDaemonConnection {
             .enable_all()
             .build()?;
         let endpoint = crate::daemon_client::DaemonEndpoint::parse(endpoint)?;
+        let startup_timeout = endpoint.startup_timeout();
         let endpoint_string = endpoint.normalized();
         let mut options = DaemonClientOptions::new(endpoint);
         options.token = token.clone();
         let client = runtime.block_on(DaemonClient::connect_with_options(options))?;
-        let mut status_rx = client.status_receiver();
-        runtime.block_on(async {
-            tokio::time::timeout(std::time::Duration::from_secs(4), async {
-                loop {
-                    if *status_rx.borrow() == DaemonClientStatus::Open {
-                        return Ok::<(), Box<dyn std::error::Error>>(());
-                    }
-                    status_rx.changed().await.map_err(|_| {
-                        Box::<dyn std::error::Error>::from(
-                            "daemon connection closed during startup",
-                        )
-                    })?;
-                }
-            })
-            .await
-            .map_err(|_| {
-                Box::<dyn std::error::Error>::from("daemon connection timed out")
-            })?
-        })?;
+        runtime.block_on(wait_for_startup(&client, startup_timeout))?;
         let (handle, mut rx, status_rx) = client.into_channels();
         let inbound = Arc::new(Mutex::new(VecDeque::new()));
         let inbound_task = Arc::clone(&inbound);
@@ -241,6 +224,46 @@ impl DesktopDaemonConnection {
             }
         }
     }
+}
+
+/// Observe startup without touching the queued HelloAck/snapshot messages.
+pub(crate) async fn wait_for_startup(
+    client: &DaemonClient,
+    timeout: std::time::Duration,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut status = client.status_receiver();
+    let mut failure = client.startup_failure_receiver();
+    tokio::time::timeout(timeout, async {
+        loop {
+            if let Some(error) = *failure.borrow() {
+                return Err(Box::<dyn std::error::Error>::from(error));
+            }
+            match *status.borrow() {
+                DaemonClientStatus::Open => return Ok(()),
+                DaemonClientStatus::Closed => {
+                    // Failure is published before Closed; re-read after observing
+                    // Closed in case it arrived between the two initial reads.
+                    if let Some(error) = *failure.borrow() {
+                        return Err(Box::<dyn std::error::Error>::from(error));
+                    }
+                    return Err("daemon connection closed during startup".into());
+                }
+                _ => {}
+            }
+            let changed = tokio::select! {
+                result = status.changed() => result,
+                result = failure.changed() => result,
+            };
+            if changed.is_err() {
+                if let Some(error) = *failure.borrow() {
+                    return Err(Box::<dyn std::error::Error>::from(error));
+                }
+                return Err("daemon connection closed during startup".into());
+            }
+        }
+    })
+    .await
+    .map_err(|_| Box::<dyn std::error::Error>::from("daemon connection timed out"))?
 }
 
 fn take_editor_messages(

@@ -5,6 +5,54 @@ use neoism_ui::panels::agent_pane::view::markdown::AssistantMarkdownBlock;
 const MAX_MARKDOWN_BLOCKS_CACHE: usize = 4096;
 const MAX_MARKDOWN_SOURCE_BYTES: usize = 32 * 1024 * 1024;
 
+fn composition_content_hash(
+    children: &[neoism_ui::panels::agent_pane::state::NeoismAgentMessage],
+) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    for child in children {
+        (
+            &child.id,
+            child.kind,
+            &child.title,
+            &child.text,
+            &child.status,
+            &child.tool,
+        )
+            .hash(&mut hasher);
+        (
+            child.output_kind,
+            &child.lang,
+            child.line_offset,
+            &child.todos,
+            &child.detail,
+            &child.images,
+            composition_content_hash(&child.composition_children),
+        )
+            .hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+fn composition_child<'a>(
+    children: &'a [neoism_ui::panels::agent_pane::state::NeoismAgentMessage],
+    id: &str,
+) -> Option<&'a neoism_ui::panels::agent_pane::state::NeoismAgentMessage> {
+    children.iter().find_map(|child| {
+        if child.id == id {
+            Some(child)
+        } else {
+            composition_child(&child.composition_children, id)
+        }
+    })
+}
+
+fn composition_contains(
+    children: &[neoism_ui::panels::agent_pane::state::NeoismAgentMessage],
+    id: &str,
+) -> bool {
+    composition_child(children, id).is_some()
+}
+
 impl NeoismAgentPane {
     /// Keep the actual allocation alive while its positional paint map is cached.
     pub(crate) fn retain_reveal_markdown_layout(
@@ -157,6 +205,7 @@ impl NeoismAgentPane {
             },
             images: hash_value(&message.images),
             selected_tool_group_child: 0,
+            composition_children: composition_content_hash(&message.composition_children),
         }
     }
 
@@ -328,15 +377,23 @@ impl NeoismAgentPane {
 
     pub(crate) fn take_timeline_dirty_marks(&mut self) -> TimelineDirtyMarks {
         // Remeasure once at the settled height, including synthetic read groups.
-        self.tool_expand_anims.retain(|id, animation| {
-            if animation.is_active() {
-                return true;
+        let settled: Vec<String> = self
+            .tool_expand_anims
+            .iter()
+            .filter(|(_, animation)| !animation.is_active())
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in settled {
+            self.tool_expand_anims.remove(&id);
+            if let Some(index) = self.tool_owner_index(&id) {
+                self.mark_timeline_message_and_next_dirty_at(index);
+            } else {
+                let source_id =
+                    id.split_once("..").map_or(id.as_str(), |(first, _)| first);
+                self.timeline_dirty_message_ids
+                    .insert(source_id.to_string());
             }
-            let source_id = id.split_once("..").map_or(id.as_str(), |(first, _)| first);
-            self.timeline_dirty_message_ids
-                .insert(source_id.to_string());
-            false
-        });
+        }
         TimelineDirtyMarks {
             ids: std::mem::take(&mut self.timeline_dirty_message_ids),
             indices: std::mem::take(&mut self.timeline_dirty_message_indices),
@@ -1066,6 +1123,23 @@ impl NeoismAgentPane {
     /// current visit (everything, after a reload). Archived cards render
     /// header-only until clicked. Synthetic read-group ids ("a..") resolve
     /// through their first member.
+    /// Resolve native composition rows (and their diff sections) to the source row.
+    pub(crate) fn tool_owner_index(&self, id: &str) -> Option<usize> {
+        let lookup = |needle: &str| {
+            self.messages.iter().position(|message| {
+                message.id == needle
+                    || composition_contains(&message.composition_children, needle)
+            })
+        };
+        lookup(id)
+            .or_else(|| {
+                id.rsplit_once(':')
+                    .filter(|(_, section)| section.parse::<usize>().is_ok())
+                    .and_then(|(parent, _)| lookup(parent))
+            })
+            .or_else(|| id.split_once("..").and_then(|(first, _)| lookup(first)))
+    }
+
     pub fn tool_archived(&self, id: &str) -> bool {
         if id.is_empty() {
             return false;
@@ -1073,13 +1147,7 @@ impl NeoismAgentPane {
         let live_start = self
             .timeline_live_trace_start
             .unwrap_or(self.messages.len());
-        let lookup = |needle: &str| {
-            self.messages
-                .iter()
-                .position(|message| message.id == needle)
-        };
-        lookup(id)
-            .or_else(|| id.split_once("..").and_then(|(first, _)| lookup(first)))
+        self.tool_owner_index(id)
             .is_some_and(|index| index < live_start)
     }
 
@@ -1101,8 +1169,10 @@ impl NeoismAgentPane {
         }
         let child_prefix = format!("{id}:");
         let group_prefix = format!("{id}..");
+        let composition_prefix = format!("{id}/compose/");
         self.tool_expand_anims.iter().any(|(key, animation)| {
             (key == id
+                || key.starts_with(&composition_prefix)
                 || key.starts_with(&child_prefix)
                 || key.starts_with(&group_prefix))
                 && animation.is_active()
@@ -1139,17 +1209,14 @@ impl NeoismAgentPane {
         };
 
         let child_target = id.split_once("::child::");
+        let is_composition_row = self.tool_owner_index(&id).is_some_and(|index| {
+            composition_contains(&self.messages[index].composition_children, &id)
+        });
         let is_diff_file = child_target.is_none()
+            && !is_composition_row
             && id
                 .rsplit_once(':')
                 .is_some_and(|(_, section)| section.parse::<usize>().is_ok());
-        if is_diff_file {
-            if !self.expanded_tool_ids.insert(id.clone()) {
-                self.expanded_tool_ids.remove(&id);
-            }
-            self.tool_expand_anims.remove(&id);
-            return true;
-        }
 
         // Only a Task row itself navigates; diff sections and grouped-child
         // controls retain their existing expansion/selection behavior.
@@ -1171,6 +1238,13 @@ impl NeoismAgentPane {
                         })
                     })
                     .flatten()
+            }).or_else(|| {
+                let index = self.tool_owner_index(&id)?;
+                let child = composition_child(&self.messages[index].composition_children, &id)?;
+                (child.tool == "task").then(|| {
+                    neoism_ui::panels::agent_pane::message_policy::task_id_from_text(&child.detail, &child.text)
+                        .map(|task_id| (task_id, child.title.clone(), child.status == "error"))
+                }).flatten()
             });
             if let Some((task_id, title, failed)) = task_target {
                 // A Task supplies the family relation even when recovery has
@@ -1251,18 +1325,7 @@ impl NeoismAgentPane {
             self.expanded_tool_ids.remove(&id);
         }
         self.timeline_measure_cache.borrow_mut().clear();
-        let parent_id = id
-            .rsplit_once(':')
-            .filter(|(_, section)| section.parse::<usize>().is_ok())
-            .map_or(id.as_str(), |(parent, _)| parent);
-        let parent_id = parent_id
-            .split_once("..")
-            .map_or(parent_id, |(first, _)| first);
-        if let Some(index) = self
-            .messages
-            .iter()
-            .position(|message| message.id == parent_id)
-        {
+        if let Some(index) = self.tool_owner_index(&id) {
             if let (Some(viewport), Some(key)) = (
                 self.timeline_viewport_rect,
                 TimelineViewAnchorKey::for_source(&self.messages, index),
@@ -1294,7 +1357,9 @@ impl NeoismAgentPane {
         } else {
             self.invalidate_timeline_layout();
         }
-        if self.tool_motion.is_enabled() {
+        if is_diff_file {
+            self.tool_expand_anims.remove(&id);
+        } else if self.tool_motion.is_enabled() {
             self.tool_expand_anims.insert(
                 id,
                 ToolExpandAnimation {
@@ -1368,7 +1433,8 @@ mod bash_diff_toggle_tests {
         assert!(pane.tool_expanded("bash-diff:0"));
         assert!(pane.tool_expanded("bash-diff"));
         assert_eq!(
-            pane.pending_timeline_anchor.map(|a| (a.content_y, a.screen_y)),
+            pane.pending_timeline_anchor
+                .map(|a| (a.content_y, a.screen_y)),
             anchor.map(|a| (a.content_y, a.screen_y)),
         );
         assert!(!pane.tool_expand_anims.contains_key("bash-diff:0"));

@@ -745,6 +745,44 @@ fn servers_mode_filters_and_emits_connection_actions() {
 }
 
 #[test]
+fn servers_refresh_inserts_host_without_resetting_query_or_selection() {
+    let local = PaletteServerEntry {
+        id: "local".into(),
+        name: "Local Server".into(),
+        address: "local daemon".into(),
+        local: true,
+        temporary: false,
+        hosted: false,
+        status: crate::panels::ServerIndicatorStatus::Online,
+        active: true,
+    };
+    let host = PaletteServerEntry {
+        id: "fast-host".into(),
+        name: "Fast Server".into(),
+        address: "https://host.example".into(),
+        local: false,
+        temporary: true,
+        hosted: true,
+        status: crate::panels::ServerIndicatorStatus::Connecting,
+        active: false,
+    };
+    let mut palette = CommandPalette::new();
+    palette.enter_servers_mode(vec![local.clone()]);
+    palette.set_query("server".into());
+    assert!(palette.refresh_servers(vec![host.clone(), local]));
+    assert_eq!(palette.query, "server");
+    assert_eq!(palette.filtered_rows().len(), 2);
+    assert_eq!(
+        palette.get_selected_action(),
+        Some(PaletteAction::SelectServer { id: "local".into() })
+    );
+    assert!(palette.server_is_temporary("fast-host"));
+    palette.enabled = false;
+    assert!(!palette.refresh_servers(vec![host]));
+    assert!(!palette.enabled);
+}
+
+#[test]
 fn servers_picker_has_one_unified_add_action() {
     let mut palette = CommandPalette::new();
     palette.enter_servers_mode(Vec::new());

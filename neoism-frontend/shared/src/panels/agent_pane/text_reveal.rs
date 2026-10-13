@@ -190,6 +190,21 @@ impl TextRevealState {
         // A new frame will re-register the still-visible, identical live rows.
         self.visible_until.set(None);
     }
+    /// Reconcile separate footer identities against status, not assistant prose.
+    pub fn reconcile_history_with_footers<'a>(
+        &mut self,
+        rows: impl Iterator<Item = (&'a str, &'a str, Option<&'a str>)>,
+    ) {
+        let mut sources = HashMap::new();
+        for (id, body, footer) in rows {
+            sources.insert(id.to_owned(), body);
+            if let Some(footer) = footer {
+                sources.insert(super::response_footer::key(id), footer.trim());
+            }
+        }
+        self.reconcile_history(sources.iter().map(|(id, text)| (id.as_str(), *text)));
+    }
+
     pub fn pending(&mut self, id: &str) -> Vec<SourceUpdate> {
         self.prune(Instant::now());
         self.bodies

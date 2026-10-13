@@ -138,6 +138,8 @@ pub struct NeoismAgentMessage {
     /// seam in the shared `api_mapping::part_block` for the multiplayer path.
     pub author: Option<String>,
     pub images: Vec<neoism_ui::panels::agent_pane::state::NeoismAgentImage>,
+    pub composition_children: Vec<neoism_ui::panels::agent_pane::state::NeoismAgentMessage>,
+    pub composition_child: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -226,6 +228,7 @@ pub struct TimelineMeasureKey {
     detail: u64,
     images: u64,
     selected_tool_group_child: u64,
+    composition_children: u64,
 }
 
 pub(crate) type TimelineLayoutCache =
@@ -551,6 +554,8 @@ impl NeoismAgentMessage {
             usage: None,
             author: None,
             images: Vec::new(),
+            composition_children: Vec::new(),
+            composition_child: false,
         }
     }
 }
@@ -868,6 +873,7 @@ impl Default for NeoismWordmarkState {
 }
 
 pub struct NeoismAgentPane {
+    footer_growth: neoism_ui::panels::agent_pane::response_footer::Growth,
     tool_motion: neoism_ui::panels::agent_pane::tool_motion::ToolMotionState,
     pub(crate) text_reveal: neoism_ui::panels::agent_pane::text_reveal::TextRevealState,
     pub(super) input: String,
@@ -1410,6 +1416,7 @@ impl Default for NeoismAgentPane {
             timeline_scroll_stop_px_s: Self::TIMELINE_TRACKPAD_STOP_PX_S,
             timeline_measure_cache: RefCell::new(HashMap::new()),
             text_reveal: Default::default(),
+            footer_growth: Default::default(),
             tool_motion: Default::default(),
             markdown_blocks_cache: RefCell::new(HashMap::new()),
             markdown_blocks_tick: std::cell::Cell::new(0),
@@ -2349,3 +2356,5 @@ fn ease_out_cubic(t: f32) -> f32 {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod footer_tests;

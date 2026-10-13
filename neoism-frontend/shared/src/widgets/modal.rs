@@ -43,6 +43,7 @@ const ORDER: u8 = 24;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ModalAction {
     Close,
+    CopyInvite { url: String },
     UpdateNeoism {
         version: String,
     },
@@ -477,6 +478,7 @@ struct BodyLine {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ModalHoverTarget {
     Close,
+    Invite,
     Tab(usize),
     Switch,
     Input,
@@ -548,6 +550,8 @@ pub struct UniversalModal {
     active: bool,
     title: String,
     body: String,
+    invite_url: Option<String>,
+    invite_hit_rects: Vec<[f32; 4]>,
     meta: String,
     buttons: Vec<ModalButton>,
     input: Option<ModalInputSpec>,
@@ -658,6 +662,8 @@ impl Default for UniversalModal {
             active: false,
             title: String::new(),
             body: String::new(),
+            invite_url: None,
+            invite_hit_rects: Vec::new(),
             meta: String::new(),
             buttons: Vec::new(),
             input: None,
@@ -755,6 +761,8 @@ impl UniversalModal {
 
     pub fn open(&mut self, spec: ModalSpec) {
         self.active = true;
+        self.invite_url = None;
+        self.invite_hit_rects.clear();
         self.title = spec.title;
         self.body = spec.body;
         self.meta = spec.meta;
@@ -873,6 +881,42 @@ impl UniversalModal {
     /// True when at least one host action is waiting to be drained.
     pub fn has_host_actions(&self) -> bool {
         !self.pending_host_actions.is_empty()
+    }
+
+    /// Dedicated ready dialog: copy the capability URL rather than opening it.
+    pub fn open_fast_server_invite(&mut self, url: String) {
+        self.open(ModalSpec {
+            title: "Fast Server ready".into(),
+            body: format!("Invite a collaborator with this link and your password:\n\n{url}\n\nStop hosting ends this temporary session; project files are kept."),
+            meta: "Click the link to copy the invite".into(),
+            input: None,
+            buttons: vec![ModalButton::new("Copy invite", "Enter", ModalAction::CopyInvite { url: url.clone() }),
+                ModalButton::new("Close", "Esc", ModalAction::Close)],
+            busy: false,
+            blocking: true,
+        });
+        self.invite_url = Some(url);
+    }
+
+    pub fn invite_action_at(&self, x: f32, y: f32) -> Option<ModalAction> {
+        if !self.active || !self.invite_hit_rects.iter().any(|r|
+            x >= r[0] && x <= r[0] + r[2] && y >= r[1] && y <= r[1] + r[3]) {
+            return None;
+        }
+        self.invite_url.clone().map(|url| ModalAction::CopyInvite { url })
+    }
+
+    pub fn mark_invite_copied(&mut self) {
+        self.meta = "Invite copied".into();
+    }
+
+    pub(crate) fn take_invite_copy(&mut self) -> Option<String> {
+        let index = self.pending_host_actions.iter().position(|action|
+            matches!(action, ModalHostAction::Generic { id, .. } if id == "copy-invite"))?;
+        match self.pending_host_actions.remove(index) {
+            ModalHostAction::Generic { value, .. } => Some(value),
+            _ => None,
+        }
     }
 
     pub fn open_message(&mut self, title: impl Into<String>, body: impl Into<String>) {
@@ -1246,6 +1290,7 @@ impl UniversalModal {
             }
             Some(
                 ModalHoverTarget::Close
+                | ModalHoverTarget::Invite
                 | ModalHoverTarget::Tab(_)
                 | ModalHoverTarget::Switch
                 | ModalHoverTarget::Action(_),
@@ -1267,6 +1312,9 @@ impl UniversalModal {
                 && y >= rect[1]
                 && y <= rect[1] + rect[3]
         };
+        if self.invite_action_at(x, y).is_some() {
+            return Some(ModalHoverTarget::Invite);
+        }
         if self.close_rect.is_some_and(contains) {
             return Some(ModalHoverTarget::Close);
         }
@@ -1983,11 +2031,10 @@ impl UniversalModal {
             .filter(|field| !field.label.is_empty())
             .count();
         let description_rows = self
-            .body_lines()
+            .form_description_lines()
             .iter()
             .map(|line| line.row_span)
-            .sum::<usize>()
-            .max(1);
+            .sum::<usize>();
         let description = description_rows as f32 * BODY_LINE_HEIGHT
             + if self.meta.is_empty() { 0.0 } else { 20.0 };
         let switch_height = if self.form_switch.is_some() {
@@ -2339,6 +2386,15 @@ impl UniversalModal {
         }
     }
 
+    /// Whitespace-only form descriptions are absent, not placeholder rows.
+    fn form_description_lines(&self) -> Vec<BodyLine> {
+        if self.body.trim().is_empty() {
+            Vec::new()
+        } else {
+            self.body_lines()
+        }
+    }
+
     fn draw_form_body(
         &mut self,
         sugarloaf: &mut Sugarloaf,
@@ -2349,33 +2405,26 @@ impl UniversalModal {
         let clip = geometry.body;
         let x = clip[0];
         let mut y = clip[1] - self.form_scroll;
-        let lines = self.body_lines();
+        let lines = self.form_description_lines();
         let opts = DrawOpts {
             font_size: BODY_FONT_SIZE * s,
             color: theme.u8(theme.dim),
             clip_rect: Some(clip),
             ..DrawOpts::default()
         };
-        if lines.is_empty() {
-            sugarloaf
-                .text_mut()
-                .draw(x, y, "No details available.", &opts);
-            y += BODY_LINE_HEIGHT * s;
-        } else {
-            for line in lines {
-                // Form descriptions share the same clipped text viewport as fields.
-                let opts = DrawOpts {
-                    bold: line.kind == BodyLineKind::Heading,
-                    ..opts
-                };
-                let text = if line.kind == BodyLineKind::Bullet {
-                    format!("• {}", line.text)
-                } else {
-                    line.text.clone()
-                };
-                sugarloaf.text_mut().draw(x, y, &text, &opts);
-                y += BODY_LINE_HEIGHT * s * line.row_span as f32;
-            }
+        for line in lines {
+            // Form descriptions share the same clipped text viewport as fields.
+            let opts = DrawOpts {
+                bold: line.kind == BodyLineKind::Heading,
+                ..opts
+            };
+            let text = if line.kind == BodyLineKind::Bullet {
+                format!("• {}", line.text)
+            } else {
+                line.text.clone()
+            };
+            sugarloaf.text_mut().draw(x, y, &text, &opts);
+            y += BODY_LINE_HEIGHT * s * line.row_span as f32;
         }
         if !self.meta.is_empty() {
             sugarloaf.text_mut().draw(
@@ -2542,13 +2591,14 @@ impl UniversalModal {
                 )
             })
         });
-        let radius = if server_form {
+        let radius = if server_form || self.invite_url.is_some() {
             12.0 * s
         } else {
             MODAL_CORNER_RADIUS * s
         };
         let (x, y, w, h) = self.modal_rect(window_width, scale_factor);
         let body_lines = self.visible_body_lines();
+        self.invite_hit_rects.clear();
         let text_clip = [
             x + pad,
             y + pad,
@@ -2882,6 +2932,23 @@ impl UniversalModal {
             text_y += BODY_LINE_HEIGHT * s;
         } else {
             for line in body_lines {
+                if self.invite_url.as_deref() == Some(line.text.as_str()) {
+                    let rect = [text_x, text_y, text_w, BODY_LINE_HEIGHT * s];
+                    self.invite_hit_rects.push(rect);
+                    let hover = self.hover_intensity(ModalHoverTarget::Invite);
+                    if hover > 0.0 {
+                        sugarloaf.rounded_rect(None, rect[0], rect[1], rect[2], rect[3],
+                            theme.f32_alpha(theme.hover, hover), DEPTH_ELEMENT, 4.0 * s, ORDER);
+                    }
+                    let opts = DrawOpts { color: theme.u8(theme.accent), ..body_opts.clone() };
+                    let label = truncate_to_fit(&line.text, text_w, sugarloaf, &opts);
+                    sugarloaf.text_mut().draw(text_x, text_y, &label, &opts);
+                    let width = sugarloaf.text_mut().measure(&label, &opts);
+                    sugarloaf.rect(None, text_x, text_y + BODY_FONT_SIZE * s + 2.0 * s,
+                        width, s, theme.f32_alpha(theme.accent, 0.5), DEPTH_ELEMENT, ORDER);
+                    text_y += BODY_LINE_HEIGHT * s;
+                    continue;
+                }
                 self.draw_body_line(
                     sugarloaf, theme, &line, text_x, text_y, text_w, body_clip,
                 );
@@ -3291,7 +3358,7 @@ impl UniversalModal {
             }
         }
 
-        if !server_form {
+        if !server_form && self.invite_url.is_none() {
             sugarloaf.rect(
                 None,
                 x,
@@ -3765,6 +3832,55 @@ mod tests {
     }
 
     #[test]
+    fn empty_form_description_has_no_rows_or_reserved_space() {
+        for scale in [0.75, 1.0, 2.0, 3.0] {
+            let mut modal = UniversalModal::new();
+            modal.set_scale(scale);
+            modal.viewport_height = 2000.0;
+            let mut spec = long_scroll_form();
+            spec.fields.truncate(2);
+            modal.open_form(spec);
+            let empty = modal.form_geometry(2400.0, 1.0).unwrap();
+            assert!(modal.form_description_lines().is_empty());
+            assert_eq!(empty.fields_start, 0.0);
+
+            modal.set_form_description(" \n\t\n ");
+            let whitespace = modal.form_geometry(2400.0, 1.0).unwrap();
+            assert!(modal.form_description_lines().is_empty());
+            assert_eq!(whitespace.fields_start, 0.0);
+            assert_eq!(whitespace.panel, empty.panel);
+            assert_eq!(whitespace.content_height, empty.content_height);
+
+            modal.set_form_description("First line\nSecond line");
+            let described = modal.form_geometry(2400.0, 1.0).unwrap();
+            let description_height = 2.0 * BODY_LINE_HEIGHT * scale;
+            assert_eq!(described.fields_start, description_height);
+            assert!((described.panel[3] - empty.panel[3] - description_height).abs() < 0.01);
+
+            modal.set_form_description("");
+            let cleared = modal.form_geometry(2400.0, 1.0).unwrap();
+            assert_eq!(cleared.fields_start, 0.0);
+            assert_eq!(cleared.panel, empty.panel);
+        }
+    }
+
+    #[test]
+    fn empty_form_description_preserves_meta_and_message_fallback() {
+        let mut modal = UniversalModal::new();
+        modal.open_form(long_scroll_form());
+        modal.meta = "Status remains visible".into();
+        let geometry = modal.form_geometry(1200.0, 1.0).unwrap();
+        assert!(modal.form_description_lines().is_empty());
+        assert_eq!(geometry.fields_start, 20.0 * geometry.scale);
+
+        modal.open_message("Message", "");
+        assert!(modal.form.is_none());
+        assert!(modal.visible_body_lines().is_empty());
+        // Generic message rendering still reserves a row for its fallback text.
+        assert_eq!(modal.visible_body_line_count(), 1);
+    }
+
+    #[test]
     fn short_form_geometry_bounds_fields_switch_and_full_footer_at_all_scales() {
         for height in [100.0, 150.0, 180.0, 240.0, 320.0, 480.0] {
             for scale in [0.75, 1.0, 2.0, 3.0] {
@@ -4154,6 +4270,36 @@ mod tests {
         ));
         assert_eq!(modal.pointer_kind(), ModalPointerKind::Pointer);
         assert_eq!(modal.selected_index, selected);
+    }
+
+    #[test]
+    fn invite_copies_exact_capability_and_resets_on_generic_open() {
+        let mut modal = UniversalModal::new();
+        let url = "https://example.com/join?token=a%2Bb#invite";
+        modal.open_fast_server_invite(url.into());
+        assert!(modal.is_active() && modal.is_blocking());
+        assert!(matches!(modal.selected_action(), Some(ModalAction::CopyInvite { url: value }) if value == url));
+        assert!(matches!(modal.escape_action(), Some(ModalAction::Close)));
+        modal.invite_hit_rects.push([10.0, 20.0, 100.0, 24.0]);
+        assert!(matches!(modal.invite_action_at(20.0, 30.0), Some(ModalAction::CopyInvite { url: value }) if value == url));
+        assert!(modal.invite_action_at(0.0, 0.0).is_none());
+        modal.mark_invite_copied();
+        assert_eq!(modal.meta, "Invite copied");
+        modal.close();
+        assert!(modal.invite_action_at(20.0, 30.0).is_none());
+        modal.open_message("Other", "Details");
+        assert!(modal.invite_url.is_none());
+        assert!(modal.invite_hit_rects.is_empty());
+    }
+
+    #[test]
+    fn invite_copy_queue_preserves_other_host_actions() {
+        let mut modal = UniversalModal::new();
+        modal.queue_host_action(ModalHostAction::Generic { id: "other".into(), value: "keep".into() });
+        modal.queue_host_action(ModalHostAction::Generic { id: "copy-invite".into(), value: "exact-url".into() });
+        assert_eq!(modal.take_invite_copy().as_deref(), Some("exact-url"));
+        assert!(modal.take_invite_copy().is_none());
+        assert_eq!(modal.pending_host_actions.len(), 1);
     }
 
     #[test]

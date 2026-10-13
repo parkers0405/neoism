@@ -184,6 +184,50 @@ fn tall_table_scrollbar_sticks_to_the_visible_bottom_above_composer() {
 }
 
 #[test]
+fn code_and_diff_scrollbars_clear_the_last_row() {
+    use crate::panels::agent_pane::view::tool_message::diff_body_height;
+    use crate::widgets::diff_card;
+
+    for s in [0.75, 1.0, 1.5, 2.0] {
+        for rows in [1, 24, 120] {
+            let code_h = (MARKDOWN_CODE_BODY_TOP_PAD
+                + MARKDOWN_CODE_BODY_BOTTOM_PAD
+                + rows as f32 * MARKDOWN_CODE_LINE_H)
+                * s;
+            let code_text_bottom = (MARKDOWN_CODE_BODY_TOP_PAD
+                + (rows - 1) as f32 * MARKDOWN_CODE_LINE_H
+                + 12.5)
+                * s;
+            let diff_h = diff_body_height(rows, s);
+            let diff_text_bottom = (diff_card::BODY_TOP_PAD
+                + (rows - 1) as f32 * diff_card::LINE_HEIGHT
+                + (diff_card::LINE_HEIGHT + diff_card::FONT_SIZE) * 0.5)
+                * s;
+            for (height, text_bottom) in
+                [(code_h, code_text_bottom), (diff_h, diff_text_bottom)]
+            {
+                let track = sticky_markdown_horizontal_scrollbar_track(
+                    [0.0, 0.0, 300.0 * s, height],
+                    0.0,
+                    300.0 * s,
+                    s,
+                )
+                .unwrap();
+                let geometry = markdown_horizontal_scrollbar_geometry(
+                    track,
+                    300.0 * s,
+                    600.0 * s,
+                    0.0,
+                    s,
+                )
+                .unwrap();
+                assert!(geometry.rail[1] >= text_bottom + 2.0 * s);
+            }
+        }
+    }
+}
+
+#[test]
 fn markdown_scrollbar_geometry_exposes_a_full_drag_target() {
     let geometry = markdown_horizontal_scrollbar_geometry(
         [30.0, 484.0, 580.0, 16.0],

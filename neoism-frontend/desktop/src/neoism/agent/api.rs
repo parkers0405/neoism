@@ -2719,6 +2719,8 @@ impl From<neoism_ui::panels::agent_pane::state::NeoismAgentMessage>
         // resolved it from info.author / part.author, so just keep it.
         out.author = message.author;
         out.images = message.images;
+        out.composition_children = message.composition_children;
+        out.composition_child = message.composition_child;
         out
     }
 }

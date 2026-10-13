@@ -151,7 +151,7 @@ impl NeoismAgentPane {
                 ) {
                     0
                 } else {
-                    hash_value(&message.detail)
+                    hash_value(&(&message.detail, message.composition_fingerprint()))
                 },
             images: hash_value(&message.images),
             selected_tool_group_child: 0,

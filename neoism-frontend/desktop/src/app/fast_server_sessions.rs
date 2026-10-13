@@ -8,6 +8,32 @@ pub(super) struct PendingFastHost {
     pub result: Result<crate::fast_servers::FastHost, String>,
 }
 
+fn open_fast_server_message(
+    palette: &mut neoism_ui::panels::command_palette::CommandPalette,
+    modal: &mut neoism_ui::widgets::modal::UniversalModal,
+    title: &str,
+    body: impl Into<String>,
+) {
+    // Closing through the palette API drops its cursor and drag state too.
+    palette.set_enabled(false);
+    if title == "Fast Server ready" {
+        modal.open_fast_server_invite(body.into());
+    } else {
+        modal.open_message(title, body);
+    }
+}
+
+fn validate_fast_join_dial(join: &crate::fast_servers::FastJoin) -> Result<(), String> {
+    if join
+        .token
+        .as_deref()
+        .is_none_or(|token| token.trim().is_empty())
+    {
+        return Err("Fast Join requires a password or an invite with an access code. Ask the host for the password or complete invite link.".into());
+    }
+    Ok(())
+}
+
 fn competing_selection(
     target: Option<(&str, Option<&str>, Option<&str>)>,
     endpoint: &str,
@@ -21,7 +47,70 @@ fn competing_selection(
 
 #[cfg(test)]
 mod selection_tests {
-    use super::competing_selection;
+    use super::{competing_selection, open_fast_server_message};
+
+    #[test]
+    fn fast_join_submission_requires_auth_and_preserves_password_bytes() {
+        let bare = "https://team.example/";
+        let normalize = |target: &str, password: Option<String>| {
+            crate::fast_servers::normalize_fast_join(
+                target.into(),
+                password.filter(|value| !value.trim().is_empty()),
+            )
+            .unwrap()
+        };
+        for password in [None, Some(String::new()), Some(" \t ".into())] {
+            let join = normalize(bare, password);
+            // Metadata is available for owned/adopted workspace lookup even
+            // without invite auth; only a subsequent dial is rejected.
+            assert_eq!(join.endpoint, "wss://team.example/session");
+            assert!(join.token.is_none());
+            let error = super::validate_fast_join_dial(&join)
+                .expect_err("missing authentication must fail before dialing");
+            assert!(error.contains("password or an invite"));
+        }
+        let password = "  actual secret  ";
+        let join = normalize(bare, Some(password.into()));
+        assert_eq!(join.token.as_deref(), Some(password));
+        super::validate_fast_join_dial(&join).unwrap();
+        let capability = "a".repeat(64);
+        let invite = format!("{bare}#neoism-fast={capability}");
+        for password in [None, Some("  ".into())] {
+            let join = normalize(&invite, password);
+            assert_eq!(join.token.as_deref(), Some(capability.as_str()));
+            super::validate_fast_join_dial(&join).unwrap();
+        }
+        // Defense in depth: a normalized blank token cannot authorize a dial.
+        let join =
+            crate::fast_servers::normalize_fast_join(bare.into(), Some("  ".into()))
+                .unwrap();
+        assert!(super::validate_fast_join_dial(&join).is_err());
+        // Identity comparisons intentionally still accept public URLs.
+        assert!(crate::fast_servers::normalize_fast_join(bare.into(), None).is_ok());
+    }
+
+    #[test]
+    fn fast_server_dialogs_close_an_open_servers_picker() {
+        use neoism_ui::panels::command_palette::CommandPalette;
+        use neoism_ui::widgets::modal::UniversalModal;
+
+        let mut palette = CommandPalette::new();
+        let mut modal = UniversalModal::new();
+        for title in ["Fast Server ready", "Fast Server failed"] {
+            palette.enter_servers_mode(Vec::new());
+            assert!(palette.is_enabled());
+            open_fast_server_message(&mut palette, &mut modal, title, "Details");
+            assert!(!palette.is_enabled());
+            assert!(modal.is_active());
+            assert!(modal.is_blocking());
+            if title == "Fast Server ready" {
+                assert!(
+                    matches!(modal.selected_action(), Some(neoism_ui::widgets::modal::ModalAction::CopyInvite { url }) if url == "Details")
+                );
+            }
+            modal.close();
+        }
+    }
     #[test]
     fn focus_supersedes_competitor_but_preserves_matching_restoration() {
         let endpoint = "wss://a.example/session";
@@ -55,6 +144,20 @@ mod selection_tests {
 }
 
 impl Application<'_> {
+    pub(in crate::app) fn finish_fast_host_progress(&mut self, window_id: WindowId) {
+        if let Some(handle) = self.fast_host_pending.remove(&window_id) {
+            if let Some(route) = self.router.routes.get_mut(&window_id) {
+                route
+                    .window
+                    .screen
+                    .renderer
+                    .notifications
+                    .finish_progress(handle);
+                route.request_redraw();
+            }
+        }
+    }
+
     /// Focus an adopted workspace and supersede a competing selection even if
     /// the tab is already current (Screen then emits no peer-switch request).
     /// Restore ONLY from its known active/parked transport, not invite or saved
@@ -134,6 +237,10 @@ impl Application<'_> {
         password: Option<String>,
     ) {
         if !host {
+            // Normalize metadata before reuse lookup. Blank input is absence,
+            // not a replacement for an invite capability; preserve all bytes
+            // of a nonblank password.
+            let password = password.filter(|value| !value.trim().is_empty());
             let join = match crate::fast_servers::normalize_fast_join(target, password) {
                 Ok(join) => join,
                 Err(error) => {
@@ -173,6 +280,13 @@ impl Application<'_> {
                         .into(),
                 );
                 self.invite_join_failed(window_id, &join.endpoint);
+                return;
+            }
+            // Only a real dial needs invite authentication. Workspace focus
+            // above restores exclusively from its authoritative live transport.
+            if let Err(error) = validate_fast_join_dial(&join) {
+                self.invite_join_failed(window_id, &join.endpoint);
+                self.fast_server_error(window_id, error);
                 return;
             }
             // Reuse a temporary entry on retry/reattach, but NEVER fetch a
@@ -217,29 +331,52 @@ impl Application<'_> {
             }
             return;
         }
-        if !self.fast_host_pending.insert(window_id) {
+        if let Err(error) =
+            crate::fast_servers::validate_host_password(password.as_deref())
+        {
+            self.fast_server_error(window_id, error);
+            return;
+        }
+        if self.fast_host_pending.contains_key(&window_id) {
             self.fast_server_error(
                 window_id,
                 "A Fast Server is already starting in this window".into(),
             );
             return;
         }
-        if let Some(route) = self.router.routes.get_mut(&window_id) {
-            route
-                .window
-                .screen
-                .renderer
-                .notifications
-                .push("Starting Fast Server...", NotificationLevel::Info);
-            route.request_redraw();
-        }
+        let Some(route) = self.router.routes.get_mut(&window_id) else {
+            return;
+        };
+        let progress = route
+            .window
+            .screen
+            .renderer
+            .notifications
+            .start_progress("Starting Fast Server...");
+        self.fast_host_pending.insert(window_id, progress);
+        route.request_redraw();
+        let agent_server = crate::agent_server::configured_server();
         let tx = self.fast_host_tx.clone();
         let proxy = self.event_proxy.clone();
         if let Err(error) = std::thread::Builder::new()
             .name("neoism-fast-host-start".into())
             .spawn(move || {
-                let result =
-                    crate::fast_servers::create_fast_server(target, name, password);
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    if !crate::agent_server::is_owned_local_endpoint(&agent_server) {
+                        Err("Fast Host requires the local Agent service for this computer".into())
+                    } else {
+                        crate::agent_server::ensure_started_for_request(&agent_server)
+                            .and_then(|_| {
+                                crate::fast_servers::create_fast_server(
+                                    target,
+                                    name,
+                                    password,
+                                    agent_server,
+                                )
+                            })
+                    }
+                }))
+                .unwrap_or_else(|_| Err("Fast Host startup worker panicked".into()));
                 let _ = tx.send(PendingFastHost { window_id, result });
                 proxy.send_event(
                     neoism_backend::event::RioEvent::Render.into(),
@@ -247,7 +384,7 @@ impl Application<'_> {
                 );
             })
         {
-            self.fast_host_pending.remove(&window_id);
+            self.finish_fast_host_progress(window_id);
             self.fast_server_error(window_id, error.to_string());
         }
     }
@@ -255,7 +392,7 @@ impl Application<'_> {
     pub(super) fn drain_fast_host_results(&mut self) {
         while let Ok(PendingFastHost { window_id, result }) = self.fast_host_rx.try_recv()
         {
-            self.fast_host_pending.remove(&window_id);
+            self.finish_fast_host_progress(window_id);
             let host = match result {
                 Ok(host) => host,
                 Err(error) => {
@@ -287,10 +424,17 @@ impl Application<'_> {
                 Some(token),
                 Some(server.id),
             );
+            let windows = self.router.routes.keys().copied().collect::<Vec<_>>();
+            for window in windows {
+                self.update_server_manager(window, false);
+            }
             if let Some(route) = self.router.routes.get_mut(&window_id) {
-                route.window.screen.renderer.modal.open_message(
+                let renderer = &mut route.window.screen.renderer;
+                open_fast_server_message(
+                    &mut renderer.command_palette,
+                    &mut renderer.modal,
                     "Fast Server ready",
-                    format!("Invite a collaborator with this link and your password:\n\n{public_url}\n\nUse Copy invite in Servers to copy the link. Stop hosting ends this temporary session; project files are kept."),
+                    public_url,
                 );
                 route.request_redraw();
             }
@@ -409,12 +553,13 @@ impl Application<'_> {
 
     pub(super) fn fast_server_error(&mut self, window_id: WindowId, error: String) {
         if let Some(route) = self.router.routes.get_mut(&window_id) {
-            route
-                .window
-                .screen
-                .renderer
-                .notifications
-                .push(error, NotificationLevel::Error);
+            let renderer = &mut route.window.screen.renderer;
+            open_fast_server_message(
+                &mut renderer.command_palette,
+                &mut renderer.modal,
+                "Fast Server failed",
+                error,
+            );
             route.request_redraw();
         }
     }

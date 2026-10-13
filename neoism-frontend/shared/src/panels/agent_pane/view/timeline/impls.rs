@@ -79,6 +79,8 @@ impl AgentTimelineMessage for NeoismAgentMessage {
             status,
             tool: "tool_group".to_string(),
             tool_batch_id: None,
+            composition_children: Vec::new(),
+            composition_child: false,
             output_kind: NeoismAgentOutputKind::Text,
             lang: String::new(),
             line_offset: None,
@@ -141,13 +143,15 @@ impl AgentTimelinePane for NeoismAgentPane {
         content_height_px: f32,
         viewport_height_px: f32,
         live_growth_px: f32,
+        scale: f32,
     ) {
-        NeoismAgentPane::set_timeline_metrics_with_live_growth(
+        NeoismAgentPane::set_timeline_metrics_with_live_growth_scaled(
             self,
             viewport_rect,
             content_height_px,
             viewport_height_px,
             Some(live_growth_px),
+            scale,
         );
     }
 

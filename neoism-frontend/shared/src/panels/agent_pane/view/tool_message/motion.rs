@@ -107,7 +107,7 @@ pub(super) fn visible_ink(rect: [f32; 4], clip: [f32; 4], cuts: &[[f32; 4]]) -> 
 
 /// A transparent first frame still owns its fade's next frame. Geometry, not
 /// current alpha, decides whether that future ink can be seen.
-pub(super) fn active_visible(
+pub(in crate::panels::agent_pane::view) fn active_visible(
     sample: crate::panels::agent_pane::tool_motion::ToolMotionSample,
     rect: [f32; 4],
     clip: [f32; 4],
@@ -122,7 +122,7 @@ pub(super) fn active_visible(
 /// Centered icons can have substantial empty padding in their layout slot.
 /// Use emitted glyph bounds (even transparent glyphs), not that slot, to avoid
 /// owning a deadline when only blank header space is uncovered.
-pub(super) fn active_glyphs(
+pub(in crate::panels::agent_pane::view) fn active_glyphs(
     sample: crate::panels::agent_pane::tool_motion::ToolMotionSample,
     sugarloaf: &mut Sugarloaf,
     first: usize,

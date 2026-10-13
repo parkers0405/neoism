@@ -557,6 +557,8 @@ fn agent_message_new(
         status: String::new(),
         tool: String::new(),
         tool_batch_id: None,
+            composition_children: Vec::new(),
+            composition_child: false,
         output_kind: NeoismAgentOutputKind::Text,
         lang: String::new(),
         line_offset: None,
@@ -2777,8 +2779,16 @@ fn tool_block(part: &Value) -> NeoismAgentMessage {
             .and_then(Value::as_str)
             .filter(|id| !id.trim().is_empty())
             .map(str::to_owned);
+        message.composition_children = composition::children(part);
         return message;
     }
+    ordinary_tool_block(tool, state, part.get("metadata"))
+}
+
+/// Shared ordinary mapper for provider tools and UI-only audited compose calls.
+fn ordinary_tool_block(tool: &str, state: &Value, metadata: Option<&Value>) -> NeoismAgentMessage {
+    let status = state.get("status").and_then(Value::as_str).unwrap_or("pending");
+    let display_status = task_runtime_status(tool, state).unwrap_or(status);
     let mut todos = if is_todo_tool(tool) {
         todos_from_state(state)
     } else {
@@ -2786,7 +2796,7 @@ fn tool_block(part: &Value) -> NeoismAgentMessage {
     };
     let terminal_output = (status == "running")
         .then(|| {
-            part.get("metadata")
+            metadata
                 .and_then(|metadata| metadata.get("terminalOutput"))
                 .and_then(Value::as_str)
                 .filter(|output| !output.is_empty())
@@ -2816,11 +2826,11 @@ fn tool_block(part: &Value) -> NeoismAgentMessage {
     }
     // Explicit identity/discovery/fallback branch: humanized labels have no
     // parentheses, and must never acquire a path from tool output.
-    let mcp_title = mcp_tool_title(tool, state, part.get("metadata"));
+    let mcp_title = mcp_tool_title(tool, state, metadata);
     let base_title = if let Some(title) = &mcp_title {
         title.clone()
     } else if tool == "task" {
-        task_tool_title(state, part.get("metadata"))
+        task_tool_title(state, metadata)
     } else {
         tool_title(tool, state)
     };
@@ -2854,8 +2864,7 @@ fn tool_block(part: &Value) -> NeoismAgentMessage {
     message.line_offset = output.line_offset;
     // Only native provider batch provenance is authoritative. Broad external
     // message/turn IDs do not describe a model-response tool-call batch.
-    message.tool_batch_id = part
-        .get("metadata")
+    message.tool_batch_id = metadata
         .and_then(|metadata| metadata.get("toolBatchID"))
         .and_then(Value::as_str)
         .filter(|id| !id.trim().is_empty())

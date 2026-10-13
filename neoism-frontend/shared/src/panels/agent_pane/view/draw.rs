@@ -9,17 +9,8 @@ use crate::panels::agent_pane::selection_model::SelectableCaretStop;
 use crate::primitives::draw_text_with_occlusion;
 
 /// Shared running indicator geometry: eight stepped stops, four white squares.
-pub(crate) const RUNNING_SQUARE_ALPHAS: [f32; 4] = [1.0, 0.65, 0.4, 0.2];
+pub(crate) use crate::render_policy::{RUNNING_SQUARE_ALPHAS, running_square_position};
 
-pub(crate) fn running_square_position(
-    now_seconds: f32,
-    trail: usize,
-    s: f32,
-) -> (f32, f32) {
-    let phase = crate::render_policy::loader_animation_frame(now_seconds).phase;
-    let step = (phase * 8.0).floor() - trail as f32;
-    crate::render_policy::loader_orbit_position(step / 8.0, 3.0 * s)
-}
 
 const TEXT_MEASURE_CACHE_LIMIT: usize = 8192;
 const CARET_STOP_CACHE_LIMIT: usize = 8192;

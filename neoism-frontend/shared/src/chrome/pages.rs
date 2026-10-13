@@ -414,6 +414,10 @@ impl<A: Send + Copy + 'static> Chrome<A> {
     /// closes honestly.
     pub(crate) fn execute_chrome_modal_action(&mut self, action: ModalAction) {
         match action {
+            ModalAction::CopyInvite { url } => {
+                self.modal.queue_host_action(ModalHostAction::Generic { id: "copy-invite".into(), value: url });
+                self.modal.mark_invite_copied();
+            }
             ModalAction::Close => {
                 if self.connection_gate_active {
                     return;
@@ -1022,6 +1026,10 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                 self.modal.close();
                 self.relayout();
             }
+            return;
+        }
+        if let Some(action) = self.modal.invite_action_at(x, y) {
+            self.execute_chrome_modal_action(action);
             return;
         }
         if self.modal.form_switch_hit(x, y) {

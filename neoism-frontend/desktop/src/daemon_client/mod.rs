@@ -55,6 +55,10 @@ pub enum DaemonClientError {
     UnsupportedScheme(String),
     #[error("websocket error: {0}")]
     WebSocket(#[from] tokio_tungstenite::tungstenite::Error),
+    #[error("invalid daemon authorization header")]
+    InvalidAuthorizationHeader,
+    #[error("daemon websocket upgrade rejected (HTTP {0})")]
+    UpgradeRejected(u16),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("json error: {0}")]
@@ -79,6 +83,23 @@ pub enum DaemonEndpoint {
 }
 
 impl DaemonEndpoint {
+    /// Remote ingress may spend five seconds connecting to its private upstream.
+    pub(crate) fn startup_timeout(&self) -> Duration {
+        match self {
+            #[cfg(unix)]
+            Self::Unix { .. } => Duration::from_secs(4),
+            Self::WebSocket { .. } => Duration::from_secs(15),
+        }
+    }
+
+    fn hello_timeout(&self) -> Duration {
+        match self {
+            #[cfg(unix)]
+            Self::Unix { .. } => Duration::from_secs(4),
+            Self::WebSocket { .. } => Duration::from_secs(10),
+        }
+    }
+
     pub fn parse(input: impl AsRef<str>) -> Result<Self> {
         let input = input.as_ref().trim();
         if input.is_empty() {
@@ -157,6 +178,8 @@ impl DaemonEndpoint {
 #[derive(Debug, Clone)]
 pub struct DaemonClientOptions {
     pub endpoint: DaemonEndpoint,
+    /// Sent as a sensitive bearer header on ws/wss upgrades and retained in Hello.
+    /// Unix upgrades continue to use the legacy NEOISM_DAEMON_TOKEN env auth.
     pub token: Option<String>,
     pub client_name: String,
     pub client_id: Uuid,
@@ -186,13 +209,17 @@ pub enum PtyFailureOperation {
 
 impl DaemonClientOptions {
     pub fn new(endpoint: DaemonEndpoint) -> Self {
+        let reconnect = ReconnectBackoff {
+            handshake: endpoint.hello_timeout(),
+            ..ReconnectBackoff::default()
+        };
         Self {
             endpoint,
             token: None,
             client_name: "neoism-desktop".into(),
             client_id: Uuid::nil(),
             since_offset: None,
-            reconnect: ReconnectBackoff::default(),
+            reconnect,
             channel_capacity: 256,
         }
     }
@@ -625,10 +652,40 @@ impl DaemonClientHandle {
     }
 }
 
+/// Only fixed categories/status codes cross the startup boundary: never HTTP
+/// bodies, credentials, endpoint URLs, or the server's arbitrary Hello reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum DaemonStartupFailure {
+    #[error("daemon authentication rejected (HTTP {0})")]
+    AuthenticationRejected(u16),
+    #[error("daemon session unavailable (HTTP 410)")]
+    SessionUnavailable,
+    #[error("invalid daemon authorization header")]
+    InvalidAuthorizationHeader,
+    #[error("daemon authentication rejected")]
+    HelloRejected,
+}
+
+impl DaemonStartupFailure {
+    fn from_error(error: &DaemonClientError) -> Option<Self> {
+        match error {
+            DaemonClientError::UpgradeRejected(status @ (401 | 403)) => {
+                Some(Self::AuthenticationRejected(*status))
+            }
+            DaemonClientError::UpgradeRejected(410) => Some(Self::SessionUnavailable),
+            DaemonClientError::InvalidAuthorizationHeader => {
+                Some(Self::InvalidAuthorizationHeader)
+            }
+            _ => None,
+        }
+    }
+}
+
 pub struct DaemonClient {
     handle: DaemonClientHandle,
     rx: mpsc::Receiver<DaemonServerMessage>,
     status_rx: watch::Receiver<DaemonClientStatus>,
+    startup_failure_rx: watch::Receiver<Option<DaemonStartupFailure>>,
 }
 
 impl DaemonClient {
@@ -647,11 +704,13 @@ impl DaemonClient {
         let last_server_activity_ms = Arc::new(AtomicU64::new(wall_clock_millis()));
         let (recycle_tx, recycle_rx) = watch::channel(0u64);
 
+        let (startup_failure_tx, startup_failure_rx) = watch::channel(None);
         let runner = ClientRunner {
             options,
             out_rx,
             in_tx: in_tx.clone(),
             status_tx,
+            startup_failure_tx,
             generation: Arc::clone(&generation),
             last_server_activity_ms: Arc::clone(&last_server_activity_ms),
             recycle_rx,
@@ -670,6 +729,7 @@ impl DaemonClient {
             },
             rx: in_rx,
             status_rx,
+            startup_failure_rx,
         })
     }
 
@@ -699,6 +759,12 @@ impl DaemonClient {
     #[allow(dead_code)]
     pub fn status_receiver(&self) -> watch::Receiver<DaemonClientStatus> {
         self.status_rx.clone()
+    }
+
+    pub(crate) fn startup_failure_receiver(
+        &self,
+    ) -> watch::Receiver<Option<DaemonStartupFailure>> {
+        self.startup_failure_rx.clone()
     }
 
     pub fn into_channels(
@@ -783,6 +849,7 @@ struct ClientRunner {
     out_rx: mpsc::Receiver<OutboundServiceMessage>,
     in_tx: mpsc::Sender<DaemonServerMessage>,
     status_tx: watch::Sender<DaemonClientStatus>,
+    startup_failure_tx: watch::Sender<Option<DaemonStartupFailure>>,
     generation: Arc<AtomicU64>,
     last_server_activity_ms: Arc<AtomicU64>,
     recycle_rx: watch::Receiver<u64>,
@@ -796,7 +863,7 @@ impl ClientRunner {
         loop {
             let _ = self.status_tx.send(DaemonClientStatus::Connecting);
             let dial = tokio::select! {
-                result = connect_endpoint(&self.options.endpoint) => result,
+                result = connect_endpoint(&self.options.endpoint, self.options.token.as_deref()) => result,
                 changed = self.recycle_rx.changed() => {
                     if changed.is_err() {
                         let _ = self.status_tx.send(DaemonClientStatus::Closed);
@@ -825,6 +892,16 @@ impl ClientRunner {
                 tracing::warn!(target: "neoism::nvim_trace", %err, "[nvim-trace] CLIENT socket loop ended with error");
             }
 
+            if let Err(ref err) = result {
+                if let Some(failure) = DaemonStartupFailure::from_error(err) {
+                    // Publish before Closed so startup never races into a generic
+                    // channel-closed error. Terminal auth/session failures cannot
+                    // recover by replaying the same credentials automatically.
+                    self.startup_failure_tx.send_replace(Some(failure));
+                    let _ = self.status_tx.send(DaemonClientStatus::Closed);
+                    return;
+                }
+            }
             if matches!(result, Err(DaemonClientError::ChannelClosed)) {
                 let _ = self.status_tx.send(DaemonClientStatus::Closed);
                 return;
@@ -1116,23 +1193,18 @@ impl ClientRunner {
             }
         }
         if let DaemonServerMessage::Workspace {
-            message:
-                WorkspaceServerMessage::HelloAck {
-                    accepted, reason, ..
-                },
+            message: WorkspaceServerMessage::HelloAck { accepted, .. },
             ..
         } = &reply
         {
             if *accepted {
                 let _ = self.status_tx.send(DaemonClientStatus::Open);
             } else {
-                let reason = reason
-                    .clone()
-                    .unwrap_or_else(|| "authentication rejected".into());
+                self.startup_failure_tx
+                    .send_replace(Some(DaemonStartupFailure::HelloRejected));
                 tracing::warn!(
                     target: "neoism::desktop_daemon",
-                    %reason,
-                    "daemon HelloAck rejected; stopping automatic reconnect"
+                    "daemon authentication rejected; stopping automatic reconnect"
                 );
                 let _ = self.in_tx.send(reply).await;
                 return Ok(FrameOutcome::HostEnded);
@@ -1232,10 +1304,41 @@ enum SocketConnection {
     Unix(WebSocketStream<UnixStream>),
 }
 
-async fn connect_endpoint(endpoint: &DaemonEndpoint) -> Result<SocketConnection> {
+fn websocket_request(
+    url: &Url,
+    token: Option<&str>,
+) -> Result<tokio_tungstenite::tungstenite::handshake::client::Request> {
+    use tokio_tungstenite::tungstenite::http::{header::AUTHORIZATION, HeaderValue};
+
+    let mut request = url.as_str().into_client_request()?;
+    if let Some(token) = token {
+        // Authenticate the HTTP upgrade (e.g. Fast ingress), not just Hello.
+        // Keep credentials out of the URL and redact the header in Debug output.
+        let mut authorization = HeaderValue::from_str(&format!("Bearer {token}"))
+            .map_err(|_| DaemonClientError::InvalidAuthorizationHeader)?;
+        authorization.set_sensitive(true);
+        request.headers_mut().insert(AUTHORIZATION, authorization);
+    }
+    Ok(request)
+}
+
+async fn connect_endpoint(
+    endpoint: &DaemonEndpoint,
+    token: Option<&str>,
+) -> Result<SocketConnection> {
     match endpoint {
         DaemonEndpoint::WebSocket { url } => {
-            let (stream, _response) = connect_async(url.as_str()).await?;
+            let request = websocket_request(url, token)?;
+            let (stream, _response) = connect_async(request).await.map_err(|err| {
+                // An ingress may echo credentials in its rejection headers/body.
+                // Only expose the status, never the full HTTP response.
+                match err {
+                    tokio_tungstenite::tungstenite::Error::Http(response) => {
+                        DaemonClientError::UpgradeRejected(response.status().as_u16())
+                    }
+                    other => DaemonClientError::WebSocket(other),
+                }
+            })?;
             Ok(SocketConnection::Tcp(stream))
         }
         #[cfg(unix)]
@@ -2104,6 +2207,7 @@ mod tests {
                 out_rx,
                 in_tx,
                 status_tx,
+                startup_failure_tx: watch::channel(None).0,
                 generation,
                 last_server_activity_ms,
                 recycle_rx,
@@ -2122,7 +2226,9 @@ mod tests {
         let stopped = tokio::time::timeout(
             Duration::from_millis(100),
             runner.collect_during_backoff(Duration::from_secs(60), &mut pending),
-        ).await.expect("manual retry must interrupt backoff");
+        )
+        .await
+        .expect("manual retry must interrupt backoff");
         assert!(!stopped);
         assert!(pending.is_empty());
         assert_eq!(*runner.recycle_rx.borrow(), 1);
@@ -2713,6 +2819,433 @@ mod tests {
             pending_nonce = None;
         }
         assert!(pending_nonce.is_none());
+    }
+
+    #[test]
+    fn upgrade_authorization_is_sensitive_and_does_not_mutate_endpoint() {
+        let endpoint =
+            DaemonEndpoint::parse("wss://example.com/session?token=legacy&other=1")
+                .unwrap();
+        let DaemonEndpoint::WebSocket { url } = &endpoint else {
+            panic!("expected websocket endpoint");
+        };
+        let before = endpoint.normalized();
+        let request = websocket_request(url, Some("private-upgrade-token")).unwrap();
+        let header = &request.headers()["authorization"];
+        assert_eq!(header, "Bearer private-upgrade-token");
+        assert!(header.is_sensitive());
+        assert!(!format!("{request:?}").contains("private-upgrade-token"));
+        assert_eq!(request.uri().query(), Some("token=legacy&other=1"));
+        assert_eq!(endpoint.normalized(), before);
+        let anonymous = websocket_request(url, None).unwrap();
+        assert!(!anonymous.headers().contains_key("authorization"));
+        assert_eq!(anonymous.uri(), request.uri());
+    }
+
+    #[tokio::test]
+    async fn upgrade_invalid_authorization_fails_safely_before_dial() {
+        let endpoint = DaemonEndpoint::parse("ws://127.0.0.1:1/session").unwrap();
+        let error =
+            connect_endpoint(&endpoint, Some("private-token\r\nInjected: secret"))
+                .await
+                .err()
+                .expect("invalid header must fail before connecting");
+        assert!(matches!(
+            error,
+            DaemonClientError::InvalidAuthorizationHeader
+        ));
+        assert_eq!(error.to_string(), "invalid daemon authorization header");
+        assert!(!format!("{error:?}").contains("private-token"));
+    }
+
+    #[tokio::test]
+    async fn upgrade_loopback_requires_bearer_and_preserves_hello_identity() {
+        // Exercise the actual runner/dial, including unauthenticated and legacy
+        // query-only endpoints. No process-global auth environment is needed.
+        for (token, query) in [
+            (Some("private-upgrade-token"), ""),
+            (Some("paired-token"), "?token=legacy-query"),
+            (None, ""),
+            (None, "?token=legacy-query"),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let client_id = Uuid::new_v4();
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut ws = tokio_tungstenite::accept_hdr_async(
+                    stream,
+                    |request: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                     response: tokio_tungstenite::tungstenite::handshake::server::Response| {
+                        let expected = token.map(|token| format!("Bearer {token}"));
+                        let actual = request
+                            .headers()
+                            .get("authorization")
+                            .map(|value| value.to_str().unwrap());
+                        if actual != expected.as_deref() {
+                            return Err(tokio_tungstenite::tungstenite::http::Response::builder()
+                                .status(401)
+                                .body(Some("unauthorized".into()))
+                                .unwrap());
+                        }
+                        assert_eq!(request.uri().query(), query.strip_prefix('?'));
+                        Ok(response)
+                    },
+                )
+                .await
+                .unwrap();
+                let frame = ws.next().await.unwrap().unwrap();
+                let hello: serde_json::Value =
+                    serde_json::from_str(frame.to_text().unwrap()).unwrap();
+                let hello = &hello["Workspace"]["message"]["Hello"];
+                assert_eq!(hello["token"], serde_json::json!(token));
+                assert_eq!(hello["client_id"], client_id.to_string());
+                assert_eq!(hello["client_name"], "upgrade-loopback");
+                ws.send(Message::Text(
+                    serde_json::json!({
+                        "WorkspaceReply": {
+                            "request_id": 0,
+                            "message": { "HelloAck": { "accepted": true } }
+                        }
+                    })
+                    .to_string(),
+                ))
+                .await
+                .unwrap();
+                let snapshot = ws.next().await.unwrap().unwrap();
+                assert!(snapshot.to_text().unwrap().contains("RequestFullSnapshot"));
+            });
+            let endpoint =
+                DaemonEndpoint::parse(format!("ws://{address}/session{query}")).unwrap();
+            let mut options = DaemonClientOptions::new(endpoint);
+            options.token = token.map(str::to_owned);
+            options.client_id = client_id;
+            options.client_name = "upgrade-loopback".into();
+            let mut client = DaemonClient::connect_with_options(options).await.unwrap();
+            let reply = tokio::time::timeout(Duration::from_secs(5), client.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(matches!(
+                reply,
+                DaemonServerMessage::Workspace {
+                    message: WorkspaceServerMessage::HelloAck { accepted: true, .. },
+                    ..
+                }
+            ));
+            tokio::time::timeout(Duration::from_secs(5), server)
+                .await
+                .unwrap()
+                .unwrap();
+            drop(client);
+        }
+    }
+
+    #[tokio::test]
+    async fn upgrade_rejection_does_not_echo_credentials() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = DaemonEndpoint::parse(format!(
+            "ws://{}/session",
+            listener.local_addr().unwrap()
+        ))
+        .unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let result = tokio_tungstenite::accept_hdr_async(
+                stream,
+                |request: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                 _response: tokio_tungstenite::tungstenite::handshake::server::Response| {
+                    assert!(!request.headers().contains_key("authorization"));
+                    Err(tokio_tungstenite::tungstenite::http::Response::builder()
+                        .status(401)
+                        .header("x-echo-token", "private-token")
+                        .body(Some("private-token".into()))
+                        .unwrap())
+                },
+            )
+            .await;
+            assert!(result.is_err());
+        });
+        let error = tokio::time::timeout(
+            Duration::from_secs(5),
+            connect_endpoint(&endpoint, None),
+        )
+        .await
+        .unwrap()
+        .err()
+        .unwrap();
+        assert!(matches!(error, DaemonClientError::UpgradeRejected(401)));
+        assert!(!format!("{error:?} {error}").contains("private-token"));
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn upgrade_startup_budgets_allow_private_upstream_deadline() {
+        for url in ["ws://127.0.0.1:7980", "wss://example.com/session"] {
+            let endpoint = DaemonEndpoint::parse(url).unwrap();
+            let options = DaemonClientOptions::new(endpoint.clone());
+            assert_eq!(endpoint.startup_timeout(), Duration::from_secs(15));
+            assert_eq!(options.reconnect.handshake, Duration::from_secs(10));
+            assert!(options.reconnect.handshake > Duration::from_secs(5));
+            assert!(endpoint.startup_timeout() > options.reconnect.handshake);
+        }
+        #[cfg(unix)]
+        {
+            let endpoint = DaemonEndpoint::parse("unix:///tmp/neoism.sock").unwrap();
+            assert_eq!(endpoint.startup_timeout(), Duration::from_secs(4));
+            assert_eq!(
+                DaemonClientOptions::new(endpoint).reconnect.handshake,
+                Duration::from_secs(4)
+            );
+        }
+        for status in [429, 500, 502, 503] {
+            assert_eq!(
+                DaemonStartupFailure::from_error(&DaemonClientError::UpgradeRejected(
+                    status
+                )),
+                None
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn upgrade_delayed_hello_succeeds_beyond_old_four_second_budget() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = DaemonEndpoint::parse(format!(
+            "ws://{}/session",
+            listener.local_addr().unwrap()
+        ))
+        .unwrap();
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let _hello = ws.next().await.unwrap().unwrap();
+            // A real wait exceeds both the old outer and Hello budgets, and the
+            // ingress private-upstream deadline, without pausing Tokio's clock.
+            tokio::time::sleep(Duration::from_millis(5100)).await;
+            ws.send(Message::Text(
+                serde_json::json!({
+                    "WorkspaceReply": { "request_id": 0, "message": {
+                        "HelloAck": { "accepted": true }
+                    }}
+                })
+                .to_string(),
+            ))
+            .await
+            .unwrap();
+            let snapshot = ws.next().await.unwrap().unwrap();
+            assert!(snapshot.to_text().unwrap().contains("RequestFullSnapshot"));
+            let _ = done_rx.await;
+        });
+        let mut client = DaemonClient::connect_with_options(DaemonClientOptions::new(
+            endpoint.clone(),
+        ))
+        .await
+        .unwrap();
+        crate::app::daemon_pump::wait_for_startup(&client, endpoint.startup_timeout())
+            .await
+            .unwrap();
+        assert_eq!(client.status(), DaemonClientStatus::Open);
+        let reply = tokio::time::timeout(Duration::from_secs(1), client.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            reply,
+            DaemonServerMessage::Workspace {
+                message: WorkspaceServerMessage::HelloAck { accepted: true, .. },
+                ..
+            }
+        ));
+        done_tx.send(()).unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn upgrade_terminal_http_failure_is_prompt_sanitized_and_never_retried() {
+        for code in [401, 403, 410] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = DaemonEndpoint::parse(format!(
+                "ws://{}/session",
+                listener.local_addr().unwrap()
+            ))
+            .unwrap();
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let result = tokio_tungstenite::accept_hdr_async(
+                    stream,
+                    move |_request: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                          _response: tokio_tungstenite::tungstenite::handshake::server::Response| {
+                        Err(tokio_tungstenite::tungstenite::http::Response::builder()
+                            .status(code)
+                            .header("x-secret", "private-token")
+                            .body(Some("private-token arbitrary server reason".into()))
+                            .unwrap())
+                    },
+                ).await;
+                assert!(result.is_err());
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(750), listener.accept())
+                        .await
+                        .is_err(),
+                    "terminal upgrade was retried"
+                );
+            });
+            let mut options = DaemonClientOptions::new(endpoint.clone());
+            options.token = Some("private-token".into());
+            let client = DaemonClient::connect_with_options(options).await.unwrap();
+            let error = tokio::time::timeout(
+                Duration::from_secs(1),
+                crate::app::daemon_pump::wait_for_startup(
+                    &client,
+                    endpoint.startup_timeout(),
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap_err();
+            let expected = if code == 410 {
+                "daemon session unavailable (HTTP 410)".to_owned()
+            } else {
+                format!("daemon authentication rejected (HTTP {code})")
+            };
+            assert_eq!(error.to_string(), expected);
+            assert!(!format!("{error:?}").contains("private-token"));
+            assert_eq!(client.status(), DaemonClientStatus::Closed);
+            assert!(!client.handle().request_reconnect());
+            // Keep the live client alive while watching for any second dial.
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn upgrade_runner_invalid_header_is_terminal_and_sanitized() {
+        let endpoint = DaemonEndpoint::parse("ws://127.0.0.1:1/session").unwrap();
+        let mut options = DaemonClientOptions::new(endpoint.clone());
+        options.token = Some("private-token\r\nInjected: secret".into());
+        let client = DaemonClient::connect_with_options(options).await.unwrap();
+        let error = tokio::time::timeout(
+            Duration::from_secs(1),
+            crate::app::daemon_pump::wait_for_startup(
+                &client,
+                endpoint.startup_timeout(),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(error.to_string(), "invalid daemon authorization header");
+        assert_eq!(client.status(), DaemonClientStatus::Closed);
+    }
+
+    #[tokio::test]
+    async fn upgrade_startup_closed_is_explicit_without_consuming_host_ended() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = DaemonEndpoint::parse(format!(
+            "ws://{}/session",
+            listener.local_addr().unwrap()
+        ))
+        .unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let _hello = ws.next().await.unwrap().unwrap();
+            ws.send(Message::Text(
+                serde_json::json!({
+                    "WorkspaceReply": { "request_id": 0, "message": {
+                        "HostEnded": { "reason": "Host stopped sharing" }
+                    }}
+                })
+                .to_string(),
+            ))
+            .await
+            .unwrap();
+        });
+        let mut client = DaemonClient::connect_with_options(DaemonClientOptions::new(
+            endpoint.clone(),
+        ))
+        .await
+        .unwrap();
+        let error = tokio::time::timeout(
+            Duration::from_secs(1),
+            crate::app::daemon_pump::wait_for_startup(
+                &client,
+                endpoint.startup_timeout(),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(error.to_string(), "daemon connection closed during startup");
+        assert_eq!(*client.startup_failure_receiver().borrow(), None);
+        assert!(matches!(
+            client.recv().await.unwrap(),
+            DaemonServerMessage::Workspace {
+                message: WorkspaceServerMessage::HostEnded { .. },
+                ..
+            }
+        ));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn upgrade_rejected_hello_uses_safe_failure_without_consuming_reply() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = DaemonEndpoint::parse(format!(
+            "ws://{}/session",
+            listener.local_addr().unwrap()
+        ))
+        .unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let _hello = ws.next().await.unwrap().unwrap();
+            ws.send(Message::Text(serde_json::json!({
+                "WorkspaceReply": { "request_id": 0, "message": {
+                    "HelloAck": { "accepted": false, "reason": "private-token arbitrary server reason" }
+                }}
+            }).to_string())).await.unwrap();
+            assert!(
+                tokio::time::timeout(Duration::from_millis(750), listener.accept())
+                    .await
+                    .is_err()
+            );
+        });
+        let mut client = DaemonClient::connect_with_options(DaemonClientOptions::new(
+            endpoint.clone(),
+        ))
+        .await
+        .unwrap();
+        let error = tokio::time::timeout(
+            Duration::from_secs(1),
+            crate::app::daemon_pump::wait_for_startup(
+                &client,
+                endpoint.startup_timeout(),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(error.to_string(), "daemon authentication rejected");
+        assert!(!format!("{error:?}").contains("private-token"));
+        // Startup's side channel must leave the original wire reply untouched.
+        let reply = tokio::time::timeout(Duration::from_secs(1), client.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(reply, DaemonServerMessage::Workspace {
+            message: WorkspaceServerMessage::HelloAck { accepted: false, reason: Some(reason), .. }, ..
+        } if reason == "private-token arbitrary server reason"));
+        let mut status = client.status_receiver();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while *status.borrow_and_update() != DaemonClientStatus::Closed {
+                status.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        server.await.unwrap();
     }
 
     #[tokio::test]

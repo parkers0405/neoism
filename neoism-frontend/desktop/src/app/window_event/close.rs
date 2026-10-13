@@ -9,6 +9,7 @@ impl Application<'_> {
         event_loop: &ActiveEventLoop,
         window_id: WindowId,
     ) {
+        self.finish_fast_host_progress(window_id);
         self.router.unbind_native_window(window_id);
         self.router.routes.remove(&window_id);
         self.window_sessions.remove(&window_id);
@@ -46,6 +47,7 @@ impl Application<'_> {
                     },
                 );
             }
+            self.finish_fast_host_progress(window_id);
             if self.router.routes.len() <= 1 {
                 event_loop.exit();
                 return;
@@ -77,6 +79,7 @@ impl Application<'_> {
                     },
                 );
             }
+            self.finish_fast_host_progress(window_id);
             if self.router.routes.len() <= 1 {
                 event_loop.exit();
                 return;

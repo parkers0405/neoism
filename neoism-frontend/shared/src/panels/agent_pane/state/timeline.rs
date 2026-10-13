@@ -300,6 +300,7 @@ impl NeoismAgentPane {
         // Every snapshot is history, including refreshes and subsequent pages.
         // Do not cancel an existing live spring: its final idle lag still settles.
         self.timeline_live_growth = false;
+        self.footer_growth.clear();
         if !self.timeline_history_position_hydrated {
             self.timeline_history_position_hydrated = true;
             self.clear_timeline_motion();
@@ -312,6 +313,7 @@ impl NeoismAgentPane {
         // An explicit gesture owns the current revision; only a subsequent
         // live arrival may start automatic motion again.
         self.timeline_live_growth = false;
+        self.footer_growth.clear();
         if self.timeline_scroll_owner == TimelineScrollOwner::FollowBottom {
             self.timeline_follow_bottom = self.timeline_scroll_px <= 1.0;
             self.clear_timeline_motion();
@@ -326,6 +328,9 @@ impl NeoismAgentPane {
     }
 
     pub(super) fn snap_timeline_follow_if_disabled(&mut self) {
+        if !self.tool_motion.is_enabled() {
+            self.footer_growth.clear();
+        }
         if !self.tool_motion.is_enabled()
             && self.timeline_scroll_owner == TimelineScrollOwner::FollowBottom
         {
@@ -357,10 +362,43 @@ impl NeoismAgentPane {
         viewport_height_px: f32,
         live_growth_px: Option<f32>,
     ) {
+        self.set_timeline_metrics_with_live_growth_scaled(
+            viewport_rect,
+            content_height_px,
+            viewport_height_px,
+            live_growth_px,
+            1.0,
+        );
+    }
+
+    pub fn response_footer_paint_y(
+        &mut self,
+        id: &str,
+        natural_y: f32,
+        sample: crate::panels::agent_pane::tool_motion::ToolMotionSample,
+    ) -> f32 {
+        self.footer_growth.paint_y(
+            id,
+            natural_y,
+            self.timeline_viewport_rect,
+            self.timeline_follow_bottom,
+            sample,
+        )
+    }
+
+    pub fn set_timeline_metrics_with_live_growth_scaled(
+        &mut self,
+        viewport_rect: [f32; 4],
+        content_height_px: f32,
+        viewport_height_px: f32,
+        live_growth_px: Option<f32>,
+        scale: f32,
+    ) {
         // A tool can unhide the whole previous turn. Even a batch of live
         // updates before this paint must not animate that historical disclosure.
         if std::mem::take(&mut self.timeline_trace_reveal_pending) {
             self.timeline_live_growth = false;
+            self.footer_growth.clear();
         }
         let old_scroll_px = self.timeline_scroll_px;
         let old_max_scroll =
@@ -373,7 +411,11 @@ impl NeoismAgentPane {
         }) {
             // Resize/reflow is geometry, not a newly arrived transcript revision.
             self.timeline_live_growth = false;
+            self.footer_growth.clear();
         }
+        // Consume exactly once, even when a reader/anchor/opt-out owns position.
+        // The measured tail bounds this further when no exact footer baseline exists.
+        let footer_credit = self.footer_growth.take(scale, live_growth_px);
         let was_following_bottom = self.timeline_follow_bottom;
         self.snap_timeline_follow_if_disabled();
         self.timeline_viewport_rect = Some(viewport_rect);
@@ -421,7 +463,7 @@ impl NeoismAgentPane {
                 if position_initialized
                     && self.tool_motion.is_enabled()
                     && (self.timeline_scroll_owner == TimelineScrollOwner::FollowBottom
-                        || (self.timeline_live_growth
+                        || ((self.timeline_live_growth || footer_credit > 0.0)
                             && max_scroll > old_max_scroll
                             && live_growth_px.is_none_or(|growth| growth > 0.0)
                             && self.timeline_wheel_target_px.is_none()))
@@ -431,8 +473,11 @@ impl NeoismAgentPane {
                     // History/layout corrections must not add lag to a live
                     // spring, but its existing lag and final shrink still settle.
                     let extent_delta = max_scroll - old_max_scroll;
-                    let follow_delta = if self.timeline_live_growth && extent_delta > 0.0
-                    {
+                    let follow_delta = if footer_credit > 0.0 && extent_delta > 0.0 {
+                        // A footer-only revision cannot charge unrelated row refinement,
+                        // even if an older live-body flag is still latched.
+                        extent_delta.min(footer_credit)
+                    } else if self.timeline_live_growth && extent_delta > 0.0 {
                         extent_delta.min(live_growth_px.unwrap_or(extent_delta).max(0.0))
                     } else {
                         extent_delta.min(0.0)

@@ -1595,6 +1595,12 @@ fn self_update(
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // A dedicated headless host is an argv[1] namespace, not a GUI option.
+    // Parse it before protocol handling, debug isolation, or service bootstrap.
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(result) = service_process::maybe_run_internal_fast_workspace_daemon() {
+        return result;
+    }
     // Protocol invocations are a restricted entry point, not generic CLI
     // requests. Inspect all operands before even internal/terminal dispatch;
     // -e and other greedy options must not swallow a URI into a command.

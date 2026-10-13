@@ -373,7 +373,7 @@ pub struct Application<'a> {
     ended_fast_hosts: HashSet<String>,
     fast_host_tx: mpsc::Sender<fast_server_sessions::PendingFastHost>,
     fast_host_rx: mpsc::Receiver<fast_server_sessions::PendingFastHost>,
-    fast_host_pending: HashSet<WindowId>,
+    fast_host_pending: HashMap<WindowId, neoism_ui::panels::notifications::ProgressHandle>,
     invite_join: invite_join::InviteJoinState,
     invite_activation: HashMap<String, neoism_backend::event::InviteActivationToken>,
     invite_activation_targets: HashMap<WindowId, String>,
@@ -595,7 +595,7 @@ impl Application<'_> {
             ended_fast_hosts: HashSet::new(),
             fast_host_tx,
             fast_host_rx,
-            fast_host_pending: HashSet::new(),
+            fast_host_pending: HashMap::new(),
             invite_join: invite_join::InviteJoinState::default(),
             invite_activation: HashMap::new(),
             invite_activation_targets: HashMap::new(),
@@ -7519,6 +7519,20 @@ impl Application<'_> {
     }
 
     fn open_server_manager(&mut self, window_id: WindowId) {
+        // A submit can synchronously open an error/unsaved-edits dialog before
+        // its queued Servers request reaches here. Never stack the picker.
+        if self
+            .router
+            .routes
+            .get(&window_id)
+            .is_some_and(|route| route.window.screen.renderer.modal.is_active())
+        {
+            return;
+        }
+        self.update_server_manager(window_id, true);
+    }
+
+    fn update_server_manager(&mut self, window_id: WindowId, open: bool) {
         if let Err(error) = self.server_registry.reload() {
             tracing::warn!(%error, "could not refresh shared server registry");
         }
@@ -7602,15 +7616,17 @@ impl Application<'_> {
             }
         }));
         if let Some(route) = self.router.routes.get_mut(&window_id) {
-            route
-                .window
-                .screen
-                .renderer
-                .command_palette
-                .enter_servers_mode(entries);
-            route.request_redraw();
+            let palette = &mut route.window.screen.renderer.command_palette;
+            if open {
+                palette.enter_servers_mode(entries);
+                route.request_redraw();
+            } else if palette.refresh_servers(entries) {
+                route.request_redraw();
+            }
         }
-        self.probe_saved_servers(active_id.as_deref());
+        if open {
+            self.probe_saved_servers(active_id.as_deref());
+        }
     }
 
     fn probe_saved_servers(&mut self, active_id: Option<&str>) {
@@ -7915,6 +7931,7 @@ impl Application<'_> {
             }
             WorkspaceServerMessage::WindowClosed { window_id } if windows_from_home => {
                 if let Some(native_id) = self.router.unbind_daemon_window(window_id) {
+                    self.finish_fast_host_progress(native_id);
                     self.router.routes.remove(&native_id);
                     crate::app::freeze_watchdog::unregister_window(native_id);
                 }
@@ -9217,6 +9234,7 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                             if let Some(route) = self.router.routes.get(&window_id) {
                                 route.window.screen.clear_remote_code_lsp();
                             }
+                            self.finish_fast_host_progress(window_id);
                             self.router.routes.remove(&window_id);
                             crate::app::freeze_watchdog::unregister_window(window_id);
                             // Unschedule pending events.
@@ -9656,6 +9674,7 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                 if let Some(route) = self.router.routes.get(&window_id) {
                     route.window.screen.clear_remote_code_lsp();
                 }
+                self.finish_fast_host_progress(window_id);
                 self.router.routes.remove(&window_id);
                 self.window_sessions.remove(&window_id);
                 crate::app::freeze_watchdog::unregister_window(window_id);

@@ -329,6 +329,7 @@ pub trait AgentTimelinePane: AgentMarkdownPane {
         content_height_px: f32,
         viewport_height_px: f32,
         live_growth_px: f32,
+        scale: f32,
     );
     fn sync_virtual_timeline(
         &mut self,
@@ -610,6 +611,8 @@ macro_rules! neoism_ui_impl_agent_timeline_message {
                     status,
                     tool: "tool_group".to_string(),
                     tool_batch_id: None,
+                    composition_children: Vec::new(),
+                    composition_child: false,
                     output_kind: $output_kind::Text,
                     lang: String::new(),
                     line_offset: None,
@@ -673,13 +676,15 @@ macro_rules! neoism_ui_impl_agent_timeline_pane {
                 content_height_px: f32,
                 viewport_height_px: f32,
                 live_growth_px: f32,
+                scale: f32,
             ) {
-                <$pane>::set_timeline_metrics_with_live_growth(
+                <$pane>::set_timeline_metrics_with_live_growth_scaled(
                     self,
                     viewport_rect,
                     content_height_px,
                     viewport_height_px,
                     Some(live_growth_px),
+                    scale,
                 );
             }
 
@@ -1014,6 +1019,10 @@ mod read_group;
 mod render;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod footer_tests;
+#[cfg(test)]
+mod footer_edge_tests;
 
 pub use read_group::read_tool_group_end;
 

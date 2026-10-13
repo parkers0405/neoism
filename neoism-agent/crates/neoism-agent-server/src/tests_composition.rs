@@ -373,13 +373,30 @@ async fn composition_parent_live_progress_and_local_cancel_clean_permission() {
         let calls = metadata["composition"]["toolCalls"].as_array().unwrap();
         assert_eq!(calls.len(), 2);
         assert_eq!(calls[0]["status"], "completed");
+        assert_eq!(calls[0]["presentation"]["tool"], "read");
+        assert!(calls[0]["presentation"]["output"]
+            .as_str()
+            .unwrap()
+            .contains("before"));
         assert_eq!(calls[1]["status"], "running");
+        assert_eq!(
+            metadata["composition"]["code"],
+            "await tools.neoism.read({filePath:'target.txt'}); return await tools.neoism.edit({filePath:'target.txt',oldString:'before',newString:'after'});"
+        );
+        assert_ne!(
+            metadata["composition"]["code"],
+            serde_json::to_value(&part.state).unwrap()["input"]["code"]
+        );
     }
     cancel.store(true, Ordering::SeqCst);
     let result = tokio::time::timeout(Duration::from_secs(5), task)
         .await
         .unwrap()
         .unwrap();
+    let replay: Value = serde_json::from_str(&result.output).unwrap();
+    assert!(replay.get("code").is_none());
+    assert!(replay.get("toolCalls").is_none());
+    assert!(result.metadata.as_ref().unwrap()["composition"]["code"].is_string());
     assert_eq!(
         result.metadata.as_ref().unwrap()["composition"]["ok"],
         false
@@ -710,6 +727,15 @@ async fn composition_real_mcp_gateway_structured_data_and_error_media() {
         "fixture.echo"
     );
     assert_eq!(metadata["composition"]["toolCalls"][0]["status"], "error");
+    let presentation = &metadata["composition"]["toolCalls"][0]["presentation"];
+    assert_eq!(presentation["tool"], "execute");
+    assert_eq!(presentation["isError"], true);
+    assert_eq!(presentation["metadata"]["mcp"]["client"], "fixture");
+    assert!(presentation["metadata"]["mcp"].get("result").is_none());
+    assert!(presentation["output"]
+        .as_str()
+        .unwrap()
+        .contains("formatted text"));
     assert!(metadata["attachments"][0]["artifactID"].as_str().is_some());
     let started = std::time::Instant::now();
     let interrupted = crate::tool_composition::run_with_limits(&state, &session.id,

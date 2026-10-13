@@ -16,6 +16,19 @@ impl AgentMarkdownPane for NeoismAgentPane {
     ) -> Option<&mut neoism_ui::panels::agent_pane::text_reveal::TextRevealState> {
         Some(&mut self.text_reveal)
     }
+    fn response_footer_motion(
+        &mut self,
+    ) -> Option<&mut neoism_ui::panels::agent_pane::tool_motion::ToolMotionState> {
+        Some(self.tool_motion_state())
+    }
+    fn response_footer_paint_y(
+        &mut self,
+        id: &str,
+        natural_y: f32,
+        sample: neoism_ui::panels::agent_pane::tool_motion::ToolMotionSample,
+    ) -> f32 {
+        NeoismAgentPane::response_footer_paint_y(self, id, natural_y, sample)
+    }
 
     #[cfg(feature = "cef-artifacts")]
     fn html_artifact_height(

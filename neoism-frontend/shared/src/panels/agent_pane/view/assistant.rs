@@ -19,7 +19,8 @@ use crate::primitives::ide_theme::IdeTheme;
 pub(super) const ASSISTANT_TEXT_PAD_LEFT: f32 = 18.0;
 /// Extra room below a settled assistant answer for the
 /// `Agent · Model · Duration` provenance line.
-pub(super) const ASSISTANT_RESPONSE_FOOTER_H: f32 = 28.0;
+pub(super) const ASSISTANT_RESPONSE_FOOTER_H: f32 =
+    crate::panels::agent_pane::response_footer::RESERVED_HEIGHT;
 
 #[allow(clippy::too_many_arguments)]
 pub fn render_assistant_text_with<P: AgentMarkdownPane>(
@@ -95,6 +96,8 @@ pub fn render_assistant_text_with<P: AgentMarkdownPane>(
             x + pad_left,
             y + body_h + 8.0 * s,
             response_footer.trim(),
+            body_id,
+            pane,
             theme,
             s,
             viewport_clip,
@@ -105,53 +108,129 @@ pub fn render_assistant_text_with<P: AgentMarkdownPane>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn render_assistant_response_footer(
+fn render_assistant_response_footer<P: AgentMarkdownPane>(
     sugarloaf: &mut Sugarloaf,
     x: f32,
     y: f32,
     footer: &str,
+    body_id: &str,
+    pane: &mut P,
     theme: &IdeTheme,
     s: f32,
     viewport_clip: [f32; 4],
     occlusion_rects: &[[f32; 4]],
 ) {
-    let (agent, rest) = footer
-        .split_once(" · ")
-        .map(|(agent, rest)| (agent, Some(rest)))
-        .unwrap_or((footer, None));
+    use crate::panels::agent_pane::{response_footer, text_reveal};
+    let key = response_footer::key(body_id);
+    let _reveal = pane.text_reveal_state().and_then(|state| {
+        if !state.has_body(&key) {
+            return None;
+        }
+        for update in state.pending(&key) {
+            let mut projection = text_reveal::Projection::default();
+            projection.push(&update.text, &update.text);
+            state.apply_projection(&key, &projection, update.at);
+        }
+        let mut projection = text_reveal::Projection::default();
+        projection.push(footer, footer);
+        Some(state.paint(&key, 0, std::rc::Rc::new(projection)))
+    });
+    let motion = pane
+        .response_footer_motion()
+        .map(|state| state.sample_group(std::iter::once(key.as_str())))
+        .unwrap_or_default();
+    let natural_y = y;
+    let y = pane.response_footer_paint_y(body_id, natural_y, motion);
+    let first_glyph = sugarloaf.text_mut().instances().len();
+    let (agent, rest) = response_footer::segments(footer);
     let Some(agent_opts) = opts_with_clip(
         DrawOpts {
             font_size: 12.0 * s,
-            color: theme.u8(theme.blue),
+            color: theme.u8_alpha(theme.blue, motion.opacity),
             ..DrawOpts::default()
         },
         viewport_clip,
     ) else {
         return;
     };
-    draw_text_clipped(sugarloaf, x, y, agent, &agent_opts, occlusion_rects);
-    let Some(rest) = rest else {
+    // The first emerging frame can be completely hidden by the composer clip.
+    // Only actual destination text (not the 28px blank slot) owns that next frame.
+    if y > natural_y {
+        let future_ink = [
+            x,
+            natural_y,
+            sugarloaf.text_mut().measure(footer, &agent_opts),
+            agent_opts.font_size,
+        ];
+        if super::tool_message::motion::active_visible(
+            motion,
+            future_ink,
+            viewport_clip,
+            occlusion_rects,
+        ) {
+            if let Some(state) = pane.response_footer_motion() {
+                state.mark_visible(motion);
+            }
+        }
+    }
+    text_reveal::begin_line(footer);
+    let agent_reveals = text_reveal::ranges(agent);
+    super::draw::draw_text_revealed_clipped(
+        sugarloaf,
+        x,
+        y,
+        agent,
+        &agent_opts,
+        occlusion_rects,
+        &agent_reveals,
+    );
+    if super::tool_message::motion::active_glyphs(
+        motion,
+        sugarloaf,
+        first_glyph,
+        viewport_clip,
+        occlusion_rects,
+    ) {
+        if let Some(state) = pane.response_footer_motion() {
+            state.mark_visible(motion);
+        }
+    }
+    let Some((rest, offset)) = rest else {
         return;
     };
     let rest_x = x + sugarloaf.text_mut().measure(agent, &agent_opts);
     let Some(rest_opts) = opts_with_clip(
         DrawOpts {
             font_size: 12.0 * s,
-            color: theme.u8(theme.muted),
+            color: theme.u8_alpha(theme.muted, motion.opacity),
             ..DrawOpts::default()
         },
         viewport_clip,
     ) else {
         return;
     };
-    draw_text_clipped(
+    text_reveal::begin_line_at(footer, offset);
+    let rest_reveals = text_reveal::ranges(rest);
+    super::draw::draw_text_revealed_clipped(
         sugarloaf,
         rest_x,
         y,
-        &format!(" · {rest}"),
+        rest,
         &rest_opts,
         occlusion_rects,
+        &rest_reveals,
     );
+    if super::tool_message::motion::active_glyphs(
+        motion,
+        sugarloaf,
+        first_glyph,
+        viewport_clip,
+        occlusion_rects,
+    ) {
+        if let Some(state) = pane.response_footer_motion() {
+            state.mark_visible(motion);
+        }
+    }
 }
 
 pub fn render_reasoning_message_with<P, M>(

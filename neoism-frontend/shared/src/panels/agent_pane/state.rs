@@ -160,6 +160,10 @@ pub struct NeoismAgentMessage {
     pub tool: String,
     /// Server-issued identity of one model response's tool-call batch.
     pub tool_batch_id: Option<String>,
+    /// UI-only executed calls; never authoritative provider parts.
+    pub composition_children: Vec<NeoismAgentMessage>,
+    /// Explicit compact-by-default context, including native edit calls.
+    pub composition_child: bool,
     pub output_kind: NeoismAgentOutputKind,
     pub lang: String,
     pub line_offset: Option<usize>,
@@ -371,6 +375,15 @@ impl ToolExpandAnimation {
 }
 
 impl NeoismAgentMessage {
+    /// Bounded identity payload; hash all retained UI content without duplicating it in virtual Markdown.
+    pub fn composition_fingerprint(&self) -> u64 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for child in &self.composition_children {
+            (&child.id, &child.title, &child.text, &child.detail, &child.status, &child.tool, &child.lang, child.line_offset, child.composition_child).hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+
     /// The exact body selected by tool rendering, not request metadata.
     pub(crate) fn tool_reveal_body(&self) -> &str {
         if self.kind == NeoismAgentMessageKind::Tool && !self.detail.trim().is_empty() {
@@ -435,6 +448,8 @@ impl NeoismAgentMessage {
             status: String::new(),
             tool: String::new(),
             tool_batch_id: None,
+            composition_children: Vec::new(),
+            composition_child: false,
             output_kind: NeoismAgentOutputKind::Text,
             lang: String::new(),
             line_offset: None,
@@ -584,6 +599,7 @@ impl Default for NeoismWordmarkState {
 }
 
 pub struct NeoismAgentPane {
+    footer_growth: crate::panels::agent_pane::response_footer::Growth,
     tool_motion: crate::panels::agent_pane::tool_motion::ToolMotionState,
     pub(crate) text_reveal: crate::panels::agent_pane::text_reveal::TextRevealState,
     pub(super) input: String,
@@ -976,6 +992,9 @@ fn virtual_agent_markdown(message: &NeoismAgentMessage) -> String {
         }
         out.push_str(message.detail.trim_end());
     }
+    if !message.composition_children.is_empty() {
+        out.push_str(&format!("\ncomposition-content: {:016x}", message.composition_fingerprint()));
+    }
     if out.trim().is_empty() {
         match message.kind {
             NeoismAgentMessageKind::User => "user",
@@ -1101,6 +1120,7 @@ impl Default for NeoismAgentPane {
             timeline_scroll_stop_px_s: Self::TIMELINE_TRACKPAD_STOP_PX_S,
             timeline_measure_cache: RefCell::new(HashMap::new()),
             text_reveal: Default::default(),
+            footer_growth: Default::default(),
             tool_motion: Default::default(),
             markdown_blocks_cache: RefCell::new(HashMap::new()),
             markdown_blocks_tick: Cell::new(0),
@@ -1305,10 +1325,14 @@ impl NeoismAgentPane {
             self.messages = snapshot.messages;
             self.text_reveal.scope(self.session_id.as_deref());
             self.tool_motion.scope(self.session_id.as_deref());
-            self.text_reveal.reconcile_history(
+            self.text_reveal.reconcile_history_with_footers(
                 self.messages
                     .iter()
-                    .map(|m| (m.id.as_str(), m.tool_reveal_body())),
+                    .flat_map(|m| std::iter::once(m).chain(m.composition_children.iter()))
+                    .map(|m| (
+                        m.id.as_str(), m.tool_reveal_body(),
+                        (m.kind == NeoismAgentMessageKind::Assistant).then_some(m.status.as_str()),
+                    )),
             );
             if self.background_tasks_started_at.is_some()
                 || self.running_background_task_count > 0
@@ -2009,18 +2033,66 @@ impl NeoismAgentPane {
         let messages = self.merge_pending_user_prompts(messages);
         let messages = self.preserve_streamed_response_text(messages);
         let messages = self.preserve_background_completion_cards(messages);
+        let footer_only = self.messages.len() == messages.len()
+            && self.messages.iter().zip(&messages).all(|(old, new)| {
+                if old == new {
+                    return true;
+                }
+                let mut same = old.clone();
+                same.status.clone_from(&new.status);
+                old.kind == NeoismAgentMessageKind::Assistant && same == *new
+            });
+        if footer_only && self.messages != messages {
+            self.timeline_live_growth = false;
+        }
         // An echo of already-arrived live text must not consume its pending
         // measurement (the final delta can be followed by idle/history before paint).
-        if !self.timeline_history_position_hydrated || messages != self.messages {
+        let footer_dirty: Vec<usize> = if footer_only {
+            self.messages.iter().zip(&messages).enumerate()
+                .filter(|(_, (old, new))| old != new)
+                .map(|(index, _)| index).collect()
+        } else {
+            Vec::new()
+        };
+        if !self.timeline_history_position_hydrated || (!footer_only && messages != self.messages) {
             self.prepare_timeline_history_position();
+        }
+        self.text_reveal.scope(self.session_id.as_deref());
+        self.tool_motion.scope(self.session_id.as_deref());
+        crate::panels::agent_pane::response_footer::record_refresh(
+            &mut self.text_reveal,
+            &mut self.tool_motion,
+            self.messages.iter()
+                .filter(|m| m.kind == NeoismAgentMessageKind::Assistant)
+                .map(|m| (m.id.as_str(), m.status.as_str())),
+            messages.iter()
+                .filter(|m| m.kind == NeoismAgentMessageKind::Assistant)
+                .map(|m| (m.id.as_str(), m.status.as_str())),
+        );
+        if footer_only {
+            self.footer_growth.record_with_edge(
+                messages.iter().zip(&self.messages)
+                    .filter(|(new, old)| {
+                        old.status.trim().is_empty()
+                            && !new.status.trim().is_empty()
+                            && !new.text.trim().is_empty()
+                    })
+                    .map(|(new, _)| new.id.clone()),
+                self.timeline_follow_bottom && !self.is_subagent_session(),
+                self.timeline_viewport_rect,
+            );
         }
         self.messages = messages;
         self.text_reveal.scope(self.session_id.as_deref());
         self.tool_motion.scope(self.session_id.as_deref());
-        self.text_reveal.reconcile_history(
+        self.text_reveal.reconcile_history_with_footers(
             self.messages
                 .iter()
-                .map(|m| (m.id.as_str(), m.tool_reveal_body())),
+                .flat_map(|m| std::iter::once(m).chain(m.composition_children.iter()))
+                    .map(|m| (
+                        m.id.as_str(), m.tool_reveal_body(),
+                        (m.kind == NeoismAgentMessageKind::Assistant).then_some(m.status.as_str()),
+                    )),
         );
         if let Some((prompt, first_live_id)) = optimistic_trace {
             let end = first_live_id
@@ -2052,7 +2124,13 @@ impl NeoismAgentPane {
             self.refresh_background_task_activity_clock();
         }
         self.rebase_current_turn_trace();
-        self.invalidate_timeline_layout();
+        if footer_only {
+            for index in footer_dirty {
+                self.mark_timeline_message_dirty_at(index);
+            }
+        } else {
+            self.invalidate_timeline_layout();
+        }
         self.clamp_timeline_scroll();
     }
 
@@ -2088,6 +2166,7 @@ impl NeoismAgentPane {
             return;
         }
         self.timeline_live_growth = false;
+        self.footer_growth.clear();
         let previous_height = self.timeline_content_height_px;
         let prepended = messages.len();
         self.messages.splice(0..0, messages);
@@ -2698,6 +2777,12 @@ fn ease_out_cubic(t: f32) -> f32 {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+#[path = "state/footer_tests.rs"]
+mod footer_tests;
+#[cfg(test)]
+#[path = "state/composition_tests.rs"]
+mod composition_tests;
 
 fn slash_options() -> Vec<NeoismAgentPickerOption> {
     crate::panels::agent_pane::command_controller::slash_options()

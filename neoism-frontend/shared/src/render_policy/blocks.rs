@@ -273,9 +273,16 @@ pub fn block_status_glyph(
 // loader code itself.
 // ---------------------------------------------------------------------------
 
-/// Compute the seconds-since-epoch animation phase the renderer threads
-/// into per-frame chrome (block-header loaders, splash ripple). Wraps
-/// at 10,000 so an f32 mantissa keeps sub-millisecond resolution.
+/// Shared agent-sidebar and server-provisioning stepped-square loader.
+pub const RUNNING_SQUARE_ALPHAS: [f32; 4] = [1.0, 0.65, 0.4, 0.2];
+
+pub fn running_square_position(now_seconds: f32, trail: usize, scale: f32) -> (f32, f32) {
+    let phase = loader_animation_frame(now_seconds).phase;
+    let step = (phase * 8.0).floor() - trail as f32;
+    loader_orbit_position(step / 8.0, 3.0 * scale)
+}
+
+/// Compute the wrapped wall-clock phase, preserving f32 sub-millisecond precision.
 pub fn animation_phase_from_unix_secs(unix_seconds: u64, subsec_nanos: u32) -> f32 {
     let nanos = subsec_nanos.min(999_999_999);
     (unix_seconds % 10_000) as f32 + nanos as f32 / 1_000_000_000.0

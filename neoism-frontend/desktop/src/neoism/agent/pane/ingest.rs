@@ -1,3 +1,42 @@
+fn composition_reveal_body(
+    row: &neoism_ui::panels::agent_pane::state::NeoismAgentMessage,
+) -> &str {
+    if row.kind == neoism_ui::panels::agent_pane::state::NeoismAgentMessageKind::Tool
+        && !row.detail.trim().is_empty()
+    {
+        &row.detail
+    } else {
+        &row.text
+    }
+}
+
+fn record_composition_motion(
+    motion: &mut neoism_ui::panels::agent_pane::tool_motion::ToolMotionState,
+    reveal: &mut neoism_ui::panels::agent_pane::text_reveal::TextRevealState,
+    before: &[neoism_ui::panels::agent_pane::state::NeoismAgentMessage],
+    after: &[neoism_ui::panels::agent_pane::state::NeoismAgentMessage],
+) {
+    for child in after {
+        let previous = before.iter().find(|row| row.id == child.id);
+        motion.record(
+            &child.id,
+            previous.map(|row| row.status.as_str()),
+            &child.status,
+        );
+        reveal.record(
+            &child.id,
+            previous.map_or("", composition_reveal_body),
+            composition_reveal_body(child),
+        );
+        record_composition_motion(
+            motion,
+            reveal,
+            previous.map_or(&[], |row| row.composition_children.as_slice()),
+            &child.composition_children,
+        );
+    }
+}
+
 use super::*;
 
 pub(super) fn update_todos_message(
@@ -246,22 +285,61 @@ impl NeoismAgentPane {
                             .map(|(index, _)| index)
                             .collect()
                     };
+                    let footer_only = self.messages.len() == messages.len()
+                        && self.messages.iter().zip(&messages).all(|(old, new)| {
+                            if old == new {
+                                return true;
+                            }
+                            let mut same = old.clone();
+                            same.status.clone_from(&new.status);
+                            old.kind == NeoismAgentMessageKind::Assistant && same == *new
+                        });
+                    if footer_only && !dirty_indices.is_empty() {
+                        self.timeline_live_growth = false;
+                    }
                     // Preserve an unpainted live delta through an identical idle
                     // snapshot; changed transcripts are history, not live arrival.
                     if !self.timeline_history_position_hydrated
-                        || structural
-                        || !dirty_indices.is_empty()
+                        || (!footer_only && (structural || !dirty_indices.is_empty()))
                     {
                         self.prepare_timeline_history_position();
                     }
                     if structural || !dirty_indices.is_empty() {
+                        if footer_only {
+self.footer_growth.record_with_edge(
+                                messages.iter().zip(&self.messages)
+                                    .filter(|(new, old)| {
+                                        old.status.trim().is_empty()
+                                            && !new.status.trim().is_empty()
+                                            && !new.text.trim().is_empty()
+                                    })
+                                    .map(|(new, _)| new.id.clone()),
+                                self.timeline_follow_bottom && !self.is_subagent_session(),
+                                self.timeline_viewport_rect,
+                            );
+                        }
+                        self.text_reveal.scope(self.session_id.as_deref());
+                        self.tool_motion.scope(self.session_id.as_deref());
+                        neoism_ui::panels::agent_pane::response_footer::record_refresh(
+                            &mut self.text_reveal,
+                            &mut self.tool_motion,
+                            self.messages.iter()
+                                .filter(|m| m.kind == NeoismAgentMessageKind::Assistant)
+                                .map(|m| (m.id.as_str(), m.status.as_str())),
+                            messages.iter()
+                                .filter(|m| m.kind == NeoismAgentMessageKind::Assistant)
+                                .map(|m| (m.id.as_str(), m.status.as_str())),
+                        );
                         self.messages = messages;
                         self.text_reveal.scope(self.session_id.as_deref());
                         self.tool_motion.scope(self.session_id.as_deref());
-                        self.text_reveal.reconcile_history(
+                        self.text_reveal.reconcile_history_with_footers(
                             self.messages
                                 .iter()
-                                .map(|m| (m.id.as_str(), m.tool_reveal_body())),
+                                .map(|m| (
+                        m.id.as_str(), m.tool_reveal_body(),
+                        (m.kind == NeoismAgentMessageKind::Assistant).then_some(m.status.as_str()),
+                    )),
                         );
                         if let Some((prompt, first_live_id)) = optimistic_trace {
                             let end = first_live_id
@@ -337,12 +415,56 @@ impl NeoismAgentPane {
                         messages = self.merge_pending_user_prompts(messages);
                         messages = self.preserve_streamed_response_text(messages);
                         let history_changed = messages != self.messages;
+                        let footer_only = self.messages.len() == messages.len()
+                            && self.messages.iter().zip(&messages).all(|(old, new)| {
+                                if old == new {
+                                    return true;
+                                }
+                                let mut same = old.clone();
+                                same.status.clone_from(&new.status);
+                                old.kind == NeoismAgentMessageKind::Assistant && same == *new
+                            });
+                        self.text_reveal.scope(self.session_id.as_deref());
+                        self.tool_motion.scope(self.session_id.as_deref());
+                        neoism_ui::panels::agent_pane::response_footer::record_refresh(
+                            &mut self.text_reveal,
+                            &mut self.tool_motion,
+                            self.messages.iter()
+                                .filter(|m| m.kind == NeoismAgentMessageKind::Assistant)
+                                .map(|m| (m.id.as_str(), m.status.as_str())),
+                            messages.iter()
+                                .filter(|m| m.kind == NeoismAgentMessageKind::Assistant)
+                                .map(|m| (m.id.as_str(), m.status.as_str())),
+                        );
+                        if footer_only {
+self.footer_growth.record_with_edge(
+                                messages.iter().zip(&self.messages)
+                                    .filter(|(new, old)| {
+                                        old.status.trim().is_empty()
+                                            && !new.status.trim().is_empty()
+                                            && !new.text.trim().is_empty()
+                                    })
+                                    .map(|(new, _)| new.id.clone()),
+                                self.timeline_follow_bottom && !self.is_subagent_session(),
+                                self.timeline_viewport_rect,
+                            );
+                        }
+                        if footer_only && history_changed {
+                            self.timeline_live_growth = false;
+                        }
+                        let footer_dirty: Vec<usize> = if footer_only {
+                            self.messages.iter().zip(&messages).enumerate()
+                                .filter(|(_, (old, new))| old != new)
+                                .map(|(index, _)| index).collect()
+                        } else {
+                            Vec::new()
+                        };
                         let merged = merge_session_snapshot(
                             messages,
                             std::mem::take(&mut self.messages),
                             self.timeline_history.oldest_loaded_cursor.is_some(),
                         );
-                        if !self.timeline_history_position_hydrated || history_changed {
+                        if !self.timeline_history_position_hydrated || (!footer_only && history_changed) {
                             self.prepare_timeline_history_position();
                         }
                         self.messages = merged;
@@ -355,7 +477,13 @@ impl NeoismAgentPane {
                             self.timeline_history.oldest_loaded_cursor = oldest_cursor;
                         }
                         self.rebase_current_turn_trace();
-                        self.invalidate_timeline_layout();
+                        if footer_only {
+                            for index in footer_dirty {
+                                self.mark_timeline_message_dirty_at(index);
+                            }
+                        } else {
+                            self.invalidate_timeline_layout();
+                        }
                     } else {
                         let cached = self
                             .session_cache
@@ -2227,10 +2355,13 @@ impl NeoismAgentPane {
                         self.messages = messages;
                         self.text_reveal.scope(self.session_id.as_deref());
                         self.tool_motion.scope(self.session_id.as_deref());
-                        self.text_reveal.reconcile_history(
+                        self.text_reveal.reconcile_history_with_footers(
                             self.messages
                                 .iter()
-                                .map(|m| (m.id.as_str(), m.tool_reveal_body())),
+                                .map(|m| (
+                        m.id.as_str(), m.tool_reveal_body(),
+                        (m.kind == NeoismAgentMessageKind::Assistant).then_some(m.status.as_str()),
+                    )),
                         );
                         self.invalidate_timeline_layout();
                         self.hydrate_runtime_status_for_session(&session_id);
@@ -2825,6 +2956,7 @@ impl NeoismAgentPane {
         self.timeline_viewport_rect = None;
         self.timeline_history_position_hydrated = false;
         self.timeline_live_growth = false;
+        self.footer_growth.clear();
         self.timeline_trace_reveal_pending = false;
         self.timeline_last_scroll_at = None;
         self.pending_timeline_anchor = None;
@@ -3031,6 +3163,8 @@ impl NeoismAgentPane {
             return;
         }
         self.timeline_live_growth = true;
+        // A subsequent real body/tool arrival owns the ordinary measured-tail path.
+        self.footer_growth.clear();
         if let (Some(part_id), Some(message_id)) = (
             part_id.as_deref().filter(|id| !id.is_empty()),
             message_id.as_deref().filter(|id| !id.is_empty()),
@@ -3205,7 +3339,28 @@ impl NeoismAgentPane {
     }
 
     pub(crate) fn upsert_part_message(&mut self, message: NeoismAgentMessage) {
-        self.timeline_live_growth = true;
+        let footer_only = self.messages.iter()
+            .find(|m| !message.id.is_empty() && m.id == message.id)
+            .is_some_and(|old| {
+                let mut same = old.clone();
+                same.status.clone_from(&message.status);
+                old.kind == NeoismAgentMessageKind::Assistant && same == message
+            });
+        if !footer_only {
+            self.timeline_live_growth = true;
+            // A subsequent real body/tool arrival owns the ordinary measured-tail path.
+            self.footer_growth.clear();
+        }
+        let footer_before = (message.kind == NeoismAgentMessageKind::Assistant).then(|| {
+            self.messages.iter().find(|m| m.id == message.id)
+                .map(|m| m.status.clone()).unwrap_or_default()
+        });
+        if footer_only
+            && footer_before.as_ref().is_some_and(|before| *before != message.status)
+        {
+            // This revision owns only footer ink/space, not a latched body flag.
+            self.timeline_live_growth = false;
+        }
         let refresh_background = message.tool == "background_task"
             || message.tool == "background_task_result"
             || is_background_completion_card(&message);
@@ -3225,6 +3380,9 @@ impl NeoismAgentPane {
                 self.messages[i].tool_reveal_body().to_owned(),
             )
         });
+        let children_before = tool_index
+            .map(|i| self.messages[i].composition_children.clone())
+            .unwrap_or_default();
         let tool_id = message.id.clone();
         let is_tool = message.kind == NeoismAgentMessageKind::Tool;
         let reveal_id = message.id.clone();
@@ -3259,6 +3417,27 @@ impl NeoismAgentPane {
                     (status, body)
                 });
                 self.record_live_tool_mutation(index, tool_before);
+                record_composition_motion(
+                    &mut self.tool_motion,
+                    &mut self.text_reveal,
+                    &children_before,
+                    &self.messages[index].composition_children,
+                );
+            }
+        }
+        if let Some(before) = footer_before {
+            if let Some(row) = self.messages.iter().find(|m| m.id == reveal_id) {
+                let born = neoism_ui::panels::agent_pane::response_footer::record(
+                    &mut self.text_reveal, &mut self.tool_motion,
+                    &row.id, &before, &row.status,
+                );
+                if footer_only && born && !row.text.trim().is_empty() {
+                    self.footer_growth.record_with_edge(
+                        std::iter::once(row.id.clone()),
+                        self.timeline_follow_bottom && !self.is_subagent_session(),
+                        self.timeline_viewport_rect,
+                    );
+                }
             }
         }
         if let Some(before) = reveal_before {

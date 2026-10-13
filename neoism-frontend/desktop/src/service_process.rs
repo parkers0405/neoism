@@ -352,6 +352,19 @@ fn valid_daemon_response(response: &[u8]) -> bool {
         && body == "neoism-daemon"
 }
 
+/// Dedicated Fast hosts run the standalone bootstrap before any GUI or legacy
+/// service setup. In particular, null stdin is NOT a parent-death signal here.
+pub(crate) fn maybe_run_internal_fast_workspace_daemon(
+) -> Option<Result<(), Box<dyn std::error::Error>>> {
+    let args: Vec<_> = std::env::args_os().collect();
+    if args.get(1).is_none_or(|arg| {
+        arg != neoism_workspace_daemon::standalone::FAST_WORKSPACE_DAEMON_FLAG
+    }) {
+        return None;
+    }
+    Some(neoism_workspace_daemon::standalone::run_standalone_from(args))
+}
+
 pub(crate) fn maybe_run_internal_service(
 ) -> Option<Result<(), Box<dyn std::error::Error>>> {
     if std::env::args().nth(1).as_deref() != Some(DAEMON_FLAG) {

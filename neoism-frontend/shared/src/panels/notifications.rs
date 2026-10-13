@@ -5,7 +5,8 @@
 //
 // Visual: stack of toast cards anchored to the top-right below the
 // Rust chrome (Rio tabs, workspace tabs, breadcrumbs), fading out over
-// `FADE_MS` after `LIFETIME_MS`. Pure view: a dispatcher pushes
+// `FADE_MS` after `LIFETIME_MS`. Progress toasts stay opaque and animate
+// until explicitly finished. Pure view: a dispatcher pushes
 // (`message`, `level`) and we handle layout + expiry. Drawn
 // unconditionally each frame from `Renderer::run` so `is_active()` only
 // governs whether we ask for redraws.
@@ -62,7 +63,12 @@ impl NotificationLevel {
     }
 }
 
+/// Opaque identity for a persistent indeterminate progress toast.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProgressHandle(u64);
+
 struct Toast {
+    progress: Option<ProgressHandle>,
     message: String,
     level: NotificationLevel,
     created: Instant,
@@ -76,6 +82,7 @@ pub struct Notifications {
     /// Multiplier applied to font / padding so toasts grow with
     /// Ctrl+/Ctrl- font zoom alongside the rest of the chrome.
     scale: f32,
+    next_progress_id: u64,
 }
 
 impl Notifications {
@@ -83,6 +90,7 @@ impl Notifications {
         Self {
             toasts: Vec::new(),
             scale: 1.0,
+            next_progress_id: 0,
         }
     }
 
@@ -113,7 +121,8 @@ impl Notifications {
         }
         let now = Instant::now();
         if let Some(existing) = self.toasts.iter_mut().rev().find(|t| {
-            t.level == level
+            t.progress.is_none()
+                && t.level == level
                 && t.message == message
                 && now.saturating_duration_since(t.created) <= DEDUPE_WINDOW
         }) {
@@ -122,6 +131,7 @@ impl Notifications {
             return;
         }
         self.toasts.push(Toast {
+            progress: None,
             message,
             level,
             created: now,
@@ -129,19 +139,58 @@ impl Notifications {
             hover_started: None,
             wrapped_lines: Vec::new(),
         });
-        if self.toasts.len() > MAX_VISIBLE {
-            let drop = self.toasts.len() - MAX_VISIBLE;
-            self.toasts.drain(0..drop);
+        self.trim_transient_toasts();
+    }
+
+    /// Start indeterminate progress. It neither expires nor deduplicates with
+    /// ordinary messages; the owner must finish it (or drop this window).
+    pub fn start_progress(&mut self, message: impl Into<String>) -> ProgressHandle {
+        let handle = ProgressHandle(self.next_progress_id);
+        self.next_progress_id = self
+            .next_progress_id
+            .checked_add(1)
+            .expect("progress handle exhausted");
+        self.toasts.push(Toast {
+            progress: Some(handle),
+            message: message.into(),
+            level: NotificationLevel::Info,
+            created: Instant::now(),
+            paused_for: Duration::ZERO,
+            hover_started: None,
+            wrapped_lines: Vec::new(),
+        });
+        self.trim_transient_toasts();
+        handle
+    }
+
+    /// Remove only this operation’s toast. Repeated completion is harmless.
+    pub fn finish_progress(&mut self, handle: ProgressHandle) {
+        self.toasts.retain(|toast| toast.progress != Some(handle));
+    }
+
+    fn trim_transient_toasts(&mut self) {
+        // Never evict an in-flight operation just because other messages arrive.
+        while self.toasts.len() > MAX_VISIBLE {
+            let Some(index) = self
+                .toasts
+                .iter()
+                .position(|toast| toast.progress.is_none())
+            else {
+                break;
+            };
+            self.toasts.remove(index);
         }
     }
 
-    /// `true` while at least one toast needs fade/expiry frames.
-    /// Hovered toasts pause expiry, so they should not keep the whole
-    /// window repainting just to remain visible.
+    /// `true` while at least one toast needs animation or fade/expiry frames.
+    /// Ordinary hovered toasts pause expiry without requesting frames;
+    /// indeterminate progress continues animating even when hovered.
     pub fn is_active(&self) -> bool {
         let now = Instant::now();
         self.toasts.iter().any(|t| {
-            t.hover_started.is_none() && visible_age(t, now) < LIFETIME_MS + FADE_MS
+            t.progress.is_some()
+                || (t.hover_started.is_none()
+                    && visible_age(t, now) < LIFETIME_MS + FADE_MS)
         })
     }
 
@@ -150,7 +199,9 @@ impl Notifications {
     pub fn tick(&mut self) {
         let now = Instant::now();
         self.toasts.retain(|t| {
-            t.hover_started.is_some() || visible_age(t, now) < LIFETIME_MS + FADE_MS
+            t.progress.is_some()
+                || t.hover_started.is_some()
+                || visible_age(t, now) < LIFETIME_MS + FADE_MS
         });
     }
 
@@ -223,9 +274,12 @@ impl Notifications {
             // Height varies per toast now that long messages wrap — use the
             // same wrap the renderer does so hover/hit-testing lines up.
             let line_count = if toast.wrapped_lines.is_empty() {
-                wrap_message_measured(&toast.message, available_text_w, |text| {
-                    text.graphemes(true).count() as f32 * font_size * 0.6
-                })
+                wrap_message_measured(
+                    &toast.message,
+                    available_text_w
+                        - progress_inset(toast.progress.is_some(), self.scale),
+                    |text| text.graphemes(true).count() as f32 * font_size * 0.6,
+                )
                 .len()
             } else {
                 toast.wrapped_lines.len()
@@ -234,7 +288,8 @@ impl Notifications {
             // Fully-faded toasts are skipped WITHOUT advancing `y`, matching
             // the renderer (which `continue`s on alpha<=0 before its `y +=`),
             // so hit-testing stays aligned with what's actually drawn.
-            if visible_age(toast, now) >= LIFETIME_MS + FADE_MS
+            if toast.progress.is_none()
+                && visible_age(toast, now) >= LIFETIME_MS + FADE_MS
                 && toast.hover_started.is_none()
             {
                 continue;
@@ -287,26 +342,33 @@ impl Notifications {
             font_size,
             ..DrawOpts::default()
         };
-        let snapshot: Vec<(Vec<String>, NotificationLevel, u128)> = {
+        let snapshot: Vec<(Vec<String>, NotificationLevel, u128, bool)> = {
             let ui = sugarloaf.overlay_text_mut();
             self.toasts
                 .iter_mut()
                 .map(|toast| {
-                    let lines =
-                        wrap_message_measured(&toast.message, available_text_w, |text| {
-                            ui.measure(text, &measure_opts)
-                        });
+                    let lines = wrap_message_measured(
+                        &toast.message,
+                        available_text_w
+                            - progress_inset(toast.progress.is_some(), self.scale),
+                        |text| ui.measure(text, &measure_opts),
+                    );
                     toast.wrapped_lines.clone_from(&lines);
-                    (lines, toast.level, visible_age(toast, now))
+                    (
+                        lines,
+                        toast.level,
+                        visible_age(toast, now),
+                        toast.progress.is_some(),
+                    )
                 })
                 .collect()
         };
 
-        for (lines, level, age) in snapshot {
+        for (lines, level, age, progress) in snapshot {
             // Linear fade once we cross LIFETIME_MS — clamps so that
             // the very last frame paints at zero alpha rather than a
             // sudden snap-out.
-            let alpha = if age <= LIFETIME_MS {
+            let alpha = if progress || age <= LIFETIME_MS {
                 1.0
             } else {
                 let into_fade = age - LIFETIME_MS;
@@ -383,19 +445,41 @@ impl Notifications {
             // shaping doesn't read premul; the renderer handles it.
             text_color[3] = (text_color[3] as f32 * alpha) as u8;
 
+            let inset = progress_inset(progress, self.scale);
+            let text_x = x + ACCENT_WIDTH * self.scale + pad_x + inset;
+            if progress {
+                let now = web_time::SystemTime::now()
+                    .duration_since(web_time::UNIX_EPOCH)
+                    .unwrap_or_default();
+                let phase = crate::render_policy::animation_phase_from_unix_secs(
+                    now.as_secs(),
+                    now.subsec_nanos(),
+                );
+                for (trail, alpha) in crate::render_policy::RUNNING_SQUARE_ALPHAS
+                    .into_iter()
+                    .enumerate()
+                {
+                    let (dx, dy) = crate::render_policy::running_square_position(
+                        phase, trail, self.scale,
+                    );
+                    sugarloaf.overlay_rect(
+                        text_x - inset * 0.5 + dx - self.scale,
+                        y + pad_y + font_size * 0.5 + dy - self.scale,
+                        2.0 * self.scale,
+                        2.0 * self.scale,
+                        theme.f32_alpha(theme.fg, alpha),
+                        DEPTH,
+                        ORDER + 2,
+                    );
+                }
+            }
             let opts = DrawOpts {
                 font_size,
                 color: text_color,
-                clip_rect: Some([
-                    x + ACCENT_WIDTH * self.scale + pad_x,
-                    y,
-                    available_text_w,
-                    toast_h,
-                ]),
+                clip_rect: Some([text_x, y, available_text_w - inset, toast_h]),
                 ..DrawOpts::default()
             };
 
-            let text_x = x + ACCENT_WIDTH * self.scale + pad_x;
             let line_h = line_height(font_size);
             // Overlay text pass: renders above the overlay quads above,
             // matching the chrome topbar menu's label path. Each wrapped line
@@ -409,6 +493,14 @@ impl Notifications {
 
             y += toast_h + gap;
         }
+    }
+}
+
+fn progress_inset(progress: bool, scale: f32) -> f32 {
+    if progress {
+        20.0 * scale
+    } else {
+        0.0
     }
 }
 
@@ -527,6 +619,68 @@ impl Default for Notifications {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn progress_survives_expiry_hover_and_notification_pressure() {
+        let mut notifications = Notifications::new();
+        let handle = notifications.start_progress("Starting Fast Server...");
+        notifications.toasts[0].created = Instant::now() - Duration::from_secs(60);
+        notifications.tick();
+        assert_eq!(
+            notifications.toasts.len(),
+            1,
+            "pending toast must not expire"
+        );
+        assert_eq!(
+            notifications.hit_test(700.0, 20.0, 1000.0, 1.0, 0.0),
+            Some(0)
+        );
+        notifications.toasts[0].hover_started = Some(Instant::now());
+        for i in 0..10 {
+            notifications.push(format!("Message {i}"), NotificationLevel::Info);
+        }
+        notifications.tick();
+        assert!(
+            notifications.is_active(),
+            "hover must not freeze the loader"
+        );
+        assert_eq!(notifications.toasts.len(), MAX_VISIBLE);
+        assert!(notifications
+            .toasts
+            .iter()
+            .any(|t| t.progress == Some(handle)));
+        notifications.finish_progress(handle);
+        notifications.finish_progress(handle);
+        assert!(notifications.toasts.iter().all(|t| t.progress.is_none()));
+    }
+
+    #[test]
+    fn progress_handles_are_independent_and_stop_redraw_when_finished() {
+        let mut notifications = Notifications::new();
+        let first = notifications.start_progress("Starting Fast Server...");
+        let second = notifications.start_progress("Starting Fast Server...");
+        assert_ne!(first, second);
+        notifications.finish_progress(first);
+        assert_eq!(notifications.toasts.len(), 1);
+        assert!(notifications.is_active());
+        notifications.finish_progress(second);
+        assert!(!notifications.is_active());
+        assert!(notifications.toasts.is_empty());
+    }
+
+    #[test]
+    fn ordinary_messages_do_not_refresh_progress_and_still_expire() {
+        let mut notifications = Notifications::new();
+        let handle = notifications.start_progress("Starting Fast Server...");
+        notifications.push("Starting Fast Server...", NotificationLevel::Info);
+        assert_eq!(notifications.toasts.len(), 2);
+        notifications.toasts[1].created = Instant::now() - Duration::from_secs(60);
+        notifications.tick();
+        assert_eq!(notifications.toasts.len(), 1);
+        assert_eq!(notifications.toasts[0].progress, Some(handle));
+        assert_eq!(progress_inset(true, 2.0), 40.0);
+        assert_eq!(progress_inset(false, 2.0), 0.0);
+    }
 
     #[test]
     fn measured_wrap_keeps_the_regression_line_inside_the_card() {

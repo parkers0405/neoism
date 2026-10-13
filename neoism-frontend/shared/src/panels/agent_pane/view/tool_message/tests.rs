@@ -96,9 +96,8 @@ fn composition_sections_update_without_losing_source_or_becoming_edit_diffs() {
         "metadata":{"composition":{"toolCalls":[{"path":"docs.write", "status":"running", "input":{}}]}}});
     let live = part_block(&part).unwrap();
     let sections = cached_edit_diff_sections(&live).unwrap();
-    assert_eq!(sections.len(), 3);
-    assert!(sections[0].lines[0].text.contains("[running]"));
-    assert_eq!(sections[2].lines[0].text.trim_start(), "return 42;");
+    assert_eq!(sections.len(), 1);
+    assert_eq!(sections[0].lines[0].text.trim_start(), "return 42;");
     assert!(sections
         .iter()
         .all(|s| s.additions == 0 && s.deletions == 0 && s.link_target.is_empty()));
@@ -109,9 +108,30 @@ fn composition_sections_update_without_losing_source_or_becoming_edit_diffs() {
         serde_json::json!("completed");
     let failed = part_block(&part).unwrap();
     let updated = cached_edit_diff_sections(&failed).unwrap();
-    assert!(updated[0].lines[0].text.contains("[completed]"));
-    assert_eq!(updated[2].fingerprint, sections[2].fingerprint);
+    assert_eq!(failed.composition_children[0].status, "completed");
+    assert_eq!(updated[0].fingerprint, sections[0].fingerprint);
     assert!(!is_edit_tool_name("compose"));
+}
+
+#[test]
+fn composition_program_retains_full_source_and_child_edits_require_click() {
+    use crate::panels::agent_pane::api_mapping::part_block;
+    let code = (0..(MAX_STORED_DIFF_ROWS + 30)).map(|i| format!("console.log({i});\n")).collect::<String>();
+    let part = serde_json::json!({"id":"p", "type":"tool", "tool":"compose", "state":{"status":"completed", "input":{"code":"old"}, "metadata":{"composition":{"code":code, "toolCalls":[
+        {"id":"edit", "path":"neoism.edit", "status":"completed", "input":{"filePath":"src/lib.rs", "oldString":"a", "newString":"b"}, "presentation":{"tool":"edit", "output":"edited"}}
+    ]}}}});
+    let m = part_block(&part).unwrap();
+    let sections = cached_edit_diff_sections(&m).unwrap();
+    assert_eq!(sections[0].path, "Program source.js");
+    assert_eq!(sections[0].lines.len(), MAX_STORED_DIFF_ROWS + 30);
+    assert_eq!(sections[0].omitted, 0);
+    assert_eq!(Lang::from_path(&sections[0].path), Lang::Javascript);
+    let mut pane = NeoismAgentPane::default(); pane.upsert_part_message(m.clone());
+    assert!(!show_tool_diff_cards("compose", "completed", pane.tool_expanded("p"), pane.tool_archived("p")));
+    let child = &m.composition_children[0];
+    assert!(cached_edit_diff_sections(child).is_some());
+    assert!(!show_tool_diff_cards(&child.tool, &child.status, false, pane.tool_archived(&child.id) || child.composition_child()));
+    assert!(show_tool_diff_cards(&child.tool, &child.status, true, pane.tool_archived(&child.id) || child.composition_child()));
 }
 
 #[test]

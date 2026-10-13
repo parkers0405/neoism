@@ -15,7 +15,7 @@ use axum::{
     Router,
 };
 use futures::{SinkExt, StreamExt};
-use neoism_agent_service_api::fast_hosting::{spawn_fast_daemon, FastDaemon};
+use neoism_agent_service_api::fast_hosting::{spawn_fast_daemon_with_prefix, FastDaemon};
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
@@ -29,6 +29,8 @@ use std::{
 use subtle::ConstantTimeEq;
 use tokio::sync::{oneshot, Semaphore};
 use tokio_tungstenite::tungstenite::Message as UpstreamMessage;
+
+const FAST_STARTUP_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// Retain this guard across transient disconnects; remove/drop it on explicit
 /// leave/stop. Call `stop_and_wait()` BEFORE application `process::exit`, which skips Drop.
@@ -87,19 +89,23 @@ impl Drop for FastHost {
 
 /// This function provisions certificates and waits for the daemon and tunnel;
 /// call it on a background worker, never the UI thread. No global lookup by name.
-pub fn create_fast_server(
-    directory: String,
-    name: Option<String>,
-    password: Option<String>,
-) -> Result<FastHost, String> {
-    if password
-        .as_ref()
-        .is_none_or(|p| p.trim().is_empty() || p.len() > 1024)
+pub(crate) fn validate_host_password(password: Option<&str>) -> Result<(), String> {
+    if password.is_none_or(|password| password.trim().is_empty() || password.len() > 1024)
     {
         return Err(
             "Fast Host requires a nonblank password of at most 1024 bytes".into(),
         );
     }
+    Ok(())
+}
+
+pub fn create_fast_server(
+    directory: String,
+    name: Option<String>,
+    password: Option<String>,
+    agent_server: String,
+) -> Result<FastHost, String> {
+    validate_host_password(password.as_deref())?;
     let path = if let Some(rest) = directory.strip_prefix("~/") {
         dirs::home_dir()
             .ok_or("Cannot resolve home directory")?
@@ -146,23 +152,12 @@ pub fn create_fast_server(
                 }
             };
             runtime.block_on(async move {
-                let startup = tokio::time::timeout(
-                    Duration::from_secs(120),
-                    start_host(
-                        binary,
-                        path,
-                        worker_host_token,
-                        guest_token,
-                        daemon_token,
-                        worker_name,
-                        has_password,
-                    ),
+                let startup = start_host(
+                    binary, path, worker_host_token, guest_token, daemon_token,
+                    worker_name, has_password, agent_server,
                 );
                 let started = tokio::select! {
-                    result = startup => match result {
-                        Ok(result) => result,
-                        Err(_) => Err("Fast Host provisioning timed out".into()),
-                    },
+                    result = startup => result,
                     _ = &mut shutdown_rx => return,
                 };
                 match started {
@@ -212,7 +207,7 @@ pub fn create_fast_server(
             runtime.shutdown_timeout(Duration::from_secs(1));
         })
         .map_err(|e| e.to_string())?;
-    match ready_rx.recv_timeout(Duration::from_secs(125)) {
+    match ready_rx.recv_timeout(FAST_STARTUP_TIMEOUT + Duration::from_secs(5)) {
         Ok(Ok((endpoint, public_url, directory))) => Ok(FastHost {
             id,
             endpoint,
@@ -227,12 +222,58 @@ pub fn create_fast_server(
         }),
         result => {
             let _ = shutdown_tx.send(());
-            let _ = worker.join();
+            // Teardown must not hide the startup error behind an unbounded join.
+            if worker.is_finished() {
+                let _ = worker.join();
+            } else {
+                let _ = std::thread::Builder::new()
+                    .name("neoism-fast-host-reap".into())
+                    .spawn(move || {
+                        let _ = worker.join();
+                    });
+            }
             Err(match result {
                 Ok(Err(error)) => error,
                 _ => "Fast Host worker did not finish provisioning".into(),
             })
         }
+    }
+}
+
+// SDK errors can contain tokens, server bodies, and identity paths.
+fn safe_opentunnel_error(error: &opentunnel::Error) -> String {
+    use opentunnel::Error;
+    match error {
+        Error::Api { status, tag, .. } => {
+            let tag = match tag.as_str() {
+                "HttpError" => "HttpError",
+                "CertificateInProgressError" => "CertificateInProgressError",
+                "TunnelNotFoundError" => "TunnelNotFoundError",
+                _ => "OtherApiError",
+            };
+            format!("API error: HTTP {status}; {tag}")
+        }
+        Error::Http(source) => {
+            let category = if source.is_timeout() {
+                "timeout"
+            } else if source.is_connect() {
+                "connection"
+            } else if source.is_decode() {
+                "decode"
+            } else {
+                "request"
+            };
+            format!("HTTP transport error: {category}")
+        }
+        Error::Io { source, .. } => {
+            format!("identity storage I/O error: {:?}", source.kind())
+        }
+        Error::Corrupt { .. } => "corrupt identity storage".into(),
+        Error::Attach(_) => "bridge attachment failed".into(),
+        Error::Bridge(_) => "bridge failed".into(),
+        Error::CertificateFailed(_) => "certificate issuance failed".into(),
+        Error::Invalid(_) => "invalid SDK input or stored state".into(),
+        Error::Crypto(_) => "cryptographic operation failed".into(),
     }
 }
 
@@ -312,20 +353,16 @@ fn secret() -> String {
     )
 }
 fn daemon_binary() -> Result<PathBuf, String> {
-    let executable = std::env::current_exe().map_err(|e| e.to_string())?;
-    let sibling = executable.with_file_name(if cfg!(windows) {
-        "neoism-workspace-daemon.exe"
-    } else {
-        "neoism-workspace-daemon"
-    });
-    if sibling.is_file() {
-        return Ok(sibling);
+    // Cargo/updaters can unlink a running Linux executable. current_exe then
+    // returns a non-existent " (deleted)" path; procfs still names its inode.
+    #[cfg(target_os = "linux")]
+    {
+        Ok(PathBuf::from("/proc/self/exe"))
     }
-    // Dev loop builds the desktop and daemon into the same target profile.
-    Err(format!(
-        "Fast Host needs the daemon binary beside Neoism: {}",
-        sibling.display()
-    ))
+    #[cfg(not(target_os = "linux"))]
+    {
+        std::env::current_exe().map_err(|error| error.to_string())
+    }
 }
 
 struct RunningHost {
@@ -354,18 +391,43 @@ async fn start_host(
     daemon_token: String,
     name: String,
     _has_password: bool,
+    agent_server: String,
 ) -> Result<RunningHost, String> {
     {
-        let mut daemon = spawn_fast_daemon(&binary, &directory, &daemon_token)
-            .map_err(|e| e.to_string())?;
+        let startup_deadline = Instant::now() + FAST_STARTUP_TIMEOUT;
+        let address = std::net::TcpListener::bind("127.0.0.1:0")
+            .and_then(|listener| listener.local_addr())
+            .map_err(|error| error.to_string())?;
+        let prefix = [std::ffi::OsString::from(
+            "--neoism-internal-fast-workspace-daemon",
+        )];
+        let mut daemon = spawn_fast_daemon_with_prefix(
+            &binary,
+            &prefix,
+            &directory,
+            address,
+            &daemon_token,
+            &agent_server,
+        )
+        .map_err(|error| format!("Could not start Fast workspace daemon: {error}"))?;
         let socket = format!("ws://{}/session", daemon.address);
         let daemon_base = format!("http://{}", daemon.address);
-        let deadline = Instant::now() + Duration::from_secs(15);
+        // Keep a provisioning reserve after the association retry budget.
+        let deadline = (Instant::now() + Duration::from_secs(120)).min(startup_deadline);
         loop {
-            if daemon.try_wait().map_err(|e| e.to_string())?.is_some() {
-                return Err("Fast daemon exited before becoming ready; check the sibling daemon binary supports temporary hosting".into());
-            }
+            if daemon
+                .try_wait()
+                .map_err(|error| error.to_string())?
+                .is_some()
             {
+                return Err(
+                    daemon.startup_failure("workspace daemon exited before readiness")
+                );
+            }
+            let ready = daemon.try_startup_ack().map_err(|_| {
+                daemon.startup_failure("invalid or closed daemon readiness protocol")
+            })?;
+            if ready {
                 if let Ok(Ok(mut upstream)) = tokio::time::timeout(
                     Duration::from_secs(1),
                     connect_daemon(&socket, &daemon_token),
@@ -376,8 +438,12 @@ async fn start_host(
                     break;
                 }
             }
-            if Instant::now() > deadline {
-                return Err("Fast daemon did not become ready within 15 seconds".into());
+            if Instant::now() >= deadline {
+                return Err(daemon.startup_failure(if ready {
+                    "authenticated workspace connection timed out"
+                } else {
+                    "workspace daemon startup timed out"
+                }));
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
@@ -386,18 +452,37 @@ async fn start_host(
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| e.to_string())?;
-        let discovery: serde_json::Value = http
+        let mut response = http
             .get(format!("{daemon_base}/agent-workspaces"))
             .bearer_auth(&daemon_token)
-            .timeout(Duration::from_secs(5))
+            .timeout(
+                Duration::from_secs(5)
+                    .min(startup_deadline.saturating_duration_since(Instant::now())),
+            )
             .send()
             .await
-            .map_err(|_| "Private daemon workspace discovery failed")?
-            .error_for_status()
-            .map_err(|_| "Private daemon rejected workspace discovery")?
-            .json()
-            .await
-            .map_err(|_| "Invalid workspace discovery")?;
+            .map_err(|_| {
+                daemon.startup_failure("private workspace discovery request failed")
+            })?;
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let mut body = Vec::new();
+            while let Ok(Some(chunk)) = response.chunk().await {
+                let remaining = 8192usize.saturating_sub(body.len());
+                body.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+                if body.len() >= 8192 {
+                    break;
+                }
+            }
+            return Err(daemon.startup_http_failure(
+                "private workspace discovery rejected",
+                status,
+                &String::from_utf8_lossy(&body),
+            ));
+        }
+        let discovery: serde_json::Value = response.json().await.map_err(|_| {
+            daemon.startup_failure("invalid private workspace discovery response")
+        })?;
         let shared = discovery
             .get("workspaces")
             .and_then(|v| v.as_array())
@@ -424,10 +509,44 @@ async fn start_host(
             storage: Some(opentunnel::Storage::at(identity_directory.path())),
             ..Default::default()
         });
-        let identity = client
-            .ensure("fast")
-            .await
-            .map_err(|e| format!("OpenTunnel provisioning: {e}"))?;
+        let phase_started = Instant::now();
+        let budget = startup_deadline
+            .saturating_duration_since(phase_started)
+            .saturating_sub(Duration::from_secs(30));
+        let stage = Mutex::new(opentunnel::ProvisionStage::CreatingTunnel);
+        // Fresh host-owned storage always needs creation and certificate issuance.
+        let provisioned = tokio::time::timeout(
+            budget,
+            client.create("fast", |next| {
+                *stage.lock().unwrap_or_else(|error| error.into_inner()) = next;
+            }),
+        )
+        .await;
+        let identity = match provisioned {
+            Ok(Ok(identity)) => identity,
+            result => {
+                let last_stage = *stage.lock().unwrap_or_else(|error| error.into_inner());
+                let reason = match result {
+                    Ok(Err(error)) => safe_opentunnel_error(&error),
+                    Err(_) => format!("timed out (budget {:.1}s)", budget.as_secs_f64()),
+                    Ok(Ok(_)) => unreachable!(),
+                };
+                let failure = format!(
+                    "Fast Host startup failed: OpenTunnel provisioning during {last_stage:?} after {:.1}s: {reason}\n\n{}",
+                    phase_started.elapsed().as_secs_f64(),
+                    daemon.diagnostics(),
+                );
+                // The SDK's remove(profile) ignores pending-only identities.
+                if let Ok(Some(pending)) = client.pending("fast") {
+                    let _ = tokio::time::timeout(
+                        Duration::from_secs(2),
+                        client.api().remove(&pending.token, &pending.id),
+                    )
+                    .await;
+                }
+                return Err(failure);
+            }
+        };
         // SDK-owned origin; never use Host/Forwarded or credentials here.
         let mut invite = url::Url::parse(&format!("https://{}/", identity.hostname))
             .map_err(|e| e.to_string())?;
@@ -467,12 +586,14 @@ async fn start_host(
             [("@".to_owned(), address.to_string().into())].into(),
         ) {
             Ok(t) => t,
-            Err(e) => {
+            Err(_) => {
                 ingress.abort();
-                return Err(format!("OpenTunnel connect: {e}"));
+                return Err(
+                    daemon.startup_failure("OpenTunnel connection initialization failed")
+                );
             }
         };
-        let running = RunningHost {
+        let mut running = RunningHost {
             daemon,
             tunnel: Some(tunnel),
             ingress,
@@ -483,17 +604,44 @@ async fn start_host(
             farewell,
             proxies,
         };
-        let deadline = Instant::now() + Duration::from_secs(30);
+        let deadline = (Instant::now() + Duration::from_secs(30)).min(startup_deadline);
         loop {
             match running.tunnel.as_ref().unwrap().status().state {
-                opentunnel::State::Connected => return Ok(running),
+                opentunnel::State::Connected => {
+                    let ready = tokio::time::timeout(
+                        startup_deadline
+                            .saturating_duration_since(Instant::now())
+                            .min(Duration::from_secs(10)),
+                        check_ingress_ready(&running.endpoint, &host_token),
+                    )
+                    .await;
+                    match ready {
+                        Ok(Ok(())) => return Ok(running),
+                        Ok(Err(error)) => {
+                            return Err(format!(
+                                "Fast Host local connection failed: {error}\n\n{}",
+                                running.daemon.diagnostics(),
+                            ))
+                        }
+                        Err(_) => {
+                            return Err(format!(
+                                "Fast Host local connection handshake timed out\n\n{}",
+                                running.daemon.diagnostics(),
+                            ))
+                        }
+                    }
+                }
                 opentunnel::State::Stopped => {
-                    return Err("OpenTunnel stopped before becoming ready".into())
+                    return Err(running
+                        .daemon
+                        .startup_failure("OpenTunnel stopped before becoming ready"))
                 }
                 _ => {}
             }
             if Instant::now() > deadline {
-                return Err("OpenTunnel did not connect within 30 seconds".into());
+                return Err(running
+                    .daemon
+                    .startup_failure("OpenTunnel connection timed out"));
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
@@ -792,6 +940,63 @@ async fn upgrade(
             proxy(socket, state).await;
         })
 }
+async fn check_ingress_ready(endpoint: &str, token: &str) -> Result<(), String> {
+    use tokio_tungstenite::tungstenite::{client::IntoClientRequest, http};
+    let mut request = endpoint
+        .into_client_request()
+        .map_err(|_| "Invalid local ingress endpoint")?;
+    let mut authorization = http::HeaderValue::from_str(&format!("Bearer {token}"))
+        .map_err(|_| "Invalid local ingress credential")?;
+    authorization.set_sensitive(true);
+    request
+        .headers_mut()
+        .insert(http::header::AUTHORIZATION, authorization);
+    let (mut socket, _) = tokio_tungstenite::connect_async(request)
+        .await
+        .map_err(|_| "Local ingress WebSocket upgrade failed")?;
+    let hello = serde_json::json!({
+        "Workspace": { "request_id": 0, "message":
+            neoism_protocol::workspace::WorkspaceClientMessage::Hello {
+                token: Some(token.to_owned()),
+                client_name: Some("fast-host-readiness".into()),
+                client_id: uuid::Uuid::new_v4(),
+            }
+        }
+    });
+    socket
+        .send(UpstreamMessage::Text(hello.to_string()))
+        .await
+        .map_err(|_| "Local ingress Hello send failed")?;
+    while let Some(frame) = socket.next().await {
+        match frame.map_err(|_| "Local ingress connection closed during Hello")? {
+            UpstreamMessage::Text(text) => {
+                let reply: serde_json::Value = serde_json::from_str(&text)
+                    .map_err(|_| "Invalid local ingress handshake reply")?;
+                if let Some(accepted) = reply
+                    .pointer("/WorkspaceReply/message/HelloAck/accepted")
+                    .and_then(serde_json::Value::as_bool)
+                {
+                    let _ = socket.close(None).await;
+                    return if accepted {
+                        Ok(())
+                    } else {
+                        Err("Local ingress Hello rejected".into())
+                    };
+                }
+            }
+            UpstreamMessage::Ping(bytes) => {
+                socket
+                    .send(UpstreamMessage::Pong(bytes))
+                    .await
+                    .map_err(|_| "Local ingress ping reply failed")?;
+            }
+            UpstreamMessage::Close(_) => break,
+            _ => {}
+        }
+    }
+    Err("Local ingress closed before HelloAck".into())
+}
+
 async fn connect_daemon(
     socket: &str,
     token: &str,
@@ -888,6 +1093,93 @@ async fn proxy(socket: WebSocket, state: Arc<Ingress>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn daemon_launch_path_names_the_running_inode() {
+        let executable = daemon_binary().unwrap();
+        assert_eq!(executable, std::path::Path::new("/proc/self/exe"));
+        assert_eq!(
+            std::fs::read_link(executable).unwrap(),
+            std::env::current_exe().unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn readiness_checks_authenticated_ingress_and_private_hello() {
+        let private = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let private_address = private.local_addr().unwrap();
+        let upstream = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (tcp, _) = private.accept().await.unwrap();
+                let mut socket = tokio_tungstenite::accept_async(tcp).await.unwrap();
+                let hello = socket.next().await.unwrap().unwrap().into_text().unwrap();
+                let hello: serde_json::Value = serde_json::from_str(&hello).unwrap();
+                assert_eq!(
+                    hello.pointer("/Workspace/message/Hello/token").unwrap(),
+                    "master"
+                );
+                socket
+                    .send(UpstreamMessage::Text(
+                        serde_json::json!({
+                            "WorkspaceReply": { "request_id": 0, "message": {
+                                "HelloAck": { "accepted": true }
+                            }}
+                        })
+                        .to_string(),
+                    ))
+                    .await
+                    .unwrap();
+                let _ = socket.next().await;
+            }
+        });
+        let (mut state, _ended) = test_ingress();
+        Arc::get_mut(&mut state).unwrap().socket =
+            format!("ws://{private_address}/session");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("ws://{}/session", listener.local_addr().unwrap());
+        let router = Router::new()
+            .route("/session", get(upgrade))
+            .with_state(state);
+        let ingress = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        for token in ["host", "guest"] {
+            tokio::time::timeout(
+                Duration::from_secs(3),
+                check_ingress_ready(&endpoint, token),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        }
+        tokio::time::timeout(Duration::from_secs(3), upstream)
+            .await
+            .unwrap()
+            .unwrap();
+        ingress.abort();
+        let _ = ingress.await;
+    }
+
+    #[test]
+    fn tunnel_errors_do_not_expose_untrusted_payloads() {
+        let error = opentunnel::Error::Api {
+            status: 503,
+            tag: "private-token".into(),
+            message: "Bearer private-token".into(),
+        };
+        assert_eq!(
+            safe_opentunnel_error(&error),
+            "API error: HTTP 503; OtherApiError"
+        );
+        assert_eq!(
+            safe_opentunnel_error(&opentunnel::Error::CertificateFailed(
+                "private-token".into()
+            )),
+            "certificate issuance failed"
+        );
+    }
+
     fn test_ingress() -> (Arc<Ingress>, tokio::sync::watch::Sender<bool>) {
         let (sender, ended) = tokio::sync::watch::channel(false);
         (
@@ -1386,8 +1678,21 @@ mod tests {
 
     #[test]
     fn host_requires_password_before_any_side_effects() {
-        for password in [None, Some(String::new()), Some("   ".into())] {
-            assert!(create_fast_server("/nonexistent".into(), None, password).is_err());
+        for password in [
+            None,
+            Some(String::new()),
+            Some("   ".into()),
+            Some("x".repeat(1025)),
+        ] {
+            let result = create_fast_server(
+                std::env::temp_dir().to_string_lossy().into_owned(),
+                None,
+                password,
+                "invalid-agent-endpoint".into(),
+            );
+            assert!(
+                matches!(result, Err(error) if error == "Fast Host requires a nonblank password of at most 1024 bytes")
+            );
         }
     }
 }

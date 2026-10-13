@@ -747,6 +747,9 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         // can't reach the panels underneath an overlay — desktop
         // parity with router/route.rs's settings/modal arms.
         if self.handle_chrome_page_event(event) {
+            if let Some(url) = self.modal.take_invite_copy() {
+                ctx.services.clipboard.write(&url);
+            }
             return;
         }
 
@@ -2834,6 +2837,8 @@ mod tests {
                 status: String::new(),
                 tool: String::new(),
                 tool_batch_id: None,
+            composition_children: Vec::new(),
+            composition_child: false,
                 output_kind:
                     crate::panels::agent_pane::state::NeoismAgentOutputKind::Text,
                 lang: String::new(),

@@ -78,6 +78,48 @@ fn fixed_diff_viewport_height(preview_rows: usize, s: f32) -> f32 {
 }
 
 pub fn measure_tool_message_height(
+    sugarloaf: &mut Sugarloaf, pane: &impl AgentToolPane, message: &impl AgentToolMessage,
+    width: f32, s: f32, tool_expanded: bool, selected_group_child: Option<&str>,
+) -> Option<f32> {
+    let mut height = measure_single_tool_message_height(sugarloaf, pane, message, width, s, tool_expanded, selected_group_child)?;
+    for child in message.composition_children() {
+        height += measure_composition_child_height(sugarloaf, pane, child, (width - 20.0 * s).max(1.0), s);
+    }
+    Some(height)
+}
+
+fn measure_composition_child_height(sugarloaf: &mut Sugarloaf, pane: &impl AgentToolPane, child: &NeoismAgentMessage, width: f32, s: f32) -> f32 {
+    let collapsed = measure_single_tool_message_height(sugarloaf, pane, child, width, s, false, None).unwrap_or(TOOL_HEADER_HEIGHT * s);
+    let progress = pane.tool_expand_progress(&child.id).clamp(0.0, 1.0);
+    if progress <= 0.001 { return collapsed; }
+    let expanded = measure_single_tool_message_height(sugarloaf, pane, child, width, s, true, None).unwrap_or(collapsed);
+    collapsed + (expanded - collapsed) * progress
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn render_tool_message(
+    sugarloaf: &mut Sugarloaf, pane: &mut impl AgentToolPane, x: f32, y: f32, w: f32, h: f32,
+    message: &impl AgentToolMessage, theme: &IdeTheme, s: f32, now_seconds: f32,
+    viewport_clip: [f32; 4], occlusion_rects: &[[f32; 4]], prepared_diff_sections: Option<&[ToolDiffSection]>, mouse: Option<(f32, f32)>,
+) -> f32 {
+    if message.composition_children().is_empty() {
+        return render_single_tool_message(sugarloaf, pane, x, y, w, h, message, theme, s, now_seconds, viewport_clip, occlusion_rects, prepared_diff_sections, mouse);
+    }
+    let child_w = (w - 20.0 * s).max(1.0);
+    let heights: Vec<f32> = message.composition_children().iter().map(|child|
+        measure_composition_child_height(sugarloaf, pane, child, child_w, s)).collect();
+    let root_h = (h - heights.iter().sum::<f32>()).max(TOOL_HEADER_HEIGHT * s);
+    let Some(viewport_clip) = intersect_rect([x, y, w, h], viewport_clip) else { return h; };
+    render_single_tool_message(sugarloaf, pane, x, y, w, root_h, message, theme, s, now_seconds, viewport_clip, occlusion_rects, prepared_diff_sections, mouse);
+    let mut child_y = y + root_h;
+    for (child, child_h) in message.composition_children().iter().zip(heights) {
+        render_tool_message(sugarloaf, pane, x + 20.0 * s, child_y, child_w, child_h, child, theme, s, now_seconds, viewport_clip, occlusion_rects, None, mouse);
+        child_y += child_h;
+    }
+    h
+}
+
+fn measure_single_tool_message_height(
     sugarloaf: &mut Sugarloaf,
     pane: &impl AgentToolPane,
     message: &impl AgentToolMessage,
@@ -112,14 +154,14 @@ pub fn measure_tool_message_height(
         message.tool(),
         message.status(),
         tool_expanded,
-        pane.tool_archived(message.id()),
+        pane.tool_archived(message.id()) || message.composition_child(),
     ) {
         if let Some(sections) = cached_edit_diff_sections(message) {
             let card_w = tool_diff_card_width(width, s);
             let mut height = TOOL_HEADER_HEIGHT * s;
             for (section_index, section) in sections.iter().enumerate() {
                 let card_key = format!("{}:{section_index}", message.id());
-                let card_expanded = pane.tool_expanded(&card_key);
+                let card_expanded = message.tool() == "compose" || pane.tool_expanded(&card_key);
                 let view = cached_diff_card_view(section, card_w, s, card_expanded);
                 height += diff_card::HEADER_HEIGHT * s
                     + fixed_diff_viewport_height(view.preview_visual_rows, s)
@@ -200,7 +242,7 @@ fn measure_tool_group_activity_height(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn render_tool_message(
+fn render_single_tool_message(
     sugarloaf: &mut Sugarloaf,
     pane: &mut impl AgentToolPane,
     x: f32,
@@ -517,7 +559,7 @@ pub fn render_tool_message(
 
     let render_expanded = pane.tool_expanded(message.id())
         || pane.tool_expand_progress(message.id()) > 0.01;
-    let archived = pane.tool_archived(message.id());
+    let archived = pane.tool_archived(message.id()) || message.composition_child();
     let cached_diff_sections;
     let diff_sections = if !show_tool_diff_cards(
         message.tool(),
@@ -1015,7 +1057,7 @@ fn render_tool_diff_cards(
         // shared the message id, so clicking one expanded (and made scrollable)
         // every card in the patch.
         let card_key = format!("{}:{section_index}", message.id());
-        let card_expanded = pane.tool_expanded(&card_key);
+        let card_expanded = message.tool() == "compose" || pane.tool_expanded(&card_key);
         let view = cached_diff_card_view(section, card_w, s, card_expanded);
         let full_body_h = diff_body_height(view.visual_rows, s);
         let body_h = fixed_diff_viewport_height(view.preview_visual_rows, s);

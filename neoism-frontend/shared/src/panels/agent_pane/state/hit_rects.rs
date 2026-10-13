@@ -366,6 +366,22 @@ impl NeoismAgentPane {
     /// current visit (everything, after a reload). Archived cards render
     /// header-only until clicked. Synthetic read-group ids ("a..") resolve
     /// through their first member.
+    /// Resolve nested UI calls and their diff sections to the authoritative row.
+    pub fn tool_owner_index(&self, id: &str) -> Option<usize> {
+        self.messages.iter().position(|m| m.id == id
+            || m.composition_children.iter().any(|c| c.id == id))
+            .or_else(|| id.rsplit_once(':').filter(|(_, n)| n.parse::<usize>().is_ok())
+                .and_then(|(base, _)| self.tool_owner_index(base)))
+            .or_else(|| id.split_once("..").and_then(|(first, _)| self.messages.iter().position(|m| m.id == first)))
+    }
+
+    /// Selection/copy resolves the actual UI child rather than its parent.
+    pub fn tool_message_by_id(&self, id: &str) -> Option<&NeoismAgentMessage> {
+        self.messages.iter().find_map(|m| if m.id == id { Some(m) } else {
+            m.composition_children.iter().find(|c| c.id == id)
+        })
+    }
+
     pub fn tool_archived(&self, id: &str) -> bool {
         if id.is_empty() {
             return false;
@@ -373,14 +389,7 @@ impl NeoismAgentPane {
         let live_start = self
             .timeline_live_trace_start
             .unwrap_or(self.messages.len());
-        let lookup = |needle: &str| {
-            self.messages
-                .iter()
-                .position(|message| message.id == needle)
-        };
-        lookup(id)
-            .or_else(|| id.split_once("..").and_then(|(first, _)| lookup(first)))
-            .is_some_and(|index| index < live_start)
+        self.tool_owner_index(id).is_some_and(|index| index < live_start)
     }
 
     pub fn tool_expand_progress(&self, id: &str) -> f32 {
@@ -404,7 +413,8 @@ impl NeoismAgentPane {
         self.tool_expand_anims.iter().any(|(key, animation)| {
             (key == id
                 || key.starts_with(&child_prefix)
-                || key.starts_with(&group_prefix))
+                || key.starts_with(&group_prefix)
+                 || key.starts_with(&format!("{id}/compose/")))
                 && animation.is_active()
         })
     }
@@ -430,6 +440,8 @@ impl NeoismAgentPane {
                 self.expanded_tool_ids.remove(&id);
             }
             self.tool_expand_anims.remove(&id);
+            self.timeline_measure_cache.borrow_mut().clear();
+            if let Some(index) = self.tool_owner_index(&id) { self.mark_timeline_message_and_next_dirty_at(index); }
             return true;
         }
 
@@ -539,10 +551,7 @@ impl NeoismAgentPane {
         let parent_id = parent_id
             .split_once("..")
             .map_or(parent_id, |(first, _)| first);
-        if let Some(index) = self
-            .messages
-            .iter()
-            .position(|message| message.id == parent_id)
+        if let Some(index) = self.tool_owner_index(parent_id)
         {
             if let (Some(viewport), Some(key)) = (
                 self.timeline_viewport_rect,

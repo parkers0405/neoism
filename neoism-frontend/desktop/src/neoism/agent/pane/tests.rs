@@ -1,5 +1,120 @@
 use super::*;
 
+fn composition_fixture() -> NeoismAgentMessage {
+    let mut parent = neoism_ui::panels::agent_pane::api_mapping::part_block(&json!({
+        "id": "compose-root", "type": "tool", "tool": "compose",
+        "state": {"status": "running", "input": {"code": "await tools.read()"}}
+    }))
+    .unwrap();
+    parent.composition_children = ["one", "two"].into_iter().map(|call| {
+        let mut child = neoism_ui::panels::agent_pane::api_mapping::part_block(&json!({
+            "id": format!("compose-root/compose/{call}"), "type": "tool", "tool": "read",
+            "state": {"status": "running", "input": {"filePath": "src/lib.rs"}}
+        })).unwrap();
+        child.composition_child = true;
+        child.text = format!("output {call}");
+        child
+    }).collect();
+    parent.into()
+}
+
+#[test]
+fn composition_children_map_to_shared_renderer_without_parent_expansion() {
+    use neoism_ui::panels::agent_pane::view::tool_message::AgentToolMessage;
+    let parent = composition_fixture();
+    assert_eq!(parent.tool, "compose");
+    assert!(parent.detail.contains("await tools.read()"));
+    let children = AgentToolMessage::composition_children(&parent);
+    assert!(children.iter().all(|child| child.composition_child));
+    assert_eq!(children.len(), 2);
+    assert_eq!(children[0].id, "compose-root/compose/one");
+    assert_eq!(children[1].text, "output two");
+    let mut shared = children[0].clone();
+    shared.composition_children = vec![children[1].clone()];
+    let mapped = NeoismAgentMessage::from(shared.clone());
+    assert_eq!(mapped.composition_children, shared.composition_children);
+    let pane = NeoismAgentPane::default();
+    assert!(!pane.tool_expanded(&parent.id));
+    assert_eq!(AgentToolMessage::composition_children(&parent), children);
+    assert!(NeoismAgentMessage::assistant("other")
+        .composition_children
+        .is_empty());
+}
+
+#[test]
+fn composition_two_children_toggle_independently_with_owner_archive_and_anchor() {
+    let mut pane = NeoismAgentPane::default();
+    pane.messages = vec![composition_fixture()];
+    pane.timeline_live_trace_start = Some(1);
+    pane.set_timeline_metrics([0.0, 100.0, 400.0, 300.0], 900.0, 300.0);
+    let one = "compose-root/compose/one";
+    let two = "compose-root/compose/two";
+    pane.register_tool_hit_rect(one.into(), [0.0, 150.0, 300.0, 20.0]);
+    pane.register_tool_hit_rect(two.into(), [0.0, 180.0, 300.0, 20.0]);
+    assert!(pane.tool_archived(one));
+    assert_eq!(pane.tool_owner_index(&format!("{two}:0")), Some(0));
+    assert!(pane.toggle_tool_at(10.0, 160.0));
+    assert!(pane.tool_expanded(one));
+    assert!(!pane.tool_expanded(two));
+    assert!(!pane.tool_expanded("compose-root"));
+    assert!(pane.timeline_view_anchor.is_some());
+    assert!(pane
+        .take_timeline_dirty_marks()
+        .indices
+        .contains(&0));
+    assert!(pane.toggle_tool_at(10.0, 190.0));
+    assert!(pane.tool_expanded(one) && pane.tool_expanded(two));
+    assert!(pane.toggle_tool_at(10.0, 160.0));
+    assert!(!pane.tool_expanded(one) && pane.tool_expanded(two));
+    assert!(pane.selected_tool_group_child.is_none());
+    pane.register_tool_hit_rect(format!("{two}:0"), [0.0, 210.0, 300.0, 20.0]);
+    assert!(pane.toggle_tool_at(10.0, 220.0));
+    assert!(pane.tool_expanded(&format!("{two}:0")));
+    assert!(pane.tool_expanded(two));
+    assert!(pane.tool_archived(&format!("{two}:0")));
+    assert!(pane
+        .take_timeline_dirty_marks()
+        .indices
+        .contains(&0));
+    for animation in pane.tool_expand_anims.values_mut() {
+        animation.started_at = Instant::now() - TOOL_EXPAND_ANIMATION;
+    }
+    assert!(pane
+        .take_timeline_dirty_marks()
+        .indices
+        .contains(&0));
+}
+
+#[test]
+fn composition_child_only_update_invalidates_measurement_and_records_live_motion() {
+    let mut pane = NeoismAgentPane::default();
+    let parent = composition_fixture();
+    pane.upsert_part_message(parent.clone());
+    let _ = pane.take_timeline_dirty_marks();
+    let before = NeoismAgentPane::timeline_measure_key(&parent, 400.0, 1.0, false, false);
+    let mut updated = parent.clone();
+    updated.composition_children[0].status = "completed".into();
+    updated.composition_children[0]
+        .text
+        .push_str(" more output");
+    let after = NeoismAgentPane::timeline_measure_key(&updated, 400.0, 1.0, false, false);
+    assert_ne!(before, after);
+    pane.upsert_part_message(updated.clone());
+    assert_eq!(
+        pane.messages[0].composition_children,
+        updated.composition_children
+    );
+    assert!(pane
+        .take_timeline_dirty_marks()
+        .indices
+        .contains(&0));
+    assert_eq!(
+        pane.tool_motion_sample("compose-root/compose/one")
+            .outgoing_status,
+        Some("running")
+    );
+}
+
 #[test]
 fn left_catalog_activity_without_a_chat_stream() {
     use neoism_agent_core::CatalogActivity;

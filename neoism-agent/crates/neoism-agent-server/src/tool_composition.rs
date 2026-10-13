@@ -47,7 +47,7 @@ pub(crate) struct ProgressSink {
     pub part_id: String,
 }
 impl ProgressSink {
-    async fn publish(&self, state: &AppState, calls: &[Value]) {
+    async fn publish(&self, state: &AppState, calls: &[Value], code: Option<&str>) {
         let part = {
             let mut message = self.message.lock().await;
             message.parts.iter_mut().find_map(|part| {
@@ -80,7 +80,16 @@ impl ProgressSink {
                         merged.push(call.clone());
                     }
                 }
-                metadata["composition"] = json!({"toolCalls": merged});
+                if !metadata.is_object() {
+                    *metadata = json!({});
+                }
+                if !metadata["composition"].is_object() {
+                    metadata["composition"] = json!({});
+                }
+                metadata["composition"]["toolCalls"] = json!(merged);
+                if let Some(code) = code {
+                    metadata["composition"]["code"] = json!(code);
+                }
                 let session_id = tool.session_id.clone();
                 Some((session_id, part.clone()))
             })
@@ -143,6 +152,7 @@ struct Entry {
 struct Audit {
     calls: Vec<Value>,
     effects: Vec<(String, Value)>,
+    presentation_bytes: usize,
     sealed: bool,
 }
 
@@ -324,7 +334,7 @@ impl Host {
             (index, self.progress.as_ref().map(|_| audit.calls.clone()))
         };
         if let (Some(progress), Some(calls)) = (&self.progress, calls) {
-            progress.publish(&self.state, &calls).await;
+            progress.publish(&self.state, &calls, None).await;
         }
         let result = async {
             let entry = self.entries.get(&path).ok_or_else(|| format!("tool is not in the captured eligible catalog: {path}"))?;
@@ -343,6 +353,18 @@ impl Host {
                 CallScope { cancel: Some(cancel), progress: None, child: true,
                     effects: Some(EffectSink {audit:self.audit.clone()}),
                     validation: Some((entry.validator.clone(), entry.mcp.then(|| entry.dispatch.clone()))) }).await?;
+            {
+                let mut audit = self.audit.lock().await;
+                if !audit.sealed {
+                    let remaining = PRESENTATION_BYTES.saturating_sub(audit.presentation_bytes);
+                    if let Some((presentation, bytes)) = child_presentation(name, &result, remaining) {
+                        audit.presentation_bytes += bytes;
+                        audit.calls[index]["presentation"] = presentation;
+                    } else {
+                        audit.calls[index]["detailsTruncated"] = json!(true);
+                    }
+                }
+            }
             // Account effects before turning protocol isError into a catchable failure.
             let mut effects = result.metadata.as_ref().map(retained_effect_metadata);
             let mut hydration_error = None;
@@ -378,7 +400,7 @@ impl Host {
             self.progress.as_ref().map(|_| audit.calls.clone())
         };
         if let (Some(progress), Some(calls)) = (&self.progress, calls) {
-            progress.publish(&self.state, &calls).await;
+            progress.publish(&self.state, &calls, None).await;
         }
         result
     }
@@ -413,6 +435,105 @@ fn bounded_input(input: &Value) -> Value {
         json!({"omitted":true,"reason":"audit input exceeds 4096 bytes"})
     }
 }
+const PRESENTATION_BYTES: usize = 512 * 1024;
+
+fn text_prefix(text: &str, limit: usize) -> &str {
+    let mut end = text.len().min(limit);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
+// Child presentation is UI-only. Retain display fields, never the raw MCP
+// protocol body, and admit the serialized payload against a separate run budget.
+fn child_presentation(
+    tool: &str,
+    result: &ToolExecutionResult,
+    remaining: usize,
+) -> Option<(Value, usize)> {
+    if remaining < 256 {
+        return None;
+    }
+    let title = text_prefix(&result.title, 1024);
+    let output = text_prefix(&result.output, 16 * 1024);
+    let mut truncated =
+        title.len() != result.title.len() || output.len() != result.output.len();
+    let mut metadata = serde_json::Map::new();
+    let mut metadata_bytes = 0usize;
+    if let Some(source) = result.metadata.as_ref() {
+        if let Some(mcp) = source.get("mcp") {
+            let mut identity = serde_json::Map::new();
+            for key in ["client", "tool", "runtimeId"] {
+                if let Some(value) = mcp.get(key) {
+                    if serialized_size(value, 1024).is_ok() {
+                        identity.insert(key.to_string(), value.clone());
+                    } else {
+                        truncated = true;
+                    }
+                }
+            }
+            if !identity.is_empty() {
+                metadata.insert("mcp".into(), Value::Object(identity));
+                metadata_bytes = serialized_size(&metadata, 16 * 1024).ok()?;
+            }
+        }
+        for key in [
+            "artifact",
+            "outputPath",
+            "truncated",
+            "files",
+            "diff",
+            "diffs",
+            "attachments",
+            "media",
+            "generatedFiles",
+            "lang",
+            "language",
+            "lineOffset",
+        ] {
+            if let Some(value) = source.get(key) {
+                let room =
+                    (16 * 1024usize).saturating_sub(metadata_bytes + key.len() + 8);
+                match serialized_size(value, room) {
+                    Ok(bytes) => {
+                        metadata_bytes += bytes + key.len() + 8;
+                        metadata.insert(key.to_string(), value.clone());
+                    }
+                    Err(_) => truncated = true,
+                }
+            }
+        }
+    }
+    let mut presentation = json!({
+        "tool": tool, "title": title, "output": output,
+        "metadata": metadata, "isError": result.is_error(), "truncated": truncated,
+    });
+    loop {
+        if let Ok(bytes) = serialized_size(&presentation, remaining) {
+            return Some((presentation, bytes));
+        }
+        presentation["truncated"] = json!(true);
+        let current = presentation["output"].as_str().unwrap_or_default();
+        if !current.is_empty() {
+            presentation["output"] = json!(text_prefix(current, current.len() / 2));
+        } else if presentation["metadata"]
+            .as_object()
+            .is_some_and(|m| !m.is_empty())
+        {
+            presentation["metadata"] = json!({});
+        } else if !presentation["title"]
+            .as_str()
+            .unwrap_or_default()
+            .is_empty()
+        {
+            presentation["title"] = json!("");
+        } else {
+            return None;
+        }
+    }
+}
+
 fn envelope(result: &ToolExecutionResult) -> Value {
     // The interpreter attaches aliases to its arena after one import. Keep one
     // canonical payload here rather than cloning structured MCP data three times.
@@ -763,6 +884,9 @@ pub(crate) async fn run_with_limits(
     if code.len() > limits.max_source_bytes {
         return Err("composition source exceeds the bounded source limit".into());
     }
+    if let Some(progress) = &progress {
+        progress.publish(state, &[], Some(code)).await;
+    }
     let local = Arc::new(AtomicBool::new(false));
     struct CancelOnDrop(Arc<AtomicBool>);
     impl Drop for CancelOnDrop {
@@ -860,7 +984,8 @@ pub(crate) async fn run_with_limits(
             .find(|call| call["id"] == record["id"])
         {
             if existing["status"] == "running" {
-                *existing = record;
+                existing["status"] = record["status"].clone();
+                existing["error"] = record["error"].clone();
             }
         } else {
             audit.calls.push(record);
@@ -892,7 +1017,8 @@ pub(crate) async fn run_with_limits(
     drop(audit);
     if let Some(progress) = &host.progress {
         let _ =
-            tokio::time::timeout(cleanup_budget, progress.publish(state, &calls)).await;
+            tokio::time::timeout(cleanup_budget, progress.publish(state, &calls, None))
+                .await;
     }
     let replay = json!({"ok":result.ok,"value":result.value,"error":result.error,
         "logs":result.logs,"warnings":result.warnings,"truncated":result.truncated});
@@ -901,6 +1027,7 @@ pub(crate) async fn run_with_limits(
         metadata = json!({});
     }
     metadata["composition"] = replay.clone();
+    metadata["composition"]["code"] = json!(code);
     metadata["composition"]["toolCalls"] = json!(calls);
     metadata["isError"] = json!(!result.ok);
     Ok(ToolExecutionResult {
@@ -913,6 +1040,54 @@ pub(crate) async fn run_with_limits(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn composition_child_presentation_is_bounded_without_raw_mcp_data() {
+        let result = ToolExecutionResult {
+            title: "Grep src/standalone.rs".into(),
+            output: "\u{e9}".repeat(30_000),
+            metadata: Some(json!({
+                "isError":true,
+                "mcp":{"client":"fixture","tool":"search","runtimeId":"mcp__fixture__search",
+                    "result":{"structuredContent":{"body":"x".repeat(1024 * 1024)}}},
+                "files":[{"path":"src/standalone.rs"}],
+                "diff":"small diff"
+            })),
+        };
+        let (view, bytes) = child_presentation("grep", &result, 32 * 1024).unwrap();
+        assert!(bytes <= 32 * 1024);
+        assert_eq!(view["tool"], "grep");
+        assert_eq!(view["isError"], true);
+        assert_eq!(view["truncated"], true);
+        assert!(view["output"].as_str().unwrap().len() <= 16 * 1024);
+        assert_eq!(view["metadata"]["mcp"]["client"], "fixture");
+        assert!(view["metadata"]["mcp"].get("result").is_none());
+        assert_eq!(view["metadata"]["diff"], "small diff");
+        assert_eq!(view["metadata"]["files"][0]["path"], "src/standalone.rs");
+    }
+
+    #[test]
+    fn composition_child_presentation_has_a_run_aggregate_budget() {
+        let result = ToolExecutionResult {
+            title: "Read file".into(),
+            output: "\n".repeat(40_000),
+            metadata: None,
+        };
+        let mut used = 0;
+        let mut omitted = 0;
+        for _ in 0..64 {
+            match child_presentation("read", &result, PRESENTATION_BYTES - used) {
+                Some((value, bytes)) => {
+                    assert_eq!(serialized_size(&value, bytes).unwrap(), bytes);
+                    used += bytes;
+                }
+                None => omitted += 1,
+            }
+        }
+        assert!(used <= PRESENTATION_BYTES);
+        assert!(omitted > 0);
+        assert!(child_presentation("read", &result, 0).is_none());
+    }
+
     #[test]
     fn composition_signatures_include_nested_ref_union_and_enum() {
         let schema = json!({"type":"object","required":["filter"],"properties":{

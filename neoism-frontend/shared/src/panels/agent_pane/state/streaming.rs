@@ -80,6 +80,7 @@ impl NeoismAgentPane {
         };
         if Some(entry.id.as_str()) == self.session_id.as_deref() {
             self.timeline_live_growth = false;
+            self.footer_growth.clear();
             self.clear_timeline_motion();
             self.pending_timeline_anchor = None;
             self.timeline_view_anchor = None;

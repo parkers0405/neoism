@@ -1,4 +1,5 @@
 use super::*;
+use neoism_backend::clipboard::ClipboardType;
 
 impl Screen<'_> {
     pub fn handle_file_browser_click(&mut self) -> bool {
@@ -27,6 +28,11 @@ impl Screen<'_> {
             } else {
                 self.renderer.modal.close();
             }
+            self.mark_dirty();
+            return true;
+        }
+        if let Some(action) = self.renderer.modal.invite_action_at(mouse_x, mouse_y) {
+            self.execute_modal_action(action);
             self.mark_dirty();
             return true;
         }
@@ -114,6 +120,13 @@ impl Screen<'_> {
         let _ = neoism_ui::chrome_policy::modal_action_dispatch(policy_tag);
 
         match action {
+            ModalAction::CopyInvite { url } => {
+                self.context_manager.event_proxy().send_event(
+                    neoism_backend::event::RioEvent::ClipboardStore(ClipboardType::Clipboard, url).into(),
+                    self.context_manager.window_id(),
+                );
+                self.renderer.modal.mark_invite_copied();
+            }
             ModalAction::Close => {
                 self.renderer.modal.close();
             }
@@ -774,7 +787,11 @@ impl Screen<'_> {
                     }
                     self.renderer.modal.close();
                     self.request_fast_server_add(host, target, value("name"), password.clone());
-                    self.request_server_manager();
+                    // Hosting starts in the background with a toast, not a
+                    // picker stacked with its eventual ready/error dialog.
+                    if !host {
+                        self.request_server_manager();
+                    }
                     return;
                 }
                 // Create-server form: `create_dir` is the discriminator

@@ -608,6 +608,8 @@ pub enum ModalActionDispatch {
     /// Long-running installer or apply step that leaves the modal open
     /// (e.g. an `InstallLsp` that flips the modal into a busy state).
     KeepOpenForBusyAction,
+    /// Immediate action that keeps the dialog visible without a busy state.
+    KeepOpen,
     /// Action that closes the modal as its first side effect (e.g.
     /// `RunEditorCommand` clearing the prompt before dispatching).
     CloseBeforeAction,
@@ -624,6 +626,7 @@ pub enum ModalActionDispatch {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModalActionTag {
     Close,
+    CopyInvite,
     UpdateNeoism,
     InstallLsp,
     InstallPythonKernel,
@@ -687,6 +690,7 @@ pub fn modal_action_dispatch(tag: ModalActionTag) -> ModalActionDispatch {
     use ModalActionTag as T;
     match tag {
         T::Close => D::Close,
+        T::CopyInvite => D::KeepOpen,
         T::UpdateNeoism => D::KeepOpenForBusyAction,
         T::InstallLsp
         | T::InstallPythonKernel
@@ -1334,6 +1338,7 @@ mod tests {
 
     #[test]
     fn modal_action_dispatch_run_paths_close_before_action() {
+        assert_eq!(modal_action_dispatch(ModalActionTag::CopyInvite), ModalActionDispatch::KeepOpen);
         for tag in [
             ModalActionTag::RunEditorCommand,
             ModalActionTag::RunAgent,

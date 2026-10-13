@@ -59,7 +59,7 @@ const COPY_REF_LINK_PREFIX: &str = "neoism-copy-ref://";
 pub const MERMAID_TOGGLE_LINK_PREFIX: &str = "neoism-mermaid-toggle://";
 const MARKDOWN_CODE_HEADER_H: f32 = 30.0;
 const MARKDOWN_CODE_BODY_TOP_PAD: f32 = 10.0;
-const MARKDOWN_CODE_BODY_BOTTOM_PAD: f32 = 10.0;
+const MARKDOWN_CODE_BODY_BOTTOM_PAD: f32 = 16.0;
 const MARKDOWN_CODE_LINE_H: f32 = 18.0;
 const INLINE_LINE_CACHE_LIMIT: usize = 8192;
 const COPY_SOURCE_CACHE_LIMIT: usize = 1024;
@@ -282,6 +282,21 @@ pub trait AgentMarkdownPane {
         None
     }
 
+    fn response_footer_motion(
+        &mut self,
+    ) -> Option<&mut crate::panels::agent_pane::tool_motion::ToolMotionState> {
+        None
+    }
+
+    fn response_footer_paint_y(
+        &mut self,
+        _id: &str,
+        natural_y: f32,
+        _sample: crate::panels::agent_pane::tool_motion::ToolMotionSample,
+    ) -> f32 {
+        natural_y
+    }
+
     fn html_artifact_status(&self, _key: &str) -> HtmlArtifactStatus {
         HtmlArtifactStatus::Disabled
     }
@@ -389,6 +404,19 @@ impl AgentMarkdownPane for NeoismAgentPane {
         &mut self,
     ) -> Option<&mut crate::panels::agent_pane::text_reveal::TextRevealState> {
         Some(&mut self.text_reveal)
+    }
+    fn response_footer_motion(
+        &mut self,
+    ) -> Option<&mut crate::panels::agent_pane::tool_motion::ToolMotionState> {
+        Some(self.tool_motion_state())
+    }
+    fn response_footer_paint_y(
+        &mut self,
+        id: &str,
+        natural_y: f32,
+        sample: crate::panels::agent_pane::tool_motion::ToolMotionSample,
+    ) -> f32 {
+        NeoismAgentPane::response_footer_paint_y(self, id, natural_y, sample)
     }
 
     fn cached_markdown_blocks_for(

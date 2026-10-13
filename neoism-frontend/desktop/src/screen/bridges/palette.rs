@@ -449,7 +449,7 @@ impl Screen<'_> {
             fields: vec![
                 ModalFormField { id: id.into(), label: label.into(), value, placeholder: placeholder.into(), secret: false },
                 ModalFormField { id: "name".into(), label: "Server name (optional)".into(), value: draft.name.clone(), placeholder: "Team server".into(), secret: false },
-                ModalFormField { id: "token".into(), label: if needs_password { "Password (required)" } else { "Password (optional)" }.into(), value: draft.password.clone(), placeholder: "password".into(), secret: true },
+                ModalFormField { id: "token".into(), label: if draft.fast && !host && !draft.invite { "Password (unless invite includes access code)" } else if needs_password { "Password (required)" } else { "Password (optional)" }.into(), value: draft.password.clone(), placeholder: "password".into(), secret: true },
             ],
             submit_label: if host { "Host server" } else { "Join server" }.into(),
         });

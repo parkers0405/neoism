@@ -31,6 +31,7 @@ mod process;
 pub mod search;
 pub mod server;
 pub mod sessions;
+pub mod standalone;
 pub mod temporary;
 pub mod tailnet;
 /// Built web UI served from the daemon HTTP listener.

@@ -20,11 +20,11 @@ fn edit_diff_sections(message: &impl AgentToolMessage) -> Option<Vec<ToolDiffSec
             return None;
         }
         let sections = [
-            ("Tool calls", "calls"),
-            ("Selected output", "result"),
             ("Program source.js", "source"),
+            ("Selected output", "result"),
         ]
         .into_iter()
+        .filter(|(_, key)| *key == "source" || value[*key].as_str().is_some_and(|s| !s.is_empty()))
         .map(|(label, key)| {
             let text = value[key].as_str().filter(|s| !s.is_empty()).unwrap_or("—");
             let rows = text
@@ -37,6 +37,15 @@ fn edit_diff_sections(message: &impl AgentToolMessage) -> Option<Vec<ToolDiffSec
                 })
                 .collect();
             let mut section = section_from_rows(label.to_owned(), rows);
+            if key == "source" {
+                // The actual executed program is not a patch preview: retain every line.
+                section.lines = text.lines().map(|text| DiffLine {
+                    kind: DiffLineKind::Context, text: text.to_owned(), line_number: None,
+                    old_line_number: None, new_line_number: None,
+                }).collect();
+                section.omitted = 0;
+                section.fingerprint = hash_value(&(label, text));
+            }
             section.link_target.clear();
             section.fingerprint = hash_value(&(section.fingerprint, label));
             section
@@ -79,6 +88,14 @@ fn edit_diff_sections(message: &impl AgentToolMessage) -> Option<Vec<ToolDiffSec
                 );
             }
             attach_section_diagnostics(&mut sections, metadata);
+            if let Some(notice) = value["compositionNotice"].as_str().filter(|s| !s.trim().is_empty()) {
+                let rows = notice.lines().map(|text| ParsedDiffRow {
+                    kind: DiffLineKind::Context, text: text.to_owned(), old_line: None, new_line: None,
+                }).collect();
+                let mut section = section_from_rows("Audit notice".into(), rows);
+                section.link_target.clear();
+                sections.push(section);
+            }
         }
     }
 
@@ -924,8 +941,9 @@ pub(crate) fn cached_diff_card_view(
 }
 
 pub(crate) fn diff_body_height(visual_rows: usize, s: f32) -> f32 {
+    // Leave a small inset below the last row for the horizontal scrollbar.
     diff_card::BODY_TOP_PAD * s
-        + diff_card::BODY_BOTTOM_PAD * s
+        + (diff_card::BODY_BOTTOM_PAD + 6.0) * s
         + visual_rows.max(1) as f32 * diff_card::LINE_HEIGHT * s
 }
 

@@ -663,6 +663,22 @@ impl CommandPalette {
         self.start_open_pop();
     }
 
+    /// Refresh an open server picker without resetting its query or selection.
+    pub fn refresh_servers(&mut self, servers: Vec<PaletteServerEntry>) -> bool {
+        if !self.enabled || !matches!(self.mode, PaletteMode::Servers(_)) {
+            return false;
+        }
+        let selected = self.get_selected_action();
+        self.mode = PaletteMode::Servers(servers);
+        let rows = self.filtered_rows();
+        let selected_index = rows
+            .iter()
+            .position(|(_, row)| selected.is_some() && row.action() == selected)
+            .unwrap_or_else(|| self.selected_index.min(rows.len().saturating_sub(1)));
+        self.selected_index = selected_index;
+        true
+    }
+
     pub fn remove_server_entry(&mut self, server_id: &str) {
         if let PaletteMode::Servers(servers) = &mut self.mode {
             servers.retain(|server| server.id != server_id);

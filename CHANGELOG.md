@@ -2,6 +2,18 @@
 
 All notable user-facing changes to Neoism are documented here.
 
+## [0.7.126-nightly.20261013.2] - 2026-10-13
+
+### Hosting reliability and Agent presentation
+
+- Adds a headless desktop workspace-daemon entry path, versioned nonce/address readiness acknowledgements, bounded startup diagnostics, authenticated WebSocket forwarding, and reuse of the local Agent service instead of competing database ownership.
+- Improves Fast Host progress notifications, ready-dialog invite copying, picker/modal coordination, connection failure handling, and shutdown/session cleanup.
+- Adds independent response-footer reveal and motion state so completion metadata does not replay answer text. Preserves reader positions and cancels inappropriate footer replay during history navigation and user gestures.
+- Renders composition child calls as typed tool rows with bounded retained output/metadata, stable identities, and independent expansion while retaining parent source/results. Interrupted or legacy records identify unavailable/truncated output explicitly.
+- Refactors standalone daemon startup into a shared runner while preserving normal bootstrap, persistence, signals, and bounded shutdown. Includes focused hosting, composition, and response-footer regression coverage.
+
+This is a real opt-in nightly release. Use `neoism update --nightly`; stable Latest remains v0.7.125. Fast Host remains for trusted participants and is not a sandbox. Browser workers remain separate experimental components and are not packaged in this release.
+
 ## [0.7.126-nightly.20261013.1] - 2026-10-13
 
 ### Tool composition, server invites, and Git controls

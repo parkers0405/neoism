@@ -157,6 +157,11 @@ features = ["wgpu"]
 workspace = true
 features = ["wgpu"]
 
+[lints.rust]
+# This feature exists only in tests/transport_contract, which includes our source.
+# Recognize its test-export cfg without exposing it as a desktop build feature.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("server-transport-contract"))'] }
+
 [features]
 default = ["wayland", "x11", "wgpu", "cef-artifacts"]
 audio = ["cpal"]

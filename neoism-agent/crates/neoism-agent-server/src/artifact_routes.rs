@@ -508,31 +508,47 @@ async fn authorize_artifact(
     let Some(claims) = claims else {
         return Ok(tenant);
     };
-    if tenant != claims.tenant_id {
-        let artifact = state
-            .inner
-            .store
-            .get_artifact(crate::state::TenantQueryScope::Tenant(&tenant), id)
-            .await?
-            .ok_or_else(|| ApiError::not_found("Artifact not found"))?;
-        let session = match artifact.session_id.as_deref() {
-            Some(id) => state.inner.store.get_session(id).await?,
-            None => None,
-        };
-        let shared = session.as_ref().is_some_and(|session| {
-            // Only artifacts originally local (or owned by this exact adopted
-            // namespace) follow the authoritative hosting association.
-            (tenant == "local" || tenant == crate::caller::session_tenant(session))
+    let artifact = state
+        .inner
+        .store
+        .get_artifact(crate::state::TenantQueryScope::Tenant(&tenant), id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("Artifact not found"))?;
+    let session = match artifact.session_id.as_deref() {
+        Some(id) => state.inner.store.get_session(id).await?,
+        None => None,
+    };
+    if let Some(session) = session.as_ref() {
+        // Storage tenant alone cannot grant a linked artifact after its family
+        // has been revoked, nor bypass the caller's directory capability.
+        if !crate::caller::allows_session(claims, session) {
+            return Err(ApiError::forbidden("Artifact session is not authorized"));
+        }
+        if tenant != claims.tenant_id {
+            let shared = (tenant == "local"
+                || tenant == crate::caller::session_tenant(session))
                 && session
                     .extra
                     .get(crate::caller::HOST_LOCAL_ACCESS_KEY)
                     .and_then(serde_json::Value::as_bool)
-                    == Some(true)
-                && crate::caller::allows_session(claims, session)
-        });
-        if !shared {
-            return Err(ApiError::forbidden("Artifact belongs to another tenant"));
+                    == Some(true);
+            let restored_local = !claims.hosted
+                && claims.workspace_id.is_none()
+                && claims.tenant_id == "local"
+                && crate::caller::session_tenant(session) == "local"
+                && state
+                    .inner
+                    .store
+                    .revoked_artifact_namespace(session.id.as_str(), &tenant)
+                    .await?;
+            if !shared && !restored_local {
+                return Err(ApiError::forbidden("Artifact belongs to another tenant"));
+            }
         }
+    } else if tenant != claims.tenant_id
+        || (claims.hosted && artifact.session_id.is_some())
+    {
+        return Err(ApiError::forbidden("Artifact belongs to another tenant"));
     }
     if let Some(days) = claims.artifact_retention_days {
         let artifact = state

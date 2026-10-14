@@ -13,6 +13,19 @@ use neoism_protocol::workspace::WorkspaceClientMessage;
 
 const DAEMON_CLIENT_RUNTIME_WORKERS: usize = 2;
 
+/// Registry provenance, never address shape or authentication failure, selects
+/// the wire contract for both Fast Host and Fast Join.
+pub(crate) fn server_upgrade_auth(
+    registry: &crate::server_registry::ServerRegistry,
+    server_id: Option<&str>,
+) -> crate::daemon_client::DaemonUpgradeAuth {
+    if server_id.is_some_and(|id| registry.is_temporary(id)) {
+        crate::daemon_client::DaemonUpgradeAuth::FastBearer
+    } else {
+        crate::daemon_client::DaemonUpgradeAuth::HelloOnly
+    }
+}
+
 pub struct DesktopDaemonConnection {
     _runtime: tokio::runtime::Runtime,
     runtime_handle: tokio::runtime::Handle,
@@ -31,6 +44,20 @@ impl DesktopDaemonConnection {
         token: Option<String>,
         event_proxy: EventProxy,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::connect_with_upgrade_auth(
+            endpoint,
+            token,
+            crate::daemon_client::DaemonUpgradeAuth::HelloOnly,
+            event_proxy,
+        )
+    }
+
+    pub fn connect_with_upgrade_auth(
+        endpoint: &str,
+        token: Option<String>,
+        upgrade_auth: crate::daemon_client::DaemonUpgradeAuth,
+        event_proxy: EventProxy,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             // One websocket receive loop plus lightweight async sends do not
             // need Tokio's default one-worker-per-logical-CPU allocation.
@@ -43,6 +70,7 @@ impl DesktopDaemonConnection {
         let endpoint_string = endpoint.normalized();
         let mut options = DaemonClientOptions::new(endpoint);
         options.token = token.clone();
+        options.upgrade_auth = upgrade_auth;
         let client = runtime.block_on(DaemonClient::connect_with_options(options))?;
         runtime.block_on(wait_for_startup(&client, startup_timeout))?;
         let (handle, mut rx, status_rx) = client.into_channels();

@@ -373,7 +373,8 @@ pub struct Application<'a> {
     ended_fast_hosts: HashSet<String>,
     fast_host_tx: mpsc::Sender<fast_server_sessions::PendingFastHost>,
     fast_host_rx: mpsc::Receiver<fast_server_sessions::PendingFastHost>,
-    fast_host_pending: HashMap<WindowId, neoism_ui::panels::notifications::ProgressHandle>,
+    fast_host_pending:
+        HashMap<WindowId, neoism_ui::panels::notifications::ProgressHandle>,
     invite_join: invite_join::InviteJoinState,
     invite_activation: HashMap<String, neoism_backend::event::InviteActivationToken>,
     invite_activation_targets: HashMap<WindowId, String>,
@@ -7180,6 +7181,7 @@ impl Application<'_> {
             let Some(route) = self.router.routes.get_mut(&window_id) else {
                 return;
             };
+            route.window.screen.process_hosted_server_completions();
             (
                 route.window.screen.take_server_connect(),
                 route.window.screen.take_ssh_workspace_attach(),
@@ -8409,16 +8411,54 @@ impl Application<'_> {
         }
         let tx = self.server_switch_tx.clone();
         let event_proxy = self.event_proxy.clone();
+        // Fast invites and local Fast hosts are registered as temporary before
+        // dialing. Saved servers, SSH, probes and home remain Hello-only.
+        let upgrade_auth =
+            daemon_pump::server_upgrade_auth(&self.server_registry, server_id.as_deref());
+        let hosted_spec = server_id
+            .as_deref()
+            .and_then(|id| self.server_registry.hosted_spec(id));
         let daemon_url = daemon_url.to_string();
         let spawn = std::thread::Builder::new()
             .name(format!("neoism-server-switch-{window_id:?}"))
             .spawn(move || {
-                let result = DesktopDaemonConnection::connect_with_token(
+                let result = DesktopDaemonConnection::connect_with_upgrade_auth(
                     &daemon_url,
-                    token,
+                    token.clone(),
+                    upgrade_auth,
                     event_proxy.clone(),
                 )
-                .map_err(|error| error.to_string());
+                .map_err(|error| error.to_string())
+                .or_else(|error| {
+                    let Some(spec) = hosted_spec else {
+                        return Err(error);
+                    };
+                    let address = std::net::SocketAddr::from(([127, 0, 0, 1], spec.port));
+                    // A live listener with an authentication failure must not be
+                    // replaced. Only revive our own missing persistent daemon.
+                    if std::net::TcpStream::connect_timeout(
+                        &address,
+                        std::time::Duration::from_millis(200),
+                    )
+                    .is_ok()
+                    {
+                        return Err(error);
+                    }
+                    crate::screen::bridges::palette::spawn_hosted_daemon(
+                        &spec,
+                        token.as_deref(),
+                    )
+                    .map_err(|startup| {
+                        format!("{error}; hosted daemon startup failed: {startup}")
+                    })?;
+                    DesktopDaemonConnection::connect_with_upgrade_auth(
+                        &daemon_url,
+                        token,
+                        upgrade_auth,
+                        event_proxy.clone(),
+                    )
+                    .map_err(|error| error.to_string())
+                });
                 let _ = tx.send(PendingServerSwitch {
                     window_id,
                     generation,
@@ -8440,14 +8480,6 @@ impl Application<'_> {
     }
 
     fn drain_server_switch_results(&mut self) {
-        // Rehosting a dead daemon re-dials, which loops back through here.
-        // Remember which hosted servers we've already relaunched this session
-        // so a daemon that refuses to come up can't spin an infinite relaunch
-        // loop — we relaunch each hosted server at most once per session.
-        thread_local! {
-            static RELAUNCHED: std::cell::RefCell<std::collections::HashSet<String>> =
-                std::cell::RefCell::new(std::collections::HashSet::new());
-        }
         while let Ok(pending) = self.server_switch_rx.try_recv() {
             if !pending.is_current(&self.server_switch_inflight) {
                 continue;
@@ -8498,50 +8530,6 @@ impl Application<'_> {
                         self.ssh_attaches.remove(&daemon_url);
                         if let Some(route) = self.router.routes.get_mut(&window_id) {
                             route.window.screen.cancel_ssh_workspace_replacement();
-                        }
-                    }
-                    // A server we host may just have died with a previous app
-                    // session. Relaunch its daemon ONCE (per session) and
-                    // re-dial before giving up — the dial retries with backoff,
-                    // so the freshly spawned daemon wins the startup race.
-                    if let Some(server_id) = server_id.clone() {
-                        if let Some(spec) = self.server_registry.hosted_spec(&server_id) {
-                            let first_attempt = RELAUNCHED
-                                .with(|set| set.borrow_mut().insert(server_id.clone()));
-                            if first_attempt {
-                                let token = self
-                                    .server_registry
-                                    .token(&server_id)
-                                    .map(str::to_string);
-                                match crate::screen::bridges::palette::spawn_hosted_daemon(
-                                    &spec,
-                                    token.as_deref(),
-                                ) {
-                                    Ok(()) => {
-                                        tracing::info!(
-                                            target: "neoism::desktop_daemon",
-                                            window = ?window_id,
-                                            daemon = %daemon_url,
-                                            server = %server_id,
-                                            "hosted daemon was down; relaunched it and re-dialing"
-                                        );
-                                        self.switch_window_server(
-                                            window_id,
-                                            &daemon_url,
-                                            token,
-                                            Some(server_id),
-                                        );
-                                        continue;
-                                    }
-                                    Err(error) => tracing::warn!(
-                                        target: "neoism::desktop_daemon",
-                                        window = ?window_id,
-                                        server = %server_id,
-                                        %error,
-                                        "failed to relaunch hosted daemon"
-                                    ),
-                                }
-                            }
                         }
                     }
                     tracing::warn!(

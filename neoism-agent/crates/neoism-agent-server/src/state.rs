@@ -1966,6 +1966,7 @@ impl SessionStore {
         self.db.execute_transaction(vec![
             ("CREATE TABLE IF NOT EXISTS hosted_chat_directories (directory TEXT PRIMARY KEY, workspace_id TEXT NOT NULL UNIQUE)".into(), vec![]),
             ("CREATE TABLE IF NOT EXISTS hosted_chat_sessions (session_id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL)".into(), vec![]),
+            ("CREATE TABLE IF NOT EXISTS hosted_chat_revocations (session_id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL)".into(), vec![]),
         ]).await?;
         self.db
             .execute(
@@ -3669,8 +3670,8 @@ impl SessionStore {
         let row = self
             .db
             .fetch_optional(
-                "SELECT info_json FROM sessions WHERE tenant_id = ? AND id = ?",
-                vec![text(tenant_id), text(session_id)],
+                "SELECT info_json FROM sessions WHERE id = ? AND (tenant_id = ? OR (tenant_id = 'local' AND id IN (SELECT session_id FROM hosted_chat_sessions WHERE 'workspace:' || workspace_id = ?)) OR (? = 'local' AND id IN (SELECT session_id FROM hosted_chat_revocations WHERE 'workspace:' || workspace_id = sessions.tenant_id)))",
+                vec![text(session_id), text(tenant_id), text(tenant_id), text(tenant_id)],
             )
             .await?;
         let mut session: Option<SessionInfo> = row
@@ -3679,6 +3680,15 @@ impl SessionStore {
         if let Some(session) = session.as_mut() {
             self.hydrate_host_associations(std::slice::from_mut(session))
                 .await?;
+        }
+        // A local row may be authoritatively associated without rewriting its
+        // history tenant. Never let that lookup override explicit foreign ownership.
+        if tenant_id != "local"
+            && session.as_ref().is_some_and(|session| {
+                crate::caller::session_tenant(session) != tenant_id
+            })
+        {
+            return Ok(None);
         }
         Ok(session)
     }
@@ -4198,7 +4208,9 @@ impl SessionStore {
                     ),
                 ])
                 .await?;
-            if results.first().copied().unwrap_or(0) > 0 { reconciled.push(row.get_str("root_session_id")?); }
+            if results.first().copied().unwrap_or(0) > 0 {
+                reconciled.push(row.get_str("root_session_id")?);
+            }
         }
         Ok(reconciled)
     }
@@ -5139,18 +5151,21 @@ impl SessionStore {
         session_id: Option<&str>,
         tenant_id: Option<&str>,
     ) -> anyhow::Result<Vec<ArtifactInfo>> {
+        // Hosted continuity includes local artifacts linked to adopted sessions,
+        // never unattached artifacts. Route-level authorization still verifies
+        // each artifact's hydrated session ownership and directory capability.
         let (sql, params) = match (session_id, tenant_id) {
             (Some(session_id), Some(tenant_id)) => (
-                "SELECT id, filename, media_type, size, sha256, session_id, created FROM artifacts WHERE session_id = ? AND tenant_id = ? ORDER BY created DESC",
-                vec![text(session_id), text(tenant_id)],
+                "SELECT id, filename, media_type, size, sha256, session_id, created FROM artifacts WHERE session_id = ? AND (((tenant_id = ? OR (tenant_id = 'local' AND session_id IN (SELECT session_id FROM hosted_chat_sessions WHERE 'workspace:' || workspace_id = ?))) AND NOT EXISTS (SELECT 1 FROM hosted_chat_revocations WHERE session_id = artifacts.session_id AND 'workspace:' || workspace_id = ?)) OR (? = 'local' AND session_id IN (SELECT session_id FROM hosted_chat_revocations WHERE 'workspace:' || workspace_id = artifacts.tenant_id))) ORDER BY created DESC",
+                vec![text(session_id), text(tenant_id), text(tenant_id), text(tenant_id), text(tenant_id)],
             ),
             (Some(session_id), None) => (
                 "SELECT id, filename, media_type, size, sha256, session_id, created FROM artifacts WHERE session_id = ? ORDER BY created DESC",
                 vec![text(session_id)],
             ),
             (None, Some(tenant_id)) => (
-                "SELECT id, filename, media_type, size, sha256, session_id, created FROM artifacts WHERE tenant_id = ? ORDER BY created DESC",
-                vec![text(tenant_id)],
+                "SELECT id, filename, media_type, size, sha256, session_id, created FROM artifacts WHERE ((tenant_id = ? OR (tenant_id = 'local' AND session_id IN (SELECT session_id FROM hosted_chat_sessions WHERE 'workspace:' || workspace_id = ?))) AND NOT EXISTS (SELECT 1 FROM hosted_chat_revocations WHERE session_id = artifacts.session_id AND 'workspace:' || workspace_id = ?)) OR (? = 'local' AND session_id IN (SELECT session_id FROM hosted_chat_revocations WHERE 'workspace:' || workspace_id = artifacts.tenant_id)) ORDER BY created DESC",
+                vec![text(tenant_id), text(tenant_id), text(tenant_id), text(tenant_id)],
             ),
             (None, None) => (
                 "SELECT id, filename, media_type, size, sha256, session_id, created FROM artifacts ORDER BY created DESC",

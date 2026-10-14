@@ -387,6 +387,633 @@ async fn hosting_preserves_local_family_and_reuses_namespace_without_stealing() 
 }
 
 #[tokio::test]
+async fn hosting_skips_entire_out_of_root_family_and_rehosts_eligible_history() {
+    let _guard = env_lock();
+    let dir = std::env::temp_dir().join(format!(
+        "agent-host-filter-{}",
+        neoism_agent_core::new_session_id()
+    ));
+    let root = dir.join("repo");
+    let child_dir = root.join("task");
+    std::fs::create_dir_all(&child_dir).unwrap();
+    let path = dir.join("agent.db");
+    let previous = std::env::var_os("NEOISM_DAEMON_TOKEN");
+    std::env::set_var("NEOISM_DAEMON_TOKEN", "hosting-filter-test-key");
+    let state = AppState::open_database(path.clone()).await.unwrap();
+    match previous {
+        Some(value) => std::env::set_var("NEOISM_DAEMON_TOKEN", value),
+        None => std::env::remove_var("NEOISM_DAEMON_TOKEN"),
+    }
+    let store = &state.inner.store;
+    let app = app(state.clone());
+    let signed = |subject: &str, workspace: &str, method: Method, uri: &str| {
+        let credential =
+            neoism_agent_service_api::daemon_credential::DaemonCredentialClaims::new(
+                subject,
+                workspace,
+                format!("workspace:{workspace}"),
+                vec![root.to_string_lossy().into_owned()],
+                true,
+                (now_millis() / 1000) as i64,
+                60,
+            )
+            .unwrap();
+        let token = neoism_agent_service_api::daemon_credential::issue(
+            &credential,
+            b"hosting-filter-test-key",
+        )
+        .unwrap();
+        let mut req = request(method, uri, None);
+        req.headers_mut()
+            .insert("authorization", format!("Bearer {token}").parse().unwrap());
+        req.headers_mut().insert(
+            "x-neoism-directory",
+            root.to_string_lossy().parse().unwrap(),
+        );
+        req
+    };
+    let mut valid = store_test_session(&neoism_agent_core::new_session_id(), 123);
+    valid.directory = root.to_string_lossy().into_owned();
+    let mut valid_child = store_test_session(&neoism_agent_core::new_session_id(), 124);
+    valid_child.parent_id = Some(valid.id.clone());
+    valid_child.directory = child_dir.to_string_lossy().into_owned();
+    let mut private = store_test_session(&neoism_agent_core::new_session_id(), 125);
+    private.directory = valid.directory.clone();
+    let mut private_inside =
+        store_test_session(&neoism_agent_core::new_session_id(), 126);
+    private_inside.parent_id = Some(private.id.clone());
+    private_inside.directory = valid.directory.clone();
+    let mut private_outside =
+        store_test_session(&neoism_agent_core::new_session_id(), 127);
+    private_outside.parent_id = Some(private.id.clone());
+    // Mirrors a project-root conversation with a historical home-directory task.
+    private_outside.directory = dir.to_string_lossy().into_owned();
+    for session in [
+        &valid,
+        &valid_child,
+        &private,
+        &private_inside,
+        &private_outside,
+    ] {
+        store.insert_session(session).await.unwrap();
+    }
+    let history = store_test_message(&private.id, 125, "private original history");
+    store
+        .append_message(private.id.as_str(), &history)
+        .await
+        .unwrap();
+    let before = store.hosting_history_json_for_test().await.unwrap();
+    for (id, session_id) in [
+        ("eligible-artifact", Some(valid.id.to_string())),
+        ("private-artifact", Some(private.id.to_string())),
+        ("unattached-artifact", None),
+    ] {
+        store
+            .insert_artifact(
+                &neoism_agent_core::ArtifactInfo {
+                    id: id.into(),
+                    filename: "test.txt".into(),
+                    media_type: "text/plain".into(),
+                    size: 1,
+                    sha256: "test".into(),
+                    created: now_millis(),
+                    session_id,
+                    download_url: String::new(),
+                },
+                "local",
+            )
+            .await
+            .unwrap();
+    }
+    let guest = claims(&root, "host-first", "device:guest");
+    let mut local = guest.clone();
+    local.hosted = false;
+    local.workspace_id = None;
+    local.tenant_id = "local".into();
+    local.directory_prefixes = vec![dir.to_string_lossy().into_owned()];
+    for requested in ["host-first", "host-next"] {
+        let associated: Value = response_json(
+            app.clone()
+                .oneshot(signed(
+                    crate::hosting::HOST_ASSOCIATION_SUBJECT,
+                    requested,
+                    Method::POST,
+                    "/v2/hosting/associate",
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(associated["workspaceId"], "host-first");
+        let artifacts: Vec<neoism_agent_core::ArtifactInfo> = response_json(
+            app.clone()
+                .oneshot(signed(
+                    "device:guest",
+                    "host-first",
+                    Method::GET,
+                    "/v2/artifacts",
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0].id, "eligible-artifact");
+        for session in [&valid, &valid_child] {
+            let loaded = store
+                .get_session(session.id.as_str())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(crate::caller::allows_session(&guest, &loaded));
+            assert_eq!(loaded.workspace_id.as_deref(), Some("host-first"));
+            let hosted: SessionInfo = response_json(
+                app.clone()
+                    .oneshot(signed(
+                        "device:guest",
+                        "host-first",
+                        Method::GET,
+                        &format!("/v2/sessions/{}", session.id),
+                    ))
+                    .await
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(hosted.id, session.id);
+            let wrong_namespace = app
+                .clone()
+                .oneshot(signed(
+                    "device:guest",
+                    "unrelated-workspace",
+                    Method::GET,
+                    &format!("/v2/sessions/{}", session.id),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(wrong_namespace.status(), StatusCode::NOT_FOUND);
+        }
+        for session in [&private, &private_inside, &private_outside] {
+            let loaded = store
+                .get_session(session.id.as_str())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(!crate::caller::allows_session(&guest, &loaded));
+            assert!(crate::caller::allows_session(&local, &loaded));
+            assert!(loaded.workspace_id.is_none());
+            let denied = app
+                .clone()
+                .oneshot(signed(
+                    "device:guest",
+                    "host-first",
+                    Method::GET,
+                    &format!("/v2/sessions/{}", session.id),
+                ))
+                .await
+                .unwrap();
+            assert!(matches!(
+                denied.status(),
+                StatusCode::FORBIDDEN | StatusCode::NOT_FOUND
+            ));
+            assert_eq!(
+                serde_json::to_value(&loaded).unwrap(),
+                serde_json::to_value(session).unwrap()
+            );
+        }
+        let after = store.hosting_history_json_for_test().await.unwrap();
+        assert_eq!(before, after, "hosting must not rewrite any history JSON");
+        assert_eq!(
+            serde_json::to_value(store.list_messages(private.id.as_str()).await.unwrap())
+                .unwrap(),
+            json!([history])
+        );
+    }
+    store.close().await;
+    let reopened = SessionStore::open(path).await.unwrap();
+    assert_eq!(
+        reopened
+            .associate_host_directory(root.to_str().unwrap(), "host-after-restart")
+            .await
+            .unwrap(),
+        "host-first"
+    );
+    assert!(reopened
+        .get_session(private.id.as_str())
+        .await
+        .unwrap()
+        .unwrap()
+        .workspace_id
+        .is_none());
+    reopened.close().await;
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn hosting_revokes_existing_and_persisted_family_grants_after_local_continuation() {
+    let _guard = env_lock();
+    let dir = std::env::temp_dir().join(format!(
+        "agent-host-revoke-{}",
+        neoism_agent_core::new_session_id()
+    ));
+    let root_dir = dir.join("repo");
+    std::fs::create_dir_all(&root_dir).unwrap();
+    let db = dir.join("agent.db");
+    let previous = std::env::var_os("NEOISM_DAEMON_TOKEN");
+    std::env::set_var("NEOISM_DAEMON_TOKEN", "hosting-revoke-test-key");
+    let state = AppState::open_database(db.clone()).await.unwrap();
+    match previous {
+        Some(value) => std::env::set_var("NEOISM_DAEMON_TOKEN", value),
+        None => std::env::remove_var("NEOISM_DAEMON_TOKEN"),
+    }
+    let store = &state.inner.store;
+    let app = app(state.clone());
+    let signed = |subject: &str, workspace: &str, method: Method, uri: &str| {
+        let claims =
+            neoism_agent_service_api::daemon_credential::DaemonCredentialClaims::new(
+                subject,
+                workspace,
+                format!("workspace:{workspace}"),
+                vec![root_dir.to_string_lossy().into_owned()],
+                true,
+                (now_millis() / 1000) as i64,
+                60,
+            )
+            .unwrap();
+        let token = neoism_agent_service_api::daemon_credential::issue(
+            &claims,
+            b"hosting-revoke-test-key",
+        )
+        .unwrap();
+        let mut req = request(method, uri, None);
+        req.headers_mut()
+            .insert("authorization", format!("Bearer {token}").parse().unwrap());
+        req.headers_mut().insert(
+            "x-neoism-directory",
+            root_dir.to_string_lossy().parse().unwrap(),
+        );
+        req
+    };
+    let mut root = store_test_session(&neoism_agent_core::new_session_id(), 123);
+    root.directory = root_dir.to_string_lossy().into_owned();
+    let mut child = store_test_session(&neoism_agent_core::new_session_id(), 124);
+    child.parent_id = Some(root.id.clone());
+    child.directory = root.directory.clone();
+    // A separate eligible family must remain served after the first is revoked.
+    let mut safe = store_test_session(&neoism_agent_core::new_session_id(), 125);
+    safe.directory = root.directory.clone();
+    for session in [&root, &child, &safe] {
+        store.insert_session(session).await.unwrap();
+    }
+    let message = store_test_message(&root.id, 123, "original local history");
+    store
+        .append_message(root.id.as_str(), &message)
+        .await
+        .unwrap();
+    let adopted: Value = response_json(
+        app.clone()
+            .oneshot(signed(
+                crate::hosting::HOST_ASSOCIATION_SUBJECT,
+                "revocation-host",
+                Method::POST,
+                "/v2/hosting/associate",
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(adopted["workspaceId"], "revocation-host");
+    let initial: SessionInfo = response_json(
+        app.clone()
+            .oneshot(signed(
+                "device:guest",
+                "revocation-host",
+                Method::GET,
+                &format!("/v2/sessions/{}", root.id),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(initial.id, root.id);
+    // Simulate a normal edit saving a hydrated overlay into historical JSON.
+    let persisted = store.get_session(root.id.as_str()).await.unwrap().unwrap();
+    store.update_session(&persisted).await.unwrap();
+    // Exercise the actual local continuation path that inherits the parent's namespace.
+    let mut continuation = request(
+        Method::POST,
+        "/v2/sessions",
+        Some(json!({
+            "parentId": root.id, "title": "local home-directory continuation",
+        })),
+    );
+    continuation
+        .headers_mut()
+        .insert("x-neoism-directory", dir.to_string_lossy().parse().unwrap());
+    let outside: SessionInfo =
+        response_json(app.clone().oneshot(continuation).await.unwrap()).await;
+    assert_eq!(outside.directory, dir.to_string_lossy());
+    assert_eq!(outside.workspace_id.as_deref(), Some("revocation-host"));
+    let children: neoism_agent_core::Page<SessionInfo> = response_json(
+        app.clone()
+            .oneshot(signed(
+                "device:guest",
+                "revocation-host",
+                Method::GET,
+                &format!("/v2/sessions/{}/children", root.id),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        children.items.len(),
+        1,
+        "each child must be authorized independently even before rehosting"
+    );
+    assert_eq!(children.items[0].id, child.id);
+    for (id, session, tenant) in [
+        ("revoked-local-artifact", &root, "local"),
+        (
+            "revoked-persisted-artifact",
+            &root,
+            "workspace:revocation-host",
+        ),
+        ("still-safe-artifact", &safe, "local"),
+    ] {
+        store
+            .insert_artifact(
+                &neoism_agent_core::ArtifactInfo {
+                    id: id.into(),
+                    filename: "original.txt".into(),
+                    media_type: "text/plain".into(),
+                    size: 1,
+                    sha256: "test".into(),
+                    created: now_millis(),
+                    session_id: Some(session.id.to_string()),
+                    download_url: String::new(),
+                },
+                tenant,
+            )
+            .await
+            .unwrap();
+    }
+    let before = store.hosting_history_json_for_test().await.unwrap();
+    for requested in ["revocation-next", "revocation-again"] {
+        let adopted: Value = response_json(
+            app.clone()
+                .oneshot(signed(
+                    crate::hosting::HOST_ASSOCIATION_SUBJECT,
+                    requested,
+                    Method::POST,
+                    "/v2/hosting/associate",
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(adopted["workspaceId"], "revocation-host");
+        for session in [&root, &child, &outside] {
+            for suffix in ["", "/messages", "/children"] {
+                let uri = format!("/v2/sessions/{}{suffix}", session.id);
+                let denied = app
+                    .clone()
+                    .oneshot(signed("device:guest", "revocation-host", Method::GET, &uri))
+                    .await
+                    .unwrap();
+                assert!(
+                    matches!(
+                        denied.status(),
+                        StatusCode::NOT_FOUND | StatusCode::FORBIDDEN
+                    ),
+                    "revoked guest route {uri}"
+                );
+            }
+            let local: SessionInfo = response_json(
+                app.clone()
+                    .oneshot(request(
+                        Method::GET,
+                        &format!("/v2/sessions/{}", session.id),
+                        None,
+                    ))
+                    .await
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(local.id, session.id);
+            assert!(local.workspace_id.is_none());
+            assert_eq!(crate::caller::session_tenant(&local), "local");
+        }
+        let history: neoism_agent_core::Page<MessageWithParts> = response_json(
+            app.clone()
+                .oneshot(request(
+                    Method::GET,
+                    &format!("/v2/sessions/{}/messages", root.id),
+                    None,
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            serde_json::to_value(history.items).unwrap(),
+            json!([message])
+        );
+        let local_children: neoism_agent_core::Page<SessionInfo> = response_json(
+            app.clone()
+                .oneshot(request(
+                    Method::GET,
+                    &format!("/v2/sessions/{}/children", root.id),
+                    None,
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(local_children.items.len(), 2);
+        for id in ["revoked-local-artifact", "revoked-persisted-artifact"] {
+            let uri = format!("/v2/artifacts/{id}");
+            let denied = app
+                .clone()
+                .oneshot(signed("device:guest", "revocation-host", Method::GET, &uri))
+                .await
+                .unwrap();
+            assert!(matches!(
+                denied.status(),
+                StatusCode::NOT_FOUND | StatusCode::FORBIDDEN
+            ));
+            let local: neoism_agent_core::ArtifactInfo = response_json(
+                app.clone()
+                    .oneshot(request(Method::GET, &uri, None))
+                    .await
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(local.id, id);
+        }
+        let artifacts: Vec<neoism_agent_core::ArtifactInfo> = response_json(
+            app.clone()
+                .oneshot(signed(
+                    "device:guest",
+                    "revocation-host",
+                    Method::GET,
+                    "/v2/artifacts",
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0].id, "still-safe-artifact");
+        let local_artifacts: Vec<neoism_agent_core::ArtifactInfo> = response_json(
+            app.clone()
+                .oneshot(request(Method::GET, "/v2/artifacts", None))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(local_artifacts.len(), 3);
+        let still_safe: SessionInfo = response_json(
+            app.clone()
+                .oneshot(signed(
+                    "device:guest",
+                    "revocation-host",
+                    Method::GET,
+                    &format!("/v2/sessions/{}", safe.id),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(still_safe.id, safe.id);
+        assert_eq!(store.hosting_history_json_for_test().await.unwrap(), before);
+    }
+    store.close().await;
+    let previous = std::env::var_os("NEOISM_DAEMON_TOKEN");
+    std::env::set_var("NEOISM_DAEMON_TOKEN", "hosting-revoke-test-key");
+    let reopened_state = AppState::open_database(db).await.unwrap();
+    match previous {
+        Some(value) => std::env::set_var("NEOISM_DAEMON_TOKEN", value),
+        None => std::env::remove_var("NEOISM_DAEMON_TOKEN"),
+    }
+    let reopened = &reopened_state.inner.store;
+    let reopened_app = crate::app(reopened_state.clone());
+    let adopted: Value = response_json(
+        reopened_app
+            .clone()
+            .oneshot(signed(
+                crate::hosting::HOST_ASSOCIATION_SUBJECT,
+                "after-reopen",
+                Method::POST,
+                "/v2/hosting/associate",
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(adopted["workspaceId"], "revocation-host");
+    for session in [&root, &child, &outside] {
+        assert!(reopened
+            .get_session_for_tenant("workspace:revocation-host", session.id.as_str())
+            .await
+            .unwrap()
+            .is_none());
+        let local = reopened
+            .get_session(session.id.as_str())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(local.workspace_id.is_none());
+        assert_eq!(crate::caller::session_tenant(&local), "local");
+        for suffix in ["", "/messages", "/children"] {
+            let uri = format!("/v2/sessions/{}{suffix}", session.id);
+            let denied = reopened_app
+                .clone()
+                .oneshot(signed("device:guest", "revocation-host", Method::GET, &uri))
+                .await
+                .unwrap();
+            assert!(
+                matches!(
+                    denied.status(),
+                    StatusCode::NOT_FOUND | StatusCode::FORBIDDEN
+                ),
+                "revoked reopened guest route {uri}"
+            );
+        }
+        let local: SessionInfo = response_json(
+            reopened_app
+                .clone()
+                .oneshot(request(
+                    Method::GET,
+                    &format!("/v2/sessions/{}", session.id),
+                    None,
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(local.id, session.id);
+    }
+    for id in ["revoked-local-artifact", "revoked-persisted-artifact"] {
+        let uri = format!("/v2/artifacts/{id}");
+        let denied = reopened_app
+            .clone()
+            .oneshot(signed("device:guest", "revocation-host", Method::GET, &uri))
+            .await
+            .unwrap();
+        assert!(matches!(
+            denied.status(),
+            StatusCode::NOT_FOUND | StatusCode::FORBIDDEN
+        ));
+        let local: neoism_agent_core::ArtifactInfo = response_json(
+            reopened_app
+                .clone()
+                .oneshot(request(Method::GET, &uri, None))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(local.id, id);
+    }
+    let history: neoism_agent_core::Page<MessageWithParts> = response_json(
+        reopened_app
+            .clone()
+            .oneshot(request(
+                Method::GET,
+                &format!("/v2/sessions/{}/messages", root.id),
+                None,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        serde_json::to_value(history.items).unwrap(),
+        json!([message])
+    );
+    let artifacts: Vec<neoism_agent_core::ArtifactInfo> = response_json(
+        reopened_app
+            .clone()
+            .oneshot(signed(
+                "device:guest",
+                "revocation-host",
+                Method::GET,
+                "/v2/artifacts",
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(artifacts.len(), 1);
+    assert_eq!(artifacts[0].id, "still-safe-artifact");
+    assert_eq!(
+        reopened.hosting_history_json_for_test().await.unwrap(),
+        before
+    );
+    reopened.close().await;
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
 async fn hosting_rejects_conflicting_family_atomically_and_guest_cannot_associate() {
     let dir = std::env::temp_dir().join(format!(
         "agent-host-auth-{}",
@@ -406,6 +1033,15 @@ async fn hosting_rejects_conflicting_family_atomically_and_guest_cannot_associat
     );
     state.inner.store.insert_session(&root).await.unwrap();
     state.inner.store.insert_session(&child).await.unwrap();
+    assert!(state
+        .inner
+        .store
+        .associate_host_directory(dir.to_str().unwrap(), "first")
+        .await
+        .is_err());
+    // Directory ineligibility must not mask a foreign ownership conflict.
+    child.directory = std::env::temp_dir().to_string_lossy().into_owned();
+    state.inner.store.update_session(&child).await.unwrap();
     assert!(state
         .inner
         .store

@@ -6,6 +6,8 @@ mod fast_servers;
 #[allow(dead_code)]
 #[path = "../src/invite_links.rs"]
 mod invite_links;
+#[path = "../src/standalone_executable.rs"]
+mod service_process;
 
 #[tokio::test]
 async fn landing_is_secretless_escaped_and_hash_csp_matches_exact_inline_sources() {

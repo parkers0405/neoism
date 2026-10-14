@@ -6,6 +6,190 @@ use std::process::{Child, Command, Stdio};
 use std::sync::{mpsc, Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
+#[path = "standalone_executable.rs"]
+mod executable_locator;
+pub(crate) use executable_locator::standalone_executable;
+
+/// Blocking startup driver: callers MUST run this off the render thread.
+/// Unlike ServiceProcess/FastHost, success relinquishes ownership: no drop kill,
+/// stdin leash, ephemeral state, or Agent reuse-only policy.
+pub(crate) fn launch_persistent_host(
+    command: &mut Command,
+    port: u16,
+    secret: Option<&str>,
+    commit: impl FnOnce() -> io::Result<()>,
+) -> io::Result<std::net::SocketAddr> {
+    use neoism_workspace_daemon::standalone::{
+        HOSTED_READINESS_NONCE_ENV, HOSTED_READINESS_PROTOCOL, StartupAcknowledgement,
+    };
+    use std::io::{Seek, SeekFrom};
+    let nonce = uuid::Uuid::new_v4().to_string();
+    // Anonymous file avoids pipe deadlock and keeps daemon logs available even
+    // after the GUI exits. Read only a bounded tail on startup failure.
+    let mut diagnostics = tempfile::tempfile()?;
+    command.env(HOSTED_READINESS_NONCE_ENV, &nonce)
+        .stdin(Stdio::null()).stdout(Stdio::piped())
+        .stderr(Stdio::from(diagnostics.try_clone()?));
+    let mut child = command.spawn()?;
+    let stdout = child.stdout.take().expect("host readiness stdout");
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        let result = io::BufReader::new(stdout).take(4096).read_line(&mut line)
+            .map(|_| line);
+        let _ = tx.send(result);
+    });
+    let deadline = Instant::now() + BOOT_TIMEOUT;
+    let outcome = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Err(format!("server exited during startup ({status})")),
+            Err(error) => break Err(format!("could not monitor server: {error}")),
+            Ok(None) => {}
+        }
+        match rx.recv_timeout(Duration::from_millis(25)) {
+            Ok(Ok(line)) => {
+                let ack = serde_json::from_str::<StartupAcknowledgement>(&line);
+                match ack {
+                    Ok(ack) if line.ends_with('\n') && line.len() < 4096
+                        && ack.protocol == HOSTED_READINESS_PROTOCOL
+                        && ack.nonce == nonce
+                        && ack.address.ip() == std::net::Ipv4Addr::UNSPECIFIED
+                        && ack.address.port() == port => {
+                            match child.try_wait() {
+                                Ok(None) => break Ok(ack.address),
+                                Ok(Some(status)) => break Err(format!("server exited at readiness ({status})")),
+                                Err(error) => break Err(format!("could not monitor ready server: {error}")),
+                            }
+                        },
+                    _ => break Err("server returned invalid persistent-host readiness".into()),
+                }
+            }
+            Ok(Err(_)) | Err(mpsc::RecvTimeoutError::Disconnected) =>
+                break Err("server closed its readiness stream before startup completed".into()),
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
+        if Instant::now() >= deadline {
+            break Err("server startup exceeded 120 seconds".into());
+        }
+    };
+    // Metadata must commit before ownership is relinquished or UI sees success.
+    // On failure terminate only this still-owned child, never a port owner.
+    let outcome = outcome.and_then(|address| commit().map(|_| address)
+        .map_err(|error| format!("could not persist hosted relaunch metadata: {error}")));
+    match outcome {
+        Ok(address) => {
+            // Reap without tying persistent lifetime to the desktop owner.
+            std::thread::spawn(move || { let _ = child.wait(); });
+            Ok(address)
+        }
+        Err(reason) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            let len = diagnostics.metadata().map(|m| m.len()).unwrap_or(0);
+            let _ = diagnostics.seek(SeekFrom::Start(len.saturating_sub(4096)));
+            let mut tail = String::new();
+            let _ = diagnostics.take(4096).read_to_string(&mut tail);
+            // No ANSI/control injection or configured master password in UI.
+            let tail = if let Some(secret) = secret.filter(|s| !s.is_empty()) {
+                tail.replace(secret, "[redacted]")
+            } else { tail };
+            let tail: String = tail.chars().filter(|c| !c.is_control() || *c == '\n').collect();
+            Err(io::Error::other(format!("{reason}: {}", tail.trim())))
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod persistent_host_tests {
+    use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn deleted_running_elf_can_relaunch_and_acknowledge_persistent_startup() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("fixture.rs");
+        let executable = directory.path().join("deleted-host-fixture");
+        let locator = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/standalone_executable.rs");
+        let code = r#"
+mod locator { include!(__LOCATOR__); }
+fn main() {
+    if std::env::args().nth(1).as_deref() == Some("--ready-child") {
+        use std::io::Write;
+        let nonce = std::env::var("NEOISM_HOSTED_READINESS_NONCE").unwrap();
+        println!("{{\"protocol\":\"neoism-hosted-ready-v1\",\"nonce\":\"{}\",\"address\":\"0.0.0.0:9877\"}}", nonce);
+        std::io::stdout().flush().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        return;
+    }
+    std::fs::remove_file(std::env::current_exe().unwrap()).unwrap();
+    assert!(!std::env::current_exe().unwrap().exists());
+    let program = locator::standalone_executable().unwrap();
+    assert_eq!(program, std::path::Path::new("/proc/self/exe"));
+    let status = std::process::Command::new(program).arg("--ready-child").status().unwrap();
+    assert!(status.success());
+}
+"#.replace("__LOCATOR__", &format!("{locator:?}"));
+        // A native ELF fixture exercises unlink semantics, not shell shebangs
+        // or a copy of locator logic. No GUI/daemon/Agent data is opened.
+        std::fs::write(&source, code).unwrap();
+        let compile = Command::new("rustc").arg("--edition=2021")
+            .arg(&source).arg("-o").arg(&executable).output().unwrap();
+        assert!(compile.status.success(), "{}", String::from_utf8_lossy(&compile.stderr));
+        let mut command = Command::new(&executable);
+        let committed = std::cell::Cell::new(false);
+        assert!(launch_persistent_host(&mut command, 9877, None, || {
+            committed.set(true); Ok(())
+        }).is_ok());
+        assert!(committed.get());
+        assert!(!executable.exists());
+    }
+
+    #[test]
+    fn actual_child_failure_is_bounded_and_redacts_master_password() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "printf 'association 409 password=private-secret\\n' >&2; exit 9"]);
+        let start = Instant::now();
+        let error = launch_persistent_host(&mut command, 9877, Some("private-secret"), || Ok(())).unwrap_err();
+        assert!(start.elapsed() < Duration::from_secs(5));
+        let text = error.to_string();
+        assert!(text.contains("association 409"), "{text}");
+        assert!(!text.contains("private-secret"), "{text}");
+    }
+
+    #[test]
+    fn actual_child_wrong_protocol_never_becomes_ready() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "printf '{\"protocol\":\"neoism-fast-ready-v1\",\"nonce\":\"%s\",\"address\":\"0.0.0.0:9877\"}\\n' \"$NEOISM_HOSTED_READINESS_NONCE\"; sleep 1"]);
+        assert!(launch_persistent_host(&mut command, 9877, None, || Ok(())).is_err());
+    }
+
+    #[test]
+    fn failed_metadata_commit_never_relinquishes_success() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "printf '{\"protocol\":\"neoism-hosted-ready-v1\",\"nonce\":\"%s\",\"address\":\"0.0.0.0:9877\"}\\n' \"$NEOISM_HOSTED_READINESS_NONCE\"; sleep 1"]);
+        let error = launch_persistent_host(&mut command, 9877, None,
+            || Err(io::Error::other("fixture sidecar write failed"))).unwrap_err();
+        assert!(error.to_string().contains("fixture sidecar write failed"));
+    }
+
+    #[test]
+    fn failed_child_never_attempts_metadata_commit() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "exit 9"]);
+        assert!(launch_persistent_host(&mut command, 9877, None,
+            || panic!("a failing child must not publish relaunch metadata")).is_err());
+    }
+
+    #[test]
+    fn actual_child_acknowledges_exact_persistent_endpoint() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "printf '{\"protocol\":\"neoism-hosted-ready-v1\",\"nonce\":\"%s\",\"address\":\"0.0.0.0:9877\"}\\n' \"$NEOISM_HOSTED_READINESS_NONCE\"; sleep 1"]);
+        assert_eq!(launch_persistent_host(&mut command, 9877, None, || Ok(())).unwrap(),
+            "0.0.0.0:9877".parse::<std::net::SocketAddr>().unwrap());
+    }
+}
+
 const DAEMON_FLAG: &str = "--neoism-internal-workspace-daemon";
 const READY: &str = "NEOISM_WORKSPACE_SERVICE/1 READY";
 // Not the GUI's patience budget. Cold hosted association/bootstrap can take
@@ -352,13 +536,15 @@ fn valid_daemon_response(response: &[u8]) -> bool {
         && body == "neoism-daemon"
 }
 
-/// Dedicated Fast hosts run the standalone bootstrap before any GUI or legacy
-/// service setup. In particular, null stdin is NOT a parent-death signal here.
-pub(crate) fn maybe_run_internal_fast_workspace_daemon(
+/// Dedicated Fast and persistent hosts share standalone bootstrap, before any
+/// GUI or legacy service setup. Null stdin is NOT a parent-death signal here;
+/// only explicit temporary-host arguments enable that lifetime policy.
+pub(crate) fn maybe_run_internal_standalone_workspace_daemon(
 ) -> Option<Result<(), Box<dyn std::error::Error>>> {
     let args: Vec<_> = std::env::args_os().collect();
     if args.get(1).is_none_or(|arg| {
         arg != neoism_workspace_daemon::standalone::FAST_WORKSPACE_DAEMON_FLAG
+            && arg != neoism_workspace_daemon::standalone::HOSTED_WORKSPACE_DAEMON_FLAG
     }) {
         return None;
     }

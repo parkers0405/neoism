@@ -4,6 +4,10 @@
 //! Directory-scoped file APIs are NOT an execution sandbox. Root is a handoff page only.
 #[path = "fast_servers/invite_page.rs"]
 pub(crate) mod invite_page;
+
+#[cfg(feature = "server-transport-contract")]
+#[path = "../tests/support/server_transport_ingress.rs"]
+pub mod transport_contract;
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
@@ -353,16 +357,7 @@ fn secret() -> String {
     )
 }
 fn daemon_binary() -> Result<PathBuf, String> {
-    // Cargo/updaters can unlink a running Linux executable. current_exe then
-    // returns a non-existent " (deleted)" path; procfs still names its inode.
-    #[cfg(target_os = "linux")]
-    {
-        Ok(PathBuf::from("/proc/self/exe"))
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        std::env::current_exe().map_err(|error| error.to_string())
-    }
+    crate::service_process::standalone_executable().map_err(|error| error.to_string())
 }
 
 struct RunningHost {

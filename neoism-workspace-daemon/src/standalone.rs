@@ -95,6 +95,26 @@ mod version_tests {
     }
 
     #[test]
+    fn persistent_host_namespace_keeps_normal_agent_and_lifetime_policy() {
+        let root = tempfile::tempdir().unwrap();
+        let args = vec![OsString::from("neoism"), OsString::from(HOSTED_WORKSPACE_DAEMON_FLAG),
+            OsString::from("--addr"), OsString::from("0.0.0.0:9877"),
+            OsString::from("--no-unix-socket"), OsString::from("--workspace"),
+            root.path().as_os_str().to_owned()];
+        let (cli, fast_nonce) = parse_from(args.clone(), None).unwrap();
+        assert_eq!(cli.addr, "0.0.0.0:9877".parse().unwrap());
+        assert!(!cli.ephemeral);
+        assert!(cli.temporary_parent_pid.is_none());
+        assert!(owns_agent_server(fast_nonce.as_deref()));
+        for extra in [vec!["--ephemeral"], vec!["--temporary-parent-pid", "123"], vec!["--background"]] {
+            let mut invalid = args.clone();
+            invalid.extend(extra.into_iter().map(OsString::from));
+            assert!(parse_from(invalid, None).is_err());
+        }
+        assert!(parse_from(args, Some("fast-nonce".into())).is_err());
+    }
+
+    #[test]
     fn fast_parser_preserves_standalone_flags_and_validates_nonce() {
         let root = tempfile::tempdir().unwrap();
         let args = fast_args(root.path());
@@ -206,6 +226,9 @@ mod version_tests {
     }
 }
 
+pub const HOSTED_WORKSPACE_DAEMON_FLAG: &str = "--neoism-internal-hosted-workspace-daemon";
+pub const HOSTED_READINESS_PROTOCOL: &str = "neoism-hosted-ready-v1";
+pub const HOSTED_READINESS_NONCE_ENV: &str = "NEOISM_HOSTED_READINESS_NONCE";
 pub const FAST_WORKSPACE_DAEMON_FLAG: &str = "--neoism-internal-fast-workspace-daemon";
 pub const FAST_READINESS_PROTOCOL: &str = "neoism-fast-ready-v1";
 pub const FAST_READINESS_NONCE_ENV: &str = "NEOISM_FAST_READINESS_NONCE";
@@ -228,6 +251,10 @@ where
     T: Into<OsString> + Clone,
 {
     let mut args: Vec<OsString> = args.into_iter().map(Into::into).collect();
+    let hosted = args.get(1).is_some_and(|arg| arg == HOSTED_WORKSPACE_DAEMON_FLAG);
+    if hosted {
+        args.remove(1);
+    }
     let fast = args
         .get(1)
         .is_some_and(|arg| arg == FAST_WORKSPACE_DAEMON_FLAG);
@@ -243,6 +270,10 @@ where
                 .is_some_and(|arg| arg.starts_with("--unix-socket="))
     });
     let cli = Cli::try_parse_from(args)?;
+    if hosted && (nonce.is_some() || cli.ephemeral || cli.temporary_parent_pid.is_some() || cli.background) {
+        return Err(clap::Error::raw(clap::error::ErrorKind::ArgumentConflict,
+            "Persistent hosted startup forbids Fast readiness, ephemeral state, a parent-death leash and --background"));
+    }
     if fast || nonce.is_some() {
         let invalid =
             |message| clap::Error::raw(clap::error::ErrorKind::ArgumentConflict, message);
@@ -276,15 +307,22 @@ where
 }
 
 /// Run the standalone CLI, owning its runtime and bounded shutdown. `args`
-/// includes argv[0]. The sole optional namespace prefix is the Fast flag at
-/// argv[1]; all remaining arguments are parsed by the original standalone CLI.
+/// includes argv[0]. An optional Fast or persistent-host namespace at argv[1]
+/// selects process policy; remaining arguments use the normal standalone CLI.
 /// Help/version return successfully before logging, watchers, or runtime startup.
 pub fn run_standalone_from<I, T>(args: I) -> StandaloneResult
 where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
 {
+    let hosted_nonce = std::env::var(HOSTED_READINESS_NONCE_ENV).ok();
+    if hosted_nonce.as_deref().is_some_and(|n| n.is_empty() || n.len() > 256 || n.chars().any(char::is_control)) {
+        return Err("invalid persistent hosted readiness nonce".into());
+    }
     let nonce = std::env::var(FAST_READINESS_NONCE_ENV).ok();
+    if nonce.is_some() && hosted_nonce.is_some() {
+        return Err("Fast and persistent hosted readiness are mutually exclusive".into());
+    }
     let (cli, nonce) = match parse_from(args, nonce) {
         Ok(parsed) => parsed,
         Err(error)
@@ -312,7 +350,7 @@ where
             .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| {
                 EnvFilter::new("info,neoism_workspace_daemon=debug")
             }));
-    if nonce.is_some() {
+    if nonce.is_some() || hosted_nonce.is_some() {
         let _ = logging
             .with_ansi(false)
             .with_writer(std::io::stderr)
@@ -325,7 +363,7 @@ where
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    let result = runtime.block_on(run(cli, nonce));
+    let result = runtime.block_on(run(cli, nonce, hosted_nonce));
     // Runtime::drop waits forever for spawn_blocking workers. Long-lived
     // agent/tool workers can outlive the accept loops, leaving a listenerless
     // daemon holding the shared agent database's exclusive lock. Persistence
@@ -339,7 +377,7 @@ fn owns_agent_server(readiness_nonce: Option<&str>) -> bool {
     readiness_nonce.is_none()
 }
 
-async fn run(cli: Cli, nonce: Option<String>) -> StandaloneResult {
+async fn run(cli: Cli, nonce: Option<String>, hosted_nonce: Option<String>) -> StandaloneResult {
     // Phase 0: make sure the daemon has a `NEOISM_DAEMON_TOKEN` before
     // anything binds. We log only the path, never the token value.
     let token_path = crate::daemon_token::ensure_daemon_token();
@@ -410,7 +448,7 @@ async fn run(cli: Cli, nonce: Option<String>) -> StandaloneResult {
         });
     // Reserve the TCP endpoint before slow agent association. Nothing serves
     // requests and no readiness is emitted until the declared namespace is ready.
-    let early_listener = if nonce.is_some() {
+    let early_listener = if nonce.is_some() || hosted_nonce.is_some() {
         Some(tokio::net::TcpListener::bind(cli.addr).await?)
     } else {
         None
@@ -475,9 +513,11 @@ async fn run(cli: Cli, nonce: Option<String>) -> StandaloneResult {
         None => tokio::net::TcpListener::bind(cli.addr).await?,
     };
     let actual_addr = listener.local_addr()?;
-    if let Some(nonce) = nonce {
+    let readiness = nonce.map(|n| (FAST_READINESS_PROTOCOL, n))
+        .or_else(|| hosted_nonce.map(|n| (HOSTED_READINESS_PROTOCOL, n)));
+    if let Some((protocol, nonce)) = readiness {
         let acknowledgement = StartupAcknowledgement {
-            protocol: FAST_READINESS_PROTOCOL.into(),
+            protocol: protocol.into(),
             nonce,
             address: actual_addr,
         };

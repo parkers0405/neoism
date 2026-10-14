@@ -52,6 +52,12 @@
   </categories>
 
   <releases>
+    <release version="0.7.126-nightly.20261014.1" date="2026-10-14" type="development">
+      <description>
+        <p>Nightly hosting eligibility, service startup, connection readiness, and server transport fixes with headless regression coverage.</p>
+      </description>
+      <url>https://github.com/parkers0405/neoism/releases/tag/v0.7.126-nightly.20261014.1</url>
+    </release>
     <release version="0.7.126-nightly.20261013.2" date="2026-10-13" type="development">
       <description>
         <p>Nightly hosting/startup fixes, Agent response-footer and composition presentation improvements, and connection lifecycle refinements.</p>

@@ -460,7 +460,7 @@ impl Screen<'_> {
     }
 
     pub(crate) fn open_add_server_prompt(&mut self) {
-        self.begin_server_form(false, false);
+        self.begin_server_form(true, false);
     }
 
     pub(crate) fn open_create_server_prompt(&mut self) {
@@ -508,9 +508,9 @@ impl Screen<'_> {
         // its own dedicated command (`Share Current Workspace`); Create Server
         // means create.
 
-        // First port that binds; dropped immediately so the daemon can
-        // take it (the tiny race is fine — a failed spawn surfaces in
-        // the join error).
+        // Choose the dedicated ordinary-Host range (not local service 7878).
+        // This reservation is advisory; a bind race is a startup failure and
+        // never publishes a registry entry or Serving notification.
         let Some(port) = (9877u16..9900)
             .find(|port| std::net::TcpListener::bind(("0.0.0.0", *port)).is_ok())
         else {
@@ -532,20 +532,48 @@ impl Screen<'_> {
             port,
             require_auth: password.is_some(),
         };
-        if let Err(error) = spawn_hosted_daemon(&spec, password.as_deref()) {
+        let proxy = self.context_manager.event_proxy();
+        let window = self.context_manager.window_id();
+        self.renderer.notifications.push("Starting persistent server…", NotificationLevel::Info);
+        self.mark_dirty();
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.hosted_server_completions.0.push(rx);
+        std::thread::spawn(move || {
+            let result = spawn_hosted_daemon(&spec, password.as_deref());
+            // Readiness AND durable metadata are complete even if the Screen
+            // has closed. A dropped receiver discards UI work, not the daemon.
+            if tx.send(HostedCompletion { spec, name, password, result }).is_ok() {
+                proxy.send_event(
+                    neoism_backend::event::RioEventType::Rio(neoism_backend::event::RioEvent::Render),
+                    window,
+                );
+            }
+        });
+    }
+
+    /// Called from App's window-server request pump after background readiness
+    /// and durable sidecar commit. Only verified success may register/announce.
+    pub(crate) fn process_hosted_server_completions(&mut self) {
+        for completion in self.hosted_server_completions.drain() {
+            self.finish_hosted_server(completion);
+        }
+    }
+
+    fn finish_hosted_server(&mut self, completion: HostedCompletion) {
+        use neoism_ui::panels::notifications::NotificationLevel;
+        let HostedCompletion { spec, name, password, result, .. } = completion;
+        if let Err(error) = result {
             self.renderer.notifications.push(
-                format!("Could not start the server daemon: {error}"),
-                NotificationLevel::Error,
+                format!("Could not start the server daemon: {error}"), NotificationLevel::Error,
             );
             self.mark_dirty();
             return;
         }
-        // The saved-server registry lives on the App layer, out of this
-        // Screen's reach, so we can't call `add_hosted` here directly. Leave
-        // the relaunch spec as a sidecar in the state dir; the queued add in
-        // `process_window_server_requests` reads it back and persists it onto
-        // the SavedServer so a later dead-daemon dial can rehost it.
-        write_hosted_sidecar(&spec);
+        let dir = spec.workspace_dir.clone();
+        let port = spec.port;
+        // The worker already committed the sidecar before relinquishing the
+        // persistent child, including when this Screen closes before completion.
+        // App reads it when the queued add lands to persist the relaunch spec.
         for context in self
             .context_manager
             .current_grid_mut()
@@ -561,11 +589,8 @@ impl Screen<'_> {
             agent.remember_hosted_selection(&dir, port);
         }
 
-        // Co-hosted agent on port + 1 (the convention joined clients
-        // derive). Missing binary just means no remote agent — the
-        // server itself is unaffected.
-        // Hand off to the normal add+join path (it dials with retry, so
-        // the daemon's startup wins the race).
+        // The daemon has acknowledged its declared workspace and bound endpoint.
+        // Only now hand off to the normal add+Hello join path.
         let address = format!("ws://127.0.0.1:{port}/session");
         let name =
             name.or_else(|| dir.file_name().map(|n| n.to_string_lossy().into_owned()));
@@ -1926,58 +1951,43 @@ impl Screen<'_> {
 /// back after the queued add lands (see `process_window_server_requests`).
 const HOSTED_SIDECAR_FILE: &str = "hosted-spec.json";
 
-/// Resolve a companion binary (the workspace daemon / agent) that the
-/// installed layout drops next to the desktop binary.
-///
-/// A DEV build breaks the naive "sibling of current_exe" assumption:
-/// `cargo run`/`target/debug/neoism` builds only `neoism`, so there is NO
-/// `target/debug/neoism-workspace-daemon`, and the launching shell's PATH
-/// usually omits `~/.local/bin` (where the installed daemon lives). The old
-/// bare-name fallback then `exec`s a name that isn't on PATH → `spawn()`
-/// fails with ENOENT → Create-Server silently launches nothing and no
-/// workspace ever appears. Probe the standard install dir before giving up
-/// to PATH so a dev build still finds the installed companion.
-fn sibling_binary(bin: &str) -> std::path::PathBuf {
-    // is_file() does not perform Windows PATHEXT lookup. Packaged siblings
-    // must include their executable suffix before checking the filesystem.
-    #[cfg(windows)]
-    let executable_name = format!("{bin}.exe");
-    #[cfg(windows)]
-    let bin = executable_name.as_str();
-    // 1) Next to the running executable (installed/packaged layout).
-    if let Some(path) = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(|dir| dir.join(bin)))
-        .filter(|path| path.is_file())
-    {
-        return path;
-    }
-    // 2) The standard user install dir (`bootstrap`/launcher installs here).
-    if let Some(home) = std::env::var_os("HOME") {
-        let candidate = std::path::PathBuf::from(home)
-            .join(".local")
-            .join("bin")
-            .join(bin);
-        if candidate.is_file() {
-            return candidate;
-        }
-    }
-    // 3) Bare name → PATH lookup (last resort).
-    std::path::PathBuf::from(bin)
+struct HostedCompletion {
+    spec: crate::server_registry::HostedServerSpec,
+    name: Option<String>,
+    password: Option<String>,
+    result: std::io::Result<()>,
 }
 
-/// Spawn a detached `neoism-workspace-daemon` for `spec`. Shared by the
-/// initial Create & join and the rehost-on-dead-daemon path so both use the
-/// exact same command + detach. Detached on purpose: a server the user
-/// created keeps serving until they stop it, even across app restarts.
+/// Screen-owned receivers: closing the window drops pending UI completions,
+/// without cancelling persistent hosting or retaining closed IDs globally.
+#[derive(Default)]
+pub(crate) struct HostedCompletions(Vec<std::sync::mpsc::Receiver<HostedCompletion>>);
+
+impl HostedCompletions {
+    fn drain(&mut self) -> Vec<HostedCompletion> {
+        let mut completed = Vec::new();
+        self.0.retain(|rx| match rx.try_recv() {
+            Ok(result) => { completed.push(result); false }
+            Err(std::sync::mpsc::TryRecvError::Empty) => true,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => false,
+        });
+        completed
+    }
+}
+
+/// Launch this desktop build's standalone daemon and verify persistent-host
+/// readiness. BLOCKING: invoke only from a worker, including rehost-on-dead-daemon.
+/// Detached on purpose: a successfully hosted server keeps serving until the
+/// user stops it, even across app restarts.
 pub(crate) fn spawn_hosted_daemon(
     spec: &crate::server_registry::HostedServerSpec,
     token: Option<&str>,
 ) -> std::io::Result<()> {
-    let daemon_bin = sibling_binary("neoism-workspace-daemon");
     let _ = std::fs::create_dir_all(&spec.state_dir);
 
-    let mut daemon = std::process::Command::new(&daemon_bin);
+    // Use this build's standalone implementation, never a stale installed sibling.
+    let mut daemon = std::process::Command::new(crate::service_process::standalone_executable()?);
+    daemon.arg(neoism_workspace_daemon::standalone::HOSTED_WORKSPACE_DAEMON_FLAG);
     daemon
         .arg("--addr")
         .arg(format!("0.0.0.0:{}", spec.port))
@@ -1989,14 +1999,16 @@ pub(crate) fn spawn_hosted_daemon(
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
+    // Never inherit Fast policy or a parent-death leash into a persistent host.
+    daemon.env_remove(neoism_workspace_daemon::standalone::FAST_READINESS_NONCE_ENV);
+    daemon.env("NEOISM_REQUIRE_AUTH", if spec.require_auth { "1" } else { "0" });
     if spec.require_auth {
-        daemon.env("NEOISM_REQUIRE_AUTH", "1");
         if let Some(token) = token {
             daemon.env("NEOISM_DAEMON_TOKEN", token);
         }
     }
     detach_hosted_daemon(&mut daemon);
-    daemon.spawn().map(|_| ())
+    crate::service_process::launch_persistent_host(&mut daemon, spec.port, token, || write_hosted_sidecar(spec)).map(|_| ())
 }
 
 /// Best-effort: STOP the detached hosted daemon serving `spec.port` when its
@@ -2008,7 +2020,7 @@ pub(crate) fn spawn_hosted_daemon(
 /// `:98770`), so we can never signal an unrelated process.
 #[cfg(unix)]
 pub(crate) fn stop_hosted_daemon(spec: &crate::server_registry::HostedServerSpec) {
-    let pattern = format!("neoism-workspace-daemon.*:{} ", spec.port);
+    let pattern = format!("(neoism-workspace-daemon|neoism-internal-hosted-workspace-daemon).*:{} ", spec.port);
     let _ = std::process::Command::new("pkill")
         .arg("-TERM")
         .arg("-f")
@@ -2084,11 +2096,66 @@ fn detach_hosted_daemon(command: &mut std::process::Command) {
 #[cfg(not(any(unix, windows)))]
 fn detach_hosted_daemon(_command: &mut std::process::Command) {}
 
-/// Best-effort: drop the relaunch spec as a sidecar in the state dir so the
-/// App layer can persist it into the registry after the queued add lands.
-fn write_hosted_sidecar(spec: &crate::server_registry::HostedServerSpec) {
-    if let Ok(bytes) = serde_json::to_vec_pretty(spec) {
-        let _ = std::fs::write(spec.state_dir.join(HOSTED_SIDECAR_FILE), bytes);
+/// Atomically commit relaunch metadata AFTER readiness, before relinquishing
+/// the child. Errors are startup failures, not a falsely successful host.
+fn write_hosted_sidecar(spec: &crate::server_registry::HostedServerSpec) -> std::io::Result<()> {
+    use std::io::Write;
+    let bytes = serde_json::to_vec_pretty(spec)?;
+    let mut temporary = tempfile::NamedTempFile::new_in(&spec.state_dir)?;
+    temporary.write_all(&bytes)?;
+    temporary.as_file().sync_all()?;
+    temporary.persist(spec.state_dir.join(HOSTED_SIDECAR_FILE))
+        .map_err(|error| error.error)?;
+    #[cfg(unix)]
+    std::fs::File::open(&spec.state_dir)?.sync_all()?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod hosted_metadata_tests {
+    use super::*;
+
+    fn spec(root: &std::path::Path) -> crate::server_registry::HostedServerSpec {
+        crate::server_registry::HostedServerSpec {
+            state_dir: root.join("state"), workspace_dir: root.to_path_buf(),
+            port: 9877, require_auth: true,
+        }
+    }
+
+    #[test]
+    fn closed_screen_discards_completion_but_keeps_committed_relaunch_metadata() {
+        let root = tempfile::tempdir().unwrap();
+        let spec = spec(root.path());
+        std::fs::create_dir(&spec.state_dir).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let queue = HostedCompletions(vec![rx]);
+        drop(queue); // Screen has closed while the worker was still starting.
+        write_hosted_sidecar(&spec).unwrap(); // Worker commits before sending.
+        let path = spec.state_dir.join(HOSTED_SIDECAR_FILE);
+        assert!(tx.send(HostedCompletion { spec, name: None,
+            password: Some("not-in-sidecar".into()), result: Ok(()) }).is_err());
+        let bytes = std::fs::read(path).unwrap();
+        let restored: crate::server_registry::HostedServerSpec = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(restored.port, 9877);
+        assert!(restored.require_auth);
+        assert!(!String::from_utf8(bytes).unwrap().contains("not-in-sidecar"));
+    }
+
+    #[test]
+    fn sidecar_write_failure_is_reported_without_creating_metadata() {
+        let root = tempfile::tempdir().unwrap();
+        let spec = spec(root.path()); // Deliberately no state directory.
+        assert!(write_hosted_sidecar(&spec).is_err());
+        assert!(!spec.state_dir.join(HOSTED_SIDECAR_FILE).exists());
+    }
+
+    #[test]
+    fn disconnected_worker_is_removed_from_screen_queue() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut queue = HostedCompletions(vec![rx]);
+        drop(tx);
+        assert!(queue.drain().is_empty());
+        assert!(queue.0.is_empty());
     }
 }
 

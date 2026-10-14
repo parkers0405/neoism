@@ -13,6 +13,7 @@ pub mod move_workspace;
 
 /// Wave 6A: `GET /tailnet-peers` fetch + lifting discovered peers into
 /// Workspaces-modal drop targets.
+#[cfg(not(feature = "server-transport-contract"))]
 pub mod remote_files;
 pub mod tailnet_peers;
 
@@ -175,12 +176,22 @@ impl DaemonEndpoint {
     }
 }
 
+/// HTTP upgrade credentials are opt-in for Fast ingress only.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum DaemonUpgradeAuth {
+    #[default]
+    HelloOnly,
+    FastBearer,
+}
+
 #[derive(Debug, Clone)]
 pub struct DaemonClientOptions {
     pub endpoint: DaemonEndpoint,
-    /// Sent as a sensitive bearer header on ws/wss upgrades and retained in Hello.
-    /// Unix upgrades continue to use the legacy NEOISM_DAEMON_TOKEN env auth.
+    /// Hello credential; not a paired-device HTTP Bearer on ordinary daemons.
     pub token: Option<String>,
+    /// Fast ingress requires the same token at upgrade time. Existing URL query
+    /// auth and Unix NEOISM_DAEMON_TOKEN auth are preserved in either mode.
+    pub upgrade_auth: DaemonUpgradeAuth,
     pub client_name: String,
     pub client_id: Uuid,
     pub since_offset: Option<u64>,
@@ -216,6 +227,7 @@ impl DaemonClientOptions {
         Self {
             endpoint,
             token: None,
+            upgrade_auth: DaemonUpgradeAuth::HelloOnly,
             client_name: "neoism-desktop".into(),
             client_id: Uuid::nil(),
             since_offset: None,
@@ -761,6 +773,12 @@ impl DaemonClient {
         self.status_rx.clone()
     }
 
+    /// Test-only observation of the runner's published startup failure.
+    #[cfg(feature = "server-transport-contract")]
+    pub fn transport_contract_startup_error(&self) -> Option<String> {
+        self.startup_failure_rx.borrow().map(|failure| failure.to_string())
+    }
+
     pub(crate) fn startup_failure_receiver(
         &self,
     ) -> watch::Receiver<Option<DaemonStartupFailure>> {
@@ -863,7 +881,7 @@ impl ClientRunner {
         loop {
             let _ = self.status_tx.send(DaemonClientStatus::Connecting);
             let dial = tokio::select! {
-                result = connect_endpoint(&self.options.endpoint, self.options.token.as_deref()) => result,
+                result = connect_endpoint(&self.options.endpoint, self.options.token.as_deref(), self.options.upgrade_auth) => result,
                 changed = self.recycle_rx.changed() => {
                     if changed.is_err() {
                         let _ = self.status_tx.send(DaemonClientStatus::Closed);
@@ -1307,11 +1325,12 @@ enum SocketConnection {
 fn websocket_request(
     url: &Url,
     token: Option<&str>,
+    upgrade_auth: DaemonUpgradeAuth,
 ) -> Result<tokio_tungstenite::tungstenite::handshake::client::Request> {
     use tokio_tungstenite::tungstenite::http::{header::AUTHORIZATION, HeaderValue};
 
     let mut request = url.as_str().into_client_request()?;
-    if let Some(token) = token {
+    if let Some(token) = token.filter(|_| upgrade_auth == DaemonUpgradeAuth::FastBearer) {
         // Authenticate the HTTP upgrade (e.g. Fast ingress), not just Hello.
         // Keep credentials out of the URL and redact the header in Debug output.
         let mut authorization = HeaderValue::from_str(&format!("Bearer {token}"))
@@ -1325,10 +1344,11 @@ fn websocket_request(
 async fn connect_endpoint(
     endpoint: &DaemonEndpoint,
     token: Option<&str>,
+    upgrade_auth: DaemonUpgradeAuth,
 ) -> Result<SocketConnection> {
     match endpoint {
         DaemonEndpoint::WebSocket { url } => {
-            let request = websocket_request(url, token)?;
+            let request = websocket_request(url, token, upgrade_auth)?;
             let (stream, _response) = connect_async(request).await.map_err(|err| {
                 // An ingress may echo credentials in its rejection headers/body.
                 // Only expose the status, never the full HTTP response.
@@ -2830,26 +2850,226 @@ mod tests {
             panic!("expected websocket endpoint");
         };
         let before = endpoint.normalized();
-        let request = websocket_request(url, Some("private-upgrade-token")).unwrap();
+        let request = websocket_request(
+            url,
+            Some("private-upgrade-token"),
+            DaemonUpgradeAuth::FastBearer,
+        )
+        .unwrap();
         let header = &request.headers()["authorization"];
         assert_eq!(header, "Bearer private-upgrade-token");
         assert!(header.is_sensitive());
         assert!(!format!("{request:?}").contains("private-upgrade-token"));
         assert_eq!(request.uri().query(), Some("token=legacy&other=1"));
         assert_eq!(endpoint.normalized(), before);
-        let anonymous = websocket_request(url, None).unwrap();
+        let anonymous =
+            websocket_request(url, None, DaemonUpgradeAuth::FastBearer).unwrap();
         assert!(!anonymous.headers().contains_key("authorization"));
         assert_eq!(anonymous.uri(), request.uri());
     }
 
     #[tokio::test]
+    async fn upgrade_registry_host_join_and_fast_host_join_wire_contracts() {
+        for (flow, temporary, hosted) in [
+            ("ordinary Host", false, true),
+            ("ordinary Join", false, false),
+            ("Fast Host", true, true),
+            ("Fast Join", true, false),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut registry =
+                crate::server_registry::ServerRegistry::load(dir.path().into()).unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = format!("ws://{}/session", listener.local_addr().unwrap());
+            let server = if temporary {
+                registry.add_temporary(&address, Some(flow), Some("master"), hosted)
+            } else if hosted {
+                registry.add_hosted(
+                    &address,
+                    Some(flow),
+                    Some("master"),
+                    neoism_agent_service_api::server_registry::HostedServerSpec {
+                        state_dir: dir.path().join("state"),
+                        workspace_dir: dir.path().join("workspace"),
+                        port: listener.local_addr().unwrap().port(),
+                        require_auth: true,
+                    },
+                )
+            } else {
+                registry.add(&address, Some(flow), Some("master"))
+            }
+            .unwrap();
+            let endpoint = DaemonEndpoint::parse(&server.endpoint).unwrap();
+            let mut options = DaemonClientOptions::new(endpoint.clone());
+            options.token = registry.token(&server.id).map(str::to_owned);
+            options.upgrade_auth =
+                crate::app::daemon_pump::server_upgrade_auth(&registry, Some(&server.id));
+            assert_eq!(
+                options.upgrade_auth == DaemonUpgradeAuth::FastBearer,
+                temporary,
+                "{flow}"
+            );
+            let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+            let task = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut ws = tokio_tungstenite::accept_hdr_async(stream,
+                    |request: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                     response: tokio_tungstenite::tungstenite::handshake::server::Response| {
+                        let bearer = request.headers().get("authorization");
+                        if temporary {
+                            assert_eq!(bearer.unwrap(), "Bearer master", "{flow}");
+                        } else {
+                            assert!(bearer.is_none(), "{flow}: master is not a paired-device Bearer");
+                        }
+                        Ok(response)
+                    }).await.unwrap();
+                let frame = ws.next().await.unwrap().unwrap();
+                let hello: serde_json::Value =
+                    serde_json::from_str(frame.to_text().unwrap()).unwrap();
+                assert_eq!(
+                    hello["Workspace"]["message"]["Hello"]["token"], "master",
+                    "{flow}"
+                );
+                ws.send(Message::Text(
+                    serde_json::json!({"WorkspaceReply": {
+                        "request_id": 0, "message": {"HelloAck": {"accepted": true}}
+                    }})
+                    .to_string(),
+                ))
+                .await
+                .unwrap();
+                let snapshot = ws.next().await.unwrap().unwrap();
+                assert!(snapshot.to_text().unwrap().contains("RequestFullSnapshot"));
+                let _ = done_rx.await;
+            });
+            let client = DaemonClient::connect_with_options(options).await.unwrap();
+            crate::app::daemon_pump::wait_for_startup(&client, Duration::from_secs(2))
+                .await
+                .unwrap();
+            assert_eq!(client.status(), DaemonClientStatus::Open, "{flow}");
+            done_tx.send(()).unwrap();
+            task.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn upgrade_saved_legacy_master_is_hello_only_and_fast_never_downgrades() {
+        // Real TCP upgrades model session_routes' precedence: a master Bearer
+        // is NOT a paired-device credential, even with a valid legacy query.
+        for (policy, query, token, accepted) in [
+            (DaemonUpgradeAuth::HelloOnly, "", "master", true),
+            (
+                DaemonUpgradeAuth::HelloOnly,
+                "?token=master",
+                "master",
+                true,
+            ),
+            // Paired Hello identity still uses the original legacy query to
+            // satisfy upgrade auth; it must not become a device Bearer.
+            (
+                DaemonUpgradeAuth::HelloOnly,
+                "?token=master",
+                "paired-identity",
+                true,
+            ),
+            (DaemonUpgradeAuth::FastBearer, "", "master", false),
+            (
+                DaemonUpgradeAuth::FastBearer,
+                "?token=master",
+                "master",
+                false,
+            ),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = DaemonEndpoint::parse(format!(
+                "ws://{}/session{query}",
+                listener.local_addr().unwrap()
+            ))
+            .unwrap();
+            let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let result = tokio_tungstenite::accept_hdr_async(stream,
+                    |request: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                     response: tokio_tungstenite::tungstenite::handshake::server::Response| {
+                        assert_eq!(request.uri().query(), query.strip_prefix('?'));
+                        if request.headers().contains_key("authorization") {
+                            assert_eq!(request.headers()["authorization"], "Bearer master");
+                            return Err(tokio_tungstenite::tungstenite::http::Response::builder()
+                                .status(401).body(Some("not a paired device".into())).unwrap());
+                        }
+                        Ok(response)
+                    }).await;
+                if accepted {
+                    let mut ws = result.unwrap();
+                    let frame = ws.next().await.unwrap().unwrap();
+                    let hello: serde_json::Value =
+                        serde_json::from_str(frame.to_text().unwrap()).unwrap();
+                    assert_eq!(hello["Workspace"]["message"]["Hello"]["token"], token);
+                    ws.send(Message::Text(
+                        serde_json::json!({"WorkspaceReply": {
+                            "request_id": 0, "message": {"HelloAck": {"accepted": true}}
+                        }})
+                        .to_string(),
+                    ))
+                    .await
+                    .unwrap();
+                    let snapshot = ws.next().await.unwrap().unwrap();
+                    assert!(snapshot.to_text().unwrap().contains("RequestFullSnapshot"));
+                    let _ = done_rx.await;
+                } else {
+                    assert!(result.is_err());
+                    assert!(
+                        tokio::time::timeout(
+                            Duration::from_millis(300),
+                            listener.accept()
+                        )
+                        .await
+                        .is_err(),
+                        "must not retry without Bearer"
+                    );
+                }
+            });
+            let mut options = DaemonClientOptions::new(endpoint.clone());
+            assert_eq!(options.upgrade_auth, DaemonUpgradeAuth::HelloOnly);
+            options.token = Some(token.into());
+            options.upgrade_auth = policy;
+            let client = DaemonClient::connect_with_options(options).await.unwrap();
+            let startup = tokio::time::timeout(
+                Duration::from_secs(2),
+                crate::app::daemon_pump::wait_for_startup(
+                    &client,
+                    endpoint.startup_timeout(),
+                ),
+            )
+            .await
+            .unwrap();
+            if accepted {
+                startup.unwrap();
+                assert_eq!(client.status(), DaemonClientStatus::Open);
+                done_tx.send(()).unwrap();
+            } else {
+                assert_eq!(
+                    startup.unwrap_err().to_string(),
+                    "daemon authentication rejected (HTTP 401)"
+                );
+                assert_eq!(client.status(), DaemonClientStatus::Closed);
+            }
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
     async fn upgrade_invalid_authorization_fails_safely_before_dial() {
         let endpoint = DaemonEndpoint::parse("ws://127.0.0.1:1/session").unwrap();
-        let error =
-            connect_endpoint(&endpoint, Some("private-token\r\nInjected: secret"))
-                .await
-                .err()
-                .expect("invalid header must fail before connecting");
+        let error = connect_endpoint(
+            &endpoint,
+            Some("private-token\r\nInjected: secret"),
+            DaemonUpgradeAuth::FastBearer,
+        )
+        .await
+        .err()
+        .expect("invalid header must fail before connecting");
         assert!(matches!(
             error,
             DaemonClientError::InvalidAuthorizationHeader
@@ -2873,7 +3093,7 @@ mod tests {
             let client_id = Uuid::new_v4();
             let server = tokio::spawn(async move {
                 let (stream, _) = listener.accept().await.unwrap();
-                let mut ws = tokio_tungstenite::accept_hdr_async(
+                let ws = tokio_tungstenite::accept_hdr_async(
                     stream,
                     |request: &tokio_tungstenite::tungstenite::handshake::server::Request,
                      response: tokio_tungstenite::tungstenite::handshake::server::Response| {
@@ -2882,7 +3102,7 @@ mod tests {
                             .headers()
                             .get("authorization")
                             .map(|value| value.to_str().unwrap());
-                        if actual != expected.as_deref() {
+                        if expected.is_none() || actual != expected.as_deref() {
                             return Err(tokio_tungstenite::tungstenite::http::Response::builder()
                                 .status(401)
                                 .body(Some("unauthorized".into()))
@@ -2892,8 +3112,12 @@ mod tests {
                         Ok(response)
                     },
                 )
-                .await
-                .unwrap();
+                .await;
+                if token.is_none() {
+                    assert!(ws.is_err(), "Fast ingress must reject query-only upgrades");
+                    return;
+                }
+                let mut ws = ws.unwrap();
                 let frame = ws.next().await.unwrap().unwrap();
                 let hello: serde_json::Value =
                     serde_json::from_str(frame.to_text().unwrap()).unwrap();
@@ -2919,9 +3143,25 @@ mod tests {
                 DaemonEndpoint::parse(format!("ws://{address}/session{query}")).unwrap();
             let mut options = DaemonClientOptions::new(endpoint);
             options.token = token.map(str::to_owned);
+            options.upgrade_auth = DaemonUpgradeAuth::FastBearer;
             options.client_id = client_id;
             options.client_name = "upgrade-loopback".into();
             let mut client = DaemonClient::connect_with_options(options).await.unwrap();
+            if token.is_none() {
+                let error = crate::app::daemon_pump::wait_for_startup(
+                    &client,
+                    Duration::from_secs(2),
+                )
+                .await
+                .unwrap_err();
+                assert_eq!(
+                    error.to_string(),
+                    "daemon authentication rejected (HTTP 401)"
+                );
+                assert_eq!(client.status(), DaemonClientStatus::Closed);
+                server.await.unwrap();
+                continue;
+            }
             let reply = tokio::time::timeout(Duration::from_secs(5), client.recv())
                 .await
                 .unwrap()
@@ -2968,7 +3208,7 @@ mod tests {
         });
         let error = tokio::time::timeout(
             Duration::from_secs(5),
-            connect_endpoint(&endpoint, None),
+            connect_endpoint(&endpoint, None, DaemonUpgradeAuth::FastBearer),
         )
         .await
         .unwrap()
@@ -3094,6 +3334,7 @@ mod tests {
             });
             let mut options = DaemonClientOptions::new(endpoint.clone());
             options.token = Some("private-token".into());
+            options.upgrade_auth = DaemonUpgradeAuth::FastBearer;
             let client = DaemonClient::connect_with_options(options).await.unwrap();
             let error = tokio::time::timeout(
                 Duration::from_secs(1),
@@ -3124,6 +3365,7 @@ mod tests {
         let endpoint = DaemonEndpoint::parse("ws://127.0.0.1:1/session").unwrap();
         let mut options = DaemonClientOptions::new(endpoint.clone());
         options.token = Some("private-token\r\nInjected: secret".into());
+        options.upgrade_auth = DaemonUpgradeAuth::FastBearer;
         let client = DaemonClient::connect_with_options(options).await.unwrap();
         let error = tokio::time::timeout(
             Duration::from_secs(1),

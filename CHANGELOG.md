@@ -2,6 +2,18 @@
 
 All notable user-facing changes to Neoism are documented here.
 
+## [0.7.126-nightly.20261014.1] - 2026-10-14
+
+### Hosted conversation access and connection startup
+
+- Adopts only complete eligible conversation families into a hosted workspace; out-of-root historical tasks keep their family private without blocking unrelated eligible conversations. Ownership conflicts remain atomic failures.
+- Restores local access after authoritative host revocation, preserves namespace continuity on rehosting, and checks session authorization for child routes and linked artifacts.
+- Starts ordinary persistent hosts through the running desktop's standalone implementation rather than a potentially stale sibling executable. Verifies nonce/protocol/endpoint readiness and persists sidecar metadata before reporting success.
+- Moves host revival off the render thread, preserves persistent host lifetime, and adds bounded startup diagnostics with credential redaction and owned-child cleanup on failed startup.
+- Distinguishes ordinary Hello-only WebSocket authentication from explicitly identified Fast Host Bearer upgrades; rejected Fast authentication never downgrades. Includes headless real-router transport contract fixtures and hosting/access regression tests.
+
+This is a real opt-in nightly release: use `neoism update --nightly`. Stable Latest remains v0.7.125. Fast Host is not a sandbox and is intended for trusted participants. Browser-engine workers remain separate and are not packaged.
+
 ## [0.7.126-nightly.20261013.2] - 2026-10-13
 
 ### Hosting reliability and Agent presentation

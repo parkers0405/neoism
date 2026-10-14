@@ -1178,6 +1178,7 @@ impl V2PromptRequest {
 pub(crate) async fn v2_session_children(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
+    claims: Option<Extension<crate::caller::CallerClaims>>,
 ) -> Result<Json<Page<SessionInfo>>, ApiError> {
     ensure_session(&state, &session_id).await?;
     let items = state
@@ -1188,6 +1189,9 @@ pub(crate) async fn v2_session_children(
         .into_iter()
         .filter(|session| {
             session.parent_id.as_ref().map(|id| id.as_str()) == Some(session_id.as_str())
+                && claims.as_ref().map(|Extension(claims)| {
+                    crate::caller::allows_session(claims, session)
+                }).unwrap_or_else(|| crate::caller::local_collaboration_session(false, session))
         })
         .collect();
     Ok(Json(Page {

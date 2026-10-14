@@ -712,6 +712,33 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore = "requires an installed nightly and a running local Agent"]
+    fn installed_fast_daemon_readiness_probe() {
+        let binary = PathBuf::from(
+            std::env::var_os("NEOISM_FAST_REPRO_BINARY")
+                .expect("set NEOISM_FAST_REPRO_BINARY"),
+        );
+        let directory = PathBuf::from(
+            std::env::var_os("NEOISM_FAST_REPRO_DIRECTORY")
+                .expect("set NEOISM_FAST_REPRO_DIRECTORY"),
+        );
+        let agent = std::env::var("NEOISM_FAST_REPRO_AGENT")
+            .expect("set NEOISM_FAST_REPRO_AGENT");
+        let mut daemon = spawn_fast_daemon_with_prefix(
+            &binary,
+            &[OsString::from("--neoism-internal-fast-workspace-daemon")],
+            &directory,
+            free_loopback().unwrap(),
+            &uuid::Uuid::new_v4().to_string(),
+            &agent,
+        )
+        .unwrap();
+        if daemon.wait_readiness(Duration::from_secs(120)).is_err() {
+            panic!("{}", daemon.startup_failure("isolated readiness probe"));
+        }
+    }
+
+    #[test]
     fn shared_agent_endpoint_must_be_direct_local_http_root() {
         for endpoint in [
             "http://127.0.0.1:4096",

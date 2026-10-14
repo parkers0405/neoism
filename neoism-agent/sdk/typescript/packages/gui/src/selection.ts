@@ -3,7 +3,7 @@ export interface ChatSelection { model: string; agent: string; thinking: string;
 export function configuredModel(catalog?: ProviderListResult): string {
     if (!catalog?.default) return '';
     for (const fallback of [false, true]) for (const p of catalog.all) {
-        if ((p.id === 'opencode') !== fallback || (catalog.connected.length > 0 && !catalog.connected.includes(p.id))) continue;
+        if ((p.id === 'opencode') !== fallback || !catalog.connected.includes(p.id)) continue;
         const model = catalog.default[p.id];
         if (model?.trim()) return `${p.id}/${model}`;
     }

@@ -84,19 +84,21 @@ pub(crate) async fn start_session_run(
         .try_start_run(&session_key, run.clone())
         .await?;
     let _ = state.inner.store.start_run(&run.id, &session_key).await;
-    let queue_count = queued_prompt_count(state, &session_key).await;
-    let status = busy_status(
-        queue_count,
-        queued_prompt_preview(state, &session_key).await,
-    );
+    register_session_busy(state, &session_key).await;
+    Ok(run)
+}
+
+/// Publish Busy after the caller has admitted its run; never acquires admission.
+pub(crate) async fn register_session_busy(state: &AppState, session_id: &str) {
+    let queue_count = queued_prompt_count(state, session_id).await;
+    let status = busy_status(queue_count, queued_prompt_preview(state, session_id).await);
     state
         .inner
         .statuses
         .write()
         .await
-        .insert(session_key.clone(), status.clone());
-    publish_session_status(state, session_id.as_str(), &status).await;
-    Ok(run)
+        .insert(session_id.to_string(), status.clone());
+    publish_session_status(state, session_id, &status).await;
 }
 
 pub(crate) async fn finish_session_run(state: &AppState, session_id: &str, run_id: &str) {

@@ -1,0 +1,11 @@
+---
+name: "Codex per-account /usage picker"
+description: "Native /usage per-account Codex limit bars; scoped WHAM fetch, remaining/reset UI and cancel-safe worker"
+type: "feature"
+scope: "project"
+origin: "native GUI usage implementation"
+created: "2026-10-07"
+updated: "2026-10-07"
+---
+
+Native Rust agent GUI recognizes `/usage` as a local `OpenUsagePicker` slash action. Desktop worker lives in `neoism-frontend/desktop/src/neoism/agent/pane/usage.rs`, uses window-waking background sender and cancellation token/server identity guards; Escape closes and Enter refreshes without creating a session or sending a prompt. Shared payload/geometry lives in `shared/src/panels/agent_pane/state/picker.rs`, renderer in `view/picker.rs`: account labels/normalized plans/default highlighting, remaining=100-used green bars, reset countdown + UTC date/time, read-only rows, wheel/arrow scrolling, narrow stacking. Backend `GET /v2/providers/openai/usage` registered through provider plugin/service; `provider_openai_usage.rs` enumerates scoped exact connections (not AuthStore.all/default), requests ChatGPT `/backend-api/wham/usage` using bearer + account header + Neoism user-agent, preserves partial failures and API-account unavailable rows. Response `{accounts:[{connection_id,label,is_default,auth_type,plan_type,windows:[{label,used_percent,reset_at,limit_window_seconds}],error}]}`; secret-free, no invented billing renewal. Fetches: concurrency 4, 10s request timeout, 22s/account, 35s aggregate deadline, 256 KiB decoded body cap, redirects disabled. OAuth refresh serializes and re-reads credentials to prevent rotating refresh-token races. Eight dedicated picker integration tests passed; final backend `cargo check -p neoism-agent-builtins -p neoism-agent-server --tests` passed. Native cargo check including unit-test compilation passed before concurrent unrelated edits; latest recheck blocked by missing `AssistantMarkdownBlock` import in desktop `pane/render_state.rs:9`. Broad shared test check also blocked by unrelated `shared/tests/buffer_tabs.rs:289` missing `PanelContext.plugins`; left those edits untouched. No release build or live-account/GUI launch validation. Shared-host transport not implemented in this native-scoped feature; shared state shows native availability notice rather than sending a prompt.

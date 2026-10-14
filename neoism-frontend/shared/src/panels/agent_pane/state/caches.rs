@@ -485,11 +485,15 @@ impl NeoismAgentPane {
     }
 
     pub(in crate::panels::agent_pane::state) fn apply_config_defaults(&mut self) {
+        self.provider_readiness = None;
         // In-memory: nothing to mutate without the response. Record the
         // request so the host can fetch config defaults and feed the
         // result back via the snapshot / setters.
         self.config_chip_hydration.begin();
         self.push_outbound(OutboundAgentCommand::ApplyConfigDefaults);
+        self.push_outbound(OutboundAgentCommand::RefreshConnectProviders {
+            directory: self.directory.clone(),
+        });
     }
 
     pub fn cursor_rect(&self) -> Option<[f32; 4]> {

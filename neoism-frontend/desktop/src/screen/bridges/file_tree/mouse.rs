@@ -66,10 +66,12 @@ impl Screen<'_> {
         // chrome, above the full-width status bar). MUST match the
         // `tree_top` used in `host/run.rs` render — both read
         // `side_panel_band()` so they can't drift.
-        let row = self.renderer.file_tree.hit_test(
-            mouse_x - tree_left,
+        let row = self.renderer.file_tree.hit_test_in_bounds(
+            mouse_x,
             mouse_y,
+            tree_left,
             tree_top,
+            tree_width,
             tree_height,
         );
         let in_tree_bounds = mouse_x >= tree_left
@@ -83,9 +85,6 @@ impl Screen<'_> {
         if !self.renderer.file_tree.is_visible() {
             return false;
         }
-        let scale_factor = self.sugarloaf.scale_factor();
-        let _mouse_x = self.mouse.x as f32 / scale_factor;
-        let _mouse_y = self.mouse.y as f32 / scale_factor;
         let (row, in_tree_bounds) = self.file_tree_row_under_mouse();
         let Some(row) = row else {
             if in_tree_bounds {
@@ -133,17 +132,33 @@ impl Screen<'_> {
         if self.renderer.file_tree.file_drag().is_none() {
             return false;
         }
+        if self.mouse.left_button_state != neoism_window::event::ElementState::Pressed
+            || self.file_tree_bounds().is_none()
+        {
+            self.cancel_file_tree_drag();
+            return false;
+        }
         let (mx, my) = self.mouse_logical_for_hit_test();
-        let (tree_top, tree_bottom) = self.side_panel_band();
-        let tree_height = (tree_bottom - tree_top).max(0.0);
-        let hovered = self
-            .renderer
-            .file_tree
-            .hit_test(mx, my, tree_top, tree_height);
-        if let Some(dir) = self.renderer.file_tree.update_file_drag(mx, my, hovered) {
+        let (hovered, inside_panel) = self.file_tree_row_under_mouse();
+        if let Some(dir) =
+            self.renderer
+                .file_tree
+                .update_file_drag(mx, my, hovered, inside_panel)
+        {
             // Dwell elapsed over a closed folder — spring it open.
             self.renderer.file_tree.open_dir(&dir);
         }
+        self.mark_dirty();
+        true
+    }
+
+    /// Cancel a tree-owned gesture without activating or moving its source.
+    pub fn cancel_file_tree_drag(&mut self) -> bool {
+        self.file_tree_opened_on_press = false;
+        if self.renderer.file_tree.file_drag().is_none() {
+            return false;
+        }
+        self.renderer.file_tree.cancel_file_drag();
         self.mark_dirty();
         true
     }
@@ -156,6 +171,16 @@ impl Screen<'_> {
         if self.renderer.file_tree.file_drag().is_none() {
             return false;
         }
+        if self.file_tree_bounds().is_none() {
+            return self.cancel_file_tree_drag();
+        }
+        // Mouse-up can arrive without a final motion event. Resolve the
+        // actual release point rather than committing a stale hover target.
+        let (mx, my) = self.mouse_logical_for_hit_test();
+        let (hovered, inside_panel) = self.file_tree_row_under_mouse();
+        self.renderer
+            .file_tree
+            .update_file_drag(mx, my, hovered, inside_panel);
         let opened_on_press = std::mem::take(&mut self.file_tree_opened_on_press);
         match self.renderer.file_tree.end_file_drag() {
             // The row already activated on press.

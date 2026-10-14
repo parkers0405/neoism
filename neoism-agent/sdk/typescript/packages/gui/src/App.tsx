@@ -432,6 +432,7 @@ function AgentApp({ connection }: { connection?: PhoneConnection }) {
                                     onDirectoryChange={a.setDirectory}
                                     onCycleAgent={a.onCycleAgent}
                                     showHints={a.hints}
+                                    needsProvider={a.providerCatalog?.connected.length === 0}
                                     busy={a.chat.state.busy}
                                     commands={a.catalog}
                                     send={(text, files) => {
@@ -477,6 +478,7 @@ function AgentApp({ connection }: { connection?: PhoneConnection }) {
                                     projectStorageScope={serverScope(a.prefs.server)}
                                     onDirectoryChange={a.setDirectory}
                                     showHints={a.hints}
+                                    needsProvider={a.providerCatalog?.connected.length === 0}
                                 />
                             </div>}
                         </div>

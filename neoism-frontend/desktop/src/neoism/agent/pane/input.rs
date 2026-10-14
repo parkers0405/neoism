@@ -460,6 +460,11 @@ impl NeoismAgentPane {
             )],
             0,
         ));
+        self.refresh_model_catalog();
+    }
+
+    pub(crate) fn refresh_model_catalog(&mut self) {
+        self.provider_readiness = None;
         let server = self.server.clone();
         let directory = self.directory.clone();
         let tx = self.background_tx.clone();

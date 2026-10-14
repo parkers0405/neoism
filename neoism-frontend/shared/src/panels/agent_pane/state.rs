@@ -811,6 +811,7 @@ pub struct NeoismAgentPane {
     /// requests are issued together and may complete in either order.
     model_context_limits: HashMap<String, u64>,
     model_options: Vec<NeoismAgentPickerOption>,
+    provider_readiness: Option<crate::panels::agent_pane::api_mapping::ProviderReadiness>,
     recent_model_options: Vec<NeoismAgentPickerOption>,
     agent_options: Vec<NeoismAgentPickerOption>,
     skill_options: Vec<NeoismAgentPickerOption>,
@@ -1162,6 +1163,7 @@ impl Default for NeoismAgentPane {
             model_context_limit: None,
             model_context_limits: HashMap::new(),
             model_options: Vec::new(),
+            provider_readiness: None,
             recent_model_options: Vec::new(),
             agent_options: Vec::new(),
             skill_options: Vec::new(),

@@ -193,6 +193,23 @@ describe("native composer", () => {
         expect(nodes().some(n => n.type === ComposerFooter)).toBe(false);
         expect(textarea()).toBeTruthy();
     });
+    it('replaces normal hints with connect-first guidance only when providers are confirmed absent', () => {
+        const text = (node: any): string => Array.isArray(node) ? node.map(text).join('') : typeof node === 'object' && node ? text(node.props?.children) : typeof node === 'string' ? node : '';
+        props.needsProvider = true; render();
+        const footer = find(n => n.type === ComposerFooter);
+        const guidance = ComposerFooter(footer.props);
+        expect(text(guidance)).toContain('/connect to connect a provider');
+        expect(text(guidance)).not.toContain('agents'); expect(text(guidance)).not.toContain('commands');
+        expect(text(ComposerFooter({ ...footer.props, needsProvider: false }))).toContain('tab agents/ commands');
+        expect(text(ComposerFooter({ ...footer.props, showHints: false }))).not.toContain('/connect');
+    });
+    it('retains the draft and attachments on a no-provider rejection', async () => {
+        props.send = vi.fn(async () => { throw new Error('No providers connected. Use /connect to connect a provider before sending a message.'); }); render();
+        change('keep me'); find(n => n.type === 'input').props.onChange({ target: { files: [file('a.txt')], value: '' } }); render();
+        button('Send message').props.onClick(); await Promise.resolve(); render();
+        expect(textarea().props.value).toBe('keep me'); expect(button('Remove a.txt')).toBeTruthy();
+        expect(find(n => n.props?.role === 'alert').props.children).toContain('Use /connect');
+    });
     it("renders directory picker, optional hints and abort", () => {
         props = { ...props, directory: "/work", busy: true, showHints: false }; render();
         const onDirectoryChange = vi.fn();

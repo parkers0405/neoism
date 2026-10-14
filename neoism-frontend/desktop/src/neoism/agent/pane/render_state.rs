@@ -466,6 +466,7 @@ impl NeoismAgentPane {
     }
 
     pub(crate) fn apply_config_defaults(&mut self) {
+        self.provider_readiness = None;
         self.config_chip_hydration.begin();
         self.push_outbound(OutboundAgentCommand::ApplyConfigDefaults);
     }
@@ -623,6 +624,10 @@ impl NeoismAgentPane {
             return;
         };
         if self.is_subagent_session() {
+            return;
+        }
+        if let Some(error) = self.prompt_readiness_error() {
+            self.push_notice(error, NeoismAgentNoticeLevel::Warn);
             return;
         }
         self.remember_sent_prompt(&text);

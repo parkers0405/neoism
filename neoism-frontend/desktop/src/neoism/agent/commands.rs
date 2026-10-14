@@ -238,6 +238,10 @@ impl NeoismAgentPane {
     }
 
     fn set_goal(&mut self, text: String) {
+        if let Some(error) = self.prompt_readiness_error() {
+            self.push_notice(error, NeoismAgentNoticeLevel::Warn);
+            return;
+        }
         let session_id = match self.ensure_session() {
             Ok(session_id) => session_id,
             Err(error) => {
@@ -962,6 +966,9 @@ impl NeoismAgentPane {
                 "Wait for the provider to confirm your option before sending".to_string(),
             );
         }
+        if let Some(error) = self.prompt_readiness_error() {
+            return Err(error.to_string());
+        }
         let parts = self.prompt_parts_for(&prompt);
         let system = self.prompt_system_for(&prompt);
         self.push_outbound(OutboundAgentCommand::SendPrompt {
@@ -992,6 +999,10 @@ impl NeoismAgentPane {
     ) {
         if self.is_subagent_session() {
             self.system_message("Prompt failed", "subagent sessions are view-only");
+            return;
+        }
+        if let Some(error) = self.prompt_readiness_error_for_model(&model) {
+            self.push_notice(error, NeoismAgentNoticeLevel::Warn);
             return;
         }
         let origin_session_id = self.session_id.clone();
@@ -1898,6 +1909,10 @@ impl NeoismAgentPane {
     }
 
     fn run_server_command(&mut self, command: &str, command_args: &str) {
+        if let Some(error) = self.prompt_readiness_error() {
+            self.push_notice(error, NeoismAgentNoticeLevel::Warn);
+            return;
+        }
         if self.session_id.is_none() {
             self.push_outbound(OutboundAgentCommand::EnsureSession);
         }
@@ -1912,6 +1927,10 @@ impl NeoismAgentPane {
         command: String,
         command_args: String,
     ) {
+        if let Some(error) = self.prompt_readiness_error() {
+            self.push_notice(error, NeoismAgentNoticeLevel::Warn);
+            return;
+        }
         let session_id = match self.ensure_session() {
             Ok(session_id) => session_id,
             Err(error) => {
@@ -1947,6 +1966,9 @@ impl NeoismAgentPane {
     fn ensure_session(&mut self) -> Result<String, String> {
         if let Some(session_id) = self.session_id.clone() {
             return Ok(session_id);
+        }
+        if let Some(error) = self.prompt_readiness_error() {
+            return Err(error.to_string());
         }
         let path = self
             .directory

@@ -123,6 +123,7 @@ impl NeoismAgentPane {
     /// placeholder; `apply_connect_catalog` swaps in the real rows when the
     /// host answers.
     pub fn open_connect_picker(&mut self) {
+        self.provider_readiness = None;
         self.push_outbound(OutboundAgentCommand::RefreshConnectProviders {
             directory: self.directory.clone(),
         });
@@ -170,7 +171,12 @@ impl NeoismAgentPane {
     /// still showing. Mirrors the desktop `fetch_connect_flow` parse, but the
     /// host ferries the raw `/provider` + `/provider/auth` JSON so the parsing
     /// stays in one place.
+    pub fn apply_provider_catalog(&mut self, providers: &Value) {
+        self.provider_readiness = super::super::api_mapping::ProviderReadiness::from_json(providers);
+    }
+
     pub fn apply_connect_catalog(&mut self, providers: Value, auth: Value) {
+        self.apply_provider_catalog(&providers);
         let mut flow = parse_connect_flow(providers, auth);
         // Keep the user's place if they already advanced past stage 1.
         if let Some(existing) = self.connect.as_ref() {
@@ -601,6 +607,7 @@ impl NeoismAgentPane {
             else {
                 return;
             };
+            self.provider_readiness = None;
             self.push_outbound(OutboundAgentCommand::ConnectDisconnect {
                 provider_id: provider.id,
                 connection_id: Some(connection.id.clone()),
@@ -685,6 +692,7 @@ impl NeoismAgentPane {
         else {
             return;
         };
+        self.provider_readiness = None;
         self.push_outbound(OutboundAgentCommand::ConnectDisconnect {
             provider_id: provider.id.clone(),
             connection_id: self.connect.as_ref().and_then(|flow| {
@@ -896,6 +904,10 @@ impl NeoismAgentPane {
             self.connection_id = Some(connection_id);
         }
         self.close_connect();
+        self.provider_readiness = None;
+        self.push_outbound(OutboundAgentCommand::RefreshConnectProviders {
+            directory: self.directory.clone(),
+        });
         self.system_message(
             "Connected",
             format!("{provider_name} connected. Open /model to pick one of its models."),

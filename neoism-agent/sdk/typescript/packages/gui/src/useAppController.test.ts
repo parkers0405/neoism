@@ -59,7 +59,7 @@ function client() {
         config: { defaults: vi.fn(async (_directory?: string) => ({ defaultAgent: null as string | null, model: null as string | null, variant: null as string | null })) },
         artifacts: { upload: vi.fn(async (file: File) => ({ filename: file.name, mediaType: file.type, downloadUrl: "https://server/artifact/file" })) },
         health: { get: vi.fn(async () => ({})) },
-        catalog: { commands: { list: vi.fn(async () => []) }, providers: { configured: vi.fn(async () => ({ providers: providers.all, default: providers.default })), list: vi.fn(async () => ({ all: [], connected: [] })) }, agents: { list: vi.fn(async () => [] as {name: string; mode?: string; hidden?: boolean; description?: string}[]) }, skills: { list: vi.fn(async () => [{ name: "review", description: "Review code" }]) } },
+        catalog: { commands: { list: vi.fn(async () => []) }, providers: { configured: vi.fn(async () => ({ providers: providers.all, default: providers.default })), list: vi.fn(async (_directory?: string) => ({ ...providers, connected: [...providers.connected, 'p', 'session', 'provider', 'one', 'two'] })) }, agents: { list: vi.fn(async () => [] as {name: string; mode?: string; hidden?: boolean; description?: string}[]) }, skills: { list: vi.fn(async () => [{ name: "review", description: "Review code" }]) } },
         sessions: {
             list: vi.fn(async () => ({ items: [] as Session[], cursor: { next: undefined as string | undefined } })),
             get: vi.fn(async (id: string) => session(id)), create: vi.fn(async () => session("created")),
@@ -559,6 +559,67 @@ describe("live Recents and persistence", () => {
 
 const providers = { all: [{ id: 'opencode', name: 'OpenCode', models: {} }, { id: 'openai', name: 'OpenAI', models: { astra: { id: 'gpt-6-astra', name: 'Astra', limit: { context: 372000 } } } }], connected: ['opencode', 'openai'], default: { opencode: 'free', openai: 'gpt-6-astra' } } as any;
 const reloadDefaults = () => { app.setPrefs(p => ({ ...p, directory: '/test' })); render(); };
+describe('provider onboarding admission', () => {
+    it('keeps home, draft and attachments when a stale model has no connected providers', async () => {
+        server.catalog.providers.list.mockResolvedValue({ ...providers, connected: [] }); reloadDefaults(); await settle();
+        app.setModel('openai/gpt-6-astra'); app.onDraftChange('keep me');
+        const file = Object.assign(new Blob(['data']), { name: 'file.txt' }) as File;
+        app.onFilesChange([file]); render();
+        const homeUrl = window.location.href, key = app.tabKey;
+        await expect(app.send('keep me', [file])).rejects.toThrow('Use /connect'); await settle();
+        expect(app.connected).toBe(true);
+        expect(app.providerCatalog?.connected).toEqual([]);
+        expect(app.id).toBeUndefined(); expect(app.tabKey).toBe(key); expect(window.location.href).toBe(homeUrl);
+        expect(app.draft).toBe('keep me'); expect(app.files).toEqual([file]); expect(app.sessions).toEqual([]);
+        expect(server.sessions.create).not.toHaveBeenCalled(); expect(server.artifacts.upload).not.toHaveBeenCalled();
+        expect(server.sessions.prompt).not.toHaveBeenCalled(); expect(host.chat.beginPrompt).not.toHaveBeenCalled(); expect(host.chat.markCreatedSession).not.toHaveBeenCalled();
+        await app.send('/connect'); await settle(); expect(app.picker).toBe('connect'); expect(app.id).toBeUndefined();
+        server.catalog.providers.list.mockResolvedValue(providers); app.setPicker(undefined); await settle();
+        await app.send('keep me', [file]); await settle();
+        expect(app.id).toBe('created'); expect(server.sessions.prompt).toHaveBeenCalledTimes(1);
+    });
+    it('waits for provider hydration before deciding whether to create a conversation', async () => {
+        const pending = deferred<any>(); server.catalog.providers.list.mockReturnValue(pending.promise); reloadDefaults();
+        const sending = app.send('hello'); const rejected = expect(sending).rejects.toThrow('Use /connect');
+        await settle(); expect(app.providerCatalog).toBeUndefined(); expect(server.sessions.create).not.toHaveBeenCalled();
+        pending.resolve({ ...providers, connected: [] }); await rejected;
+        expect(server.sessions.create).not.toHaveBeenCalled(); expect(server.sessions.prompt).not.toHaveBeenCalled();
+    });
+    it('asks for a model when providers are connected but no model is selected', async () => {
+        await settle(); app.setModel(''); render();
+        await expect(app.send('hello')).rejects.toThrow('Use /models');
+        expect(server.sessions.create).not.toHaveBeenCalled(); expect(app.id).toBeUndefined();
+    });
+    it('blocks a selected disconnected provider before creating a conversation', async () => {
+        await settle(); app.setModel('disconnected/model'); render();
+        await expect(app.send('hello')).rejects.toThrow('Use /connect');
+        expect(server.sessions.create).not.toHaveBeenCalled();
+    });
+    it('guards existing chats and forwarded server commands without prompt side effects', async () => {
+        server.catalog.providers.list.mockResolvedValue({ ...providers, connected: [] }); reloadDefaults(); await settle();
+        app.openSession('existing'); await settle();
+        await expect(app.send('hello')).rejects.toThrow('Use /connect');
+        const { nativeCommand } = await import('./nativeCommands'); vi.mocked(nativeCommand).mockResolvedValueOnce(false);
+        await expect(app.send('/server-only hello')).rejects.toThrow('Use /connect');
+        expect(server.sessions.create).not.toHaveBeenCalled(); expect(server.sessions.prompt).not.toHaveBeenCalled(); expect(server.sessions.command).not.toHaveBeenCalled();
+        expect(host.chat.beginPrompt).not.toHaveBeenCalled(); expect(app.id).toBe('existing');
+    });
+    it('uses the target workspace catalog rather than a previously connected workspace', async () => {
+        await settle(); server.catalog.providers.list.mockImplementation(async dir => dir === '/empty' ? { ...providers, connected: [] } : providers);
+        app.selectWorkspace('/empty'); render(); expect(app.providerCatalog).toBeUndefined();
+        await expect(app.send('hello')).rejects.toThrow('Use /connect'); await settle();
+        expect(app.providerCatalog?.connected).toEqual([]); expect(app.id).toBeUndefined(); expect(server.sessions.create).not.toHaveBeenCalled();
+        app.selectWorkspace('/work'); await settle(); await app.send('hello'); expect(server.sessions.prompt).toHaveBeenCalledTimes(1);
+    });
+    it('does not reuse an old server catalog and retries catalog failures without creating a chat', async () => {
+        await settle(); const other = client(); other.catalog.providers.list.mockRejectedValue(new Error('offline')); host.clients.set('http://other', other);
+        app.setPrefs(p => ({ ...p, server: 'http://other' })); render(); expect(app.providerCatalog).toBeUndefined(); await settle();
+        await expect(app.send('hello')).rejects.toThrow('Could not load providers'); expect(other.sessions.create).not.toHaveBeenCalled();
+        other.catalog.providers.list.mockResolvedValue({ ...providers, connected: [] });
+        await expect(app.send('hello')).rejects.toThrow('No providers connected'); expect(other.sessions.create).not.toHaveBeenCalled();
+    });
+});
+
 describe('directory defaults and atomic selection precedence', () => {
     it('hydrates actual config model/effort and Build fallback before first submission', async () => {
         const pending = deferred<{ defaultAgent: string | null; model: string | null; variant: string | null }>();

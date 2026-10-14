@@ -302,6 +302,7 @@ pub(crate) async fn ensure_for_prompt(
     Ok(Some(snapshot))
 }
 
+/// The caller must hold the session family's admission guard.
 pub(crate) async fn begin_manual_action(
     state: &AppState,
     session_id: &str,
@@ -314,20 +315,38 @@ pub(crate) async fn begin_manual_action(
     let starts_top_level_execution = info.parent_id.is_none();
     let root = root_session_id(state, &info).await;
     let snapshot = if starts_top_level_execution {
+        // Compaction can run while previews or child work keep this execution
+        // alive; only the admitting session's own run must be exclusive.
+        match state.inner.store.get_execution_activity(&root).await? {
+            Some(snapshot) if !snapshot.finished => snapshot,
+            _ => state
+                .inner
+                .store
+                .admit_execution_activity(
+                    &root,
+                    &Id::ascending(IdKind::Event).to_string(),
+                    &action_id,
+                    run_id,
+                )
+                .await?
+                .ok_or_else(|| {
+                    anyhow::anyhow!("execution {root} still has active work")
+                })?,
+        }
+    } else {
         state
             .inner
             .store
-            .admit_execution_activity(
-                &root,
-                &Id::ascending(IdKind::Event).to_string(),
-                &action_id,
-                run_id,
-            )
+            .get_execution_activity(&root)
             .await?
-            .ok_or_else(|| anyhow::anyhow!("execution {root} still has active work"))?
-    } else {
-        ensure_for_prompt(state, &mut info, &action_id, false)
-            .await?
+            .filter(|snapshot| {
+                !snapshot.finished
+                    && info
+                        .extra
+                        .get(EXECUTION_ID_KEY)
+                        .and_then(|value| value.as_str())
+                        .is_none_or(|execution| execution == snapshot.execution_id)
+            })
             .ok_or_else(|| anyhow::anyhow!("no active parent execution"))?
     };
     info.extra
@@ -580,12 +599,22 @@ async fn finish_if_quiescent_impl(
     session_id: &str,
     admitting_session: Option<&str>,
 ) {
+    let Some(_admission) = admission_guard(state, session_id).await else {
+        return;
+    };
+    finish_if_quiescent_locked(state, session_id, admitting_session).await;
+}
+
+/// The caller must hold the session family's admission guard.
+pub(crate) async fn finish_if_quiescent_locked(
+    state: &AppState,
+    session_id: &str,
+    admitting_session: Option<&str>,
+) {
     let Ok(Some(session)) = state.inner.store.get_session(session_id).await else {
         return;
     };
     let root_id = root_session_id(state, &session).await;
-    let lock = keyed_lock(state, &root_id).await;
-    let _guard = lock.lock().await;
     let Ok(Some(_)) = state.inner.store.get_session(&root_id).await else {
         return;
     };

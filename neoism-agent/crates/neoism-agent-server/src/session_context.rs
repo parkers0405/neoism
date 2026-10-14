@@ -66,6 +66,7 @@ pub(crate) async fn compact_session_context(
     let admission = crate::execution_activity::admission_guard(state, session_id)
         .await
         .ok_or_else(|| ApiError::not_found(format!("session {session_id} not found")))?;
+    crate::execution_activity::finish_if_quiescent_locked(state, session_id, None).await;
     let started = now_millis();
     let run = SessionRun {
         id: Id::ascending(IdKind::Event).to_string(),
@@ -78,16 +79,23 @@ pub(crate) async fn compact_session_context(
         .try_start_run(session_id, run.clone())
         .await
         .map_err(|_| ApiError::conflict("Session is already running"))?;
+    let mut run_guard =
+        crate::session_run::SessionRunGuard::new(state, session_id, &run.id);
     if let Err(error) = state.inner.store.start_run(&run.id, session_id).await {
+        drop(admission);
         crate::session_run::finish_session_run(state, session_id, &run.id).await;
+        run_guard.disarm();
         return Err(ApiError::internal(error.to_string()));
     }
     if let Err(error) =
         crate::execution_activity::begin_manual_action(state, session_id, &run.id).await
     {
+        drop(admission);
         crate::session_run::finish_session_run(state, session_id, &run.id).await;
+        run_guard.disarm();
         return Err(ApiError::internal(error.to_string()));
     }
+    crate::session_run::register_session_busy(state, session_id).await;
     drop(admission);
     let result = run_compaction(
         state,
@@ -98,6 +106,7 @@ pub(crate) async fn compact_session_context(
     )
     .await;
     release_owned_compaction_run(state, session_id, Some(run.id)).await;
+    run_guard.disarm();
     result
 }
 
@@ -119,6 +128,7 @@ async fn compact_session_context_inner(
     // agent loop (auto-compaction) a run already exists — reuse its cancel flag
     // so aborting the run also stops the summary. Otherwise (manual `/compact`)
     // register a transient run we own and tear down when done.
+    let mut run_guard = None;
     let existing = state.inner.session_coordinator.active_run(session_id).await;
     let (cancel, owned_run_id) = if let Some(run) = existing {
         (run.cancel, None)
@@ -136,7 +146,13 @@ async fn compact_session_context_inner(
             .try_start_run(session_id, run.clone())
             .await
         {
-            Ok(()) => (run.cancel, Some(run.id)),
+            Ok(()) => {
+                run_guard = Some(crate::session_run::SessionRunGuard::new(
+                    state, session_id, &run.id,
+                ));
+                crate::session_run::register_session_busy(state, session_id).await;
+                (run.cancel, Some(run.id))
+            }
             Err(active) => (active.cancel, None),
         }
     };
@@ -145,6 +161,9 @@ async fn compact_session_context_inner(
     // in a permanent "already running" state.
     let result = run_compaction(state, session_id, reason, started, &cancel).await;
     release_owned_compaction_run(state, session_id, owned_run_id).await;
+    if let Some(guard) = run_guard.as_mut() {
+        guard.disarm();
+    }
     result
 }
 
@@ -361,11 +380,14 @@ async fn release_owned_compaction_run(
     {
         tracing::warn!(%error, %session_id, %run_id, "failed to durably finish compaction run");
     }
-    state
+    if state
         .inner
         .session_coordinator
         .finish_run(session_id, &run_id)
-        .await;
+        .await
+    {
+        crate::session_run::publish_idle_if_no_run(state, session_id).await;
+    }
     crate::execution_activity::finish_if_quiescent(state, session_id).await;
 }
 
@@ -1509,6 +1531,161 @@ fn plugin_run_system_message(
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn manual_compaction_reconciles_idle_execution_and_releases_admission() {
+        for scenario in ["idle", "active", "child", "orphan-child"] {
+            let directory = std::env::temp_dir().join(format!(
+                "neoism-manual-compaction-{}",
+                Id::ascending(IdKind::Event)
+            ));
+            std::fs::create_dir_all(directory.join(".agent")).unwrap();
+            std::fs::write(
+                directory.join(".agent/agent.json"),
+                r#"{"model":"neoism/stub"}"#,
+            )
+            .unwrap();
+            let state = AppState::open_database(directory.join("state.sqlite3"))
+                .await
+                .unwrap();
+            let root_id = neoism_agent_core::new_session_id();
+            let root: SessionInfo = serde_json::from_value(json!({
+                "id": root_id, "slug": "manual-compact", "projectId": "global",
+                "directory": directory.to_string_lossy(), "title": "Manual compact",
+                "version": "test", "model": {"providerId": "neoism", "id": "stub"},
+                "time": {"created": 1, "updated": 1}
+            }))
+            .unwrap();
+            state.inner.store.insert_session(&root).await.unwrap();
+            let previous = state
+                .inner
+                .store
+                .admit_execution_activity(
+                    root_id.as_str(),
+                    "previous-execution",
+                    "previous-message",
+                    "",
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            let active = matches!(scenario, "active" | "child");
+            if active {
+                assert!(state
+                    .inner
+                    .store
+                    .insert_execution_segment(
+                        root_id.as_str(),
+                        &previous.execution_id,
+                        "active-segment",
+                        &state.inner.execution_owner_id,
+                        root_id.as_str(),
+                        now_millis(),
+                    )
+                    .await
+                    .unwrap());
+            }
+            let mut session = root.clone();
+            if matches!(scenario, "child" | "orphan-child") {
+                session.id = neoism_agent_core::new_session_id();
+                session.parent_id = Some(root_id.clone());
+                session
+                    .extra
+                    .insert("executionID".into(), json!(previous.execution_id));
+                state.inner.store.insert_session(&session).await.unwrap();
+            }
+            let model = user_model_from_model_ref(session.model.as_ref().unwrap());
+            let message_id = Id::ascending(IdKind::Message);
+            let message = MessageWithParts {
+                info: MessageInfo::User(UserMessage {
+                    id: message_id.clone(),
+                    session_id: session.id.clone(),
+                    time: CreatedTime { created: 1 },
+                    agent: "build".into(),
+                    model,
+                    system: None,
+                    tools: None,
+                    author: None,
+                }),
+                parts: vec![Part::Text(TextPart {
+                    id: Id::ascending(IdKind::Part),
+                    session_id: session.id.clone(),
+                    message_id,
+                    text: "Keep the landing page deployment instructions.".into(),
+                    synthetic: None,
+                    time: None,
+                })],
+            };
+            state
+                .inner
+                .store
+                .append_message(session.id.as_str(), &message)
+                .await
+                .unwrap();
+            let result = timeout(
+                Duration::from_secs(10),
+                compact_session_context(&state, session.id.as_str()),
+            )
+            .await
+            .expect("manual compaction must not deadlock on admission or cleanup");
+            let rejected = scenario == "orphan-child";
+            let history = state
+                .inner
+                .store
+                .list_messages(session.id.as_str())
+                .await
+                .unwrap();
+            if rejected {
+                let error = result.unwrap_err().to_string();
+                assert!(error.contains("no active parent execution"), "{error}");
+                assert_eq!(history.len(), 1, "rejection must not invoke compaction");
+            } else {
+                assert!(result.unwrap().extra.contains_key("summary"));
+                assert!(history
+                    .iter()
+                    .flat_map(|message| &message.parts)
+                    .any(|part| matches!(part, Part::Compaction(_))));
+            }
+            assert!(state
+                .inner
+                .session_coordinator
+                .active_run(session.id.as_str())
+                .await
+                .is_none());
+            let runs = state
+                .inner
+                .store
+                .session_run_statuses(session.id.as_str())
+                .await
+                .unwrap();
+            assert_eq!(runs.len(), 1);
+            assert_eq!(runs[0].1, "completed");
+            timeout(
+                Duration::from_secs(2),
+                crate::execution_activity::finish_if_quiescent(
+                    &state,
+                    session.id.as_str(),
+                ),
+            )
+            .await
+            .expect("runtime reconciliation must be able to reacquire admission");
+            let execution = state
+                .inner
+                .store
+                .get_execution_activity(root_id.as_str())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(execution.finished, !active);
+            if scenario == "idle" {
+                assert_ne!(execution.execution_id, previous.execution_id);
+            } else {
+                assert_eq!(execution.execution_id, previous.execution_id);
+            }
+            state.shutdown().await.unwrap();
+            let _ = std::fs::remove_dir_all(directory);
+        }
+    }
+
     #[test]
     fn html_artifact_guidance_requires_explicit_opt_in() {
         for flag in [None, Some("0"), Some(""), Some("true"), Some("2")] {
@@ -1791,7 +1968,28 @@ mod tests {
             .await
             .unwrap();
 
+        let mut events = state.subscribe();
+        crate::session_run::register_session_busy(&state, &session_id).await;
+        let busy = events.recv().await.unwrap();
+        assert_eq!(busy.kind, event_type::SESSION_STATUS);
+        assert_eq!(busy.properties["status"]["type"], "busy");
+
+        // Auto compaction reuses the parent run; stale ownership must not idle it either.
+        release_owned_compaction_run(&state, &session_id, None).await;
+        release_owned_compaction_run(&state, &session_id, Some("stale-run".into())).await;
+        assert!(matches!(
+            state.inner.statuses.read().await.get(&session_id),
+            Some(neoism_agent_core::SessionStatus::Busy { .. })
+        ));
+        while let Ok(event) = events.try_recv() {
+            assert_ne!(event.kind, event_type::SESSION_STATUS);
+        }
+
         release_owned_compaction_run(&state, &session_id, Some(run.id.clone())).await;
+        let idle = events.recv().await.unwrap();
+        assert_eq!(idle.kind, event_type::SESSION_STATUS);
+        assert_eq!(idle.properties["status"]["type"], "idle");
+        assert!(!state.inner.statuses.read().await.contains_key(&session_id));
 
         // The in-memory slot is free again AND the store row is finalized —
         // a 'running' leftover would veto execution settling forever.

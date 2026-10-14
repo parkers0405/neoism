@@ -1800,6 +1800,9 @@ self.footer_growth.record_with_edge(
                 }
                 Ok(NeoismAgentBackgroundUpdate::ConfigDefaultsLoaded(defaults)) => {
                     self.config_chip_hydration.complete();
+                    if let Some(readiness) = defaults.provider_readiness {
+                        self.provider_readiness = Some(readiness);
+                    }
                     if let Some(agent) = defaults.agent {
                         match agent.as_str() {
                             "build" => self.mode = NeoismAgentMode::Build,
@@ -1839,6 +1842,13 @@ self.footer_growth.record_with_edge(
                     }
                 }
                 Ok(NeoismAgentBackgroundUpdate::ModelOptionsRefreshed(result)) => {
+                    let result = result.map(|(options, readiness)| {
+                        if let Some(readiness) = readiness {
+                            self.provider_readiness = Some(readiness);
+                            changed = true;
+                        }
+                        options
+                    });
                     if let Some(picker) = self
                         .picker
                         .as_ref()

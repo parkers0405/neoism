@@ -27,6 +27,7 @@ export interface ComposerProps extends ProjectPickerProps {
     directory?: string;
     onCycleAgent?(): void;
     showHints?: boolean;
+    needsProvider?: boolean;
     /** App hosts the footer outside its capped input scroller. */
     showFooter?: boolean;
 }
@@ -36,7 +37,7 @@ const sizeLabel = (bytes: number) => bytes < 1024 ? `${bytes} B` : bytes < 10485
 
 export function Composer({ busy, commands, send, abort, model, agent, thinking, openPicker, pickerOpen = false,
     draftInsertion, tabKey = "legacy", draft, onDraftChange, files: controlledFiles,
-    onFilesChange, directory, client, sessionId, recentDirectories, projectStorageScope, onDirectoryChange, onCycleAgent, showHints = true, showFooter = true }: ComposerProps) {
+    onFilesChange, directory, client, sessionId, recentDirectories, projectStorageScope, onDirectoryChange, onCycleAgent, showHints = true, needsProvider = false, showFooter = true }: ComposerProps) {
     // Unkeyed hosts retain local drafts/attachments across tab switches. Keyed hosts
     // must supply controlled files as well as controlled drafts to retain both.
     const tabs = useRef(new Map<string, TabDraft>());
@@ -169,22 +170,23 @@ export function Composer({ busy, commands, send, abort, model, agent, thinking, 
             </div>
         </div>
         {state.error && <p className="native-composer-error" role="alert">{state.error}</p>}
-        {showFooter && <ComposerFooter busy={busy && !!sessionId} tabKey={tabKey} client={client} sessionId={sessionId} directory={directory} recentDirectories={recentDirectories} projectStorageScope={projectStorageScope} onDirectoryChange={onDirectoryChange} showHints={showHints} />}
+        {showFooter && <ComposerFooter busy={busy && !!sessionId} tabKey={tabKey} client={client} sessionId={sessionId} directory={directory} recentDirectories={recentDirectories} projectStorageScope={projectStorageScope} onDirectoryChange={onDirectoryChange} showHints={showHints} needsProvider={needsProvider} />}
     </div>;
 }
 
 export interface ComposerFooterProps extends ProjectPickerProps {
     tabKey?: string;
     showHints?: boolean;
+    needsProvider?: boolean;
     busy?: boolean;
     /** Home-only project selector; session-backed standalone composers hide it too. */
     showProject?: boolean;
 }
 
-export function ComposerFooter({ tabKey, client, sessionId, directory, recentDirectories, projectStorageScope, onDirectoryChange, showHints = true, busy = false, showProject = !sessionId }: ComposerFooterProps) {
+export function ComposerFooter({ tabKey, client, sessionId, directory, recentDirectories, projectStorageScope, onDirectoryChange, showHints = true, needsProvider = false, busy = false, showProject = !sessionId }: ComposerFooterProps) {
     if (sessionId) return null;
     return (<div className="native-composer-footer">
             {showProject && <ProjectPicker key={tabKey} client={client} sessionId={sessionId} directory={directory} recentDirectories={recentDirectories} projectStorageScope={projectStorageScope} onDirectoryChange={onDirectoryChange} />}
-            {showHints && <span className="native-composer-hints"><span><kbd>tab</kbd> agents</span><span><kbd>/</kbd> commands</span></span>}
+            {showHints && <span className="native-composer-hints">{needsProvider ? <span><kbd>/connect</kbd> to connect a provider</span> : <><span><kbd>tab</kbd> agents</span><span><kbd>/</kbd> commands</span></>}</span>}
         </div>);
 }

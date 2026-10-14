@@ -1,0 +1,19 @@
+---
+name: "Website screenshots and 3D ASCII art: latest requirements"
+description: "Latest: no image-model pictures; retain real screenshots, use relevant 3D rainbow ASCII with Roman styling, not irrelevant monuments. Caption-free centered Firefox-compatible gallery."
+type: "feedback"
+scope: "project"
+origin: "Latest user art-direction corrections during website refinement"
+created: "2026-10-14"
+updated: "2026-10-14"
+---
+
+LATEST WEBSITE ART DIRECTION supersedes older screenshot/diagram-only inventory and the briefly requested image-model generation: user rejected ALL image-model pictures, specifically the Live workspace hands image. Do not generate more model pictures or use them on the site. Three rejected public images were removed. Retain authoritative real screenshots where useful, particularly hero and Agent In your workspace. Models and Skills picker screenshots should be replaced by relevant original ASCII art. Final target: 18 rows, 7 real screenshots, 9 original ASCII SVGs, and only 2 retained technical diagrams (HTTP/SDK).
+
+ASCII must look THREE-DIMENSIONAL, with perspective, visible sides, surface lighting and glyph-density shading, not flat icons/diagrams. Colorful punctuation inspiration is a watermarked stock portrait: borrow technique only, never stock silhouette/watermark. Roman-era sculpture/architecture is an ART STYLE, not unrelated content: busts suit models/conversations, papyrus/code instruction scroll suits skills, but tools/connections/self-host MUST have recognizable technological subjects (mechanisms, ports/cables, compute/server hardware). Do not use plain aqueducts or Roman monuments instead of relevant tech. Deterministic authorship scripts in website/scripts/generate-ascii-art.mjs and generate-ascii-tech.mjs; transparent theme-aware static SVGs in public/ascii-*.svg. No fake UI, simulated jobs/Git/auth/terminal controls. No automatic cycling or explanatory captions below art. Keep accessible alt, feature descriptions, canonical guide links.
+
+Screenshot workflow: user provides specifically labeled PNGs in ~/Pictures, agent crops/optimizes/places derivatives only. Original PNGs untouched. No Computer MCP/window/focus/screen capture without renewed explicit permission. Do not inspect unrelated personal directories. Seven active real feature captures: neoism-intro, subagents, terminal, editor, git, notes, themes; retained models/skills screenshots are no longer those rows' visuals. Four alternating categories Agent(9), IDE & Terminal(5), Multiplayer(2), Self-host(2).
+
+Preserve centered actual scroll-follow: sticky preview rail centers horizontally in opposite column and vertically in viewport band below header, 420px travel runway even for short sections, releases at category boundaries. body overflow-x:clip avoids non-scrolling sticky ancestor. Images proportional, uncropped throughCSS. Mobile selected art stays centered beneath active row, clicked row position anchored on selection. No captions DOM or metadata. Smoothscroll supports Firefox pixel-wheel/precision trackpads via standard pixel/line/page units into bounded finite critical spring omega16; no lingering glide; preserve touch/pinch/nested/navigation/reducedmotion. Textscramble total260ms, rainbowpunctuationONLY unresolvedglyphs then immediately normal color/position, no lingering rainbow or wave. Semantic source text retained. Large responsive PressStart2P categorytitles and1.2em custompixelicons remain.
+
+Preview http://localhost:4321 restarted via 6-hour background task. Missing-picture complaint initially meant preview was down, not missing asset files. No website deployment, DNS edits, commit/staging or Rustreleasebuild. Latest verification in progress after final3D refinements; before refinements fullbrowser229passed/5intentional skips, prior9unitpassed. Re-run check/unit/build/browser after final assets. Firefox covered; Safari not runtime-tested.

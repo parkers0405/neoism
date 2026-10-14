@@ -19,7 +19,7 @@ use super::picker::NeoismAgentPickerOption;
 use neoism_ui::panels::agent_pane::api_mapping::{
     config_defaults_from_json, default_model_from_providers_json,
     model_context_limit_from_providers_json, model_options_from_providers_json,
-    session_state_from_json, ConfigDefaults, SessionState,
+    session_state_from_json, ConfigDefaults, ProviderReadiness, SessionState,
 };
 use neoism_ui::panels::agent_pane::session_group::{
     group_session_options, SessionOptionInput,
@@ -455,13 +455,16 @@ fn agent_server_credential(server: &str) -> Option<String> {
 pub(super) fn fetch_model_options(
     server: &str,
     directory: Option<&str>,
-) -> Result<Vec<NeoismAgentPickerOption>, String> {
+) -> Result<(Vec<NeoismAgentPickerOption>, Option<ProviderReadiness>), String> {
     let path = directory
         .map(|dir| format!("/v2/providers/configured?directory={}", percent_encode(dir)))
         .unwrap_or_else(|| "/v2/providers/configured".to_string());
     let value = api_request_json(server, "GET", &path, None)?
         .ok_or_else(|| "Neoism Agent returned an empty provider response".to_string())?;
-    Ok(model_options_from_providers_json(&value))
+    let catalog_path = path.replace("/providers/configured", "/providers");
+    let readiness = api_request_json(server, "GET", &catalog_path, None).ok().flatten()
+        .as_ref().and_then(ProviderReadiness::from_json);
+    Ok((model_options_from_providers_json(&value), readiness))
 }
 
 pub(super) fn fetch_model_context_limit(
@@ -1548,6 +1551,14 @@ pub(super) fn fetch_config_defaults(
     )?
     .ok_or_else(|| "Neoism Agent returned an empty config response".to_string())?;
     let mut defaults = config_defaults_from_json(&value);
+    let catalog_path = directory
+        .map(|dir| format!("/v2/providers?directory={}", percent_encode(dir)))
+        .unwrap_or_else(|| "/v2/providers".to_string());
+    if let Ok(Some(catalog)) = api_request_json_with_read_timeout(
+        server, "GET", &catalog_path, None, std::time::Duration::from_secs(12),
+    ) {
+        defaults.provider_readiness = ProviderReadiness::from_json(&catalog);
+    }
     if defaults.model.is_none() {
         let provider_path = directory
             .map(|dir| {

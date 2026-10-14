@@ -28,6 +28,7 @@ impl Application<'_> {
                 route.window.screen.mouse.chrome_gesture_owned = false;
                 if route.window.screen.cancel_island_drag()
                     | route.window.screen.cancel_buffer_tab_drag()
+                    | route.window.screen.cancel_file_tree_drag()
                 {
                     route.window.set_cursor(CursorIcon::Default);
                     route.request_redraw();
@@ -780,6 +781,7 @@ impl Application<'_> {
         if route.window.screen.mouse.left_button_state != ElementState::Pressed {
             if route.window.screen.cancel_island_drag()
                 | route.window.screen.cancel_buffer_tab_drag()
+                | route.window.screen.cancel_file_tree_drag()
             {
                 route.window.set_cursor(CursorIcon::Default);
                 route.request_redraw();

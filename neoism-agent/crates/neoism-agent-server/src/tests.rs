@@ -1728,6 +1728,36 @@ async fn list_messages_page_pages_by_cursor_in_sql() {
 
 #[tokio::test]
 async fn compact_session_publishes_streaming_compaction_events() {
+    assert_compaction_status_lifecycle("success").await;
+}
+
+#[tokio::test]
+async fn compact_session_error_releases_busy_status() {
+    assert_compaction_status_lifecycle("error").await;
+}
+
+#[tokio::test]
+async fn compact_session_abort_releases_busy_status() {
+    assert_compaction_status_lifecycle("abort").await;
+}
+
+#[tokio::test]
+async fn dropped_compaction_future_releases_busy_status() {
+    assert_compaction_status_lifecycle("drop").await;
+}
+
+#[tokio::test]
+async fn transient_compaction_registers_and_releases_busy_status() {
+    assert_compaction_status_lifecycle("transient").await;
+}
+
+#[tokio::test]
+async fn transient_compaction_error_releases_busy_status() {
+    assert_compaction_status_lifecycle("transient-error").await;
+}
+
+async fn assert_compaction_status_lifecycle(scenario: &str) {
+    let succeeds = matches!(scenario, "success" | "transient");
     let path = std::env::temp_dir().join(format!(
         "neoism-agent-compaction-events-{}.sqlite3",
         Id::ascending(IdKind::Event)
@@ -1763,6 +1793,11 @@ async fn compact_session_publishes_streaming_compaction_events() {
         permission: None,
         extra: BTreeMap::new(),
     };
+    let mut info = info;
+    if scenario.ends_with("error") {
+        // A deliberately unavailable provider fails locally, without any API call.
+        info.model.as_mut().unwrap().provider_id = "missing-compaction-provider".into();
+    }
     state.inner.store.insert_session(&info).await.unwrap();
 
     let message_id = Id::ascending(IdKind::Message);
@@ -1800,34 +1835,112 @@ async fn compact_session_publishes_streaming_compaction_events() {
         .await
         .unwrap();
 
-    let compacted = compact_session_context(&state, session_id.as_str())
-        .await
-        .unwrap();
-    assert!(compacted.time.compacting.is_none());
-    assert!(compacted
-        .extra
-        .get("summary")
-        .and_then(|summary| summary.get("text"))
-        .and_then(Value::as_str)
-        .is_some_and(|text| !text.trim().is_empty()));
-
     let mut kinds = Vec::new();
-    tokio::time::timeout(Duration::from_secs(2), async {
+    let mut statuses = Vec::new();
+    let mut saw_streaming_busy = false;
+    let result = tokio::time::timeout(Duration::from_secs(10), async {
+        let mut compaction = Box::pin(async {
+            if scenario.starts_with("transient") {
+                crate::session_context::compact_session_context_for_run(
+                    &state,
+                    session_id.as_str(),
+                )
+                .await
+            } else {
+                compact_session_context(&state, session_id.as_str()).await
+            }
+        });
         loop {
+            tokio::select! {
+                biased;
+                event = events.recv() => {
+                    let event = event.unwrap();
+                    kinds.push(event.kind.clone());
+                    if event.kind == event_type::SESSION_STATUS {
+                        statuses.push(event.properties["status"]["type"].as_str().unwrap().to_string());
+                    }
+                    if event.kind == event_type::SESSION_COMPACTION_STARTED {
+                        assert_eq!(statuses.first().map(String::as_str), Some("busy"));
+                        assert!(matches!(
+                            state.inner.statuses.read().await.get(session_id.as_str()),
+                            Some(SessionStatus::Busy { .. })
+                        ));
+                        if scenario == "abort" {
+                            state.inner.session_coordinator.active_run(session_id.as_str())
+                                .await.unwrap().cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+                        }
+                        if scenario == "drop" {
+                            // Drop the request future, not just its cooperative cancel flag.
+                            return None;
+                        }
+                    }
+                    if event.kind == event_type::SESSION_COMPACTION_DELTA {
+                        assert!(matches!(
+                            state.inner.statuses.read().await.get(session_id.as_str()),
+                            Some(SessionStatus::Busy { .. })
+                        ));
+                        saw_streaming_busy = true;
+                    }
+                }
+                result = &mut compaction => break Some(result),
+            }
+        }
+    }).await.unwrap();
+
+    if succeeds {
+        let compacted = result.unwrap().unwrap();
+        assert!(compacted.time.compacting.is_none());
+        assert!(compacted
+            .extra
+            .get("summary")
+            .and_then(|summary| summary.get("text"))
+            .and_then(Value::as_str)
+            .is_some_and(|text| !text.trim().is_empty()));
+    } else if scenario != "drop" {
+        assert!(result.unwrap().is_err());
+    }
+
+    // Drop cleanup is asynchronous; wait for its Idle event as well.
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while statuses.last().map(String::as_str) != Some("idle") {
             let event = events.recv().await.unwrap();
             kinds.push(event.kind.clone());
-            if event.kind == event_type::SESSION_COMPACTED {
-                break;
+            if event.kind == event_type::SESSION_STATUS {
+                let status = event.properties["status"]["type"].as_str().unwrap();
+                statuses.push(status.to_string());
+                if status == "idle" {
+                    break;
+                }
             }
         }
     })
     .await
     .unwrap();
-
+    assert_eq!(statuses, vec!["busy", "idle"]);
+    assert!(!state
+        .inner
+        .statuses
+        .read()
+        .await
+        .contains_key(session_id.as_str()));
+    assert!(state
+        .inner
+        .session_coordinator
+        .active_run(session_id.as_str())
+        .await
+        .is_none());
     assert!(kinds.contains(&event_type::SESSION_COMPACTION_STARTED.to_string()));
-    assert!(kinds.contains(&event_type::SESSION_COMPACTION_DELTA.to_string()));
-    assert!(kinds.contains(&event_type::SESSION_COMPACTION_ENDED.to_string()));
-    assert!(kinds.contains(&event_type::SESSION_COMPACTED.to_string()));
+    if succeeds {
+        assert!(saw_streaming_busy);
+        assert!(kinds.contains(&event_type::SESSION_COMPACTION_DELTA.to_string()));
+    }
+    if scenario != "drop" {
+        assert!(kinds.contains(&event_type::SESSION_COMPACTION_ENDED.to_string()));
+    }
+    if succeeds {
+        assert!(kinds.contains(&event_type::SESSION_COMPACTED.to_string()));
+    }
+    state.shutdown().await.unwrap();
     cleanup_sqlite_files(&path);
 }
 

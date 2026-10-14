@@ -1147,10 +1147,11 @@ impl NeoismAgentPane {
             NeoismAgentMessageKind::Assistant => {
                 self.note_streaming(NeoismAgentStreamingState::Generating, None);
             }
+            NeoismAgentMessageKind::Compaction => {
+                self.note_streaming(NeoismAgentStreamingState::Compacting, None);
+            }
             // User / System messages don't move us into a streaming state.
-            NeoismAgentMessageKind::User
-            | NeoismAgentMessageKind::System
-            | NeoismAgentMessageKind::Compaction => {}
+            NeoismAgentMessageKind::User | NeoismAgentMessageKind::System => {}
         }
     }
 

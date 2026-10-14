@@ -99,9 +99,10 @@ impl CachedAgentRuntime {
             NeoismAgentMessageKind::Assistant => {
                 (NeoismAgentStreamingState::Generating, None)
             }
-            NeoismAgentMessageKind::User
-            | NeoismAgentMessageKind::System
-            | NeoismAgentMessageKind::Compaction => return,
+            NeoismAgentMessageKind::Compaction => {
+                (NeoismAgentStreamingState::Compacting, None)
+            }
+            NeoismAgentMessageKind::User | NeoismAgentMessageKind::System => return,
         };
         self.note_streaming(state, tool);
     }

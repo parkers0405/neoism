@@ -1,0 +1,23 @@
+---
+name: "Fast Host ownership, connection and picker fixes"
+description: "Fast Host and public Join LIVE VERIFIED; Agent ownership, upgrade auth, deleted-exe launcher, animated Servers and copy-invite UI"
+type: "bug"
+scope: "project"
+origin: "source fixes, executed regressions and live two-window debug GUI smoke"
+created: "2026-10-13"
+updated: "2026-10-13"
+---
+
+Fast Host originally spawned a second Agent on a random port while preserving agent.turso.db. Turso 0.6.1 holds an exclusive POSIX fcntl lock. Fix: desktop launches own standalone implementation via --neoism-internal-fast-workspace-daemon; Fast mode reuses validated loopback Agent and NEVER starts/supervises it, preserves history/credentials and independent temporary lifetime. Strict nonce/address neoism-fast-ready-v1 acknowledgment, bounded/redacted diagnostics, password-before-side-effects, overall 180s startup budget.
+
+User debug screenshots confirmed readiness acknowledged then OpenTunnel provisioning timeout. SDK0.5.1 creates tunnel then issues certificate before connecting; fresh temporary identity means issuance latency every Host. Removed short30s cap: provisioning gets remaining deadline minus30s connection reserve, Client::create callback records ProvisionStage. Safe fixed-label error categories/status; bounded pending-only remote cleanup; captured daemon logs ANSI disabled. Live provisioning now passed in about1minute.
+
+Connection bug: actual desktop DaemonClient sent token only in Hello AFTER upgrade; Fast ingress needs auth BEFORE upgrade. connect_endpoint now receives options.token and sets sensitive Authorization Bearer header for WS/WSS while retaining Hello token/client ID. Query auth and Unix legacy env auth preserved. HTTP rejection diagnostics expose status only. start_host now performs authenticated ingress upgrade and accepted HelloAck before returning ready; filter rewrites host/guest Hello to private master token. Real loopback tests cover host/guest and client runner.
+
+Linux rebuilding unlinks a running executable; current_exe then names non-existing ' (deleted)' file. daemon_binary uses /proc/self/exe on Linux. CRITICAL: launcher must NOT canonicalize absolute executable paths, or procfs resolves back to deleted pathname. Relative paths remain canonicalized before cwd change. Deleted-ELF launch regression uses running copied /bin/sh then unlink and launch via /proc/PID/exe. Test fixture retries transient ETXTBSY due concurrent test forks inheriting copy's write fd.
+
+UI: Servers snapshot refreshed on Host completion preserving query/selected row. Host submit no longer auto-opens Servers; ready/error dialogs close command palette first; opening Servers ignored while modal active. Starting modal removed (caused picker text bleed-through). Top-right Servers reuses agent stepped-square animation while fast_host_pending, wrapped clock and redraw ownership. Ready modal rounded12px-scaled/no left stripe; underlined hover-highlight invite copies EXACT URL on click, Copy invite/Enter keyboard action keeps open with Invite copied feedback; Esc closes. Empty Add Server descriptions have zero rows/space and no 'No details available' fallback (generic message fallback preserved). Startup panics become errors; failure reporting does not block on unbounded join.
+
+2026-10-13 verification: 21 Fast backend tests,4 real client upgrade tests,5 UI tests,15 launcher tests EXECUTED PASSED (45total), debug build and diff check passed; shared wasm compile check passed. Live TWO-window Host+PUBLIC Join passed: loader phases visibly change; roundedReady/invite-copy observed; active hosted server connected (theme-purple dot, not necessarily green); public wss Join ran echo FAST_PUBLIC_JOIN_OK; pwd => /tmp/neoism-fast-host-smoke, command completed0.354s. Left guest then stopped smokehost; private daemon exited; closed only owned smoke windows. User's original debug/host and production app remained running; shared Agent healthy. Tests launched with NEOISM_DEV_AGENT_SERVER pointing to existing debug Agent: default debug profile shares DB but normally randomizes port, so a second independent debug process without override cannot open same DB. Never replace user's history to work around this. Current target/debug/neoism built; existing windows still oldcode until user relaunch.
+
+Files: desktop fast_servers.rs, daemon_client/mod.rs, app/fast_server_sessions.rs and app/mod.rs, screen/lifecycle/modal.rs/lifecycle.rs, host/state.rs/service_process.rs; shared widgets/modal.rs, panels/chrome_topbar.rs, chrome/events.rs/pages.rs/chrome_policy.rs, render_policy/blocks.rs and agent_pane/view/draw.rs; workspace-daemon standalone.rs; agent-service-api fast_hosting.rs.

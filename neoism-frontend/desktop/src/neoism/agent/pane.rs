@@ -401,9 +401,10 @@ impl CachedAgentRuntime {
             NeoismAgentMessageKind::Assistant => {
                 (NeoismAgentStreamingState::Generating, None)
             }
-            NeoismAgentMessageKind::User
-            | NeoismAgentMessageKind::System
-            | NeoismAgentMessageKind::Compaction => return,
+            NeoismAgentMessageKind::Compaction => {
+                (NeoismAgentStreamingState::Compacting, None)
+            }
+            NeoismAgentMessageKind::User | NeoismAgentMessageKind::System => return,
         };
         self.note_streaming(state, tool);
     }
@@ -644,7 +645,7 @@ pub(crate) enum NeoismAgentBackgroundUpdate {
         model: String,
         limit: Option<u64>,
     },
-    ModelOptionsRefreshed(Result<Vec<NeoismAgentPickerOption>, String>),
+    ModelOptionsRefreshed(Result<(Vec<NeoismAgentPickerOption>, Option<neoism_ui::panels::agent_pane::api_mapping::ProviderReadiness>), String>),
     AgentOptionsRefreshed(Result<Vec<NeoismAgentPickerOption>, String>),
     SessionOptionsRefreshed(Result<Vec<NeoismAgentPickerOption>, String>),
     SkillOptionsRefreshed {
@@ -936,6 +937,7 @@ pub struct NeoismAgentPane {
     /// buffer)`. `Some` diverts typed keys into the buffer until the user
     /// commits (Enter) or cancels (Esc).
     pub(super) session_rename: Option<(String, String)>,
+    provider_readiness: Option<neoism_ui::panels::agent_pane::api_mapping::ProviderReadiness>,
     recent_model_options: Vec<NeoismAgentPickerOption>,
     skill_options: Vec<NeoismAgentPickerOption>,
     skill_options_directory: Option<Option<String>>,
@@ -1300,6 +1302,7 @@ impl Default for NeoismAgentPane {
             pending_connect: None,
             pending_usage: None,
             session_rename: None,
+            provider_readiness: None,
             recent_model_options: Vec::new(),
             skill_options: Vec::new(),
             skill_options_directory: None,

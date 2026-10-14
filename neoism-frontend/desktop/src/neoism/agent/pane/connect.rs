@@ -78,6 +78,7 @@ pub(in crate::neoism::agent) struct ConnectMethod {
 /// In-progress `/connect` state, held on the pane while any connect picker is
 /// open.
 pub(crate) struct ConnectFlow {
+    readiness: Option<neoism_ui::panels::agent_pane::api_mapping::ProviderReadiness>,
     providers: Vec<ConnectProvider>,
     methods_by_provider: BTreeMap<String, Vec<ConnectMethod>>,
     provider: Option<ConnectProvider>,
@@ -395,6 +396,9 @@ impl NeoismAgentPane {
                 self.pending_connect = None;
                 match outcome {
                     ConnectOutcome::Catalog(flow) => {
+                        if let Some(readiness) = flow.readiness.clone() {
+                            self.provider_readiness = Some(readiness);
+                        }
                         if flow.providers.is_empty() {
                             self.close_connect();
                             self.system_message(
@@ -440,6 +444,7 @@ impl NeoismAgentPane {
                         };
                         match effect {
                             ConnectEffect::Refresh { notice } => {
+                                self.provider_readiness = None;
                                 if let Some((title, message)) = notice {
                                     self.system_message(&title, message);
                                 }
@@ -538,6 +543,7 @@ impl NeoismAgentPane {
     /// `/connect` entry point: fetch the provider catalog + auth methods and
     /// open stage 1 (the provider list).
     pub(in crate::neoism::agent) fn open_connect_picker(&mut self) {
+        self.provider_readiness = None;
         self.close_connect();
         self.start_connect_request(ConnectRequest::Catalog);
     }
@@ -1196,6 +1202,8 @@ impl NeoismAgentPane {
             self.connection_id = connection_id;
         }
         self.close_connect();
+        self.provider_readiness = None;
+        self.refresh_model_catalog();
         self.system_message(
             "Connected",
             format!(
@@ -1305,6 +1313,7 @@ fn fetch_connect_flow(server: &str, token: &AtomicBool) -> Result<ConnectFlow, S
     }
 
     Ok(ConnectFlow {
+        readiness: neoism_ui::panels::agent_pane::api_mapping::ProviderReadiness::from_json(&providers_value),
         providers,
         methods_by_provider,
         provider: None,

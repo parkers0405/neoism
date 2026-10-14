@@ -167,6 +167,7 @@ impl FileTree {
     pub fn set_visible(&mut self, v: bool) {
         self.visible = v;
         if !v {
+            self.cancel_file_drag();
             self.scroll.reset();
             self.cursor_spring.reset();
             self.wheel_accumulator = 0.0;
@@ -177,7 +178,7 @@ impl FileTree {
 
     #[allow(dead_code)]
     pub fn toggle_visible(&mut self) {
-        self.visible = !self.visible;
+        self.set_visible(!self.visible);
     }
 
     pub fn set_focused(&mut self, f: bool) {

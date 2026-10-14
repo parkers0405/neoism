@@ -1,0 +1,11 @@
+---
+name: "Long streaming pagination jolts and whole-page follow animation"
+description: "Long paginated streaming chat jumps: measured-tail growth budgets, logical-anchor lazy windows, inclusive clipped tool anchors; normal animations preserved."
+type: "bug"
+scope: "project"
+origin: "Implementation and regression audit in Neoism workspace"
+created: "2026-10-12"
+updated: "2026-10-12"
+---
+
+Long conversations with much pagination could animate down the whole page during streaming patch updates, or jolt while reading old history. Fixed three concrete mechanisms without changing wheel/trackpad physics or tool animation timing: (1) shared timeline layout reports positive growth from an already-measured dirty tail instead of letting historical estimate refinement become follow spring lag; desktop/shared metrics apply that growth budget while retaining existing spring motion. Baselines distinguish exact empty suffixes (including nonempty transcripts with blank/hidden source rows) from unknown estimates, include a new append's leading gap, and clamp historical dirty prefix boundaries to the first measured row so real live-tail growth still animates. Valid empty caches remain reusable. (2) lazy rebuilds choose the exact window using the reader's durable TimelineViewAnchorKey plus intra-row screen offset, not a bottom-distance from the old differently measured geometry; tall/clipped/grouped anchor rows are explicitly included. (3) desktop/shared expansion anchoring now uses inclusive source_end_index, so single-source and final grouped-source cards use their logical row origin rather than a clipped header hit rectangle. Main files: shared view/timeline/layout.rs, view/timeline/render.rs, view/timeline.rs + impls.rs, shared state/timeline.rs/hit_rects.rs, desktop pane/timeline.rs/render_state.rs. Regression tests added in shared view/timeline/tests.rs and both pane state test files. Shared timeline suite passes; desktop scroll/anchor/new regressions pass, cargo check neoism-ui + neoism passes. Broad desktop pane test run: 241 pass, 6 unrelated failures in child navigation, external model picker, snapshot hydration, imported-history disclosure, tab-mode chip transition. No app-runtime reproduction or f64 geometry migration; a speculative large-document f32 precision concern was not treated as the root cause.

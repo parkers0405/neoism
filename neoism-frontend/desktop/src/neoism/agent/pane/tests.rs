@@ -1,5 +1,132 @@
 use super::*;
 
+#[test]
+fn provider_readiness_blocks_native_generation_bypasses_before_side_effects() {
+    for session_id in [None, Some("existing".to_string())] {
+        let mut pane = NeoismAgentPane::default();
+        pane.server = "invalid://agent-server".into();
+        pane.session_id = session_id.clone();
+        pane.provider_readiness = Some(Default::default());
+        pane.input = "keep draft".into();
+        pane.cursor_byte = pane.input.len();
+        assert!(pane.send_prepared_prompt("direct".into(), true, "message".into()).is_err());
+        pane.queue_send_prompt_command(
+            "queued".into(), "direct".into(), vec![], None, None, "".into(), None,
+            neoism_protocol::agent::PromptDelivery::Steer, true,
+        );
+        pane.execute_server_command("forwarded".into(), "args".into());
+        pane.execute_slash_text("/init");
+        pane.execute_slash_text("/goal ship it");
+        pane.start_goal_prompt("goal prompt".into());
+        pane.fx_pending_prompt = Some("fx prompt".into());
+        pane.fire_fx_prompt();
+        if session_id.is_none() {
+            let error = pane.execute_ensure_session_command().unwrap_err();
+            assert!(error.contains("/connect"));
+        }
+        assert_eq!(pane.session_id, session_id);
+        assert_eq!(pane.input, "keep draft");
+        assert_eq!(pane.cursor_byte, pane.input.len());
+        assert!(pane.messages.is_empty());
+        assert!(!pane.is_streaming());
+        assert!(pane.pending_prompt_dispatches.is_empty());
+        assert!(!pane.prompt_dispatch_in_flight);
+        assert_eq!(pane.queued_prompt_count, 0);
+        assert!(pane.drain_pending_outbound().is_empty());
+        assert!(pane.ui_events.iter().any(|event| matches!(event,
+            NeoismAgentUiEvent::Notice { message, .. } if message.contains("/connect"))));
+    }
+}
+
+#[test]
+fn provider_readiness_checks_the_queued_model_and_exempts_current_external_source() {
+    let mut pane = NeoismAgentPane::default();
+    pane.server = "invalid://agent-server".into();
+    seed_prompt_catalog(&mut pane);
+    pane.prompt_dispatch_in_flight = true;
+    pane.queue_send_prompt_command(
+        "invalid".into(), "hello".into(), vec![], None, None, "other/model".into(), None,
+        neoism_protocol::agent::PromptDelivery::Steer, true,
+    );
+    assert!(pane.pending_prompt_dispatches.is_empty());
+    assert!(pane.ui_events.iter().any(|event| matches!(event,
+        NeoismAgentUiEvent::Notice { message, .. } if message.contains("/models"))));
+    pane.session_id = Some("external".into());
+    pane.new_chat_source = neoism_ui::panels::agent_pane::state::side_panel::ConversationSource::Codex;
+    pane.provider_readiness = Some(Default::default());
+    assert!(!pane.no_providers_connected());
+    assert!(pane.send_prepared_prompt("external".into(), true, "external-message".into()).is_ok());
+    pane.queue_send_prompt_command(
+        "external-queued".into(), "hello".into(), vec![], None, None, "".into(), None,
+        neoism_protocol::agent::PromptDelivery::Steer, true,
+    );
+    assert_eq!(pane.pending_prompt_dispatches.len(), 1);
+}
+
+
+#[test]
+fn provider_readiness_rejects_without_consuming_or_navigating() {
+    use neoism_ui::panels::agent_pane::api_mapping::ProviderReadiness;
+    for (catalog, model, action) in [
+        (None, "", "/connect"),
+        (Some(json!({"all": [], "connected": []})), "stale/model", "/connect"),
+        (Some(json!({"all": [], "connected": ["env-provider"]})), "", "/models"),
+        (Some(json!({"all": [{"id": "env-provider", "models": {"good": {}}}], "connected": ["env-provider"], "default": {"env-provider": "good"}})), "", "/models"),
+        (Some(json!({"all": [{"id": "env-provider", "models": {"good": {}}}], "connected": ["env-provider"]})), "other/model", "/models"),
+    ] {
+        for session_id in [None, Some("existing".to_string())] {
+            let mut pane = NeoismAgentPane::default();
+            pane.server = "invalid://agent-server".into();
+            pane.session_id = session_id.clone();
+            pane.provider_readiness = catalog.as_ref().and_then(ProviderReadiness::from_json);
+            pane.model = model.into();
+            pane.insert_paste("large pasted prompt\nsecond line");
+            let input = pane.input.clone();
+            let cursor = pane.cursor_byte;
+            let attachments = pane.input_attachments.len();
+            assert!(pane.submit());
+            assert_eq!(pane.input, input);
+            assert_eq!(pane.cursor_byte, cursor);
+            assert_eq!(pane.input_attachments.len(), attachments);
+            assert_eq!(pane.session_id, session_id);
+            assert!(pane.messages.is_empty());
+            assert!(!pane.is_streaming());
+            assert!(pane.drain_pending_outbound().iter().all(|command| !matches!(command,
+                OutboundAgentCommand::EnsureSession | OutboundAgentCommand::SendPrompt { .. })));
+            assert!(pane.ui_events.iter().any(|event| matches!(event,
+                NeoismAgentUiEvent::Notice { message, .. } if message.contains(action))));
+        }
+    }
+}
+
+#[test]
+fn provider_readiness_keeps_local_connect_and_external_cli_available() {
+    let mut pane = NeoismAgentPane::default();
+    pane.server = "invalid://agent-server".into();
+    pane.provider_readiness = Some(Default::default());
+    assert!(pane.no_providers_connected());
+    pane.input = "/connect ".into();
+    assert!(pane.submit());
+    assert!(pane.pending_connect.is_some());
+    assert!(pane.messages.is_empty());
+    pane.close_connect();
+    pane.new_chat_source = neoism_ui::panels::agent_pane::state::side_panel::ConversationSource::Codex;
+    assert!(!pane.no_providers_connected());
+    pane.insert_text("external prompt");
+    assert!(pane.submit());
+    assert!(pane.drain_pending_outbound().iter().any(|command| matches!(command,
+        OutboundAgentCommand::SendPrompt { .. })));
+}
+
+
+fn seed_prompt_catalog(pane: &mut NeoismAgentPane) {
+    pane.model = "test/model".into();
+    pane.provider_readiness = Some(neoism_ui::panels::agent_pane::api_mapping::ProviderReadiness {
+        connected: vec!["test".into()],
+        models: vec!["test/model".into()],
+    });
+}
+
 fn composition_fixture() -> NeoismAgentMessage {
     let mut parent = neoism_ui::panels::agent_pane::api_mapping::part_block(&json!({
         "id": "compose-root", "type": "tool", "tool": "compose",
@@ -3269,6 +3396,7 @@ fn compact_session_queues_outbound_command_for_runtime() {
 #[test]
 fn submit_prompt_queues_send_prompt_for_runtime() {
     let mut pane = NeoismAgentPane::default();
+    seed_prompt_catalog(&mut pane);
     pane.insert_text("ship it");
 
     assert!(pane.submit());
@@ -3288,7 +3416,7 @@ fn submit_prompt_queues_send_prompt_for_runtime() {
             assert_eq!(text, "ship it");
             assert_eq!(pane.messages[0].id.as_str(), message_id);
             assert_eq!(agent.as_deref(), Some(DEFAULT_AGENT));
-            assert_eq!(model, DEFAULT_MODEL);
+            assert_eq!(model, "test/model");
             assert_eq!(thinking, &None);
             assert!(
                 *transcript_echo,
@@ -3304,6 +3432,7 @@ fn submit_prompt_queues_send_prompt_for_runtime() {
 #[test]
 fn prompt_dispatch_is_off_thread_and_serialized() {
     let mut pane = NeoismAgentPane::default();
+    seed_prompt_catalog(&mut pane);
     pane.server = "invalid://agent-server".to_string();
     pane.session_id = Some("sess-1".to_string());
 
@@ -3348,6 +3477,7 @@ fn completed_prompt_does_not_attach_to_a_replaced_draft() {
 #[test]
 fn submit_prompt_with_session_queues_send_prompt_only() {
     let mut pane = NeoismAgentPane::default();
+    seed_prompt_catalog(&mut pane);
     pane.session_id = Some("sess-1".to_string());
     pane.insert_text("continue");
 
@@ -3374,6 +3504,7 @@ fn submit_prompt_with_session_queues_send_prompt_only() {
 #[test]
 fn setting_goal_starts_an_agent_turn_with_the_goal_text() {
     let mut pane = NeoismAgentPane::default();
+    seed_prompt_catalog(&mut pane);
     pane.session_id = Some("sess-1".to_string());
 
     pane.start_goal_prompt("ship the durable goal".to_string());
@@ -3396,6 +3527,7 @@ fn setting_goal_starts_an_agent_turn_with_the_goal_text() {
 #[test]
 fn setting_goal_during_a_run_queues_its_agent_turn() {
     let mut pane = NeoismAgentPane::default();
+    seed_prompt_catalog(&mut pane);
     pane.session_id = Some("sess-1".to_string());
     pane.note_streaming(NeoismAgentStreamingState::Generating, None);
 
@@ -3420,6 +3552,7 @@ fn setting_goal_during_a_run_queues_its_agent_turn() {
 #[test]
 fn submit_pasted_text_expands_outbound_but_keeps_transcript_token() {
     let mut pane = NeoismAgentPane::default();
+    seed_prompt_catalog(&mut pane);
     pane.session_id = Some("sess-1".to_string());
     pane.insert_paste("first line\nsecond line");
 
@@ -3489,6 +3622,7 @@ fn pending_question_paste_fills_the_typed_answer_not_the_composer() {
 #[test]
 fn submit_prompt_while_streaming_queues_bottom_preview_without_transcript_echo() {
     let mut pane = NeoismAgentPane::default();
+    seed_prompt_catalog(&mut pane);
     pane.session_id = Some("sess-1".to_string());
     pane.messages = vec![
         NeoismAgentMessage::user("first"),
@@ -3530,6 +3664,7 @@ fn submit_prompt_while_streaming_queues_bottom_preview_without_transcript_echo()
 #[test]
 fn server_expanded_user_part_merges_into_pasted_token_echo() {
     let mut pane = NeoismAgentPane::default();
+    seed_prompt_catalog(&mut pane);
     pane.insert_paste("first line\nsecond line");
     assert!(pane.submit());
     assert_eq!(pane.messages[0].text, "[pasted 2 lines]");
@@ -3595,6 +3730,7 @@ fn streamed_first_prompt_image_and_text_merge_in_either_order() {
 #[test]
 fn history_refresh_compacts_expanded_pasted_user_text() {
     let mut pane = NeoismAgentPane::default();
+    seed_prompt_catalog(&mut pane);
     pane.insert_paste("first line\nsecond line");
     assert!(pane.submit());
 
@@ -3684,6 +3820,7 @@ fn dequeued_prompt_and_server_echo_merge_by_message_id_for_runtime() {
 #[test]
 fn unknown_slash_command_queues_session_and_slash_for_runtime() {
     let mut pane = NeoismAgentPane::default();
+    seed_prompt_catalog(&mut pane);
 
     pane.execute_slash_text("/login token=abc");
 
@@ -3898,6 +4035,7 @@ fn with_directory_queues_config_defaults_for_runtime() {
 #[test]
 fn switching_to_joined_agent_server_reloads_that_hosts_defaults() {
     let mut pane = NeoismAgentPane::default();
+    seed_prompt_catalog(&mut pane);
     pane.directory = Some("/tmp/project".to_string());
     pane.model = "local/model".to_string();
     pane.thinking = Some("high".to_string());
@@ -3905,6 +4043,7 @@ fn switching_to_joined_agent_server_reloads_that_hosts_defaults() {
     pane.switch_server("http://peer:7981/agent/workspaces/ws/".to_string());
 
     assert_eq!(pane.server, "http://peer:7981/agent/workspaces/ws");
+    assert!(pane.provider_readiness.is_none());
     assert_eq!(pane.directory.as_deref(), Some("/tmp/project"));
     assert!(pane.model.is_empty());
     assert_eq!(pane.thinking, None);
@@ -4744,6 +4883,93 @@ fn compaction_lifecycle_events_do_not_create_messages() {
     pane.apply_compaction_delta("summary");
     pane.finish_compaction_message("summary", "model");
     assert!(pane.messages.is_empty());
+}
+
+#[test]
+fn streaming_compaction_retains_activity_across_status_refresh_and_deltas() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("root".into());
+    pane.event_stream = Some(AgentSessionEventStream::with_updates_for_test(
+        "root",
+        [
+            AgentSessionUpdate::CompactionStarted {
+                session_id: "root".into(),
+                id: "marker".into(),
+                reason: "manual".into(),
+            },
+            AgentSessionUpdate::PartUpdated {
+                message: NeoismAgentMessage::compaction("", "summary").with_id("summary"),
+                parent_message_id: None,
+            },
+            AgentSessionUpdate::PartDelta {
+                message_id: Some("summary".into()),
+                part_id: Some("summary-text".into()),
+                kind: Some("compaction".into()),
+                delta: "first chunk".into(),
+            },
+        ],
+    ));
+    pane.drain_server_updates();
+    assert_eq!(pane.streaming_label(), "Compacting");
+    assert!(pane.is_streaming());
+
+    // Reconciliation must recover the summary's activity, not generic Thinking.
+    pane.note_streaming(NeoismAgentStreamingState::Idle, None);
+    let statuses = HashMap::from([(
+        "root".into(),
+        super::super::api::SessionStatusSnapshot {
+            kind: "busy".into(),
+            ..Default::default()
+        },
+    )]);
+    pane.apply_runtime_status_for_session("root", &statuses);
+    assert_eq!(pane.streaming_label(), "Compacting");
+    let started = pane.streaming_started_at;
+
+    pane.event_stream = Some(AgentSessionEventStream::with_updates_for_test(
+        "root",
+        [AgentSessionUpdate::PartDelta {
+            message_id: Some("summary".into()),
+            part_id: Some("summary-text".into()),
+            kind: Some("compaction".into()),
+            delta: " second chunk".into(),
+        }],
+    ));
+    pane.drain_server_updates();
+    assert_eq!(pane.streaming_label(), "Compacting");
+    assert_eq!(pane.streaming_started_at, started);
+    assert_eq!(pane.messages.len(), 1);
+    assert_eq!(pane.messages[0].text, "first chunk second chunk");
+
+    pane.event_stream = Some(AgentSessionEventStream::with_updates_for_test(
+        "root",
+        [AgentSessionUpdate::CompactionEnded {
+            session_id: "root".into(),
+            summary: "first chunk second chunk".into(),
+            kind: "model".into(),
+        }],
+    ));
+    pane.drain_server_updates();
+    pane.apply_runtime_status_for_session("root", &HashMap::new());
+    assert!(!pane.is_streaming());
+    assert_eq!(pane.streaming_state, NeoismAgentStreamingState::Idle);
+}
+
+#[test]
+fn cached_compaction_tail_restores_compacting_activity() {
+    let mut runtime = CachedAgentRuntime::default();
+    let messages = vec![NeoismAgentMessage::compaction("partial summary", "summary")];
+    runtime.refresh_streaming_from_tail(&messages);
+    assert_eq!(
+        runtime.streaming_state,
+        NeoismAgentStreamingState::Compacting
+    );
+    assert!(runtime.is_streaming());
+    let started = runtime.streaming_started_at;
+    runtime.refresh_streaming_from_tail(&messages);
+    assert_eq!(runtime.streaming_started_at, started);
+    runtime.note_streaming(NeoismAgentStreamingState::Idle, None);
+    assert!(!runtime.is_streaming());
 }
 
 #[test]

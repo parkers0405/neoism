@@ -6,9 +6,9 @@ describe('canonical api_mapping.rs provider fallback', () => {
     it('prefers connected non-opencode providers preserving source order', () => {
         expect(configuredModel(catalog(['opencode', 'z', 'a'], ['opencode', 'z', 'a'], { opencode: 'free', z: 'z-model', a: 'a-model' }))).toBe('z/z-model');
     });
-    it('filters disconnected providers only when the connected list is nonempty', () => {
+    it('never chooses a disconnected provider, including an empty connected list', () => {
         expect(configuredModel(catalog(['a', 'opencode'], ['opencode'], { a: 'model', opencode: 'free' }))).toBe('opencode/free');
-        expect(configuredModel(catalog(['a', 'opencode'], [], { a: 'model', opencode: 'free' }))).toBe('a/model');
+        expect(configuredModel(catalog(['a', 'opencode'], [], { a: 'model', opencode: 'free' }))).toBe('');
     });
     it('does not invent a model from a provider first model or sort providers', () => {
         expect(configuredModel(catalog(['a', 'opencode'], ['a'], { a: '  ', opencode: 'free' }))).toBe('');

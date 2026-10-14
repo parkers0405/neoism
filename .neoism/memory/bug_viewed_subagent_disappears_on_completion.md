@@ -1,11 +1,11 @@
 ---
-name: "Viewed subagent disappears on completion — FIXED"
-description: "Live viewed subagent retained through completion until navigation; historical dead sessions remain filtered"
+name: "Viewed subagent return navigation"
+description: "Viewed completed child kept for main-session return navigation, including old Task-click destinations; other historical children stay hidden"
 type: "bug"
 scope: "project"
-origin: "session"
-created: "2026-09-01"
-updated: "2026-09-01"
+origin: "neoism-agent"
+created: "2026-10-08"
+updated: "2026-10-08"
 ---
 
-2026-08 sidebar viewed subagent disappearing on completion FIXED. History: original viewed_session_id retention came in e30b6e9 (v0.7.21); execution-family pruning in 6738566 and later recovery/pruning changes af8f8e6/936070c bypassed it through retain_authoritative_branches, deleting an open completed child when the parent continuation replaced the execution. With only root left, Branches section hid, stranding user in child. Fix in shared agent pane side_panel.rs: added non-persisted retained_viewed_subagent_id latch. It arms only when currently viewed child is observed Active/WaitingPermission (on navigation into known-live row or live/recovery active edge), preserves that existing row/activity through authoritative snapshots and set_subagents omissions after terminal transition, and clears on viewed-session change. subagent_hidden now uses latch rather than raw viewed id, so merely opening/loading a historical completed session cannot retain/resurrect it. Tests cover live viewed completion surviving empty authoritative reconciliation until leaving, and viewed historical completion remaining filtered. Verified cargo check -p neoism-ui -p neoism --tests and both focused tests pass; warnings pre-existing.
+The old live-only exception was insufficient once Task rows could open completed subagent conversations: physically-pruned children lost sidebar family membership, so the Agents section disappeared and left no main-session return target. The shared side_panel.rs policy now retains the CURRENTLY VIEWED non-root child independent of lifecycle status. This is a visibility/navigation exception, not an active transition. set_subagents re-evaluates the hold when a roster arrives after navigation, preserves the viewed row when recovery omits it, and authoritative branch pruning preserves its row/activity. set_viewed_session_id clears the old hold and prunes eligible historical children when navigating away; nonviewed historical siblings stay filtered. Both shared state/hit_rects.rs and desktop pane/render_state.rs Task-click paths restore root/main and the clicked child BEFORE switch_session, pin viewed child before cache activation, preserve known lifecycle activity/runtime status, and use terminal recovery defaults only when status is missing (error => Stopped, otherwise Completed; stale running Task text is never authority). Regression tests cover completed/stopped rows, view-before-roster/roster-before-view, physically-pruned children with cold/cached navigation, empty authoritative and root-only recovery snapshots, returning via sidebar to root, zero active contribution for completed children, missing-main restoration and preservation of live activity/runtime. Native production cargo check -p neoism-ui -p neoism passed. This supersedes the prior rule that only children observed live could be retained: explicitly viewed historical children are now intentionally retained until leaving.

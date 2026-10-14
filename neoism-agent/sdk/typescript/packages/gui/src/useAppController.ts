@@ -312,8 +312,9 @@ export function useAppController(connection?: PhoneConnection) {
     const directory = tabDirectory(tab);
     const currentDirectory = useRef(directory);
     currentDirectory.current = directory;
-    const [providerCatalog, setProviderCatalog] = useState<ProviderListResult>();
     const catalogScope = `${credentialScope}:${token}:${directory}`;
+    const [providerState, setProviderCatalog] = useState<{ scope: string; catalog: ProviderListResult }>();
+    const providerCatalog = providerState?.scope === catalogScope ? providerState.catalog : undefined;
     const [catalogPending, setCatalogPending] = useState({ scope: '', model: false, agent: false });
     const defaultsCache = useRef(new Map<string, { defaults?: ConfigDefaults; providers?: ProviderListResult; models?: Choice[]; promise: Promise<void> }>());
     const hydrationKey = (dir: string) => `${prefs.server}:${token}:${dir}`;
@@ -328,7 +329,7 @@ export function useAppController(connection?: PhoneConnection) {
             request(() => client.catalog.providers.list(dir), v => {
                 entry.providers = v;
                 if (currentClient.current === client && currentDirectory.current === dir) {
-                    setProviderCatalog(v);
+                    setProviderCatalog({ scope: `${credentialScope}:${token}:${dir}`, catalog: v });
                 }
             }),
             request(() => client.catalog.providers.configured(dir), v => {
@@ -370,7 +371,7 @@ export function useAppController(connection?: PhoneConnection) {
         const entry = hydrate(directory);
         void entry.promise.then(() => {
             if (!alive) return;
-            setProviderCatalog(entry.providers);
+            setProviderCatalog(entry.providers ? { scope: catalogScope, catalog: entry.providers } : undefined);
             setModels(entry.models || []);
             setCatalogPending(p => ({ ...p, model: false }));
             // The tab may have changed while directory hydration was in flight.
@@ -542,17 +543,29 @@ export function useAppController(connection?: PhoneConnection) {
         else persistTabs();
     };
     const wireVariant = (target: ChatTab, thinking: string) => target.explicit.thinking !== undefined || target.metadata?.model ? thinking : thinking || undefined;
-    const prepare = async (target: ChatTab): Promise<ReturnType<typeof resolveSelection>> => {
+    const prepare = async (target: ChatTab, requireModel = false): Promise<ReturnType<typeof resolveSelection>> => {
         let flight: Promise<void> | undefined;
         do { flight = metadataFlights.current.get(target.key); await flight; } while (flight !== metadataFlights.current.get(target.key));
         const dir = tabDirectory(target);
         const data = hydrate(dir); await data.promise;
-        if (tabDirectory(target) !== dir) return prepare(target);
+        if (tabDirectory(target) !== dir) return prepare(target, requireModel);
         if (currentClient.current !== client) throw new Error('Server changed. Submit again in the current chat.');
-        return resolved(target, data);
+        const next = resolved(target, data);
+        if (requireModel) {
+            if (!data.providers) {
+                defaultsCache.current.delete(hydrationKey(dir));
+                throw new Error('Could not load providers. Try sending again or use /connect to check your connection.');
+            }
+            if (!data.providers.connected.length) throw new Error('No providers connected. Use /connect to connect a provider before sending a message.');
+            assertAccount(next.model, next.connectionId);
+            const slash = next.model.indexOf('/');
+            if (slash < 1 || !next.model.slice(slash + 1).trim()) throw new Error('No model selected. Use /models to choose a model before sending a message.');
+            if (!data.providers.connected.includes(next.model.slice(0, slash))) throw new Error('The selected provider is not connected. Use /connect to connect it or /models to choose a connected model.');
+        }
+        return next;
     };
     const ensureSession = async (target: ChatTab = tabState.tabs.find(t => t.key === tabState.active)!): Promise<string> => {
-        const next = await prepare(target);
+        const next = await prepare(target, true);
         if (target.sessionId) return target.sessionId;
         const existing = creations.current.get(target.key); if (existing) return existing;
         assertAccount(next.model, next.connectionId);
@@ -720,7 +733,7 @@ export function useAppController(connection?: PhoneConnection) {
         const originalDraft = target.draft;
         const session = await ensureSession(target);
         if (!guard()) return;
-        const { model, agent, thinking, connectionId } = await prepare(target);
+        const { model, agent, thinking, connectionId } = await prepare(target, true);
         assertAccount(model, connectionId);
         const parts = await Promise.all(files.map(async file => {
             const artifact = await client.artifacts.upload(file, { filename: file.name, mediaType: file.type || 'application/octet-stream', sessionId: session });
@@ -935,7 +948,7 @@ export function useAppController(connection?: PhoneConnection) {
                         assertAccount(selection.current.model, selection.current.connectionId);
                         const session = await ensureSession();
                         assertCurrent();
-                        const { model, agent, thinking, connectionId } = await prepare(tab);
+                        const { model, agent, thinking, connectionId } = await prepare(tab, true);
                         assertAccount(model, connectionId);
                         const { name, args } = parseCommand(command, []);
                         const slash = model.indexOf("/");

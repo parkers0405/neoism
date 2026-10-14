@@ -176,6 +176,26 @@ impl NeoismAgentPane {
         true
     }
 
+    pub fn no_providers_connected(&self) -> bool {
+        self.new_chat_source.provider().is_none()
+            && self
+                .provider_readiness
+                .as_ref()
+                .is_some_and(|catalog| catalog.connected.is_empty())
+    }
+
+    fn prompt_readiness_error(&self) -> Option<&'static str> {
+        if self.new_chat_source.provider().is_some() {
+            return None;
+        }
+        match self.provider_readiness.as_ref() {
+            Some(catalog) => catalog.prompt_error(&self.model),
+            None => Some(
+                "Provider catalog is not ready. Use /connect to connect a provider or retry after it loads.",
+            ),
+        }
+    }
+
     pub fn submit(&mut self) -> bool {
         if self.commit_picker() {
             return true;
@@ -188,6 +208,19 @@ impl NeoismAgentPane {
             return false;
         }
         let prompt = self.expand_text_attachments(&text);
+        let local_command =
+            text.starts_with('/') && self.new_chat_source.provider().is_none();
+        if !local_command {
+            if let Some(error) = self.prompt_readiness_error() {
+                self.push_notice(error, NeoismAgentNoticeLevel::Warn);
+                if self.provider_readiness.is_none() {
+                    self.push_outbound(OutboundAgentCommand::RefreshConnectProviders {
+                        directory: self.directory.clone(),
+                    });
+                }
+                return true;
+            }
+        }
         self.input.clear();
         self.cursor_byte = 0;
         self.history_index = None;
@@ -553,6 +586,9 @@ impl NeoismAgentPane {
         echo_prompt: &str,
         transcript_echo: bool,
     ) -> Result<(), String> {
+        if let Some(error) = self.prompt_readiness_error() {
+            return Err(error.to_string());
+        }
         let echo_prompt = echo_prompt.to_string();
         let message_id = crate::panels::agent_pane::outbound::next_prompt_message_id();
         if transcript_echo {

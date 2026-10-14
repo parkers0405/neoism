@@ -107,17 +107,23 @@ impl FileTree {
     /// activation threshold, resolve the hovered drop-target folder, and
     /// return the path of a closed folder that has been dwelled on long
     /// enough to spring open (returned once per folder). `hovered_row` is
-    /// the row currently under the cursor (host hit-test).
+    /// the row currently under the cursor (host hit-test). `inside_panel`
+    /// distinguishes blank tree space (a root target) from outside the tree.
     pub fn update_file_drag(
         &mut self,
         mouse_x: f32,
         mouse_y: f32,
         hovered_row: Option<usize>,
+        inside_panel: bool,
     ) -> Option<PathBuf> {
         // Resolve the drop target against `&self.entries` BEFORE taking a
         // mutable borrow of `self.file_drag`.
         let source_path = self.file_drag.as_ref()?.source_path.clone();
-        let target = self.drag_drop_target(hovered_row, &source_path);
+        let target = if inside_panel {
+            self.drag_drop_target(hovered_row, &source_path)
+        } else {
+            None
+        };
 
         let drag = self.file_drag.as_mut()?;
         drag.current_x = mouse_x;
@@ -348,12 +354,12 @@ mod tests {
         tree.begin_file_drag(1, 100.0, 100.0);
         assert!(!tree.is_file_dragging());
         // A tiny nudge stays a click.
-        tree.update_file_drag(101.0, 101.0, Some(2));
+        tree.update_file_drag(101.0, 101.0, Some(2), true);
         assert!(!tree.is_file_dragging());
         assert!(matches!(tree.end_file_drag(), FileDropOutcome::Click));
         // Past the threshold it goes live.
         tree.begin_file_drag(1, 100.0, 100.0);
-        tree.update_file_drag(100.0, 120.0, Some(2));
+        tree.update_file_drag(100.0, 120.0, Some(2), true);
         assert!(tree.is_file_dragging());
     }
 
@@ -361,7 +367,7 @@ mod tests {
     fn dropping_a_file_into_a_folder_moves_it() {
         let mut tree = sample();
         tree.begin_file_drag(1, 100.0, 100.0); // /w/src/a.rs
-        tree.update_file_drag(100.0, 130.0, Some(2)); // over /w/docs
+        tree.update_file_drag(100.0, 130.0, Some(2), true); // over /w/docs
         match tree.end_file_drag() {
             FileDropOutcome::Move { source, dest_dir } => {
                 assert_eq!(source, PathBuf::from("/w/src/a.rs"));
@@ -375,7 +381,7 @@ mod tests {
     fn dropping_into_the_current_parent_is_a_noop() {
         let mut tree = sample();
         tree.begin_file_drag(1, 100.0, 100.0); // /w/src/a.rs, already in /w/src
-        tree.update_file_drag(100.0, 130.0, Some(0)); // over /w/src
+        tree.update_file_drag(100.0, 130.0, Some(0), true); // over /w/src
         assert!(matches!(tree.end_file_drag(), FileDropOutcome::Cancel));
     }
 
@@ -383,7 +389,7 @@ mod tests {
     fn cannot_drop_a_folder_into_its_own_subtree() {
         let mut tree = sample();
         tree.begin_file_drag(3, 100.0, 100.0); // /w/assets
-        tree.update_file_drag(100.0, 130.0, Some(4)); // over /w/assets/img
+        tree.update_file_drag(100.0, 130.0, Some(4), true); // over /w/assets/img
         assert!(matches!(tree.end_file_drag(), FileDropOutcome::Cancel));
     }
 
@@ -393,7 +399,7 @@ mod tests {
         // empty-space drop to land.
         let mut tree = sample();
         tree.begin_file_drag(1, 100.0, 100.0);
-        tree.update_file_drag(100.0, 130.0, None);
+        tree.update_file_drag(100.0, 130.0, None, true);
         assert!(matches!(tree.end_file_drag(), FileDropOutcome::Cancel));
     }
 
@@ -405,10 +411,61 @@ mod tests {
     }
 
     #[test]
+    fn leaving_panel_clears_target_and_dwell_without_dropping_at_root() {
+        for hovered_row in [None, Some(2)] {
+            let mut tree = sample_rooted();
+            tree.begin_file_drag(1, 100.0, 100.0);
+            tree.update_file_drag(100.0, 130.0, Some(2), true);
+            assert!(tree.file_drag().unwrap().hovered_dir.is_some());
+            tree.update_file_drag(600.0, 130.0, hovered_row, false);
+            let drag = tree.file_drag().unwrap();
+            assert!(drag.live);
+            assert!(drag.hovered_dir.is_none());
+            assert!(drag.hovered_since.is_none());
+            assert!(!tree.is_root_drop_target());
+            assert!(matches!(tree.end_file_drag(), FileDropOutcome::Cancel));
+        }
+    }
+
+    #[test]
+    fn reentering_panel_restores_drop_target() {
+        let mut tree = sample_rooted();
+        tree.begin_file_drag(1, 100.0, 100.0);
+        tree.update_file_drag(600.0, 130.0, None, false);
+        tree.update_file_drag(100.0, 130.0, Some(2), true);
+        assert!(matches!(
+            tree.end_file_drag(),
+            FileDropOutcome::Move { dest_dir, .. } if dest_dir == PathBuf::from("/w/docs")
+        ));
+    }
+
+    #[test]
+    fn cancelled_or_hidden_drag_cannot_restart_on_motion() {
+        for live in [false, true] {
+            for hide in [false, true] {
+                let mut tree = sample_rooted();
+                tree.set_visible(true);
+                tree.begin_file_drag(1, 100.0, 100.0);
+                if live {
+                    tree.update_file_drag(100.0, 130.0, Some(2), true);
+                }
+                if hide {
+                    tree.set_visible(false);
+                } else {
+                    tree.cancel_file_drag();
+                }
+                tree.update_file_drag(600.0, 130.0, None, false);
+                assert!(tree.file_drag().is_none());
+                assert!(matches!(tree.end_file_drag(), FileDropOutcome::Cancel));
+            }
+        }
+    }
+
+    #[test]
     fn dropping_into_empty_space_moves_to_root() {
         let mut tree = sample_rooted();
         tree.begin_file_drag(1, 100.0, 100.0); // /w/src/a.rs
-        tree.update_file_drag(100.0, 400.0, None); // released in empty space
+        tree.update_file_drag(100.0, 400.0, None, true); // released in empty space
         match tree.end_file_drag() {
             FileDropOutcome::Move { source, dest_dir } => {
                 assert_eq!(source, PathBuf::from("/w/src/a.rs"));
@@ -434,7 +491,7 @@ mod tests {
             entry("a.rs", NodeKind::File, "/w/src/a.rs", 2, None),
         ]);
         tree.begin_file_drag(2, 100.0, 100.0); // /w/src/a.rs
-        tree.update_file_drag(100.0, 130.0, Some(0)); // over the virtual header
+        tree.update_file_drag(100.0, 130.0, Some(0), true); // over the virtual header
         match tree.end_file_drag() {
             FileDropOutcome::Move { source, dest_dir } => {
                 assert_eq!(source, PathBuf::from("/w/src/a.rs"));
@@ -449,7 +506,7 @@ mod tests {
         // `docs` (index 2) already lives directly at root.
         let mut tree = sample_rooted();
         tree.begin_file_drag(2, 100.0, 100.0);
-        tree.update_file_drag(100.0, 400.0, None); // empty space => root
+        tree.update_file_drag(100.0, 400.0, None, true); // empty space => root
         assert!(matches!(tree.end_file_drag(), FileDropOutcome::Cancel));
     }
 
@@ -457,10 +514,10 @@ mod tests {
     fn is_root_drop_target_flags_only_the_root_wash() {
         let mut tree = sample_rooted();
         tree.begin_file_drag(1, 100.0, 100.0); // /w/src/a.rs
-        tree.update_file_drag(100.0, 400.0, None); // empty space => root
+        tree.update_file_drag(100.0, 400.0, None, true); // empty space => root
         assert!(tree.is_root_drop_target());
         // Over a real folder the flag is off — the per-row band handles it.
-        tree.update_file_drag(100.0, 130.0, Some(2)); // over /w/docs
+        tree.update_file_drag(100.0, 130.0, Some(2), true); // over /w/docs
         assert!(!tree.is_root_drop_target());
     }
 }

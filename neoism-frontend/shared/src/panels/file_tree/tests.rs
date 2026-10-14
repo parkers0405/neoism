@@ -468,6 +468,32 @@ fn hit_test_rejects_outside_panel() {
 }
 
 #[test]
+fn hit_test_uses_rendered_width_and_offset() {
+    let mut t = FileTree::empty();
+    t.set_entries(sample_entries(10));
+    t.set_visible(true);
+    t.width = 400.0;
+    let left = 100.0;
+    let top = 30.0;
+    let height = 200.0;
+    let y = top + ROW_HEIGHT / 2.0;
+
+    for width in [200.0, 500.0] {
+        let hit = t.hit_test_in_bounds(left + width - 10.0, y, left, top, width, height);
+        assert_eq!(hit, Some(0));
+        for (x, y) in [
+            (left - 1.0, y),
+            (left + width + 1.0, y),
+            (left + 20.0, top - 1.0),
+            (left + 20.0, top + height + 1.0),
+        ] {
+            let row = t.hit_test_in_bounds(x, y, left, top, width, height);
+            assert_eq!(row, None);
+        }
+    }
+}
+
+#[test]
 fn toggle_dir_collapse_drops_descendants() {
     // Hand-crafted entries: dir A (open) with two children, then
     // sibling file B. Collapsing A should strip its two children

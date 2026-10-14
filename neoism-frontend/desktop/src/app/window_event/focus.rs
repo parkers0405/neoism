@@ -40,6 +40,12 @@ impl Application<'_> {
                     .set_cursor(neoism_window::window::CursorIcon::Default);
                 route.request_redraw();
             }
+            if route.window.screen.cancel_file_tree_drag() {
+                route
+                    .window
+                    .set_cursor(neoism_window::window::CursorIcon::Default);
+                route.request_redraw();
+            }
             if route.window.screen.cancel_buffer_tab_drag() {
                 route
                     .window

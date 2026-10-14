@@ -1,6 +1,119 @@
 use super::*;
 
 #[test]
+fn provider_readiness_rejects_without_consuming_or_navigating() {
+    use crate::panels::agent_pane::api_mapping::ProviderReadiness;
+    for (catalog, model, action) in [
+        (None, "", "/connect"),
+        (Some(serde_json::json!({"all": [], "connected": []})), "stale/model", "/connect"),
+        (Some(serde_json::json!({"all": [], "connected": ["env-provider"]})), "", "/models"),
+        (Some(serde_json::json!({"all": [{"id": "env-provider", "models": {"good": {}}}], "connected": ["env-provider"], "default": {"env-provider": "good"}})), "", "/models"),
+        (Some(serde_json::json!({"all": [{"id": "env-provider", "models": {"good": {}}}], "connected": ["env-provider"]})), "other/model", "/models"),
+    ] {
+        for session_id in [None, Some("existing".to_string())] {
+            let mut pane = NeoismAgentPane::default();
+            pane.session_id = session_id.clone();
+            pane.provider_readiness = catalog.as_ref().and_then(ProviderReadiness::from_json);
+            pane.model = model.into();
+            pane.insert_pasted_text_attachment("large pasted prompt".into());
+            let input = pane.input.clone();
+            let cursor = pane.cursor_byte;
+            let attachments = pane.input_attachments.len();
+            assert!(pane.submit());
+            assert_eq!(pane.input, input);
+            assert_eq!(pane.cursor_byte, cursor);
+            assert_eq!(pane.input_attachments.len(), attachments);
+            assert_eq!(pane.session_id, session_id);
+            assert!(pane.messages.is_empty());
+            assert!(!pane.is_streaming());
+            assert!(pane.drain_pending_outbound().iter().all(|command| !matches!(command,
+                OutboundAgentCommand::EnsureSession | OutboundAgentCommand::SendPrompt { .. })));
+            assert!(pane.ui_events.iter().any(|event| matches!(event,
+                NeoismAgentUiEvent::Notice { message, .. } if message.contains(action))));
+            assert!(pane.send_prompt_with_echo("direct", "direct", true).is_err());
+            assert!(pane.messages.is_empty());
+        }
+    }
+}
+
+#[test]
+fn provider_readiness_keeps_local_connect_and_external_cli_available() {
+    let mut pane = NeoismAgentPane::default();
+    pane.apply_connect_catalog(serde_json::json!({"all": [], "connected": []}), serde_json::json!({}));
+    assert!(pane.no_providers_connected());
+    pane.input = "/connect ".into();
+    assert!(pane.submit());
+    assert!(pane.drain_pending_outbound().iter().any(|command| matches!(command,
+        OutboundAgentCommand::RefreshConnectProviders { .. })));
+    assert!(pane.messages.is_empty());
+    pane.picker = None;
+    pane.new_chat_source = side_panel::ConversationSource::Codex;
+    assert!(!pane.no_providers_connected());
+    pane.insert_text("external prompt");
+    assert!(pane.submit());
+    assert!(pane.drain_pending_outbound().iter().any(|command| matches!(command,
+        OutboundAgentCommand::SendPrompt { .. })));
+}
+
+#[test]
+fn provider_readiness_uses_connected_env_and_no_auth_catalog_after_picker_closes() {
+    let mut pane = NeoismAgentPane::default();
+    pane.apply_connect_catalog(serde_json::json!({
+        "all": [{"id": "local", "models": {"model": {}}}],
+        "connected": ["local"], "default": {"local": "model"}
+    }), serde_json::json!({}));
+    pane.close_connect();
+    pane.model = "local/model".into();
+    assert!(!pane.no_providers_connected());
+    pane.insert_text("hello");
+    assert!(pane.submit());
+    assert!(pane.input.is_empty());
+    assert!(pane.drain_pending_outbound().iter().any(|command| matches!(command,
+        OutboundAgentCommand::SendPrompt { .. })));
+}
+
+
+fn seed_prompt_catalog(pane: &mut NeoismAgentPane) {
+    pane.model = "test/model".into();
+    pane.provider_readiness = Some(crate::panels::agent_pane::api_mapping::ProviderReadiness {
+        connected: vec!["test".into()],
+        models: vec!["test/model".into()],
+    });
+}
+
+#[test]
+fn compaction_parts_and_cached_tail_restore_compacting_activity() {
+    let mut pane = NeoismAgentPane::default();
+    pane.ingest_live_part_message(
+        NeoismAgentMessage::compaction("", "summary").with_id("summary"),
+    );
+    assert_eq!(pane.streaming_state, NeoismAgentStreamingState::Compacting);
+    pane.ingest_live_part_delta(
+        Some("summary".into()),
+        Some("summary-text".into()),
+        Some("compaction".into()),
+        "partial summary",
+    );
+    let started = pane.streaming_started_at;
+    pane.refresh_streaming_from_tail();
+    assert_eq!(pane.streaming_state, NeoismAgentStreamingState::Compacting);
+    assert_eq!(pane.streaming_started_at, started);
+    assert_eq!(pane.messages.len(), 1);
+
+    let mut runtime = session_cache::CachedAgentRuntime::default();
+    runtime.refresh_streaming_from_tail(&pane.messages);
+    assert_eq!(
+        runtime.streaming_state,
+        NeoismAgentStreamingState::Compacting
+    );
+    assert!(runtime.is_streaming());
+    runtime.note_streaming(NeoismAgentStreamingState::Idle, None);
+    assert!(!runtime.is_streaming());
+    pane.note_compaction(CompactionPhase::Ended, None, None);
+    assert_eq!(pane.streaming_state, NeoismAgentStreamingState::Idle);
+}
+
+#[test]
 fn input_wheel_scrolls_draft_without_changing_text_or_cursor() {
     let mut pane = NeoismAgentPane::default();
     let draft = (0..12)
@@ -424,6 +537,7 @@ fn branch_count_is_unique_union_and_terminal_decrements_once() {
 #[test]
 fn composer_control_routes_idle_draft_to_send() {
     let mut pane = NeoismAgentPane::default();
+    seed_prompt_catalog(&mut pane);
     pane.insert_text("ship it");
 
     assert!(pane.activate_composer_control());
@@ -1435,6 +1549,7 @@ fn sessions_catalog_replaces_open_loading_picker() {
 #[test]
 fn submit_plain_prompt_queues_send_prompt_with_ensure_session_when_no_session() {
     let mut pane = NeoismAgentPane::default();
+    seed_prompt_catalog(&mut pane);
     pane.insert_text("hello world");
     pane.submit();
 
@@ -1474,6 +1589,7 @@ fn submit_plain_prompt_queues_send_prompt_with_ensure_session_when_no_session() 
 #[test]
 fn submit_plain_prompt_skips_ensure_session_when_session_exists() {
     let mut pane = NeoismAgentPane::default();
+    seed_prompt_catalog(&mut pane);
     pane.set_session_id(Some("sess-1".to_string()));
     // The first drain may surface an `ApplyConfigDefaults` from a
     // construction-time call; we don't care about that here.
@@ -1502,6 +1618,7 @@ fn submit_plain_prompt_skips_ensure_session_when_session_exists() {
 #[test]
 fn submit_pasted_text_expands_outbound_but_keeps_transcript_token() {
     let mut pane = NeoismAgentPane::default();
+    seed_prompt_catalog(&mut pane);
     pane.set_session_id(Some("sess-1".to_string()));
     let _ = pane.drain_pending_outbound();
     pane.insert_paste("first line\nsecond line");
@@ -1529,6 +1646,7 @@ fn submit_pasted_text_expands_outbound_but_keeps_transcript_token() {
 #[test]
 fn submit_plain_prompt_while_streaming_queues_without_transcript_echo() {
     let mut pane = NeoismAgentPane::default();
+    seed_prompt_catalog(&mut pane);
     pane.set_session_id(Some("sess-1".to_string()));
     let _ = pane.drain_pending_outbound();
     pane.messages = vec![
@@ -1804,6 +1922,7 @@ fn slash_fx_easter_eggs_queue_a_request_for_the_render_loop() {
     use crate::panels::agent_pane::view::fx::AgentFxKind;
 
     let mut pane = NeoismAgentPane::default();
+    seed_prompt_catalog(&mut pane);
     for (command, kind) in [
         ("/piss", AgentFxKind::Piss),
         ("/cuss", AgentFxKind::Cuss),
@@ -6096,6 +6215,7 @@ fn history_chunk_mid_stream_keeps_optimistic_echo_and_streamed_text() {
 #[test]
 fn history_chunk_canonicalizes_expanded_prompt_echoes() {
     let mut pane = NeoismAgentPane::default();
+    seed_prompt_catalog(&mut pane);
     pane.set_session_id(Some("sess-1".to_string()));
     pane.insert_text("please review ");
     pane.insert_pasted_text_attachment("line one\nline two\nline three".to_string());
@@ -6271,6 +6391,7 @@ fn repeated_image_attachments_get_unique_tokens() {
 #[test]
 fn submitting_an_attached_image_ships_a_file_part_and_echoes_the_chip() {
     let mut pane = NeoismAgentPane::default();
+    seed_prompt_catalog(&mut pane);
     pane.set_session_id(Some("sess-1".to_string()));
     let _ = pane.drain_pending_outbound();
 

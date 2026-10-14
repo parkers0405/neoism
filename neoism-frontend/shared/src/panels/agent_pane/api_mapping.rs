@@ -120,6 +120,7 @@ pub struct ConfigDefaults {
     pub thinking: Option<String>,
     pub input_help_visible: Option<bool>,
     pub sidebar_visible: Option<bool>,
+    pub provider_readiness: Option<ProviderReadiness>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -161,6 +162,49 @@ pub struct SessionState {
     pub imported_history: Option<ImportedHistory>,
     /// None = provider did not report a plan; Some([]) = explicit clear.
     pub plan_todos: Option<Vec<NeoismAgentTodo>>,
+}
+
+/// Authoritative `/providers` readiness, independent of stored auth accounts.
+/// `None` on the pane means the catalog has not loaded (not disconnected).
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
+pub struct ProviderReadiness {
+    pub connected: Vec<String>,
+    pub models: Vec<String>,
+}
+
+impl ProviderReadiness {
+    pub fn from_json(value: &Value) -> Option<Self> {
+        let connected = value
+            .get("connected")?
+            .as_array()?
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let models = model_options_from_providers_json(value)
+            .into_iter()
+            .filter(|option| option.is_selectable())
+            .map(|option| option.value)
+            .filter(|model| {
+                model.split_once('/').is_some_and(|(provider, _)| {
+                    connected.iter().any(|id| id == provider)
+                })
+            })
+            .collect::<Vec<_>>();
+        Some(Self { connected, models })
+    }
+
+    pub fn prompt_error(&self, model: &str) -> Option<&'static str> {
+        let usable_model = !model.trim().is_empty()
+            && self.models.iter().any(|candidate| candidate == model.trim());
+        if self.connected.is_empty() {
+            Some("Use /connect to connect a provider before sending a prompt.")
+        } else if !usable_model {
+            Some("Use /models to select a usable model before sending a prompt.")
+        } else {
+            None
+        }
+    }
 }
 
 pub fn model_options_from_providers_json(value: &Value) -> Vec<NeoismAgentPickerOption> {
@@ -362,6 +406,7 @@ pub fn config_defaults_from_json(value: &Value) -> ConfigDefaults {
         thinking,
         input_help_visible,
         sidebar_visible,
+        provider_readiness: None,
     }
 }
 

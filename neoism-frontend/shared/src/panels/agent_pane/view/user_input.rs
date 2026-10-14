@@ -418,6 +418,7 @@ pub trait AgentUserInputPane {
         None
     }
     fn input(&self) -> &str;
+    fn no_providers_connected(&self) -> bool;
     fn input_help_visible(&self) -> bool;
     fn input_images(&self) -> Vec<NeoismAgentImage>;
     fn cursor_byte(&self) -> usize;
@@ -526,6 +527,10 @@ macro_rules! neoism_ui_impl_agent_user_input {
 
             fn input(&self) -> &str {
                 <$pane>::input(self)
+            }
+
+            fn no_providers_connected(&self) -> bool {
+                <$pane>::no_providers_connected(self)
             }
 
             fn input_help_visible(&self) -> bool {
@@ -780,6 +785,10 @@ impl AgentUserInputPane for NeoismAgentPane {
 
     fn input(&self) -> &str {
         NeoismAgentPane::input(self)
+    }
+
+    fn no_providers_connected(&self) -> bool {
+        self.no_providers_connected()
     }
 
     fn input_help_visible(&self) -> bool {
@@ -1894,7 +1903,13 @@ fn render_input_help_strip(
     let baseline_y = y + (h - key_opts.font_size) * 0.5;
 
     // Reserve the right-hand hints before deciding whether the branch fits.
-    let (slash, command_label) = INPUT_COMMAND_HINT;
+    let needs_connect = pane.no_providers_connected();
+    let show_tab_hint = policy.show_tab_hint && !needs_connect;
+    let (slash, command_label) = if needs_connect {
+        ("/connect", "to connect a provider")
+    } else {
+        INPUT_COMMAND_HINT
+    };
     let (tab, agents) = INPUT_TAB_HINT;
     let command_label_w = sugarloaf.text_mut().measure(command_label, &label_opts);
     let slash_w = sugarloaf.text_mut().measure(slash, &key_opts);
@@ -1904,7 +1919,7 @@ fn render_input_help_strip(
     let group_gap = 26.0 * s;
     let tab_group_w = tab_w + inner_gap + agents_w;
     let command_group_w = slash_w + inner_gap + command_label_w;
-    let right_w = if policy.show_tab_hint {
+    let right_w = if show_tab_hint {
         tab_group_w + group_gap + command_group_w
     } else {
         command_group_w
@@ -1979,7 +1994,7 @@ fn render_input_help_strip(
         return;
     }
     let groups_fit = right_x >= activity_guard;
-    if policy.show_tab_hint && groups_fit {
+    if show_tab_hint && groups_fit {
         draw_text_clipped(
             sugarloaf,
             right_x,
@@ -1997,7 +2012,7 @@ fn render_input_help_strip(
             occlusion_rects,
         );
     }
-    let slash_x = if policy.show_tab_hint && groups_fit {
+    let slash_x = if show_tab_hint && groups_fit {
         right_x + tab_group_w + group_gap
     } else if groups_fit {
         right_x

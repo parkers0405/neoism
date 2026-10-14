@@ -545,6 +545,12 @@ describe("composer docking contract", () => {
         expect(main.style.getPropertyValue("--composer-max-height")).toBe("370px");
         expect(host.querySelector(".composer-footer-dock")).toBeNull();
     });
+    it("passes scoped provider readiness to the independently hosted home footer", () => {
+        state.app.id = undefined; state.app.providerCatalog = { connected: [] }; render();
+        expect(state.footer.needsProvider).toBe(true); expect(state.composer.needsProvider).toBe(true);
+        state.app.providerCatalog = undefined; render(); expect(state.footer.needsProvider).toBe(false);
+        state.app.providerCatalog = { connected: ['openai'] }; render(); expect(state.footer.needsProvider).toBe(false);
+    });
     it("keeps home hints but passes chat busy state into the composer without a footer", () => {
         state.app.id = undefined; state.app.chat.state.busy = true; render();
         expect(state.footer.showProject).toBe(true);

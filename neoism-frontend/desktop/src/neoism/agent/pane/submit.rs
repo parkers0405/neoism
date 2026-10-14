@@ -230,6 +230,33 @@ impl NeoismAgentPane {
         true
     }
 
+    pub fn no_providers_connected(&self) -> bool {
+        self.conversation_source().provider().is_none()
+            && self
+                .provider_readiness
+                .as_ref()
+                .is_some_and(|catalog| catalog.connected.is_empty())
+    }
+
+    pub(in crate::neoism::agent) fn prompt_readiness_error(&self) -> Option<&'static str> {
+        self.prompt_readiness_error_for_model(&self.model)
+    }
+
+    pub(in crate::neoism::agent) fn prompt_readiness_error_for_model(
+        &self,
+        model: &str,
+    ) -> Option<&'static str> {
+        if self.conversation_source().provider().is_some() {
+            return None;
+        }
+        match self.provider_readiness.as_ref() {
+            Some(catalog) => catalog.prompt_error(model),
+            None => Some(
+                "Provider catalog is not ready. Use /connect to connect a provider or retry after it loads.",
+            ),
+        }
+    }
+
     pub fn submit(&mut self) -> bool {
         if self.commit_picker() {
             return true;
@@ -251,6 +278,20 @@ impl NeoismAgentPane {
             );
             return true;
         }
+        let local_command =
+            text.starts_with('/') && self.new_chat_source.provider().is_none();
+        let close_home = text.eq_ignore_ascii_case("exit")
+            && self.session_id.is_none()
+            && !self.has_conversation();
+        if !local_command && !close_home {
+            if let Some(error) = self.prompt_readiness_error() {
+                self.push_notice(error, NeoismAgentNoticeLevel::Warn);
+                if self.provider_readiness.is_none() {
+                    self.refresh_model_catalog();
+                }
+                return true;
+            }
+        }
         self.input.clear();
         self.cursor_byte = 0;
         self.history_index = None;
@@ -260,10 +301,7 @@ impl NeoismAgentPane {
             self.execute_slash_text(&text);
             return true;
         }
-        if text.eq_ignore_ascii_case("exit")
-            && self.session_id.is_none()
-            && !self.has_conversation()
-        {
+        if close_home {
             self.input_attachments.clear();
             self.request_close_tab();
             return true;
@@ -329,6 +367,10 @@ impl NeoismAgentPane {
     pub(crate) fn start_goal_prompt(&mut self, text: String) {
         let prompt = text.trim().to_string();
         if prompt.is_empty() || self.is_subagent_session() {
+            return;
+        }
+        if let Some(error) = self.prompt_readiness_error() {
+            self.push_notice(error, NeoismAgentNoticeLevel::Warn);
             return;
         }
         let was_streaming = self.is_streaming();

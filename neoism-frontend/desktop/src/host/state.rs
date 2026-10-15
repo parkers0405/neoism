@@ -395,6 +395,12 @@ impl Renderer {
         // or the status row is mid-animation — without this, the event
         // loop sleeps between SSE events and the timer / dots / scramble
         // visibly freeze for hundreds of ms at a time.
+        if self.file_browser.is_animating() {
+            return Some("file_browser");
+        }
+        if self.conversation_navigator.is_active() {
+            return Some("conversation_navigator");
+        }
         if self.background_effects_animating {
             return Some("surface_background");
         }

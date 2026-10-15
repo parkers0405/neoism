@@ -76,6 +76,7 @@ use crate::panels::trail_cursor::TrailCursor;
 use crate::panels::yank_flash::YankFlash;
 
 mod config;
+mod navigator;
 mod content;
 mod draw;
 mod events;
@@ -494,6 +495,11 @@ pub struct Chrome<A: Send + Copy + 'static = ()> {
     connection_gate_active: bool,
     /// Workspace-scoped, reusable file chooser. Unlike the generic modal it
     /// dims but does not suppress the canvas beneath it.
+    pub conversation_navigator: crate::widgets::conversation_navigator::ConversationNavigator,
+    pub(crate) conversation_dashboard_root: Option<std::path::PathBuf>,
+    pub(crate) conversation_dashboard_endpoint: Option<String>,
+    pub(crate) pending_catalog_header: Option<crate::panels::agent_pane::state::side_panel::CatalogHeaderAction>,
+    pub(crate) pending_navigator_action: Option<crate::widgets::conversation_navigator::ConversationNavigatorAction>,
     pub file_browser: crate::panels::file_browser::FileBrowserModal,
     /// Settings actions queued for the host to persist/route —
     /// drained via [`Chrome::drain_settings_actions`].

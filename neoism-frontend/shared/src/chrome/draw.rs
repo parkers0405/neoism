@@ -101,6 +101,12 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         ]) {
             active_text_occlusions.push(rect);
         }
+        if self.conversation_navigator.is_active() {
+            active_text_occlusions.push(self.conversation_navigator.bounds_for_viewport(
+                [0.0, 0.0, window_width, layout.status_line.y + layout.status_line.h],
+                self.chrome_scale,
+            ));
+        }
         if self.share_sheet.is_visible() {
             active_text_occlusions.push([
                 0.0,
@@ -1192,6 +1198,16 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                     [viewport.x, viewport.y, viewport.w, viewport.h],
                     &self.ide_theme,
                 );
+                sugarloaf.set_late_overlay_mode(false);
+            }
+        }
+
+        if self.conversation_navigator.is_active() {
+            if let Some(viewport) = self.last_viewport {
+                sugarloaf.set_late_overlay_mode(true);
+                self.conversation_navigator.render(sugarloaf, &self.ide_theme,
+                    [viewport.x, viewport.y, viewport.w, viewport.h], self.chrome_scale,
+                    crate::render_policy::animation_phase_from_unix_secs(time.as_secs(), time.subsec_nanos()));
                 sugarloaf.set_late_overlay_mode(false);
             }
         }

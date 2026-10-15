@@ -12,6 +12,7 @@ import {
   SearchClientMessage,
   SearchServerMessage,
   WorkspaceClientMessage,
+  ProjectRootSummary,
   WorkspaceServerMessage,
   DiagnosticsClientMessage,
   DiagnosticsServerMessage,
@@ -69,6 +70,10 @@ export interface ConnectionState {
   gateVisible: boolean;
   intentional: boolean;
 }
+
+// A new client is also a new authorization boundary, even at the same URL.
+// Never copy bearer/pairing tokens (or token-bearing URLs) into UI identity.
+let nextAgentCatalogClientIdentity = 1;
 
 type TimerHandle = ReturnType<typeof setTimeout>;
 
@@ -242,6 +247,11 @@ export class ProtocolClient {
   private nextRequestId = 0x4000_0000;
   private readonly pending = new Map<number, PendingRequest>();
   private connectedHostId: string | null = null;
+  // Retain the last accepted identity across temporary socket outages. Live
+  // connectedHostId is cleared during reconnect and must not reset a catalog.
+  private agentCatalogHostIdentity: string | null = null;
+  private agentCatalogPeerIdentity: string | null = null;
+  private readonly agentCatalogClientIdentity = nextAgentCatalogClientIdentity++;
   private readonly runtime: ProtocolClientRuntime;
   private readonly reconnect: Required<ReconnectOptions>;
   private generation = 0;
@@ -312,6 +322,20 @@ export class ProtocolClient {
    * omit it, in which case callers must use the conservative legacy policy. */
   getConnectedHostId(): string | null {
     return this.connectedHostId;
+  }
+
+  /** All-project catalog cache scope, not an execution-directory filter.
+   * WorkplaceService constructs a fresh client for server/auth switches and
+   * rehomes; ordinary socket reconnects keep this identity. An accepted host
+   * change or workspace authorization-context change must invalidate too. */
+  agentCatalogIdentity(workspaceId: string | null = null): string {
+    return JSON.stringify([
+      "agent-catalog-v1",
+      this.agentCatalogClientIdentity,
+      this.agentCatalogHostIdentity,
+      this.agentCatalogPeerIdentity,
+      workspaceId,
+    ]);
   }
 
   getConnectionState(): ConnectionState {
@@ -724,6 +748,31 @@ export class ProtocolClient {
     this.send(ClientMessage.search({ request_id, message }));
   }
 
+  private readonly projectRootWaiters = new Set<(message: WorkspaceServerMessage) => void>();
+
+  /** Existing persisted project registry, bound to this authenticated client and
+   * socket generation. No dashboard/admin transport or workspace adoption. */
+  requestProjectRoots(): Promise<ProjectRootSummary[]> {
+    const generation = this.getGeneration();
+    const identity = this.agentCatalogIdentity();
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.projectRootWaiters.delete(accept);
+        reject(new Error("Project directory registry unavailable on this connection"));
+      }, 10000);
+      const accept = (message: WorkspaceServerMessage) => {
+        if (typeof message !== "object" || message === null || !("ProjectRootList" in message)) return;
+        this.projectRootWaiters.delete(accept);
+        clearTimeout(timeout);
+        if (generation !== this.getGeneration() || identity !== this.agentCatalogIdentity()) {
+          reject(new Error("Project registry connection changed"));
+        } else resolve(message.ProjectRootList.project_roots);
+      };
+      this.projectRootWaiters.add(accept);
+      this.sendWorkspace("ListProjectRoots");
+    });
+  }
+
   /** Ship a `WorkspaceClientMessage` to the daemon. */
   sendWorkspace(message: WorkspaceClientMessage): void {
     this.send(ClientMessage.workspace({ message }));
@@ -1009,6 +1058,7 @@ export class ProtocolClient {
     }
     if (isWorkspaceReply(msg)) {
       const inner = msg.WorkspaceReply.message;
+      for (const accept of this.projectRootWaiters) accept(inner);
       // Intercept `HelloAck` so the workplace service can surface
       // accept / reject without every consumer having to type-narrow
       // the `WorkspaceServerMessage` union. We still forward the
@@ -1028,6 +1078,10 @@ export class ProtocolClient {
         this.connectedHostId = helloAck.accepted
           ? (helloAck.connected_host_id ?? null)
           : null;
+        if (helloAck.accepted) {
+          this.agentCatalogHostIdentity = this.connectedHostId;
+          this.agentCatalogPeerIdentity = helloAck.peer_identity ?? null;
+        }
         this.handlers.onHelloAck?.(
           Boolean(helloAck.accepted),
           helloAck.reason ?? null,

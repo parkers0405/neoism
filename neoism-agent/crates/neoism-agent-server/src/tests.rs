@@ -864,6 +864,8 @@ async fn tenant_scoped_search_and_root_pagination_never_cross_tenants() {
     let alpha_page = store
         .list_root_sessions_page(
             TenantQueryScope::Tenant("alpha"),
+            false,
+            false,
             None,
             None,
             None,
@@ -889,6 +891,8 @@ async fn tenant_scoped_search_and_root_pagination_never_cross_tenants() {
     let local_page = store
         .list_root_sessions_page(
             TenantQueryScope::LocalAll,
+            false,
+            false,
             None,
             None,
             None,
@@ -899,6 +903,116 @@ async fn tenant_scoped_search_and_root_pagination_never_cross_tenants() {
         .await
         .unwrap();
     assert_eq!(local_page.items.len(), 2);
+    cleanup_sqlite_files(&path);
+}
+
+#[tokio::test]
+async fn session_projects_discovery_has_no_recent_cutoff_and_filters_before_activity() {
+    use axum::{extract::State, Extension};
+    let base = std::env::temp_dir().join(format!("session-projects-{}", Id::ascending(IdKind::Event)));
+    let allowed = base.join("allowed");
+    let crowded = allowed.join("crowded");
+    let older = allowed.join("older");
+    let tied = allowed.join("tied");
+    let denied = base.join("denied");
+    for directory in [&crowded, &older, &tied, &denied] {
+        std::fs::create_dir_all(directory).unwrap();
+    }
+    let path = base.join("catalog.db");
+    let state = AppState::open_database(path.clone()).await.unwrap();
+    state.start_session_list_backfill();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while !state.inner.store.session_list_index_ready().await.unwrap() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }).await.unwrap();
+    for n in 0..1000 {
+        let mut session = store_test_session(&neoism_agent_core::new_session_id(), 1000 + n);
+        session.directory = crowded.to_string_lossy().into_owned();
+        state.inner.store.insert_session(&session).await.unwrap();
+    }
+    let mut expected_pins = Vec::new();
+    for directory in [&older, &tied] {
+        let mut session = store_test_session(&neoism_agent_core::new_session_id(), 10);
+        session.extra.insert("pinned".into(), json!(true));
+        // Private full-session state must never make it into root metadata.
+        session.extra.insert("privateHistory".into(), json!("not catalog metadata"));
+        expected_pins.push(session.id.to_string());
+        session.directory = directory.to_string_lossy().into_owned();
+        // Neoism-owned external-provider roots are eligible without importing history.
+        session.extra.insert("externalAgent".into(), json!({"historyState":"neoism_only"}));
+        state.inner.store.insert_session(&session).await.unwrap();
+    }
+    // None of these rows may create a directory or advance visible activity.
+    for kind in ["denied", "tenant", "workspace", "imported", "child"] {
+        let mut session = store_test_session(&neoism_agent_core::new_session_id(), 9000);
+        session.directory = if kind == "denied" { &denied } else { &older }.to_string_lossy().into_owned();
+        session.extra.insert("pinned".into(), json!(true));
+        session.title = format!("hidden {kind} pin");
+        match kind {
+            "tenant" => { session.extra.insert(crate::caller::TENANT_EXTRA_KEY.into(), json!("foreign")); }
+            "workspace" => { session.workspace_id = Some("foreign".into()); }
+            "imported" => { session.extra.insert("externalAgent".into(), json!({"historyState":"imported"})); }
+            "child" => { session.parent_id = Some(neoism_agent_core::new_session_id()); }
+            _ => {}
+        }
+        state.inner.store.insert_session(&session).await.unwrap();
+    }
+    let claims = crate::caller::CallerClaims {
+        subject: "test".into(), workspace_id: Some("visible".into()), tenant_id: "local".into(),
+        directory_prefixes: vec![allowed.to_string_lossy().into_owned()], hosted: true,
+        max_sessions: None, max_artifacts: None, max_artifact_bytes: None,
+        artifact_retention_days: None, requests_per_minute: None, max_in_flight: None,
+        resolved: None, worker: None,
+    };
+    // Apply the visible workspace to otherwise local roots to exercise workspace checks.
+    let mut visible = state.inner.store.list_sessions().await.unwrap();
+    for session in &mut visible {
+        if session.workspace_id.is_none() {
+            session.workspace_id = Some("visible".into());
+            state.inner.store.update_session(session).await.unwrap();
+        }
+    }
+    let axum::Json(response) = crate::v2_routes::v2_session_projects(State(state.clone()), Some(Extension(claims))).await.unwrap();
+    assert_eq!(response["items"], json!([
+        {"directory": crowded.to_string_lossy(), "updatedMs":1999},
+        {"directory": older.to_string_lossy(), "updatedMs":10},
+        {"directory": tied.to_string_lossy(), "updatedMs":10}
+    ]));
+    expected_pins.sort_by(|a, b| b.cmp(a));
+    let pins = response["pinnedSessions"].as_array().unwrap();
+    assert_eq!(pins.iter().map(|s| s["id"].as_str().unwrap()).collect::<Vec<_>>(), expected_pins);
+    for pin in pins {
+        assert_eq!(pin["pinned"], true);
+        assert!(pin.get("privateHistory").is_none());
+        assert!(pin.get("messages").is_none());
+        assert!(pin.get("parentID").is_none_or(serde_json::Value::is_null));
+    }
+    // A required but empty directory remains an explicit empty-string project.
+    let mut empty = store_test_session(&neoism_agent_core::new_session_id(), 1);
+    empty.directory.clear();
+    state.inner.store.insert_session(&empty).await.unwrap();
+    // A JSON-null externalAgent key is not an eligible owned root: the SQL
+    // fast path must match the post-decode ownership predicate as well.
+    let mut invalid_external = empty.clone();
+    invalid_external.id = neoism_agent_core::new_session_id();
+    invalid_external.directory = base.join("null-external-only").to_string_lossy().into_owned();
+    invalid_external.extra.insert("externalAgent".into(), serde_json::Value::Null);
+    invalid_external.extra.insert("pinned".into(), json!(true));
+    state.inner.store.insert_session(&invalid_external).await.unwrap();
+    let axum::Json(response) = crate::v2_routes::v2_session_projects(State(state), None).await.unwrap();
+    // The claim-free SQL aggregation still covers every saved directory without
+    // a recent-session cutoff and computes the maximum across eligible roots.
+    let pins = response["pinnedSessions"].as_array().unwrap();
+    assert_eq!(pins.len(), 5); // LocalAll includes foreign tenants/workspaces.
+    assert!(pins.windows(2).all(|pair| {
+        let key = |s: &serde_json::Value| (s["time"]["updated"].as_u64().unwrap(), s["id"].as_str().unwrap().to_string());
+        key(&pair[0]) > key(&pair[1])
+    }));
+    assert!(pins.iter().all(|pin| pin["title"] != "hidden child pin" && pin["title"] != "hidden imported pin"));
+    assert_eq!(response["items"].as_array().unwrap().len(), 5);
+    assert_eq!(response["items"][0], json!({"directory":older.to_string_lossy(), "updatedMs":9000}));
+    assert!(response["items"].as_array().unwrap().contains(&json!({"directory":"", "updatedMs":1})));
     cleanup_sqlite_files(&path);
 }
 
@@ -1374,6 +1488,59 @@ async fn deferred_session_move_creates_target_and_preserves_chronology() {
 }
 
 #[tokio::test]
+async fn session_list_exclude_pinned_filters_before_limit_and_preserves_continuation() {
+    use axum::extract::{Query, State};
+    let path = std::env::temp_dir().join(format!("exclude-pinned-{}.db", Id::ascending(IdKind::Event)));
+    let state = AppState::open_database(path.clone()).await.unwrap();
+    state.start_session_list_backfill();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while !state.inner.store.session_list_index_ready().await.unwrap() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }).await.unwrap();
+    let mut expected = Vec::new();
+    for n in 0..32 {
+        let mut session = store_test_session(&neoism_agent_core::new_session_id(), if n < 12 { 10 } else { 100 });
+        session.directory = "/pin-page".into();
+        if n >= 12 {
+            session.extra.insert("pinned".into(), json!(true));
+        } else {
+            // Both absent and explicit false flags belong to the folder page.
+            if n % 2 == 0 {
+                session.extra.insert("pinned".into(), json!(false));
+            }
+            expected.push(session.id.to_string());
+        }
+        state.inner.store.insert_session(&session).await.unwrap();
+    }
+    expected.sort_by(|a, b| b.cmp(a));
+    let query = json!({"roots":"true", "directory":"/pin-page", "exact_directory":true, "limit":5});
+    let default_query: crate::SessionListQuery = serde_json::from_value(query.clone()).unwrap();
+    assert!(!default_query.exclude_pinned);
+    let default_page = crate::v2_routes::v2_session_list(State(state.clone()), Query(default_query), None).await.unwrap().0;
+    assert_eq!(default_page.items.len(), 5);
+    assert!(default_page.items.iter().all(|s| s.extra.get("pinned") == Some(&json!(true))));
+    let mut cursor = None;
+    let mut actual = Vec::new();
+    for size in [5, 5, 2] {
+        let mut query = query.clone();
+        query["exclude_pinned"] = json!(true);
+        query["cursor"] = json!(cursor);
+        let page = crate::v2_routes::v2_session_list(
+            State(state.clone()), Query(serde_json::from_value(query).unwrap()), None,
+        ).await.unwrap().0;
+        assert_eq!(page.items.len(), size, "newer pins must not consume the page allotment");
+        assert!(page.items.iter().all(|s| s.extra.get("pinned") != Some(&json!(true))));
+        actual.extend(page.items.iter().map(|s| s.id.to_string()));
+        cursor = page.cursor.next;
+        assert_eq!(cursor.is_some(), size == 5);
+    }
+    assert_eq!(actual, expected, "equal-timestamp cursors must neither omit nor duplicate roots");
+    state.inner.store.close().await;
+    cleanup_sqlite_files(&path);
+}
+
+#[tokio::test]
 async fn session_list_index_pages_equal_timestamps_and_tracks_mutations() {
     let path = std::env::temp_dir().join(format!(
         "neoism-agent-session-list-{}.turso.db",
@@ -1395,6 +1562,8 @@ async fn session_list_index_pages_equal_timestamps_and_tracks_mutations() {
     let first = store
         .list_root_sessions_page(
             TenantQueryScope::LocalAll,
+            false,
+            false,
             Some("/indexed"),
             None,
             None,
@@ -1412,6 +1581,8 @@ async fn session_list_index_pages_equal_timestamps_and_tracks_mutations() {
     let second = store
         .list_root_sessions_page(
             TenantQueryScope::LocalAll,
+            false,
+            false,
             Some("/indexed"),
             None,
             None,
@@ -1442,6 +1613,8 @@ async fn session_list_index_pages_equal_timestamps_and_tracks_mutations() {
         store
             .list_root_sessions_page(
                 TenantQueryScope::LocalAll,
+                false,
+                false,
                 Some("/moved"),
                 None,
                 None,
@@ -1459,6 +1632,8 @@ async fn session_list_index_pages_equal_timestamps_and_tracks_mutations() {
     assert!(store
         .list_root_sessions_page(
             TenantQueryScope::LocalAll,
+            false,
+            false,
             Some("/moved"),
             None,
             None,
@@ -1471,6 +1646,82 @@ async fn session_list_index_pages_equal_timestamps_and_tracks_mutations() {
         .items
         .is_empty());
     store.close().await;
+    cleanup_sqlite_files(&path);
+}
+
+#[tokio::test]
+async fn semantic_search_directory_filters_before_keyword_and_vector_limits() {
+    let path = std::env::temp_dir().join(format!(
+        "neoism-semantic-directory-{}.turso.db",
+        Id::ascending(IdKind::Event)
+    ));
+    let state = AppState::open_database(path.clone()).await.unwrap();
+    let store = &state.inner.store;
+    let now = now_millis();
+    let mut matching = store_test_session(&neoism_agent_core::new_session_id(), now);
+    matching.directory = "/project".into();
+    matching.extra.insert(crate::caller::TENANT_EXTRA_KEY.into(), json!("alpha"));
+    let mut foreign = store_test_session(&neoism_agent_core::new_session_id(), now + 1);
+    // A child directory must not count as an exact project match.
+    foreign.directory = "/project/child".into();
+    foreign.extra.insert(crate::caller::TENANT_EXTRA_KEY.into(), json!("alpha"));
+    let mut other_tenant = store_test_session(&neoism_agent_core::new_session_id(), now + 2);
+    other_tenant.directory = "/project".into();
+    other_tenant.extra.insert(crate::caller::TENANT_EXTRA_KEY.into(), json!("beta"));
+    for (session, created, vector) in [
+        (&matching, now, "[0,1,0]"),
+        (&foreign, now + 1, "[1,0,0]"),
+        (&other_tenant, now + 2, "[1,0,0]"),
+    ] {
+        store.insert_session(session).await.unwrap();
+        let message = store_test_message(&session.id, created, "directory needle");
+        store.append_message(session.id.as_str(), &message).await.unwrap();
+        store.upsert_message_embedding(
+            &message_id_of(&message), session.id.as_str(), created as i64, "directory-test", vector,
+        ).await.unwrap();
+    }
+
+    // Deserialize the actual route query, including directory, then exercise
+    // keyword search without depending on an external embeddings provider.
+    let query = serde_json::from_value(json!({
+        "q": "directory needle", "directory": "/project", "limit": "1"
+    })).unwrap();
+    std::env::set_var("NEOISM_AGENT_DISABLE_EMBEDDINGS", "1");
+    let response = crate::semantic::semantic_search_with_scope(
+        &state, query, TenantQueryScope::Tenant("alpha"),
+    ).await.unwrap();
+    std::env::remove_var("NEOISM_AGENT_DISABLE_EMBEDDINGS");
+    let response = serde_json::to_value(response.0).unwrap();
+    assert_eq!(response["hits"].as_array().unwrap().len(), 1);
+    assert_eq!(response["hits"][0]["sessionId"], matching.id.to_string());
+    let hits = store.search_messages_in_directory(
+        TenantQueryScope::Tenant("alpha"), "directory needle", None, Some("/project"), 1,
+    ).await.unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].session_id, matching.id.to_string());
+    let hits = store.semantic_search_in_directory(
+        TenantQueryScope::Tenant("alpha"), "[1,0,0]", "directory-test", None, Some("/project"), 1,
+    ).await.unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].session_id, matching.id.to_string());
+
+    // None keeps all authorized projects: the newer/nearer foreign hit wins.
+    let hits = store.search_messages_in_directory(
+        TenantQueryScope::Tenant("alpha"), "directory needle", None, None, 1,
+    ).await.unwrap();
+    assert_eq!(hits[0].session_id, foreign.id.to_string());
+    let hits = store.semantic_search_in_directory(
+        TenantQueryScope::Tenant("alpha"), "[1,0,0]", "directory-test", None, None, 1,
+    ).await.unwrap();
+    assert_eq!(hits[0].session_id, foreign.id.to_string());
+    // Session and directory constraints intersect rather than overriding one another.
+    assert!(store.search_messages_in_directory(
+        TenantQueryScope::Tenant("alpha"), "directory needle", Some(foreign.id.as_str()), Some("/project"), 1,
+    ).await.unwrap().is_empty());
+    assert!(store.semantic_search_in_directory(
+        TenantQueryScope::Tenant("alpha"), "[1,0,0]", "directory-test", Some(foreign.id.as_str()), Some("/project"), 1,
+    ).await.unwrap().is_empty());
+    state.shutdown().await.unwrap();
     cleanup_sqlite_files(&path);
 }
 

@@ -79,11 +79,8 @@ pub(crate) fn render_section_header(
     clip: [f32; 4],
     occlusion_rects: &[[f32; 4]],
 ) -> f32 {
-    // Styled like a Markdown H3 heading: the mirrored H3 size, bold, drawn in
-    // the whitest theme token rather than the old muted header grey.
+    // Keep the checkpoint's H3 layout size while compensating for P2's width.
     let header_size = section_header_font_size(s);
-    // Press Start 2P draws much wider per point than the default font, so its
-    // drawn size drops by 3px while layout continues to use `header_size`.
     let pixel_font = crate::primitives::pixel_font_id(sugarloaf);
     let drawn_size = if pixel_font.is_some() {
         header_size - 3.0 * s
@@ -100,16 +97,14 @@ pub(crate) fn render_section_header(
         ..DrawOpts::default()
     };
 
-    // Preserve the original illuminated drop-cap treatment. When the pixel
-    // face resolves the cap uses it too; blackletter remains the fallback.
+    // Original illuminated drop cap; blackletter is the missing-P2 fallback.
     let mut chars = label.chars();
     if let Some(first) = chars.next() {
         let rest: String = chars.collect();
         let cap_font =
             pixel_font.or_else(|| crate::primitives::maguntia_font_id(sugarloaf));
-        let cap_size = drawn_size * 1.4;
         let cap_opts = DrawOpts {
-            font_size: cap_size,
+            font_size: drawn_size * 1.4,
             color: theme.u8(theme.fg),
             bold: false,
             italic: false,

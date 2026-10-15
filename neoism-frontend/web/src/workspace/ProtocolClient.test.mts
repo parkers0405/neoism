@@ -173,6 +173,39 @@ class FakeRuntime implements ProtocolClientRuntime {
   resume(): void { for (const callback of this.resumeCallbacks) callback(); }
 }
 
+test("catalog identity survives a socket reconnect but not a new auth client", () => {
+  const runtime = new FakeRuntime();
+  const client = supervised(runtime);
+  const authenticatedAck = (socket: FakeSocket, peer = "peer-a") => socket.message({
+    WorkspaceReply: {
+      request_id: 1,
+      message: { HelloAck: { accepted: true, connected_host_id: "host-a", peer_identity: peer } },
+    },
+  });
+  client.connect();
+  runtime.sockets[0].open();
+  authenticatedAck(runtime.sockets[0]);
+  client.markHydrated();
+  const identity = client.agentCatalogIdentity("workspace-a");
+  runtime.sockets[0].remoteClose();
+  assert.equal(client.agentCatalogIdentity("workspace-a"), identity);
+  runtime.advance(50);
+  assert.equal(runtime.sockets.length, 2);
+  runtime.sockets[1].open();
+  assert.equal(client.agentCatalogIdentity("workspace-a"), identity);
+  authenticatedAck(runtime.sockets[1]);
+  client.markHydrated();
+  assert.equal(client.agentCatalogIdentity("workspace-a"), identity);
+  assert.notEqual(client.agentCatalogIdentity("workspace-b"), identity);
+  assert.notEqual(supervised(new FakeRuntime()).agentCatalogIdentity("workspace-a"), identity);
+  runtime.sockets[1].remoteClose();
+  runtime.advance(50);
+  runtime.sockets[2].open();
+  authenticatedAck(runtime.sockets[2], "peer-b");
+  assert.notEqual(client.agentCatalogIdentity("workspace-a"), identity);
+  client.disconnect();
+});
+
 function ack(socket: FakeSocket, accepted = true, reason?: string): void {
   socket.message({
     WorkspaceReply: {

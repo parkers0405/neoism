@@ -32,7 +32,7 @@ use serde_json::{json, Value};
 use super::api::{
     api_request_json, delete_session, fetch_agent_options, fetch_config_defaults,
     fetch_family_runtime, fetch_model_context_limit, fetch_model_options,
-    fetch_pending_permissions, fetch_pending_questions, fetch_session_entries,
+    fetch_pending_permissions, fetch_pending_questions,
     fetch_session_goal, fetch_session_options, fetch_session_statuses,
     fetch_skill_options, fetch_subagent_entries, fetch_subagent_options,
     neoism_agent_server, rename_session, set_session_pinned, SessionStatusSnapshot,
@@ -55,7 +55,6 @@ const FILE_MENTION_LIMIT: usize = 10;
 const MAX_INLINE_ATTACHMENT_BYTES: u64 = 20 * 1024 * 1024;
 const ABORT_STREAM_SUPPRESSION: Duration = Duration::from_secs(5);
 const TOOL_EXPAND_ANIMATION: Duration = Duration::from_millis(190);
-const WORDMARK_CLICK_ANIMATION: Duration = Duration::from_millis(460);
 const CODE_COPY_FEEDBACK_ANIMATION: Duration = Duration::from_millis(1_400);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -566,8 +565,7 @@ pub struct NeoismWordmarkState {
     pub hover: [f32; 6],
     pub last_frame_at: Option<Instant>,
     pub rect: Option<[f32; 4]>,
-    pub click_started: Option<Instant>,
-    pub click_pos: Option<(f32, f32)>,
+    pub animation: neoism_ui::primitives::wordmark_animation::WordmarkAnimation,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -647,7 +645,10 @@ pub(crate) enum NeoismAgentBackgroundUpdate {
     },
     ModelOptionsRefreshed(Result<(Vec<NeoismAgentPickerOption>, Option<neoism_ui::panels::agent_pane::api_mapping::ProviderReadiness>), String>),
     AgentOptionsRefreshed(Result<Vec<NeoismAgentPickerOption>, String>),
-    SessionOptionsRefreshed(Result<Vec<NeoismAgentPickerOption>, String>),
+    SessionOptionsRefreshed {
+        catalog_generation: u64,
+        result: Result<Vec<NeoismAgentPickerOption>, String>,
+    },
     SkillOptionsRefreshed {
         directory: Option<String>,
         result: Result<Vec<NeoismAgentPickerOption>, String>,
@@ -670,7 +671,24 @@ pub(crate) enum NeoismAgentBackgroundUpdate {
             String,
         >,
     },
+    SessionProjectsRefreshed {
+        server: String,
+        catalog_generation: u64,
+        generation: u64,
+        result: Result<crate::neoism::agent::api::SessionProjects, String>,
+    },
+    ProjectSessionPage {
+        server: String,
+        catalog_generation: u64,
+        directory: String,
+        requested_cursor: Option<String>,
+        generation: u64,
+        result: Result<(Vec<NeoismAgentSessionEntry>, Option<String>), String>,
+    },
     SidePanelSessionsRefreshed {
+        server: String,
+        catalog_generation: u64,
+        directory: Option<String>,
         generation: u64,
         requested_cursor: Option<String>,
         result: Result<(Vec<NeoismAgentSessionEntry>, Option<String>), String>,
@@ -680,12 +698,13 @@ pub(crate) enum NeoismAgentBackgroundUpdate {
         generation: u64,
         result: Result<Vec<NeoismAgentSessionEntry>, String>,
     },
-    /// Semantic session-search results for `query`, fetched off-thread.
-    /// `hits: None` means the server reports semantic search unavailable
-    /// (no vector backend / no embeddings key) — stop asking this run.
+    /// Combined server-filtered title and transcript results for `query`.
+    /// Only transcript queries are disabled by `transcript_unavailable`.
     SemanticSessionHits {
+        catalog_generation: u64,
         query: String,
         hits: Option<Vec<super::api::NeoismAgentSemanticSessionHit>>,
+        transcript_unavailable: bool,
     },
     /// The session's persistent goal, refetched in the background. The
     /// `session_id` it was fetched for is carried so a stale result that
@@ -867,8 +886,7 @@ impl Default for NeoismWordmarkState {
             hover: [0.0; 6],
             last_frame_at: None,
             rect: None,
-            click_started: None,
-            click_pos: None,
+            animation: Default::default(),
         }
     }
 }
@@ -949,6 +967,7 @@ pub struct NeoismAgentPane {
     >,
     event_stream: Option<AgentSessionEventStream>,
     session_catalog_stream: Option<AgentSessionCatalogStream>,
+    catalog_generation: u64,
     event_wake: Option<AgentEventWake>,
     /// When the most recent update was drained from the event stream.
     /// Feeds the liveness watchdog: a session that claims active work but
@@ -988,8 +1007,8 @@ pub struct NeoismAgentPane {
     background_rx: Receiver<NeoismAgentBackgroundUpdate>,
     /// Semantic session-search coalescing: at most one fetch in flight; a
     /// query typed meanwhile waits in `semantic_pending_query` and is kicked
-    /// when the current fetch lands. `semantic_unavailable` latches once the
-    /// server says the feature is off so we stop asking.
+    /// when the current fetch lands. `semantic_unavailable` only suppresses
+    /// transcript/vector requests; server-filtered title search always runs.
     pub(crate) semantic_in_flight: bool,
     pub(crate) semantic_pending_query: Option<String>,
     pub(crate) semantic_unavailable: bool,
@@ -1076,6 +1095,7 @@ pub struct NeoismAgentPane {
     prompt_picker_rect: Option<[f32; 4]>,
     link_hit_rects: Vec<(String, [f32; 4])>,
     mermaid_raw_blocks: BTreeSet<u64>,
+    pub composer_interactions: neoism_ui::panels::agent_pane::composer_interactions::ComposerInteractions,
     usage_chip_rect: Option<[f32; 4]>,
     composer_control_rect: Option<[f32; 4]>,
     status_chip_rects: Vec<Option<[f32; 4]>>,
@@ -1313,6 +1333,7 @@ impl Default for NeoismAgentPane {
             file_mention_root_pin: Mutex::new(None),
             event_stream: None,
             session_catalog_stream: None,
+            catalog_generation: 0,
             event_wake: None,
             last_stream_update_at: None,
             last_stream_resubscribe_at: None,
@@ -1385,6 +1406,7 @@ impl Default for NeoismAgentPane {
             prompt_picker_rect: None,
             link_hit_rects: Vec::new(),
             mermaid_raw_blocks: BTreeSet::new(),
+            composer_interactions: Default::default(),
             usage_chip_rect: None,
             composer_control_rect: None,
             status_chip_rects: vec![None; 3],

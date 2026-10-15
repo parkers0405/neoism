@@ -15,7 +15,9 @@ impl ChromeBridge {
         let event: neoism_ui::event::UiEvent = serde_json::from_str(event_json)
             .map_err(|e| JsValue::from_str(&format!("UiEvent parse: {e}")))?;
 
-        if is_neoism_agent_shortcut(&event) {
+        if !self.chrome.conversation_navigator.is_active()
+            && is_neoism_agent_shortcut(&event)
+        {
             self.queue_agent_tab_open();
             return Ok(());
         }
@@ -259,6 +261,7 @@ impl ChromeBridge {
         // including while the active tab is a terminal/editor. Do not wait
         // for another pointer event to transport that request.
         let _ = self.drain_agent_outbound();
+        self.pump_project_sessions();
         // 3. Single present.
         self.rendered.present();
         Ok(())
@@ -494,8 +497,68 @@ impl ChromeBridge {
             .set_cursor_style_config(color_hex.as_deref(), &style);
     }
 
+    /// CSS cursor for painted chrome controls, in logical canvas coordinates.
+    /// Picker hit testing belongs to the shared modal, never the web host.
+    pub fn pointer_cursor_at(&self, x: f32, y: f32) -> String {
+        use neoism_ui::widgets::modal::ModalPointerKind;
+        let kind = if self.chrome.file_browser.is_active() {
+            self.chrome.file_browser.pointer_kind_at(x, y)
+        } else if self.chrome.modal.is_active() {
+            self.chrome.modal.pointer_kind()
+        } else if self.chrome.conversation_navigator.is_active() {
+            if self.chrome.conversation_navigator.clickable_at(x, y) {
+                ModalPointerKind::Pointer
+            } else {
+                ModalPointerKind::Default
+            }
+        } else if self.chrome.generic_keyboard_overlay_active() {
+            ModalPointerKind::Default
+        } else if self.chrome.status_line.cwd_at(x, y)
+            || self.chrome.layout().file_tree.is_some_and(|bounds| {
+                x < bounds.x + bounds.w - 5.0
+                    && self.chrome.file_tree.as_ref().is_some_and(|tree| {
+                        tree.hit_test_in_bounds(
+                            x, y, bounds.x, bounds.y, bounds.w, bounds.h,
+                        )
+                        .is_some()
+                    })
+            })
+            || (self
+                .chrome
+                .layout()
+                .conversations
+                .is_some_and(|rect| rect.contains(x, y))
+                && self
+                    .chrome
+                    .agent_pane()
+                    .is_some_and(|pane| pane.side_panel().catalog_clickable_at(x, y)))
+            || (self.chrome.splash_overlay.is_active()
+                && (self.chrome.splash_overlay.menu_hit(x, y).is_some()
+                    || self.chrome.splash_overlay.wordmark_hit(x, y)))
+            || (self.chrome.is_neoism_agent_tab_active()
+                && self.chrome.agent_pane().is_some_and(|pane| {
+                    pane.composer_pointer_at(x, y)
+                        || pane.detail_sidebar_pointer_at(x, y)
+                        || pane.usage_chip_contains(x, y)
+                }))
+        {
+            ModalPointerKind::Pointer
+        } else {
+            ModalPointerKind::Default
+        };
+        match kind {
+            ModalPointerKind::Default => "default",
+            ModalPointerKind::Text => "text",
+            ModalPointerKind::Pointer => "pointer",
+        }
+        .to_owned()
+    }
+
     pub fn animations_active(&self) -> bool {
-        self.chrome.animations_active()
+        self.agent_state
+            .project_discovery_retry_wake
+            .is_some_and(|deadline| web_time::Instant::now() < deadline)
+            || self.chrome.animations_active()
             || self.workspace_island.needs_redraw()
             || self.surface_background_animating
     }

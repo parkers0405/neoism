@@ -8,19 +8,153 @@ use std::path::{Component, Path};
 use serde::{Deserialize, Serialize};
 use sugarloaf::text::DrawOpts;
 use sugarloaf::Sugarloaf;
+use unicode_segmentation::UnicodeSegmentation;
+use web_time::Instant;
+
+use crate::animation::ease_out_cubic;
 
 use crate::event::{
-    KeyDescriptor, KeyState, LogicalKey, NamedKey, PointerButton, UiEvent, WheelMode,
+    KeyDescriptor, KeyState, LogicalKey, Modifiers, NamedKey, PointerButton, UiEvent,
+    WheelMode,
 };
+use crate::panels::file_tree::icons::folder_icon;
 use crate::panels::file_tree::{
-    icon_for_file, FONT_SIZE, FRAME_RADIUS, FRAME_STROKE, ICON_FONT_SIZE, ROW_HEIGHT,
-    ROW_PADDING_X,
+    icon_for_file, FONT_SIZE, FRAME_RADIUS, FRAME_STROKE, ICON_FONT_SIZE,
 };
 use crate::primitives::geom::intersect_rect;
 use crate::primitives::IdeTheme;
 
 const ORDER: u8 = 29;
-const USEFUL_ROWS: f32 = 14.0;
+const USEFUL_ROWS: f32 = 16.0;
+const ROW_HEIGHT: f32 = 32.0;
+const ROW_PADDING_X: f32 = 16.0;
+const OPEN_SECONDS: f32 = 0.18;
+const DIRECTORY_SECONDS: f32 = 0.16;
+const CLICK_SECONDS: f32 = 0.16;
+
+fn transition_remaining(start: Option<Instant>, seconds: f32) -> f32 {
+    start.map_or(0.0, |start| {
+        1.0 - ease_out_cubic((start.elapsed().as_secs_f32() / seconds).clamp(0.0, 1.0))
+    })
+}
+
+fn fade_color(mut color: [u8; 4], opacity: f32) -> [u8; 4] {
+    color[3] = (color[3] as f32 * opacity.clamp(0.0, 1.0)) as u8;
+    color
+}
+
+#[derive(Clone, Debug, Default)]
+struct TextCursor {
+    byte: usize,
+    anchor: Option<usize>,
+    scroll_x: f32,
+    stops: Vec<(usize, f32)>,
+}
+
+impl TextCursor {
+    fn reset(&mut self, text: &str) {
+        self.byte = text.len();
+        self.anchor = None;
+        self.scroll_x = 0.0;
+        self.stops.clear();
+    }
+
+    fn snap_after_edit(&mut self, text: &str) {
+        self.byte = text
+            .grapheme_indices(true)
+            .map(|(byte, _)| byte)
+            .find(|byte| *byte >= self.byte)
+            .unwrap_or(text.len());
+        self.anchor = None;
+        self.stops.clear();
+    }
+
+    fn selection(&self) -> Option<std::ops::Range<usize>> {
+        self.anchor
+            .filter(|anchor| *anchor != self.byte)
+            .map(|anchor| anchor.min(self.byte)..anchor.max(self.byte))
+    }
+
+    fn move_to(&mut self, byte: usize, extend: bool) {
+        if extend {
+            self.anchor.get_or_insert(self.byte);
+        } else {
+            self.anchor = None;
+        }
+        self.byte = byte;
+    }
+
+    fn key(&mut self, text: &mut String, key: NamedKey, extend: bool) -> bool {
+        let previous = || {
+            text.grapheme_indices(true)
+                .map(|(i, _)| i)
+                .take_while(|i| *i < self.byte)
+                .last()
+                .unwrap_or(0)
+        };
+        let next = || {
+            text.grapheme_indices(true)
+                .map(|(i, _)| i)
+                .find(|i| *i > self.byte)
+                .unwrap_or(text.len())
+        };
+        match key {
+            NamedKey::ArrowLeft => {
+                let byte = if !extend {
+                    self.selection().map(|range| range.start)
+                } else {
+                    None
+                }
+                .unwrap_or_else(previous);
+                self.move_to(byte, extend);
+            }
+            NamedKey::ArrowRight => {
+                let byte = if !extend {
+                    self.selection().map(|range| range.end)
+                } else {
+                    None
+                }
+                .unwrap_or_else(next);
+                self.move_to(byte, extend);
+            }
+            NamedKey::Home => self.move_to(0, extend),
+            NamedKey::End => self.move_to(text.len(), extend),
+            NamedKey::Backspace | NamedKey::Delete => {
+                let range = self.selection().unwrap_or_else(|| {
+                    if key == NamedKey::Backspace {
+                        previous()..self.byte
+                    } else {
+                        self.byte..next()
+                    }
+                });
+                let changed = !range.is_empty();
+                self.byte = range.start;
+                text.replace_range(range, "");
+                self.snap_after_edit(text);
+                return changed;
+            }
+            _ => {}
+        }
+        false
+    }
+
+    fn insert(&mut self, text: &mut String, value: &str) {
+        let range = self.selection().unwrap_or(self.byte..self.byte);
+        self.byte = range.start + value.len();
+        text.replace_range(range, value);
+        self.snap_after_edit(text);
+    }
+
+    fn click(&mut self, x: f32, text: &str) {
+        self.byte = self
+            .stops
+            .iter()
+            .min_by(|a, b| (a.1 - x).abs().total_cmp(&(b.1 - x).abs()))
+            .map(|(byte, _)| *byte)
+            .unwrap_or(text.len());
+        self.anchor = None;
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FileBrowserDensity {
@@ -45,11 +179,11 @@ pub const FILE_BROWSER_DENSITY: FileBrowserDensity = FileBrowserDensity {
     row_padding_x: ROW_PADDING_X,
     frame_radius: FRAME_RADIUS,
     frame_stroke: FRAME_STROKE,
-    header_height: 30.0,
-    toolbar_height: 32.0,
-    footer_height: 36.0,
-    sidebar_width: 148.0,
-    visual_control_height: 24.0,
+    header_height: 48.0,
+    toolbar_height: 48.0,
+    footer_height: 56.0,
+    sidebar_width: 184.0,
+    visual_control_height: 32.0,
     touch_hit_height: 44.0,
 };
 
@@ -154,8 +288,8 @@ impl FileBrowserPalette {
         Self {
             backdrop: theme.bg,
             card: theme.panel_bg(),
-            sidebar: theme.surface,
-            body: theme.bg,
+            sidebar: theme.panel_bg(),
+            body: theme.panel_bg(),
             border: theme.border,
         }
     }
@@ -176,11 +310,14 @@ pub struct FileBrowserModal {
     mode: FileBrowserMode,
     current_path: String,
     path_input: String,
+    path_cursor: TextCursor,
     search: String,
+    search_cursor: TextCursor,
     search_focused: bool,
     path_focused: bool,
     entries: Vec<FileBrowserEntry>,
     selected: usize,
+    selection_explicit: bool,
     scroll_px: f32,
     back: Vec<String>,
     forward: Vec<String>,
@@ -190,8 +327,13 @@ pub struct FileBrowserModal {
     pending_selection: Option<FileBrowserSelection>,
     last_geometry: Option<FileBrowserGeometry>,
     error: Option<String>,
+    listing_ready: bool,
     safe_area: [f32; 4],
     font_scale: f32,
+    opened_at: Option<Instant>,
+    listing_at: Option<Instant>,
+    clicked_at: Option<(FileBrowserHit, Instant)>,
+    hovered: Option<FileBrowserHit>,
 }
 
 impl Default for FileBrowserModal {
@@ -207,11 +349,14 @@ impl FileBrowserModal {
             mode: FileBrowserMode::OpenFile,
             current_path: String::new(),
             path_input: String::new(),
+            path_cursor: TextCursor::default(),
             search: String::new(),
+            search_cursor: TextCursor::default(),
             search_focused: false,
             path_focused: false,
             entries: Vec::new(),
             selected: 0,
+            selection_explicit: false,
             scroll_px: 0.0,
             back: Vec::new(),
             forward: Vec::new(),
@@ -221,14 +366,58 @@ impl FileBrowserModal {
             pending_selection: None,
             last_geometry: None,
             error: None,
+            listing_ready: false,
             safe_area: [0.0; 4],
             font_scale: 1.0,
+            opened_at: None,
+            listing_at: None,
+            clicked_at: None,
+            hovered: None,
         }
     }
 
     pub fn is_active(&self) -> bool {
         self.active
     }
+
+    pub fn is_animating(&self) -> bool {
+        self.active
+            && (transition_remaining(self.opened_at, OPEN_SECONDS) > 0.0
+                || transition_remaining(self.listing_at, DIRECTORY_SECONDS) > 0.0
+                || transition_remaining(
+                    self.clicked_at.map(|(_, time)| time),
+                    CLICK_SECONDS,
+                ) > 0.0)
+    }
+
+    fn animated_geometry(&self, viewport: [f32; 4]) -> FileBrowserGeometry {
+        let safe = self.safe_viewport(viewport);
+        let mut g = Self::geometry(safe);
+        let room = (safe[1] + safe[3] - g.card[1] - g.card[3]).max(0.0);
+        let dy = 12.0_f32.min(room) * transition_remaining(self.opened_at, OPEN_SECONDS);
+        for rect in [
+            &mut g.card,
+            &mut g.list,
+            &mut g.cancel,
+            &mut g.accept,
+            &mut g.cancel_hit,
+            &mut g.accept_hit,
+        ] {
+            rect[1] += dy;
+        }
+        if let Some(side) = g.sidebar.as_mut() {
+            side[1] += dy;
+        }
+        g
+    }
+    fn click_strength(&self, hit: FileBrowserHit) -> f32 {
+        self.clicked_at
+            .filter(|(clicked, _)| *clicked == hit)
+            .map_or(0.0, |(_, time)| {
+                transition_remaining(Some(time), CLICK_SECONDS)
+            })
+    }
+
     pub fn mode(&self) -> FileBrowserMode {
         self.mode
     }
@@ -269,13 +458,24 @@ impl FileBrowserModal {
         self.forward.clear();
         self.search.clear();
         self.search_focused = false;
-        self.path_focused = false;
+        self.path_focused = true;
+        self.search_cursor.reset("");
+        self.opened_at = Some(Instant::now());
+        self.listing_at = None;
+        self.clicked_at = None;
+        self.hovered = None;
         self.pending_selection = None;
         self.last_geometry = None;
         self.error = None;
         self.current_path = start.to_string();
         self.path_input = start.to_string();
+        self.path_cursor.reset(&self.path_input);
         self.entries.clear();
+        self.locations.clear();
+        self.listing_ready = false;
+        self.selected = 0;
+        self.selection_explicit = false;
+        self.scroll_px = 0.0;
         self.pending_requests.clear();
         self.pending_requests
             .push(FileBrowserRequest::LoadLocations);
@@ -283,6 +483,10 @@ impl FileBrowserModal {
 
     pub fn close(&mut self) {
         self.active = false;
+        self.opened_at = None;
+        self.listing_at = None;
+        self.clicked_at = None;
+        self.hovered = None;
         self.pending_requests.clear();
         self.last_geometry = None;
     }
@@ -293,7 +497,7 @@ impl FileBrowserModal {
         let narrow = vw < 520.0;
         let margin = if narrow { 8.0 } else { 18.0 };
         let toolbar_h = if narrow {
-            density.touch_hit_height
+            density.touch_hit_height * 2.0
         } else {
             density.toolbar_height
         };
@@ -305,7 +509,7 @@ impl FileBrowserModal {
         let w = (if narrow {
             vw - margin * 2.0
         } else {
-            700.0_f32.min(vw - margin * 2.0)
+            960.0_f32.min(vw - margin * 2.0)
         })
         .max(1.0);
         let desired_h = density.header_height
@@ -333,7 +537,9 @@ impl FileBrowserModal {
             body_w,
             h - density.header_height - toolbar_h - footer_h,
         ];
-        let button_w = 72.0;
+        let available = (w - density.row_padding_x * 2.0 - 8.0).max(2.0);
+        let button_w = 128.0_f32.min(available * 0.58);
+        let cancel_w = 96.0_f32.min(available - button_w);
         let button_h = density.visual_control_height;
         let by = y + h - footer_h + (footer_h - button_h) * 0.5;
         let accept = [
@@ -342,7 +548,7 @@ impl FileBrowserModal {
             button_w,
             button_h,
         ];
-        let cancel = [accept[0] - button_w - 6.0, by, button_w, button_h];
+        let cancel = [accept[0] - cancel_w - 8.0, by, cancel_w, button_h];
         let hit_h = if narrow {
             density.touch_hit_height
         } else {
@@ -368,8 +574,11 @@ impl FileBrowserModal {
             .flatten()
     }
     pub fn occlusion_rect_for(&self, viewport: [f32; 4]) -> Option<[f32; 4]> {
-        self.active
-            .then(|| Self::geometry(self.safe_viewport(viewport)).card)
+        self.active.then(|| {
+            let base = Self::geometry(self.safe_viewport(viewport)).card;
+            let painted = self.animated_geometry(viewport).card;
+            [base[0], base[1], base[2], painted[1] + painted[3] - base[1]]
+        })
     }
 
     pub fn drain_requests(&mut self) -> Vec<FileBrowserRequest> {
@@ -377,6 +586,39 @@ impl FileBrowserModal {
     }
     pub fn take_selection(&mut self) -> Option<FileBrowserSelection> {
         self.pending_selection.take()
+    }
+
+    pub fn pointer_kind_at(
+        &self,
+        x: f32,
+        y: f32,
+    ) -> crate::widgets::modal::ModalPointerKind {
+        use crate::widgets::modal::ModalPointerKind;
+        if !self.active {
+            return ModalPointerKind::Default;
+        }
+        match self.hit_test(x, y) {
+            Some(FileBrowserHit::Path | FileBrowserHit::Search) => ModalPointerKind::Text,
+            Some(FileBrowserHit::Accept) if !self.can_accept() => {
+                ModalPointerKind::Default
+            }
+            Some(FileBrowserHit::Back) if self.back.is_empty() => {
+                ModalPointerKind::Default
+            }
+            Some(FileBrowserHit::Forward) if self.forward.is_empty() => {
+                ModalPointerKind::Default
+            }
+            Some(
+                FileBrowserHit::Sidebar(_)
+                | FileBrowserHit::Row { .. }
+                | FileBrowserHit::Back
+                | FileBrowserHit::Forward
+                | FileBrowserHit::Up
+                | FileBrowserHit::Cancel
+                | FileBrowserHit::Accept,
+            ) => ModalPointerKind::Pointer,
+            _ => ModalPointerKind::Default,
+        }
     }
 
     /// Path and search are the only keyboard-bearing controls in the picker.
@@ -393,7 +635,7 @@ impl FileBrowserModal {
         let Ok(path) = normalize_browser_path(path) else {
             return false;
         };
-        if path != self.current_path {
+        if !self.active || path != self.current_path {
             return false;
         }
         self.entries = entries
@@ -401,8 +643,11 @@ impl FileBrowserModal {
             .filter(|e| !e.name.starts_with('.') && valid_child_name(&e.name))
             .filter(|e| {
                 e.is_dir
-                    || self.mode != FileBrowserMode::AttachImage
-                    || is_supported_image_name(&e.name)
+                    || match self.mode {
+                        FileBrowserMode::OpenFile => true,
+                        FileBrowserMode::AttachImage => is_supported_image_name(&e.name),
+                        FileBrowserMode::ChooseDirectory => false,
+                    }
             })
             .collect();
         self.entries.sort_by(|a, b| {
@@ -411,38 +656,59 @@ impl FileBrowserModal {
                 .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
         });
         self.selected = 0;
+        self.selection_explicit = false;
         self.scroll_px = 0.0;
         self.error = None;
+        self.listing_ready = true;
+        self.listing_at = Some(Instant::now());
         true
     }
 
     pub fn set_locations(&mut self, locations: Vec<FileBrowserLocation>) -> bool {
+        if !self.active {
+            return false;
+        }
         self.locations = locations
             .into_iter()
             .filter(|location| normalize_browser_path(&location.path).is_ok())
             .collect();
-        let preferred = self
-            .locations
-            .iter()
-            .find(|location| location.path == self.current_path)
+        let preferred = normalize_browser_path(&self.current_path)
+            .ok()
+            .filter(|path| {
+                self.locations
+                    .iter()
+                    .any(|location| host_path_within(path, &location.path))
+            })
             .or_else(|| {
                 self.locations
                     .iter()
                     .find(|location| location.kind == "workspace")
-            })
-            .or_else(|| self.locations.first())
-            .map(|location| location.path.clone());
+                    .or_else(|| self.locations.first())
+                    .map(|location| location.path.clone())
+            });
         let Some(path) = preferred else {
             self.set_error("No available locations");
             return false;
         };
+        let draft = (self.path_input != display_path(&self.current_path)
+            || self.path_cursor.anchor.is_some()
+            || self.path_cursor.byte != self.path_input.len())
+        .then(|| (self.path_input.clone(), self.path_cursor.clone()));
+        let search_draft = (self.search.clone(), self.search_cursor.clone());
         self.current_path = path;
         self.request_current();
+        self.search = search_draft.0;
+        self.search_cursor = search_draft.1;
+        if let Some((text, cursor)) = draft {
+            self.path_input = text;
+            self.path_cursor = cursor;
+        }
         true
     }
 
     pub fn set_error(&mut self, message: impl Into<String>) {
         self.error = Some(message.into());
+        self.listing_ready = false;
     }
 
     /// Native twin of the daemon-backed host pump. The same relative-path
@@ -481,14 +747,22 @@ impl FileBrowserModal {
     }
 
     pub fn press_named(&mut self, key: NamedKey) {
+        let _ = self.press_named_with_modifiers(key, Modifiers::empty());
+    }
+
+    pub fn press_named_with_modifiers(
+        &mut self,
+        key: NamedKey,
+        modifiers: Modifiers,
+    ) -> bool {
         let descriptor = KeyDescriptor {
             physical: crate::event::PhysicalKey(0),
             logical: LogicalKey::Named(key),
             state: KeyState::Pressed,
-            modifiers: crate::event::Modifiers::empty(),
+            modifiers,
             repeat: false,
         };
-        self.handle_key(&descriptor);
+        self.handle_key(&descriptor)
     }
 
     pub fn input_text(&mut self, text: &str) {
@@ -512,10 +786,23 @@ impl FileBrowserModal {
 
     fn request_current(&mut self) {
         self.entries.clear();
+        self.listing_ready = false;
         self.selected = 0;
+        self.selection_explicit = false;
         self.scroll_px = 0.0;
         self.error = None;
         self.path_input = display_path(&self.current_path);
+        if self
+            .clicked_at
+            .is_some_and(|(hit, _)| matches!(hit, FileBrowserHit::Row { .. }))
+        {
+            self.clicked_at = None;
+        }
+        self.path_cursor.reset(&self.path_input);
+        self.search.clear();
+        self.search_cursor.reset("");
+        self.listing_at = None;
+        self.hovered = None;
         self.pending_requests
             .push(FileBrowserRequest::ListDirectory {
                 path: self.current_path.clone(),
@@ -524,10 +811,13 @@ impl FileBrowserModal {
 
     pub fn navigate(&mut self, path: &str) -> bool {
         let Ok(path) = normalize_browser_path(path) else {
-            self.error = Some("Invalid location".into());
+            self.set_error("Invalid location");
             return false;
         };
         if path == self.current_path {
+            if !self.listing_ready {
+                self.request_current();
+            }
             return true;
         }
         self.back.push(self.current_path.clone());
@@ -576,7 +866,9 @@ impl FileBrowserModal {
     }
 
     fn selected_entry(&self) -> Option<&FileBrowserEntry> {
-        self.visible_entries().get(self.selected).map(|(_, e)| *e)
+        self.selection_explicit
+            .then(|| self.visible_entries().get(self.selected).map(|(_, e)| *e))
+            .flatten()
     }
 
     fn activate_selected(&mut self) -> bool {
@@ -596,6 +888,13 @@ impl FileBrowserModal {
         }
     }
 
+    fn can_accept(&self) -> bool {
+        self.listing_ready
+            && self.error.is_none()
+            && (self.mode == FileBrowserMode::ChooseDirectory
+                || self.selected_entry().is_some())
+    }
+
     fn accept_button(&mut self) -> bool {
         if self.mode == FileBrowserMode::ChooseDirectory {
             let path = self
@@ -610,6 +909,17 @@ impl FileBrowserModal {
     }
 
     fn accept_path(&mut self, path: String) -> bool {
+        if !self.listing_ready || self.error.is_some() {
+            return false;
+        }
+        if self.mode == FileBrowserMode::ChooseDirectory
+            && path != self.current_path
+            && !self.selected_entry().is_some_and(|entry| {
+                entry.is_dir && join_path(&self.current_path, &entry.name) == path
+            })
+        {
+            return false;
+        }
         if self.mode == FileBrowserMode::AttachImage && !is_supported_image_name(&path) {
             return false;
         }
@@ -680,54 +990,103 @@ impl FileBrowserModal {
                 self.last_geometry = None;
                 true
             }
-            UiEvent::PointerDown { .. }
-            | UiEvent::PointerUp { .. }
-            | UiEvent::PointerMove { .. }
-            | UiEvent::PointerLeave => true,
+            UiEvent::PointerMove { x, y, .. } => {
+                self.hovered = self.hit_test(*x, *y);
+                true
+            }
+            UiEvent::PointerLeave => {
+                self.hovered = None;
+                true
+            }
+            UiEvent::PointerDown { .. } | UiEvent::PointerUp { .. } => true,
             _ => false,
         }
     }
 
     fn handle_key(&mut self, key: &KeyDescriptor) -> bool {
-        match key.logical {
-            LogicalKey::Named(NamedKey::Escape) => self.close(),
-            LogicalKey::Named(NamedKey::ArrowUp) => {
-                self.selected = self.selected.saturating_sub(1);
-                self.reveal_selected();
-            }
-            LogicalKey::Named(NamedKey::ArrowDown) => {
-                self.selected = (self.selected + 1)
-                    .min(self.visible_entries().len().saturating_sub(1));
-                self.reveal_selected();
-            }
-            LogicalKey::Named(NamedKey::Enter) => {
-                if self.path_focused {
-                    let p = self.path_input.clone();
-                    let _ = self.navigate(&p);
-                    self.path_focused = false;
-                } else {
-                    let _ = self.activate_selected();
-                }
-            }
-            LogicalKey::Named(NamedKey::Backspace) => {
-                let target = if self.path_focused {
-                    &mut self.path_input
+        let shortcut = key.modifiers.intersects(Modifiers::CTRL | Modifiers::META);
+        // Printable commits arrive separately so IME and key events never insert twice.
+        if let LogicalKey::Character(text) = &key.logical {
+            if shortcut && text.eq_ignore_ascii_case("a") {
+                let (text, cursor) = if self.path_focused {
+                    (&self.path_input, &mut self.path_cursor)
                 } else {
                     self.search_focused = true;
-                    &mut self.search
+                    (&self.search, &mut self.search_cursor)
                 };
-                target.pop();
-                self.selected = 0;
+                cursor.anchor = Some(0);
+                cursor.byte = text.len();
             }
-            LogicalKey::Named(NamedKey::ArrowLeft)
-                if key.modifiers.contains(crate::event::Modifiers::ALT) =>
-            {
+            return true;
+        }
+        let LogicalKey::Named(named) = key.logical else {
+            return true;
+        };
+        if key.modifiers.contains(Modifiers::ALT) {
+            if named == NamedKey::ArrowLeft {
                 self.go_back();
+                return true;
             }
-            LogicalKey::Named(NamedKey::ArrowRight)
-                if key.modifiers.contains(crate::event::Modifiers::ALT) =>
-            {
+            if named == NamedKey::ArrowRight {
                 self.go_forward();
+                return true;
+            }
+        }
+        match named {
+            NamedKey::Escape => self.close(),
+            NamedKey::Tab => {
+                self.path_focused = !self.path_focused;
+                self.search_focused = !self.path_focused;
+            }
+            NamedKey::ArrowUp | NamedKey::ArrowDown => {
+                let count = self.visible_entries().len();
+                self.selected = if !self.selection_explicit {
+                    0
+                } else if named == NamedKey::ArrowUp {
+                    self.selected.saturating_sub(1)
+                } else {
+                    (self.selected + 1).min(count.saturating_sub(1))
+                };
+                self.selection_explicit = count > 0;
+                self.path_focused = false;
+                self.search_focused = false;
+                self.reveal_selected();
+            }
+            NamedKey::Enter => {
+                if self.path_focused {
+                    let path = self.path_input.clone();
+                    if self.navigate(&path) {
+                        self.path_focused = false;
+                    }
+                } else {
+                    self.activate_selected();
+                }
+            }
+            NamedKey::ArrowLeft
+            | NamedKey::ArrowRight
+            | NamedKey::Home
+            | NamedKey::End
+            | NamedKey::Backspace
+            | NamedKey::Delete => {
+                let changed = if self.path_focused {
+                    self.path_cursor.key(
+                        &mut self.path_input,
+                        named,
+                        key.modifiers.contains(Modifiers::SHIFT),
+                    )
+                } else {
+                    self.search_focused = true;
+                    self.search_cursor.key(
+                        &mut self.search,
+                        named,
+                        key.modifiers.contains(Modifiers::SHIFT),
+                    )
+                };
+                if changed && self.search_focused {
+                    self.selected = 0;
+                    self.selection_explicit = false;
+                    self.scroll_px = 0.0;
+                }
             }
             _ => {}
         }
@@ -740,11 +1099,13 @@ impl FileBrowserModal {
             return;
         }
         if self.path_focused {
-            self.path_input.push_str(&filtered);
+            self.path_cursor.insert(&mut self.path_input, &filtered);
         } else {
             self.search_focused = true;
-            self.search.push_str(&filtered);
+            self.search_cursor.insert(&mut self.search, &filtered);
             self.selected = 0;
+            self.selection_explicit = false;
+            self.scroll_px = 0.0;
         }
     }
 
@@ -768,6 +1129,12 @@ impl FileBrowserModal {
         let Some(hit) = self.hit_test(x, y) else {
             return;
         };
+        let same_click = self.clicked_at.is_some_and(|(previous, _)| previous == hit);
+        self.clicked_at = Some((hit, Instant::now()));
+        if !matches!(hit, FileBrowserHit::Path | FileBrowserHit::Search) {
+            self.path_focused = false;
+            self.search_focused = false;
+        }
         match hit {
             FileBrowserHit::Scrim => self.close(),
             FileBrowserHit::Cancel => self.close(),
@@ -786,10 +1153,20 @@ impl FileBrowserModal {
             FileBrowserHit::Search => {
                 self.search_focused = true;
                 self.path_focused = false;
+                self.search_cursor.click(x, &self.search);
+                if click_count >= 2 {
+                    self.search_cursor.anchor = Some(0);
+                    self.search_cursor.byte = self.search.len();
+                }
             }
             FileBrowserHit::Path => {
                 self.path_focused = true;
                 self.search_focused = false;
+                self.path_cursor.click(x, &self.path_input);
+                if click_count >= 2 {
+                    self.path_cursor.anchor = Some(0);
+                    self.path_cursor.byte = self.path_input.len();
+                }
             }
             FileBrowserHit::Sidebar(row) => {
                 let places = place_paths(&self.locations, &self.recents);
@@ -806,11 +1183,11 @@ impl FileBrowserModal {
                     .get(visible)
                     .is_some_and(|(s, _)| *s == source)
                 {
+                    let already_selected =
+                        self.selection_explicit && self.selected == visible;
                     self.selected = visible;
-                    let is_dir = self.selected_entry().is_some_and(|entry| entry.is_dir);
-                    // A folder is a one-tap affordance on mobile. Files retain
-                    // familiar select-then-Attach behavior (double-click opens).
-                    if is_dir || click_count >= 2 {
+                    self.selection_explicit = true;
+                    if click_count >= 2 && same_click && already_selected {
                         self.activate_selected();
                     }
                 }
@@ -856,7 +1233,11 @@ impl FileBrowserModal {
                 let row = ((y - side[1] - 4.0) / FILE_BROWSER_DENSITY.row_height).floor()
                     as isize;
                 let count = place_paths(&self.locations, &self.recents).len();
-                return if row >= 0 && (row as usize) < count {
+                return if row >= 0
+                    && (row as usize) < count
+                    && side[1] + 4.0 + (row + 1) as f32 * FILE_BROWSER_DENSITY.row_height
+                        <= side[1] + side[3]
+                {
                     Some(FileBrowserHit::Sidebar(row as usize))
                 } else {
                     Some(FileBrowserHit::Footer)
@@ -900,11 +1281,33 @@ impl FileBrowserModal {
             self.last_geometry = None;
             return;
         }
-        let safe_viewport = self.safe_viewport(viewport);
-        let g = Self::geometry(safe_viewport);
-        self.last_geometry = Some(g);
+        let mut g = self.animated_geometry(viewport);
         let [vx, vy, vw, vh] = viewport;
         let density = FILE_BROWSER_DENSITY.with_font_scale(self.font_scale);
+        let opts = DrawOpts {
+            font_size: density.font_size,
+            ..DrawOpts::default()
+        };
+        let available = (g.card[2] - density.row_padding_x * 2.0 - 8.0).max(2.0);
+        let accept_w = (sugarloaf.text_mut().measure(self.mode.action(), &opts) + 32.0)
+            .max(128.0)
+            .min(available * 0.58);
+        let cancel_w = (sugarloaf.text_mut().measure("Cancel", &opts) + 32.0)
+            .max(96.0)
+            .min(available - accept_w);
+        for rect in [&mut g.accept, &mut g.accept_hit] {
+            rect[0] = g.card[0] + g.card[2] - density.row_padding_x - accept_w;
+            rect[2] = accept_w;
+        }
+        for rect in [&mut g.cancel, &mut g.cancel_hit] {
+            rect[0] = g.accept[0] - cancel_w - 8.0;
+            rect[2] = cancel_w;
+        }
+        self.last_geometry = Some(g);
+        let opening = transition_remaining(self.opened_at, OPEN_SECONDS);
+        let entering = transition_remaining(self.listing_at, DIRECTORY_SECONDS);
+        let row_offset = entering * 12.0;
+        let row_opacity = 1.0 - entering * 0.8;
         let palette = FileBrowserPalette::from_theme(theme);
         sugarloaf.rect(
             None,
@@ -912,7 +1315,7 @@ impl FileBrowserModal {
             vy,
             vw,
             vh,
-            theme.f32_alpha(palette.backdrop, 0.58),
+            theme.f32_alpha(palette.backdrop, 0.72 - opening * 0.35),
             0.0,
             ORDER,
         );
@@ -934,7 +1337,7 @@ impl FileBrowserModal {
             y + density.frame_stroke,
             w - density.frame_stroke * 2.0,
             h - density.frame_stroke * 2.0,
-            theme.f32_alpha(palette.card, 0.99),
+            theme.f32(palette.card),
             0.0,
             (density.frame_radius - density.frame_stroke).max(0.0),
             ORDER + 2,
@@ -958,7 +1361,7 @@ impl FileBrowserModal {
                 density.header_height,
             ],
             self.mode.title(),
-            density.font_size,
+            density.font_size + 1.0,
             theme.u8(theme.fg),
             false,
             true,
@@ -970,7 +1373,7 @@ impl FileBrowserModal {
                 side[1],
                 side[2],
                 side[3],
-                theme.f32_alpha(palette.sidebar, 0.96),
+                theme.f32(palette.sidebar),
                 0.0,
                 ORDER + 2,
             );
@@ -982,14 +1385,18 @@ impl FileBrowserModal {
                 if ry + density.row_height > side[1] + side[3] {
                     break;
                 }
-                if path == self.current_path {
+                let place_hit = FileBrowserHit::Sidebar(i);
+                if path == self.current_path || self.hovered == Some(place_hit) {
                     sugarloaf.rounded_rect(
                         None,
                         side[0] + 4.0,
                         ry,
                         side[2] - 8.0,
                         density.row_height,
-                        theme.f32_alpha(theme.accent, 0.18),
+                        theme.f32_alpha(
+                            theme.fg,
+                            0.07 + self.click_strength(place_hit) * 0.12,
+                        ),
                         0.0,
                         5.0,
                         ORDER + 3,
@@ -1005,7 +1412,7 @@ impl FileBrowserModal {
                     ],
                     icon,
                     density.icon_size,
-                    theme.u8(theme.folder),
+                    folder_icon(path == self.current_path).1,
                     true,
                     true,
                 );
@@ -1027,13 +1434,22 @@ impl FileBrowserModal {
         }
         for (i, glyph) in ["‹", "›", "↑"].into_iter().enumerate() {
             let rect = nav_control_rect(g, i, true);
+            let hit = [
+                FileBrowserHit::Back,
+                FileBrowserHit::Forward,
+                FileBrowserHit::Up,
+            ][i];
             sugarloaf.rounded_rect(
                 None,
                 rect[0],
                 rect[1],
                 rect[2],
                 rect[3],
-                theme.f32_alpha(theme.bg, 0.48),
+                theme.f32_alpha(
+                    theme.fg,
+                    0.04 + self.click_strength(hit) * 0.14
+                        + if self.hovered == Some(hit) { 0.03 } else { 0.0 },
+                ),
                 0.0,
                 5.0,
                 ORDER + 3,
@@ -1043,7 +1459,7 @@ impl FileBrowserModal {
                 rect,
                 glyph,
                 density.icon_size,
-                theme.u8(theme.fg),
+                theme.u8(theme.muted),
                 true,
                 true,
             );
@@ -1053,19 +1469,18 @@ impl FileBrowserModal {
             sugarloaf,
             path_rect,
             &self.path_input,
+            "",
+            &mut self.path_cursor,
             self.path_focused,
             density.font_size,
             theme,
         );
-        let search_label = if self.search.is_empty() {
-            "Search"
-        } else {
-            &self.search
-        };
         input_box(
             sugarloaf,
             search_control_rect(g, true),
-            search_label,
+            &self.search,
+            "Filter",
+            &mut self.search_cursor,
             self.search_focused,
             density.font_size,
             theme,
@@ -1076,7 +1491,7 @@ impl FileBrowserModal {
             g.list[1],
             g.list[2],
             g.list[3],
-            theme.f32_alpha(palette.body, 0.72),
+            theme.f32(palette.body),
             0.0,
             ORDER + 2,
         );
@@ -1096,36 +1511,42 @@ impl FileBrowserModal {
             };
             let ry = row_geometry.full[1];
             let row_clip = row_geometry.visible;
-            if first + visual == self.selected {
+            let row_hit = FileBrowserHit::Row {
+                visible: row,
+                source: *source,
+            };
+            if (self.selection_explicit && row == self.selected)
+                || self.hovered == Some(row_hit)
+            {
                 if let Some(selection) = intersect_rect(
                     [g.list[0] + 4.0, ry, g.list[2] - 8.0, density.row_height],
                     g.list,
                 ) {
-                    sugarloaf.rect(
+                    sugarloaf.rounded_rect(
                         None,
                         selection[0],
                         selection[1],
                         selection[2],
                         selection[3],
-                        theme.f32_alpha(theme.accent, 0.18),
+                        theme.f32_alpha(
+                            theme.fg,
+                            (0.07 + self.click_strength(row_hit) * 0.14) * row_opacity,
+                        ),
                         0.0,
+                        6.0,
                         ORDER + 3,
                     );
                 }
             }
             let (glyph, color) = if entry.is_dir {
-                ("󰉋", theme.folder)
+                folder_icon(false)
             } else {
-                let (i, c) = icon_for_file(&entry.name);
-                (
-                    i,
-                    ((c[0] as u32) << 16) | ((c[1] as u32) << 8) | c[2] as u32,
-                )
+                icon_for_file(&entry.name)
             };
             draw_text_in_rect_clipped(
                 sugarloaf,
                 [
-                    g.list[0] + density.row_padding_x,
+                    g.list[0] + density.row_padding_x + row_offset,
                     ry,
                     16.0,
                     density.row_height,
@@ -1133,22 +1554,23 @@ impl FileBrowserModal {
                 row_clip,
                 glyph,
                 density.icon_size,
-                theme.u8(color),
+                fade_color(color, row_opacity),
                 true,
                 true,
             );
             draw_text_in_rect_clipped(
                 sugarloaf,
                 [
-                    g.list[0] + density.row_padding_x + 24.0,
+                    g.list[0] + density.row_padding_x + 24.0 + row_offset,
                     ry,
-                    g.list[2] - 118.0,
+                    (g.list[2] - if entry.is_dir { 72.0 } else { 118.0 } - row_offset)
+                        .max(1.0),
                     density.row_height,
                 ],
                 row_clip,
                 &entry.name,
                 density.font_size,
-                theme.u8(theme.fg),
+                fade_color(theme.u8(theme.fg), row_opacity),
                 false,
                 true,
             );
@@ -1165,20 +1587,64 @@ impl FileBrowserModal {
                     true,
                 );
             }
+            if entry.is_dir {
+                draw_text_in_rect_clipped(
+                    sugarloaf,
+                    [g.list[0] + g.list[2] - 32.0, ry, 16.0, density.row_height],
+                    row_clip,
+                    "›",
+                    density.icon_size,
+                    fade_color(theme.u8(theme.muted), row_opacity),
+                    true,
+                    true,
+                );
+            }
             let _ = source;
         }
-        if let Some(error) = &self.error {
-            let footer_h = if g.narrow {
-                density.touch_hit_height
+        if rows.is_empty() {
+            let label = if self.error.is_some() {
+                "Folder unavailable"
+            } else if !self.listing_ready {
+                "Loading..."
+            } else if !self.search.is_empty() {
+                "No matches"
+            } else if self.mode == FileBrowserMode::ChooseDirectory {
+                "No subfolders"
             } else {
-                density.footer_height
+                "No files here"
             };
             draw_text_in_rect(
                 sugarloaf,
+                g.list,
+                label,
+                density.font_size,
+                theme.u8(theme.muted),
+                true,
+                true,
+            );
+        }
+        let footer_h = if g.narrow {
+            density.touch_hit_height
+        } else {
+            density.footer_height
+        };
+        sugarloaf.rect(
+            None,
+            x + density.frame_stroke,
+            y + h - footer_h,
+            w - density.frame_stroke * 2.0,
+            1.0,
+            theme.f32(palette.border),
+            0.0,
+            ORDER + 3,
+        );
+        if let Some(error) = &self.error {
+            draw_text_in_rect(
+                sugarloaf,
                 [
-                    g.list[0] + density.row_padding_x,
+                    x + density.row_padding_x,
                     y + h - footer_h,
-                    (w - 180.0).max(20.0),
+                    (g.cancel[0] - x - density.row_padding_x * 2.0).max(1.0),
                     footer_h,
                 ],
                 error,
@@ -1193,6 +1659,8 @@ impl FileBrowserModal {
             g.cancel,
             "Cancel",
             false,
+            true,
+            self.click_strength(FileBrowserHit::Cancel),
             density.font_size,
             theme,
         );
@@ -1201,6 +1669,8 @@ impl FileBrowserModal {
             g.accept,
             self.mode.action(),
             true,
+            self.can_accept(),
+            self.click_strength(FileBrowserHit::Accept),
             density.font_size,
             theme,
         );
@@ -1450,7 +1920,15 @@ fn nav_control_rect(g: FileBrowserGeometry, index: usize, visual: bool) -> [f32;
 fn search_control_rect(g: FileBrowserGeometry, visual: bool) -> [f32; 4] {
     let density = FILE_BROWSER_DENSITY;
     let bar = toolbar_rect(g, visual);
-    let width = if g.narrow { 86.0 } else { 150.0 };
+    if g.narrow {
+        return [
+            g.card[0] + density.row_padding_x,
+            bar[1] + density.touch_hit_height,
+            (g.card[2] - density.row_padding_x * 2.0).max(1.0),
+            bar[3],
+        ];
+    }
+    let width = 150.0;
     [
         g.card[0] + g.card[2] - density.row_padding_x - width,
         bar[1],
@@ -1467,8 +1945,12 @@ fn path_control_rect(g: FileBrowserGeometry, visual: bool) -> [f32; 4] {
         density.visual_control_height * 3.0
     };
     let x = g.list[0] + density.row_padding_x + nav_span + 4.0;
-    let search = search_control_rect(g, visual);
-    [x, bar[1], (search[0] - x - 6.0).max(20.0), bar[3]]
+    let right = if g.narrow {
+        g.card[0] + g.card[2] - density.row_padding_x
+    } else {
+        search_control_rect(g, visual)[0] - 6.0
+    };
+    [x, bar[1], (right - x).max(1.0), bar[3]]
 }
 fn format_size(n: u64) -> String {
     if n >= 1_048_576 {
@@ -1569,6 +2051,8 @@ fn input_box(
     s: &mut Sugarloaf,
     r: [f32; 4],
     value: &str,
+    placeholder: &str,
+    cursor: &mut TextCursor,
     focused: bool,
     font_size: f32,
     theme: &IdeTheme,
@@ -1579,7 +2063,7 @@ fn input_box(
         r[1],
         r[2],
         r[3],
-        theme.f32(if focused { theme.accent } else { theme.border }),
+        theme.f32(if focused { theme.muted } else { theme.border }),
         0.0,
         5.0,
         ORDER + 3,
@@ -1590,49 +2074,164 @@ fn input_box(
         r[1] + 1.0,
         r[2] - 2.0,
         r[3] - 2.0,
-        theme.f32(theme.bg),
+        theme.f32(theme.panel_bg()),
         0.0,
         4.0,
         ORDER + 4,
     );
-    draw_text_in_rect(
-        s,
-        [r[0] + 7.0, r[1], (r[2] - 14.0).max(1.0), r[3]],
-        value,
+    let inner = [
+        r[0] + 10.0,
+        r[1] + 2.0,
+        (r[2] - 20.0).max(1.0),
+        (r[3] - 4.0).max(1.0),
+    ];
+    let font_size = font_size.min((inner[3] - 4.0).max(1.0));
+    let opts = DrawOpts {
         font_size,
-        theme.u8(if value == "Search" {
+        color: theme.u8(if value.is_empty() {
             theme.muted
         } else {
             theme.fg
         }),
-        false,
-        true,
+        clip_rect: Some(inner),
+        ..DrawOpts::default()
+    };
+    let caret_width = s.text_mut().measure(&value[..cursor.byte], &opts);
+    let full_width = s.text_mut().measure(value, &opts);
+    if focused {
+        cursor.scroll_x = cursor
+            .scroll_x
+            .max(caret_width - inner[2] + 2.0)
+            .min(caret_width)
+            .max(0.0);
+    } else {
+        cursor.scroll_x = cursor.scroll_x.min((full_width - inner[2]).max(0.0));
+    }
+    let text_x = inner[0] - cursor.scroll_x;
+    cursor.stops.clear();
+    cursor.stops.push((0, text_x));
+    for (start, grapheme) in value.grapheme_indices(true) {
+        let end = start + grapheme.len();
+        cursor
+            .stops
+            .push((end, text_x + s.text_mut().measure(&value[..end], &opts)));
+    }
+    if focused {
+        if let Some(range) = cursor.selection() {
+            let left = text_x + s.text_mut().measure(&value[..range.start], &opts);
+            let right = text_x + s.text_mut().measure(&value[..range.end], &opts);
+            if let Some(selection) = intersect_rect(
+                [left, inner[1] + 2.0, right - left, inner[3] - 4.0],
+                inner,
+            ) {
+                s.rect(
+                    None,
+                    selection[0],
+                    selection[1],
+                    selection[2],
+                    selection[3],
+                    theme.f32_alpha(theme.accent, 0.25),
+                    0.0,
+                    ORDER + 5,
+                );
+            }
+        }
+    }
+    let label = if value.is_empty() { placeholder } else { value };
+    let first = s.text_mut().instance_count();
+    s.text_mut().draw(
+        text_x,
+        inner[1] + (inner[3] - font_size) * 0.5,
+        label,
+        &opts,
     );
+    let _ = s
+        .text_mut()
+        .center_instances_in_rect(first, inner, false, true);
+    if focused {
+        let x = (text_x + caret_width).clamp(inner[0], inner[0] + inner[2] - 1.0);
+        s.rect(
+            None,
+            x,
+            inner[1] + 3.0,
+            1.5,
+            (inner[3] - 6.0).max(1.0),
+            theme.f32(theme.fg),
+            0.0,
+            ORDER + 6,
+        );
+    }
 }
+fn fitted_label_size(requested: f32, measured_width: f32, inner: [f32; 4]) -> f32 {
+    requested
+        * (inner[2] / measured_width.max(1.0))
+            .min(inner[3] / requested.max(1.0))
+            .min(1.0)
+}
+
 fn button(
     s: &mut Sugarloaf,
     r: [f32; 4],
     label: &str,
     primary: bool,
+    enabled: bool,
+    pressed: f32,
     font_size: f32,
     theme: &IdeTheme,
 ) {
+    let inset = pressed * 1.5;
+    let r = [
+        r[0] + inset,
+        r[1] + inset,
+        r[2] - inset * 2.0,
+        r[3] - inset * 2.0,
+    ];
     s.rounded_rect(
         None,
         r[0],
         r[1],
         r[2],
         r[3],
-        theme.f32(if primary { theme.accent } else { theme.surface }),
+        theme.f32_alpha(
+            if primary { theme.fg } else { theme.border },
+            if enabled { 1.0 } else { 0.35 },
+        ),
         0.0,
-        5.0,
+        6.0,
         ORDER + 3,
     );
+    if !primary {
+        s.rounded_rect(
+            None,
+            r[0] + 1.0,
+            r[1] + 1.0,
+            r[2] - 2.0,
+            r[3] - 2.0,
+            theme.f32(theme.panel_bg()),
+            0.0,
+            5.0,
+            ORDER + 4,
+        );
+    }
+    let inner = [
+        r[0] + 12.0,
+        r[1] + 4.0,
+        (r[2] - 24.0).max(1.0),
+        (r[3] - 8.0).max(1.0),
+    ];
+    let measured = s.text_mut().measure(
+        label,
+        &DrawOpts {
+            font_size,
+            ..DrawOpts::default()
+        },
+    );
+    let size = fitted_label_size(font_size, measured, inner);
     draw_text_in_rect(
         s,
-        r,
+        inner,
         label,
-        font_size,
+        size,
         theme.u8(if primary { theme.bg } else { theme.fg }),
         true,
         true,
@@ -1659,6 +2258,439 @@ mod tests {
         )]));
         modal
     }
+    fn select_all(modal: &mut FileBrowserModal) {
+        modal.handle_event(&UiEvent::Key(KeyDescriptor {
+            physical: crate::event::PhysicalKey(0),
+            logical: LogicalKey::Character("a".into()),
+            state: KeyState::Pressed,
+            modifiers: Modifiers::CTRL,
+            repeat: false,
+        }));
+    }
+
+    #[test]
+    fn key_and_text_event_pairs_insert_each_commit_once() {
+        let mut modal = ready(FileBrowserMode::ChooseDirectory);
+        select_all(&mut modal);
+        let key = KeyDescriptor {
+            physical: crate::event::PhysicalKey(0),
+            logical: LogicalKey::Character("x".into()),
+            state: KeyState::Pressed,
+            modifiers: Modifiers::empty(),
+            repeat: false,
+        };
+        modal.handle_event(&UiEvent::Key(key));
+        assert_eq!(modal.path_input, "/workspace");
+        modal.handle_event(&UiEvent::Text("x".into()));
+        assert_eq!(modal.path_input, "x");
+        modal.press_named(NamedKey::ArrowLeft);
+        modal.handle_event(&UiEvent::Text("y".into()));
+        assert_eq!(modal.path_input, "yx");
+    }
+
+    #[test]
+    fn double_click_cannot_activate_a_different_row_after_layout_motion() {
+        let mut modal = ready(FileBrowserMode::ChooseDirectory);
+        modal.set_listing(
+            "/workspace",
+            vec![
+                FileBrowserEntry {
+                    name: "a".into(),
+                    is_dir: true,
+                    size: None,
+                },
+                FileBrowserEntry {
+                    name: "b".into(),
+                    is_dir: true,
+                    size: None,
+                },
+            ],
+        );
+        let g = FileBrowserModal::geometry([0.0, 0.0, 1200.0, 800.0]);
+        modal.last_geometry = Some(g);
+        let x = g.list[0] + 30.0;
+        modal.pointer_down(x, g.list[1] + ROW_HEIGHT * 0.5, 1);
+        modal.pointer_down(x, g.list[1] + ROW_HEIGHT * 1.5, 2);
+        assert_eq!(modal.current_path(), "/workspace");
+        modal.pointer_down(x, g.list[1] + ROW_HEIGHT * 1.5, 2);
+        assert_eq!(modal.current_path(), "/workspace/b");
+    }
+
+    #[test]
+    fn address_bar_inserts_at_caret_and_enter_navigates() {
+        let mut modal = ready(FileBrowserMode::ChooseDirectory);
+        assert!(modal.path_focused);
+        select_all(&mut modal);
+        modal.input_text("/workspace/ab");
+        modal.press_named(NamedKey::ArrowLeft);
+        modal.input_text("X");
+        assert_eq!(modal.path_input, "/workspace/aXb");
+        modal.press_named(NamedKey::Delete);
+        assert_eq!(modal.path_input, "/workspace/aX");
+        modal.press_named(NamedKey::Enter);
+        assert_eq!(modal.current_path(), "/workspace/aX");
+        assert!(!modal.path_focused);
+        assert!(modal
+            .drain_requests()
+            .iter()
+            .any(|request| matches!(request,
+                FileBrowserRequest::ListDirectory { path } if path == "/workspace/aX"
+            )));
+    }
+
+    #[test]
+    fn address_bar_keeps_focus_after_invalid_enter_and_supports_selection() {
+        let mut modal = ready(FileBrowserMode::ChooseDirectory);
+        select_all(&mut modal);
+        modal.input_text("relative");
+        modal.press_named(NamedKey::Enter);
+        assert!(modal.path_focused);
+        assert!(modal.error.is_some());
+        select_all(&mut modal);
+        modal.input_text("/workspace/good");
+        modal.press_named(NamedKey::End);
+        modal.press_named_with_modifiers(NamedKey::ArrowLeft, Modifiers::SHIFT);
+        modal.input_text("D");
+        assert_eq!(modal.path_input, "/workspace/gooD");
+        modal.press_named(NamedKey::Enter);
+        assert_eq!(modal.current_path(), "/workspace/gooD");
+    }
+
+    #[test]
+    fn text_cursor_moves_and_deletes_whole_graphemes() {
+        let mut text = "aé👩‍💻e\u{301}".to_string();
+        let mut cursor = TextCursor::default();
+        cursor.reset(&text);
+        cursor.key(&mut text, NamedKey::ArrowLeft, false);
+        assert_eq!(cursor.byte, "aé👩‍💻".len());
+        cursor.key(&mut text, NamedKey::Backspace, false);
+        assert_eq!(text, "aée\u{301}");
+        cursor.key(&mut text, NamedKey::Home, false);
+        cursor.key(&mut text, NamedKey::Delete, false);
+        assert_eq!(text, "ée\u{301}");
+        cursor.key(&mut text, NamedKey::End, false);
+        cursor.key(&mut text, NamedKey::ArrowLeft, true);
+        cursor.insert(&mut text, "Z");
+        assert_eq!(text, "éZ");
+    }
+
+    #[test]
+    fn edits_that_join_graphemes_leave_a_valid_caret_stop() {
+        let mut text = "\u{301}".to_string();
+        let mut cursor = TextCursor::default();
+        cursor.insert(&mut text, "e");
+        assert_eq!(cursor.byte, text.len());
+        cursor.key(&mut text, NamedKey::Backspace, false);
+        assert_eq!(text, "");
+        text = "🇺 x 🇸".into();
+        cursor.byte = "🇺 x ".len();
+        cursor.anchor = Some("🇺".len());
+        cursor.key(&mut text, NamedKey::Delete, false);
+        assert_eq!(text, "🇺🇸");
+        assert_eq!(cursor.byte, text.len());
+    }
+
+    #[test]
+    fn text_cursor_click_uses_measured_character_positions() {
+        let mut cursor = TextCursor::default();
+        cursor.stops = vec![(0, 10.0), (1, 16.0), (3, 32.0)];
+        cursor.click(30.0, "aé");
+        assert_eq!(cursor.byte, 3);
+        cursor.click(17.0, "aé");
+        let mut text = "aé".to_string();
+        cursor.insert(&mut text, "!");
+        assert_eq!(text, "a!é");
+    }
+
+    #[test]
+    fn location_reply_preserves_selection_and_caret_before_typing() {
+        let mut modal = FileBrowserModal::new();
+        modal.open(FileBrowserMode::ChooseDirectory, "/workspace", vec![]);
+        select_all(&mut modal);
+        modal.set_locations(vec![location("workspace", "Workspace", "/workspace")]);
+        assert_eq!(modal.path_cursor.selection(), Some(0.."/workspace".len()));
+        modal.input_text("/workspace/next");
+        assert_eq!(modal.path_input, "/workspace/next");
+        modal.open(FileBrowserMode::ChooseDirectory, "/workspace", vec![]);
+        modal.press_named(NamedKey::ArrowLeft);
+        let byte = modal.path_cursor.byte;
+        modal.set_locations(vec![location("workspace", "Workspace", "/workspace")]);
+        assert_eq!(modal.path_cursor.byte, byte);
+        modal.input_text("X");
+        assert_eq!(modal.path_input, "/workspacXe");
+    }
+
+    #[test]
+    fn location_replies_preserve_path_and_filter_drafts_after_focus_changes() {
+        let mut modal = FileBrowserModal::new();
+        modal.open(FileBrowserMode::ChooseDirectory, "/workspace", vec![]);
+        select_all(&mut modal);
+        modal.input_text("/workspace/typed");
+        modal.press_named(NamedKey::Tab);
+        modal.input_text("projects");
+        modal.press_named(NamedKey::ArrowLeft);
+        let search_byte = modal.search_cursor.byte;
+        assert!(modal.set_locations(vec![location(
+            "workspace",
+            "Workspace",
+            "/workspace"
+        )]));
+        assert_eq!(modal.path_input, "/workspace/typed");
+        assert_eq!(modal.search, "projects");
+        assert_eq!(modal.search_cursor.byte, search_byte);
+        assert!(modal.search_focused);
+    }
+
+    #[test]
+    fn folder_single_click_selects_for_confirmation_and_double_click_opens() {
+        let entries = vec![FileBrowserEntry {
+            name: "child".into(),
+            is_dir: true,
+            size: None,
+        }];
+        let mut modal = ready(FileBrowserMode::ChooseDirectory);
+        modal.set_listing("/workspace", entries.clone());
+        assert!(modal.selected_entry().is_none());
+        let g = FileBrowserModal::geometry([0.0, 0.0, 1200.0, 800.0]);
+        modal.last_geometry = Some(g);
+        let (x, y) = (g.list[0] + 30.0, g.list[1] + ROW_HEIGHT * 0.5);
+        modal.pointer_down(x, y, 1);
+        assert_eq!(modal.current_path(), "/workspace");
+        assert!(modal.accept_button());
+        assert_eq!(modal.take_selection().unwrap().path, "/workspace/child");
+        modal.open(FileBrowserMode::ChooseDirectory, "/workspace", vec![]);
+        modal.set_listing("/workspace", entries);
+        modal.last_geometry = Some(g);
+        modal.pointer_down(x, y, 1);
+        modal.pointer_down(x, y, 2);
+        assert_eq!(modal.current_path(), "/workspace/child");
+        assert!(modal.take_selection().is_none());
+        assert!(!modal.listing_ready);
+        assert!(!modal.selection_explicit);
+    }
+
+    #[test]
+    fn pointer_cursor_classification_uses_only_actionable_hits() {
+        use crate::widgets::modal::ModalPointerKind;
+        let mut modal = ready(FileBrowserMode::AttachImage);
+        let g = FileBrowserModal::geometry([0.0, 0.0, 1200.0, 800.0]);
+        modal.last_geometry = Some(g);
+        let (x, y) = point(path_control_rect(g, false));
+        assert_eq!(modal.pointer_kind_at(x, y), ModalPointerKind::Text);
+        let (x, y) = point(g.accept_hit);
+        assert_eq!(modal.pointer_kind_at(x, y), ModalPointerKind::Default);
+        modal.set_listing(
+            "/workspace",
+            vec![FileBrowserEntry {
+                name: "photo.png".into(),
+                is_dir: false,
+                size: None,
+            }],
+        );
+        let (x, y) = (g.list[0] + 30.0, g.list[1] + ROW_HEIGHT * 0.5);
+        assert_eq!(modal.pointer_kind_at(x, y), ModalPointerKind::Pointer);
+        modal.pointer_down(x, y, 1);
+        let (x, y) = point(g.accept_hit);
+        assert_eq!(modal.pointer_kind_at(x, y), ModalPointerKind::Pointer);
+        modal.close();
+        assert_eq!(modal.pointer_kind_at(x, y), ModalPointerKind::Default);
+    }
+
+    #[test]
+    fn opening_click_and_directory_animations_are_bounded_and_safe() {
+        let mut modal = ready(FileBrowserMode::ChooseDirectory);
+        assert!(modal.is_animating());
+        for viewport in [[0.0, 0.0, 390.0, 500.0], [0.0, 0.0, 1200.0, 800.0]] {
+            let painted = modal.animated_geometry(viewport).card;
+            let cover = modal.occlusion_rect_for(viewport).unwrap();
+            assert!(painted[1] >= viewport[1]);
+            assert!(painted[1] + painted[3] <= viewport[1] + viewport[3]);
+            assert!(cover[1] <= painted[1]);
+            assert!(cover[1] + cover[3] >= painted[1] + painted[3] - 0.01);
+        }
+        let old = Instant::now() - web_time::Duration::from_secs(2);
+        modal.opened_at = Some(old);
+        assert!(!modal.is_animating());
+        modal.set_listing(
+            "/workspace",
+            vec![FileBrowserEntry {
+                name: "child".into(),
+                is_dir: true,
+                size: None,
+            }],
+        );
+        assert!(modal.is_animating());
+        modal.listing_at = Some(old);
+        let g = FileBrowserModal::geometry([0.0, 0.0, 1200.0, 800.0]);
+        modal.last_geometry = Some(g);
+        modal.pointer_down(g.list[0] + 30.0, g.list[1] + ROW_HEIGHT * 0.5, 1);
+        assert!(modal.is_animating());
+        modal.clicked_at = modal.clicked_at.map(|(hit, _)| (hit, old));
+        assert!(!modal.is_animating());
+        modal.close();
+        assert!(!modal.is_animating());
+    }
+
+    #[test]
+    fn button_labels_fit_with_padding_at_all_supported_scales() {
+        assert_eq!(FileBrowserMode::ChooseDirectory.action(), "Select");
+        for width in [280.0, 390.0, 1200.0] {
+            let g = FileBrowserModal::geometry([0.0, 0.0, width, 700.0]);
+            for scale in [0.5, 1.0, 1.5, 3.0] {
+                let requested = FILE_BROWSER_DENSITY.font_size * scale;
+                for (label, r) in [
+                    ("Attach", g.accept),
+                    ("Open", g.accept),
+                    ("Select", g.accept),
+                    ("Cancel", g.cancel),
+                ] {
+                    let measured = label.len() as f32 * requested * 0.8;
+                    let inner = [r[0] + 12.0, r[1] + 4.0, r[2] - 24.0, r[3] - 8.0];
+                    let size = fitted_label_size(requested, measured, inner);
+                    assert!(size <= inner[3] + 0.001);
+                    assert!(measured * size / requested <= inner[2] + 0.001);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn invisible_partial_sidebar_rows_cannot_be_clicked() {
+        let mut modal = ready(FileBrowserMode::ChooseDirectory);
+        let mut g = FileBrowserModal::geometry([0.0, 0.0, 1200.0, 800.0]);
+        let side = g.sidebar.as_mut().unwrap();
+        side[3] = ROW_HEIGHT * 1.5 + 4.0;
+        let (x, y) = (side[0] + 20.0, side[1] + 4.0 + ROW_HEIGHT * 1.25);
+        modal.last_geometry = Some(g);
+        assert_eq!(modal.hit_test(x, y), Some(FileBrowserHit::Footer));
+    }
+
+    #[test]
+    fn correcting_an_invalid_path_restores_confirmation() {
+        let mut modal = ready(FileBrowserMode::ChooseDirectory);
+        assert!(modal.set_listing("/workspace", vec![]));
+        assert!(!modal.navigate("relative/path"));
+        assert!(!modal.accept_button());
+        assert!(modal.navigate("/workspace"));
+        assert!(modal.set_listing("/workspace", vec![]));
+        assert!(modal.accept_button());
+    }
+
+    #[test]
+    fn narrow_toolbar_reflows_search_below_navigation_and_path() {
+        for width in [280.0, 320.0, 390.0] {
+            let g = FileBrowserModal::geometry([0.0, 0.0, width, 600.0]);
+            let search = search_control_rect(g, false);
+            let path = path_control_rect(g, false);
+            assert!(search[1] >= path[1] + path[3]);
+            assert!(path[0] + path[2] <= g.card[0] + g.card[2]);
+            for control in [
+                nav_control_rect(g, 0, false),
+                nav_control_rect(g, 1, false),
+                nav_control_rect(g, 2, false),
+                path,
+                search,
+            ] {
+                assert!(intersect_rect(control, g.list).is_none());
+                assert!(control[0] >= g.card[0]);
+                assert!(control[0] + control[2] <= g.card[0] + g.card[2]);
+            }
+        }
+    }
+
+    #[test]
+    fn directory_mode_filters_files_and_confirms_the_viewed_folder() {
+        let mut modal = ready(FileBrowserMode::ChooseDirectory);
+        modal.set_listing(
+            "/workspace",
+            vec![
+                FileBrowserEntry {
+                    name: "child".into(),
+                    is_dir: true,
+                    size: None,
+                },
+                FileBrowserEntry {
+                    name: "readme.md".into(),
+                    is_dir: false,
+                    size: Some(12),
+                },
+            ],
+        );
+        assert_eq!(modal.entries.len(), 1);
+        assert!(!modal.accept_path("/workspace/readme.md".into()));
+        assert!(modal.accept_button());
+        assert_eq!(modal.take_selection().unwrap().path, "/workspace");
+    }
+
+    #[test]
+    fn directory_confirmation_waits_for_a_successful_listing() {
+        let mut modal = ready(FileBrowserMode::ChooseDirectory);
+        assert!(!modal.accept_button());
+        assert!(modal.set_listing("/workspace", vec![]));
+        assert!(modal.navigate("/workspace/child"));
+        assert!(!modal.accept_button());
+        modal.set_error("Permission denied");
+        assert!(!modal.accept_button());
+        assert!(modal.navigate("/workspace/child"));
+        assert!(modal.drain_requests().iter().any(|request| matches!(
+            request, FileBrowserRequest::ListDirectory { path } if path == "/workspace/child"
+        )));
+        assert!(modal.set_listing("/workspace/child", vec![]));
+        assert!(modal.accept_button());
+        assert_eq!(modal.take_selection().unwrap().path, "/workspace/child");
+    }
+
+    #[test]
+    fn location_discovery_preserves_nested_host_start_directory() {
+        for start in ["/host/projects/app", "C:\\Users\\host\\project"] {
+            let root = if start.starts_with('/') {
+                "/host"
+            } else {
+                "C:\\Users\\host"
+            };
+            let mut modal = FileBrowserModal::new();
+            modal.open(FileBrowserMode::ChooseDirectory, start, vec![]);
+            modal.set_locations(vec![location("home", "Home", root)]);
+            assert_eq!(modal.current_path(), start);
+            assert_eq!(
+                modal.drain_requests().last(),
+                Some(&FileBrowserRequest::ListDirectory { path: start.into() })
+            );
+        }
+    }
+
+    #[test]
+    fn reopening_clears_previous_host_locations_and_ignores_closed_replies() {
+        let mut modal = ready(FileBrowserMode::ChooseDirectory);
+        modal.close();
+        assert!(!modal.set_listing("/workspace", vec![]));
+        assert!(!modal.set_locations(vec![location("home", "Home", "/old-host")]));
+        modal.open(FileBrowserMode::ChooseDirectory, "/guest/dir", vec![]);
+        assert!(modal.locations.is_empty());
+        modal.set_locations(vec![location("workspace", "Workspace", "/host/workspace")]);
+        assert_eq!(modal.current_path(), "/host/workspace");
+        assert!(!modal.set_listing("/guest/dir", vec![]));
+        assert!(!modal.accept_button());
+    }
+
+    #[test]
+    fn enter_navigates_without_confirming_an_unloaded_directory() {
+        let mut modal = ready(FileBrowserMode::ChooseDirectory);
+        modal.set_listing(
+            "/workspace",
+            vec![FileBrowserEntry {
+                name: "folder".into(),
+                is_dir: true,
+                size: None,
+            }],
+        );
+        modal.press_named(NamedKey::ArrowDown);
+        modal.press_named(NamedKey::Enter);
+        assert_eq!(modal.current_path(), "/workspace/folder");
+        assert!(modal.take_selection().is_none());
+        assert!(!modal.accept_button());
+    }
+
     #[test]
     fn browser_paths_are_absolute_and_labels_are_never_paths() {
         assert!(normalize_browser_path("Documents").is_err());
@@ -1712,7 +2744,8 @@ mod tests {
         theme.border = 0x345678;
         let palette = FileBrowserPalette::from_theme(&theme);
         assert_eq!(palette.backdrop, theme.bg);
-        assert_eq!(palette.sidebar, theme.surface);
+        assert_eq!(palette.sidebar, theme.panel_bg());
+        assert_eq!(palette.body, palette.card);
         assert_eq!(palette.border, theme.border);
         assert_eq!(palette.card, theme.panel_bg());
     }
@@ -1720,7 +2753,7 @@ mod tests {
     fn centered_button_origin_centers_both_axes() {
         let rect = [10.0, 20.0, 72.0, FILE_BROWSER_DENSITY.visual_control_height];
         let origin = centered_text_origin(rect, 40.0, FILE_BROWSER_DENSITY.font_size);
-        assert_eq!(origin, [26.0, 25.5]);
+        assert_eq!(origin, [26.0, 29.5]);
         assert_eq!(origin[0] + 20.0, rect[0] + rect[2] * 0.5);
         assert_eq!(
             origin[1] + FILE_BROWSER_DENSITY.font_size * 0.5,
@@ -1728,7 +2761,7 @@ mod tests {
         );
     }
     #[test]
-    fn density_is_the_shared_file_tree_density() {
+    fn modal_keeps_shared_type_and_radius_with_roomier_rows() {
         assert_eq!(FILE_BROWSER_DENSITY.font_size, FONT_SIZE);
         assert_eq!(FILE_BROWSER_DENSITY.icon_size, ICON_FONT_SIZE);
         assert_eq!(FILE_BROWSER_DENSITY.row_height, ROW_HEIGHT);
@@ -1794,8 +2827,8 @@ mod tests {
     #[test]
     fn card_is_restrained_and_mobile_hits_do_not_inflate_visuals() {
         let desktop = FileBrowserModal::geometry([0.0, 0.0, 1600.0, 1000.0]);
-        assert!(desktop.card[2] <= 700.0);
-        assert!(desktop.card[3] <= 462.0);
+        assert_eq!(desktop.card[2], 960.0);
+        assert!(desktop.card[3] >= 640.0 && desktop.card[3] <= 680.0);
         let mobile = FileBrowserModal::geometry([0.0, 0.0, 390.0, 700.0]);
         assert_eq!(mobile.accept[3], FILE_BROWSER_DENSITY.visual_control_height);
         assert_eq!(mobile.accept_hit[3], FILE_BROWSER_DENSITY.touch_hit_height);
@@ -1820,6 +2853,8 @@ mod tests {
                 size: Some(2),
             }],
         );
+        assert!(modal.selected_entry().is_none());
+        modal.press_named(NamedKey::ArrowDown);
         assert!(modal.activate_selected());
         assert_eq!(modal.take_selection().unwrap().path, "/workspace/a.png");
     }
@@ -2083,6 +3118,9 @@ mod tests {
         folder.last_geometry = Some(g);
         let (x, y) = row_point(0);
         folder.pointer_down(x, y, 1);
+        assert_eq!(folder.current_path(), "/workspace");
+        assert!(folder.selection_explicit);
+        folder.pointer_down(x, y, 2);
         assert_eq!(folder.current_path(), "/workspace/folder");
 
         let mut confirm = ready(FileBrowserMode::OpenFile);
@@ -2096,6 +3134,8 @@ mod tests {
             }],
         );
         confirm.last_geometry = Some(g);
+        let (x, y) = row_point(0);
+        confirm.pointer_down(x, y, 1);
         let (x, y) = point(g.accept_hit);
         confirm.pointer_down(x, y, 1);
         assert_eq!(confirm.take_selection().unwrap().path, "/workspace/a.txt");

@@ -140,6 +140,11 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             neoworld_pane: None,
             modal: crate::widgets::modal::UniversalModal::new(),
             connection_gate_active: false,
+            conversation_navigator: Default::default(),
+            conversation_dashboard_root: None,
+            conversation_dashboard_endpoint: None,
+            pending_catalog_header: None,
+            pending_navigator_action: None,
             file_browser: crate::panels::file_browser::FileBrowserModal::new(),
             pending_settings_actions: Vec::new(),
             pending_extensions_actions: Vec::new(),
@@ -367,6 +372,14 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         self.file_tree = Some(tree);
     }
 
+    /// Request one ordinary Agent draft. Both New Chat intents use the same
+    /// host activation path as Open Agent; do not also enqueue EnsureSession
+    /// or a provider-specific new-chat command (that would create two threads).
+    /// Focus is committed by the host only once its new tab is selected.
+    pub(crate) fn activate_new_conversation(&mut self) {
+        self.apply_top_bar_action(TopBarAction::OpenAgent);
+    }
+
     /// Drain a selected catalog thread for the web host to open in an Agent tab.
     pub fn take_conversation_new(
         &mut self,
@@ -585,6 +598,11 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         if !self.details_panel_enabled {
             pane.side_panel_mut().set_user_hidden(true);
         }
+        pane.side_panel_mut().set_dashboard_directory(
+            self.conversation_dashboard_root
+                .as_ref()
+                .map(|root| root.to_string_lossy().into_owned()),
+        );
         self.agent_pane = Some(pane);
     }
 

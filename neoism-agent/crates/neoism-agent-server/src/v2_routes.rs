@@ -503,17 +503,33 @@ async fn worker_stream_expiry(expires_at: Option<i64>) {
     }
 }
 
-/// Root-session lifecycle events for one authorized workspace directory.
-/// This is deliberately separate from `/v2/events`: transcript streams are
-/// scoped to one conversation family, while the GUI catalogue must also see
-/// independent roots created by another workspace participant.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SessionCatalogQuery {
+    pub directory: Option<String>,
+    /// Explicitly omit directory narrowing, retaining per-root authorization.
+    pub scope: Option<SessionCatalogScope>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum SessionCatalogScope {
+    All,
+}
+
+/// Root-session lifecycle events for an authorized directory or all authorized
+/// projects on this endpoint (`scope=all`). Omitted scope preserves the legacy
+/// query/header/default-directory behavior.
 pub(crate) async fn v2_session_catalog_events(
     State(state): State<AppState>,
     claims: Option<Extension<crate::caller::CallerClaims>>,
     headers: HeaderMap,
-    Query(query): Query<InstanceQuery>,
+    Query(query): Query<SessionCatalogQuery>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let directory = resolve_directory(query.directory, &headers);
+    let directory = match query.scope {
+        Some(SessionCatalogScope::All) => None,
+        None => Some(resolve_directory(query.directory, &headers)),
+    };
     let claims = claims.map(|Extension(claims)| claims);
     let credential_expiry = state.services().workspace_worker.as_ref().and_then(|_| {
         claims
@@ -524,7 +540,7 @@ pub(crate) async fn v2_session_catalog_events(
     let mut receiver = state.subscribe();
     let stream = async_stream::stream! {
         let Ok(mut catalog) = crate::catalog_activity::CatalogProjection::load(&state).await else { return };
-        let Ok(baseline) = catalog.baseline(&state, &directory, claims.as_ref()).await else { return };
+        let Ok(baseline) = catalog.baseline(&state, directory.as_deref(), claims.as_ref()).await else { return };
         for event in baseline { yield Ok(v2_live_sse_event(event)); }
         loop {
             let event = match receiver.recv().await {
@@ -535,7 +551,7 @@ pub(crate) async fn v2_session_catalog_events(
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
             };
-            let Ok(projected) = catalog.project_event(&state, event, &directory, claims.as_ref()).await else { break };
+            let Ok(projected) = catalog.project_event(&state, event, directory.as_deref(), claims.as_ref()).await else { break };
             for projected in projected {
                 yield Ok(v2_live_sse_event(projected));
             }
@@ -796,6 +812,34 @@ pub(crate) struct V2PromptRequest {
     pub variant: Option<String>,
 }
 
+/// Saved-directory discovery plus all authorized pinned root metadata. Neither
+/// collection has a recent-session cutoff; no message/history reads are needed.
+pub(crate) async fn v2_session_projects(
+    State(state): State<AppState>,
+    claims: Option<Extension<crate::caller::CallerClaims>>,
+) -> Result<Json<Value>, ApiError> {
+    if !state.inner.store.session_list_index_ready().await? {
+        return Err(ApiError::service_unavailable(
+            "Session catalog is still indexing; retry shortly",
+        ));
+    }
+    let claims = claims.as_ref().map(|Extension(claims)| claims);
+    let scope = claims.map(|claims| {
+        if !claims.hosted && claims.workspace_id.is_none() && claims.tenant_id == "local" {
+            crate::state::TenantQueryScope::LocalAll
+        } else {
+            crate::state::TenantQueryScope::Tenant(&claims.tenant_id)
+        }
+    }).unwrap_or(crate::state::TenantQueryScope::LocalAll);
+    let items = state.inner.store.session_projects(scope, claims).await?;
+    let pinned = state.inner.store.pinned_root_sessions(scope, claims).await?;
+    // Return the compact list metadata directly: the live activity projection
+    // would load every full session to discover families, defeating this query.
+    Ok(Json(serde_json::json!({"items": items.into_iter().map(|(directory, updated)| {
+        serde_json::json!({"directory": directory, "updatedMs": updated})
+    }).collect::<Vec<_>>(), "pinnedSessions": pinned})))
+}
+
 pub(crate) async fn v2_session_list(
     State(state): State<AppState>,
     Query(query): Query<SessionListQuery>,
@@ -808,42 +852,59 @@ pub(crate) async fn v2_session_list(
             .map(crate::state::SessionListCursor::decode)
             .transpose()
             .map_err(|error| ApiError::bad_request(error.to_string()))?;
-        let mut page = state
-            .inner
-            .store
-            .list_root_sessions_page(
-                claims
-                    .as_ref()
-                    .map(|Extension(claims)| {
-                        if !claims.hosted
-                            && claims.workspace_id.is_none()
-                            && claims.tenant_id == "local"
-                        {
-                            crate::state::TenantQueryScope::LocalAll
-                        } else {
-                            crate::state::TenantQueryScope::Tenant(&claims.tenant_id)
-                        }
-                    })
-                    .unwrap_or(crate::state::TenantQueryScope::LocalAll),
-                query.directory.as_deref(),
-                query.path.as_deref(),
-                query.start,
-                query.search.as_deref(),
-                cursor.as_ref(),
-                query.limit,
-            )
-            .await?;
-        if !state.inner.store.session_list_index_ready().await? {
-            return Err(ApiError::service_unavailable(
-                "Session catalog is still indexing; retry shortly",
-            ));
-        }
-        if let Some(Extension(claims)) = claims {
+        let mut cursor = cursor;
+        let mut page = loop {
+            let mut page = state
+                .inner
+                .store
+                .list_root_sessions_page(
+                    claims
+                        .as_ref()
+                        .map(|Extension(claims)| {
+                            if !claims.hosted
+                                && claims.workspace_id.is_none()
+                                && claims.tenant_id == "local"
+                            {
+                                crate::state::TenantQueryScope::LocalAll
+                            } else {
+                                crate::state::TenantQueryScope::Tenant(&claims.tenant_id)
+                            }
+                        })
+                        .unwrap_or(crate::state::TenantQueryScope::LocalAll),
+                    query.exact_directory,
+                    query.exclude_pinned,
+                    query.directory.as_deref(),
+                    query.path.as_deref(),
+                    query.start,
+                    query.search.as_deref(),
+                    cursor.as_ref(),
+                    query.limit,
+                )
+                .await?;
+            if !state.inner.store.session_list_index_ready().await? {
+                return Err(ApiError::service_unavailable(
+                    "Session catalog is still indexing; retry shortly",
+                ));
+            }
+            if let Some(Extension(claims)) = claims.as_ref() {
+                page.items
+                    .retain(|session| crate::caller::allows_session(claims, session));
+            }
             page.items
-                .retain(|session| crate::caller::allows_session(&claims, session));
-        }
-        page.items
-            .retain(crate::external_agent::catalog::is_neoism_owned_root);
+                .retain(crate::external_agent::catalog::is_neoism_owned_root);
+            if !page.items.is_empty() || page.next_cursor.is_none() {
+                break page;
+            }
+            // Authorization and ownership are evaluated after the indexed query.
+            // Skip entirely hidden pages so a scoped caller does not mistake one
+            // for an exhausted catalog before reaching another authorized project.
+            cursor = page
+                .next_cursor
+                .as_deref()
+                .map(crate::state::SessionListCursor::decode)
+                .transpose()
+                .map_err(|error| ApiError::bad_request(error.to_string()))?;
+        };
         for session in &mut page.items {
             if !crate::session_context::is_default_session_title(&session.title) {
                 continue;

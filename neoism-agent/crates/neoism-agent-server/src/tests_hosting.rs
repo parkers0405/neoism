@@ -244,6 +244,93 @@ fn claims(
 }
 
 #[tokio::test]
+async fn exact_directory_filters_associated_chats_before_project_page_limit() {
+    use axum::extract::{Query, State};
+    let dir = std::env::temp_dir().join(format!("exact-project-page-{}", neoism_agent_core::new_session_id()));
+    let root = dir.join("repo");
+    let nested = root.join("sub");
+    std::fs::create_dir_all(&nested).unwrap();
+    let path = dir.join("agent.db");
+    let state = AppState::open_database(path.clone()).await.unwrap();
+    state.start_session_list_backfill();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while !state.inner.store.session_list_index_ready().await.unwrap() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }).await.unwrap();
+    let mut own_ids = std::collections::HashSet::new();
+    let mut moved = Vec::new();
+    for n in 0..12 {
+        let mut session = store_test_session(&neoism_agent_core::new_session_id(), n + 1);
+        session.directory = root.to_string_lossy().into_owned();
+        state.inner.store.insert_session(&session).await.unwrap();
+        if n < 6 { own_ids.insert(session.id.to_string()); } else { moved.push(session); }
+    }
+    state.inner.store.associate_host_directory(root.to_str().unwrap(), "exact-page-host").await.unwrap();
+    for mut session in moved {
+        session.directory = nested.to_string_lossy().into_owned();
+        state.inner.store.update_session(&session).await.unwrap();
+    }
+    let uri: axum::http::Uri = format!("/v2/sessions?roots=true&limit=5&directory={}", root.display()).parse().unwrap();
+    let broad_query = Query::<crate::SessionListQuery>::try_from_uri(&uri).unwrap().0;
+    assert!(!broad_query.exact_directory, "existing callers default to broad matching");
+    let broad = crate::v2_routes::v2_session_list(State(state.clone()), Query(broad_query), None).await.unwrap().0;
+    assert_eq!(broad.items.len(), 5);
+    assert!(broad.items.iter().all(|session| session.info.directory == nested.to_string_lossy()));
+    let uri: axum::http::Uri = format!("{uri}&exact_directory=true").parse().unwrap();
+    let exact_query = Query::<crate::SessionListQuery>::try_from_uri(&uri).unwrap().0;
+    assert!(exact_query.exact_directory);
+    let exact = crate::v2_routes::v2_session_list(State(state.clone()), Query(exact_query.clone()), None).await.unwrap().0;
+    assert_eq!(exact.items.len(), 5);
+    assert!(exact.items.iter().all(|session| own_ids.contains(session.info.id.as_str())));
+    let mut next_query = exact_query;
+    next_query.cursor = exact.cursor.next;
+    assert!(next_query.cursor.is_some());
+    let next = crate::v2_routes::v2_session_list(State(state.clone()), Query(next_query), None).await.unwrap().0;
+    assert_eq!(next.items.len(), 1);
+    assert!(own_ids.contains(next.items[0].info.id.as_str()));
+    assert!(!exact.items.iter().any(|session| session.info.id == next.items[0].info.id));
+    assert!(next.cursor.next.is_none());
+    state.inner.store.close().await;
+    cleanup_sqlite_files(&path);
+}
+
+#[tokio::test]
+async fn session_projects_discovery_excludes_association_only_directory_names() {
+    let dir = std::env::temp_dir().join(format!("project-associations-{}", neoism_agent_core::new_session_id()));
+    let root = dir.join("repo");
+    let nested = root.join("nested");
+    std::fs::create_dir_all(&nested).unwrap();
+    let path = dir.join("agent.db");
+    let store = SessionStore::open(path.clone()).await.unwrap();
+    let mut session = store_test_session(&neoism_agent_core::new_session_id(), 123);
+    session.directory = root.to_string_lossy().into_owned();
+    store.insert_session(&session).await.unwrap();
+    store.associate_host_directory(root.to_str().unwrap(), "project-host").await.unwrap();
+    // An associated chat can later save a nested working directory while the
+    // sidebar still matches its original hosting namespace.
+    session.directory = nested.to_string_lossy().into_owned();
+    store.update_session(&session).await.unwrap();
+    let mut local = claims(&root, "project-host", "local-operator");
+    local.hosted = false;
+    local.workspace_id = None;
+    local.tenant_id = "local".into();
+    assert_eq!(store.session_projects(crate::state::TenantQueryScope::LocalAll, Some(&local)).await.unwrap(), vec![
+        (nested.to_string_lossy().into_owned(), 123),
+    ]);
+    assert_eq!(store.session_projects(crate::state::TenantQueryScope::LocalAll, None).await.unwrap(), vec![
+        (nested.to_string_lossy().into_owned(), 123),
+    ]);
+    // Namespace aliases must never create groups, even for callers authorized
+    // for the parent. A nested-only caller sees the same saved directory.
+    local.directory_prefixes = vec![nested.to_string_lossy().into_owned()];
+    assert_eq!(store.session_projects(crate::state::TenantQueryScope::LocalAll, Some(&local)).await.unwrap(), vec![
+        (nested.to_string_lossy().into_owned(), 123),
+    ]);
+    cleanup_sqlite_files(&path);
+}
+
+#[tokio::test]
 async fn hosting_preserves_local_family_and_reuses_namespace_without_stealing() {
     let dir = std::env::temp_dir().join(format!(
         "agent-hosting-{}",
@@ -294,6 +381,8 @@ async fn hosting_preserves_local_family_and_reuses_namespace_without_stealing() 
     let page = store
         .list_root_sessions_page(
             crate::state::TenantQueryScope::LocalAll,
+            false,
+            false,
             root.to_str(),
             None,
             None,
@@ -303,6 +392,13 @@ async fn hosting_preserves_local_family_and_reuses_namespace_without_stealing() 
         )
         .await
         .unwrap();
+    // Discovery uses the same hydrated authorization as the root list. An
+    // unrelated/foreign root cannot create a project or advance its activity.
+    let projects = store
+        .session_projects(crate::state::TenantQueryScope::LocalAll, Some(&local))
+        .await
+        .unwrap();
+    assert_eq!(projects, vec![(root.to_string_lossy().into_owned(), 123)]);
     assert!(page
         .items
         .iter()

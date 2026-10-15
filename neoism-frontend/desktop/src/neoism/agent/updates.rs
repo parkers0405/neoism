@@ -396,7 +396,7 @@ pub(super) enum AgentSessionCatalogUpdate {
 
 pub(crate) struct AgentSessionCatalogStream {
     server: String,
-    directory: String,
+    directory: Option<String>,
     rx: Receiver<AgentSessionCatalogUpdate>,
     stop: Arc<AtomicBool>,
     wake: Arc<Mutex<Option<AgentEventWake>>>,
@@ -417,15 +417,15 @@ impl AgentSessionCatalogStream {
         }
         Self {
             server: "test".into(),
-            directory: "/tmp".into(),
+            directory: None,
             rx,
             stop: Arc::new(AtomicBool::new(false)),
             wake: Arc::new(Mutex::new(None)),
         }
     }
 
-    pub(super) fn matches(&self, server: &str, directory: &str) -> bool {
-        self.server == server && self.directory == directory
+    pub(super) fn matches(&self, server: &str, directory: Option<&str>) -> bool {
+        self.server == server && self.directory.as_deref() == directory
     }
 
     pub(super) fn drain(&mut self, limit: usize) -> Vec<AgentSessionCatalogUpdate> {
@@ -459,7 +459,7 @@ impl Drop for AgentSessionCatalogStream {
 
 pub(super) fn start_session_catalog_stream(
     server: String,
-    directory: String,
+    directory: Option<String>,
 ) -> AgentSessionCatalogStream {
     let (tx, rx) = mpsc::channel();
     let stop = Arc::new(AtomicBool::new(false));
@@ -472,7 +472,10 @@ pub(super) fn start_session_catalog_stream(
         .name("neoism-agent-session-catalog".into())
         .spawn(move || {
             while !stream_stop.load(Ordering::Relaxed) {
-                match open_session_catalog_stream(&thread_server, &thread_directory) {
+                match open_session_catalog_stream(
+                    &thread_server,
+                    thread_directory.as_deref(),
+                ) {
                     Ok(connection) => {
                         if tx.send(AgentSessionCatalogUpdate::Reconnected).is_err() {
                             return;

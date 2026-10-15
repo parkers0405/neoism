@@ -637,6 +637,42 @@ struct ChromeLayoutSignature {
     pane_breadcrumb_count: usize,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum DesktopBrowserPurpose {
+    Workspace,
+    AddWorkspace,
+    AgentDirectory,
+    AgentImage,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DesktopBrowserTarget {
+    purpose: DesktopBrowserPurpose,
+    workspace_id: Option<WorkspaceKey>,
+    root: PathBuf,
+    scope: String,
+    joined: bool,
+    route: Option<usize>,
+    agent: Option<(String, Option<String>, u64, Option<String>)>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DesktopBrowserRequestKind {
+    Locations,
+    Listing,
+    DirectoryStat,
+    DirectoryListing,
+    ImageStat,
+    ImageRead,
+}
+
+struct RemoteBrowserRequest {
+    connection_key: Option<usize>,
+    generation: u64,
+    path: Option<String>,
+    kind: DesktopBrowserRequestKind,
+}
+
 struct RemoteTerminalCompletion {
     route_id: usize,
     scope: String,
@@ -847,6 +883,12 @@ pub struct Screen<'screen> {
     /// Host directory listings requested by joined-terminal Tab completion.
     /// The snapshot prevents a delayed reply from editing newer input.
     pending_remote_terminal_completions: HashMap<u64, RemoteTerminalCompletion>,
+    conversation_workspaces: bridges::conversation_workspaces::ConversationWorkspaceState,
+    conversation_search: bridges::conversation_navigator::ConversationSearchState,
+    desktop_browser_target: Option<DesktopBrowserTarget>,
+    desktop_browser_generation: u64,
+    pending_remote_browser: HashMap<u64, RemoteBrowserRequest>,
+    desktop_browser_errors: (std::sync::mpsc::Sender<(u64, u64, String)>, std::sync::mpsc::Receiver<(u64, u64, String)>),
     /// In-flight daemon `ReadFile` fetches for markdown panes opened in
     /// a joined workspace (the bytes only exist on the host), by request
     /// id → pane path. The correlated `FileContent` reply fills the pane.
@@ -1888,6 +1930,12 @@ impl Screen<'_> {
             pending_workspace_unsubscriptions: Vec::new(),
             pending_remote_file_ops: std::collections::HashSet::new(),
             pending_remote_terminal_completions: HashMap::new(),
+            conversation_workspaces: bridges::conversation_workspaces::ConversationWorkspaceState::default(),
+            conversation_search: bridges::conversation_navigator::ConversationSearchState::default(),
+            desktop_browser_target: None,
+            desktop_browser_generation: 0,
+            pending_remote_browser: HashMap::new(),
+            desktop_browser_errors: std::sync::mpsc::channel(),
             pending_remote_markdown_opens: HashMap::new(),
             pending_remote_code_opens: HashMap::new(),
             markdown_cover_cache: HashMap::new(),

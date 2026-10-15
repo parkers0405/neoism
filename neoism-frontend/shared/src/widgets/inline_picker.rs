@@ -326,6 +326,32 @@ pub fn render_limited(
     max_rows: usize,
     min_y: f32,
 ) -> Option<InlinePickerRenderState> {
+    render_limited_with_disabled(
+        sugarloaf,
+        view,
+        input_rect,
+        theme,
+        scale,
+        max_rows,
+        min_y,
+        &[],
+    )
+}
+
+/// Render disabled choices as ordinary two-line items with muted titles, not
+/// section headers. Indices refer to `view.rows`; hosts still own activation.
+/// The separate slice avoids changing every existing picker row initializer.
+#[allow(clippy::too_many_arguments)]
+pub fn render_limited_with_disabled(
+    sugarloaf: &mut Sugarloaf,
+    view: InlinePickerView<'_>,
+    input_rect: [f32; 4],
+    theme: &IdeTheme,
+    scale: f32,
+    max_rows: usize,
+    min_y: f32,
+    disabled_rows: &[usize],
+) -> Option<InlinePickerRenderState> {
     let s = scale.clamp(0.5, 3.0);
     let row_h = ROW_H * s;
     let title_h = TITLE_H * s;
@@ -669,7 +695,12 @@ pub fn render_limited(
         if row_y + row_h <= list_y || row_y >= list_bottom {
             continue;
         }
-        let selected_row = absolute_ix == selected;
+        let disabled = disabled_rows.contains(&absolute_ix);
+        let selected_row = absolute_ix == selected && !disabled;
+        let title_opts = DrawOpts {
+            color: theme.u8(if disabled { theme.muted } else { theme.fg }),
+            ..title_opts.clone()
+        };
         if row.is_header {
             if row.title.is_empty() {
                 continue;

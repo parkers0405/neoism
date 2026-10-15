@@ -1040,6 +1040,11 @@ impl Screen<'_> {
         let directory = self
             .workspace_root_for_new_shell()
             .map(|path| path.to_string_lossy().into_owned());
+        let catalog_directory = crate::neoism::agent::NeoismAgentPane::catalog_scope_for_workspace(
+            directory.as_deref(),
+            self.context_manager.current_workspace_is_remote_joined(),
+            dirs::home_dir().as_deref(),
+        );
         let rich_text_id = next_rich_text_id();
         let _ = self.sugarloaf.text(Some(rich_text_id));
         let route_id = self.context_manager.add_stacked_neoism_agent(
@@ -1052,6 +1057,7 @@ impl Screen<'_> {
         )
         .1;
         if let Some(agent) = self.context_manager.current_mut().neoism_agent.as_mut() {
+            agent.set_catalog_directory(catalog_directory);
             agent.set_local_presence_name(Some(local_presence_name));
             if !self.details_panel_enabled {
                 agent.side_panel_mut().set_user_hidden(true);
@@ -1065,7 +1071,7 @@ impl Screen<'_> {
         // it on the local server and shows the guest's own sessions. The
         // workspace-switch path already syncs; opening the tab did not.
         self.sync_agent_server_for_current_workspace();
-        self.renderer.file_tree.set_focused(false);
+        self.focus_active_agent_composer();
         self.renderer.file_tree.set_active_path(None);
         self.reapply_chrome_layout();
         self.renderer.trail_cursor.reset();
@@ -1349,6 +1355,31 @@ impl Screen<'_> {
         {
             return false;
         }
+        use neoism_ui::panels::agent_pane::composer_interactions::ComposerAction;
+        let composer_action = self.context_manager.current().neoism_agent.as_ref()
+            .and_then(|agent| agent.composer_interactions.action_at(mx, my));
+        if let Some(action) = composer_action {
+            match action {
+                ComposerAction::AttachPicture => self.open_agent_image_browser(),
+                ComposerAction::ChangeDirectory => self.open_agent_directory_browser(),
+            }
+            self.mark_dirty();
+            return true;
+        }
+        let usage_hit = self
+            .context_manager
+            .current()
+            .neoism_agent
+            .as_ref()
+            .is_some_and(|agent| agent.usage_chip_contains(mx, my));
+        if usage_hit {
+            if let Some(agent) = self.context_manager.current_mut().neoism_agent.as_mut() {
+                agent.close_picker();
+            }
+            self.open_agent_image_browser();
+            self.mark_dirty();
+            return true;
+        }
         // Picker overlay wins ABOVE anything else — when /session is open
         // the popover sits over the message timeline (and can spill over
         // the buffer tab strip when the conversation is small), so a row
@@ -1376,6 +1407,14 @@ impl Screen<'_> {
         // `handle_island_click` in the mouse pipeline.
         if self.point_in_island_strip(mx, my) {
             return false;
+        }
+        // The workspace Conversations catalog is a different backing pane
+        // from the displayed Agent body. Give its actual bounds priority over
+        // any stale embedded side/detail hit geometry on the current Agent.
+        if self.renderer.conversations_visible
+            && self.renderer.conversations_pane.side_panel().contains_point(mx, my)
+        {
+            return self.handle_conversations_click();
         }
         // Side-panel toggle button. Always checked first so clicking
         // the bottom-right icon never falls through to the timeline /
@@ -1478,17 +1517,6 @@ impl Screen<'_> {
             .as_mut()
             .is_some_and(|agent| agent.respond_question_at(mx, my));
         if question_hit {
-            self.mark_dirty();
-            return true;
-        }
-        let usage_hit = self
-            .context_manager
-            .current()
-            .neoism_agent
-            .as_ref()
-            .is_some_and(|agent| agent.usage_chip_contains(mx, my));
-        if usage_hit {
-            self.open_agent_image_browser();
             self.mark_dirty();
             return true;
         }
@@ -1786,6 +1814,17 @@ impl Screen<'_> {
         false
     }
 
+    pub fn neoism_agent_wordmark_hovered(&self) -> bool {
+        let scale = self.sugarloaf.scale_factor();
+        let mx = self.mouse.x as f32 / scale;
+        let my = self.mouse.y as f32 / scale;
+        self.context_manager
+            .current()
+            .neoism_agent
+            .as_ref()
+            .is_some_and(|agent| agent.wordmark_hit(mx, my))
+    }
+
     pub fn neoism_agent_link_hovered(&self) -> bool {
         self.context_manager
             .current()
@@ -1946,83 +1985,6 @@ impl Screen<'_> {
         None
     }
 
-    pub(crate) fn open_agent_image_browser(&mut self) {
-        let persisted =
-            neoism_backend::config::config_dir_path().join("file-browser-recents.json");
-        let recents = std::fs::read(&persisted)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<Vec<String>>(&bytes).ok())
-            .unwrap_or_else(|| self.renderer.file_browser.recents().to_vec());
-        self.renderer.file_browser.open(
-            neoism_ui::panels::file_browser::FileBrowserMode::AttachImage,
-            "",
-            recents,
-        );
-        let root = self
-            .active_pane_workspace_root()
-            .or_else(|| self.active_workspace_root.clone())
-            .unwrap_or_else(|| {
-                std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-            });
-        let candidates = [
-            ("workspace", "Workspace", Some(root)),
-            ("home", "Home", dirs::home_dir()),
-            ("documents", "Documents", dirs::document_dir()),
-            ("downloads", "Downloads", dirs::download_dir()),
-            ("pictures", "Pictures", dirs::picture_dir()),
-        ];
-        let mut locations = Vec::new();
-        for (kind, label, path) in candidates {
-            let Some(path) = path
-                .and_then(|path| path.canonicalize().ok())
-                .filter(|path| path.is_dir())
-            else {
-                continue;
-            };
-            let path = path.to_string_lossy().into_owned();
-            locations.push(neoism_ui::panels::file_browser::FileBrowserLocation {
-                kind: kind.into(),
-                label: label.into(),
-                path,
-            });
-        }
-        self.renderer.file_browser.set_locations(locations);
-        self.pump_agent_image_browser();
-    }
-
-    pub(crate) fn pump_agent_image_browser(&mut self) {
-        let root = self
-            .active_pane_workspace_root()
-            .or_else(|| self.active_workspace_root.clone())
-            .unwrap_or_else(|| {
-                std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-            });
-        self.renderer.file_browser.fulfill_requests_native(&root);
-        if let Some(selection) = self.renderer.file_browser.take_selection() {
-            let state_path = neoism_backend::config::config_dir_path()
-                .join("file-browser-recents.json");
-            if let Ok(bytes) = serde_json::to_vec(self.renderer.file_browser.recents()) {
-                let _ =
-                    std::fs::create_dir_all(neoism_backend::config::config_dir_path());
-                let _ = std::fs::write(state_path, bytes);
-            }
-            if selection.mode
-                == neoism_ui::panels::file_browser::FileBrowserMode::AttachImage
-            {
-                let resolved = self
-                    .renderer
-                    .file_browser
-                    .resolve_native_selection(&selection.path);
-                if let Some(agent) =
-                    self.context_manager.current_mut().neoism_agent.as_mut()
-                {
-                    if let Ok(path) = resolved {
-                        let _ = agent.attach_path(&path);
-                    }
-                }
-            }
-        }
-    }
 
     pub(crate) fn find_neoism_file_by_name(
         &self,

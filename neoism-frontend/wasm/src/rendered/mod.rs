@@ -1603,6 +1603,12 @@ struct AgentPendingPermission {
 /// touching the wasm-bindgen surface.
 #[derive(Default)]
 struct AgentBridgeState {
+    catalog_endpoint: String,
+    catalog_fingerprint: String,
+    catalog_epoch: u64,
+    project_discovery_generation: u64,
+    project_discovery_identity: Option<String>,
+    project_discovery_retry_wake: Option<web_time::Instant>,
     // NB: the composer (input text, caret, Up-arrow recall) has NO
     // bridge-side mirror — the shared `NeoismAgentPane` is the single
     // source of truth and `agent_input` / `agent_set_input` /
@@ -1901,6 +1907,7 @@ pub struct ChromeBridge {
     /// Lives on the bridge so the web frontend can drive an
     /// `AgentPane`-equivalent without spawning a parallel store.
     agent_state: AgentBridgeState,
+    pending_agent_file_browser: Option<serde_json::Value>,
     /// Per-pane data-only terminals for SPLIT terminal panes, keyed by
     /// the pane grid's external id. While the grid is split every
     /// visible terminal pane renders from its own pane-sized
@@ -1959,6 +1966,7 @@ mod chrome_bridge_core;
 mod chrome_pages;
 mod construct;
 mod editor_panes;
+mod conversation_navigator;
 mod file_browser;
 mod file_tree_workspace;
 mod frame;

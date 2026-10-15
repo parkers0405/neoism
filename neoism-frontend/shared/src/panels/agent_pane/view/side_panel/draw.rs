@@ -1,6 +1,59 @@
-use super::sections::{render_directory_section, render_section_header, SECTION_GAP};
+use super::sections::render_section_header;
 use super::*;
 use crate::panels::agent_pane::view::draw::measure_text_cached;
+
+#[derive(Clone, Copy)]
+enum CatalogIcon {
+    Compose,
+    Folder,
+    Chevron,
+}
+
+/// Use the file tree's bundled icon font, sizing, and ink-centered alignment.
+#[allow(clippy::too_many_arguments)]
+fn draw_catalog_icon(
+    sugarloaf: &mut Sugarloaf,
+    icon: CatalogIcon,
+    x: f32,
+    y: f32,
+    s: f32,
+    theme: &IdeTheme,
+    clip: [f32; 4],
+    cuts: &[[f32; 4]],
+) {
+    let (glyph, color) = match icon {
+        CatalogIcon::Compose => ("\u{f044}", theme.fg),
+        CatalogIcon::Folder => (
+            crate::panels::file_tree::icons::folder_icon(false).0,
+            theme.folder,
+        ),
+        CatalogIcon::Chevron => ("\u{f078}", theme.muted),
+    };
+    let opts = DrawOpts {
+        font_size: crate::panels::file_tree::ICON_FONT_SIZE * s,
+        color: theme.u8(color),
+        clip_rect: Some(clip),
+        ..DrawOpts::default()
+    };
+    crate::primitives::draw_icon_centered_with_occlusion(
+        sugarloaf,
+        x,
+        [x, y, 20.0 * s, 20.0 * s],
+        glyph,
+        &opts,
+        cuts,
+        true,
+    );
+}
+
+fn project_label_opts(theme: &IdeTheme, scale: f32, clip: [f32; 4]) -> DrawOpts {
+    DrawOpts {
+        font_size: FONT_SIZE * scale,
+        color: theme.u8(theme.readable_accent(theme.blue)),
+        clip_rect: Some(clip),
+        ..DrawOpts::default()
+    }
+}
 
 const SCRAMBLE_MS: f32 = 320.0;
 const SCRAMBLE_GLYPHS: &[char] = &['#', '@', '%', '&', '*', '+', '?', '/', '~', '='];
@@ -257,7 +310,16 @@ pub(crate) fn render_sessions_list(
     pane.maybe_refresh_side_panel_sessions();
 
     let [cx, cy, cw, ch] = content_rect;
-    let pad_x = ROW_PADDING_X * s;
+    let navigation = pane.side_panel().navigation_header_enabled();
+    pane.side_panel_mut().clear_header_rects();
+    if navigation {
+        pane.side_panel_mut().clear_session_search_rect();
+    }
+    let pad_x = if navigation {
+        18.0 * s
+    } else {
+        ROW_PADDING_X * s
+    };
     let text_x = cx + pad_x;
     let text_w = (cw - pad_x * 2.0).max(0.0);
     let clip = [cx, cy, cw, ch];
@@ -266,18 +328,6 @@ pub(crate) fn render_sessions_list(
     // Catalog is always the left rail, whether a chat is open or not.
     let mut y = cy + 14.0 * s;
     pane.side_panel_mut().close_provider_menu();
-    y = render_directory_section(
-        sugarloaf,
-        pane,
-        text_x,
-        y,
-        text_w,
-        theme,
-        s,
-        clip,
-        occlusion_rects,
-    );
-    y += SECTION_GAP * s;
     y = render_section_header(
         sugarloaf,
         "Chats",
@@ -319,7 +369,7 @@ pub(crate) fn render_sessions_list(
     let icon_side = 20.0 * s;
     let icon_x = button_rect[0] + 7.0 * s;
     let icon_y = button_rect[1] + (button_h - icon_side) / 2.0;
-    if button_hovered || button_selected {
+    if !navigation && (button_hovered || button_selected) {
         sugarloaf.rounded_rect(
             None,
             icon_x,
@@ -334,32 +384,28 @@ pub(crate) fn render_sessions_list(
             ORDER_PANEL + 3,
         );
     }
-    let plus_opts = DrawOpts {
-        font_size: 12.0 * s,
-        color: theme.u8(theme.readable_accent(theme.accent)),
-        bold: true,
-        clip_rect: Some(clip),
-        ..DrawOpts::default()
-    };
-    draw_text_with_occlusion(
+    draw_catalog_icon(
         sugarloaf,
-        icon_x + 5.0 * s,
-        icon_y + 4.0 * s,
-        "+",
-        &plus_opts,
+        CatalogIcon::Compose,
+        icon_x,
+        icon_y,
+        s,
+        theme,
+        clip,
         occlusion_rects,
     );
+    let label_size = FONT_SIZE * s * if navigation { 1.0 } else { 0.95 };
     let label_opts = DrawOpts {
-        font_size: FONT_SIZE * s * 0.95,
+        font_size: label_size,
         color: theme.u8(theme.fg),
-        bold: button_hovered || button_selected,
+        bold: !navigation && (button_hovered || button_selected),
         clip_rect: Some(clip),
         ..DrawOpts::default()
     };
     draw_text_with_occlusion(
         sugarloaf,
         icon_x + icon_side + 9.0 * s,
-        button_rect[1] + (button_h - FONT_SIZE * s * 0.95) / 2.0,
+        button_rect[1] + (button_h - label_size) / 2.0,
         "New chat",
         &label_opts,
         occlusion_rects,
@@ -375,7 +421,118 @@ pub(crate) fn render_sessions_list(
         ]);
     }
 
-    y = button_rect[1] + button_rect[3] + 8.0 * s;
+    y = button_rect[1] + button_rect[3] + if navigation { 0.0 } else { 8.0 * s };
+    if navigation {
+        use crate::panels::agent_pane::state::side_panel::CatalogHeaderAction;
+        let label = pane.side_panel().project_button_label().to_owned();
+        super::super::draw::draw_rect_clipped(
+            sugarloaf,
+            [text_x, y + 4.0 * s, text_w, s],
+            theme.f32_alpha(theme.muted, 0.22),
+            ORDER_PANEL + 2,
+            clip,
+        );
+        y += 8.0 * s;
+        for (action, title, icon) in [(
+            CatalogHeaderAction::Projects,
+            label.as_str(),
+            CatalogIcon::Folder,
+        )] {
+            let rect = [text_x, y, text_w.max(0.0), 34.0 * s];
+            if let Some(hit) = intersect_rect(rect, clip) {
+                pane.side_panel_mut().set_header_action_rect(action, hit);
+            }
+            draw_catalog_icon(
+                sugarloaf,
+                icon,
+                icon_x,
+                y + 7.0 * s,
+                s,
+                theme,
+                clip,
+                occlusion_rects,
+            );
+            let opts = DrawOpts {
+                font_size: FONT_SIZE * s,
+                color: theme.u8(theme.fg),
+                clip_rect: intersect_rect(
+                    [icon_x + 29.0 * s, y, (rect[2] - 54.0 * s).max(0.0), rect[3]],
+                    clip,
+                ),
+                ..DrawOpts::default()
+            };
+            if opts.clip_rect.is_some() {
+                draw_text_with_occlusion(
+                    sugarloaf,
+                    icon_x + 29.0 * s,
+                    y + 10.0 * s,
+                    title,
+                    &opts,
+                    occlusion_rects,
+                );
+            }
+            if pane.side_panel().projects_selected() && pane.side_panel().is_focused() {
+                let cursor_w = (FONT_SIZE * s * 0.6).max(2.0);
+                let cursor_h = (rect[3] - 8.0 * s).max(FONT_SIZE * s).min(rect[3]);
+                pane.side_panel_mut().set_selected_cursor_rect([
+                    rect[0] + s,
+                    rect[1] + (rect[3] - cursor_h) / 2.0,
+                    cursor_w,
+                    cursor_h,
+                ]);
+            }
+            if action == CatalogHeaderAction::Projects {
+                draw_catalog_icon(
+                    sugarloaf,
+                    CatalogIcon::Chevron,
+                    rect[0] + rect[2] - 22.0 * s,
+                    y + 7.0 * s,
+                    s,
+                    theme,
+                    clip,
+                    occlusion_rects,
+                );
+            }
+            y += 34.0 * s;
+        }
+        super::super::draw::draw_rect_clipped(
+            sugarloaf,
+            [text_x, y + 4.0 * s, text_w, s],
+            theme.f32_alpha(theme.muted, 0.22),
+            ORDER_PANEL + 2,
+            clip,
+        );
+        y += 12.0 * s;
+    } else {
+        // Legacy hosts still route text input to the inline session query.
+        let rect = [text_x, y, text_w, 32.0 * s];
+        if let Some(hit) = intersect_rect(rect, clip) {
+            pane.side_panel_mut().set_session_search_rect(hit);
+        }
+        let query = pane.side_panel().session_query();
+        let label = if query.is_empty() { "Search" } else { query };
+        let opts = DrawOpts {
+            font_size: FONT_SIZE * s,
+            color: theme.u8(if query.is_empty() {
+                theme.muted
+            } else {
+                theme.fg
+            }),
+            clip_rect: intersect_rect(rect, clip),
+            ..DrawOpts::default()
+        };
+        if opts.clip_rect.is_some() {
+            draw_text_with_occlusion(
+                sugarloaf,
+                text_x + 7.0 * s,
+                y + 9.0 * s,
+                label,
+                &opts,
+                occlusion_rects,
+            );
+        }
+        y += 40.0 * s;
+    }
     let list_top = y;
     let list_h = (cy + ch - list_top).max(0.0);
     let list_rect = [cx, list_top, cw, list_h];
@@ -563,7 +720,7 @@ pub(crate) fn render_sessions_list(
         clip_rect: Some(list_rect),
         ..DrawOpts::default()
     };
-    // Date groups share the model chip's subdued blue accent across themes.
+    // Date groups retain the original extruded P2 date-heading style.
     let pixel_font = crate::primitives::pixel_font_id(sugarloaf);
     let header_opts = DrawOpts {
         font_size: FONT_SIZE * s * 0.92,
@@ -620,16 +777,115 @@ pub(crate) fn render_sessions_list(
 
         let text_y = row_y + (row_h - FONT_SIZE * s) / 2.0;
 
-        // Date-group / "Pinned" header row.
-        if entry.is_header {
-            let label =
-                truncate_sidebar_text(&entry.title, text_w, sugarloaf, &header_opts);
+        // Paging controls are selectable catalog actions, never sessions.
+        if entry.is_project_page() {
+            let directory = entry.directory.as_deref().unwrap_or_default();
+            if pane.side_panel().project_page_loading(directory) {
+                // Static, directory-stable widths: no per-row animation owner or
+                // clock, and no additional display-list entries/hit targets.
+                let seed = directory.bytes().fold(0u32, |hash, byte| {
+                    hash.wrapping_mul(31).wrapping_add(u32::from(byte))
+                });
+                let width_fraction = 0.46 + (seed % 5) as f32 * 0.05;
+                let bar_h = (FONT_SIZE * 0.72 * s).min(row_h);
+                let budget = (text_x + text_w - title_x).max(0.0);
+                let bar = [
+                    title_x,
+                    row_y + (row_h - bar_h) * 0.5,
+                    budget * width_fraction,
+                    bar_h,
+                ];
+                if let Some(bar) = intersect_rect(bar, list_rect) {
+                    // Match the existing status primitive's conservative
+                    // occlusion: omit a covered bar rather than bleed through.
+                    if running_square_visible(bar, list_rect, occlusion_rects) {
+                        sugarloaf.quad(
+                            None,
+                            bar[0],
+                            bar[1],
+                            bar[2],
+                            bar[3],
+                            theme.f32_alpha(theme.muted, 0.18),
+                            [bar[3] * 0.5; 4],
+                            DEPTH,
+                            ORDER_PANEL + 2,
+                        );
+                    }
+                }
+                continue;
+            }
+            let selected = pane.side_panel().selected_index() == absolute_ix
+                && !pane.side_panel().search_focused()
+                && !pane.side_panel().new_chat_selected()
+                && !pane.side_panel().projects_selected();
+            if selected || hovered_session == Some(absolute_ix) {
+                sugarloaf.quad(
+                    None,
+                    list_rect[0],
+                    visible_y,
+                    list_rect[2],
+                    visible_h,
+                    sidebar_background_opacity(theme.f32_alpha(theme.surface, 0.28)),
+                    [5.0 * s; 4],
+                    DEPTH,
+                    ORDER_PANEL + 1,
+                );
+            }
+            let page_opts = project_label_opts(theme, s, list_rect);
+            let label = truncate_sidebar_text(
+                &entry.title,
+                text_w - 16.0 * s,
+                sugarloaf,
+                &page_opts,
+            );
             draw_text_with_occlusion(
                 sugarloaf,
-                text_x,
+                text_x + 16.0 * s,
                 text_y,
                 &label,
-                &header_opts,
+                &page_opts,
+                occlusion_rects,
+            );
+            continue;
+        }
+        // Project folders are selectable; unknown/date captions remain labels.
+        if entry.is_project() {
+            let directory = entry.directory.as_deref().unwrap_or_default();
+            render_project_row(
+                sugarloaf,
+                entry,
+                pane.side_panel().project_expanded(directory),
+                text_x,
+                text_y,
+                text_w,
+                theme,
+                s,
+                list_rect,
+                occlusion_rects,
+            );
+            continue;
+        }
+        // Browsing sections share folder typography; legacy date labels retain P2.
+        if entry.is_header {
+            let section_opts = project_label_opts(theme, s, list_rect);
+            let opts = if entry.id.starts_with("section:") {
+                &section_opts
+            } else {
+                &header_opts
+            };
+            let indent = entry.depth as f32 * dot_gutter;
+            let label = truncate_sidebar_text(
+                &entry.title,
+                (text_w - indent).max(0.0),
+                sugarloaf,
+                opts,
+            );
+            draw_text_with_occlusion(
+                sugarloaf,
+                text_x + indent,
+                text_y,
+                &label,
+                opts,
                 occlusion_rects,
             );
             continue;
@@ -947,6 +1203,62 @@ pub(crate) fn render_sessions_list(
     }
 }
 
+/// Folder glyphs retain the file tree's Nerd Font fallback and theme token;
+/// project labels use the same regular body font as chat titles.
+#[allow(clippy::too_many_arguments)]
+fn render_project_row(
+    sugarloaf: &mut Sugarloaf,
+    entry: &NeoismAgentSessionEntry,
+    open: bool,
+    x: f32,
+    y: f32,
+    width: f32,
+    theme: &IdeTheme,
+    s: f32,
+    clip: [f32; 4],
+    occlusion_rects: &[[f32; 4]],
+) {
+    let indent = crate::panels::file_tree::INDENT_PX * s;
+    let icon_size = crate::panels::file_tree::ICON_FONT_SIZE * s;
+    let icon_opts = DrawOpts {
+        font_size: (indent - 6.0 * s).max(6.0 * s),
+        color: theme.u8(theme.muted),
+        clip_rect: Some(clip),
+        ..DrawOpts::default()
+    };
+    crate::primitives::draw_icon_centered_with_occlusion(
+        sugarloaf,
+        x,
+        [x, y, (indent - 4.0 * s).max(1.0), FONT_SIZE * s],
+        if open { "\u{f078}" } else { "\u{f054}" },
+        &icon_opts,
+        occlusion_rects,
+        true,
+    );
+    let (folder, _) = crate::panels::file_tree::icons::folder_icon(open);
+    let folder_opts = DrawOpts {
+        font_size: icon_size,
+        color: theme.u8(theme.folder),
+        ..icon_opts
+    };
+    crate::primitives::draw_icon_centered_with_occlusion(
+        sugarloaf,
+        x + indent,
+        [x + indent, y, icon_size, FONT_SIZE * s],
+        folder,
+        &folder_opts,
+        occlusion_rects,
+        true,
+    );
+    let label_opts = project_label_opts(theme, s, clip);
+    let label_x = x + indent + icon_size + crate::panels::file_tree::ICON_GAP * s;
+    let right = x + width;
+    // Project folders deliberately have no numeric/partial-page count badge.
+    let label_budget = (right - label_x).max(0.0);
+    let label = truncate_sidebar_text(&entry.title, label_budget, sugarloaf, &label_opts);
+    draw_text_with_occlusion(sugarloaf, label_x, y, &label, &label_opts, occlusion_rects);
+}
+
 fn relative_session_time(updated_ms: u64, now_ms: u64) -> String {
     if updated_ms == 0 || now_ms == 0 {
         return String::new();
@@ -967,7 +1279,25 @@ fn relative_session_time(updated_ms: u64, now_ms: u64) -> String {
 
 #[cfg(test)]
 mod row_time_tests {
-    use super::{relative_session_time, running_square_visible};
+    use super::{
+        project_label_opts, relative_session_time, running_square_visible, IdeTheme,
+        FONT_SIZE,
+    };
+
+    #[test]
+    fn project_and_page_labels_share_regular_body_typography() {
+        let theme = IdeTheme::default();
+        let clip = [0.0, 0.0, 300.0, 500.0];
+        for scale in [1.0, 1.5, 2.0] {
+            let opts = project_label_opts(&theme, scale, clip);
+            assert_eq!(opts.font_size, FONT_SIZE * scale);
+            assert!(opts.font_id.is_none());
+            assert!(!opts.bold);
+            assert!(!opts.extrude);
+            assert_eq!(opts.clip_rect, Some(clip));
+            assert_eq!(opts.color, theme.u8(theme.readable_accent(theme.blue)));
+        }
+    }
 
     #[test]
     fn running_squares_own_only_visible_nonoccluded_ink() {

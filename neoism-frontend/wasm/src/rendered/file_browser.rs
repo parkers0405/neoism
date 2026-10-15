@@ -15,6 +15,56 @@ impl ChromeBridge {
         self.chrome.open_file_browser(mode, start, recents);
     }
 
+    /// Hand the host a captured action rather than opening a browser without a
+    /// target. JS binds it to the current daemon, workspace and pane before IO.
+    pub fn drain_agent_file_browser_action(&mut self) -> JsValue {
+        serde_wasm_bindgen::to_value(&self.pending_agent_file_browser.take())
+            .unwrap_or(JsValue::NULL)
+    }
+
+    /// Existing sessions use `/cd`; blank panes keep a directory draft for
+    /// their first CreateThread. Neither path touches/submits composer input.
+    pub fn agent_change_directory(
+        &mut self,
+        session_id: Option<String>,
+        path: &str,
+    ) -> bool {
+        if self.agent_session_id() != session_id
+            || self.chrome.agent_pane().is_none()
+            || path.trim().is_empty()
+        {
+            return false;
+        }
+        if let Some(session_id) = session_id {
+            self.send_agent_envelope(
+                &neoism_protocol::agent::AgentClientMessage::SlashCommand {
+                    session_id,
+                    text: format!("/cd {path}"),
+                },
+            )
+        } else {
+            // A submitted first prompt may be awaiting ThreadCreated while the
+            // displayed session is still null. Its execution directory is fixed.
+            crate::agent_directory::set_blank_directory(
+                self.chrome.agent_pane_mut().expect("pane checked above"),
+                path,
+                self.agent_state.thread_create_inflight,
+                self.agent_state.pending_prompt.is_some(),
+            )
+        }
+    }
+
+    pub fn agent_directory(&self) -> Option<String> {
+        crate::agent_directory::execution_directory(
+            self.chrome.agent_pane(),
+            self.agent_state.default_directory.as_deref(),
+        )
+    }
+
+    pub fn file_browser_path(&self) -> String {
+        self.chrome.file_browser.current_path().to_owned()
+    }
+
     pub fn file_browser_active(&self) -> bool {
         self.chrome.file_browser.is_active()
     }

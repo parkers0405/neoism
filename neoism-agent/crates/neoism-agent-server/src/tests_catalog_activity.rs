@@ -1,5 +1,202 @@
 use super::*;
 
+#[tokio::test]
+async fn all_project_catalog_authorizes_baseline_new_directories_and_pagination() {
+    use axum::{
+        extract::{Query, State},
+        response::IntoResponse,
+        Extension,
+    };
+    let base = std::env::temp_dir()
+        .join(format!("catalog-projects-{}", Id::ascending(IdKind::Event)));
+    let allowed = base.join("allowed");
+    let a = allowed.join("a");
+    let b = allowed.join("b");
+    let unseen = allowed.join("new-project");
+    let denied = base.join("denied");
+    for directory in [&a, &b, &unseen, &denied] {
+        std::fs::create_dir_all(directory).unwrap();
+    }
+    let path = base.join("catalog.sqlite3");
+    let state = AppState::open_database(path.clone()).await.unwrap();
+    let mut first = store_test_session(&neoism_agent_core::new_session_id(), 100);
+    first.directory = a.to_string_lossy().into_owned();
+    let mut second = store_test_session(&neoism_agent_core::new_session_id(), 200);
+    second.directory = b.to_string_lossy().into_owned();
+    let mut hidden = store_test_session(&neoism_agent_core::new_session_id(), 300);
+    hidden.directory = denied.to_string_lossy().into_owned();
+    let mut foreign = store_test_session(&neoism_agent_core::new_session_id(), 400);
+    foreign.directory = first.directory.clone();
+    foreign.extra.insert(
+        crate::caller::TENANT_EXTRA_KEY.into(),
+        json!("other-tenant"),
+    );
+    for session in [&first, &second, &hidden, &foreign] {
+        state.inner.store.insert_session(session).await.unwrap();
+    }
+    let claims = crate::caller::CallerClaims {
+        subject: "test".into(),
+        workspace_id: None,
+        tenant_id: "local".into(),
+        directory_prefixes: vec![allowed.to_string_lossy().into_owned()],
+        hosted: true,
+        max_sessions: None,
+        max_artifacts: None,
+        max_artifact_bytes: None,
+        artifact_retention_days: None,
+        requests_per_minute: None,
+        max_in_flight: None,
+        resolved: None,
+        worker: None,
+    };
+    // Explicit all scope ignores directory narrowing, not authorization.
+    let response = crate::v2_routes::v2_session_catalog_events(
+        State(state.clone()),
+        Some(Extension(claims.clone())),
+        axum::http::HeaderMap::new(),
+        Query(crate::v2_routes::SessionCatalogQuery {
+            directory: Some(first.directory.clone()),
+            scope: Some(crate::v2_routes::SessionCatalogScope::All),
+        }),
+    )
+    .await
+    .into_response();
+    let mut body = response.into_body().into_data_stream();
+    let mut baseline = std::collections::HashSet::new();
+    for _ in 0..2 {
+        baseline.insert(
+            next_activity(&mut body).await["sessionID"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+        );
+    }
+    assert_eq!(
+        baseline,
+        std::collections::HashSet::from([first.id.to_string(), second.id.to_string()])
+    );
+    let mut created = store_test_session(&neoism_agent_core::new_session_id(), 500);
+    created.directory = unseen.to_string_lossy().into_owned();
+    state.inner.store.insert_session(&created).await.unwrap();
+    // Denied roots must not emit metadata or activity even after subscription.
+    state.publish(EventPayload::new(
+        event_type::SESSION_UPDATED,
+        json!({"info": hidden}),
+    ));
+    state.publish(EventPayload::new(
+        event_type::SESSION_CREATED,
+        json!({"info": created}),
+    ));
+    assert_eq!(
+        next_activity(&mut body).await,
+        json!({"sessionID": created.id, "activity": "idle"})
+    );
+
+    wait_index(&state).await;
+    let list =
+        |directory: Option<String>, cursor: Option<String>| crate::SessionListQuery {
+            directory,
+            exact_directory: false,
+            exclude_pinned: false,
+            roots: Some("true".into()),
+            path: None,
+            start: None,
+            search: None,
+            limit: Some(1),
+            cursor,
+        };
+    let mut cursor = None;
+    let mut ids = Vec::new();
+    loop {
+        let page = crate::v2_routes::v2_session_list(
+            State(state.clone()),
+            Query(list(None, cursor)),
+            Some(Extension(claims.clone())),
+        )
+        .await
+        .unwrap()
+        .0;
+        ids.extend(page.items.iter().map(|item| item.info.id.to_string()));
+        if page.cursor.next.is_none() {
+            break;
+        }
+        assert!(
+            !page.items.is_empty(),
+            "hidden pages must not look exhausted"
+        );
+        cursor = page.cursor.next;
+    }
+    assert_eq!(
+        ids,
+        vec![
+            created.id.to_string(),
+            second.id.to_string(),
+            first.id.to_string()
+        ]
+    );
+    let page = crate::v2_routes::v2_session_list(
+        State(state.clone()),
+        Query(list(Some(first.directory.clone()), None)),
+        Some(Extension(claims.clone())),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].info.id, first.id);
+    let projection = crate::catalog_activity::CatalogProjection::load(&state)
+        .await
+        .unwrap();
+    let scoped = projection
+        .baseline(&state, Some(&first.directory), Some(&claims))
+        .await
+        .unwrap();
+    assert_eq!(scoped.len(), 1);
+    assert_eq!(scoped[0].properties["sessionID"], first.id.as_str());
+    for session in [&first, &second, &hidden, &foreign] {
+        state
+            .inner
+            .store
+            .append_message(
+                session.id.as_str(),
+                &store_test_message(
+                    &session.id,
+                    now_millis(),
+                    "catalogneedle transcript",
+                ),
+            )
+            .await
+            .unwrap();
+    }
+    std::env::set_var("NEOISM_AGENT_DISABLE_EMBEDDINGS", "1");
+    let search = crate::semantic::semantic_search_route(
+        State(state.clone()),
+        Query(
+            serde_json::from_value(json!({"q": "catalogneedle", "limit": 20})).unwrap(),
+        ),
+        Some(Extension(claims.clone())),
+    )
+    .await
+    .unwrap()
+    .0;
+    std::env::remove_var("NEOISM_AGENT_DISABLE_EMBEDDINGS");
+    let search = serde_json::to_value(search).unwrap();
+    let hit_ids: std::collections::HashSet<_> = search["hits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|hit| hit["sessionId"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(
+        hit_ids,
+        std::collections::HashSet::from([first.id.to_string(), second.id.to_string()])
+    );
+    drop(body);
+    state.shutdown().await.unwrap();
+    cleanup_sqlite_files(&path);
+    std::fs::remove_dir_all(base).unwrap();
+}
+
 async fn next_activity<S, T, E>(body: &mut S) -> Value
 where
     S: futures::Stream<Item = Result<T, E>> + Unpin,
@@ -557,8 +754,9 @@ async fn catalog_activity_authorizes_owning_root_not_cross_directory_child() {
         State(state.clone()),
         Some(Extension(claims.clone())),
         axum::http::HeaderMap::new(),
-        Query(crate::InstanceQuery {
+        Query(crate::v2_routes::SessionCatalogQuery {
             directory: Some("/tmp".into()),
+            scope: None,
         }),
     )
     .await
@@ -589,6 +787,8 @@ async fn catalog_activity_authorizes_owning_root_not_cross_directory_child() {
         State(state.clone()),
         Query(crate::SessionListQuery {
             directory: Some("/tmp".into()),
+            exact_directory: false,
+            exclude_pinned: false,
             roots: Some("true".into()),
             path: None,
             start: None,

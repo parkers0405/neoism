@@ -12,9 +12,8 @@
 //   3. Eight rounded-rect menu buttons inside the menu band, each with hover
 //      + click states and click-to-shortcut wired through the
 //      input layer.
-//   4. The click "fidget" on the wordmark — a
-//      brief image squash, staggered expanding rings, and a
-//      soft white burst at the click point.
+//   4. Click-only pixel animations shared with the agent home
+//      wordmark and the website hero. Idle lettering is unchanged.
 //
 // Visibility predicate (mirrored in `Renderer::run` and
 // `Screen` button hit-tests): pane is terminal, alt-screen off,
@@ -265,6 +264,7 @@ pub struct SplashOverlay {
     active: bool,
     started: Option<Instant>,
     click: Option<Click>,
+    wordmark_animation: crate::primitives::wordmark_animation::WordmarkAnimation,
     image_registered: bool,
     /// Letter tint cycle the wordmark pixels were last uploaded with
     /// (the pack's `[wordmark] colors`, or `[theme.fg]`). The PNG is a
@@ -381,8 +381,15 @@ impl SplashOverlay {
         });
     }
 
+    pub fn replay_wordmark(&mut self) {
+        self.wordmark_animation.replay();
+    }
+
     pub fn is_animating(&self) -> bool {
-        self.started.is_some() || self.click.is_some() || self.dismiss_started.is_some()
+        self.started.is_some()
+            || self.click.is_some()
+            || self.dismiss_started.is_some()
+            || self.wordmark_animation.is_active()
     }
 
     /// True while the dismiss-out animation is still in flight.
@@ -402,6 +409,7 @@ impl SplashOverlay {
     pub fn reset(&mut self) {
         self.active = false;
         self.click = None;
+        self.wordmark_animation.cancel();
         self.wordmark_rect = None;
         self.menu_rects.clear();
         self.dismiss_started = None;
@@ -591,6 +599,10 @@ impl SplashOverlay {
             self.letter_hover[i] += (target - self.letter_hover[i]) * alpha;
         }
 
+        if !wants_visible {
+            self.wordmark_animation.cancel();
+        }
+        let animation = self.wordmark_animation.frame();
         for i in 0..LETTER_COUNT {
             let hov = self.letter_hover[i].clamp(0.0, 1.0);
             // Idle shimmer — staggered phase per letter so the
@@ -610,41 +622,57 @@ impl SplashOverlay {
 
             let u0 = i as f32 / LETTER_COUNT as f32;
             let u1 = (i as f32 + 1.0) / LETTER_COUNT as f32;
-            sugarloaf.push_image_overlay(
-                SPLASH_PANEL_ID,
-                GraphicOverlay {
-                    image_id: SPLASH_WORDMARK_IMAGE_ID,
-                    x: lx * scale,
-                    y: ly * scale,
-                    width: lw * scale,
-                    height: lh * scale,
-                    z_index: wordmark_z_index,
-                    source_rect: [u0, 0.0, u1, 1.0],
-                },
-            );
+            if animation.as_ref().is_none_or(|frame| frame.show_original()) {
+                sugarloaf.push_image_overlay(
+                    SPLASH_PANEL_ID,
+                    GraphicOverlay {
+                        image_id: SPLASH_WORDMARK_IMAGE_ID,
+                        x: lx * scale,
+                        y: ly * scale,
+                        width: lw * scale,
+                        height: lh * scale,
+                        z_index: wordmark_z_index,
+                        source_rect: [u0, 0.0, u1, 1.0],
+                    },
+                );
 
-            // Per-letter halo — a slightly larger duplicate
-            // behind the letter, sized off the letter's hover
-            // strength so hovering a letter glows specifically
-            // that letter rather than the whole wordmark.
-            let halo_letter = halo_strength + hov * 0.4;
-            let glow_extra = 1.0 + 0.05 * halo_letter;
-            let gw = lw * glow_extra;
-            let gh = lh * glow_extra;
-            let gx = centre_x - gw * 0.5;
-            let gy = centre_y - gh * 0.5;
-            sugarloaf.push_image_overlay(
-                SPLASH_PANEL_ID,
-                GraphicOverlay {
-                    image_id: SPLASH_WORDMARK_IMAGE_ID,
-                    x: gx * scale,
-                    y: gy * scale,
-                    width: gw * scale,
-                    height: gh * scale,
-                    z_index: wordmark_z_index,
-                    source_rect: [u0, 0.0, u1, 1.0],
-                },
-            );
+                // Per-letter halo — a slightly larger duplicate
+                // behind the letter, sized off the letter's hover
+                // strength so hovering a letter glows specifically
+                // that letter rather than the whole wordmark.
+                let halo_letter = halo_strength + hov * 0.4;
+                let glow_extra = 1.0 + 0.05 * halo_letter;
+                let gw = lw * glow_extra;
+                let gh = lh * glow_extra;
+                let gx = centre_x - gw * 0.5;
+                let gy = centre_y - gh * 0.5;
+                sugarloaf.push_image_overlay(
+                    SPLASH_PANEL_ID,
+                    GraphicOverlay {
+                        image_id: SPLASH_WORDMARK_IMAGE_ID,
+                        x: gx * scale,
+                        y: gy * scale,
+                        width: gw * scale,
+                        height: gh * scale,
+                        z_index: wordmark_z_index,
+                        source_rect: [u0, 0.0, u1, 1.0],
+                    },
+                );
+            }
+            if let Some(frame) = animation.as_ref() {
+                let tint = self.wordmark_tint.as_deref().unwrap_or(&[]);
+                let color = tint.get(i % tint.len().max(1)).copied().unwrap_or(theme.fg);
+                frame.draw_letter(
+                    sugarloaf,
+                    i,
+                    [lx, ly, lw, lh],
+                    theme.f32_alpha(color, dismiss_alpha),
+                    [pane_origin.0, pane_origin.1, pane_size.0, pane_size.1],
+                    occlusion_rects,
+                    DEPTH,
+                    ORDER,
+                );
+            }
         }
         let _ = click_alpha_extra;
 
@@ -1041,6 +1069,22 @@ impl SplashOverlay {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wordmark_replay_is_click_only_and_reset_cancels_it() {
+        let mut overlay = SplashOverlay::new();
+        assert!(!overlay.wordmark_animation.is_active());
+        overlay.pop_click(10.0, 20.0);
+        assert!(
+            !overlay.wordmark_animation.is_active(),
+            "menu feedback must not replay the logo"
+        );
+        overlay.replay_wordmark();
+        assert!(overlay.wordmark_animation.is_active());
+        overlay.reset();
+        assert!(!overlay.wordmark_animation.is_active());
+        assert!(!overlay.wordmark_hit(10.0, 20.0));
+    }
 
     #[test]
     fn splash_has_eight_actions_in_column_order() {

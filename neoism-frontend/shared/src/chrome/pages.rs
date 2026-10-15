@@ -81,6 +81,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
     /// into `Chrome::handle_event` (web `keyboard_capture_active`).
     pub fn chrome_page_wants_keyboard(&self) -> bool {
         self.chrome_overlay_active()
+            || self.conversation_navigator.is_active()
             || self.file_browser.is_active()
             || self.active_chrome_page().is_some()
     }

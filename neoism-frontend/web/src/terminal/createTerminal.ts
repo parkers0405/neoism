@@ -388,6 +388,8 @@ export interface TerminalAdapter {
     /** True while the chrome-hosted modal is up (it owns the keyboard
      *  via `chromeKeyboardCaptureActive`). */
     modalActive?(): boolean;
+    /** CSS cursor for Rust-painted chrome controls (logical canvas pixels). */
+    pointerCursorAt?(x: number, y: number): "default" | "text" | "pointer";
     /** Open desktop's "New File" prompt for `dir` (absolute path;
      *  echoed back verbatim in the drained action). */
     openFileTreeNewFileModal?(dir: string): void;
@@ -726,6 +728,7 @@ export interface TerminalAdapter {
      *  `(requestId: number, envelopeJson: string)`. */
     setAgentSend?(cb: (requestId: number, envelopeJson: string) => void): void;
     /** Wake/list the daemon-backed agent server without creating a session. */
+    agentSetCatalogEndpoint?(identity: string): void;
     agentAttach?(directory?: string | null, presenceName?: string | null): void;
     /** Drive the bridge's "send a SendMessage" path; under the hood the
      *  bridge fires `agent_send` with a fresh request id. */
@@ -746,7 +749,23 @@ export interface TerminalAdapter {
      *  composer chip — the web analogue of desktop's DroppedFile →
      *  attach_path. Empty mime is sniffed from the filename. */
     agentAttachFile?(filename: string, mime: string, bytes: Uint8Array): boolean;
+    enableConversationNavigationHeader?(): void;
+    drainCatalogHeaderAction?(): string | null;
+    conversationNavigatorSetDashboardRoot?(root: string | null): void;
+    conversationNavigatorOpen?(mode: string, rows: string): void;
+    conversationNavigatorClose?(): void;
+    conversationNavigatorActive?(): boolean;
+    conversationNavigatorQuery?(): string;
+    conversationNavigatorSetRows?(rows: string): void;
+    conversationNavigatorSetLoading?(loading: boolean): void;
+    conversationNavigatorSetError?(error: string | null): void;
+    drainConversationNavigatorAction?(): { kind: string; value?: string } | null;
+    conversationNavigatorAttach?(id: string, directory: string | null): void;
     openFileBrowser?(mode: string, start: string, recentsJson: string): void;
+    drainAgentFileBrowserAction?(): unknown;
+    agentChangeDirectory?(sessionId: string | null, path: string): boolean;
+    agentDirectory?(): string | null;
+    fileBrowserPath?(): string;
     fileBrowserActive?(): boolean;
     drainFileBrowserRequests?(): unknown;
     setFileBrowserEntries?(path: string, entriesJson: string): boolean;
@@ -1542,6 +1561,7 @@ interface ChromeBridgeInstance {
     editor_input_modal_active?(): boolean;
     focus_editor_input?(): void;
     modal_active?(): boolean;
+    pointer_cursor_at?(x: number, y: number): string;
     open_file_tree_new_file_modal?(dir: string): void;
     open_file_tree_new_folder_modal?(dir: string): void;
     open_file_tree_rename_modal?(path: string): void;
@@ -1640,6 +1660,7 @@ interface ChromeBridgeInstance {
     agent_submit_permission(): boolean;
     agent_reply_permission(decision: string): boolean;
     set_agent_send(cb: (requestId: number, envelopeJson: string) => void): void;
+    agent_set_catalog_endpoint?(identity: string): void;
     agent_attach?(directory?: string | null, presenceName?: string | null): void;
     agent_send_message(text: string): void;
     agent_send_message_with_attachments?(text: string, attachmentsJson: string): void;
@@ -1650,7 +1671,23 @@ interface ChromeBridgeInstance {
       bytes: Uint8Array,
     ): boolean;
     agent_attach_file?(filename: string, mime: string, bytes: Uint8Array): boolean;
+    enable_conversation_navigation_header?(): void;
+    drain_catalog_header_action?(): string | null;
+    conversation_navigator_set_dashboard_root?(root: string | null): void;
+    conversation_navigator_open?(mode: string, rows: string): void;
+    conversation_navigator_close?(): void;
+    conversation_navigator_active?(): boolean;
+    conversation_navigator_query?(): string;
+    conversation_navigator_set_rows?(rows: string): void;
+    conversation_navigator_set_loading?(loading: boolean): void;
+    conversation_navigator_set_error?(error: string | null): void;
+    drain_conversation_navigator_action?(): { kind: string; value?: string } | null;
+    conversation_navigator_attach?(id: string, directory: string | null): void;
     open_file_browser?(mode: string, start: string, recentsJson: string): void;
+    drain_agent_file_browser_action?(): unknown;
+    agent_change_directory?(sessionId: string | null, path: string): boolean;
+    agent_directory?(): string | undefined;
+    file_browser_path?(): string;
     file_browser_active?(): boolean;
     drain_file_browser_requests?(): unknown;
     set_file_browser_entries?(path: string, entriesJson: string): boolean;
@@ -3037,6 +3074,10 @@ class ChromeAdapter implements TerminalAdapter {
     drainNeoworldSnapshot(): string | null {
         return this.inner.drain_neoworld_snapshot?.() ?? null;
     }
+    pointerCursorAt(x: number, y: number): "default" | "text" | "pointer" {
+        const cursor = this.inner.pointer_cursor_at?.(x, y);
+        return cursor === "text" || cursor === "pointer" ? cursor : "default";
+    }
     modalActive(): boolean {
         return this.inner.modal_active?.() === true;
     }
@@ -3375,6 +3416,9 @@ class ChromeAdapter implements TerminalAdapter {
     setAgentSend(cb: (requestId: number, envelopeJson: string) => void): void {
         this.inner.set_agent_send(cb);
     }
+    agentSetCatalogEndpoint(identity: string): void {
+        this.inner.agent_set_catalog_endpoint?.(identity);
+    }
     agentAttach(directory?: string | null, presenceName?: string | null): void {
         this.inner.agent_attach?.(directory ?? undefined, presenceName ?? undefined);
     }
@@ -3399,9 +3443,25 @@ class ChromeAdapter implements TerminalAdapter {
     agentAttachFile(filename: string, mime: string, bytes: Uint8Array): boolean {
         return this.inner.agent_attach_file?.(filename, mime, bytes) === true;
     }
+    enableConversationNavigationHeader(): void { this.inner.enable_conversation_navigation_header?.(); }
+    drainCatalogHeaderAction(): string | null { return this.inner.drain_catalog_header_action?.() ?? null; }
+    conversationNavigatorSetDashboardRoot(root: string | null): void { this.inner.conversation_navigator_set_dashboard_root?.(root); }
+    conversationNavigatorOpen(mode: string, rows: string): void { this.inner.conversation_navigator_open?.(mode, rows); }
+    conversationNavigatorClose(): void { this.inner.conversation_navigator_close?.(); }
+    conversationNavigatorActive(): boolean { return this.inner.conversation_navigator_active?.() === true; }
+    conversationNavigatorQuery(): string { return this.inner.conversation_navigator_query?.() ?? ""; }
+    conversationNavigatorSetRows(rows: string): void { this.inner.conversation_navigator_set_rows?.(rows); }
+    conversationNavigatorSetLoading(loading: boolean): void { this.inner.conversation_navigator_set_loading?.(loading); }
+    conversationNavigatorSetError(error: string | null): void { this.inner.conversation_navigator_set_error?.(error); }
+    drainConversationNavigatorAction(): { kind: string; value?: string } | null { return this.inner.drain_conversation_navigator_action?.() ?? null; }
+    conversationNavigatorAttach(id: string, directory: string | null): void { this.inner.conversation_navigator_attach?.(id, directory); }
     openFileBrowser(mode: string, start: string, recentsJson: string): void {
         this.inner.open_file_browser?.(mode, start, recentsJson);
     }
+    drainAgentFileBrowserAction(): unknown { return this.inner.drain_agent_file_browser_action?.(); }
+    agentChangeDirectory(sessionId: string | null, path: string): boolean { return this.inner.agent_change_directory?.(sessionId, path) === true; }
+    agentDirectory(): string | null { return this.inner.agent_directory?.() ?? null; }
+    fileBrowserPath(): string { return this.inner.file_browser_path?.() ?? ""; }
     fileBrowserActive(): boolean { return this.inner.file_browser_active?.() === true; }
     drainFileBrowserRequests(): unknown { return this.inner.drain_file_browser_requests?.(); }
     setFileBrowserEntries(path: string, entriesJson: string): boolean {

@@ -46,7 +46,7 @@ impl NeoismAgentPane {
         }
         self.side_panel.mark_refresh_kicked();
         self.push_outbound(OutboundAgentCommand::RefreshSessions {
-            directory: self.directory.clone(),
+            directory: self.side_panel.catalog_directory().map(str::to_owned),
             cursor: None,
         });
     }
@@ -66,7 +66,7 @@ impl NeoismAgentPane {
     pub fn maybe_request_side_panel_session_page(&mut self) {
         if let Some(cursor) = self.side_panel.begin_session_page_near_end() {
             self.push_outbound(OutboundAgentCommand::RefreshSessions {
-                directory: self.directory.clone(),
+                directory: self.side_panel.catalog_directory().map(str::to_owned),
                 cursor: Some(cursor),
             });
         }
@@ -75,6 +75,9 @@ impl NeoismAgentPane {
     /// Resume the side-panel's currently selected previous session, if
     /// any. Exposed for the click/Enter handler in `screen::bridges::agent`.
     pub fn activate_side_panel_selection(&mut self) -> bool {
+        if self.side_panel.toggle_selected_project() {
+            return false;
+        }
         let Some(entry) = self.side_panel.selected_session().cloned() else {
             return false;
         };

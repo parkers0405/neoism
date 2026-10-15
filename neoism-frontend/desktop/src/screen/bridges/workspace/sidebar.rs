@@ -20,6 +20,16 @@ struct ConversationTabCandidate {
     location: ConversationTabLocation,
 }
 
+fn conversation_catalog_matches(
+    server: &str,
+    directory: Option<&str>,
+    expected_server: &str,
+    expected_directory: Option<&str>,
+) -> bool {
+    server.trim_end_matches('/') == expected_server.trim_end_matches('/')
+        && directory == expected_directory
+}
+
 fn matching_conversation_tab(
     candidates: &[ConversationTabCandidate],
     session_id: &str,
@@ -42,8 +52,47 @@ fn matching_conversation_tab(
 #[cfg(test)]
 mod conversation_tab_tests {
     use super::{
-        matching_conversation_tab, ConversationTabCandidate, ConversationTabLocation,
+        conversation_catalog_matches, matching_conversation_tab,
+        ConversationTabCandidate, ConversationTabLocation,
     };
+
+    #[test]
+    fn catalog_guard_accepts_dashboard_chats_without_using_execution_directory() {
+        let mut pane = crate::neoism::agent::NeoismAgentPane::with_directory(Some(
+            "/other/project".into(),
+        ));
+        pane.set_catalog_directory(None);
+        assert!(conversation_catalog_matches(
+            "http://host/",
+            pane.side_panel().catalog_directory(),
+            "http://host",
+            None,
+        ));
+        assert!(!conversation_catalog_matches(
+            "http://host",
+            None,
+            "http://other-host",
+            None
+        ));
+        assert!(!conversation_catalog_matches(
+            "http://host",
+            None,
+            "http://host",
+            Some("/project")
+        ));
+        assert!(!conversation_catalog_matches(
+            "http://host",
+            Some("/old"),
+            "http://host",
+            Some("/new")
+        ));
+        assert!(conversation_catalog_matches(
+            "http://host",
+            Some("/project"),
+            "http://host/",
+            Some("/project")
+        ));
+    }
 
     #[test]
     fn reuse_matches_session_server_and_directory_including_secondary_pane() {
@@ -155,6 +204,27 @@ mod conversation_tab_tests {
 }
 
 impl Screen<'_> {
+    /// Focus the displayed Agent body, not the catalog's backing pane. Agent
+    /// text entry owns body focus implicitly; the normal chrome focus chain
+    /// must release every sidebar and strip before keys reach its composer.
+    pub(crate) fn focus_active_agent_composer(&mut self) {
+        if self.context_manager.current().neoism_agent.is_some() {
+            self.focus_selected_workspace_content();
+        }
+    }
+
+    /// Mouse and keyboard New Chat share one activation. Keep catalog focus
+    /// until a real Agent route has been created and selected successfully.
+    pub(crate) fn activate_new_conversation(&mut self) {
+        if self.open_neoism_agent_tab().is_none() {
+            self.renderer.notifications.push(
+                "Could not open a new chat. Close an unused tab and try again.",
+                neoism_ui::panels::notifications::NotificationLevel::Warn,
+            );
+            self.mark_dirty();
+        }
+    }
+
     pub(crate) fn handle_conversations_key(
         &mut self,
         key: &neoism_window::event::KeyEvent,
@@ -178,6 +248,14 @@ impl Screen<'_> {
         {
             return false;
         }
+        if mods.control_key()
+            && !mods.alt_key()
+            && !mods.super_key()
+            && matches!(key.logical_key.as_ref(), Key::Character(c) if c.eq_ignore_ascii_case("f"))
+        {
+            self.open_conversation_search();
+            return true;
+        }
         let ctrl_page = mods.control_key() && !mods.alt_key() && !mods.super_key();
         let panel = &mut self.renderer.conversations_pane;
         match key.logical_key.as_ref() {
@@ -195,10 +273,24 @@ impl Screen<'_> {
                 panel.maybe_request_side_panel_session_page();
             }
             Key::Named(NamedKey::ArrowUp) => panel.side_panel_mut().select_prev(),
+            Key::Named(NamedKey::ArrowLeft) => {
+                panel.side_panel_mut().navigate_project(false);
+            }
+            Key::Named(NamedKey::ArrowRight) => {
+                panel.side_panel_mut().navigate_project(true);
+            }
             Key::Named(NamedKey::Escape) => panel.side_panel_mut().set_focused(false),
             Key::Named(NamedKey::Enter) => {
-                if panel.side_panel().new_chat_selected() {
-                    self.open_neoism_agent_tab();
+                if panel.side_panel().navigation_header_enabled()
+                    && panel.side_panel().search_focused()
+                {
+                    self.open_conversation_search();
+                } else if panel.side_panel().projects_selected() {
+                    self.open_conversation_project_picker();
+                } else if panel.side_panel().new_chat_selected() {
+                    self.activate_new_conversation();
+                } else if panel.side_panel_mut().toggle_selected_project() {
+                    // Folder expansion does not navigate or move workspace focus.
                 } else if let Some(entry) = panel.side_panel().selected_session().cloned()
                 {
                     self.activate_catalog_entry(entry);
@@ -213,26 +305,18 @@ impl Screen<'_> {
         &mut self,
         entry: neoism_ui::panels::agent_pane::state::side_panel::NeoismAgentSessionEntry,
     ) {
-        self.focus_or_open_conversation(entry.id, entry.source);
+        let server = self.renderer.conversations_pane.server_address().to_owned();
+        self.open_conversation_catalog_entry(entry, &server);
     }
 
-    /// Focus the already-open conversation in this grid, including secondary
-    /// pane tab strips. A session ID alone is not an identity across servers.
-    pub(crate) fn focus_or_open_conversation(
+    /// Search results carry their own saved directory, independently of the
+    /// visible sidebar's project filter. Endpoint identity still guards opens.
+    pub(crate) fn open_conversation_catalog_entry(
         &mut self,
-        id: String,
-        source: neoism_ui::panels::agent_pane::state::side_panel::ConversationSource,
+        entry: neoism_ui::panels::agent_pane::state::side_panel::NeoismAgentSessionEntry,
+        originating_server: &str,
     ) {
-        let server = self
-            .renderer
-            .conversations_pane
-            .server_address()
-            .to_string();
-        let directory = self
-            .renderer
-            .conversations_pane
-            .session_directory()
-            .map(str::to_owned);
+        let server = originating_server.to_owned();
         let expected_server = self
             .context_manager
             .agent_server_override_for_current()
@@ -240,15 +324,31 @@ impl Screen<'_> {
         let expected_directory = self
             .workspace_root_for_new_shell()
             .map(|root| root.to_string_lossy().into_owned());
-        if server.trim_end_matches('/') != expected_server.trim_end_matches('/')
-            || directory != expected_directory
-        {
+        let expected_catalog_directory =
+            crate::neoism::agent::NeoismAgentPane::catalog_scope_for_workspace(
+                expected_directory.as_deref(),
+                self.context_manager.current_workspace_is_remote_joined(),
+                dirs::home_dir().as_deref(),
+            );
+        if !conversation_catalog_matches(
+            &server,
+            self.renderer
+                .conversations_pane
+                .side_panel()
+                .catalog_directory(),
+            &expected_server,
+            expected_catalog_directory.as_deref(),
+        ) {
+            self.show_conversations_sidebar(true);
             self.renderer.notifications.push(
-                "This conversation belongs to another workspace; reopen Conversations there",
-                neoism_ui::panels::notifications::NotificationLevel::Warn,
+                "Chat list refreshed for the current workspace; select the chat again",
+                neoism_ui::panels::notifications::NotificationLevel::Info,
             );
             return;
         }
+        let target_directory = entry.directory.or(expected_directory);
+        let id = entry.id;
+        let source = entry.source;
         let candidates: Vec<_> = self
             .context_manager
             .current_grid()
@@ -293,7 +393,7 @@ impl Screen<'_> {
             &candidates,
             &id,
             &server,
-            directory.as_deref(),
+            target_directory.as_deref(),
             self.context_manager.current_route(),
         ) {
             let expected_route = candidates
@@ -542,14 +642,26 @@ impl Screen<'_> {
         let expected_directory = self
             .workspace_root_for_new_shell()
             .map(|root| root.to_string_lossy().into_owned());
-        self.renderer
-            .conversations_pane
-            .server_address()
-            .trim_end_matches('/')
-            == server.trim_end_matches('/')
-            && self.renderer.conversations_pane.session_directory() == directory
-            && server.trim_end_matches('/') == expected_server.trim_end_matches('/')
-            && directory == expected_directory.as_deref()
+        let expected_catalog_directory =
+            crate::neoism::agent::NeoismAgentPane::catalog_scope_for_workspace(
+                expected_directory.as_deref(),
+                self.context_manager.current_workspace_is_remote_joined(),
+                dirs::home_dir().as_deref(),
+            );
+        conversation_catalog_matches(
+            self.renderer.conversations_pane.server_address(),
+            self.renderer
+                .conversations_pane
+                .side_panel()
+                .catalog_directory(),
+            server,
+            directory,
+        ) && conversation_catalog_matches(
+            server,
+            directory,
+            &expected_server,
+            expected_catalog_directory.as_deref(),
+        )
     }
 
     pub(crate) fn handle_conversations_context_click(&mut self) -> bool {
@@ -581,7 +693,7 @@ impl Screen<'_> {
         panel.side_panel_mut().set_focused(true);
         panel.side_panel_mut().set_selected(row);
         let server = panel.server_address().to_owned();
-        let directory = panel.session_directory().map(str::to_owned);
+        let directory = panel.side_panel().catalog_directory().map(str::to_owned);
         let items = vec![
             ContextMenuItem::new(
                 if entry.pinned {
@@ -645,20 +757,39 @@ impl Screen<'_> {
             return false;
         }
         panel.side_panel_mut().set_focused(true);
+        if let Some(action) = panel.side_panel().header_action_at(x, y) {
+            use neoism_ui::panels::agent_pane::state::side_panel::CatalogHeaderAction;
+            match action {
+                CatalogHeaderAction::Search => self.open_conversation_search(),
+                CatalogHeaderAction::Projects => {
+                    panel.side_panel_mut().select_projects();
+                    self.open_conversation_project_picker();
+                }
+                CatalogHeaderAction::AddWorkspace => {
+                    self.open_add_conversation_workspace_browser()
+                }
+            }
+            self.mark_dirty();
+            return true;
+        }
         if matches!(panel.side_panel().new_chat_hit(x, y), Some(None)) {
             panel.side_panel_mut().select_new_chat();
-            self.open_neoism_agent_tab();
+            self.activate_new_conversation();
             return true;
         }
         if let Some(rect) = panel.side_panel().last_panel_rect() {
             if let Some(row) = panel.side_panel().hit_test_row(x, y, rect) {
-                if !panel
+                if panel
                     .side_panel()
                     .sessions()
                     .get(row)
-                    .is_some_and(|entry| entry.is_header)
+                    .is_some_and(|entry| entry.is_selectable())
                 {
                     panel.side_panel_mut().set_selected(row);
+                    if panel.side_panel_mut().toggle_selected_project() {
+                        self.mark_dirty();
+                        return true;
+                    }
                     let selected = panel.side_panel().selected_session().cloned();
                     if let Some(entry) = selected {
                         self.activate_catalog_entry(entry);

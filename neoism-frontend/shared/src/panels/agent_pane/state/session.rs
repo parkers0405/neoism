@@ -59,6 +59,22 @@ impl NeoismAgentPane {
         let Some(option) = picker.selected_option().cloned() else {
             return true;
         };
+        if picker.kind == NeoismAgentPickerKind::Session
+            && option.value == "__neoism_load_session_page__"
+        {
+            self.picker = Some(picker);
+            if self.session_picker_requested_cursor.is_none() {
+                if let Some(cursor) = self.session_picker_next_cursor.clone() {
+                    self.session_picker_requested_cursor = Some(cursor.clone());
+                    self.push_outbound(OutboundAgentCommand::RefreshSessions {
+                        directory: self.side_panel.catalog_directory().map(str::to_owned),
+                        cursor: Some(cursor),
+                    });
+                    self.set_session_options(self.session_options.clone());
+                }
+            }
+            return true;
+        }
         match picker.kind {
             NeoismAgentPickerKind::Slash => {
                 self.input.clear();

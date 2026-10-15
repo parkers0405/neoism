@@ -71,6 +71,12 @@ impl ChromeBridge {
         }) else {
             return 0;
         };
+        if self.chrome.conversation_navigator.is_active() {
+            if let Some(action) = self.chrome.conversation_navigator.pointer_down(x, y) {
+                self.chrome.apply_navigator_action(action);
+            }
+            return 2;
+        }
         if self.chrome.file_browser.is_active() {
             self.chrome.file_browser.pointer_down(x, y, 1);
             return 2;
@@ -146,6 +152,10 @@ impl ChromeBridge {
             let _ = self.chrome.modal.scroll_at(x, y, pw, sf, delta_pixels);
             return true;
         }
+        if self.chrome.conversation_navigator.is_active() {
+            self.chrome.conversation_navigator.scroll(delta_pixels);
+            return true;
+        }
         if self.chrome.file_browser.is_active() {
             self.chrome.file_browser.scroll_pixels(delta_pixels);
             return true;
@@ -192,6 +202,10 @@ impl ChromeBridge {
         }) else {
             return false;
         };
+        if self.chrome.conversation_navigator.is_active() {
+            self.chrome.conversation_navigator.scroll(-finger_delta);
+            return true;
+        }
         if self.chrome.file_browser.is_active() {
             self.chrome.file_browser.scroll_pixels(-finger_delta);
             return true;
@@ -259,6 +273,7 @@ impl ChromeBridge {
     /// gate; interaction state remains in the shared Rust panels.
     pub fn pointer_overlay_active(&self) -> bool {
         self.chrome.chrome_overlay_active()
+            || self.chrome.conversation_navigator.is_active()
             || self.chrome.active_chrome_page().is_some()
             || self.chrome.file_browser.is_active()
             || self.chrome.share_sheet.is_visible()
@@ -282,6 +297,9 @@ impl ChromeBridge {
     /// mirrors pointer z-order, so an overlay field always beats the Agent
     /// composer beneath it and a row miss never falls through.
     pub fn mobile_text_field_at(&mut self, x: f32, y: f32) -> String {
+        if self.chrome.conversation_navigator.is_active() {
+            return "conversation-navigator".to_string();
+        }
         if self.chrome.file_browser.text_entry_at(x, y) {
             return "file-browser".to_string();
         }

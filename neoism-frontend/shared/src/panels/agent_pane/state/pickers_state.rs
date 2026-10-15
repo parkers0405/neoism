@@ -156,8 +156,9 @@ impl NeoismAgentPane {
     }
 
     pub fn open_sessions_picker(&mut self) {
+        self.session_picker_requested_cursor = None;
         self.push_outbound(OutboundAgentCommand::RefreshSessions {
-            directory: self.directory.clone(),
+            directory: self.side_panel.catalog_directory().map(str::to_owned),
             cursor: None,
         });
         let selected = self
@@ -264,6 +265,44 @@ impl NeoismAgentPane {
         {
             picker.replace_options(options);
         }
+    }
+
+    /// Apply a paged all-project picker catalog. Hosts must pass continuation
+    /// cursors instead of dropping picker rows after the first 50 sessions.
+    pub fn set_session_options_page(
+        &mut self,
+        options: Vec<NeoismAgentPickerOption>,
+        requested_cursor: Option<&str>,
+        next_cursor: Option<String>,
+    ) {
+        if requested_cursor.is_some()
+            && requested_cursor != self.session_picker_requested_cursor.as_deref()
+        {
+            return;
+        }
+        self.session_picker_requested_cursor = None;
+        self.session_picker_next_cursor = next_cursor;
+        let options = if requested_cursor.is_some() {
+            let mut merged = self.session_options.clone();
+            for option in options {
+                if option.is_header
+                    || !merged
+                        .iter()
+                        .any(|old| !old.is_header && old.value == option.value)
+                {
+                    merged.push(option);
+                }
+            }
+            merged
+        } else {
+            options
+        };
+        self.set_session_options(options);
+    }
+
+    pub fn session_picker_page_failed(&mut self) {
+        self.session_picker_requested_cursor = None;
+        self.set_session_options(self.session_options.clone());
     }
 
     pub fn set_session_options(&mut self, options: Vec<NeoismAgentPickerOption>) {
@@ -429,7 +468,7 @@ impl NeoismAgentPane {
     ) -> Vec<NeoismAgentPickerOption> {
         if !self.session_options.is_empty() {
             let current_id = self.session_id.as_deref();
-            return self
+            let mut options: Vec<_> = self
                 .session_options
                 .iter()
                 .map(|opt| {
@@ -438,6 +477,17 @@ impl NeoismAgentPane {
                     o
                 })
                 .collect();
+            if self.session_picker_next_cursor.is_some()
+                && self.session_picker_requested_cursor.is_none()
+            {
+                options.push(NeoismAgentPickerOption::new(
+                    "Load more sessions",
+                    "All projects",
+                    "more",
+                    "__neoism_load_session_page__",
+                ));
+            }
+            return options;
         }
         if refreshing {
             return vec![NeoismAgentPickerOption::new(
@@ -449,7 +499,7 @@ impl NeoismAgentPane {
         }
         vec![NeoismAgentPickerOption::new(
             "No sessions",
-            "No saved sessions for this workspace",
+            "No saved sessions",
             "empty",
             "",
         )]
@@ -495,15 +545,23 @@ impl NeoismAgentPane {
         true
     }
 
+    pub fn wordmark_hit(&self, x: f32, y: f32) -> bool {
+        !self.has_conversation()
+            && self.wordmark.rect.is_some_and(|[rx, ry, rw, rh]| {
+                x >= rx && x <= rx + rw && y >= ry && y <= ry + rh
+            })
+    }
+
     pub fn pop_wordmark_click(&mut self, x: f32, y: f32) -> bool {
-        let Some([rx, ry, rw, rh]) = self.wordmark.rect else {
-            return false;
-        };
-        if x < rx || x > rx + rw || y < ry || y > ry + rh {
+        if self.has_conversation() {
+            self.wordmark.animation.cancel();
+            self.wordmark.rect = None;
             return false;
         }
-        self.wordmark.click_started = Some(Instant::now());
-        self.wordmark.click_pos = Some((x, y));
+        if !self.wordmark_hit(x, y) {
+            return false;
+        }
+        self.wordmark.animation.replay();
         true
     }
 
@@ -608,9 +666,7 @@ impl NeoismAgentPane {
     pub(in crate::panels::agent_pane::state) fn wordmark_click_is_animating(
         &self,
     ) -> bool {
-        self.wordmark.click_started.is_some_and(|started| {
-            Instant::now().saturating_duration_since(started) <= WORDMARK_CLICK_ANIMATION
-        })
+        !self.has_conversation() && self.wordmark.animation.is_active()
     }
 
     pub fn swap_detail_panel(&mut self) {

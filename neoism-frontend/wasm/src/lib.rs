@@ -13,6 +13,9 @@
 //!    + `render` per RAF. This is the libghostty endgame: sugarloaf
 //!    paints cells via WebGPU/WebGL, no xterm.js in the loop.
 
+#[cfg(any(target_arch = "wasm32", test))]
+mod agent_directory;
+
 use neoism_terminal_core::ansi::CursorShape;
 use neoism_terminal_core::handler::Processor;
 use neoism_terminal_core::{Crosswords, TerminalEffect, TerminalId};

@@ -52,15 +52,29 @@ impl Screen<'_> {
             self.renderer.conversations_pane.session_directory(),
             directory.as_deref(),
         );
+        let catalog_directory = crate::neoism::agent::NeoismAgentPane::catalog_scope_for_workspace(
+            directory.as_deref(),
+            self.context_manager.current_workspace_is_remote_joined(),
+            dirs::home_dir().as_deref(),
+        );
+        let scope_changed = self.renderer.conversations_pane.side_panel().catalog_directory()
+            != catalog_directory.as_deref();
         if changed {
             self.renderer.conversations_pane =
                 crate::neoism::agent::NeoismAgentPane::with_directory(directory);
+        }
+        self.renderer.conversations_pane.set_catalog_directory(catalog_directory.clone());
+        for context in self.context_manager.current_grid_mut().contexts_mut().values_mut() {
+            if let Some(agent) = context.context_mut().neoism_agent.as_mut() {
+                agent.set_catalog_directory(catalog_directory.clone());
+            }
         }
         self.renderer
             .conversations_pane
             .side_panel_mut()
             .set_width(self.conversations_sidebar_width);
-        changed
+        self.sync_conversation_dashboard_directory();
+        changed || scope_changed
     }
 
     pub(crate) fn initial_process_workspace_root() -> Option<PathBuf> {
@@ -287,19 +301,25 @@ impl Screen<'_> {
                 .map(Self::normalize_workspace_root);
         }
 
+        // Preserve a deliberate picker/project directory while the first shell
+        // still reports its pre-change cwd. A real subsequent shell cwd change
+        // resumes the existing cwd-follow behavior; no shell input is injected.
+        let terminal_cwd = self.active_terminal_process_cwd().or_else(|| {
+            current
+                .terminal
+                .try_lock_unfair()
+                .and_then(|terminal| terminal.current_directory.clone())
+        });
+        if let Some(root) = self.conversation_explicit_root_for_cwd(terminal_cwd.as_deref()) {
+            return Some(root);
+        }
+
         // Split terminals remain local helpers. Only the grid's root terminal
         // owns cwd-driven workspace and Explorer updates.
         let grid = self.context_manager.current_grid();
         terminal_workspace_root(
             grid.root == Some(grid.current),
-            || {
-                self.active_terminal_process_cwd().or_else(|| {
-                    current
-                        .terminal
-                        .try_lock_unfair()
-                        .and_then(|terminal| terminal.current_directory.clone())
-                })
-            },
+            || terminal_cwd,
             || {
                 self.active_workspace_root
                     .clone()
@@ -424,6 +444,20 @@ impl Screen<'_> {
             self.workspace_roots.insert(id, root.clone());
         }
 
+        if changed {
+            let directory = root.to_string_lossy();
+            let scope = crate::neoism::agent::NeoismAgentPane::catalog_scope_for_workspace(
+                Some(directory.as_ref()),
+                self.context_manager.current_workspace_is_remote_joined(),
+                dirs::home_dir().as_deref(),
+            );
+            self.renderer.conversations_pane.set_catalog_directory(scope.clone());
+            for context in self.context_manager.current_grid_mut().contexts_mut().values_mut() {
+                if let Some(agent) = context.context_mut().neoism_agent.as_mut() {
+                    agent.set_catalog_directory(scope.clone());
+                }
+            }
+        }
         let tree_root_changed = self.renderer.file_tree.root() != Some(root.as_path());
         if force_tree_refresh
             || (self.renderer.file_tree.is_visible() && tree_root_changed)
@@ -1218,6 +1252,19 @@ impl Screen<'_> {
     /// current workspace is remote-joined (shared chats + SSE), and
     /// back to the local one for local workspaces.
     pub(crate) fn sync_agent_server_for_current_workspace(&mut self) {
+        let directory = self.workspace_root_for_new_shell()
+            .map(|root| root.to_string_lossy().into_owned());
+        let scope = crate::neoism::agent::NeoismAgentPane::catalog_scope_for_workspace(
+            directory.as_deref(),
+            self.context_manager.current_workspace_is_remote_joined(),
+            dirs::home_dir().as_deref(),
+        );
+        self.renderer.conversations_pane.set_catalog_directory(scope.clone());
+        for context in self.context_manager.current_grid_mut().contexts_mut().values_mut() {
+            if let Some(agent) = context.context_mut().neoism_agent.as_mut() {
+                agent.set_catalog_directory(scope.clone());
+            }
+        }
         let server = self
             .context_manager
             .agent_server_override_for_current()
@@ -1230,6 +1277,7 @@ impl Screen<'_> {
             .trim_end_matches('/')
             != server.trim_end_matches('/');
         self.renderer.conversations_pane.switch_server(server);
+        self.sync_conversation_dashboard_directory();
         self.renderer
             .conversations_pane
             .side_panel_mut()

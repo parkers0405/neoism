@@ -54,6 +54,37 @@ pub fn dispatch(session: &AgentSession, msg: AgentClientMessage) {
                 handle_delete_thread(inner, session_id).await;
             });
         }
+        AgentClientMessage::SearchThreads { query, generation } => {
+            tokio::spawn(async move {
+                handle_search_threads(inner, query, generation).await;
+            });
+        }
+        AgentClientMessage::ListSessionProjects {
+            catalog_identity,
+            generation,
+        } => {
+            tokio::spawn(async move {
+                super::events::start_catalog_event_stream(&inner, None);
+                handle_session_projects(inner, catalog_identity, generation).await;
+            });
+        }
+        AgentClientMessage::ListProjectSessions {
+            catalog_identity,
+            directory,
+            cursor,
+            generation,
+        } => {
+            tokio::spawn(async move {
+                handle_project_sessions(
+                    inner,
+                    catalog_identity,
+                    directory,
+                    cursor,
+                    generation,
+                )
+                .await;
+            });
+        }
         AgentClientMessage::ListThreads {
             directory,
             limit,

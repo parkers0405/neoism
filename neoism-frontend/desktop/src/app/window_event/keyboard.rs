@@ -120,6 +120,7 @@ impl Application<'_> {
 
         #[cfg(feature = "cef-artifacts")]
         if key_event.state == ElementState::Released
+            && !route.window.screen.renderer.conversation_navigator.is_active()
             && route.window.screen.html_artifact_key(&key_event)
         {
             route.request_redraw();

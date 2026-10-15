@@ -1,9 +1,104 @@
 use super::*;
 
+#[cfg(test)]
+mod directory_browser_tests {
+    use super::*;
+
+    #[test]
+    fn project_session_pool_caps_workers_across_catalog_lifetimes() {
+        use std::sync::{Arc, Condvar};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        // Two independent claim batches model rediscovery or endpoint replacement.
+        for _ in 0..6 {
+            let gate = gate.clone();
+            let active = active.clone();
+            let peak = peak.clone();
+            let started_tx = started_tx.clone();
+            let done_tx = done_tx.clone();
+            enqueue_project_session_job(Box::new(move || {
+                let count = active.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(count, Ordering::SeqCst);
+                started_tx.send(()).unwrap();
+                let (lock, wake) = &*gate;
+                let mut released = lock.lock().unwrap();
+                while !*released {
+                    released = wake.wait(released).unwrap();
+                }
+                active.fetch_sub(1, Ordering::SeqCst);
+                done_tx.send(()).unwrap();
+            })).unwrap();
+        }
+        for _ in 0..3 {
+            started_rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        }
+        let fourth = started_rx.recv_timeout(std::time::Duration::from_millis(50));
+        *gate.0.lock().unwrap() = true;
+        gate.1.notify_all();
+        for _ in 0..6 {
+            done_rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        }
+        assert!(fourth.is_err());
+        assert_eq!(peak.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn fresh_folder_choice_preserves_prompt_and_does_not_create_session() {
+        let mut pane = NeoismAgentPane::default();
+        pane.insert_text("keep this draft");
+        let draft = pane.file_browser_identity().2;
+        pane.choose_session_directory("/chosen/project".to_string());
+        assert_eq!(pane.session_directory(), Some("/chosen/project"));
+        assert!(pane.session_id_str().is_none());
+        assert_eq!(pane.input, "keep this draft");
+        assert_eq!(pane.file_browser_identity().2, draft);
+    }
+}
+
 // An explicit Create Server handoff only; ordinary server switches must still
 // discard all cached history. Selection is reloaded through hosted authorization.
 static HOSTED_SELECTIONS: std::sync::OnceLock<Mutex<HashMap<(String, PathBuf), String>>> =
     std::sync::OnceLock::new();
+
+type ProjectSessionJob = Box<dyn FnOnce() + Send + 'static>;
+
+/// Shared claims bound one catalog's work. This process-wide pool also bounds
+/// actual HTTP workers when a catalog/endpoint is replaced while requests run.
+fn enqueue_project_session_job(job: ProjectSessionJob) -> Result<(), String> {
+    static POOL: std::sync::OnceLock<Result<std::sync::mpsc::Sender<ProjectSessionJob>, String>> =
+        std::sync::OnceLock::new();
+    let sender = POOL.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::channel::<ProjectSessionJob>();
+        let rx = std::sync::Arc::new(Mutex::new(rx));
+        for index in 0..3 {
+            let rx = rx.clone();
+            std::thread::Builder::new()
+                .name(format!("neoism-agent-project-sessions-{index}"))
+                .spawn(move || loop {
+                    // Never hold the queue lock during HTTP or callback delivery.
+                    let job = { rx.lock().unwrap().recv() };
+                    match job {
+                        Ok(job) => {
+                            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(job)).is_err() {
+                                tracing::error!("project session worker panicked");
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                })
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(tx)
+    });
+    match sender {
+        Ok(sender) => sender.send(job).map_err(|error| error.to_string()),
+        Err(error) => Err(error.clone()),
+    }
+}
 
 impl NeoismAgentPane {
     pub(crate) fn remember_hosted_selection(&self, directory: &Path, port: u16) {
@@ -44,7 +139,9 @@ impl NeoismAgentPane {
             return;
         }
         let directory = self.directory.clone();
+        let catalog_directory = self.side_panel.catalog_directory().map(str::to_owned);
         *self = Self::default();
+        self.set_catalog_directory(catalog_directory);
         self.server = server;
         self.directory = directory;
         // Construction queued defaults for the original (usually local)
@@ -74,15 +171,23 @@ impl NeoismAgentPane {
         // the existing background channel.
     }
 
+    pub fn wordmark_hit(&self, x: f32, y: f32) -> bool {
+        !self.has_conversation()
+            && self.wordmark.rect.is_some_and(|[rx, ry, rw, rh]| {
+                x >= rx && x <= rx + rw && y >= ry && y <= ry + rh
+            })
+    }
+
     pub fn pop_wordmark_click(&mut self, x: f32, y: f32) -> bool {
-        let Some([rx, ry, rw, rh]) = self.wordmark.rect else {
-            return false;
-        };
-        if x < rx || x > rx + rw || y < ry || y > ry + rh {
+        if self.has_conversation() {
+            self.wordmark.animation.cancel();
+            self.wordmark.rect = None;
             return false;
         }
-        self.wordmark.click_started = Some(Instant::now());
-        self.wordmark.click_pos = Some((x, y));
+        if !self.wordmark_hit(x, y) {
+            return false;
+        }
+        self.wordmark.animation.replay();
         true
     }
 
@@ -188,9 +293,7 @@ impl NeoismAgentPane {
     }
 
     pub(crate) fn wordmark_click_is_animating(&self) -> bool {
-        self.wordmark.click_started.is_some_and(|started| {
-            Instant::now().saturating_duration_since(started) <= WORDMARK_CLICK_ANIMATION
-        })
+        !self.has_conversation() && self.wordmark.animation.is_active()
     }
 
     pub fn conversation_source(
@@ -300,6 +403,62 @@ impl NeoismAgentPane {
         &self.server
     }
 
+    /// Joined paths are opaque: the client's home is not the host's dashboard.
+    pub(crate) fn catalog_scope_for_workspace(
+        directory: Option<&str>,
+        remote_joined: bool,
+        local_home: Option<&Path>,
+    ) -> Option<String> {
+        let directory = directory?;
+        let path = Path::new(directory);
+        let bytes = directory.as_bytes();
+        let filesystem_root = (path.is_absolute() && path.parent().is_none())
+            || (bytes.len() == 3
+                && bytes[0].is_ascii_alphabetic()
+                && bytes[1] == b':'
+                && matches!(bytes[2], b'/' | b'\\'));
+        let local_dashboard = !remote_joined && local_home == Some(path);
+        if filesystem_root || local_dashboard {
+            None
+        } else {
+            Some(directory.to_owned())
+        }
+    }
+
+    /// Catalog scope belongs to the workspace, never to the selected chat.
+    pub fn set_catalog_directory(&mut self, directory: Option<String>) {
+        if !self.side_panel.set_catalog_directory(directory) {
+            return;
+        }
+        self.catalog_generation = self.catalog_generation.wrapping_add(1);
+        self.session_catalog_stream = None;
+        self.semantic_in_flight = false;
+        self.semantic_pending_query = None;
+        self.semantic_unavailable = false;
+        self.session_picker_base.clear();
+        self.set_semantic_loading_indicators(false);
+        if self.session_picker_open() {
+            self.open_sessions_picker();
+        }
+    }
+
+    /// Captures backend, session/draft and cwd for modal stale-result rejection.
+    pub(crate) fn file_browser_identity(&self) -> (String, Option<String>, u64, Option<String>) {
+        (self.server.clone(), self.session_id.clone(), self.prompt_draft_id, self.directory.clone())
+    }
+
+    pub(crate) fn choose_session_directory(&mut self, path: String) {
+        if self.session_id.is_none() {
+            // A fresh composer has no backend session to PATCH yet. Keep its
+            // prompt/attachments and use this cwd when the first prompt creates it.
+            self.directory = Some(path);
+            self.invalidate_skill_options();
+            self.close_picker();
+            return;
+        }
+        self.change_directory(path);
+    }
+
     pub fn session_directory(&self) -> Option<&str> {
         self.directory.as_deref()
     }
@@ -356,6 +515,7 @@ impl NeoismAgentPane {
 
     pub fn maybe_refresh_side_panel_sessions(&mut self) {
         self.ensure_session_catalog_stream();
+        self.pump_project_session_requests();
         if !self.side_panel.should_refresh_sessions() {
             return;
         }
@@ -364,33 +524,46 @@ impl NeoismAgentPane {
     }
 
     fn ensure_session_catalog_stream(&mut self) {
-        let Some(directory) = self.directory.clone() else {
-            self.session_catalog_stream = None;
-            return;
-        };
         if self
             .session_catalog_stream
             .as_ref()
-            .is_some_and(|stream| stream.matches(&self.server, &directory))
+            .is_some_and(|stream| stream.matches(&self.server, self.side_panel.catalog_directory()))
         {
             return;
         }
-        let mut stream = start_session_catalog_stream(self.server.clone(), directory);
+        let mut stream = start_session_catalog_stream(
+            self.server.clone(), self.side_panel.catalog_directory().map(str::to_owned),
+        );
         if let Some(wake) = self.event_wake.clone() {
             stream.set_wake(wake);
         }
         self.session_catalog_stream = Some(stream);
     }
 
+    pub(crate) fn catalog_callback_is_current(
+        &self, server: &str, generation: u64, directory: Option<&str>,
+    ) -> bool {
+        self.server == server && self.catalog_generation == generation
+            && self.side_panel.catalog_directory() == directory
+    }
+
     pub(crate) fn request_side_panel_session_page(&mut self, cursor: Option<String>) {
         let generation = self.side_panel.next_session_request_generation();
+        let directory = self.side_panel.catalog_directory().map(str::to_owned);
         let server = self.server.clone();
+        let catalog_generation = self.catalog_generation;
         let current = self.session_id.clone();
-        let directory = self.directory.clone();
         let tx = self.background_tx.clone();
         if std::thread::Builder::new()
             .name("neoism-agent-sessions".into())
             .spawn(move || {
+                if directory.is_none() {
+                    let result = crate::neoism::agent::api::fetch_session_projects(&server);
+                    let _ = tx.send(NeoismAgentBackgroundUpdate::SessionProjectsRefreshed {
+                        server, catalog_generation, generation, result,
+                    });
+                    return;
+                }
                 let entries = crate::neoism::agent::api::fetch_session_entries_page(
                     &server,
                     current.as_deref(),
@@ -399,6 +572,9 @@ impl NeoismAgentPane {
                 );
                 let _ =
                     tx.send(NeoismAgentBackgroundUpdate::SidePanelSessionsRefreshed {
+                        server,
+                        catalog_generation,
+                        directory,
                         generation,
                         requested_cursor: cursor,
                         result: entries,
@@ -413,12 +589,43 @@ impl NeoismAgentPane {
         }
     }
 
+    /// Shared claims enforce visibility and tokens; the native pool caps HTTP workers.
+    pub(crate) fn pump_project_session_requests(&mut self) -> bool {
+        if !self.side_panel.project_pagination_enabled() {
+            return false;
+        }
+        let requests = self.side_panel.begin_project_session_requests();
+        let changed = !requests.is_empty();
+        for (directory, cursor, generation) in requests {
+            let server = self.server.clone();
+            let catalog_generation = self.catalog_generation;
+            let tx = self.background_tx.clone();
+            let requested_directory = directory.clone();
+            if let Err(error) = enqueue_project_session_job(Box::new(move || {
+                let result = crate::neoism::agent::api::fetch_project_session_page(
+                    &server, &requested_directory, cursor.as_deref(),
+                );
+                let _ = tx.send(NeoismAgentBackgroundUpdate::ProjectSessionPage {
+                    server, catalog_generation, directory: requested_directory,
+                    requested_cursor: cursor, generation, result,
+                });
+            })) {
+                self.side_panel.settle_project_session_error(&directory, generation, error);
+            }
+        }
+        changed
+    }
+
     pub fn scroll_side_panel_pixels(&mut self, delta_pixels: f32, rows: usize) {
         self.side_panel.scroll_pixels(delta_pixels, rows);
         self.maybe_request_side_panel_session_page();
     }
 
     pub fn maybe_request_side_panel_session_page(&mut self) {
+        self.pump_project_session_requests();
+        if self.side_panel.project_pagination_enabled() || self.side_panel.catalog_directory().is_none() {
+            return;
+        }
         if let Some(cursor) = self.side_panel.begin_session_page_near_end() {
             self.request_side_panel_session_page(Some(cursor));
         }
@@ -428,11 +635,11 @@ impl NeoismAgentPane {
     /// to one fetch in flight (the newest query typed meanwhile replaces any
     /// waiting one). Results land as `SemanticSessionHits` in
     /// `drain_background_updates` and feed both the side-panel session list
-    /// and an open `/sessions` picker. No-ops once the server has reported
-    /// semantic search unavailable.
+    /// and an open `/sessions` picker. Title queries always run; only the
+    /// transcript/vector endpoint is skipped when it reports unavailable.
     pub(crate) fn kick_semantic_session_search(&mut self, query: String) {
         let query = query.trim().to_string();
-        if query.is_empty() || self.semantic_unavailable {
+        if query.is_empty() {
             self.set_semantic_loading_indicators(false);
             return;
         }
@@ -442,27 +649,32 @@ impl NeoismAgentPane {
             return;
         }
         self.semantic_in_flight = true;
+        let transcript_enabled = !self.semantic_unavailable;
+        let directory = self.side_panel.catalog_directory().map(str::to_owned);
+        let catalog_generation = self.catalog_generation;
         let server = self.server.clone();
         let current = self.session_id.clone();
-        let directory = self.directory.clone();
         let tx = self.background_tx.clone();
         std::thread::Builder::new()
             .name("neoism-agent-semantic".into())
             .spawn(move || {
-                let hits = match crate::neoism::agent::api::fetch_semantic_session_hits(
+                let (hits, transcript_unavailable) = match crate::neoism::agent::api::fetch_session_search_hits(
                     &server,
                     &query,
                     current.as_deref(),
                     directory.as_deref(),
+                    transcript_enabled,
                 ) {
-                    Ok(hits) => hits,
+                    Ok(result) => result,
                     // Network hiccups yield "no results" rather than
                     // latching the feature off.
-                    Err(_) => Some(Vec::new()),
+                    Err(_) => (Vec::new(), !transcript_enabled),
                 };
                 let _ = tx.send(NeoismAgentBackgroundUpdate::SemanticSessionHits {
+                    catalog_generation,
                     query,
-                    hits,
+                    hits: Some(hits),
+                    transcript_unavailable,
                 });
             })
             .ok();
@@ -483,6 +695,9 @@ impl NeoismAgentPane {
     /// Resume the side-panel's currently selected previous session, if
     /// any. Exposed for the click/Enter handler in `screen::bridges::agent`.
     pub fn activate_side_panel_selection(&mut self) -> bool {
+        if self.side_panel.toggle_selected_project() {
+            return false;
+        }
         let Some(entry) = self.side_panel.selected_session().cloned() else {
             return false;
         };

@@ -22,6 +22,9 @@
 //! analogue — same scroll/cursor primitives, same clamp/scrolloff
 //! pattern.
 
+#[cfg(test)]
+mod dashboard_directory_tests;
+
 use std::collections::{BTreeSet, HashMap, HashSet};
 use web_time::Duration;
 use web_time::Instant;
@@ -30,6 +33,245 @@ use crate::animation::CriticallyDampedSpring;
 
 use crate::panels::agent_pane::icon::AgentKind;
 use crate::widgets::scroll::Scroll;
+
+#[cfg(test)]
+mod detail_pointer_tests {
+    use super::*;
+
+    #[test]
+    fn detail_pointer_hits_real_root_child_rows_not_headings_tasks_or_padding() {
+        let mut panel = NeoismAgentSidePanel::default();
+        panel.set_subagents(vec![
+            NeoismAgentSessionEntry::new("root", "main session", ""),
+            NeoismAgentSessionEntry::new("child", "child task", "")
+                .with_runtime_status(Some("running".into())),
+        ]);
+        panel.set_mode(SidePanelMode::Subagents);
+        panel.set_last_panel_rect([500., 0., 240., 500.]);
+        // The actual renderer registers a clipped branch-list slice and its full origin.
+        panel.set_row_hit_rect_with_origin([510., 100., 220., 80.], 100., 40.);
+        let selected = panel.selected_index();
+        assert!(panel.detail_clickable_at(600., 110.));
+        assert!(panel.detail_clickable_at(600., 150.));
+        assert!(!panel.catalog_clickable_at(600., 150.)); // never the left catalog policy
+        assert!(!panel.detail_clickable_at(600., 80.)); // heading
+        assert!(!panel.detail_clickable_at(600., 200.)); // Tasks/status region
+        assert!(!panel.detail_clickable_at(505., 110.)); // panel padding
+        assert!(!panel.detail_clickable_at(800., 110.));
+        assert_eq!(panel.selected_index(), selected); // hit testing is pure
+        panel.set_user_hidden(true);
+        assert!(!panel.detail_clickable_at(600., 110.));
+        panel.set_user_hidden(false);
+        panel.set_mode(SidePanelMode::Sessions);
+        assert!(!panel.detail_clickable_at(600., 110.));
+        panel.set_mode(SidePanelMode::Subagents);
+        panel.clear_last_panel_rect();
+        assert!(!panel.detail_clickable_at(600., 110.));
+    }
+
+    #[test]
+    fn detail_pointer_uses_scrolled_origin_and_rejects_empty_or_non_session_rows() {
+        let mut panel = NeoismAgentSidePanel::default();
+        panel.set_mode(SidePanelMode::Subagents);
+        panel.set_last_panel_rect([500., 0., 240., 500.]);
+        panel.set_row_hit_rect_with_origin([510., 100., 220., 40.], 60., 40.);
+        assert!(!panel.detail_clickable_at(600., 110.));
+        panel.subagents = vec![
+            NeoismAgentSessionEntry::new("root", "main session", ""),
+            NeoismAgentSessionEntry::new("child", "child task", "")
+                .with_runtime_status(Some("running".into())),
+        ];
+        assert!(panel.detail_clickable_at(600., 110.)); // clipped child, not row 0
+        assert!(!panel.detail_clickable_at(600., 70.)); // root scrolled out
+        panel.subagents[1].is_header = true;
+        assert!(!panel.detail_clickable_at(600., 110.));
+        panel.clear_row_hit_rect();
+        assert!(!panel.detail_clickable_at(600., 110.));
+    }
+}
+
+#[cfg(test)]
+mod navigation_header_tests {
+    use super::*;
+
+    #[test]
+    fn capability_gates_and_resets_typed_hits() {
+        let mut panel = NeoismAgentSidePanel::default();
+        assert!(!panel.navigation_header_enabled());
+        panel.set_header_action_rect(CatalogHeaderAction::Search, [0., 0., 80., 30.]);
+        assert_eq!(panel.header_action_at(10., 10.), None);
+        panel.set_navigation_header_enabled(true);
+        panel.set_header_action_rect(CatalogHeaderAction::Search, [0., 0., 80., 30.]);
+        panel.set_header_action_rect(CatalogHeaderAction::Projects, [0., 30., 80., 30.]);
+        panel.set_header_action_rect(
+            CatalogHeaderAction::AddWorkspace,
+            [80., 30., 30., 30.],
+        );
+        assert_eq!(panel.header_action_at(10., 10.), None);
+        assert_eq!(
+            panel.header_action_at(10., 40.),
+            Some(CatalogHeaderAction::Projects)
+        );
+        assert_eq!(panel.header_action_at(90., 40.), None);
+        assert_eq!(panel.project_button_rect(), Some([0., 30., 80., 30.]));
+        panel.clear_new_chat_rect();
+        assert_eq!(panel.project_button_rect(), None);
+        panel.set_navigation_header_enabled(false);
+        assert_eq!(panel.header_action_at(10., 10.), None);
+    }
+
+    #[test]
+    fn removed_add_workspace_button_never_registers_hit_targets() {
+        let mut panel = NeoismAgentSidePanel::default();
+        panel.set_navigation_header_enabled(true);
+        panel.set_header_action_rect(CatalogHeaderAction::Search, [0., 0., 80., 30.]);
+        panel.set_header_action_rect(CatalogHeaderAction::Projects, [0., 30., 80., 30.]);
+        let add_rect = [80., 30., 30., 30.];
+        panel.set_header_action_rect(CatalogHeaderAction::AddWorkspace, add_rect);
+        assert_eq!(panel.header_action_at(90., 40.), None);
+        panel.set_catalog_directory(Some("/work/project".into()));
+        assert!(!panel.header_action_enabled(CatalogHeaderAction::AddWorkspace));
+        assert_eq!(panel.header_action_at(90., 40.), None);
+        panel.set_header_action_rect(CatalogHeaderAction::AddWorkspace, add_rect);
+        assert_eq!(panel.header_action_at(90., 40.), None);
+        assert_eq!(panel.header_action_at(10., 10.), None);
+        assert_eq!(
+            panel.header_action_at(10., 40.),
+            Some(CatalogHeaderAction::Projects)
+        );
+        panel.set_catalog_directory(None);
+        assert!(panel.header_action_enabled(CatalogHeaderAction::AddWorkspace));
+        assert_eq!(panel.header_action_at(90., 40.), None);
+        panel.set_header_action_rect(CatalogHeaderAction::AddWorkspace, add_rect);
+        assert_eq!(panel.header_action_at(90., 40.), None);
+    }
+
+    #[test]
+    fn projects_is_a_separate_stop_in_root_and_scoped_catalogs() {
+        for scope in [None, Some("/work/a".to_owned())] {
+            let mut panel = NeoismAgentSidePanel::default();
+            panel.set_navigation_header_enabled(true);
+            panel.set_catalog_directory(scope);
+            let mut chat = NeoismAgentSessionEntry::new("chat", "Chat", "");
+            chat.directory = Some("/work/a".into());
+            panel.set_sessions(vec![chat]);
+            panel.select_new_chat();
+            panel.select_next();
+            assert!(panel.projects_selected());
+            assert!(!panel.new_chat_selected());
+            assert!(panel.selected_session().is_none());
+            assert!(panel.selected_catalog_row().is_none());
+            assert!(!panel.toggle_selected_project());
+            assert!(!panel.navigate_project(false));
+            panel.set_focused(true);
+            assert_eq!(panel.catalog_highlight_index(None), None);
+            panel.select_next();
+            assert!(!panel.projects_selected());
+            let first = panel.selected_row().unwrap().stable_identity().to_owned();
+            assert!(panel.selected_row().unwrap().is_selectable());
+            panel.select_prev();
+            assert!(panel.projects_selected());
+            panel.select_prev();
+            assert!(panel.new_chat_selected());
+            panel.select_prev();
+            assert!(panel.new_chat_selected());
+            panel.select_next();
+            panel.select_next();
+            assert_eq!(panel.selected_row().unwrap().stable_identity(), first);
+        }
+    }
+
+    #[test]
+    fn projects_focus_survives_empty_refresh_scope_change_and_live_pins() {
+        let mut panel = NeoismAgentSidePanel::default();
+        panel.set_navigation_header_enabled(true);
+        panel.select_new_chat();
+        panel.select_next();
+        assert!(panel.projects_selected());
+        panel.select_next(); // Empty catalogs still expose Projects.
+        assert!(panel.projects_selected());
+        panel.set_session_projects(vec![("/work/a".into(), 1)]);
+        assert!(panel.projects_selected());
+        let mut chat = NeoismAgentSessionEntry::new("pin", "Pinned", "");
+        chat.directory = Some("/work/a".into());
+        chat.pinned = true;
+        panel.upsert_session(chat);
+        assert!(panel.projects_selected());
+        panel.set_catalog_directory(Some("/work/a".into()));
+        panel.set_sessions(vec![]);
+        assert!(panel.projects_selected());
+        assert!(!panel.toggle_selected_project());
+        panel.select_prev();
+        assert!(panel.new_chat_selected());
+    }
+
+    #[test]
+    fn hidden_search_cannot_register_hits_or_take_focus() {
+        let mut panel = NeoismAgentSidePanel::default();
+        panel.focus_search();
+        panel.set_navigation_header_enabled(true);
+        panel.set_header_action_rect(CatalogHeaderAction::Search, [0., 0., 80., 30.]);
+        panel.set_session_search_rect([0., 0., 80., 30.]);
+        panel.focus_search();
+        assert!(!panel.search_focused());
+        assert!(!panel.session_search_contains(10., 10.));
+        assert_eq!(panel.header_action_at(10., 10.), None);
+        panel.set_selected_cursor_rect([0., 0., 1., 20.]);
+        panel.select_projects();
+        assert_eq!(panel.selected_cursor_rect(), None);
+        panel.select_prev();
+        assert!(panel.new_chat_selected());
+    }
+
+    #[test]
+    fn pointing_cursor_matches_buttons_and_chat_rows_not_section_captions() {
+        let mut panel = NeoismAgentSidePanel::default();
+        panel.set_last_panel_height_rows(8);
+        panel.set_catalog_directory(Some("/work/a".into()));
+        panel.set_sessions(vec![
+            NeoismAgentSessionEntry::new("pin", "Pin", "")
+                .with_directory(Some("/work/a".into()))
+                .with_pinned(true),
+            NeoismAgentSessionEntry::new("chat", "Chat", "")
+                .with_directory(Some("/work/a".into())),
+        ]);
+        panel.set_navigation_header_enabled(true);
+        panel.set_new_chat_rect([0., 0., 240., 34.]);
+        panel.set_header_action_rect(CatalogHeaderAction::Projects, [0., 42., 240., 34.]);
+        let height = panel.row_height();
+        let rect = [0., 100., 240., height * 4.];
+        panel.set_last_panel_rect([0., 0., 240., 100. + height * 4.]);
+        panel.set_row_hit_rect(rect, height);
+        assert!(panel.catalog_clickable_at(100., 17.));
+        assert!(panel.catalog_clickable_at(100., 59.));
+        assert!(!panel.catalog_clickable_at(100., 38.));
+        assert!(!panel.catalog_clickable_at(100., 100. + height * 0.5));
+        assert!(panel.catalog_clickable_at(100., 100. + height * 1.5));
+        assert!(!panel.catalog_clickable_at(100., 100. + height * 2.5));
+        assert!(panel.catalog_clickable_at(100., 100. + height * 3.5));
+        assert!(!panel.catalog_clickable_at(300., 100. + height * 3.5));
+        panel.clear_new_chat_rect();
+        assert!(!panel.catalog_clickable_at(100., 17.));
+        assert!(!panel.catalog_clickable_at(100., 59.));
+    }
+
+    #[test]
+    fn project_label_and_tooltip_follow_catalog_scope() {
+        let mut panel = NeoismAgentSidePanel::default();
+        assert_eq!(panel.project_button_label(), "~");
+        panel.set_catalog_directory(Some("/work/neoism".into()));
+        assert_eq!(panel.project_button_label(), "neoism");
+        assert_eq!(panel.project_button_tooltip(), Some("/work/neoism"));
+    }
+}
+
+/// Typed navigation intents; hosts own data loading and overlays.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CatalogHeaderAction {
+    Search,
+    Projects,
+    AddWorkspace,
+}
 
 /// Default width of the workspace Chats panel. The in-chat details
 /// rail has its own fixed width and must not inherit this resizable value.
@@ -154,6 +396,9 @@ pub struct ExternalSessionPreview {
     pub neoism_session_id: Option<String>,
 }
 
+mod project_pagination;
+use project_pagination::ProjectSessionPage;
+
 /// One entry in the sessions / sub-agents list. `time_label` doubles
 /// as the right-aligned footer text — "5 minutes ago" for sessions,
 /// agent name ("build" / "plan" / "main session") for sub-agents.
@@ -161,6 +406,8 @@ pub struct ExternalSessionPreview {
 pub struct NeoismAgentSessionEntry {
     pub id: String,
     pub title: String,
+    /// Persisted execution directory; independent of the workspace displaying the catalog.
+    pub directory: Option<String>,
     pub time_label: String,
     pub depth: usize,
     pub source: ConversationSource,
@@ -171,8 +418,7 @@ pub struct NeoismAgentSessionEntry {
     pub runtime_status: Option<String>,
     /// Server-owned whole-family authority, independent of branch status.
     pub catalog_activity: Option<neoism_agent_core::CatalogActivity>,
-    /// Raw `time.updated` unix-ms — buckets the entry under a date-group
-    /// header in home mode. `0` for untracked / non-session rows.
+    /// Raw `time.updated` unix-ms, used to order projects and their chats.
     pub updated_ms: u64,
     /// Whether the session is pinned to the top of the list.
     pub pinned: bool,
@@ -212,6 +458,7 @@ impl NeoismAgentSessionEntry {
         Self {
             id: id.into(),
             title: title.into(),
+            directory: None,
             time_label: time_label.into(),
             depth: 0,
             source: ConversationSource::Neoism,
@@ -233,6 +480,7 @@ impl NeoismAgentSessionEntry {
         Self {
             id: String::new(),
             title: label.into(),
+            directory: None,
             time_label: String::new(),
             depth: 0,
             source: ConversationSource::Neoism,
@@ -255,6 +503,7 @@ impl NeoismAgentSessionEntry {
         Self {
             id: session_id.into(),
             title: excerpt.into(),
+            directory: None,
             time_label: String::new(),
             depth: 0,
             source: ConversationSource::Neoism,
@@ -269,6 +518,23 @@ impl NeoismAgentSessionEntry {
             is_excerpt: true,
             highlights: Vec::new(),
         }
+    }
+
+    pub fn with_directory(mut self, directory: Option<String>) -> Self {
+        self.directory = directory.filter(|directory| !directory.trim().is_empty());
+        self
+    }
+
+    pub fn is_project_page(&self) -> bool {
+        self.is_header && self.id.starts_with("project-page:")
+    }
+
+    pub fn is_project(&self) -> bool {
+        self.is_header && self.directory.is_some() && !self.is_project_page()
+    }
+
+    pub fn is_selectable(&self) -> bool {
+        !self.is_header || self.is_project() || self.is_project_page()
     }
 
     pub fn with_source(mut self, source: ConversationSource) -> Self {
@@ -431,6 +697,59 @@ fn wrap_excerpt_lines(excerpt: &str, columns: usize, max_lines: usize) -> Vec<St
         }
     }
     lines.retain(|line| !line.is_empty());
+    lines
+}
+
+fn wrap_excerpt_measured(
+    excerpt: &str,
+    width: f32,
+    max_lines: usize,
+    measure: &mut impl FnMut(&str) -> f32,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    let mut truncated = false;
+    'words: for word in excerpt.split_whitespace() {
+        let candidate = if current.is_empty() {
+            word.to_string()
+        } else {
+            format!("{current} {word}")
+        };
+        if measure(&candidate) <= width {
+            current = candidate;
+            continue;
+        }
+        if !current.is_empty() {
+            lines.push(std::mem::take(&mut current));
+            if lines.len() == max_lines {
+                truncated = true;
+                break;
+            }
+        }
+        // Long paths/tokens split at UTF-8 character boundaries, using shaped widths.
+        for ch in word.chars() {
+            let candidate = format!("{current}{ch}");
+            if !current.is_empty() && measure(&candidate) > width {
+                lines.push(std::mem::take(&mut current));
+                if lines.len() == max_lines {
+                    truncated = true;
+                    break 'words;
+                }
+            }
+            current.push(ch);
+        }
+    }
+    if !current.is_empty() && lines.len() < max_lines {
+        lines.push(current);
+    }
+    if truncated {
+        if let Some(last) = lines.last_mut() {
+            while !last.is_empty() && measure(&format!("{last}…")) > width {
+                last.pop();
+            }
+            last.push('…');
+        }
+    }
     lines
 }
 
@@ -827,6 +1146,8 @@ pub struct NeoismAgentSidePanel {
     /// Monospace column budget for wrapping semantic excerpt chunks into
     /// list rows, fed back from the renderer's measured panel width.
     result_wrap_columns: usize,
+    measured_excerpt_lines: HashMap<String, Vec<String>>,
+    result_wrap_metrics: Option<(u32, u32, Option<usize>, u32)>,
     /// True when the selection cursor sits on the search row (reached by
     /// arrow-up past the first session, or by typing). While set, the
     /// trail cursor renders on the search field and no session row is
@@ -837,6 +1158,18 @@ pub struct NeoismAgentSidePanel {
     /// session row or a vertical list drag.
     session_search_rect: Option<[f32; 4]>,
     sessions: Vec<NeoismAgentSessionEntry>,
+    /// Workspace-owned catalog scope, never the selected chat's execution directory.
+    catalog_directory: Option<String>,
+    /// Authorized dashboard identity, independent of the current catalog scope.
+    dashboard_directory: Option<String>,
+    collapsed_projects: HashSet<String>,
+    project_pages: HashMap<String, ProjectSessionPage>,
+    project_pagination: bool,
+    project_generation: u64,
+    retired_project_requests: HashSet<u64>,
+    search_only_session_ids: HashSet<String>,
+    discovered_pinned_versions: HashMap<String, u64>,
+    deleted_session_ids: HashSet<String>,
     session_catalog_state: SessionCatalogState,
     visible_running_indicator: bool,
     /// Opaque keyset cursor returned by the session catalogue. `None` means
@@ -904,8 +1237,11 @@ pub struct NeoismAgentSidePanel {
     content_scroll_px: f32,
     content_scroll_max: f32,
     reveal_selected_branch: bool,
+    navigation_header_enabled: bool,
+    header_rects: Vec<(CatalogHeaderAction, [f32; 4])>,
     new_chat_rect: Option<[f32; 4]>,
     new_chat_selected: bool,
+    projects_selected: bool,
     provider_menu_open: bool,
     provider_selection: usize,
     hovered_session: Option<usize>,
@@ -961,6 +1297,8 @@ impl Default for NeoismAgentSidePanel {
             semantic_searching: false,
             semantic_search_started: None,
             result_wrap_columns: 42,
+            measured_excerpt_lines: HashMap::new(),
+            result_wrap_metrics: None,
             search_focused: false,
             session_search_rect: None,
             session_next_cursor: None,
@@ -969,6 +1307,16 @@ impl Default for NeoismAgentSidePanel {
             session_request_generation: 0,
             session_refresh_attempts: 0,
             sessions: Vec::new(),
+            catalog_directory: None,
+            dashboard_directory: None,
+            collapsed_projects: HashSet::new(),
+            project_pages: HashMap::new(),
+            project_pagination: false,
+            project_generation: 0,
+            retired_project_requests: HashSet::new(),
+            search_only_session_ids: HashSet::new(),
+            discovered_pinned_versions: HashMap::new(),
+            deleted_session_ids: HashSet::new(),
             session_catalog_state: SessionCatalogState::Initial,
             visible_running_indicator: false,
             sessions_loading_started: Instant::now(),
@@ -989,8 +1337,11 @@ impl Default for NeoismAgentSidePanel {
             content_scroll_px: 0.0,
             content_scroll_max: 0.0,
             reveal_selected_branch: false,
+            navigation_header_enabled: false,
+            header_rects: Vec::new(),
             new_chat_rect: None,
             new_chat_selected: false,
+            projects_selected: false,
             provider_menu_open: false,
             provider_selection: 0,
             hovered_session: None,
@@ -1010,10 +1361,93 @@ impl Default for NeoismAgentSidePanel {
 }
 
 impl NeoismAgentSidePanel {
+    pub fn navigation_header_enabled(&self) -> bool {
+        self.navigation_header_enabled
+    }
+
+    pub fn set_navigation_header_enabled(&mut self, enabled: bool) {
+        if self.navigation_header_enabled == enabled {
+            return;
+        }
+        self.navigation_header_enabled = enabled;
+        self.projects_selected = false;
+        self.selected_cursor_rect = None;
+        self.clear_header_rects();
+        if enabled {
+            self.session_search_rect = None;
+            self.search_focused = false;
+        }
+    }
+
+    pub fn clear_header_rects(&mut self) {
+        self.header_rects.clear();
+    }
+
+    pub fn header_action_enabled(&self, action: CatalogHeaderAction) -> bool {
+        self.navigation_header_enabled
+            && action != CatalogHeaderAction::Search
+            && (action != CatalogHeaderAction::AddWorkspace
+                || self.catalog_directory.is_none())
+    }
+
+    pub fn set_header_action_rect(
+        &mut self,
+        action: CatalogHeaderAction,
+        rect: [f32; 4],
+    ) {
+        self.header_rects.retain(|(a, _)| *a != action);
+        if action != CatalogHeaderAction::AddWorkspace
+            && self.header_action_enabled(action)
+        {
+            self.header_rects.push((action, rect));
+        }
+    }
+
+    pub fn header_action_at(&self, x: f32, y: f32) -> Option<CatalogHeaderAction> {
+        if !self.navigation_header_enabled {
+            return None;
+        }
+        self.header_rects
+            .iter()
+            .find_map(|(action, [rx, ry, w, h])| {
+                (self.header_action_enabled(*action)
+                    && x >= *rx
+                    && x < rx + w
+                    && y >= *ry
+                    && y < ry + h)
+                    .then_some(*action)
+            })
+    }
+
+    pub fn project_button_rect(&self) -> Option<[f32; 4]> {
+        self.header_rects
+            .iter()
+            .find_map(|(a, r)| (*a == CatalogHeaderAction::Projects).then_some(*r))
+    }
+
+    /// Full selected path, suitable for a host tooltip. Scope stays catalog-owned.
+    pub fn project_button_tooltip(&self) -> Option<&str> {
+        self.catalog_directory()
+    }
+
+    pub fn project_button_label(&self) -> &str {
+        self.catalog_directory()
+            .map(|path| {
+                path.trim_end_matches(['/', '\\'])
+                    .rsplit(['/', '\\'])
+                    .next()
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or(path)
+            })
+            .unwrap_or("~")
+    }
+
     /// Catalog-only presentation: disable controls owned by other surfaces
     /// even when an old render frame left hit rectangles or focus behind.
     pub fn hide_catalog_controls(&mut self) {
+        self.clear_header_rects();
         self.new_chat_rect = None;
+        self.projects_selected = false;
         self.new_chat_selected = false;
         self.session_search_rect = None;
         self.provider_menu_open = false;
@@ -1057,6 +1491,23 @@ impl NeoismAgentSidePanel {
         self.new_chat_rect = Some(rect);
     }
 
+    pub fn projects_selected(&self) -> bool {
+        self.projects_selected
+            && self.navigation_header_enabled
+            && matches!(self.mode, SidePanelMode::Sessions)
+    }
+
+    pub fn select_projects(&mut self) {
+        if self.navigation_header_enabled && matches!(self.mode, SidePanelMode::Sessions)
+        {
+            self.new_chat_selected = false;
+            self.search_focused = false;
+            self.projects_selected = true;
+            self.cursor_spring.reset();
+            self.selected_cursor_rect = None;
+        }
+    }
+
     pub fn new_chat_selected(&self) -> bool {
         self.new_chat_selected && matches!(self.mode, SidePanelMode::Sessions)
     }
@@ -1065,12 +1516,47 @@ impl NeoismAgentSidePanel {
         if matches!(self.mode, SidePanelMode::Sessions) {
             self.search_focused = false;
             self.new_chat_selected = true;
+            self.projects_selected = false;
+            self.selected_cursor_rect = None;
             self.cursor_spring.reset();
         }
     }
 
     pub fn clear_new_chat_rect(&mut self) {
+        self.clear_header_rects();
         self.new_chat_rect = None;
+    }
+
+    /// Pure cursor hit policy for the right-hand conversation branch list.
+    /// Its renderer-registered viewport excludes headings, Tasks and status padding.
+    pub fn detail_clickable_at(&self, x: f32, y: f32) -> bool {
+        if self.user_hidden || !matches!(self.mode, SidePanelMode::Subagents) {
+            return false;
+        }
+        self.last_panel_rect()
+            .filter(|_| self.contains_point(x, y))
+            .and_then(|rect| self.hit_test_row(x, y, rect))
+            .and_then(|row| self.subagents.get(row))
+            .is_some_and(|entry| !entry.is_header && !entry.id.is_empty())
+    }
+
+    pub fn catalog_clickable_at(&self, x: f32, y: f32) -> bool {
+        if !matches!(self.mode, SidePanelMode::Sessions) {
+            return false;
+        }
+        if self.new_chat_hit(x, y).is_some() || self.header_action_at(x, y).is_some() {
+            return true;
+        }
+        self.last_panel_rect()
+            .and_then(|rect| self.hit_test_row(x, y, rect))
+            .and_then(|row| self.sessions.get(row))
+            .is_some_and(|entry| {
+                if entry.is_project_page() {
+                    self.project_page_action_at(x, y)
+                } else {
+                    entry.is_selectable()
+                }
+            })
     }
 
     pub fn new_chat_hit(&self, x: f32, y: f32) -> Option<Option<usize>> {
@@ -1305,6 +1791,7 @@ impl NeoismAgentSidePanel {
             return;
         }
         self.mode = mode;
+        self.projects_selected = false;
         self.new_chat_selected = false;
         self.selected = 0;
         self.scroll_top = 0;
@@ -1438,8 +1925,83 @@ impl NeoismAgentSidePanel {
         &self.sessions
     }
 
+    /// Hosts supply only the observed, authorized dashboard path. Use the same
+    /// exact saved-directory identity as grouping; never infer it from a basename,
+    /// execution cwd, filesystem root, or the client's home.
+    pub fn set_dashboard_directory(&mut self, directory: Option<String>) {
+        let directory = directory.filter(|directory| !directory.trim().is_empty());
+        if self.dashboard_directory == directory {
+            return;
+        }
+        self.dashboard_directory = directory;
+        if self.catalog_directory.is_some() {
+            return;
+        }
+        if !matches!(self.mode, SidePanelMode::Sessions) {
+            self.rebuild_session_display();
+            return;
+        }
+        let selected = self
+            .selected_catalog_row()
+            .map(|entry| entry.stable_identity().to_owned());
+        let at_top = self.scroll_px <= f32::EPSILON;
+        let anchor = self.session_viewport_anchor();
+        self.rebuild_session_display();
+        self.restore_selected_session(selected.as_deref());
+        if at_top {
+            self.scroll_px = 0.0;
+            self.scroll_top = 0;
+            self.scroll.set_target_immediate(0.0);
+        } else {
+            self.restore_session_viewport_anchor(anchor);
+        }
+    }
+
+    pub fn catalog_directory(&self) -> Option<&str> {
+        self.catalog_directory.as_deref()
+    }
+
+    pub fn set_catalog_directory(&mut self, directory: Option<String>) -> bool {
+        let directory = directory.filter(|directory| !directory.trim().is_empty());
+        if self.catalog_directory == directory {
+            return false;
+        }
+        self.catalog_directory = directory;
+        self.header_rects
+            .retain(|(action, _)| *action != CatalogHeaderAction::AddWorkspace);
+        self.invalidate_session_catalog();
+        true
+    }
+
+    fn in_catalog_scope(&self, entry: &NeoismAgentSessionEntry) -> bool {
+        self.catalog_directory
+            .as_deref()
+            .is_none_or(|directory| entry.directory.as_deref() == Some(directory))
+    }
+
     pub fn invalidate_session_catalog(&mut self) {
+        self.selected = 0;
+        self.selected_cursor_rect = None;
+        self.cursor_spring.reset();
         self.all_sessions.clear();
+        self.external_sessions.clear();
+        self.external_errors.clear();
+        self.external_importing_key = None;
+        self.external_scanning = false;
+        self.semantic_results.clear();
+        self.semantic_query.clear();
+        self.semantic_searching = false;
+        self.semantic_search_started = None;
+        self.measured_excerpt_lines.clear();
+        self.result_wrap_metrics = None;
+        self.project_pages.clear();
+        self.retired_project_requests.clear();
+        self.search_only_session_ids.clear();
+        self.discovered_pinned_versions.clear();
+        self.project_pagination = false;
+        self.collapsed_projects.clear();
+        self.deleted_session_ids.clear();
+        self.catalog_viewed_root = None;
         self.session_activity_overrides.clear();
         self.sessions.clear();
         self.session_next_cursor = None;
@@ -1498,8 +2060,11 @@ impl NeoismAgentSidePanel {
     /// Paint policy only: never changes the keyboard candidate or viewport.
     pub fn catalog_highlight_index(&self, legacy_root: Option<&str>) -> Option<usize> {
         if self.focused {
-            return (!self.new_chat_selected && self.selected < self.sessions.len())
-                .then_some(self.selected);
+            return (!self.new_chat_selected()
+                && !self.projects_selected()
+                && !self.search_focused()
+                && self.selected < self.sessions.len())
+            .then_some(self.selected);
         }
         let root = self.catalog_viewed_root(legacy_root)?;
         self.sessions
@@ -1770,7 +2335,7 @@ impl NeoismAgentSidePanel {
     }
 
     pub fn set_session_search_rect(&mut self, rect: [f32; 4]) {
-        self.session_search_rect = Some(rect);
+        self.session_search_rect = (!self.navigation_header_enabled).then_some(rect);
     }
 
     pub fn clear_session_search_rect(&mut self) {
@@ -1843,18 +2408,27 @@ impl NeoismAgentSidePanel {
     /// Kept for the home-mode click path that always wants a session
     /// (not a subagent). Subagent click uses `selected_row()` instead.
     pub fn selected_session(&self) -> Option<&NeoismAgentSessionEntry> {
-        if self.search_focused() || self.new_chat_selected() {
+        if self.search_focused() || self.new_chat_selected() || self.projects_selected() {
             return None;
         }
         self.sessions.get(self.selected).filter(|e| !e.is_header)
     }
 
-    /// Replace the cached sessions list. The incoming list is a *flat*
-    /// set of session rows (no headers); the displayed `sessions` list is
-    /// derived from it — filtered by `session_query`, sorted pinned-first
-    /// / newest-day-first, with date-group header rows injected. Resets
-    /// selection / scroll on the sessions axis only when home mode is
-    /// active — flipping modes already resets these.
+    fn selected_catalog_row(&self) -> Option<&NeoismAgentSessionEntry> {
+        if !matches!(self.mode, SidePanelMode::Sessions)
+            || self.search_focused()
+            || self.new_chat_selected()
+            || self.projects_selected()
+        {
+            return None;
+        }
+        self.sessions
+            .get(self.selected)
+            .filter(|entry| entry.is_selectable() && !entry.is_project_page())
+    }
+
+    /// Replace the flat catalog; display rows are derived by project, with pins
+    /// first within each project. Only home-mode selection/scroll is affected.
     pub fn set_sessions(&mut self, sessions: Vec<NeoismAgentSessionEntry>) {
         self.set_session_page(sessions, None, None);
     }
@@ -1890,30 +2464,98 @@ impl NeoismAgentSidePanel {
 
     /// Apply one live catalogue mutation without discarding continuation pages
     /// or moving the user's selection to a different session after re-sorting.
-    pub fn upsert_session(&mut self, mut session: NeoismAgentSessionEntry) {
-        self.apply_session_activity_override(&mut session);
-        let selected_id = self.selected_session().map(|entry| entry.id.clone());
-        if let Some(existing) = self
-            .all_sessions
-            .iter_mut()
-            .find(|existing| existing.id == session.id)
-        {
-            if session.catalog_activity.is_none() {
-                session.catalog_activity = existing.catalog_activity;
+    pub fn upsert_session(&mut self, session: NeoismAgentSessionEntry) {
+        if !self.in_catalog_scope(&session) {
+            if self.all_sessions.iter().any(|entry| entry.id == session.id) {
+                self.remove_session(&session.id);
             }
-            // Metadata-only rename/title events are not an idle edge.
-            if session.runtime_status.is_none()
-                && !self.session_activity_overrides.contains_key(&session.id)
+            return;
+        }
+        self.upsert_sessions(std::iter::once(session));
+    }
+
+    pub fn catalog_session(&self, id: &str) -> Option<&NeoismAgentSessionEntry> {
+        self.all_sessions
+            .iter()
+            .find(|entry| entry.id == id && self.in_catalog_scope(entry))
+    }
+
+    /// Search snapshots may discover chats, but never replace newer live metadata.
+    pub fn admit_search_sessions(
+        &mut self,
+        sessions: impl IntoIterator<Item = NeoismAgentSessionEntry>,
+    ) {
+        let sessions = sessions
+            .into_iter()
+            .filter(|session| {
+                self.in_catalog_scope(session)
+                    && !self.deleted_session_ids.contains(&session.id)
+                    && !self
+                        .all_sessions
+                        .iter()
+                        .any(|existing| existing.id == session.id)
+            })
+            .collect::<Vec<_>>();
+        let search_ids: Vec<_> = sessions.iter().map(|entry| entry.id.clone()).collect();
+        let discovered: HashSet<_> = self.project_pages.keys().cloned().collect();
+        self.upsert_sessions(sessions);
+        self.project_pages
+            .retain(|directory, _| discovered.contains(directory));
+        self.search_only_session_ids.extend(search_ids);
+        if self.project_pagination_enabled() && self.session_query.trim().is_empty() {
+            self.rebuild_session_display();
+        }
+    }
+
+    /// Admit search/catalog batches with one grouping rebuild, not one per hit.
+    pub fn upsert_sessions(
+        &mut self,
+        sessions: impl IntoIterator<Item = NeoismAgentSessionEntry>,
+    ) {
+        let mut sessions = sessions
+            .into_iter()
+            .filter(|session| self.in_catalog_scope(session))
+            .collect::<Vec<_>>()
+            .into_iter()
+            .peekable();
+        if sessions.peek().is_none() {
+            return;
+        }
+        let selected_id = self
+            .selected_catalog_row()
+            .map(|entry| entry.stable_identity().to_owned());
+        let anchor = self.session_viewport_anchor();
+        for mut session in sessions {
+            self.search_only_session_ids.remove(&session.id);
+            if self.project_pagination_enabled() {
+                let directory = session.directory.clone().unwrap_or_default();
+                let page = self.project_pages.entry(directory).or_default();
+                page.updated_ms = page.updated_ms.max(session.updated_ms);
+            }
+            self.apply_session_activity_override(&mut session);
+            if let Some(existing) = self
+                .all_sessions
+                .iter_mut()
+                .find(|existing| existing.id == session.id)
             {
-                session.runtime_status.clone_from(&existing.runtime_status);
+                if session.catalog_activity.is_none() {
+                    session.catalog_activity = existing.catalog_activity;
+                }
+                // Metadata-only rename/title events are not an idle edge.
+                if session.runtime_status.is_none()
+                    && !self.session_activity_overrides.contains_key(&session.id)
+                {
+                    session.runtime_status.clone_from(&existing.runtime_status);
+                }
+                *existing = session;
+            } else {
+                self.all_sessions.push(session);
             }
-            *existing = session;
-        } else {
-            self.all_sessions.push(session);
         }
         self.session_catalog_state = SessionCatalogState::Ready;
         self.rebuild_session_display();
         self.restore_selected_session(selected_id.as_deref());
+        self.restore_session_viewport_anchor(anchor);
     }
 
     /// Merge an authoritative newest page after the catalogue stream has
@@ -1925,10 +2567,13 @@ impl NeoismAgentSidePanel {
         next_cursor: Option<String>,
     ) {
         let selected_id = self
-            .selected_session()
+            .selected_catalog_row()
             .map(|entry| entry.stable_identity().to_owned());
         let viewport_anchor = self.session_viewport_anchor();
         for mut session in sessions {
+            if !self.in_catalog_scope(&session) {
+                continue;
+            }
             self.apply_session_activity_override(&mut session);
             if let Some(existing) = self
                 .all_sessions
@@ -1952,9 +2597,10 @@ impl NeoismAgentSidePanel {
     }
 
     pub fn remove_session(&mut self, session_id: &str) {
+        self.deleted_session_ids.insert(session_id.to_owned());
         self.session_activity_overrides.remove(session_id);
         let selected_id = self
-            .selected_session()
+            .selected_catalog_row()
             .filter(|entry| entry.id != session_id)
             .map(|entry| entry.id.clone());
         self.all_sessions.retain(|entry| entry.id != session_id);
@@ -1969,7 +2615,7 @@ impl NeoismAgentSidePanel {
             return;
         };
         if let Some(index) = self.sessions.iter().position(|entry| {
-            !entry.is_header
+            entry.is_selectable()
                 && (entry.id == session_identity
                     || entry.stable_identity() == session_identity)
         }) {
@@ -1984,7 +2630,7 @@ impl NeoismAgentSidePanel {
             .iter()
             .enumerate()
             .skip(top)
-            .find(|(_, entry)| !entry.is_header && !entry.is_excerpt)
+            .find(|(_, entry)| entry.is_selectable() && !entry.is_excerpt)
             .map(|(index, entry)| {
                 (
                     entry.stable_identity().to_owned(),
@@ -1994,11 +2640,25 @@ impl NeoismAgentSidePanel {
     }
 
     fn restore_session_viewport_anchor(&mut self, anchor: Option<(String, f32)>) {
+        // Initial/global-pin hydration must not scroll past the new top section.
+        if self.catalog_directory.is_none()
+            && self.scroll_px <= f32::EPSILON
+            && self
+                .sessions
+                .first()
+                .is_some_and(|row| row.id == "section:global:Pinned")
+        {
+            self.scroll_top = 0;
+            self.scroll.set_target_immediate(0.0);
+            return;
+        }
         let Some((identity, offset)) = anchor else {
             return;
         };
         let Some(index) = self.sessions.iter().position(|entry| {
-            !entry.is_header && !entry.is_excerpt && entry.stable_identity() == identity
+            entry.is_selectable()
+                && !entry.is_excerpt
+                && entry.stable_identity() == identity
         }) else {
             return;
         };
@@ -2051,7 +2711,7 @@ impl NeoismAgentSidePanel {
         rows: Vec<NeoismAgentSessionEntry>,
     ) {
         let selected_id = self
-            .selected_session()
+            .selected_catalog_row()
             .map(|entry| entry.stable_identity().to_owned());
         let viewport_anchor = self.session_viewport_anchor();
         self.external_errors
@@ -2093,6 +2753,7 @@ impl NeoismAgentSidePanel {
         requested_cursor: Option<&str>,
         next_cursor: Option<String>,
     ) {
+        sessions.retain(|session| self.in_catalog_scope(session));
         for session in &mut sessions {
             self.apply_session_activity_override(session);
         }
@@ -2100,7 +2761,7 @@ impl NeoismAgentSidePanel {
         let catalog_was_empty =
             self.all_sessions.is_empty() && self.external_sessions.is_empty();
         let selected_id = self
-            .selected_session()
+            .selected_catalog_row()
             .map(|entry| entry.stable_identity().to_owned());
         let viewport_anchor = self.session_viewport_anchor();
         if requested_cursor.is_some() {
@@ -2159,7 +2820,8 @@ impl NeoismAgentSidePanel {
     /// of the loaded end. The claim is single-flight until a page or failure
     /// settles it.
     pub fn begin_session_page_near_end(&mut self) -> Option<String> {
-        if self.session_page_loading
+        if self.project_pagination_enabled()
+            || self.session_page_loading
             || !matches!(self.mode, SidePanelMode::Sessions)
             || !self.session_query.trim().is_empty()
             || self
@@ -2239,9 +2901,17 @@ impl NeoismAgentSidePanel {
         query: String,
         results: Vec<NeoismAgentSemanticMatch>,
     ) {
+        let selected = self
+            .selected_catalog_row()
+            .map(|row| row.stable_identity().to_owned());
+        let anchor = self.session_viewport_anchor();
         self.semantic_query = query.trim().to_string();
         self.semantic_results = results;
+        self.result_wrap_metrics = None;
+        self.measured_excerpt_lines.clear();
         self.rebuild_session_display();
+        self.restore_selected_session(selected.as_deref());
+        self.restore_session_viewport_anchor(anchor);
     }
 
     /// Mark a semantic transcript search as started/finished so the
@@ -2273,6 +2943,50 @@ impl NeoismAgentSidePanel {
         }
     }
 
+    /// Reflow proportional-font excerpts only when their content or typography changes.
+    pub fn set_result_wrap_metrics(
+        &mut self,
+        width: f32,
+        font_size: f32,
+        font_id: Option<usize>,
+        scale: f32,
+        mut measure: impl FnMut(&str) -> f32,
+    ) {
+        let width = width.max(1.0);
+        let key = (
+            width.to_bits(),
+            font_size.to_bits(),
+            font_id,
+            scale.to_bits(),
+        );
+        if self.result_wrap_metrics == Some(key) {
+            return;
+        }
+        let selected = self
+            .selected_catalog_row()
+            .map(|row| row.stable_identity().to_owned());
+        let anchor = self.session_viewport_anchor();
+        self.result_wrap_metrics = Some(key);
+        self.measured_excerpt_lines = self
+            .semantic_results
+            .iter()
+            .map(|hit| {
+                (
+                    hit.session_id.clone(),
+                    wrap_excerpt_measured(
+                        &compact_excerpt(&hit.excerpt),
+                        width,
+                        3,
+                        &mut measure,
+                    ),
+                )
+            })
+            .collect();
+        self.rebuild_session_display();
+        self.restore_selected_session(selected.as_deref());
+        self.restore_session_viewport_anchor(anchor);
+    }
+
     /// Seconds since the in-flight semantic search began.
     pub fn semantic_search_elapsed(&self) -> f32 {
         self.semantic_search_started
@@ -2284,13 +2998,80 @@ impl NeoismAgentSidePanel {
             .unwrap_or(0.0)
     }
 
-    /// Rebuild the displayed `sessions` list from `all_sessions`: filter
-    /// by `session_query`, sort pinned-first / newest-day-first, and
-    /// inject "Pinned" + date-group header rows. Semantic matches are
-    /// unioned in with title matches while their query is current.
-    fn rebuild_session_display(&mut self) {
-        use crate::panels::agent_pane::session_group::section_label_at;
+    pub fn project_expanded(&self, directory: &str) -> bool {
+        !self.session_query.trim().is_empty()
+            || !self.collapsed_projects.contains(directory)
+    }
 
+    /// Folder rows are keyboard-selectable, but never session activation targets.
+    pub fn toggle_selected_project(&mut self) -> bool {
+        if !matches!(self.mode, SidePanelMode::Sessions)
+            || self.search_focused()
+            || self.new_chat_selected()
+            || self.projects_selected()
+        {
+            return false;
+        }
+        if self.activate_selected_project_page() {
+            return true;
+        }
+        let Some(directory) = self
+            .sessions
+            .get(self.selected)
+            .filter(|entry| entry.is_project())
+            .and_then(|entry| entry.directory.clone())
+        else {
+            return false;
+        };
+        if !self.collapsed_projects.remove(&directory) {
+            self.collapsed_projects.insert(directory.clone());
+        }
+        self.rebuild_session_display();
+        if let Some(index) = self.sessions.iter().position(|entry| {
+            entry.is_project() && entry.directory.as_deref() == Some(directory.as_str())
+        }) {
+            self.move_selection_to(index);
+        }
+        true
+    }
+
+    pub fn navigate_project(&mut self, expand: bool) -> bool {
+        if !matches!(self.mode, SidePanelMode::Sessions)
+            || self.search_focused()
+            || self.new_chat_selected()
+            || self.projects_selected()
+        {
+            return false;
+        }
+        let Some(entry) = self.sessions.get(self.selected) else {
+            return false;
+        };
+        let Some(directory) = entry.directory.clone().or_else(|| {
+            (self.project_pagination_enabled() && self.project_pages.contains_key(""))
+                .then(String::new)
+        }) else {
+            return false;
+        };
+        if entry.is_project() {
+            if self.project_expanded(&directory) != expand {
+                self.toggle_selected_project();
+            } else if expand {
+                self.select_next();
+            }
+        } else if !expand {
+            if let Some(index) = self.sessions.iter().position(|entry| {
+                entry.is_project()
+                    && entry.directory.as_deref() == Some(directory.as_str())
+            }) {
+                self.move_selection_to(index);
+            }
+        }
+        true
+    }
+
+    /// Filter the catalog and group exact saved directories by recent activity.
+    /// Pins remain within their project; search temporarily reveals collapsed groups.
+    fn rebuild_session_display(&mut self) {
         let needle = self.session_query.trim().to_lowercase();
         // Search terms for excerpt highlighting: whitespace-split words of
         // two characters or more, already lowercased with the needle.
@@ -2329,41 +3110,213 @@ impl NeoismAgentSidePanel {
                             && entry.source_key == stored.source_key)
                 })
             }))
+            .filter(|entry| self.in_catalog_scope(entry))
+            .filter(|entry| {
+                !self.project_pagination_enabled()
+                    || !needle.is_empty()
+                    || !self.search_only_session_ids.contains(&entry.id)
+            })
             .filter(|entry| {
                 needle.is_empty()
                     || entry.title.to_lowercase().contains(&needle)
+                    || (self.catalog_directory.is_none()
+                        && entry.directory.as_ref().is_some_and(|directory| {
+                            directory.to_lowercase().contains(&needle)
+                        }))
                     || (entry.external_preview.is_some()
                         && entry.source.label().to_lowercase().contains(&needle))
                     || semantic.contains_key(entry.id.as_str())
             })
             .cloned()
             .collect();
-        // Pinned first, then newest updated time. Stable so equal keys
-        // keep the source order.
-        visible.sort_by(|a, b| {
-            b.pinned
-                .cmp(&a.pinned)
-                .then(b.updated_ms.cmp(&a.updated_ms))
-        });
-
-        let mut out = Vec::with_capacity(visible.len() + 8);
-        for i in 0..visible.len() {
-            if let Some(label) =
-                section_label_at(i, |k| visible[k].pinned, |k| visible[k].updated_ms)
+        let mut groups: HashMap<Option<String>, Vec<NeoismAgentSessionEntry>> =
+            HashMap::new();
+        for entry in visible.drain(..) {
+            let directory = if entry.directory.is_none()
+                && self.project_pagination_enabled()
+                && self.project_pages.contains_key("")
             {
-                out.push(NeoismAgentSessionEntry::header(label));
+                Some(String::new())
+            } else {
+                entry.directory.clone()
+            };
+            groups.entry(directory).or_default().push(entry);
+        }
+        let grouped_paging = self.project_pagination_enabled() && needle.is_empty();
+        if grouped_paging {
+            groups.retain(|directory, entries| {
+                directory.is_none()
+                    || directory
+                        .as_ref()
+                        .is_some_and(|d| self.project_pages.contains_key(d))
+                    || entries.iter().any(|entry| entry.external_preview.is_some())
+            });
+            for directory in self.project_pages.keys() {
+                groups.entry(Some(directory.clone())).or_default();
             }
-            out.push(visible[i].clone());
-            // The matched transcript chunk renders as its own rows under the
-            // session — word-wrapped to the measured panel width, one list
-            // row per line, so the fixed-height virtualized list stays
-            // uniform while the chunk reads like real text.
-            if let Some(hit) = semantic.get(visible[i].id.as_str()) {
-                let excerpt = compact_excerpt(&hit.excerpt);
-                for line in wrap_excerpt_lines(&excerpt, self.result_wrap_columns, 3) {
-                    let mut row =
-                        NeoismAgentSessionEntry::excerpt(visible[i].id.clone(), line);
-                    row.highlights = term_highlight_ranges(&row.title, &terms);
+        }
+        let project_name = |directory: &str| {
+            if directory.is_empty() {
+                return "Other chats".to_owned();
+            }
+            let trimmed = directory.trim_end_matches(['/', '\\']);
+            trimmed
+                .rsplit(['/', '\\'])
+                .next()
+                .filter(|name| !name.is_empty())
+                .unwrap_or(directory)
+                .to_string()
+        };
+        let mut name_counts: HashMap<String, usize> = HashMap::new();
+        for directory in groups.keys().flatten() {
+            *name_counts.entry(project_name(directory)).or_default() += 1;
+        }
+        let dashboard = self
+            .catalog_directory
+            .is_none()
+            .then_some(self.dashboard_directory.as_deref())
+            .flatten();
+        let mut groups: Vec<_> = groups.into_iter().collect();
+        groups.sort_by(|(a_dir, a), (b_dir, b)| {
+            let is_dashboard = |directory: &Option<String>| {
+                dashboard.is_some() && directory.as_deref() == dashboard
+            };
+            let latest = |entries: &[NeoismAgentSessionEntry]| {
+                entries
+                    .iter()
+                    .map(|entry| entry.updated_ms)
+                    .max()
+                    .unwrap_or(0)
+            };
+            let project_latest =
+                |directory: &Option<String>, entries: &[NeoismAgentSessionEntry]| {
+                    latest(entries).max(if grouped_paging {
+                        directory
+                            .as_ref()
+                            .and_then(|d| self.project_pages.get(d))
+                            .map_or(0, |p| p.updated_ms)
+                    } else {
+                        0
+                    })
+                };
+            is_dashboard(b_dir)
+                .cmp(&is_dashboard(a_dir))
+                .then_with(|| project_latest(b_dir, b).cmp(&project_latest(a_dir, a)))
+                .then(a_dir.cmp(b_dir))
+        });
+        let scoped = self.catalog_directory.is_some();
+        let mut out = Vec::new();
+        if !scoped && needle.is_empty() {
+            let mut pinned: Vec<_> = groups
+                .iter()
+                .flat_map(|(_, entries)| entries.iter())
+                .filter(|entry| entry.pinned)
+                .cloned()
+                .collect();
+            pinned.sort_by(|a, b| b.updated_ms.cmp(&a.updated_ms).then(a.id.cmp(&b.id)));
+            if !pinned.is_empty() {
+                let mut header = NeoismAgentSessionEntry::header("Pinned");
+                header.id = "section:global:Pinned".into();
+                out.push(header);
+                for mut entry in pinned {
+                    entry.depth = 0;
+                    out.push(entry);
+                }
+            }
+        }
+        for (directory, mut entries) in groups {
+            if !scoped {
+                let label = directory
+                    .as_deref()
+                    .map(|directory| {
+                        if dashboard == Some(directory) {
+                            return "~".to_owned();
+                        }
+                        let name = project_name(directory);
+                        if name_counts.get(&name).copied().unwrap_or(0) > 1 {
+                            directory.to_string()
+                        } else {
+                            name
+                        }
+                    })
+                    .unwrap_or_else(|| "Other chats".to_string());
+                let mut header = NeoismAgentSessionEntry::header(label)
+                    .with_directory(directory.clone());
+                if grouped_paging {
+                    header.directory = directory.clone();
+                }
+                header.time_label = format!(
+                    "{}{}",
+                    entries.len(),
+                    if self.session_next_cursor.is_some() {
+                        "+"
+                    } else {
+                        ""
+                    }
+                );
+                if grouped_paging {
+                    // Discovery supplies no total count; do not invent one from loaded pages.
+                    header.time_label.clear();
+                }
+                if let Some(directory) = &directory {
+                    header.id = format!("project:{directory}");
+                }
+                out.push(header);
+                if directory
+                    .as_deref()
+                    .is_some_and(|directory| !self.project_expanded(directory))
+                {
+                    continue;
+                }
+            }
+            entries.sort_by(|a, b| {
+                b.pinned
+                    .cmp(&a.pinned)
+                    .then(b.updated_ms.cmp(&a.updated_ms))
+                    .then(a.id.cmp(&b.id))
+            });
+            if !scoped && needle.is_empty() {
+                entries.retain(|entry| !entry.pinned);
+            }
+            let mut previous_section = None;
+            for mut entry in entries {
+                let depth = usize::from(!scoped);
+                if scoped && needle.is_empty() && previous_section != Some(entry.pinned) {
+                    let title = if entry.pinned { "Pinned" } else { "Recent" };
+                    let mut section = NeoismAgentSessionEntry::header(title);
+                    section.id = format!(
+                        "section:{}:{title}",
+                        directory.as_deref().unwrap_or_default()
+                    );
+                    out.push(section);
+                    previous_section = Some(entry.pinned);
+                }
+                entry.depth = depth;
+                let hit = semantic.get(entry.id.as_str()).copied();
+                let id = entry.id.clone();
+                out.push(entry);
+                if let Some(hit) = hit {
+                    let excerpt = compact_excerpt(&hit.excerpt);
+                    let lines = self
+                        .measured_excerpt_lines
+                        .get(&id)
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            wrap_excerpt_lines(&excerpt, self.result_wrap_columns, 3)
+                        });
+                    for line in lines {
+                        let mut row = NeoismAgentSessionEntry::excerpt(id.clone(), line)
+                            .with_directory(directory.clone())
+                            .with_depth(depth);
+                        row.highlights = term_highlight_ranges(&row.title, &terms);
+                        out.push(row);
+                    }
+                }
+            }
+            if grouped_paging {
+                if let Some(row) =
+                    directory.as_deref().and_then(|d| self.project_page_row(d))
+                {
                     out.push(row);
                 }
             }
@@ -2577,7 +3530,7 @@ impl NeoismAgentSidePanel {
         if matches!(self.session_catalog_state, SessionCatalogState::Ready) {
             // Periodic first-page replacement races continuation pages and
             // resets a scrolled catalogue. Ready lists advance only through
-            // their cursor; directory changes explicitly invalidate them.
+            // their cursor; endpoint changes explicitly invalidate them.
             return false;
         }
         let Some(last) = self.last_sessions_refresh else {
@@ -3029,9 +3982,9 @@ impl NeoismAgentSidePanel {
     fn step_selectable(&self, from: usize, forward: bool) -> Option<usize> {
         let rows = self.active_rows();
         if forward {
-            ((from + 1)..rows.len()).find(|&i| !rows[i].is_header)
+            ((from + 1)..rows.len()).find(|&i| rows[i].is_selectable())
         } else {
-            (0..from).rev().find(|&i| !rows[i].is_header)
+            (0..from).rev().find(|&i| rows[i].is_selectable())
         }
     }
 
@@ -3042,7 +3995,7 @@ impl NeoismAgentSidePanel {
             return None;
         }
         let index = index.min(rows.len() - 1);
-        if !rows[index].is_header {
+        if rows[index].is_selectable() {
             return Some(index);
         }
         self.step_selectable(index, true)
@@ -3065,6 +4018,11 @@ impl NeoismAgentSidePanel {
 
     /// Move the selection cursor onto the search row.
     pub fn focus_search(&mut self) {
+        if self.navigation_header_enabled {
+            return;
+        }
+        self.projects_selected = false;
+        self.new_chat_selected = false;
         self.search_focused = true;
         self.cursor_spring.reset();
     }
@@ -3075,6 +4033,16 @@ impl NeoismAgentSidePanel {
 
     pub fn select_next(&mut self) {
         let len = self.active_len();
+        if self.new_chat_selected() && self.navigation_header_enabled {
+            self.select_projects();
+            return;
+        }
+        if self.projects_selected() {
+            if let Some(first) = self.nearest_selectable(0) {
+                self.move_selection_to(first);
+            }
+            return;
+        }
         if self.new_chat_selected() {
             self.new_chat_selected = false;
             if let Some(first) = self.nearest_selectable(0) {
@@ -3098,7 +4066,18 @@ impl NeoismAgentSidePanel {
     }
 
     pub fn select_prev(&mut self) {
+        if self.projects_selected() {
+            self.select_new_chat();
+            return;
+        }
         if self.new_chat_selected() || self.search_focused() {
+            return;
+        }
+        if self.navigation_header_enabled
+            && matches!(self.mode, SidePanelMode::Sessions)
+            && self.step_selectable(self.selected, false).is_none()
+        {
+            self.select_projects();
             return;
         }
         if self.active_len() == 0 {
@@ -3126,6 +4105,10 @@ impl NeoismAgentSidePanel {
     }
 
     pub fn select_next_by(&mut self, rows: usize) {
+        if self.new_chat_selected() || self.projects_selected() {
+            self.select_next();
+            return;
+        }
         let len = self.active_len();
         if len == 0 {
             return;
@@ -3134,7 +4117,7 @@ impl NeoismAgentSidePanel {
             self.clear_search_focus();
         }
         let target = self.selected.saturating_add(rows.max(1)).min(len - 1);
-        let target = if self.active_rows()[target].is_header {
+        let target = if !self.active_rows()[target].is_selectable() {
             self.step_selectable(target, true)
                 .or_else(|| self.step_selectable(target, false))
         } else {
@@ -3146,11 +4129,15 @@ impl NeoismAgentSidePanel {
     }
 
     pub fn select_prev_by(&mut self, rows: usize) {
+        if self.new_chat_selected() || self.projects_selected() {
+            self.select_prev();
+            return;
+        }
         if self.search_focused() || self.active_len() == 0 {
             return;
         }
         let target = self.selected.saturating_sub(rows.max(1));
-        let target = if self.active_rows()[target].is_header {
+        let target = if !self.active_rows()[target].is_selectable() {
             self.step_selectable(target, false)
                 .or_else(|| self.step_selectable(target, true))
         } else {
@@ -3176,6 +4163,9 @@ impl NeoismAgentSidePanel {
     }
 
     fn move_selection_to(&mut self, new_selected: usize) {
+        self.projects_selected = false;
+        self.new_chat_selected = false;
+        self.selected_cursor_rect = None;
         let len = self.active_len();
         if len == 0 {
             return;
@@ -3440,6 +4430,10 @@ impl NeoismAgentSidePanel {
         Some(row)
     }
 }
+
+#[cfg(test)]
+#[path = "project_catalog_tests.rs"]
+mod project_catalog_tests;
 
 #[cfg(test)]
 mod catalog_activity_tests {

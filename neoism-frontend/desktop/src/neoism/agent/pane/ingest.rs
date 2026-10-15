@@ -91,6 +91,7 @@ impl NeoismAgentPane {
         let mut delta_bytes = 0usize;
         let mut changed = include_outbound && self.drain_outbound_commands();
         changed |= self.drain_background_updates();
+        changed |= self.pump_project_session_requests();
         let catalog_updates = self
             .session_catalog_stream
             .as_mut()
@@ -110,6 +111,15 @@ impl NeoismAgentPane {
                         self.side_panel.set_session_activity(&session_id, activity);
                 }
                 AgentSessionCatalogUpdate::Upsert(session) => {
+                    if self.side_panel.catalog_directory().is_some_and(|directory| {
+                        session.directory.as_deref() != Some(directory)
+                    }) {
+                        if self.side_panel.catalog_session(&session.id).is_some() {
+                            self.side_panel.remove_session(&session.id);
+                            changed = true;
+                        }
+                        continue;
+                    }
                     self.side_panel.upsert_session(session);
                     changed = true;
                 }
@@ -1897,7 +1907,10 @@ self.footer_growth.record_with_edge(
                         changed = true;
                     }
                 }
-                Ok(NeoismAgentBackgroundUpdate::SessionOptionsRefreshed(result)) => {
+                Ok(NeoismAgentBackgroundUpdate::SessionOptionsRefreshed { catalog_generation, result }) => {
+                    if catalog_generation != self.catalog_generation {
+                        continue;
+                    }
                     if let Some(picker) = self
                         .picker
                         .as_mut()
@@ -1959,12 +1972,47 @@ self.footer_growth.record_with_edge(
                         server, session_id, generation, result, true,
                     );
                 }
+                Ok(NeoismAgentBackgroundUpdate::SessionProjectsRefreshed {
+                    server, catalog_generation, generation, result,
+                }) => {
+                    if !self.catalog_callback_is_current(&server, catalog_generation, None)
+                        || !self.side_panel.session_request_is_current(generation) {
+                        continue;
+                    }
+                    match result {
+                        Ok(discovery) => {
+                            self.side_panel.set_session_projects(discovery.projects);
+                            self.side_panel.set_pinned_sessions(discovery.pinned_sessions);
+                        }
+                        Err(error) => self.side_panel.settle_session_page_error(&error),
+                    }
+                    changed = true;
+                }
+                Ok(NeoismAgentBackgroundUpdate::ProjectSessionPage {
+                    server, catalog_generation, directory, requested_cursor, generation, result,
+                }) => {
+                    if !self.catalog_callback_is_current(&server, catalog_generation, None)
+                        || !self.side_panel.project_pagination_enabled() {
+                        continue;
+                    }
+                    match result {
+                        Ok((sessions, next_cursor)) => self.side_panel.set_project_session_page(
+                            &directory, requested_cursor.as_deref(), sessions, next_cursor, generation,
+                        ),
+                        Err(error) => self.side_panel.settle_project_session_error(&directory, generation, error),
+                    }
+                    changed = true;
+                }
                 Ok(NeoismAgentBackgroundUpdate::SidePanelSessionsRefreshed {
+                    server,
+                    catalog_generation,
+                    directory,
                     generation,
                     requested_cursor,
                     result,
                 }) => {
-                    if !self.side_panel.session_request_is_current(generation) {
+                    if !self.catalog_callback_is_current(&server, catalog_generation, directory.as_deref())
+                        || !self.side_panel.session_request_is_current(generation) {
                         continue;
                     }
                     match result {
@@ -2040,12 +2088,28 @@ self.footer_growth.record_with_edge(
                     self.sync_subagent_waiting_clock();
                     changed = true;
                 }
-                Ok(NeoismAgentBackgroundUpdate::SemanticSessionHits { query, hits }) => {
+                Ok(NeoismAgentBackgroundUpdate::SemanticSessionHits { catalog_generation, query, hits, transcript_unavailable }) => {
+                    if catalog_generation != self.catalog_generation {
+                        continue;
+                    }
                     self.semantic_in_flight = false;
+                    self.semantic_unavailable |= transcript_unavailable;
                     self.set_semantic_loading_indicators(false);
                     match hits {
-                        None => self.semantic_unavailable = true,
-                        Some(hits) => {
+                        None => {},
+                        Some(mut hits) => {
+                            if let Some(directory) = self.side_panel.catalog_directory() {
+                                hits.retain(|hit| hit.entry.directory.as_deref() == Some(directory));
+                            }
+                            // Search can discover roots outside loaded catalog
+                            // pages. Keep their saved directory/source for grouping.
+                            self.side_panel.admit_search_sessions(hits.iter().map(|hit| hit.entry.clone()));
+                            let hits = hits.into_iter().filter_map(|mut hit| {
+                                let entry = self.side_panel.catalog_session(&hit.session_id)?.clone();
+                                hit.title = entry.title.clone();
+                                hit.entry = entry;
+                                Some(hit)
+                            }).collect::<Vec<_>>();
                             self.side_panel.set_semantic_results(
                                 query.clone(),
                                 hits.iter()

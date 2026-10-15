@@ -651,20 +651,39 @@ fn fetch_sessions_page(
     directory: Option<&str>,
     cursor: Option<&str>,
 ) -> Result<SessionValuesPage, String> {
-    let mut path = directory
-        .filter(|directory| !directory.trim().is_empty())
-        .map(|dir| {
-            format!(
-                "/v2/sessions?roots=true&limit=24&directory={}",
-                percent_encode(dir)
-            )
-        })
-        .unwrap_or_else(|| "/v2/sessions?roots=true&limit=24".to_string());
+    fetch_sessions_query_page(server, directory, cursor, None)
+}
+
+fn session_search_path(directory: Option<&str>, cursor: Option<&str>, search: Option<&str>) -> String {
+    let limit = if search.is_some() { 50 } else { 24 };
+    let mut path = format!("/v2/sessions?roots=true&limit={limit}");
+    if let Some(directory) = directory.filter(|directory| !directory.trim().is_empty()) {
+        path.push_str("&directory=");
+        path.push_str(&percent_encode(directory));
+    }
+    if let Some(search) = search {
+        path.push_str("&search=");
+        path.push_str(&percent_encode(search));
+    }
     if let Some(cursor) = cursor.filter(|cursor| !cursor.is_empty()) {
         path.push_str("&cursor=");
         path.push_str(&percent_encode(cursor));
     }
-    let value = api_request_json(server, "GET", &path, None)?
+    path
+}
+
+fn fetch_sessions_query_page(
+    server: &str,
+    directory: Option<&str>,
+    cursor: Option<&str>,
+    search: Option<&str>,
+) -> Result<SessionValuesPage, String> {
+    let path = session_search_path(directory, cursor, search);
+    fetch_sessions_path_page(server, &path)
+}
+
+fn fetch_sessions_path_page(server: &str, path: &str) -> Result<SessionValuesPage, String> {
+    let value = api_request_json(server, "GET", path, None)?
         .ok_or_else(|| "Neoism Agent returned an empty session response".to_string())?;
     let sessions = value
         .get("items")
@@ -694,18 +713,81 @@ pub(super) fn fetch_session_options(
     Ok(group_session_options(inputs))
 }
 
-/// Flat side-panel session entries (no header rows — the side panel injects
-/// its own date-group headers). Carries `updated_ms` + `pinned` so the panel
-/// can sort + group them identically to the `/sessions` picker.
-pub(super) fn fetch_session_entries(
-    server: &str,
-    current_id: Option<&str>,
-    directory: Option<&str>,
-) -> Result<Vec<NeoismAgentSessionEntry>, String> {
-    fetch_session_entries_page(server, current_id, directory, None).map(|page| page.0)
+fn project_session_path(directory: &str, cursor: Option<&str>) -> String {
+    let mut path = format!("/v2/sessions?roots=true&limit=5&exact_directory=true&exclude_pinned=true&directory={}", percent_encode(directory));
+    if let Some(cursor) = cursor {
+        path.push_str("&cursor=");
+        path.push_str(&percent_encode(cursor));
+    }
+    path
 }
 
-pub(super) fn fetch_session_entries_page(
+pub(crate) struct SessionProjects {
+    pub projects: Vec<(String, u64)>,
+    pub pinned_sessions: Vec<NeoismAgentSessionEntry>,
+}
+
+pub(crate) fn fetch_session_projects(server: &str) -> Result<SessionProjects, String> {
+    let value = api_request_json(server, "GET", "/v2/session-projects", None)?
+        .ok_or_else(|| "Neoism Agent returned an empty projects response".to_string())?;
+    decode_session_projects(&value)
+}
+
+fn decode_session_projects(value: &Value) -> Result<SessionProjects, String> {
+    let items = value.get("items").and_then(Value::as_array)
+        .ok_or_else(|| "Neoism Agent returned malformed projects".to_string())?;
+    let projects = items.iter().map(|item| {
+        let directory = item.get("directory").and_then(Value::as_str)
+            .ok_or_else(|| "project missing directory".to_string())?;
+        let updated = item.get("updatedMs").and_then(Value::as_u64)
+            .ok_or_else(|| "project missing updatedMs".to_string())?;
+        Ok((directory.to_owned(), updated))
+    }).collect::<Result<Vec<_>, String>>()?;
+    let statuses = HashMap::new();
+    let pinned_values = value.get("pinnedSessions").map(|pins| pins.as_array()
+        .ok_or_else(|| "Neoism Agent returned malformed pinned sessions".to_string())).transpose()?;
+    let pinned_sessions = pinned_values.into_iter().flatten()
+        .filter_map(|session| session_entry(session, &statuses)).collect();
+    Ok(SessionProjects { projects, pinned_sessions })
+}
+
+#[cfg(test)]
+mod discovery_pin_tests {
+    use super::*;
+
+    #[test]
+    fn discovery_decodes_old_pins_with_existing_session_decoder() {
+        let pin = serde_json::json!({"id":"old-pin", "title":"Old pin", "directory":"/archived",
+            "time":{"updated":1}, "pinned":true, "catalogActivity":"permission",
+            "externalAgent":{"provider":"codex", "sourceKey":"stable-key", "historyState":"neoism_only"}});
+        let decoded = decode_session_projects(&serde_json::json!({
+            "items":[{"directory":"/active", "updatedMs":100}], "pinnedSessions":[pin.clone()]
+        })).unwrap();
+        assert_eq!(decoded.projects, vec![("/active".into(), 100)]);
+        let entry = &decoded.pinned_sessions[0];
+        let expected = session_entry(&pin, &HashMap::new()).unwrap();
+        assert_eq!(entry.id, expected.id);
+        assert_eq!(entry.directory.as_deref(), Some("/archived"));
+        assert_eq!(entry.source, expected.source);
+        assert_eq!(entry.source_key.as_deref(), Some("stable-key"));
+        assert_eq!(entry.catalog_activity, expected.catalog_activity);
+        assert!(entry.pinned);
+        assert!(decode_session_projects(&serde_json::json!({"items":[]})).unwrap().pinned_sessions.is_empty());
+    }
+}
+
+pub(crate) fn fetch_project_session_page(
+    server: &str,
+    directory: &str,
+    cursor: Option<&str>,
+) -> Result<(Vec<NeoismAgentSessionEntry>, Option<String>), String> {
+    let page = fetch_sessions_path_page(server, &project_session_path(directory, cursor))?;
+    let statuses = HashMap::new();
+    let entries = page.items.iter().filter_map(|session| session_entry(session, &statuses)).collect();
+    Ok((entries, page.next_cursor))
+}
+
+pub(crate) fn fetch_session_entries_page(
     server: &str,
     current_id: Option<&str>,
     directory: Option<&str>,
@@ -1000,6 +1082,109 @@ fn normalize_explicit_runtime_status(status: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod subagent_runtime_snapshot_tests {
     use super::*;
+
+    #[test]
+    fn project_pages_use_five_roots_and_encode_directory_and_cursor() {
+        assert_eq!(project_session_path("/a project", None),
+            "/v2/sessions?roots=true&limit=5&exact_directory=true&exclude_pinned=true&directory=%2Fa%20project");
+        assert_eq!(project_session_path("/a project", Some("next:+/=")),
+            "/v2/sessions?roots=true&limit=5&exact_directory=true&exclude_pinned=true&directory=%2Fa%20project&cursor=next%3A%2B%2F%3D");
+        // Scoped flat paging and global search keep their existing limits.
+        assert_eq!(session_search_path(Some("/project"), None, None),
+            "/v2/sessions?roots=true&limit=24&directory=%2Fproject");
+        assert_eq!(session_search_path(None, None, Some("query")),
+            "/v2/sessions?roots=true&limit=50&search=query");
+    }
+
+    #[test]
+    fn server_title_search_is_filtered_paginated_and_retains_project_metadata() {
+        assert_eq!(session_search_path(None, None, Some("older chat")),
+            "/v2/sessions?roots=true&limit=50&search=older%20chat");
+        assert_eq!(session_search_path(Some("/allowed/project"), Some("next:page"), Some("older chat")),
+            "/v2/sessions?roots=true&limit=50&directory=%2Fallowed%2Fproject&search=older%20chat&cursor=next%3Apage");
+        let entry = session_entry(&serde_json::json!({
+            "id":"older", "title":"Older chat", "directory":"/allowed/old-project",
+            "externalAgent":{"historyState":"neoism_only", "provider":"codex"}
+        }), &HashMap::new()).unwrap();
+        let title = NeoismAgentSemanticSessionHit {
+            session_id: entry.id.clone(), title: entry.title.clone(), entry: entry.clone(),
+            excerpt: String::new(), distance: 0.0,
+        };
+        let title_only = merge_session_search_hits(vec![title.clone()], Vec::new());
+        assert_eq!(title_only.len(), 1, "unavailable transcript search must retain titles");
+        assert_eq!(title_only[0].entry.directory.as_deref(), Some("/allowed/old-project"));
+        let mut transcript = title;
+        transcript.excerpt = "matched transcript".into();
+        transcript.distance = 0.3;
+        let merged = merge_session_search_hits(title_only, vec![transcript]);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].excerpt, "matched transcript");
+        assert_eq!(merged[0].entry.source, entry.source);
+        assert_eq!(merged[0].entry.directory, entry.directory);
+    }
+
+    #[test]
+    fn catalog_all_scope_and_session_directory_are_independent() {
+        assert_eq!(
+            session_catalog_events_path(None),
+            "/v2/session-catalog/events?scope=all"
+        );
+        assert_eq!(
+            session_catalog_events_path(Some("/tmp/my project")),
+            "/v2/session-catalog/events?directory=%2Ftmp%2Fmy%20project"
+        );
+        let entry = session_entry(
+            &serde_json::json!({
+                "id": "root", "title": "Other project", "directory": "/tmp/other-project"
+            }),
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(entry.directory.as_deref(), Some("/tmp/other-project"));
+    }
+
+    #[test]
+    fn optional_registry_uses_http_status_and_preserves_proxy_prefix() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        for (status, register) in [(404, false), (200, false), (401, false), (403, false), (503, false), (404, true)] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let worker = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+                let mut request = Vec::new();
+                loop {
+                    let mut chunk = [0; 4096];
+                    let count = stream.read(&mut chunk).unwrap();
+                    assert!(count > 0);
+                    request.extend_from_slice(&chunk[..count]);
+                    if let Some(end) = find_header_end(&request) {
+                        let headers = String::from_utf8_lossy(&request[..end]);
+                        let length = headers.lines().find_map(|line| line.strip_prefix("Content-Length:")
+                            .map(|value| value.trim().parse::<usize>().unwrap())).unwrap_or(0);
+                        if request.len() >= end + 4 + length { break; }
+                    }
+                }
+                let body = if status == 200 { "[]" } else { "404 mentioned in body is not a status classifier" };
+                write!(stream, "HTTP/1.1 {status} Mock\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+                String::from_utf8(request).unwrap().lines().next().unwrap().to_owned()
+            });
+            let result = conversation_workspace_registry_request(
+                &format!("http://{address}/agent/workspaces/authorized"),
+                register.then(|| std::path::Path::new("/chosen")),
+            );
+            let method = if register { "POST" } else { "GET" };
+            assert_eq!(worker.join().unwrap(), format!("{method} /agent/workspaces/authorized/v2/management/workspaces HTTP/1.1"));
+            if status == 404 && !register {
+                assert_eq!(result.unwrap(), None);
+            } else if status == 200 {
+                assert_eq!(result.unwrap(), Some(serde_json::json!([])));
+            } else {
+                assert!(result.unwrap_err().contains(&format!("HTTP {status}")));
+            }
+        }
+    }
 
     #[test]
     fn http_error_uses_server_message_without_dumping_json() {
@@ -1555,7 +1740,11 @@ pub(super) fn fetch_config_defaults(
         .map(|dir| format!("/v2/providers?directory={}", percent_encode(dir)))
         .unwrap_or_else(|| "/v2/providers".to_string());
     if let Ok(Some(catalog)) = api_request_json_with_read_timeout(
-        server, "GET", &catalog_path, None, std::time::Duration::from_secs(12),
+        server,
+        "GET",
+        &catalog_path,
+        None,
+        std::time::Duration::from_secs(12),
     ) {
         defaults.provider_readiness = ProviderReadiness::from_json(&catalog);
     }
@@ -1975,16 +2164,71 @@ pub(super) fn question_answers(input: &str, count: usize) -> Vec<Vec<String>> {
 pub(crate) struct NeoismAgentSemanticSessionHit {
     pub session_id: String,
     pub title: String,
+    /// Preserve project grouping and source metadata for hits outside loaded pages.
+    pub entry: NeoismAgentSessionEntry,
     pub excerpt: String,
     pub distance: f64,
 }
 
-/// Query the agent server's semantic transcript search (`/search/semantic`)
-/// and join hits with the directory's session list. `Ok(None)` means the
-/// server reports semantic search unavailable (no vector backend or no
-/// embeddings key) — callers should stop asking. Sessions outside this
-/// directory's list are dropped, which also scopes the server's global
-/// search to the current workspace.
+/// Search titles on the server, rather than filtering only the first loaded
+/// catalog page. At most two matching pages (100 roots) are read per query.
+/// Transcript/vector availability never disables this authorized title query.
+pub(crate) fn fetch_session_search_hits(
+    server: &str,
+    query: &str,
+    current_session: Option<&str>,
+    directory: Option<&str>,
+    transcript_enabled: bool,
+) -> Result<(Vec<NeoismAgentSemanticSessionHit>, bool), String> {
+    let mut titles = Vec::new();
+    let mut cursor = None;
+    let mut title_error = None;
+    for _ in 0..2 {
+        let page = match fetch_sessions_query_page(server, directory, cursor.as_deref(), Some(query)) {
+            Ok(page) => page,
+            Err(error) => { title_error = Some(error); break; }
+        };
+        titles.extend(page.items.iter().filter_map(|session| {
+            session_entry(session, &HashMap::new()).map(|entry| NeoismAgentSemanticSessionHit {
+                session_id: entry.id.clone(), title: entry.title.clone(), entry,
+                excerpt: String::new(), distance: 0.0,
+            })
+        }));
+        if page.next_cursor.is_none() || page.next_cursor == cursor { break; }
+        cursor = page.next_cursor;
+    }
+    let (transcript, unavailable) = if transcript_enabled {
+        match fetch_semantic_session_hits(server, query, current_session, directory) {
+            Ok(Some(hits)) => (hits, false),
+            Ok(None) => (Vec::new(), true),
+            // A transient transcript failure must not erase successful titles
+            // or permanently disable later transcript queries.
+            Err(_) => (Vec::new(), false),
+        }
+    } else { (Vec::new(), true) };
+    if titles.is_empty() && transcript.is_empty() {
+        if let Some(error) = title_error { return Err(error); }
+    }
+    Ok((merge_session_search_hits(titles, transcript), unavailable))
+}
+
+fn merge_session_search_hits(
+    mut titles: Vec<NeoismAgentSemanticSessionHit>,
+    transcript: Vec<NeoismAgentSemanticSessionHit>,
+) -> Vec<NeoismAgentSemanticSessionHit> {
+    for hit in transcript {
+        if let Some(title) = titles.iter_mut().find(|title| title.session_id == hit.session_id) {
+            title.excerpt = hit.excerpt;
+        } else {
+            titles.push(hit);
+        }
+    }
+    titles
+}
+
+/// Query semantic transcript search and join hits with authorized root sessions.
+/// Resolve hits outside the first catalog page individually so old projects
+/// remain searchable without downloading the entire endpoint catalog.
 pub(crate) fn fetch_semantic_session_hits(
     server: &str,
     query: &str,
@@ -1992,8 +2236,9 @@ pub(crate) fn fetch_semantic_session_hits(
     directory: Option<&str>,
 ) -> Result<Option<Vec<NeoismAgentSemanticSessionHit>>, String> {
     let path = format!(
-        "/v2/plugins/dev.neoism.semantic/search?q={}&limit=20",
-        percent_encode(query)
+        "/v2/plugins/dev.neoism.semantic/search?q={}&limit=20{}",
+        percent_encode(query),
+        directory.map(|directory| format!("&directory={}", percent_encode(directory))).unwrap_or_default()
     );
     let value = api_request_json(server, "GET", &path, None)?
         .ok_or_else(|| "empty semantic search response".to_string())?;
@@ -2012,11 +2257,44 @@ pub(crate) fn fetch_semantic_session_hits(
     if hits.is_empty() {
         return Ok(Some(Vec::new()));
     }
-    let entries =
-        fetch_session_entries(server, current_session, directory).unwrap_or_default();
-    let titles: HashMap<&str, &str> = entries
+    let _ = current_session;
+    let mut entries = Vec::<NeoismAgentSessionEntry>::new();
+    let mut seen: std::collections::HashSet<String> =
+        entries.iter().map(|entry| entry.id.clone()).collect();
+    for session_id in hits
         .iter()
-        .map(|entry| (entry.id.as_str(), entry.title.as_str()))
+        .filter_map(|hit| hit.get("sessionId").and_then(Value::as_str))
+    {
+        if !seen.insert(session_id.to_owned()) {
+            continue;
+        }
+        // GET retains the endpoint's normal session authorization. Never trust
+        // search hit metadata as authority to admit a conversation.
+        let Ok(Some(session)) = api_request_json(
+            server,
+            "GET",
+            &format!("/v2/sessions/{}", percent_encode(session_id)),
+            None,
+        ) else {
+            continue;
+        };
+        if session
+            .get("parentId")
+            .or_else(|| session.get("parentID"))
+            .is_some_and(|parent| !parent.is_null())
+            || directory.is_some_and(|directory| {
+                session.get("directory").and_then(Value::as_str) != Some(directory)
+            })
+        {
+            continue;
+        }
+        if let Some(entry) = session_entry(&session, &HashMap::new()) {
+            entries.push(entry);
+        }
+    }
+    let titles: HashMap<&str, &NeoismAgentSessionEntry> = entries
+        .iter()
+        .map(|entry| (entry.id.as_str(), entry))
         .collect();
     let mut best: Vec<NeoismAgentSemanticSessionHit> = Vec::new();
     for hit in &hits {
@@ -2044,7 +2322,8 @@ pub(crate) fn fetch_semantic_session_hits(
             }
             None => best.push(NeoismAgentSemanticSessionHit {
                 session_id: session_id.to_string(),
-                title: (*title).to_string(),
+                title: title.title.clone(),
+                entry: (*title).clone(),
                 excerpt,
                 distance,
             }),
@@ -2069,6 +2348,8 @@ pub(super) fn percent_encode(value: &str) -> String {
 
 struct HttpResponse {
     body: Vec<u8>,
+    status: u16,
+    reason: String,
 }
 
 pub(super) struct EventStreamConnection {
@@ -2092,15 +2373,20 @@ pub(super) fn open_event_stream(
 
 pub(super) fn open_session_catalog_stream(
     server: &str,
-    directory: &str,
+    directory: Option<&str>,
 ) -> Result<EventStreamConnection, String> {
-    open_sse_stream(
-        server,
-        &format!(
+    let path = session_catalog_events_path(directory);
+    open_sse_stream(server, &path)
+}
+
+fn session_catalog_events_path(directory: Option<&str>) -> String {
+    match directory {
+        Some(directory) => format!(
             "/v2/session-catalog/events?directory={}",
             percent_encode(directory)
         ),
-    )
+        None => "/v2/session-catalog/events?scope=all".to_owned(),
+    }
 }
 
 fn open_sse_stream(
@@ -2202,7 +2488,48 @@ fn open_sse_stream(
     }
 }
 
+/// Workspace registry transport; callers must run this off the UI thread. Reuses
+/// endpoint-scoped credentials and the existing daemon management bridge.
+/// A listing GET may return None: the management routes are optional and are
+/// absent unless NEOISM_AGENT_MANAGEMENT_API=1. Only an actual HTTP 404 has this
+/// meaning; registration failures and every other error remain actionable.
+pub(crate) fn conversation_workspace_registry_request(
+    server: &str,
+    root: Option<&std::path::Path>,
+) -> Result<Option<Value>, String> {
+    let body = root.map(|root| serde_json::json!({"root": root, "createDirectory": false}));
+    let response = http_request_with_status(
+        server,
+        if body.is_some() { "POST" } else { "GET" },
+        "/v2/management/workspaces",
+        body.as_ref(),
+        Duration::from_secs(8),
+    )?;
+    if root.is_none() && response.status == 404 {
+        return Ok(None);
+    }
+    let response = require_http_success(response)?;
+    serde_json::from_slice(&response.body).map(Some).map_err(|error| error.to_string())
+}
+
+fn require_http_success(response: HttpResponse) -> Result<HttpResponse, String> {
+    if !(200..300).contains(&response.status) {
+        return Err(http_error(response.status, &response.reason, &String::from_utf8_lossy(&response.body)));
+    }
+    Ok(response)
+}
+
 fn http_request(
+    server: &str,
+    method: &str,
+    path: &str,
+    body: Option<&Value>,
+    read_timeout: Duration,
+) -> Result<HttpResponse, String> {
+    require_http_success(http_request_with_status(server, method, path, body, read_timeout)?)
+}
+
+fn http_request_with_status(
     server: &str,
     method: &str,
     path: &str,
@@ -2281,10 +2608,7 @@ fn http_request(
     } else {
         body.to_vec()
     };
-    if !(200..300).contains(&status) {
-        return Err(http_error(status, reason, &String::from_utf8_lossy(&body)));
-    }
-    Ok(HttpResponse { body })
+    Ok(HttpResponse { body, status, reason: reason.to_owned() })
 }
 
 pub(super) fn http_error(status: u16, reason: &str, body: &str) -> String {
@@ -2457,6 +2781,7 @@ pub(super) fn session_entry(
         .to_string();
     Some(
         NeoismAgentSessionEntry::new(id, title, "")
+            .with_directory(session.get("directory").and_then(Value::as_str).map(str::to_owned))
             .with_source(neoism_ui::panels::agent_pane::state::side_panel::ConversationSource::from_session_json(session))
             .with_source_key(session.pointer("/externalAgent/sourceKey").or_else(|| session.pointer("/extra/externalAgent/sourceKey")).and_then(Value::as_str).map(str::to_owned))
             .with_updated_ms(session_updated_at(session))

@@ -117,7 +117,6 @@ const MAX_INLINE_ATTACHMENT_BYTES: u64 = 20 * 1024 * 1024;
 #[allow(dead_code)]
 const ABORT_STREAM_SUPPRESSION: Duration = Duration::from_secs(5);
 const TOOL_EXPAND_ANIMATION: Duration = Duration::from_millis(190);
-const WORDMARK_CLICK_ANIMATION: Duration = Duration::from_millis(460);
 const CODE_COPY_FEEDBACK_ANIMATION: Duration = Duration::from_millis(1_400);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -482,8 +481,7 @@ pub struct NeoismWordmarkState {
     pub hover: [f32; 6],
     pub last_frame_at: Option<Instant>,
     pub rect: Option<[f32; 4]>,
-    pub click_started: Option<Instant>,
-    pub click_pos: Option<(f32, f32)>,
+    pub animation: crate::primitives::wordmark_animation::WordmarkAnimation,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -592,8 +590,7 @@ impl Default for NeoismWordmarkState {
             hover: [0.0; 6],
             last_frame_at: None,
             rect: None,
-            click_started: None,
-            click_pos: None,
+            animation: Default::default(),
         }
     }
 }
@@ -698,6 +695,7 @@ pub struct NeoismAgentPane {
     prompt_picker_rect: Option<[f32; 4]>,
     link_hit_rects: Vec<(String, [f32; 4])>,
     mermaid_raw_blocks: BTreeSet<u64>,
+    pub composer_interactions: crate::panels::agent_pane::composer_interactions::ComposerInteractions,
     usage_chip_rect: Option<[f32; 4]>,
     composer_control_rect: Option<[f32; 4]>,
     status_chip_rects: Vec<Option<[f32; 4]>>,
@@ -816,6 +814,8 @@ pub struct NeoismAgentPane {
     agent_options: Vec<NeoismAgentPickerOption>,
     skill_options: Vec<NeoismAgentPickerOption>,
     session_options: Vec<NeoismAgentPickerOption>,
+    session_picker_next_cursor: Option<String>,
+    session_picker_requested_cursor: Option<String>,
     subagent_options: Vec<NeoismAgentPickerOption>,
     /// Queue of "the user just asked to do X" records the host drains
     /// between event cycles to perform the actual IO. See
@@ -1087,6 +1087,7 @@ impl Default for NeoismAgentPane {
             prompt_picker_rect: None,
             link_hit_rects: Vec::new(),
             mermaid_raw_blocks: BTreeSet::new(),
+            composer_interactions: Default::default(),
             usage_chip_rect: None,
             composer_control_rect: None,
             status_chip_rects: vec![None; 4],
@@ -1168,6 +1169,8 @@ impl Default for NeoismAgentPane {
             agent_options: Vec::new(),
             skill_options: Vec::new(),
             session_options: Vec::new(),
+            session_picker_next_cursor: None,
+            session_picker_requested_cursor: None,
             subagent_options: Vec::new(),
             pending_outbound: VecDeque::new(),
             fx_requested: None,
@@ -1437,13 +1440,41 @@ impl NeoismAgentPane {
         }
     }
 
+    /// Set catalog scope independently of the selected chat's execution directory.
+    /// `None` lists all projects; `Some` lists only that exact workspace.
+    pub fn set_catalog_directory(&mut self, directory: Option<String>) {
+        if self.side_panel.set_catalog_directory(directory) {
+            self.session_picker_next_cursor = None;
+            self.session_picker_requested_cursor = None;
+            self.set_session_options(Vec::new());
+        }
+    }
+
+    /// Bind the catalog to its authorized server endpoint. Hosts call this on
+    /// endpoint changes, not on execution-directory changes. Explicit workspace
+    /// catalog scope is retained until the host changes it.
+    pub fn set_catalog_endpoint(&mut self, endpoint: String) {
+        if self.server != endpoint {
+            self.server = endpoint;
+            self.side_panel.invalidate_session_catalog();
+            self.session_picker_next_cursor = None;
+            self.session_picker_requested_cursor = None;
+            self.set_session_options(Vec::new());
+        }
+    }
+
     /// Replace the directory (workspace root) label. The chrome's
     /// breadcrumbs / status pull from this.
+    pub fn session_directory(&self) -> Option<&str> {
+        self.directory.as_deref()
+    }
+
     pub fn set_directory(&mut self, directory: Option<String>) {
         let directory = directory.and_then(|d| (!d.trim().is_empty()).then_some(d));
         if self.directory != directory {
             self.skill_options.clear();
-            self.side_panel.invalidate_session_catalog();
+            // Execution-directory changes never change workspace catalog scope.
+            // Only the authoritative host updates it (or the endpoint identity).
         }
         self.directory = directory;
     }

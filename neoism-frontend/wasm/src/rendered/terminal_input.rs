@@ -659,10 +659,10 @@ impl ChromeBridge {
         self.chrome.splash_overlay.set_mouse(None);
     }
 
-    /// Pop the wordmark fidget (squash + ripple) at a click point.
+    /// Replay a random pixel effect without changing the splash's idle appearance.
     pub fn splash_wordmark_click(&mut self, x: f32, y: f32) {
         if self.chrome.splash_overlay.wordmark_hit(x, y) {
-            self.chrome.splash_overlay.pop_click(x, y);
+            self.chrome.splash_overlay.replay_wordmark();
         }
     }
 

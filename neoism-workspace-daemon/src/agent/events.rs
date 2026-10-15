@@ -20,20 +20,36 @@ pub(crate) fn start_event_stream(inner: &Arc<AgentInner>, session_id: &str) {
         .insert(session_id.to_string(), handle);
 }
 
-pub(crate) fn start_catalog_event_stream(inner: &Arc<AgentInner>, directory: &str) {
-    let key = format!("catalog:{directory}");
+pub(crate) fn start_catalog_event_stream(
+    inner: &Arc<AgentInner>,
+    directory: Option<&str>,
+) {
+    let key = match directory {
+        Some(directory) => format!("catalog:directory:{directory}"),
+        None => "catalog:all".to_owned(),
+    };
     let mut handles = inner.stream_handles.lock();
     if handles.contains_key(&key) {
         return;
     }
     let inner = inner.clone();
     let task_key = key.clone();
-    let directory = directory.to_owned();
+    let directory = directory.map(str::to_owned);
     let handle = tokio::spawn(async move {
-        run_event_stream_inner(inner.clone(), String::new(), Some(directory)).await;
+        run_event_stream_inner(inner.clone(), String::new(), directory).await;
         inner.stream_handles.lock().remove(&task_key);
     });
     handles.insert(key, handle);
+}
+
+pub(crate) fn catalog_events_path(directory: Option<&str>) -> String {
+    match directory {
+        Some(directory) => format!(
+            "/v2/session-catalog/events?directory={}",
+            percent_encode(directory)
+        ),
+        None => "/v2/session-catalog/events?scope=all".to_owned(),
+    }
 }
 
 pub(crate) fn stop_event_stream(inner: &Arc<AgentInner>, session_id: &str) {
@@ -52,12 +68,13 @@ async fn run_event_stream_inner(
     directory: Option<String>,
 ) {
     use futures::StreamExt;
-    let catalog = directory.is_some();
-    let url = if let Some(directory) = directory {
+    // Catalog identity is independent of its optional directory filter.
+    let catalog = session_id.is_empty();
+    let url = if catalog {
         format!(
-            "{}/v2/session-catalog/events?directory={}",
+            "{}{}",
             inner.agent_server,
-            percent_encode(&directory)
+            catalog_events_path(directory.as_deref())
         )
     } else {
         format!(
@@ -101,7 +118,24 @@ async fn run_event_stream_inner(
         };
 
         retry_delay = std::time::Duration::from_millis(250);
-        if connected_once && !catalog {
+        if connected_once && catalog {
+            // The SSE baseline restores activity only. Re-read metadata too:
+            // roots may have been created/deleted while disconnected, including
+            // in a project not present in any previously loaded catalog page.
+            if directory.is_none() {
+                // No unbounded/global head list in grouped mode. The client captures
+                // its current endpoint/root identity when requesting summaries.
+                let _ = inner.tx.send(AgentServerMessage::SessionProjectsChanged);
+            } else {
+                super::handlers::fetch_thread_page(
+                    inner.clone(),
+                    directory.clone(),
+                    None,
+                    None,
+                )
+                .await;
+            }
+        } else if connected_once {
             push_session_running_state(inner.clone(), session_id.clone()).await;
             push_runtime_snapshot(inner.clone(), session_id.clone()).await;
             push_todo_snapshot(inner.clone(), session_id.clone()).await;

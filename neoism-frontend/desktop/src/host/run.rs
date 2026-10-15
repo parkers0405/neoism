@@ -937,6 +937,7 @@ impl Renderer {
                     ),
                     LeftSidebarView::Conversations => {
                         let panel = &mut self.conversations_pane;
+                        panel.side_panel_mut().set_navigation_header_enabled(true);
                         panel
                             .side_panel_mut()
                             .set_catalog_viewed_root(active_agent_root.as_deref());
@@ -1494,6 +1495,24 @@ impl Renderer {
             &modal_theme,
         );
         if modal_late_overlay {
+            sugarloaf.set_late_overlay_mode(false);
+        }
+
+        if self.conversation_navigator.is_active() {
+            let theme = neoism_ui::chrome::active_ide_theme();
+            let scale = self.chrome_scale();
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| neoism_ui::render_policy::animation_phase_from_unix_secs(
+                    duration.as_secs(), duration.subsec_nanos(),
+                ))
+                .unwrap_or(0.0);
+            sugarloaf.set_late_overlay_mode(true);
+            self.conversation_navigator.render(
+                sugarloaf, &theme,
+                [0.0, 0.0, window_size.width as f32 / scale_factor, window_size.height as f32 / scale_factor],
+                scale, now,
+            );
             sugarloaf.set_late_overlay_mode(false);
         }
 

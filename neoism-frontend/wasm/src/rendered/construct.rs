@@ -95,9 +95,13 @@ impl ChromeBridge {
         chrome.set_workspace_root_path(Some(root.clone()));
         // Web-only menu row: hand a phone a URL for THIS daemon.
         chrome.top_bar.set_share_with_phone_enabled(true);
-        chrome.install_agent_pane(NeoismAgentPane::with_directory(Some(
+        let mut agent_pane = NeoismAgentPane::with_directory(Some(
             root.to_string_lossy().into_owned(),
-        )));
+        ));
+        agent_pane.set_catalog_directory(
+            super::file_tree_workspace::workspace_catalog_directory(&root),
+        );
+        chrome.install_agent_pane(agent_pane);
 
         // W3-A: install the remaining slim panels so the JS-side
         // bridge state pushes (W3-B) have a uniform install
@@ -160,6 +164,7 @@ impl ChromeBridge {
             cd_search_key: None,
             cd_search_pending: None,
             agent_state: AgentBridgeState::default(),
+            pending_agent_file_browser: None,
             pane_terminals: std::collections::HashMap::new(),
             pending_pane_tab_intents: Vec::new(),
             tab_drag_begin_ix: None,

@@ -23,6 +23,10 @@ use crate::{
 #[derive(Clone, Debug, Deserialize)]
 pub(crate) struct SessionListQuery {
     pub directory: Option<String>,
+    #[serde(default)]
+    pub exact_directory: bool,
+    #[serde(default)]
+    pub exclude_pinned: bool,
     pub path: Option<String>,
     pub roots: Option<String>,
     pub start: Option<u64>,

@@ -888,6 +888,7 @@ impl Screen<'_> {
             || self.renderer.modal.is_active()
             || self.renderer.settings.is_active()
             || self.renderer.file_browser.is_active()
+            || self.renderer.conversation_navigator.is_active()
             || self.renderer.assistant.is_active()
             || self.renderer.command_palette.is_enabled()
             || self.renderer.context_menu.rect().is_some()

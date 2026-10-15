@@ -638,6 +638,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
 
     pub fn animations_active(&self) -> bool {
         self.editor_pane_animating
+            || self.conversation_navigator.is_active()
             || self.chrome_pages_animating()
             || self.rainbow_cursor_active()
             || self.trail_cursor.is_animating()
@@ -648,6 +649,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                 .file_tree
                 .as_ref()
                 .is_some_and(|tree| tree.is_animating())
+            || self.file_browser.is_animating()
             || self.context_menu.is_animating()
             || self.command_palette.is_animating()
             || self.command_composer.is_animating(&self.terminal_input)

@@ -427,6 +427,10 @@ pub trait AgentUserInputPane {
     fn input_viewport_mut(
         &mut self,
     ) -> &mut crate::panels::agent_pane::input_viewport::InputViewport;
+    fn composer_interactions(
+        &mut self,
+    ) -> &mut crate::panels::agent_pane::composer_interactions::ComposerInteractions;
+    fn composer_directory(&self) -> Option<String>;
     fn clear_usage_chip_rect(&mut self);
     fn register_usage_chip_rect(&mut self, rect: [f32; 4]);
     fn clear_composer_control_rect(&mut self);
@@ -560,6 +564,14 @@ macro_rules! neoism_ui_impl_agent_user_input {
 
             fn input_viewport_mut(&mut self) -> &mut $crate::panels::agent_pane::input_viewport::InputViewport {
                 <$pane>::input_viewport_mut(self)
+            }
+
+            fn composer_interactions(&mut self) -> &mut $crate::panels::agent_pane::composer_interactions::ComposerInteractions {
+                &mut self.composer_interactions
+            }
+
+            fn composer_directory(&self) -> Option<String> {
+                self.session_directory().map(str::to_string)
             }
 
             fn clear_usage_chip_rect(&mut self) {
@@ -815,6 +827,16 @@ impl AgentUserInputPane for NeoismAgentPane {
         &mut self,
     ) -> &mut crate::panels::agent_pane::input_viewport::InputViewport {
         NeoismAgentPane::input_viewport_mut(self)
+    }
+
+    fn composer_interactions(
+        &mut self,
+    ) -> &mut crate::panels::agent_pane::composer_interactions::ComposerInteractions {
+        &mut self.composer_interactions
+    }
+
+    fn composer_directory(&self) -> Option<String> {
+        self.session_directory().map(str::to_string)
     }
 
     fn clear_usage_chip_rect(&mut self) {
@@ -1430,10 +1452,26 @@ pub fn render_input(
     checkout_context: Option<&AgentCheckoutContext>,
 ) {
     let [x, y, w, h] = rect;
+    // Agent cwd is independent of the workspace and terminal cwd.
+    let session_checkout = pane.composer_directory().map(|directory| {
+        AgentCheckoutContext::new(
+            Some(
+                crate::panels::agent_pane::attachment_policy::compact_directory_label(
+                    &directory,
+                ),
+            ),
+            None,
+        )
+    });
+    let checkout_context = session_checkout.as_ref().or(checkout_context);
     pane.set_cursor_rect(None);
+    pane.composer_interactions().clear_rects();
     pane.clear_usage_chip_rect();
     pane.clear_composer_control_rect();
     pane.clear_status_chip_rects();
+    pane.composer_interactions()
+        .occlusion_rects
+        .extend_from_slice(occlusion_rects);
     // Floating-island composer: the input box's own border IS the
     // island's top and sides — the shell only shows as a "skirt"
     // below the box, wrapping the dropdown chip row (agent ˅ /
@@ -1872,7 +1910,7 @@ pub fn render_input(
 /// side advertises the slash-command shortcut that is always available.
 fn render_input_help_strip(
     sugarloaf: &mut Sugarloaf,
-    pane: &impl AgentUserInputPane,
+    pane: &mut impl AgentUserInputPane,
     policy: ComposerVisualPolicy,
     rect: [f32; 4],
     theme: &IdeTheme,
@@ -1934,6 +1972,7 @@ fn render_input_help_strip(
     // A settled conversation mirrors New Chat's checkout context. While a run
     // is active, the activity scanner and interrupt hint own this same slot.
     let visible_checkout = visible_footer_checkout_context(policy, checkout_context);
+    let checkout_hint_left = hint_left;
     let mut activity_guard = visible_checkout.map_or(x, |context| {
         render_checkout_context(
             sugarloaf,
@@ -1942,11 +1981,28 @@ fn render_input_help_strip(
             baseline_y,
             &key_opts,
             &label_opts,
-            hint_left,
+            checkout_hint_left,
             s,
             occlusion_rects,
         )
     });
+    if let Some(cwd) = visible_checkout.and_then(|context| context.cwd.as_deref()) {
+        let glyph = crate::primitives::look::themed_glyph("status.folder", "\u{f07b}");
+        let measured_cwd = sugarloaf.text_mut().measure(glyph, &label_opts)
+            + 6.0 * s
+            + sugarloaf.text_mut().measure(cwd, &key_opts);
+        let clip_width = checkout_context_width(rect, checkout_hint_left, s);
+        let hits =
+            crate::panels::agent_pane::composer_interactions::cwd_visible_hit_rects(
+                rect,
+                measured_cwd,
+                clip_width,
+                occlusion_rects,
+            );
+        let interactions = pane.composer_interactions();
+        interactions.cwd_rect = (hits.len() == 1).then(|| hits[0]);
+        interactions.cwd_rects = hits;
+    }
     if !pane.input_help_visible() {
         return;
     }

@@ -1300,21 +1300,27 @@ fn pending_outbound_starts_empty() {
 }
 
 #[test]
-fn expired_wordmark_click_does_not_drive_animation() {
+fn cancelled_wordmark_click_does_not_drive_animation() {
     let mut pane = NeoismAgentPane::default();
-    pane.wordmark.click_started = Some(
-        Instant::now()
-            .checked_sub(WORDMARK_CLICK_ANIMATION + Duration::from_millis(1))
-            .unwrap(),
-    );
+    pane.wordmark.animation.replay();
+    pane.wordmark.animation.cancel();
 
     assert_ne!(pane.animation_reason(), Some("wordmark"));
 }
 
 #[test]
-fn fresh_wordmark_click_drives_short_animation() {
+fn fresh_wordmark_click_drives_pixel_animation() {
     let mut pane = NeoismAgentPane::default();
-    pane.wordmark.click_started = Some(Instant::now());
+    assert!(!pane.wordmark_hit(100.0, 40.0));
+    pane.wordmark.rect = Some([10.0, 20.0, 300.0, 50.0]);
+    assert!(pane.wordmark_hit(100.0, 40.0));
+    assert!(pane.wordmark_hit(10.0, 20.0));
+    assert!(pane.wordmark_hit(310.0, 70.0));
+    assert!(!pane.wordmark_hit(311.0, 40.0));
+    assert!(!pane.wordmark_hit(100.0, 71.0));
+    assert!(!pane.wordmark_hit(f32::NAN, 40.0));
+    assert!(!pane.pop_wordmark_click(0.0, 0.0));
+    assert!(pane.pop_wordmark_click(100.0, 40.0));
 
     assert_eq!(pane.animation_reason(), Some("wordmark"));
 }
@@ -2793,10 +2799,167 @@ fn live_session_catalog_mutations_preserve_pages_and_selected_session() {
 }
 
 #[test]
+fn execution_directory_changes_preserve_all_project_catalog_and_generation() {
+    let mut pane = NeoismAgentPane::default();
+    pane.set_catalog_endpoint("https://server-a".into());
+    pane.set_directory(Some("/project-a".into()));
+    pane.side_panel.set_session_page(
+        vec![NeoismAgentSessionEntry::new("saved", "Saved", "")
+            .with_directory(Some("/project-b".into()))],
+        None,
+        Some("next-page".into()),
+    );
+    let generation = pane.side_panel.next_session_request_generation();
+    pane.set_directory(Some("/project-c".into()));
+    assert_eq!(pane.directory.as_deref(), Some("/project-c"));
+    assert!(pane.side_panel.session_request_is_current(generation));
+    assert_eq!(pane.side_panel.session_next_cursor(), Some("next-page"));
+    let saved = pane.side_panel.sessions().iter().find(|row| row.id == "saved").unwrap();
+    assert_eq!(saved.directory.as_deref(), Some("/project-b"));
+    pane.set_catalog_endpoint("https://server-a".into());
+    assert!(pane.side_panel.session_request_is_current(generation));
+    pane.set_catalog_endpoint("https://server-b".into());
+    assert!(!pane.side_panel.session_request_is_current(generation));
+    assert!(pane.side_panel.sessions().is_empty());
+    assert_eq!(pane.side_panel.session_next_cursor(), None);
+}
+
+#[test]
+fn workspace_catalog_scope_survives_endpoint_and_execution_changes() {
+    let mut pane = NeoismAgentPane::default();
+    pane.set_catalog_directory(Some("/workspace".into()));
+    pane.set_catalog_endpoint("https://server-a".into());
+    pane.side_panel.set_session_page(
+        vec![NeoismAgentSessionEntry::new("saved", "Saved", "")
+            .with_directory(Some("/workspace".into()))],
+        None,
+        Some("next-page".into()),
+    );
+    pane.set_session_options_page(
+        vec![NeoismAgentPickerOption::new("Saved", "", "", "saved")],
+        None,
+        Some("picker-next".into()),
+    );
+    let generation = pane.side_panel.next_session_request_generation();
+    pane.set_catalog_directory(Some("/workspace".into()));
+    pane.set_directory(Some("/different-chat-dir".into()));
+    pane.set_session_id(Some("different-chat".into()));
+    assert!(pane.side_panel.session_request_is_current(generation));
+    assert_eq!(pane.side_panel.catalog_directory(), Some("/workspace"));
+    assert_eq!(pane.session_picker_next_cursor.as_deref(), Some("picker-next"));
+
+    pane.set_catalog_endpoint("https://server-b".into());
+    assert_eq!(pane.side_panel.catalog_directory(), Some("/workspace"));
+    assert!(!pane.side_panel.session_request_is_current(generation));
+    assert!(pane.side_panel.sessions().is_empty());
+    assert!(pane.session_options.is_empty());
+    assert!(pane.session_picker_next_cursor.is_none());
+
+    pane.set_catalog_directory(None);
+    assert_eq!(pane.side_panel.catalog_directory(), None);
+    pane.open_sessions_picker();
+    assert!(matches!(pane.drain_pending_outbound().as_slice(),
+        [OutboundAgentCommand::RefreshSessions { directory: None, cursor: None }]
+    ));
+}
+
+#[test]
+fn workspace_catalog_scope_change_clears_picker_and_invalidates_pages() {
+    let mut pane = NeoismAgentPane::default();
+    pane.set_catalog_directory(Some("/workspace-a".into()));
+    pane.set_session_options_page(
+        vec![NeoismAgentPickerOption::new("Saved", "", "", "saved")],
+        None,
+        Some("picker-next".into()),
+    );
+    pane.session_picker_requested_cursor = Some("picker-next".into());
+    let generation = pane.side_panel.next_session_request_generation();
+    pane.set_catalog_directory(Some("/workspace-b".into()));
+    assert!(!pane.side_panel.session_request_is_current(generation));
+    assert!(pane.session_options.is_empty());
+    assert!(pane.session_picker_next_cursor.is_none());
+    assert!(pane.session_picker_requested_cursor.is_none());
+}
+
+#[test]
+fn cached_session_restores_execution_directory_without_narrowing_catalog() {
+    let mut pane = NeoismAgentPane::default();
+    pane.set_catalog_directory(Some("/project-b".into()));
+    pane.session_id = Some("session-a".into());
+    pane.set_directory(Some("/project-a".into()));
+    pane.side_panel.set_session_page(
+        vec![NeoismAgentSessionEntry::new("catalog-root", "Root", "")
+            .with_directory(Some("/project-b".into()))],
+        None,
+        Some("catalog-next".into()),
+    );
+    pane.cache_current_session();
+    pane.session_id = Some("session-b".into());
+    pane.set_directory(Some("/project-b".into()));
+    assert!(pane.activate_cached_session("session-a"));
+    assert_eq!(pane.side_panel.catalog_directory(), Some("/project-b"));
+    assert_eq!(pane.directory.as_deref(), Some("/project-a"));
+    assert_eq!(pane.side_panel.session_next_cursor(), Some("catalog-next"));
+    assert!(pane.side_panel.sessions().iter().any(|entry| entry.id == "catalog-root"));
+}
+
+#[test]
+fn sidebar_and_sessions_picker_request_declared_catalog_scope() {
+    for scope in [None, Some("/workspace".to_string())] {
+        let mut pane = NeoismAgentPane::default();
+        pane.set_catalog_directory(scope.clone());
+        pane.set_directory(Some("/unrelated-execution-dir".into()));
+        let _ = pane.drain_pending_outbound();
+        pane.maybe_refresh_side_panel_sessions();
+        assert!(matches!(pane.drain_pending_outbound().as_slice(),
+            [OutboundAgentCommand::RefreshSessions { directory, cursor: None }]
+                if directory == &scope
+        ));
+        pane.open_sessions_picker();
+        assert!(matches!(pane.drain_pending_outbound().as_slice(),
+            [OutboundAgentCommand::RefreshSessions { directory, cursor: None }]
+                if directory == &scope
+        ));
+    }
+}
+
+#[test]
+fn sessions_picker_continuation_appends_rows_without_switching_session() {
+    let mut pane = NeoismAgentPane::default();
+    pane.set_catalog_directory(Some("/workspace".into()));
+    pane.set_directory(Some("/active".into()));
+    pane.open_sessions_picker();
+    let _ = pane.drain_pending_outbound();
+    pane.set_session_options_page(
+        vec![NeoismAgentPickerOption::new("First", "", "", "first")],
+        None,
+        Some("page-2".into()),
+    );
+    pane.move_picker_selection(1);
+    assert!(pane.commit_picker());
+    assert!(matches!(pane.drain_pending_outbound().as_slice(),
+        [OutboundAgentCommand::RefreshSessions { directory: Some(directory), cursor: Some(cursor) }]
+            if cursor == "page-2" && directory == "/workspace"
+    ));
+    assert_eq!(pane.session_id, None);
+    assert!(pane.picker.is_some());
+    pane.set_session_options_page(
+        vec![NeoismAgentPickerOption::new("Second", "", "", "second")],
+        Some("page-2"),
+        None,
+    );
+    assert_eq!(pane.session_options.len(), 2);
+    assert_eq!(pane.session_options[0].value, "first");
+    assert_eq!(pane.session_options[1].value, "second");
+    assert!(pane.session_picker_next_cursor.is_none());
+}
+
+#[test]
 fn scrolling_session_catalog_tail_requests_the_continuation_cursor() {
     let mut pane = NeoismAgentPane::default();
     let _ = pane.drain_pending_outbound();
     pane.set_directory(Some("/workspace".to_string()));
+    pane.set_catalog_directory(Some("/workspace".to_string()));
     pane.side_panel.set_session_page(
         (0..8)
             .map(|index| {
@@ -2805,6 +2968,7 @@ fn scrolling_session_catalog_tail_requests_the_continuation_cursor() {
                     format!("Session {index}"),
                     "now",
                 )
+                .with_directory(Some("/workspace".into()))
                 .with_updated_ms(100 - index)
             })
             .collect(),
@@ -2819,7 +2983,7 @@ fn scrolling_session_catalog_tail_requests_the_continuation_cursor() {
         [OutboundAgentCommand::RefreshSessions {
             directory: Some(directory),
             cursor: Some(cursor),
-        }] if directory == "/workspace" && cursor == "next-page"
+        }] if cursor == "next-page" && directory == "/workspace"
     ));
     pane.scroll_side_panel_pixels(-10_000.0, 2);
     assert!(pane.drain_pending_outbound().is_empty());

@@ -503,6 +503,16 @@ impl<A: Send + Copy + 'static> Chrome<A> {
     /// swallowing editor keys after the user has clearly returned to
     /// the buffer.
     pub fn focus_content_surface(&mut self) {
+        self.notes_sidebar.set_focused(false);
+        self.git_diff_panel.set_focused(false);
+        self.left_sidebar_host.set_focused(None);
+        for tabs in self.pane_tabs.values_mut() {
+            tabs.set_focused(false);
+        }
+        if let Some(pane) = self.agent_pane.as_mut() {
+            pane.side_panel_mut().set_focused(false);
+            pane.detail_panel_mut().set_focused(false);
+        }
         if let Some(tree) = self.file_tree.as_mut() {
             tree.set_focused(false);
         }
@@ -720,6 +730,9 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             plugins: Some(&plugins),
         };
 
+        if self.handle_conversation_navigator_event(event) {
+            return;
+        }
         // The file browser is a true modal and owns every input shape. It is
         // checked before global shortcuts and every canvas surface.
         if self.file_browser.is_active() && self.file_browser.handle_event(event) {
@@ -1026,10 +1039,20 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                         LogicalKey::Named(NamedKey::ArrowUp) => {
                             pane.side_panel_mut().select_prev()
                         }
+                        LogicalKey::Named(NamedKey::ArrowLeft) => {
+                            pane.side_panel_mut().navigate_project(false);
+                        }
+                        LogicalKey::Named(NamedKey::ArrowRight) => {
+                            pane.side_panel_mut().navigate_project(true);
+                        }
                         LogicalKey::Named(NamedKey::Enter) => {
-                            if pane.side_panel().new_chat_selected() {
-                                self.apply_top_bar_action(TopBarAction::OpenAgent);
-                            } else {
+                            if pane.side_panel().projects_selected() {
+                                self.pending_catalog_header = Some(
+                                    crate::panels::agent_pane::state::side_panel::CatalogHeaderAction::Projects,
+                                );
+                            } else if pane.side_panel().new_chat_selected() {
+                                self.activate_new_conversation();
+                            } else if !pane.side_panel_mut().toggle_selected_project() {
                                 self.pending_conversation_open = pane
                                     .side_panel()
                                     .selected_session()
@@ -1338,10 +1361,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
     pub fn open_neoism_agent_tab(&mut self, route_id: usize) -> usize {
         let idx = self.buffer_tabs.open_neoism_agent(route_id);
         self.set_active_tab_index(idx);
-        if let Some(tree) = self.file_tree.as_mut() {
-            tree.set_focused(false);
-        }
-        self.blur(PanelKey::FileTree);
+        self.focus_content_surface();
         idx
     }
 
@@ -1543,6 +1563,10 @@ impl<A: Send + Copy + 'static> Chrome<A> {
     /// finger movement in logical pixels, not wheel deltas. Every branch
     /// updates a bounded visual position immediately and creates no velocity.
     pub fn touch_scroll_at(&mut self, x: f32, y: f32, dx: f32, dy: f32) -> bool {
+        if self.conversation_navigator.is_active() {
+            self.conversation_navigator.scroll(-dy);
+            return true;
+        }
         if self.is_neoism_agent_tab_active()
             && self.agent_pane_mut().is_some_and(|pane| {
                 if pane.detail_panel().contains_point(x, y) {
@@ -1605,7 +1629,13 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         false
     }
 
-    fn scroll_command_composer_at(&mut self, x: f32, y: f32, dy: f32, mode: WheelMode) -> bool {
+    fn scroll_command_composer_at(
+        &mut self,
+        x: f32,
+        y: f32,
+        dy: f32,
+        mode: WheelMode,
+    ) -> bool {
         let Some(rect) = self.layout.command_composer else {
             return false;
         };
@@ -1644,6 +1674,9 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                 Modifiers::empty()
             },
         };
+        if self.handle_conversation_navigator_event(&event) {
+            return true;
+        }
         if self.handle_side_panel_pointer(&event, x, y) {
             return true;
         }
@@ -1808,6 +1841,17 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             ) {
                 return true;
             }
+            if let Some(action) = self.agent_pane.as_ref()
+                .and_then(|pane| pane.side_panel().header_action_at(*x, *y))
+            {
+                if action == crate::panels::agent_pane::state::side_panel::CatalogHeaderAction::Projects {
+                    if let Some(pane) = self.agent_pane.as_mut() {
+                        pane.side_panel_mut().select_projects();
+                    }
+                }
+                self.pending_catalog_header = Some(action);
+                return true;
+            }
             let new_chat_hit = self.agent_pane.as_ref().is_some_and(|pane| {
                 matches!(pane.side_panel().new_chat_hit(*x, *y), Some(None))
             });
@@ -1815,13 +1859,17 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                 if let Some(pane) = self.agent_pane.as_mut() {
                     pane.side_panel_mut().select_new_chat();
                 }
-                self.apply_top_bar_action(TopBarAction::OpenAgent);
+                self.activate_new_conversation();
                 return true;
             }
             if let Some(pane) = self.agent_pane.as_mut() {
                 pane.side_panel_mut().set_focused(true);
                 if let Some(rect) = pane.side_panel().last_panel_rect() {
                     if let Some(row) = pane.side_panel().hit_test_row(*x, *y, rect) {
+                        pane.side_panel_mut().set_selected(row);
+                        if pane.side_panel_mut().toggle_selected_project() {
+                            return true;
+                        }
                         if pane
                             .side_panel()
                             .sessions()
@@ -1830,7 +1878,6 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                         {
                             return true;
                         }
-                        pane.side_panel_mut().set_selected(row);
                         self.pending_conversation_open =
                             pane.side_panel().selected_session().and_then(|entry| {
                                 entry
@@ -2672,6 +2719,53 @@ mod tests {
         assert_eq!(chrome.drain_top_bar_action(), Some(TopBarAction::OpenAgent));
         assert!(chrome.take_conversation_new().is_none());
         assert!(chrome.take_conversation_open().is_none());
+        // The host commits focus only after selecting its newly-created tab.
+        assert!(chrome.agent_pane().unwrap().side_panel().is_focused());
+        chrome.open_neoism_agent_tab(99);
+        assert_new_chat_composer_focus(&mut chrome);
+    }
+
+    fn assert_new_chat_composer_focus(chrome: &mut Chrome<()>) {
+        assert!(chrome.is_neoism_agent_tab_active());
+        assert!(!chrome.agent_pane().unwrap().side_panel().is_focused());
+        assert!(!chrome.agent_pane().unwrap().detail_panel().is_focused());
+        assert!(!chrome.notes_sidebar.is_focused());
+        assert!(!chrome.buffer_tabs.is_focused());
+        assert!(chrome.focused().is_none());
+        // No implicit session creation on activation: first submit owns that.
+        assert!(!chrome.agent_pane_mut().unwrap().drain_pending_outbound().iter().any(
+            |message| matches!(message, crate::panels::agent_pane::outbound::OutboundAgentCommand::EnsureSession)
+        ));
+        let typing = UiEvent::Key(crate::event::KeyDescriptor {
+            physical: crate::event::PhysicalKey(0),
+            logical: LogicalKey::Character("i".into()),
+            state: KeyState::Pressed,
+            modifiers: Modifiers::empty(),
+            repeat: false,
+        });
+        assert!(!chrome.handle_chrome_key_shortcut(&typing), "sidebar must not consume immediate typing");
+        chrome.agent_pane_mut().unwrap().insert_text("immediately typed");
+        assert_eq!(chrome.agent_pane().unwrap().input(), "immediately typed");
+    }
+
+    #[test]
+    fn catalog_new_chat_enter_commits_composer_focus_only_on_activation() {
+        let mut chrome = chrome_with_active_agent();
+        chrome.toggle_conversations();
+        chrome.agent_pane_mut().unwrap().side_panel_mut().select_new_chat();
+        let event = UiEvent::Key(crate::event::KeyDescriptor {
+            physical: crate::event::PhysicalKey(0),
+            state: KeyState::Pressed,
+            logical: LogicalKey::Named(NamedKey::Enter),
+            modifiers: Modifiers::empty(),
+            repeat: false,
+        });
+        assert!(chrome.handle_chrome_key_shortcut(&event));
+        assert_eq!(chrome.drain_top_bar_action(), Some(TopBarAction::OpenAgent));
+        assert!(chrome.take_conversation_new().is_none());
+        assert!(chrome.agent_pane().unwrap().side_panel().is_focused());
+        chrome.open_neoism_agent_tab(100);
+        assert_new_chat_composer_focus(&mut chrome);
     }
 
     #[test]
@@ -2837,8 +2931,8 @@ mod tests {
                 status: String::new(),
                 tool: String::new(),
                 tool_batch_id: None,
-            composition_children: Vec::new(),
-            composition_child: false,
+                composition_children: Vec::new(),
+                composition_child: false,
                 output_kind:
                     crate::panels::agent_pane::state::NeoismAgentOutputKind::Text,
                 lang: String::new(),

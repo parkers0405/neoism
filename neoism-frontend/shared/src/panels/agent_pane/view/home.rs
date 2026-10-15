@@ -73,6 +73,7 @@ pub fn render_home_with<P: AgentHomePane>(
         sugarloaf,
         pane.wordmark_mut(),
         [logo_x, logo_y, logo_w, logo_h],
+        rect,
         now_seconds,
         mouse,
         1,

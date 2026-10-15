@@ -51,6 +51,20 @@ pub fn icon_for(entry: &TreeEntry) -> (&'static str, [u8; 4]) {
     }
 }
 
+pub fn folder_icon(open: bool) -> (&'static str, [u8; 4]) {
+    with_override(
+        "folder",
+        (
+            if open {
+                FOLDER_OPEN_ICON
+            } else {
+                FOLDER_CLOSED_ICON
+            },
+            FOLDER_ICON_COLOR,
+        ),
+    )
+}
+
 pub fn workspace_root_icon() -> (&'static str, [u8; 4]) {
     with_override("workspace", (FOLDER_CLOSED_ICON, FOLDER_ICON_COLOR))
 }

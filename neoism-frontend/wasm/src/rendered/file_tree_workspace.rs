@@ -5,6 +5,52 @@ use neoism_ui::widgets::island::IslandHit;
 use std::path::PathBuf;
 use web_time::Duration;
 
+// Initial construction has no authorized FilesLocations response yet. This
+// fallback therefore recognizes only explicit filesystem roots, never home-like
+// names. Runtime set_workspace_root uses Chrome's dashboard-aware scope method
+// below, so a subsequently advertised home also becomes an all-project view.
+pub(super) fn workspace_catalog_directory(root: &std::path::Path) -> Option<String> {
+    let directory = root.to_string_lossy();
+    let bytes = directory.as_bytes();
+    let filesystem_root = directory == "/"
+        || (bytes.len() == 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && matches!(bytes[2], b'/' | b'\\'));
+    (!filesystem_root).then(|| directory.into_owned())
+}
+
+#[cfg(test)]
+mod catalog_scope_tests {
+    use super::workspace_catalog_directory;
+    use std::path::Path;
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    #[wasm_bindgen_test]
+    fn explicit_filesystem_roots_are_dashboards() {
+        for root in ["/", "C:/", "D:\\"] {
+            assert_eq!(workspace_catalog_directory(Path::new(root)), None);
+        }
+    }
+
+    #[wasm_bindgen_test]
+    fn declared_workspaces_are_exact_without_home_path_guesses() {
+        for root in [
+            "/home/alice",
+            "/root",
+            "/Users/alice",
+            "/project",
+            "/project/subdir",
+            "C:\\Users\\alice",
+        ] {
+            assert_eq!(
+                workspace_catalog_directory(Path::new(root)),
+                Some(root.into())
+            );
+        }
+    }
+}
+
 #[wasm_bindgen]
 impl ChromeBridge {
     pub fn refresh_file_tree(&mut self) {
@@ -63,6 +109,9 @@ impl ChromeBridge {
             .and_then(|tree| tree.root())
             .is_some_and(|current| current == root.as_path());
         self.workspace_root = root.clone();
+        self.chrome.set_conversation_catalog_workspace_root(&root);
+        // Advance identity at the mutation, including A→B→A before the next frame.
+        self.project_catalog_identity();
         if !same_root {
             self.chrome.install_file_tree(FileTree::new(root.clone()));
         }

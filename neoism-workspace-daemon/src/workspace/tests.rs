@@ -640,6 +640,14 @@ fn workspace_root_change_resolves_relative_path_and_rejects_missing_directory() 
         .set_host_workspace_root("workspace-cd", PathBuf::from("-"))
         .expect("cd - returns to the previous workspace root");
     assert_eq!(previous.root_dir.as_deref(), Some(original.as_path()));
+    assert_eq!(updated.id, previous.id, "cwd changes preserve current workspace identity");
+    assert_eq!(mgr.list_host_workspaces(None).len(), 1, "no extra grid/workspace created");
+    let projects = mgr.list_workspaces();
+    assert!(projects.iter().any(|p| p.path == original));
+    assert!(projects.iter().any(|p| p.path == target));
+    assert_eq!(projects.iter().filter(|p| p.path == target).count(), 1);
+    let persisted = load_registry_full(&td.path().join("workspaces.json"));
+    assert!(persisted.workspaces.iter().any(|p| p.path == target));
 
     let missing = td.path().join("projects").join("missing");
     assert!(mgr

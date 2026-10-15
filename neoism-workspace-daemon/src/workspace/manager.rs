@@ -704,7 +704,23 @@ impl WorkspaceManager {
         if workspace.root_dir.as_deref() != Some(dir.as_path()) {
             inner
                 .previous_workspace_roots
-                .insert(workspace_id.to_string(), current_root);
+                .insert(workspace_id.to_string(), current_root.clone());
+        }
+        // A regular cwd/root change also remembers directories independently
+        // of chats and workspace grids. Never create/adopt another workspace.
+        let mut registry_changed = false;
+        for path in [current_root, dir.clone()] {
+            if !inner.workspaces.values().any(|project| project.path == path) {
+                let project = ProjectRootSummary {
+                    id: Uuid::new_v4().to_string(),
+                    name: path.file_name().map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| path.to_string_lossy().into_owned()),
+                    path,
+                    last_opened: now_secs(),
+                };
+                inner.workspaces.insert(project.id.clone(), project);
+                registry_changed = true;
+            }
         }
         workspace.root_dir = Some(dir.clone());
         workspace.linked_vault_dir = linked_vault_dir;
@@ -714,6 +730,7 @@ impl WorkspaceManager {
             .host_workspaces
             .insert(workspace.id.clone(), workspace.clone());
         drop(inner);
+        if registry_changed { self.persist(); }
         self.mark_dirty();
         watch_notes_link_dir(&dir);
         Some(workspace)

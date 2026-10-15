@@ -106,6 +106,15 @@ impl Application<'_> {
             _ => (),
         }
 
+        if route
+            .window
+            .screen
+            .handle_conversation_navigator_mouse(button, state)
+        {
+            route.request_redraw();
+            return;
+        }
+
         #[cfg(feature = "cef-artifacts")]
         if route
             .window
@@ -670,7 +679,15 @@ impl Application<'_> {
                         .screen
                         .handle_neoism_agent_mouse_release(&mut self.router.clipboard)
                 {
-                    route.window.set_cursor(CursorIcon::Text);
+                    route.window.set_cursor(
+                        if route.window.screen.neoism_agent_wordmark_hovered()
+                            || route.window.screen.neoism_agent_link_hovered()
+                        {
+                            CursorIcon::Pointer
+                        } else {
+                            CursorIcon::Text
+                        },
+                    );
                     route.request_redraw();
                     return;
                 }
@@ -775,6 +792,38 @@ impl Application<'_> {
         route.window.screen.mouse.raw_y = position.y;
         route.window.screen.mouse.raw_x = position.x;
 
+        if route
+            .window
+            .screen
+            .renderer
+            .conversation_navigator
+            .is_active()
+        {
+            let (x, y) = route.window.screen.mouse_logical_for_hit_test();
+            if route
+                .window
+                .screen
+                .renderer
+                .conversation_navigator
+                .pointer_move(x, y)
+            {
+                route.request_redraw();
+            }
+            let cursor = if route
+                .window
+                .screen
+                .renderer
+                .conversation_navigator
+                .clickable_at(x, y)
+            {
+                CursorIcon::Pointer
+            } else {
+                CursorIcon::Default
+            };
+            route.window.set_cursor(cursor);
+            return;
+        }
+
         // A release may be consumed by native capture loss or another UI
         // subsystem. Never let a workspace tab continue following motion
         // after the authoritative button state is already up.
@@ -845,6 +894,32 @@ impl Application<'_> {
 
         if route.window.screen.git_diff_panel_scrollbar_drag_active() {
             route.window.screen.drag_git_diff_panel_scrollbar();
+            route.request_redraw();
+            return;
+        }
+
+        // The file picker owns its entire overlay, including blank backdrop.
+        if route.window.screen.renderer.file_browser.is_active() {
+            let (mx, my) = route.window.screen.mouse_logical_for_hit_test();
+            use neoism_ui::widgets::modal::ModalPointerKind;
+            route.window.screen.renderer.file_browser.handle_event(
+                &neoism_ui::event::UiEvent::PointerMove {
+                    x: mx,
+                    y: my,
+                    modifiers: neoism_ui::event::Modifiers::empty(),
+                },
+            );
+            let kind = route
+                .window
+                .screen
+                .renderer
+                .file_browser
+                .pointer_kind_at(mx, my);
+            route.window.set_cursor(match kind {
+                ModalPointerKind::Default => CursorIcon::Default,
+                ModalPointerKind::Text => CursorIcon::Text,
+                ModalPointerKind::Pointer => CursorIcon::Pointer,
+            });
             route.request_redraw();
             return;
         }
@@ -1041,19 +1116,47 @@ impl Application<'_> {
             return;
         }
 
+        let clickable_chrome_hovered = {
+            let (mx, my) = route.window.screen.mouse_logical_for_hit_test();
+            route.window.screen.renderer.status_line.cwd_at(mx, my)
+                || route
+                    .window
+                    .screen
+                    .context_manager
+                    .current()
+                    .neoism_agent
+                    .as_ref()
+                    .is_some_and(|agent| {
+                        agent.composer_pointer_at(mx, my)
+                            || agent.detail_sidebar_pointer_at(mx, my)
+                            || agent.usage_chip_contains(mx, my)
+                    })
+        };
+        if clickable_chrome_hovered {
+            if route.window.screen.handle_neoism_agent_hover_move() {
+                route.request_redraw();
+            }
+            route.window.set_cursor(CursorIcon::Pointer);
+            return;
+        }
+
         if route.window.screen.handle_neoism_agent_hover_move() {
-            route
-                .window
-                .set_cursor(if route.window.screen.neoism_agent_link_hovered() {
+            route.window.set_cursor(
+                if route.window.screen.neoism_agent_link_hovered()
+                    || route.window.screen.neoism_agent_wordmark_hovered()
+                {
                     CursorIcon::Pointer
                 } else {
                     CursorIcon::Default
-                });
+                },
+            );
             route.request_redraw();
             return;
         }
 
-        if route.window.screen.neoism_agent_link_hovered() {
+        if route.window.screen.neoism_agent_link_hovered()
+            || route.window.screen.neoism_agent_wordmark_hovered()
+        {
             route.window.set_cursor(CursorIcon::Pointer);
             return;
         }
@@ -1339,6 +1442,42 @@ impl Application<'_> {
         {
             route.window.set_cursor(CursorIcon::ColResize);
             route.window.screen.mouse.on_border = true;
+            return;
+        }
+
+        let (tree_row, in_tree) = route.window.screen.file_tree_row_under_mouse();
+        if in_tree {
+            route.window.screen.mouse.on_border = false;
+            route.window.set_cursor(if tree_row.is_some() {
+                CursorIcon::Pointer
+            } else {
+                CursorIcon::Default
+            });
+            return;
+        }
+
+        let (mx, my) = route.window.screen.mouse_logical_for_hit_test();
+        if route
+            .window
+            .screen
+            .conversations_sidebar_bounds()
+            .is_some_and(|(left, top, height, width)| {
+                mx >= left && mx < left + width && my >= top && my < top + height
+            })
+        {
+            let clickable = route
+                .window
+                .screen
+                .renderer
+                .conversations_pane
+                .side_panel()
+                .catalog_clickable_at(mx, my);
+            route.window.screen.mouse.on_border = false;
+            route.window.set_cursor(if clickable {
+                CursorIcon::Pointer
+            } else {
+                CursorIcon::Default
+            });
             return;
         }
 

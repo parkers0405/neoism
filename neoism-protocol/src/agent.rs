@@ -88,10 +88,14 @@ pub enum AgentClientMessage {
     /// Resume / focus an existing session by id. The daemon swaps the
     /// active session for this client and starts streaming its event
     /// feed back over [`AgentServerMessage::SessionEvent`] / friends.
-    SwitchThread { session_id: String },
+    SwitchThread {
+        session_id: String,
+    },
     /// Delete a session entirely (drops both the timeline and the
     /// agent-server's persisted record).
-    DeleteThread { session_id: String },
+    DeleteThread {
+        session_id: String,
+    },
     /// List sessions known to the agent-server. The reply is
     /// [`AgentServerMessage::ThreadList`].
     ListThreads {
@@ -106,6 +110,24 @@ pub enum AgentClientMessage {
         /// Opaque keyset cursor returned by the preceding page.
         #[serde(default)]
         cursor: Option<String>,
+    },
+    /// Global title/message search on this connection's authorized agent endpoint.
+    /// Deliberately has no directory argument: search is independent of execution cwd.
+    /// Discover authorized project directories, independently of session pages.
+    ListSessionProjects {
+        catalog_identity: String,
+        generation: u64,
+    },
+    /// Fetch exactly five root chats in one project. Generation is project-local.
+    ListProjectSessions {
+        catalog_identity: String,
+        directory: String,
+        cursor: Option<String>,
+        generation: u64,
+    },
+    SearchThreads {
+        query: String,
+        generation: u64,
     },
     /// Replay the persisted message timeline for a session. Useful
     /// for restoring chrome state on reload. The reply is one or
@@ -122,9 +144,13 @@ pub enum AgentClientMessage {
     /// Re-attach to a session's live SSE event stream (e.g. after a
     /// reconnect). Idempotent. The daemon will start forwarding the
     /// usual `SessionEvent` / `ContentDelta` / etc. messages.
-    ResumeStream { session_id: String },
+    ResumeStream {
+        session_id: String,
+    },
     /// Detach from a session's event stream without deleting it.
-    StopStream { session_id: String },
+    StopStream {
+        session_id: String,
+    },
 
     // -- Prompt / submission ------------------------------------------
     /// Submit a prompt against a specific session. Same intent as
@@ -159,19 +185,32 @@ pub enum AgentClientMessage {
     /// Cancel the current prompt for a specific session (the original
     /// [`AgentClientMessage::Cancel`] cancels the whole-connection
     /// proxy turn instead).
-    CancelInflight { session_id: String },
+    CancelInflight {
+        session_id: String,
+    },
     /// Clear the pending queue without running any of its entries.
-    ClearQueue { session_id: String },
+    ClearQueue {
+        session_id: String,
+    },
     /// Stop one running background shell task and its process tree.
-    StopBackgroundTask { session_id: String, job_id: String },
+    StopBackgroundTask {
+        session_id: String,
+        job_id: String,
+    },
     /// Re-run the most recent user turn. Equivalent to clicking
     /// "retry" on the assistant's last reply.
-    RetryLast { session_id: String },
+    RetryLast {
+        session_id: String,
+    },
     /// Revert the active session to the previous undoable user turn and
     /// restore file snapshots captured by edit tools.
-    UndoSession { session_id: String },
+    UndoSession {
+        session_id: String,
+    },
     /// Restore the next reverted user turn and its file snapshots.
-    RedoSession { session_id: String },
+    RedoSession {
+        session_id: String,
+    },
 
     // -- Tool / permission gating -------------------------------------
     /// Approve a pending permission request. `decision` mirrors
@@ -195,9 +234,15 @@ pub enum AgentClientMessage {
     // -- Edit proposals (Edit / Write / Patch tools) -------------------
     /// Apply a pending edit the agent proposed. `edit_id` is the
     /// `tool_use_id` from [`AgentServerMessage::EditProposed`].
-    ApplyEdit { session_id: String, edit_id: String },
+    ApplyEdit {
+        session_id: String,
+        edit_id: String,
+    },
     /// Reject a proposed edit without applying it.
-    RejectEdit { session_id: String, edit_id: String },
+    RejectEdit {
+        session_id: String,
+        edit_id: String,
+    },
 
     // -- Provider / model / agent configuration ------------------------
     /// Set the active provider for a session (e.g.
@@ -219,7 +264,10 @@ pub enum AgentClientMessage {
     },
     /// Switch the active agent (`"build"`, `"plan"`, etc.) for a
     /// session.
-    SetAgent { session_id: String, agent: String },
+    SetAgent {
+        session_id: String,
+        agent: String,
+    },
     /// Switch the session's reasoning-effort variant without
     /// touching the model.
     SetThinkingMode {
@@ -248,9 +296,13 @@ pub enum AgentClientMessage {
     },
     /// Persist the agent composer's helper-strip preference in the host's
     /// unified JSON config.
-    SetInputHelpVisible { visible: bool },
+    SetInputHelpVisible {
+        visible: bool,
+    },
     /// Persist whether new Agent panes show their conversation sidebar.
-    SetSidebarVisible { visible: bool },
+    SetSidebarVisible {
+        visible: bool,
+    },
 
     // -- Local context (skills / agents / sub-agents) ------------------
     /// Request the agent catalog for a workspace. Reply:
@@ -302,9 +354,13 @@ pub enum AgentClientMessage {
         directory: Option<String>,
     },
     /// List pending permission requests, optionally filtered by session.
-    ShowPermissions { session_id: String },
+    ShowPermissions {
+        session_id: String,
+    },
     /// List pending structured questions, optionally filtered by session.
-    ShowQuestions { session_id: String },
+    ShowQuestions {
+        session_id: String,
+    },
     /// Spawn a subagent under the current session.
     StartSubagent {
         session_id: String,
@@ -315,9 +371,14 @@ pub enum AgentClientMessage {
 
     // -- Maintenance ---------------------------------------------------
     /// Trigger a context-window compaction pass.
-    Compact { session_id: String },
+    Compact {
+        session_id: String,
+    },
     /// Run an agent-server slash command for a session.
-    SlashCommand { session_id: String, text: String },
+    SlashCommand {
+        session_id: String,
+        text: String,
+    },
     /// Show or mutate the session prompt queue. `None` means show.
     HandleQueue {
         session_id: String,
@@ -333,7 +394,10 @@ pub enum AgentClientMessage {
         request_id: Option<String>,
     },
     /// Answer the first pending question for a session.
-    HandleAnswer { session_id: String, answer: String },
+    HandleAnswer {
+        session_id: String,
+        answer: String,
+    },
     /// Answer a specific pending structured question (the `question`
     /// tool). Mirrors the desktop pane's HTTP
     /// `POST /question/{id}/reply` with one answer list per question
@@ -360,12 +424,18 @@ pub enum AgentClientMessage {
         request_id: Option<String>,
     },
     /// Update the session's stored title.
-    SetTitle { session_id: String, title: String },
+    SetTitle {
+        session_id: String,
+        title: String,
+    },
     /// Toggle a session's pinned flag. Mirrors the desktop pane's
     /// `POST /session/{id}/pin` with `{ "pinned": <bool> }` — the
     /// flag persists server-side and floats the session into the
     /// "Pinned" section of the `/sessions` picker.
-    SetPinned { session_id: String, pinned: bool },
+    SetPinned {
+        session_id: String,
+        pinned: bool,
+    },
 
     // -- Provider connect / auth flow (`/connect` picker) --------------
     //
@@ -382,7 +452,9 @@ pub enum AgentClientMessage {
         directory: Option<String>,
     },
     /// Fetch secret-free account summaries for one provider.
-    ConnectListConnections { provider_id: String },
+    ConnectListConnections {
+        provider_id: String,
+    },
     /// Store an API key (or the Meridian one-click marker) for a
     /// provider: `PUT /auth/{provider_id}` with
     /// `{ "type": "api", "key": <key> }`. Reply is
@@ -510,6 +582,43 @@ pub enum AgentServerMessage {
     /// Acknowledge a [`AgentClientMessage::DeleteThread`].
     ThreadDeleted {
         session_id: String,
+    },
+    /// Correlated global search, preserving the endpoint's full result metadata.
+    ThreadSearchResult {
+        generation: u64,
+        query: String,
+        sessions: serde_json::Value,
+        semantic: serde_json::Value,
+        error: Option<String>,
+    },
+    /// Catalog stream reconnected: client must re-discover summaries with its current identity.
+    SessionProjectsChanged,
+    SessionProjects {
+        catalog_identity: String,
+        generation: u64,
+        items: Vec<SessionProjectSummary>,
+        #[serde(default, rename = "pinnedSessions")]
+        pinned_sessions: Vec<SessionListInfo>,
+    },
+    SessionProjectsFailed {
+        catalog_identity: String,
+        generation: u64,
+        message: String,
+    },
+    ProjectSessionPage {
+        catalog_identity: String,
+        directory: String,
+        requested_cursor: Option<String>,
+        generation: u64,
+        threads: Vec<ThreadSummary>,
+        next_cursor: Option<String>,
+    },
+    ProjectSessionPageFailed {
+        catalog_identity: String,
+        directory: String,
+        requested_cursor: Option<String>,
+        generation: u64,
+        message: String,
     },
     /// Reply to [`AgentClientMessage::ListThreads`]. `threads` is
     /// sorted newest-first.
@@ -959,6 +1068,17 @@ pub struct Attachment {
     #[serde(default)]
     pub bytes: Vec<u8>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionProjectSummary {
+    pub directory: String,
+    pub updated_ms: u64,
+}
+
+/// Raw root-session list metadata. Kept lossless so catalog discovery preserves
+/// source identity and future additive server fields without fetching histories.
+pub type SessionListInfo = serde_json::Value;
 
 /// Lightweight session descriptor returned by
 /// [`AgentServerMessage::ThreadList`].

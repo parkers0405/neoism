@@ -125,6 +125,9 @@ pub enum OutboundAgentCommand {
     RefreshModelContextLimit,
 
     /// Refresh the session list used by `/sessions` and the agent side panel.
+    /// `directory: None` explicitly lists all authorized directories, never
+    /// the active/default execution directory. Hosts must preserve this scope
+    /// for initial requests and continuation pages; authorization is server-owned.
     RefreshSessions {
         directory: Option<String>,
         cursor: Option<String>,

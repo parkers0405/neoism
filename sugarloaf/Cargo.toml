@@ -10,6 +10,7 @@ include = [
     "build.rs",
     "src/**/*.ttf",
     "src/**/*.otf",
+    "src/font/resources/**/OFL.txt",
     "src/**/*.wgsl",
     "src/components/filters/**/*.slang",
     "src/components/filters/**/*.slangp",

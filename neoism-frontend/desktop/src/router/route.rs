@@ -516,6 +516,51 @@ impl Route<'_> {
             "route key-wait entered"
         );
 
+        // Conversation navigation is modal: never let shortcuts or key releases
+        // escape to an editor/terminal underneath it. Input starts focused.
+        if self.window.screen.renderer.conversation_navigator.is_active() {
+            if key_event.state == ElementState::Pressed {
+                let mods = self.window.screen.modifiers.state();
+                let before = self.window.screen.renderer.conversation_navigator.query().to_owned();
+                match &key_event.logical_key {
+                    Key::Named(NamedKey::Escape) => self.window.screen.close_conversation_navigator(),
+                    Key::Named(NamedKey::ArrowUp) => self.window.screen.renderer.conversation_navigator.select_previous(),
+                    Key::Named(NamedKey::ArrowDown) => self.window.screen.renderer.conversation_navigator.select_next(),
+                    Key::Named(NamedKey::Enter) => {
+                        let value = self.window.screen.renderer.conversation_navigator.selected_value().map(str::to_owned);
+                        if let Some(value) = value {
+                            self.window.screen.activate_conversation_navigator_value(value);
+                        }
+                    }
+                    Key::Named(NamedKey::Backspace) => self.window.screen.renderer.conversation_navigator.pop_char(),
+                    Key::Character(text) if text.eq_ignore_ascii_case("v")
+                        && (mods.control_key() || mods.super_key()) && !mods.alt_key() => {
+                        let text: String = clipboard.get(ClipboardType::Clipboard)
+                            .chars().filter(|ch| !ch.is_control()).collect();
+                        self.window.screen.renderer.conversation_navigator.push_text(&text);
+                    }
+                    _ if !mods.control_key() && !mods.super_key() => {
+                        let text = key_event.text.as_deref().or_else(|| match &key_event.logical_key {
+                            Key::Character(text) => Some(text.as_str()),
+                            _ => None,
+                        });
+                        if let Some(text) = text {
+                            let text: String = text.chars().filter(|ch| !ch.is_control()).collect();
+                            self.window.screen.renderer.conversation_navigator.push_text(&text);
+                        }
+                    }
+                    _ => {}
+                }
+                if self.window.screen.renderer.conversation_navigator.is_active()
+                    && before != self.window.screen.renderer.conversation_navigator.query()
+                {
+                    self.window.screen.conversation_navigator_query_changed();
+                }
+                self.request_overlay_redraw();
+            }
+            return true;
+        }
+
         // A pinned diagnostic behaves like an editor popover: Escape closes
         // it but still reaches the editor so normal-mode semantics remain
         // unchanged.
@@ -639,44 +684,76 @@ impl Route<'_> {
 
         // Workspace file browser owns the keyboard while visible. Navigation
         // and text editing stay in the shared state; native only translates
-        // winit's logical key vocabulary and pumps local listings.
+        // winit's logical key vocabulary and pumps the captured host's requests.
         if self.window.screen.renderer.file_browser.is_active() {
             if key_event.state == ElementState::Pressed {
-                match &key_event.logical_key {
-                    Key::Named(NamedKey::Escape) => self
-                        .window
-                        .screen
-                        .renderer
-                        .file_browser
-                        .press_named(neoism_ui::event::NamedKey::Escape),
-                    Key::Named(NamedKey::Enter) => self
-                        .window
-                        .screen
-                        .renderer
-                        .file_browser
-                        .press_named(neoism_ui::event::NamedKey::Enter),
-                    Key::Named(NamedKey::ArrowUp) => self
-                        .window
-                        .screen
-                        .renderer
-                        .file_browser
-                        .press_named(neoism_ui::event::NamedKey::ArrowUp),
-                    Key::Named(NamedKey::ArrowDown) => self
-                        .window
-                        .screen
-                        .renderer
-                        .file_browser
-                        .press_named(neoism_ui::event::NamedKey::ArrowDown),
-                    Key::Named(NamedKey::Backspace) => self
-                        .window
-                        .screen
-                        .renderer
-                        .file_browser
-                        .press_named(neoism_ui::event::NamedKey::Backspace),
-                    Key::Character(text) => {
-                        self.window.screen.renderer.file_browser.input_text(text)
-                    }
-                    _ => {}
+                use neoism_ui::event::NamedKey as SharedKey;
+                use neoism_ui::event::{
+                    KeyDescriptor, KeyState, LogicalKey, Modifiers, PhysicalKey, UiEvent,
+                };
+                let mods = self.window.screen.modifiers.state();
+                let mut modifiers = Modifiers::empty();
+                modifiers.set(Modifiers::SHIFT, mods.shift_key());
+                modifiers.set(Modifiers::CTRL, mods.control_key());
+                modifiers.set(Modifiers::ALT, mods.alt_key());
+                modifiers.set(Modifiers::META, mods.super_key());
+                if modifiers.intersects(Modifiers::CTRL | Modifiers::META)
+                    && !modifiers.contains(Modifiers::ALT)
+                    && matches!(&key_event.logical_key, Key::Character(text) if text.eq_ignore_ascii_case("v"))
+                {
+                    let text = clipboard.get(ClipboardType::Clipboard);
+                    self.window.screen.renderer.file_browser.input_text(&text);
+                    self.request_overlay_redraw();
+                    return true;
+                }
+                let logical = match &key_event.logical_key {
+                    Key::Named(key) => match key {
+                        NamedKey::Escape => LogicalKey::Named(SharedKey::Escape),
+                        NamedKey::Enter => LogicalKey::Named(SharedKey::Enter),
+                        NamedKey::ArrowUp => LogicalKey::Named(SharedKey::ArrowUp),
+                        NamedKey::ArrowDown => LogicalKey::Named(SharedKey::ArrowDown),
+                        NamedKey::ArrowLeft => LogicalKey::Named(SharedKey::ArrowLeft),
+                        NamedKey::ArrowRight => LogicalKey::Named(SharedKey::ArrowRight),
+                        NamedKey::Home => LogicalKey::Named(SharedKey::Home),
+                        NamedKey::End => LogicalKey::Named(SharedKey::End),
+                        NamedKey::Delete => LogicalKey::Named(SharedKey::Delete),
+                        NamedKey::Backspace => LogicalKey::Named(SharedKey::Backspace),
+                        NamedKey::Tab => LogicalKey::Named(SharedKey::Tab),
+                        _ => LogicalKey::Unidentified,
+                    },
+                    Key::Character(text) => LogicalKey::Character(text.as_str().into()),
+                    _ => LogicalKey::Unidentified,
+                };
+                let text = if !modifiers.contains(Modifiers::META)
+                    && (!modifiers.contains(Modifiers::CTRL) || modifiers.contains(Modifiers::ALT))
+                {
+                    key_event
+                        .text
+                        .as_ref()
+                        .map(|text| text.to_string())
+                        .or_else(|| {
+                            if let LogicalKey::Character(text) = &logical {
+                                Some(text.to_string())
+                            } else {
+                                None
+                            }
+                        })
+                } else {
+                    None
+                };
+                // Key events edit selection/caret state; committed text is separate.
+                self.window.screen.renderer.file_browser.handle_event(
+                    &UiEvent::Key(KeyDescriptor {
+                        physical: PhysicalKey(0),
+                        logical,
+                        state: KeyState::Pressed,
+                        modifiers,
+                        repeat: key_event.repeat,
+                    }),
+                );
+                if let Some(text) = text {
+                    self.window.screen.renderer.file_browser
+                        .handle_event(&UiEvent::Text(text));
                 }
                 self.window.screen.pump_agent_image_browser();
                 self.request_overlay_redraw();

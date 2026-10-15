@@ -243,6 +243,197 @@ fn composition_child_only_update_invalidates_measurement_and_records_live_motion
 }
 
 #[test]
+#[cfg(unix)]
+fn conditional_workspace_catalog_scope_is_local_home_or_filesystem_root_only() {
+    let home = Path::new("/home/catalog-user");
+    let scope = |directory, joined| NeoismAgentPane::catalog_scope_for_workspace(
+        Some(directory), joined, Some(home),
+    );
+    assert_eq!(scope("/home/catalog-user", false), None);
+    assert_eq!(scope("/", false), None);
+    assert_eq!(scope("/", true), None);
+    assert_eq!(scope("C:\\", true), None);
+    assert_eq!(scope("D:/", true), None);
+    assert_eq!(scope("C:\\project", true), Some("C:\\project".into()));
+    assert_eq!(scope("/home/catalog-user/project", false), Some("/home/catalog-user/project".into()));
+    assert_eq!(scope("/home/catalog-user", true), Some("/home/catalog-user".into()));
+    assert_eq!(scope("/remote/project", true), Some("/remote/project".into()));
+}
+
+#[test]
+fn selecting_foreign_chat_keeps_workspace_catalog_scope() {
+    let mut pane = NeoismAgentPane::default();
+    pane.directory = Some("/workspace/project".into());
+    pane.set_catalog_directory(Some("/workspace/project".into()));
+    let mut cached = CachedAgentSession::live_only();
+    cached.hydrated = true;
+    cached.state.directory = Some("/foreign/project".into());
+    cached.messages = vec![NeoismAgentMessage::assistant("foreign chat")];
+    pane.session_cache.insert("foreign".into(), cached);
+    pane.runtime_hydrated_sessions.insert("foreign".into());
+    pane.switch_session("foreign".into());
+    assert_eq!(pane.session_directory(), Some("/foreign/project"));
+    assert_eq!(pane.side_panel.catalog_directory(), Some("/workspace/project"));
+}
+
+#[test]
+fn catalog_scope_change_discards_old_search_and_resets_stream() {
+    let mut pane = NeoismAgentPane::default();
+    let old_generation = pane.catalog_generation;
+    pane.semantic_in_flight = true;
+    pane.semantic_pending_query = Some("stale".into());
+    pane.session_catalog_stream = Some(AgentSessionCatalogStream::with_events_for_test([]));
+    pane.set_catalog_directory(Some("/project".into()));
+    assert!(pane.session_catalog_stream.is_none());
+    assert!(!pane.semantic_in_flight);
+    assert!(pane.semantic_pending_query.is_none());
+    pane.background_tx.send(NeoismAgentBackgroundUpdate::SemanticSessionHits {
+        catalog_generation: old_generation,
+        query: "stale".into(),
+        hits: Some(Vec::new()),
+        transcript_unavailable: true,
+    }).unwrap();
+    pane.drain_background_updates();
+    assert!(!pane.semantic_unavailable);
+    let generation = pane.catalog_generation;
+    pane.set_catalog_directory(Some("/project".into()));
+    assert_eq!(pane.catalog_generation, generation);
+}
+
+#[test]
+fn catalog_callbacks_reject_endpoint_scope_and_generation_changes() {
+    let mut pane = NeoismAgentPane::default();
+    let server = pane.server.clone();
+    let generation = pane.catalog_generation;
+    assert!(pane.catalog_callback_is_current(&server, generation, None));
+    assert!(!pane.catalog_callback_is_current("http://different", generation, None));
+    assert!(!pane.catalog_callback_is_current(&server, generation.wrapping_add(1), None));
+    pane.set_catalog_directory(Some("/project".into()));
+    assert!(!pane.catalog_callback_is_current(&server, generation, None));
+    assert!(!pane.catalog_callback_is_current(&server, pane.catalog_generation, None));
+    assert!(pane.catalog_callback_is_current(&server, pane.catalog_generation, Some("/project")));
+
+    let request = pane.side_panel.next_session_request_generation();
+    pane.background_tx.send(NeoismAgentBackgroundUpdate::SidePanelSessionsRefreshed {
+        server: "http://different".into(), catalog_generation: pane.catalog_generation,
+        directory: Some("/project".into()), generation: request, requested_cursor: None,
+        result: Ok((vec![NeoismAgentSessionEntry::new("stale", "Stale", "")], None)),
+    }).unwrap();
+    pane.drain_background_updates();
+    assert!(pane.side_panel.catalog_session("stale").is_none());
+}
+
+#[test]
+fn project_callbacks_cannot_populate_a_new_catalog_scope() {
+    let mut pane = NeoismAgentPane::default();
+    let server = pane.server.clone();
+    let old_generation = pane.catalog_generation;
+    pane.set_catalog_directory(Some("/new-project".into()));
+    pane.background_tx.send(NeoismAgentBackgroundUpdate::SessionProjectsRefreshed {
+        server: server.clone(), catalog_generation: old_generation, generation: 0,
+        result: Ok(crate::neoism::agent::api::SessionProjects {
+            projects: vec![("/old-project".into(), 10)],
+            pinned_sessions: vec![NeoismAgentSessionEntry::new("stale-pin", "Pin", "").with_pinned(true)],
+        }),
+    }).unwrap();
+    pane.background_tx.send(NeoismAgentBackgroundUpdate::ProjectSessionPage {
+        server, catalog_generation: old_generation, directory: "/old-project".into(),
+        requested_cursor: None, generation: 0,
+        result: Ok((vec![NeoismAgentSessionEntry::new("old", "Old", "")
+            .with_directory(Some("/old-project".into()))], None)),
+    }).unwrap();
+    pane.drain_background_updates();
+    assert!(!pane.side_panel.project_pagination_enabled());
+    assert!(pane.side_panel.catalog_session("old").is_none());
+    assert!(pane.side_panel.catalog_session("stale-pin").is_none());
+    assert_eq!(pane.side_panel.catalog_directory(), Some("/new-project"));
+}
+
+#[test]
+fn discovery_pins_share_endpoint_and_request_generation_guards() {
+    let mut pane = NeoismAgentPane::default();
+    let request = pane.side_panel.next_session_request_generation();
+    for (server, catalog_generation, generation) in [
+        ("http://different".to_owned(), pane.catalog_generation, request),
+        (pane.server.clone(), pane.catalog_generation.wrapping_add(1), request),
+        (pane.server.clone(), pane.catalog_generation, request.wrapping_add(1)),
+    ] {
+        pane.background_tx.send(NeoismAgentBackgroundUpdate::SessionProjectsRefreshed {
+            server, catalog_generation, generation,
+            result: Ok(crate::neoism::agent::api::SessionProjects {
+                projects: vec![],
+                pinned_sessions: vec![NeoismAgentSessionEntry::new("rejected-pin", "Pin", "").with_pinned(true)],
+            }),
+        }).unwrap();
+    }
+    pane.drain_background_updates();
+    assert!(pane.side_panel.catalog_session("rejected-pin").is_none());
+    pane.background_tx.send(NeoismAgentBackgroundUpdate::SessionProjectsRefreshed {
+        server: pane.server.clone(), catalog_generation: pane.catalog_generation, generation: request,
+        result: Ok(crate::neoism::agent::api::SessionProjects {
+            projects: vec![],
+            pinned_sessions: vec![NeoismAgentSessionEntry::new("accepted-pin", "Pin", "")
+                .with_directory(Some("/archived".into())).with_pinned(true)],
+        }),
+    }).unwrap();
+    pane.drain_background_updates();
+    assert!(pane.side_panel.catalog_session("accepted-pin").is_some());
+}
+
+#[test]
+fn scoped_catalog_rejects_foreign_upserts_from_all_scope_stream() {
+    let mut pane = NeoismAgentPane::default();
+    pane.set_catalog_directory(Some("/project".into()));
+    pane.session_catalog_stream = Some(AgentSessionCatalogStream::with_events_for_test([
+        serde_json::json!({"id":"foreign-update", "sequence":1, "source":"neoism-agent",
+            "schemaVersion":"1.0.0", "timestamp":1,
+            "type":"session.updated", "subject":{"kind":"session", "id":"foreign"}, "data":{"info":{
+                "id":"foreign", "title":"Foreign", "directory":"/other", "time":{"updated":1}
+        }}}),
+        serde_json::json!({"id":"local-update", "sequence":2, "source":"neoism-agent",
+            "schemaVersion":"1.0.0", "timestamp":1,
+            "type":"session.updated", "subject":{"kind":"session", "id":"local"}, "data":{"info":{
+                "id":"local", "title":"Local", "directory":"/project", "time":{"updated":1}
+        }}}),
+    ]));
+    pane.drain_live_session_updates();
+    assert!(pane.side_panel.catalog_session("foreign").is_none());
+    assert!(pane.side_panel.catalog_session("local").is_some());
+}
+
+#[test]
+fn old_project_search_hit_preserves_directory_and_titles_survive_unavailable_transcripts() {
+    use crate::neoism::agent::api::NeoismAgentSemanticSessionHit;
+    use neoism_ui::panels::agent_pane::state::side_panel::ConversationSource;
+    let mut pane = NeoismAgentPane::default();
+    pane.directory = Some("/active-project".into());
+    pane.side_panel.set_session_query("Older chat".into());
+    let entry = NeoismAgentSessionEntry::new("older", "Older chat", "")
+        .with_directory(Some("/saved/old-project".into()))
+        .with_source(ConversationSource::Codex);
+    pane.background_tx.send(NeoismAgentBackgroundUpdate::SemanticSessionHits {
+        catalog_generation: pane.catalog_generation,
+        query: "Older chat".into(),
+        hits: Some(vec![NeoismAgentSemanticSessionHit {
+            session_id: entry.id.clone(), title: entry.title.clone(), entry,
+            excerpt: String::new(), distance: 0.0,
+        }]),
+        transcript_unavailable: true,
+    }).unwrap();
+    assert!(pane.drain_background_updates());
+    let row = pane.side_panel.sessions().iter().find(|row| row.id == "older").unwrap();
+    assert_eq!(row.directory.as_deref(), Some("/saved/old-project"));
+    assert_eq!(row.source, ConversationSource::Codex);
+    assert_eq!(pane.directory.as_deref(), Some("/active-project"));
+    assert!(pane.semantic_unavailable);
+    // Coalesce without starting an HTTP thread: unavailable vectors must not
+    // stop the next server-filtered title query from entering the queue.
+    pane.semantic_in_flight = true;
+    pane.kick_semantic_session_search("another title".into());
+    assert_eq!(pane.semantic_pending_query.as_deref(), Some("another title"));
+}
+
+#[test]
 fn left_catalog_activity_without_a_chat_stream() {
     use neoism_agent_core::CatalogActivity;
     let mut pane = NeoismAgentPane::default();
@@ -1920,21 +2111,27 @@ fn retry_status_includes_a_compact_provider_reason() {
 }
 
 #[test]
-fn expired_wordmark_click_does_not_drive_animation() {
+fn cancelled_wordmark_click_does_not_drive_animation() {
     let mut pane = NeoismAgentPane::default();
-    pane.wordmark.click_started = Some(
-        Instant::now()
-            .checked_sub(WORDMARK_CLICK_ANIMATION + Duration::from_millis(1))
-            .unwrap(),
-    );
+    pane.wordmark.animation.replay();
+    pane.wordmark.animation.cancel();
 
     assert_ne!(pane.animation_reason(), Some("wordmark"));
 }
 
 #[test]
-fn fresh_wordmark_click_drives_short_animation() {
+fn fresh_wordmark_click_drives_pixel_animation() {
     let mut pane = NeoismAgentPane::default();
-    pane.wordmark.click_started = Some(Instant::now());
+    assert!(!pane.wordmark_hit(100.0, 40.0));
+    pane.wordmark.rect = Some([10.0, 20.0, 300.0, 50.0]);
+    assert!(pane.wordmark_hit(100.0, 40.0));
+    assert!(pane.wordmark_hit(10.0, 20.0));
+    assert!(pane.wordmark_hit(310.0, 70.0));
+    assert!(!pane.wordmark_hit(311.0, 40.0));
+    assert!(!pane.wordmark_hit(100.0, 71.0));
+    assert!(!pane.wordmark_hit(f32::NAN, 40.0));
+    assert!(!pane.pop_wordmark_click(0.0, 0.0));
+    assert!(pane.pop_wordmark_click(100.0, 40.0));
 
     assert_eq!(pane.animation_reason(), Some("wordmark"));
 }
@@ -2486,6 +2683,31 @@ fn abort_without_session_does_not_queue_outbound_command() {
     pane.abort_session();
 
     assert!(pane.drain_pending_outbound().is_empty());
+}
+
+#[test]
+fn cross_project_cached_chat_restores_execution_directory_without_workspace_switch() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("project-a-chat".into());
+    pane.directory = Some("/tmp/project-a".into());
+    let mut cached = CachedAgentSession::live_only();
+    cached.hydrated = true;
+    cached.state.directory = Some("/tmp/project-b".into());
+    pane.session_cache.insert("project-b-chat".into(), cached);
+    pane.runtime_hydrated_sessions
+        .insert("project-b-chat".into());
+    pane.activate_cached_session("project-b-chat");
+    assert_eq!(pane.session_directory(), Some("/tmp/project-b"));
+    assert!(!pane
+        .ui_events
+        .iter()
+        .any(|event| matches!(event, NeoismAgentUiEvent::SwitchWorkspace { .. })));
+    pane.activate_cached_session("project-a-chat");
+    assert_eq!(pane.session_directory(), Some("/tmp/project-a"));
+    assert!(!pane
+        .ui_events
+        .iter()
+        .any(|event| matches!(event, NeoismAgentUiEvent::SwitchWorkspace { .. })));
 }
 
 #[test]

@@ -287,6 +287,8 @@ impl Screen<'_> {
     ) -> Option<crate::context::renderable::WindowUpdate> {
         #[cfg(feature = "cef-artifacts")]
         self.begin_html_artifact_frame();
+        self.pump_agent_image_browser();
+        self.pump_conversation_navigator();
         self.renderer.background_effects_animating = false;
         let window_id = self.context_manager.window_id();
         crate::app::freeze_watchdog::mark_render_stage(window_id, "screen.render.enter");

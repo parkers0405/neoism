@@ -327,6 +327,8 @@ pub(crate) struct SemanticSearchQuery {
     #[serde(default, deserialize_with = "usize_or_string")]
     limit: Option<usize>,
     session_id: Option<String>,
+    /// Exact project directory; omission searches all authorized projects.
+    directory: Option<String>,
 }
 
 /// Plugin-dispatched routes deliver query params as strings; accept both
@@ -381,7 +383,28 @@ pub(crate) async fn semantic_search_route(
             }
         })
         .unwrap_or(crate::state::TenantQueryScope::LocalAll);
-    semantic_search_with_scope(&state, query, scope).await
+    let mut response = semantic_search_with_scope(&state, query, scope).await?;
+    if let Some(axum::Extension(claims)) = claims.as_ref() {
+        // Tenant filtering alone is not sufficient for directory-prefix or
+        // workspace credentials. Do not expose excerpts from inaccessible
+        // projects when the catalog/search covers the whole endpoint.
+        let mut admitted = std::collections::HashMap::new();
+        for hit in &response.0.hits {
+            if admitted.contains_key(&hit.session_id) {
+                continue;
+            }
+            let allowed = match state.inner.store.get_session(&hit.session_id).await? {
+                Some(session) => crate::caller::allows_session(claims, &session),
+                None => false,
+            };
+            admitted.insert(hit.session_id.clone(), allowed);
+        }
+        response
+            .0
+            .hits
+            .retain(|hit| admitted.get(&hit.session_id) == Some(&true));
+    }
+    Ok(response)
 }
 
 pub(crate) async fn semantic_search_with_scope(
@@ -400,8 +423,15 @@ pub(crate) async fn semantic_search_with_scope(
     let limit = query.limit.unwrap_or(20);
     // Exact matches first: they carry distance 0.0 so a literal hit always
     // outranks a fuzzy-semantic one, and they work with zero configuration.
-    let mut hits =
-        keyword_hits(store, scope, needle, query.session_id.as_deref(), limit).await;
+    let mut hits = keyword_hits(
+        store,
+        scope,
+        needle,
+        query.session_id.as_deref(),
+        query.directory.as_deref(),
+        limit,
+    )
+    .await;
 
     let auth = if let Some(provider_id) = EmbeddingsClient::configured_provider_id() {
         state
@@ -422,11 +452,12 @@ pub(crate) async fn semantic_search_with_scope(
                 .next()
                 .context("embeddings response was empty")?;
             let semantic = store
-                .semantic_search(
+                .semantic_search_in_directory(
                     scope,
                     &vector_json(&vector),
                     &client.model_spec,
                     query.session_id.as_deref(),
+                    query.directory.as_deref(),
                     limit,
                 )
                 .await?;
@@ -457,9 +488,10 @@ async fn keyword_hits(
     scope: crate::state::TenantQueryScope<'_>,
     query: &str,
     session_id: Option<&str>,
+    directory: Option<&str>,
     limit: usize,
 ) -> Vec<crate::state::SemanticSearchHit> {
-    let hits = search_hits(store, scope, query, session_id, limit).await;
+    let hits = search_hits(store, scope, query, session_id, directory, limit).await;
     if !hits.is_empty() {
         return hits;
     }
@@ -473,7 +505,7 @@ async fn keyword_hits(
     let mut merged: Vec<crate::state::SemanticSearchHit> = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for term in terms {
-        for hit in search_hits(store, scope, term, session_id, limit).await {
+        for hit in search_hits(store, scope, term, session_id, directory, limit).await {
             if seen.insert(hit.message_id.clone()) {
                 merged.push(hit);
             }
@@ -489,10 +521,11 @@ async fn search_hits(
     scope: crate::state::TenantQueryScope<'_>,
     query: &str,
     session_id: Option<&str>,
+    directory: Option<&str>,
     limit: usize,
 ) -> Vec<crate::state::SemanticSearchHit> {
     store
-        .search_messages(scope, query, session_id, limit)
+        .search_messages_in_directory(scope, query, session_id, directory, limit)
         .await
         .unwrap_or_default()
         .into_iter()

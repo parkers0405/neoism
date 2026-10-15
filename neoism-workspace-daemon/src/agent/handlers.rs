@@ -160,34 +160,205 @@ pub(crate) async fn handle_delete_thread(inner: Arc<AgentInner>, session_id: Str
     }
 }
 
+/// Search uses the same authenticated bridge as listing; never derives cwd or
+/// opens a second endpoint with broader credentials.
+pub(crate) async fn handle_search_threads(
+    inner: Arc<AgentInner>,
+    query: String,
+    generation: u64,
+) {
+    let needle = query.trim();
+    let (sessions, semantic, error) = if needle.is_empty() {
+        (json!([]), json!({"hits": []}), None)
+    } else {
+        let encoded = percent_encode(needle);
+        let titles = format!("/v2/sessions?roots=true&limit=100&search={encoded}");
+        let content =
+            format!("/v2/plugins/dev.neoism.semantic/search?q={encoded}&limit=100");
+        let (a, b) = tokio::join!(
+            http_get_json(&inner, &titles),
+            http_get_json(&inner, &content)
+        );
+        let error = match (&a, &b) {
+            (Err(a), Err(b)) => Some(format!("Search unavailable: {a}; {b}")),
+            (_, Err(b)) => Some(format!("Message search unavailable: {b}")),
+            (Err(a), _) => Some(format!("Title search unavailable: {a}")),
+            _ => None,
+        };
+        let mut semantic = b.unwrap_or(Value::Null);
+        if let Some(hits) = semantic.get_mut("hits").and_then(Value::as_array_mut) {
+            let mut metadata = std::collections::HashMap::new();
+            for hit in hits.iter_mut() {
+                let Some(id) = hit
+                    .get("session_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                else {
+                    continue;
+                };
+                if !metadata.contains_key(&id) {
+                    let detail = http_get_json(
+                        &inner,
+                        &format!("/v2/sessions/{}", percent_encode(&id)),
+                    )
+                    .await
+                    .ok();
+                    metadata.insert(id.clone(), detail);
+                }
+                if let (Some(Some(detail)), Some(hit)) =
+                    (metadata.get(&id), hit.as_object_mut())
+                {
+                    for key in [
+                        "title",
+                        "directory",
+                        "projectID",
+                        "source",
+                        "externalProvider",
+                    ] {
+                        if let Some(value) = detail.get(key) {
+                            hit.insert(key.to_owned(), value.clone());
+                        }
+                    }
+                }
+            }
+        }
+        (a.unwrap_or(Value::Null), semantic, error)
+    };
+    let _ = inner.tx.send(AgentServerMessage::ThreadSearchResult {
+        generation,
+        query,
+        sessions,
+        semantic,
+        error,
+    });
+}
+
+pub(crate) async fn handle_session_projects(
+    inner: Arc<AgentInner>,
+    catalog_identity: String,
+    generation: u64,
+) {
+    let result = match http_get_json(&inner, "/v2/session-projects").await {
+        Ok(value) => decode_session_projects(value),
+        Err(error) => Err(error.to_string()),
+    };
+    let message = match result {
+        Ok((items, pinned_sessions)) => AgentServerMessage::SessionProjects {
+            catalog_identity,
+            generation,
+            items,
+            pinned_sessions,
+        },
+        Err(message) => AgentServerMessage::SessionProjectsFailed {
+            catalog_identity,
+            generation,
+            message,
+        },
+    };
+    let _ = inner.tx.send(message);
+}
+
+fn decode_session_projects(value: Value) -> Result<(
+    Vec<neoism_protocol::agent::SessionProjectSummary>,
+    Vec<neoism_protocol::agent::SessionListInfo>,
+), String> {
+    let items = serde_json::from_value(value.get("items").cloned().unwrap_or(Value::Null))
+        .map_err(|error| error.to_string())?;
+    // Forward every authorized pin, without the five-row project-page cap or
+    // lossy ThreadSummary conversion (external source keys must survive).
+    let pinned_sessions = serde_json::from_value(value.get("pinnedSessions").cloned().unwrap_or_else(|| json!([])))
+        .map_err(|error| error.to_string())?;
+    Ok((items, pinned_sessions))
+}
+
+#[cfg(test)]
+mod discovery_pin_tests {
+    use super::*;
+
+    #[test]
+    fn discovery_forwards_all_pins_without_project_page_cap_or_metadata_loss() {
+        let pins = (0..12).map(|i| json!({"id":format!("old-{i}"), "pinned":true,
+            "directory":"/old", "time":{"updated":1}, "catalogActivity":"background",
+            "externalAgent":{"provider":"codex", "sourceKey":format!("key-{i}"), "historyState":"neoism_only"}
+        })).collect::<Vec<_>>();
+        let (items, forwarded) = decode_session_projects(json!({"items":[], "pinnedSessions":pins})).unwrap();
+        assert!(items.is_empty());
+        assert_eq!(forwarded, pins);
+        assert!(decode_session_projects(json!({"items":[]})).unwrap().1.is_empty());
+    }
+}
+
+pub(crate) async fn handle_project_sessions(
+    inner: Arc<AgentInner>,
+    catalog_identity: String,
+    directory: String,
+    cursor: Option<String>,
+    generation: u64,
+) {
+    // Exact requested directory, never the daemon cwd, and exactly five chats.
+    let path = project_session_list_path(&directory, cursor.as_deref());
+    let message = match http_get_json(&inner, &path).await {
+        Ok(value) => {
+            let mut threads = thread_summaries_from_sessions(&value, 5);
+            if threads
+                .iter()
+                .any(|thread| thread.catalog_activity.is_none())
+            {
+                if let Some(statuses) = fetch_session_statuses(&inner).await {
+                    apply_thread_busy_statuses(&mut threads, &statuses);
+                }
+            }
+            let next_cursor = value
+                .get("cursor")
+                .and_then(|v| v.get("next"))
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            AgentServerMessage::ProjectSessionPage {
+                catalog_identity,
+                directory,
+                requested_cursor: cursor,
+                generation,
+                threads,
+                next_cursor,
+            }
+        }
+        Err(error) => AgentServerMessage::ProjectSessionPageFailed {
+            catalog_identity,
+            directory,
+            requested_cursor: cursor,
+            generation,
+            message: error.to_string(),
+        },
+    };
+    let _ = inner.tx.send(message);
+}
+
 pub(crate) async fn handle_list_threads(
     inner: Arc<AgentInner>,
     directory: Option<String>,
     limit: Option<u32>,
     cursor: Option<String>,
 ) {
-    if let Some(directory) = directory
-        .as_deref()
-        .filter(|directory| !directory.is_empty())
-    {
-        super::events::start_catalog_event_stream(&inner, directory);
-    }
+    let filtered_dir = directory.as_deref().filter(|d| !d.is_empty());
+    // Subscribe before listing: an unfiltered catalog must discover roots in
+    // projects that have never appeared on any fetched page.
+    super::events::start_catalog_event_stream(&inner, filtered_dir);
+    fetch_thread_page(inner, directory, limit, cursor).await;
+}
+
+/// Catalog read without starting a stream (also used to recover after SSE reconnect).
+pub(crate) async fn fetch_thread_page(
+    inner: Arc<AgentInner>,
+    directory: Option<String>,
+    limit: Option<u32>,
+    cursor: Option<String>,
+) {
     let filtered_dir = directory.as_deref().filter(|d| !d.is_empty());
     let take = limit.unwrap_or(24).max(1) as usize;
     let path = session_list_path(filtered_dir, take, cursor.as_deref());
     match http_get_json(&inner, &path).await {
         Ok(value) => {
             let mut threads = thread_summaries_from_sessions(&value, take);
-            if filtered_dir.is_none() {
-                let directories: std::collections::HashSet<_> = threads
-                    .iter()
-                    .filter_map(|thread| thread.directory.as_deref())
-                    .filter(|directory| !directory.is_empty())
-                    .collect();
-                for directory in directories {
-                    super::events::start_catalog_event_stream(&inner, directory);
-                }
-            }
             if threads
                 .iter()
                 .any(|thread| thread.catalog_activity.is_none())
@@ -242,6 +413,13 @@ fn apply_thread_busy_statuses(threads: &mut [ThreadSummary], statuses: &Value) {
             .get(&thread.session_id)
             .is_some_and(status_is_running);
     }
+}
+
+fn project_session_list_path(directory: &str, cursor: Option<&str>) -> String {
+    format!(
+        "{}&exact_directory=true&exclude_pinned=true",
+        session_list_path(Some(directory), 5, cursor)
+    )
 }
 
 pub(crate) fn session_list_path(
@@ -2236,6 +2414,38 @@ mod canonical_route_tests {
                 "legacy daemon event route remains: {direct}"
             );
         }
+    }
+
+    #[test]
+    fn catalog_subscription_discovers_projects_beyond_the_current_page() {
+        assert_eq!(
+            super::super::events::catalog_events_path(None),
+            "/v2/session-catalog/events?scope=all"
+        );
+        assert_eq!(
+            super::super::events::catalog_events_path(Some("/tmp/my project")),
+            "/v2/session-catalog/events?directory=%2Ftmp%2Fmy%20project"
+        );
+        assert_eq!(
+            session_list_path(None, 24, Some("cursor")),
+            "/v2/sessions?roots=true&limit=24&cursor=cursor"
+        );
+    }
+
+    #[test]
+    fn project_page_paths_are_five_and_preserve_independent_cursors() {
+        assert_eq!(
+            super::project_session_list_path("/a project", None),
+            "/v2/sessions?roots=true&limit=5&directory=%2Fa%20project&exact_directory=true&exclude_pinned=true"
+        );
+        assert_eq!(
+            super::project_session_list_path("/b", Some("b+/=&")),
+            "/v2/sessions?roots=true&limit=5&directory=%2Fb&cursor=b%2B%2F%3D%26&exact_directory=true&exclude_pinned=true"
+        );
+        assert_eq!(
+            super::project_session_list_path("/a project", Some("a:2")),
+            "/v2/sessions?roots=true&limit=5&directory=%2Fa%20project&cursor=a%3A2&exact_directory=true&exclude_pinned=true"
+        );
     }
 
     #[test]

@@ -34,6 +34,9 @@ pub(crate) fn filter_sessions(sessions: &mut Vec<SessionInfo>, query: &SessionLi
         let search = search.to_lowercase();
         sessions.retain(|session| session.title.to_lowercase().contains(&search));
     }
+    if query.exclude_pinned {
+        sessions.retain(|session| session.extra.get("pinned").and_then(serde_json::Value::as_bool) != Some(true));
+    }
     if let Some(limit) = query.limit.filter(|limit| *limit > 0) {
         sessions.truncate(limit);
     }

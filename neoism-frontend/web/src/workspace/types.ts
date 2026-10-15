@@ -1151,6 +1151,9 @@ export type AgentClientMessage =
     }
   | { RejectQuestion: { request_id: string; session_id: string } }
   | { SetPinned: { session_id: string; pinned: boolean } }
+  | { ListSessionProjects: { catalog_identity: string; generation: number } }
+  | { ListProjectSessions: { catalog_identity: string; directory: string; cursor: string | null; generation: number } }
+  | { SearchThreads: { query: string; generation: number } }
   | {
       ListThreads: {
         directory?: string | null;
@@ -1285,6 +1288,12 @@ export type AgentServerMessage =
         next_cursor?: string | null;
       };
     }
+  | { ThreadSearchResult: { generation: number; query: string; sessions: unknown; semantic: unknown; error: string | null } }
+  | "SessionProjectsChanged"
+  | { SessionProjects: { catalog_identity: string; generation: number; items: Array<{ directory: string; updatedMs: number }> } }
+  | { SessionProjectsFailed: { catalog_identity: string; generation: number; message: string } }
+  | { ProjectSessionPage: { catalog_identity: string; directory: string; requested_cursor: string | null; generation: number; threads: ThreadSummary[]; next_cursor: string | null } }
+  | { ProjectSessionPageFailed: { catalog_identity: string; directory: string; requested_cursor: string | null; generation: number; message: string } }
   | { ThreadListFailed: { message: string } }
   | {
       HistoryChunk: {

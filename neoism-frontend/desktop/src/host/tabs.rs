@@ -172,6 +172,12 @@ impl Renderer {
         if let Some(rect) = self.lsp_popup.occlusion_rect() {
             rects.push(rect);
         }
+        if self.conversation_navigator.is_active() {
+            rects.push(self.conversation_navigator.bounds_for_viewport(
+                [0.0, 0.0, window_width / scale_factor, window_height / scale_factor],
+                self.chrome_scale(),
+            ));
+        }
         if let Some(rect) = self.file_browser.occlusion_rect_for([
             0.0,
             0.0,

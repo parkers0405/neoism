@@ -582,6 +582,9 @@ impl Screen<'_> {
         use neoism_protocol::files::FilesServerMessage;
         use neoism_ui::panels::notifications::NotificationLevel;
 
+        if self.apply_desktop_browser_message(request_id, message) {
+            return true;
+        }
         let own_op = self.pending_remote_file_ops.remove(&request_id);
         let notes_listing = self.pending_remote_notes_listing.remove(&request_id);
         let notes_create_vault = self.pending_remote_notes_creates.remove(&request_id);

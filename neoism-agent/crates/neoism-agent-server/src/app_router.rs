@@ -40,7 +40,7 @@ use crate::tool_routes::tool_list;
 use crate::v2_routes::{
     v2_capabilities, v2_compact, v2_context, v2_events, v2_message_list, v2_meta,
     v2_plugin, v2_plugin_lifecycle, v2_plugins, v2_prompt, v2_prompt_async,
-    v2_session_catalog_events, v2_session_children, v2_session_list, v2_session_runtime,
+    v2_session_catalog_events, v2_session_children, v2_session_list, v2_session_projects, v2_session_runtime,
     v2_wait,
 };
 
@@ -106,6 +106,7 @@ pub(crate) fn app_with_cors(state: AppState, allowed_origins: &[String]) -> Rout
             get(crate::external_agent::options::preview)
                 .post(crate::external_agent::options::preview_selected),
         )
+        .route("/v2/session-projects", get(v2_session_projects))
         .route("/v2/sessions", get(v2_session_list).post(session_create))
         .route(
             "/v2/sessions/external/catalog",
@@ -1553,6 +1554,7 @@ fn operation_class(request: &Request<Body>) -> OperationClass {
 
 fn requires_directory_scope(path: &str) -> bool {
     !path.starts_with("/v2/sessions")
+        && path != "/v2/session-projects"
         && !path.starts_with("/v2/interactions")
         && !path.starts_with("/v2/artifacts")
         && !path.starts_with("/v2/events")
@@ -1571,6 +1573,12 @@ fn requires_directory_scope(path: &str) -> bool {
 #[cfg(test)]
 mod hosted_plugin_authorization_tests {
     use super::*;
+
+    #[test]
+    fn session_projects_discovery_authorizes_each_root_not_a_request_directory() {
+        assert!(!requires_directory_scope("/v2/session-projects"));
+        assert_eq!(session_id_from_path("/v2/session-projects"), None);
+    }
 
     #[test]
     fn only_workspace_daemon_peers_can_use_host_provider_auth() {

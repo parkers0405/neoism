@@ -1046,6 +1046,14 @@ impl Application<'_> {
                         message,
                     } => {
                         if let Some(route) = self.router.routes.get_mut(&window_id) {
+                            // Request counters are connection-local. A workspace event earlier
+                            // in this batch may have re-bound the window; never let a parked
+                            // host's reply satisfy a new host's file-browser request.
+                            if route.window.screen.context_manager.daemon_endpoint() != Some(endpoint.as_str())
+                                || route.window.screen.context_manager.daemon_connection_key() != Some(connection_key)
+                            {
+                                continue;
+                            }
                             if route
                                 .window
                                 .screen

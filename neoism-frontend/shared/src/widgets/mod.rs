@@ -13,6 +13,7 @@
 //! translates incoming `UiEvent`s into that enum before calling
 //! `handle_key`.
 
+pub mod conversation_navigator;
 pub mod diff_card;
 pub mod frame;
 pub mod inline_picker;

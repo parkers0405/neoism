@@ -273,6 +273,21 @@ impl Screen<'_> {
         changed
     }
 
+    /// Return keyboard ownership to the selected content node without changing
+    /// it. Unlike `focus_main_workspace`, this is safe after opening an Agent
+    /// in a stacked/split pane: selecting the root here could focus an old tab.
+    pub(crate) fn focus_selected_workspace_content(&mut self) {
+        let _ = self.clear_buffer_tab_focus();
+        self.renderer.set_left_sidebar_focus(None);
+        self.renderer.git_diff_panel.set_focused(false);
+        if let Some(agent) = self.context_manager.current_mut().neoism_agent.as_mut() {
+            agent.side_panel_mut().set_focused(false);
+            agent.detail_panel_mut().set_focused(false);
+        }
+        self.renderer.trail_cursor.reset();
+        self.mark_dirty();
+    }
+
     pub(crate) fn focus_main_workspace(&mut self) -> bool {
         let tree_was_focused = self.renderer.file_tree.is_focused();
         let changed = self
@@ -280,9 +295,8 @@ impl Screen<'_> {
             .focus_current_grid_root(&mut self.sugarloaf);
         let tabs_were_focused = self.clear_buffer_tab_focus();
         if tree_was_focused || tabs_were_focused || changed {
-            self.renderer.file_tree.set_focused(false);
+            self.focus_selected_workspace_content();
             self.reapply_chrome_layout();
-            self.mark_dirty();
             return true;
         }
         false

@@ -537,7 +537,8 @@ pub fn canonical_openapi() -> Value {
         "tags": ["events"], "operationId": "v2.sessionCatalog.subscribe",
         "description": "Authorized root metadata events and canonical session.catalog.activity family projections. Subscribe-before-read activity baselines are emitted initially and on reconnect. Runtime edges re-read authority; raw session.status events are not forwarded. Lag or credential expiry closes the stream.",
         "parameters": [
-            { "name": "directory", "in": "query", "required": true, "schema": { "type": "string" } }
+            { "name": "directory", "in": "query", "required": false, "description": "Directory filter; omitted scope preserves query/header/default directory resolution", "schema": { "type": "string" } },
+            { "name": "scope", "in": "query", "required": false, "description": "all streams every authorized project on this endpoint, ignoring directory narrowing; tenant, workspace, ownership and directory-prefix authorization still apply", "schema": { "type": "string", "enum": ["all"] } }
         ],
         "responses": { "200": { "description": "Authorized root metadata and session.catalog.activity projections; initial/reconnect activity baseline follows subscription, runtime edges re-read authority, and lag/credential expiry closes the stream", "content": { "text/event-stream": { "schema": { "type": "string" } } } } }
     }}));
@@ -640,6 +641,19 @@ pub fn canonical_openapi() -> Value {
                 "responses": merge_responses(json!({ "200": json_response("OAuth response", json!({})) }), errors()) }
         }));
     }
+    paths.insert("/v2/session-projects".into(), json!({ "get": {
+        "tags": ["sessions"], "operationId": "v2.sessions.projects",
+        "summary": "All authorized chat-bearing saved directories and pinned roots globally",
+        "responses": merge_responses(json!({ "200": json_response("Saved directories (empty directory preserved) plus all authorized eligible pinned roots, ordered by updated DESC then id DESC, without a recent limit or message history. Pinned metadata has the same compact shape as /v2/sessions items.", json!({
+            "type": "object", "required": ["items", "pinnedSessions"], "additionalProperties": false,
+            "properties": {
+                "pinnedSessions": { "type": "array", "items": { "$ref": "#/components/schemas/Session" } },
+                "items": { "type": "array", "items": {
+                "type": "object", "required": ["directory", "updatedMs"], "additionalProperties": false,
+                "properties": { "directory": { "type": "string" }, "updatedMs": { "type": "integer", "format": "int64", "minimum": 0 } }
+            } } }
+        })) }), errors())
+    }}));
     paths.insert("/v2/sessions".into(), json!({
         "get": { "tags": ["sessions"], "operationId": "v2.sessions.list", "parameters": session_list_parameters(),
             "responses": merge_responses(json!({ "200": json_response("Session page", json!({ "$ref": "#/components/schemas/SessionPage" })) }), errors()) },
@@ -980,7 +994,11 @@ fn apply_authoritative_contract(document: &mut Value) {
             "plugins",
             json!([directory()]),
             None,
-            success("200", "Plugin package activation and permissions", json!({ "type": "array", "items": r("PackageLifecycleInfo") })),
+            success(
+                "200",
+                "Plugin package activation and permissions",
+                json!({ "type": "array", "items": r("PackageLifecycleInfo") }),
+            ),
         ),
     );
     add(
@@ -1031,7 +1049,7 @@ fn apply_authoritative_contract(document: &mut Value) {
         op(
             "v2.sessionCatalog.subscribe",
             "events",
-            json!([directory()]),
+            json!([directory(), query("scope", false, json!({ "type": "string", "enum": ["all"], "description": "All authorized projects on this endpoint; ignores directory narrowing, not authorization" }))]),
             None,
             json!({ "200": { "description": "Authorized root metadata and session.catalog.activity projections; initial/reconnect activity baseline follows subscription, runtime edges re-read authority, and lag/credential expiry closes the stream", "content": {
                 "text/event-stream": { "schema": { "type": "string" } }
@@ -1881,6 +1899,25 @@ fn apply_authoritative_contract(document: &mut Value) {
     );
     let session_id = || path("session_id");
     add(
+        "/v2/session-projects",
+        "get",
+        op(
+            "v2.sessions.projects",
+            "sessions",
+            json!([]),
+            None,
+            success("200", "All authorized chat-bearing saved directories (empty strings preserved) plus all authorized eligible pinned roots globally, sorted updated DESC then id DESC, without a recent limit or history", json!({
+                "type": "object", "required": ["items", "pinnedSessions"], "additionalProperties": false,
+                "properties": {
+                    "pinnedSessions": { "type": "array", "description": "Compact root metadata, as in /v2/sessions items; no messages or history", "items": { "$ref": "#/components/schemas/Session" } },
+                    "items": { "type": "array", "items": {
+                    "type": "object", "required": ["directory", "updatedMs"], "additionalProperties": false,
+                    "properties": { "directory": { "type": "string" }, "updatedMs": { "type": "integer", "format": "int64", "minimum": 0 } }
+                } } }
+            })),
+        ),
+    );
+    add(
         "/v2/sessions",
         "get",
         op(
@@ -1888,6 +1925,8 @@ fn apply_authoritative_contract(document: &mut Value) {
             "sessions",
             json!([
                 directory(),
+                query("exact_directory", false, json!({ "type": "boolean", "default": false, "description": "Match only the saved session directory before pagination; exclude hosting namespace associations" })),
+                query("exclude_pinned", false, json!({ "type": "boolean", "default": false, "description": "Exclude pinned roots before LIMIT and cursor pagination; scoped lists include pins by default" })),
                 query("path", false, json!({ "type": "string" })),
                 query("roots", false, json!({ "type": "string" })),
                 query("start", false, json!({ "type": "integer", "minimum": 0 })),
@@ -3181,6 +3220,8 @@ fn session_response(description: &str, errors: Value) -> Value {
 fn session_list_parameters() -> Value {
     json!([
         { "name": "directory", "in": "query", "schema": { "type": "string" } },
+        { "name": "exact_directory", "in": "query", "schema": { "type": "boolean", "default": false } },
+        { "name": "exclude_pinned", "in": "query", "description": "Exclude pinned roots before pagination; scoped lists include pins by default", "schema": { "type": "boolean", "default": false } },
         { "name": "path", "in": "query", "schema": { "type": "string" } },
         { "name": "roots", "in": "query", "schema": { "type": "string" } },
         { "name": "start", "in": "query", "schema": { "type": "integer", "minimum": 0 } },
@@ -3994,6 +4035,19 @@ mod tests {
     use super::*;
 
     const ROUTER_SOURCE: &str = include_str!("app_router.rs");
+
+    #[test]
+    fn session_projects_schema_includes_global_pinned_metadata() {
+        let document = canonical_openapi();
+        let schema = &document["paths"]["/v2/session-projects"]["get"]["responses"]["200"]["content"]["application/json"]["schema"];
+        assert_eq!(schema["required"], json!(["items", "pinnedSessions"]));
+        assert_eq!(schema["properties"]["pinnedSessions"]["items"]["$ref"], "#/components/schemas/Session");
+        assert_eq!(schema["properties"]["items"]["items"]["required"], json!(["directory", "updatedMs"]));
+        let parameters = document["paths"]["/v2/sessions"]["get"]["parameters"].as_array().unwrap();
+        let exclude = parameters.iter().find(|p| p["name"] == "exclude_pinned").unwrap();
+        assert_eq!(exclude["schema"]["type"], "boolean");
+        assert_eq!(exclude["schema"]["default"], false);
+    }
 
     #[test]
     fn openai_usage_contract_is_secret_free_and_nullable() {

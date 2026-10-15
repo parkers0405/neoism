@@ -1,7 +1,9 @@
+import { AuthorizedDashboardRootCache, conversationSearchRows, projectNavigatorRows, navigatorContextCurrent, NavigatorProjectDiscovery, ADD_NAVIGATOR_WORKSPACE, canAddNavigatorWorkspace, type ConversationResult } from "./conversationNavigatorHost";
 import { ProtocolClient } from "../workspace/ProtocolClient";
 import type { ConnectionState } from "../workspace/ProtocolClient";
 import type { PtyService } from "../services/PtyService";
 import { DaemonFilesService } from "../services/FilesService";
+import { browserFileParent, fileBrowserRecentsKey, parseFileBrowserRecents, type FileBrowserRequest } from "./fileBrowserHost";
 import type { WorkplacePreferences } from "../services/WorkplaceService";
 import { isMarkdownPath, renderMarkdownDocument } from "./MarkdownRenderer";
 import { WasmTerminalStub, type TerminalSnapshot } from "./WasmTerminalStub";
@@ -169,6 +171,8 @@ interface WebBufferTab {
   /** Agent-server conversation represented by this tab. The shared wasm
    * pane swaps its cached conversation when this tab is activated. */
   agentSessionId?: string;
+  /** Directory selected before first submit, owned only by this agent tab. */
+  agentDraftDirectory?: string;
   /** Present only for the daemon-hosted config virtual document. */
   configRevision?: string;
   configDisplayPath?: string;
@@ -665,6 +669,7 @@ export class TerminalPanel {
       this.terminalInitError = null;
       if (adapter.isReal()) {
         this.wasmAdapter = adapter;
+        this.syncAgentCatalogEndpoint();
         this.setTerminalShell(
           this.options.sessionId,
           this.terminalSessionShells.get(this.options.sessionId) ?? this.options.shell ?? null,
@@ -808,6 +813,8 @@ export class TerminalPanel {
     this.pointerUpHandler = (event) => this.handlePointerUp(event);
     this.pointerCancelHandler = (event) => this.handlePointerCancel(event);
     this.pointerLeaveHandler = () => {
+      this.canvas.style.cursor = "";
+      this.markdownLayer.style.cursor = "";
       this.hideCustomCursor();
       this.forwardChromeEvent(pointerLeaveEvent());
     };
@@ -1326,6 +1333,7 @@ export class TerminalPanel {
   /** Ordered, idempotent read-side recovery after HelloAck. Never replays PTY
    * input, saves, file writes, prompts, or other mutations. */
   rehydrateConnection(): void {
+    this.syncAgentCatalogEndpoint();
     this.transportAvailable = true;
     this.notesWorkspaceBarrierReady = true;
     this.flushPendingTabCloses(true);
@@ -1436,6 +1444,9 @@ export class TerminalPanel {
   }
 
   dispose(): void {
+    this.clearConversationNavigation();
+    this.fileBrowserTarget = null;
+    this.fileBrowserQueue = [];
     this.notesRefresh.invalidate();
     if (this.notesRefreshTimer !== null) {
       clearTimeout(this.notesRefreshTimer);
@@ -1720,6 +1731,28 @@ export class TerminalPanel {
   }
 
   agentReply(payload: AgentServerMessage): void {
+    const navigator = this.conversationNavigation;
+    if (navigator?.discovery) {
+      if (!this.navigatorTargetCurrent(navigator)) this.clearConversationNavigation();
+      else if (navigator.discovery.accept(payload)) return;
+    }
+    if (typeof payload === "object" && payload !== null && "ThreadSearchResult" in payload) {
+      const reply = payload.ThreadSearchResult;
+      const target = this.conversationNavigation;
+      if (target && target.mode === "search" && this.navigatorTargetCurrent(target)
+        && target.serial === reply.generation && target.query === reply.query
+        && target.adapter.conversationNavigatorQuery?.() === reply.query) {
+        const rows = conversationSearchRows(reply.sessions, reply.semantic);
+        target.completed = true;
+        target.results = new Map(rows.map((row) => [row.value, row]));
+        target.adapter.conversationNavigatorSetRows?.(JSON.stringify(rows));
+        target.adapter.conversationNavigatorSetLoading?.(false);
+        target.adapter.conversationNavigatorSetError?.(rows.length ? null : reply.error);
+        if (rows.length && reply.error) this.pushInAppNotification("Conversation search", reply.error, "warn");
+        this.scheduleDraw();
+      }
+      return;
+    }
     try {
       let createdForRoute: number | null = null;
       if (
@@ -1790,6 +1823,7 @@ export class TerminalPanel {
           }
         } catch { /* The timeline still shows the link or auth error. */ }
       }
+      this.syncAgentCatalogEndpoint();
       this.wasmAdapter?.agentEvent?.(JSON.stringify(payload));
       // A CreateThread reply can arrive after the user has already opened a
       // second fresh tab. Keep the reply bound to its originating tab and
@@ -2916,9 +2950,167 @@ export class TerminalPanel {
   private workspaceSessionId: string | null = null;
   private readonly editorSurfaceBindings = new Map<string, EditorSurfaceSummary>();
   private readonly editorResizeBySurface = new Map<string, { width: number; height: number }>();
+  private fileBrowserLastPress: { x: number; y: number; time: number; count: number } | null = null;
   private fileBrowserRequestInFlight = false;
+  private fileBrowserQueue: Array<{ request: FileBrowserRequest; target: NonNullable<TerminalPanel["fileBrowserTarget"]> }> = [];
+  private fileBrowserTarget: {
+    adapter: TerminalAdapter;
+    client: ProtocolClient;
+    identity: string;
+    generation: number;
+    workspaceId: string | null;
+    root: string | null | undefined;
+    tabKey: string | null;
+    sessionId: string | null;
+    kind: "workspace" | "agent";
+    mode: string;
+    recentsKey: string;
+  } | null = null;
+
+  private dashboardRootCache = new AuthorizedDashboardRootCache();
+  private static navigatorSerial = 0;
+  private conversationNavigation: {
+    adapter: TerminalAdapter; client: ProtocolClient; identity: string; generation: number;
+    workspaceId: string | null; root: string | null | undefined; mode: "search" | "projects"; serial: number;
+    query: string; completed: boolean; results: Map<string, ConversationResult>; homePath: string | null;
+    projects: import("../workspace/types").ProjectRootSummary[];
+    allowedProjects: Set<string>;
+    discovery: NavigatorProjectDiscovery | null;
+  } | null = null;
+
+  private clearConversationNavigation(): void {
+    const target = this.conversationNavigation;
+    this.conversationNavigation = null;
+    target?.discovery?.close();
+    (target?.adapter ?? this.wasmAdapter)?.conversationNavigatorClose?.();
+  }
+
+  private navigatorTargetCurrent(target: NonNullable<TerminalPanel["conversationNavigation"]>, requireActive = true): boolean {
+    const client = this.options.client;
+    return this.conversationNavigation === target && this.wasmAdapter === target.adapter
+      && target.root === this.options.workspaceRoot
+      && (!requireActive || target.adapter.conversationNavigatorActive?.() === true)
+      && navigatorContextCurrent(target, { client, identity: client.agentCatalogIdentity(this.options.activeWorkspaceId ?? null),
+        generation: client.getGeneration(), workspaceId: this.options.activeWorkspaceId ?? null });
+  }
+
+  private refreshNavigatorProjects(target: NonNullable<TerminalPanel["conversationNavigation"]>): void {
+    if (!this.navigatorTargetCurrent(target)) return;
+    const rows = projectNavigatorRows(target.projects, target.root ?? null, target.homePath);
+    target.allowedProjects = new Set(rows.filter((r) => !r.is_disabled && r.value !== ADD_NAVIGATOR_WORKSPACE).map((r) => r.value));
+    target.adapter.conversationNavigatorSetRows?.(JSON.stringify(rows));
+    this.scheduleDraw();
+  }
+
+  private pumpConversationNavigator(): void {
+    const adapter = this.wasmAdapter;
+    if (!adapter) {
+      this.clearConversationNavigation();
+      return;
+    }
+    this.syncAgentCatalogEndpoint();
+    adapter.enableConversationNavigationHeader?.();
+    const header = adapter.drainCatalogHeaderAction?.();
+    if (header) {
+      this.clearConversationNavigation();
+      if (header === "add_workspace") {
+        if (canAddNavigatorWorkspace(this.options.workspaceRoot ?? null, this.syncAuthorizedDashboardRoot())) {
+          this.openHostFileBrowser("workspace", "choose_directory");
+        }
+        return;
+      }
+      const client = this.options.client;
+      const workspaceId = this.options.activeWorkspaceId ?? null;
+      const target: NonNullable<TerminalPanel["conversationNavigation"]> = {
+        adapter, client, workspaceId, root: this.options.workspaceRoot, identity: client.agentCatalogIdentity(workspaceId), generation: client.getGeneration(),
+        mode: header === "projects" ? "projects" : "search", serial: ++TerminalPanel.navigatorSerial,
+        query: "", completed: false, results: new Map(), homePath: null, projects: [], allowedProjects: new Set(), discovery: null,
+      };
+      this.conversationNavigation = target;
+      adapter.conversationNavigatorOpen?.(target.mode, "[]");
+      if (target.mode === "projects") {
+        target.homePath = this.syncAuthorizedDashboardRoot();
+        const reported = new Set<string>();
+        target.discovery = new NavigatorProjectDiscovery(client, workspaceId, (state) => {
+          if (!this.navigatorTargetCurrent(target)) {
+            if (this.conversationNavigation === target) this.clearConversationNavigation();
+            else target.discovery?.close();
+            return;
+          }
+          target.projects = state.projects;
+          this.refreshNavigatorProjects(target);
+          target.adapter.conversationNavigatorSetLoading?.(state.registry === "loading" || state.chats === "loading");
+          for (const source of ["registry", "chats"] as const) {
+            const error = state.errors[source];
+            if (error && !reported.has(source)) {
+              reported.add(source);
+              this.pushInAppNotification(source === "registry" ? "Project registry" : "Saved chat projects", error, "warn");
+            }
+          }
+        });
+        target.adapter.conversationNavigatorSetLoading?.(true);
+        target.discovery.start();
+        this.refreshNavigatorProjects(target);
+      }
+      this.scheduleDraw();
+    }
+    const target = this.conversationNavigation;
+    const action = adapter.drainConversationNavigatorAction?.();
+    if (!target) return;
+    if (action) {
+      if (action.kind === "activate" && action.value && this.navigatorTargetCurrent(target, false)) {
+        if (target.mode === "projects") {
+          if (action.value === ADD_NAVIGATOR_WORKSPACE) {
+            if (target.workspaceId && canAddNavigatorWorkspace(target.root ?? null, target.homePath)) {
+              this.openHostFileBrowser("workspace", "choose_directory");
+            }
+          } else if (target.allowedProjects.has(action.value) && target.workspaceId) {
+            this.options.onWorkspaceRootRequested?.(action.value, target.workspaceId);
+          }
+        } else {
+          const result = target.results.get(action.value);
+          if (result && target.completed && adapter.conversationNavigatorQuery?.() === target.query) {
+            this.openNeoismAgentTab();
+            adapter.conversationNavigatorAttach?.(result.value, result.directory);
+            this.bindAgentSessionToRoute(this.activeAgentRouteId(), result.value);
+          }
+        }
+      }
+      this.clearConversationNavigation();
+      this.scheduleDraw();
+      return;
+    }
+    if (!this.navigatorTargetCurrent(target)) {
+      this.clearConversationNavigation();
+      return;
+    }
+    if (target.mode === "projects") return;
+    const query = adapter.conversationNavigatorQuery?.() ?? "";
+    if (query === target.query) return;
+    target.query = query;
+    target.completed = false;
+    target.serial = ++TerminalPanel.navigatorSerial;
+    target.results.clear();
+    adapter.conversationNavigatorSetRows?.("[]");
+    adapter.conversationNavigatorSetError?.(null);
+    adapter.conversationNavigatorSetLoading?.(query.trim().length > 0);
+    const serial = target.serial;
+    if (!query.trim()) return;
+    // Debounce without letting an older timer submit a newer query accidentally.
+    setTimeout(() => {
+      if (!this.navigatorTargetCurrent(target) || target.serial !== serial || target.query !== query) return;
+      target.client.sendAgent(target.client.allocateRequestId(), { SearchThreads: { query, generation: serial } });
+      setTimeout(() => {
+        if (!this.navigatorTargetCurrent(target) || target.serial !== serial || target.completed) return;
+        adapter.conversationNavigatorSetLoading?.(false);
+        if (target.results.size === 0) adapter.conversationNavigatorSetError?.("Search timed out or is unavailable on this host");
+        this.scheduleDraw();
+      }, 30000);
+    }, 180);
+  }
 
   private drainChromeIntents(): void {
+    this.pumpConversationNavigator();
     this.drainTopBarActions();
     for (const command of this.wasmAdapter?.drainPluginCommands?.() ?? []) {
       this.options.onPluginCommand?.(command);
@@ -2937,81 +3129,138 @@ export class TerminalPanel {
     this.pumpCompletionDirRequests();
   }
 
-  /** Satisfy the shared Sugarloaf browser exclusively through the daemon's
-   * daemon-authorized browser roots, then materialize its image selection
-   * through the existing composer attachment path. The web client never
-   * fabricates a host path from a display label. */
+  private openHostFileBrowser(kind: "workspace" | "agent", mode: string, sessionId: string | null = null): void {
+    const adapter = this.wasmAdapter;
+    if (!adapter?.openFileBrowser) return;
+    const client = this.options.client;
+    const workspaceId = this.options.activeWorkspaceId ?? null;
+    this.fileBrowserTarget = {
+      adapter, client, workspaceId,
+      identity: client.agentCatalogIdentity(workspaceId),
+      generation: client.getGeneration(),
+      root: this.options.workspaceRoot,
+      tabKey: this.activeTabKey(), sessionId, kind, mode,
+      recentsKey: fileBrowserRecentsKey(client),
+    };
+    this.fileBrowserQueue = [];
+    let recents: string[] = [];
+    try { recents = parseFileBrowserRecents(localStorage.getItem(this.fileBrowserTarget.recentsKey)); } catch { /* disabled storage */ }
+    this.fileBrowserLastPress = null;
+    adapter.openFileBrowser(mode, kind !== "agent" ? this.options.workspaceRoot ?? "" : adapter.agentDirectory?.() ?? "", JSON.stringify(recents));
+    this.scheduleDraw();
+  }
+
+  private fileBrowserTargetCurrent(target: NonNullable<TerminalPanel["fileBrowserTarget"]>): boolean {
+    return this.fileBrowserTarget === target
+      && this.wasmAdapter === target.adapter
+      && this.options.client === target.client
+      && target.generation === target.client.getGeneration()
+      && target.identity === target.client.agentCatalogIdentity(this.options.activeWorkspaceId ?? null)
+      && target.workspaceId === (this.options.activeWorkspaceId ?? null)
+      && target.root === this.options.workspaceRoot
+      && (target.kind !== "agent" || (target.tabKey === this.activeTabKey()
+        && target.sessionId === (target.adapter.agentSessionId?.() ?? null)));
+  }
+
+  private rememberBrowserDirectory(target: NonNullable<TerminalPanel["fileBrowserTarget"]>, path: string): void {
+    if (!path) return;
+    try {
+      const old = parseFileBrowserRecents(localStorage.getItem(target.recentsKey));
+      localStorage.setItem(target.recentsKey, JSON.stringify([path, ...old.filter((p) => p !== path)].slice(0, 8)));
+    } catch { /* disabled storage */ }
+  }
+
+  private async commitFileBrowserSelection(target: NonNullable<TerminalPanel["fileBrowserTarget"]>, mode: string, path: string): Promise<void> {
+    try {
+      if (!this.fileBrowserTargetCurrent(target) || target.mode !== mode) return;
+      const files = new DaemonFilesService(target.client);
+      const entry = await files.browserStat(path);
+      if (!this.fileBrowserTargetCurrent(target)) return;
+      if (mode === "choose_directory") {
+        if (!entry.is_dir) throw new Error("The selected path is no longer a directory");
+        // Recheck listing permission/existence immediately before changing roots.
+        await files.browserListDir(path);
+        if (!this.fileBrowserTargetCurrent(target)) return;
+        if (target.kind === "workspace") {
+          this.options.onWorkspaceRootRequested?.(path, target.workspaceId);
+        } else {
+          const tab = this.bufferTabs[this.activeTabIndex];
+          if (target.sessionId === null && (tab?.kind !== "neoism-agent" || tab.agentSessionId)) {
+            throw new Error("The agent draft changed; reopen the directory picker");
+          }
+          if (!target.adapter.agentChangeDirectory?.(target.sessionId, path)) {
+            throw new Error("The agent session changed; reopen the directory picker");
+          }
+          if (target.sessionId === null) tab.agentDraftDirectory = path;
+        }
+        this.rememberBrowserDirectory(target, path);
+      } else if (mode === "attach_image" && target.kind === "agent") {
+        if (entry.is_dir || (entry.size ?? 0) > 20 * 1024 * 1024) throw new Error("Invalid image or image larger than 20 MB");
+        const mime: Record<string, string> = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", bmp: "image/bmp", avif: "image/avif", svg: "image/svg+xml" };
+        const kind = mime[path.split(".").pop()?.toLowerCase() ?? ""];
+        if (!kind) throw new Error("Unsupported image type");
+        const bytes = await files.browserReadFile(path);
+        if (!this.fileBrowserTargetCurrent(target)) return;
+        const name = path.split(/[\\/]/).pop() || "image";
+        if (!target.adapter.agentAttachFile?.(name, kind, bytes)) throw new Error(`Could not attach ${name}`);
+        this.rememberBrowserDirectory(target, browserFileParent(path));
+      }
+      this.scheduleDraw();
+    } catch (error) {
+      if (this.fileBrowserTargetCurrent(target)) this.pushInAppNotification("File browser", String(error), "warn");
+    }
+  }
+
+  /** Keep every drained request, serialize IO, and discard replies from prior
+   * picker/host generations. All filesystem operations run on the daemon. */
   private pumpFileBrowser(): void {
     const adapter = this.wasmAdapter;
     if (!adapter) return;
-    if (adapter.fileBrowserActive?.()) {
-      try {
-        adapter.setFileBrowserRecents?.(localStorage.getItem("neoism.file-browser.recents") || "[]");
-      } catch { /* storage may be disabled */ }
+    const action = adapter.drainAgentFileBrowserAction?.() as { mode?: string; session_id?: string | null } | null;
+    if (action?.mode && (action.session_id ?? null) === (adapter.agentSessionId?.() ?? null)) {
+      this.openHostFileBrowser("agent", action.mode, action.session_id ?? null);
     }
-    const selected = adapter.drainFileBrowserSelection?.() as
-      | { mode?: string; path?: string }
-      | null
-      | undefined;
-    if (selected?.path && selected.mode === "attach_image") {
-      const path = selected.path;
-      const ext = path.split(".").pop()?.toLowerCase() ?? "";
-      const mime: Record<string, string> = {
-        png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg",
-        gif: "image/gif", webp: "image/webp", bmp: "image/bmp",
-        avif: "image/avif", svg: "image/svg+xml",
-      };
-      const kind = mime[ext];
-      if (kind) {
-        const files = new DaemonFilesService(this.options.client);
-        void files.browserStat(path).then((entry) => {
-          if ((entry.size ?? 0) > 20 * 1024 * 1024) {
-            throw new Error("Image is larger than the 20 MB attachment limit");
-          }
-          return files.browserReadFile(path);
-        }).then((bytes) => {
-          const name = path.split(/[\\/]/).pop() || "image";
-          if (!adapter.agentAttachFile?.(name, kind, bytes)) {
-            this.pushInAppNotification("Attachment failed", `Could not attach ${name}.`, "warn");
-          }
-          const separator = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
-          const parent = separator >= 0 ? path.slice(0, separator) : "";
-          try {
-            const old = JSON.parse(localStorage.getItem("neoism.file-browser.recents") || "[]") as string[];
-            localStorage.setItem("neoism.file-browser.recents", JSON.stringify([parent, ...old.filter((p) => p !== parent)].slice(0, 8)));
-          } catch { /* storage may be disabled */ }
-          this.scheduleDraw();
-        }).catch((error) => this.pushInAppNotification("Attachment failed", String(error), "warn"));
+    let target = this.fileBrowserTarget;
+    if (target && !this.fileBrowserTargetCurrent(target)) {
+      // Invalidate permanently, not just while another pane/host is focused.
+      this.fileBrowserTarget = null;
+      this.fileBrowserQueue = [];
+      target = null;
+      if (adapter.fileBrowserActive?.()) {
+        adapter.setFileBrowserError?.("The picker target changed. Close and reopen the file browser.");
+        this.scheduleDraw();
       }
     }
+    const selected = adapter.drainFileBrowserSelection?.() as { mode?: string; path?: string } | null;
+    if (target && selected?.path && selected.mode) void this.commitFileBrowserSelection(target, selected.mode, selected.path);
+    const requests = adapter.drainFileBrowserRequests?.() as FileBrowserRequest[] | null;
+    if (target && this.fileBrowserTargetCurrent(target)) {
+      for (const request of requests ?? []) this.fileBrowserQueue.push({ request, target });
+    }
     if (this.fileBrowserRequestInFlight) return;
-    const requests = adapter.drainFileBrowserRequests?.() as
-      | Array<{ kind?: string; path?: string }>
-      | null
-      | undefined;
-    const request = requests?.[0];
-    if (!request) return;
+    let next = this.fileBrowserQueue.shift();
+    while (next && !this.fileBrowserTargetCurrent(next.target)) next = this.fileBrowserQueue.shift();
+    if (!next) return;
+    const { request, target: captured } = next;
     this.fileBrowserRequestInFlight = true;
-    const files = new DaemonFilesService(this.options.client);
+    const files = new DaemonFilesService(captured.client);
+    const current = () => this.fileBrowserTargetCurrent(captured) && adapter.fileBrowserActive?.()
+      && (request.kind !== "list_directory" || !adapter.fileBrowserPath || adapter.fileBrowserPath() === request.path);
     const operation = request.kind === "load_locations"
       ? files.browserLocations().then((locations) => {
-          adapter.setFileBrowserLocations?.(JSON.stringify(locations));
+          if (current()) adapter.setFileBrowserLocations?.(JSON.stringify(locations));
         })
       : request.kind === "list_directory" && typeof request.path === "string"
         ? files.browserListDir(request.path).then((entries) => {
-            adapter.setFileBrowserEntries?.(request.path!, JSON.stringify(entries));
+            if (current()) adapter.setFileBrowserEntries?.(request.path!, JSON.stringify(entries));
           })
         : Promise.resolve();
-    void operation
-      .then(() => {
-        this.scheduleDraw();
-      })
-      .catch((error) => {
-        const concise = String(error).replace(/^Error:\s*(files service error:\s*)?/, "");
-        adapter.setFileBrowserError?.(concise);
-        this.scheduleDraw();
-      })
-      .finally(() => { this.fileBrowserRequestInFlight = false; });
+    void operation.catch((error) => {
+      if (current()) adapter.setFileBrowserError?.(String(error).replace(/^Error:\s*(files service error:\s*)?/, ""));
+    }).finally(() => {
+      this.fileBrowserRequestInFlight = false;
+      this.scheduleDraw();
+    });
   }
 
   private drainTopBarActions(): void {
@@ -3728,6 +3977,7 @@ export class TerminalPanel {
   /** The workspace the share QR should deep-link to. */
   setShareWorkspaceId(id: string | null): void {
     this.options.activeWorkspaceId = id;
+    this.syncAgentCatalogEndpoint();
     this.wasmAdapter?.setActiveWorkspaceId?.(id);
     this.ensureNotesSidebarSnapshot(false);
   }
@@ -3787,11 +4037,7 @@ export class TerminalPanel {
   }
 
   private openWorkspaceDirectoryPalette(): void {
-    this.wasmAdapter?.openWorkspaceDirectoryPalette?.(
-      this.options.activeWorkspaceId ?? null,
-      this.options.workspaceRoot ?? ".",
-    );
-    this.scheduleDraw();
+    this.openHostFileBrowser("workspace", "choose_directory");
   }
 
   private dispatchPaletteExCommand(
@@ -5687,6 +5933,11 @@ export class TerminalPanel {
     const directory = this.wasmAdapter?.fileTreeWorkspaceRoot?.() ?? null;
     this.wasmAdapter?.agentNewThread?.(directory);
     this.ensureNeoismAgentAttached();
+    // The selected Agent body owns text entry implicitly. Release Chrome's
+    // sidebar/strip focus only after replayBufferTabs selected the new draft;
+    // focus the browser input target too, so the very next key reaches it.
+    this.wasmAdapter?.focusEditorInput?.();
+    this.focus();
     this.scheduleDraw();
   }
 
@@ -5717,13 +5968,72 @@ export class TerminalPanel {
         this.wasmAdapter?.agentSwitchThread?.(tab.agentSessionId);
       }
     } else {
-      const directory = this.wasmAdapter?.fileTreeWorkspaceRoot?.() ?? null;
+      const directory = tab.agentDraftDirectory ?? this.wasmAdapter?.fileTreeWorkspaceRoot?.() ?? null;
       this.wasmAdapter?.agentNewThread?.(directory);
     }
     this.ensureNeoismAgentAttached();
   }
 
+  private syncAuthorizedDashboardRoot(): string | null {
+    const adapter = this.wasmAdapter;
+    const client = this.options.client;
+    const identity = client.agentCatalogIdentity(this.options.activeWorkspaceId ?? null);
+    const cache = this.dashboardRootCache ??= new AuthorizedDashboardRootCache();
+    const binding = cache.bind(client, identity, this.options.workspaceRoot);
+    adapter?.conversationNavigatorSetDashboardRoot?.(binding.root);
+    const generation = client.getGeneration();
+    const phase = client.getConnectionState?.().phase;
+    const authorized = phase === "connected" || phase === "hydrating";
+    if (!binding.lookupComplete && binding.lookupGeneration !== generation && authorized
+      && adapter?.conversationNavigatorSetDashboardRoot) {
+      binding.lookupGeneration = generation;
+      // One authorized lookup per client/catalog binding, started at bridge
+      // initialization rather than waiting for the Projects menu to be opened.
+      void new DaemonFilesService(client).browserLocations().then((locations) => {
+        if (!cache.isCurrent(binding) || this.options.client !== client
+          || client.getGeneration() !== generation
+          || client.agentCatalogIdentity(this.options.activeWorkspaceId ?? null) !== identity) return;
+        binding.lookupComplete = true;
+        const home = locations.find((location) => location.kind === "home")?.path;
+        if (!cache.acceptHome(binding, home)) return;
+        this.wasmAdapter?.conversationNavigatorSetDashboardRoot?.(binding.root);
+        const target = this.conversationNavigation;
+        if (target?.mode === "projects" && this.navigatorTargetCurrent(target)) {
+          target.homePath = binding.root;
+          this.refreshNavigatorProjects(target);
+        }
+        this.scheduleDraw();
+      }).catch(() => {
+        // Cache a terminal unavailable/denied response, but allow a request
+        // interrupted by disconnect to retry once on the next socket generation.
+        const phase = client.getConnectionState?.().phase;
+        if (cache.isCurrent(binding) && client.getGeneration() === generation
+          && (phase === "connected" || phase === "hydrating")) binding.lookupComplete = true;
+        // All projects stays disabled unless an actual FS root was observed;
+        // saved projects remain usable, with no per-frame retry loop.
+      });
+    }
+    return binding.root;
+  }
+
+  private syncAgentCatalogEndpoint(): void {
+    if (this.conversationNavigation && !this.navigatorTargetCurrent(this.conversationNavigation, false)) {
+      this.clearConversationNavigation();
+    }
+    const adapter = this.wasmAdapter;
+    if (!adapter?.agentSetCatalogEndpoint) return;
+    // Repeat the idempotent binding: the agent pane may be created lazily
+    // after WASM initialization. Never derive catalog scope from cwd/root.
+    adapter.agentSetCatalogEndpoint(
+      this.options.client.agentCatalogIdentity(this.options.activeWorkspaceId ?? null),
+    );
+    this.syncAuthorizedDashboardRoot();
+  }
+
   private ensureNeoismAgentAttached(): void {
+    // Bind before the attach debounce: auth/workspace changes cannot wait for
+    // a timer while stale catalog rows remain visible.
+    this.syncAgentCatalogEndpoint();
     // Re-attach on every agent-tab open (debounced) instead of once per
     // panel lifetime: the first attach can race the embedded
     // agent-server's boot, and a once-guard left the pane stuck with
@@ -5733,7 +6043,9 @@ export class TerminalPanel {
     const adapter = this.wasmAdapter;
     if (!adapter?.agentAttach) return;
     this.agentLastAttachAt = now;
-    const directory = adapter.fileTreeWorkspaceRoot?.() ?? null;
+    const tab = this.bufferTabs?.[this.activeTabIndex];
+    const directory = (tab?.kind === "neoism-agent" ? tab.agentDraftDirectory : null)
+      ?? adapter.fileTreeWorkspaceRoot?.() ?? null;
     adapter.agentAttach(directory, this.presenceIdentity.displayName);
   }
 
@@ -8536,6 +8848,13 @@ export class TerminalPanel {
     });
   }
 
+  private updateChromePointerCursor(event: PointerEvent): void {
+    const { x, y } = this.canvasLogicalPoint(event);
+    const cursor = this.wasmAdapter?.pointerCursorAt?.(x, y) ?? "default";
+    this.canvas.style.cursor = cursor;
+    this.markdownLayer.style.cursor = cursor;
+  }
+
   private handlePointerMove(event: PointerEvent): void {
     // Touch pointers are owned entirely by the touchstart/move/end
     // handlers; letting the parallel PointerEvent stream through
@@ -8552,6 +8871,7 @@ export class TerminalPanel {
     }
     if (this.wasmAdapter?.pointerOverlayActive?.()) {
       this.forwardChromeEvent(fromPointerMoveEvent(event, this.canvas));
+      this.updateChromePointerCursor(event);
       event.preventDefault();
       this.scheduleDraw();
       return;
@@ -8635,6 +8955,24 @@ export class TerminalPanel {
       if (flags & 1) this.scheduleDraw();
     }
     this.forwardChromeEvent(fromPointerMoveEvent(event, this.canvas));
+    this.updateChromePointerCursor(event);
+  }
+
+  private fileBrowserPointerClickCount(event: PointerEvent): number {
+    if (!this.wasmAdapter?.fileBrowserActive?.() || event.button !== 0) {
+      this.fileBrowserLastPress = null;
+      return event.detail || 1;
+    }
+    // PointerEvent.detail is zero in browsers that only count MouseEvents.
+    // Track repeated primary presses in logical pixels for the shared picker.
+    const { x, y } = this.canvasLogicalPoint(event);
+    const previous = this.fileBrowserLastPress;
+    const repeated = previous && event.timeStamp - previous.time < 300
+      && event.timeStamp >= previous.time
+      && Math.hypot(x - previous.x, y - previous.y) <= 5;
+    const count = event.detail || (repeated ? previous.count % 3 + 1 : 1);
+    this.fileBrowserLastPress = { x, y, time: event.timeStamp, count };
+    return count;
   }
 
   private handlePointerDown(event: PointerEvent): void {
@@ -8664,7 +9002,7 @@ export class TerminalPanel {
     }
     if (this.wasmAdapter?.pointerOverlayActive?.()) {
       this.forwardChromeEvent(
-        fromPointerDownEvent(event, event.detail || 1, this.canvas),
+        fromPointerDownEvent(event, this.fileBrowserPointerClickCount(event), this.canvas),
       );
       event.preventDefault();
       this.scheduleDraw();

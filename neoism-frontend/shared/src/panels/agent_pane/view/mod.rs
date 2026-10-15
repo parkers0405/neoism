@@ -392,6 +392,7 @@ fn render_agent_pane_with_responsive<P, D, I>(
     I: side_panel::AgentSidePanelIconHost,
 {
     let render_started = web_time::Instant::now();
+    user_input::AgentUserInputPane::composer_interactions(pane).clear_rects();
     let [_, _, w, h] = rect;
     if w <= 8.0 || h <= 8.0 {
         return;

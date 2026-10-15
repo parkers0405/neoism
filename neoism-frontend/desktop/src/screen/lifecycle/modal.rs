@@ -7,7 +7,12 @@ impl Screen<'_> {
             return false;
         }
         let (x, y) = self.mouse_logical_for_hit_test();
-        self.renderer.file_browser.pointer_down(x, y, 1);
+        let click_count = match self.mouse.click_state {
+            crate::event::ClickState::DoubleClick => 2,
+            crate::event::ClickState::TripleClick => 3,
+            _ => 1,
+        };
+        self.renderer.file_browser.pointer_down(x, y, click_count);
         self.pump_agent_image_browser();
         self.mark_dirty();
         true

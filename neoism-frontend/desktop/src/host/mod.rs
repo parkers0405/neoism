@@ -242,6 +242,7 @@ pub struct Renderer {
     pub minimap: minimap::Minimap,
     pub yank_flash: yank_flash::YankFlash,
     pub modal: modal::UniversalModal,
+    pub conversation_navigator: neoism_ui::widgets::conversation_navigator::ConversationNavigator,
     pub file_browser: neoism_ui::panels::file_browser::FileBrowserModal,
     pub settings: neoism_ui::panels::NeoismSettingsPane,
     pub git_diff_panel: git_diff_panel::GitDiffPanel,
@@ -493,6 +494,7 @@ impl Renderer {
             minimap: minimap::Minimap::new(),
             yank_flash: yank_flash::YankFlash::new(),
             modal: modal::UniversalModal::new(),
+            conversation_navigator: neoism_ui::widgets::conversation_navigator::ConversationNavigator::default(),
             file_browser: neoism_ui::panels::file_browser::FileBrowserModal::new(),
             settings: neoism_ui::panels::NeoismSettingsPane::new(),
             git_diff_panel: {

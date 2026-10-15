@@ -1,5 +1,14 @@
 use neoism_ui::Chrome;
 
+/// Identity transitions request immediately; same-identity failures obey the
+/// shared debounced/bounded retry budget, and Ready catalogs do not poll.
+pub(crate) fn project_discovery_request_due(
+    identity_changed: bool,
+    shared_refresh_due: bool,
+) -> bool {
+    identity_changed || shared_refresh_due
+}
+
 pub(crate) fn is_neoism_agent_shortcut(event: &neoism_ui::event::UiEvent) -> bool {
     use neoism_ui::event::{KeyState, LogicalKey, Modifiers};
 
@@ -267,6 +276,61 @@ pub(crate) fn apply_agent_event_to_pane(
         AgentServerMessage::ThreadDeleted { session_id } => {
             pane.clear_session_id_if(&session_id);
         }
+        AgentServerMessage::SessionProjects { items, pinned_sessions, .. } => {
+            // Discovery is root-global only. Keep the defensive scope gate here
+            // as well as the host's endpoint/generation validation.
+            if pane.side_panel().catalog_directory().is_some() {
+                return;
+            }
+            let pins = pinned_sessions.iter().filter_map(session_entry_from_root).collect::<Vec<_>>();
+            for entry in &pins {
+                pane.remember_session_source(&entry.id, entry.source);
+            }
+            pane.side_panel_mut().set_session_projects(
+                items
+                    .into_iter()
+                    .map(|item| (item.directory, item.updated_ms))
+                    .collect(),
+            );
+            pane.side_panel_mut().set_pinned_sessions(pins);
+        }
+        AgentServerMessage::SessionProjectsFailed { message, .. } => {
+            // Discovery refreshes are non-destructive. Existing grouped rows stay
+            // Ready; only an initial failed catalog uses the shared retry budget.
+            if !pane.side_panel().project_pagination_enabled() {
+                pane.side_panel_mut().settle_session_page_error(&message);
+            }
+        }
+        AgentServerMessage::SessionProjectsChanged => {}
+        AgentServerMessage::ProjectSessionPage {
+            directory,
+            requested_cursor,
+            threads,
+            next_cursor,
+            generation,
+            ..
+        } => {
+            let entries = session_entries_from_catalog(&threads);
+            for entry in &entries {
+                pane.remember_session_source(&entry.id, entry.source);
+            }
+            pane.side_panel_mut().set_project_session_page(
+                &directory,
+                requested_cursor.as_deref(),
+                entries,
+                next_cursor,
+                generation,
+            );
+        }
+        AgentServerMessage::ProjectSessionPageFailed {
+            directory,
+            generation,
+            message,
+            ..
+        } => {
+            pane.side_panel_mut()
+                .settle_project_session_error(&directory, generation, message);
+        }
         AgentServerMessage::ThreadList {
             threads,
             requested_cursor,
@@ -277,17 +341,18 @@ pub(crate) fn apply_agent_event_to_pane(
                 .side_panel()
                 .session_requested_cursor()
                 .map(str::to_string);
-            if requested_cursor.is_none() {
-                pane.set_session_options(session_options_from_catalog(
-                    &threads,
-                    current_session_id.as_deref(),
-                ));
-            }
+            pane.set_session_options_page(
+                session_options_from_catalog(&threads, current_session_id.as_deref()),
+                requested_cursor.as_deref(),
+                next_cursor.clone(),
+            );
             let entries = session_entries_from_catalog(&threads);
             for entry in &entries {
                 pane.remember_session_source(&entry.id, entry.source);
             }
-            if requested_cursor == expected_cursor {
+            if requested_cursor == expected_cursor
+                && !pane.side_panel().project_pagination_enabled()
+            {
                 pane.side_panel_mut().set_session_page(
                     entries,
                     requested_cursor.as_deref(),
@@ -297,6 +362,7 @@ pub(crate) fn apply_agent_event_to_pane(
         }
         AgentServerMessage::ThreadListFailed { message } => {
             tracing::warn!(%message, "failed to refresh agent sessions");
+            pane.session_picker_page_failed();
             pane.side_panel_mut()
                 .settle_session_page_error("couldn't load sessions; retrying");
         }
@@ -765,6 +831,7 @@ pub(crate) fn apply_agent_event_to_pane(
         }
 
         // -- Maintenance -----------------------------------------
+        AgentServerMessage::ThreadSearchResult { .. } => {}
         AgentServerMessage::Pong => {
             // Connection-health probe — no UI mutation needed.
         }
@@ -1284,7 +1351,13 @@ pub(crate) fn agent_event_session_id(
         | AgentServerMessage::Disabled { .. }
         | AgentServerMessage::PermissionRequest { .. }
         | AgentServerMessage::Error { .. }
+        | AgentServerMessage::SessionProjectsChanged
+        | AgentServerMessage::SessionProjects { .. }
+        | AgentServerMessage::SessionProjectsFailed { .. }
+        | AgentServerMessage::ProjectSessionPage { .. }
+        | AgentServerMessage::ProjectSessionPageFailed { .. }
         | AgentServerMessage::ThreadList { .. }
+        | AgentServerMessage::ThreadSearchResult { .. }
         | AgentServerMessage::ThreadListFailed { .. }
         | AgentServerMessage::ProviderCatalog { .. }
         | AgentServerMessage::ConfigDefaults { .. }
@@ -1419,6 +1492,26 @@ pub(crate) fn session_options_from_catalog(
     group_session_options(inputs)
 }
 
+fn session_entry_from_root(
+    session: &neoism_protocol::agent::SessionListInfo,
+) -> Option<neoism_ui::panels::agent_pane::state::side_panel::NeoismAgentSessionEntry> {
+    use neoism_ui::panels::agent_pane::state::side_panel::{ConversationSource, NeoismAgentSessionEntry};
+    let external = session.get("externalAgent").or_else(|| session.pointer("/extra/externalAgent"));
+    if external.is_some_and(|external| external.get("historyState").and_then(serde_json::Value::as_str) != Some("neoism_only")) {
+        return None;
+    }
+    let id = session.get("id")?.as_str()?;
+    let title = session.get("title").and_then(serde_json::Value::as_str)
+        .filter(|title| !title.trim().is_empty()).unwrap_or("Untitled");
+    Some(NeoismAgentSessionEntry::new(id, title, "")
+        .with_directory(session.get("directory").and_then(serde_json::Value::as_str).map(str::to_owned))
+        .with_source(ConversationSource::from_session_json(session))
+        .with_source_key(external.and_then(|external| external.get("sourceKey")).and_then(serde_json::Value::as_str).map(str::to_owned))
+        .with_updated_ms(session.pointer("/time/updated").and_then(serde_json::Value::as_u64).unwrap_or(0))
+        .with_pinned(session.get("pinned").and_then(serde_json::Value::as_bool).unwrap_or(false))
+        .with_catalog_activity(session.get("catalogActivity").and_then(|value| serde_json::from_value(value.clone()).ok())))
+}
+
 pub(crate) fn session_entries_from_catalog(
     threads: &[neoism_protocol::agent::ThreadSummary],
 ) -> Vec<neoism_ui::panels::agent_pane::state::side_panel::NeoismAgentSessionEntry> {
@@ -1444,6 +1537,7 @@ pub(crate) fn session_entries_from_catalog(
                 Some("codex") => neoism_ui::panels::agent_pane::state::side_panel::ConversationSource::Codex,
                 _ => neoism_ui::panels::agent_pane::state::side_panel::ConversationSource::Neoism,
             })
+            .with_directory(thread.directory.clone())
             .with_updated_ms(thread.updated_at)
             .with_pinned(thread.pinned)
             .with_runtime_status(thread.busy.then(|| "running".to_string()));
@@ -1521,6 +1615,176 @@ mod activity_tests {
     };
     use wasm_bindgen_test::wasm_bindgen_test;
 
+    #[wasm_bindgen_test]
+    fn discovery_pins_preserve_old_source_identity_and_never_enter_scoped_catalogs() {
+        use neoism_protocol::agent::AgentServerMessage as M;
+        let pin = serde_json::json!({"id":"old-pin", "title":"Archived", "directory":"/archived",
+            "time":{"updated":1}, "pinned":true, "catalogActivity":"permission",
+            "externalAgent":{"provider":"codex", "sourceKey":"stable-key", "historyState":"neoism_only"}});
+        let entry = session_entry_from_root(&pin).unwrap();
+        assert_eq!(entry.directory.as_deref(), Some("/archived"));
+        assert_eq!(entry.source_key.as_deref(), Some("stable-key"));
+        assert_eq!(entry.source, neoism_ui::panels::agent_pane::state::side_panel::ConversationSource::Codex);
+        assert!(entry.pinned);
+        let mut pane = NeoismAgentPane::default();
+        pane.set_catalog_directory(Some("/scoped".into()));
+        apply_agent_event_to_pane(&mut pane, M::SessionProjects {
+            catalog_identity:"stale-root".into(), generation:1,
+            items:vec![], pinned_sessions:vec![pin],
+        });
+        assert!(pane.side_panel().catalog_session("old-pin").is_none());
+        assert!(!pane.side_panel().project_pagination_enabled());
+    }
+
+    #[wasm_bindgen_test]
+    fn discovery_retry_policy_is_debounced_and_ready_refresh_failure_keeps_groups() {
+        use super::project_discovery_request_due as due;
+        use neoism_protocol::agent::{AgentServerMessage as M, SessionProjectSummary};
+        assert!(due(true, false)); // endpoint/root change: initial discovery
+        assert!(!due(false, false)); // in-flight/debounce or retry budget exhausted
+        assert!(due(false, true)); // shared timer permits first failure retry
+        let mut pane = NeoismAgentPane::default();
+        pane.set_catalog_directory(None);
+        pane.side_panel_mut().mark_refresh_kicked();
+        apply_agent_event_to_pane(
+            &mut pane,
+            M::SessionProjectsFailed {
+                catalog_identity: "test".into(),
+                generation: 1,
+                message: "503".into(),
+            },
+        );
+        assert!(!pane.side_panel().should_refresh_sessions()); // not every frame
+        apply_agent_event_to_pane(
+            &mut pane,
+            M::SessionProjects {
+                catalog_identity: "test".into(),
+                generation: 2,
+                pinned_sessions: vec![],
+                items: vec![SessionProjectSummary {
+                    directory: "/a".into(),
+                    updated_ms: 1,
+                }],
+            },
+        );
+        assert!(!pane.side_panel().should_refresh_sessions()); // Ready stops retrying
+        apply_agent_event_to_pane(
+            &mut pane,
+            M::SessionProjectsFailed {
+                catalog_identity: "test".into(),
+                generation: 3,
+                message: "503".into(),
+            },
+        );
+        assert!(pane.side_panel().project_pagination_enabled());
+        assert!(!pane.side_panel().should_refresh_sessions());
+        assert_eq!(
+            pane.side_panel_mut().begin_project_session_requests().len(),
+            1
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn project_discovery_and_pages_use_independent_shared_requests() {
+        use neoism_protocol::agent::{AgentServerMessage as M, SessionProjectSummary};
+        let mut pane = NeoismAgentPane::default();
+        pane.set_catalog_directory(None);
+        pane.side_panel_mut().set_last_panel_height_rows(10);
+        apply_agent_event_to_pane(
+            &mut pane,
+            M::SessionProjects {
+                catalog_identity: "test".into(),
+                generation: 7,
+                pinned_sessions: vec![],
+                items: vec![
+                    SessionProjectSummary {
+                        directory: "/a".into(),
+                        updated_ms: 2,
+                    },
+                    SessionProjectSummary {
+                        directory: "/b".into(),
+                        updated_ms: 1,
+                    },
+                ],
+            },
+        );
+        assert!(pane.side_panel().project_pagination_enabled());
+        let requests = pane.side_panel_mut().begin_project_session_requests();
+        assert_eq!(requests.len(), 2);
+        for (directory, cursor, generation) in requests.into_iter().rev() {
+            let threads = serde_json::from_value(serde_json::json!([{
+                "session_id": format!("chat:{directory}"), "title": directory,
+                "directory": directory, "updated_at": 2
+            }]))
+            .unwrap();
+            apply_agent_event_to_pane(
+                &mut pane,
+                M::ProjectSessionPage {
+                    catalog_identity: "test".into(),
+                    directory: directory.clone(),
+                    requested_cursor: cursor,
+                    generation,
+                    threads,
+                    next_cursor: Some("next".into()),
+                },
+            );
+            assert!(pane
+                .side_panel()
+                .catalog_session(&format!("chat:{directory}"))
+                .is_some());
+        }
+        assert!(pane
+            .side_panel_mut()
+            .begin_project_session_requests()
+            .is_empty());
+    }
+
+    #[wasm_bindgen_test]
+    fn chat_directory_events_do_not_change_workspace_catalog_scope() {
+        let mut pane = NeoismAgentPane::default();
+        pane.set_catalog_directory(Some("/declared-workspace".into()));
+        apply_agent_event_to_pane(
+            &mut pane,
+            AgentServerMessage::ThreadCreated {
+                session_id: "chat-in-other-project".into(),
+                title: Some("Other project".into()),
+                directory: Some("/other-project".into()),
+                agent: None,
+                model: None,
+            },
+        );
+        assert_eq!(
+            pane.side_panel().catalog_directory(),
+            Some("/declared-workspace")
+        );
+        pane.open_sessions_picker();
+        assert!(pane.drain_pending_outbound().iter().any(|command| matches!(
+            command,
+            neoism_ui::panels::agent_pane::outbound::OutboundAgentCommand::RefreshSessions {
+                directory: Some(directory), cursor: None,
+            } if directory == "/declared-workspace"
+        )));
+    }
+
+    #[wasm_bindgen_test]
+    fn catalog_rows_preserve_root_and_external_preview_directories() {
+        let threads = serde_json::from_value::<Vec<neoism_protocol::agent::ThreadSummary>>(
+            serde_json::json!([
+                { "session_id": "root", "title": "Root", "directory": "/root-project", "updated_at": 10 },
+                { "session_id": "external", "title": "Preview", "directory": "/external-project", "updated_at": 9, "external_provider": "codex" },
+                { "session_id": "legacy", "title": "Legacy", "updated_at": 8 }
+            ]),
+        ).unwrap();
+        let entries = session_entries_from_catalog(&threads);
+        assert_eq!(entries[0].directory.as_deref(), Some("/root-project"));
+        assert_eq!(entries[1].directory.as_deref(), Some("/external-project"));
+        assert_eq!(entries[2].directory, None);
+        assert_eq!(
+            entries[1].source,
+            neoism_ui::panels::agent_pane::state::side_panel::ConversationSource::Codex
+        );
+    }
+
     fn part(
         id: &str,
         kind: HistoryMessageKind,
@@ -1543,6 +1807,7 @@ mod activity_tests {
             todos: Vec::new(),
             usage: None,
             created_at: 0,
+            attachments: Vec::new(),
         }
     }
 

@@ -127,9 +127,12 @@ impl NeoismAgentPane {
 
     pub fn with_directory(directory: Option<String>) -> Self {
         let mut pane = Self {
-            directory,
+            directory: directory.clone(),
             ..Self::default()
         };
+        // Screen plumbing may explicitly widen HOME/root dashboards. Default
+        // to exact scope here because this may be a remote host's directory.
+        pane.set_catalog_directory(directory);
         // Seed the composer's Up-arrow recall from the GLOBAL, persisted
         // prompt history so a brand-new pane sees every past session's
         // prompts (zsh-style). Persistence is host-only std::fs, so it is
@@ -925,10 +928,13 @@ impl NeoismAgentPane {
     }
 
     pub fn clear_status_chip_rects(&mut self) {
+        self.composer_interactions.clear_status_chip_rects();
         self.status_chip_rects.clear();
     }
 
     pub fn register_status_chip_rect(&mut self, index: usize, rect: [f32; 4]) {
+        self.composer_interactions
+            .register_status_chip_rect(index, rect);
         if self.status_chip_rects.len() <= index {
             self.status_chip_rects.resize(index + 1, None);
         }
@@ -940,9 +946,7 @@ impl NeoismAgentPane {
     /// Which dropdown chip (0 = agent, 1 = model, 2 = thinking) sits
     /// under the pointer, if any.
     pub fn status_chip_at(&self, x: f32, y: f32) -> Option<usize> {
-        self.status_chip_rects.iter().position(|slot| {
-            slot.is_some_and(|rect| interaction_policy::rect_contains(rect, x, y))
-        })
+        self.composer_interactions.status_chip_at(x, y)
     }
 
     /// Open the "/" picker matching a clicked dropdown chip. Clicking

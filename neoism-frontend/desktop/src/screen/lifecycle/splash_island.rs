@@ -85,7 +85,7 @@ impl Screen<'_> {
             return true;
         }
         if self.renderer.splash_overlay.wordmark_hit(mx, my) {
-            self.renderer.splash_overlay.pop_click(mx, my);
+            self.renderer.splash_overlay.replay_wordmark();
             self.mark_dirty();
             return true;
         }

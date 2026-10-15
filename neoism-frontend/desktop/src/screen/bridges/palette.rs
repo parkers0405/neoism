@@ -650,28 +650,7 @@ impl Screen<'_> {
     }
 
     pub(crate) fn open_workspace_directory_palette(&mut self) {
-        use neoism_ui::panels::command_palette::WorkspaceDirectoryTarget;
-
-        let root = self
-            .active_workspace_root
-            .clone()
-            .or_else(|| self.workspace_root_for_new_shell())
-            .unwrap_or_else(|| PathBuf::from("."));
-        self.renderer
-            .command_palette
-            .record_workspace_directory(root.to_string_lossy().into_owned());
-        self.renderer
-            .command_palette
-            .set_surface(neoism_ui::panels::command_palette::PaletteSurface::Terminal);
-        self.renderer.command_palette.open_commands_for_workspace(
-            "cd ",
-            WorkspaceDirectoryTarget {
-                workspace_id: self.current_workspace_id(),
-                root: root.to_string_lossy().into_owned(),
-            },
-        );
-        self.refresh_cd_palette_results();
-        self.mark_dirty();
+        self.open_workspace_directory_browser();
     }
 
     pub fn run_palette_ex_query(&mut self, query: &str) -> bool {

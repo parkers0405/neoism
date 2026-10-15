@@ -29,6 +29,16 @@ impl Application<'_> {
             }
         }
 
+        if route.window.screen.renderer.conversation_navigator.is_active() {
+            let dy = match delta {
+                MouseScrollDelta::LineDelta(_, lines) => lines * 34.0,
+                MouseScrollDelta::PixelDelta(pos) => pos.y as f32,
+            };
+            route.window.screen.renderer.conversation_navigator.scroll(-dy);
+            route.request_redraw();
+            return;
+        }
+
         if route.window.screen.renderer.file_browser.is_active() {
             let dy = match delta {
                 MouseScrollDelta::LineDelta(_, lines) => lines * 34.0,

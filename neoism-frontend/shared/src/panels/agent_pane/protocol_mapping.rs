@@ -156,7 +156,7 @@ pub fn map_outbound_command(
         }
         Cmd::RefreshSessions { directory, cursor } => {
             Mapping::Messages(vec![Msg::ListThreads {
-                directory: directory.or_else(|| context.default_directory.clone()),
+                directory,
                 limit: Some(50),
                 cursor,
             }])
@@ -468,6 +468,43 @@ fn non_empty(value: String) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn refresh_sessions_preserves_explicit_catalog_scope_and_pagination() {
+        let context = AgentProtocolMappingContext {
+            default_directory: Some("/active-project".to_string()),
+            ..AgentProtocolMappingContext::default()
+        };
+        for directory in [None, Some("/other-project".to_string())] {
+            for cursor in [None, Some("next-page".to_string())] {
+                let AgentProtocolMapping::Messages(messages) = map_outbound_command(
+                    OutboundAgentCommand::RefreshSessions {
+                        directory: directory.clone(),
+                        cursor: cursor.clone(),
+                    },
+                    &context,
+                ) else {
+                    panic!("expected messages");
+                };
+                assert!(matches!(messages.as_slice(),
+                    [AgentClientMessage::ListThreads {
+                        directory: mapped_directory, limit: Some(50), cursor: mapped_cursor,
+                    }] if mapped_directory == &directory && mapped_cursor == &cursor
+                ));
+            }
+        }
+        // Execution-scoped commands retain their default-directory fallback.
+        let AgentProtocolMapping::Messages(messages) = map_outbound_command(
+            OutboundAgentCommand::RefreshSkills { directory: None },
+            &context,
+        ) else {
+            panic!("expected messages");
+        };
+        assert!(matches!(messages.as_slice(),
+            [AgentClientMessage::ListSkills { directory: Some(directory) }]
+                if directory == "/active-project"
+        ));
+    }
 
     #[test]
     fn switch_session_requests_session_history_and_stream() {

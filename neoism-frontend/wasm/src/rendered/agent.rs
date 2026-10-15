@@ -86,6 +86,50 @@ impl ChromeBridge {
         // a rename / pin / delete can target a session other than the
         // active one (any row of the /sessions picker), and its ack
         // must still refresh the catalog.
+        let identity = self.project_catalog_identity();
+        use neoism_protocol::agent::AgentServerMessage as M;
+        match &parsed {
+            M::SessionProjectsChanged => {
+                self.refresh_agent_catalog();
+                return Ok(());
+            }
+            M::SessionProjects {
+                catalog_identity,
+                generation,
+                ..
+            }
+            | M::SessionProjectsFailed {
+                catalog_identity,
+                generation,
+                ..
+            } => {
+                if catalog_identity != &identity
+                    || *generation != self.agent_state.project_discovery_generation
+                {
+                    return Ok(());
+                }
+            }
+            M::ProjectSessionPage {
+                catalog_identity, ..
+            }
+            | M::ProjectSessionPageFailed {
+                catalog_identity, ..
+            } => {
+                if catalog_identity != &identity {
+                    return Ok(());
+                }
+            }
+            _ => {}
+        }
+        if matches!(&parsed, M::SessionProjects { .. }) {
+            self.agent_state.project_discovery_retry_wake = None;
+        }
+        if matches!(&parsed, M::SessionProjectsFailed { .. }) {
+            // Error rows do not animate. Keep frames alive across the shared
+            // 750ms debounce so an idle canvas can actually perform its retry.
+            self.agent_state.project_discovery_retry_wake =
+                Some(web_time::Instant::now() + std::time::Duration::from_millis(850));
+        }
         self.note_agent_catalog_side_effects(&parsed);
 
         if !self.should_apply_agent_event(&parsed) {
@@ -164,7 +208,7 @@ impl ChromeBridge {
         &mut self,
         parsed: &neoism_protocol::agent::AgentServerMessage,
     ) {
-        use neoism_protocol::agent::{AgentClientMessage, AgentServerMessage};
+        use neoism_protocol::agent::AgentServerMessage;
         if matches!(
             parsed,
             AgentServerMessage::ThreadUpdated { .. }
@@ -175,11 +219,7 @@ impl ChromeBridge {
                 | AgentServerMessage::SessionIdle { .. }
                 | AgentServerMessage::StreamingState { .. }
         ) {
-            self.send_agent_envelope(&AgentClientMessage::ListThreads {
-                directory: self.agent_state.default_directory.clone(),
-                limit: Some(50),
-                cursor: None,
-            });
+            self.refresh_agent_catalog();
         }
     }
 
@@ -371,7 +411,7 @@ impl ChromeBridge {
         let external = external_provider.is_some();
         self.send_agent_envelope(&AgentClientMessage::CreateThread {
             title: None,
-            directory: self.agent_state.default_directory.clone(),
+            directory: self.agent_directory(),
             agent: if external {
                 None
             } else {
@@ -1304,6 +1344,18 @@ impl ChromeBridge {
         self.send_agent_envelope(&envelope);
     }
 
+    /// Invalidate catalog rows when the transport's authorized endpoint changes,
+    /// retaining the independent declared-workspace catalog scope. The JS host
+    /// supplies endpoint identity separately from the execution directory.
+    pub fn agent_set_catalog_endpoint(&mut self, endpoint: String) {
+        self.agent_state.catalog_endpoint = endpoint.clone();
+        self.chrome.bind_conversation_dashboard_endpoint(&endpoint);
+        if let Some(pane) = self.chrome.agent_pane_mut() {
+            pane.set_catalog_endpoint(endpoint);
+        }
+        self.project_catalog_identity();
+    }
+
     /// Wake/attach to the daemon-backed agent-server without
     /// creating a new session. Mirrors desktop's agent-pane open:
     /// start/connect the server and load session/provider catalogs;
@@ -1324,13 +1376,8 @@ impl ChromeBridge {
         if let Some(pane) = self.chrome.agent_pane_mut() {
             pane.set_directory(self.agent_state.default_directory.clone());
             pane.set_local_presence_name(self.agent_state.local_presence_name.clone());
-            pane.side_panel_mut().mark_refresh_kicked();
         }
-        self.send_agent_envelope(&AgentClientMessage::ListThreads {
-            directory: self.agent_state.default_directory.clone(),
-            limit: Some(50),
-            cursor: None,
-        });
+        self.refresh_agent_catalog();
         self.send_agent_envelope(&AgentClientMessage::GetConfigDefaults {
             directory: self.agent_state.default_directory.clone(),
         });
@@ -1376,6 +1423,11 @@ impl ChromeBridge {
             .as_ref()
             .filter(|dir| !dir.trim().is_empty())
             .cloned();
+        if let Some(pane) = self.chrome.agent_pane_mut() {
+            // Reset the execution draft when activating a different blank tab;
+            // the host passes that tab's own directory, never a previous pane's.
+            pane.set_directory(self.agent_state.default_directory.clone());
+        }
     }
 
     /// Session currently displayed by the shared web agent pane. The JS tab
@@ -1442,6 +1494,116 @@ impl ChromeBridge {
     /// Variants the daemon-side has no native equivalent for yet
     /// are surfaced as pane system messages instead of being
     /// silently dropped.
+    pub(crate) fn project_catalog_identity(&mut self) -> String {
+        let scope = self
+            .chrome
+            .agent_pane()
+            .and_then(|pane| pane.side_panel().catalog_directory());
+        let fingerprint = serde_json::to_string(&(
+            &self.agent_state.catalog_endpoint,
+            self.workspace_root.to_string_lossy(),
+            scope,
+        ))
+        .unwrap_or_default();
+        if fingerprint != self.agent_state.catalog_fingerprint {
+            self.agent_state.catalog_fingerprint = fingerprint;
+            self.agent_state.catalog_epoch =
+                self.agent_state.catalog_epoch.wrapping_add(1);
+            self.agent_state.project_discovery_identity = None;
+        }
+        format!(
+            "{}:{}",
+            self.agent_state.catalog_epoch, self.agent_state.catalog_fingerprint
+        )
+    }
+
+    pub(crate) fn refresh_agent_catalog(&mut self) {
+        use neoism_protocol::agent::AgentClientMessage;
+        let directory = self
+            .chrome
+            .agent_pane()
+            .and_then(|pane| pane.side_panel().catalog_directory().map(str::to_owned));
+        if let Some(pane) = self.chrome.agent_pane_mut() {
+            if !pane.side_panel().project_pagination_enabled() {
+                pane.side_panel_mut().mark_refresh_kicked();
+            }
+        }
+        if directory.is_some() {
+            self.send_agent_envelope(&AgentClientMessage::ListThreads {
+                directory,
+                limit: Some(50),
+                cursor: None,
+            });
+        } else {
+            let catalog_identity = self.project_catalog_identity();
+            self.agent_state.project_discovery_generation = self
+                .agent_state
+                .project_discovery_generation
+                .wrapping_add(1);
+            let generation = self.agent_state.project_discovery_generation;
+            // Record attempted sends too: a disconnected transport must not spin
+            // a request per frame. The shared bounded retry policy governs errors.
+            self.agent_state.project_discovery_identity = Some(catalog_identity.clone());
+            self.agent_state.project_discovery_retry_wake =
+                Some(web_time::Instant::now() + std::time::Duration::from_millis(850));
+            if !self.send_agent_envelope(&AgentClientMessage::ListSessionProjects {
+                catalog_identity,
+                generation,
+            }) {
+                if let Some(pane) = self.chrome.agent_pane_mut() {
+                    if !pane.side_panel().project_pagination_enabled() {
+                        pane.side_panel_mut()
+                            .settle_session_page_error("not connected");
+                    }
+                }
+            }
+        }
+    }
+
+    pub(crate) fn pump_project_sessions(&mut self) {
+        use neoism_protocol::agent::AgentClientMessage;
+        let identity = self.project_catalog_identity();
+        let grouped = self
+            .chrome
+            .agent_pane()
+            .is_some_and(|pane| pane.side_panel().catalog_directory().is_none());
+        if !grouped {
+            return;
+        }
+        let refresh_due = self
+            .chrome
+            .agent_pane()
+            .is_some_and(|pane| pane.side_panel().should_refresh_sessions());
+        if project_discovery_request_due(
+            self.agent_state.project_discovery_identity.as_deref()
+                != Some(identity.as_str()),
+            refresh_due,
+        ) {
+            self.refresh_agent_catalog();
+        }
+        let requests = self
+            .chrome
+            .agent_pane_mut()
+            .map(|pane| pane.side_panel_mut().begin_project_session_requests())
+            .unwrap_or_default();
+        for (directory, cursor, generation) in requests {
+            if !self.send_agent_envelope(&AgentClientMessage::ListProjectSessions {
+                catalog_identity: identity.clone(),
+                directory: directory.clone(),
+                cursor,
+                generation,
+            }) {
+                if let Some(pane) = self.chrome.agent_pane_mut() {
+                    pane.side_panel_mut().settle_project_session_error(
+                        &directory,
+                        generation,
+                        "not connected".into(),
+                    );
+                }
+            }
+        }
+    }
+
     pub fn drain_agent_outbound(&mut self) -> u32 {
         use neoism_ui::panels::agent_pane::protocol_mapping::{
             map_outbound_command, AgentProtocolMapping, AgentProtocolMappingContext,
@@ -1460,6 +1622,10 @@ impl ChromeBridge {
         };
         let mut delivered = 0u32;
         for command in commands {
+            if matches!(&command, neoism_ui::panels::agent_pane::outbound::OutboundAgentCommand::RefreshSessions { directory: None, .. }) {
+                self.refresh_agent_catalog();
+                continue;
+            }
             let context = AgentProtocolMappingContext {
                 active_session_id: self.agent_state.session_id.clone(),
                 default_directory: self.agent_state.default_directory.clone(),
@@ -1563,7 +1729,7 @@ impl ChromeBridge {
         let dismiss_side_panel_after_navigation =
             self.chrome.agent_side_panel_takeover_active();
         let mut usage_menu_lines = None;
-        let mut open_attachment_browser = false;
+        let mut file_browser_action = None;
         // Match desktop z-order: the top bar and its open menu own their full
         // painted area before the agent timeline can begin a selection.
         let in_top_bar = self
@@ -1577,6 +1743,12 @@ impl ChromeBridge {
             let Some(pane) = self.chrome.agent_pane_mut() else {
                 break 'chain;
             };
+            // The shared footer owns its clipped directory hit rects on every host.
+            if let Some(action) = pane.composer_interactions.action_at(x, y) {
+                file_browser_action = Some(action);
+                result.handled = true;
+                break 'chain;
+            }
             // /sessions, /model, slash-command pickers overlay the
             // timeline — a row tap commits the picker first, and
             // ANY press inside the card is consumed so it can't
@@ -1655,7 +1827,8 @@ impl ChromeBridge {
                 break 'chain;
             }
             if pane.usage_chip_contains(x, y) {
-                open_attachment_browser = true;
+                pane.close_picker();
+                file_browser_action = Some(neoism_ui::panels::agent_pane::composer_interactions::ComposerAction::AttachPicture);
                 result.handled = true;
                 break 'chain;
             }
@@ -1711,12 +1884,16 @@ impl ChromeBridge {
         if let Some(lines) = usage_menu_lines {
             open_agent_usage_menu(self, lines, x, y);
         }
-        if open_attachment_browser {
-            self.chrome.open_file_browser(
-                neoism_ui::panels::file_browser::FileBrowserMode::AttachImage,
-                "",
-                Vec::new(),
-            );
+        if let Some(action) = file_browser_action {
+            use neoism_ui::panels::agent_pane::composer_interactions::ComposerAction;
+            let mode = match action {
+                ComposerAction::AttachPicture => "attach_image",
+                ComposerAction::ChangeDirectory => "choose_directory",
+            };
+            self.pending_agent_file_browser = Some(serde_json::json!({
+                "mode": mode,
+                "session_id": self.agent_session_id(),
+            }));
         }
         if result.handled {
             // Picker commits / permission replies queue outbound

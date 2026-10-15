@@ -148,7 +148,7 @@ impl CatalogProjection {
     pub(crate) async fn baseline(
         &self,
         state: &AppState,
-        directory: &str,
+        directory: Option<&str>,
         claims: Option<&crate::caller::CallerClaims>,
     ) -> anyhow::Result<Vec<neoism_agent_core::EventPayload>> {
         let mut events = Vec::new();
@@ -183,7 +183,7 @@ impl CatalogProjection {
         &mut self,
         state: &AppState,
         mut event: neoism_agent_core::EventPayload,
-        directory: &str,
+        directory: Option<&str>,
         claims: Option<&crate::caller::CallerClaims>,
     ) -> anyhow::Result<Vec<neoism_agent_core::EventPayload>> {
         use neoism_agent_core::event_type as et;
@@ -304,7 +304,7 @@ impl CatalogProjection {
 async fn authorized_root(
     state: &AppState,
     root: SessionInfo,
-    directory: &str,
+    directory: Option<&str>,
     claims: Option<&crate::caller::CallerClaims>,
 ) -> anyhow::Result<Option<SessionInfo>> {
     let mut hydrated = [root];
@@ -315,7 +315,7 @@ async fn authorized_root(
         .await?;
     let [root] = hydrated;
     Ok((root.parent_id.is_none()
-        && root.directory == directory
+        && directory.is_none_or(|directory| root.directory == directory)
         && crate::external_agent::catalog::is_neoism_owned_root(&root)
         && claims.is_none_or(|claims| crate::caller::allows_session(claims, &root)))
     .then_some(root))

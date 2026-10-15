@@ -225,11 +225,43 @@ impl NeoismAgentPane {
             .filter(|elapsed| *elapsed < 280.0)
     }
 
+    /// Hand-cursor policy for measured footer and picker-chip targets only.
+    /// The host retains modal/drag/selection precedence and text keeps its I-beam.
+    pub fn composer_pointer_at(&self, x: f32, y: f32) -> bool {
+        let overlay = self
+            .picker
+            .as_ref()
+            .and_then(|picker| picker.last_rect)
+            .or(self.prompt_picker_rect);
+        !overlay.is_some_and(|rect| interaction_policy::rect_contains(rect, x, y))
+            && self.composer_interactions.pointer_at(x, y)
+    }
+
+    /// Measured right-rail root/subagent rows, excluding pane-owned overlays.
+    /// Hosts retain modal, text-selection, drag and resize cursor precedence.
+    pub fn detail_sidebar_pointer_at(&self, x: f32, y: f32) -> bool {
+        let overlay = self
+            .picker
+            .as_ref()
+            .and_then(|picker| picker.last_rect)
+            .or(self.prompt_picker_rect);
+        self.has_conversation()
+            && !self.side_panel().user_hidden()
+            && !overlay.is_some_and(|rect| interaction_policy::rect_contains(rect, x, y))
+            && !self.composer_interactions.occlusion_rects.iter().any(|rect| {
+                interaction_policy::rect_contains(*rect, x, y)
+            })
+            && self.detail_panel().detail_clickable_at(x, y)
+    }
+
     pub fn clear_status_chip_rects(&mut self) {
+        self.composer_interactions.clear_status_chip_rects();
         self.status_chip_rects.clear();
     }
 
     pub fn register_status_chip_rect(&mut self, index: usize, rect: [f32; 4]) {
+        self.composer_interactions
+            .register_status_chip_rect(index, rect);
         if self.status_chip_rects.len() <= index {
             self.status_chip_rects.resize(index + 1, None);
         }
@@ -241,9 +273,7 @@ impl NeoismAgentPane {
     /// Which dropdown chip (0 = agent, 1 = model, 2 = thinking) sits
     /// under the pointer, if any.
     pub fn status_chip_at(&self, x: f32, y: f32) -> Option<usize> {
-        self.status_chip_rects.iter().position(|slot| {
-            slot.is_some_and(|rect| interaction_policy::rect_contains(rect, x, y))
-        })
+        self.composer_interactions.status_chip_at(x, y)
     }
 
     /// Open the "/" picker matching a clicked dropdown chip. Clicking
@@ -675,6 +705,60 @@ mod bash_diff_toggle_tests {
 #[cfg(test)]
 mod source_picker_tests {
     use super::*;
+    use crate::panels::agent_pane::state::side_panel::{NeoismAgentSessionEntry, SidePanelMode};
+
+    #[test]
+    fn detail_sidebar_pointer_requires_visible_rows_and_no_covering_overlay() {
+        let mut pane = NeoismAgentPane::default();
+        pane.messages.push(NeoismAgentMessage::user("hello"));
+        pane.detail_panel_mut().set_subagents(vec![
+            NeoismAgentSessionEntry::new("root", "main session", ""),
+            NeoismAgentSessionEntry::new("child", "child task", "")
+                .with_runtime_status(Some("running".into())),
+        ]);
+        pane.detail_panel_mut().set_mode(SidePanelMode::Subagents);
+        pane.detail_panel_mut().set_last_panel_rect([500., 0., 240., 500.]);
+        pane.detail_panel_mut().set_row_hit_rect_with_origin([510., 100., 220., 80.], 100., 40.);
+        assert!(pane.detail_sidebar_pointer_at(600., 110.));
+        assert!(pane.detail_sidebar_pointer_at(600., 150.));
+        assert!(!pane.detail_sidebar_pointer_at(600., 200.));
+        let selected = pane.detail_panel().selected_index();
+        pane.prompt_picker_rect = Some([500., 100., 240., 80.]);
+        assert!(!pane.detail_sidebar_pointer_at(600., 150.));
+        pane.prompt_picker_rect = None;
+        pane.composer_interactions.occlusion_rects.push([500., 100., 240., 80.]);
+        assert!(!pane.detail_sidebar_pointer_at(600., 150.));
+        pane.composer_interactions.occlusion_rects.clear();
+        pane.side_panel_mut().set_user_hidden(true);
+        assert!(!pane.detail_sidebar_pointer_at(600., 150.));
+        pane.side_panel_mut().set_user_hidden(false);
+        pane.detail_panel_mut().set_user_hidden(true);
+        assert!(!pane.detail_sidebar_pointer_at(600., 150.));
+        pane.detail_panel_mut().set_user_hidden(false);
+        assert_eq!(pane.detail_panel().selected_index(), selected);
+        assert!(pane.session_id.is_none());
+        pane.messages.clear();
+        assert!(!pane.detail_sidebar_pointer_at(600., 150.));
+    }
+
+
+    #[test]
+    fn composer_pointer_uses_registered_chips_and_respects_prompt_overlay() {
+        let mut pane = NeoismAgentPane::default();
+        for index in 0..3 {
+            pane.register_status_chip_rect(index, [index as f32 * 100.0, 100.0, 80.0, 24.0]);
+            assert!(pane.composer_pointer_at(index as f32 * 100.0 + 10.0, 110.0));
+        }
+        assert!(!pane.composer_pointer_at(10.0, 60.0));
+        pane.prompt_picker_rect = Some([0.0, 90.0, 80.0, 50.0]);
+        assert!(!pane.composer_pointer_at(10.0, 110.0));
+        pane.prompt_picker_rect = None;
+        pane.composer_interactions.occlusion_rects.push([100.0, 100.0, 80.0, 24.0]);
+        assert_eq!(pane.status_chip_at(110.0, 110.0), None);
+        assert!(!pane.composer_pointer_at(110.0, 110.0));
+        pane.clear_status_chip_rects();
+        assert!(!pane.composer_pointer_at(210.0, 110.0));
+    }
 
     #[test]
     fn blank_home_source_chip_is_disabled_and_secondary_chips_still_open() {

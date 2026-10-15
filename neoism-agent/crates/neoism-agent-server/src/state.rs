@@ -256,6 +256,8 @@ fn int(value: i64) -> SqlValue {
     SqlValue::Integer(value)
 }
 
+const NEOISM_ROOT_INDEX_CONDITION: &str = "((json_extract(i.summary_json, '$.externalAgent') IS NULL AND json_extract(i.summary_json, '$.extra.externalAgent') IS NULL) OR COALESCE(json_extract(i.summary_json, '$.externalAgent.historyState'), json_extract(i.summary_json, '$.extra.externalAgent.historyState')) = 'neoism_only')";
+
 fn session_list_index_statement(
     info: &SessionInfo,
 ) -> anyhow::Result<(String, Vec<SqlValue>)> {
@@ -2064,6 +2066,12 @@ impl SessionStore {
                 )
                 .await?;
         }
+        // Install after the summary-column migration for older databases. This
+        // partial index keeps global pin discovery proportional to pinned roots.
+        self.db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_session_list_pinned_roots_updated ON session_list_index(updated DESC, session_id DESC) WHERE parent_id IS NULL AND json_type(summary_json, '$.pinned') = 'true'",
+            Vec::new(),
+        ).await?;
         if !self.schema_migration_applied(4).await? {
             self.db
                 .execute_transaction(vec![
@@ -2824,8 +2832,22 @@ impl SessionStore {
         session_id: Option<&str>,
         limit: usize,
     ) -> anyhow::Result<Vec<SemanticSearchHit>> {
+        self.semantic_search_in_directory(scope, query_vector_json, model, session_id, None, limit)
+            .await
+    }
+
+    /// Apply exact project membership before ranking/limiting vector candidates.
+    pub(crate) async fn semantic_search_in_directory(
+        &self,
+        scope: TenantQueryScope<'_>,
+        query_vector_json: &str,
+        model: &str,
+        session_id: Option<&str>,
+        directory: Option<&str>,
+        limit: usize,
+    ) -> anyhow::Result<Vec<SemanticSearchHit>> {
         let limit = limit.clamp(1, 50) as i64;
-        let (sql, params) = match (scope, session_id) {
+        let (sql, mut params) = match (scope, session_id) {
             (TenantQueryScope::Tenant(tenant), Some(session)) => (
                 "SELECT e.session_id, e.message_id, m.message_json, \
                   vector_distance_cos(e.embedding, vector32(?)) AS distance \
@@ -2865,7 +2887,20 @@ impl SessionStore {
                 vec![text(query_vector_json), text(model), int(limit)],
             ),
         };
-        let rows = self.db.fetch_all(sql, params).await?;
+        // Directory is a selection constraint, not an authorization grant.
+        // Keep the tenant/session predicates and filter before the SQL LIMIT.
+        let sql = if let Some(directory) = directory {
+            params.insert(params.len() - 1, text(directory));
+            sql.replacen(
+                "ORDER BY",
+                "AND EXISTS (SELECT 1 FROM sessions s WHERE s.id = e.session_id \
+                 AND json_extract(s.info_json, '$.directory') = ?) ORDER BY",
+                1,
+            )
+        } else {
+            sql.to_string()
+        };
+        let rows = self.db.fetch_all(&sql, params).await?;
         let mut hits = Vec::new();
         for row in rows {
             let json = row.get_str("message_json")?;
@@ -3018,7 +3053,20 @@ impl SessionStore {
         session_id: Option<&str>,
         limit: usize,
     ) -> anyhow::Result<Vec<MessageSearchHit>> {
-        self.search_messages_like(scope, query, session_id, limit.clamp(1, 50))
+        self.search_messages_in_directory(scope, query, session_id, None, limit)
+            .await
+    }
+
+    /// Exact project selection is applied before the bounded candidate scan.
+    pub(crate) async fn search_messages_in_directory(
+        &self,
+        scope: TenantQueryScope<'_>,
+        query: &str,
+        session_id: Option<&str>,
+        directory: Option<&str>,
+        limit: usize,
+    ) -> anyhow::Result<Vec<MessageSearchHit>> {
+        self.search_messages_like(scope, query, session_id, directory, limit.clamp(1, 50))
             .await
     }
 
@@ -3031,6 +3079,7 @@ impl SessionStore {
         scope: TenantQueryScope<'_>,
         query: &str,
         session_id: Option<&str>,
+        directory: Option<&str>,
         limit: usize,
     ) -> anyhow::Result<Vec<MessageSearchHit>> {
         const SCAN_CAP: i64 = 500;
@@ -3039,7 +3088,7 @@ impl SessionStore {
             return Ok(Vec::new());
         };
         let pattern = format!("%{}%", escape_like(seed));
-        let (sql, params) = match (scope, session_id) {
+        let (sql, mut params) = match (scope, session_id) {
             (TenantQueryScope::Tenant(tenant), Some(session)) => (
                 "SELECT m.session_id, m.id, m.message_json FROM messages m \
                  WHERE m.message_json LIKE ? ESCAPE '\\' AND m.session_id = ? AND m.tenant_id = ? \
@@ -3053,19 +3102,30 @@ impl SessionStore {
                 vec![text(pattern), text(tenant), int(SCAN_CAP)],
             ),
             (TenantQueryScope::LocalAll, Some(session)) => (
-                "SELECT session_id, id, message_json FROM messages \
+                "SELECT m.session_id, m.id, m.message_json FROM messages m \
                  WHERE message_json LIKE ? ESCAPE '\\' AND session_id = ? \
                  ORDER BY created DESC LIMIT ?",
                 vec![text(pattern), text(session), int(SCAN_CAP)],
             ),
             (TenantQueryScope::LocalAll, None) => (
-                "SELECT session_id, id, message_json FROM messages \
+                "SELECT m.session_id, m.id, m.message_json FROM messages m \
                  WHERE message_json LIKE ? ESCAPE '\\' \
                  ORDER BY created DESC LIMIT ?",
                 vec![text(pattern), int(SCAN_CAP)],
             ),
         };
-        let rows = self.db.fetch_all(sql, params).await?;
+        let sql = if let Some(directory) = directory {
+            params.insert(params.len() - 1, text(directory));
+            sql.replacen(
+                "ORDER BY",
+                "AND EXISTS (SELECT 1 FROM sessions s WHERE s.id = m.session_id \
+                 AND json_extract(s.info_json, '$.directory') = ?) ORDER BY",
+                1,
+            )
+        } else {
+            sql.to_string()
+        };
+        let rows = self.db.fetch_all(&sql, params).await?;
         let mut hits = Vec::new();
         for row in rows {
             let json = row.get_str("message_json")?;
@@ -3154,6 +3214,8 @@ impl SessionStore {
     pub(crate) async fn list_root_sessions_page(
         &self,
         scope: TenantQueryScope<'_>,
+        exact_directory: bool,
+        exclude_pinned: bool,
         directory: Option<&str>,
         path: Option<&str>,
         start: Option<u64>,
@@ -3164,17 +3226,29 @@ impl SessionStore {
         let limit = limit.unwrap_or(50).clamp(1, 200);
         let mut clauses = vec![
             "i.parent_id IS NULL".to_string(),
-            "((json_extract(i.summary_json, '$.externalAgent') IS NULL AND json_extract(i.summary_json, '$.extra.externalAgent') IS NULL) OR COALESCE(json_extract(i.summary_json, '$.externalAgent.historyState'), json_extract(i.summary_json, '$.extra.externalAgent.historyState')) = 'neoism_only')".to_string(),
+            NEOISM_ROOT_INDEX_CONDITION.to_string(),
         ];
         let mut params = Vec::new();
         if let TenantQueryScope::Tenant(tenant) = scope {
             clauses.push("i.tenant_id = ?".to_string());
             params.push(text(tenant));
         }
+        if exclude_pinned {
+            // Match the global pin query exactly, including missing/false flags.
+            // Apply before LIMIT so globally displayed pins cannot starve a page.
+            clauses.push("json_type(i.summary_json, '$.pinned') IS NOT 'true'".to_string());
+        }
         if let Some(directory) = directory {
-            clauses.push("(i.directory = ? OR i.session_id IN (SELECT h.session_id FROM hosted_chat_sessions h JOIN hosted_chat_directories d ON d.workspace_id = h.workspace_id WHERE d.directory = ?))".to_string());
-            params.push(text(directory));
-            params.push(text(directory));
+            if exact_directory {
+                // Apply saved-project membership before ordering/LIMIT. Newer
+                // namespace-associated chats must not consume this project's page.
+                clauses.push("i.directory = ?".to_string());
+                params.push(text(directory));
+            } else {
+                clauses.push("(i.directory = ? OR i.session_id IN (SELECT h.session_id FROM hosted_chat_sessions h JOIN hosted_chat_directories d ON d.workspace_id = h.workspace_id WHERE d.directory = ?))".to_string());
+                params.push(text(directory));
+                params.push(text(directory));
+            }
         }
         if let Some(path) = path {
             clauses.push("i.path = ?".to_string());
@@ -3225,6 +3299,90 @@ impl SessionStore {
             }),
             items,
         })
+    }
+
+    /// Discover from compact root metadata, never session/history JSON. Authorization
+    /// must precede aggregation: even MAX(updated) can disclose a denied chat.
+    pub(crate) async fn session_projects(
+        &self,
+        scope: TenantQueryScope<'_>,
+        claims: Option<&crate::caller::CallerClaims>,
+    ) -> anyhow::Result<Vec<(String, u64)>> {
+        let mut params = Vec::new();
+        let tenant = if let TenantQueryScope::Tenant(tenant) = scope {
+            params.push(text(tenant));
+            " AND i.tenant_id = ?"
+        } else {
+            ""
+        };
+        // Without caller claims or hosting overlays there is nothing to hydrate
+        // or authorize per root. Aggregate in SQL instead of decoding every chat.
+        // Hosted associations can canonicalize the returned session directory;
+        // retain the root-list hydration path when any such overlays exist.
+        if claims.is_none()
+            && self.db.fetch_optional("SELECT session_id FROM hosted_chat_sessions LIMIT 1", Vec::new()).await?.is_none()
+        {
+            let rows = self.db.fetch_all(
+                &format!("SELECT i.directory, MAX(i.updated) AS updated FROM session_list_index i WHERE i.parent_id IS NULL AND {NEOISM_ROOT_INDEX_CONDITION}{tenant} AND (json_type(i.summary_json, '$.externalAgent') IS NULL OR json_extract(i.summary_json, '$.externalAgent.historyState') = 'neoism_only') GROUP BY i.directory ORDER BY updated DESC, i.directory ASC"),
+                params,
+            ).await?;
+            return rows.into_iter().map(|row| Ok((
+                row.get_str("directory")?, row.get_i64("updated")?.max(0) as u64,
+            ))).collect();
+        }
+        // No LIMIT: a crowded project must never starve an older project.
+        // Existing partial root indexes cover this scan; no messages are joined.
+        let rows = self.db.fetch_all(
+            &format!("SELECT i.session_id, i.directory, i.path, i.parent_id, i.title, i.updated, i.archived, i.tenant_id, i.workspace_id, i.summary_json FROM session_list_index i WHERE i.parent_id IS NULL AND {NEOISM_ROOT_INDEX_CONDITION}{tenant}"),
+            params,
+        ).await?;
+        let mut sessions = rows.iter().map(session_list_info_from_row)
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        self.hydrate_host_associations(&mut sessions).await?;
+        let mut directories = BTreeMap::<String, u64>::new();
+        for session in sessions {
+            if !crate::external_agent::catalog::is_neoism_owned_root(&session)
+                || claims.is_some_and(|claims| !crate::caller::allows_session(claims, &session))
+            {
+                continue;
+            }
+            // Only the directory returned on the saved session forms a group.
+            // Hosting namespace aliases can match a scoped list query, but are
+            // not saved directories and would create duplicate empty groups.
+            let updated = directories.entry(session.directory).or_default();
+            *updated = (*updated).max(session.time.updated);
+        }
+        let mut items: Vec<_> = directories.into_iter().collect();
+        items.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        Ok(items)
+    }
+
+    /// All pinned roots, independent of recent-page limits. Filter the compact
+    /// index in SQL so unpinned roots are never decoded or hydrated.
+    pub(crate) async fn pinned_root_sessions(
+        &self,
+        scope: TenantQueryScope<'_>,
+        claims: Option<&crate::caller::CallerClaims>,
+    ) -> anyhow::Result<Vec<SessionInfo>> {
+        let mut params = Vec::new();
+        let tenant = if let TenantQueryScope::Tenant(tenant) = scope {
+            params.push(text(tenant));
+            " AND i.tenant_id = ?"
+        } else {
+            ""
+        };
+        let rows = self.db.fetch_all(
+            &format!("SELECT i.session_id, i.directory, i.path, i.parent_id, i.title, i.updated, i.archived, i.tenant_id, i.workspace_id, i.summary_json FROM session_list_index i WHERE i.parent_id IS NULL AND json_type(i.summary_json, '$.pinned') = 'true' AND {NEOISM_ROOT_INDEX_CONDITION}{tenant} ORDER BY i.updated DESC, i.session_id DESC"),
+            params,
+        ).await?;
+        let mut sessions = rows.iter().map(session_list_info_from_row)
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        self.hydrate_host_associations(&mut sessions).await?;
+        sessions.retain(|session| {
+            crate::external_agent::catalog::is_neoism_owned_root(session)
+                && claims.is_none_or(|claims| crate::caller::allows_session(claims, session))
+        });
+        Ok(sessions)
     }
 
     pub(crate) async fn session_list_index_ready(&self) -> anyhow::Result<bool> {

@@ -268,8 +268,8 @@ impl Screen<'_> {
             );
     }
 
-    /// Re-point the workspace captured by Alt+D. Shell cwd remains local to
-    /// each terminal; this command changes the app's declared directory.
+    /// Explicit GUI rebase: update the declared root and queue a safe change
+    /// in the captured workspace's existing focused/primary backing shell.
     pub(crate) fn commit_palette_cd(&mut self, target: &str) -> bool {
         let parsed = match neoism_ui::panels::command_palette::parse_cd_operand(target) {
             Ok(parsed) => parsed,
@@ -293,16 +293,16 @@ impl Screen<'_> {
             return true;
         }
         if self.context_manager.current_workspace_is_remote_joined() {
-            let Some(workspace_id) = intent.target.workspace_id else {
+            let Some(_workspace_id) = intent.target.workspace_id else {
                 self.renderer
                     .command_palette
                     .set_cd_error("No active workspace");
                 return false;
             };
-            self.context_manager.set_daemon_workspace_root(
-                workspace_id,
-                PathBuf::from(intent.destination),
-            );
+            if let Err(error) = self.commit_workspace_directory(PathBuf::from(intent.destination)) {
+                self.renderer.command_palette.set_cd_error(error);
+                return false;
+            }
             self.renderer
                 .command_palette
                 .continue_workspace_directory_pending();
@@ -335,7 +335,10 @@ impl Screen<'_> {
                 .set_cd_error(format!("Not a directory: {}", path.display()));
             return false;
         }
-        self.set_active_workspace_root(path.clone(), true);
+        if let Err(error) = self.commit_workspace_directory(path.clone()) {
+            self.renderer.command_palette.set_cd_error(error);
+            return false;
+        }
         self.renderer
             .command_palette
             .continue_workspace_directory(path.to_string_lossy());

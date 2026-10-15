@@ -1593,6 +1593,9 @@ fn pty_request_target(
                 PtyFailureOperation::Input
             },
         ),
+        PtyClientMessage::ChangeTerminalDirectory { session_id, .. } => {
+            (Some(session_id.clone()), PtyFailureOperation::CommandInput)
+        }
         PtyClientMessage::Resize { session_id, .. } => {
             (Some(session_id.clone()), PtyFailureOperation::Resize)
         }
@@ -1779,7 +1782,7 @@ fn parse_server_frame(frame: Message) -> Result<Option<DaemonServerMessage>> {
                 message: parsed.message,
             }))
         }
-        "PtyCreated" | "PtyOutput" | "PtyClosed" | "SessionCwd" | "Error" => {
+        "PtyCreated" | "PtyOutput" | "PtyClosed" | "SessionCwd" | "TerminalDirectoryChanged" | "TerminalDirectoryChangeFailed" | "Error" => {
             let message: PtyServerMessage = serde_json::from_value(raw.clone())?;
             Ok(Some(DaemonServerMessage::Pty {
                 request_id: 0,

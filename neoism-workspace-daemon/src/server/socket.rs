@@ -714,6 +714,10 @@ pub(crate) async fn handle_socket(
         // Try each known client message shape. Variant names across pty /
         // files / git are disjoint, so the first successful parse wins.
         if let Ok(msg) = serde_json::from_str::<ClientMessage>(&text) {
+            if let Some(denial) = directory_permission_denial(&msg, &device, &workspace_manager) {
+                let _ = send_json(&mut sink, &denial).await;
+                continue;
+            }
             // PtyCreate is the privileged op; PtyInput/Resize/Close
             // operate on an already-created session implicitly authorized
             // at create time.
@@ -751,6 +755,10 @@ pub(crate) async fn handle_socket(
                     request_id,
                     message,
                 } => {
+                    if let Some(denial) = directory_permission_denial(&message, &device, &workspace_manager) {
+                        let _ = send_json(&mut sink, &ServiceServerMessage::PtyReply { request_id, message: denial }).await;
+                        continue;
+                    }
                     if matches!(&message, ClientMessage::CreatePty { .. }) {
                         if let Err(denial) =
                             check_permission(&device, Permission::PtyCreate)
@@ -1969,12 +1977,59 @@ pub(crate) async fn handle_socket(
     tracing::debug!("websocket connection closed");
 }
 
+fn directory_permission_denial(message: &ClientMessage, device: &Option<crate::auth::DeviceRecord>, manager: &WorkspaceManager) -> Option<ServerMessage> {
+    let ClientMessage::ChangeTerminalDirectory { session_id, request_id, .. } = message else { return None; };
+    // Same trusted local/token transport as Input, plus an explicit execution
+    // capability check for paired devices. An output subscription is not a grant.
+    if let Err(ServerMessage::Error { message }) = check_permission(device, Permission::PtyCreate) {
+        return Some(ServerMessage::TerminalDirectoryChangeFailed {
+            session_id: session_id.clone(), request_id: request_id.clone(), message,
+        });
+    }
+    if let Some(scope) = device.as_ref().and_then(|d| d.workspace_id.as_deref()) {
+        if !manager.workspace_sessions(scope).iter().any(|tab| manager.pty_session_for(&tab.id).as_ref() == Some(session_id)) {
+            return Some(ServerMessage::TerminalDirectoryChangeFailed {
+                session_id: session_id.clone(), request_id: request_id.clone(),
+                message: "Terminal is outside this device's authorized workspace scope".into(),
+            });
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod directory_authorization_tests {
+    use super::*;
+    #[test]
+    fn directory_write_capability_and_workspace_scope_are_correlated() {
+        let manager = WorkspaceManager::bootstrap();
+        let msg = ClientMessage::ChangeTerminalDirectory {
+            session_id: "unlinked-host-session".into(), request_id: "generation-b".into(), directory: "/tmp".into(),
+        };
+        assert!(directory_permission_denial(&msg, &None, &manager).is_none());
+        let mut device = crate::auth::DeviceRecord {
+            device_id: "reader".into(), device_label: "reader".into(), token_hash: String::new(),
+            created_at: 0, last_seen: 0, granted_permissions: [Permission::ReadFiles].into(), workspace_id: None,
+        };
+        assert!(matches!(directory_permission_denial(&msg, &Some(device.clone()), &manager),
+            Some(ServerMessage::TerminalDirectoryChangeFailed { session_id, request_id, .. })
+                if session_id == "unlinked-host-session" && request_id == "generation-b"));
+        device.granted_permissions.insert(Permission::PtyCreate);
+        assert!(directory_permission_denial(&msg, &Some(device.clone()), &manager).is_none());
+        device.workspace_id = Some("another-workspace".into());
+        assert!(matches!(directory_permission_denial(&msg, &Some(device), &manager),
+            Some(ServerMessage::TerminalDirectoryChangeFailed { message, .. }) if message.contains("scope")));
+    }
+}
+
 fn pty_client_session_id(message: &ClientMessage) -> Option<&str> {
     match message {
         ClientMessage::PtyInput { session_id, .. }
         | ClientMessage::Resize { session_id, .. }
         | ClientMessage::ClosePty { session_id }
         | ClientMessage::AttachPty { session_id, .. } => Some(session_id),
+        // Directory requests must not establish their own authorization/subscription.
+        ClientMessage::ChangeTerminalDirectory { .. } => None,
         ClientMessage::CreatePty { .. } => None,
     }
 }
@@ -1984,6 +2039,8 @@ fn pty_message_session_id(message: &ServerMessage) -> Option<&str> {
         ServerMessage::PtyCreated { session_id, .. }
         | ServerMessage::PtyOutput { session_id, .. }
         | ServerMessage::PtyClosed { session_id, .. }
+        | ServerMessage::TerminalDirectoryChanged { session_id, .. }
+        | ServerMessage::TerminalDirectoryChangeFailed { session_id, .. }
         | ServerMessage::SessionCwd { session_id, .. } => Some(session_id),
         ServerMessage::Ack | ServerMessage::Error { .. } => None,
     }

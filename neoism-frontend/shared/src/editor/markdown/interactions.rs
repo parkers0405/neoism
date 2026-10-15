@@ -208,15 +208,17 @@ impl MarkdownPane {
         changed
     }
 
-    pub fn handle_hovered(&self) -> bool {
-        self.scrollbar_hovered
-            || self.table_action_hovered
+    pub fn handle_hovered(&self, x: f32, y: f32) -> bool {
+        self.scrollbar_rect
+            .is_some_and(|scrollbar| markdown_scrollbar_hit(x, y, scrollbar.track_rect))
+            || self
+                .table_scrollbar_rects
+                .iter()
+                .any(|scrollbar| point_in_rect(x, y, scrollbar.thumb_rect))
             || (!self.read_only
-                && self.hovered_line.is_some_and(|line| {
-                    self.block_rects
-                        .iter()
-                        .find(|block| block.line == line)
-                        .is_some()
+                && self.block_rects.iter().any(|block| {
+                    point_in_rect(x, y, block.handle_rect)
+                        && !point_in_rect(x, y, block.convert_rect)
                 }))
     }
 

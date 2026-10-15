@@ -7,6 +7,9 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
+mod terminal_rebase;
+use terminal_rebase::PendingTerminalDirectory;
+
 #[derive(Clone, Debug)]
 struct Project {
     value: String,
@@ -25,6 +28,7 @@ pub(crate) struct ConversationWorkspaceState {
     refreshed: Option<Instant>,
     error: Option<String>,
     // An explicit picker change must not be undone by the unchanged first shell.
+    terminal_directories: HashMap<(String, String), PendingTerminalDirectory>,
     explicit_roots: HashMap<(String, String), ExplicitRoot>,
 }
 struct ExplicitRoot {
@@ -286,8 +290,10 @@ impl Screen<'_> {
             self.conversation_host_scope(),
             self.context_manager.current_workspace_tree_id(),
         );
-        self.conversation_workspaces
-            .retire_explicit_root_for_cwd(&key, cwd);
+        if !self.conversation_workspaces.terminal_directories.contains_key(&key) {
+            self.conversation_workspaces
+                .retire_explicit_root_for_cwd(&key, cwd);
+        }
     }
 
     pub(crate) fn conversation_explicit_root_for_cwd(
@@ -299,6 +305,9 @@ impl Screen<'_> {
             self.context_manager.current_workspace_tree_id(),
         );
         let explicit = self.conversation_workspaces.explicit_roots.get(&key)?;
+        if self.conversation_workspaces.terminal_directories.contains_key(&key) {
+            return Some(explicit.root.clone());
+        }
         retain_explicit_root(explicit, self.active_workspace_root.as_deref(), cwd)
             .then(|| explicit.root.clone())
     }
@@ -313,6 +322,19 @@ impl Screen<'_> {
             return Err("Project directory must be absolute".into());
         }
         self.capture_conversation_home_anchor();
+        let root = if self.context_manager.current_workspace_is_remote_joined() {
+            root
+        } else {
+            Self::normalize_workspace_dir(root).ok_or("Project directory is unavailable")?
+        };
+        if self.context_manager.current_workspace_is_remote_joined() {
+            let id = self.current_workspace_id().ok_or("No current workspace")?;
+            if !self.context_manager.may_publish_workspace(&id)
+                || self.context_manager.daemon_link_handle_and_runtime().is_none() {
+                return Err("Only the connected workspace owner may change its directory; no terminal request was sent".into());
+            }
+        }
+        self.queue_explicit_terminal_directory(root.clone())?;
         if self.context_manager.current_workspace_is_remote_joined() {
             let id = self.current_workspace_id().ok_or("No current workspace")?;
             self.context_manager.set_daemon_workspace_root(id, root);
@@ -340,6 +362,13 @@ impl Screen<'_> {
                     .explicit_roots
                     .insert(key, ExplicitRoot { root, previous_cwd });
             }
+        }
+        self.pump_explicit_terminal_directory();
+        if !self.conversation_workspaces.terminal_directories.is_empty() {
+            self.renderer.notifications.push(
+                "Terminal directory change queued. Commands for that terminal are blocked until its shell confirms the new directory; running jobs are untouched.",
+                neoism_ui::panels::notifications::NotificationLevel::Info,
+            );
         }
         self.mark_dirty();
         Ok(())

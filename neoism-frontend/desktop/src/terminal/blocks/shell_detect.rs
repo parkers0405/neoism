@@ -18,6 +18,16 @@ pub fn detect_foreground_shell(
     }
     let pgid = pgid as u32;
 
+    // Shell wrappers can change argv[0]/comm (for example a generated init
+    // script name). The executable identifies bash/zsh/fish reliably and must
+    // win over those cosmetic process labels.
+    if let Ok(executable) = std::fs::read_link(format!("/proc/{pgid}/exe")) {
+        let detected = TerminalShellKind::detect(&executable.to_string_lossy());
+        if detected != TerminalShellKind::Unknown {
+            return Some(detected);
+        }
+    }
+
     let comm = std::fs::read_to_string(format!("/proc/{pgid}/comm"))
         .map(|s| s.trim().to_string())
         .unwrap_or_default();

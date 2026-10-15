@@ -5351,6 +5351,22 @@ fn history_refresh_keeps_live_trace_anchored_to_its_turn() {
 }
 
 #[test]
+fn tool_hover_uses_only_current_click_targets_without_expanding() {
+    let mut pane = NeoismAgentPane::default();
+    assert!(!pane.tool_hit(30.0, 160.0));
+    pane.register_tool_hit_rect("tool-1".to_string(), [20.0, 150.0, 300.0, 30.0]);
+    pane.register_tool_hit_rect("tool-1:0".to_string(), [20.0, 200.0, 300.0, 25.0]);
+    assert!(pane.tool_hit(30.0, 160.0));
+    assert!(pane.tool_hit(30.0, 210.0));
+    assert!(!pane.tool_hit(30.0, 190.0));
+    assert!(!pane.tool_hit(0.0, 160.0));
+    assert!(pane.expanded_tool_ids.is_empty());
+    assert!(pane.tool_expand_anims.is_empty());
+    pane.clear_tool_hit_rects();
+    assert!(!pane.tool_hit(30.0, 160.0));
+}
+
+#[test]
 fn diff_file_toggle_does_not_move_or_reanchor_the_timeline() {
     let mut pane = NeoismAgentPane::default();
     pane.set_timeline_metrics([10.0, 100.0, 400.0, 300.0], 900.0, 300.0);

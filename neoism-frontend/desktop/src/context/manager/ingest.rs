@@ -603,6 +603,14 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             // falls back to it for remote panes, and returning `true`
             // requests the redraw whose `sync_workspace_root_from_active_pane`
             // re-roots the tree.
+            PtyServerMessage::TerminalDirectoryChanged { session_id, request_id, directory } => {
+                self.daemon.cache.terminal_directory_results.insert(request_id, (session_id, Ok(directory)));
+                true
+            }
+            PtyServerMessage::TerminalDirectoryChangeFailed { session_id, request_id, message } => {
+                self.daemon.cache.terminal_directory_results.insert(request_id, (session_id, Err(message)));
+                true
+            }
             PtyServerMessage::SessionCwd { session_id, cwd } => {
                 if cwd.starts_with('/') {
                     self.daemon

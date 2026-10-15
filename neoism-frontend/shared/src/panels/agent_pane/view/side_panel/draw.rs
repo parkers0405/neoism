@@ -55,6 +55,12 @@ fn project_label_opts(theme: &IdeTheme, scale: f32, clip: [f32; 4]) -> DrawOpts 
     }
 }
 
+fn conversation_row_columns(left: f32, width: f32, scale: f32) -> (f32, f32) {
+    let width = width.max(0.0);
+    let status_width = (18.0 * scale).min(width);
+    (width - status_width, left + width - status_width * 0.5)
+}
+
 const SCRAMBLE_MS: f32 = 320.0;
 const SCRAMBLE_GLYPHS: &[char] = &['#', '@', '%', '&', '*', '+', '?', '/', '~', '='];
 
@@ -732,11 +738,11 @@ pub(crate) fn render_sessions_list(
         ..DrawOpts::default()
     };
 
-    // Reserve only the activity mark plus a normal gap. The old 34px gutter
-    // left a large empty column on scaled displays.
-    let dot_gutter = 18.0 * s;
+    // Keep activity in a trailing slot; titles start at the normal left inset.
     let dot_diameter = 7.0 * s;
-    let title_x = text_x + dot_gutter;
+    let title_x = text_x;
+    let (title_budget, status_center_x) = conversation_row_columns(text_x, text_w, s);
+    let text_clip = [title_x, list_rect[1], title_budget, list_rect[3]];
 
     // Feed the measured monospace column budget back so excerpt chunks wrap
     // to this exact panel width; a change (resize) rebuilds the display list
@@ -748,7 +754,7 @@ pub(crate) fn render_sessions_list(
             ..DrawOpts::default()
         };
         let char_w = sugarloaf.text_mut().measure("M", &probe).max(1.0);
-        let excerpt_w = (text_w - dot_gutter - 10.0 * s).max(char_w);
+        let excerpt_w = (title_budget - 10.0 * s).max(char_w);
         pane.side_panel_mut()
             .set_result_wrap_columns((excerpt_w / char_w).floor() as usize);
     }
@@ -788,7 +794,7 @@ pub(crate) fn render_sessions_list(
                 });
                 let width_fraction = 0.46 + (seed % 5) as f32 * 0.05;
                 let bar_h = (FONT_SIZE * 0.72 * s).min(row_h);
-                let budget = (text_x + text_w - title_x).max(0.0);
+                let budget = title_budget;
                 let bar = [
                     title_x,
                     row_y + (row_h - bar_h) * 0.5,
@@ -873,7 +879,7 @@ pub(crate) fn render_sessions_list(
             } else {
                 &header_opts
             };
-            let indent = entry.depth as f32 * dot_gutter;
+            let indent = entry.depth as f32 * 18.0 * s;
             let label = truncate_sidebar_text(
                 &entry.title,
                 (text_w - indent).max(0.0),
@@ -941,7 +947,7 @@ pub(crate) fn render_sessions_list(
                 ..DrawOpts::default()
             };
             let excerpt_x = title_x + 10.0 * s;
-            let excerpt_w = text_w - dot_gutter - 10.0 * s;
+            let excerpt_w = title_budget - 10.0 * s;
             let label =
                 truncate_sidebar_text(&entry.title, excerpt_w, sugarloaf, &excerpt_opts);
             // Matched search terms render as bright segments over a soft
@@ -1040,7 +1046,7 @@ pub(crate) fn render_sessions_list(
             let spinner = 10.0 * s * hover_scale;
             let visible = draw_subagent_spinner(
                 sugarloaf,
-                text_x - (spinner - dot_diameter) * 0.5,
+                status_center_x - spinner * 0.5,
                 row_y + (row_h - spinner) * 0.5,
                 spinner,
                 rgb,
@@ -1056,7 +1062,7 @@ pub(crate) fn render_sessions_list(
             let dot_y = row_y + (row_h - scaled_dot) / 2.0;
             draw_status_dot_text(
                 sugarloaf,
-                text_x - (scaled_dot - dot_diameter) * 0.5,
+                status_center_x - scaled_dot * 0.5,
                 dot_y,
                 scaled_dot,
                 theme.u8(theme.green),
@@ -1075,11 +1081,10 @@ pub(crate) fn render_sessions_list(
             sugarloaf,
             source_icon,
             [title_x, row_y + 4.0 * s, icon_size, icon_size],
-            list_rect,
+            text_clip,
             occlusion_rects,
         );
 
-        let title_budget = (text_w - dot_gutter).max(0.0);
         let context = if entry.time_label.trim().is_empty() {
             relative_session_time(entry.updated_ms, now_ms)
         } else {
@@ -1088,7 +1093,7 @@ pub(crate) fn render_sessions_list(
         let identity_opts = DrawOpts {
             font_size: FONT_SIZE * s * 0.82,
             color: theme.u8_alpha(theme.fg, 0.72),
-            clip_rect: Some(list_rect),
+            clip_rect: Some(text_clip),
             ..DrawOpts::default()
         };
         let identity_x = title_x + icon_size + 6.0 * s;
@@ -1111,7 +1116,7 @@ pub(crate) fn render_sessions_list(
                     source_icon.display_name(),
                     &identity_opts,
                 );
-            let context_right = text_x + text_w;
+            let context_right = title_x + title_budget;
             let context_budget = (context_right - identity_end - 10.0 * s).max(0.0);
             let label =
                 truncate_sidebar_text(&context, context_budget, sugarloaf, &context_opts);
@@ -1280,9 +1285,28 @@ fn relative_session_time(updated_ms: u64, now_ms: u64) -> String {
 #[cfg(test)]
 mod row_time_tests {
     use super::{
-        project_label_opts, relative_session_time, running_square_visible, IdeTheme,
-        FONT_SIZE,
+        conversation_row_columns, project_label_opts, relative_session_time,
+        running_square_visible, IdeTheme, FONT_SIZE,
     };
+
+    #[test]
+    fn activity_slot_trails_the_text_column_at_each_scale() {
+        for scale in [1.0, 1.5, 2.0] {
+            let left = 16.0 * scale;
+            let width = 250.0 * scale;
+            let (text_width, center) = conversation_row_columns(left, width, scale);
+            assert_eq!(text_width, width - 18.0 * scale);
+            for diameter in [7.0 * scale, 10.0 * scale * 1.045] {
+                assert!(center - diameter * 0.5 > left + text_width);
+                assert!(center + diameter * 0.5 < left + width);
+            }
+        }
+        for width in [0.0, 4.0, 12.0] {
+            let (text_width, center) = conversation_row_columns(16.0, width, 2.0);
+            assert_eq!(text_width, 0.0);
+            assert!(center >= 16.0 && center <= 16.0 + width);
+        }
+    }
 
     #[test]
     fn project_and_page_labels_share_regular_body_typography() {

@@ -140,7 +140,9 @@ export interface ProtocolClientHandlers {
   onPtyOutput?: (sessionId: string, bytes: Uint8Array) => void;
   onPtyClosed?: (sessionId: string, exitCode: number | null) => void;
   /// Daemon-tracked live cwd of a PTY's foreground process. Pushed
-  /// whenever the shell `cd`s; clients re-root the tree/LSP off it.
+  /// whenever the shell `cd`s; this is terminal-local, never workspace intent.
+  onTerminalDirectoryChanged?: (sessionId: string, requestId: string, directory: string) => void;
+  onTerminalDirectoryChangeFailed?: (sessionId: string, requestId: string, message: string) => void;
   onSessionCwd?: (sessionId: string, cwd: string) => void;
   onServerError?: (message: string) => void;
   onProtocolError?: (message: string, raw: unknown) => void;
@@ -587,6 +589,10 @@ export class ProtocolClient {
     });
   }
 
+  changeTerminalDirectory(sessionId: string, directory: string, requestId: string): boolean {
+    return this.send({ ChangeTerminalDirectory: { session_id: sessionId, directory, request_id: requestId } });
+  }
+
   sendInput(sessionId: string, bytes: Uint8Array): boolean {
     return this.send(
       ClientMessage.ptyInput({
@@ -968,6 +974,8 @@ export class ProtocolClient {
       case "PtyCreated":
       case "PtyOutput":
       case "PtyClosed":
+      case "TerminalDirectoryChanged":
+      case "TerminalDirectoryChangeFailed":
       case "SessionCwd":
       case "Error":
       case "FilesReply":
@@ -1019,6 +1027,16 @@ export class ProtocolClient {
       const { session_id, exit_code } = msg.PtyClosed;
       this.ptyOutputCursors.delete(session_id);
       this.handlers.onPtyClosed?.(session_id, exit_code);
+      return;
+    }
+    if ("TerminalDirectoryChanged" in msg) {
+      const p = msg.TerminalDirectoryChanged;
+      this.handlers.onTerminalDirectoryChanged?.(p.session_id, p.request_id, p.directory);
+      return;
+    }
+    if ("TerminalDirectoryChangeFailed" in msg) {
+      const p = msg.TerminalDirectoryChangeFailed;
+      this.handlers.onTerminalDirectoryChangeFailed?.(p.session_id, p.request_id, p.message);
       return;
     }
     if (isSessionCwd(msg)) {

@@ -454,6 +454,9 @@ pub struct ContextManagerDaemonCache {
     /// this is how its cwd reaches the active-pane root resolution. Lets
     /// a remote `cd` move the tree the same way a local one does.
     pub remote_session_cwds: HashMap<String, String>,
+    /// Correlated, host-observed explicit directory-control results. Session
+    /// identity is retained so stale replies cannot release another pane's gate.
+    pub terminal_directory_results: HashMap<String, (String, Result<String, String>)>,
     /// 8A: daemon-backed panes by route — the feed pushes daemon
     /// `PtyOutput` into the pane's machine, the shared slot resolves
     /// the pane's input sink once `PtyCreated` names the session.

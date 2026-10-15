@@ -453,6 +453,10 @@ impl NeoismAgentPane {
         self.tool_expand_anims.values().any(|anim| anim.is_active())
     }
 
+    pub fn tool_hit(&self, x: f32, y: f32) -> bool {
+        interaction_policy::hit_rect_target(&self.tool_hit_rects, x, y).is_some()
+    }
+
     pub fn toggle_tool_at(&mut self, x: f32, y: f32) -> bool {
         let Some((id, rect)) =
             interaction_policy::hit_rect_target(&self.tool_hit_rects, x, y)

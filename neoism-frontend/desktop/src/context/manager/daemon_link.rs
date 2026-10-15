@@ -55,6 +55,7 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             self.ensure_daemon_sessions_for_all_routes();
             self.sync_daemon_workspaces();
         }
+        self.restore_daemon_workspace_selection();
         // Wave 6A: warm the tailnet peer cache at attach so the first
         // Workspaces-modal open already has discovery data to show.
         self.request_tailnet_peers();
@@ -214,6 +215,24 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         })?;
         let binding = self.adopted_workspaces.get(&grid.workspace_route_id()?)?;
         Some((&binding.endpoint, &binding.workspace_id))
+    }
+
+    /// Workspace ids can be advertised by independent ordinary/Fast hubs.
+    /// Reusing a grid by id alone silently steals its durable endpoint binding.
+    /// Only explicit SSH tunnel replacement may opt into cross-endpoint rebind.
+    pub fn grid_index_for_attached_daemon_workspace(&self, workspace_id: &str) -> Option<usize> {
+        self.contexts.iter().enumerate().find_map(|(index, grid)| {
+            if self.workspace_id_for_grid(grid, index) != workspace_id {
+                return None;
+            }
+            let binding = grid.workspace_route_id()
+                .and_then(|stable| self.adopted_workspaces.get(&stable));
+            let belongs = match binding {
+                Some(binding) => self.daemon_endpoint() == Some(binding.endpoint.as_str()),
+                None => !self.daemon.link_is_peer,
+            };
+            belongs.then_some(index)
+        })
     }
 
     /// Rebind an already-open adopted grid to the currently attached daemon.
@@ -655,18 +674,39 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         }
     }
 
+    /// Connection selection is distinct from publishing the owner's active
+    /// workspace. Guests need SubscribeWorkspace for presence/document events,
+    /// but must never send SwitchHostWorkspace.
+    pub(super) fn daemon_workspace_selection_messages(
+        &self,
+        workspace_id: String,
+    ) -> Vec<WorkspaceClientMessage> {
+        let publish = self.may_publish_workspace(&workspace_id);
+        let mut messages = vec![WorkspaceClientMessage::SubscribeWorkspace {
+            workspace_id: workspace_id.clone(),
+        }];
+        if publish {
+            messages.push(WorkspaceClientMessage::SwitchHostWorkspace { workspace_id });
+        }
+        messages
+    }
+
     pub fn switch_daemon_host_workspace(&self, workspace_id: String) {
-        // MULTI-USER GUARD: a guest inside a joined workspace must not
-        // flip the daemon's per-host active pointer — that pointer
-        // belongs to the workspace's OWNER, and flipping it yanks the
-        // owner's screen (and every other client) to whatever the
-        // guest just clicked. Positive-proof ownership: an UNKNOWN id
-        // right after a redial must not pass.
-        if !self.may_publish_workspace(&workspace_id) {
+        if let Some(link) = self.daemon.link.as_ref() {
+            for message in self.daemon_workspace_selection_messages(workspace_id) {
+                link.send(message);
+            }
+        }
+    }
+
+    /// Selection is connection-local daemon state and is lost on reconnect.
+    /// Never select an unrelated local/other-endpoint grid on a peer link.
+    pub(super) fn restore_daemon_workspace_selection(&self) {
+        if !self.current_workspace_uses_attached_daemon() {
             return;
         }
-        if let Some(link) = self.daemon.link.as_ref() {
-            link.send(WorkspaceClientMessage::SwitchHostWorkspace { workspace_id });
+        if let Some(workspace_id) = self.workspace_tree_id_for_index(self.current_index()) {
+            self.switch_daemon_host_workspace(workspace_id);
         }
     }
 
@@ -896,6 +936,13 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
     }
 
     #[allow(dead_code)]
+    pub(crate) fn take_terminal_directory_result(
+        &mut self,
+        request_id: &str,
+    ) -> Option<(String, Result<String, String>)> {
+        self.daemon.cache.terminal_directory_results.remove(request_id)
+    }
+
     pub fn daemon_cache(&self) -> &ContextManagerDaemonCache {
         &self.daemon.cache
     }

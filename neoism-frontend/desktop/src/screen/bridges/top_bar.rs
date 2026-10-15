@@ -255,6 +255,16 @@ impl Screen<'_> {
         true
     }
 
+    pub fn handle_top_chrome_hover(&mut self) -> (bool, bool) {
+        let top_changed = self.handle_top_bar_hover();
+        let (island_changed, over_island) = self.handle_island_hover();
+        let (tab_hit, tabs_changed) = self.handle_buffer_tabs_hover();
+        (
+            top_changed || island_changed || tabs_changed,
+            self.renderer.top_bar.pointer_hovered() || over_island || tab_hit.is_some(),
+        )
+    }
+
     pub fn start_web_frontend_server(&mut self) {
         if let Some(url) = daemon_web_ui_url() {
             self.renderer.notifications.push(

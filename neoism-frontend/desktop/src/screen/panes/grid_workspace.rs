@@ -301,9 +301,9 @@ impl Screen<'_> {
                 .map(Self::normalize_workspace_root);
         }
 
-        // Preserve a deliberate picker/project directory while the first shell
-        // still reports its pre-change cwd. A real subsequent shell cwd change
-        // resumes the existing cwd-follow behavior; no shell input is injected.
+        // Preserve the explicit picker/project root until its captured shell
+        // acknowledges the queued directory change. Only the explicit GUI helper
+        // queues shell execution; this ambient synchronization never writes input.
         let terminal_cwd = self.active_terminal_process_cwd().or_else(|| {
             current
                 .terminal
@@ -764,19 +764,15 @@ impl Screen<'_> {
         if self.renderer.conversations_visible {
             self.sync_file_tree_root_for_current_workspace();
         }
-        if self.renderer.file_tree.is_visible() {
-            if let Some(root) = self.active_workspace_root.clone() {
-                if self.renderer.file_tree.root() != Some(root.as_path()) {
-                    self.populate_file_tree_from_dir(&root);
-                } else {
-                    // Restored tree already shows the right root — no
-                    // repopulate (state preserved). But its remote
-                    // service handle may predate a daemon redial:
-                    // re-point it at the CURRENT link, and reconcile
-                    // the local fs watcher.
-                    self.sync_file_tree_remote_mode(&root);
-                    self.sync_file_tree_fs_watcher();
-                }
+        if let Some(root) = self.active_workspace_root.clone() {
+            if self.renderer.file_tree.is_visible()
+                && self.renderer.file_tree.root() != Some(root.as_path())
+            {
+                self.populate_file_tree_from_dir(&root);
+            } else {
+                // Rebind even hidden/cached chrome after a workspace switch or redial.
+                self.sync_file_tree_remote_mode(&root);
+                self.sync_file_tree_fs_watcher();
             }
         }
         if self.renderer.git_diff_panel.is_visible()

@@ -6,6 +6,7 @@ use super::*;
 
 impl Screen<'_> {
     pub(crate) fn snapshot_panels(&mut self, ctx: &mut FrameCtx) {
+        self.pump_explicit_terminal_directory();
         let window_id = ctx.window_id;
         // (Snapshot row painting moved into the per-panel GPU emission
         // loop below — snapshot rows now write into the same grid

@@ -692,32 +692,55 @@ impl TerminalInputBuffer {
         cwd: Option<&Path>,
         output_start_row: Option<usize>,
     ) -> String {
-        let shell_kind = self.shell_kind();
         let command =
             sanitize_history_entry(&sanitize_input_text(&std::mem::take(&mut self.text)));
         self.cursor = 0;
         self.remote_prompt_fallback_open = false;
         self.remote_blank_prompt_anchor = None;
         self.reset_transient_edit_state();
+        self.record_submitted_command(&command, cwd, output_start_row);
+        command
+    }
+
+    /// Record an app-owned command through the normal block/history lifecycle
+    /// without consuming or moving the user's unsent composer draft.
+    /// The caller must verify an idle shell before writing its payload.
+    pub fn record_control_command(
+        &mut self,
+        command: &str,
+        cwd: Option<&Path>,
+        output_start_row: Option<usize>,
+    ) {
+        self.remote_prompt_fallback_open = false;
+        self.remote_blank_prompt_anchor = None;
+        self.record_submitted_command(command, cwd, output_start_row);
+    }
+
+    fn record_submitted_command(
+        &mut self,
+        command: &str,
+        cwd: Option<&Path>,
+        output_start_row: Option<usize>,
+    ) {
+        let shell_kind = self.shell_kind();
         self.trigger_prompt_burst();
         if !command.trim().is_empty() {
-            if !shell_kind.is_clear_command(&command) {
+            if !shell_kind.is_clear_command(command) {
                 self.command_blocks.retain(|block| {
                     !(matches!(block.status, TerminalCommandBlockStatus::Finished { .. })
                         && shell_kind.is_clear_command(&block.command))
                 });
             }
-            self.push_history(command.clone());
+            self.push_history(command.to_owned());
             self.push_command_block(
-                command.clone(),
+                command.to_owned(),
                 cwd.map(display_path),
                 output_start_row,
             );
-            if shell_kind.is_clear_command(&command) {
+            if shell_kind.is_clear_command(command) {
                 self.clear_previous_blocks_for_active_command();
             }
         }
-        command
     }
 
     pub(crate) fn trigger_prompt_burst(&mut self) {

@@ -13,6 +13,18 @@ pub enum ClientMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         shell: Option<String>,
     },
+    /// Explicit user intent; never implied by workspace-root metadata.
+    /// The string request_id is independent of the service-envelope numeric id.
+    /// Reply on the requesting connection only, never via output broadcasts.
+    /// Unsupported/busy/unauthorized hosts must fail without writing PTY bytes;
+    /// generic Ack is not a cwd confirmation. An empty directory cancels the
+    /// exact request_id on the requesting connection; an already-dispatched cd
+    /// still reports its real cwd result before input may resume.
+    ChangeTerminalDirectory {
+        session_id: String,
+        directory: String,
+        request_id: String,
+    },
     PtyInput {
         session_id: String,
         bytes: Vec<u8>,
@@ -45,6 +57,17 @@ pub enum ServerMessage {
     /// operation. It keeps successful input/resize requests from lingering in
     /// a reconnect replay queue without inventing a fake output event.
     Ack,
+    /// Only emitted after host-observed cwd confirmation, never on write alone.
+    TerminalDirectoryChanged {
+        session_id: String,
+        request_id: String,
+        directory: String,
+    },
+    TerminalDirectoryChangeFailed {
+        session_id: String,
+        request_id: String,
+        message: String,
+    },
     PtyCreated {
         session_id: String,
         /// Actual spawned program, replayed on attach. Never infer from the client OS.
@@ -70,10 +93,9 @@ pub enum ServerMessage {
     /// Daemon-tracked working directory of a live PTY's foreground
     /// process group. Pushed unsolicited whenever the shell's cwd
     /// changes — the daemon polls `/proc/<pgrp>/cwd` (the same source the
-    /// desktop reads in-process). Clients re-root the file tree / LSP /
-    /// git off this so a `cd` in the active terminal moves the workspace
-    /// root, and switching workspaces re-roots to that workspace's
-    /// terminal cwd. Added after `PtyClosed`, so older clients that don't
+    /// desktop reads in-process). This updates only that terminal's observed
+    /// cwd/composer prefix; it must not publish or rebase the workspace root.
+    /// Added after `PtyClosed`, so older clients that don't
     /// know the variant simply ignore it.
     SessionCwd {
         session_id: String,

@@ -1814,6 +1814,15 @@ impl Screen<'_> {
         false
     }
 
+    pub fn neoism_agent_tool_hovered(&self) -> bool {
+        let (mx, my) = self.mouse_logical_for_hit_test();
+        self.context_manager
+            .current()
+            .neoism_agent
+            .as_ref()
+            .is_some_and(|agent| agent.tool_hit(mx, my))
+    }
+
     pub fn neoism_agent_wordmark_hovered(&self) -> bool {
         let scale = self.sugarloaf.scale_factor();
         let mx = self.mouse.x as f32 / scale;

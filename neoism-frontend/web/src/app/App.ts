@@ -375,6 +375,10 @@ export class App {
         if (!this.workspaceGateSatisfied) return;
         this.ptyService?.ingestClosed(sessionId, exitCode);
       },
+      onTerminalDirectoryChanged: (sessionId: string, requestId: string, directory: string) =>
+        this.terminalPanel?.terminalDirectoryChanged(sessionId, requestId, directory),
+      onTerminalDirectoryChangeFailed: (sessionId: string, requestId: string, message: string) =>
+        this.terminalPanel?.terminalDirectoryChangeFailed(sessionId, requestId, message),
       onSessionCwd: (sessionId: string, cwd: string) =>
         this.workspaceGateSatisfied && this.handleSessionCwd(sessionId, cwd),
       onServerError: (message: string) => {
@@ -725,9 +729,16 @@ export class App {
         this.switchToWorkspaceById(workspaceId),
       onWorkspaceRootRequested: (path, capturedWorkspaceId) => {
         const workspaceId = capturedWorkspaceId ?? this.activeHostWorkspaceId;
-        if (workspaceId) {
-          this.pendingWorkspaceRootId = workspaceId;
-          this.workspaceService?.setWorkspaceRoot(workspaceId, path);
+        const client = this.client;
+        const service = this.workspaceService;
+        const panel = this.terminalPanel;
+        if (workspaceId && service && panel) {
+          panel.requestTerminalDirectoryChange(path, workspaceId, (actualDirectory) => {
+            if (this.client !== client || this.workspaceService !== service
+              || this.terminalPanel !== panel || this.activeHostWorkspaceId !== workspaceId) return;
+            this.pendingWorkspaceRootId = workspaceId;
+            service.setWorkspaceRoot(workspaceId, actualDirectory);
+          });
         }
       },
       onWorkspaceIslandIntent: (intent) => this.handleWorkspaceIslandIntent(intent),

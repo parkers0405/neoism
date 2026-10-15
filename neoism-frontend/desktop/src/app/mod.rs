@@ -693,6 +693,8 @@ impl Application<'_> {
                 session.connection.token().map(str::to_string),
                 is_home,
             );
+            route.window.screen.refresh_selected_workspace_after_daemon_attach();
+            route.request_redraw();
         }
     }
 
@@ -7760,6 +7762,7 @@ impl Application<'_> {
         {
             return;
         }
+        route.window.screen.refresh_selected_workspace_after_daemon_attach();
         route.window.screen.request_markdown_crdt_resync();
         route.window.screen.request_code_crdt_resync();
         route.window.screen.sync_host_git();
@@ -7967,23 +7970,26 @@ impl Application<'_> {
         // old shared helper treated that singleton as the whole server and
         // silently deleted every other subscription, which later looked like
         // tabs disappearing when another shared workspace changed.
-        let authoritative_summaries = match &message {
-            WorkspaceServerMessage::HostWorkspaceTree { workspaces, .. }
-            | WorkspaceServerMessage::HostWorkspaceList { workspaces } => {
-                Some(workspaces.as_slice())
-            }
-            _ => None,
-        };
-        if let Some(summaries) = authoritative_summaries {
+        let inventory = Self::workspace_inventory_from_message(&message);
+        if let Some((summaries, complete)) = inventory {
             let subscription =
                 self.window_sessions.get(&source_window_id).map(|session| {
                     let server_id =
                         session.active_server_id.as_deref().unwrap_or("local");
-                    self.server_registry.prune_workspace_subscription(
-                        &session.profile_id,
-                        server_id,
-                        summaries.iter().map(|workspace| workspace.id.as_str()),
-                    )
+                    if complete {
+                        self.server_registry.prune_workspace_subscription(
+                            &session.profile_id,
+                            server_id,
+                            summaries.iter().map(|workspace| workspace.id.as_str()),
+                        )
+                    } else {
+                        // HostWorkspaceList is a scoped merge, not a deletion
+                        // authority for subscriptions on other hosts.
+                        Ok(self.server_registry.workspace_subscription(
+                            &session.profile_id,
+                            server_id,
+                        ))
+                    }
                 });
             if let Some(subscription) = subscription {
                 let subscription = match subscription {
@@ -8008,10 +8014,9 @@ impl Application<'_> {
                         )
                     }
                 };
-                let restored_any = !subscription.subscribed_workspace_ids.is_empty()
-                    || subscription.last_active_workspace_id.is_some();
+                let mut restored_any = false;
                 if let Some(route) = self.router.routes.get_mut(&source_window_id) {
-                    route.window.screen.restore_subscribed_daemon_workspaces(
+                    restored_any = route.window.screen.restore_subscribed_daemon_workspaces(
                         &subscription.subscribed_workspace_ids,
                         subscription.last_active_workspace_id.as_deref(),
                     );
@@ -8023,26 +8028,17 @@ impl Application<'_> {
                 // screen and file clicks reuse its editor. Adopt the most
                 // recent workspace from the arriving tree (the daemon
                 // sorts them most-recently-active first).
-                let needs_initial = self
-                    .window_sessions
-                    .get_mut(&source_window_id)
-                    .map(|session| {
-                        std::mem::take(&mut session.needs_initial_workspace_adopt)
-                    })
-                    .unwrap_or(false);
-                if needs_initial && !restored_any {
-                    if let Some(workspace_id) =
-                        summaries.first().map(|workspace| workspace.id.clone())
-                    {
-                        if let Some(route) = self.router.routes.get_mut(&source_window_id)
-                        {
-                            route
-                                .window
-                                .screen
-                                .open_or_adopt_daemon_workspace(workspace_id);
-                            route.request_redraw();
-                        }
-                    }
+                if let (Some(session), Some(route)) = (
+                    self.window_sessions.get_mut(&source_window_id),
+                    self.router.routes.get_mut(&source_window_id),
+                ) {
+                    Self::initialize_workspace_adoption(
+                        &mut session.needs_initial_workspace_adopt,
+                        restored_any,
+                        summaries,
+                        |workspace| route.window.screen.open_or_adopt_daemon_workspace(workspace.id.clone()),
+                    );
+                    route.request_redraw();
                 }
             }
         }
@@ -8062,19 +8058,18 @@ impl Application<'_> {
                 .iter()
                 .any(|workspace| workspace.id == workspace_id);
             if carried {
-                if let Some(session) = self.window_sessions.get_mut(&source_window_id) {
-                    session.pending_peer_adopt = None;
-                }
                 if let Some(route) = self.router.routes.get_mut(&source_window_id) {
                     tracing::info!(
                         target: "neoism::workspaces",
                         workspace_id = %workspace_id,
                         "peer workspace tree landed; adopting over the new daemon link"
                     );
-                    route
-                        .window
-                        .screen
-                        .open_or_adopt_daemon_workspace(workspace_id);
+                    if route.window.screen.open_or_adopt_daemon_workspace(workspace_id) {
+                        if let Some(session) = self.window_sessions.get_mut(&source_window_id) {
+                            session.pending_peer_adopt = None;
+                            session.needs_initial_workspace_adopt = false;
+                        }
+                    }
                     route.request_redraw();
                 }
             }
@@ -8692,6 +8687,34 @@ impl Application<'_> {
         }
     }
 
+    /// Only successful grid selection/adoption completes initialization. Empty
+    /// inventories and transient/capacity failures remain armed for a retry.
+    fn initialize_workspace_adoption(
+        needs_initial: &mut bool,
+        restored_any: bool,
+        summaries: &[WorkspaceSummary],
+        mut adopt: impl FnMut(&WorkspaceSummary) -> bool,
+    ) {
+        if restored_any || (*needs_initial && summaries.iter().any(&mut adopt)) {
+            *needs_initial = false;
+        }
+    }
+
+    /// Lists are scoped merges; only a full tree can prune saved subscriptions.
+    fn workspace_inventory_from_message(
+        message: &WorkspaceServerMessage,
+    ) -> Option<(&[WorkspaceSummary], bool)> {
+        match message {
+            WorkspaceServerMessage::HostWorkspaceTree { workspaces, .. } => {
+                Some((workspaces, true))
+            }
+            WorkspaceServerMessage::HostWorkspaceList { workspaces } => {
+                Some((workspaces, false))
+            }
+            _ => None,
+        }
+    }
+
     /// Workspace summaries carried by a tree / list / control-change message
     /// — the source of `running_on_host_id`. Mirrors the web
     /// `workspaceSummariesFromMessage`.
@@ -9086,6 +9109,57 @@ impl Application<'_> {
             None => ControlFlow::Wait,
         };
         event_loop.set_control_flow(control_flow);
+    }
+}
+
+#[cfg(test)]
+mod workspace_inventory_tests {
+    use super::*;
+
+    #[test]
+    fn initialization_retries_empty_and_failed_adoption_until_a_real_success() {
+        let mut needs_initial = true;
+        Application::initialize_workspace_adoption(&mut needs_initial, false, &[], |_| {
+            panic!("empty inventory cannot adopt")
+        });
+        assert!(needs_initial);
+        let summaries = vec![
+            serde_json::from_value(serde_json::json!({"id": "stale", "host_id": "peer", "title": "stale"})).unwrap(),
+            serde_json::from_value(serde_json::json!({"id": "live", "host_id": "peer", "title": "live"})).unwrap(),
+        ];
+        Application::initialize_workspace_adoption(&mut needs_initial, false, &summaries, |_| false);
+        assert!(needs_initial, "failed adoption is not completion");
+        let mut attempts = Vec::new();
+        Application::initialize_workspace_adoption(&mut needs_initial, false, &summaries, |workspace| {
+            attempts.push(workspace.id.clone());
+            workspace.id == "live"
+        });
+        assert_eq!(attempts, ["stale", "live"]);
+        assert!(!needs_initial);
+        Application::initialize_workspace_adoption(&mut needs_initial, false, &summaries, |_| {
+            panic!("completed initialization must not re-adopt")
+        });
+        needs_initial = true;
+        Application::initialize_workspace_adoption(&mut needs_initial, true, &summaries, |_| {
+            panic!("actual successful restoration needs no fallback")
+        });
+        assert!(!needs_initial);
+    }
+
+    #[test]
+    fn only_full_tree_can_prune_saved_subscriptions() {
+        let list = WorkspaceServerMessage::HostWorkspaceList { workspaces: vec![] };
+        let tree = WorkspaceServerMessage::HostWorkspaceTree {
+            hosts: vec![], workspaces: vec![], tabs: vec![],
+        };
+        assert_eq!(Application::workspace_inventory_from_message(&list), Some((&[][..], false)));
+        assert_eq!(Application::workspace_inventory_from_message(&tree), Some((&[][..], true)));
+        // A singleton control update isn't an inventory at all.
+        let workspace = serde_json::from_value(serde_json::json!({
+            "id": "one", "host_id": "peer", "title": "one", "last_active": 0
+        })).unwrap();
+        let change = WorkspaceServerMessage::WorkspaceControlChanged { workspace };
+        assert!(Application::workspace_inventory_from_message(&change).is_none());
     }
 }
 

@@ -207,6 +207,7 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         } else {
             self.rehydrate_remote_routes_for_generation(generation);
         }
+        self.restore_daemon_workspace_selection();
         if let Some(link) = self.daemon.link.as_ref() {
             link.send(WorkspaceClientMessage::RequestHostWorkspaceTree);
             link.send(WorkspaceClientMessage::RequestFullSnapshot {
@@ -825,10 +826,11 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
     /// 8C adopt: build a real top-level workspace grid out of a
     /// daemon-tree workspace's live terminal sessions. The FIRST
     /// session becomes the grid's root pane; the rest stack as
-    /// additional contexts in the same grid. Returns `false` (and
-    /// creates nothing) when the workspace has no live sessions to
-    /// attach or no usable daemon link exists — callers fall back to
-    /// the plain pointer switch.
+    /// additional contexts in the same grid. A root-only workspace with no
+    /// sessions, tabs, or layout is valid: guests get a remote channel and ask
+    /// the attached daemon for a fresh PTY without waiting for its reply.
+    /// Returns `false` when transport/capacity/context creation is unavailable;
+    /// a guest never substitutes an unowned local shell.
     ///
     /// `rich_text_id` is the pre-allocated sugarloaf slot for the root
     /// pane (mirrors `create_tab_inner`); stacked panes allocate their
@@ -838,6 +840,21 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         workspace_id: &str,
         rich_text_id: usize,
         sugarloaf: &mut Sugarloaf,
+        replace_index: Option<usize>,
+    ) -> bool {
+        self.adopt_daemon_workspace_with_renderer(
+            workspace_id, rich_text_id, Some(sugarloaf), replace_index,
+        )
+    }
+
+    /// Root-only adoption does not touch GPU text state. Keeping the renderer
+    /// optional lets headless callers exercise the real transport/grid commit;
+    /// replacement and stacked rich-text changes still require a renderer.
+    pub(super) fn adopt_daemon_workspace_with_renderer(
+        &mut self,
+        workspace_id: &str,
+        rich_text_id: usize,
+        mut sugarloaf: Option<&mut Sugarloaf>,
         replace_index: Option<usize>,
     ) -> bool {
         let workspace_owned_locally = self.workspace_owned_locally(workspace_id);
@@ -874,6 +891,9 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             Vec::new()
         };
         tabs.sort_by_key(|tab| std::cmp::Reverse(tab.active));
+        if sugarloaf.is_none() && (replace_index.is_some() || tabs.len() > 1) {
+            return false;
+        }
         if terminal_uses_remote_pty && self.prepared_remote_pty_for_adopt().is_none() {
             tracing::warn!(
                 target: "neoism::workspaces",
@@ -974,7 +994,9 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             if let Some(stable) = self.contexts[index].workspace_route_id() {
                 self.adopted_workspaces.remove(&stable);
             }
-            self.contexts[index].remove_all_rich_text(sugarloaf);
+            self.contexts[index].remove_all_rich_text(
+                sugarloaf.as_deref_mut().expect("replacement requires renderer"),
+            );
             self.contexts[index] = adopted_grid;
             // A custom title or terminal-derived title belongs to the local
             // workspace being replaced, not the SSH host.
@@ -1014,6 +1036,7 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             let Some(session_id) = tab.session_id.clone() else {
                 continue;
             };
+            let sugarloaf = sugarloaf.as_deref_mut().expect("stacked tabs require renderer");
             let stacked_rich_text_id = crate::context::next_rich_text_id();
             let _ = sugarloaf.text(Some(stacked_rich_text_id));
             let stacked_dimension = self.current_grid().grid_dimension();

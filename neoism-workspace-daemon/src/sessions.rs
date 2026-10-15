@@ -73,7 +73,12 @@ impl OutputBacklog {
     }
 }
 
+#[path = "directory_control.rs"]
+mod directory_control;
+use directory_control::DirectoryControl;
+
 struct SessionEntry {
+    control: Arc<Mutex<DirectoryControl>>,
     pty: Arc<Mutex<PtySession>>,
     backlog: Arc<Mutex<OutputBacklog>>,
     workspace_root: Option<String>,
@@ -278,6 +283,32 @@ impl SessionRegistry {
                 rows,
                 shell,
             } => self.create(cwd, cols, rows, shell, subscription),
+            ClientMessage::ChangeTerminalDirectory {
+                session_id,
+                directory,
+                request_id,
+            } => {
+                let Some(subscription) = subscription else {
+                    return vec![ServerMessage::TerminalDirectoryChangeFailed {
+                        session_id, request_id, message: "Directory control requires a captured client reply route".into(),
+                    }];
+                };
+                // Same authenticated PTY-write capability as Input; requiring an
+                // existing attach additionally captures this client's reply route.
+                let Some(entry) = self.inner.get(&session_id) else {
+                    return vec![ServerMessage::TerminalDirectoryChangeFailed {
+                        session_id, request_id, message: "Unknown host terminal session".into(),
+                    }];
+                };
+                if !subscription.subscriber.sessions.read().contains(&session_id) {
+                    return vec![ServerMessage::TerminalDirectoryChangeFailed {
+                        session_id, request_id, message: "Attach the authorized host terminal before directory control".into(),
+                    }];
+                }
+                let replies = entry.control.lock().request(session_id, request_id, directory,
+                    subscription.id, subscription.subscriber.tx.clone());
+                replies
+            }
             ClientMessage::PtyInput { session_id, bytes } => {
                 self.input(session_id, bytes)
             }
@@ -331,7 +362,22 @@ impl SessionRegistry {
         subscription: Option<&SessionOutputSubscription>,
     ) -> Vec<ServerMessage> {
         let (shell, args) = shell_for_create(explicit_shell);
+        // Recognize only wrappers installed by this spawn, never an arbitrary
+        // legacy/published PTY whose program happens to be named bash or zsh.
+        let integrated_program = match shell.as_deref().and_then(|s| Path::new(s).file_name()).and_then(|s| s.to_str()) {
+            Some("bash") if args.first().is_some_and(|s| s == "--rcfile") => shell.clone(),
+            Some("env") if args.first().is_some_and(|s| s.starts_with("ZDOTDIR=")) => args.get(1).cloned(),
+            _ => None,
+        };
+        let executable = integrated_program.and_then(|s| {
+            let program = if Path::new(&s).is_absolute() { s } else { command_in_path(&s)? };
+            fs::canonicalize(program).ok()
+        });
+        let control_token = executable.as_ref().map(|_| Uuid::new_v4().to_string());
+        let control = Arc::new(Mutex::new(DirectoryControl::new(control_token.clone(), executable)));
         let mut env: Vec<(String, String)> = std::env::vars().collect();
+        env.retain(|(key, _)| key != "NEOISM_DIRECTORY_CONTROL_TOKEN");
+        if let Some(token) = control_token { env.push(("NEOISM_DIRECTORY_CONTROL_TOKEN".into(), token)); }
         // Headless daemons (containers, systemd units) often run with no
         // TERM at all — child shells then break every curses program and
         // even `clear` ("TERM environment variable not set"). The client
@@ -370,6 +416,7 @@ impl SessionRegistry {
         let backlog = Arc::new(Mutex::new(OutputBacklog::default()));
         let workspace_root = Some(workspace_root_label());
         let entry = SessionEntry {
+            control: control.clone(),
             pty: Arc::new(Mutex::new(pty)),
             backlog: backlog.clone(),
             shell: actual_shell.clone(),
@@ -385,7 +432,7 @@ impl SessionRegistry {
         let id_for_task = session_id.clone();
         let registry = self.clone();
         tokio::task::spawn_blocking(move || {
-            reader_loop(id_for_task, pty_arc, backlog, registry);
+            reader_loop(id_for_task, pty_arc, backlog, registry, control);
         });
 
         // Creation belongs only to the requesting client. Broadcasting this
@@ -408,6 +455,11 @@ impl SessionRegistry {
             }];
         };
         let byte_count = bytes.len();
+        let mut control = entry.control.lock();
+        if control.blocks_input() {
+            return vec![ServerMessage::Error { message: "Terminal directory change pending; input paused until confirmation or cancellation".into() }];
+        }
+        control.input(&bytes);
         if let Err(err) = entry.pty.lock().write(&bytes) {
             tracing::warn!(%session_id, error = %err, "pty write failed");
             return vec![ServerMessage::Error {
@@ -703,20 +755,30 @@ __neoism_preexec() {
   case "$BASH_COMMAND" in
     __neoism_prompt_command*|PS1=*) return ;;
   esac
+  [ "${__neoism_command_started:-0}" = 1 ] && return
+  __neoism_command_started=1
   printf '\033]133;C\007'
+  printf '\033]777;neoism-control;%s;C\007' "${NEOISM_DIRECTORY_CONTROL_TOKEN:-}"
 }
 __neoism_prompt_command() {
   local __neoism_status=$?
   __neoism_in_prompt=1
-  if [ -n "${__neoism_saved_prompt_command:-}" ]; then
-    eval "$__neoism_saved_prompt_command"
-  fi
+  local __neoism_saved_command
+  for __neoism_saved_command in "${__neoism_saved_prompt_commands[@]}"; do
+    eval "$__neoism_saved_command"
+  done
   PS1="$__neoism_hidden_ps1"
-  __neoism_in_prompt=0
   printf '\033]7;file://%s%s\007' "${HOSTNAME:-localhost}" "$PWD"
   printf '\033]133;D;%d\007' "$__neoism_status"
+  printf '\033]777;neoism-control;%s;D\007' "${NEOISM_DIRECTORY_CONTROL_TOKEN:-}"
+  __neoism_command_started=0
+  printf '\033]777;neoism-control;%s;B\007' "${NEOISM_DIRECTORY_CONTROL_TOKEN:-}"
+  __neoism_in_prompt=0
 }
-__neoism_saved_prompt_command=${PROMPT_COMMAND:-}
+__neoism_saved_prompt_commands=("${PROMPT_COMMAND[@]}")
+# Replace the whole array, not only element zero: leftover title/zoxide hooks
+# would otherwise run AFTER our ready marker and produce a false preexec.
+unset PROMPT_COMMAND
 bind '"\C-p": kill-whole-line'
 PROMPT_COMMAND=__neoism_prompt_command
 PS1="$__neoism_hidden_ps1"
@@ -768,10 +830,12 @@ __neoism_precmd() {{
   local __neoism_status=$?
   printf '\033]7;file://%s%s\007' "$HOST" "$PWD"
   printf '\033]133;D;%d\007' "$__neoism_status"
+  printf '\033]777;neoism-control;%s;D\007' "${{NEOISM_DIRECTORY_CONTROL_TOKEN:-}}"
   # Emit prompt-ready from precmd as well as PROMPT. Frameworks such as
   # Starship replace PROMPT dynamically after this wrapper loads; keeping
   # A/B here preserves Neoism's composer lifecycle in that case.
   printf '\033]133;A\007\033]133;B\007'
+  printf '\033]777;neoism-control;%s;B\007' "${{NEOISM_DIRECTORY_CONTROL_TOKEN:-}}"
   # This hook is deliberately last. Prompt frameworks run before it and may
   # rebuild PROMPT/RPROMPT on every command; clear those values here so their
   # raw prompt (including command-duration timers) never paints behind the
@@ -781,6 +845,7 @@ __neoism_precmd() {{
 }}
 __neoism_preexec() {{
   printf '\033]133;C\007'
+  printf '\033]777;neoism-control;%s;C\007' "${{NEOISM_DIRECTORY_CONTROL_TOKEN:-}}"
 }}
 typeset -ga precmd_functions
 typeset -ga preexec_functions
@@ -812,6 +877,7 @@ fn reader_loop(
     pty: Arc<Mutex<PtySession>>,
     backlog: Arc<Mutex<OutputBacklog>>,
     registry: SessionRegistry,
+    control: Arc<Mutex<DirectoryControl>>,
 ) {
     let mut buf = vec![0u8; READ_BUFFER_SIZE];
     // Foreground-cwd tracking state. The fd/pid are stable for the
@@ -851,7 +917,14 @@ fn reader_loop(
                 }
             }
         }
-        let read_result = pty.lock().read(&mut buf);
+        let read_result = {
+            let mut state = control.lock();
+            let mut terminal = pty.lock();
+            let result = terminal.read(&mut buf);
+            if let Ok(n) = &result { if *n > 0 { state.output(&buf[..*n]); } }
+            state.tick(&mut terminal);
+            result
+        };
         match read_result {
             Ok(0) => {
                 let exited = pty.lock().exit_code();
@@ -896,6 +969,8 @@ fn server_message_session_id(message: &ServerMessage) -> Option<&str> {
         ServerMessage::PtyCreated { session_id, .. }
         | ServerMessage::PtyOutput { session_id, .. }
         | ServerMessage::PtyClosed { session_id, .. }
+        | ServerMessage::TerminalDirectoryChanged { session_id, .. }
+        | ServerMessage::TerminalDirectoryChangeFailed { session_id, .. }
         | ServerMessage::SessionCwd { session_id, .. } => Some(session_id),
         ServerMessage::Ack | ServerMessage::Error { .. } => None,
     }

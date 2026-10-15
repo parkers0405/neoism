@@ -21,6 +21,10 @@ server-transport-contract = []
 name = "server_transport_contract"
 path = "../server_transport_contract.rs"
 
+[[test]]
+name = "live_ordinary_diagnostic"
+path = "src/live_diagnostic.rs"
+
 [dependencies]
 neoism_desktop = { package = "neoism", path = "../..", default-features = false, features = ["x11"] }
 base64 = "0.22"

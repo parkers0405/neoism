@@ -2197,6 +2197,10 @@ export class TerminalPanel {
         void this.deliverNotification(title, body, level, adapter);
       },
       commandRun: (requestId, command) => {
+        if (this.directorySubmissionBlocked()) {
+          adapter.serviceReply?.(requestId, { ok: false, error: "Terminal directory change unresolved" });
+          return;
+        }
         if (!this.runChromeCommand(command, adapter)) {
           this.handleInputBytes(new TextEncoder().encode(`${command}\r`));
         }
@@ -3976,6 +3980,7 @@ export class TerminalPanel {
    *  file tree this is the only thing that re-lists notes. */
   /** The workspace the share QR should deep-link to. */
   setShareWorkspaceId(id: string | null): void {
+    if (id !== this.options.activeWorkspaceId) this.latestDirectoryRequests?.clear();
     this.options.activeWorkspaceId = id;
     this.syncAgentCatalogEndpoint();
     this.wasmAdapter?.setActiveWorkspaceId?.(id);
@@ -4017,18 +4022,72 @@ export class TerminalPanel {
     this.scheduleDraw();
   }
 
+  private latestDirectoryRequests = new Map<string, string>();
+  private directoryChanges = new Map<string, { requestId: string; workspaceId: string; client: ProtocolClient; generation: number; identity: string; root: string | null | undefined; cancelRequested?: boolean; commit: (directory: string) => void }>();
+
+  /** Explicit picker intent, captured before any asynchronous host reply. */
+  requestTerminalDirectoryChange(directory: string, workspaceId: string, commit: (directory: string) => void): void {
+    if (workspaceId !== this.options.activeWorkspaceId) return;
+    const sessionId = this.activePtySessionId()
+      ?? this.bufferTabs.find((tab) => tab.kind === "terminal" && !!tab.sessionId)?.sessionId;
+    if (!sessionId || !this.transportAvailable) {
+      if (this.wasmAdapter) this.notifyPaletteUnavailable("Directory change requires a connected host terminal", this.wasmAdapter);
+      return;
+    }
+    const requestId = crypto.randomUUID();
+    this.latestDirectoryRequests.set(workspaceId, requestId);
+    const client = this.options.client;
+    this.directoryChanges.set(sessionId, {
+      requestId, workspaceId, commit, client, generation: client.getGeneration(),
+      identity: client.agentCatalogIdentity(workspaceId), root: this.options.workspaceRoot,
+    });
+    if (this.wasmAdapter) this.notifyPaletteUnavailable("Waiting for host-confirmed terminal directory. Commands paused; Ctrl+C cancels without clearing your draft.", this.wasmAdapter);
+    if (!this.options.client.changeTerminalDirectory(sessionId, directory, requestId)) {
+      this.terminalDirectoryChangeFailed(sessionId, requestId, "Host disconnected; directory was not changed");
+    }
+  }
+
+  terminalDirectoryChanged(sessionId: string, requestId: string, directory: string): void {
+    const pending = this.directoryChanges.get(sessionId);
+    if (!pending || pending.requestId !== requestId) return;
+    // A reply must never focus or re-root a different workspace after a switch.
+    if (pending.workspaceId !== this.options.activeWorkspaceId
+      || pending.client !== this.options.client
+      || pending.generation !== pending.client.getGeneration()
+      || pending.identity !== pending.client.agentCatalogIdentity(pending.workspaceId)
+      || pending.root !== this.options.workspaceRoot
+      || (!pending.cancelRequested && this.latestDirectoryRequests.get(pending.workspaceId) !== requestId)) return;
+    this.directoryChanges.delete(sessionId);
+    this.setTerminalCwd(sessionId, directory);
+    if (!pending.cancelRequested) pending.commit(directory);
+    else if (this.wasmAdapter) this.notifyPaletteUnavailable("Host confirmed the already-dispatched directory change. Project selection cancelled; actual cwd updated and draft preserved.", this.wasmAdapter);
+  }
+
+  terminalDirectoryChangeFailed(sessionId: string, requestId: string, message: string): void {
+    const pending = this.directoryChanges.get(sessionId);
+    if (!pending || pending.requestId !== requestId || pending.workspaceId !== this.options.activeWorkspaceId
+      || pending.client !== this.options.client || pending.generation !== pending.client.getGeneration()
+      || pending.identity !== pending.client.agentCatalogIdentity(pending.workspaceId)
+      || pending.root !== this.options.workspaceRoot
+      || (!pending.cancelRequested && this.latestDirectoryRequests.get(pending.workspaceId) !== requestId)) return;
+    if (pending.cancelRequested) {
+      this.directoryChanges.delete(sessionId);
+      if (this.wasmAdapter) this.notifyPaletteUnavailable(`${message} Directory request cancelled; draft preserved.`, this.wasmAdapter);
+      return;
+    }
+    // Keep submission gated until explicit cancellation; never execute in old cwd.
+    if (this.wasmAdapter) this.notifyPaletteUnavailable(`${message} Commands paused; Ctrl+C cancels this directory request without clearing your draft.`, this.wasmAdapter);
+  }
+
+  private directorySubmissionBlocked(): boolean {
+    const sessionId = this.activePtySessionId() ?? this.options.sessionId;
+    return this.directoryChanges?.has(sessionId) ?? false;
+  }
+
   setTerminalCwd(sessionId: string, cwd: string): void {
     if (sessionId && cwd) {
       this.terminalSessionCwds.set(sessionId, cwd);
-      const firstTerminal = this.bufferTabs.find(
-        (tab) => tab.kind === "terminal" && !!tab.sessionId,
-      )?.sessionId ?? this.options.sessionId;
-      if (sessionId === firstTerminal && cwd !== this.options.workspaceRoot) {
-        this.options.onWorkspaceRootRequested?.(
-          cwd,
-          this.options.activeWorkspaceId ?? null,
-        );
-      }
+      // Shell-local cd stays local; only explicit picker intent re-roots.
       if (sessionId === this.activePtySessionId()) {
         this.wasmAdapter?.setActiveTerminalCwd?.(cwd);
         this.scheduleDraw();
@@ -4524,11 +4583,8 @@ export class TerminalPanel {
     this.pendingTerminalTabSpawns.push(pending);
     // New shells open IN the workspace directory (the anchor). The user
     // can `cd` anywhere afterward — that stays local to this shell.
-    const focusedSession = this.activePtySessionId();
     this.options.pty.spawn({
-      cwd: (focusedSession && this.terminalSessionCwds.get(focusedSession))
-        ?? this.options.workspaceRoot
-        ?? null,
+      cwd: this.options.workspaceRoot ?? null,
       cols: this.cols,
       rows: this.rows,
     });
@@ -8681,7 +8737,7 @@ export class TerminalPanel {
         const bytes = effect.bytes instanceof Uint8Array
           ? effect.bytes
           : Uint8Array.from(effect.bytes);
-        if (bytes.length > 0) {
+        if (bytes.length > 0 && !this.directoryChanges?.has(sourceSessionId)) {
           if (this.options.pty) this.options.pty.sendInput(sourceSessionId, bytes);
           else this.options.client.sendInput(sourceSessionId, bytes);
         }
@@ -8690,6 +8746,7 @@ export class TerminalPanel {
           (tab) => tab.kind === "terminal" && !!tab.sessionId,
         )?.sessionId ?? this.options.sessionId;
         if (sourceSessionId === firstTerminal) {
+          // Private OSC 777 is explicit app intent, unlike ambient SessionCwd.
           this.options.onWorkspaceRootRequested?.(
             effect.path,
             this.options.activeWorkspaceId ?? null,
@@ -11314,6 +11371,16 @@ export class TerminalPanel {
     // single source of truth so JS and Rust agree without an extra
     // cache.
     const surface = this.activeSurface();
+    if (surface === "terminal" && this.directorySubmissionBlocked() && bytes.length === 1 && bytes[0] === 3) {
+      const sessionId = this.activePtySessionId() ?? this.options.sessionId;
+      const pending = this.directoryChanges.get(sessionId);
+      if (pending) {
+        pending.cancelRequested = true;
+        this.options.client.changeTerminalDirectory(sessionId, "", pending.requestId);
+      }
+      if (this.wasmAdapter) this.notifyPaletteUnavailable("Cancelling directory request; waiting for the host before resuming commands. Draft preserved.", this.wasmAdapter);
+      return;
+    }
     if (surface === "agent" && this.routeInputBytesToAgent(bytes)) {
       return;
     }
@@ -11353,7 +11420,7 @@ export class TerminalPanel {
   /// falling back to the raw protocol client for back-compat with hosts
   /// that wired the panel up before the service existed.
   private sendPtyInput(bytes: Uint8Array): void {
-    if (!this.transportAvailable) return;
+    if (!this.transportAvailable || this.directorySubmissionBlocked()) return;
     const sessionId = this.activePtySessionId() ?? this.options.sessionId;
     if (this.options.pty) {
       this.options.pty.sendInput(sessionId, bytes);
@@ -11396,6 +11463,7 @@ export class TerminalPanel {
     const key = keyNameFromTerminalBytes(bytes);
     if (key) {
       if (key === "Enter") {
+        if (this.directorySubmissionBlocked()) return true;
         const command = adapter.terminalInput?.() ?? this.terminalInput;
         const payload = adapter.terminalSubmitPayload?.() ?? new Uint8Array();
         if (this.wasmAdapter?.terminalIsClearCommand?.(command) === true) {
@@ -11462,6 +11530,11 @@ export class TerminalPanel {
     const normalized = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
     const newline = normalized.search(/\n/);
     if (newline >= 0) {
+      if (this.directorySubmissionBlocked()) {
+        adapter.terminalInputInsert?.(normalized);
+        syncInput();
+        return true;
+      }
       const prefix = normalized.slice(0, newline);
       if (prefix) adapter.terminalInputInsert?.(prefix);
       const command = adapter.terminalInput?.() ?? this.terminalInput;

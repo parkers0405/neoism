@@ -866,6 +866,15 @@ impl Screen<'_> {
                     self.mark_dirty();
                     return true;
                 }
+                self.pump_explicit_terminal_directory();
+                if self.terminal_directory_submission_blocked() {
+                    self.renderer.notifications.push(
+                        "Waiting for this terminal to confirm the selected directory. Draft preserved; nothing was sent.",
+                        neoism_ui::panels::notifications::NotificationLevel::Warn,
+                    );
+                    self.mark_dirty();
+                    return true;
+                }
                 let rich_text_id = self.context_manager.current().rich_text_id;
                 let cwd = self.current_terminal_completion_cwd();
                 let output_start_row = {

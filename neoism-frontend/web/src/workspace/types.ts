@@ -47,6 +47,7 @@ export interface AttachPtyArgs {
 
 export type ClientMessage =
   | { CreatePty: CreatePtyArgs }
+  | { ChangeTerminalDirectory: { session_id: string; directory: string; request_id: string } }
   | { PtyInput: PtyInputArgs }
   | { Resize: ResizeArgs }
   | { ClosePty: ClosePtyArgs }
@@ -92,6 +93,8 @@ export type ServerMessage =
   | { PtyCreated: PtyCreatedArgs }
   | { PtyOutput: PtyOutputArgs }
   | { PtyClosed: PtyClosedArgs }
+  | { TerminalDirectoryChanged: { session_id: string; request_id: string; directory: string } }
+  | { TerminalDirectoryChangeFailed: { session_id: string; request_id: string; message: string } }
   | { SessionCwd: SessionCwdArgs }
   | { Error: ErrorArgs }
   | { FilesReply: FilesReplyEnvelope }

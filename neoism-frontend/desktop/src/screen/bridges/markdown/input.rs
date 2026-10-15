@@ -73,19 +73,43 @@ impl Screen<'_> {
         }
     }
 
+    pub fn markdown_pane_contains_mouse(&self) -> bool {
+        // Match render geometry so markdown cannot claim sidebar or sibling-pane cursors.
+        let grid = self.context_manager.current_grid();
+        let Some(item) = grid.current_item() else {
+            return false;
+        };
+        let scale = self.sugarloaf.scale_factor();
+        let [x, y] = self.markdown_mouse_logical();
+        let left = (grid.scaled_margin.left + item.layout_rect[0]) / scale;
+        let top = (grid.scaled_margin.top + item.layout_rect[1]) / scale;
+        x >= left
+            && x < left + item.layout_rect[2] / scale
+            && y >= top
+            && y < top + item.layout_rect[3] / scale
+    }
+
     pub fn handle_markdown_hover(&mut self) -> bool {
         let [x, y] = self.markdown_mouse_logical();
+        let in_pane = self.markdown_pane_contains_mouse();
         self.context_manager
             .current_mut()
             .active_markdown_mut()
-            .is_some_and(|markdown| markdown.hover_at(x, y))
+            .is_some_and(|markdown| {
+                if in_pane {
+                    markdown.hover_at(x, y)
+                } else {
+                    markdown.clear_hover()
+                }
+            })
     }
 
     pub fn markdown_handle_hovered(&self) -> bool {
+        let [x, y] = self.markdown_mouse_logical();
         self.context_manager
             .current()
             .active_markdown()
-            .is_some_and(|markdown| markdown.handle_hovered())
+            .is_some_and(|markdown| markdown.handle_hovered(x, y))
     }
 
     pub fn markdown_link_hovered(&self) -> bool {

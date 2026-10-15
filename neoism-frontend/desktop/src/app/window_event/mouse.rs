@@ -519,7 +519,12 @@ impl Application<'_> {
                 if button == MouseButton::Left && route.window.screen.has_island_drag() {
                     route.window.screen.handle_island_drag_release();
                     route.window.screen.mouse.chrome_gesture_owned = false;
-                    route.window.set_cursor(CursorIcon::Default);
+                    let (_, over_action) = route.window.screen.handle_top_chrome_hover();
+                    route.window.set_cursor(if over_action {
+                        CursorIcon::Pointer
+                    } else {
+                        CursorIcon::Default
+                    });
                     route.request_redraw();
                     return;
                 }
@@ -532,7 +537,12 @@ impl Application<'_> {
                 {
                     route.window.screen.handle_buffer_tabs_drag_release();
                     route.window.screen.mouse.chrome_gesture_owned = false;
-                    route.window.set_cursor(CursorIcon::Default);
+                    let (_, over_action) = route.window.screen.handle_top_chrome_hover();
+                    route.window.set_cursor(if over_action {
+                        CursorIcon::Pointer
+                    } else {
+                        CursorIcon::Default
+                    });
                     route.request_redraw();
                     return;
                 }
@@ -540,7 +550,12 @@ impl Application<'_> {
                 if button == MouseButton::Left
                     && std::mem::take(&mut route.window.screen.mouse.chrome_gesture_owned)
                 {
-                    route.window.set_cursor(CursorIcon::Default);
+                    let (_, over_action) = route.window.screen.handle_top_chrome_hover();
+                    route.window.set_cursor(if over_action {
+                        CursorIcon::Pointer
+                    } else {
+                        CursorIcon::Default
+                    });
                     route.request_redraw();
                     return;
                 }
@@ -681,6 +696,7 @@ impl Application<'_> {
                 {
                     route.window.set_cursor(
                         if route.window.screen.neoism_agent_wordmark_hovered()
+                            || route.window.screen.neoism_agent_tool_hovered()
                             || route.window.screen.neoism_agent_link_hovered()
                         {
                             CursorIcon::Pointer
@@ -1144,6 +1160,7 @@ impl Application<'_> {
             route.window.set_cursor(
                 if route.window.screen.neoism_agent_link_hovered()
                     || route.window.screen.neoism_agent_wordmark_hovered()
+                    || route.window.screen.neoism_agent_tool_hovered()
                 {
                     CursorIcon::Pointer
                 } else {
@@ -1156,6 +1173,7 @@ impl Application<'_> {
 
         if route.window.screen.neoism_agent_link_hovered()
             || route.window.screen.neoism_agent_wordmark_hovered()
+            || route.window.screen.neoism_agent_tool_hovered()
         {
             route.window.set_cursor(CursorIcon::Pointer);
             return;
@@ -1197,39 +1215,13 @@ impl Application<'_> {
             route.window.set_cursor(CursorIcon::Pointer);
             return;
         }
-        if route.window.screen.handle_top_bar_hover() {
-            // Hover state may have changed; redraw and let other
-            // hover handlers below still run (they early-return for
-            // their own region).
+        let (chrome_hover_changed, over_chrome_action) =
+            route.window.screen.handle_top_chrome_hover();
+        if chrome_hover_changed {
             route.request_redraw();
         }
-
-        // Top-level workspace (Island) strip hover — lights up the
-        // hovered workspace tab like a buffer tab. Sits above the
-        // buffer-tab strip, so it's checked first and short-circuits when
-        // the cursor is over a workspace tab.
-        let (island_hover_changed, over_island_tab) =
-            route.window.screen.handle_island_hover();
-        if island_hover_changed {
-            route.request_redraw();
-        }
-        if over_island_tab {
-            route.window.set_cursor(CursorIcon::Default);
-            return;
-        }
-
-        let (tab_hit, tab_hover_changed) = route.window.screen.handle_buffer_tabs_hover();
-        if tab_hover_changed {
-            route.request_redraw();
-        }
-        if let Some(hit) = tab_hit {
-            route.window.set_cursor(
-                if matches!(hit, neoism_ui::panels::buffer_tabs::TabHit::Close(_)) {
-                    CursorIcon::Pointer
-                } else {
-                    CursorIcon::Default
-                },
-            );
+        if over_chrome_action {
+            route.window.set_cursor(CursorIcon::Pointer);
             return;
         }
 
@@ -1272,19 +1264,21 @@ impl Application<'_> {
             if route.window.screen.handle_markdown_hover() {
                 route.request_redraw();
             }
-            route.window.set_cursor(
-                if route.window.screen.markdown_link_hovered()
-                    || route.window.screen.markdown_notebook_action_hovered()
-                    || route.window.screen.epub_page_turn_hovered()
-                {
-                    CursorIcon::Pointer
-                } else if route.window.screen.markdown_handle_hovered() {
-                    CursorIcon::Grab
-                } else {
-                    CursorIcon::Text
-                },
-            );
-            return;
+            if route.window.screen.markdown_pane_contains_mouse() {
+                route.window.set_cursor(
+                    if route.window.screen.markdown_link_hovered()
+                        || route.window.screen.markdown_notebook_action_hovered()
+                        || route.window.screen.epub_page_turn_hovered()
+                    {
+                        CursorIcon::Pointer
+                    } else if route.window.screen.markdown_handle_hovered() {
+                        CursorIcon::Grab
+                    } else {
+                        CursorIcon::Text
+                    },
+                );
+                return;
+            }
         }
 
         if route.window.screen.handle_minimap_drag_move() {

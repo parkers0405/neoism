@@ -710,6 +710,19 @@ impl ChromeTopBar {
         self.handle_pointer_move(x, y);
     }
 
+    pub fn pointer_hovered(&self) -> bool {
+        self.visible
+            && (self.hover_panel_btn
+                || self.hover_menu_btn
+                || self.hover_search_btn
+                || self.hover_notes_btn
+                || self.hover_conversations_btn
+                || self.hover_server_btn
+                || self.hover_right_btn
+                || self.hover_mobile_agent_panel_btn
+                || self.hover_menu_item.is_some())
+    }
+
     /// Public left-button-down entry point. Returns `true` when the
     /// click landed on the strip or on the open dropdown (and the
     /// caller should consider it consumed). The resulting
@@ -1581,6 +1594,44 @@ mod tests {
                 assert!((physical_edge - physical_edge.round()).abs() < 0.0001);
             }
         }
+    }
+
+    #[test]
+    fn pointer_hover_tracks_only_visible_clickable_controls() {
+        let mut bar = ChromeTopBar::new();
+        bar.set_right_button_visible(true);
+        bar.set_mobile_agent_panel_button_visible(true);
+        paint_strip(&mut bar, Rect::new(0.0, 0.0, 800.0, CHROME_TOPBAR_HEIGHT));
+        for rect in [
+            bar.menu_btn_rect,
+            bar.panel_btn_rect,
+            bar.notes_btn_rect,
+            bar.conversations_btn_rect,
+            bar.search_btn_rect,
+            bar.server_btn_rect,
+            bar.right_btn_rect,
+            bar.mobile_agent_panel_hit_rect,
+        ] {
+            bar.pointer_move(rect.x + rect.w * 0.5, rect.y + rect.h * 0.5);
+            assert!(bar.pointer_hovered());
+            assert!(
+                bar.take_action().is_none(),
+                "hover must not activate a control"
+            );
+        }
+        bar.pointer_move(400.0, CHROME_TOPBAR_HEIGHT * 0.5);
+        assert!(!bar.pointer_hovered());
+        bar.hover_peer = Some(0);
+        assert!(
+            !bar.pointer_hovered(),
+            "presence tooltips are not clickable"
+        );
+        bar.menu_open = true;
+        let row = bar.menu_item_rect(1);
+        bar.pointer_move(row.x + row.w * 0.5, row.y + row.h * 0.5);
+        assert!(bar.pointer_hovered());
+        bar.set_visible(false);
+        assert!(!bar.pointer_hovered());
     }
 
     #[test]

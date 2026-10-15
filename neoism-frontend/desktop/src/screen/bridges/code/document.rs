@@ -61,15 +61,9 @@ impl Screen<'_> {
     /// `request_remote_markdown_content`; the reply is applied in
     /// `apply_daemon_files_message`'s `FileContent` arm.
     fn request_remote_code_content(&mut self, path: &Path) {
-        let Some(remote) = self.renderer.file_tree.remote_files() else {
+        let Some(remote) = self.remote_editor_files(path) else {
             return;
         };
-        if neoism_protocol::host_path::HostPath::new(remote.root().to_string_lossy())
-            .relative(&path.to_string_lossy())
-            .is_none()
-        {
-            return;
-        }
         let needs_fetch = self
             .context_manager
             .code_pane_mut_by_path(path)
@@ -96,7 +90,8 @@ impl Screen<'_> {
         let source = neoism_ui::services::FileOpenSource::workspace(
             self.context_manager.current_workspace_is_remote_joined(),
         );
-        self.activate_code_path_with_source(path, source);
+        self.activate_code_path_with_source(path.clone(), source);
+        self.request_remote_code_content(&path);
     }
 
     fn activate_code_path_with_source(

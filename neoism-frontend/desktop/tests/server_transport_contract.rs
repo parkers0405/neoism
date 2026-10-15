@@ -438,3 +438,6 @@ fn contract_real_daemon_and_fast_ingress() {
         assert_ne!(offline.status(), DaemonClientStatus::Open);
     });
 }
+
+#[path = "support/document_sync_contract.rs"]
+mod document_sync_contract;

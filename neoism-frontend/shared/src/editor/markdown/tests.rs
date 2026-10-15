@@ -130,6 +130,39 @@ mod tests {
     }
 
     #[test]
+    fn prose_hover_does_not_claim_the_drag_handle_cursor() {
+        let mut pane = pane_for_test();
+        pane.lines = vec!["ordinary prose".to_string()];
+        pane.register_block_rect(
+            0,
+            [40.0, 20.0, 300.0, 30.0],
+            [10.0, 20.0, 24.0, 30.0],
+            40.0,
+            20.0,
+            0,
+            8.0,
+            20.0,
+            300.0,
+            None,
+        );
+        pane.block_rects[0].convert_rect = [22.0, 20.0, 12.0, 30.0];
+        pane.hover_at(50.0, 25.0);
+        assert_eq!(
+            pane.hovered_line,
+            Some(0),
+            "keep paragraph hover highlighting"
+        );
+        assert!(!pane.handle_hovered(50.0, 25.0));
+        assert!(pane.handle_hovered(15.0, 25.0));
+        assert!(!pane.handle_hovered(26.0, 25.0), "conversion is not a drag");
+        assert!(!pane.handle_hovered(0.0, 25.0));
+        assert!(pane.clear_hover());
+        assert_eq!(pane.hovered_line, None);
+        pane.read_only = true;
+        assert!(!pane.handle_hovered(15.0, 25.0));
+    }
+
+    #[test]
     fn read_only_reader_hides_edit_handles_and_source_reveal() {
         let mut pane = pane_for_test();
         pane.lines = vec!["# Chapter".to_string()];
@@ -148,7 +181,7 @@ mod tests {
             Some([50.0, 25.0]),
         );
         assert!(!active);
-        assert!(!pane.handle_hovered());
+        assert!(!pane.handle_hovered(50.0, 25.0));
         assert!(!pane.reveals_source_line(0));
         assert_eq!(pane.block_rects[0].handle_rect[2], 0.0);
     }

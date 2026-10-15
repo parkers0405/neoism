@@ -155,6 +155,7 @@ fn check_paths(value: &Value, root: &Path) -> Result<(), String> {
                     "path"
                         | "paths"
                         | "cwd"
+                        | "directory"
                         | "dir"
                         | "from"
                         | "to"
@@ -293,6 +294,23 @@ mod tests {
             assert!(filter_frame(&frame.to_string(), &root, "master").is_err());
         }
         assert_eq!(std::fs::read_to_string(secret).unwrap(), "untouched");
+    }
+
+    #[test]
+    fn terminal_directory_control_checks_host_scope_before_dispatch() {
+        let project = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let root = project.path().canonicalize().unwrap();
+        for directory in [outside.path().to_string_lossy().into_owned(), "../escape".into()] {
+            let frame = serde_json::json!({"Pty":{"request_id":9,"message":{"ChangeTerminalDirectory":{
+                "session_id":"host-pty", "request_id":"generation-b", "directory":directory
+            }}}});
+            assert!(filter_frame(&frame.to_string(), &root, "master").is_err());
+        }
+        let frame = serde_json::json!({"Pty":{"request_id":9,"message":{"ChangeTerminalDirectory":{
+            "session_id":"host-pty", "request_id":"generation-b", "directory":root
+        }}}});
+        assert!(filter_frame(&frame.to_string(), &root, "master").is_ok());
     }
 
     #[test]

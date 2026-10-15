@@ -1,29 +1,40 @@
 use super::*;
 
 impl Screen<'_> {
+    /// Retry activation skipped while this grid's owning endpoint was not yet
+    /// installed. Preserve the live tab snapshot before the canonical loader
+    /// reactivates its selected code/markdown buffer and refreshes hidden chrome.
+    pub(crate) fn refresh_selected_workspace_after_daemon_attach(&mut self) {
+        if self.context_manager.current_adopted_workspace_id().is_none()
+            || !self.context_manager.current_workspace_uses_attached_daemon()
+        {
+            return;
+        }
+        self.save_current_workspace_chrome();
+        self.load_current_workspace_chrome();
+        self.mark_dirty();
+    }
+
     pub(crate) fn restore_subscribed_daemon_workspaces(
         &mut self,
         workspace_ids: &[String],
         last_active_workspace_id: Option<&str>,
-    ) {
-        for workspace_id in workspace_ids {
-            if self
-                .pending_workspace_unsubscriptions
-                .contains(workspace_id)
-            {
-                continue;
-            }
-            self.open_or_adopt_daemon_workspace(workspace_id.clone());
-        }
-        if let Some(workspace_id) = last_active_workspace_id {
-            if !self
-                .pending_workspace_unsubscriptions
-                .iter()
-                .any(|pending| pending == workspace_id)
-            {
-                self.open_or_adopt_daemon_workspace(workspace_id.to_string());
-            }
-        }
+    ) -> bool {
+        restore_workspace_selection(
+            workspace_ids,
+            last_active_workspace_id,
+            |workspace_id| {
+                if self.pending_workspace_unsubscriptions.iter().any(|pending| pending == workspace_id)
+                    || !self.context_manager.daemon_host_workspaces().iter().any(|workspace| workspace.id == workspace_id)
+                {
+                    // A persisted id absent from this connection's cache is
+                    // not evidence of a restorable workspace. A scoped list
+                    // must not fabricate a rootless adopted grid for it.
+                    return false;
+                }
+                self.open_or_adopt_daemon_workspace(workspace_id.to_string())
+            },
+        )
     }
 
     pub fn open_path_in_editor(&mut self, path: std::path::PathBuf) {
@@ -379,7 +390,9 @@ impl Screen<'_> {
     /// of the daemon tree's live sessions — the same visible result as
     /// Ctrl+Shift+W, but attached to the existing shells — instead of
     /// only flipping the daemon's active-workspace pointer.
-    pub(crate) fn open_or_adopt_daemon_workspace(&mut self, workspace_id: String) {
+    /// Returns true only once a grid was selected or successfully adopted.
+    /// A queued peer redial or failed adoption must remain retryable.
+    pub(crate) fn open_or_adopt_daemon_workspace(&mut self, workspace_id: String) -> bool {
         let replacement_source = (self.pending_ssh_workspace_id.as_deref()
             == Some(workspace_id.as_str()))
         .then(|| self.pending_ssh_workspace_replacement.clone())
@@ -392,9 +405,13 @@ impl Screen<'_> {
                     == Some(source)
             })
         });
-        let matched_index = self
-            .context_manager
-            .grid_index_for_workspace_id(&workspace_id);
+        let matched_index = if self.pending_ssh_workspace_id.as_deref() == Some(workspace_id.as_str()) {
+            // A recreated SSH tunnel is an explicit endpoint migration. Ordinary
+            // server inventories must not migrate another hub's retained grid.
+            self.context_manager.grid_index_for_workspace_id(&workspace_id)
+        } else {
+            self.context_manager.grid_index_for_attached_daemon_workspace(&workspace_id)
+        };
         let current_index = self.context_manager.current_index();
         let owned = self.context_manager.workspace_owned_locally(&workspace_id);
         let is_peer = self.context_manager.daemon_link_is_peer();
@@ -421,7 +438,12 @@ impl Screen<'_> {
                 .current_adopted_workspace_id()
                 .as_deref()
                 == Some(workspace_id.as_str());
-            if index != current_index {
+            if index != current_index
+                && workspace_match_is_already_open(
+                    self.context_manager.workspace_is_adopted(&workspace_id),
+                    owned,
+                )
+            {
                 self.select_top_level_workspace_at(index);
                 if let Some(source) = replacement_source.as_deref() {
                     self.retire_replaced_workspace(source);
@@ -429,7 +451,7 @@ impl Screen<'_> {
                 }
                 self.context_manager
                     .switch_daemon_host_workspace(workspace_id);
-                return;
+                return true;
             } else if workspace_match_is_already_open(current_is_really_this, owned) {
                 // Returning HOME after leaving a guest workspace lands on an
                 // existing local grid whose synthetic id legitimately matches
@@ -449,7 +471,8 @@ impl Screen<'_> {
                 // workspace-owned Agent surfaces immediately, even while the
                 // Conversations catalog is hidden.
                 self.sync_agent_server_for_current_workspace();
-                return;
+                self.refresh_selected_workspace_after_daemon_attach();
+                return true;
             }
             // else: false-positive current-grid match — fall through to adopt.
             tracing::info!(
@@ -479,7 +502,7 @@ impl Screen<'_> {
             );
             self.pending_peer_workspace_join = Some((workspace_id, daemon_url));
             self.mark_dirty();
-            return;
+            return false;
         }
 
         // Geometry dance mirrors `create_tab_inner`: reserve the
@@ -536,7 +559,7 @@ impl Screen<'_> {
                     .switch_daemon_host_workspace(workspace_id);
             }
             self.mark_dirty();
-            return;
+            return false;
         }
 
         let new_index = self.context_manager.current_index();
@@ -597,6 +620,7 @@ impl Screen<'_> {
         self.context_manager
             .switch_daemon_host_workspace(workspace_id);
         self.mark_dirty();
+        true
     }
 
     fn discard_workspace_chrome(&mut self, workspace_id: &str) {
@@ -637,6 +661,24 @@ impl Screen<'_> {
     }
 }
 
+/// Restore every saved workspace, then reselect the last-active one. Persisted
+/// ids are only intentions: the caller reports whether each attempt really
+/// selected/adopted a grid (rather than failed or merely queued a redial).
+fn restore_workspace_selection(
+    workspace_ids: &[String],
+    last_active_workspace_id: Option<&str>,
+    mut open: impl FnMut(&str) -> bool,
+) -> bool {
+    let mut restored_any = false;
+    for workspace_id in workspace_ids {
+        restored_any |= open(workspace_id);
+    }
+    if let Some(workspace_id) = last_active_workspace_id {
+        restored_any |= open(workspace_id);
+    }
+    restored_any
+}
+
 fn workspace_match_is_already_open(
     current_is_adopted_workspace: bool,
     workspace_is_owned_locally: bool,
@@ -646,7 +688,32 @@ fn workspace_match_is_already_open(
 
 #[cfg(test)]
 mod workspace_match_tests {
-    use super::workspace_match_is_already_open;
+    use super::{restore_workspace_selection, workspace_match_is_already_open};
+
+    #[test]
+    fn restoration_requires_success_not_persisted_ids_and_retries_failures() {
+        let ids = vec!["stale".to_string(), "not-ready".to_string()];
+        let mut attempts = Vec::new();
+        assert!(!restore_workspace_selection(&ids, Some("stale"), |id| {
+            attempts.push(id.to_string());
+            false
+        }));
+        assert_eq!(attempts, ["stale", "not-ready", "stale"]);
+        // The next inventory can retry the exact same persisted intentions.
+        assert!(restore_workspace_selection(&ids, Some("stale"), |id| id == "not-ready"));
+        assert!(!restore_workspace_selection(&[], None, |_| panic!("empty inventory")));
+    }
+
+    #[test]
+    fn restoration_opens_all_subscriptions_before_selecting_last_active() {
+        let ids = vec!["a".to_string(), "b".to_string()];
+        let mut selected = Vec::new();
+        assert!(restore_workspace_selection(&ids, Some("a"), |id| {
+            selected.push(id.to_string());
+            true
+        }));
+        assert_eq!(selected, ["a", "b", "a"]);
+    }
 
     #[test]
     fn owned_home_workspace_reuses_existing_grid() {

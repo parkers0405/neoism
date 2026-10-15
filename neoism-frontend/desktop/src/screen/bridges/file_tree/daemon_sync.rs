@@ -9,6 +9,36 @@ fn host_join(root: &Path, relative: &str) -> PathBuf {
 }
 
 impl Screen<'_> {
+    /// Editor reads belong to the active workspace connection, not cached sidebar state.
+    pub(crate) fn remote_editor_files(
+        &self,
+        path: &Path,
+    ) -> Option<std::sync::Arc<dyn crate::editor::file_tree::state::RemoteFileSource>> {
+        let remote = if self.context_manager.current_workspace_is_remote_joined() {
+            if !self.context_manager.current_workspace_uses_attached_daemon() {
+                return None;
+            }
+            let root = self
+                .active_pane_workspace_root()
+                .or_else(|| self.active_workspace_root.clone())?;
+            let (handle, runtime) = self
+                .context_manager
+                .daemon_link_handle_and_runtime()?;
+            std::sync::Arc::new(crate::daemon_client::remote_files::RemoteFiles::new(
+                handle,
+                runtime,
+                root,
+                self.context_manager.event_proxy(),
+                self.context_manager.window_id(),
+            )) as std::sync::Arc<dyn crate::editor::file_tree::state::RemoteFileSource>
+        } else {
+            self.renderer.file_tree.remote_files()?
+        };
+        neoism_protocol::host_path::HostPath::new(remote.root().to_string_lossy())
+            .relative(&path.to_string_lossy())?;
+        Some(remote)
+    }
+
     /// Complete just the correlated read. Never turn failed/placeholder bytes
     /// into an authoritative CRDT seed, or discard an existing dirty buffer.
     pub(crate) fn fail_remote_editor_read(

@@ -2,6 +2,18 @@
 
 All notable user-facing changes to Neoism are documented here.
 
+## [0.7.126-nightly.20261015.2] - 2026-10-15
+
+### Directory control, remote hydration, and interaction fixes
+
+- Improves workspace restoration and remote attachment retries, distinguishes scoped inventories from authoritative trees, preserves endpoint ownership, and restores connection-local subscriptions without publishing a guest's workspace selection.
+- Hydrates remote code and Markdown documents through their owning workspace's live daemon connection, with activation/attachment refreshes and ordinary/Fast transport contract coverage.
+- Applies explicit project/directory selections to the existing focused or primary backing terminal, preserves composer drafts, defers busy-shell operations, and waits for host-observed cwd confirmation before submissions resume.
+- Adds correlated PTY directory-control requests with capability/session/scope checks and literal path handling. Remote live control currently supports integrated Linux bash/zsh only; unsupported shells/platforms fail closed.
+- Improves cursor ownership, Markdown handle hit-testing, pane containment, tool pointer feedback, and trailing conversation activity indicators.
+
+Native first/root-terminal directory following and split isolation are preserved. Browser ambient shell cwd updates do not automatically re-root the workspace; explicit directory selection uses the confirmed control flow. This is an opt-in nightly: use `neoism update --nightly`. Stable Latest remains v0.7.125, Fast Host is for trusted participants, and browser-engine workers remain unpackaged.
+
 ## [0.7.126-nightly.20261015.1] - 2026-10-15
 
 ### Project conversations and unified navigation

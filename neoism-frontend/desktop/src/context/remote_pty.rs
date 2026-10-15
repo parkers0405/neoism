@@ -65,6 +65,35 @@ pub struct RemotePtyBinding {
     pub shared: Arc<Mutex<RemoteRouteShared>>,
 }
 
+impl RemotePtyBinding {
+    /// Send semantic control through this route's OWN transport. Never use a
+    /// window-global link that may have switched to a different host.
+    pub(crate) fn request_directory_change(
+        &self,
+        expected_session: &str,
+        directory: String,
+        request_id: String,
+    ) -> Result<(), String> {
+        let transport = {
+            let shared = self.shared.lock().map_err(|_| "Terminal binding is unavailable")?;
+            if shared.failed || shared.awaiting_attach.is_some()
+                || shared.session_id.as_deref() != Some(expected_session) {
+                return Err("Terminal session changed or is reconnecting; directory change was not sent".into());
+            }
+            shared.transport.clone().ok_or("Terminal transport is unavailable")?
+        };
+        let message = PtyClientMessage::ChangeTerminalDirectory {
+            session_id: expected_session.to_owned(), directory, request_id,
+        };
+        transport.runtime.spawn(async move {
+            if let Err(error) = transport.handle.send_pty(message).await {
+                tracing::warn!(%error, "terminal directory control delivery failed");
+            }
+        });
+        Ok(())
+    }
+}
+
 /// Sink + shared slot handed to `create_context` so it can build the
 /// remote `PtySession` in place of a local spawn.
 pub struct PreparedRemotePty {

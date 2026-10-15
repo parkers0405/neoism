@@ -468,6 +468,22 @@ impl Screen<'_> {
     }
 
     pub(crate) fn sync_workspace_root_from_active_pane(&mut self) -> bool {
+        // Only a real root-terminal observation may retire a picker pin. Split
+        // helpers and joined host roots must not affect its lifetime.
+        if !self.context_manager.current_workspace_is_remote_joined()
+            && !self.context_manager.current().has_non_terminal_surface()
+            && self.context_manager.current_grid().root
+                == Some(self.context_manager.current_grid().current)
+        {
+            let cwd = self.active_terminal_process_cwd().or_else(|| {
+                self.context_manager
+                    .current()
+                    .terminal
+                    .try_lock_unfair()
+                    .and_then(|terminal| terminal.current_directory.clone())
+            });
+            self.retire_conversation_explicit_root_for_cwd(cwd.as_deref());
+        }
         self.active_pane_workspace_root()
             .map(|root| {
                 // Joined panes cannot publish ambient cwd changes as host roots.

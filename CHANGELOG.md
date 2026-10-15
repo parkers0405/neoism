@@ -2,6 +2,19 @@
 
 All notable user-facing changes to Neoism are documented here.
 
+## [0.7.126-nightly.20261015.1] - 2026-10-15
+
+### Project conversations and unified navigation
+
+- Adds project-grouped conversation navigation, global pins, activity ordering, folder collapse/expand, and independent paginated chat lists with retry and stale-request invalidation.
+- Adds a shared conversation navigator with project, title, and message search, endpoint-aware opens, and saved-project discovery across desktop and browser hosts.
+- Unifies directory and image browsing for workspace selection, Agent execution-directory changes, and attachments, including daemon-backed joined/web browsing and host-scoped recents.
+- Improves composer hit targets, cursor behavior, occlusion handling, and blank-draft directory selection without creating a session.
+- Adds shared vector wordmark animations and carries font-license files into source packaging.
+- Includes the branch checkpoint's Agent submission/activity, provider onboarding, React composer, and file-tree dragging fixes. Preserves first-terminal shell directory following, explicit picker selections, and split-terminal isolation.
+
+This is a real opt-in nightly release. Use `neoism update --nightly`; stable Latest remains v0.7.125. Fast Host is for trusted participants, not a sandbox. Browser-engine workers remain separate experimental components and are not packaged.
+
 ## [0.7.126-nightly.20261014.1] - 2026-10-14
 
 ### Hosted conversation access and connection startup

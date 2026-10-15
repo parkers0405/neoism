@@ -19015,6 +19015,18 @@
             }
           },
           {
+            "in": "query",
+            "name": "scope",
+            "required": false,
+            "schema": {
+              "description": "All authorized projects on this endpoint; ignores directory narrowing, not authorization",
+              "enum": [
+                "all"
+              ],
+              "type": "string"
+            }
+          },
+          {
             "in": "header",
             "name": "X-Neoism-Directory",
             "required": false,
@@ -19070,6 +19082,92 @@
         ]
       }
     },
+    "/v2/session-projects": {
+      "get": {
+        "operationId": "v2.sessions.projects",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "items": {
+                      "items": {
+                        "additionalProperties": false,
+                        "properties": {
+                          "directory": {
+                            "type": "string"
+                          },
+                          "updatedMs": {
+                            "format": "int64",
+                            "minimum": 0,
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "directory",
+                          "updatedMs"
+                        ],
+                        "type": "object"
+                      },
+                      "type": "array"
+                    },
+                    "pinnedSessions": {
+                      "description": "Compact root metadata, as in /v2/sessions items; no messages or history",
+                      "items": {
+                        "$ref": "#/components/schemas/Session"
+                      },
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "items",
+                    "pinnedSessions"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "All authorized chat-bearing saved directories (empty strings preserved) plus all authorized eligible pinned roots globally, sorted updated DESC then id DESC, without a recent limit or history"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMediaType"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "501": {
+            "$ref": "#/components/responses/NotImplemented"
+          }
+        },
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
     "/v2/sessions": {
       "get": {
         "operationId": "v2.sessions.list",
@@ -19080,6 +19178,26 @@
             "required": false,
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "exact_directory",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Match only the saved session directory before pagination; exclude hosting namespace associations",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "exclude_pinned",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Exclude pinned roots before LIMIT and cursor pagination; scoped lists include pins by default",
+              "type": "boolean"
             }
           },
           {

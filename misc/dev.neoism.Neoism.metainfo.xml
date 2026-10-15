@@ -52,6 +52,12 @@
   </categories>
 
   <releases>
+    <release version="0.7.126-nightly.20261015.1" date="2026-10-15" type="development">
+      <description>
+        <p>Nightly project-grouped conversations, paginated navigation, unified directory picking, and shared desktop/web interaction improvements.</p>
+      </description>
+      <url>https://github.com/parkers0405/neoism/releases/tag/v0.7.126-nightly.20261015.1</url>
+    </release>
     <release version="0.7.126-nightly.20261014.1" date="2026-10-14" type="development">
       <description>
         <p>Nightly hosting eligibility, service startup, connection readiness, and server transport fixes with headless regression coverage.</p>

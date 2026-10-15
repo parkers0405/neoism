@@ -31,6 +31,26 @@ struct ExplicitRoot {
     root: PathBuf,
     previous_cwd: Option<PathBuf>,
 }
+impl ConversationWorkspaceState {
+    fn retire_explicit_root_for_cwd(
+        &mut self,
+        key: &(String, String),
+        cwd: Option<&Path>,
+    ) {
+        // Missing cwd is not evidence of shell movement. Once movement is
+        // observed, remove the pin rather than letting a later round trip revive it.
+        if let Some(cwd) = cwd {
+            if self
+                .explicit_roots
+                .get(key)
+                .is_some_and(|explicit| explicit.previous_cwd.as_deref() != Some(cwd))
+            {
+                self.explicit_roots.remove(key);
+            }
+        }
+    }
+}
+
 struct RegistryJob {
     scope: String,
     origin: String,
@@ -256,6 +276,18 @@ impl Screen<'_> {
                     .set_dashboard_directory(directory.clone());
             }
         }
+    }
+
+    pub(crate) fn retire_conversation_explicit_root_for_cwd(
+        &mut self,
+        cwd: Option<&Path>,
+    ) {
+        let key = (
+            self.conversation_host_scope(),
+            self.context_manager.current_workspace_tree_id(),
+        );
+        self.conversation_workspaces
+            .retire_explicit_root_for_cwd(&key, cwd);
     }
 
     pub(crate) fn conversation_explicit_root_for_cwd(
@@ -804,6 +836,74 @@ mod tests {
         anchors.insert("host-A", PathBuf::from("/"));
         assert!(anchors.get("host-B").is_none());
     }
+    #[test]
+    fn first_terminal_pin_roundtrip_and_repeat_picker_use_fresh_baseline() {
+        fn sync(
+            state: &mut ConversationWorkspaceState,
+            key: &(String, String),
+            active: &mut PathBuf,
+            cwd: Option<&str>,
+        ) {
+            let cwd = cwd.map(Path::new);
+            state.retire_explicit_root_for_cwd(key, cwd);
+            let pinned = state.explicit_roots.get(key).is_some_and(|pin| {
+                retain_explicit_root(pin, Some(active.as_path()), cwd)
+            });
+            if !pinned {
+                if let Some(cwd) = cwd {
+                    *active = cwd.to_path_buf();
+                }
+            }
+        }
+
+        let key = ("local-host".into(), "workspace".into());
+        let other_key = ("other-host".into(), "workspace".into());
+        let mut state = ConversationWorkspaceState::default();
+        let mut active = PathBuf::from("/B"); // A -> picker B; shell stays at A.
+        for key in [&key, &other_key] {
+            state.explicit_roots.insert(
+                key.clone(),
+                ExplicitRoot {
+                    root: "/B".into(),
+                    previous_cwd: Some("/A".into()),
+                },
+            );
+        }
+        for cwd in [Some("/A"), None, Some("/A")] {
+            sync(&mut state, &key, &mut active, cwd);
+            assert_eq!(active, Path::new("/B"));
+            assert!(state.explicit_roots.contains_key(&key));
+        }
+        // Exact regression: A -> picker B -> cd C -> cd B -> cd A.
+        for cwd in ["/C", "/B", "/A"] {
+            sync(&mut state, &key, &mut active, Some(cwd));
+            assert_eq!(active, Path::new(cwd));
+            assert!(!state.explicit_roots.contains_key(&key));
+            assert!(state.explicit_roots.contains_key(&other_key));
+        }
+
+        sync(&mut state, &key, &mut active, Some("/C"));
+        // A second picker records the NEW baseline, not the retired A baseline.
+        active = "/D".into();
+        state.explicit_roots.insert(
+            key.clone(),
+            ExplicitRoot {
+                root: active.clone(),
+                previous_cwd: Some("/C".into()),
+            },
+        );
+        for cwd in [None, Some("/C"), Some("/C")] {
+            sync(&mut state, &key, &mut active, cwd);
+            assert_eq!(active, Path::new("/D"));
+            assert!(state.explicit_roots.contains_key(&key));
+        }
+        for cwd in ["/A", "/D", "/C"] {
+            sync(&mut state, &key, &mut active, Some(cwd));
+            assert_eq!(active, Path::new(cwd));
+            assert!(!state.explicit_roots.contains_key(&key));
+        }
+    }
+
     #[test]
     fn stale_shell_cwd_does_not_undo_explicit_directory_change() {
         let pin = ExplicitRoot {

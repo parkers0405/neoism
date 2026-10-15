@@ -249,6 +249,7 @@ pub fn default_config_file_content() -> String {
     //     "theme": "tokyo_night",    // IDE theme: pastel_dark | nvchad_one | tokyo_night | catppuccin_mocha
     //     "palette": "lucario",      // terminal color file in themes/<name>.json
     //     "line-height": 1.2,
+    //     "splash-auto-animate": false, // one random logo animation per new terminal or agent tab; clicks always animate
     //     "mashup-pack": "lucid-blocks", // active Mash Up Pack under packs/<id>; picker captures/restores your prior theme/font
     //     // "mashup-baseline": { "theme": "tokyo_night", "font-family": null }, // Neoism-managed while a pack is active
     //     "fonts": { "family": "CascadiaCode", "size": 14.0, "weight": 400 },

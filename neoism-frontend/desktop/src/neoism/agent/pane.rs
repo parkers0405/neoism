@@ -566,6 +566,8 @@ pub struct NeoismWordmarkState {
     pub last_frame_at: Option<Instant>,
     pub rect: Option<[f32; 4]>,
     pub animation: neoism_ui::primitives::wordmark_animation::WordmarkAnimation,
+    pub startup_pending: bool,
+    pub auto_animate: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -887,6 +889,8 @@ impl Default for NeoismWordmarkState {
             last_frame_at: None,
             rect: None,
             animation: Default::default(),
+            startup_pending: true,
+            auto_animate: false,
         }
     }
 }

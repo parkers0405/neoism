@@ -1659,6 +1659,72 @@ fn failed_subagent_refresh_preserves_sidebar_and_footer_activity() {
 }
 
 #[test]
+fn catalog_picker_skeletons_keep_drafts_and_finish_on_success_or_error() {
+    for kind in [
+        NeoismAgentPickerKind::Model,
+        NeoismAgentPickerKind::Agent,
+        NeoismAgentPickerKind::Session,
+    ] {
+        for failed in [false, true] {
+            let mut pane = NeoismAgentPane::default();
+            pane.input = "unsent draft".into();
+            pane.picker = Some(NeoismAgentPicker::new_loading(kind, "Catalog"));
+            pane.picker.as_mut().unwrap().set_query("match".into());
+            assert!(pane.commit_picker());
+            assert_eq!(pane.input, "unsent draft");
+            let picker = pane.picker.as_ref().unwrap();
+            assert!(picker.loading);
+            assert!(picker.options().is_empty());
+            assert!(picker.selected_option().is_none());
+
+            let result = if failed {
+                Err("match failure".to_string())
+            } else {
+                Ok(vec![NeoismAgentPickerOption::new("match", "", "", "match")])
+            };
+            let update = match kind {
+                NeoismAgentPickerKind::Model => {
+                    NeoismAgentBackgroundUpdate::ModelOptionsRefreshed(
+                        result.map(|options| (options, None)),
+                    )
+                }
+                NeoismAgentPickerKind::Agent => {
+                    NeoismAgentBackgroundUpdate::AgentOptionsRefreshed(result)
+                }
+                NeoismAgentPickerKind::Session => {
+                    NeoismAgentBackgroundUpdate::SessionOptionsRefreshed {
+                        catalog_generation: pane.catalog_generation,
+                        result,
+                    }
+                }
+                _ => unreachable!(),
+            };
+            pane.background_sender().send(update).unwrap();
+            assert!(pane.drain_background_updates());
+            let picker = pane.picker.as_ref().unwrap();
+            assert!(!picker.loading);
+            assert_eq!(picker.query, "match");
+            assert!(!picker.options().is_empty());
+            assert_eq!(pane.input, "unsent draft");
+            assert!(pane.messages.is_empty());
+            assert!(pane.session_id.is_none());
+        }
+    }
+}
+
+#[test]
+fn thinking_picker_is_ready_immediately_with_current_reasoning_selected() {
+    let mut pane = NeoismAgentPane::default();
+    pane.model = "openai/gpt-5.6".into();
+    pane.thinking = Some("ultra".into());
+    pane.open_thinking_picker();
+    let picker = pane.picker.as_ref().unwrap();
+    assert_eq!(picker.kind, NeoismAgentPickerKind::Thinking);
+    assert!(!picker.loading);
+    assert_eq!(picker.selected_option().unwrap().value, "ultra");
+}
+
+#[test]
 fn background_results_wake_the_window_and_replace_restored_placeholder_titles() {
     let mut pane = NeoismAgentPane::default();
     pane.session_id = Some("parent".to_string());
@@ -2108,6 +2174,40 @@ fn retry_status_includes_a_compact_provider_reason() {
     );
 
     assert_eq!(pane.streaming_label(), "Retrying · Provider overloaded");
+}
+
+#[test]
+fn wordmark_startup_defaults_off_without_disabling_logo_clicks() {
+    use neoism_ui::panels::agent_pane::view::wordmark::WordmarkState;
+
+    let mut pane = NeoismAgentPane::default();
+    pane.wordmark.play_startup_animation();
+    assert!(!pane.wordmark.animation.is_active());
+    pane.set_splash_auto_animate(true);
+    pane.wordmark.play_startup_animation();
+    assert!(!pane.wordmark.animation.is_active());
+    pane.set_splash_auto_animate(false);
+    pane.wordmark.rect = Some([0.0, 0.0, 300.0, 50.0]);
+    assert!(pane.pop_wordmark_click(100.0, 25.0));
+    assert!(pane.wordmark.animation.is_active());
+}
+
+#[test]
+fn wordmark_startup_is_once_per_agent_tab() {
+    use neoism_ui::panels::agent_pane::view::wordmark::WordmarkState;
+
+    let mut pane = NeoismAgentPane::default();
+    pane.set_splash_auto_animate(true);
+    assert!(pane.wordmark.startup_pending);
+    assert!(!pane.wordmark.animation.is_active());
+    pane.wordmark.play_startup_animation();
+    assert!(!pane.wordmark.startup_pending);
+    assert_eq!(pane.animation_reason(), Some("wordmark"));
+    pane.wordmark.animation.cancel();
+    pane.wordmark.play_startup_animation();
+    assert!(!pane.wordmark.animation.is_active());
+    let new_tab = NeoismAgentPane::default();
+    assert!(new_tab.wordmark.startup_pending);
 }
 
 #[test]

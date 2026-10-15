@@ -67,7 +67,8 @@ cargo build --bin neoism
 
 ## Documentation
 
-Documentation ships inside Neoism. Open **Neoism Notes** with `Alt+N` for the editor, agent, daemon, multiplayer, extensions, configuration, keybindings, and troubleshooting.
+- [Guides](https://neoism.ai/api/docs/#guides): editor, agent, daemon, multiplayer, extensions, configuration, keybindings, and troubleshooting.
+- [API reference](https://neoism.ai/api/docs/#reference): Neoism's API documentation.
 
 Native UI, commands, keymaps, events, panels, agent surfaces, trees, tabs, status, and chrome are customizable from [`~/.config/neoism/init.lua`](docs/lua.md) without moving rendering out of Rust.
 

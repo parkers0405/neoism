@@ -661,6 +661,7 @@ impl Renderer {
         let mut overlay_active = false;
         if let Some(grid_context) = grid.contexts_mut().get_mut(&active_key) {
             let ctx = grid_context.context_mut();
+            self.splash_overlay.bind_context(ctx.route_id);
             let is_terminal_pane = !ctx.has_non_terminal_surface();
             let injection = ctx.splash_injection;
             let mut wants_visible = false;
@@ -778,6 +779,10 @@ impl Renderer {
                         self.chrome_scale,
                         wants_visible,
                         &splash_occlusion,
+                    );
+                    self.splash_overlay.play_wordmark_startup(
+                        &mut grid_context.context_mut().pending_splash_animation,
+                        self.splash_auto_animate,
                     );
                     overlay_active = true;
                 }

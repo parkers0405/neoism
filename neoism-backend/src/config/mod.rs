@@ -103,6 +103,9 @@ pub struct Appearance {
     pub fonts: SugarloafFonts,
     #[serde(rename = "line-height", default = "default_line_height")]
     pub line_height: f32,
+    /// Play one random splash animation when a new terminal or agent tab opens.
+    #[serde(default, rename = "splash-auto-animate")]
+    pub splash_auto_animate: bool,
     /// Active Mash Up Pack id (a directory under `packs/`). Its resolved
     /// theme/font are persisted above; shader, filters, and look slots are
     /// re-applied on startup. Empty/unset = no pack.
@@ -142,6 +145,7 @@ impl Default for Appearance {
             palette: String::default(),
             fonts: SugarloafFonts::default(),
             line_height: default_line_height(),
+            splash_auto_animate: false,
             mashup_pack: None,
             mashup_baseline: None,
             look: mashup::LookConfig::default(),
@@ -1484,6 +1488,25 @@ mod tests {
         assert_eq!(serialized["agent"]["details-panel-enabled"], false);
         assert!(serialized.get("conversations-panel-enabled").is_none());
         assert!(serialized.get("details-panel-enabled").is_none());
+    }
+
+    #[test]
+    fn splash_auto_animate_is_grouped_and_disabled_by_default() {
+        assert!(!parse("{}").appearance.splash_auto_animate);
+        assert!(!parse(r#"{"appearance":{}}"#).appearance.splash_auto_animate);
+        for enabled in [false, true] {
+            let text = format!(r#"{{"appearance":{{"splash-auto-animate":{enabled}}}}}"#);
+            let config = parse(&text);
+            assert_eq!(config.appearance.splash_auto_animate, enabled);
+            let serialized = serde_json::to_value(config).unwrap();
+            assert_eq!(serialized["appearance"]["splash-auto-animate"], enabled);
+            assert!(serialized.get("splash-auto-animate").is_none());
+            validate_config_document(&text).unwrap();
+        }
+        assert!(validate_config_document(
+            r#"{"appearance":{"splash-auto-animate":"on"}}"#
+        )
+        .is_err());
     }
 
     #[test]

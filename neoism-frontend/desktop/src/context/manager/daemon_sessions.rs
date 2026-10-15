@@ -1227,6 +1227,7 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             dimension,
             pending_terminal_resize: false,
             pending_splash: true,
+            pending_splash_animation: true,
             splash_dim_stable_frames: 0,
             splash_last_dim: (0, 0),
             splash_last_cursor_row: 0,

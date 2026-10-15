@@ -111,6 +111,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             conversations_panel_enabled: true,
             details_panel_enabled: true,
             streaming_text_animation: true,
+            splash_auto_animate: false,
             conversations_resize: None,
             pending_conversation_open: None,
             pending_conversation_new: None,
@@ -485,6 +486,10 @@ impl<A: Send + Copy + 'static> Chrome<A> {
 
     pub fn details_panel_enabled(&self) -> bool {
         self.details_panel_enabled
+    }
+
+    pub fn set_splash_auto_animate(&mut self, enabled: bool) {
+        self.splash_auto_animate = enabled;
     }
 
     pub fn set_streaming_text_animation(&mut self, enabled: bool) {

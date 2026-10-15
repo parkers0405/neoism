@@ -501,28 +501,28 @@ impl NeoismAgentPane {
         }
         self.status_chip_activated = Some((0, Instant::now()));
         self.close_connect();
-        self.picker = Some(NeoismAgentPicker::new(
+        self.picker = Some(NeoismAgentPicker::new_loading(
             NeoismAgentPickerKind::Agent,
             "Agents",
-            vec![NeoismAgentPickerOption::new(
-                "Loading agents...",
-                "",
-                "",
-                "",
-            )],
-            0,
         ));
         let server = self.server.clone();
         let directory = self.directory.clone();
         let tx = self.background_tx.clone();
-        std::thread::Builder::new()
+        if std::thread::Builder::new()
             .name("neoism-agent-options".into())
             .spawn(move || {
                 let _ = tx.send(NeoismAgentBackgroundUpdate::AgentOptionsRefreshed(
                     fetch_agent_options(&server, directory.as_deref()),
                 ));
             })
-            .ok();
+            .is_err()
+        {
+            let _ = self.background_tx.send(
+                NeoismAgentBackgroundUpdate::AgentOptionsRefreshed(Err(
+                    "Could not start agent refresh".into(),
+                )),
+            );
+        }
     }
 
     pub fn open_model_picker(&mut self) {
@@ -531,16 +531,9 @@ impl NeoismAgentPane {
         }
         self.status_chip_activated = Some((1, Instant::now()));
         self.close_connect();
-        self.picker = Some(NeoismAgentPicker::new(
+        self.picker = Some(NeoismAgentPicker::new_loading(
             NeoismAgentPickerKind::Model,
             "Select model",
-            vec![NeoismAgentPickerOption::new(
-                "Loading models...",
-                "",
-                "",
-                "",
-            )],
-            0,
         ));
         self.refresh_model_catalog();
     }
@@ -550,14 +543,21 @@ impl NeoismAgentPane {
         let server = self.server.clone();
         let directory = self.directory.clone();
         let tx = self.background_tx.clone();
-        std::thread::Builder::new()
+        if std::thread::Builder::new()
             .name("neoism-model-options".into())
             .spawn(move || {
                 let _ = tx.send(NeoismAgentBackgroundUpdate::ModelOptionsRefreshed(
                     fetch_model_options(&server, directory.as_deref()),
                 ));
             })
-            .ok();
+            .is_err()
+        {
+            let _ = self.background_tx.send(
+                NeoismAgentBackgroundUpdate::ModelOptionsRefreshed(Err(
+                    "Could not start model refresh".into(),
+                )),
+            );
+        }
     }
 
     pub(crate) fn model_picker_options(
@@ -701,23 +701,16 @@ impl NeoismAgentPane {
 
     pub fn open_sessions_picker(&mut self) {
         self.close_connect();
-        self.picker = Some(NeoismAgentPicker::new(
+        self.picker = Some(NeoismAgentPicker::new_loading(
             NeoismAgentPickerKind::Session,
             "Sessions",
-            vec![NeoismAgentPickerOption::new(
-                "Loading sessions...",
-                "",
-                "",
-                "",
-            )],
-            0,
         ));
         let server = self.server.clone();
         let current = self.session_id.clone();
         let directory = self.side_panel.catalog_directory().map(str::to_owned);
         let catalog_generation = self.catalog_generation;
         let tx = self.background_tx.clone();
-        std::thread::Builder::new()
+        if std::thread::Builder::new()
             .name("neoism-session-options".into())
             .spawn(move || {
                 let _ = tx.send(NeoismAgentBackgroundUpdate::SessionOptionsRefreshed {
@@ -725,7 +718,15 @@ impl NeoismAgentPane {
                     result: fetch_session_options(&server, current.as_deref(), directory.as_deref()),
                 });
             })
-            .ok();
+            .is_err()
+        {
+            let _ = self.background_tx.send(
+                NeoismAgentBackgroundUpdate::SessionOptionsRefreshed {
+                    catalog_generation,
+                    result: Err("Could not start session refresh".into()),
+                },
+            );
+        }
     }
 
     /// Selected `(session_id, title, pinned)` in an open `/sessions` picker.

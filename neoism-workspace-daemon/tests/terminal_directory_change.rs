@@ -131,59 +131,61 @@ async fn confirmed(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn integrated_shells_home_to_quoted_repo_confirms_real_pwd_and_cargo() {
     for shell in ["/bin/bash", "/bin/zsh"] {
-    if !std::path::Path::new(shell).exists() { continue; }
-    let home = tempfile::tempdir().unwrap();
-    let repo = home.path().join("repo 'quoted' ; $(touch INJECTED)");
-    std::fs::create_dir(&repo).unwrap();
-    std::fs::write(
-        repo.join("Cargo.toml"),
-        "[package]\nname='selected-repo'\nversion='0.1.0'\n",
-    )
-    .unwrap();
-    let (registry, mut owner) = SessionRegistry::new();
-    let created = registry.handle_subscribed(
-        ClientMessage::CreatePty {
-            cwd: Some(home.path().to_string_lossy().into_owned()),
-            cols: 120,
-            rows: 24,
-            shell: Some(shell.into()),
-        },
-        Some(&owner),
-    );
-    let id = match &created[0] {
-        ServerMessage::PtyCreated { session_id, .. } => session_id.clone(),
-        other => panic!("{other:?}"),
-    };
-    let _cleanup = Cleanup(registry.clone(), id.clone());
-    until(&mut owner, "\x1b]133;B").await;
-    let peer = registry.subscribe();
-    let denied = registry.handle_subscribed(
-        request(&id, repo.to_str().unwrap(), "unauthorized"),
-        Some(&peer),
-    );
-    assert!(matches!(
-        denied.as_slice(),
-        [ServerMessage::TerminalDirectoryChangeFailed { .. }]
-    ));
-    assert!(registry
-        .handle_subscribed(
-            request(&id, repo.to_str().unwrap(), "selected"),
-            Some(&owner)
+        if !std::path::Path::new(shell).exists() {
+            continue;
+        }
+        let home = tempfile::tempdir().unwrap();
+        let repo = home.path().join("repo 'quoted' ; $(touch INJECTED)");
+        std::fs::create_dir(&repo).unwrap();
+        std::fs::write(
+            repo.join("Cargo.toml"),
+            "[package]\nname='selected-repo'\nversion='0.1.0'\n",
         )
-        .is_empty());
-    assert_eq!(
-        confirmed(&mut owner, &id, "selected").await,
-        repo.canonicalize().unwrap().to_str().unwrap()
-    );
-    registry.handle(ClientMessage::PtyInput { session_id: id.clone(), bytes: b"stty -echo; printf 'PWD_%s\\n' CHECK; pwd; cargo locate-project --message-format plain; printf 'DONE_%s\\n' SELECTED\r".to_vec() });
-    let result = until(&mut owner, "DONE_SELECTED").await;
-    assert!(result.contains(repo.to_str().unwrap()), "{result}");
-    assert!(
-        result.contains(repo.join("Cargo.toml").to_str().unwrap()),
-        "{result}"
-    );
-    assert!(!home.path().join("INJECTED").exists());
-    registry.handle(ClientMessage::ClosePty { session_id: id });
+        .unwrap();
+        let (registry, mut owner) = SessionRegistry::new();
+        let created = registry.handle_subscribed(
+            ClientMessage::CreatePty {
+                cwd: Some(home.path().to_string_lossy().into_owned()),
+                cols: 120,
+                rows: 24,
+                shell: Some(shell.into()),
+            },
+            Some(&owner),
+        );
+        let id = match &created[0] {
+            ServerMessage::PtyCreated { session_id, .. } => session_id.clone(),
+            other => panic!("{other:?}"),
+        };
+        let _cleanup = Cleanup(registry.clone(), id.clone());
+        until(&mut owner, "\x1b]133;B").await;
+        let peer = registry.subscribe();
+        let denied = registry.handle_subscribed(
+            request(&id, repo.to_str().unwrap(), "unauthorized"),
+            Some(&peer),
+        );
+        assert!(matches!(
+            denied.as_slice(),
+            [ServerMessage::TerminalDirectoryChangeFailed { .. }]
+        ));
+        assert!(registry
+            .handle_subscribed(
+                request(&id, repo.to_str().unwrap(), "selected"),
+                Some(&owner)
+            )
+            .is_empty());
+        assert_eq!(
+            confirmed(&mut owner, &id, "selected").await,
+            repo.canonicalize().unwrap().to_str().unwrap()
+        );
+        registry.handle(ClientMessage::PtyInput { session_id: id.clone(), bytes: b"stty -echo; printf 'PWD_%s\\n' CHECK; pwd; cargo locate-project --message-format plain; printf 'DONE_%s\\n' SELECTED\r".to_vec() });
+        let result = until(&mut owner, "DONE_SELECTED").await;
+        assert!(result.contains(repo.to_str().unwrap()), "{result}");
+        assert!(
+            result.contains(repo.join("Cargo.toml").to_str().unwrap()),
+            "{result}"
+        );
+        assert!(!home.path().join("INJECTED").exists());
+        registry.handle(ClientMessage::ClosePty { session_id: id });
     }
 }
 

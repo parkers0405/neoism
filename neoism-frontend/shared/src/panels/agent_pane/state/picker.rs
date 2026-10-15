@@ -243,9 +243,8 @@ pub struct NeoismAgentPicker {
     cursor_spring: CriticallyDampedSpring,
     last_list_scroll_frame: Instant,
     last_cursor_frame: Instant,
-    /// True while an async search (semantic session search) is in
-    /// flight — the empty state renders a skeleton shimmer instead of
-    /// "No results".
+    /// True while async picker data is in flight; an empty list renders
+    /// a skeleton shimmer instead of "No results".
     pub loading: bool,
     loading_started: Option<Instant>,
     /// Rendered list-window size. Chat uses the standard eight rows;
@@ -318,10 +317,14 @@ impl NeoismAgentPicker {
         }
     }
 
-    pub fn usage_loading() -> Self {
-        let mut picker = Self::new(NeoismAgentPickerKind::Usage, "Codex", Vec::new(), 0);
+    pub fn new_loading(kind: NeoismAgentPickerKind, title: &str) -> Self {
+        let mut picker = Self::new(kind, title, Vec::new(), 0);
         picker.set_loading(true);
         picker
+    }
+
+    pub fn usage_loading() -> Self {
+        Self::new_loading(NeoismAgentPickerKind::Usage, "Codex")
     }
 
     pub fn set_usage_accounts(&mut self, accounts: Vec<NeoismAgentUsageAccount>) {

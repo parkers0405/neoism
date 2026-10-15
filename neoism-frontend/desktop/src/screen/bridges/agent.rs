@@ -834,6 +834,7 @@ impl Screen<'_> {
                         chrome_scale,
                     );
             }
+            agent.set_splash_auto_animate(self.renderer.splash_auto_animate);
             crate::neoism::view::render(
                 &mut self.sugarloaf,
                 agent,

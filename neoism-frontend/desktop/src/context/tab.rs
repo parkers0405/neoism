@@ -42,6 +42,8 @@ pub struct Context<T: EventListener> {
     /// panes are born with this `false` (no PTY scrollback to write
     /// to).
     pub pending_splash: bool,
+    /// Play one random wordmark effect on this pane's first visible splash.
+    pub pending_splash_animation: bool,
     /// Counter of consecutive frames the pane's `(cols, rows)` has
     /// been stable. Used by the splash injector to wait for layout
     /// to settle before computing the centering pad — the

@@ -232,6 +232,17 @@ pub fn config_descriptors() -> Vec<D> {
             Control::Number,
         ),
         d(
+            "appearance.splash-auto-animate",
+            "Splash startup animation",
+            "Play one random logo animation in each new terminal or agent tab. Clicking the logo always animates it.",
+            Kind::Boolean,
+            json!(false),
+            &[],
+            false,
+            C::Appearance,
+            Control::Toggle,
+        ),
+        d(
             "appearance.effects.trail-cursor",
             "Cursor trail",
             "Animate a trail behind the caret.",

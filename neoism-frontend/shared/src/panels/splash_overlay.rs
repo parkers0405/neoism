@@ -265,6 +265,8 @@ pub struct SplashOverlay {
     started: Option<Instant>,
     click: Option<Click>,
     wordmark_animation: crate::primitives::wordmark_animation::WordmarkAnimation,
+    /// Native terminal panes share this renderer, but never their playback.
+    context_id: Option<usize>,
     image_registered: bool,
     /// Letter tint cycle the wordmark pixels were last uploaded with
     /// (the pack's `[wordmark] colors`, or `[theme.fg]`). The PNG is a
@@ -379,6 +381,25 @@ impl SplashOverlay {
             cy: y,
             started: Instant::now(),
         });
+    }
+
+    /// Cancel transient feedback when a different terminal owns the overlay.
+    pub fn bind_context(&mut self, context_id: usize) {
+        if self.context_id != Some(context_id) {
+            self.reset();
+            self.context_id = Some(context_id);
+        }
+    }
+
+    /// Consume startup eligibility after paint, even when autoplay is disabled.
+    pub fn play_wordmark_startup(&mut self, pending: &mut bool, enabled: bool) {
+        if self.active
+            && self.wordmark_rect.is_some()
+            && std::mem::take(pending)
+            && enabled
+        {
+            self.replay_wordmark();
+        }
     }
 
     pub fn replay_wordmark(&mut self) {
@@ -1071,7 +1092,70 @@ mod tests {
     use super::*;
 
     #[test]
-    fn wordmark_replay_is_click_only_and_reset_cancels_it() {
+    fn wordmark_startup_can_be_disabled_without_disabling_clicks() {
+        let mut overlay = SplashOverlay::new();
+        let mut pending = true;
+        overlay.bind_context(1);
+        overlay.play_wordmark_startup(&mut pending, false);
+        assert!(pending, "hidden tabs retain startup eligibility");
+        overlay.active = true;
+        overlay.wordmark_rect = Some([0.0, 0.0, 300.0, 50.0]);
+        overlay.play_wordmark_startup(&mut pending, false);
+        assert!(!pending);
+        assert!(!overlay.wordmark_animation.is_active());
+        overlay.play_wordmark_startup(&mut pending, true);
+        assert!(!overlay.wordmark_animation.is_active(), "do not replay old tabs");
+        overlay.replay_wordmark();
+        assert!(overlay.wordmark_animation.is_active());
+    }
+
+    #[test]
+    fn wordmark_startup_is_once_per_pane_and_waits_for_visible_artwork() {
+        let mut overlay = SplashOverlay::new();
+        let mut pending = true;
+        overlay.bind_context(1);
+        overlay.play_wordmark_startup(&mut pending, true);
+        assert!(pending);
+        assert!(!overlay.wordmark_animation.is_active());
+        overlay.active = true;
+        overlay.play_wordmark_startup(&mut pending, true);
+        assert!(pending, "wait for the wordmark to paint");
+        overlay.wordmark_rect = Some([0.0, 0.0, 300.0, 50.0]);
+        overlay.play_wordmark_startup(&mut pending, true);
+        assert!(!pending);
+        assert!(overlay.wordmark_animation.is_active());
+        overlay.wordmark_animation.cancel();
+        overlay.play_wordmark_startup(&mut pending, true);
+        assert!(!overlay.wordmark_animation.is_active());
+        overlay.reset();
+        overlay.active = true;
+        overlay.wordmark_rect = Some([0.0, 0.0, 300.0, 50.0]);
+        overlay.play_wordmark_startup(&mut pending, true);
+        assert!(!overlay.wordmark_animation.is_active(), "clear does not rearm");
+    }
+
+    #[test]
+    fn wordmark_playback_does_not_leak_between_terminal_contexts() {
+        let mut overlay = SplashOverlay::new();
+        overlay.bind_context(1);
+        overlay.replay_wordmark();
+        overlay.bind_context(1);
+        assert!(overlay.wordmark_animation.is_active());
+        overlay.bind_context(2);
+        assert!(!overlay.wordmark_animation.is_active());
+        assert!(!overlay.is_active());
+        let mut new_pane_pending = true;
+        overlay.active = true;
+        overlay.wordmark_rect = Some([0.0, 0.0, 300.0, 50.0]);
+        overlay.play_wordmark_startup(&mut new_pane_pending, true);
+        assert!(!new_pane_pending);
+        assert!(overlay.wordmark_animation.is_active());
+        overlay.bind_context(1);
+        assert!(!overlay.wordmark_animation.is_active());
+    }
+
+    #[test]
+    fn wordmark_menu_feedback_does_not_replay_and_reset_cancels_playback() {
         let mut overlay = SplashOverlay::new();
         assert!(!overlay.wordmark_animation.is_active());
         overlay.pop_click(10.0, 20.0);

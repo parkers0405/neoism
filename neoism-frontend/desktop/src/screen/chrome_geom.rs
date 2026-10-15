@@ -120,6 +120,7 @@ impl Screen<'_> {
         self.conversations_panel_enabled = config.agent.conversations_panel_enabled;
         self.details_panel_enabled = config.agent.details_panel_enabled;
         self.streaming_text_animation = config.agent.streaming_text_animation;
+        self.renderer.splash_auto_animate = config.appearance.splash_auto_animate;
         self.renderer.code_git_blame = config.editor.git_blame;
         self.renderer.code_git_blame_delay_ms = config.editor.git_blame_delay_ms;
         self.renderer.code_git_blame_hide_on_scroll =

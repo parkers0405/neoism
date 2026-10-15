@@ -47,6 +47,13 @@ impl NeoismAgentPane {
             }
             return true;
         }
+        if self
+            .picker
+            .as_ref()
+            .is_some_and(|picker| picker.loading && picker.options().is_empty())
+        {
+            return true;
+        }
         if !self
             .picker
             .as_ref()

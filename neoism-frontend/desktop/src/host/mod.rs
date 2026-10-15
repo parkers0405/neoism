@@ -150,6 +150,7 @@ pub struct Renderer {
     pub fps_counter: fps::FpsCounter,
     pub terminal_block_prompt_animating: bool,
     pub terminal_splash_animating: bool,
+    pub splash_auto_animate: bool,
     pub notebook_animating: bool,
     /// True while an animated shader overlay is applied. The overlay
     /// samples the wall clock per drawn frame, so it needs the loop to
@@ -466,6 +467,7 @@ impl Renderer {
             fps_counter: fps::FpsCounter::default(),
             terminal_block_prompt_animating: false,
             terminal_splash_animating: false,
+            splash_auto_animate: config.appearance.splash_auto_animate,
             notebook_animating: false,
             shader_overlay_active: false,
             editor_scroll: editor_scroll::EditorScroll::new(),

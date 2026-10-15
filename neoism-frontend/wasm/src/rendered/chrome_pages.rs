@@ -105,6 +105,12 @@ impl ChromeBridge {
     pub fn set_settings_values(&mut self, config_json: &str) -> Result<(), JsValue> {
         let values: serde_json::Value = serde_json::from_str(config_json)
             .map_err(|e| JsValue::from_str(&format!("config parse: {e}")))?;
+        let splash_auto_animate = values
+            .get("appearance")
+            .and_then(|appearance| appearance.get("splash-auto-animate"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        self.chrome.set_splash_auto_animate(splash_auto_animate);
         let agent = values.get("agent");
         let conversations_enabled = agent
             .and_then(|agent| agent.get("conversations-panel-enabled"))
@@ -227,6 +233,11 @@ impl ChromeBridge {
                 if let Some(name) = value.as_str() {
                     let name = name.to_string();
                     self.set_ide_theme(&name);
+                }
+            }
+            "appearance.splash-auto-animate" => {
+                if let Some(enabled) = value.as_bool() {
+                    self.chrome.set_splash_auto_animate(enabled);
                 }
             }
             "presence.cursor-style" => {

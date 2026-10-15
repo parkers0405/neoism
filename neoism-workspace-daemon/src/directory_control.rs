@@ -16,14 +16,15 @@ struct Request {
     tx: mpsc::Sender<ServerMessage>,
     target: PathBuf,
     since: Instant,
+    reported_timeout: bool,
 }
 impl Request {
-    fn fail(self, message: &str) {
+    fn fail(&self, message: &str) {
         let _ = self
             .tx
             .try_send(ServerMessage::TerminalDirectoryChangeFailed {
-                session_id: self.session_id,
-                request_id: self.request_id,
+                session_id: self.session_id.clone(),
+                request_id: self.request_id.clone(),
                 message: message.into(),
             });
     }
@@ -242,6 +243,7 @@ impl DirectoryControl {
             tx,
             target,
             since: Instant::now(),
+            reported_timeout: false,
         });
         vec![]
     }
@@ -255,17 +257,16 @@ impl DirectoryControl {
         if self.queued.as_ref().is_some_and(|r| r.tx.is_closed()) {
             self.queued.take();
         }
-        if self.active.as_ref().is_some_and(|r| r.tx.is_closed()) {
-            self.active.take();
-        }
-        if self
-            .active
-            .as_ref()
-            .is_some_and(|r| r.since.elapsed() > Duration::from_secs(15))
-        {
-            self.active.take().unwrap().fail(
-                "Timed out waiting for shell-confirmed cwd; no success was assumed",
-            );
+        // Dropping a reply route can cancel a queue, but cannot retract bytes
+        // already written. Keep the host input gate until that shell is safe.
+        if let Some(active) = &mut self.active {
+            if !active.reported_timeout
+                && active.since.elapsed() > Duration::from_secs(15)
+            {
+                active.reported_timeout = true;
+                tracing::warn!(session_id = %active.session_id, request_id = %active.request_id,
+                    "still waiting for shell-confirmed cwd; host input remains paused");
+            }
         }
         if self
             .queued
@@ -317,7 +318,9 @@ impl DirectoryControl {
                     self.active = Some(queued);
                 }
                 Err(_) => {
-                    queued.fail("Failed to write directory control to the host shell")
+                    tracing::warn!(session_id = %queued.session_id, "directory control write failed; awaiting terminal closure or verified prompt");
+                    queued.reported_timeout = true;
+                    self.active = Some(queued);
                 }
             }
         }

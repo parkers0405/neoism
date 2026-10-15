@@ -16,6 +16,7 @@ pub trait WordmarkState {
     fn set_rect(&mut self, rect: [f32; 4]);
     fn frame_delta_seconds(&mut self) -> f32;
     fn animation_mut(&mut self) -> &mut WordmarkAnimation;
+    fn play_startup_animation(&mut self);
     fn hover_mut(&mut self) -> &mut [f32; LETTER_COUNT];
 }
 
@@ -45,6 +46,12 @@ macro_rules! neoism_ui_impl_wordmark_state {
                 &mut self,
             ) -> &mut $crate::primitives::wordmark_animation::WordmarkAnimation {
                 &mut self.animation
+            }
+
+            fn play_startup_animation(&mut self) {
+                if std::mem::take(&mut self.startup_pending) && self.auto_animate {
+                    self.animation.replay();
+                }
             }
 
             fn hover_mut(&mut self) -> &mut [f32; 6] {
@@ -95,7 +102,44 @@ pub fn format_elapsed(seconds: f32) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::format_elapsed;
+    use super::{format_elapsed, WordmarkState};
+    use crate::panels::agent_pane::state::NeoismWordmarkState;
+
+    #[test]
+    fn wordmark_startup_is_opt_in_without_affecting_click_replay() {
+        let mut state = NeoismWordmarkState::default();
+        assert!(!state.auto_animate);
+        state.play_startup_animation();
+        assert!(!state.startup_pending);
+        assert!(!state.animation.is_active());
+        state.auto_animate = true;
+        state.play_startup_animation();
+        assert!(!state.animation.is_active(), "enabling does not replay an old tab");
+        state.auto_animate = false;
+        state.animation.replay();
+        assert!(state.animation.is_active(), "clicks ignore the startup preference");
+    }
+
+    #[test]
+    fn wordmark_startup_waits_for_render_and_never_rearms() {
+        let mut state = NeoismWordmarkState::default();
+        state.auto_animate = true;
+        assert!(state.startup_pending);
+        assert!(!state.animation.is_active());
+        state.play_startup_animation();
+        assert!(!state.startup_pending);
+        assert!(state.animation.is_active());
+        state.animation.cancel();
+        state.play_startup_animation();
+        assert!(!state.animation.is_active());
+        state.animation.replay();
+        assert!(state.animation.is_active(), "click replay still works");
+
+        let mut new_tab = NeoismWordmarkState::default();
+        new_tab.auto_animate = true;
+        new_tab.play_startup_animation();
+        assert!(new_tab.animation.is_active());
+    }
 
     #[test]
     fn elapsed_formats_hours_instead_of_unbounded_minutes() {
@@ -170,6 +214,7 @@ pub fn render_wordmark(
     let [x, y, w, h] = rect;
     state.set_rect(rect);
     let dt = state.frame_delta_seconds();
+    state.play_startup_animation();
     let animation = state.animation_mut().frame();
     let tint =
         crate::primitives::look::wordmark_colors_or(crate::chrome::active_ide_theme().fg);

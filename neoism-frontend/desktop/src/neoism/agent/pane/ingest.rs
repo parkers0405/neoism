@@ -1875,6 +1875,7 @@ self.footer_growth.record_with_edge(
                             )],
                         };
                         if let Some(picker) = self.picker.as_mut() {
+                            picker.set_loading(false);
                             picker.replace_options(options);
                         }
                         changed = true;
@@ -1898,6 +1899,7 @@ self.footer_growth.record_with_edge(
                         let selected = options
                             .iter()
                             .position(|option| option.value == active_agent);
+                        picker.set_loading(false);
                         picker.replace_options(options);
                         if picker.query.is_empty() {
                             if let Some(selected) = selected {
@@ -1925,6 +1927,7 @@ self.footer_growth.record_with_edge(
                             )]
                         });
                         self.session_picker_base = options.clone();
+                        picker.set_loading(false);
                         picker.replace_options(options);
                         changed = true;
                     }

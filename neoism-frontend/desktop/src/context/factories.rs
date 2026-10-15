@@ -65,6 +65,7 @@ pub fn create_dead_context<T: neoism_backend::event::EventListener>(
         dimension,
         pending_terminal_resize: false,
         pending_splash: false,
+        pending_splash_animation: false,
         splash_dim_stable_frames: 0,
         splash_last_dim: (0, 0),
         splash_last_cursor_row: 0,

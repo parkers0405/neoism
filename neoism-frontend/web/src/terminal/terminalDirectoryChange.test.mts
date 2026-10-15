@@ -74,6 +74,18 @@ test("failure preserves draft and blocks old-cwd commands until explicit cancell
   assert.deepEqual(f.commits, []);
 });
 
+test("blocked pre-WASM fallback Enter preserves the unsent draft", () => {
+  const f = fixture();
+  f.panel.options.onWorkspaceRootRequested("/picked", "workspace-a");
+  f.panel.activeTabIndex = 0;
+  f.panel.wasmAdapter = null;
+  f.panel.terminalInput = "cargo locate-project";
+  f.panel.mirrorTerminalInput(Uint8Array.of(13));
+  f.panel.sendPtyInput(Uint8Array.of(13));
+  assert.equal(f.panel.terminalInput, "cargo locate-project");
+  assert.deepEqual(f.writes, []);
+});
+
 test("stale A replies, peer sessions and switched workspace cannot commit or steal focus", () => {
   const f = fixture();
   f.panel.options.onWorkspaceRootRequested("/a", "workspace-a");

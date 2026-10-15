@@ -5,6 +5,26 @@ use neoism_ui::panels::agent_pane::state::picker::{
 use neoism_ui::widgets::inline_picker::{layout_limited, row_limit_for_space};
 
 #[test]
+fn catalog_loading_pickers_start_empty_and_shimmer_like_usage() {
+    for kind in [
+        NeoismAgentPickerKind::Model,
+        NeoismAgentPickerKind::Agent,
+        NeoismAgentPickerKind::Session,
+    ] {
+        let mut picker = NeoismAgentPicker::new_loading(kind, "Catalog");
+        assert_eq!(picker.kind, kind);
+        assert!(picker.loading);
+        assert!(picker.is_animating());
+        assert!(picker.options().is_empty());
+        assert!(picker.selected_option().is_none());
+        picker.set_query("typed while loading".into());
+        assert!(picker.loading);
+        picker.set_loading(false);
+        assert!(!picker.is_animating());
+    }
+}
+
+#[test]
 fn slash_command_prefix_outranks_description_matches() {
     let mut picker = NeoismAgentPicker::new(
         NeoismAgentPickerKind::Slash,

@@ -11555,6 +11555,11 @@ export class TerminalPanel {
 
   private mirrorTerminalInput(bytes: Uint8Array): void {
     if (bytes.length === 0) return;
+    if (this.directorySubmissionBlocked() && bytes.some((byte) => byte === 13 || byte === 10)) {
+      // The pre-WASM fallback must not clear a draft on a blocked submit either.
+      if (bytes.length > 1) this.setTerminalInput(this.terminalInput + new TextDecoder().decode(bytes).replace(/\r\n?/g, "\n"));
+      return;
+    }
     if (bytes.length === 1) {
       const byte = bytes[0];
       if (byte === 0x0d) {

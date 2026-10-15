@@ -65,6 +65,10 @@ impl NeoismAgentPane {
     }
 
     /// Paint-only reveal and motion share the existing animation opt-out.
+    pub fn set_splash_auto_animate(&mut self, enabled: bool) {
+        self.wordmark.auto_animate = enabled;
+    }
+
     pub fn set_text_reveal_enabled(&mut self, enabled: bool) {
         self.text_reveal.set_enabled(enabled);
         self.tool_motion.set_enabled(enabled);

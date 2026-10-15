@@ -38,6 +38,20 @@ Neoism maps Omarchy's semantic background, foreground, accent, ANSI, and syntax 
 
 Future `omarchy-theme-set` changes are watched and applied live. Omarchy replaces its active theme atomically; Neoism follows that replacement without a generated Neoism theme, symlink, restart, or shell hook. The integration is currently native-desktop only because web/Wasm clients cannot read host theme files.
 
+## Splash animations
+
+Startup logo animations are off by default. Set `appearance.splash-auto-animate` to `true` to play one random NEOISM animation when each new terminal or agent tab first shows its splash. Existing tabs do not replay when you change this setting, switch tabs, resize, or clear the terminal. Clicking the logo always plays an animation, regardless of this preference.
+
+```jsonc
+{
+  "appearance": {
+    "splash-auto-animate": true
+  }
+}
+```
+
+You can also toggle **Splash startup animation** under Appearance in Settings. Changes apply without restarting Neoism.
+
 ## Backgrounds
 
 On desktop, choose **Backgrounds** from the hamburger menu or search for **Backgrounds** in the command palette. The picker uses the same searchable list and split layout as Themes, with the selected image displayed on the right. Arrow keys browse, Enter or a result click applies, and Escape closes without changing your background. Narrow windows show the list without the preview pane.

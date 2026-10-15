@@ -52,6 +52,12 @@
   </categories>
 
   <releases>
+    <release version="0.7.126" date="2026-10-15">
+      <description>
+        <p>Stable project conversations, unified navigation, tool composition, hosting and transport improvements, picker loading, and optional startup animation.</p>
+      </description>
+      <url>https://github.com/parkers0405/neoism/releases/tag/v0.7.126</url>
+    </release>
     <release version="0.7.126-nightly.20261015.2" date="2026-10-15" type="development">
       <description>
         <p>Nightly terminal-directory control, project selection, joined-document synchronization, and pointer/sidebar refinements.</p>

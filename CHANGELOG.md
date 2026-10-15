@@ -2,6 +2,21 @@
 
 All notable user-facing changes to Neoism are documented here.
 
+## [0.7.126] - 2026-10-15
+
+### Project conversations, hosting, and native interaction
+
+- Promotes the nightly project-grouped conversation sidebar, global pins, independent pagination, conversation search/navigation, unified directory/image browser, and host-scoped recents to stable.
+- Adds bounded Rust tool composition with native/MCP dispatch, schema validation, permissions, cancellation, and visible child-call traces.
+- Adds Fast Host invites/deep links, unified server controls, recovery/leave workflows, and persistent-host readiness checks. Improves hosted-family authorization, revocation restoration, namespace continuity, and ordinary/Fast transport contracts.
+- Improves remote workspace restoration and document hydration. Explicit directory selection targets the existing terminal, preserves drafts, defers busy-shell operations, and waits for host-observed cwd confirmation; input remains blocked after dispatch until trusted completion is known.
+- Adds opt-in `appearance.splash-auto-animate` (off by default), preserves click-triggered wordmark effects, and improves native catalog-picker loading states without dropping drafts or search queries.
+- Improves response-footer/stream presentation, activity indicators, pointer ownership, Git actions and diff controls, composer interaction, and file-tree dragging. Updates README links to hosted documentation.
+
+Fast Host gives trusted participants host-user access and is not a sandbox. Remote live directory control currently requires integrated Linux bash/zsh; uncertain completion intentionally stays gated rather than accepting unsafe submissions. Native first-terminal directory following and split isolation are preserved; browser ambient shell cwd does not automatically re-root the workspace. Servo and CEF browser workers remain separate experimental components and are not packaged.
+
+This is a stable production release, available through plain `neoism update` after all required platform builds and packaging checks succeed.
+
 ## [0.7.126-nightly.20261015.2] - 2026-10-15
 
 ### Directory control, remote hydration, and interaction fixes

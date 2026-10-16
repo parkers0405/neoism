@@ -415,6 +415,13 @@ impl<A: Send + Copy + 'static> Chrome<A> {
     /// closes honestly.
     pub(crate) fn execute_chrome_modal_action(&mut self, action: ModalAction) {
         match action {
+            ModalAction::OpenUrl { url } => {
+                // Keep the modal open; the host validates before opening.
+                self.modal.queue_host_action(ModalHostAction::Generic {
+                    id: "open-url".into(),
+                    value: url,
+                });
+            }
             ModalAction::CopyInvite { url } => {
                 self.modal.queue_host_action(ModalHostAction::Generic { id: "copy-invite".into(), value: url });
                 self.modal.mark_invite_copied();
@@ -1033,6 +1040,10 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             self.execute_chrome_modal_action(action);
             return;
         }
+        if let Some(action) = self.modal.body_link_action_at(x, y) {
+            self.execute_chrome_modal_action(action);
+            return;
+        }
         if self.modal.form_switch_hit(x, y) {
             self.activate_chrome_form_switch();
             return;
@@ -1367,6 +1378,30 @@ fn validate_child_name(input: &str) -> Result<String, String> {
 #[cfg(test)]
 mod connection_gate_tests {
     use super::*;
+
+    #[test]
+    fn open_url_queues_exact_target_without_closing_modal() {
+        let mut chrome = Chrome::<()>::new();
+        chrome.open_chrome_modal(ModalSpec {
+            title: "Links".into(),
+            body: "A linked body".into(),
+            meta: String::new(),
+            input: None,
+            buttons: vec![ModalButton::new("OK", "Enter", ModalAction::Close)],
+            busy: false,
+            blocking: true,
+        });
+        let url = "https://Example.com/a%2Fb?token=a%2fb&x=1#MixedCase";
+        chrome.execute_chrome_modal_action(ModalAction::OpenUrl { url: url.into() });
+        assert!(chrome.modal.is_active());
+        assert_eq!(
+            chrome.drain_modal_host_actions(),
+            vec![ModalHostAction::Generic {
+                id: "open-url".into(),
+                value: url.into(),
+            }]
+        );
+    }
 
     #[test]
     fn form_switch_keys_emit_control_changes_without_submitting() {

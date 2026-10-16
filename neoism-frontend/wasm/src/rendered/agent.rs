@@ -569,25 +569,9 @@ impl ChromeBridge {
                 return true;
             }
         }
-        if pane.detail_panel().is_focused()
-            && !mods.alt
-            && !mods.control
-            && !mods.super_key
-        {
-            match key {
-                "ArrowDown" => pane.detail_panel_mut().select_next(),
-                "ArrowUp" => pane.detail_panel_mut().select_prev(),
-                "Enter" => {
-                    let activated = pane.activate_detail_panel_subagent();
-                    if activated {
-                        pane.detail_panel_mut().set_focused(false);
-                    }
-                }
-                "Escape" => pane.detail_panel_mut().set_focused(false),
-                _ => return false,
-            }
-            return true;
-        }
+        // The detail rail contains usage/tasks, not a second conversation
+        // navigator. Do not let stale focus activate invisible branch rows.
+        pane.detail_panel_mut().set_focused(false);
         let ctx = AgentKeyContext {
             side_panel_focused: pane.side_panel().is_focused(),
             pending_permission: pane.pending_permission().is_some(),
@@ -1430,6 +1414,14 @@ impl ChromeBridge {
         }
     }
 
+    /// Stable owning family while the displayed session may be a child.
+    pub fn agent_conversation_root_id(&self) -> Option<String> {
+        self.chrome
+            .agent_pane
+            .as_ref()
+            .and_then(|pane| pane.conversation_root_id().map(str::to_owned))
+    }
+
     /// Session currently displayed by the shared web agent pane. The JS tab
     /// host persists this on its unique tab before changing surfaces.
     pub fn agent_session_id(&self) -> Option<String> {
@@ -1475,11 +1467,16 @@ impl ChromeBridge {
         };
         let id = self.agent_state.next_request_id.wrapping_add(1).max(1);
         self.agent_state.next_request_id = id;
-        let _ = cb.call2(
+        let sent = cb.call2(
             &JsValue::NULL,
             &JsValue::from_f64(id as f64),
             &JsValue::from_str(&json),
         );
+        // Older hosts return undefined; only an explicit false (or callback
+        // exception) rejects a catalog read. Do not change other send paths.
+        if matches!(envelope, neoism_protocol::agent::AgentClientMessage::ShowMcp { .. }) {
+            return sent.is_ok_and(|value| value.as_bool() != Some(false));
+        }
         true
     }
 
@@ -1604,6 +1601,15 @@ impl ChromeBridge {
         }
     }
 
+    /// Coarse host-timer hook: catalog polling must not depend on paint or
+    /// animation activity. Closed/non-MCP pickers do not enqueue any work.
+    pub fn pump_mcp_catalog(&mut self) -> u32 {
+        if !self.chrome.agent_pane().is_some_and(|pane| pane.mcp_picker_visible()) {
+            return 0;
+        }
+        self.drain_agent_outbound()
+    }
+
     pub fn drain_agent_outbound(&mut self) -> u32 {
         use neoism_ui::panels::agent_pane::protocol_mapping::{
             map_outbound_command, AgentProtocolMapping, AgentProtocolMappingContext,
@@ -1622,6 +1628,13 @@ impl ChromeBridge {
         };
         let mut delivered = 0u32;
         for command in commands {
+            if let neoism_ui::panels::agent_pane::outbound::OutboundAgentCommand::RefreshMcp { directory } = &command {
+                if let Some(pane) = self.chrome.agent_pane_mut() {
+                    pane.set_mcp_catalog_request_directory(
+                        directory.clone().or_else(|| self.agent_state.default_directory.clone()),
+                    );
+                }
+            }
             if matches!(&command, neoism_ui::panels::agent_pane::outbound::OutboundAgentCommand::RefreshSessions { directory: None, .. }) {
                 self.refresh_agent_catalog();
                 continue;
@@ -1690,6 +1703,10 @@ impl ChromeBridge {
                         }
                         if self.send_agent_envelope(&envelope) {
                             delivered = delivered.saturating_add(1);
+                        } else if matches!(envelope, neoism_protocol::agent::AgentClientMessage::ShowMcp { .. }) {
+                            if let Some(pane) = self.chrome.agent_pane_mut() {
+                                pane.mcp_catalog_send_failed();
+                            }
                         }
                     }
                 }
@@ -1783,15 +1800,7 @@ impl ChromeBridge {
             }
             if pane.detail_panel().contains_point(x, y) {
                 pane.side_panel_mut().set_focused(false);
-                pane.detail_panel_mut().set_focused(true);
-                if let Some(rect) = pane.detail_panel().last_panel_rect() {
-                    if let Some(row) = pane.detail_panel().hit_test_row(x, y, rect) {
-                        let activated = pane.activate_clicked_detail_panel_subagent(row);
-                        if activated {
-                            pane.detail_panel_mut().set_focused(false);
-                        }
-                    }
-                }
+                pane.detail_panel_mut().set_focused(false);
                 result.handled = true;
                 break 'chain;
             }
@@ -1864,7 +1873,8 @@ impl ChromeBridge {
                 result.handled = true;
                 break 'chain;
             }
-            if pane.toggle_tool_at(x, y) || pane.pop_wordmark_click(x, y) {
+            if pane.pop_activity_status_click(x, y)
+                || pane.toggle_tool_at(x, y) || pane.pop_wordmark_click(x, y) {
                 result.handled = true;
                 break 'chain;
             }
@@ -2168,7 +2178,7 @@ impl ChromeBridge {
         let Some(pane) = self.chrome.agent_pane_mut() else {
             return false;
         };
-        pane.pop_wordmark_click(x, y)
+        pane.pop_activity_status_click(x, y) || pane.pop_wordmark_click(x, y)
     }
 }
 

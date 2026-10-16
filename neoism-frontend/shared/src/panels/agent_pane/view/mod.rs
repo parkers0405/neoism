@@ -532,14 +532,12 @@ fn render_agent_pane_with_responsive<P, D, I>(
         );
     }
     if let Some(detail) = detail_rect {
-        side_panel::render_detail_panel::<P, I>(
+        side_panel::render_detail_panel::<P>(
             sugarloaf,
             pane,
             detail,
             theme,
             chrome_scale,
-            now_seconds,
-            mouse,
             &local_occlusions,
         );
     } else {

@@ -2049,6 +2049,36 @@ impl Renderer {
         );
     }
 
+    /// Submit a physical-pixel analytic ring to the normal or late overlay pass.
+    #[inline]
+    #[allow(clippy::too_many_arguments)]
+    pub fn ring_clipped(
+        &mut self,
+        center: [f32; 2],
+        radius: f32,
+        stroke_width: f32,
+        color: [f32; 4],
+        depth: f32,
+        order: u8,
+        clip: [f32; 4],
+        overlay: bool,
+    ) {
+        let compositor = if overlay {
+            &mut self.overlay_comp
+        } else {
+            &mut self.comp
+        };
+        compositor.batches.ring_clipped(
+            center,
+            radius,
+            stroke_width,
+            &color,
+            depth,
+            order,
+            clip,
+        );
+    }
+
     #[inline]
     #[allow(clippy::too_many_arguments)]
     pub fn add_image_rect(

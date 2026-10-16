@@ -52,6 +52,8 @@ MIT, Copyright (c) 2023 shellRaining.
 
 OpenCode provider artwork (`neoism-agent/sdk/typescript/packages/gui/src/components/providers/icons.svg`) — MIT, Copyright (c) 2025 opencode. See `neoism-agent/sdk/typescript/packages/gui/src/components/providers/LICENSE.opencode`.
 
+MCP service artwork — Firecrawl mark from Lobe Icons, MIT, Copyright (c) 2023 LobeHub; Webflow mark from Simple Icons, CC0-1.0. SVG sources, rasterizations, source URLs, and the LobeHub MIT license are in `neoism-frontend/shared/assets/icons/MCP-ARTWORK.md`. Service marks remain trademarks of their respective owners.
+
 
 Tool Composition parser
 -----------------------
@@ -69,6 +71,7 @@ Fonts
 -----
 
 Cascadia Code — SIL Open Font License 1.1, Copyright (c) Microsoft Corporation.
+Geist — SIL Open Font License 1.1, Copyright 2024 The Geist Project Authors. Browser pages embed a WOFF2 conversion of the website font; full license: neoism-agent/crates/neoism-agent-service-api/src/browser_pages/geist-LICENSE.txt.
 Symbols Nerd Font — MIT License, Copyright (c) Ryan L McIntyre (Nerd Fonts).
 DejaVu fonts (test resources) — Bitstream Vera / DejaVu license (permissive).
 Exo 2 (test resources) — SIL Open Font License 1.1.

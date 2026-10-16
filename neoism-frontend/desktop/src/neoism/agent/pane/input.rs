@@ -3,10 +3,12 @@ use super::*;
 #[cfg(test)]
 mod composer_cursor_tests {
     use super::*;
-    use neoism_ui::panels::agent_pane::state::side_panel::{NeoismAgentSessionEntry, SidePanelMode};
+    use neoism_ui::panels::agent_pane::state::side_panel::{
+        NeoismAgentSessionEntry, SidePanelMode,
+    };
 
     #[test]
-    fn detail_sidebar_pointer_requires_visible_rows_and_no_covering_overlay() {
+    fn obsolete_detail_branch_geometry_never_advertises_pointer() {
         let mut pane = NeoismAgentPane::default();
         pane.messages.push(NeoismAgentMessage::user("hello"));
         pane.detail_panel_mut().set_subagents(vec![
@@ -15,16 +17,23 @@ mod composer_cursor_tests {
                 .with_runtime_status(Some("running".into())),
         ]);
         pane.detail_panel_mut().set_mode(SidePanelMode::Subagents);
-        pane.detail_panel_mut().set_last_panel_rect([500., 0., 240., 500.]);
-        pane.detail_panel_mut().set_row_hit_rect_with_origin([510., 100., 220., 80.], 100., 40.);
-        assert!(pane.detail_sidebar_pointer_at(600., 110.));
-        assert!(pane.detail_sidebar_pointer_at(600., 150.));
+        pane.detail_panel_mut()
+            .set_last_panel_rect([500., 0., 240., 500.]);
+        pane.detail_panel_mut().set_row_hit_rect_with_origin(
+            [510., 100., 220., 80.],
+            100.,
+            40.,
+        );
+        assert!(!pane.detail_sidebar_pointer_at(600., 110.));
+        assert!(!pane.detail_sidebar_pointer_at(600., 150.));
         assert!(!pane.detail_sidebar_pointer_at(600., 200.));
         let selected = pane.detail_panel().selected_index();
         pane.prompt_picker_rect = Some([500., 100., 240., 80.]);
         assert!(!pane.detail_sidebar_pointer_at(600., 150.));
         pane.prompt_picker_rect = None;
-        pane.composer_interactions.occlusion_rects.push([500., 100., 240., 80.]);
+        pane.composer_interactions
+            .occlusion_rects
+            .push([500., 100., 240., 80.]);
         assert!(!pane.detail_sidebar_pointer_at(600., 150.));
         pane.composer_interactions.occlusion_rects.clear();
         pane.side_panel_mut().set_user_hidden(true);
@@ -39,19 +48,23 @@ mod composer_cursor_tests {
         assert!(!pane.detail_sidebar_pointer_at(600., 150.));
     }
 
-
     #[test]
     fn registered_agent_model_thinking_chips_not_text_or_covered_regions_use_pointer() {
         let mut pane = NeoismAgentPane::default();
         for index in 0..3 {
-            pane.register_status_chip_rect(index, [index as f32 * 100.0, 100.0, 80.0, 24.0]);
+            pane.register_status_chip_rect(
+                index,
+                [index as f32 * 100.0, 100.0, 80.0, 24.0],
+            );
             assert!(pane.composer_pointer_at(index as f32 * 100.0 + 10.0, 110.0));
         }
         assert!(!pane.composer_pointer_at(10.0, 60.0));
         pane.prompt_picker_rect = Some([0.0, 90.0, 80.0, 50.0]);
         assert!(!pane.composer_pointer_at(10.0, 110.0));
         pane.prompt_picker_rect = None;
-        pane.composer_interactions.occlusion_rects.push([100.0, 100.0, 80.0, 24.0]);
+        pane.composer_interactions
+            .occlusion_rects
+            .push([100.0, 100.0, 80.0, 24.0]);
         assert_eq!(pane.status_chip_at(110.0, 110.0), None);
         assert!(!pane.composer_pointer_at(110.0, 110.0));
         pane.clear_status_chip_rects();
@@ -69,18 +82,21 @@ impl NeoismAgentPane {
             && self.composer_interactions.pointer_at(x, y)
     }
 
-    /// Measured root/subagent row hits only; never focus or activate on hover.
-    /// Hosts retain modal, text-selection, drag and resize cursor precedence.
+    /// Only usage remains clickable in the detail rail; stale branch geometry
+    /// must not advertise a hand cursor after navigation moved to the catalog.
     pub fn detail_sidebar_pointer_at(&self, x: f32, y: f32) -> bool {
         self.has_conversation()
             && !self.side_panel().user_hidden()
-            && !self.picker_card_rect().is_some_and(|rect| {
-                interaction_policy::rect_contains(rect, x, y)
-            })
-            && !self.composer_interactions.occlusion_rects.iter().any(|rect| {
-                interaction_policy::rect_contains(*rect, x, y)
-            })
-            && self.detail_panel().detail_clickable_at(x, y)
+            && !self
+                .picker_card_rect()
+                .is_some_and(|rect| interaction_policy::rect_contains(rect, x, y))
+            && !self
+                .composer_interactions
+                .occlusion_rects
+                .iter()
+                .any(|rect| interaction_policy::rect_contains(*rect, x, y))
+            && !self.detail_panel().user_hidden()
+            && self.detail_panel().usage_contains(x, y)
     }
 
     pub fn input_images(
@@ -148,6 +164,7 @@ impl NeoismAgentPane {
     }
 
     pub fn insert_text(&mut self, text: &str) {
+        if self.picker.as_ref().is_some_and(|p| p.mcp_authorization.is_some()) { return; }
         if self.is_subagent_session() && self.picker.is_none() {
             return;
         }
@@ -192,6 +209,7 @@ impl NeoismAgentPane {
         if self.question_type_str(&text) {
             return;
         }
+        if self.picker.as_ref().is_some_and(|p| p.mcp_authorization.is_some()) { return; }
         if self.is_subagent_session() && self.picker.is_none() {
             return;
         }
@@ -318,6 +336,7 @@ impl NeoismAgentPane {
     }
 
     pub fn backspace(&mut self) {
+        if self.picker.as_ref().is_some_and(|p| p.mcp_authorization.is_some()) { return; }
         if self.is_subagent_session() && self.picker.is_none() {
             return;
         }
@@ -715,7 +734,11 @@ impl NeoismAgentPane {
             .spawn(move || {
                 let _ = tx.send(NeoismAgentBackgroundUpdate::SessionOptionsRefreshed {
                     catalog_generation,
-                    result: fetch_session_options(&server, current.as_deref(), directory.as_deref()),
+                    result: fetch_session_options(
+                        &server,
+                        current.as_deref(),
+                        directory.as_deref(),
+                    ),
                 });
             })
             .is_err()
@@ -1012,6 +1035,9 @@ impl NeoismAgentPane {
                     return;
                 }
                 NeoismAgentPickerKind::McpActions => {
+                    if self.picker.as_mut().is_some_and(|p| p.clear_mcp_authorization()) {
+                        return;
+                    }
                     self.picker = None;
                     self.show_mcp();
                     return;

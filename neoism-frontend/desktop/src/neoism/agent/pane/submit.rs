@@ -180,14 +180,13 @@ impl NeoismAgentPane {
                 self.apply_model(option.value)
             }
             NeoismAgentPickerKind::Mcp => {
-                self.picker = Some(NeoismAgentPicker::new(
-                    NeoismAgentPickerKind::McpActions,
-                    &format!("{} actions", option.title),
-                    neoism_ui::panels::agent_pane::state::mcp_action_options(
-                        &serde_json::from_str(&option.value).unwrap_or_default(),
-                    ),
-                    0,
+                self.picker = Some(NeoismAgentPicker::mcp_actions(
+                    &serde_json::from_str(&option.value).unwrap_or_default(), Some(&picker),
                 ));
+                if let Some(name) = serde_json::from_str::<serde_json::Value>(&option.value)
+                    .ok().and_then(|entry| entry.get("name").and_then(serde_json::Value::as_str).map(str::to_owned)) {
+                    self.reattach_mcp_oauth(&name);
+                }
             }
             NeoismAgentPickerKind::McpActions => {
                 self.picker = Some(picker);
@@ -800,6 +799,7 @@ impl NeoismAgentPane {
     }
 
     pub(crate) fn set_picker_query(&mut self, query: String) {
+        if self.picker.as_ref().is_some_and(|p| p.mcp_authorization.is_some()) { return; }
         let mut kick_semantic = false;
         if let Some(picker) = self.picker.as_mut() {
             if picker.kind == NeoismAgentPickerKind::Slash {

@@ -423,6 +423,9 @@ impl NeoismAgentPane {
     /// other `&mut` borrows on the pane while it processes commands
     /// (e.g. pushing notices on failure).
     pub fn drain_pending_outbound(&mut self) -> Vec<OutboundAgentCommand> {
+        if self.mcp_catalog_poll_due() {
+            self.refresh_mcp_if_visible();
+        }
         self.pending_outbound.drain(..).collect()
     }
 
@@ -430,7 +433,7 @@ impl NeoismAgentPane {
     /// avoiding the `Vec` allocation in `drain_pending_outbound` when
     /// the queue is empty (the hot path).
     pub fn has_pending_outbound(&self) -> bool {
-        !self.pending_outbound.is_empty()
+        !self.pending_outbound.is_empty() || self.mcp_catalog_poll_due()
     }
 
     pub fn running_background_task_count(&self) -> usize {

@@ -19,6 +19,17 @@ use super::mcp_runtime::MCP_PROTOCOL_VERSION;
 use super::*;
 
 #[test]
+fn service_brand_uses_exact_aliases_and_hostname_boundaries() {
+    let remote = |url: &str| serde_json::from_value::<McpConfig>(json!({"type":"remote", "url":url})).unwrap();
+    assert_eq!(catalog_brand("custom", &remote("https://mcp.firecrawl.dev/mcp")), Some("firecrawl".into()));
+    assert_eq!(catalog_brand("custom", &remote("https://mcp.webflow.com/mcp")), Some("webflow".into()));
+    assert_eq!(catalog_brand("custom", &remote("https://mcp.vercel.com/mcp")), Some("vercel".into()));
+    assert_eq!(catalog_brand("custom", &remote("https://firecrawl.dev.evil.example/mcp")), None);
+    assert_eq!(catalog_brand("custom", &remote("https://evil.example/firecrawl.dev")), None);
+    assert_eq!(catalog_brand("firecrawl", &remote("https://example.com/mcp")), Some("firecrawl".into()));
+}
+
+#[test]
 fn standalone_server_services_inject_the_local_mcp_store() {
     let services = crate::standard_services();
     assert!(!services.mcp_credentials.supports_hosted_scopes());
@@ -343,11 +354,19 @@ async fn local_stdio_runtime_lists_and_calls_tools() {
     let store = McpAuthStore::new(root.join("mcp-auth.json"));
     let directory = root.to_str().unwrap();
     let state = test_state(&root).await;
+    let mut catalog_events = state.subscribe();
 
     let connected = connect(directory, "mock", &store, state.clone())
         .await
         .unwrap();
     assert!(matches!(connected, McpStatus::Connected));
+    let mut changes = Vec::new();
+    while let Ok(event) = catalog_events.try_recv() {
+        if event.kind == neoism_agent_core::event_type::MCP_TOOLS_CHANGED {
+            changes.push(event.properties);
+        }
+    }
+    assert_eq!(changes, vec![json!({"server": "mock", "directory": directory})]);
     assert!(matches!(
         status(directory, &store, &state).await.unwrap()["mock"],
         McpStatus::Connected
@@ -382,8 +401,17 @@ async fn local_stdio_runtime_lists_and_calls_tools() {
     .await
     .unwrap();
     assert_eq!(tool_result_text(&result), "ok");
-
+    // Reusing the runtime for tools/resources/prompts must not trigger a
+    // catalog invalidation storm. Disconnect must notify other clients once.
+    while let Ok(event) = catalog_events.try_recv() {
+        assert_ne!(event.kind, neoism_agent_core::event_type::MCP_TOOLS_CHANGED);
+    }
     assert!(disconnect(&state, directory, "mock").await.unwrap());
+    let event = catalog_events.try_recv().unwrap();
+    assert_eq!(event.kind, neoism_agent_core::event_type::MCP_TOOLS_CHANGED);
+    assert_eq!(event.properties, json!({"server": "mock", "directory": directory}));
+    assert!(!disconnect(&state, directory, "mock").await.unwrap());
+    assert!(catalog_events.try_recv().is_err());
     let _ = fs::remove_dir_all(root);
 }
 

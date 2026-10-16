@@ -611,6 +611,7 @@ macro_rules! neoism_ui_impl_agent_timeline_message {
                     status,
                     tool: "tool_group".to_string(),
                     tool_batch_id: None,
+                    mcp: None,
                     composition_children: Vec::new(),
                     composition_child: false,
                     output_kind: $output_kind::Text,

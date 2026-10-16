@@ -156,7 +156,7 @@ mod tests {
     use super::tool_symbol;
 
     #[test]
-    fn tools_use_distinct_symbols_and_mcp_tools_use_a_gear() {
+    fn native_tools_keep_their_symbols_and_unknown_native_tools_keep_the_gear() {
         assert_eq!(tool_symbol("Read"), "\u{2192}");
         assert_eq!(tool_symbol("Bash"), "\u{f120}");
         assert_eq!(tool_symbol("grep"), "\u{f002}");

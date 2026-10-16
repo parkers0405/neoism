@@ -389,12 +389,18 @@ impl<A: Send + Copy + 'static> Chrome<A> {
     }
 
     pub fn take_conversation_open(&mut self) -> Option<String> {
-        let id = self.pending_conversation_open.take()?;
+        self.take_conversation_open_with_family().map(|(id, _)| id)
+    }
+
+    /// Exact destination plus the owning family, captured together on activation.
+    /// Keep the ID-only drain for older hosts.
+    pub fn take_conversation_open_with_family(&mut self) -> Option<(String, String)> {
+        let intent = self.pending_conversation_open.take()?;
         if self.layout.terminal.w <= 0.0 {
             self.hide_conversations();
             self.relayout();
         }
-        Some(id)
+        Some(intent)
     }
 
     pub fn hide_conversations(&mut self) {

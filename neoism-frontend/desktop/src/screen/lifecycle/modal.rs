@@ -1,6 +1,30 @@
 use super::*;
 use neoism_backend::clipboard::ClipboardType;
 
+/// Validate at the host boundary without normalizing the opener's argument.
+fn validate_modal_url(raw: &str) -> Result<(), String> {
+    let parsed = url::Url::parse(raw).map_err(|error| error.to_string())?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err("Only HTTP and HTTPS links are supported".into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod url_tests {
+    use super::validate_modal_url;
+
+    #[test]
+    fn modal_urls_only_allow_absolute_http_and_https() {
+        for url in ["https://example.com/a%2Fb?x=%2f#Frag", "HTTP://example.com/"] {
+            assert!(validate_modal_url(url).is_ok(), "{url}");
+        }
+        for url in ["javascript:alert(1)", "file:///tmp/test", "mailto:a@example.com", "/relative", "//example.com", "https://", ""] {
+            assert!(validate_modal_url(url).is_err(), "{url}");
+        }
+    }
+}
+
 impl Screen<'_> {
     pub fn handle_file_browser_click(&mut self) -> bool {
         if !self.renderer.file_browser.is_active() {
@@ -37,6 +61,11 @@ impl Screen<'_> {
             return true;
         }
         if let Some(action) = self.renderer.modal.invite_action_at(mouse_x, mouse_y) {
+            self.execute_modal_action(action);
+            self.mark_dirty();
+            return true;
+        }
+        if let Some(action) = self.renderer.modal.body_link_action_at(mouse_x, mouse_y) {
             self.execute_modal_action(action);
             self.mark_dirty();
             return true;
@@ -131,6 +160,16 @@ impl Screen<'_> {
                     self.context_manager.window_id(),
                 );
                 self.renderer.modal.mark_invite_copied();
+            }
+            ModalAction::OpenUrl { url } => {
+                let result = validate_modal_url(&url)
+                    .and_then(|()| crate::background_process::open_url(&url));
+                if let Err(error) = result {
+                    self.renderer.notifications.push(
+                        format!("Could not open link: {error}"),
+                        neoism_ui::panels::notifications::NotificationLevel::Error,
+                    );
+                }
             }
             ModalAction::Close => {
                 self.renderer.modal.close();

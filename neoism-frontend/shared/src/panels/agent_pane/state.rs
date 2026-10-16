@@ -159,6 +159,7 @@ pub struct NeoismAgentMessage {
     pub tool: String,
     /// Server-issued identity of one model response's tool-call batch.
     pub tool_batch_id: Option<String>,
+    pub mcp: Option<super::mcp_icon::McpToolPresentation>,
     /// UI-only executed calls; never authoritative provider parts.
     pub composition_children: Vec<NeoismAgentMessage>,
     /// Explicit compact-by-default context, including native edit calls.
@@ -447,6 +448,7 @@ impl NeoismAgentMessage {
             status: String::new(),
             tool: String::new(),
             tool_batch_id: None,
+            mcp: None,
             composition_children: Vec::new(),
             composition_child: false,
             output_kind: NeoismAgentOutputKind::Text,
@@ -630,6 +632,7 @@ pub struct NeoismAgentPane {
     #[allow(dead_code)]
     pub(super) server: String,
     pub(super) picker: Option<NeoismAgentPicker>,
+    mcp_catalog_refresh: pickers_state::McpCatalogRefresh,
     /// In-progress `/connect` provider-auth flow (catalog + chosen
     /// provider/method), held while any connect picker stage is open.
     connect: Option<connect::ConnectFlow>,
@@ -837,6 +840,9 @@ pub struct NeoismAgentPane {
     /// The running skit + its start time on the render animation clock.
     fx_started: Option<(crate::panels::agent_pane::view::fx::AgentFxKind, f32)>,
     pub wordmark: NeoismWordmarkState,
+    pub activity_animation: crate::primitives::wordmark_animation::WordmarkAnimation,
+    pub activity_status_rects: Vec<[f32; 4]>,
+    activity_session_id: Option<String>,
     pub(super) side_panel: NeoismAgentSidePanel,
     catalog_toggle_requested: bool,
     detail_panel: NeoismAgentSidePanel,
@@ -1051,6 +1057,7 @@ impl Default for NeoismAgentPane {
             directory: None,
             server: String::new(),
             picker: None,
+            mcp_catalog_refresh: Default::default(),
             connect: None,
             file_mention_anchor: None,
             file_mention_candidates: Vec::new(),
@@ -1181,6 +1188,9 @@ impl Default for NeoismAgentPane {
             fx_pending_prompt: None,
             fx_started: None,
             wordmark: NeoismWordmarkState::default(),
+            activity_animation: Default::default(),
+            activity_status_rects: Vec::new(),
+            activity_session_id: None,
             side_panel: NeoismAgentSidePanel::default(),
             catalog_toggle_requested: false,
             detail_panel: NeoismAgentSidePanel::default(),
@@ -1371,6 +1381,10 @@ impl NeoismAgentPane {
                 self.timeline_live_trace_start = None;
                 self.timeline_live_trace_anchor = None;
             }
+            if self.session_id != session_id {
+                self.activity_animation.cancel();
+                self.clear_activity_status_rects();
+            }
             self.session_id = session_id;
             self.text_reveal.scope(self.session_id.as_deref());
             self.tool_motion.scope(self.session_id.as_deref());
@@ -1427,6 +1441,10 @@ impl NeoismAgentPane {
                 .entry(id.clone())
                 .or_insert(self.new_chat_source);
         }
+        if self.session_id != session_id {
+            self.activity_animation.cancel();
+            self.clear_activity_status_rects();
+        }
         self.session_id = session_id;
     }
 
@@ -1437,6 +1455,8 @@ impl NeoismAgentPane {
         // parked cache entry so it doesn't occupy an LRU slot.
         self.session_cache.remove(session_id);
         if self.session_id.as_deref() == Some(session_id) {
+            self.activity_animation.cancel();
+            self.clear_activity_status_rects();
             self.session_id = None;
             self.timeline_live_trace_start = None;
             self.timeline_live_trace_anchor = None;

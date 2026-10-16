@@ -628,6 +628,7 @@ pub(crate) fn history_from_agent_message(
         status: message.status,
         tool: message.tool,
         tool_batch_id: message.tool_batch_id,
+        mcp: message.mcp.as_ref().map(|mcp| mcp.to_wire()),
         lang: message.lang,
         line_offset: message.line_offset.map(|offset| offset as u32),
         detail: message.detail,
@@ -1564,7 +1565,7 @@ pub(crate) async fn handle_list_mcp(inner: Arc<AgentInner>, directory: Option<St
     };
     match http_get_json(&inner, &path).await {
         Ok(status) => {
-            let _ = inner.tx.send(AgentServerMessage::McpCatalog { status });
+            let _ = inner.tx.send(AgentServerMessage::McpCatalog { status, directory });
         }
         Err(error) => {
             let _ = inner

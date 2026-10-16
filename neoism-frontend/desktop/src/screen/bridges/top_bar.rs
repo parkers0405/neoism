@@ -184,15 +184,20 @@ impl Screen<'_> {
         outcome.consumed
     }
 
-    /// Hover router for the settings panel.
-    #[allow(dead_code)]
-    pub fn handle_settings_hover(&mut self) -> bool {
+    /// Settings owns hover and cursor classification across the whole overlay.
+    pub fn handle_settings_hover(&mut self) -> Option<neoism_window::window::CursorIcon> {
+        use neoism_ui::widgets::modal::ModalPointerKind;
+        use neoism_window::window::CursorIcon;
         if !self.renderer.settings.is_active() {
-            return false;
+            return None;
         }
         let (mx, my) = self.mouse_logical_for_hit_test();
         self.renderer.settings.pointer_move(mx, my);
-        true
+        Some(match self.renderer.settings.pointer_kind_at(mx, my) {
+            ModalPointerKind::Default => CursorIcon::Default,
+            ModalPointerKind::Text => CursorIcon::Text,
+            ModalPointerKind::Pointer => CursorIcon::Pointer,
+        })
     }
 
     pub(crate) fn apply_settings_action(

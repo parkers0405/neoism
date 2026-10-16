@@ -602,6 +602,7 @@ fn agent_message_new(
         status: String::new(),
         tool: String::new(),
         tool_batch_id: None,
+        mcp: None,
             composition_children: Vec::new(),
             composition_child: false,
         output_kind: NeoismAgentOutputKind::Text,
@@ -1140,6 +1141,42 @@ fn is_compaction_summary_message(parts: &[Value]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mcp_timeline_identity_uses_routing_metadata_not_display_names() {
+        for status in ["pending", "running", "completed", "error", "interrupted"] {
+            let part = json!({"tool":"mcp__old__search", "state":{
+                "status":status, "input":{}, "metadata":{"mcp":{"client":"custom-service", "tool":"lookup",
+                    "presentation":{"brand":"firecrawl"}}}},
+                "metadata":{"toolResult":{"mcp":{"client":"wrong", "tool":"lookup"}}}});
+            let message = tool_block(&part);
+            let mcp = message.mcp.unwrap();
+            assert_eq!(mcp.server.as_deref(), Some("custom-service"));
+            assert_eq!(mcp.to_wire()["presentation"]["brand"], "firecrawl");
+        }
+        let message = tool_block(&json!({"tool":"execute", "state":{"status":"error", "input":{}},
+            "metadata":{"toolResult":{"mcp":{"runtimeId":"mcp__webflow__lookup"}}}}));
+        assert_eq!(message.mcp.unwrap().server.as_deref(), Some("webflow"));
+    }
+
+    #[test]
+    fn mcp_timeline_call_targets_are_delimited_and_native_tools_stay_native() {
+        for (tool, input, expected) in [
+            ("execute", json!({"action":"call","tool":"firecrawl.scrape"}), Some("firecrawl")),
+            ("execute", json!({"action":"call","tool":"mcp__webflow__lookup"}), Some("webflow")),
+            ("execute", json!({"action":"search","namespace":"vercel"}), Some("vercel")),
+            ("mcp__local__lookup", json!({}), Some("local")),
+            ("mcp__bad", json!({}), None),
+            ("execute", json!({"action":"call","tool":"firecrawl_scrape"}), None),
+        ] {
+            let message = tool_block(&json!({"tool":tool,"state":{"status":"running","input":input}}));
+            assert_eq!(message.mcp.unwrap().server.as_deref(), expected);
+        }
+        for tool in ["read", "bash", "webfetch", "firecrawl_scrape", "my_mcp__webflow__tool"] {
+            let message = tool_block(&json!({"tool":tool,"state":{"status":"running","input":{"tool":"firecrawl.scrape"}}}));
+            assert!(message.mcp.is_none(), "{tool}");
+        }
+    }
 
     #[test]
     fn mcp_headers_are_identity_only_across_statuses() {
@@ -2907,6 +2944,7 @@ fn ordinary_tool_block(tool: &str, state: &Value, metadata: Option<&Value>) -> N
         edit_tool_detail(tool, state).unwrap_or(output.content)
     };
     message.line_offset = output.line_offset;
+    message.mcp = mcp_tool_presentation(tool, state, metadata);
     // Only native provider batch provenance is authoritative. Broad external
     // message/turn IDs do not describe a model-response tool-call batch.
     message.tool_batch_id = metadata
@@ -3168,6 +3206,48 @@ fn mcp_discovery_title(namespace: Option<&str>) -> String {
         .filter(|words| !words.is_empty())
         .map(|words| mcp_bound_label(&format!("Find {} Tools", words.join(" "))))
         .unwrap_or_else(|| "Find Tools".to_owned())
+}
+
+/// Server keys are routing identity, never the humanized/sanitized title.
+fn mcp_server_key(value: &str) -> Option<&str> {
+    (!value.is_empty() && value.len() <= 512 && value.trim() == value
+        && !value.chars().any(|c| c.is_control() || matches!(c, '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{206f}' | '\u{feff}')))
+        .then_some(value)
+}
+
+fn mcp_target_server(target: &str) -> Option<&str> {
+    let (server, tool) = if let Some(runtime) = target.strip_prefix("mcp__") {
+        runtime.split_once("__")?
+    } else {
+        target.split_once('.')?
+    };
+    mcp_server_key(tool)?;
+    mcp_server_key(server)
+}
+
+pub(super) fn mcp_tool_presentation(
+    tool: &str, state: &Value, metadata: Option<&Value>,
+) -> Option<super::mcp_icon::McpToolPresentation> {
+    use super::mcp_icon::McpToolPresentation;
+    for mcp in [state.get("metadata").and_then(|m| m.get("mcp")),
+        metadata.and_then(|m| m.get("toolResult")).and_then(|m| m.get("mcp"))].into_iter().flatten() {
+        let server = mcp["client"].as_str().and_then(mcp_server_key)
+            .or_else(|| mcp["runtimeId"].as_str().and_then(mcp_target_server));
+        if let Some(server) = server {
+            return Some(McpToolPresentation::new(Some(server.into()), &mcp["presentation"]));
+        }
+    }
+    let input = &state["input"];
+    if tool == "execute" {
+        let server = match input["action"].as_str() {
+            Some("call") => input["tool"].as_str().and_then(mcp_target_server),
+            Some("search") => input["namespace"].as_str().and_then(mcp_server_key),
+            _ => None,
+        };
+        return Some(McpToolPresentation::new(server.map(str::to_owned), &Value::Null));
+    }
+    tool.starts_with("mcp__").then(|| McpToolPresentation::new(
+        mcp_target_server(tool).map(str::to_owned), &Value::Null))
 }
 
 fn mcp_tool_title(

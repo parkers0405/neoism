@@ -1309,6 +1309,99 @@ fn cancelled_wordmark_click_does_not_drive_animation() {
 }
 
 #[test]
+fn activity_overlap_reserves_background_menu_without_disabling_primary_word() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("activity-root".into());
+    pane.messages.push(NeoismAgentMessage::user("prompt"));
+    // Primary Background glyph padding/motion extends into the child row.
+    pane.register_activity_status_rect([10.0, 20.0, 100.0, 30.0]);
+    pane.register_background_status_rect([10.0, 40.0, 120.0, 24.0]);
+    assert!(pane.activity_status_contains(20.0, 30.0));
+    assert!(pane.pop_activity_status_click(20.0, 30.0));
+    let effect = pane.activity_animation_frame().unwrap().effect;
+    for (x, y) in [(20.0, 45.0), (10.0, 40.0), (110.0, 50.0)] {
+        assert!(pane.background_status_contains(x, y));
+        assert!(!pane.activity_status_contains(x, y), "child menu owns overlap and its boundary");
+        assert!(!pane.pop_activity_status_click(x, y));
+        assert_eq!(pane.activity_animation_frame().unwrap().effect, effect, "menu press must not restart replay");
+    }
+    // A menu-free primary word still replays, even when its label is Background.
+    assert!(pane.pop_activity_status_click(20.0, 30.0));
+    assert_ne!(pane.activity_animation_frame().unwrap().effect, effect);
+    pane.clear_tool_hit_rects();
+    assert!(!pane.activity_status_contains(20.0, 30.0));
+    assert!(!pane.pop_activity_status_click(20.0, 30.0));
+    assert_eq!(pane.animation_reason(), None, "skipping status render must not leave stale hit/redraw state");
+}
+
+#[test]
+fn activity_replay_bag_is_independent_and_restarts_in_conversation() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("activity-root".into());
+    pane.messages.push(NeoismAgentMessage::user("prompt"));
+    pane.wordmark.animation.cancel();
+    pane.register_activity_status_rect([10.0, 20.0, 40.0, 12.0]);
+    let mut effects = Vec::new();
+    for _ in 0..15 {
+        assert!(pane.pop_activity_status_click(20.0, 25.0));
+        let frame = pane.activity_animation_frame().unwrap();
+        assert!(frame.progress < 0.1, "a second click restarts immediately");
+        assert!(!effects.contains(&frame.effect), "one complete shuffled bag");
+        effects.push(frame.effect);
+        assert_eq!(pane.animation_reason(), Some("agent_activity_word"));
+    }
+    assert!(pane.pop_activity_status_click(20.0, 25.0));
+    assert_ne!(pane.activity_animation_frame().unwrap().effect, *effects.last().unwrap());
+    assert!(!pane.wordmark.animation.is_active());
+}
+
+#[test]
+fn activity_hits_are_frame_local_clipped_and_preserve_background_menu() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("activity-root".into());
+    pane.messages.push(NeoismAgentMessage::user("prompt"));
+    pane.register_background_status_rect([60.0, 20.0, 40.0, 12.0]);
+    assert!(!pane.pop_activity_status_click(20.0, 25.0));
+    // Only the clipped, visible primary word is supplied by the renderer.
+    pane.register_activity_status_rect([10.0, 20.0, 20.0, 12.0]);
+    pane.register_activity_status_rect([0.0, 0.0, 0.0, 20.0]);
+    pane.register_activity_status_rect([f32::NAN, 0.0, 20.0, 20.0]);
+    assert!(!pane.activity_status_contains(31.0, 25.0));
+    assert!(!pane.activity_status_contains(f32::NAN, 25.0));
+    assert!(pane.pop_activity_status_click(10.0, 20.0));
+    assert!(!pane.pop_activity_status_click(70.0, 25.0));
+    assert!(pane.background_status_contains(70.0, 25.0));
+    pane.clear_tool_hit_rects();
+    assert!(!pane.activity_status_contains(20.0, 25.0));
+    assert!(pane.activity_animation_frame().is_some(), "clearing hits is not cancellation");
+    assert_eq!(pane.animation_reason(), None, "offscreen status cannot spin");
+    pane.register_activity_status_rect([10.0, 20.0, 20.0, 12.0]);
+    assert_eq!(pane.animation_reason(), Some("agent_activity_word"));
+    pane.reset_transient_timeline_interactions();
+    assert!(pane.activity_animation_frame().is_none());
+    assert!(!pane.activity_status_contains(20.0, 25.0));
+}
+
+#[test]
+fn activity_replay_scope_and_expiry_do_not_leave_idle_redraw() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("activity-root".into());
+    pane.messages.push(NeoismAgentMessage::user("prompt"));
+    pane.register_activity_status_rect([10.0, 20.0, 20.0, 12.0]);
+    assert!(pane.pop_activity_status_click(20.0, 25.0));
+    pane.session_id = Some("other-root".into());
+    assert!(!pane.activity_status_contains(20.0, 25.0));
+    assert!(pane.activity_animation_frame().is_none());
+    pane.register_activity_status_rect([10.0, 20.0, 20.0, 12.0]);
+    assert!(pane.activity_animation_frame().is_none());
+    assert_ne!(pane.animation_reason(), Some("agent_activity_word"));
+    assert!(pane.pop_activity_status_click(20.0, 25.0));
+    std::thread::sleep(std::time::Duration::from_millis(2800));
+    assert!(pane.activity_animation_frame().is_none());
+    assert_eq!(pane.animation_reason(), None, "expired replay leaves no idle redraw owner");
+}
+
+#[test]
 fn fresh_wordmark_click_drives_pixel_animation() {
     let mut pane = NeoismAgentPane::default();
     assert!(!pane.wordmark_hit(100.0, 40.0));

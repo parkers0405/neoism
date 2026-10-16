@@ -5,9 +5,160 @@ mod directory_browser_tests {
     use super::*;
 
     #[test]
+    fn catalog_retention_prunes_only_after_last_applicable_family_owner_closes() {
+        let mut catalog = NeoismAgentPane::with_directory(Some("/project".into()));
+        catalog.server = "http://host/".into();
+        catalog.set_catalog_directory(Some("/project".into()));
+        catalog.side_panel.set_sessions(vec![
+            NeoismAgentSessionEntry::new("root-a", "A", "")
+                .with_directory(Some("/project".into())),
+            NeoismAgentSessionEntry::new("root-b", "B", "")
+                .with_directory(Some("/project".into())),
+        ]);
+        let source = |root: &str, server: &str, directory: &str| {
+            let mut pane = NeoismAgentPane::with_directory(Some(directory.into()));
+            pane.server = server.into();
+            pane.session_id = Some(format!("{root}-child"));
+            pane.session_tree_root_id = Some(root.into());
+            pane.detail_panel.set_user_hidden(true);
+            pane.side_panel.set_subagents(vec![
+                NeoismAgentSessionEntry::new(root, "Root", "")
+                    .with_directory(Some(directory.into())),
+                NeoismAgentSessionEntry::new(format!("{root}-child"), "Child", "")
+                    .with_runtime_status(Some("running".into())),
+            ]);
+            pane
+        };
+        // Two contexts can own the same root, including an inactive workspace.
+        let mut owners = vec![
+            source("root-a", "http://host", "/project"),
+            source("root-a", "http://host", "/project"),
+            source("root-b", "http://host", "/project"),
+            source("root-b", "http://other", "/project"),
+            source("root-b", "http://host", "/other"),
+        ];
+        let reconcile = |catalog: &mut NeoismAgentPane, owners: &[NeoismAgentPane]| {
+            let mut roots = std::collections::HashSet::new();
+            for owner in owners {
+                if let Some(root) = catalog.catalog_live_family_root(owner) {
+                    roots.insert(root.to_owned());
+                }
+                catalog.sync_catalog_subagents_from_pane(owner);
+            }
+            catalog.side_panel.retain_catalog_subagent_families(&roots);
+            roots
+        };
+        assert_eq!(reconcile(&mut catalog, &owners).len(), 2);
+        owners.remove(0); // A remains represented in another context.
+        owners.remove(1); // Last applicable B owner closes; wrong scopes remain.
+        let roots = reconcile(&mut catalog, &owners);
+        assert_eq!(
+            roots,
+            std::collections::HashSet::from(["root-a".to_owned()])
+        );
+        assert!(catalog
+            .side_panel
+            .sessions()
+            .iter()
+            .any(|row| row.id == "root-a-child"));
+        assert!(!catalog
+            .side_panel
+            .sessions()
+            .iter()
+            .any(|row| row.id == "root-b-child"));
+        assert!(catalog
+            .side_panel
+            .sessions()
+            .iter()
+            .any(|row| row.id == "root-b"));
+        owners.remove(0);
+        assert!(reconcile(&mut catalog, &owners).is_empty());
+        assert!(!catalog
+            .side_panel
+            .sessions()
+            .iter()
+            .any(|row| row.branch_root_id.is_some()));
+    }
+
+    #[test]
+    fn catalog_live_family_root_requires_session_but_not_loaded_roster() {
+        let mut catalog = NeoismAgentPane::default();
+        catalog.set_catalog_directory(None);
+        let mut source = NeoismAgentPane::default();
+        source.session_tree_root_id = Some("stale-root".into());
+        assert_eq!(catalog.catalog_live_family_root(&source), None);
+        source.session_id = Some("child".into());
+        source.session_tree_root_id = Some("root".into());
+        assert_eq!(catalog.catalog_live_family_root(&source), Some("root"));
+        source.session_tree_root_id = None;
+        assert_eq!(catalog.catalog_live_family_root(&source), Some("child"));
+    }
+
+    #[test]
+    fn catalog_family_sync_is_endpoint_and_directory_scoped_even_with_hidden_rail() {
+        let mut catalog = NeoismAgentPane::with_directory(Some("/project".into()));
+        catalog.server = "http://host/".into();
+        catalog.set_catalog_directory(Some("/project".into()));
+        catalog
+            .side_panel
+            .set_sessions(vec![NeoismAgentSessionEntry::new("root", "Root", "")
+                .with_directory(Some("/project".into()))]);
+        let mut source = NeoismAgentPane::with_directory(Some("/project".into()));
+        source.server = "http://host".into();
+        source.session_id = Some("child".into());
+        source.session_tree_root_id = Some("root".into());
+        source.side_panel.set_subagents(vec![
+            NeoismAgentSessionEntry::new("root", "Root", ""),
+            NeoismAgentSessionEntry::new("child", "Child", "")
+                .with_runtime_status(Some("running".into())),
+        ]);
+        source.detail_panel.set_user_hidden(true);
+        assert!(catalog.catalog_accepts_family(&source));
+        catalog.sync_catalog_subagents_from_pane(&source);
+        let child = catalog
+            .side_panel
+            .sessions()
+            .iter()
+            .find(|row| row.id == "child")
+            .expect("hidden rail still projects child");
+        assert_eq!(child.branch_root_id.as_deref(), Some("root"));
+        assert_eq!(child.runtime_status.as_deref(), Some("running"));
+        assert!(child.branch_status.is_some());
+        source.side_panel.set_subagents(vec![
+            NeoismAgentSessionEntry::new("root", "Root", ""),
+            NeoismAgentSessionEntry::new("child", "Child", "")
+                .with_runtime_status(Some("completed".into())),
+        ]);
+        catalog.sync_catalog_subagents_from_pane(&source);
+        let child = catalog
+            .side_panel
+            .sessions()
+            .iter()
+            .find(|row| row.id == "child")
+            .expect("child remains in catalog");
+        assert_eq!(child.runtime_status.as_deref(), Some("completed"));
+        assert_eq!(source.session_id_str(), Some("child"));
+        assert!(catalog.session_id_str().is_none());
+        source.server = "http://other".into();
+        assert!(!catalog.catalog_accepts_family(&source));
+        source.server = "http://host".into();
+        source.directory = Some("/other".into());
+        assert!(!catalog.catalog_accepts_family(&source));
+        // A child worktree must not move the owning family into another project.
+        source.side_panel.set_subagents(vec![
+            NeoismAgentSessionEntry::new("root", "Root", "")
+                .with_directory(Some("/project".into())),
+            NeoismAgentSessionEntry::new("child", "Child", ""),
+        ]);
+        assert!(catalog.catalog_accepts_family(&source));
+        catalog.set_catalog_directory(None);
+        assert!(catalog.catalog_accepts_family(&source));
+    }
+
+    #[test]
     fn project_session_pool_caps_workers_across_catalog_lifetimes() {
-        use std::sync::{Arc, Condvar};
         use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Condvar};
         let gate = Arc::new((Mutex::new(false), Condvar::new()));
         let active = Arc::new(AtomicUsize::new(0));
         let peak = Arc::new(AtomicUsize::new(0));
@@ -31,16 +182,21 @@ mod directory_browser_tests {
                 }
                 active.fetch_sub(1, Ordering::SeqCst);
                 done_tx.send(()).unwrap();
-            })).unwrap();
+            }))
+            .unwrap();
         }
         for _ in 0..3 {
-            started_rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+            started_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
         }
         let fourth = started_rx.recv_timeout(std::time::Duration::from_millis(50));
         *gate.0.lock().unwrap() = true;
         gate.1.notify_all();
         for _ in 0..6 {
-            done_rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+            done_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
         }
         assert!(fourth.is_err());
         assert_eq!(peak.load(Ordering::SeqCst), 3);
@@ -69,8 +225,9 @@ type ProjectSessionJob = Box<dyn FnOnce() + Send + 'static>;
 /// Shared claims bound one catalog's work. This process-wide pool also bounds
 /// actual HTTP workers when a catalog/endpoint is replaced while requests run.
 fn enqueue_project_session_job(job: ProjectSessionJob) -> Result<(), String> {
-    static POOL: std::sync::OnceLock<Result<std::sync::mpsc::Sender<ProjectSessionJob>, String>> =
-        std::sync::OnceLock::new();
+    static POOL: std::sync::OnceLock<
+        Result<std::sync::mpsc::Sender<ProjectSessionJob>, String>,
+    > = std::sync::OnceLock::new();
     let sender = POOL.get_or_init(|| {
         let (tx, rx) = std::sync::mpsc::channel::<ProjectSessionJob>();
         let rx = std::sync::Arc::new(Mutex::new(rx));
@@ -83,7 +240,9 @@ fn enqueue_project_session_job(job: ProjectSessionJob) -> Result<(), String> {
                     let job = { rx.lock().unwrap().recv() };
                     match job {
                         Ok(job) => {
-                            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(job)).is_err() {
+                            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(job))
+                                .is_err()
+                            {
                                 tracing::error!("project session worker panicked");
                             }
                         }
@@ -204,6 +363,9 @@ impl NeoismAgentPane {
     }
 
     pub fn animation_reason(&self) -> Option<&'static str> {
+        if !self.activity_status_rects.is_empty() && self.activity_animation_frame().is_some() {
+            return Some("agent_activity_word");
+        }
         if self
             .tool_motion
             .is_animating_for(self.session_id.as_deref())
@@ -359,6 +521,51 @@ impl NeoismAgentPane {
             .sync_conversation_details_from_root(&self.side_panel, root.as_deref());
     }
 
+    pub(crate) fn conversation_family_directory(&self) -> Option<&str> {
+        self.side_panel
+            .subagents()
+            .first()
+            .filter(|entry| Some(entry.id.as_str()) == self.conversation_root_id())
+            .and_then(|entry| entry.directory.as_deref())
+            .or_else(|| self.session_directory())
+    }
+
+    /// A dashboard catalog accepts every project on its endpoint; a scoped
+    /// catalog accepts only that exact directory (joined paths stay opaque).
+    pub(crate) fn catalog_accepts_family(&self, source: &Self) -> bool {
+        self.server.trim_end_matches('/') == source.server.trim_end_matches('/')
+            && self.side_panel.catalog_directory().is_none_or(|directory| {
+                source.conversation_family_directory() == Some(directory)
+            })
+    }
+
+    /// Retention follows live pane ownership, not whether its roster has loaded
+    /// or its tab/rail is visible. Never keep a cached root on an empty pane.
+    pub(crate) fn catalog_live_family_root<'a>(
+        &self,
+        source: &'a Self,
+    ) -> Option<&'a str> {
+        if !self.catalog_accepts_family(source) {
+            return None;
+        }
+        let session = source.session_id_str().filter(|id| !id.is_empty())?;
+        Some(
+            source
+                .conversation_root_id()
+                .filter(|id| !id.is_empty())
+                .unwrap_or(session),
+        )
+    }
+
+    pub(crate) fn sync_catalog_subagents_from_pane(&mut self, source: &Self) {
+        if self.catalog_accepts_family(source) {
+            self.side_panel.sync_catalog_subagents_from(
+                source.side_panel(),
+                source.conversation_root_id(),
+            );
+        }
+    }
+
     pub fn take_catalog_toggle_request(&mut self) -> bool {
         std::mem::take(&mut self.catalog_toggle_requested)
     }
@@ -443,8 +650,15 @@ impl NeoismAgentPane {
     }
 
     /// Captures backend, session/draft and cwd for modal stale-result rejection.
-    pub(crate) fn file_browser_identity(&self) -> (String, Option<String>, u64, Option<String>) {
-        (self.server.clone(), self.session_id.clone(), self.prompt_draft_id, self.directory.clone())
+    pub(crate) fn file_browser_identity(
+        &self,
+    ) -> (String, Option<String>, u64, Option<String>) {
+        (
+            self.server.clone(),
+            self.session_id.clone(),
+            self.prompt_draft_id,
+            self.directory.clone(),
+        )
     }
 
     pub(crate) fn choose_session_directory(&mut self, path: String) {
@@ -524,15 +738,14 @@ impl NeoismAgentPane {
     }
 
     fn ensure_session_catalog_stream(&mut self) {
-        if self
-            .session_catalog_stream
-            .as_ref()
-            .is_some_and(|stream| stream.matches(&self.server, self.side_panel.catalog_directory()))
-        {
+        if self.session_catalog_stream.as_ref().is_some_and(|stream| {
+            stream.matches(&self.server, self.side_panel.catalog_directory())
+        }) {
             return;
         }
         let mut stream = start_session_catalog_stream(
-            self.server.clone(), self.side_panel.catalog_directory().map(str::to_owned),
+            self.server.clone(),
+            self.side_panel.catalog_directory().map(str::to_owned),
         );
         if let Some(wake) = self.event_wake.clone() {
             stream.set_wake(wake);
@@ -541,9 +754,13 @@ impl NeoismAgentPane {
     }
 
     pub(crate) fn catalog_callback_is_current(
-        &self, server: &str, generation: u64, directory: Option<&str>,
+        &self,
+        server: &str,
+        generation: u64,
+        directory: Option<&str>,
     ) -> bool {
-        self.server == server && self.catalog_generation == generation
+        self.server == server
+            && self.catalog_generation == generation
             && self.side_panel.catalog_directory() == directory
     }
 
@@ -558,10 +775,15 @@ impl NeoismAgentPane {
             .name("neoism-agent-sessions".into())
             .spawn(move || {
                 if directory.is_none() {
-                    let result = crate::neoism::agent::api::fetch_session_projects(&server);
-                    let _ = tx.send(NeoismAgentBackgroundUpdate::SessionProjectsRefreshed {
-                        server, catalog_generation, generation, result,
-                    });
+                    let result =
+                        crate::neoism::agent::api::fetch_session_projects(&server);
+                    let _ =
+                        tx.send(NeoismAgentBackgroundUpdate::SessionProjectsRefreshed {
+                            server,
+                            catalog_generation,
+                            generation,
+                            result,
+                        });
                     return;
                 }
                 let entries = crate::neoism::agent::api::fetch_session_entries_page(
@@ -603,14 +825,21 @@ impl NeoismAgentPane {
             let requested_directory = directory.clone();
             if let Err(error) = enqueue_project_session_job(Box::new(move || {
                 let result = crate::neoism::agent::api::fetch_project_session_page(
-                    &server, &requested_directory, cursor.as_deref(),
+                    &server,
+                    &requested_directory,
+                    cursor.as_deref(),
                 );
                 let _ = tx.send(NeoismAgentBackgroundUpdate::ProjectSessionPage {
-                    server, catalog_generation, directory: requested_directory,
-                    requested_cursor: cursor, generation, result,
+                    server,
+                    catalog_generation,
+                    directory: requested_directory,
+                    requested_cursor: cursor,
+                    generation,
+                    result,
                 });
             })) {
-                self.side_panel.settle_project_session_error(&directory, generation, error);
+                self.side_panel
+                    .settle_project_session_error(&directory, generation, error);
             }
         }
         changed
@@ -623,7 +852,9 @@ impl NeoismAgentPane {
 
     pub fn maybe_request_side_panel_session_page(&mut self) {
         self.pump_project_session_requests();
-        if self.side_panel.project_pagination_enabled() || self.side_panel.catalog_directory().is_none() {
+        if self.side_panel.project_pagination_enabled()
+            || self.side_panel.catalog_directory().is_none()
+        {
             return;
         }
         if let Some(cursor) = self.side_panel.begin_session_page_near_end() {
@@ -658,18 +889,19 @@ impl NeoismAgentPane {
         std::thread::Builder::new()
             .name("neoism-agent-semantic".into())
             .spawn(move || {
-                let (hits, transcript_unavailable) = match crate::neoism::agent::api::fetch_session_search_hits(
-                    &server,
-                    &query,
-                    current.as_deref(),
-                    directory.as_deref(),
-                    transcript_enabled,
-                ) {
-                    Ok(result) => result,
-                    // Network hiccups yield "no results" rather than
-                    // latching the feature off.
-                    Err(_) => (Vec::new(), !transcript_enabled),
-                };
+                let (hits, transcript_unavailable) =
+                    match crate::neoism::agent::api::fetch_session_search_hits(
+                        &server,
+                        &query,
+                        current.as_deref(),
+                        directory.as_deref(),
+                        transcript_enabled,
+                    ) {
+                        Ok(result) => result,
+                        // Network hiccups yield "no results" rather than
+                        // latching the feature off.
+                        Err(_) => (Vec::new(), !transcript_enabled),
+                    };
                 let _ = tx.send(NeoismAgentBackgroundUpdate::SemanticSessionHits {
                     catalog_generation,
                     query,
@@ -744,6 +976,7 @@ impl NeoismAgentPane {
         let server = self.server.clone();
         let tx = self.background_tx.clone();
         let requested_session_id = session_id.clone();
+        let wake = self.event_wake.clone();
         if let Err(error) = std::thread::Builder::new()
             .name("neoism-agent-subagents".into())
             .spawn(move || {
@@ -754,6 +987,9 @@ impl NeoismAgentPane {
                         generation,
                         result,
                     });
+                if let Some(wake) = wake {
+                    wake.wake();
+                }
             })
         {
             self.side_panel.complete_subagent_refresh(generation);

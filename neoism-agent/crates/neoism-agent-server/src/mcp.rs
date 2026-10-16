@@ -78,6 +78,10 @@ pub(crate) async fn catalog_with_state(
         .map(|state| state.services().clone())
         .unwrap_or_else(crate::standard_services);
     let sources = crate::config::snapshot(&services, directory).ok();
+    let runtime = match state {
+        Some(state) => state.inner.workspace_runtimes.loaded(directory).await,
+        None => None,
+    };
     let mut catalog = BTreeMap::new();
     for (name, entry) in &config {
         let oauth_capable = matches!(
@@ -106,6 +110,8 @@ pub(crate) async fn catalog_with_state(
         catalog.insert(
             name.clone(),
             McpCatalogEntry {
+                server_info: runtime.as_ref().and_then(|runtime| runtime.mcp_if_allocated()).and_then(|mcp| mcp.server_info(directory, name)),
+                brand: catalog_brand(name, entry),
                 enabled: is_enabled(entry),
                 runtime_connected: matches!(status, McpStatus::Connected),
                 status,
@@ -179,6 +185,8 @@ pub(crate) async fn catalog_with_snapshot(
         catalog.insert(
             name.clone(),
             McpCatalogEntry {
+                server_info: snapshot.mcp().ok().and_then(|mcp| mcp.server_info(directory, name)),
+                brand: catalog_brand(name, entry),
                 enabled: is_enabled(entry),
                 runtime_connected: matches!(status, McpStatus::Connected),
                 status,
@@ -190,6 +198,35 @@ pub(crate) async fn catalog_with_snapshot(
         );
     }
     catalog
+}
+
+/// The same bounded presentation as `/mcp`, attached to tool results so history
+/// and virtualized/remote timelines need no catalog fetch to recover artwork.
+pub(crate) fn tool_presentation_metadata(
+    directory: &str, name: &str, snapshot: &crate::workspace_runtime::PluginGenerationLease,
+) -> Value {
+    let brand = snapshot.config().mcp.get(name).and_then(|config| catalog_brand(name, config));
+    let server_info = snapshot.mcp().ok().and_then(|runtime| runtime.server_info(directory, name));
+    serde_json::json!({"brand":brand, "serverInfo":server_info})
+}
+
+/// Exact aliases/host suffixes only; never expose configured URLs or headers.
+fn catalog_brand(name: &str, config: &McpConfig) -> Option<String> {
+    let alias = name.trim().to_ascii_lowercase().replace('_', "-");
+    for brand in ["firecrawl", "webflow", "vercel"] {
+        if alias == brand || alias == format!("{brand}-mcp") || alias == format!("mcp-{brand}") {
+            return Some(brand.into());
+        }
+    }
+    let McpConfig::Remote { url, .. } = config else { return None; };
+    let url = reqwest::Url::parse(url).ok()?;
+    let host = url.host_str()?.trim_end_matches('.').to_ascii_lowercase();
+    for (domain, brand) in [("firecrawl.dev", "firecrawl"), ("webflow.com", "webflow"), ("vercel.com", "vercel")] {
+        if host == domain || host.ends_with(&format!(".{domain}")) {
+            return Some(brand.into());
+        }
+    }
+    None
 }
 
 fn config_source_metadata(
@@ -349,6 +386,34 @@ async fn connect_config(
     state: AppState,
     runtime: Arc<McpRuntimeManager>,
 ) -> anyhow::Result<McpStatus> {
+    let before = runtime.status(directory, name);
+    let result = connect_config_inner(
+        directory, name, config, auth_store, state.clone(), runtime.clone(),
+    )
+    .await;
+    // Publish only after the authoritative runtime has changed. Catalog reads
+    // remain passive, and reused connections must not invalidate every tool call.
+    if before != runtime.status(directory, name) {
+        publish_catalog_changed(&state, directory, name);
+    }
+    result
+}
+
+fn publish_catalog_changed(state: &AppState, directory: &str, name: &str) {
+    state.publish(neoism_agent_core::EventPayload::new(
+        neoism_agent_core::event_type::MCP_TOOLS_CHANGED,
+        serde_json::json!({ "server": name, "directory": directory }),
+    ));
+}
+
+async fn connect_config_inner(
+    directory: &str,
+    name: &str,
+    config: &McpConfig,
+    auth_store: &McpAuthStore,
+    state: AppState,
+    runtime: Arc<McpRuntimeManager>,
+) -> anyhow::Result<McpStatus> {
     if matches!(config, McpConfig::Local { .. })
         || builtin_service(Some(&state), name).is_some()
     {
@@ -468,13 +533,17 @@ pub(crate) async fn disconnect(
         crate::computer_use::stop();
         return Ok(true);
     }
-    state
+    let disconnected = state
         .workspace_runtime(directory)
         .await
         .map_err(anyhow::Error::msg)?
         .mcp()?
         .disconnect(directory, name)
-        .await
+        .await?;
+    if disconnected {
+        publish_catalog_changed(state, directory, name);
+    }
+    Ok(disconnected)
 }
 
 #[cfg(test)]

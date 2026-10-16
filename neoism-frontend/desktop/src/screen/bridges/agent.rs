@@ -174,40 +174,10 @@ impl Screen<'_> {
             return true;
         }
 
-        // The detail rail has its own branch cursor; keep it separate from
-        // catalog search/selection while reusing the branch activation path.
-        if self
-            .context_manager
-            .current()
-            .neoism_agent
-            .as_ref()
-            .is_some_and(|a| a.detail_panel().is_focused())
-            && !mods.alt_key()
-            && !mods.control_key()
-            && !mods.super_key()
-        {
-            let agent = self
-                .context_manager
-                .current_mut()
-                .neoism_agent
-                .as_mut()
-                .unwrap();
-            match key.logical_key.as_ref() {
-                Key::Named(NamedKey::ArrowDown) => agent.detail_panel_mut().select_next(),
-                Key::Named(NamedKey::ArrowUp) => agent.detail_panel_mut().select_prev(),
-                Key::Named(NamedKey::Enter) => {
-                    let selected = agent.activate_detail_panel_subagent();
-                    if selected {
-                        agent.detail_panel_mut().set_focused(false);
-                    }
-                }
-                Key::Named(NamedKey::Escape) => {
-                    agent.detail_panel_mut().set_focused(false)
-                }
-                _ => return false,
-            }
-            self.mark_dirty();
-            return true;
+        // Branch navigation belongs to the left Conversations catalog. Clear
+        // stale detail focus (including focus retained across renderer reloads).
+        if let Some(agent) = self.context_manager.current_mut().neoism_agent.as_mut() {
+            agent.detail_panel_mut().set_focused(false);
         }
 
         // Side panel intercept: when it owns focus, arrow keys move the
@@ -717,6 +687,9 @@ impl Screen<'_> {
                 .drain_live_session_updates();
             agent_animating |= self.renderer.conversations_pane.catalog_is_animating();
         }
+        // The catalog owns copies, not subscriptions. Reconcile ownership once
+        // after ALL contexts (including inactive workspaces/tabs) have drained.
+        let mut live_catalog_families = std::collections::HashSet::new();
         let current_grid_index = self.context_manager.current_index();
         for (grid_index, grid) in
             self.context_manager.all_grids_mut().iter_mut().enumerate()
@@ -731,6 +704,17 @@ impl Screen<'_> {
                     // An inactive workspace still owns a live subscription. Consume
                     // its bounded batch so reopening it cannot replay a long queue.
                     agent_animating |= agent.drain_live_session_updates();
+                    agent.maybe_refresh_side_panel_subagents();
+                    if let Some(root) = self
+                        .renderer
+                        .conversations_pane
+                        .catalog_live_family_root(agent)
+                    {
+                        live_catalog_families.insert(root.to_owned());
+                    }
+                    self.renderer
+                        .conversations_pane
+                        .sync_catalog_subagents_from_pane(agent);
                 }
             }
         }
@@ -760,6 +744,19 @@ impl Screen<'_> {
             } else {
                 agent.drain_live_session_updates()
             };
+            // Family refresh is a lifecycle concern, not a detail-rail render
+            // concern. Hidden tabs/rails must still feed the independent catalog.
+            agent.maybe_refresh_side_panel_subagents();
+            if let Some(root) = self
+                .renderer
+                .conversations_pane
+                .catalog_live_family_root(agent)
+            {
+                live_catalog_families.insert(root.to_owned());
+            }
+            self.renderer
+                .conversations_pane
+                .sync_catalog_subagents_from_pane(agent);
             agent.maybe_refresh_external_options();
             external_root_bound |= agent.take_external_root_bound_refresh();
             if agent_changed {
@@ -852,6 +849,11 @@ impl Screen<'_> {
             agent_animating |= animation_reason.is_some();
             agent_animating_reason = agent_animating_reason.or(animation_reason);
         }
+        agent_animating |= self
+            .renderer
+            .conversations_pane
+            .side_panel_mut()
+            .retain_catalog_subagent_families(&live_catalog_families);
         #[cfg(feature = "cef-artifacts")]
         {
             if self.sync_html_artifacts() {
@@ -965,8 +967,12 @@ impl Screen<'_> {
                     self.renderer.notifications.push(message, level);
                     self.mark_dirty();
                 }
-                crate::neoism::agent::NeoismAgentUiEvent::Dialog { title, body } => {
-                    self.renderer.modal.open_message(title, body);
+                crate::neoism::agent::NeoismAgentUiEvent::Dialog { title, body, link } => {
+                    if let Some((label, url)) = link {
+                        self.renderer.modal.open_link_message(title, body, label, url);
+                    } else {
+                        self.renderer.modal.open_message(title, body);
+                    }
                     self.mark_dirty();
                 }
                 crate::neoism::agent::NeoismAgentUiEvent::SwitchWorkspace {
@@ -1041,11 +1047,12 @@ impl Screen<'_> {
         let directory = self
             .workspace_root_for_new_shell()
             .map(|path| path.to_string_lossy().into_owned());
-        let catalog_directory = crate::neoism::agent::NeoismAgentPane::catalog_scope_for_workspace(
-            directory.as_deref(),
-            self.context_manager.current_workspace_is_remote_joined(),
-            dirs::home_dir().as_deref(),
-        );
+        let catalog_directory =
+            crate::neoism::agent::NeoismAgentPane::catalog_scope_for_workspace(
+                directory.as_deref(),
+                self.context_manager.current_workspace_is_remote_joined(),
+                dirs::home_dir().as_deref(),
+            );
         let rich_text_id = next_rich_text_id();
         let _ = self.sugarloaf.text(Some(rich_text_id));
         let route_id = self.context_manager.add_stacked_neoism_agent(
@@ -1357,7 +1364,11 @@ impl Screen<'_> {
             return false;
         }
         use neoism_ui::panels::agent_pane::composer_interactions::ComposerAction;
-        let composer_action = self.context_manager.current().neoism_agent.as_ref()
+        let composer_action = self
+            .context_manager
+            .current()
+            .neoism_agent
+            .as_ref()
             .and_then(|agent| agent.composer_interactions.action_at(mx, my));
         if let Some(action) = composer_action {
             match action {
@@ -1374,7 +1385,8 @@ impl Screen<'_> {
             .as_ref()
             .is_some_and(|agent| agent.usage_chip_contains(mx, my));
         if usage_hit {
-            if let Some(agent) = self.context_manager.current_mut().neoism_agent.as_mut() {
+            if let Some(agent) = self.context_manager.current_mut().neoism_agent.as_mut()
+            {
                 agent.close_picker();
             }
             self.open_agent_image_browser();
@@ -1413,7 +1425,11 @@ impl Screen<'_> {
         // from the displayed Agent body. Give its actual bounds priority over
         // any stale embedded side/detail hit geometry on the current Agent.
         if self.renderer.conversations_visible
-            && self.renderer.conversations_pane.side_panel().contains_point(mx, my)
+            && self
+                .renderer
+                .conversations_pane
+                .side_panel()
+                .contains_point(mx, my)
         {
             return self.handle_conversations_click();
         }
@@ -1453,21 +1469,14 @@ impl Screen<'_> {
             return true;
         }
         if let Some(agent) = self.context_manager.current_mut().neoism_agent.as_mut() {
+            agent.detail_panel_mut().set_focused(false);
             if agent.detail_panel().contains_point(mx, my) {
                 agent.side_panel_mut().set_focused(false);
-                agent.detail_panel_mut().set_focused(true);
-                if let Some(rect) = agent.detail_panel().last_panel_rect() {
-                    if let Some(row) = agent.detail_panel().hit_test_row(mx, my, rect) {
-                        let activated = agent.activate_clicked_detail_panel_subagent(row);
-                        if activated {
-                            agent.detail_panel_mut().set_focused(false);
-                        }
-                    }
-                }
+                // Consume the rail background without leaving invisible branch
+                // hit targets or stealing keyboard focus from the composer.
                 self.mark_dirty();
                 return true;
             }
-            agent.detail_panel_mut().set_focused(false);
         }
         // Side-panel hit test: focus on a body click, and if the click
         // landed on a row in home mode, resume that session. Has to win
@@ -1549,6 +1558,12 @@ impl Screen<'_> {
             {
                 let _ = agent.activate_composer_control();
             }
+            self.mark_dirty();
+            return true;
+        }
+        if self.context_manager.current_mut().neoism_agent.as_mut()
+            .is_some_and(|agent| agent.pop_activity_status_click(mx, my))
+        {
             self.mark_dirty();
             return true;
         }
@@ -1832,7 +1847,7 @@ impl Screen<'_> {
             .current()
             .neoism_agent
             .as_ref()
-            .is_some_and(|agent| agent.wordmark_hit(mx, my))
+            .is_some_and(|agent| agent.wordmark_hit(mx, my) || agent.activity_status_contains(mx, my))
     }
 
     pub fn neoism_agent_link_hovered(&self) -> bool {
@@ -1994,7 +2009,6 @@ impl Screen<'_> {
         }
         None
     }
-
 
     pub(crate) fn find_neoism_file_by_name(
         &self,

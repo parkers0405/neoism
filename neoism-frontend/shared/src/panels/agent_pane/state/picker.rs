@@ -214,6 +214,15 @@ pub struct UsagePickerGeometry {
 }
 
 #[derive(Clone, Debug)]
+pub struct McpAuthorizationDetail {
+    pub name: String,
+    pub body: String,
+    pub status: String,
+    pub busy: bool,
+    pub url: Option<String>,
+}
+
+#[derive(Clone, Debug)]
 pub struct NeoismAgentPicker {
     pub kind: NeoismAgentPickerKind,
     pub title: String,
@@ -251,6 +260,11 @@ pub struct NeoismAgentPicker {
     /// the centered pre-chat surface lowers this so the picker stays
     /// between the composer and the pane chrome.
     visible_row_limit: usize,
+    pub mcp_authorization: Option<McpAuthorizationDetail>,
+    pub mcp_server: Option<String>,
+    pub mcp_icons: std::collections::BTreeMap<String, super::super::mcp_icon::McpServiceIcon>,
+    mcp_normal_options: Option<Vec<NeoismAgentPickerOption>>,
+    painted_rows: Option<Vec<(usize, [f32; 4])>>,
     pub usage_accounts: Vec<NeoismAgentUsageAccount>,
     pub usage_error: Option<String>,
     usage_geometry: Option<UsagePickerGeometry>,
@@ -258,6 +272,19 @@ pub struct NeoismAgentPicker {
 }
 
 impl NeoismAgentPicker {
+    /// Shared by desktop and WASM so list-to-actions transitions retain identity
+    /// and already-decoded service artwork rather than reconstructing a header.
+    pub fn mcp_actions(entry: &serde_json::Value, previous: Option<&Self>) -> Self {
+        let name = entry["name"].as_str().unwrap_or("MCP");
+        let icon = super::super::mcp_icon::McpServiceIcon::from_entry(
+            name, entry, previous.and_then(|picker| picker.mcp_icons.get(name)));
+        let mut picker = Self::new(NeoismAgentPickerKind::McpActions, &format!("{name} actions"),
+            super::pickers_state::mcp_action_options(entry), 0);
+        picker.mcp_server = Some(name.into());
+        picker.mcp_icons.insert(name.into(), icon);
+        picker
+    }
+
     pub fn source_picker(source: super::side_panel::ConversationSource) -> Self {
         let choices = super::side_panel::ConversationSource::CHOICES;
         Self::new(
@@ -310,10 +337,80 @@ impl NeoismAgentPicker {
             loading: false,
             loading_started: None,
             visible_row_limit: PICKER_VISIBLE_ROWS,
+            mcp_authorization: None,
+            mcp_server: None,
+            mcp_icons: Default::default(),
+            mcp_normal_options: None,
+            painted_rows: None,
             usage_accounts: Vec::new(),
             usage_error: None,
             usage_geometry: None,
             usage_stacked: false,
+        }
+    }
+
+    /// Show authorization progress in the existing server-actions picker.
+    /// `Connected` is reserved for a confirmed runtime connection, not OAuth success.
+    pub fn set_mcp_authorization(&mut self, detail: McpAuthorizationDetail) {
+        self.mcp_server = Some(detail.name.clone());
+        self.mcp_icons.entry(detail.name.clone()).or_insert_with(||
+            super::super::mcp_icon::McpServiceIcon::from_entry(&detail.name, &serde_json::Value::Null, None));
+        if self.mcp_authorization.is_none() {
+            self.mcp_normal_options = Some(self.all_options.clone());
+        }
+        self.kind = NeoismAgentPickerKind::McpActions;
+        self.title = format!("{} actions", detail.name);
+        self.query.clear();
+        self.set_loading(false);
+        let mut options = Vec::new();
+        let action = |title: &str, action: &str| NeoismAgentPickerOption::new(
+            title, "", "", &serde_json::json!({"name": detail.name, "action": action}).to_string(),
+        );
+        if let Some(url) = &detail.url {
+            options.push(NeoismAgentPickerOption::new(
+                "Open authorization page", "Continue in your browser", "",
+                &serde_json::json!({"name": detail.name, "action": "oauth_open", "url": url}).to_string(),
+            ));
+        }
+        if !detail.busy && detail.status != "Connected" {
+            options.push(action("Retry authorization", "authenticate"));
+            // Hosts can report e.g. "Authorized · connection failed" without
+            // conflating stored credentials with a live MCP connection.
+            let status = detail.status.to_ascii_lowercase();
+            if status.starts_with("authorized") || status.starts_with("authenticated") {
+                options.push(action("Retry connection", "connect"));
+            }
+        }
+        if !detail.busy && detail.status == "Connected" {
+            options.push(action("Done", "oauth_done"));
+        } else {
+            options.push(action("Back", "oauth_back"));
+        }
+        self.replace_options(options);
+        self.mcp_authorization = Some(detail);
+        self.reset_usage_scroll();
+        self.painted_rows = None;
+    }
+
+    /// Restore the latest catalog-backed normal server actions.
+    pub fn clear_mcp_authorization(&mut self) -> bool {
+        if self.mcp_authorization.take().is_none() {
+            return false;
+        }
+        self.query.clear();
+        self.set_loading(false);
+        let options = self.mcp_normal_options.take().unwrap_or_default();
+        self.replace_options(options);
+        self.reset_usage_scroll();
+        self.painted_rows = None;
+        true
+    }
+
+    pub(super) fn update_mcp_normal_options(&mut self, options: Vec<NeoismAgentPickerOption>) {
+        if self.mcp_authorization.is_some() {
+            self.mcp_normal_options = Some(options);
+        } else {
+            self.replace_options(options);
         }
     }
 
@@ -438,6 +535,7 @@ impl NeoismAgentPicker {
     }
 
     pub fn set_loading(&mut self, loading: bool) {
+        let loading = loading && self.mcp_authorization.is_none();
         if loading && !self.loading {
             self.loading_started = Some(Instant::now());
         }
@@ -527,7 +625,34 @@ impl NeoismAgentPicker {
         self.clamp_scroll();
     }
 
+    /// Cache exact painted rows, including the measured detail header and
+    /// animated scroll residual. Header/footer space is never actionable.
+    pub fn set_render_geometry(
+        &mut self,
+        state: crate::widgets::inline_picker::InlinePickerRenderState,
+        scale: f32,
+        list_scroll_offset: f32,
+    ) {
+        self.last_rect = Some(state.rect);
+        self.footer_h_px = state.footer_h;
+        let s = scale.clamp(0.5, 3.0);
+        let residual = crate::primitives::snap_to_device_px(list_scroll_offset * s, s);
+        let top = state.rect[1] + state.header_h;
+        let bottom = top + state.visible_rows as f32 * PICKER_ROW_HEIGHT * s;
+        let mut rows = Vec::new();
+        for ix in state.first_row.saturating_sub(1)..(state.first_row + state.visible_rows + 1).min(self.filtered_options.len()) {
+            let y = top + (ix as isize - state.first_row as isize) as f32 * PICKER_ROW_HEIGHT * s + residual;
+            let clipped_top = y.max(top);
+            let clipped_bottom = (y + PICKER_ROW_HEIGHT * s).min(bottom);
+            if clipped_bottom > clipped_top {
+                rows.push((ix, [state.rect[0], clipped_top, state.rect[2], clipped_bottom - clipped_top]));
+            }
+        }
+        self.painted_rows = Some(rows);
+    }
+
     pub fn set_last_rect(&mut self, rect: [f32; 4]) {
+        self.painted_rows = None;
         self.last_rect = Some(rect);
     }
 
@@ -547,6 +672,20 @@ impl NeoismAgentPicker {
     pub fn activate_row_at(&mut self, x: f32, y: f32) -> bool {
         if self.kind == NeoismAgentPickerKind::Usage {
             return false;
+        }
+        if let Some(rows) = &self.painted_rows {
+            let target = rows.iter().find_map(|(ix, [rx, ry, rw, rh])| {
+                (x >= *rx && x < rx + rw && y >= *ry && y < ry + rh).then_some(*ix)
+            });
+            let Some(target) = target else { return false; };
+            if !self.filtered_options.get(target).is_some_and(|row| row.is_selectable()) {
+                return false;
+            }
+            self.set_selected(target);
+            return true;
+        }
+        if self.mcp_authorization.is_some() {
+            return false; // Variable header: wait for measured geometry.
         }
         let Some([rx, ry, rw, rh]) = self.last_rect else {
             return false;
@@ -680,7 +819,8 @@ impl NeoismAgentPicker {
     }
 
     pub fn is_animating(&self) -> bool {
-        self.list_scroll.is_animating()
+        self.mcp_authorization.as_ref().is_some_and(|detail| detail.busy)
+            || self.list_scroll.is_animating()
             || self.cursor_spring.position != 0.0
             // Loading may outlive a failed request, but shimmer does not
             // own frames indefinitely.
@@ -884,7 +1024,7 @@ impl NeoismAgentPicker {
     }
 
     pub fn set_query(&mut self, query: String) {
-        if self.kind == NeoismAgentPickerKind::Usage {
+        if self.kind == NeoismAgentPickerKind::Usage || self.mcp_authorization.is_some() {
             return;
         }
         // Idempotent guard — same query firing every keystroke as the

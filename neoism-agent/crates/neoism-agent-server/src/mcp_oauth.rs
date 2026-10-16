@@ -85,13 +85,7 @@ pub(crate) async fn auth_start_with_config(
     } else if let Some(uri) = peer_redirect_uri {
         let parsed =
             reqwest::Url::parse(uri).context("invalid peer MCP OAuth redirect URI")?;
-        if !matches!(parsed.scheme(), "http" | "https")
-            || parsed.query().is_some()
-            || parsed.fragment().is_some()
-            || !parsed
-                .path()
-                .ends_with(&format!("/v2/plugins/dev.neoism.mcp/{name}/auth/callback"))
-        {
+        if !is_peer_callback_uri(&parsed, name) {
             return Err(anyhow!("invalid peer MCP OAuth callback route"));
         }
         uri.to_string()
@@ -548,6 +542,39 @@ fn redirect_uri(name: &str, oauth: &McpOAuthConfig) -> String {
 #[cfg(test)]
 pub(super) fn redirect_uri_for_test(name: &str, oauth: &McpOAuthConfig) -> String {
     redirect_uri(name, oauth)
+}
+
+fn is_peer_callback_uri(uri: &reqwest::Url, name: &str) -> bool {
+    // Match the same encoded path segment sent by HTTP clients; query-form
+    // escaping uses '+' for spaces, while callback paths require '%20'.
+    let name = form_escape(name).replace('+', "%20");
+    matches!(uri.scheme(), "http" | "https")
+        && uri.query().is_none()
+        && uri.fragment().is_none()
+        && uri.path().ends_with(&format!("/v2/plugins/dev.neoism.mcp/{name}/auth/callback"))
+}
+
+#[cfg(test)]
+mod callback_uri_tests {
+    use super::*;
+
+    #[test]
+    fn peer_callback_matches_encoded_server_names_without_losing_scope() {
+        for (name, encoded) in [
+            ("webflow", "webflow"),
+            ("my server", "my%20server"),
+            ("café + team/one", "caf%C3%A9%20%2B%20team%2Fone"),
+            ("percent%name", "percent%25name"),
+        ] {
+            let uri = reqwest::Url::parse(&format!(
+                "http://127.0.0.1:58732/agent/workspaces/debug/v2/plugins/dev.neoism.mcp/{encoded}/auth/callback",
+            )).unwrap();
+            assert!(is_peer_callback_uri(&uri, name));
+            assert!(!is_peer_callback_uri(&uri, "another server"));
+        }
+        let uri = reqwest::Url::parse("http://localhost/v2/plugins/dev.neoism.mcp/webflow/auth/callback?state=unexpected").unwrap();
+        assert!(!is_peer_callback_uri(&uri, "webflow"));
+    }
 }
 
 fn append_query(base: &str, params: &[(&str, String)]) -> String {

@@ -1,0 +1,30 @@
+.hero-wordmark .wordmark-trigger {
+  appearance: none;
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  line-height: inherit;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.hero-wordmark .wordmark-trigger:focus-visible {
+  outline: 2px solid var(--fg, currentColor);
+  outline-offset: 6px;
+  border-radius: 4px;
+}
+
+/* Particle motion never enlarges the layout or intercepts letter hitboxes. */
+.hero-wordmark .splash-wordmark { overflow: hidden; }
+.hero-wordmark .pixel-wordmark-layer { pointer-events: none; }
+.hero-wordmark.is-pixel-animating .wordmark-letter > use { visibility: hidden; }
+
+@media (prefers-reduced-motion: reduce) {
+  .hero-wordmark.is-pixel-animating .wordmark-letter > use { visibility: visible; }
+  .hero-wordmark .pixel-wordmark-layer { display: none; }
+}

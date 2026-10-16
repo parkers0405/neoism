@@ -50,7 +50,9 @@ pub fn render_picker(
         render_usage_picker(sugarloaf, picker, input_rect, theme, s, max_rows, min_y);
         return;
     }
-    picker.set_visible_row_limit(max_rows);
+    if picker.mcp_authorization.is_none() {
+        picker.set_visible_row_limit(max_rows);
+    }
     let is_session = picker.kind == NeoismAgentPickerKind::Session;
     let footer_hint = is_session.then_some(SESSION_PICKER_FOOTER);
     // Rename only applies while a session picker is open.
@@ -92,7 +94,15 @@ pub fn render_picker(
             }),
         })
         .collect::<Vec<_>>();
-    if let Some(render_state) = crate::widgets::inline_picker::render_limited(
+    let row_icons = picker.options().iter().map(|option| {
+        if picker.kind != NeoismAgentPickerKind::Mcp || option.is_header { return None; }
+        Some(picker.mcp_icons.get(&option.title).cloned().unwrap_or_default().presentation(sugarloaf, theme.u8(theme.fg)))
+    }).collect::<Vec<_>>();
+    let header_icon = (picker.kind == NeoismAgentPickerKind::McpActions).then(|| {
+        picker.mcp_server.as_ref().and_then(|name| picker.mcp_icons.get(name)).cloned().unwrap_or_default()
+            .presentation(sugarloaf, theme.u8(theme.fg))
+    });
+    if let Some(render_state) = crate::widgets::inline_picker::render_limited_with_icons(
         sugarloaf,
         InlinePickerView {
             title: &picker.title,
@@ -116,9 +126,18 @@ pub fn render_picker(
         s,
         max_rows,
         min_y,
+        picker.mcp_authorization.as_ref().map(|detail| crate::widgets::inline_picker::InlinePickerActivity {
+            body: &detail.body,
+            status: &detail.status,
+            busy: detail.busy,
+        }),
+        &row_icons,
+        header_icon,
     ) {
-        picker.set_last_rect(render_state.rect);
-        picker.set_footer_h(render_state.footer_h);
+        if picker.mcp_authorization.is_some() {
+            picker.set_visible_row_limit(render_state.visible_rows.max(1));
+        }
+        picker.set_render_geometry(render_state, s, list_scroll_offset);
         // cursor rect is intentionally NOT updated here — the caret stays
         // in the input text area while the picker dropdown is visible.
     }

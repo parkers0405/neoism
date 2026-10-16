@@ -9,9 +9,11 @@ use sugarloaf::text::DrawOpts;
 use sugarloaf::Sugarloaf;
 
 use crate::panels::agent_pane::icon::{self as agent_icon, SIDE_PANEL_ICON_PANEL_ID};
+#[cfg(test)]
+use crate::panels::agent_pane::state::side_panel::BranchActivity;
 use crate::panels::agent_pane::state::side_panel::{
-    BranchActivity, BranchStatus, SessionGoal, FONT_SIZE, FRAME_RADIUS, FRAME_STROKE,
-    ROW_HEIGHT, ROW_PADDING_X,
+    BranchStatus, SessionGoal, FONT_SIZE, FRAME_RADIUS, FRAME_STROKE, ROW_HEIGHT,
+    ROW_PADDING_X,
 };
 use crate::panels::agent_pane::state::side_panel::{
     NeoismAgentSessionEntry, NeoismAgentSidePanel,
@@ -511,15 +513,12 @@ pub fn render_side_panel_with_icons<P, I>(
 
 /// Right-hand detail rail. Only called for an active conversation with enough
 /// room after the left catalog and the composer have been laid out.
-#[allow(clippy::too_many_arguments)]
-pub fn render_detail_panel<P: AgentSidePanelPane, I: AgentSidePanelIconHost>(
+pub fn render_detail_panel<P: AgentSidePanelPane>(
     sugarloaf: &mut Sugarloaf,
     pane: &mut P,
     rect: [f32; 4],
     theme: &IdeTheme,
     s: f32,
-    now_seconds: f32,
-    mouse: Option<(f32, f32)>,
     occlusion_rects: &[[f32; 4]],
 ) {
     pane.maybe_refresh_side_panel_subagents();
@@ -552,7 +551,7 @@ pub fn render_detail_panel<P: AgentSidePanelPane, I: AgentSidePanelIconHost>(
         ORDER_PANEL,
         ORDER_PANEL + 1,
     );
-    render_session_info::<I>(
+    render_session_info(
         sugarloaf,
         pane,
         [
@@ -563,10 +562,7 @@ pub fn render_detail_panel<P: AgentSidePanelPane, I: AgentSidePanelIconHost>(
         ],
         theme,
         s,
-        now_seconds,
-        mouse,
         occlusion_rects,
-        radius - stroke,
     );
     pane.swap_detail_panel();
 }
@@ -588,6 +584,7 @@ pub(crate) fn session_entry_is_running(entry: &NeoismAgentSessionEntry) -> bool 
         .is_some_and(|status| matches!(status, BranchStatus::Active))
 }
 
+#[cfg(test)]
 fn subagent_row_activity(
     pane: &impl AgentSidePanelPane,
     entry: &NeoismAgentSessionEntry,

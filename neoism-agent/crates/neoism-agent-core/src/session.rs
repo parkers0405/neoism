@@ -500,7 +500,8 @@ pub struct BackgroundJobRuntimeSnapshot {
     pub started_at: u64,
 }
 
-/// Current whole-family activity for a root conversation's catalog indicator.
+/// Catalog indicator: the root's own foreground work, plus family-wide
+/// permission requests and background jobs that still need attention.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CatalogActivity {

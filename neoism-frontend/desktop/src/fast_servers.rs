@@ -1215,7 +1215,7 @@ mod tests {
         };
         let response = router.clone().oneshot(request()).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), 65536)
+        let body = axum::body::to_bytes(response.into_body(), 256 * 1024)
             .await
             .unwrap();
         let html = String::from_utf8(body.to_vec()).unwrap();

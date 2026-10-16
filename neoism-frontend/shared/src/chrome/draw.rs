@@ -103,7 +103,12 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         }
         if self.conversation_navigator.is_active() {
             active_text_occlusions.push(self.conversation_navigator.bounds_for_viewport(
-                [0.0, 0.0, window_width, layout.status_line.y + layout.status_line.h],
+                [
+                    0.0,
+                    0.0,
+                    window_width,
+                    layout.status_line.y + layout.status_line.h,
+                ],
                 self.chrome_scale,
             ));
         }
@@ -1022,13 +1027,18 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         );
         if let (Some(rect), Some(pane)) = (layout.conversations, self.agent_pane.as_mut())
         {
-            let viewed_root = if agent_buffer_in_view {
-                pane.conversation_root_id().map(str::to_owned)
-            } else {
-                None
-            };
+            let root = pane.conversation_root_id().map(str::to_owned);
+            let viewed_session = agent_buffer_in_view
+                .then(|| pane.session_id_str().map(str::to_owned))
+                .flatten();
+            let viewed_root = agent_buffer_in_view.then_some(root.as_deref()).flatten();
+            // The roster lives on this same pane on web. Project it independently
+            // of the detail rail, which may be hidden (or contain no child UI).
             pane.side_panel_mut()
-                .set_catalog_viewed_root(viewed_root.as_deref());
+                .sync_catalog_subagents(root.as_deref());
+            pane.side_panel_mut().set_catalog_viewed_root(viewed_root);
+            pane.side_panel_mut()
+                .set_catalog_viewed_session(viewed_session.as_deref());
             crate::panels::agent_pane::view::side_panel::render_side_panel_with_icons::<
                 _,
                 crate::panels::agent_pane::view::side_panel::SharedAgentSidePanelIcons,
@@ -1206,9 +1216,16 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         if self.conversation_navigator.is_active() {
             if let Some(viewport) = self.last_viewport {
                 sugarloaf.set_late_overlay_mode(true);
-                self.conversation_navigator.render(sugarloaf, &self.ide_theme,
-                    [viewport.x, viewport.y, viewport.w, viewport.h], self.chrome_scale,
-                    crate::render_policy::animation_phase_from_unix_secs(time.as_secs(), time.subsec_nanos()));
+                self.conversation_navigator.render(
+                    sugarloaf,
+                    &self.ide_theme,
+                    [viewport.x, viewport.y, viewport.w, viewport.h],
+                    self.chrome_scale,
+                    crate::render_policy::animation_phase_from_unix_secs(
+                        time.as_secs(),
+                        time.subsec_nanos(),
+                    ),
+                );
                 sugarloaf.set_late_overlay_mode(false);
             }
         }

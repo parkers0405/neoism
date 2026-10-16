@@ -1009,6 +1009,9 @@ pub enum AgentServerMessage {
     /// Workspace MCP status object returned by `GET /mcp`.
     McpCatalog {
         status: serde_json::Value,
+        /// Echoed request scope so late catalog reads cannot replace another workspace.
+        #[serde(default)]
+        directory: Option<String>,
     },
     /// Authorization URL returned by `POST /mcp/:name/auth`.
     McpOauthUrl {
@@ -1138,6 +1141,9 @@ pub struct HistoryMessage {
     /// Server-issued identity of one model response's tool-call batch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_batch_id: Option<String>,
+    /// Optional bounded MCP service presentation, independent of display titles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp: Option<serde_json::Value>,
     #[serde(default)]
     pub lang: String,
     #[serde(default)]

@@ -31,6 +31,7 @@ fn modal_action_policy_tag(
     match action {
         A::Close => Tag::Close,
         A::CopyInvite { .. } => Tag::CopyInvite,
+        A::OpenUrl { .. } => Tag::OpenUrl,
         A::UpdateNeoism { .. } => Tag::UpdateNeoism,
         A::InstallLsp { .. } => Tag::InstallLsp,
         A::InstallPythonKernel => Tag::InstallPythonKernel,

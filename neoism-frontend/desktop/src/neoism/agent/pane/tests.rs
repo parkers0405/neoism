@@ -1,6 +1,236 @@
 use super::*;
 
 #[test]
+fn connected_mcp_done_closes_picker_without_changing_the_draft() {
+    use neoism_ui::panels::agent_pane::state::picker::McpAuthorizationDetail;
+    let mut pane = NeoismAgentPane::default();
+    pane.input = "unsent draft".into();
+    pane.cursor_byte = pane.input.len();
+    let mut picker = NeoismAgentPicker::new(
+        NeoismAgentPickerKind::McpActions, "example actions", Vec::new(), 0,
+    );
+    picker.set_mcp_authorization(McpAuthorizationDetail {
+        name: "example".into(), body: "Waiting".into(), status: "Not connected".into(),
+        busy: true, url: None,
+    });
+    assert_eq!(picker.options().last().unwrap().title, "Back");
+    pane.picker = Some(picker);
+    pane.execute_mcp_action(&serde_json::json!({"name":"example", "action":"oauth_done"}));
+    assert!(pane.picker.is_some());
+    pane.picker.as_mut().unwrap().set_mcp_authorization(McpAuthorizationDetail {
+        name: "example".into(), body: "Connected".into(), status: "Connected".into(),
+        busy: false, url: None,
+    });
+    let options = pane.picker.as_ref().unwrap().options();
+    assert_eq!(options.len(), 1);
+    assert_eq!(options[0].title, "Done");
+    let action = serde_json::from_str(&options[0].value).unwrap();
+    pane.execute_mcp_action(&action);
+    assert!(pane.picker.is_none());
+    assert_eq!(pane.input, "unsent draft");
+    assert_eq!(pane.cursor_byte, pane.input.len());
+    assert!(pane.drain_ui_events().is_empty());
+}
+
+#[test]
+fn mcp_inline_authorization_lifecycle() {
+    use neoism_ui::panels::agent_pane::state::picker::McpAuthorizationDetail;
+    let mut pane = NeoismAgentPane::default();
+    pane.input = "unsent draft".into();
+    pane.cursor_byte = pane.input.len();
+    let options = neoism_ui::panels::agent_pane::state::mcp_action_options(
+        &serde_json::json!({"name":"example", "enabled":true, "status":{"status":"needs_auth"}}));
+    pane.picker = Some(NeoismAgentPicker::new(
+        NeoismAgentPickerKind::McpActions, "example actions", options.clone(), 0,
+    ));
+    let activity = pane.open_mcp_oauth_activity("example".into(), false);
+    assert!(pane.picker.as_ref().unwrap().mcp_authorization.is_some());
+    let visible_actions = pane.picker.as_ref().unwrap().options().to_vec();
+    pane.insert_text("invisible filter");
+    pane.backspace();
+    pane.insert_paste("pasted filter");
+    pane.set_picker_query("programmatic filter".into());
+    assert_eq!(pane.picker.as_ref().unwrap().options(), visible_actions.as_slice());
+    assert!(pane.picker.as_ref().unwrap().query.is_empty());
+    assert_eq!(pane.input, "unsent draft");
+    assert!(pane.drain_ui_events().is_empty());
+    pane.close_picker();
+    assert_eq!(pane.picker.as_ref().unwrap().kind, NeoismAgentPickerKind::McpActions);
+    assert_eq!(pane.picker.as_ref().unwrap().options(), options.as_slice());
+    assert!(pane.picker.as_ref().unwrap().mcp_authorization.is_none());
+    assert!(!activity.is_cancelled());
+    let detail = McpAuthorizationDetail {
+        name: "example".into(), body: "waiting".into(), status: "Not connected".into(), busy: true,
+        url: Some("https://Example.com/oauth)?state=a)b#Frag)".into()),
+    };
+    assert!(pane.apply_mcp_oauth_progress(activity.clone(), detail.clone()));
+    assert!(pane.picker.as_ref().unwrap().mcp_authorization.is_none());
+    pane.reattach_mcp_oauth("example");
+    assert_eq!(pane.picker.as_ref().unwrap().mcp_authorization.as_ref().unwrap().url, detail.url);
+    pane.execute_mcp_action(&serde_json::json!({"name":"example", "action":"oauth_back"}));
+    assert!(pane.picker.as_ref().unwrap().mcp_authorization.is_none());
+    pane.picker = None;
+    pane.apply_mcp_oauth_progress(activity.clone(), detail);
+    assert!(pane.picker.is_none());
+    assert!(!activity.is_cancelled());
+    assert_eq!(pane.input, "unsent draft");
+    assert_eq!(pane.cursor_byte, pane.input.len());
+    assert!(pane.drain_ui_events().is_empty());
+    drop(pane);
+    assert!(activity.is_cancelled());
+}
+
+
+#[test]
+fn mcp_inline_authorization_ignores_stale_attempts_and_scopes() {
+    use neoism_ui::panels::agent_pane::state::picker::McpAuthorizationDetail;
+    let mut pane = NeoismAgentPane::default();
+    pane.picker = Some(NeoismAgentPicker::new(
+        NeoismAgentPickerKind::McpActions, "example actions", Vec::new(), 0,
+    ));
+    let old = pane.open_mcp_oauth_activity("example".into(), false);
+    let current = pane.open_mcp_oauth_activity("example".into(), false);
+    assert!(old.is_cancelled());
+    let detail = McpAuthorizationDetail {
+        name: "example".into(), body: "stale".into(), status: "Not connected".into(), busy: false, url: None,
+    };
+    assert!(!pane.apply_mcp_oauth_progress(old, detail.clone()));
+    assert_ne!(pane.picker.as_ref().unwrap().mcp_authorization.as_ref().unwrap().body, "stale");
+    pane.picker = Some(NeoismAgentPicker::new(
+        NeoismAgentPickerKind::McpActions, "other actions", Vec::new(), 0,
+    ));
+    assert!(pane.apply_mcp_oauth_progress(current.clone(), detail.clone()));
+    assert!(pane.picker.as_ref().unwrap().mcp_authorization.is_none());
+    pane.directory = Some("/another/workspace".into());
+    assert!(!pane.apply_mcp_oauth_progress(current.clone(), detail.clone()));
+    assert!(current.is_cancelled());
+    let changed_server = pane.open_mcp_oauth_activity("other".into(), false);
+    pane.server = "http://another-host:4096".into();
+    pane.cancel_out_of_scope_mcp_oauth();
+    assert!(changed_server.is_cancelled());
+    assert!(pane.picker.is_none());
+    assert!(!pane.apply_mcp_oauth_progress(changed_server, detail));
+}
+
+#[test]
+fn completed_mcp_authorization_does_not_replace_reopened_management_actions() {
+    use neoism_ui::panels::agent_pane::state::picker::McpAuthorizationDetail;
+    let mut pane = NeoismAgentPane::default();
+    pane.picker = Some(NeoismAgentPicker::new(
+        NeoismAgentPickerKind::McpActions, "example actions", Vec::new(), 0,
+    ));
+    let activity = pane.open_mcp_oauth_activity("example".into(), false);
+    pane.picker = None;
+    assert!(pane.apply_mcp_oauth_progress(activity, McpAuthorizationDetail {
+        name: "example".into(), body: "Connected".into(),
+        status: "Connected".into(), busy: false, url: None,
+    }));
+    pane.picker = Some(NeoismAgentPicker::new(
+        NeoismAgentPickerKind::McpActions, "example actions", Vec::new(), 0,
+    ));
+    pane.reattach_mcp_oauth("example");
+    assert!(pane.picker.as_ref().unwrap().mcp_authorization.is_none());
+    pane.open_mcp_oauth_activity("example".into(), true);
+    assert_eq!(pane.picker.as_ref().unwrap().mcp_authorization.as_ref().unwrap().status, "Connecting");
+}
+
+#[test]
+fn agent_dialog_handoff_dismisses_picker_and_hit_geometry_before_host_draw() {
+    for kind in [
+        NeoismAgentPickerKind::Slash,
+        NeoismAgentPickerKind::Mcp,
+        NeoismAgentPickerKind::McpActions,
+    ] {
+        let mut pane = NeoismAgentPane::default();
+        pane.server = "invalid://agent-server".into();
+        pane.input = "unsent draft".into();
+        pane.cursor_byte = pane.input.len();
+        let mut picker = NeoismAgentPicker::new(kind, "vercel actions", Vec::new(), 0);
+        picker.last_rect = Some([10.0, 20.0, 400.0, 300.0]);
+        pane.picker = Some(picker);
+        assert!(pane.picker_card_rect().is_some());
+        assert!(pane.picker_contains_point(30.0, 40.0));
+
+        let body = "Opened your browser to authorize this MCP server.\n\nAuthorization URL:\n[https://example.com/oauth](https://example.com/oauth)";
+        pane.system_message("vercel", body);
+
+        // The host draws the pane before drawing the queued dialog. No picker
+        // material, labels, or stale chrome occlusion may survive that handoff.
+        assert!(pane.picker().is_none());
+        assert!(pane.picker_card_rect().is_none());
+        assert!(!pane.picker_contains_point(30.0, 40.0));
+        assert_eq!(pane.input, "unsent draft");
+        assert_eq!(pane.cursor_byte, pane.input.len());
+        assert!(matches!(
+            pane.drain_ui_events().as_slice(),
+            [NeoismAgentUiEvent::Dialog { title, body: dialog_body, .. }]
+                if title == "vercel" && dialog_body == body
+        ));
+        assert!(pane.picker().is_none());
+    }
+}
+
+#[test]
+fn linked_dialog_handoff_preserves_unmatched_parentheses_in_structured_url() {
+    let mut pane = NeoismAgentPane::default();
+    pane.server = "invalid://agent-server".into();
+    pane.input = "unsent draft".into();
+    pane.cursor_byte = pane.input.len();
+    let mut picker = NeoismAgentPicker::new(
+        NeoismAgentPickerKind::McpActions,
+        "vercel actions",
+        Vec::new(),
+        0,
+    );
+    picker.last_rect = Some([10.0, 20.0, 400.0, 300.0]);
+    pane.picker = Some(picker);
+    let url = "https://Example.com/oauth)?state=a)b&redirect_uri=https%3A%2F%2Fexample.com%2Fcb#Frag)";
+    let body = "Opened your browser to authorize this MCP server.";
+
+    // Exercise a generic linked dialog without a request or browser call.
+    pane.push_dialog(
+        "vercel",
+        body,
+        Some(("Open authorization page".into(), url.into())),
+    );
+
+    assert!(pane.picker().is_none());
+    assert!(pane.picker_card_rect().is_none());
+    assert!(!pane.picker_contains_point(30.0, 40.0));
+    assert_eq!(pane.input, "unsent draft");
+    assert_eq!(pane.cursor_byte, pane.input.len());
+    assert_eq!(
+        pane.drain_ui_events(),
+        vec![NeoismAgentUiEvent::Dialog {
+            title: "vercel".into(),
+            body: body.into(),
+            link: Some(("Open authorization page".into(), url.into())),
+        }]
+    );
+}
+
+#[test]
+fn agent_dialog_handoff_preserves_picker_for_notices_and_empty_dialogs() {
+    let mut pane = NeoismAgentPane::default();
+    pane.picker = Some(NeoismAgentPicker::new(
+        NeoismAgentPickerKind::McpActions,
+        "vercel actions",
+        Vec::new(),
+        0,
+    ));
+    pane.push_dialog("vercel", " \n ", None);
+    assert!(pane.picker().is_some());
+    assert!(pane.drain_ui_events().is_empty());
+
+    pane.system_message("vercel", "MCP server returned no authorization URL");
+    assert!(pane.picker().is_some());
+    assert!(matches!(
+        pane.drain_ui_events().as_slice(),
+        [NeoismAgentUiEvent::Notice { .. }]
+    ));
+}
+
+#[test]
 fn provider_readiness_blocks_native_generation_bypasses_before_side_effects() {
     for session_id in [None, Some("existing".to_string())] {
         let mut pane = NeoismAgentPane::default();
@@ -2217,6 +2447,99 @@ fn cancelled_wordmark_click_does_not_drive_animation() {
     pane.wordmark.animation.cancel();
 
     assert_ne!(pane.animation_reason(), Some("wordmark"));
+}
+
+#[test]
+fn activity_overlap_reserves_background_menu_without_disabling_primary_word() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("activity-root".into());
+    pane.messages.push(NeoismAgentMessage::user("prompt"));
+    // Primary Background glyph padding/motion extends into the child row.
+    pane.register_activity_status_rect([10.0, 20.0, 100.0, 30.0]);
+    pane.register_background_status_rect([10.0, 40.0, 120.0, 24.0]);
+    assert!(pane.activity_status_contains(20.0, 30.0));
+    assert!(pane.pop_activity_status_click(20.0, 30.0));
+    let effect = pane.activity_animation_frame().unwrap().effect;
+    for (x, y) in [(20.0, 45.0), (10.0, 40.0), (110.0, 50.0)] {
+        assert!(pane.background_status_contains(x, y));
+        assert!(!pane.activity_status_contains(x, y), "child menu owns overlap and its boundary");
+        assert!(!pane.pop_activity_status_click(x, y));
+        assert_eq!(pane.activity_animation_frame().unwrap().effect, effect, "menu press must not restart replay");
+    }
+    // A menu-free primary word still replays, even when its label is Background.
+    assert!(pane.pop_activity_status_click(20.0, 30.0));
+    assert_ne!(pane.activity_animation_frame().unwrap().effect, effect);
+    pane.clear_tool_hit_rects();
+    assert!(!pane.activity_status_contains(20.0, 30.0));
+    assert!(!pane.pop_activity_status_click(20.0, 30.0));
+    assert_eq!(pane.animation_reason(), None, "skipping status render must not leave stale hit/redraw state");
+}
+
+#[test]
+fn activity_replay_bag_is_independent_and_restarts_in_conversation() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("activity-root".into());
+    pane.messages.push(NeoismAgentMessage::user("prompt"));
+    pane.wordmark.animation.cancel();
+    pane.register_activity_status_rect([10.0, 20.0, 40.0, 12.0]);
+    let mut effects = Vec::new();
+    for _ in 0..15 {
+        assert!(pane.pop_activity_status_click(20.0, 25.0));
+        let frame = pane.activity_animation_frame().unwrap();
+        assert!(frame.progress < 0.1, "a second click restarts immediately");
+        assert!(!effects.contains(&frame.effect), "one complete shuffled bag");
+        effects.push(frame.effect);
+        assert_eq!(pane.animation_reason(), Some("agent_activity_word"));
+    }
+    assert!(pane.pop_activity_status_click(20.0, 25.0));
+    assert_ne!(pane.activity_animation_frame().unwrap().effect, *effects.last().unwrap());
+    assert!(!pane.wordmark.animation.is_active());
+}
+
+#[test]
+fn activity_hits_are_frame_local_clipped_and_preserve_background_menu() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("activity-root".into());
+    pane.messages.push(NeoismAgentMessage::user("prompt"));
+    pane.register_background_status_rect([60.0, 20.0, 40.0, 12.0]);
+    assert!(!pane.pop_activity_status_click(20.0, 25.0));
+    // Only the clipped, visible primary word is supplied by the renderer.
+    pane.register_activity_status_rect([10.0, 20.0, 20.0, 12.0]);
+    pane.register_activity_status_rect([0.0, 0.0, 0.0, 20.0]);
+    pane.register_activity_status_rect([f32::NAN, 0.0, 20.0, 20.0]);
+    assert!(!pane.activity_status_contains(31.0, 25.0));
+    assert!(!pane.activity_status_contains(f32::NAN, 25.0));
+    assert!(pane.pop_activity_status_click(10.0, 20.0));
+    assert!(!pane.pop_activity_status_click(70.0, 25.0));
+    assert!(pane.background_status_contains(70.0, 25.0));
+    pane.clear_tool_hit_rects();
+    assert!(!pane.activity_status_contains(20.0, 25.0));
+    assert!(pane.activity_animation_frame().is_some(), "clearing hits is not cancellation");
+    assert_eq!(pane.animation_reason(), None, "offscreen status cannot spin");
+    pane.register_activity_status_rect([10.0, 20.0, 20.0, 12.0]);
+    assert_eq!(pane.animation_reason(), Some("agent_activity_word"));
+    pane.reset_transient_timeline_interactions();
+    assert!(pane.activity_animation_frame().is_none());
+    assert!(!pane.activity_status_contains(20.0, 25.0));
+}
+
+#[test]
+fn activity_replay_scope_and_expiry_do_not_leave_idle_redraw() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("activity-root".into());
+    pane.messages.push(NeoismAgentMessage::user("prompt"));
+    pane.register_activity_status_rect([10.0, 20.0, 20.0, 12.0]);
+    assert!(pane.pop_activity_status_click(20.0, 25.0));
+    pane.session_id = Some("other-root".into());
+    assert!(!pane.activity_status_contains(20.0, 25.0));
+    assert!(pane.activity_animation_frame().is_none());
+    pane.register_activity_status_rect([10.0, 20.0, 20.0, 12.0]);
+    assert!(pane.activity_animation_frame().is_none());
+    assert_ne!(pane.animation_reason(), Some("agent_activity_word"));
+    assert!(pane.pop_activity_status_click(20.0, 25.0));
+    std::thread::sleep(std::time::Duration::from_millis(2800));
+    assert!(pane.activity_animation_frame().is_none());
+    assert_eq!(pane.animation_reason(), None, "expired replay leaves no idle redraw owner");
 }
 
 #[test]

@@ -1,0 +1,18 @@
+<svg class="splash-wordmark" viewBox="-24 566 1550 338" aria-hidden="true" focusable="false">
+            <defs>
+              <path id="splash-n" d="M0-31.25V-187.5h187.5v31.25h31.25v125h-62.5v-125H62.5v125Z" />
+              <path id="splash-e" d="M31.25-31.25V-62.5H0v-93.75h31.25v-31.25H187.5v31.25h31.25v62.5H62.5v31.25h125v31.25ZM62.5-125h93.75v-31.25H62.5Z" />
+              <path id="splash-o" d="M31.25-31.25V-62.5H0v-93.75h31.25v-31.25H187.5v31.25h31.25V-62.5H187.5v31.25ZM62.5-62.5h93.75v-93.75H62.5Z" />
+              <path id="splash-i" d="M93.75-218.75V-250h62.5v31.25ZM31.25-31.25V-62.5h62.5v-93.75H62.5v-31.25h93.75v125h62.5v31.25Z" />
+              <path id="splash-s" d="M0-31.25V-62.5h156.25V-93.75h-125V-125H0v-31.25h31.25v-31.25H187.5v31.25H62.5V-125h125v31.25h31.25V-62.5H187.5v31.25Z" />
+              <path id="splash-m" d="M0-31.25V-187.5h187.5v31.25h31.25v125h-62.5v-125H125v125H62.5v-125H31.25v125Z" />
+            </defs>
+            <g fill="currentColor">
+              <g class="wordmark-cell" data-letter="n" transform="translate(0,874.498729)"><rect class="letter-hitbox" x="-10" y="-260" width="248" height="265" /><g class="wordmark-letter"><use href="#splash-n" transform="translate(25.742966,-20.846183)" opacity=".302" /><use href="#splash-n" transform="translate(12.8715,-10.423127)" opacity=".502" /><use href="#splash-n" /></g></g>
+              <g class="wordmark-cell" data-letter="e" transform="translate(249.997092,874.498729)"><rect class="letter-hitbox" x="-10" y="-260" width="248" height="265" /><g class="wordmark-letter"><use href="#splash-e" transform="translate(25.742966,-20.846183)" opacity=".302" /><use href="#splash-e" transform="translate(12.8715,-10.423127)" opacity=".502" /><use href="#splash-e" /></g></g>
+              <g class="wordmark-cell" data-letter="o" transform="translate(499.99415,874.498729)"><rect class="letter-hitbox" x="-10" y="-260" width="248" height="265" /><g class="wordmark-letter"><use href="#splash-o" transform="translate(25.742966,-20.846183)" opacity=".302" /><use href="#splash-o" transform="translate(12.8715,-10.423127)" opacity=".502" /><use href="#splash-o" /></g></g>
+              <g class="wordmark-cell" data-letter="i" transform="translate(749.991186,874.498729)"><rect class="letter-hitbox" x="-10" y="-260" width="248" height="265" /><g class="wordmark-letter"><use href="#splash-i" transform="translate(25.742966,-20.846183)" opacity=".302" /><use href="#splash-i" transform="translate(12.8715,-10.423127)" opacity=".502" /><use href="#splash-i" /></g></g>
+              <g class="wordmark-cell" data-letter="s" transform="translate(999.988267,874.498729)"><rect class="letter-hitbox" x="-10" y="-260" width="248" height="265" /><g class="wordmark-letter"><use href="#splash-s" transform="translate(25.742966,-20.846183)" opacity=".302" /><use href="#splash-s" transform="translate(12.8715,-10.423127)" opacity=".502" /><use href="#splash-s" /></g></g>
+              <g class="wordmark-cell" data-letter="m" transform="translate(1249.985348,874.498729)"><rect class="letter-hitbox" x="-10" y="-260" width="248" height="265" /><g class="wordmark-letter"><use href="#splash-m" transform="translate(25.742966,-20.846183)" opacity=".302" /><use href="#splash-m" transform="translate(12.8715,-10.423127)" opacity=".502" /><use href="#splash-m" /></g></g>
+            </g>
+          </svg>

@@ -17,6 +17,8 @@ use std::hash::Hasher;
 use wide::{u32x4, u32x8};
 
 #[cfg(test)]
+mod ring_tests;
+#[cfg(test)]
 mod tests;
 
 #[derive(Default)]
@@ -751,7 +753,7 @@ fn draw_glyph(
     }
 }
 
-/// Rasterize one `QuadInstance` (rect / quad / rounded_rect /
+/// Rasterize one `QuadInstance` (rect / quad / rounded_rect / analytic ring /
 /// underline-style 1) into the softbuffer pixel buffer. Honors
 /// `clip_rect` (interpreted the same as the GPU shader: zero w/h
 /// means "no clip"). Rounded corners use a square-distance test
@@ -766,7 +768,7 @@ fn draw_quad_instance(
     let g = (inst.color[1].clamp(0.0, 1.0) * 255.0) as u8;
     let b = (inst.color[2].clamp(0.0, 1.0) * 255.0) as u8;
     let a = (inst.color[3].clamp(0.0, 1.0) * 255.0) as u8;
-    if a == 0 {
+    if a == 0 && inst.underline_style != -1 {
         return;
     }
 
@@ -774,6 +776,47 @@ fn draw_quad_instance(
     let qy0 = inst.pos[1];
     let qx1 = qx0 + inst.size[0];
     let qy1 = qy0 + inst.size[1];
+
+    if inst.underline_style == -1 {
+        // Evaluate at physical pixel centers, exactly like the GPU. In
+        // particular do not round a fractional clip or reshape the ring to it.
+        let x0 = qx0.floor().max(0.0) as i32;
+        let y0 = qy0.floor().max(0.0) as i32;
+        let x1 = qx1.ceil().min(buf_w as f32) as i32;
+        let y1 = qy1.ceil().min(buf_h as f32) as i32;
+        for y in y0..y1 {
+            let py = y as f32 + 0.5;
+            for x in x0..x1 {
+                let px = x as f32 + 0.5;
+                if px < qx0
+                    || px >= qx1
+                    || py < qy0
+                    || py >= qy1
+                    || px < inst.clip_rect[0]
+                    || px >= inst.clip_rect[0] + inst.clip_rect[2]
+                    || py < inst.clip_rect[1]
+                    || py >= inst.clip_rect[1] + inst.clip_rect[3]
+                {
+                    continue;
+                }
+                let dx = px - qx0 - inst.corner_radii[0];
+                let dy = py - qy0 - inst.corner_radii[1];
+                let coverage = (0.5
+                    - (((dx * dx + dy * dy).sqrt() - inst.corner_radii[2]).abs()
+                        - inst.corner_radii[3]))
+                    .clamp(0.0, 1.0);
+                let pa =
+                    (inst.color[3].clamp(0.0, 1.0) * coverage * 255.0).round() as u32;
+                let pr = (r as u32 * pa + 127) / 255;
+                let pg = (g as u32 * pa + 127) / 255;
+                let pb = (b as u32 * pa + 127) / 255;
+                let src = (pa << 24) | (pr << 16) | (pg << 8) | pb;
+                let idx = y as usize * buf_w as usize + x as usize;
+                buf[idx] = blend_over_swar(src, buf[idx]);
+            }
+        }
+        return;
+    }
 
     let mut x0 = qx0.round() as i32;
     let mut y0 = qy0.round() as i32;

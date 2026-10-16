@@ -511,6 +511,8 @@ impl ChromeBridge {
             } else {
                 ModalPointerKind::Default
             }
+        } else if self.chrome.settings_page.is_active() {
+            self.chrome.settings_page.pointer_kind_at(x, y)
         } else if self.chrome.generic_keyboard_overlay_active() {
             ModalPointerKind::Default
         } else if self.chrome.status_line.cwd_at(x, y)
@@ -537,7 +539,8 @@ impl ChromeBridge {
                     || self.chrome.splash_overlay.wordmark_hit(x, y)))
             || (self.chrome.is_neoism_agent_tab_active()
                 && self.chrome.agent_pane().is_some_and(|pane| {
-                    pane.composer_pointer_at(x, y)
+                    pane.activity_status_contains(x, y)
+                        || pane.composer_pointer_at(x, y)
                         || pane.detail_sidebar_pointer_at(x, y)
                         || pane.usage_chip_contains(x, y)
                 }))

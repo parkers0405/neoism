@@ -124,6 +124,7 @@ pub struct NeoismAgentMessage {
     pub tool: String,
     /// Server-issued identity of one model response's tool-call batch.
     pub tool_batch_id: Option<String>,
+    pub mcp: Option<neoism_ui::panels::agent_pane::mcp_icon::McpToolPresentation>,
     pub output_kind: NeoismAgentOutputKind,
     pub lang: String,
     pub line_offset: Option<usize>,
@@ -546,6 +547,7 @@ impl NeoismAgentMessage {
             status: String::new(),
             tool: String::new(),
             tool_batch_id: None,
+            mcp: None,
             output_kind: NeoismAgentOutputKind::Text,
             lang: String::new(),
             line_offset: None,
@@ -616,6 +618,8 @@ pub enum NeoismAgentUiEvent {
     Dialog {
         title: String,
         body: String,
+        /// Structured link metadata; never interpolate arbitrary URLs into Markdown.
+        link: Option<(String, String)>,
     },
     SwitchWorkspace {
         directory: String,
@@ -624,6 +628,16 @@ pub enum NeoismAgentUiEvent {
 }
 
 pub(crate) enum NeoismAgentBackgroundUpdate {
+    McpCatalogRefreshed {
+        token: u64,
+        server: String,
+        directory: Option<String>,
+        result: Result<Value, String>,
+    },
+    McpOAuthProgress {
+        activity: neoism_ui::widgets::modal::ModalActivity,
+        detail: neoism_ui::panels::agent_pane::state::picker::McpAuthorizationDetail,
+    },
     PromptDispatched {
         session_title: Option<String>,
         origin_session_id: Option<String>,
@@ -949,6 +963,8 @@ pub struct NeoismAgentPane {
     pub(super) directory: Option<String>,
     pub(super) server: String,
     pub(super) picker: Option<NeoismAgentPicker>,
+    pending_mcp_oauth: Option<mcp_oauth::PendingMcpOAuth>,
+    mcp_catalog_monitor: mcp_catalog::McpCatalogMonitor,
     /// Active `/connect` provider-auth flow. `Some` while any of the connect
     /// pickers (provider list / auth method / secret entry) is open, carrying
     /// the fetched catalog and the in-progress provider/method selection.
@@ -1214,6 +1230,9 @@ pub struct NeoismAgentPane {
     pub(super) prompt_draft_id: u64,
     pub(super) model_context_limit: Option<u64>,
     pub wordmark: NeoismWordmarkState,
+    pub activity_animation: neoism_ui::primitives::wordmark_animation::WordmarkAnimation,
+    pub activity_status_rects: Vec<[f32; 4]>,
+    activity_session_id: Option<String>,
     pub(super) side_panel: NeoismAgentSidePanel,
     pub(super) catalog_toggle_requested: bool,
     detail_panel: NeoismAgentSidePanel,
@@ -1322,6 +1341,8 @@ impl Default for NeoismAgentPane {
             directory: None,
             server: neoism_agent_server(),
             picker: None,
+            pending_mcp_oauth: None,
+            mcp_catalog_monitor: Default::default(),
             connect: None,
             pending_connect: None,
             pending_usage: None,
@@ -1487,6 +1508,9 @@ impl Default for NeoismAgentPane {
             prompt_draft_id: 0,
             model_context_limit: None,
             wordmark: NeoismWordmarkState::default(),
+            activity_animation: Default::default(),
+            activity_status_rects: Vec::new(),
+            activity_session_id: None,
             side_panel: NeoismAgentSidePanel::default(),
             catalog_toggle_requested: false,
             detail_panel: NeoismAgentSidePanel::default(),
@@ -1501,6 +1525,8 @@ impl Default for NeoismAgentPane {
 pub(super) mod connect;
 mod external_options;
 mod ingest;
+mod mcp_catalog;
+pub(super) mod mcp_oauth;
 mod input;
 mod permissions;
 mod questions;

@@ -1,3 +1,7 @@
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use web_time::{Duration, Instant};
 
 use sugarloaf::text::DrawOpts;
@@ -10,8 +14,10 @@ use crate::syntax::{highlight_line, syn_color, Lang};
 use crate::widgets::mermaid::{mermaid_scene, parse_mermaid_diagram, MermaidDiagram};
 use crate::widgets::scrollbar;
 
+mod body;
+
 const MODAL_WIDTH: f32 = 560.0;
-const MODAL_CORNER_RADIUS: f32 = 8.0;
+const MODAL_CORNER_RADIUS: f32 = 13.0;
 const MODAL_MARGIN_TOP: f32 = 92.0;
 const MODAL_PADDING: f32 = 18.0;
 const TITLE_FONT_SIZE: f32 = 15.0;
@@ -31,7 +37,6 @@ const BUSY_BAR_HEIGHT: f32 = 4.0;
 const BUSY_BAR_WIDTH: f32 = 120.0;
 const MAX_BODY_LINES: usize = 14;
 const MAX_VISIBLE_ACTIONS: usize = 8;
-const WRAP_COLUMNS: usize = 72;
 const HOVER_ANIMATION_DURATION: Duration = Duration::from_millis(150);
 
 #[allow(dead_code)]
@@ -43,6 +48,7 @@ const ORDER: u8 = 24;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ModalAction {
     Close,
+    OpenUrl { url: String },
     CopyInvite { url: String },
     UpdateNeoism {
         version: String,
@@ -473,12 +479,30 @@ struct BodyLine {
     kind: BodyLineKind,
     mermaid: Option<MermaidDiagram>,
     row_span: usize,
+    links: Vec<BodyLink>,
+    continuation: bool,
+}
+
+#[derive(Clone, Debug)]
+struct BodyLink {
+    range: std::ops::Range<usize>,
+    url: String,
+}
+
+#[derive(Clone, Debug)]
+struct BodyLayout {
+    source: String,
+    width: f32,
+    scale: f32,
+    font_probe: (f32, f32),
+    lines: Vec<BodyLine>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ModalHoverTarget {
     Close,
     Invite,
+    Link(usize),
     Tab(usize),
     Switch,
     Input,
@@ -500,11 +524,9 @@ impl BodyLine {
             kind,
             mermaid: None,
             row_span: 1,
+            links: Vec::new(),
+            continuation: false,
         }
-    }
-
-    fn code(text: String, lang: Lang) -> Self {
-        Self::new(text, BodyLineKind::Code(lang))
     }
 }
 
@@ -517,6 +539,7 @@ struct FormGeometry {
     action_row_height: f32,
     switch: Option<[f32; 4]>,
     switch_in_body: bool,
+    compact: bool,
     scale: f32,
     pad: f32,
     gap: f32,
@@ -545,11 +568,40 @@ impl FormGeometry {
     }
 }
 
-#[derive(Clone, Debug)]
+/// Identity and cancellation shared by a modal and its background operation.
+#[derive(Clone, Debug, Default)]
+pub struct ModalActivity(Arc<AtomicBool>);
+
+impl ModalActivity {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
+impl PartialEq for ModalActivity {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for ModalActivity {}
+
+#[derive(Debug)]
 pub struct UniversalModal {
     active: bool,
     title: String,
     body: String,
+    body_layout: Option<BodyLayout>,
+    body_link: Option<(String, String)>,
+    body_link_hit_rects: Vec<(String, [f32; 4])>,
     invite_url: Option<String>,
     invite_hit_rects: Vec<[f32; 4]>,
     meta: String,
@@ -566,6 +618,7 @@ pub struct UniversalModal {
     form_switch: Option<ModalFormSwitch>,
     form_switch_rect: Option<[f32; 4]>,
     form_scroll: f32,
+    form_compact: bool,
     form_reveal_pending: bool,
     /// Caret position in CHARS within the focused input (single input or
     /// focused form field). Reset to end-of-value on open and focus change.
@@ -580,6 +633,7 @@ pub struct UniversalModal {
     body_wheel_accumulator: f32,
     scale: f32,
     busy: bool,
+    activity: Option<ModalActivity>,
     progress: Option<u8>,
     blocking: bool,
     dismissible: bool,
@@ -662,6 +716,9 @@ impl Default for UniversalModal {
             active: false,
             title: String::new(),
             body: String::new(),
+            body_layout: None,
+            body_link: None,
+            body_link_hit_rects: Vec::new(),
             invite_url: None,
             invite_hit_rects: Vec::new(),
             meta: String::new(),
@@ -676,6 +733,7 @@ impl Default for UniversalModal {
             form_switch: None,
             form_switch_rect: None,
             form_scroll: 0.0,
+            form_compact: false,
             form_reveal_pending: true,
             input_caret: 0,
             markdown_input: false,
@@ -688,6 +746,7 @@ impl Default for UniversalModal {
             body_wheel_accumulator: 0.0,
             scale: 1.0,
             busy: false,
+            activity: None,
             progress: None,
             blocking: true,
             dismissible: true,
@@ -705,6 +764,14 @@ impl Default for UniversalModal {
     }
 }
 
+impl Drop for UniversalModal {
+    fn drop(&mut self) {
+        if let Some(activity) = &self.activity {
+            activity.cancel();
+        }
+    }
+}
+
 impl UniversalModal {
     pub fn new() -> Self {
         Self::default()
@@ -718,6 +785,8 @@ impl UniversalModal {
         let scale = scale.clamp(0.5, 3.0);
         if self.scale != scale {
             self.form_reveal_pending = true;
+            self.body_layout = None;
+            self.body_link_hit_rects.clear();
         }
         self.scale = scale;
     }
@@ -727,7 +796,13 @@ impl UniversalModal {
     }
 
     pub fn close(&mut self) {
+        if let Some(activity) = self.activity.take() {
+            activity.cancel();
+        }
         self.active = false;
+        self.body_link = None;
+        self.body_layout = None;
+        self.body_link_hit_rects.clear();
         self.buttons.clear();
         self.input = None;
         self.markdown_input = false;
@@ -741,6 +816,7 @@ impl UniversalModal {
         self.form_switch = None;
         self.form_switch_rect = None;
         self.form_scroll = 0.0;
+        self.form_compact = false;
         self.form_reveal_pending = true;
         self.submitted_form = None;
         self.selected_index = 0;
@@ -760,11 +836,17 @@ impl UniversalModal {
     }
 
     pub fn open(&mut self, spec: ModalSpec) {
+        if let Some(activity) = self.activity.take() {
+            activity.cancel();
+        }
         self.active = true;
         self.invite_url = None;
         self.invite_hit_rects.clear();
         self.title = spec.title;
         self.body = spec.body;
+        self.body_link = None;
+        self.body_layout = None;
+        self.body_link_hit_rects.clear();
         self.meta = spec.meta;
         self.input = spec.input;
         self.form = None;
@@ -775,6 +857,7 @@ impl UniversalModal {
         self.form_switch = None;
         self.form_switch_rect = None;
         self.form_scroll = 0.0;
+        self.form_compact = false;
         self.form_reveal_pending = true;
         self.submitted_form = None;
         self.buttons = if spec.buttons.is_empty() {
@@ -850,6 +933,7 @@ impl UniversalModal {
         self.form_switch = None;
         self.form_switch_rect = None;
         self.form_scroll = 0.0;
+        self.form_compact = false;
         self.form_reveal_pending = true;
         self.form_focus = self
             .form
@@ -929,6 +1013,52 @@ impl UniversalModal {
             busy: false,
             blocking: true,
         });
+    }
+
+    /// Keep authorization targets out of Markdown syntax: OAuth state may
+    /// contain parentheses or punctuation that must reach the browser intact.
+    pub fn open_link_message(
+        &mut self,
+        title: impl Into<String>,
+        body: impl Into<String>,
+        label: impl Into<String>,
+        url: impl Into<String>,
+    ) {
+        self.open_message(title, body);
+        self.body_link = Some((label.into(), url.into()));
+    }
+
+    pub fn open_activity_message(
+        &mut self,
+        activity: ModalActivity,
+        title: impl Into<String>,
+        body: impl Into<String>,
+        status: impl Into<String>,
+    ) {
+        if activity.is_cancelled() {
+            return;
+        }
+        self.open_message(title, body);
+        self.activity = Some(activity);
+        self.meta = status.into();
+        self.busy = true;
+    }
+
+    /// Late worker results may update their own modal, never reopen a closed
+    /// modal or replace a different operation's dialog.
+    pub fn update_activity_message(
+        &mut self,
+        activity: &ModalActivity,
+        body: impl Into<String>,
+        status: impl Into<String>,
+        busy: bool,
+        link: Option<(String, String)>,
+    ) -> bool {
+        if !self.active || activity.is_cancelled() || self.activity.as_ref() != Some(activity) {
+            return false;
+        }
+        self.body_link = link;
+        self.update_progress(body, status, None, busy)
     }
 
     pub fn is_blocking(&self) -> bool {
@@ -1245,6 +1375,24 @@ impl UniversalModal {
                     .is_some_and(|started| started.elapsed() < HOVER_ANIMATION_DURATION))
     }
 
+    pub fn body_link_action_at(&self, x: f32, y: f32) -> Option<ModalAction> {
+        if !self.active {
+            return None;
+        }
+        self.body_link_hit_rects.iter().find_map(|(url, rect)| {
+            (x >= rect[0] && x < rect[0] + rect[2]
+                && y >= rect[1] && y < rect[1] + rect[3])
+                .then(|| ModalAction::OpenUrl { url: url.clone() })
+        })
+    }
+
+    fn record_body_link(&mut self, url: &str, rect: [f32; 4], clip: [f32; 4]) -> Option<usize> {
+        let hit = crate::primitives::geom::intersect_rect(rect, clip)?;
+        let index = self.body_link_hit_rects.len();
+        self.body_link_hit_rects.push((url.to_string(), hit));
+        Some(index)
+    }
+
     pub fn pointer_move(
         &mut self,
         x: f32,
@@ -1291,6 +1439,7 @@ impl UniversalModal {
             Some(
                 ModalHoverTarget::Close
                 | ModalHoverTarget::Invite
+                | ModalHoverTarget::Link(_)
                 | ModalHoverTarget::Tab(_)
                 | ModalHoverTarget::Switch
                 | ModalHoverTarget::Action(_),
@@ -1312,6 +1461,9 @@ impl UniversalModal {
                 && y >= rect[1]
                 && y <= rect[1] + rect[3]
         };
+        if let Some(index) = self.body_link_hit_rects.iter().position(|(_, rect)| contains(*rect)) {
+            return Some(ModalHoverTarget::Link(index));
+        }
         if self.invite_action_at(x, y).is_some() {
             return Some(ModalHoverTarget::Invite);
         }
@@ -1382,6 +1534,8 @@ impl UniversalModal {
             return false;
         }
         self.body = body.into();
+        self.body_layout = None;
+        self.body_link_hit_rects.clear();
         self.meta = meta.into();
         self.progress = progress.map(|value| value.min(100));
         self.busy = busy;
@@ -1486,6 +1640,8 @@ impl UniversalModal {
     pub fn set_form_description(&mut self, description: impl Into<String>) {
         if self.form.is_some() {
             self.body = description.into();
+            self.body_layout = None;
+            self.body_link_hit_rects.clear();
         }
     }
 
@@ -1762,103 +1918,60 @@ impl UniversalModal {
     }
 
     fn body_lines(&self) -> Vec<BodyLine> {
-        let mut out = Vec::new();
-        let mut in_code = false;
-        let mut code_lang = Lang::Other;
-        let mut code_info = String::new();
-        let mut code_lines: Vec<String> = Vec::new();
-        for raw in self.body.lines() {
-            let trimmed = raw.trim();
-            if let Some(info) = trimmed
-                .strip_prefix("```")
-                .or_else(|| trimmed.strip_prefix("~~~"))
-            {
-                if in_code {
-                    if code_info.trim().eq_ignore_ascii_case("mermaid") {
-                        let source = code_lines.join("\n");
-                        if let Some(diagram) = parse_mermaid_diagram(&source) {
-                            out.push(BodyLine {
-                                text: source,
-                                kind: BodyLineKind::Mermaid,
-                                mermaid: Some(diagram),
-                                row_span: 8,
-                            });
-                        } else {
-                            for line in code_lines.drain(..) {
-                                out.push(BodyLine::code(line, code_lang));
-                            }
-                        }
-                    } else {
-                        for line in code_lines.drain(..) {
-                            for wrapped in wrap_preserving(&line, WRAP_COLUMNS) {
-                                out.push(BodyLine::code(wrapped, code_lang));
-                            }
-                        }
-                    }
-                    code_lines.clear();
-                    code_info.clear();
-                    in_code = false;
-                } else {
-                    in_code = true;
-                    code_info = info.trim().to_string();
-                    code_lang = lang_from_fence(&code_info);
-                    code_lines.clear();
-                }
-                continue;
-            }
-
-            if trimmed.is_empty() {
-                out.push(BodyLine {
-                    text: String::new(),
-                    kind: BodyLineKind::Text,
-                    mermaid: None,
-                    row_span: 1,
-                });
-                continue;
-            }
-
-            if in_code {
-                code_lines.push(raw.to_string());
-                continue;
-            }
-
-            let (kind, content) = if let Some(heading) = markdown_heading(raw) {
-                (BodyLineKind::Heading, heading)
-            } else if let Some(bullet) = markdown_bullet(raw) {
-                (BodyLineKind::Bullet, bullet)
-            } else {
-                (BodyLineKind::Text, trimmed)
-            };
-
-            let mut line = String::new();
-            for word in content.split_whitespace() {
-                let next_len = if line.is_empty() {
-                    word.len()
-                } else {
-                    line.len() + 1 + word.len()
-                };
-                if next_len > WRAP_COLUMNS && !line.is_empty() {
-                    out.push(BodyLine::new(line, kind));
-                    line = word.to_string();
-                } else {
-                    if !line.is_empty() {
-                        line.push(' ');
-                    }
-                    line.push_str(word);
-                }
-            }
-            if !line.is_empty() {
-                out.push(BodyLine::new(line, kind));
+        if let Some(layout) = &self.body_layout {
+            if layout.source == self.body {
+                return layout.lines.clone();
             }
         }
-        if in_code {
-            for line in code_lines {
-                for wrapped in wrap_preserving(&line, WRAP_COLUMNS) {
-                    out.push(BodyLine::code(wrapped, code_lang));
-                }
+        // Geometry can be queried before the first paint. The render pass
+        // replaces this estimate with the actual font measurements.
+        self.layout_body(
+            (MODAL_WIDTH - MODAL_PADDING * 2.0 - 8.0) * self.scale,
+            self.scale,
+            |text, _| text.chars().count() as f32 * BODY_FONT_SIZE * self.scale * 0.6,
+        )
+    }
+
+    fn layout_body(
+        &self,
+        width: f32,
+        scale: f32,
+        mut measure: impl FnMut(&str, bool) -> f32,
+    ) -> Vec<BodyLine> {
+        let mut lines = body::layout_lines(
+            &self.body, width, scale, self.invite_url.as_deref(), &mut measure,
+        );
+        if let Some((label, url)) = &self.body_link {
+            if !lines.is_empty() {
+                lines.push(BodyLine::new(String::new(), BodyLineKind::Text));
             }
+            lines.extend(body::link_lines(label, url, width, scale, &mut measure));
         }
-        out
+        lines
+    }
+
+    fn prepare_body_layout(&mut self, sugarloaf: &mut Sugarloaf, width: f32, scale: f32) {
+        let opts = DrawOpts { font_size: BODY_FONT_SIZE * scale, ..DrawOpts::default() };
+        let bold_opts = DrawOpts { bold: true, ..opts.clone() };
+        let probe = "Wim 0123456789";
+        let font_probe = (
+            sugarloaf.text_mut().measure(probe, &opts),
+            sugarloaf.text_mut().measure(probe, &bold_opts),
+        );
+        if self.body_layout.as_ref().is_some_and(|layout| {
+            layout.source == self.body && layout.width == width
+                && layout.scale == scale && layout.font_probe == font_probe
+        }) {
+            return;
+        }
+        let lines = self.layout_body(
+            width, scale,
+            |text, bold| sugarloaf.text_mut().measure(text, if bold { &bold_opts } else { &opts }),
+        );
+        self.body_layout = Some(BodyLayout {
+            source: self.body.clone(), width, scale, font_probe, lines,
+        });
+        self.body_link_hit_rects.clear();
     }
 
     fn visible_body_lines(&self) -> Vec<BodyLine> {
@@ -1898,6 +2011,7 @@ impl UniversalModal {
         if rows == 0 {
             return;
         }
+        self.body_link_hit_rects.clear();
         let max_offset = self
             .body_lines()
             .len()
@@ -2052,7 +2166,7 @@ impl UniversalModal {
             + 19.0
             + actions)
             * self.scale;
-        let compact = natural > viewport_h - 24.0 * self.scale;
+        let compact = self.form_compact || natural > viewport_h - 24.0 * self.scale;
         // Compact spacing first, then bounded scale adaptation (never tiny text).
         let s = if compact {
             self.scale.min(((viewport_h - 8.0) / 207.0).max(0.75))
@@ -2140,6 +2254,7 @@ impl UniversalModal {
             action_row_height,
             switch,
             switch_in_body,
+            compact,
             scale: s,
             pad,
             gap,
@@ -2149,6 +2264,7 @@ impl UniversalModal {
     }
 
     fn scroll_form_by(&mut self, geometry: FormGeometry, pixels: f32) {
+        self.body_link_hit_rects.clear();
         self.form_scroll = (self.form_scroll + pixels).clamp(0.0, geometry.max_scroll());
         self.form_reveal_pending = false;
         self.form_field_hit_rects.clear();
@@ -2225,7 +2341,7 @@ impl UniversalModal {
         let width = (MODAL_WIDTH * s).min((viewport_w - margin * 2.0).max(1.0));
         let body_lines = self.visible_body_line_count() as f32;
         let meta_h = if self.meta.is_empty() { 0.0 } else { 20.0 * s };
-        let busy_h = if self.busy {
+        let busy_h = if self.activity.is_none() && self.busy {
             BUSY_BAR_HEIGHT * s + 12.0 * s
         } else {
             0.0
@@ -2269,7 +2385,7 @@ impl UniversalModal {
         let s = self.scale;
         let body_lines = self.visible_body_line_count() as f32;
         let meta_h = if self.meta.is_empty() { 0.0 } else { 20.0 * s };
-        let busy_h = if self.busy {
+        let busy_h = if self.activity.is_none() && self.busy {
             BUSY_BAR_HEIGHT * s + 12.0 * s
         } else {
             0.0
@@ -2413,17 +2529,7 @@ impl UniversalModal {
             ..DrawOpts::default()
         };
         for line in lines {
-            // Form descriptions share the same clipped text viewport as fields.
-            let opts = DrawOpts {
-                bold: line.kind == BodyLineKind::Heading,
-                ..opts
-            };
-            let text = if line.kind == BodyLineKind::Bullet {
-                format!("• {}", line.text)
-            } else {
-                line.text.clone()
-            };
-            sugarloaf.text_mut().draw(x, y, &text, &opts);
+            self.draw_body_line(sugarloaf, theme, &line, x, y, clip[2], clip, s);
             y += BODY_LINE_HEIGHT * s * line.row_span as f32;
         }
         if !self.meta.is_empty() {
@@ -2571,7 +2677,32 @@ impl UniversalModal {
             self.form_reveal_pending = true;
         }
         self.viewport_height = viewport_height;
+        self.form_compact = false;
+        let viewport_width = (window_width / scale_factor).max(1.0);
+        let normal_margin = if self.form.is_some() {
+            (12.0 * self.scale).min(viewport_height * 0.02).min(viewport_width * 0.05)
+        } else {
+            (12.0 * self.scale).min(viewport_width * 0.05)
+        };
+        let normal_width = (MODAL_WIDTH * self.scale)
+            .min((viewport_width - 2.0 * normal_margin).max(1.0));
+        let normal_pad = if self.form.is_some() && viewport_height < 120.0 { 2.0 } else { MODAL_PADDING } * self.scale;
+        // Decide compact mode from NORMAL-width wrapping, then hold that
+        // decision while measuring the wider compact viewport. Otherwise a
+        // two-row description can shrink to one row and undo compact mode.
+        self.prepare_body_layout(
+            sugarloaf, (normal_width - 2.0 * normal_pad - 8.0 * self.scale).max(1.0), self.scale,
+        );
+        if let Some(geometry) = self.form_geometry(window_width, scale_factor) {
+            self.form_compact = geometry.compact;
+            if geometry.compact {
+                self.prepare_body_layout(
+                    sugarloaf, (geometry.body[2] - 8.0 * geometry.scale).max(1.0), geometry.scale,
+                );
+            }
+        }
         self.clamp_body_scroll();
+        self.body_link_hit_rects.clear();
         self.input_hit_rects.clear();
         self.form_field_hit_rects.clear();
         let form_geometry = self.form_geometry(window_width, scale_factor);
@@ -2583,19 +2714,7 @@ impl UniversalModal {
         }
         let s = form_geometry.map_or(self.scale, |geometry| geometry.scale);
         let pad = form_geometry.map_or(MODAL_PADDING * s, |geometry| geometry.pad);
-        let server_form = self.form.as_ref().is_some_and(|form| {
-            form.fields.iter().any(|field| {
-                matches!(
-                    field.id.as_str(),
-                    "address" | "create_dir" | "fast_host_dir" | "fast_join_address"
-                )
-            })
-        });
-        let radius = if server_form || self.invite_url.is_some() {
-            12.0 * s
-        } else {
-            MODAL_CORNER_RADIUS * s
-        };
+        let radius = MODAL_CORNER_RADIUS * s;
         let (x, y, w, h) = self.modal_rect(window_width, scale_factor);
         let body_lines = self.visible_body_lines();
         self.invite_hit_rects.clear();
@@ -2618,7 +2737,7 @@ impl UniversalModal {
             y,
             w,
             h,
-            theme.f32_alpha(theme.panel_bg(), 0.99),
+            theme.f32(theme.panel_bg()),
             DEPTH_BG,
             radius,
             ORDER,
@@ -2647,7 +2766,7 @@ impl UniversalModal {
         let text_x = x + pad;
         let mut text_y = y + pad;
         let text_w = (w - pad * 2.0).max(0.0);
-        let title = truncate_to_fit(self.title.as_str(), text_w, sugarloaf, &title_opts);
+        let title = truncate_to_fit(self.title.as_str(), (text_w - 28.0 * s).max(0.0), sugarloaf, &title_opts);
         sugarloaf
             .text_mut()
             .draw(text_x, text_y, title.as_str(), &title_opts);
@@ -2915,13 +3034,14 @@ impl UniversalModal {
                 [x, y, w, h],
                 (s, pad),
                 form_geometry,
-                server_form,
             );
             return;
         }
         let body_view_y = text_y;
         let body_view_h = self.visible_body_line_count() as f32 * BODY_LINE_HEIGHT * s;
-        let body_clip = [text_x, body_view_y, text_w, body_view_h];
+        let body_clip = crate::primitives::geom::intersect_rect(
+            [text_x, body_view_y, text_w, body_view_h], text_clip,
+        ).unwrap_or([text_x, body_view_y, 0.0, 0.0]);
         if body_lines.is_empty() {
             sugarloaf.text_mut().draw(
                 text_x,
@@ -2950,7 +3070,7 @@ impl UniversalModal {
                     continue;
                 }
                 self.draw_body_line(
-                    sugarloaf, theme, &line, text_x, text_y, text_w, body_clip,
+                    sugarloaf, theme, &line, text_x, text_y, text_w, body_clip, s,
                 );
                 text_y += BODY_LINE_HEIGHT * s * line.row_span as f32;
             }
@@ -2990,14 +3110,35 @@ impl UniversalModal {
         }
 
         if !self.meta.is_empty() {
-            let meta = truncate_to_fit(self.meta.as_str(), text_w, sugarloaf, &meta_opts);
-            sugarloaf
-                .text_mut()
-                .draw(text_x, text_y, meta.as_str(), &meta_opts);
+            let loading = self.activity.is_some() && self.busy;
+            let inset = if loading { 18.0 * s } else { 0.0 };
+            if loading {
+                let now = web_time::SystemTime::now()
+                    .duration_since(web_time::UNIX_EPOCH)
+                    .unwrap_or_default();
+                let phase = crate::render_policy::animation_phase_from_unix_secs(
+                    now.as_secs(), now.subsec_nanos(),
+                );
+                for (trail, alpha) in crate::render_policy::RUNNING_SQUARE_ALPHAS.into_iter().enumerate() {
+                    let (dx, dy) = crate::render_policy::running_square_position(phase, trail, s);
+                    draw_form_rect(
+                        sugarloaf,
+                        [text_x + 5.0 * s + dx - s, text_y + META_FONT_SIZE * s * 0.5 + dy - s, 2.0 * s, 2.0 * s],
+                        text_clip, theme.f32_alpha(theme.fg, alpha), 0.0, ORDER + 1,
+                    );
+                }
+            }
+            let opts = if self.activity.is_some() {
+                DrawOpts { color: theme.u8(theme.dim), ..meta_opts.clone() }
+            } else {
+                meta_opts.clone()
+            };
+            let meta = truncate_to_fit(self.meta.as_str(), (text_w - inset).max(0.0), sugarloaf, &opts);
+            sugarloaf.text_mut().draw(text_x + inset, text_y, meta.as_str(), &opts);
             text_y += 20.0 * s;
         }
 
-        if self.busy || self.progress.is_some() {
+        if self.activity.is_none() && (self.busy || self.progress.is_some()) {
             let track_y = text_y + 4.0 * s;
             let track_w = w - pad * 2.0;
             sugarloaf.rounded_rect(
@@ -3202,7 +3343,6 @@ impl UniversalModal {
             [x, y, w, h],
             (s, pad),
             None,
-            server_form,
         );
     }
 
@@ -3213,9 +3353,8 @@ impl UniversalModal {
         panel: [f32; 4],
         metrics: (f32, f32),
         form_geometry: Option<FormGeometry>,
-        server_form: bool,
     ) {
-        let [x, y, w, h] = panel;
+        let [x, y, w, _] = panel;
         let (s, pad) = metrics;
         let actions_y = form_geometry
             .map_or_else(|| self.actions_y(y), |geometry| geometry.actions[1]);
@@ -3291,7 +3430,7 @@ impl UniversalModal {
                         theme.f32(theme.hover)
                     },
                     DEPTH_ELEMENT,
-                    4.0 * s,
+                    8.0 * s,
                     ORDER,
                 );
             }
@@ -3306,10 +3445,10 @@ impl UniversalModal {
                     if destructive {
                         theme.f32_alpha(theme.red, 0.08 + hover * 0.12)
                     } else {
-                        theme.f32_alpha(theme.accent, 0.04 + hover * 0.12)
+                        theme.f32_alpha(theme.hover, 0.5 + hover * 0.5)
                     },
                     DEPTH_ELEMENT + 0.01,
-                    4.0 * s,
+                    8.0 * s,
                     ORDER + 1,
                 );
             }
@@ -3358,22 +3497,10 @@ impl UniversalModal {
             }
         }
 
-        if !server_form && self.invite_url.is_none() {
-            sugarloaf.rect(
-                None,
-                x,
-                y,
-                3.0 * s,
-                h,
-                theme.f32(theme.accent),
-                DEPTH_ELEMENT,
-                ORDER,
-            );
-        }
     }
 
     fn draw_body_line(
-        &self,
+        &mut self,
         sugarloaf: &mut Sugarloaf,
         theme: &IdeTheme,
         line: &BodyLine,
@@ -3381,8 +3508,8 @@ impl UniversalModal {
         y: f32,
         w: f32,
         clip: [f32; 4],
+        s: f32,
     ) {
-        let s = self.scale;
         let line_h = BODY_LINE_HEIGHT * s;
         match line.kind {
             BodyLineKind::Mermaid => {
@@ -3391,16 +3518,9 @@ impl UniversalModal {
                 };
                 let h = line_h * line.row_span as f32 - 8.0 * s;
                 let rect = [x, y + 4.0 * s, w, h.max(line_h)];
-                sugarloaf.rounded_rect(
-                    None,
-                    rect[0],
-                    rect[1],
-                    rect[2],
-                    rect[3],
-                    theme.f32_alpha(theme.black, 0.42),
-                    DEPTH_ELEMENT,
-                    10.0 * s,
-                    ORDER,
+                draw_form_rect(
+                    sugarloaf, rect, clip, theme.f32_alpha(theme.black, 0.42),
+                    10.0 * s, ORDER,
                 );
                 let scene = mermaid_scene(diagram, theme, s);
                 let Some(bounds) = scene.bounds() else {
@@ -3422,61 +3542,54 @@ impl UniversalModal {
                 };
                 render_scene(sugarloaf, &scene, &camera, clip, DEPTH_ELEMENT, ORDER + 1);
             }
-            BodyLineKind::Heading => {
+            BodyLineKind::Heading | BodyLineKind::Bullet | BodyLineKind::Text => {
                 let opts = DrawOpts {
                     font_size: BODY_FONT_SIZE * s,
-                    color: theme.u8(theme.fg),
-                    bold: true,
+                    color: theme.u8(if line.kind == BodyLineKind::Heading { theme.fg } else { theme.dim }),
+                    bold: line.kind == BodyLineKind::Heading,
                     clip_rect: Some(clip),
                     ..DrawOpts::default()
                 };
-                let text = truncate_to_fit(&line.text, w, sugarloaf, &opts);
-                sugarloaf.text_mut().draw(x, y, &text, &opts);
-            }
-            BodyLineKind::Bullet => {
-                let bullet_opts = DrawOpts {
-                    font_size: BODY_FONT_SIZE * s,
-                    color: theme.u8(theme.accent),
-                    bold: true,
-                    clip_rect: Some(clip),
-                    ..DrawOpts::default()
-                };
-                let text_opts = DrawOpts {
-                    font_size: BODY_FONT_SIZE * s,
-                    color: theme.u8(theme.dim),
-                    clip_rect: Some(clip),
-                    ..DrawOpts::default()
-                };
-                let bullet_slot = BODY_FONT_SIZE * s;
-                draw_icon_centered_with_occlusion(
-                    sugarloaf,
-                    x,
-                    [x, y, bullet_slot, line_h],
-                    "•",
-                    &bullet_opts,
-                    &[],
-                    true,
-                );
-                let text_x = x + bullet_slot + 8.0 * s;
-                let text = truncate_to_fit(
-                    &line.text,
-                    (w - bullet_slot - 8.0 * s).max(0.0),
-                    sugarloaf,
-                    &text_opts,
-                );
-                sugarloaf.text_mut().draw(text_x, y, &text, &text_opts);
+                let mut text_x = x;
+                if line.kind == BodyLineKind::Bullet {
+                    if !line.continuation {
+                        draw_icon_centered_with_occlusion(
+                            sugarloaf, x, [x, y, BODY_FONT_SIZE * s, line_h],
+                            "•", &opts, &[], true,
+                        );
+                    }
+                    text_x += (BODY_FONT_SIZE + 8.0) * s;
+                }
+                let mut byte = 0;
+                for link in &line.links {
+                    if byte < link.range.start {
+                        let text = &line.text[byte..link.range.start];
+                        sugarloaf.text_mut().draw(text_x, y, text, &opts);
+                        text_x += sugarloaf.text_mut().measure(text, &opts);
+                    }
+                    let label = &line.text[link.range.clone()];
+                    let link_opts = DrawOpts { color: theme.u8(theme.fg), ..opts.clone() };
+                    let width = sugarloaf.text_mut().measure(label, &link_opts);
+                    let rect = [text_x, y, width, line_h];
+                    if let Some(index) = self.record_body_link(&link.url, rect, clip) {
+                        let hover = self.hover_intensity(ModalHoverTarget::Link(index));
+                        sugarloaf.text_mut().draw(text_x, y, label, &link_opts);
+                        draw_form_rect(
+                            sugarloaf,
+                            [text_x, y + (BODY_FONT_SIZE + 2.0) * s, width, s],
+                            clip, theme.f32_alpha(theme.fg, 0.45 + hover * 0.45),
+                            0.0, ORDER + 1,
+                        );
+                    }
+                    text_x += width;
+                    byte = link.range.end;
+                }
+                sugarloaf.text_mut().draw(text_x, y, &line.text[byte..], &opts);
             }
             BodyLineKind::Code(lang) => {
-                sugarloaf.rounded_rect(
-                    None,
-                    x,
-                    y - 2.0 * s,
-                    w,
-                    line_h,
-                    theme.f32_alpha(theme.surface, 0.55),
-                    DEPTH_ELEMENT,
-                    3.0 * s,
-                    ORDER,
+                draw_form_rect(
+                    sugarloaf, [x, y - 2.0 * s, w, line_h], clip,
+                    theme.f32_alpha(theme.surface, 0.55), 3.0 * s, ORDER,
                 );
                 let mut tx = x + 8.0 * s;
                 for (tok, slice) in highlight_line(&line.text, lang) {
@@ -3491,16 +3604,6 @@ impl UniversalModal {
                         break;
                     }
                 }
-            }
-            BodyLineKind::Text => {
-                let opts = DrawOpts {
-                    font_size: BODY_FONT_SIZE * s,
-                    color: theme.u8(theme.dim),
-                    clip_rect: Some(clip),
-                    ..DrawOpts::default()
-                };
-                let text = truncate_to_fit(&line.text, w, sugarloaf, &opts);
-                sugarloaf.text_mut().draw(x, y, &text, &opts);
             }
         }
     }
@@ -3556,24 +3659,6 @@ fn markdown_bullet(line: &str) -> Option<&str> {
         .strip_prefix("- ")
         .or_else(|| trimmed.strip_prefix("* "))
         .or_else(|| trimmed.strip_prefix("• "))
-}
-
-fn wrap_preserving(line: &str, max_chars: usize) -> Vec<String> {
-    if max_chars == 0 || line.chars().count() <= max_chars {
-        return vec![line.to_string()];
-    }
-    let mut out = Vec::new();
-    let mut current = String::new();
-    for ch in line.chars() {
-        current.push(ch);
-        if current.chars().count() >= max_chars {
-            out.push(std::mem::take(&mut current));
-        }
-    }
-    if !current.is_empty() {
-        out.push(current);
-    }
-    out
 }
 
 fn lang_from_fence(label: &str) -> Lang {
@@ -4300,6 +4385,171 @@ mod tests {
         assert_eq!(modal.take_invite_copy().as_deref(), Some("exact-url"));
         assert!(modal.take_invite_copy().is_none());
         assert_eq!(modal.pending_host_actions.len(), 1);
+    }
+
+    #[test]
+    fn activity_updates_preserve_links_and_stop_the_square_loader_on_completion() {
+        let mut modal = UniversalModal::new();
+        let activity = ModalActivity::new();
+        let url = "https://example.com/auth?state=a)b";
+        modal.open_activity_message(activity.clone(), "vercel", "Authorize in your browser.", "Not connected");
+        let opened_at = modal.opened_at;
+        assert!(modal.needs_redraw());
+        assert!(modal.update_activity_message(
+            &activity, "Authorize in your browser.", "Waiting for authorization", true,
+            Some(("Open authorization page".into(), url.into())),
+        ));
+        let (_, y, _, height) = modal.modal_rect(1000.0, 1.0);
+        let actions_y = modal.actions_y(y);
+        assert_eq!(modal.body_link.as_ref().unwrap().1, url);
+        assert!(modal.update_activity_message(
+            &activity, "Authorize in your browser.", "Connected", false,
+            Some(("Open authorization page".into(), url.into())),
+        ));
+        assert!(!modal.needs_redraw());
+        assert_eq!(modal.opened_at, opened_at);
+        assert_eq!(modal.body_link.as_ref().unwrap().1, url);
+        assert_eq!(modal.modal_rect(1000.0, 1.0).3, height);
+        assert_eq!(modal.actions_y(y), actions_y);
+        assert!(modal.update_activity_message(&activity, "Connected.", "Connected", false, None));
+        assert!(modal.body_link.is_none());
+    }
+
+    #[test]
+    fn activity_results_never_reopen_or_replace_other_dialogs() {
+        let mut modal = UniversalModal::new();
+        let first = ModalActivity::new();
+        modal.open_activity_message(first.clone(), "vercel", "Authorize", "Waiting");
+        modal.close();
+        assert!(first.is_cancelled());
+        assert!(!modal.update_activity_message(&first, "Connected", "Connected", false, None));
+        assert!(!modal.is_active());
+        modal.open_activity_message(first.clone(), "vercel", "Late open", "Waiting");
+        assert!(!modal.is_active());
+        let second = ModalActivity::new();
+        modal.open_activity_message(second.clone(), "vercel", "Other attempt", "Waiting");
+        assert_ne!(first, second);
+        assert!(!modal.update_activity_message(&first, "Old result", "Connected", false, None));
+        assert_eq!(modal.body, "Other attempt");
+        modal.open_message("vercel", "Unrelated message");
+        assert!(second.is_cancelled());
+        assert!(!modal.update_activity_message(&second, "Late result", "Connected", false, None));
+        assert_eq!(modal.body, "Unrelated message");
+    }
+
+    #[test]
+    fn destroying_the_modal_cancels_its_background_activity() {
+        let activity = ModalActivity::new();
+        {
+            let mut modal = UniversalModal::new();
+            modal.open_activity_message(activity.clone(), "vercel", "Authorize", "Waiting");
+            assert!(!activity.is_cancelled());
+        }
+        assert!(activity.is_cancelled());
+    }
+
+    #[test]
+    fn structured_message_link_preserves_arbitrary_oauth_state() {
+        let mut modal = UniversalModal::new();
+        for url in [
+            "https://example.com/auth?state=a)b",
+            "https://example.com/auth?state=a(b",
+            "https://example.com/auth?state=a%2Bb#finish.",
+        ] {
+            modal.open_link_message("Authorize", "Continue in your browser.", "Open authorization page", url);
+            let lines = modal.layout_body(90.0, 1.0, |text, _| text.chars().count() as f32 * 7.0);
+            let links: Vec<_> = lines.iter().flat_map(|line| &line.links).collect();
+            assert!(links.len() > 1);
+            assert!(links.iter().all(|link| link.url == url));
+            assert!(lines.iter().all(|line| !line.text.contains("https://")));
+        }
+        modal.open_message("Other", "Details");
+        assert!(modal.body_link.is_none());
+    }
+
+    #[test]
+    fn compact_form_decision_survives_wider_description_reflow() {
+        let mut modal = UniversalModal::new();
+        modal.open_form(ModalFormSpec {
+            title: "Form".into(),
+            fields: vec![ModalFormField {
+                id: "name".into(), label: "Name".into(), value: String::new(),
+                placeholder: String::new(), secret: false,
+            }],
+            submit_label: "Save".into(),
+        });
+        modal.buttons.truncate(1);
+        modal.body = "x".repeat(53);
+        modal.viewport_height = 240.0;
+        for _ in 0..3 {
+            modal.form_compact = false;
+            let lines = modal.layout_body(516.0, 1.0, |text, _| text.chars().count() as f32 * 10.0);
+            assert_eq!(lines.len(), 2);
+            modal.body_layout = Some(BodyLayout {
+                source: modal.body.clone(), width: 516.0, scale: 1.0,
+                font_probe: (10.0, 10.0), lines,
+            });
+            let geometry = modal.form_geometry(1000.0, 1.0).unwrap();
+            assert!(geometry.compact);
+            modal.form_compact = geometry.compact;
+            let width = geometry.body[2] - 8.0 * geometry.scale;
+            let lines = modal.layout_body(width, geometry.scale, |text, _| text.chars().count() as f32 * 10.0);
+            assert_eq!(lines.len(), 1);
+            modal.body_layout.as_mut().unwrap().lines = lines;
+            let final_geometry = modal.form_geometry(1000.0, 1.0).unwrap();
+            assert!(final_geometry.compact);
+            assert_eq!(final_geometry.pad, geometry.pad);
+            assert_eq!(final_geometry.body[2], geometry.body[2]);
+        }
+    }
+
+    #[test]
+    fn body_links_use_clipped_hits_and_preserve_exact_destination() {
+        let mut modal = UniversalModal::new();
+        let url = "https://example.com/oauth?state=a%2Bb&next=(done)#finish.";
+        modal.open_message("Authorize", format!("[Open authorization page]({url})"));
+        let clip = [20.0, 30.0, 80.0, 40.0];
+        assert_eq!(modal.record_body_link(url, [10.0, 20.0, 100.0, 25.0], clip), Some(0));
+        assert!(modal.record_body_link(url, [10.0, 80.0, 100.0, 20.0], clip).is_none());
+        assert!(modal.body_link_action_at(15.0, 35.0).is_none());
+        assert!(modal.body_link_action_at(25.0, 25.0).is_none());
+        assert_eq!(modal.body_link_action_at(25.0, 35.0), Some(ModalAction::OpenUrl { url: url.into() }));
+        modal.pointer_move(25.0, 35.0, 1200.0, 1.0);
+        assert_eq!(modal.pointer_kind(), ModalPointerKind::Pointer);
+        assert!(modal.is_active());
+        modal.scroll_body_rows(1);
+        assert!(modal.body_link_action_at(25.0, 35.0).is_none());
+        modal.record_body_link(url, clip, clip);
+        modal.close();
+        assert!(modal.body_link_action_at(25.0, 35.0).is_none());
+        modal.open_message("Other", "No link");
+        assert!(modal.body_link_hit_rects.is_empty());
+    }
+
+    #[test]
+    fn measured_body_rows_drive_panel_height_actions_and_scrolling() {
+        let mut modal = UniversalModal::new();
+        let url = format!("https://example.com/{}", "x".repeat(400));
+        modal.open_message("Authorize", format!("[{}]({})", url, url));
+        let lines = body::layout_lines(&modal.body, 140.0, 1.0, None, |text, _| text.chars().count() as f32 * 7.0);
+        assert!(lines.len() > modal.body_row_budget());
+        modal.body_layout = Some(BodyLayout {
+            source: modal.body.clone(), width: 140.0, scale: 1.0,
+            font_probe: (7.0, 7.0), lines,
+        });
+        let (_, y, _, h) = modal.modal_rect(360.0, 1.0);
+        let visible_rows = modal.visible_body_line_count() as f32;
+        assert_eq!(modal.actions_y(y), y + MODAL_PADDING + TITLE_HEIGHT + 12.0
+            + visible_rows * BODY_LINE_HEIGHT + 14.0 + SEPARATOR_HEIGHT + 4.0);
+        assert!(modal.actions_y(y) + ACTION_ROW_HEIGHT <= y + h);
+        modal.scroll_body_page(true);
+        assert!(modal.body_scroll_offset > 0);
+        assert!(modal.visible_body_lines().iter().all(|line| !line.links.is_empty()));
+        modal.set_scale(2.0);
+        assert!(modal.body_layout.is_none());
+        modal.update_progress("New details", "", None, false);
+        assert!(modal.body_link_hit_rects.is_empty());
+        assert!(modal.body_lines().iter().all(|line| line.links.is_empty()));
     }
 
     #[test]

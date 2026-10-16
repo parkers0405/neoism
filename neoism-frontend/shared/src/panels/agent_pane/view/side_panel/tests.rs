@@ -1,6 +1,190 @@
 use super::*;
 
 #[test]
+fn catalog_branch_stems_touch_parent_and_join_siblings_across_nested_rows() {
+    let root = NeoismAgentSessionEntry::new("root", "Parent", "");
+    let mut child = NeoismAgentSessionEntry::new("child", "Child", "").with_depth(1);
+    child.branch_root_id = Some("root".into());
+    let mut nested = child.clone();
+    nested.id = "nested".into();
+    nested.depth = 2;
+    let mut sibling = child.clone();
+    sibling.id = "sibling".into();
+    let rows = [root, child, nested, sibling];
+    for scale in [1.0, 1.5, 2.0] {
+        let row_h = ROW_HEIGHT * scale;
+        let top = |index| {
+            draw::branch_connector_top(&rows, index, index as f32 * row_h, row_h, scale)
+                .unwrap()
+        };
+        assert_eq!(top(1), (23.0 + FONT_SIZE) * scale);
+        assert!(top(1) < row_h);
+        assert_eq!(top(2), row_h + (23.0 + FONT_SIZE) * scale);
+        assert_eq!(top(3), row_h + (23.0 + FONT_SIZE * 0.5) * scale);
+        // Scrolling moves the whole connector without changing its attachment.
+        assert_eq!(
+            draw::branch_connector_top(&rows, 3, 3.0 * row_h - 17.0, row_h, scale),
+            Some(top(3) - 17.0)
+        );
+    }
+}
+
+#[test]
+fn catalog_branch_geometry_has_a_shared_heavier_spine_and_matching_elbows() {
+    for scale in [1.0, 1.5, 2.0] {
+        for device_scale in [0.8, 1.0, 1.25, 2.0] {
+            let title_x = 100.0 + 24.0 * scale;
+            let row_y = ROW_HEIGHT * scale;
+            let elbow_y = row_y + (23.0 + FONT_SIZE * 0.5) * scale;
+            let first = draw::branch_connector_geometry(
+                title_x,
+                row_y,
+                (23.0 + FONT_SIZE) * scale,
+                true,
+                scale,
+                device_scale,
+            );
+            let last = draw::branch_connector_geometry(
+                title_x,
+                row_y * 2.0,
+                elbow_y,
+                false,
+                scale,
+                device_scale,
+            );
+            assert_eq!(first.straight[0][0], last.straight[0][0]);
+            assert_eq!(first.straight[0][2], last.straight[0][2]);
+            assert!(first.straight[0][2] * device_scale >= 2.0 - 0.001);
+            assert!(first.straight[0][1] + first.straight[0][3] >= last.straight[0][1]);
+            for geometry in [&first, &last] {
+                let [stem, arm] = geometry.straight;
+                assert_eq!(stem[2], geometry.stroke);
+                assert_eq!(arm[3], geometry.stroke);
+                assert_eq!(arm[0], geometry.center[0]);
+                let tangent_x = stem[0] + geometry.stroke * 0.5;
+                assert!((geometry.center[0] - geometry.radius - tangent_x).abs() < 0.001);
+                let tangent_y = arm[1] + geometry.stroke * 0.5;
+                assert!((geometry.center[1] + geometry.radius - tangent_y).abs() < 0.001);
+                let [x, y, width, height] = geometry.curve_bounds;
+                assert!((x + width - geometry.center[0]).abs() < 0.001);
+                assert_eq!(y, geometry.center[1]);
+                assert_eq!(width, height);
+                // Preserve the entire half-physical-pixel AA fringe.
+                assert!(
+                    (width
+                        - geometry.radius
+                        - geometry.stroke * 0.5
+                        - 0.5 / device_scale)
+                        .abs()
+                        < 0.001
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn catalog_branch_geometry_is_clipped_without_gaps_or_overlay_bleed() {
+    use crate::primitives::intersect_rect;
+    let clip = [20.0, 50.0, 200.0, 100.0];
+    let cut = [23.0, 70.0, 4.0, 20.0];
+    let geometry = draw::branch_connector_geometry(44.0, 96.0, 37.0, false, 1.0, 2.0);
+    let visible: Vec<_> = geometry
+        .straight
+        .into_iter()
+        .chain(std::iter::once(geometry.curve_bounds))
+        .flat_map(|rect| crate::primitives::visible_rect_fragments(rect, clip, &[cut]))
+        .collect();
+    assert!(!visible.is_empty());
+    for rect in visible {
+        assert_eq!(intersect_rect(rect, clip), Some(rect));
+        assert!(intersect_rect(rect, cut).is_none());
+    }
+}
+
+#[test]
+fn catalog_branch_stems_do_not_attach_to_an_unrelated_chat() {
+    let mut child = NeoismAgentSessionEntry::new("child", "Child", "").with_depth(1);
+    child.branch_root_id = Some("missing-root".into());
+    let rows = [NeoismAgentSessionEntry::new("other", "Other", ""), child];
+    assert_eq!(
+        draw::branch_connector_top(&rows, 1, ROW_HEIGHT, ROW_HEIGHT, 1.0),
+        None
+    );
+    assert_eq!(
+        draw::branch_connector_top(&rows, 0, 0.0, ROW_HEIGHT, 1.0),
+        None
+    );
+}
+
+#[test]
+fn catalog_branch_indent_requires_explicit_relationship_not_project_depth() {
+    let mut entry = NeoismAgentSessionEntry::new("child", "Child", "");
+    entry.depth = 3;
+    assert_eq!(draw::branch_row_indent(&entry, 1, 1.0), 0.0);
+    entry.branch_root_id = Some("root".into());
+    assert_eq!(draw::branch_row_indent(&entry, 1, 1.0), 48.0);
+    assert_eq!(draw::branch_row_indent(&entry, 1, 2.0), 96.0);
+    entry.depth = 0;
+    assert_eq!(draw::branch_row_indent(&entry, 1, 1.0), 24.0);
+}
+
+#[test]
+fn catalog_branch_paint_uses_flattened_lifecycle_and_current_tool() {
+    let mut entry = NeoismAgentSessionEntry::new("child", "Child", "")
+        .with_runtime_status(Some("running".into()));
+    entry.branch_root_id = Some("root".into());
+    for status in [
+        BranchStatus::Active,
+        BranchStatus::WaitingPermission,
+        BranchStatus::Completed,
+        BranchStatus::Stopped,
+    ] {
+        entry.branch_status = Some(status);
+        assert_eq!(draw::catalog_branch_status(&entry), status);
+        assert_eq!(draw::catalog_branch_activity_label(&entry), status.label());
+    }
+    entry.branch_activity_label = Some("cargo check".into());
+    assert_eq!(draw::catalog_branch_activity_label(&entry), "cargo check");
+    entry.branch_activity_label = Some("  ".into());
+    assert_eq!(
+        draw::catalog_branch_activity_label(&entry),
+        BranchStatus::Stopped.label()
+    );
+    entry.branch_status = None;
+    assert_eq!(draw::catalog_branch_status(&entry), BranchStatus::Active);
+}
+
+#[test]
+fn passive_catalog_highlights_exact_child_and_focus_keeps_own_candidate() {
+    let mut panel = NeoismAgentSidePanel::default();
+    panel.set_sessions(vec![NeoismAgentSessionEntry::new("root", "Root", "")]);
+    panel.set_viewed_session_id(Some("child".into()));
+    panel.set_subagents(vec![
+        NeoismAgentSessionEntry::new("root", "Root", ""),
+        NeoismAgentSessionEntry::new("child", "Child", "")
+            .with_runtime_status(Some("running".into())),
+    ]);
+    panel.sync_catalog_subagents(Some("root"));
+    panel.set_catalog_viewed_session(Some("child"));
+    let child = panel
+        .sessions()
+        .iter()
+        .position(|row| row.id == "child")
+        .unwrap();
+    let root = panel
+        .sessions()
+        .iter()
+        .position(|row| row.id == "root")
+        .unwrap();
+    panel.set_selected(root);
+    assert_eq!(panel.catalog_viewed_session(Some("root")), Some("child"));
+    assert_eq!(panel.catalog_highlight_index(Some("root")), Some(child));
+    panel.set_focused(true);
+    assert_eq!(panel.catalog_highlight_index(Some("child")), Some(root));
+}
+
+#[test]
 fn passive_catalog_tracks_root_not_keyboard_candidate() {
     let mut panel = NeoismAgentSidePanel::default();
     panel.set_sessions(vec![
@@ -131,6 +315,41 @@ fn detail_same_family_navigation_preserves_viewport_roster_and_candidate() {
     assert_eq!(detail.content_scroll_px(), 0.0);
     assert_eq!(detail.selected_index(), 0);
     assert_eq!(detail.subagents().len(), 1);
+}
+
+#[test]
+fn root_indicator_is_independent_of_running_child_rows() {
+    use neoism_agent_core::CatalogActivity;
+    let red = [0.8, 0.1, 0.2];
+    let yellow = [0.9, 0.7, 0.1];
+    let mut panel = NeoismAgentSidePanel::default();
+    panel.set_sessions(vec![NeoismAgentSessionEntry::new("root", "Root", "")
+        .with_runtime_status(Some("running".into()))]);
+    panel.set_subagents(vec![
+        NeoismAgentSessionEntry::new("root", "Root", ""),
+        NeoismAgentSessionEntry::new("child", "Child", "")
+            .with_runtime_status(Some("running".into())),
+    ]);
+    panel.sync_catalog_subagents(Some("root"));
+    for (activity, expected) in [
+        (CatalogActivity::Idle, None),
+        (CatalogActivity::Running, Some([1.0; 3])),
+        (CatalogActivity::Idle, None),
+    ] {
+        panel.set_session_activity("root", activity);
+        let root = panel
+            .sessions()
+            .iter()
+            .find(|row| row.id == "root")
+            .unwrap();
+        let child = panel
+            .sessions()
+            .iter()
+            .find(|row| row.id == "child")
+            .unwrap();
+        assert_eq!(draw::catalog_activity_color(root, red, yellow), expected);
+        assert_eq!(draw::catalog_branch_status(child), BranchStatus::Active);
+    }
 }
 
 #[test]

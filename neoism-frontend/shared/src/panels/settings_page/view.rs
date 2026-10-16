@@ -9,7 +9,7 @@ use crate::primitives::draw_text_with_occlusion;
 use crate::primitives::geom::intersect_rect;
 use crate::primitives::ide_theme::IdeTheme;
 
-use super::state::{point_in, Category, NeoismSettingsPane, RowControl, KEYBINDS};
+use super::state::{point_in, NeoismSettingsPane, RowControl, KEYBINDS};
 
 const DEPTH: f32 = 0.0;
 const ORDER_SCRIM: u8 = 40;
@@ -60,6 +60,105 @@ fn settings_geometry(
         header_h: if compact { 102.0 * s } else { 54.0 * s },
         sidebar_w: if compact { 0.0 } else { 200.0 * s },
     }
+}
+
+#[derive(Debug)]
+struct SettingLayout {
+    labels: Vec<String>,
+    details: Vec<String>,
+    detail_y: f32,
+    control_y: f32,
+    height: f32,
+}
+
+/// Measure before painting so wrapping, scrolling, and menu anchors share geometry.
+fn setting_layout(
+    label: &str,
+    detail: &str,
+    width: f32,
+    scale: f32,
+    mut measure: impl FnMut(&str, f32) -> f32,
+) -> SettingLayout {
+    let mut wrap = |text: &str, size: f32| {
+        let mut lines = Vec::new();
+        if text.trim().is_empty() {
+            return lines;
+        }
+        for paragraph in text.lines() {
+            let mut line = String::new();
+            for word in paragraph.split_whitespace() {
+                let candidate = if line.is_empty() {
+                    word.to_string()
+                } else {
+                    format!("{line} {word}")
+                };
+                if measure(&candidate, size) <= width {
+                    line = candidate;
+                    continue;
+                }
+                if !line.is_empty() {
+                    lines.push(std::mem::take(&mut line));
+                }
+                // Paths and other unbroken tokens must also fit narrow panes.
+                for ch in word.chars() {
+                    let mut candidate = line.clone();
+                    candidate.push(ch);
+                    if !line.is_empty() && measure(&candidate, size) > width {
+                        lines.push(std::mem::take(&mut line));
+                    }
+                    line.push(ch);
+                }
+            }
+            lines.push(line);
+        }
+        lines
+    };
+    let labels = wrap(label, 14.0 * scale);
+    let details = wrap(detail, 12.0 * scale);
+    let detail_y = labels.len() as f32 * 20.0 * scale
+        + if details.is_empty() { 0.0 } else { 4.0 * scale };
+    let control_y = detail_y + details.len() as f32 * 18.0 * scale + 10.0 * scale;
+    SettingLayout {
+        labels,
+        details,
+        detail_y,
+        control_y,
+        height: control_y + 56.0 * scale,
+    }
+}
+
+fn dropdown_geometry(
+    anchor: [f32; 4],
+    bounds: [f32; 4],
+    requested_rows: usize,
+    search_h: f32,
+    scale: f32,
+) -> [f32; 4] {
+    let gap = 3.0 * scale;
+    let below = anchor[1] + anchor[3] + gap;
+    let below_h = (bounds[1] + bounds[3] - below).max(0.0);
+    let above_h = (anchor[1] - gap - bounds[1]).max(0.0);
+    let overhead = 8.0 * scale + search_h;
+    let desired_h = requested_rows.max(1) as f32 * 28.0 * scale + overhead;
+    let use_below = desired_h <= below_h || below_h >= above_h;
+    let available = if use_below { below_h } else { above_h };
+    let rows = ((available - overhead) / (28.0 * scale))
+        .floor()
+        .max(1.0)
+        .min(requested_rows.max(1) as f32);
+    let height = (rows * 28.0 * scale + overhead).min(bounds[3]);
+    let width = anchor[2].max(150.0 * scale).min(bounds[2]);
+    let y = if use_below {
+        below
+    } else {
+        anchor[1] - gap - height
+    };
+    [
+        anchor[0].clamp(bounds[0], bounds[0] + bounds[2] - width),
+        y.clamp(bounds[1], bounds[1] + bounds[3] - height),
+        width,
+        height,
+    ]
 }
 
 /// A rounded rect clipped (by intersection) to `clip`, so a partly
@@ -134,6 +233,7 @@ fn render_compact_root(
         &[],
     );
 
+    let categories = pane.navigation_categories();
     let row_h = 54.0 * s;
     let list_x = px + pad;
     let list_w = (pw - pad * 2.0).max(1.0);
@@ -145,14 +245,14 @@ fn render_compact_root(
         list_x,
         list_top,
         list_w,
-        (row_h * Category::ALL.len() as f32).min(clip[3]),
+        (row_h * categories.len() as f32).min(clip[3]),
         theme.f32(theme.surface),
         DEPTH,
         12.0 * s,
         ORDER_ROW,
     );
 
-    for (index, category) in Category::ALL.into_iter().enumerate() {
+    for (index, category) in categories.iter().copied().enumerate() {
         let y = list_top + index as f32 * row_h - scroll;
         let rect = [list_x, y, list_w, row_h];
         let Some(hit_rect) = intersect_rect(rect, clip) else {
@@ -219,7 +319,7 @@ fn render_compact_root(
             &chevron_opts,
             &[],
         );
-        if index + 1 < Category::ALL.len() {
+        if index + 1 < categories.len() {
             if let Some(separator) = intersect_rect(
                 [list_x + 56.0 * s, y + row_h - 1.0, list_w - 56.0 * s, 1.0],
                 clip,
@@ -238,7 +338,7 @@ fn render_compact_root(
         }
         pane.category_rects.push((hit_rect, category));
     }
-    pane.set_content_metrics(row_h * Category::ALL.len() as f32, clip[3]);
+    pane.set_content_metrics(row_h * categories.len() as f32, clip[3]);
 }
 
 pub(crate) fn render(
@@ -528,7 +628,7 @@ pub(crate) fn render(
     let mut cy = content_top + pad;
     let searching = !pane.search_is_empty();
     if !compact {
-        for cat in Category::ALL {
+        for cat in pane.navigation_categories() {
             let rect = [px + 10.0 * s, cy, sidebar_w - 20.0 * s, cat_row_h];
             let selected = !searching && cat == pane.current_category();
             let hovered = mouse.is_some_and(|(mx, my)| point_in(rect, mx, my));
@@ -622,14 +722,85 @@ pub(crate) fn render(
         (clip_bottom - clip_top).max(0.0),
     ];
     let viewport_h = (clip_bottom - (content_top + pad * 0.5)).max(0.0);
-    let setting_row_h = 66.0 * s;
-    let pill_w = if compact {
-        (cw * 0.46).clamp(92.0 * s, 150.0 * s)
-    } else {
-        180.0 * s
-    };
+    let pill_w = (360.0 * s).min(cw);
     let pill_h = 28.0 * s;
     let visible = pane.visible_settings();
+    let label_opts = DrawOpts {
+        font_size: 14.0 * s,
+        clip_rect: Some([cx, clip_top, cw, content_clip[3]]),
+        ..base
+    };
+    let desc_opts = DrawOpts {
+        font_size: 12.0 * s,
+        color: theme.u8(theme.dim),
+        ..label_opts
+    };
+    let layouts: Vec<_> = visible
+        .iter()
+        .map(|&idx| {
+            let def = pane.row(idx);
+            let mut detail = def.description.clone();
+            if def.constraints.min.is_some() || def.constraints.max.is_some() {
+                let range = match (def.constraints.min, def.constraints.max) {
+                    (Some(min), Some(max)) => format!("{min}-{max}"),
+                    (Some(min), None) => format!(">= {min}"),
+                    (None, Some(max)) => format!("<= {max}"),
+                    (None, None) => String::new(),
+                };
+                if !detail.is_empty() {
+                    detail.push_str("  |  ");
+                }
+                detail.push_str(&range);
+                if let Some(unit) = def.constraints.unit.as_deref() {
+                    detail.push(' ');
+                    detail.push_str(unit);
+                }
+            }
+            setting_layout(&def.label, &detail, cw, s, |text, font_size| {
+                sugarloaf
+                    .text_mut()
+                    .measure(text, &DrawOpts { font_size, ..base })
+            })
+        })
+        .collect();
+    let descriptor_h: f32 = layouts.iter().map(|layout| layout.height).sum();
+    let kb_header_h = 52.0 * s;
+    let keybind_layouts: Vec<_> = if pane.is_keybinds() {
+        KEYBINDS
+            .iter()
+            .enumerate()
+            .map(|(idx, def)| {
+                setting_layout(
+                    def.label,
+                    if pane.keybind_is_rebindable(idx) {
+                        def.action
+                    } else {
+                        ""
+                    },
+                    cw,
+                    s,
+                    |text, font_size| {
+                        sugarloaf
+                            .text_mut()
+                            .measure(text, &DrawOpts { font_size, ..base })
+                    },
+                )
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let mut content_h = descriptor_h;
+    let mut last_group = None;
+    for (idx, layout) in keybind_layouts.iter().enumerate() {
+        let group = pane.keybind_group(idx);
+        if last_group != Some(group) {
+            content_h += kb_header_h;
+            last_group = Some(group);
+        }
+        content_h += layout.height;
+    }
+    pane.set_content_metrics(content_h + pad * 0.5, viewport_h);
     let scroll = pane.scroll_offset();
 
     // Pre-compute the open dropdown's popover rect so the row text under
@@ -648,26 +819,30 @@ pub(crate) fn render(
         {
             let opt_count = pane.dropdown_options(open_idx).len();
             let rows = opt_count.min(pane.dropdown_visible_rows()).max(1);
-            let row_ry = content_top + pad - scroll + pos as f32 * setting_row_h;
-            let pxr = cx + cw - pill_w;
-            let pyr = row_ry - 2.0 * s;
-            let opt_h = 28.0 * s;
-            let dd_pad = 4.0 * s;
-            // Long dynamic catalogs reserve an auto-focused search box.
+            let row_offset: f32 = layouts[..pos].iter().map(|layout| layout.height).sum();
+            let anchor = [
+                cx,
+                content_top + pad - scroll + row_offset + layouts[pos].control_y,
+                pill_w,
+                pill_h,
+            ];
             let search_h = if pane.open_dropdown_is_searchable() {
                 30.0 * s
             } else {
                 0.0
             };
-            let dd_w = pill_w.max(150.0 * s);
-            let dd_h = rows as f32 * opt_h + dd_pad * 2.0 + search_h;
-            let below = pyr + pill_h + 3.0 * s;
-            let dd_y = if below + dd_h > py + ph {
-                (pyr - dd_h - 3.0 * s).max(py + 4.0 * s)
-            } else {
-                below
-            };
-            dropdown = Some(([pxr, dd_y, dd_w, dd_h], open_idx));
+            if intersect_rect(anchor, content_clip).is_some() {
+                let bounds = [
+                    cx,
+                    clip_top + 4.0 * s,
+                    cw,
+                    (clip_bottom - clip_top - 8.0 * s).max(1.0),
+                ];
+                dropdown = Some((
+                    dropdown_geometry(anchor, bounds, rows, search_h, s),
+                    open_idx,
+                ));
+            }
         }
     }
     let row_occ: &[[f32; 4]] = match &dropdown {
@@ -676,59 +851,42 @@ pub(crate) fn render(
     };
 
     let mut ry = content_top + pad - scroll;
-    for &idx in &visible {
-        // Cheap cull only for rows far outside; near-edge rows are drawn
-        // and clipped so they scroll off smoothly.
-        if ry + setting_row_h < clip_top - setting_row_h
-            || ry > clip_bottom + setting_row_h
-        {
+    for (&idx, layout) in visible.iter().zip(&layouts) {
+        let setting_row_h = layout.height;
+        if ry + setting_row_h < clip_top || ry > clip_bottom {
             ry += setting_row_h;
             continue;
         }
         let def = pane.row(idx).clone();
-        let label_opts = DrawOpts {
-            font_size: 14.0 * s,
-            clip_rect: Some(content_clip),
-            ..base
-        };
-        draw_text_with_occlusion(sugarloaf, cx, ry, &def.label, &label_opts, row_occ);
-        let desc_opts = DrawOpts {
-            font_size: 12.0 * s,
-            color: theme.u8(theme.dim),
-            clip_rect: Some(content_clip),
-            ..base
-        };
-        let mut detail = def.description.clone();
-        if def.constraints.min.is_some() || def.constraints.max.is_some() {
-            let range = match (def.constraints.min, def.constraints.max) {
-                (Some(min), Some(max)) => format!("{min}-{max}"),
-                (Some(min), None) => format!(">= {min}"),
-                (None, Some(max)) => format!("<= {max}"),
-                (None, None) => String::new(),
-            };
-            detail.push_str("  ·  ");
-            detail.push_str(&range);
-            if let Some(unit) = def.constraints.unit.as_deref() {
-                detail.push(' ');
-                detail.push_str(unit);
-            }
+        for (line, text) in layout.labels.iter().enumerate() {
+            draw_text_with_occlusion(
+                sugarloaf,
+                cx,
+                ry + line as f32 * 20.0 * s,
+                text,
+                &label_opts,
+                row_occ,
+            );
         }
-        draw_text_with_occlusion(
-            sugarloaf,
-            cx,
-            ry + 20.0 * s,
-            &detail,
-            &desc_opts,
-            row_occ,
-        );
+        for (line, text) in layout.details.iter().enumerate() {
+            draw_text_with_occlusion(
+                sugarloaf,
+                cx,
+                ry + layout.detail_y + line as f32 * 18.0 * s,
+                text,
+                &desc_opts,
+                row_occ,
+            );
+        }
+        let control_y = ry + layout.control_y;
 
         match def.control {
             RowControl::Toggle => {
                 let on = pane.bool_at(idx);
-                let tw = 40.0 * s;
+                let tw = (40.0 * s).min(cw);
                 let th = 22.0 * s;
-                let tx = cx + cw - tw;
-                let ty = ry + 2.0 * s;
+                let tx = cx;
+                let ty = control_y + 3.0 * s;
                 clip_rrect(
                     sugarloaf,
                     [tx, ty, tw, th],
@@ -751,7 +909,9 @@ pub(crate) fn render(
                     knob * 0.5,
                     ORDER_TEXT,
                 );
-                pane.push_control_rect([tx, ty, tw, th], idx);
+                if let Some(hit) = intersect_rect([tx, ty, tw, th], content_clip) {
+                    pane.push_control_rect(hit, idx);
+                }
             }
             RowControl::Select | RowControl::FontFamily => {
                 let raw = pane.string_at(idx);
@@ -760,8 +920,8 @@ pub(crate) fn render(
                 } else {
                     raw
                 };
-                let pxr = cx + cw - pill_w;
-                let pyr = ry - 2.0 * s;
+                let pxr = cx;
+                let pyr = control_y;
                 let hovered =
                     pane.hover_control == Some(idx) || pane.open_dropdown() == Some(idx);
                 clip_rrect(
@@ -779,7 +939,7 @@ pub(crate) fn render(
                             [pxr, pyr, pill_w - 22.0 * s, pill_h],
                             content_clip,
                         )
-                        .unwrap_or(content_clip),
+                        .unwrap_or([0.0; 4]),
                     ),
                     ..base
                 };
@@ -805,11 +965,15 @@ pub(crate) fn render(
                     &chev_opts,
                     row_occ,
                 );
-                pane.push_control_rect([pxr, pyr, pill_w, pill_h], idx);
+                if let Some(hit) =
+                    intersect_rect([pxr, pyr, pill_w, pill_h], content_clip)
+                {
+                    pane.push_control_rect(hit, idx);
+                }
             }
             RowControl::Text => {
-                let pxr = cx + cw - pill_w;
-                let pyr = ry - 2.0 * s;
+                let pxr = cx;
+                let pyr = control_y;
                 let editing = pane.is_editing(idx);
                 let value = if editing {
                     pane.edit_buffer().to_string()
@@ -836,55 +1000,66 @@ pub(crate) fn render(
                 let value_opts = DrawOpts {
                     font_size: 12.5 * s,
                     clip_rect: Some(
-                        intersect_rect([pxr, pyr, pill_w, pill_h], content_clip)
-                            .unwrap_or(content_clip),
+                        intersect_rect(
+                            [pxr + 10.0 * s, pyr, (pill_w - 20.0 * s).max(0.0), pill_h],
+                            content_clip,
+                        )
+                        .unwrap_or([0.0; 4]),
                     ),
                     ..base
                 };
+                let width = sugarloaf.text_mut().measure(&value, &value_opts);
+                let text_x = pxr + 10.0 * s
+                    - if editing {
+                        (width - (pill_w - 24.0 * s).max(0.0)).max(0.0)
+                    } else {
+                        0.0
+                    };
                 draw_text_with_occlusion(
                     sugarloaf,
-                    pxr + 10.0 * s,
+                    text_x,
                     pyr + (pill_h - 12.0 * s) * 0.5,
                     &value,
                     &value_opts,
                     row_occ,
                 );
                 if editing {
-                    let width = sugarloaf.text_mut().measure(&value, &value_opts);
-                    sugarloaf.rect(
-                        None,
-                        (pxr + 10.0 * s + width).min(pxr + pill_w - 5.0 * s),
-                        pyr + 5.0 * s,
-                        1.5 * s,
-                        pill_h - 10.0 * s,
+                    clip_rrect(
+                        sugarloaf,
+                        [text_x + width, pyr + 5.0 * s, 1.5 * s, pill_h - 10.0 * s],
+                        content_clip,
                         theme.f32(theme.accent),
-                        DEPTH,
+                        0.0,
                         ORDER_TEXT,
                     );
                 }
-                pane.push_control_rect([pxr, pyr, pill_w, pill_h], idx);
+                if let Some(hit) =
+                    intersect_rect([pxr, pyr, pill_w, pill_h], content_clip)
+                {
+                    pane.push_control_rect(hit, idx);
+                }
             }
             RowControl::Keybinding => {
                 let value_opts = DrawOpts {
                     font_size: 12.0 * s,
                     color: theme.u8(theme.dim),
-                    clip_rect: Some(content_clip),
+                    clip_rect: Some([cx, clip_top, cw, content_clip[3]]),
                     ..base
                 };
                 draw_text_with_occlusion(
                     sugarloaf,
-                    cx + cw - 140.0 * s,
-                    ry + 4.0 * s,
+                    cx,
+                    control_y + 6.0 * s,
                     "Shortcuts below",
                     &value_opts,
                     row_occ,
                 );
             }
             RowControl::Action { button, .. } => {
-                let bw = 130.0 * s;
+                let bw = (130.0 * s).min(cw);
                 let bh = 28.0 * s;
-                let bx = cx + cw - bw;
-                let by = ry - 2.0 * s;
+                let bx = cx;
+                let by = control_y;
                 let hovered = pane.hover_control == Some(idx);
                 clip_rrect(
                     sugarloaf,
@@ -909,7 +1084,9 @@ pub(crate) fn render(
                     &b_opts,
                     row_occ,
                 );
-                pane.push_control_rect([bx, by, bw, bh], idx);
+                if let Some(hit) = intersect_rect([bx, by, bw, bh], content_clip) {
+                    pane.push_control_rect(hit, idx);
+                }
             }
         }
 
@@ -931,23 +1108,16 @@ pub(crate) fn render(
         }
         ry += setting_row_h;
     }
-    // The Keybinds list owns its own content metrics below; setting this
-    // here (with an empty `visible`) would clamp scroll to 0 every frame.
-    if !pane.is_keybinds() {
-        pane.set_content_metrics(visible.len() as f32 * setting_row_h, viewport_h);
-    }
 
     // ── Keybinds list (below its canonical descriptor row). Click a
     //    shortcut pill to capture a new chord; the reset glyph clears an
     //    override. ──
     if pane.is_keybinds() {
-        let kb_row_h = 46.0 * s;
-        let header_h = 52.0 * s;
+        let header_h = kb_header_h;
         let capturing = pane.capturing();
         // Section titles render in the bundled Press Start 2P pixel face
         // (same treatment as the notes / agent-panel section headers).
         let pixel_font = crate::primitives::pixel_font_id(sugarloaf);
-        let descriptor_h = visible.len() as f32 * setting_row_h;
         let start_y = content_top + pad - scroll + descriptor_h;
         let mut ky = start_y;
         let mut last_group: Option<super::state::KeyGroup> = None;
@@ -999,39 +1169,34 @@ pub(crate) fn render(
                 }
                 ky += header_h;
             }
-            if ky + kb_row_h < clip_top - kb_row_h || ky > clip_bottom + kb_row_h {
+            let layout = &keybind_layouts[idx];
+            let kb_row_h = layout.height;
+            if ky + kb_row_h < clip_top || ky > clip_bottom {
                 ky += kb_row_h;
                 continue;
             }
-            let def = KEYBINDS[idx];
             let rebindable = pane.keybind_is_rebindable(idx);
-            let label_opts = DrawOpts {
-                font_size: 13.5 * s,
-                clip_rect: Some(content_clip),
-                ..base
-            };
-            let label_y = if rebindable {
-                ky + 2.0 * s
-            } else {
-                ky + kb_row_h * 0.5 - 7.0 * s
-            };
-            draw_text_with_occlusion(sugarloaf, cx, label_y, def.label, &label_opts, occ);
-            if rebindable {
-                let sub_opts = DrawOpts {
-                    font_size: 10.5 * s,
-                    color: theme.u8(theme.dim),
-                    clip_rect: Some(content_clip),
-                    ..base
-                };
+            for (line, text) in layout.labels.iter().enumerate() {
                 draw_text_with_occlusion(
                     sugarloaf,
                     cx,
-                    ky + 21.0 * s,
-                    def.action,
-                    &sub_opts,
+                    ky + line as f32 * 20.0 * s,
+                    text,
+                    &label_opts,
                     occ,
                 );
             }
+            for (line, text) in layout.details.iter().enumerate() {
+                draw_text_with_occlusion(
+                    sugarloaf,
+                    cx,
+                    ky + layout.detail_y + line as f32 * 18.0 * s,
+                    text,
+                    &desc_opts,
+                    occ,
+                );
+            }
+            let control_y = ky + layout.control_y;
 
             let is_capturing = capturing == Some(idx);
             let combo = if is_capturing {
@@ -1052,8 +1217,16 @@ pub(crate) fn render(
                 let has_ov = pane.keybind_has_override(idx);
                 let reset_sz = if has_ov { 22.0 * s } else { 0.0 };
                 let reset_gap = if has_ov { 8.0 * s } else { 0.0 };
-                let pill_x = cx + cw - pw - reset_sz - reset_gap;
-                let pill_y = ky - 1.0 * s;
+                let pw = pw.min((cw - reset_sz - reset_gap).max(1.0));
+                let pill_x = cx;
+                let pill_y = control_y;
+                let combo_opts = DrawOpts {
+                    clip_rect: Some(
+                        intersect_rect([pill_x, pill_y, pw, pill_h], content_clip)
+                            .unwrap_or([0.0; 4]),
+                    ),
+                    ..combo_opts
+                };
                 let hovered = mouse.is_some_and(|(mx, my)| {
                     point_in([pill_x, pill_y, pw, pill_h], mx, my)
                 });
@@ -1074,17 +1247,21 @@ pub(crate) fn render(
                 );
                 draw_text_with_occlusion(
                     sugarloaf,
-                    pill_x + (pw - combo_w) * 0.5,
+                    pill_x + ((pw - combo_w) * 0.5).max(8.0 * s),
                     pill_y + (pill_h - 12.5 * s) * 0.5,
                     &combo,
                     &combo_opts,
                     occ,
                 );
-                pane.push_keybind_rect([pill_x, pill_y, pw, pill_h], idx);
+                if let Some(hit) =
+                    intersect_rect([pill_x, pill_y, pw, pill_h], content_clip)
+                {
+                    pane.push_keybind_rect(hit, idx);
+                }
                 if has_ov {
                     // Small rounded "reset to default" button, only shown
                     // when this shortcut has been changed from its default.
-                    let rx = cx + cw - reset_sz;
+                    let rx = pill_x + pw + reset_gap;
                     let rry = pill_y + (pill_h - reset_sz) * 0.5;
                     let rhov = mouse.is_some_and(|(mx, my)| {
                         point_in([rx, rry, reset_sz, reset_sz], mx, my)
@@ -1116,21 +1293,24 @@ pub(crate) fn render(
                         &ro,
                         occ,
                     );
-                    pane.push_keybind_reset_rect([rx, rry, reset_sz, reset_sz], idx);
+                    if let Some(hit) =
+                        intersect_rect([rx, rry, reset_sz, reset_sz], content_clip)
+                    {
+                        pane.push_keybind_reset_rect(hit, idx);
+                    }
                 }
             } else {
                 // Reference row: a plain dim combo, no button / capture.
                 let combo_opts = DrawOpts {
                     font_size: 12.5 * s,
                     color: theme.u8(theme.dim),
-                    clip_rect: Some(content_clip),
+                    clip_rect: Some([cx, clip_top, cw, content_clip[3]]),
                     ..base
                 };
-                let combo_w = sugarloaf.text_mut().measure(&combo, &combo_opts);
                 draw_text_with_occlusion(
                     sugarloaf,
-                    cx + cw - combo_w - 6.0 * s,
-                    ky + kb_row_h * 0.5 - 6.0 * s,
+                    cx,
+                    control_y + 6.0 * s,
                     &combo,
                     &combo_opts,
                     occ,
@@ -1153,7 +1333,6 @@ pub(crate) fn render(
             }
             ky += kb_row_h;
         }
-        pane.set_content_metrics(descriptor_h + ky - start_y, viewport_h);
     }
 
     // ── Dropdown popover (drawn last, on top; row text under it is
@@ -1211,6 +1390,7 @@ pub(crate) fn render(
                 let ph = DrawOpts {
                     font_size: 11.5 * s,
                     color: theme.u8(theme.dim),
+                    clip_rect: Some([qx, sb[1], (sb[2] - 30.0 * s).max(0.0), sb[3]]),
                     ..base
                 };
                 draw_text_with_occlusion(
@@ -1229,6 +1409,7 @@ pub(crate) fn render(
                 let qo = DrawOpts {
                     font_size: 11.5 * s,
                     color: theme.u8(theme.fg),
+                    clip_rect: Some([qx, sb[1], (sb[2] - 30.0 * s).max(0.0), sb[3]]),
                     ..base
                 };
                 draw_text_with_occlusion(sugarloaf, qx, qy, &q, &qo, occ);
@@ -1265,9 +1446,11 @@ pub(crate) fn render(
                 occ,
             );
         }
-        let rows = options.len().min(pane.dropdown_visible_rows()).max(1);
+        let rows = (((dd_h - dd_pad * 2.0 - search_h) / opt_h).round().max(1.0) as usize)
+            .min(options.len().max(1));
         let max_dscroll = options.len().saturating_sub(rows);
-        let dscroll = pane.dropdown_scroll().min(max_dscroll);
+        pane.clamp_dropdown_scroll(max_dscroll);
+        let dscroll = pane.dropdown_scroll();
         let current = pane.string_at(idx);
         let mut oy = dd_y + dd_pad + search_h;
         for opt in options.iter().skip(dscroll).take(rows) {
@@ -1353,6 +1536,130 @@ pub(crate) fn render(
 #[cfg(test)]
 mod geometry_tests {
     use super::*;
+
+    fn measure(text: &str, size: f32) -> f32 {
+        text.chars().count() as f32 * size * 0.6
+    }
+
+    #[test]
+    fn controls_follow_wrapped_descriptions_at_every_width_and_scale() {
+        for scale in [0.75, 1.0, 2.0] {
+            for width in [180.0, 340.0, 900.0] {
+                let width = width * scale;
+                let layout = setting_layout(
+                    "Background image opacity",
+                    "Image alpha multiplier from 0 (transparent) to 1 (opaque). Independent of window and panel opacity. | 0-1",
+                    width, scale, measure,
+                );
+                for line in &layout.labels {
+                    assert!(measure(line, 14.0 * scale) <= width);
+                }
+                for line in &layout.details {
+                    assert!(measure(line, 12.0 * scale) <= width);
+                }
+                let detail_bottom =
+                    layout.detail_y + layout.details.len() as f32 * 18.0 * scale;
+                assert!(layout.control_y >= detail_bottom + 10.0 * scale - 0.001);
+                assert!(layout.height >= layout.control_y + 28.0 * scale + 24.0 * scale);
+            }
+        }
+    }
+
+    #[test]
+    fn unbroken_tokens_and_explicit_lines_stay_inside_the_row() {
+        let detail = "/home/somebody/a-very-long-directory-name/background.png\n\u{65e5}\u{672c}\u{8a9e}\u{306e}\u{8aac}\u{660e}";
+        let layout = setting_layout("Path", detail, 120.0, 1.0, measure);
+        assert!(layout.details.len() > 2);
+        assert!(layout
+            .details
+            .iter()
+            .all(|line| measure(line, 12.0) <= 120.0));
+        assert_eq!(layout.details.concat(), detail.replace('\n', ""));
+    }
+
+    #[test]
+    fn empty_descriptions_do_not_reserve_a_phantom_line() {
+        let empty = setting_layout("Setting", "", 300.0, 1.0, measure);
+        let described = setting_layout("Setting", "Description.", 300.0, 1.0, measure);
+        assert!(empty.details.is_empty());
+        assert_eq!(empty.control_y, 30.0);
+        assert_eq!(described.control_y - empty.control_y, 22.0);
+    }
+
+    #[test]
+    fn wrapped_rows_expand_scroll_extent_and_menu_anchor() {
+        let wide = setting_layout(
+            "Setting",
+            "A long description that wraps onto several lines.",
+            900.0,
+            1.0,
+            measure,
+        );
+        let narrow = setting_layout(
+            "Setting",
+            "A long description that wraps onto several lines.",
+            140.0,
+            1.0,
+            measure,
+        );
+        assert!(narrow.height > wide.height);
+        let anchor_y = wide.height + narrow.control_y;
+        let menu = dropdown_geometry(
+            [20.0, anchor_y, 140.0, 28.0],
+            [20.0, 0.0, 300.0, 700.0],
+            3,
+            0.0,
+            1.0,
+        );
+        assert_eq!(menu[1], anchor_y + 28.0 + 3.0);
+    }
+
+    #[test]
+    fn dropdowns_flip_shrink_and_stay_within_the_content_bounds() {
+        let bounds = [20.0, 100.0, 260.0, 300.0];
+        for search_h in [0.0, 30.0] {
+            for anchor_y in [100.0, 240.0, 365.0] {
+                let menu = dropdown_geometry(
+                    [200.0, anchor_y, 180.0, 28.0],
+                    bounds,
+                    10,
+                    search_h,
+                    1.0,
+                );
+                assert!(menu[0] >= bounds[0]);
+                assert!(menu[1] >= bounds[1]);
+                assert!(menu[0] + menu[2] <= bounds[0] + bounds[2]);
+                assert!(menu[1] + menu[3] <= bounds[1] + bounds[3]);
+                assert!(menu[3] < 10.0 * 28.0 + 8.0 + search_h);
+                if anchor_y == 365.0 {
+                    assert!(menu[1] + menu[3] < anchor_y);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn variable_height_content_keeps_last_row_reachable_and_clamps_after_resize() {
+        let short = setting_layout("Setting", "Short.", 600.0, 1.0, measure);
+        let wrapped = setting_layout(
+            "Setting",
+            "A much longer description that needs multiple lines.",
+            140.0,
+            1.0,
+            measure,
+        );
+        let content_h = short.height + wrapped.height;
+        let viewport_h = 100.0;
+        let mut pane = NeoismSettingsPane::new();
+        pane.open();
+        pane.set_content_metrics(content_h, viewport_h);
+        pane.scroll_by(-10000.0);
+        assert_eq!(pane.scroll_offset(), content_h - viewport_h);
+        pane.set_content_metrics(short.height * 2.0, viewport_h);
+        assert_eq!(pane.scroll_offset(), short.height * 2.0 - viewport_h);
+        pane.set_content_metrics(short.height, 900.0);
+        assert_eq!(pane.scroll_offset(), 0.0);
+    }
 
     #[test]
     fn iphone_geometry_is_full_width_and_uses_pushed_navigation() {

@@ -454,6 +454,8 @@ impl Application<'_> {
             unsafe { Clipboard::new(event_loop.display_handle().unwrap().as_raw()) };
 
         let config_dir = neoism_backend::config::config_dir_path();
+        // Finish bundled asset writes before plugin discovery and config watching.
+        crate::mashup::seed_example_packs();
         crate::mashup::seed_first_party_plugins();
         // Eager plugins may make capability-checked read-only decisions during
         // initialization. Seed the same typed config snapshot that the normal

@@ -1,5 +1,22 @@
 use super::*;
 
+const MCP_CATALOG_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+#[derive(Default)]
+pub(super) struct McpCatalogRefresh {
+    in_flight: bool,
+    started_at: Option<Instant>,
+    invalidated: bool,
+    completed_at: Option<Instant>,
+    directory: Option<String>,
+}
+
+impl McpCatalogRefresh {
+    fn request_expired(&self) -> bool {
+        self.in_flight && self.started_at.is_none_or(|at| at.elapsed() >= MCP_CATALOG_REQUEST_TIMEOUT)
+    }
+}
+
 impl NeoismAgentPane {
     pub fn open_agent_picker(&mut self) {
         if self.new_chat_source.provider().is_some() {
@@ -42,9 +59,6 @@ impl NeoismAgentPane {
     }
 
     pub fn open_mcp_picker(&mut self) {
-        self.push_outbound(OutboundAgentCommand::RefreshMcp {
-            directory: self.directory.clone(),
-        });
         let mut picker = NeoismAgentPicker::new(
             NeoismAgentPickerKind::Mcp,
             "MCP servers",
@@ -53,31 +67,104 @@ impl NeoismAgentPane {
         );
         picker.loading = true;
         self.picker = Some(picker);
+        self.refresh_mcp_if_visible();
+    }
+
+    /// Hosts that resolve an unset pane directory against their workspace default
+    /// record that effective scope before dispatching the catalog command.
+    pub fn set_mcp_catalog_request_directory(&mut self, directory: Option<String>) {
+        self.mcp_catalog_refresh.directory = directory;
+    }
+
+    pub fn set_mcp_status_for_directory(&mut self, directory: Option<String>, status: Value) {
+        let expected = self.directory.as_ref().or(self.mcp_catalog_refresh.directory.as_ref());
+        if directory.as_ref() != expected {
+            if self.mcp_catalog_refresh.in_flight && self.mcp_catalog_refresh.directory == directory {
+                self.mcp_catalog_refresh.in_flight = false;
+                self.mcp_catalog_refresh.invalidated = false;
+                self.refresh_mcp_if_visible();
+            }
+            return;
+        }
+        self.set_mcp_status(status);
     }
 
     pub fn set_mcp_status(&mut self, status: Value) {
+        self.mcp_catalog_refresh.in_flight = false;
+        self.mcp_catalog_refresh.started_at = None;
+        self.mcp_catalog_refresh.completed_at = Some(Instant::now());
+        // An event/action invalidated this read while it was running. Do not
+        // briefly expose stale action controls; retain loading/confirmed rows
+        // until the single coalesced follow-up has authoritative data.
+        if std::mem::take(&mut self.mcp_catalog_refresh.invalidated) {
+            self.refresh_mcp_if_visible();
+            return;
+        }
         if let Some(picker) = self.picker.as_mut() {
             picker.apply_mcp_status(&status);
         }
     }
 
-    pub fn refresh_mcp_if_visible(&mut self) {
-        let Some(kind) = self.picker.as_ref().map(|picker| picker.kind) else {
-            return;
-        };
-        if !matches!(
-            kind,
+    pub fn mcp_picker_visible(&self) -> bool {
+        self.picker.as_ref().is_some_and(|picker| matches!(
+            picker.kind,
             NeoismAgentPickerKind::Mcp | NeoismAgentPickerKind::McpActions
-        ) {
+        ))
+    }
+
+    /// Passive catalog polling; hosts drain this through their existing async IO.
+    /// A missing response releases the latch after a bounded deadline. Only GET
+    /// catalog reads are retried; this never makes runtime connections.
+    pub(super) fn mcp_catalog_poll_due(&self) -> bool {
+        self.mcp_picker_visible()
+            && (self.mcp_catalog_refresh.request_expired()
+                || (!self.mcp_catalog_refresh.in_flight
+                    && self.mcp_catalog_refresh.completed_at.is_none_or(|at| {
+                        at.elapsed() >= std::time::Duration::from_secs(2)
+                    })))
+    }
+
+    pub fn refresh_mcp_if_visible(&mut self) {
+        if !self.mcp_picker_visible() {
             return;
         }
-        self.picker.as_mut().unwrap().set_loading(true);
+        if self.mcp_catalog_refresh.in_flight && !self.mcp_catalog_refresh.request_expired() {
+            // One trailing read ensures an event arriving during a stale read
+            // cannot be lost, without allowing notification bursts to fan out.
+            self.mcp_catalog_refresh.invalidated = true;
+            return;
+        }
+        // The replacement read also satisfies any coalesced invalidation.
+        self.mcp_catalog_refresh.invalidated = false;
+        self.mcp_catalog_refresh.in_flight = true;
+        self.mcp_catalog_refresh.started_at = Some(Instant::now());
+        self.mcp_catalog_refresh.directory = self.directory.clone();
         self.push_outbound(OutboundAgentCommand::RefreshMcp {
             directory: self.directory.clone(),
         });
     }
 
+    /// A transport rejection is not an MCP server error. Retain confirmed rows
+    /// and retry on the normal poll cadence without adding transcript messages.
+    pub fn mcp_catalog_send_failed(&mut self) {
+        self.mcp_catalog_refresh.in_flight = false;
+        self.mcp_catalog_refresh.started_at = None;
+        self.mcp_catalog_refresh.invalidated = false;
+        self.mcp_catalog_refresh.completed_at = Some(Instant::now());
+        if let Some(picker) = self.picker.as_mut().filter(|picker| matches!(
+            picker.kind,
+            NeoismAgentPickerKind::Mcp | NeoismAgentPickerKind::McpActions
+        )) {
+            picker.set_loading(false);
+        }
+    }
+
     pub fn apply_mcp_failure(&mut self, name: Option<String>, error: String) {
+        if name.is_none() {
+            self.mcp_catalog_refresh.in_flight = false;
+            self.mcp_catalog_refresh.invalidated = false;
+            self.mcp_catalog_refresh.completed_at = Some(Instant::now());
+        }
         if let Some(picker) = self.picker.as_mut().filter(|picker| {
             matches!(
                 picker.kind,
@@ -94,13 +181,7 @@ impl NeoismAgentPane {
         let Ok(entry) = serde_json::from_str::<Value>(value) else {
             return;
         };
-        let name = entry.get("name").and_then(Value::as_str).unwrap_or("MCP");
-        self.picker = Some(NeoismAgentPicker::new(
-            NeoismAgentPickerKind::McpActions,
-            &format!("{name} actions"),
-            mcp_action_options(&entry),
-            0,
-        ));
+        self.picker = Some(NeoismAgentPicker::mcp_actions(&entry, self.picker.as_ref()));
     }
 
     pub fn apply_mcp_oauth_url(&mut self, name: String, url: String) {
@@ -570,6 +651,9 @@ impl NeoismAgentPane {
     }
 
     pub fn animation_reason(&self) -> Option<&'static str> {
+        if !self.activity_status_rects.is_empty() && self.activity_animation_frame().is_some() {
+            return Some("agent_activity_word");
+        }
         if self
             .tool_motion
             .is_animating_for(self.session_id.as_deref())
@@ -726,11 +810,20 @@ impl NeoismAgentPicker {
     /// Apply authoritative data to the live picker, preserving query and selection.
     /// Shared by the native desktop and web hosts.
     pub fn apply_mcp_status(&mut self, status: &Value) {
+        if !matches!(self.kind, NeoismAgentPickerKind::Mcp | NeoismAgentPickerKind::McpActions) { return; }
+        if let Some(servers) = status.as_object() {
+            self.mcp_icons = servers.iter().map(|(name, entry)| {
+                let icon = super::super::mcp_icon::McpServiceIcon::from_entry(name, entry, self.mcp_icons.get(name));
+                (name.clone(), icon)
+            }).collect();
+        }
         let rows = mcp_options_from_status(status);
         let options = match self.kind {
             NeoismAgentPickerKind::Mcp => rows,
             NeoismAgentPickerKind::McpActions => {
-                let name = self.title.strip_suffix(" actions").unwrap_or_default();
+                let name = self.mcp_server.as_deref()
+                    .or_else(|| self.mcp_authorization.as_ref().map(|detail| detail.name.as_str()))
+                    .unwrap_or_else(|| self.title.strip_suffix(" actions").unwrap_or_default());
                 rows.iter()
                     .find(|row| row.title == name)
                     .and_then(|row| serde_json::from_str::<Value>(&row.value).ok())
@@ -740,7 +833,7 @@ impl NeoismAgentPicker {
             _ => return,
         };
         self.set_loading(false);
-        self.replace_options(options);
+        self.update_mcp_normal_options(options);
     }
 }
 
@@ -795,6 +888,8 @@ pub fn mcp_options_from_status(status: &Value) -> Vec<NeoismAgentPickerOption> {
             let description = format!("{scope}{} · {description}", if writable { "" } else { " (read-only)" });
             let value = json!({
                 "name": name,
+                "brand": entry.get("brand"),
+                "serverInfo": entry.get("serverInfo"),
                 "configScope": entry.get("configScope"),
                 "enabled": entry.get("enabled").and_then(Value::as_bool).unwrap_or(status != "disabled"),
                 "connected": entry.get("runtimeConnected").and_then(Value::as_bool).unwrap_or(status == "connected"),
@@ -913,6 +1008,250 @@ pub fn mcp_action_options(entry: &Value) -> Vec<NeoismAgentPickerOption> {
 #[cfg(test)]
 mod mcp_tests {
     use super::*;
+    use crate::panels::agent_pane::state::picker::McpAuthorizationDetail;
+
+    #[test]
+    fn mcp_icons_survive_actions_authorization_refresh_and_done() {
+        let mut pane = NeoismAgentPane::default();
+        pane.open_mcp_picker();
+        pane.drain_pending_outbound();
+        let catalog = json!({
+            "another": {"status":{"status":"connected"}},
+            "webflow": {"status":{"status":"needs_auth"}, "enabled":true, "oauthCapable":true,
+                "brand":"webflow", "serverInfo":{"name":"custom", "icons":[{"src":"https://example.com/icon.svg"}]}}
+        });
+        pane.set_mcp_status(catalog.clone());
+        let picker = pane.picker.as_mut().unwrap();
+        picker.move_selection(1);
+        let value = picker.selected_option().unwrap().value.clone();
+        assert_eq!(serde_json::from_str::<Value>(&value).unwrap()["brand"], "webflow");
+        picker.apply_mcp_status(&catalog);
+        assert_eq!(picker.selected_option().unwrap().title, "webflow");
+        pane.open_mcp_actions(&value);
+        let picker = pane.picker.as_mut().unwrap();
+        assert_eq!(picker.mcp_server.as_deref(), Some("webflow"));
+        assert!(picker.mcp_icons.contains_key("webflow"));
+        picker.set_mcp_authorization(authorization_detail(true, "Waiting"));
+        picker.apply_mcp_status(&catalog);
+        assert_eq!(picker.mcp_server.as_deref(), Some("webflow"));
+        assert!(picker.mcp_icons.contains_key("webflow"));
+        picker.set_mcp_authorization(authorization_detail(false, "Connected"));
+        assert_eq!(serde_json::from_str::<Value>(&picker.options().last().unwrap().value).unwrap()["action"], "oauth_done");
+        picker.clear_mcp_authorization();
+        assert_eq!(picker.mcp_server.as_deref(), Some("webflow"));
+        assert!(picker.mcp_icons.contains_key("webflow"));
+    }
+
+    fn authorization_detail(busy: bool, status: &str) -> McpAuthorizationDetail {
+        McpAuthorizationDetail {
+            name: "webflow".into(), body: "Continue in your browser. Connection is not yet confirmed.".into(),
+            status: status.into(), busy, url: Some("https://example.com/oauth?state=a)b".into()),
+        }
+    }
+
+    #[test]
+    fn authorization_refresh_preserves_detail_server_and_live_actions() {
+        let mut picker = NeoismAgentPicker::new(NeoismAgentPickerKind::McpActions, "webflow actions", Vec::new(), 0);
+        picker.apply_mcp_status(&toggle_catalog(true));
+        picker.set_mcp_authorization(authorization_detail(true, "Waiting for authorization"));
+        let before = picker.options().to_vec();
+        picker.apply_mcp_status(&json!({
+            "another-server": {"status": "connected"},
+            "webflow": {"status": "disabled", "enabled": false, "oauthCapable": true}
+        }));
+        let detail = picker.mcp_authorization.as_ref().unwrap();
+        assert_eq!(detail.name, "webflow");
+        assert_eq!(detail.status, "Waiting for authorization");
+        assert!(detail.busy);
+        assert_eq!(picker.title, "webflow actions");
+        assert_eq!(picker.options(), before);
+        assert!(!picker.loading);
+        assert!(picker.clear_mcp_authorization());
+        assert!(!picker.clear_mcp_authorization());
+        assert!(picker.options().iter().any(|row| row.title == "Enable"));
+        assert!(!picker.options().iter().any(|row| row.title == "Disable"));
+        assert!(picker.options().iter().all(|row| serde_json::from_str::<Value>(&row.value).unwrap()["name"] == "webflow"));
+    }
+
+    #[test]
+    fn busy_authorization_links_and_back_are_actionable_and_own_redraw() {
+        let mut pane = NeoismAgentPane::default();
+        let mut picker = NeoismAgentPicker::new(NeoismAgentPickerKind::McpActions, "webflow actions", Vec::new(), 0);
+        picker.set_mcp_authorization(authorization_detail(true, "Waiting"));
+        picker.set_loading(true);
+        picker.set_query("must not filter progress".into());
+        assert!(!picker.loading);
+        assert!(picker.query.is_empty());
+        assert!(picker.is_animating());
+        assert_eq!(picker.options().len(), 2);
+        let link: Value = serde_json::from_str(&picker.selected_option().unwrap().value).unwrap();
+        assert_eq!(link["action"], "oauth_open");
+        assert_eq!(link["url"], "https://example.com/oauth?state=a)b");
+        picker.move_selection(1);
+        assert_eq!(serde_json::from_str::<Value>(&picker.selected_option().unwrap().value).unwrap()["action"], "oauth_back");
+        pane.picker = Some(picker);
+        assert!(pane.is_animating());
+    }
+
+    #[test]
+    fn oauth_success_is_not_a_runtime_connection() {
+        let mut picker = NeoismAgentPicker::new(NeoismAgentPickerKind::McpActions, "webflow actions", Vec::new(), 0);
+        picker.set_mcp_authorization(authorization_detail(false, "Authorized · connection failed"));
+        let actions = |picker: &NeoismAgentPicker| picker.options().iter().map(|row| {
+            serde_json::from_str::<Value>(&row.value).unwrap()["action"].as_str().unwrap().to_owned()
+        }).collect::<Vec<_>>();
+        assert_eq!(actions(&picker), ["oauth_open", "authenticate", "connect", "oauth_back"]);
+        picker.set_mcp_authorization(authorization_detail(false, "Unauthorized"));
+        assert!(!actions(&picker).iter().any(|action| action == "connect"));
+        picker.set_mcp_authorization(authorization_detail(false, "Connected"));
+        assert_eq!(actions(&picker), ["oauth_open", "oauth_done"]);
+        assert!(!picker.is_animating());
+    }
+
+    #[test]
+    fn authorization_hit_geometry_uses_measured_header_at_every_scale() {
+        use crate::widgets::inline_picker::InlinePickerRenderState;
+        for s in [0.5, 1.0, 1.5, 2.0, 3.0] {
+            for header in [54.0, 126.0, 234.0] {
+                let mut picker = NeoismAgentPicker::new(NeoismAgentPickerKind::McpActions, "webflow actions", Vec::new(), 0);
+                picker.set_mcp_authorization(authorization_detail(true, "Waiting"));
+                let state = InlinePickerRenderState {
+                    rect: [10.0, 20.0, 400.0 * s, (header + 92.0 + 26.0) * s],
+                    header_h: header * s, footer_h: 26.0 * s,
+                    first_row: 0, visible_rows: 2, selected_cursor_rect: None,
+                };
+                picker.set_render_geometry(state, s, 0.0);
+                assert!(!picker.activate_row_at(11.0, 20.0 + header * s - s));
+                for ix in 0..2 {
+                    let row = state.row_rect(ix, s);
+                    assert!(picker.activate_row_at(row[0] + s, row[1] + row[3] * 0.5));
+                    assert_eq!(picker.selected, ix);
+                }
+                assert!(!picker.activate_row_at(11.0, 20.0 + (header + 92.0 + 10.0) * s));
+            }
+        }
+    }
+
+    #[test]
+    fn invalidated_mcp_read_keeps_loading_until_follow_up() {
+        let mut pane = NeoismAgentPane::default();
+        pane.open_mcp_picker();
+        pane.drain_pending_outbound();
+        pane.refresh_mcp_if_visible();
+        pane.set_mcp_status(toggle_catalog(false));
+        let picker = pane.picker.as_ref().unwrap();
+        assert!(picker.loading);
+        assert!(picker.options().is_empty());
+        assert_eq!(pane.drain_pending_outbound().len(), 1);
+        pane.set_mcp_status(toggle_catalog(true));
+        let picker = pane.picker.as_ref().unwrap();
+        assert!(!picker.loading);
+        assert_eq!(picker.options().len(), 1);
+        assert!(pane.drain_pending_outbound().is_empty());
+    }
+
+    #[test]
+    fn invalidated_mcp_read_does_not_replace_confirmed_actions() {
+        let mut pane = NeoismAgentPane::default();
+        pane.open_mcp_picker();
+        pane.drain_pending_outbound();
+        pane.set_mcp_status(toggle_catalog(true));
+        let entry = pane.picker.as_ref().unwrap().options()[0].value.clone();
+        pane.open_mcp_actions(&entry);
+        pane.refresh_mcp_if_visible();
+        pane.drain_pending_outbound();
+        pane.refresh_mcp_if_visible();
+        pane.set_mcp_status(toggle_catalog(false));
+        let picker = pane.picker.as_ref().unwrap();
+        assert_eq!(picker.kind, NeoismAgentPickerKind::McpActions);
+        assert_eq!(picker.options()[0].title, "Disable");
+        assert_eq!(pane.drain_pending_outbound().len(), 1);
+        pane.set_mcp_status(toggle_catalog(false));
+        assert_eq!(pane.picker.as_ref().unwrap().options()[0].title, "Enable");
+        assert!(pane.drain_pending_outbound().is_empty());
+    }
+
+    #[test]
+    fn lost_mcp_read_expires_and_retries_once_with_coalesced_invalidation() {
+        let mut pane = NeoismAgentPane::default();
+        pane.open_mcp_picker();
+        assert_eq!(pane.drain_pending_outbound().len(), 1);
+        pane.refresh_mcp_if_visible();
+        assert!(pane.drain_pending_outbound().is_empty());
+        pane.mcp_catalog_refresh.started_at = Some(
+            Instant::now() - MCP_CATALOG_REQUEST_TIMEOUT - std::time::Duration::from_secs(1),
+        );
+        assert!(pane.has_pending_outbound());
+        assert_eq!(pane.drain_pending_outbound().len(), 1);
+        assert!(!pane.mcp_catalog_refresh.invalidated);
+        assert!(!pane.has_pending_outbound());
+        pane.set_mcp_status(toggle_catalog(false));
+        assert!(pane.drain_pending_outbound().is_empty());
+    }
+
+    #[test]
+    fn expired_mcp_read_does_not_reopen_a_dismissed_picker() {
+        let mut pane = NeoismAgentPane::default();
+        pane.open_mcp_picker();
+        pane.drain_pending_outbound();
+        pane.picker = None;
+        pane.mcp_catalog_refresh.started_at = Some(
+            Instant::now() - MCP_CATALOG_REQUEST_TIMEOUT - std::time::Duration::from_secs(1),
+        );
+        assert!(!pane.has_pending_outbound());
+        assert!(pane.drain_pending_outbound().is_empty());
+        assert!(pane.picker.is_none());
+        // An explicit reopen recovers even if the old read never replies.
+        pane.open_mcp_picker();
+        assert_eq!(pane.drain_pending_outbound().len(), 1);
+    }
+
+    #[test]
+    fn rejected_mcp_send_is_quiet_and_retries_after_backoff() {
+        let mut pane = NeoismAgentPane::default();
+        pane.open_mcp_picker();
+        pane.drain_pending_outbound();
+        pane.set_mcp_status(toggle_catalog(false));
+        let before = pane.picker.as_ref().unwrap().options().to_vec();
+        let messages = pane.messages.len();
+        pane.refresh_mcp_if_visible();
+        pane.drain_pending_outbound();
+        pane.refresh_mcp_if_visible();
+        pane.mcp_catalog_send_failed();
+        assert_eq!(pane.messages.len(), messages);
+        assert_eq!(pane.picker.as_ref().unwrap().options().len(), before.len());
+        assert_eq!(pane.picker.as_ref().unwrap().options()[0].value, before[0].value);
+        assert!(!pane.has_pending_outbound());
+        pane.mcp_catalog_refresh.completed_at = Some(
+            Instant::now() - std::time::Duration::from_secs(3),
+        );
+        assert_eq!(pane.drain_pending_outbound().len(), 1);
+        assert!(!pane.has_pending_outbound());
+        pane.picker = None;
+        pane.mcp_catalog_send_failed();
+        assert!(pane.picker.is_none());
+    }
+
+    #[test]
+    fn expired_mcp_read_retry_keeps_directory_scope_gate() {
+        let mut pane = NeoismAgentPane::default();
+        pane.directory = Some("/old".into());
+        pane.open_mcp_picker();
+        pane.drain_pending_outbound();
+        pane.directory = Some("/new".into());
+        pane.mcp_catalog_refresh.started_at = Some(
+            Instant::now() - MCP_CATALOG_REQUEST_TIMEOUT - std::time::Duration::from_secs(1),
+        );
+        assert!(matches!(pane.drain_pending_outbound().as_slice(),
+            [OutboundAgentCommand::RefreshMcp { directory }] if directory.as_deref() == Some("/new")
+        ));
+        pane.set_mcp_status_for_directory(Some("/old".into()), toggle_catalog(true));
+        assert!(pane.picker.as_ref().unwrap().options().is_empty());
+        assert!(pane.mcp_catalog_refresh.in_flight);
+        pane.set_mcp_status_for_directory(Some("/new".into()), toggle_catalog(false));
+        assert_eq!(pane.picker.as_ref().unwrap().options().len(), 1);
+        assert!(!pane.has_pending_outbound());
+    }
 
     #[test]
     fn maps_mcp_statuses_to_actionable_picker_rows() {
@@ -931,6 +1270,79 @@ mod mcp_tests {
         assert_eq!(row("broken").footer, "failed");
         assert_eq!(row("off").footer, "disabled");
         assert_eq!(row("disabled_oauth").footer, "needs auth");
+    }
+
+    #[test]
+    fn mcp_refresh_is_single_flight_with_one_trailing_invalidation() {
+        let mut pane = NeoismAgentPane::default();
+        pane.open_mcp_picker();
+        assert_eq!(pane.drain_pending_outbound().len(), 1);
+        for _ in 0..10 {
+            pane.refresh_mcp_if_visible();
+        }
+        assert!(pane.drain_pending_outbound().is_empty());
+        pane.set_mcp_status(toggle_catalog(false));
+        assert_eq!(pane.drain_pending_outbound().len(), 1);
+        pane.set_mcp_status(toggle_catalog(true));
+        assert!(pane.drain_pending_outbound().is_empty());
+        assert_eq!(pane.picker.as_ref().unwrap().options()[0].footer, "ready");
+    }
+
+    #[test]
+    fn mcp_visible_poll_is_bounded_and_stops_on_dismissal() {
+        let mut pane = NeoismAgentPane::default();
+        pane.open_mcp_picker();
+        pane.drain_pending_outbound();
+        pane.set_mcp_status(toggle_catalog(false));
+        assert!(!pane.has_pending_outbound());
+        pane.mcp_catalog_refresh.completed_at = Some(
+            Instant::now() - std::time::Duration::from_secs(3),
+        );
+        assert!(pane.has_pending_outbound());
+        assert_eq!(pane.drain_pending_outbound().len(), 1);
+        assert!(!pane.has_pending_outbound());
+        pane.apply_mcp_failure(None, "temporary catalog failure".into());
+        assert!(!pane.has_pending_outbound());
+        pane.mcp_catalog_refresh.completed_at = None;
+        pane.picker = None;
+        assert!(!pane.has_pending_outbound());
+    }
+
+    #[test]
+    fn mcp_late_catalog_cannot_overwrite_a_different_directory_or_picker() {
+        let mut pane = NeoismAgentPane::default();
+        pane.directory = Some("/old".into());
+        pane.open_mcp_picker();
+        pane.drain_pending_outbound();
+        pane.directory = Some("/new".into());
+        pane.set_mcp_status_for_directory(Some("/old".into()), toggle_catalog(true));
+        assert!(pane.picker.as_ref().unwrap().options().is_empty());
+        assert!(matches!(pane.drain_pending_outbound().as_slice(),
+            [OutboundAgentCommand::RefreshMcp { directory }] if directory.as_deref() == Some("/new")
+        ));
+        pane.set_mcp_status_for_directory(Some("/new".into()), toggle_catalog(false));
+        let entry = pane.picker.as_ref().unwrap().options()[0].value.clone();
+        pane.open_mcp_actions(&entry);
+        pane.set_mcp_status_for_directory(Some("/new".into()), toggle_catalog(true));
+        let picker = pane.picker.as_ref().unwrap();
+        assert_eq!(picker.kind, NeoismAgentPickerKind::McpActions);
+        assert_eq!(picker.title, "webflow actions");
+        assert!(picker.options().iter().any(|option| option.title == "Disable"));
+        pane.picker = None;
+        pane.set_mcp_status_for_directory(Some("/new".into()), toggle_catalog(false));
+        assert!(pane.picker.is_none());
+    }
+
+    #[test]
+    fn mcp_unset_directory_accepts_only_the_hosts_effective_request_scope() {
+        let mut pane = NeoismAgentPane::default();
+        pane.open_mcp_picker();
+        pane.drain_pending_outbound();
+        pane.set_mcp_catalog_request_directory(Some("/workspace".into()));
+        pane.set_mcp_status_for_directory(Some("/other".into()), toggle_catalog(true));
+        assert!(pane.picker.as_ref().unwrap().options().is_empty());
+        pane.set_mcp_status_for_directory(Some("/workspace".into()), toggle_catalog(false));
+        assert_eq!(pane.picker.as_ref().unwrap().options().len(), 1);
     }
 
     #[test]

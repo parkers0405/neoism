@@ -708,7 +708,51 @@ impl NeoismAgentPane {
             .then_some(self.input_wrap_rows.as_slice())
     }
 
+    /// Clear frame-local geometry without interrupting a replay.
+    pub fn clear_activity_status_rects(&mut self) {
+        self.activity_status_rects.clear();
+    }
+
+    pub fn register_activity_status_rect(&mut self, rect: [f32; 4]) {
+        if self.activity_session_id != self.session_id {
+            self.activity_animation.cancel();
+            self.activity_status_rects.clear();
+            self.activity_session_id = self.session_id.clone();
+        }
+        if rect.iter().all(|v| v.is_finite()) && rect[2] > 0.0 && rect[3] > 0.0 {
+            self.activity_status_rects.push(rect);
+        }
+    }
+
+    pub fn activity_status_contains(&self, x: f32, y: f32) -> bool {
+        // Moving/padded primary glyphs may overlap the child-summary row.
+        // Reserve that entire row for its existing Background task menu.
+        !self.background_status_contains(x, y)
+            && self.activity_session_id == self.session_id
+            && self.activity_status_rects.iter().any(|rect| {
+                interaction_policy::rect_contains(*rect, x, y)
+            })
+    }
+
+    pub fn pop_activity_status_click(&mut self, x: f32, y: f32) -> bool {
+        if !self.activity_status_contains(x, y) {
+            return false;
+        }
+        self.activity_animation.replay();
+        true
+    }
+
+    pub fn activity_animation_frame(
+        &self,
+    ) -> Option<neoism_ui::primitives::wordmark_animation::AnimationFrame> {
+        if self.activity_session_id != self.session_id {
+            return None;
+        }
+        self.activity_animation.frame()
+    }
+
     pub fn clear_tool_hit_rects(&mut self) {
+        self.clear_activity_status_rects();
         self.text_reveal.scope(self.session_id.as_deref());
         self.tool_motion.scope(self.session_id.as_deref());
         self.text_reveal.begin_frame();
@@ -1205,6 +1249,9 @@ impl NeoismAgentPane {
     /// and the navigation click's raised Task card came back still
     /// showing its title until clicked again.
     pub(crate) fn reset_transient_timeline_interactions(&mut self) {
+        self.activity_animation.cancel();
+        self.clear_activity_status_rects();
+        self.activity_session_id = self.session_id.clone();
         self.expanded_tool_ids.clear();
         self.tool_expand_anims.clear();
         self.selected_tool_group_child = None;

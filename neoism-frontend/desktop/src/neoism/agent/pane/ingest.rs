@@ -1689,6 +1689,8 @@ self.footer_growth.record_with_edge(
     }
 
     pub(crate) fn drain_background_updates(&mut self) -> bool {
+        self.cancel_out_of_scope_mcp_oauth();
+        self.reconcile_mcp_catalog_monitor();
         const MAX_BACKGROUND_UPDATES_PER_FRAME: usize = 64;
         // Clear the coalesced wake before draining. A worker that races this
         // pass will then schedule the next frame instead of leaving its result
@@ -2465,6 +2467,13 @@ self.footer_growth.record_with_edge(
                     self.finish_connect_request(token, result);
                     changed = true;
                 }
+                Ok(NeoismAgentBackgroundUpdate::McpCatalogRefreshed { token, server, directory, result }) => {
+                    self.finish_mcp_catalog_refresh(token, server, directory, result);
+                    changed = true;
+                }
+                Ok(NeoismAgentBackgroundUpdate::McpOAuthProgress { activity, detail }) => {
+                    changed |= self.apply_mcp_oauth_progress(activity, detail);
+                }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => break,
             }
@@ -2500,14 +2509,19 @@ self.footer_growth.record_with_edge(
         &mut self,
         title: impl Into<String>,
         body: impl Into<String>,
+        link: Option<(String, String)>,
     ) {
         let title = title.into();
         let body = body.into();
         if body.trim().is_empty() {
             return;
         }
+        // Dismiss before drawing: picker material sorts above dialogs and its
+        // labels share the late overlay batch. close_picker() would navigate
+        // MCP actions back to the server picker instead of dismissing it.
+        self.picker = None;
         self.ui_events
-            .push(NeoismAgentUiEvent::Dialog { title, body });
+            .push(NeoismAgentUiEvent::Dialog { title, body, link });
     }
 
     pub(crate) fn request_close_tab(&mut self) {

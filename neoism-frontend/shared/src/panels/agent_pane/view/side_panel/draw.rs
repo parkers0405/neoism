@@ -61,6 +61,128 @@ fn conversation_row_columns(left: f32, width: f32, scale: f32) -> (f32, f32) {
     (width - status_width, left + width - status_width * 0.5)
 }
 
+/// Project nesting is not a branch relationship. Only explicit branch rows
+/// receive a connector; flattened depth is relative to the owning root.
+pub(super) fn branch_row_indent(
+    entry: &NeoismAgentSessionEntry,
+    root_depth: usize,
+    scale: f32,
+) -> f32 {
+    if entry.branch_root_id.is_some() {
+        entry.depth.saturating_sub(root_depth).max(1) as f32 * 24.0 * scale
+    } else {
+        0.0
+    }
+}
+
+pub(super) fn branch_connector_top(
+    sessions: &[NeoismAgentSessionEntry],
+    index: usize,
+    row_y: f32,
+    row_h: f32,
+    scale: f32,
+) -> Option<f32> {
+    let entry = sessions.get(index)?;
+    let root = entry.branch_root_id.as_deref()?;
+    let (previous_index, previous) =
+        sessions[..index]
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, row)| {
+                row.id == root
+                    || (row.branch_root_id.as_deref() == Some(root)
+                        && row.depth <= entry.depth)
+            })?;
+    let previous_y = row_y - (index - previous_index) as f32 * row_h;
+    let sibling =
+        previous.branch_root_id.as_deref() == Some(root) && previous.depth == entry.depth;
+    let sibling_offset = 23.0 + FONT_SIZE * 0.5;
+    Some(
+        previous_y
+            + if sibling {
+                sibling_offset
+            } else {
+                23.0 + FONT_SIZE
+            } * scale,
+    )
+}
+
+pub(super) struct BranchConnectorGeometry {
+    pub straight: [[f32; 4]; 2],
+    pub center: [f32; 2],
+    pub radius: f32,
+    pub stroke: f32,
+    pub curve_bounds: [f32; 4],
+}
+
+/// Shared straight-stroke tangents and an analytic bottom-left quarter-ring.
+pub(super) fn branch_connector_geometry(
+    title_x: f32,
+    row_y: f32,
+    top: f32,
+    continues: bool,
+    scale: f32,
+    device_scale: f32,
+) -> BranchConnectorGeometry {
+    let device_scale = device_scale.max(f32::EPSILON);
+    let stroke = (2.0 * scale * device_scale).round().max(2.0) / device_scale;
+    let radius = snap_to_device_px(5.0 * scale, device_scale).max(stroke);
+    let left = snap_to_device_px(title_x - 19.0 * scale - stroke * 0.5, device_scale);
+    let elbow_y =
+        snap_to_device_px(row_y + (23.0 + FONT_SIZE * 0.5) * scale, device_scale);
+    let center_x = left + stroke * 0.5 + radius;
+    let center_y = elbow_y - radius;
+    let top = snap_to_device_px(top, device_scale);
+    let bottom = if continues {
+        elbow_y + stroke * 0.5
+    } else {
+        center_y
+    };
+    let straight = [
+        [left, top, stroke, (bottom - top).max(0.0)],
+        [
+            center_x,
+            elbow_y - stroke * 0.5,
+            (title_x - 6.0 * scale - center_x).max(0.0),
+            stroke,
+        ],
+    ];
+    // Keep the AA fringe while clipping at the two tangent axes. The full
+    // circle's center/radius stay fixed under scrolling and overlay cutouts.
+    let padded_outer = radius + stroke * 0.5 + 0.5 / device_scale;
+    BranchConnectorGeometry {
+        straight,
+        center: [center_x, center_y],
+        radius,
+        stroke,
+        curve_bounds: [
+            center_x - padded_outer,
+            center_y,
+            padded_outer,
+            padded_outer,
+        ],
+    }
+}
+
+pub(super) fn catalog_branch_status(entry: &NeoismAgentSessionEntry) -> BranchStatus {
+    entry.branch_status.unwrap_or_else(|| {
+        entry
+            .runtime_status
+            .as_deref()
+            .and_then(BranchStatus::from_runtime_status)
+            .unwrap_or(BranchStatus::Completed)
+    })
+}
+
+pub(super) fn catalog_branch_activity_label(entry: &NeoismAgentSessionEntry) -> &str {
+    entry
+        .branch_activity_label
+        .as_deref()
+        .filter(|label| !label.trim().is_empty())
+        .unwrap_or_else(|| catalog_branch_status(entry).label())
+}
+
 const SCRAMBLE_MS: f32 = 320.0;
 const SCRAMBLE_GLYPHS: &[char] = &['#', '@', '%', '&', '*', '+', '?', '/', '~', '='];
 
@@ -662,11 +784,11 @@ pub(crate) fn render_sessions_list(
     let focused = pane.side_panel().is_focused();
     let current_id = pane
         .side_panel()
-        .catalog_viewed_root(pane.conversation_root_id())
+        .catalog_viewed_session(pane.session_id_str())
         .map(str::to_owned);
     let highlighted = pane
         .side_panel()
-        .catalog_highlight_index(pane.conversation_root_id());
+        .catalog_highlight_index(pane.session_id_str());
     let list_bottom = list_rect[1] + list_rect[3];
 
     let sessions_len = pane.side_panel().sessions().len();
@@ -742,7 +864,6 @@ pub(crate) fn render_sessions_list(
     let dot_diameter = 7.0 * s;
     let title_x = text_x;
     let (title_budget, status_center_x) = conversation_row_columns(text_x, text_w, s);
-    let text_clip = [title_x, list_rect[1], title_budget, list_rect[3]];
 
     // Feed the measured monospace column budget back so excerpt chunks wrap
     // to this exact panel width; a change (resize) rebuilds the display list
@@ -775,6 +896,65 @@ pub(crate) fn render_sessions_list(
         let row_ix = absolute_ix as isize - render_top as isize;
         let row_y = list_rect[1] + row_ix as f32 * row_h - frac;
         let row_bottom = row_y + row_h;
+        // Draw before row culling: a below-viewport child can still have a
+        // visible stem reaching up through its parent or preceding sibling.
+        if let Some(top) = branch_connector_top(sessions, absolute_ix, row_y, row_h, s) {
+            let root_depth = sessions
+                .iter()
+                .find(|row| Some(row.id.as_str()) == entry.branch_root_id.as_deref())
+                .map_or(0, |root| root.depth);
+            let child_x =
+                title_x + branch_row_indent(entry, root_depth, s).min(title_budget);
+            let continues = sessions[absolute_ix + 1..]
+                .iter()
+                .take_while(|row| {
+                    row.branch_root_id == entry.branch_root_id && row.depth >= entry.depth
+                })
+                .any(|row| row.depth == entry.depth);
+            let geometry = branch_connector_geometry(
+                child_x,
+                row_y,
+                top,
+                continues,
+                s,
+                sugarloaf.scale_factor(),
+            );
+            let color = theme.f32_alpha(theme.fg, 1.0);
+            for clip in crate::primitives::visible_rect_fragments(
+                geometry.curve_bounds,
+                list_rect,
+                occlusion_rects,
+            ) {
+                sugarloaf.ring_clipped(
+                    geometry.center,
+                    geometry.radius,
+                    geometry.stroke,
+                    color,
+                    DEPTH,
+                    ORDER_PANEL + 2,
+                    clip,
+                );
+            }
+            for rect in geometry.straight {
+                for [x, y, w, h] in crate::primitives::visible_rect_fragments(
+                    rect,
+                    list_rect,
+                    occlusion_rects,
+                ) {
+                    sugarloaf.quad(
+                        None,
+                        x,
+                        y,
+                        w,
+                        h,
+                        color,
+                        [0.0; 4],
+                        DEPTH,
+                        ORDER_PANEL + 2,
+                    );
+                }
+            }
+        }
         let visible_y = row_y.max(list_rect[1]);
         let visible_h = row_bottom.min(list_bottom) - visible_y;
         if visible_h <= 0.0 {
@@ -838,15 +1018,11 @@ pub(crate) fn render_sessions_list(
                 );
             }
             let page_opts = project_label_opts(theme, s, list_rect);
-            let label = truncate_sidebar_text(
-                &entry.title,
-                text_w - 16.0 * s,
-                sugarloaf,
-                &page_opts,
-            );
+            let label =
+                truncate_sidebar_text(&entry.title, text_w, sugarloaf, &page_opts);
             draw_text_with_occlusion(
                 sugarloaf,
-                text_x + 16.0 * s,
+                text_x,
                 text_y,
                 &label,
                 &page_opts,
@@ -871,9 +1047,13 @@ pub(crate) fn render_sessions_list(
             );
             continue;
         }
-        // Browsing sections share folder typography; legacy date labels retain P2.
+        // Pinned/Recent use monochrome P2; project rows keep their body typography.
         if entry.is_header {
-            let section_opts = project_label_opts(theme, s, list_rect);
+            let section_opts = DrawOpts {
+                color: theme.u8(theme.fg),
+                font_id: pixel_font,
+                ..project_label_opts(theme, s, list_rect)
+            };
             let opts = if entry.id.starts_with("section:") {
                 &section_opts
             } else {
@@ -1015,12 +1195,28 @@ pub(crate) fn render_sessions_list(
             continue;
         }
 
+        let is_child = entry.branch_root_id.is_some();
+        let root_depth = entry
+            .branch_root_id
+            .as_deref()
+            .and_then(|root| sessions.iter().find(|row| row.id == root))
+            .map_or(0, |root| root.depth);
+        let indent = branch_row_indent(entry, root_depth, s).min(title_budget);
+        let title_x = title_x + indent;
+        let title_budget = (title_budget - indent).max(0.0);
+        let text_clip = [title_x, visible_y, title_budget, visible_h];
+
         let is_current = current_id.as_deref() == Some(entry.id.as_str());
-        let activity_color = catalog_activity_color(
-            entry,
-            theme.f32_alpha(theme.red, 1.0)[..3].try_into().unwrap(),
-            theme.f32_alpha(theme.yellow, 1.0)[..3].try_into().unwrap(),
-        );
+        let activity_color = if is_child {
+            matches!(catalog_branch_status(entry), BranchStatus::Active)
+                .then_some([1.0; 3])
+        } else {
+            catalog_activity_color(
+                entry,
+                theme.f32_alpha(theme.red, 1.0)[..3].try_into().unwrap(),
+                theme.f32_alpha(theme.yellow, 1.0)[..3].try_into().unwrap(),
+            )
+        };
         let hover = if hovered_session == Some(absolute_ix) {
             session_hover_scale
         } else {
@@ -1057,25 +1253,57 @@ pub(crate) fn render_sessions_list(
                 occlusion_rects,
             );
             running_indicator_visible |= visible;
-        } else if is_current {
+        } else if is_child || is_current {
             let scaled_dot = dot_diameter * hover_scale;
             let dot_y = row_y + (row_h - scaled_dot) / 2.0;
+            let (color, halo) = if is_child {
+                match catalog_branch_status(entry) {
+                    BranchStatus::WaitingPermission => {
+                        let blink = 0.55 + 0.45 * (now_seconds * 4.0).sin().abs();
+                        (
+                            theme.u8_alpha(theme.yellow, blink),
+                            Some((theme.u8(theme.yellow), (1.0 - blink) * 0.25)),
+                        )
+                    }
+                    BranchStatus::Stopped => (theme.u8(theme.red), None),
+                    _ => (theme.u8(theme.green), None),
+                }
+            } else {
+                (theme.u8(theme.green), Some((theme.u8(theme.green), 0.35)))
+            };
             draw_status_dot_text(
                 sugarloaf,
                 status_center_x - scaled_dot * 0.5,
                 dot_y,
                 scaled_dot,
-                theme.u8(theme.green),
-                Some((theme.u8(theme.green), 0.35)),
+                color,
+                halo,
                 list_rect,
                 occlusion_rects,
                 s,
             );
+            if is_child && catalog_branch_status(entry) == BranchStatus::WaitingPermission
+            {
+                running_indicator_visible |= running_square_visible(
+                    [
+                        status_center_x - scaled_dot * 0.5,
+                        dot_y,
+                        scaled_dot,
+                        scaled_dot,
+                    ],
+                    list_rect,
+                    occlusion_rects,
+                );
+            }
         }
 
         // Conversation cards lead with the product identity, matching the
         // compact app/title/time hierarchy used by the rest of the sidebar.
-        let source_icon = agent_icon::AgentKind::Neoism;
+        let source_icon = if is_child {
+            entry.agent_kind.unwrap_or(agent_icon::AgentKind::Neoism)
+        } else {
+            agent_icon::AgentKind::Neoism
+        };
         let icon_size = 13.0 * s;
         push_provider_icon_clipped(
             sugarloaf,
@@ -1085,7 +1313,9 @@ pub(crate) fn render_sessions_list(
             occlusion_rects,
         );
 
-        let context = if entry.time_label.trim().is_empty() {
+        let context = if is_child {
+            catalog_branch_activity_label(entry).to_owned()
+        } else if entry.time_label.trim().is_empty() {
             relative_session_time(entry.updated_ms, now_ms)
         } else {
             entry.time_label.clone()
@@ -1132,6 +1362,9 @@ pub(crate) fn render_sessions_list(
         }
         let mut hovered_title_opts = title_opts;
         hovered_title_opts.font_size *= hover_scale;
+        if is_child && is_current {
+            hovered_title_opts.color = theme.u8(theme.accent);
+        }
         hovered_title_opts.clip_rect =
             Some([title_x, visible_y, title_budget, visible_h]);
         let display_title = if focused && absolute_ix == selected {

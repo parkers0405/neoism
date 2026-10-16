@@ -81,6 +81,7 @@ export interface TerminalAdapter {
     drainConversationNew?(): string | null;
     agentNewChatFrom?(provider: string): void;
     drainConversationOpen?(): string | null;
+    drainConversationOpenIntent?(): { sessionId: string; rootSessionId: string } | null;
     conversationsVisible?(): boolean;
     showConversationsForAgent?(): void;
     /** Drain pending finder "open this hit" intents queued when the
@@ -718,6 +719,9 @@ export interface TerminalAdapter {
     agentInputRect?(): [number, number, number, number] | null;
     agentHasConversation?(): boolean;
     agentSessionId?(): string | null;
+    /** Coarse timer hook for visible MCP catalog reads, independent of paint. */
+    pumpMcpCatalog?(): number;
+    agentConversationRootId?(): string | null;
     agentHasPendingPermission?(): boolean;
     agentIsStreaming?(): boolean;
     agentMovePermissionSelection?(delta: number): boolean;
@@ -725,8 +729,10 @@ export interface TerminalAdapter {
     agentReplyPermission?(decision: "Yes" | "Always" | "No"): boolean;
     /** Install the JS-side callback the bridge fires when the chrome
      *  wants to emit an `AgentClientMessage`. Signature is
-     *  `(requestId: number, envelopeJson: string)`. */
-    setAgentSend?(cb: (requestId: number, envelopeJson: string) => void): void;
+     *  `(requestId: number, envelopeJson: string)`. Return false on transport
+     *  rejection so MCP catalog polling can retry without transcript errors;
+     *  void remains compatible with older hosts. */
+    setAgentSend?(cb: (requestId: number, envelopeJson: string) => boolean | void): void;
     /** Wake/list the daemon-backed agent server without creating a session. */
     agentSetCatalogEndpoint?(identity: string): void;
     agentAttach?(directory?: string | null, presenceName?: string | null): void;
@@ -1391,6 +1397,7 @@ interface ChromeBridgeInstance {
     drain_conversation_new?(): string | undefined;
     agent_new_chat_from?(provider: string): void;
     drain_conversation_open?(): string | undefined;
+    drain_conversation_open_intent?(): string | undefined;
     conversations_visible?(): boolean;
     show_conversations_for_agent?(): void;
     drain_finder_open_intents(): unknown;
@@ -1659,7 +1666,7 @@ interface ChromeBridgeInstance {
     agent_move_permission_selection(delta: number): boolean;
     agent_submit_permission(): boolean;
     agent_reply_permission(decision: string): boolean;
-    set_agent_send(cb: (requestId: number, envelopeJson: string) => void): void;
+    set_agent_send(cb: (requestId: number, envelopeJson: string) => boolean | void): void;
     agent_set_catalog_endpoint?(identity: string): void;
     agent_attach?(directory?: string | null, presenceName?: string | null): void;
     agent_send_message(text: string): void;
@@ -1700,6 +1707,8 @@ interface ChromeBridgeInstance {
     agent_cancel(): void;
     agent_new_thread(directory?: string | null): void;
     agent_session_id?(): string | null;
+    pump_mcp_catalog?(): number;
+    agent_conversation_root_id?(): string | null;
     agent_switch_thread?(sessionId: string): void;
     agent_wordmark_click?(x: number, y: number): boolean;
     active_surface(): string;
@@ -2496,6 +2505,15 @@ class ChromeAdapter implements TerminalAdapter {
     }
     agentNewChatFrom(provider: string): void {
         this.inner.agent_new_chat_from?.(provider);
+    }
+    drainConversationOpenIntent(): { sessionId: string; rootSessionId: string } | null {
+        const raw = this.inner.drain_conversation_open_intent?.();
+        if (!raw) return null;
+        try {
+            const intent = JSON.parse(raw);
+            return typeof intent.sessionId === "string" && typeof intent.rootSessionId === "string"
+                ? intent : null;
+        } catch { return null; }
     }
     drainConversationOpen(): string | null {
         return this.inner.drain_conversation_open?.() ?? null;
@@ -3394,6 +3412,12 @@ class ChromeAdapter implements TerminalAdapter {
     agentHasConversation(): boolean {
         return this.inner.agent_has_conversation?.() === true;
     }
+    agentConversationRootId(): string | null {
+        return this.inner.agent_conversation_root_id?.() ?? null;
+    }
+    pumpMcpCatalog(): number {
+        return this.inner.pump_mcp_catalog?.() ?? 0;
+    }
     agentSessionId(): string | null {
         const value = this.inner.agent_session_id?.();
         return typeof value === "string" && value.length > 0 ? value : null;
@@ -3413,7 +3437,7 @@ class ChromeAdapter implements TerminalAdapter {
     agentReplyPermission(decision: "Yes" | "Always" | "No"): boolean {
         return this.inner.agent_reply_permission(decision);
     }
-    setAgentSend(cb: (requestId: number, envelopeJson: string) => void): void {
+    setAgentSend(cb: (requestId: number, envelopeJson: string) => boolean | void): void {
         this.inner.set_agent_send(cb);
     }
     agentSetCatalogEndpoint(identity: string): void {

@@ -1,6 +1,29 @@
 use super::*;
 use std::sync::Mutex;
 
+#[tokio::test]
+async fn initialize_preserves_optional_server_icons_without_protocol_upgrade() {
+    let client = CatalogClient::new(json!({}));
+    let (_, info, _) = load_snapshot("fixture", &client, false).await.unwrap();
+    let info = info.unwrap();
+    assert_eq!(info["name"], "fixture");
+    assert_eq!(info["icons"][0]["mimeType"], "image/svg+xml");
+    assert_eq!(*client.methods.lock().unwrap(), ["initialize", "notifications/initialized"]);
+}
+
+#[test]
+fn optional_server_metadata_is_tolerant_and_bounded() {
+    assert!(presentation_server_info(&Value::Null).is_none());
+    let info = presentation_server_info(&json!({
+        "name":"test", "version":false, "secret":"not forwarded",
+        "icons":[{}, {"src":false}, {"src":"x".repeat(32_769)}, {"src":"https://example.com/icon.png", "theme":"dark"}, {"src":"ignored"}]
+    })).unwrap();
+    assert_eq!(info["name"], "test");
+    assert!(info.get("secret").is_none());
+    assert!(info.get("version").is_none());
+    assert_eq!(info["icons"].as_array().unwrap().len(), 1);
+}
+
 struct CatalogClient {
     capabilities: Value,
     methods: Mutex<Vec<String>>,
@@ -22,10 +45,13 @@ impl CatalogClient {
 }
 
 impl JsonRpcClient for CatalogClient {
-    async fn request(&self, method: &str, _: Value) -> anyhow::Result<Value> {
+    async fn request(&self, method: &str, params: Value) -> anyhow::Result<Value> {
         self.methods.lock().unwrap().push(method.to_string());
         if method == "initialize" {
-            return Ok(json!({"capabilities": self.capabilities}));
+            assert_eq!(params["protocolVersion"], "2024-11-05");
+            return Ok(json!({"capabilities": self.capabilities, "serverInfo": {
+                "name": "fixture", "version": "1", "icons": [{"src":"https://example.com/icon.svg", "mimeType":"image/svg+xml"}]
+            }}));
         }
         assert!(self.initialized.load(Ordering::SeqCst));
         if let Some(barrier) = &self.barrier {
@@ -64,7 +90,7 @@ async fn discovery_and_refresh_only_request_advertised_catalogs() {
         ("prompts", "prompts/list"),
     ] {
         let client = CatalogClient::new(json!({capability: {}}));
-        let (capabilities, snapshot) =
+        let (capabilities, _, snapshot) =
             load_snapshot("fixture", &client, true).await.unwrap();
         assert_eq!(snapshot.0.len(), usize::from(capability == "tools"));
         assert_eq!(snapshot.1.len(), usize::from(capability == "resources"));
@@ -84,7 +110,7 @@ async fn discovery_and_refresh_only_request_advertised_catalogs() {
         json!({"tools":null,"resources":false,"prompts":[]}),
     ] {
         let client = CatalogClient::new(capabilities);
-        let (_, snapshot) = load_snapshot("fixture", &client, false).await.unwrap();
+        let (_, _, snapshot) = load_snapshot("fixture", &client, false).await.unwrap();
         assert!(snapshot.0.is_empty() && snapshot.1.is_empty() && snapshot.2.is_empty());
         assert_eq!(
             *client.methods.lock().unwrap(),
@@ -99,7 +125,7 @@ async fn advertised_catalogs_are_read_concurrently_after_initialization() {
     // Serial discovery cannot cross this barrier. No provider, process, or clock
     // performance assumption is needed to prove the three requests overlap.
     client.barrier = Some(tokio::sync::Barrier::new(3));
-    let (_, snapshot) = tokio::time::timeout(
+    let (_, _, snapshot) = tokio::time::timeout(
         Duration::from_secs(2),
         load_snapshot("fixture", &client, true),
     )
@@ -122,7 +148,7 @@ async fn required_tools_fail_closed_but_optional_catalog_errors_remain_tolerated
         if method == "tools/list" {
             assert!(result.is_err());
         } else {
-            let (_, snapshot) = result.unwrap();
+            let (_, _, snapshot) = result.unwrap();
             assert_eq!(snapshot.0.len(), 1);
             assert_eq!(snapshot.1.len(), usize::from(method != "resources/list"));
             assert_eq!(snapshot.2.len(), usize::from(method != "prompts/list"));

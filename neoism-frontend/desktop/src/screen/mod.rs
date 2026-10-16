@@ -1647,12 +1647,9 @@ impl Screen<'_> {
             ),
         );
 
-        // Mash Up Packs: seed the examples on first run, make runtime
-        // themes resolvable before Renderer::new reads `[neoism] theme`,
-        // and re-apply the active pack's shader slots (the theme slot is
-        // persisted into `[neoism] theme` at apply time, so it needs no
-        // startup handling — and an individually overridden theme wins).
-        crate::mashup::seed_example_packs();
+        // Make runtime themes resolvable before Renderer::new and re-apply the
+        // active pack's shader slots. Bundled packs are seeded by Application
+        // before config watching starts, not while creating a window.
         crate::mashup::sync_custom_ide_themes();
         crate::mashup::publish_active_look(
             &config.appearance.look,

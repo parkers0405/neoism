@@ -107,12 +107,11 @@ pub enum Category {
     Keybinds,
     Agent,
     Platform,
-    Renderer,
     Developer,
 }
 
 impl Category {
-    pub(crate) const ALL: [Category; 11] = [
+    pub(crate) const ALL: [Category; 10] = [
         Category::General,
         Category::Appearance,
         Category::Editor,
@@ -122,7 +121,6 @@ impl Category {
         Category::Keybinds,
         Category::Agent,
         Category::Platform,
-        Category::Renderer,
         Category::Developer,
     ];
 
@@ -137,7 +135,6 @@ impl Category {
             Category::Keybinds => "Keybinds",
             Category::Agent => "Agent",
             Category::Platform => "Platform",
-            Category::Renderer => "Renderer",
             Category::Developer => "Developer",
         }
     }
@@ -153,7 +150,6 @@ impl Category {
             Category::Keybinds => "\u{f11c}",
             Category::Agent => "\u{f544}",
             Category::Platform => "\u{f17a}",
-            Category::Renderer => "\u{f1fc}",
             Category::Developer => "\u{f188}",
         }
     }
@@ -169,8 +165,7 @@ impl Category {
             ConfigCategory::Keybinds => Self::Keybinds,
             ConfigCategory::Agent => Self::Agent,
             ConfigCategory::Platform => Self::Platform,
-            ConfigCategory::Renderer => Self::Renderer,
-            ConfigCategory::Developer => Self::Developer,
+            ConfigCategory::Renderer | ConfigCategory::Developer => Self::Developer,
         }
     }
 }
@@ -785,7 +780,86 @@ impl NeoismSettingsPane {
             .any(|(rect, _)| point_in(*rect, x, y))
     }
 
+    /// The settings overlay owns the cursor, not the editor underneath it.
+    pub fn pointer_kind_at(
+        &self,
+        x: f32,
+        y: f32,
+    ) -> crate::widgets::modal::ModalPointerKind {
+        use crate::widgets::modal::ModalPointerKind::{Default, Pointer, Text};
+        if !self.active {
+            return Default;
+        }
+        if self.open_dropdown.is_some() {
+            return if self.open_dropdown_is_searchable()
+                && point_in(self.dropdown_search_rect, x, y)
+            {
+                Text
+            } else if self
+                .dropdown_rects
+                .iter()
+                .any(|(rect, _, _)| point_in(*rect, x, y))
+            {
+                Pointer
+            } else {
+                Default
+            };
+        }
+        if point_in(self.close_rect, x, y)
+            || (self.compact_detail() && point_in(self.back_rect, x, y))
+            || (!self.compact_root() && point_in(self.edit_json_rect, x, y))
+            || (!self.compact_detail()
+                && self
+                    .category_rects
+                    .iter()
+                    .any(|(rect, _)| point_in(*rect, x, y)))
+        {
+            return Pointer;
+        }
+        if self.compact_root() {
+            return Default;
+        }
+        if point_in(self.search_rect, x, y) {
+            return Text;
+        }
+        if self.is_keybinds()
+            && self
+                .keybind_rects
+                .iter()
+                .chain(&self.keybind_reset_rects)
+                .any(|(rect, _)| point_in(*rect, x, y))
+        {
+            return Pointer;
+        }
+        for (rect, idx) in &self.control_rects {
+            if point_in(*rect, x, y) {
+                return match self.rows.get(*idx) {
+                    Some(row)
+                        if self.editing == Some(*idx)
+                            || row.control == RowControl::Text =>
+                    {
+                        Text
+                    }
+                    Some(row) if row.control != RowControl::Keybinding => Pointer,
+                    _ => Default,
+                };
+            }
+        }
+        Default
+    }
+
+    fn clear_detail_hit_regions(&mut self) {
+        self.control_rects.clear();
+        self.dropdown_rects.clear();
+        self.dropdown_search_rect = [0.0; 4];
+        self.keybind_rects.clear();
+        self.keybind_reset_rects.clear();
+        self.hover_control = None;
+    }
+
     pub fn open(&mut self) {
+        self.clear_detail_hit_regions();
+        self.category_rects.clear();
         self.active = true;
         self.search.clear();
         self.search_focused = false;
@@ -837,6 +911,21 @@ impl NeoismSettingsPane {
         });
         self.open_dropdown = None;
         self.editing = None;
+        self.clear_detail_hit_regions();
+        self.category_rects.clear();
+        if !self.navigation_categories().contains(&self.category) {
+            self.category = Category::General;
+        }
+    }
+
+    pub(crate) fn navigation_categories(&self) -> Vec<Category> {
+        Category::ALL
+            .into_iter()
+            .filter(|category| {
+                *category != Category::Platform
+                    || self.rows.iter().any(|row| row.category == *category)
+            })
+            .collect()
     }
 
     pub fn descriptor_count(&self) -> usize {
@@ -953,6 +1042,9 @@ impl NeoismSettingsPane {
     }
     pub(crate) fn dropdown_scroll(&self) -> usize {
         self.dropdown_scroll
+    }
+    pub(crate) fn clamp_dropdown_scroll(&mut self, max: usize) {
+        self.dropdown_scroll = self.dropdown_scroll.min(max);
     }
     pub(crate) fn dropdown_search_query(&self) -> &str {
         &self.dropdown_search
@@ -1280,6 +1372,8 @@ impl NeoismSettingsPane {
                 self.scroll = 0.0;
                 self.search.clear();
                 self.search_focused = false;
+                self.clear_detail_hit_regions();
+                self.category_rects.clear();
             }
             return swallow();
         }
@@ -1303,8 +1397,11 @@ impl NeoismSettingsPane {
                 self.category = cat;
                 self.scroll = 0.0;
                 self.capturing = None;
+                self.editing = None;
+                self.clear_detail_hit_regions();
                 if self.compact_root() {
                     self.compact_detail = true;
+                    self.category_rects.clear();
                 }
                 return swallow();
             }
@@ -1456,6 +1553,186 @@ mod descriptor_tests {
     }
 
     #[test]
+    fn empty_platform_is_hidden_but_real_platform_settings_remain_accessible() {
+        let mut pane = NeoismSettingsPane::new();
+        assert!(!pane.navigation_categories().contains(&Category::Platform));
+        let mut hidden = descriptor(
+            "platform.hidden",
+            ConfigCategory::Platform,
+            ConfigControl::Toggle,
+            ConfigValueKind::Boolean,
+            json!(false),
+        );
+        hidden.settings_visible = false;
+        pane.set_descriptors(vec![hidden]);
+        assert!(!pane.navigation_categories().contains(&Category::Platform));
+        pane.set_descriptors(vec![descriptor(
+            "platform.option",
+            ConfigCategory::Platform,
+            ConfigControl::Toggle,
+            ConfigValueKind::Boolean,
+            json!(false),
+        )]);
+        assert!(pane.navigation_categories().contains(&Category::Platform));
+    }
+
+    #[test]
+    fn renderer_settings_live_under_developer_and_keep_their_persistence_paths() {
+        let mut pane = NeoismSettingsPane::new();
+        pane.set_descriptors(vec![
+            descriptor(
+                "renderer.option",
+                ConfigCategory::Renderer,
+                ConfigControl::Toggle,
+                ConfigValueKind::Boolean,
+                json!(false),
+            ),
+            descriptor(
+                "developer.option",
+                ConfigCategory::Developer,
+                ConfigControl::Toggle,
+                ConfigValueKind::Boolean,
+                json!(false),
+            ),
+        ]);
+        pane.open();
+        pane.category = Category::Developer;
+        assert_eq!(pane.visible_settings().len(), 2);
+        let idx = pane
+            .rows
+            .iter()
+            .position(|row| row.path == "renderer.option")
+            .unwrap();
+        assert_eq!(pane.row(idx).category, Category::Developer);
+        pane.push_control_rect([10.0, 100.0, 40.0, 24.0], idx);
+        let outcome = pane.pointer_down(20.0, 110.0);
+        assert!(
+            matches!(outcome.action, Some(SettingsAction::Set { key, value }) if key == "renderer.option" && value == json!(true))
+        );
+        pane.search = "renderer.option".into();
+        assert_eq!(pane.visible_settings(), vec![idx]);
+    }
+
+    #[test]
+    fn settings_cursor_distinguishes_clickable_controls_text_and_blank_space() {
+        use crate::widgets::modal::ModalPointerKind::{Default, Pointer, Text};
+        let mut pane = NeoismSettingsPane::new();
+        pane.set_descriptors(vec![
+            descriptor(
+                "general.toggle",
+                ConfigCategory::General,
+                ConfigControl::Toggle,
+                ConfigValueKind::Boolean,
+                json!(false),
+            ),
+            descriptor(
+                "general.select",
+                ConfigCategory::General,
+                ConfigControl::Select,
+                ConfigValueKind::String,
+                json!("value"),
+            ),
+            descriptor(
+                "general.font",
+                ConfigCategory::General,
+                ConfigControl::FontFamily,
+                ConfigValueKind::String,
+                json!(""),
+            ),
+            descriptor(
+                "general.text",
+                ConfigCategory::General,
+                ConfigControl::Text,
+                ConfigValueKind::String,
+                json!(""),
+            ),
+            descriptor(
+                "agent.model",
+                ConfigCategory::Agent,
+                ConfigControl::Text,
+                ConfigValueKind::String,
+                json!(""),
+            ),
+        ]);
+        pane.open();
+        pane.search_rect = [0.0, 0.0, 100.0, 20.0];
+        pane.close_rect = [110.0, 0.0, 20.0, 20.0];
+        pane.edit_json_rect = [140.0, 0.0, 20.0, 20.0];
+        pane.category_rects
+            .push(([0.0, 30.0, 100.0, 25.0], Category::Developer));
+        assert_eq!(pane.pointer_kind_at(10.0, 10.0), Text);
+        assert_eq!(pane.pointer_kind_at(115.0, 10.0), Pointer);
+        assert_eq!(pane.pointer_kind_at(145.0, 10.0), Pointer);
+        assert_eq!(pane.pointer_kind_at(10.0, 40.0), Pointer);
+        assert_eq!(pane.pointer_kind_at(200.0, 40.0), Default);
+        for idx in 0..pane.rows.len() {
+            pane.push_control_rect([idx as f32 * 50.0, 100.0, 40.0, 24.0], idx);
+            let expected = if pane.rows[idx].control == RowControl::Text {
+                Text
+            } else {
+                Pointer
+            };
+            assert_eq!(
+                pane.pointer_kind_at(idx as f32 * 50.0 + 10.0, 110.0),
+                expected
+            );
+        }
+        pane.category = Category::Keybinds;
+        pane.keybind_rects.push(([0.0, 150.0, 80.0, 28.0], 0));
+        pane.keybind_reset_rects
+            .push(([90.0, 150.0, 24.0, 24.0], 0));
+        assert!(pane.text_entry_at(10.0, 160.0));
+        assert_eq!(pane.pointer_kind_at(10.0, 160.0), Pointer);
+        assert_eq!(pane.pointer_kind_at(100.0, 160.0), Pointer);
+        pane.close();
+        assert_eq!(pane.pointer_kind_at(10.0, 10.0), Default);
+    }
+
+    #[test]
+    fn dropdown_cursor_owns_underlying_targets_and_custom_values_use_text() {
+        use crate::widgets::modal::ModalPointerKind::{Default, Pointer, Text};
+        let mut pane = NeoismSettingsPane::new();
+        pane.set_descriptors(vec![descriptor(
+            "appearance.font",
+            ConfigCategory::Appearance,
+            ConfigControl::FontFamily,
+            ConfigValueKind::String,
+            json!(""),
+        )]);
+        pane.open();
+        pane.push_control_rect([0.0, 100.0, 120.0, 28.0], 0);
+        pane.open_dropdown = Some(0);
+        pane.dropdown_search_rect = [0.0, 140.0, 120.0, 24.0];
+        pane.push_dropdown_rect([0.0, 170.0, 120.0, 28.0], 0, "Font".into());
+        assert_eq!(pane.pointer_kind_at(10.0, 150.0), Text);
+        assert_eq!(pane.pointer_kind_at(10.0, 180.0), Pointer);
+        assert_eq!(pane.pointer_kind_at(10.0, 110.0), Default);
+        pane.open_dropdown = None;
+        assert_eq!(pane.pointer_kind_at(10.0, 150.0), Default);
+        assert_eq!(pane.pointer_kind_at(10.0, 180.0), Default);
+        pane.editing = Some(0);
+        assert_eq!(pane.pointer_kind_at(10.0, 110.0), Text);
+    }
+
+    #[test]
+    fn navigation_discards_previous_page_cursor_targets_before_repaint() {
+        use crate::widgets::modal::ModalPointerKind::{Default, Pointer};
+        let mut pane = NeoismSettingsPane::new();
+        pane.open();
+        pane.set_compact_layout(true);
+        pane.category_rects
+            .push(([0.0, 40.0, 180.0, 40.0], Category::Keybinds));
+        assert_eq!(pane.pointer_kind_at(10.0, 50.0), Pointer);
+        assert!(pane.pointer_down(10.0, 50.0).consumed);
+        assert_eq!(pane.pointer_kind_at(10.0, 50.0), Default);
+        pane.back_rect = [0.0, 0.0, 30.0, 30.0];
+        pane.keybind_rects.push(([0.0, 100.0, 180.0, 28.0], 0));
+        assert_eq!(pane.pointer_kind_at(10.0, 110.0), Pointer);
+        assert!(pane.pointer_down(10.0, 10.0).consumed);
+        assert_eq!(pane.pointer_kind_at(10.0, 110.0), Default);
+    }
+
+    #[test]
     fn descriptors_are_owned_visible_rows_and_map_every_category() {
         let mut pane = NeoismSettingsPane::new();
         let descriptors = Category::ALL
@@ -1472,7 +1749,6 @@ mod descriptor_tests {
                     Category::Keybinds => ConfigCategory::Keybinds,
                     Category::Agent => ConfigCategory::Agent,
                     Category::Platform => ConfigCategory::Platform,
-                    Category::Renderer => ConfigCategory::Renderer,
                     Category::Developer => ConfigCategory::Developer,
                 };
                 descriptor(

@@ -453,6 +453,9 @@ pub trait AgentUserInputPane {
     fn running_background_task_count(&self) -> usize;
     fn background_task_details_expanded(&self) -> bool;
     fn active_background_task_summaries(&self) -> Vec<String>;
+    fn register_activity_status_rect(&mut self, rect: [f32; 4]);
+    fn clear_activity_status_rects(&mut self);
+    fn activity_animation_frame(&self) -> Option<crate::primitives::wordmark_animation::AnimationFrame>;
     fn register_background_status_rect(&mut self, rect: [f32; 4]);
     fn clear_background_status_rect(&mut self);
     fn streaming_elapsed_seconds(&self) -> Option<f32>;
@@ -679,6 +682,18 @@ macro_rules! neoism_ui_impl_agent_user_input {
 
             fn active_background_task_summaries(&self) -> Vec<String> {
                 <$pane>::active_background_task_summaries(self)
+            }
+
+            fn register_activity_status_rect(&mut self, rect: [f32; 4]) {
+                <$pane>::register_activity_status_rect(self, rect);
+            }
+
+            fn clear_activity_status_rects(&mut self) {
+                <$pane>::clear_activity_status_rects(self);
+            }
+
+            fn activity_animation_frame(&self) -> Option<$crate::primitives::wordmark_animation::AnimationFrame> {
+                <$pane>::activity_animation_frame(self)
             }
 
             fn register_background_status_rect(&mut self, rect: [f32; 4]) {
@@ -932,6 +947,18 @@ impl AgentUserInputPane for NeoismAgentPane {
 
     fn active_background_task_summaries(&self) -> Vec<String> {
         self.active_background_task_summaries()
+    }
+
+    fn register_activity_status_rect(&mut self, rect: [f32; 4]) {
+        self.register_activity_status_rect(rect);
+    }
+
+    fn clear_activity_status_rects(&mut self) {
+        self.clear_activity_status_rects();
+    }
+
+    fn activity_animation_frame(&self) -> Option<crate::primitives::wordmark_animation::AnimationFrame> {
+        self.activity_animation_frame()
     }
 
     fn register_background_status_rect(&mut self, rect: [f32; 4]) {
@@ -2297,6 +2324,7 @@ pub fn render_streaming_status_row(
     viewport_clip: [f32; 4],
     occlusion_rects: &[[f32; 4]],
 ) {
+    pane.clear_activity_status_rects();
     pane.clear_background_status_rect();
     let [bar_x, bar_y, bar_w, bar_h] = rect;
     if bar_w <= 0.0 || bar_h <= 0.0 {
@@ -2365,6 +2393,7 @@ pub fn render_streaming_status_row(
         clip_rect: Some(text_clip),
         ..DrawOpts::default()
     };
+    let activity_frame = pixel_font.and_then(|_| pane.activity_animation_frame());
     let label_lines =
         wrap_streaming_status_label(sugarloaf, &display_label, bar_w, s, &word_opts);
     // The status row sits immediately above the composer. Anchor the final
@@ -2381,7 +2410,9 @@ pub fn render_streaming_status_row(
     let word_x = bar_x + 3.3 * s;
     let mut cursor_x = word_x + word_drift_x;
     let mut trailing_color = theme.u8(accent);
+    let glyph_count = label_lines.iter().map(|line| line.chars().count()).sum::<usize>().max(1);
     let mut ix = 0usize;
+    let mut animated_hits = Vec::new();
     for (line_ix, line) in label_lines.iter().enumerate() {
         cursor_x = word_x + word_drift_x;
         let lines_above = label_lines.len().saturating_sub(1 + line_ix);
@@ -2418,34 +2449,48 @@ pub fn render_streaming_status_row(
             let glyph = display.encode_utf8(&mut buf);
             let glyph_x = cursor_x + sway_x;
             let glyph_y = line_y - lift_y;
-            let mut far_depth_opts = opts;
-            far_depth_opts.color = theme.u8_alpha(theme.bg, 210.0 / 255.0);
-            crate::primitives::draw_text_with_occlusion(
-                sugarloaf,
-                glyph_x + 3.5 * s,
-                glyph_y + 3.5 * s,
-                glyph,
-                &far_depth_opts,
-                occlusion_rects,
-            );
-            let mut near_depth_opts = opts;
-            near_depth_opts.color = theme.u8_alpha(theme.dim, 240.0 / 255.0);
-            crate::primitives::draw_text_with_occlusion(
-                sugarloaf,
-                glyph_x + 1.75 * s,
-                glyph_y + 1.75 * s,
-                glyph,
-                &near_depth_opts,
-                occlusion_rects,
-            );
-            let glyph_w = crate::primitives::draw_text_with_occlusion(
-                sugarloaf,
-                glyph_x,
-                glyph_y,
-                glyph,
-                &opts,
-                occlusion_rects,
-            );
+            let glyph_w = sugarloaf.text_mut().measure(glyph, &opts);
+            let draw_idle = |sugarloaf: &mut Sugarloaf| {
+                let mut far_depth_opts = opts;
+                far_depth_opts.color = theme.u8_alpha(theme.bg, 210.0 / 255.0);
+                crate::primitives::draw_text_with_occlusion(
+                    sugarloaf, glyph_x + 3.5 * s, glyph_y + 3.5 * s,
+                    glyph, &far_depth_opts, occlusion_rects,
+                );
+                let mut near_depth_opts = opts;
+                near_depth_opts.color = theme.u8_alpha(theme.dim, 240.0 / 255.0);
+                crate::primitives::draw_text_with_occlusion(
+                    sugarloaf, glyph_x + 1.75 * s, glyph_y + 1.75 * s,
+                    glyph, &near_depth_opts, occlusion_rects,
+                );
+                crate::primitives::draw_text_with_occlusion(
+                    sugarloaf, glyph_x, glyph_y, glyph, &opts, occlusion_rects,
+                );
+            };
+            let show_idle = activity_frame.as_ref().is_none_or(|frame| frame.show_original());
+            if show_idle {
+                draw_idle(sugarloaf);
+            }
+            if let Some(frame) = activity_frame.as_ref() {
+                let drawn = frame.draw_glyph(
+                    sugarloaf, display, ix, glyph_count,
+                    [glyph_x, glyph_y, glyph_w, opts.font_size],
+                    color.map(|channel| channel as f32 / 255.0),
+                    text_clip, occlusion_rects, DEPTH, ORDER_TEXT, &mut animated_hits,
+                );
+                for hit in animated_hits.drain(..) {
+                    pane.register_activity_status_rect(hit);
+                }
+                if !drawn && !show_idle {
+                    draw_idle(sugarloaf);
+                }
+            }
+            for hit in crate::primitives::geom::visible_rect_fragments(
+                [glyph_x, glyph_y - 4.0 * s, glyph_w + 3.5 * s, opts.font_size + 8.0 * s],
+                text_clip, occlusion_rects,
+            ) {
+                pane.register_activity_status_rect(hit);
+            }
             cursor_x += glyph_w;
             ix += 1;
         }

@@ -1,27 +1,13 @@
-//! Right-attached side panel for the Neoism agent pane.
+//! Conversation catalog and agent detail-rail state.
 //!
-//! Mirrors the visual shape of `editor/file_tree` (frame + scroll spring
-//! + per-row cursor spring + pixel-accurate wheel handling) but lives
-//! on the agent pane itself rather than on the renderer. That keeps it
-//! scoped to the neoism tab — it only paints while a neoism agent pane
-//! is rendering, and it splits with the agent's own rect instead of the
-//! window-wide left column the file tree owns.
-//!
-//! Two display modes, toggled by whether the agent is mid-conversation:
-//!
-//! - **Home mode** (no messages yet — wordmark + centered input
-//!   visible): show the most recent previous sessions, click to resume.
-//! - **Chat mode** (a conversation has started): show live session info
-//!   — agent / model / thinking, streaming state, usage chip, queued
-//!   prompts, pending permissions.
-//!
-//! State is per-pane; the rendering side reads from this module via
-//! [`NeoismAgentPane::side_panel`].
-//!
-//! See [`crate::editor::file_tree::state::FileTree`] for the structural
-//! analogue — same scroll/cursor primitives, same clamp/scrolloff
-//! pattern.
+//! The left catalog flattens project groups, root conversations and their
+//! live subagent children into one list shared by painting, keyboard navigation
+//! and pointer hits. The right rail retains informational session sections.
+//! Branch lifecycle state stays per conversation family; catalog projections
+//! preserve its completion grace, permission state and viewed-child retention.
 
+#[cfg(test)]
+mod catalog_subagent_tests;
 #[cfg(test)]
 mod dashboard_directory_tests;
 
@@ -410,13 +396,17 @@ pub struct NeoismAgentSessionEntry {
     pub directory: Option<String>,
     pub time_label: String,
     pub depth: usize,
+    /// Owning conversation for a child projected into the left catalog.
+    pub branch_root_id: Option<String>,
+    pub branch_status: Option<BranchStatus>,
+    pub branch_activity_label: Option<String>,
     pub source: ConversationSource,
     pub source_key: Option<String>,
     /// Present only for provider-native previews, never for stored roots.
     pub external_preview: Option<ExternalSessionPreview>,
     pub agent_kind: Option<AgentKind>,
     pub runtime_status: Option<String>,
-    /// Server-owned whole-family authority, independent of branch status.
+    /// Server-owned root activity/attention, independent of child foreground work.
     pub catalog_activity: Option<neoism_agent_core::CatalogActivity>,
     /// Raw `time.updated` unix-ms, used to order projects and their chats.
     pub updated_ms: u64,
@@ -461,6 +451,9 @@ impl NeoismAgentSessionEntry {
             directory: None,
             time_label: time_label.into(),
             depth: 0,
+            branch_root_id: None,
+            branch_status: None,
+            branch_activity_label: None,
             source: ConversationSource::Neoism,
             source_key: None,
             external_preview: None,
@@ -483,6 +476,9 @@ impl NeoismAgentSessionEntry {
             directory: None,
             time_label: String::new(),
             depth: 0,
+            branch_root_id: None,
+            branch_status: None,
+            branch_activity_label: None,
             source: ConversationSource::Neoism,
             source_key: None,
             external_preview: None,
@@ -506,6 +502,9 @@ impl NeoismAgentSessionEntry {
             directory: None,
             time_label: String::new(),
             depth: 0,
+            branch_root_id: None,
+            branch_status: None,
+            branch_activity_label: None,
             source: ConversationSource::Neoism,
             source_key: None,
             external_preview: None,
@@ -1198,6 +1197,8 @@ pub struct NeoismAgentSidePanel {
     viewed_session_id: Option<String>,
     /// None means legacy/unbound; Some(None) is authoritative no-chat context.
     catalog_viewed_root: Option<Option<String>>,
+    catalog_viewed_session: Option<Option<String>>,
+    catalog_subagents: HashMap<String, Vec<NeoismAgentSessionEntry>>,
     detail_family_root: Option<String>,
     /// Keep the viewed child as a return-navigation affordance, even when
     /// opening a historical completion. Cleared when navigating away.
@@ -1324,6 +1325,8 @@ impl Default for NeoismAgentSidePanel {
             subagents: Vec::new(),
             viewed_session_id: None,
             catalog_viewed_root: None,
+            catalog_viewed_session: None,
+            catalog_subagents: HashMap::new(),
             detail_family_root: None,
             retained_viewed_subagent_id: None,
             subagents_loaded: false,
@@ -1984,6 +1987,7 @@ impl NeoismAgentSidePanel {
         self.selected_cursor_rect = None;
         self.cursor_spring.reset();
         self.all_sessions.clear();
+        self.catalog_subagents.clear();
         self.external_sessions.clear();
         self.external_errors.clear();
         self.external_importing_key = None;
@@ -2040,6 +2044,107 @@ impl NeoismAgentSidePanel {
         &self.subagents
     }
 
+    /// Project the existing branch lifecycle into the workspace's selectable tree.
+    pub fn sync_catalog_subagents_from(&mut self, source: &Self, root: Option<&str>) {
+        let Some(root) = root.filter(|root| !root.is_empty()) else {
+            return;
+        };
+        if source.subagents.first().map(|entry| entry.id.as_str()) != Some(root) {
+            return;
+        }
+        let rows = source.catalog_subagent_rows(root);
+        self.set_catalog_subagent_rows(root, rows);
+    }
+
+    /// A single-pane host subscribes to one family at a time. Discard older
+    /// projections when it changes families rather than retaining stale spinners.
+    pub fn sync_catalog_subagents(&mut self, root: Option<&str>) {
+        let root = root.filter(|root| !root.is_empty());
+        let roots = root.into_iter().map(str::to_owned).collect();
+        self.retain_catalog_subagent_families(&roots);
+        let Some(root) = root else {
+            return;
+        };
+        if self.subagents.first().map(|entry| entry.id.as_str()) != Some(root) {
+            return;
+        }
+        let rows = self.catalog_subagent_rows(root);
+        self.set_catalog_subagent_rows(root, rows);
+    }
+
+    fn catalog_subagent_rows(&self, root: &str) -> Vec<NeoismAgentSessionEntry> {
+        self.subagents
+            .iter()
+            .skip(1)
+            .filter(|entry| !self.subagent_hidden(entry))
+            .map(|entry| {
+                let mut row = entry.clone();
+                let activity = self.branch_activity(&row.id);
+                row.branch_root_id = Some(root.to_owned());
+                row.branch_status = row
+                    .runtime_status
+                    .as_deref()
+                    .and_then(BranchStatus::from_runtime_status)
+                    .or_else(|| activity.map(|activity| activity.status));
+                row.branch_activity_label =
+                    activity.and_then(|activity| activity.current_tool.clone());
+                row.catalog_activity = None;
+                row
+            })
+            .collect()
+    }
+
+    fn set_catalog_subagent_rows(
+        &mut self,
+        root: &str,
+        rows: Vec<NeoismAgentSessionEntry>,
+    ) {
+        if self.catalog_subagents.get(root) == Some(&rows)
+            || (rows.is_empty() && !self.catalog_subagents.contains_key(root))
+        {
+            return;
+        }
+        let selected = self
+            .selected_catalog_row()
+            .map(|row| row.stable_identity().to_owned());
+        let anchor = self.session_viewport_anchor();
+        if rows.is_empty() {
+            self.catalog_subagents.remove(root);
+        } else {
+            self.catalog_subagents.insert(root.to_owned(), rows);
+        }
+        self.rebuild_session_display();
+        self.restore_selected_session(selected.as_deref());
+        self.restore_session_viewport_anchor(anchor);
+    }
+
+    /// Forget projections whose owning pane has closed, so stale running
+    /// snapshots cannot keep animating without a live family subscription.
+    pub fn retain_catalog_subagent_families(&mut self, roots: &HashSet<String>) -> bool {
+        if self
+            .catalog_subagents
+            .keys()
+            .all(|root| roots.contains(root))
+        {
+            return false;
+        }
+        let selected = self
+            .selected_catalog_row()
+            .map(|row| row.stable_identity().to_owned());
+        let anchor = self.session_viewport_anchor();
+        self.catalog_subagents
+            .retain(|root, _| roots.contains(root));
+        self.rebuild_session_display();
+        self.restore_selected_session(selected.as_deref());
+        self.restore_session_viewport_anchor(anchor);
+        true
+    }
+
+    pub fn set_catalog_viewed_session(&mut self, session: Option<&str>) {
+        self.catalog_viewed_session =
+            Some(session.filter(|id| !id.is_empty()).map(str::to_owned));
+    }
+
     /// Bind the catalog to the focused buffer's owning root. Explicit None
     /// clears passive paint; it never falls back to cached pane/session data.
     pub fn set_catalog_viewed_root(&mut self, root: Option<&str>) {
@@ -2057,6 +2162,16 @@ impl NeoismAgentSidePanel {
         }
     }
 
+    pub fn catalog_viewed_session<'a>(
+        &'a self,
+        legacy_root: Option<&'a str>,
+    ) -> Option<&'a str> {
+        match &self.catalog_viewed_session {
+            Some(viewed) => viewed.as_deref(),
+            None => self.catalog_viewed_root(legacy_root),
+        }
+    }
+
     /// Paint policy only: never changes the keyboard candidate or viewport.
     pub fn catalog_highlight_index(&self, legacy_root: Option<&str>) -> Option<usize> {
         if self.focused {
@@ -2066,10 +2181,10 @@ impl NeoismAgentSidePanel {
                 && self.selected < self.sessions.len())
             .then_some(self.selected);
         }
-        let root = self.catalog_viewed_root(legacy_root)?;
+        let viewed = self.catalog_viewed_session(legacy_root)?;
         self.sessions
             .iter()
-            .position(|row| !row.is_header && !row.is_excerpt && row.id == root)
+            .position(|row| !row.is_header && !row.is_excerpt && row.id == viewed)
     }
 
     pub fn detail_highlight_index(&self, viewed: Option<&str>) -> Option<usize> {
@@ -2259,18 +2374,20 @@ impl NeoismAgentSidePanel {
             ix += 1;
             keep
         });
-        // Keep the cursor on the same logical branch; clamp if it was
-        // the row that just got hidden.
-        if let Some(index) = selected_id
-            .as_deref()
-            .and_then(|id| self.subagents.iter().position(|entry| entry.id == id))
-        {
-            self.selected = index;
-        } else if self.selected >= self.subagents.len() {
-            self.selected = self.subagents.len().saturating_sub(1);
-        }
-        if self.scroll_top >= self.subagents.len() {
-            self.scroll_top = self.subagents.len().saturating_sub(1);
+        // In catalog mode this cursor belongs to the flattened conversation
+        // tree, not the lifecycle roster being pruned.
+        if matches!(self.mode, SidePanelMode::Subagents) {
+            if let Some(index) = selected_id
+                .as_deref()
+                .and_then(|id| self.subagents.iter().position(|entry| entry.id == id))
+            {
+                self.selected = index;
+            } else if self.selected >= self.subagents.len() {
+                self.selected = self.subagents.len().saturating_sub(1);
+            }
+            if self.scroll_top >= self.subagents.len() {
+                self.scroll_top = self.subagents.len().saturating_sub(1);
+            }
         }
         true
     }
@@ -2288,11 +2405,8 @@ impl NeoismAgentSidePanel {
         }
     }
 
-    /// Whether Alt+Right should claim focus on this panel. Home mode
-    /// is focusable whenever there's any session row. Chat mode is
-    /// focusable only when the Branches section actually renders —
-    /// i.e. there's at least one real child below the implicit "main
-    /// session" entry the picker prepends.
+    /// Only the left catalog owns selectable conversation rows. The detail
+    /// rail contains informational sections and no longer takes row focus.
     pub fn focusable(&self) -> bool {
         // A hidden panel is never focusable, whatever rows it last held.
         if self.user_hidden {
@@ -2302,7 +2416,7 @@ impl NeoismAgentSidePanel {
             SidePanelMode::Sessions => {
                 self.new_chat_rect.is_some() || !self.sessions.is_empty()
             }
-            SidePanelMode::Subagents => self.subagents.len() > 1,
+            SidePanelMode::Subagents => false,
         }
     }
 
@@ -2599,6 +2713,10 @@ impl NeoismAgentSidePanel {
     pub fn remove_session(&mut self, session_id: &str) {
         self.deleted_session_ids.insert(session_id.to_owned());
         self.session_activity_overrides.remove(session_id);
+        self.catalog_subagents.remove(session_id);
+        for children in self.catalog_subagents.values_mut() {
+            children.retain(|entry| entry.id != session_id);
+        }
         let selected_id = self
             .selected_catalog_row()
             .filter(|entry| entry.id != session_id)
@@ -3321,7 +3439,25 @@ impl NeoismAgentSidePanel {
                 }
             }
         }
-        self.sessions = out;
+        // The same flattened rows drive painting, pointer hits and keyboard stops.
+        let mut tree = Vec::with_capacity(out.len());
+        for entry in out {
+            let children = (!entry.is_header && !entry.is_excerpt)
+                .then(|| self.catalog_subagents.get(&entry.id))
+                .flatten();
+            let directory = entry.directory.clone();
+            let depth = entry.depth;
+            tree.push(entry);
+            if let Some(children) = children {
+                for child in children {
+                    let mut child = child.clone();
+                    child.directory.clone_from(&directory);
+                    child.depth = depth + child.depth.max(1);
+                    tree.push(child);
+                }
+            }
+        }
+        self.sessions = tree;
 
         // Selection / scroll indices only refer to the sessions list in
         // home mode; in chat (subagent) mode they belong to `subagents`,

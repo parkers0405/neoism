@@ -530,6 +530,16 @@ impl ChromeBridge {
         self.chrome.take_conversation_open()
     }
 
+    /// Structured workspace route; the legacy ID-only drain remains available
+    /// for older web bundles. Both consume the same single pending intent.
+    pub fn drain_conversation_open_intent(&mut self) -> Option<String> {
+        self.chrome
+            .take_conversation_open_with_family()
+            .map(|(id, root)| {
+                serde_json::json!({ "sessionId": id, "rootSessionId": root }).to_string()
+            })
+    }
+
     pub fn drain_agent_tab_opens(&mut self) -> u32 {
         let count = self.pending_agent_tab_opens;
         self.pending_agent_tab_opens = 0;

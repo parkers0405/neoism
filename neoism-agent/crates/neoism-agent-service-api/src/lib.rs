@@ -1,3 +1,4 @@
+pub mod browser_pages;
 pub mod server_registry;
 pub mod fast_hosting;
 

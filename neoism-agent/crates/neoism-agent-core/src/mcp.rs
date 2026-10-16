@@ -97,7 +97,7 @@ pub struct McpOAuthConfig {
     pub registration_url: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum McpStatus {
     Connected,
@@ -117,6 +117,11 @@ pub enum McpConfigScope {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpCatalogEntry {
+    /// Optional presentation metadata; never contains configuration secrets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_info: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brand: Option<String>,
     pub status: McpStatus,
     pub enabled: bool,
     pub runtime_connected: bool,

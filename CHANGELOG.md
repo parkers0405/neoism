@@ -2,6 +2,19 @@
 
 All notable user-facing changes to Neoism are documented here.
 
+## [0.7.127] - 2026-10-16
+
+### MCP authorization, subagent navigation, and rendering
+
+- Adds inline cancellable MCP browser authorization with scope-preserving callbacks, explicit connection retry, and status that distinguishes authorization from an established runtime connection. Coalesces visible catalog refreshes and invalidates stale runtime status.
+- Adds bounded MCP presentation metadata and inline raster icons, bundled service artwork, and consistent presentation through tool results, history, and remote timelines. Includes artwork/font provenance and license notices.
+- Adds selectable connected-subagent catalog rows with exact child identity and owning-project navigation; parent foreground activity no longer mirrors child execution incorrectly.
+- Improves dialog wrapping, clickable links, picker actions, icon cropping, settings layout/navigation, and cursor affordances.
+- Adds self-contained branded invite/OAuth handoff pages with embedded Geist font and replayable wordmark animation. Adds analytic antialiased ring rendering across CPU, WebGPU, Vulkan, and Metal backends.
+- Improves browser conversation-family handling and hover ownership. Uses measured terminal dimensions for initial PTY creation instead of the placeholder size.
+
+This is a stable production release, available through plain `neoism update` after all platform builds and packaging checks pass. Existing first-terminal directory following, trusted-user hosting boundaries, and Servo/CEF worker exclusion are preserved.
+
 ## [0.7.126] - 2026-10-15
 
 ### Project conversations, hosting, and native interaction

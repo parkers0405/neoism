@@ -291,6 +291,12 @@ impl Application<'_> {
                     }
 
                     if route.window.screen.handle_settings_click() {
+                        let cursor = route
+                            .window
+                            .screen
+                            .handle_settings_hover()
+                            .unwrap_or(CursorIcon::Default);
+                        route.window.set_cursor(cursor);
                         route.request_redraw();
                         return;
                     }
@@ -558,6 +564,14 @@ impl Application<'_> {
                     });
                     route.request_redraw();
                     return;
+                }
+
+                if !route.window.screen.renderer.modal.is_active() {
+                    if let Some(cursor) = route.window.screen.handle_settings_hover() {
+                        route.window.set_cursor(cursor);
+                        route.request_redraw();
+                        return;
+                    }
                 }
 
                 // 5D-drag: finish a Workspaces-modal drag. A drop on a
@@ -1020,6 +1034,12 @@ impl Application<'_> {
                     neoism_ui::widgets::modal::ModalPointerKind::Text => CursorIcon::Text,
                 },
             );
+            return;
+        }
+
+        if let Some(cursor) = route.window.screen.handle_settings_hover() {
+            route.window.set_cursor(cursor);
+            route.request_redraw();
             return;
         }
 

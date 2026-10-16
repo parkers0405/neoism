@@ -252,6 +252,7 @@ pub trait AgentToolMessage {
     fn text(&self) -> &str;
     fn status(&self) -> &str;
     fn tool(&self) -> &str;
+    fn mcp(&self) -> Option<&crate::panels::agent_pane::mcp_icon::McpToolPresentation> { None }
     fn detail(&self) -> &str;
     fn composition_children(&self) -> &[NeoismAgentMessage] { &[] }
     fn composition_child(&self) -> bool { false }
@@ -354,6 +355,8 @@ impl AgentToolMessage for NeoismAgentMessage {
     fn detail(&self) -> &str {
         &self.detail
     }
+
+    fn mcp(&self) -> Option<&crate::panels::agent_pane::mcp_icon::McpToolPresentation> { self.mcp.as_ref() }
 
     fn composition_children(&self) -> &[NeoismAgentMessage] { &self.composition_children }
     fn composition_child(&self) -> bool { self.composition_child }
@@ -468,6 +471,8 @@ macro_rules! neoism_ui_impl_agent_tool_message {
             fn detail(&self) -> &str {
                 &self.detail
             }
+
+            fn mcp(&self) -> Option<&$crate::panels::agent_pane::mcp_icon::McpToolPresentation> { self.mcp.as_ref() }
 
             fn composition_children(&self) -> &[$crate::panels::agent_pane::state::NeoismAgentMessage] { &self.composition_children }
             fn composition_child(&self) -> bool { self.composition_child }

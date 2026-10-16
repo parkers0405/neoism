@@ -27,6 +27,15 @@ fn surface_viewport_is_stale(
 }
 
 #[inline]
+fn surface_bottom_inset(
+    viewport: neoism_ui::layout::Rect,
+    content: neoism_ui::layout::Rect,
+) -> f32 {
+    // Both rectangles must belong to the same solve, including before first layout.
+    (viewport.y + viewport.h - content.y - content.h).max(0.0)
+}
+
+#[inline]
 fn pane_content_rect(slot_rect: [f32; 4], chrome_height: f32) -> [f32; 4] {
     [
         slot_rect[0],
@@ -304,6 +313,14 @@ impl Screen<'_> {
         let _ = previous_minimap_enabled;
 
         let scale = self.sugarloaf.scale_factor();
+        let window_size = self.sugarloaf.window_size();
+        // Renderer::new has an empty viewport. Resolve it before computing
+        // margins, or the entire window becomes bottom padding and PTYs shrink
+        // to 1x2 during reload (which can crash Bash's Readline).
+        self.renderer.relayout_surfaces(
+            window_size.width as f32 / scale,
+            window_size.height as f32 / scale,
+        );
         let chrome_offset = self.chrome_x_offset();
         let chrome_margins = self.workspace_chrome_margins();
         // Keep the parse-time color-query palette in sync with the
@@ -759,11 +776,10 @@ impl Screen<'_> {
             buffer_tabs_height: self.renderer.buffer_tabs_height(),
             breadcrumbs_height: self.renderer.breadcrumbs_height(),
             status_line_height: self.renderer.status_line_height()
-                + (self.sugarloaf.window_size().height as f32
-                    / self.sugarloaf.scale_factor()
-                    - self.renderer.surface_layout.content.y
-                    - self.renderer.surface_layout.content.h)
-                    .max(0.0),
+                + surface_bottom_inset(
+                    self.renderer.surface_layout.viewport,
+                    self.renderer.surface_layout.content,
+                ),
             terminal_top_padding: terminal_top_padding_for_chrome_scale(
                 self.renderer.chrome_scale(),
             ),
@@ -1310,8 +1326,48 @@ impl Screen<'_> {
 mod launch_layout_tests {
     use super::{
         chrome_layout_repair_required, pane_content_rect, reload_font_size,
-        surface_viewport_is_stale, top_aligned_pane_content_rect, ChromeLayoutSignature,
+        surface_bottom_inset, surface_viewport_is_stale, top_aligned_pane_content_rect,
+        ChromeLayoutSignature,
     };
+
+    #[test]
+    fn config_reload_empty_surface_does_not_consume_terminal_height() {
+        use neoism_backend::config::layout::Margin;
+        use neoism_backend::sugarloaf::layout::TextDimensions;
+        use neoism_ui::layout::Rect;
+
+        let empty = Rect::new(0.0, 0.0, 0.0, 0.0);
+        let bottom = surface_bottom_inset(empty, empty);
+        assert_eq!(bottom, 0.0);
+        let dimensions = crate::layout::dimensions::ContextDimension::build(
+            760.0,
+            457.0,
+            TextDimensions {
+                width: 10.0,
+                height: 20.0,
+                scale: 1.0,
+                ..Default::default()
+            },
+            1.0,
+            Margin::new(26.0, 0.0, 24.0 + bottom, 0.0),
+        );
+        assert_eq!((dimensions.columns, dimensions.lines), (76, 20));
+    }
+
+    #[test]
+    fn config_reload_bottom_inset_uses_the_resolved_viewport() {
+        use neoism_ui::layout::Rect;
+
+        let viewport = Rect::new(0.0, 0.0, 800.0, 600.0);
+        assert_eq!(
+            surface_bottom_inset(viewport, Rect::new(0.0, 26.0, 800.0, 574.0)),
+            0.0,
+        );
+        assert_eq!(
+            surface_bottom_inset(viewport, Rect::new(0.0, 0.0, 800.0, 540.0)),
+            60.0,
+        );
+    }
 
     #[test]
     fn config_reload_preserves_zoom_when_configured_size_is_unchanged() {

@@ -601,6 +601,7 @@ pub(crate) async fn execute_mcp_tool_by_runtime_id(
                 "client": tool.client,
                 "tool": tool.name,
                 "runtimeId": runtime_id,
+                "presentation": mcp::tool_presentation_metadata(directory, &tool.client, snapshot),
                 "result": result,
             }
         })),

@@ -405,7 +405,7 @@ pub struct Chrome<A: Send + Copy + 'static = ()> {
     streaming_text_animation: bool,
     splash_auto_animate: bool,
     conversations_resize: Option<(f32, f32)>,
-    pending_conversation_open: Option<String>,
+    pending_conversation_open: Option<(String, String)>,
     pending_conversation_new:
         Option<crate::panels::agent_pane::state::side_panel::ConversationSource>,
     pub command_composer: CommandComposer,

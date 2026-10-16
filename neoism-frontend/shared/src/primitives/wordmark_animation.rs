@@ -1,4 +1,5 @@
-//! Dependency-free vector port of `neoism-web/src/pixel-wordmark.ts`.
+//! Vector port of `neoism-web/src/pixel-wordmark.ts`, plus CPU-rasterized
+//! bundled Press Start 2P glyphs sharing the same fifteen effect algorithms.
 //!
 //! Hosts own redraw scheduling, visibility, and the unchanged idle artwork.
 //! Rectangles (including clip/occlusions) are `[x, y, width, height]` in logical
@@ -6,6 +7,7 @@
 //! hover/shimmer transform, not a tight glyph bounding box.
 //! During `show_original()` draw idle first, then this fading vector overlay.
 
+use std::cell::RefCell;
 use std::f32::consts::{PI, TAU};
 use std::sync::atomic::{AtomicU32, Ordering};
 use sugarloaf::Sugarloaf;
@@ -195,6 +197,7 @@ struct Tile {
     row: usize,
     column: usize,
     letter: usize,
+    phase: f32,
     seed: f32,
 }
 impl Tile {
@@ -206,6 +209,7 @@ impl Tile {
             row,
             column,
             letter,
+            phase: letter as f32,
             seed: ((row * 37 + column * 19 + letter * 13) % 101) as f32 / 101.0,
         }
     }
@@ -309,7 +313,7 @@ fn sample(effect: Effect, progress: f32, t: Tile) -> Sample {
             s.opacity = reveal(t.across * 0.25, 0.25);
         }
         Effect::Fireworks => {
-            let flight = clamp((p - t.letter as f32 * 0.04) / 0.7);
+            let flight = clamp((p - t.phase * 0.04) / 0.7);
             let launch = ease(flight / 0.4);
             let travel = launch + (flight * PI).sin() * 0.4;
             s.dx = (3.0 * GRID - t.x) * (1.0 - travel);
@@ -337,14 +341,14 @@ fn sample(effect: Effect, progress: f32, t: Tile) -> Sample {
             s.opacity = 1.0 - if (beat + t.row) % 3 == 0 { 0.55 } else { 0.1 } * envelope;
         }
         Effect::Rise => {
-            let lift = reveal(t.letter as f32 * 0.055 + (6 - t.row) as f32 * 0.04, 0.36);
+            let lift = reveal(t.phase * 0.055 + (6 - t.row) as f32 * 0.04, 0.36);
             s.dy = (6 - t.row) as f32 * GRID * (1.0 - lift);
             s.sy = lift;
             s.opacity = lift;
         }
         Effect::Checkerboard => {
             let parity = (t.column + t.row) % 2;
-            let flip = reveal(parity as f32 * 0.38 + t.letter as f32 * 0.025, 0.32);
+            let flip = reveal(parity as f32 * 0.38 + t.phase * 0.025, 0.32);
             s.sx = ((1.0 - flip) * PI / 2.0).cos().abs();
             s.sy = 0.2 + flip * 0.8;
             s.rotation = (1.0 - flip) * if parity == 1 { 90.0 } else { -90.0 };
@@ -373,6 +377,9 @@ struct Spark {
     opacity: f32,
 }
 fn spark(effect: Effect, progress: f32, letter: usize, index: usize) -> Spark {
+    spark_at(effect, progress, letter as f32, index)
+}
+fn spark_at(effect: Effect, progress: f32, letter: f32, index: usize) -> Spark {
     let p = clamp(progress);
     let seed = index as f32 * 0.43 + letter as f32 * 0.07;
     let mut s = Spark {
@@ -418,6 +425,112 @@ fn spark(effect: Effect, progress: f32, letter: usize, index: usize) -> Spark {
     s
 }
 
+// Rasterize at the face's native eight-pixel design grid, not at UI size.
+// This preserves counters, bearings, accents and descenders without GPU access.
+// Each cached glyph has at most 32*32 cells; cache includes unsupported chars.
+#[derive(Clone, Debug)]
+struct GlyphMask {
+    cells: Vec<(i32, i32, f32)>, // baseline-relative x/y and coverage
+    ascent: f32,
+    descent: f32,
+}
+
+fn raster_glyph(character: char) -> Option<GlyphMask> {
+    use sugarloaf::swash::{
+        scale::{Render, ScaleContext, Source},
+        zeno::Format,
+        FontRef,
+    };
+    let font = FontRef::from_index(sugarloaf::font::constants::FONT_PRESS_START_2P, 0)?;
+    let id = font.charmap().map(character);
+    if id == 0 {
+        return None;
+    }
+    let metrics = font.metrics(&[]).scale(8.0);
+    let mut mask = GlyphMask {
+        cells: Vec::new(),
+        ascent: metrics.ascent,
+        descent: metrics.descent.abs(),
+    };
+    // Spaces are supported, intentionally blank glyphs; controls are not text.
+    if character.is_control() {
+        return None;
+    }
+    if character.is_whitespace() {
+        return Some(mask);
+    }
+    let mut context = ScaleContext::new();
+    let mut scaler = context.builder(font).size(8.0).hint(false).build();
+    let image = Render::new(&[Source::Outline])
+        .format(Format::Alpha)
+        .render(&mut scaler, id)?;
+    let p = image.placement;
+    if p.width > 32 || p.height > 32 {
+        return None;
+    }
+    for y in 0..p.height {
+        for x in 0..p.width {
+            let alpha = image.data[(y * p.width + x) as usize];
+            if alpha != 0 {
+                mask.cells.push((
+                    p.left + x as i32,
+                    -p.top + y as i32,
+                    alpha as f32 / 255.0,
+                ));
+            }
+        }
+    }
+    Some(mask)
+}
+
+thread_local! {
+    static GLYPHS: RefCell<lru::LruCache<char, Option<std::sync::Arc<GlyphMask>>>> =
+        RefCell::new(lru::LruCache::new(std::num::NonZeroUsize::new(256).unwrap()));
+}
+
+fn glyph_mask(character: char) -> Option<std::sync::Arc<GlyphMask>> {
+    GLYPHS.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        cache
+            .get_or_insert(character, || {
+                raster_glyph(character).map(std::sync::Arc::new)
+            })
+            .clone()
+    })
+}
+
+// Keep effect rows/columns in their original seven-cell domain, but retain
+// actual font geometry independently. No arithmetic on unbounded indices.
+fn glyph_tile(x: i32, y: i32, index: usize, count: usize) -> Tile {
+    let mut tile = Tile::new(
+        index % 6,
+        (y + 8).clamp(0, 6) as usize,
+        x.clamp(0, 6) as usize,
+    );
+    tile.x = x as f32 * GRID;
+    tile.y = y as f32 * GRID;
+    tile.phase = if count <= 1 {
+        0.0
+    } else {
+        (index.min(count - 1) as f64 / (count - 1) as f64 * 5.0) as f32
+    };
+    tile.across = ((index.min(count.saturating_sub(1)) as f64
+        + (x as f64 / 8.0).clamp(0.0, 1.0))
+        / count.max(1) as f64) as f32;
+    tile
+}
+
+fn map_glyph_point(p: Point, layer: [f32; 3], rect: [f32; 4], mask: &GlyphMask) -> Point {
+    let scale = rect[3] / 8.0;
+    // Same centred nominal line box as Sugarloaf DrawOpts. Logical rounding
+    // matches scale=1; device-pixel snapping can differ by <= one device pixel.
+    let baseline = ((rect[3] + (mask.ascent - mask.descent) * scale) * 0.5).round();
+    [
+        rect[0] + (p[0] + layer[0]) / GRID * scale,
+        rect[1] + baseline + (p[1] + layer[1]) / GRID * scale,
+    ]
+}
+
 type Point = [f32; 2];
 
 /// The PNG was rasterized at 0.8 pixels/SVG unit and integer-trimmed:
@@ -457,6 +570,101 @@ fn tile_corners(t: Tile, s: Sample) -> [Point; 4] {
 }
 
 impl AnimationFrame {
+    /// Animate an actual bundled Press Start 2P glyph; false requests normal-text
+    /// fallback (missing character or invalid inputs). A supported blank returns
+    /// true even though it emits nothing. This does not perform font fallback.
+    ///
+    /// `rect = [glyph_x, glyph_y, glyph_advance, font_size]` uses the same logical
+    /// nominal-box top-left as Sugarloaf `DrawOpts`, NOT an ink bounding box or
+    /// baseline origin. Ink keeps the TTF bearings and font-size aspect ratio;
+    /// advance is layout information, not a horizontal stretch. Native 8px mask
+    /// scaling is intentionally pixelated, not size-dependent hinted text.
+    /// `glyph_count` includes spaces; index must be less than count. All timings
+    /// span that count, including indices > 6. Parent owns layout and redraws.
+    ///
+    /// Three layers retain the wordmark's depth proportions in font pixel units.
+    /// At progress=1 foreground is the exact cached mask; in the settle tail draw
+    /// ordinary text first (`show_original`), then this fading depth overlay.
+    /// Clip/occlusions constrain travelling cells, not the glyph's advance box.
+    /// Appends logical `[x, y, width, height]` bounds of actually emitted visible
+    /// cell/spark triangles to `hit_rects` (does not clear it). Bounds are kept
+    /// separate across clip/occlusion cuts, including displaced shadow layers;
+    /// transparent, degenerate, unsupported or fully occluded glyphs add none.
+    /// Parent should register these in addition to its idle label hit area.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_glyph(
+        &self,
+        sugarloaf: &mut Sugarloaf,
+        character: char,
+        glyph_index: usize,
+        glyph_count: usize,
+        rect: [f32; 4],
+        color: [f32; 4],
+        clip: [f32; 4],
+        occlusions: &[[f32; 4]],
+        depth: f32,
+        order: u8,
+        hit_rects: &mut Vec<[f32; 4]>,
+    ) -> bool {
+        if glyph_index >= glyph_count
+            || !valid_rect(rect)
+            || !valid_rect(clip)
+            || !color.iter().all(|v| v.is_finite())
+            || !depth.is_finite()
+            || !self.progress.is_finite()
+            || !self.tail_opacity.is_finite()
+        {
+            return false;
+        }
+        let Some(mask) = glyph_mask(character) else {
+            return false;
+        };
+        if mask.cells.is_empty() {
+            return true;
+        }
+        let mut paint = |corners: [Point; 4], alpha: f32, layer: [f32; 3]| {
+            let mut rgba = color;
+            rgba[3] =
+                clamp(color[3]) * clamp(alpha) * layer[2] * clamp(self.tail_opacity);
+            if rgba[3] <= 0.0 {
+                return;
+            }
+            let mapped = corners.map(|p| map_glyph_point(p, layer, rect, &mask));
+            if mapped.iter().flatten().all(|v| v.is_finite()) {
+                paint_polygons(
+                    sugarloaf,
+                    mapped,
+                    rgba,
+                    clip,
+                    occlusions,
+                    depth,
+                    order,
+                    Some(&mut *hit_rects),
+                );
+            }
+        };
+        for (layer_index, layer) in LAYERS.into_iter().enumerate() {
+            for &(x, y, coverage) in &mask.cells {
+                let tile = glyph_tile(x, y, glyph_index, glyph_count);
+                let s = sample(self.effect, self.progress, tile);
+                paint(tile_corners(tile, s), s.opacity * coverage, layer);
+            }
+            if layer_index == 2 {
+                let phase = glyph_tile(0, 0, glyph_index, glyph_count).phase;
+                for index in 0..2 {
+                    let s = spark_at(self.effect, self.progress, phase, index);
+                    let [x, y, w, h] = s.rect;
+                    paint(
+                        [[x, y], [x + w, y], [x + w, y + h], [x, y + h]],
+                        s.opacity,
+                        layer,
+                    );
+                }
+            }
+        }
+        true
+    }
+
     pub fn show_original(&self) -> bool {
         self.tail
     }
@@ -497,18 +705,9 @@ impl AnimationFrame {
             if !mapped.iter().flatten().all(|v| v.is_finite()) {
                 return;
             }
-            for poly in visible_polygons(&mapped, clip, occlusions) {
-                for i in 1..poly.len().saturating_sub(1) {
-                    let (a, b, c) = (poly[0], poly[i], poly[i + 1]);
-                    let area =
-                        (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
-                    if area.is_finite() && area.abs() > 0.000001 {
-                        sugarloaf.triangle_ordered(
-                            a[0], a[1], b[0], b[1], c[0], c[1], depth, rgba, order,
-                        );
-                    }
-                }
-            }
+            paint_polygons(
+                sugarloaf, mapped, rgba, clip, occlusions, depth, order, None,
+            );
         };
         for (layer_index, layer) in LAYERS.into_iter().enumerate() {
             for (row, mask) in MASKS[letter_index].iter().enumerate() {
@@ -534,6 +733,49 @@ impl AnimationFrame {
             }
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_polygons(
+    sugarloaf: &mut Sugarloaf,
+    mapped: [Point; 4],
+    rgba: [f32; 4],
+    clip: [f32; 4],
+    occlusions: &[[f32; 4]],
+    depth: f32,
+    order: u8,
+    mut hit_rects: Option<&mut Vec<[f32; 4]>>,
+) {
+    for poly in visible_polygons(&mapped, clip, occlusions) {
+        for i in 1..poly.len().saturating_sub(1) {
+            let (a, b, c) = (poly[0], poly[i], poly[i + 1]);
+            if let Some(bounds) = painted_triangle_bounds(a, b, c, rgba[3]) {
+                sugarloaf.triangle_ordered(
+                    a[0], a[1], b[0], b[1], c[0], c[1], depth, rgba, order,
+                );
+                if let Some(hits) = hit_rects.as_deref_mut() {
+                    hits.push(bounds);
+                }
+            }
+        }
+    }
+}
+
+// Bounds of the same nondegenerate triangle accepted by the paint pipeline.
+// Compute per clipped fragment, never union across an occlusion's cut edges.
+fn painted_triangle_bounds(a: Point, b: Point, c: Point, alpha: f32) -> Option<[f32; 4]> {
+    if !alpha.is_finite() || alpha <= 0.0 {
+        return None;
+    }
+    let area = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+    if !area.is_finite() || area.abs() <= 0.000001 {
+        return None;
+    }
+    let left = a[0].min(b[0]).min(c[0]);
+    let top = a[1].min(b[1]).min(c[1]);
+    let right = a[0].max(b[0]).max(c[0]);
+    let bottom = a[1].max(b[1]).max(c[1]);
+    Some([left, top, right - left, bottom - top])
 }
 
 fn valid_rect(r: [f32; 4]) -> bool {
@@ -635,6 +877,183 @@ mod tests {
     use web_time::Duration;
     fn close(a: f32, b: f32) {
         assert!((a - b).abs() < 0.0001, "{a} != {b}");
+    }
+
+    #[test]
+    fn bundled_glyph_masks_are_actual_font_geometry() {
+        let c = glyph_mask('C').unwrap();
+        let lower = glyph_mask('g').unwrap();
+        assert!(!c.cells.is_empty());
+        assert_ne!(c.cells, lower.cells);
+        // Golden native-grid raster of the actual TTF's lowercase g. Its
+        // designer places the tail above baseline, not below as in most fonts.
+        let mut rows = [0_u8; 6];
+        for &(x, y, coverage) in &lower.cells {
+            assert_eq!(coverage, 1.0);
+            rows[(y + 6) as usize] |= 1 << (7 - x);
+        }
+        assert_eq!(rows, [0x7e, 0xc6, 0xc6, 0x7e, 0x06, 0x7c]);
+        assert!(glyph_mask(' ').unwrap().cells.is_empty());
+        assert!(glyph_mask('\u{10ffff}').is_none());
+        assert!(glyph_mask('\n').is_none());
+        // C has an open right edge and a closed left stem, not the NEOISM C-less masks.
+        let left = c.cells.iter().map(|c| c.0).min().unwrap();
+        let right = c.cells.iter().map(|c| c.0).max().unwrap();
+        assert!(
+            c.cells.iter().filter(|c| c.0 == left).count()
+                > c.cells.iter().filter(|c| c.0 == right).count()
+        );
+        for ch in "Crafting…Åé!?09".chars() {
+            let m = glyph_mask(ch).unwrap();
+            assert!(m.cells.len() <= 1024);
+            assert!(m.cells.iter().all(|c| c.2 > 0.0 && c.2 <= 1.0));
+        }
+        assert!(std::sync::Arc::ptr_eq(&c, &glyph_mask('C').unwrap()));
+    }
+
+    #[test]
+    fn arbitrary_glyphs_all_effects_finite_and_settle_exactly() {
+        for character in "CraftingÅg!?".chars() {
+            let mask = glyph_mask(character).unwrap();
+            for (index, count) in [(0, 1), (7, 8), (31, 32), (usize::MAX - 1, usize::MAX)]
+            {
+                for effect in Effect::ALL {
+                    for &(x, y, _) in &mask.cells {
+                        let tile = glyph_tile(x, y, index, count);
+                        assert!((0.0..=1.0).contains(&tile.across));
+                        assert!((0.0..=5.0).contains(&tile.phase));
+                        assert_eq!(sample(effect, 1.0, tile), Sample::default());
+                        for p in [0.0, 0.1, 0.5, 0.9, 1.0] {
+                            let s = sample(effect, p, tile);
+                            let corners = tile_corners(tile, s).map(|p| {
+                                map_glyph_point(
+                                    p,
+                                    LAYERS[2],
+                                    [10.0, 20.0, 16.0, 16.0],
+                                    &mask,
+                                )
+                            });
+                            assert!(corners.iter().flatten().all(|v| v.is_finite()));
+                            assert!((0.0..=1.0).contains(&s.opacity));
+                            let spark = spark_at(effect, p, tile.phase, 1);
+                            assert!(spark.rect.iter().all(|v| v.is_finite()));
+                        }
+                        let corners = tile_corners(tile, Sample::default());
+                        let mapped = map_glyph_point(
+                            corners[0],
+                            LAYERS[2],
+                            [10.0, 20.0, 16.0, 16.0],
+                            &mask,
+                        );
+                        close(mapped[0], 10.0 + x as f32 * 2.0);
+                        let baseline = (8.0 + mask.ascent - mask.descent).round();
+                        close(mapped[1], 20.0 + baseline + y as f32 * 2.0);
+                        assert!(visible_polygons(
+                            &corners,
+                            [-1000.0, -1000.0, 2000.0, 2000.0],
+                            &[[-1000.0, -1000.0, 2000.0, 2000.0]]
+                        )
+                        .is_empty());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn glyph_layers_and_clipping_use_text_box_not_advance_stretch() {
+        let mask = glyph_mask('C').unwrap();
+        let rect = [10.0, 20.0, 99.0, 16.0];
+        for &(x, y, _) in &mask.cells {
+            let corners = tile_corners(glyph_tile(x, y, 12, 13), Sample::default());
+            let front = corners.map(|p| map_glyph_point(p, LAYERS[2], rect, &mask));
+            for layer in LAYERS {
+                let mapped = corners.map(|p| map_glyph_point(p, layer, rect, &mask));
+                for i in 0..4 {
+                    close(mapped[i][0] - front[i][0], layer[0] / GRID * 2.0);
+                    close(mapped[i][1] - front[i][1], layer[1] / GRID * 2.0);
+                    let narrow = map_glyph_point(
+                        corners[i],
+                        layer,
+                        [10.0, 20.0, 1.0, 16.0],
+                        &mask,
+                    );
+                    assert_eq!(narrow, mapped[i]);
+                }
+                for poly in visible_polygons(
+                    &mapped,
+                    [12.0, 20.0, 8.0, 16.0],
+                    &[[14.0, 20.0, 2.0, 16.0]],
+                ) {
+                    for p in poly {
+                        assert!(
+                            p[0] >= 12.0 && p[0] <= 20.0 && p[1] >= 20.0 && p[1] <= 36.0
+                        );
+                        assert!(
+                            p[0] <= 14.0 || p[0] >= 16.0 || p[1] == 20.0 || p[1] == 36.0
+                        );
+                    }
+                }
+            }
+        }
+        for value in 0..300 {
+            let _ = glyph_mask(char::from_u32(0x1000 + value).unwrap());
+        }
+        GLYPHS.with(|cache| assert_eq!(cache.borrow().len(), 256));
+    }
+
+    #[test]
+    fn displaced_glyph_hits_follow_only_painted_fragments() {
+        let mask = glyph_mask('C').unwrap();
+        let idle = [100.0, 40.0, 16.0, 16.0];
+        let clip = [0.0, 0.0, 300.0, 150.0];
+        let contains = |r: [f32; 4], p: Point| {
+            p[0] >= r[0] && p[0] <= r[0] + r[2] && p[1] >= r[1] && p[1] <= r[1] + r[3]
+        };
+        let collect = |corners: [Point; 4], alpha: f32, occlusions: &[[f32; 4]]| {
+            let mut hits = Vec::new();
+            for poly in visible_polygons(&corners, clip, occlusions) {
+                for i in 1..poly.len().saturating_sub(1) {
+                    if let Some(bounds) =
+                        painted_triangle_bounds(poly[0], poly[i], poly[i + 1], alpha)
+                    {
+                        hits.push(bounds);
+                    }
+                }
+            }
+            hits
+        };
+        let mut found_displaced_hit = false;
+        for &(x, y, coverage) in &mask.cells {
+            let tile = glyph_tile(x, y, 8, 9);
+            let s = sample(Effect::Slice, 0.2, tile);
+            let corners =
+                tile_corners(tile, s).map(|p| map_glyph_point(p, LAYERS[2], idle, &mask));
+            let alpha = s.opacity * coverage;
+            let hits = collect(corners, alpha, &[]);
+            let center = [
+                (corners[0][0] + corners[2][0]) * 0.5,
+                (corners[0][1] + corners[2][1]) * 0.5,
+            ];
+            if alpha > 0.0 && !contains(idle, center) {
+                assert!(hits.iter().any(|&r| contains(r, center)));
+                found_displaced_hit = true;
+            }
+            assert!(collect(corners, 0.0, &[]).is_empty());
+            assert!(collect(corners, alpha, &[clip]).is_empty());
+            // Each emitted fragment's AABB stays on one side of this overlay.
+            let overlay = [center[0] - 0.25, 0.0, 0.5, 150.0];
+            for r in collect(corners, alpha, &[overlay]) {
+                assert!(
+                    r[0] + r[2] <= overlay[0] + 0.0001
+                        || r[0] >= overlay[0] + overlay[2] - 0.0001
+                );
+            }
+        }
+        assert!(
+            found_displaced_hit,
+            "Slice must exercise cells outside idle glyph bounds"
+        );
     }
 
     #[test]

@@ -30,6 +30,30 @@ test("modal overlay hover forwards first then uses Rust cursor classification", 
   assert.equal(panel.markdownLayer.style.cursor, "pointer");
 });
 
+test("overlay presses refresh both cursor layers after Rust mutates the overlay", () => {
+  for (const pageOverlay of [true, false]) {
+    const { panel, seen, event } = fixture(true);
+    let cursor = "pointer";
+    panel.wasmAdapter.chromePageOverlayActive = () => pageOverlay;
+    panel.forwardChromeEvent = () => { seen.push("forward"); cursor = "text"; };
+    panel.wasmAdapter.pointerCursorAt = (x: number, y: number) => {
+      seen.push([x, y]);
+      return cursor;
+    };
+    panel.handlePointerDown(event);
+    assert.deepEqual(seen, ["forward", [42, 17]]);
+    assert.equal(panel.canvas.style.cursor, "text");
+    assert.equal(panel.markdownLayer.style.cursor, "text");
+  }
+});
+
+test("touch overlay presses do not change the mouse cursor", () => {
+  const { panel, seen, event } = fixture(true);
+  panel.handlePointerDown({ ...event, pointerType: "touch" });
+  assert.deepEqual(seen, []);
+  assert.equal(panel.canvas.style.cursor, "");
+});
+
 test("picker counts zero-detail primary presses for single-select/double-navigation", () => {
   const { panel, event } = fixture(true);
   panel.wasmAdapter.fileBrowserActive = () => true;

@@ -30,6 +30,19 @@ fn conversation_catalog_matches(
         && directory == expected_directory
 }
 
+fn catalog_activation_target<'a>(
+    session_id: &'a str,
+    branch_root: Option<&'a str>,
+    viewed: Option<&str>,
+    pointer: bool,
+) -> &'a str {
+    if pointer && viewed == Some(session_id) {
+        branch_root.unwrap_or(session_id)
+    } else {
+        session_id
+    }
+}
+
 fn matching_conversation_tab(
     candidates: &[ConversationTabCandidate],
     session_id: &str,
@@ -52,9 +65,63 @@ fn matching_conversation_tab(
 #[cfg(test)]
 mod conversation_tab_tests {
     use super::{
-        conversation_catalog_matches, matching_conversation_tab,
-        ConversationTabCandidate, ConversationTabLocation,
+        catalog_activation_target, conversation_catalog_matches,
+        matching_conversation_tab, ConversationTabCandidate, ConversationTabLocation,
     };
+
+    #[test]
+    fn branch_pointer_toggles_only_the_viewed_child_keyboard_is_explicit() {
+        assert_eq!(
+            catalog_activation_target("child", Some("root"), Some("child"), true),
+            "root"
+        );
+        assert_eq!(
+            catalog_activation_target("child", Some("root"), Some("child"), false),
+            "child"
+        );
+        assert_eq!(
+            catalog_activation_target("child", Some("root"), Some("sibling"), true),
+            "child"
+        );
+        assert_eq!(
+            catalog_activation_target("root", None, Some("root"), true),
+            "root"
+        );
+    }
+
+    #[test]
+    fn branch_family_reuse_rejects_other_endpoints_and_directories() {
+        let tabs = vec![ConversationTabCandidate {
+            route_id: 7,
+            session_id: "sibling".into(),
+            root_id: Some("root".into()),
+            server: "http://host".into(),
+            directory: Some("/project".into()),
+            location: ConversationTabLocation::Workspace(2),
+        }];
+        assert_eq!(
+            matching_conversation_tab(&tabs, "root", "http://host/", Some("/project"), 7),
+            Some(ConversationTabLocation::Workspace(2))
+        );
+        assert_eq!(
+            matching_conversation_tab(&tabs, "root", "http://other", Some("/project"), 7),
+            None
+        );
+        assert_eq!(
+            matching_conversation_tab(&tabs, "root", "http://host", Some("/other"), 7),
+            None
+        );
+        assert_eq!(
+            matching_conversation_tab(
+                &tabs,
+                "unrelated",
+                "http://host",
+                Some("/project"),
+                7
+            ),
+            None
+        );
+    }
 
     #[test]
     fn catalog_guard_accepts_dashboard_chats_without_using_execution_directory() {
@@ -316,6 +383,15 @@ impl Screen<'_> {
         entry: neoism_ui::panels::agent_pane::state::side_panel::NeoismAgentSessionEntry,
         originating_server: &str,
     ) {
+        self.activate_conversation_catalog_entry(entry, originating_server, false);
+    }
+
+    fn activate_conversation_catalog_entry(
+        &mut self,
+        entry: neoism_ui::panels::agent_pane::state::side_panel::NeoismAgentSessionEntry,
+        originating_server: &str,
+        pointer: bool,
+    ) {
         let server = originating_server.to_owned();
         let expected_server = self
             .context_manager
@@ -348,6 +424,7 @@ impl Screen<'_> {
         }
         let target_directory = entry.directory.or(expected_directory);
         let id = entry.id;
+        let branch_root = entry.branch_root_id;
         let source = entry.source;
         let candidates: Vec<_> = self
             .context_manager
@@ -384,14 +461,14 @@ impl Screen<'_> {
                     session_id: agent.session_id_str()?.to_owned(),
                     root_id: agent.conversation_root_id().map(str::to_owned),
                     server: agent.server_address().to_owned(),
-                    directory: agent.session_directory().map(str::to_owned),
+                    directory: agent.conversation_family_directory().map(str::to_owned),
                     location,
                 })
             })
             .collect();
         if let Some(location) = matching_conversation_tab(
             &candidates,
-            &id,
+            branch_root.as_deref().unwrap_or(&id),
             &server,
             target_directory.as_deref(),
             self.context_manager.current_route(),
@@ -400,6 +477,8 @@ impl Screen<'_> {
                 .iter()
                 .find(|candidate| candidate.location == location)
                 .map(|candidate| candidate.route_id);
+            let toggle_active_child =
+                pointer && expected_route == Some(self.context_manager.current_route());
             let activated = match location {
                 ConversationTabLocation::Workspace(index) => {
                     self.activate_workspace_buffer_tab(index)
@@ -422,9 +501,19 @@ impl Screen<'_> {
             }
             if let Some(agent) = self.context_manager.current_mut().neoism_agent.as_mut()
             {
-                if agent.session_id_str() != Some(id.as_str()) {
-                    agent.switch_session(id);
-                    agent.set_conversation_source(source);
+                let target = catalog_activation_target(
+                    &id,
+                    branch_root.as_deref(),
+                    agent.session_id_str(),
+                    toggle_active_child,
+                );
+                if agent.session_id_str() != Some(target) {
+                    // The pane owns parked parent runtime/input and the family
+                    // subscription. Never replace it with the catalog pane.
+                    agent.switch_session(target.to_owned());
+                    if branch_root.is_none() {
+                        agent.set_conversation_source(source);
+                    }
                 }
             }
             self.renderer
@@ -684,6 +773,7 @@ impl Screen<'_> {
                 let entry = panel.side_panel().sessions().get(row)?;
                 (!entry.is_header
                     && !entry.is_excerpt
+                    && entry.branch_root_id.is_none()
                     && !entry.id.starts_with("external:"))
                 .then_some((row, entry.clone()))
             })
@@ -792,7 +882,8 @@ impl Screen<'_> {
                     }
                     let selected = panel.side_panel().selected_session().cloned();
                     if let Some(entry) = selected {
-                        self.activate_catalog_entry(entry);
+                        let server = panel.server_address().to_owned();
+                        self.activate_conversation_catalog_entry(entry, &server, true);
                     }
                 }
             }

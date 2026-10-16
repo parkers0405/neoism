@@ -1057,13 +1057,18 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                                     .side_panel()
                                     .selected_session()
                                     .and_then(|entry| {
-                                        entry
+                                        let id = entry
                                             .external_preview
                                             .as_ref()
                                             .map(|preview| {
                                                 preview.neoism_session_id.clone()
                                             })
-                                            .unwrap_or_else(|| Some(entry.id.clone()))
+                                            .unwrap_or_else(|| Some(entry.id.clone()))?;
+                                        let root = entry
+                                            .branch_root_id
+                                            .clone()
+                                            .unwrap_or_else(|| id.clone());
+                                        Some((id, root))
                                     });
                             }
                         }
@@ -1841,7 +1846,9 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             ) {
                 return true;
             }
-            if let Some(action) = self.agent_pane.as_ref()
+            if let Some(action) = self
+                .agent_pane
+                .as_ref()
                 .and_then(|pane| pane.side_panel().header_action_at(*x, *y))
             {
                 if action == crate::panels::agent_pane::state::side_panel::CatalogHeaderAction::Projects {
@@ -1880,11 +1887,25 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                         }
                         self.pending_conversation_open =
                             pane.side_panel().selected_session().and_then(|entry| {
-                                entry
+                                // Pointer activation of the already viewed child
+                                // returns to its root. Enter always navigates to
+                                // the selected transcript explicitly.
+                                if entry.branch_root_id.is_some()
+                                    && pane.session_id_str() == Some(entry.id.as_str())
+                                    && matches!(
+                                        self.buffer_tabs.target_at(self.active_tab_index),
+                                        Some(crate::panels::buffer_tabs::BufferTabTarget::NeoismAgent(_))
+                                    )
+                                {
+                                    return entry.branch_root_id.clone().map(|root| (root.clone(), root));
+                                }
+                                let id = entry
                                     .external_preview
                                     .as_ref()
                                     .map(|preview| preview.neoism_session_id.clone())
-                                    .unwrap_or_else(|| Some(entry.id.clone()))
+                                    .unwrap_or_else(|| Some(entry.id.clone()))?;
+                                let root = entry.branch_root_id.clone().unwrap_or_else(|| id.clone());
+                                Some((id, root))
                             });
                     }
                 }
@@ -2733,9 +2754,15 @@ mod tests {
         assert!(!chrome.buffer_tabs.is_focused());
         assert!(chrome.focused().is_none());
         // No implicit session creation on activation: first submit owns that.
-        assert!(!chrome.agent_pane_mut().unwrap().drain_pending_outbound().iter().any(
-            |message| matches!(message, crate::panels::agent_pane::outbound::OutboundAgentCommand::EnsureSession)
-        ));
+        assert!(!chrome
+            .agent_pane_mut()
+            .unwrap()
+            .drain_pending_outbound()
+            .iter()
+            .any(|message| matches!(
+                message,
+                crate::panels::agent_pane::outbound::OutboundAgentCommand::EnsureSession
+            )));
         let typing = UiEvent::Key(crate::event::KeyDescriptor {
             physical: crate::event::PhysicalKey(0),
             logical: LogicalKey::Character("i".into()),
@@ -2743,8 +2770,14 @@ mod tests {
             modifiers: Modifiers::empty(),
             repeat: false,
         });
-        assert!(!chrome.handle_chrome_key_shortcut(&typing), "sidebar must not consume immediate typing");
-        chrome.agent_pane_mut().unwrap().insert_text("immediately typed");
+        assert!(
+            !chrome.handle_chrome_key_shortcut(&typing),
+            "sidebar must not consume immediate typing"
+        );
+        chrome
+            .agent_pane_mut()
+            .unwrap()
+            .insert_text("immediately typed");
         assert_eq!(chrome.agent_pane().unwrap().input(), "immediately typed");
     }
 
@@ -2752,7 +2785,11 @@ mod tests {
     fn catalog_new_chat_enter_commits_composer_focus_only_on_activation() {
         let mut chrome = chrome_with_active_agent();
         chrome.toggle_conversations();
-        chrome.agent_pane_mut().unwrap().side_panel_mut().select_new_chat();
+        chrome
+            .agent_pane_mut()
+            .unwrap()
+            .side_panel_mut()
+            .select_new_chat();
         let event = UiEvent::Key(crate::event::KeyDescriptor {
             physical: crate::event::PhysicalKey(0),
             state: KeyState::Pressed,
@@ -2766,6 +2803,93 @@ mod tests {
         assert!(chrome.agent_pane().unwrap().side_panel().is_focused());
         chrome.open_neoism_agent_tab(100);
         assert_new_chat_composer_focus(&mut chrome);
+    }
+
+    fn chrome_with_catalog_child(viewed: &str) -> Chrome<()> {
+        use crate::panels::agent_pane::state::side_panel::NeoismAgentSessionEntry as Entry;
+        let mut chrome = chrome_with_active_agent();
+        chrome.set_layout(Rect::new(0.0, 0.0, 1200.0, 800.0));
+        chrome.toggle_conversations();
+        let rect = chrome.layout.conversations.unwrap();
+        let pane = chrome.agent_pane_mut().unwrap();
+        pane.set_session_id(Some(viewed.into()));
+        let panel = pane.side_panel_mut();
+        panel.set_catalog_directory(Some("/work/a".into()));
+        panel.set_sessions(vec![Entry::new("root", "Parent", "")
+            .with_directory(Some("/work/a".into()))
+            .with_updated_ms(20)]);
+        panel.set_subagents(vec![
+            Entry::new("root", "main session", ""),
+            Entry::new("child", "Research", "explore")
+                .with_depth(1)
+                .with_runtime_status(Some("running".into())),
+        ]);
+        panel.sync_catalog_subagents(Some("root"));
+        let child = panel
+            .sessions()
+            .iter()
+            .position(|row| row.id == "child")
+            .unwrap();
+        panel.set_selected(child);
+        panel.set_focused(true);
+        panel.set_last_panel_height_rows(12);
+        panel.set_last_panel_rect([rect.x, rect.y, rect.w, rect.h]);
+        panel.set_row_hit_rect([rect.x, rect.y + 40.0, rect.w, rect.h - 40.0], 42.0);
+        chrome
+    }
+
+    #[test]
+    fn catalog_child_enter_preserves_family_and_does_not_toggle_viewed_child() {
+        let mut chrome = chrome_with_catalog_child("child");
+        let event = UiEvent::Key(crate::event::KeyDescriptor {
+            physical: crate::event::PhysicalKey(0),
+            state: KeyState::Pressed,
+            logical: LogicalKey::Named(NamedKey::Enter),
+            modifiers: Modifiers::empty(),
+            repeat: false,
+        });
+        assert!(chrome.handle_chrome_key_shortcut(&event));
+        // A refresh may remove the row before the host drains the activation.
+        chrome
+            .agent_pane_mut()
+            .unwrap()
+            .side_panel_mut()
+            .set_sessions(Vec::new());
+        assert_eq!(
+            chrome.take_conversation_open_with_family(),
+            Some(("child".into(), "root".into()))
+        );
+    }
+
+    #[test]
+    fn catalog_child_pointer_toggles_only_the_actually_viewed_child() {
+        for (viewed, expected) in [("root", "child"), ("child", "root")] {
+            let mut chrome = chrome_with_catalog_child(viewed);
+            let panel = chrome.agent_pane().unwrap().side_panel();
+            let rect = panel.last_panel_rect().unwrap();
+            let row = panel
+                .sessions()
+                .iter()
+                .position(|row| row.id == "child")
+                .unwrap();
+            let x = rect[0] + 20.0;
+            let y = rect[1] + 40.0 + (row as f32 + 0.5) * 42.0;
+            assert!(chrome.handle_side_panel_pointer(
+                &UiEvent::PointerDown {
+                    button: crate::event::PointerButton::Left,
+                    x,
+                    y,
+                    modifiers: Modifiers::empty(),
+                    click_count: 1,
+                },
+                x,
+                y
+            ));
+            assert_eq!(
+                chrome.take_conversation_open_with_family(),
+                Some((expected.into(), "root".into()))
+            );
+        }
     }
 
     #[test]
@@ -2931,6 +3055,7 @@ mod tests {
                 status: String::new(),
                 tool: String::new(),
                 tool_batch_id: None,
+                mcp: None,
                 composition_children: Vec::new(),
                 composition_child: false,
                 output_kind:

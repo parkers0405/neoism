@@ -33,6 +33,10 @@ fn tool_spinner_position(now_seconds: f32, trail: usize, s: f32) -> (f32, f32) {
 pub const TOOL_HEADER_HEIGHT: f32 = 30.0;
 const TOOL_GROUP_BODY_Y: f32 = 36.0;
 
+fn service_symbol_rect(x: f32, y: f32, scale: f32) -> [f32; 4] {
+    [x + 20.0 * scale, y + 2.0 * scale, 18.0 * scale, 18.0 * scale]
+}
+
 fn tool_status_label(status: &str) -> &str {
     match status {
         "completed" => "",
@@ -393,14 +397,37 @@ fn render_single_tool_message(
     symbol_opts.bold = false;
     symbol_opts.color = theme.u8(theme.muted);
     let first_symbol = sugarloaf.text_mut().instances().len();
-    draw_tool_symbol(
-        sugarloaf,
-        [x + 20.0 * s, y, 18.0 * s, 22.0 * s],
-        message.tool(),
-        &symbol_opts,
-        occlusion_rects,
-    );
-    let symbol_visible = active_glyphs(
+    let fallback_mcp = message.mcp().is_none().then(||
+        crate::panels::agent_pane::api_mapping::mcp_tool_presentation(message.tool(), &Value::Null, None)).flatten();
+    let mcp = message.mcp().or(fallback_mcp.as_ref());
+    let symbol_rect = service_symbol_rect(x, y, s);
+    let mut image_symbol_visible = false;
+    if let Some(mcp) = mcp {
+        use crate::widgets::inline_picker::{InlinePickerIcon, clip_icon_image};
+        match mcp.icon.presentation(sugarloaf, symbol_opts.color) {
+            InlinePickerIcon::Glyph(glyph) => {
+                crate::primitives::draw_icon_centered_with_occlusion(sugarloaf,
+                    symbol_rect[0], [symbol_rect[0], y, 18.0 * s, 22.0 * s],
+                    glyph, &symbol_opts, occlusion_rects, true);
+            }
+            InlinePickerIcon::Image { panel_id, image_id, source_rect } => {
+                image_symbol_visible = active_visible(motion, symbol_rect, message_clip, occlusion_rects);
+                if symbol_opts.color[3] > 0 {
+                    if let Some((rect, source_rect)) = clip_icon_image(symbol_rect, source_rect, message_clip) {
+                        let scale = sugarloaf.scale_factor();
+                        // Timeline images belong to ordinary content, below modal
+                        // material; the same UV crop and occlusions bound the icon.
+                        super::super::draw::push_image_overlay_clipped(sugarloaf,
+                            panel_id, image_id, rect, source_rect, 1, scale, occlusion_rects);
+                    }
+                }
+            }
+        }
+    } else {
+        draw_tool_symbol(sugarloaf, [x + 20.0 * s, y, 18.0 * s, 22.0 * s],
+            message.tool(), &symbol_opts, occlusion_rects);
+    }
+    let symbol_visible = image_symbol_visible || active_glyphs(
         motion,
         sugarloaf,
         first_symbol,
@@ -1279,6 +1306,21 @@ mod tests {
         tool_status_label, ToolMessageParts, TOOL_GROUP_BODY_Y, TOOL_HEADER_HEIGHT,
     };
     use crate::primitives::ide_theme::IdeTheme;
+
+    #[test]
+    fn service_images_and_glyphs_fit_the_existing_gutter_during_scroll() {
+        for scale in [0.5, 1.0, 1.5, 2.0, 3.0] {
+            let rect = super::service_symbol_rect(10.0, -7.0 * scale, scale);
+            assert!(rect[0] + rect[2] < 10.0 + 42.0 * scale);
+            let (clipped, uv) = crate::widgets::inline_picker::clip_icon_image(
+                rect, [0.5, 0.0, 0.75, 1.0], [0.0, 0.0, 1000.0, 1000.0]).unwrap();
+            assert_eq!(clipped[1], 0.0);
+            assert!(clipped[3] <= 18.0 * scale);
+            assert!(uv[1] > 0.0 && uv[1] < 1.0);
+            assert_eq!(uv[0], 0.5);
+            assert_eq!(uv[2], 0.75);
+        }
+    }
 
     #[test]
     fn followup_gutter_is_a_continuation_in_every_lifecycle() {

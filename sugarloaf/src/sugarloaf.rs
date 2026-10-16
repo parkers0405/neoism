@@ -1239,6 +1239,38 @@ impl Sugarloaf<'_> {
         );
     }
 
+    /// Draw a full analytic ring, clipped without changing its geometry.
+    /// Center, radius, stroke width and clip [x, y, width, height] are logical
+    /// pixels; antialiasing spans one physical pixel. Invalid inputs are ignored.
+    /// Immediate-mode; preserves explicit order and the late-overlay route.
+    #[inline]
+    #[allow(clippy::too_many_arguments)]
+    pub fn ring_clipped(
+        &mut self,
+        center: [f32; 2],
+        radius: f32,
+        stroke_width: f32,
+        color: [f32; 4],
+        depth: f32,
+        order: u8,
+        clip: [f32; 4],
+    ) {
+        let scale = self.state.style.scale_factor;
+        if !scale.is_finite() || scale <= 0.0 {
+            return;
+        }
+        self.renderer.ring_clipped(
+            center.map(|v| v * scale),
+            radius * scale,
+            stroke_width * scale,
+            color,
+            depth,
+            order,
+            clip.map(|v| v * scale),
+            self.late_overlay_mode,
+        );
+    }
+
     /// Add an image rectangle to content system
     /// - `id: None` - not cached, rendered immediately
     /// - `id: Some(n)` - cached with id n, overwrites existing content

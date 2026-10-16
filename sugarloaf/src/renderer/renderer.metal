@@ -283,6 +283,15 @@ fragment float4 fs_main(
 
     float4 out = input.f_color;
 
+    // Internal ring tag: local center xy, radius, half stroke.
+    if (input.underline_style == -1) {
+        float2 p = input.f_uv * input.rect_size;
+        float coverage = clamp(0.5 - (abs(length(p - input.corner_radii.xy)
+            - input.corner_radii.z) - input.corner_radii.w), 0.0, 1.0);
+        return float4(prepare_output_rgb(out.rgb, globals.input_colorspace),
+                      out.a * coverage);
+    }
+
  // Handle GPU-rendered underlines
  // Underlines have: underline_style > 0, thickness in corner_radii.x
     if (input.underline_style > 0) {

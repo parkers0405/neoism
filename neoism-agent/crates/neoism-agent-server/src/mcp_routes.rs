@@ -270,9 +270,7 @@ pub(crate) async fn mcp_auth_callback_get(
     )
     .await
     .map_err(|error| ApiError::bad_request(error.to_string()))?;
-    Ok(Html(
-        "<!doctype html><meta charset=\"utf-8\"><title>Neoism MCP authenticated</title><body style=\"font:16px system-ui;background:#111;color:#eee;padding:3rem\"><h1>MCP server connected</h1><p>Authentication completed. You can close this tab and return to Neoism.</p></body>".to_string(),
-    ))
+    Ok(Html(neoism_agent_service_api::browser_pages::mcp_connected()))
 }
 
 pub(crate) async fn mcp_auth_authenticate(

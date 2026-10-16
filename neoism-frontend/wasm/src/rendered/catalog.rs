@@ -129,6 +129,23 @@ pub(crate) fn apply_agent_event_to_pane(
     pane: &mut neoism_ui::panels::agent_pane::state::NeoismAgentPane,
     parsed: neoism_protocol::agent::AgentServerMessage,
 ) {
+    apply_agent_event_to_pane_inner(pane, parsed);
+    project_catalog_subagents(pane);
+}
+
+/// Projection must not depend on preparing/painting the right detail rail.
+fn project_catalog_subagents(
+    pane: &mut neoism_ui::panels::agent_pane::state::NeoismAgentPane,
+) {
+    let root = pane.conversation_root_id().map(str::to_owned);
+    pane.side_panel_mut()
+        .sync_catalog_subagents(root.as_deref());
+}
+
+fn apply_agent_event_to_pane_inner(
+    pane: &mut neoism_ui::panels::agent_pane::state::NeoismAgentPane,
+    parsed: neoism_protocol::agent::AgentServerMessage,
+) {
     use neoism_protocol::agent::{
         AgentServerMessage, CompactionPhase as ProtoCompactionPhase, ContentKind,
         NoticeLevel, Role, SubagentStatus, ToolStatus,
@@ -193,6 +210,7 @@ pub(crate) fn apply_agent_event_to_pane(
                 status: String::new(),
                 tool: String::new(),
                 tool_batch_id: None,
+                mcp: None,
                 composition_children: Vec::new(),
                 composition_child: false,
                 output_kind: NeoismAgentOutputKind::Text,
@@ -276,13 +294,20 @@ pub(crate) fn apply_agent_event_to_pane(
         AgentServerMessage::ThreadDeleted { session_id } => {
             pane.clear_session_id_if(&session_id);
         }
-        AgentServerMessage::SessionProjects { items, pinned_sessions, .. } => {
+        AgentServerMessage::SessionProjects {
+            items,
+            pinned_sessions,
+            ..
+        } => {
             // Discovery is root-global only. Keep the defensive scope gate here
             // as well as the host's endpoint/generation validation.
             if pane.side_panel().catalog_directory().is_some() {
                 return;
             }
-            let pins = pinned_sessions.iter().filter_map(session_entry_from_root).collect::<Vec<_>>();
+            let pins = pinned_sessions
+                .iter()
+                .filter_map(session_entry_from_root)
+                .collect::<Vec<_>>();
             for entry in &pins {
                 pane.remember_session_source(&entry.id, entry.source);
             }
@@ -720,8 +745,8 @@ pub(crate) fn apply_agent_event_to_pane(
         AgentServerMessage::SkillCatalog { skills } => {
             pane.set_skill_options(skill_options_from_catalog(&skills));
         }
-        AgentServerMessage::McpCatalog { status } => {
-            pane.set_mcp_status(status);
+        AgentServerMessage::McpCatalog { status, directory } => {
+            pane.set_mcp_status_for_directory(directory, status);
         }
         AgentServerMessage::McpOauthUrl { name, url } => {
             pane.apply_mcp_oauth_url(name, url);
@@ -890,6 +915,7 @@ fn map_history(
         status: m.status,
         tool: m.tool,
         tool_batch_id: m.tool_batch_id,
+        mcp: m.mcp.as_ref().and_then(neoism_ui::panels::agent_pane::mcp_icon::McpToolPresentation::from_wire),
         composition_children: Vec::new(),
         composition_child: false,
         output_kind,
@@ -946,6 +972,15 @@ pub(crate) fn apply_agent_event_to_cache(
     pane: &mut neoism_ui::panels::agent_pane::state::NeoismAgentPane,
     parsed: neoism_protocol::agent::AgentServerMessage,
 ) -> bool {
+    let applied = apply_agent_event_to_cache_inner(pane, parsed);
+    project_catalog_subagents(pane);
+    applied
+}
+
+fn apply_agent_event_to_cache_inner(
+    pane: &mut neoism_ui::panels::agent_pane::state::NeoismAgentPane,
+    parsed: neoism_protocol::agent::AgentServerMessage,
+) -> bool {
     use neoism_protocol::agent::{
         AgentServerMessage, CompactionPhase, ContentKind, Role,
     };
@@ -984,6 +1019,7 @@ pub(crate) fn apply_agent_event_to_cache(
                 status: String::new(),
                 tool: String::new(),
                 tool_batch_id: None,
+                mcp: None,
                 composition_children: Vec::new(),
                 composition_child: false,
                 output_kind:
@@ -1495,21 +1531,59 @@ pub(crate) fn session_options_from_catalog(
 fn session_entry_from_root(
     session: &neoism_protocol::agent::SessionListInfo,
 ) -> Option<neoism_ui::panels::agent_pane::state::side_panel::NeoismAgentSessionEntry> {
-    use neoism_ui::panels::agent_pane::state::side_panel::{ConversationSource, NeoismAgentSessionEntry};
-    let external = session.get("externalAgent").or_else(|| session.pointer("/extra/externalAgent"));
-    if external.is_some_and(|external| external.get("historyState").and_then(serde_json::Value::as_str) != Some("neoism_only")) {
+    use neoism_ui::panels::agent_pane::state::side_panel::{
+        ConversationSource, NeoismAgentSessionEntry,
+    };
+    let external = session
+        .get("externalAgent")
+        .or_else(|| session.pointer("/extra/externalAgent"));
+    if external.is_some_and(|external| {
+        external
+            .get("historyState")
+            .and_then(serde_json::Value::as_str)
+            != Some("neoism_only")
+    }) {
         return None;
     }
     let id = session.get("id")?.as_str()?;
-    let title = session.get("title").and_then(serde_json::Value::as_str)
-        .filter(|title| !title.trim().is_empty()).unwrap_or("Untitled");
-    Some(NeoismAgentSessionEntry::new(id, title, "")
-        .with_directory(session.get("directory").and_then(serde_json::Value::as_str).map(str::to_owned))
-        .with_source(ConversationSource::from_session_json(session))
-        .with_source_key(external.and_then(|external| external.get("sourceKey")).and_then(serde_json::Value::as_str).map(str::to_owned))
-        .with_updated_ms(session.pointer("/time/updated").and_then(serde_json::Value::as_u64).unwrap_or(0))
-        .with_pinned(session.get("pinned").and_then(serde_json::Value::as_bool).unwrap_or(false))
-        .with_catalog_activity(session.get("catalogActivity").and_then(|value| serde_json::from_value(value.clone()).ok())))
+    let title = session
+        .get("title")
+        .and_then(serde_json::Value::as_str)
+        .filter(|title| !title.trim().is_empty())
+        .unwrap_or("Untitled");
+    Some(
+        NeoismAgentSessionEntry::new(id, title, "")
+            .with_directory(
+                session
+                    .get("directory")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned),
+            )
+            .with_source(ConversationSource::from_session_json(session))
+            .with_source_key(
+                external
+                    .and_then(|external| external.get("sourceKey"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned),
+            )
+            .with_updated_ms(
+                session
+                    .pointer("/time/updated")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0),
+            )
+            .with_pinned(
+                session
+                    .get("pinned")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false),
+            )
+            .with_catalog_activity(
+                session
+                    .get("catalogActivity")
+                    .and_then(|value| serde_json::from_value(value.clone()).ok()),
+            ),
+    )
 }
 
 pub(crate) fn session_entries_from_catalog(
@@ -1624,14 +1698,22 @@ mod activity_tests {
         let entry = session_entry_from_root(&pin).unwrap();
         assert_eq!(entry.directory.as_deref(), Some("/archived"));
         assert_eq!(entry.source_key.as_deref(), Some("stable-key"));
-        assert_eq!(entry.source, neoism_ui::panels::agent_pane::state::side_panel::ConversationSource::Codex);
+        assert_eq!(
+            entry.source,
+            neoism_ui::panels::agent_pane::state::side_panel::ConversationSource::Codex
+        );
         assert!(entry.pinned);
         let mut pane = NeoismAgentPane::default();
         pane.set_catalog_directory(Some("/scoped".into()));
-        apply_agent_event_to_pane(&mut pane, M::SessionProjects {
-            catalog_identity:"stale-root".into(), generation:1,
-            items:vec![], pinned_sessions:vec![pin],
-        });
+        apply_agent_event_to_pane(
+            &mut pane,
+            M::SessionProjects {
+                catalog_identity: "stale-root".into(),
+                generation: 1,
+                items: vec![],
+                pinned_sessions: vec![pin],
+            },
+        );
         assert!(pane.side_panel().catalog_session("old-pin").is_none());
         assert!(!pane.side_panel().project_pagination_enabled());
     }
@@ -1801,6 +1883,7 @@ mod activity_tests {
             status: "running".to_string(),
             tool: tool.to_string(),
             tool_batch_id: None,
+            mcp: None,
             lang: String::new(),
             line_offset: None,
             detail: String::new(),
@@ -1876,6 +1959,81 @@ mod activity_tests {
                 },
             );
             assert_eq!(pane.streaming_state(), expected);
+        }
+    }
+
+    #[wasm_bindgen_test]
+    fn history_seeds_do_not_revive_completed_catalog_children() {
+        use neoism_ui::panels::agent_pane::state::side_panel::NeoismAgentSessionEntry;
+        let mut pane = NeoismAgentPane::default();
+        pane.detail_panel_mut().set_user_hidden(true);
+        pane.side_panel_mut()
+            .set_sessions(vec![NeoismAgentSessionEntry::new("root", "Parent", "")]);
+        let mut task = part("task-card", HistoryMessageKind::Tool, "Research", "task");
+        task.detail = "task_id: historical-child\nstatus: completed\ndone".into();
+        task.status = "completed".into();
+        apply_agent_event_to_pane(
+            &mut pane,
+            AgentServerMessage::HistoryChunk {
+                session_id: "root".into(),
+                messages: vec![task],
+                next_cursor: None,
+            },
+        );
+        assert_eq!(
+            pane.side_panel()
+                .branch_activity("historical-child")
+                .map(|activity| activity.status),
+            Some(BranchStatus::Completed),
+        );
+        assert!(!pane
+            .side_panel()
+            .sessions()
+            .iter()
+            .any(|row| row.id == "historical-child"));
+        assert!(pane.detail_panel().last_panel_rect().is_none());
+    }
+
+    #[wasm_bindgen_test]
+    fn hidden_detail_rail_live_branch_updates_project_into_catalog() {
+        use neoism_protocol::agent::SubagentStatus;
+        use neoism_ui::panels::agent_pane::state::side_panel::NeoismAgentSessionEntry;
+        let mut pane = NeoismAgentPane::default();
+        pane.set_session_id(Some("root".into()));
+        pane.detail_panel_mut().set_user_hidden(true);
+        pane.side_panel_mut()
+            .set_sessions(vec![NeoismAgentSessionEntry::new("root", "Parent", "")]);
+        for (status, expected) in [
+            (SubagentStatus::Running, BranchStatus::Active),
+            (SubagentStatus::Completed, BranchStatus::Completed),
+        ] {
+            let event = AgentServerMessage::SubagentUpdate {
+                session_id: "child".into(),
+                status,
+                title: Some("Research".into()),
+                agent: Some("explore".into()),
+                current_tool: None,
+                started_at: None,
+                parent_session_id: Some("root".into()),
+                root_session_id: Some("root".into()),
+                execution_id: None,
+                family_revision: None,
+            };
+            if status == SubagentStatus::Completed {
+                // A sibling's lifecycle bypasses the viewed-session gate and
+                // must still update the workspace tree via the cache path.
+                assert!(apply_agent_event_to_cache(&mut pane, event));
+            } else {
+                apply_agent_event_to_pane(&mut pane, event);
+            }
+            let child = pane
+                .side_panel()
+                .sessions()
+                .iter()
+                .find(|row| row.id == "child")
+                .unwrap();
+            assert_eq!(child.branch_root_id.as_deref(), Some("root"));
+            assert_eq!(child.branch_status, Some(expected));
         }
     }
 

@@ -473,6 +473,15 @@ fn child_presentation(
                     }
                 }
             }
+            if let Some(presentation) = mcp.get("presentation") {
+                // Keep service artwork in audited child timelines without
+                // allowing icon data to consume the bounded output projection.
+                if serialized_size(presentation, 4096).is_ok() {
+                    identity.insert("presentation".into(), presentation.clone());
+                } else if let Some(brand) = presentation.get("brand").and_then(Value::as_str).filter(|s| s.len() <= 128) {
+                    identity.insert("presentation".into(), json!({"brand":brand}));
+                }
+            }
             if !identity.is_empty() {
                 metadata.insert("mcp".into(), Value::Object(identity));
                 metadata_bytes = serialized_size(&metadata, 16 * 1024).ok()?;
@@ -1048,6 +1057,7 @@ mod tests {
             metadata: Some(json!({
                 "isError":true,
                 "mcp":{"client":"fixture","tool":"search","runtimeId":"mcp__fixture__search",
+                    "presentation":{"brand":"firecrawl"},
                     "result":{"structuredContent":{"body":"x".repeat(1024 * 1024)}}},
                 "files":[{"path":"src/standalone.rs"}],
                 "diff":"small diff"
@@ -1060,6 +1070,7 @@ mod tests {
         assert_eq!(view["truncated"], true);
         assert!(view["output"].as_str().unwrap().len() <= 16 * 1024);
         assert_eq!(view["metadata"]["mcp"]["client"], "fixture");
+        assert_eq!(view["metadata"]["mcp"]["presentation"]["brand"], "firecrawl");
         assert!(view["metadata"]["mcp"].get("result").is_none());
         assert_eq!(view["metadata"]["diff"], "small diff");
         assert_eq!(view["metadata"]["files"][0]["path"], "src/standalone.rs");

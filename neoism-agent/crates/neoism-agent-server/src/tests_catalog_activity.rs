@@ -358,11 +358,12 @@ async fn catalog_activity_outstanding_child_baseline_reconnect_and_stale_edges()
     crate::execution_activity::register_subtask(&state, &root, child.id.as_str())
         .await
         .unwrap();
-    assert_list(&state, root.id.as_str(), "running").await;
+    // Outstanding children are not the root's own live work.
+    assert_list(&state, root.id.as_str(), "idle").await;
     let mut body = stream(&state).await.into_body().into_data_stream();
     assert_eq!(
         next_activity(&mut body).await,
-        json!({"sessionID": root.id, "activity": "running"})
+        json!({"sessionID": root.id, "activity": "idle"})
     );
     // Foreign trigger is excluded; cross-directory child's trigger belongs to root.
     for id in [&foreign.id, &child.id, &root.id] {
@@ -372,11 +373,11 @@ async fn catalog_activity_outstanding_child_baseline_reconnect_and_stale_edges()
         ));
     }
     for _ in 0..2 {
-        assert_eq!(next_activity(&mut body).await["activity"], "running");
+        assert_eq!(next_activity(&mut body).await["activity"], "idle");
     }
     drop(body);
     let mut body = stream(&state).await.into_body().into_data_stream();
-    assert_eq!(next_activity(&mut body).await["activity"], "running");
+    assert_eq!(next_activity(&mut body).await["activity"], "idle");
     // Pending permission wins even over an outstanding branch.
     let request = pending(&child);
     state
@@ -392,7 +393,7 @@ async fn catalog_activity_outstanding_child_baseline_reconnect_and_stale_edges()
     assert_eq!(next_activity(&mut body).await["activity"], "permission");
     assert_list(&state, root.id.as_str(), "permission").await;
     reply_permission(&state, &request.id).await;
-    assert_eq!(next_activity(&mut body).await["activity"], "running");
+    assert_eq!(next_activity(&mut body).await["activity"], "idle");
     let stale_runtime = state
         .inner
         .store
@@ -420,6 +421,100 @@ async fn catalog_activity_outstanding_child_baseline_reconnect_and_stale_edges()
         event_type::SESSION_EXECUTION_UPDATED,
         json!({"sessionID": root.id, "runtime": stale_runtime}),
     ));
+    assert_eq!(next_activity(&mut body).await["activity"], "idle");
+    assert_list(&state, root.id.as_str(), "idle").await;
+    drop(body);
+    state.shutdown().await.unwrap();
+    cleanup_sqlite_files(&path);
+}
+
+#[tokio::test]
+async fn catalog_activity_provider_segments_are_root_owned_across_http_and_sse() {
+    use crate::execution_activity::{begin_provider_segment, end_provider_segment};
+
+    let path = std::env::temp_dir().join(format!(
+        "catalog-provider-segments-{}.sqlite3",
+        Id::ascending(IdKind::Event)
+    ));
+    let state = AppState::open_database(path.clone()).await.unwrap();
+    let mut root = store_test_session(&neoism_agent_core::new_session_id(), now_millis());
+    let mut child =
+        store_test_session(&neoism_agent_core::new_session_id(), now_millis());
+    child.parent_id = Some(root.id.clone());
+    child.directory = "/tmp/catalog-provider-child-worktree".into();
+    for session in [&root, &child] {
+        state.inner.store.insert_session(session).await.unwrap();
+    }
+    let execution = state
+        .inner
+        .store
+        .admit_execution_activity(root.id.as_str(), "provider-overlap", "message", "")
+        .await
+        .unwrap()
+        .unwrap();
+    root.extra.insert(
+        crate::execution_activity::EXECUTION_ID_KEY.into(),
+        json!(execution.execution_id),
+    );
+    root.extra.insert(
+        crate::execution_activity::EXECUTION_ROOT_KEY.into(),
+        json!(root.id),
+    );
+    state.inner.store.update_session(&root).await.unwrap();
+    assert!(crate::execution_activity::register_subtask(&state, &root, child.id.as_str())
+        .await
+        .unwrap());
+
+    // The aggregate contains provider work, but the root's own segments are empty.
+    let child_segment = begin_provider_segment(&state, child.id.as_str())
+        .await
+        .expect("child provider segment");
+    assert_list(&state, root.id.as_str(), "idle").await;
+    let mut body = stream(&state).await.into_body().into_data_stream();
+    assert_eq!(
+        next_activity(&mut body).await,
+        json!({"sessionID": root.id, "activity": "idle"})
+    );
+    drop(body);
+    let mut body = stream(&state).await.into_body().into_data_stream();
+    assert_eq!(next_activity(&mut body).await["activity"], "idle");
+
+    // Both active: a child must never hide simultaneous root provider work.
+    let root_segment = begin_provider_segment(&state, root.id.as_str())
+        .await
+        .expect("root provider segment");
+    assert_eq!(next_activity(&mut body).await["activity"], "running");
+    assert_list(&state, root.id.as_str(), "running").await;
+    drop(body);
+    let mut body = stream(&state).await.into_body().into_data_stream();
+    assert_eq!(next_activity(&mut body).await["activity"], "running");
+
+    // Root finishes while the same child is still in its provider request.
+    end_provider_segment(Some(root_segment)).await;
+    assert_eq!(next_activity(&mut body).await["activity"], "idle");
+    assert_list(&state, root.id.as_str(), "idle").await;
+    drop(body);
+    let mut body = stream(&state).await.into_body().into_data_stream();
+    assert_eq!(next_activity(&mut body).await["activity"], "idle");
+
+    // Root resumes before the child finishes: Running must return immediately.
+    let root_segment = begin_provider_segment(&state, root.id.as_str())
+        .await
+        .expect("resumed root provider segment");
+    assert_eq!(next_activity(&mut body).await["activity"], "running");
+    assert_list(&state, root.id.as_str(), "running").await;
+    end_provider_segment(Some(child_segment)).await;
+    assert_eq!(next_activity(&mut body).await["activity"], "running");
+    assert_list(&state, root.id.as_str(), "running").await;
+    let child_segment = begin_provider_segment(&state, child.id.as_str())
+        .await
+        .expect("resumed child provider segment");
+    assert_eq!(next_activity(&mut body).await["activity"], "running");
+    assert_list(&state, root.id.as_str(), "running").await;
+    end_provider_segment(Some(root_segment)).await;
+    assert_eq!(next_activity(&mut body).await["activity"], "idle");
+    assert_list(&state, root.id.as_str(), "idle").await;
+    end_provider_segment(Some(child_segment)).await;
     assert_eq!(next_activity(&mut body).await["activity"], "idle");
     assert_list(&state, root.id.as_str(), "idle").await;
     drop(body);
@@ -490,7 +585,21 @@ async fn catalog_activity_background_permission_and_model_overlap_priority() {
         event_type::SESSION_STATUS,
         json!({"sessionID": child.id, "status": {"type": "idle"}}),
     ));
+    assert_eq!(next_activity(&mut body).await["activity"], "background");
+    assert_list(&state, root.id.as_str(), "background").await;
+    // Root Busy still outranks background even with a Busy child present.
+    state
+        .inner
+        .statuses
+        .write()
+        .await
+        .insert(root.id.to_string(), SessionStatus::Busy { queue: None });
+    state.publish(EventPayload::new(
+        event_type::SESSION_STATUS,
+        json!({"sessionID": root.id, "status": {"type": "busy"}}),
+    ));
     assert_eq!(next_activity(&mut body).await["activity"], "running");
+    assert_list(&state, root.id.as_str(), "running").await;
     let request = pending(&child);
     state
         .inner
@@ -636,12 +745,18 @@ async fn catalog_activity_terminal_child_busy_ledger_is_not_resurrection_authori
     ));
     assert_eq!(next_activity(&mut body).await["activity"], "idle");
     drop(body);
-    // Manual prompts and external-agent child resumes claim this same live run
-    // authority, even if an earlier durable child lifecycle is still terminal.
+    // A resumed child owns a live run, but cannot make the root Running.
     let run = crate::session_run::start_session_run(&state, &child.id)
         .await
         .unwrap();
+    assert_list(&state, root.id.as_str(), "idle").await;
+    // Nor may child work suppress the root's own active-run fallback.
+    let root_run = crate::session_run::start_session_run(&state, &root.id)
+        .await
+        .unwrap();
     assert_list(&state, root.id.as_str(), "running").await;
+    crate::session_run::finish_session_run(&state, root.id.as_str(), &root_run.id).await;
+    assert_list(&state, root.id.as_str(), "idle").await;
     crate::session_run::finish_session_run(&state, child.id.as_str(), &run.id).await;
     state
         .inner
@@ -780,7 +895,7 @@ async fn catalog_activity_authorizes_owning_root_not_cross_directory_child() {
     }
     assert_eq!(
         next_activity(&mut body).await,
-        json!({"sessionID": root.id, "activity": "running"})
+        json!({"sessionID": root.id, "activity": "idle"})
     );
     wait_index(&state).await;
     let page = crate::v2_routes::v2_session_list(
@@ -805,7 +920,7 @@ async fn catalog_activity_authorizes_owning_root_not_cross_directory_child() {
     assert_eq!(page.items[0].info.id, root.id);
     assert_eq!(
         serde_json::to_value(&page.items[0]).unwrap()["catalogActivity"],
-        "running"
+        "idle"
     );
     drop(body);
     state.shutdown().await.unwrap();

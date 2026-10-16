@@ -171,8 +171,12 @@ interface WebBufferTab {
   /** Agent-server conversation represented by this tab. The shared wasm
    * pane swaps its cached conversation when this tab is activated. */
   agentSessionId?: string;
+  /** Stable family identity while agentSessionId follows a viewed child. */
+  agentRootSessionId?: string;
   /** Directory selected before first submit, owned only by this agent tab. */
   agentDraftDirectory?: string;
+  /** Unsaved text for a route that has not created a server session yet. */
+  agentDraftInput?: string;
   /** Present only for the daemon-hosted config virtual document. */
   configRevision?: string;
   configDisplayPath?: string;
@@ -516,6 +520,8 @@ export class TerminalPanel {
   private readonly pointerUpHandler: (event: PointerEvent) => void;
   private readonly pointerCancelHandler: (event: PointerEvent) => void;
   private readonly pointerLeaveHandler: () => void;
+  private modalPenPointerDownId: number | null = null;
+  private pendingModalPenUrl: { pointerId: number; url: string } | null = null;
   private readonly wheelHandler: (event: WheelEvent) => void;
   // IME composition tracking. `imeComposing` flips true between
   // `compositionstart` and `compositionend`; the keydown path uses it
@@ -643,6 +649,10 @@ export class TerminalPanel {
       this.pumpCrdtOutbox();
       this.pumpCodeCrdt();
       this.pollOpenMarkdownTabs();
+      // Passive MCP reads must continue when the dropdown and conversation
+      // are settled and no animation frame is scheduled. Rust gates visibility
+      // and the two-second/single-flight cadence; this creates no session.
+      this.wasmAdapter?.pumpMcpCatalog?.();
       if (this.remotePresence.pruneStale(Date.now(), 15_000)) {
         this.syncMarkdownPresenceOverlay();
         this.syncFileTreePresence();
@@ -809,10 +819,32 @@ export class TerminalPanel {
     };
     document.addEventListener("keydown", this.documentKeydownHandler, true);
     this.pointerMoveHandler = (event) => this.handlePointerMove(event);
-    this.pointerDownHandler = (event) => this.handlePointerDown(event);
-    this.pointerUpHandler = (event) => this.handlePointerUp(event);
-    this.pointerCancelHandler = (event) => this.handlePointerCancel(event);
+    this.pointerDownHandler = (event) => {
+      this.pendingModalPenUrl = null;
+      this.modalPenPointerDownId = event.pointerType === "pen" ? event.pointerId : null;
+      try {
+        this.handlePointerDown(event);
+      } finally {
+        this.modalPenPointerDownId = null;
+      }
+    };
+    this.pointerUpHandler = (event) => {
+      const pending = this.pendingModalPenUrl;
+      if (pending?.pointerId === event.pointerId) {
+        this.pendingModalPenUrl = null;
+        // Pen activation begins on trusted pointerup, unlike mouse down.
+        if (event.isTrusted && event.pointerType === "pen") {
+          this.handleModalHostActions([{ kind: "generic", id: "open-url", value: pending.url }]);
+        }
+      }
+      this.handlePointerUp(event);
+    };
+    this.pointerCancelHandler = (event) => {
+      this.pendingModalPenUrl = null;
+      this.handlePointerCancel(event);
+    };
     this.pointerLeaveHandler = () => {
+      this.pendingModalPenUrl = null;
       this.canvas.style.cursor = "";
       this.markdownLayer.style.cursor = "";
       this.hideCustomCursor();
@@ -2260,7 +2292,7 @@ export class TerminalPanel {
         );
         (mcpAuth as { redirect_uri?: string }).redirect_uri = callback.href;
       }
-      this.options.client.sendRaw(
+      return this.options.client.sendRaw(
         JSON.stringify({
           Agent: {
             request_id: requestId,
@@ -2639,6 +2671,9 @@ export class TerminalPanel {
   private forwardChromeEvent(event: unknown): void {
     try {
       this.wasmAdapter?.handleUiEvent?.(event);
+      // Browser links must open in the input event's user-activation scope,
+      // not in the animation-frame poll used for other modal outcomes.
+      this.drainModalOutcomes();
     } catch (err) {
       if (typeof console !== "undefined") {
         console.warn("[neoism] chrome event failed", err);
@@ -5852,11 +5887,50 @@ export class TerminalPanel {
       this.wasmAdapter?.agentNewChatFrom?.(provider);
       this.scheduleDraw();
     }
-    const id = this.wasmAdapter?.drainConversationOpen?.();
+    const intent = this.wasmAdapter?.drainConversationOpenIntent?.();
+    const id = intent?.sessionId ?? this.wasmAdapter?.drainConversationOpen?.();
     if (!id) return;
-    this.openNeoismAgentTab();
-    this.wasmAdapter?.agentSwitchThread?.(id);
-    this.bindAgentSessionToRoute(this.activeAgentRouteId(), id);
+    this.openAgentConversation(id, intent?.rootSessionId ?? id);
+  }
+
+  private openAgentConversation(id: string, rootId: string): void {
+    this.rememberActiveAgentSession();
+    let index = this.bufferTabs.findIndex((tab) => tab.kind === "neoism-agent"
+      && (tab.agentRootSessionId === rootId || tab.agentSessionId === rootId
+        || tab.agentSessionId === id));
+    if (index < 0) {
+      // Allocate only the route, not a new chat: starting a draft here clears
+      // the currently viewed transcript/input before switch_session caches it.
+      const identity = allocateAgentTabIdentity(
+        this.bufferTabs.flatMap((tab) => tab.neoismAgentRouteId === undefined ? [] : [tab.neoismAgentRouteId]),
+        this.nextNeoismAgentRouteId,
+      );
+      this.nextNeoismAgentRouteId = identity.nextRouteId;
+      this.explicitlyReopenTabKey(`agent:${identity.routeId}`);
+      this.bufferTabs.push({ title: identity.title, kind: "neoism-agent", neoismAgentRouteId: identity.routeId });
+      index = this.bufferTabs.length - 1;
+    }
+    const tab = this.bufferTabs[index];
+    tab.agentRootSessionId = rootId;
+    tab.agentSessionId = id;
+    this.activeTabIndex = index;
+    // Focus its existing split rather than moving the family to another pane.
+    const owner = [...this.paneTabState.entries()].find(([, state]) =>
+      state.tabIndices?.includes(index) || state.activeTabIndex === index);
+    if (owner) {
+      this.applySessionLayoutPolicy("focus_external", null, null, owner[0]);
+      this.assignTabToPane(owner[0], index);
+    } else {
+      this.assignActiveTabToFocusedEditorPane();
+    }
+    this.replayBufferTabs();
+    this.wasmAdapter?.showConversationsForAgent?.();
+    if (this.wasmAdapter?.agentSessionId?.() !== id) {
+      this.wasmAdapter?.agentSwitchThread?.(id);
+    }
+    this.ensureNeoismAgentAttached();
+    this.wasmAdapter?.focusEditorInput?.();
+    this.focus();
     this.scheduleDraw();
   }
 
@@ -6009,13 +6083,29 @@ export class TerminalPanel {
     const tab = this.bufferTabs.find(
       (candidate) => candidate.neoismAgentRouteId === routeId,
     );
-    if (tab?.kind === "neoism-agent") tab.agentSessionId = sessionId;
+    if (tab?.kind === "neoism-agent") {
+      tab.agentSessionId = sessionId;
+      // The bridge may still show the previous route while a create reply is
+      // binding in the background; only use its family for an exact match.
+      if (this.wasmAdapter?.agentSessionId?.() === sessionId) {
+        const root = this.wasmAdapter?.agentConversationRootId?.();
+        // A cold child switch may not know its parent until ThreadSwitched.
+        // Do not replace the catalog's authoritative family with that child.
+        if (!tab.agentRootSessionId || (root && root !== sessionId)) {
+          tab.agentRootSessionId = root ?? sessionId;
+        }
+      }
+    }
   }
 
   private rememberActiveAgentSession(): void {
     const routeId = this.activeAgentRouteId();
     const sessionId = this.wasmAdapter?.agentSessionId?.() ?? null;
     if (sessionId) this.bindAgentSessionToRoute(routeId, sessionId);
+    else {
+      const tab = this.bufferTabs[this.activeTabIndex];
+      if (tab?.kind === "neoism-agent") tab.agentDraftInput = this.wasmAdapter?.agentInput?.() ?? "";
+    }
   }
 
   private activateAgentTab(tab: WebBufferTab): void {
@@ -6026,6 +6116,7 @@ export class TerminalPanel {
     } else {
       const directory = tab.agentDraftDirectory ?? this.wasmAdapter?.fileTreeWorkspaceRoot?.() ?? null;
       this.wasmAdapter?.agentNewThread?.(directory);
+      if (tab.agentDraftInput) this.wasmAdapter?.agentSetInput?.(tab.agentDraftInput);
     }
     this.ensureNeoismAgentAttached();
   }
@@ -6360,6 +6451,20 @@ export class TerminalPanel {
    *  simply ends. Survives the confirm-then-close ordering because
    *  the wasm queue outlives the modal's close. */
   private modalPumpActive = false;
+
+  private drainModalOutcomes(): void {
+    const raw = this.wasmAdapter?.drainModalActions?.();
+    if (!raw) return;
+    let actions: Array<Record<string, unknown>> = [];
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      if (Array.isArray(parsed)) actions = parsed as Array<Record<string, unknown>>;
+    } catch {
+      return;
+    }
+    if (actions.length > 0) this.handleModalHostActions(actions);
+  }
+
   private pumpModalOutcomes(): void {
     if (this.modalPumpActive) return;
     this.modalPumpActive = true;
@@ -6369,16 +6474,7 @@ export class TerminalPanel {
         this.modalPumpActive = false;
         return;
       }
-      const raw = adapter.drainModalActions?.();
-      if (raw) {
-        let actions: Array<Record<string, unknown>> = [];
-        try {
-          actions = JSON.parse(raw) as Array<Record<string, unknown>>;
-        } catch {
-          actions = [];
-        }
-        if (actions.length > 0) this.handleModalHostActions(actions);
-      }
+      this.drainModalOutcomes();
       if (adapter.modalActive?.() === true) {
         requestAnimationFrame(poll);
       } else {
@@ -6431,14 +6527,34 @@ export class TerminalPanel {
         }
         case "generic": {
           const id = str("id");
+          if (id === "open-url") {
+            const url = str("value");
+            try {
+              const parsed = new URL(url);
+              if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+                throw new Error("Only HTTP and HTTPS links are supported");
+              }
+              // Validate without replacing the original target with parsed.href.
+              if (this.modalPenPointerDownId !== null) {
+                this.pendingModalPenUrl = { pointerId: this.modalPenPointerDownId, url };
+              } else {
+                window.open(url, "_blank", "noopener,noreferrer");
+              }
+            } catch (error) {
+              this.wasmAdapter?.pushNotification?.(JSON.stringify({
+                title: "Could not open link",
+                message: error instanceof Error ? error.message : String(error),
+                severity: "error",
+              }));
+              this.scheduleDraw();
+            }
+          }
           if (id === "connection.retry") this.connectionRetry?.();
           if (id === "connection.switch") this.connectionSwitch?.();
           break;
         }
         default:
-          // "generic" spec outcomes have no consumers on this panel
-          // yet (vault/workspace flows adopt them as their wire
-          // paths land).
+          // Other modal outcomes are handled by their owning host surfaces.
           break;
       }
     }
@@ -9048,6 +9164,7 @@ export class TerminalPanel {
       this.forwardChromeEvent(
         fromPointerDownEvent(event, event.detail || 1, this.canvas),
       );
+      this.updateChromePointerCursor(event);
       event.preventDefault();
       this.scheduleDraw();
       return;
@@ -9061,6 +9178,7 @@ export class TerminalPanel {
       this.forwardChromeEvent(
         fromPointerDownEvent(event, this.fileBrowserPointerClickCount(event), this.canvas),
       );
+      this.updateChromePointerCursor(event);
       event.preventDefault();
       this.scheduleDraw();
       return;

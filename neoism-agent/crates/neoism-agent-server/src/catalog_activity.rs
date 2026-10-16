@@ -68,48 +68,32 @@ pub(crate) async fn activity(
     {
         return Ok(CatalogActivity::Permission);
     }
-    if runtime.branches.iter().any(|b| b.status == "outstanding")
-        || runtime
-            .execution
-            .as_ref()
-            .is_some_and(|e| !e.active_segments.is_empty())
+    // Child rows have their own foreground indicator. Only the root's own
+    // provider/run activity should animate its catalog row.
+    if runtime
+        .execution
+        .as_ref()
+        .and_then(|execution| execution.session_activities.get(root))
+        .is_some_and(|activity| !activity.active_segments.is_empty())
     {
         return Ok(CatalogActivity::Running);
     }
     let runs = state.inner.session_coordinator.active_runs().await;
-    if family.iter().any(|id| runs.contains_key(id)) {
+    if runs.contains_key(root) {
         return Ok(CatalogActivity::Running);
     }
-    // A terminal branch's status ledger can lag teardown. It is not a
-    // resurrection authority; genuine resumes still win through live runs,
-    // provider segments, workers, queues, or a new outstanding admission.
-    // Keep root/untracked-child status fallback for external/manual runs.
-    let terminal_children: HashSet<&str> = runtime
-        .branches
-        .iter()
-        .filter(|b| matches!(b.status.as_str(), "completed" | "failed"))
-        .map(|b| b.session_id.as_str())
-        .collect();
     let busy = state
         .inner
         .statuses
         .read()
         .await
-        .iter()
-        .any(|(id, status)| {
-            family.contains(id)
-                && !matches!(status, SessionStatus::Idle)
-                && (id.as_str() == root || !terminal_children.contains(id.as_str()))
-        });
-    if busy {
+        .get(root)
+        .is_some_and(|status| !matches!(status, SessionStatus::Idle));
+    if busy
+        || state.inner.session_coordinator.worker_active(root).await
+        || crate::session_queue::queued_prompt_count(state, root).await > 0
+    {
         return Ok(CatalogActivity::Running);
-    }
-    for id in &family {
-        if state.inner.session_coordinator.worker_active(id).await
-            || crate::session_queue::queued_prompt_count(state, id).await > 0
-        {
-            return Ok(CatalogActivity::Running);
-        }
     }
     let (_, jobs) = crate::background_job::running_jobs_for_family(state, &family).await;
     Ok(if jobs.is_empty() {

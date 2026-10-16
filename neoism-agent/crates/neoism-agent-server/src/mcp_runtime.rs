@@ -44,6 +44,7 @@ struct McpCapabilities {
 
 struct LocalMcpRuntime {
     capabilities: McpCapabilities,
+    server_info: Option<Value>,
     spec: LocalMcpRuntimeSpec,
     client: Arc<StdioJsonRpcClient>,
     tools: Vec<McpToolInfo>,
@@ -53,6 +54,7 @@ struct LocalMcpRuntime {
 
 struct RemoteMcpRuntime {
     capabilities: McpCapabilities,
+    server_info: Option<Value>,
     spec: Option<RemoteMcpRuntimeSpec>,
     url: String,
     client: Option<Arc<HttpJsonRpcClient>>,
@@ -134,7 +136,7 @@ impl McpRuntimeManager {
             .with_context(|| format!("failed to start MCP server {name}"))?,
         );
         let snapshot = load_snapshot(name, &client, false).await;
-        let (capabilities, (tools, resources, prompts)) = match snapshot {
+        let (capabilities, server_info, (tools, resources, prompts)) = match snapshot {
             Ok(snapshot) => snapshot,
             Err(error) => {
                 client.shutdown().await;
@@ -144,6 +146,7 @@ impl McpRuntimeManager {
 
         let runtime = Arc::new(McpRuntimeEntry::Local(LocalMcpRuntime {
             capabilities,
+            server_info,
             spec,
             client,
             tools,
@@ -202,11 +205,12 @@ impl McpRuntimeManager {
             request_timeout,
             notification_handler(directory, name, state, Arc::downgrade(self)),
         )?);
-        let (capabilities, (tools, resources, prompts)) =
+        let (capabilities, server_info, (tools, resources, prompts)) =
             load_snapshot(name, &client, true).await?;
 
         let runtime = Arc::new(McpRuntimeEntry::Remote(RemoteMcpRuntime {
             capabilities,
+            server_info,
             spec: Some(spec),
             url: url.to_string(),
             client: Some(client.clone()),
@@ -244,6 +248,7 @@ impl McpRuntimeManager {
         }
         let runtime = Arc::new(McpRuntimeEntry::Remote(RemoteMcpRuntime {
             capabilities: McpCapabilities::default(),
+            server_info: None,
             spec: None,
             url: url.to_string(),
             client: None,
@@ -273,6 +278,14 @@ impl McpRuntimeManager {
             return Ok(true);
         }
         Ok(false)
+    }
+
+    pub(super) fn server_info(&self, directory: &str, name: &str) -> Option<Value> {
+        let runtime = self.runtime(directory, name)?;
+        match runtime.as_ref() {
+            McpRuntimeEntry::Local(local) => local.server_info.clone(),
+            McpRuntimeEntry::Remote(remote) => remote.server_info.clone(),
+        }
     }
 
     pub(super) fn status(&self, directory: &str, name: &str) -> Option<McpStatus> {
@@ -410,6 +423,7 @@ impl McpRuntimeManager {
                     read_snapshot(name, &local.client, local.capabilities).await?;
                 Arc::new(McpRuntimeEntry::Local(LocalMcpRuntime {
                     capabilities: local.capabilities,
+                    server_info: local.server_info.clone(),
                     spec: local.spec.clone(),
                     client: local.client.clone(),
                     tools,
@@ -428,6 +442,7 @@ impl McpRuntimeManager {
                     read_snapshot(name, client, remote.capabilities).await?;
                 Arc::new(McpRuntimeEntry::Remote(RemoteMcpRuntime {
                     capabilities: remote.capabilities,
+                    server_info: remote.server_info.clone(),
                     spec: remote.spec.clone(),
                     url: remote.url.clone(),
                     client: remote.client.clone(),
@@ -509,10 +524,11 @@ async fn load_snapshot<C: JsonRpcClient + Sync>(
     name: &str,
     client: &C,
     remote: bool,
-) -> anyhow::Result<(McpCapabilities, McpSnapshot)> {
-    let capabilities = initialize_client(name, client, remote).await?;
+) -> anyhow::Result<(McpCapabilities, Option<Value>, McpSnapshot)> {
+    let (capabilities, server_info) = initialize_client(name, client, remote).await?;
     Ok((
         capabilities,
+        server_info,
         read_snapshot(name, client, capabilities).await?,
     ))
 }
@@ -581,7 +597,7 @@ async fn initialize_client<C>(
     name: &str,
     client: &C,
     remote: bool,
-) -> anyhow::Result<McpCapabilities>
+) -> anyhow::Result<(McpCapabilities, Option<Value>)>
 where
     C: JsonRpcClient + Sync,
 {
@@ -616,11 +632,38 @@ where
             }
         })?;
     let capabilities = &initialized["capabilities"];
-    Ok(McpCapabilities {
+    Ok((McpCapabilities {
         tools: capabilities.get("tools").is_some_and(Value::is_object),
         resources: capabilities.get("resources").is_some_and(Value::is_object),
         prompts: capabilities.get("prompts").is_some_and(Value::is_object),
-    })
+    }, presentation_server_info(&initialized["serverInfo"])))
+}
+
+/// Presentation extensions are optional even with our existing protocol version.
+/// Bound untrusted metadata before exposing it in the passive catalog. No URLs
+/// are fetched here (or by catalog reads).
+fn presentation_server_info(value: &Value) -> Option<Value> {
+    value.as_object()?;
+    let mut info = serde_json::Map::new();
+    for key in ["name", "version", "title"] {
+        if let Some(text) = value[key].as_str().filter(|s| s.len() <= 512) {
+            info.insert(key.into(), json!(text));
+        }
+    }
+    if let Some(icons) = value["icons"].as_array() {
+        let icons: Vec<Value> = icons.iter().take(4).filter_map(|icon| {
+            let src = icon["src"].as_str().filter(|s| s.len() <= 32_768)?;
+            let mut result = json!({ "src": src });
+            for key in ["mimeType", "theme"] {
+                if let Some(text) = icon[key].as_str().filter(|s| s.len() <= 128) {
+                    result[key] = json!(text);
+                }
+            }
+            Some(result)
+        }).collect();
+        info.insert("icons".into(), json!(icons));
+    }
+    Some(Value::Object(info))
 }
 
 fn notification_handler(

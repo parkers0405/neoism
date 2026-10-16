@@ -197,6 +197,14 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
 
     var out: vec4<f32> = input.f_color;
 
+    // Internal ring tag: local center xy, radius, half stroke.
+    if (input.underline_style == -1) {
+        let p = input.f_uv * input.rect_size;
+        let coverage = clamp(0.5 - (abs(length(p - input.corner_radii.xy)
+            - input.corner_radii.z) - input.corner_radii.w), 0.0, 1.0);
+        return vec4<f32>(out.rgb, out.a * coverage);
+    }
+
     // Handle GPU-rendered underlines
     // Underlines have: underline_style > 0, thickness in corner_radii.x
     if (input.underline_style > 0) {

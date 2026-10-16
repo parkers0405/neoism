@@ -1115,7 +1115,7 @@ impl NeoismAgentPane {
         let body = body.into();
         let title = if title.is_empty() { "System" } else { title };
         if body.contains('\n') || body.chars().count() > 140 {
-            self.push_dialog(title.to_string(), body);
+            self.push_dialog(title.to_string(), body, None);
             return;
         }
         let level = if title.to_ascii_lowercase().contains("failed") {
@@ -1253,71 +1253,21 @@ impl NeoismAgentPane {
     }
 
     pub(super) fn show_mcp(&mut self) {
-        let path = self
-            .directory
-            .as_deref()
-            .map(|dir| {
-                format!(
-                    "/v2/plugins/dev.neoism.mcp/catalog?directory={}",
-                    percent_encode(dir)
-                )
-            })
-            .unwrap_or_else(|| "/v2/plugins/dev.neoism.mcp/catalog".to_string());
-        match api_request_json(&self.server, "GET", &path, None) {
-            Ok(value) => {
-                if !self.picker.as_ref().is_some_and(|picker| {
-                    matches!(
-                        picker.kind,
-                        NeoismAgentPickerKind::Mcp | NeoismAgentPickerKind::McpActions
-                    )
-                }) {
-                    self.picker = Some(NeoismAgentPicker::new(
-                        NeoismAgentPickerKind::Mcp,
-                        "MCP servers",
-                        Vec::new(),
-                        0,
-                    ));
-                }
-                self.picker
-                    .as_mut()
-                    .unwrap()
-                    .apply_mcp_status(value.as_ref().unwrap_or(&Value::Null));
-            }
-            Err(error) => self.system_message("MCP", error),
+        if !self.picker.as_ref().is_some_and(|picker| matches!(
+            picker.kind, NeoismAgentPickerKind::Mcp | NeoismAgentPickerKind::McpActions
+        )) {
+            let mut picker = NeoismAgentPicker::new(
+                NeoismAgentPickerKind::Mcp, "MCP servers", Vec::new(), 0,
+            );
+            picker.set_loading(true);
+            self.picker = Some(picker);
         }
+        self.request_mcp_catalog_refresh();
     }
 
     pub(super) fn begin_mcp_oauth(&mut self, name: String) {
-        let directory = self
-            .directory
-            .as_deref()
-            .map(|dir| format!("?directory={}", percent_encode(dir)))
-            .unwrap_or_default();
-        let path = format!(
-            "/v2/plugins/dev.neoism.mcp/{}/auth{directory}",
-            percent_encode(&name)
-        );
-        let value = match api_request_json(&self.server, "POST", &path, Some(&json!({})))
-        {
-            Ok(value) => value.unwrap_or(Value::Null),
-            Err(error) => {
-                self.system_message(&name, error);
-                return;
-            }
-        };
-        let Some(url) = value.get("authorizationUrl").and_then(Value::as_str) else {
-            self.system_message(&name, "MCP server returned no authorization URL");
-            return;
-        };
-        let browser_error = crate::background_process::open_url(url).err();
-        let lead = browser_error.map_or_else(
-            || "Opened your browser to authorize this MCP server.".to_string(),
-            |error| format!("Could not open your browser ({error})."),
-        );
-        self.system_message(
-            name,
-            format!("{lead}\n\nAuthorization URL:\n[{url}]({url})"),
-        );
+        let activity = self.open_mcp_oauth_activity(name.clone(), false);
+        self.start_mcp_oauth_monitor(name, activity, false);
     }
 
     pub(super) fn execute_mcp_action(&mut self, value: &Value) {
@@ -1327,6 +1277,34 @@ impl NeoismAgentPane {
         let Some(action) = value.get("action").and_then(Value::as_str) else {
             return;
         };
+        if action == "oauth_done" {
+            if self.picker.as_ref().is_some_and(|picker| {
+                picker.mcp_authorization.as_ref().is_some_and(|detail| {
+                    detail.name == name && !detail.busy && detail.status == "Connected"
+                })
+            }) {
+                self.picker = None;
+            }
+            return;
+        }
+        if action == "oauth_back" {
+            if let Some(picker) = self.picker.as_mut() { picker.clear_mcp_authorization(); }
+            return;
+        }
+        if action == "oauth_open" {
+            if let Some(url) = value.get("url").and_then(Value::as_str) {
+                // Pass the original URL unchanged; validation must not normalize it.
+                let _ = super::pane::mcp_oauth::open_authorization_url(url);
+            }
+            return;
+        }
+        if action == "connect" && self.picker.as_ref().is_some_and(|p| {
+            p.mcp_authorization.as_ref().is_some_and(|d| d.name == name)
+        }) {
+            let activity = self.open_mcp_oauth_activity(name.to_string(), true);
+            self.start_mcp_oauth_monitor(name.to_string(), activity, true);
+            return;
+        }
         if action == "authenticate" {
             self.begin_mcp_oauth(name.to_string());
             return;

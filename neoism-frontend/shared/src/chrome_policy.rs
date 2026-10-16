@@ -627,6 +627,7 @@ pub enum ModalActionDispatch {
 pub enum ModalActionTag {
     Close,
     CopyInvite,
+    OpenUrl,
     UpdateNeoism,
     InstallLsp,
     InstallPythonKernel,
@@ -690,7 +691,7 @@ pub fn modal_action_dispatch(tag: ModalActionTag) -> ModalActionDispatch {
     use ModalActionTag as T;
     match tag {
         T::Close => D::Close,
-        T::CopyInvite => D::KeepOpen,
+        T::CopyInvite | T::OpenUrl => D::KeepOpen,
         T::UpdateNeoism => D::KeepOpenForBusyAction,
         T::InstallLsp
         | T::InstallPythonKernel
@@ -1309,6 +1310,14 @@ mod tests {
             filetype: Some("go".to_string()),
         });
         assert_eq!(a.dedupe_key, b.dedupe_key);
+    }
+
+    #[test]
+    fn modal_open_url_keeps_modal_open() {
+        assert_eq!(
+            modal_action_dispatch(ModalActionTag::OpenUrl),
+            ModalActionDispatch::KeepOpen
+        );
     }
 
     #[test]

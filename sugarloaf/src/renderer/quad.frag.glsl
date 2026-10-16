@@ -180,6 +180,16 @@ void main() {
 
     vec4 color = in_color;
 
+    // Internal ring tag: local center xy, radius, half stroke.
+    if (in_underline_style == -1) {
+        vec2 p = in_uv * in_rect_size;
+        float coverage = clamp(0.5 - (abs(length(p - in_corner_radii.xy)
+            - in_corner_radii.z) - in_corner_radii.w), 0.0, 1.0);
+        out_color = vec4(prepare_output_rgb(color.rgb, globals.input_colorspace),
+                         color.a * coverage);
+        return;
+    }
+
     // Underline patterns are emitted as their own quad instances
     // (see `Compositor::push_underline` in `renderer/batch.rs`):
     //   color = underline color

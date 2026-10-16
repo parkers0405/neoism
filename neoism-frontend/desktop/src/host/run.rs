@@ -901,16 +901,21 @@ impl Renderer {
                     )
                 })
                 .unwrap_or(0.0);
-            let active_agent_root = context_manager
+            let active_agent = context_manager
                 .current()
                 .neoism_agent
                 .as_ref()
+                .filter(|agent| self.conversations_pane.catalog_accepts_family(agent));
+            let active_agent_root = active_agent
                 .and_then(|agent| {
                     viewed_catalog_root(
                         agent.session_id_str(),
                         agent.conversation_root_id(),
                     )
                 })
+                .map(str::to_owned);
+            let active_agent_session = active_agent
+                .and_then(|agent| agent.session_id_str())
                 .map(str::to_owned);
             let chrome_scale = self.chrome_scale();
             let mut side_x = frame.x;
@@ -946,6 +951,9 @@ impl Renderer {
                         panel
                             .side_panel_mut()
                             .set_catalog_viewed_root(active_agent_root.as_deref());
+                        panel
+                            .side_panel_mut()
+                            .set_catalog_viewed_session(active_agent_session.as_deref());
                         panel.drain_server_updates();
                         neoism_ui::panels::agent_pane::view::side_panel::render_side_panel_with_icons::<
                             _, crate::neoism::view::side_panel::DesktopSidePanelIcons,
@@ -1508,15 +1516,25 @@ impl Renderer {
             let scale = self.chrome_scale();
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map(|duration| neoism_ui::render_policy::animation_phase_from_unix_secs(
-                    duration.as_secs(), duration.subsec_nanos(),
-                ))
+                .map(|duration| {
+                    neoism_ui::render_policy::animation_phase_from_unix_secs(
+                        duration.as_secs(),
+                        duration.subsec_nanos(),
+                    )
+                })
                 .unwrap_or(0.0);
             sugarloaf.set_late_overlay_mode(true);
             self.conversation_navigator.render(
-                sugarloaf, &theme,
-                [0.0, 0.0, window_size.width as f32 / scale_factor, window_size.height as f32 / scale_factor],
-                scale, now,
+                sugarloaf,
+                &theme,
+                [
+                    0.0,
+                    0.0,
+                    window_size.width as f32 / scale_factor,
+                    window_size.height as f32 / scale_factor,
+                ],
+                scale,
+                now,
             );
             sugarloaf.set_late_overlay_mode(false);
         }

@@ -15,6 +15,8 @@ use crate::UnderlineShape;
 use bytemuck::{Pod, Zeroable};
 
 #[cfg(test)]
+mod ring_tests;
+#[cfg(test)]
 mod tests;
 
 #[allow(dead_code)]
@@ -39,7 +41,7 @@ pub struct QuadInstance {
     pub layers: [i32; 2],       // [color_layer, mask_layer] (8)
     pub size: [f32; 2],         // width, height in pixels (8)
     pub corner_radii: [f32; 4], // [tl, tr, br, bl] (16)
-    pub underline_style: i32,   // 0=none, 1=regular, 2=dashed, 3=dotted, 4=curly (4)
+    pub underline_style: i32,   // -1=ring payload, 0=none, 1..4=underlines (4)
     pub clip_rect: [f32; 4],    // [x, y, w, h] physical pixels (16)
 }
 
@@ -542,6 +544,30 @@ impl Batch {
             underline_style,
             clip_rect,
         );
+        true
+    }
+
+    /// Internal QuadInstance ABI: underline_style = -1 is an analytic ring;
+    /// corner_radii = [local center x, local center y, radius, half stroke],
+    /// all in physical pixels. UVs remain the ordinary unit quad UVs.
+    #[inline]
+    fn ring(
+        &mut self,
+        rect: &Rect,
+        depth: f32,
+        color: &[f32; 4],
+        payload: [f32; 4],
+        clip: [f32; 4],
+    ) -> bool {
+        if !self.is_empty()
+            && (self.subpix || self.image.is_some() || self.mask.is_some())
+        {
+            return false;
+        }
+        self.subpix = false;
+        self.image = None;
+        self.mask = None;
+        self.push_rect(rect, depth, color, None, [0, 0], payload, -1, clip);
         true
     }
 
@@ -1060,6 +1086,71 @@ impl BatchManager {
             order,
             self.clip_rect,
         );
+    }
+
+    /// Full ring geometry with fragment-only clipping. All dimensions are physical
+    /// pixels. Explicit clips must have positive size (zero is not 'unclipped').
+    #[allow(clippy::too_many_arguments)]
+    pub fn ring_clipped(
+        &mut self,
+        center: [f32; 2],
+        radius: f32,
+        stroke_width: f32,
+        color: &[f32; 4],
+        depth: f32,
+        order: u8,
+        clip: [f32; 4],
+    ) {
+        if !center
+            .iter()
+            .chain(clip.iter())
+            .chain(color.iter())
+            .all(|v| v.is_finite())
+            || !depth.is_finite()
+            || !radius.is_finite()
+            || radius <= 0.0
+            || !stroke_width.is_finite()
+            || stroke_width <= 0.0
+            || clip[2] <= 0.0
+            || clip[3] <= 0.0
+            || !(clip[0] + clip[2]).is_finite()
+            || !(clip[1] + clip[3]).is_finite()
+        {
+            return;
+        }
+        let half_stroke = stroke_width * 0.5;
+        let extent = radius + half_stroke + 0.5;
+        // Bound squared distances as well as vertices: GPU length() must not
+        // overflow its dot product. Keep at least half a physical pixel of AA.
+        if half_stroke <= 0.0
+            || !extent.is_finite()
+            || extent > f32::MAX.sqrt() * 0.125
+            || extent - (radius + half_stroke) < 0.5
+        {
+            return;
+        }
+        let rect = Rect {
+            x: center[0] - extent,
+            y: center[1] - extent,
+            width: extent * 2.0,
+            height: extent * 2.0,
+        };
+        if ![rect.x, rect.y, rect.x + rect.width, rect.y + rect.height]
+            .iter()
+            .all(|v| v.is_finite())
+            || rect.x + rect.width <= rect.x
+            || rect.y + rect.height <= rect.y
+        {
+            return;
+        }
+        let payload = [extent, extent, radius, half_stroke];
+        for batch in self.active.iter_mut() {
+            if batch.order == order && batch.ring(&rect, depth, color, payload, clip) {
+                return;
+            }
+        }
+        self.alloc_batch(order)
+            .ring(&rect, depth, color, payload, clip);
     }
 
     /// Preserve the shape's bounds and apply clipping only to its fragments.

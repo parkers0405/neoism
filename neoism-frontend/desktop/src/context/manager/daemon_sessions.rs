@@ -299,13 +299,24 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
     }
 
     fn request_daemon_pty_for_route(&mut self, route_id: usize) -> bool {
+        // Do not start a real shell with the layout's 1x2 placeholder size.
+        let Some(context) = self
+            .contexts
+            .iter()
+            .flat_map(|grid| grid.contexts().values())
+            .map(|item| item.context())
+            .find(|context| context.route_id == route_id)
+        else {
+            return false;
+        };
+        let size = crate::bridges::utils::terminal_dimensions(&context.dimension);
         let Some(link) = self.daemon.link.as_ref() else {
             return false;
         };
         let request_id = link.send_pty(PtyClientMessage::CreatePty {
             cwd: self.config.working_dir.clone(),
-            cols: MIN_COLUMNS as u16,
-            rows: MIN_LINES as u16,
+            cols: size.cols,
+            rows: size.rows,
             shell: None,
         });
         self.daemon

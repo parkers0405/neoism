@@ -54,6 +54,24 @@ Notes are ordinary Markdown vaults with graphs, backlinks, tags, and tasks (`Alt
 
 Every release includes Linux, macOS, and Windows builds. Download the latest from [GitHub Releases](https://github.com/parkers0405/neoism/releases/latest).
 
+### NixOS
+
+To run an extracted Linux release with `programs.nix-ld.enable = true`, launch it from its extracted directory:
+
+```sh
+nix run github:parkers0405/neoism/main#neoism-runtime -- ./neoism
+```
+
+This supplies the matching runtime libraries without recompiling Neoism. Keep the helper binaries beside `neoism`; graphics drivers still come from your NixOS configuration.
+
+To build and run the Nix source package instead:
+
+```sh
+nix run github:parkers0405/neoism/main
+```
+
+The source package builds the desktop and helper executables unless a binary cache supplies them. It does not currently include the release's bundled web UI or CEF worker assets.
+
 Cross-play is supported: people on different platforms can join the same workspace.
 
 ## Build from source

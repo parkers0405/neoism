@@ -4,13 +4,25 @@ on:
   workflow_dispatch:
   pull_request:
     paths:
-      - '**/*.rs'
-      - '**/Cargo.toml'
-      - '**/Cargo.lock'
+      - '**/*.nix'
+      - 'flake.lock'
+      - 'rust-toolchain.toml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      # Workspace members, including their embedded assets and build scripts.
+      - 'neoism-*/**'
+      - 'sugarloaf/**'
+      - 'teletypewriter/**'
+      - 'corcovado/**'
+      - 'copa/**'
+      - 'assets/omarchy/**'
+      - 'docs/lua-api.lua'
+      - 'README.md'
+      - 'misc/**'
       - '.github/workflows/nix-build.yml'
 
 jobs:
-  lints:
+  build:
     name: Build
     runs-on: ubuntu-24.04-arm
     steps:
@@ -18,4 +30,9 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: DeterminateSystems/magic-nix-cache-action@main
       - uses: DeterminateSystems/flake-checker-action@main
-      - run: nix build --max-jobs auto --build-max-jobs auto --print-build-logs
+      - name: Evaluate all declared platforms
+        run: nix flake check --all-systems --no-build --no-write-lock-file
+      - name: Check runtime library loading
+        run: nix flake check --no-write-lock-file --max-jobs 1 --cores 2 --print-build-logs
+      - name: Build native package
+        run: nix build .#neoism --no-write-lock-file --max-jobs 1 --cores 2 --print-build-logs

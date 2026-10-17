@@ -68,9 +68,38 @@
               else
                 "neoism-${k}";
             value = pkgs.callPackage ./pkgNeoism.nix { rust-toolchain = v; };
-          }) toolchains;
+          }) toolchains // lib.optionalAttrs pkgs.stdenv.isLinux {
+            # Run an existing Linux release without compiling the Rust workspace.
+            neoism-runtime = pkgs.writeShellScriptBin "neoism-runtime" ''
+              if [ "$#" -eq 0 ]; then
+                echo "Usage: neoism-runtime /path/to/neoism [arguments...]" >&2
+                exit 64
+              fi
+              export NIX_LD="${pkgs.stdenv.cc.bintools.dynamicLinker}"
+              export NIX_LD_LIBRARY_PATH="${lib.makeLibraryPath self'.packages.neoism.runtimeDependencies}''${NIX_LD_LIBRARY_PATH:+:$NIX_LD_LIBRARY_PATH}"
+              export LD_LIBRARY_PATH="${lib.makeLibraryPath self'.packages.neoism.runtimeDependencies}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+              exec "$@"
+            '';
+          };
           # Different devshells for different rust versions
           devShells = lib.mapAttrs (_: v: mkDevShell v) toolchains;
+
+          checks = lib.optionalAttrs pkgs.stdenv.isLinux {
+            runtime-libraries = pkgs.runCommand "neoism-runtime-libraries" { } ''
+              ${self'.packages.neoism-runtime}/bin/neoism-runtime \
+                ${pkgs.python3}/bin/python3 - <<'PY'
+              import ctypes
+              for library in [
+                  "libwayland-client.so.0", "libwayland-cursor.so.0", "libwayland-egl.so.1",
+                  "libvulkan.so.1", "libxkbcommon.so.0", "libgbm.so.1", "libdbus-1.so.3",
+                  "libfontconfig.so.1", "libstdc++.so.6", "libz.so.1", "libEGL.so.1", "libGL.so.1",
+              ]:
+                  ctypes.CDLL(library)
+                  print("Loaded " + library)
+              PY
+              touch "$out"
+            '';
+          };
         };
     };
 }

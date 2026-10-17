@@ -12,6 +12,10 @@
   gcc-unwrapped,
   fontconfig,
   libGL,
+  libgbm,
+  dbus,
+  zlib,
+  glslang,
   vulkan-loader,
   libxkbcommon,
   withX11 ? !stdenv.isDarwin,
@@ -37,6 +41,9 @@ let
       (lib.getLib gcc-unwrapped)
       fontconfig
       libGL
+      libgbm
+      dbus
+      zlib
       libxkbcommon
       vulkan-loader
     ]
@@ -51,6 +58,14 @@ let
       wayland
     ];
 
+  # Build and test the same shipped programs, not every workspace member.
+  cargoPackageFlags = lib.concatMap (package: [ "-p" package ]) [
+    "neoism"
+    "neoism-workspace-daemon"
+    "neoism-agent"
+    "neoism-agent-lua-runner"
+  ];
+
   inherit (lib.fileset) unions toSource;
 in
 rustPlatform.buildRustPackage {
@@ -62,6 +77,11 @@ rustPlatform.buildRustPackage {
       [
         ./Cargo.lock
         ./Cargo.toml
+        ./README.md # Workspace package metadata
+        ./assets/omarchy # Embedded desktop integration
+        ./docs/lua-api.lua # neoism-lua's checked-in API contract test fixture
+        # Optional path dependencies still have to exist during Cargo resolution.
+        ./neoism-frontend/interactive-artifacts
         ./misc # Extra desktop files
       ]
       ++ (map (x: ./. + "/${x}") cargoToml.workspace.members)
@@ -69,7 +89,8 @@ rustPlatform.buildRustPackage {
   };
   cargoLock.lockFile = ./Cargo.lock;
 
-  cargoBuildFlags = "-p neoism";
+  cargoBuildFlags = cargoPackageFlags;
+  cargoTestFlags = cargoPackageFlags;
 
   buildInputs = rlinkLibs ++ (lib.optionals stdenv.isDarwin [ darwin.libutil ]);
   runtimeDependencies = rlinkLibs;
@@ -79,6 +100,7 @@ rustPlatform.buildRustPackage {
   ]
   ++ lib.optionals stdenv.isLinux [
     cmake
+    glslang # sugarloaf compiles its Vulkan shaders with glslangValidator
     pkg-config
     autoPatchelfHook
   ];
@@ -104,7 +126,7 @@ rustPlatform.buildRustPackage {
   checkType = "debug";
   meta = {
     description = neoismToml.package.description;
-    longDescription = neoismToml.package.extended-description;
+    longDescription = neoismToml.package.metadata.deb.extended-description;
     homepage = cargoToml.workspace.package.homepage;
     license = lib.licenses.mit;
     platforms = lib.platforms.unix;

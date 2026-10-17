@@ -530,6 +530,7 @@ impl NeoismAgentPane {
     }
 
     pub(super) fn execute_switch_session_command(&mut self, session_id: String) {
+        self.conversation_header.clear();
         self.close_connect();
         if session_id.is_empty() {
             return;
@@ -761,6 +762,7 @@ impl NeoismAgentPane {
         self.session_cache.insert(
             session_id,
             CachedAgentSession {
+                input: std::mem::take(&mut self.input),
                 state,
                 messages,
                 pending_user_prompts: std::mem::take(&mut self.pending_user_prompts),
@@ -787,6 +789,7 @@ impl NeoismAgentPane {
     }
 
     pub(crate) fn activate_cached_session(&mut self, session_id: &str) {
+        self.conversation_header.clear();
         if self.session_id.as_deref() == Some(session_id) {
             self.pending_session_switch = None;
             return;
@@ -853,7 +856,7 @@ impl NeoismAgentPane {
         self.parent_session_id = parent_id;
         self.side_panel
             .set_viewed_session_id(Some(session_id.to_string()));
-        self.input.clear();
+        self.input = cached.input;
         self.close_picker();
         self.reset_timeline_navigation_for_session_switch();
         if stays_in_family {

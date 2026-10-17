@@ -1249,6 +1249,7 @@ impl NeoismAgentPane {
     /// and the navigation click's raised Task card came back still
     /// showing its title until clicked again.
     pub(crate) fn reset_transient_timeline_interactions(&mut self) {
+        self.conversation_header.clear();
         self.activity_animation.cancel();
         self.clear_activity_status_rects();
         self.activity_session_id = self.session_id.clone();
@@ -1446,7 +1447,10 @@ impl NeoismAgentPane {
     }
 
     pub fn update_link_hover_at(&mut self, x: f32, y: f32) -> bool {
-        let next = self.link_at(x, y);
+        let next = self
+            .conversation_navigation_at(x, y)
+            .map(str::to_owned)
+            .or_else(|| self.link_at(x, y));
         interaction_policy::update_hover_target(&mut self.hover_link_target, next)
     }
 

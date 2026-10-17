@@ -270,6 +270,7 @@ pub(super) struct AgentTimelineHistoryState {
 }
 
 pub(super) struct CachedAgentSession {
+    pub input: String,
     pub state: SessionState,
     pub messages: Vec<NeoismAgentMessage>,
     pub pending_user_prompts: Vec<String>,
@@ -291,6 +292,7 @@ pub(super) struct CachedAgentSession {
 impl CachedAgentSession {
     pub(super) fn live_only() -> Self {
         Self {
+            input: String::new(),
             state: SessionState::default(),
             messages: Vec::new(),
             pending_user_prompts: Vec::new(),
@@ -910,6 +912,8 @@ impl Default for NeoismWordmarkState {
 }
 
 pub struct NeoismAgentPane {
+    pub conversation_header:
+        neoism_ui::panels::agent_pane::conversation_header::ConversationHeader,
     footer_growth: neoism_ui::panels::agent_pane::response_footer::Growth,
     tool_motion: neoism_ui::panels::agent_pane::tool_motion::ToolMotionState,
     pub(crate) text_reveal: neoism_ui::panels::agent_pane::text_reveal::TextRevealState,
@@ -1303,6 +1307,7 @@ impl Default for NeoismAgentPane {
         let background_tx =
             AgentBackgroundSender::new(background_raw_tx, Arc::new(Mutex::new(None)));
         Self {
+            conversation_header: Default::default(),
             input: String::new(),
             input_help_visible: true,
             messages: Vec::new(),

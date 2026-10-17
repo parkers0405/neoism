@@ -43,6 +43,7 @@ function Invoke-NativeWorker([string]$Mode, [string]$Directory) {
     # These owners are absent: the fixture never launches its tampered exe/GUI.
     # PID 0 is the production helper's existing optional-owner contract.
     $arguments = "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$helper`" -UpdaterPid 0 -GuiPid 0 -MsiPath `"$msi`" -TempDir `"$download`" -InvokingExe `"$exe`" -ExpectedVersion `"$Version`" -ResultPath `"$result`" -Relaunch 0"
+    Write-ValidationPhase $Evidence "native updater mode=$Mode worker begin (owners=0, relaunch=0)"
     try {
         Invoke-CheckedProcess (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') `
             $arguments (Join-Path $caseEvidence 'worker') 180 @(0) | Out-Host
@@ -53,6 +54,7 @@ function Invoke-NativeWorker([string]$Mode, [string]$Directory) {
         }
         throw
     }
+    Write-ValidationPhase $Evidence "native updater mode=$Mode worker exited; receipt/payload verification begin"
     $receipt = Get-Content -LiteralPath $result -Raw | ConvertFrom-Json
     Assert-Native ($receipt.protocol -eq 1 -and $receipt.state -eq 'succeeded' -and $receipt.installation_verified) 'Worker did not durably verify installation'
     Assert-Native ($receipt.expected_version -eq $Version -and $receipt.target.mode -eq $Mode) 'Wrong worker release/installation mode'
@@ -69,6 +71,7 @@ function Invoke-NativeWorker([string]$Mode, [string]$Directory) {
     Get-PayloadManifest $Directory | ConvertTo-Json | Set-Content (Join-Path $caseEvidence 'installed-payload-hashes.json')
     Assert-Native (([IO.File]::ReadAllText((Join-Path $Directory $markerName))) -eq $markerText) 'Updater removed unrelated fixture data'
     Assert-NoFixtureProcesses $Directory
+    Write-ValidationPhase $Evidence "native updater mode=$Mode receipt/payload verification complete"
     return $receipt
 }
 try {
@@ -79,6 +82,7 @@ try {
     $script:CandidateManifest = Get-PayloadManifest $PackagingDir
     $script:CandidateManifest | ConvertTo-Json | Set-Content (Join-Path $evidenceRoot 'expected-payload-hashes.json')
     foreach ($mode in @('managed', 'portable')) {
+        Write-ValidationPhase $Evidence "native updater mode=$mode fixture preparation begin"
         $directory = $ManagedDir
         if ($mode -eq 'portable') {
             $directory = (New-Item -ItemType Directory -Path (Join-Path $fixtureRoot 'PATH-shadow portable')).FullName

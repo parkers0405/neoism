@@ -2044,6 +2044,15 @@ impl NeoismAgentSidePanel {
         &self.subagents
     }
 
+    pub fn visible_subagents(&self) -> impl Iterator<Item = &NeoismAgentSessionEntry> {
+        self.subagents
+            .iter()
+            .enumerate()
+            .filter_map(move |(index, entry)| {
+                (index == 0 || !self.subagent_hidden(entry)).then_some(entry)
+            })
+    }
+
     /// Project the existing branch lifecycle into the workspace's selectable tree.
     pub fn sync_catalog_subagents_from(&mut self, source: &Self, root: Option<&str>) {
         let Some(root) = root.filter(|root| !root.is_empty()) else {

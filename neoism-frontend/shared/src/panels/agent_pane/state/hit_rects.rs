@@ -22,9 +22,10 @@ impl NeoismAgentPane {
         // Reserve that entire row for its existing Background task menu.
         !self.background_status_contains(x, y)
             && self.activity_session_id == self.session_id
-            && self.activity_status_rects.iter().any(|rect| {
-                interaction_policy::rect_contains(*rect, x, y)
-            })
+            && self
+                .activity_status_rects
+                .iter()
+                .any(|rect| interaction_policy::rect_contains(*rect, x, y))
     }
 
     pub fn pop_activity_status_click(&mut self, x: f32, y: f32) -> bool {
@@ -292,9 +293,11 @@ impl NeoismAgentPane {
         self.has_conversation()
             && !self.side_panel().user_hidden()
             && !overlay.is_some_and(|rect| interaction_policy::rect_contains(rect, x, y))
-            && !self.composer_interactions.occlusion_rects.iter().any(|rect| {
-                interaction_policy::rect_contains(*rect, x, y)
-            })
+            && !self
+                .composer_interactions
+                .occlusion_rects
+                .iter()
+                .any(|rect| interaction_policy::rect_contains(*rect, x, y))
             && self.detail_panel().detail_clickable_at(x, y)
     }
 
@@ -416,6 +419,7 @@ impl NeoismAgentPane {
     pub(in crate::panels::agent_pane) fn reset_transient_timeline_interactions(
         &mut self,
     ) {
+        self.conversation_header.clear();
         self.activity_animation.cancel();
         self.clear_activity_status_rects();
         self.activity_session_id = self.session_id.clone();
@@ -445,17 +449,29 @@ impl NeoismAgentPane {
     /// through their first member.
     /// Resolve nested UI calls and their diff sections to the authoritative row.
     pub fn tool_owner_index(&self, id: &str) -> Option<usize> {
-        self.messages.iter().position(|m| m.id == id
-            || m.composition_children.iter().any(|c| c.id == id))
-            .or_else(|| id.rsplit_once(':').filter(|(_, n)| n.parse::<usize>().is_ok())
-                .and_then(|(base, _)| self.tool_owner_index(base)))
-            .or_else(|| id.split_once("..").and_then(|(first, _)| self.messages.iter().position(|m| m.id == first)))
+        self.messages
+            .iter()
+            .position(|m| m.id == id || m.composition_children.iter().any(|c| c.id == id))
+            .or_else(|| {
+                id.rsplit_once(':')
+                    .filter(|(_, n)| n.parse::<usize>().is_ok())
+                    .and_then(|(base, _)| self.tool_owner_index(base))
+            })
+            .or_else(|| {
+                id.split_once("..").and_then(|(first, _)| {
+                    self.messages.iter().position(|m| m.id == first)
+                })
+            })
     }
 
     /// Selection/copy resolves the actual UI child rather than its parent.
     pub fn tool_message_by_id(&self, id: &str) -> Option<&NeoismAgentMessage> {
-        self.messages.iter().find_map(|m| if m.id == id { Some(m) } else {
-            m.composition_children.iter().find(|c| c.id == id)
+        self.messages.iter().find_map(|m| {
+            if m.id == id {
+                Some(m)
+            } else {
+                m.composition_children.iter().find(|c| c.id == id)
+            }
         })
     }
 
@@ -466,7 +482,8 @@ impl NeoismAgentPane {
         let live_start = self
             .timeline_live_trace_start
             .unwrap_or(self.messages.len());
-        self.tool_owner_index(id).is_some_and(|index| index < live_start)
+        self.tool_owner_index(id)
+            .is_some_and(|index| index < live_start)
     }
 
     pub fn tool_expand_progress(&self, id: &str) -> f32 {
@@ -491,7 +508,7 @@ impl NeoismAgentPane {
             (key == id
                 || key.starts_with(&child_prefix)
                 || key.starts_with(&group_prefix)
-                 || key.starts_with(&format!("{id}/compose/")))
+                || key.starts_with(&format!("{id}/compose/")))
                 && animation.is_active()
         })
     }
@@ -522,7 +539,9 @@ impl NeoismAgentPane {
             }
             self.tool_expand_anims.remove(&id);
             self.timeline_measure_cache.borrow_mut().clear();
-            if let Some(index) = self.tool_owner_index(&id) { self.mark_timeline_message_and_next_dirty_at(index); }
+            if let Some(index) = self.tool_owner_index(&id) {
+                self.mark_timeline_message_and_next_dirty_at(index);
+            }
             return true;
         }
 
@@ -632,8 +651,7 @@ impl NeoismAgentPane {
         let parent_id = parent_id
             .split_once("..")
             .map_or(parent_id, |(first, _)| first);
-        if let Some(index) = self.tool_owner_index(parent_id)
-        {
+        if let Some(index) = self.tool_owner_index(parent_id) {
             if let (Some(viewport), Some(key)) = (
                 self.timeline_viewport_rect,
                 crate::panels::agent_pane::view::timeline::TimelineViewAnchorKey::for_source(
@@ -682,7 +700,10 @@ impl NeoismAgentPane {
     }
 
     pub fn update_link_hover_at(&mut self, x: f32, y: f32) -> bool {
-        let next = self.link_at(x, y);
+        let next = self
+            .conversation_navigation_at(x, y)
+            .map(str::to_owned)
+            .or_else(|| self.link_at(x, y));
         interaction_policy::update_hover_target(&mut self.hover_link_target, next)
     }
 
@@ -733,7 +754,8 @@ mod bash_diff_toggle_tests {
         assert!(pane.tool_expanded("bash-diff:0"));
         assert!(pane.tool_expanded("bash-diff"));
         assert_eq!(
-            pane.pending_timeline_anchor.map(|a| (a.content_y, a.screen_y)),
+            pane.pending_timeline_anchor
+                .map(|a| (a.content_y, a.screen_y)),
             anchor.map(|a| (a.content_y, a.screen_y)),
         );
         assert!(!pane.tool_expand_anims.contains_key("bash-diff:0"));
@@ -756,7 +778,9 @@ mod bash_diff_toggle_tests {
 #[cfg(test)]
 mod source_picker_tests {
     use super::*;
-    use crate::panels::agent_pane::state::side_panel::{NeoismAgentSessionEntry, SidePanelMode};
+    use crate::panels::agent_pane::state::side_panel::{
+        NeoismAgentSessionEntry, SidePanelMode,
+    };
 
     #[test]
     fn detail_sidebar_pointer_requires_visible_rows_and_no_covering_overlay() {
@@ -768,8 +792,13 @@ mod source_picker_tests {
                 .with_runtime_status(Some("running".into())),
         ]);
         pane.detail_panel_mut().set_mode(SidePanelMode::Subagents);
-        pane.detail_panel_mut().set_last_panel_rect([500., 0., 240., 500.]);
-        pane.detail_panel_mut().set_row_hit_rect_with_origin([510., 100., 220., 80.], 100., 40.);
+        pane.detail_panel_mut()
+            .set_last_panel_rect([500., 0., 240., 500.]);
+        pane.detail_panel_mut().set_row_hit_rect_with_origin(
+            [510., 100., 220., 80.],
+            100.,
+            40.,
+        );
         assert!(pane.detail_sidebar_pointer_at(600., 110.));
         assert!(pane.detail_sidebar_pointer_at(600., 150.));
         assert!(!pane.detail_sidebar_pointer_at(600., 200.));
@@ -777,7 +806,9 @@ mod source_picker_tests {
         pane.prompt_picker_rect = Some([500., 100., 240., 80.]);
         assert!(!pane.detail_sidebar_pointer_at(600., 150.));
         pane.prompt_picker_rect = None;
-        pane.composer_interactions.occlusion_rects.push([500., 100., 240., 80.]);
+        pane.composer_interactions
+            .occlusion_rects
+            .push([500., 100., 240., 80.]);
         assert!(!pane.detail_sidebar_pointer_at(600., 150.));
         pane.composer_interactions.occlusion_rects.clear();
         pane.side_panel_mut().set_user_hidden(true);
@@ -792,19 +823,23 @@ mod source_picker_tests {
         assert!(!pane.detail_sidebar_pointer_at(600., 150.));
     }
 
-
     #[test]
     fn composer_pointer_uses_registered_chips_and_respects_prompt_overlay() {
         let mut pane = NeoismAgentPane::default();
         for index in 0..3 {
-            pane.register_status_chip_rect(index, [index as f32 * 100.0, 100.0, 80.0, 24.0]);
+            pane.register_status_chip_rect(
+                index,
+                [index as f32 * 100.0, 100.0, 80.0, 24.0],
+            );
             assert!(pane.composer_pointer_at(index as f32 * 100.0 + 10.0, 110.0));
         }
         assert!(!pane.composer_pointer_at(10.0, 60.0));
         pane.prompt_picker_rect = Some([0.0, 90.0, 80.0, 50.0]);
         assert!(!pane.composer_pointer_at(10.0, 110.0));
         pane.prompt_picker_rect = None;
-        pane.composer_interactions.occlusion_rects.push([100.0, 100.0, 80.0, 24.0]);
+        pane.composer_interactions
+            .occlusion_rects
+            .push([100.0, 100.0, 80.0, 24.0]);
         assert_eq!(pane.status_chip_at(110.0, 110.0), None);
         assert!(!pane.composer_pointer_at(110.0, 110.0));
         pane.clear_status_chip_rects();

@@ -1722,8 +1722,8 @@ impl ChromeBridge {
 
     /// Route a pointer-down on the agent pane through the same
     /// priority chain desktop uses (`handle_neoism_agent_click`):
-    /// picker rows → side-panel toggle/rows → permission buttons →
-    /// links → tool-card expand → wordmark. Returns JSON
+    /// picker rows → conversation back → side-panel toggle/rows →
+    /// permission buttons → links → tool-card expand → wordmark. Returns JSON
     /// `{ handled, copy, link }` — `copy` carries code-block text
     /// the host should put on the clipboard, `link` a link target
     /// the host should open.
@@ -1776,6 +1776,14 @@ impl ChromeBridge {
                 break 'chain;
             }
             if pane.picker_contains_point(x, y) {
+                result.handled = true;
+                break 'chain;
+            }
+            // The shared header owns the rendered, unoccluded hit and validates
+            // its direction against the live ordered conversation neighbors. Use
+            // its cached session switch; the handled-path drain below updates the
+            // bridge and sends the existing SwitchThread/history/stream lifecycle.
+            if pane.activate_conversation_navigation(x, y) {
                 result.handled = true;
                 break 'chain;
             }

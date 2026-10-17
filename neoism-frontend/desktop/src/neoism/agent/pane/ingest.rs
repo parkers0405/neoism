@@ -1732,6 +1732,7 @@ self.footer_growth.record_with_edge(
                             self.maybe_refresh_external_options();
                             self.session_title = session_title;
                             self.parent_session_id = None;
+                            self.conversation_header.clear();
                             self.session_tree_root_id = Some(session_id.clone());
                             self.side_panel
                                 .set_viewed_session_id(Some(session_id.clone()));
@@ -2066,6 +2067,9 @@ self.footer_growth.record_with_edge(
                     };
                     let root_id = subagents.first().map(|root| root.id.clone());
                     if let Some(root_id) = root_id.as_ref() {
+                        if self.session_tree_root_id.as_ref() != Some(root_id) {
+                            self.conversation_header.clear();
+                        }
                         self.session_tree_root_id = Some(root_id.clone());
                     }
                     let preload_ids = subagents

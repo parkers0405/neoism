@@ -1578,6 +1578,18 @@ impl Screen<'_> {
             self.mark_dirty();
             return true;
         }
+        // Measured header navigation wins over transcript selection, tools
+        // and links, but never over the overlay/chrome guards above.
+        if self
+            .context_manager
+            .current_mut()
+            .neoism_agent
+            .as_mut()
+            .is_some_and(|agent| agent.activate_conversation_navigation(mx, my))
+        {
+            self.mark_dirty();
+            return true;
+        }
         // Rendered Markdown tables and fenced code own their sticky
         // horizontal rail. Give it priority over transcript selection and
         // links, exactly like the timeline's vertical scrollbar below.
@@ -1847,15 +1859,21 @@ impl Screen<'_> {
             .current()
             .neoism_agent
             .as_ref()
-            .is_some_and(|agent| agent.wordmark_hit(mx, my) || agent.activity_status_contains(mx, my))
+            .is_some_and(|agent| {
+                agent.wordmark_hit(mx, my) || agent.activity_status_contains(mx, my)
+            })
     }
 
     pub fn neoism_agent_link_hovered(&self) -> bool {
+        let (mx, my) = self.mouse_logical_for_hit_test();
         self.context_manager
             .current()
             .neoism_agent
             .as_ref()
-            .is_some_and(|agent| agent.link_hover_active())
+            .is_some_and(|agent| {
+                agent.conversation_navigation_at(mx, my).is_some()
+                    || agent.link_at(mx, my).is_some()
+            })
     }
 
     pub fn neoism_agent_markdown_scrollbar_hovered(&self) -> bool {

@@ -602,6 +602,44 @@ impl NeoismAgentPane {
             .filter(|title| !title.is_empty())
     }
 
+    /// Ordered navigation through the authoritative family's visible roster.
+    pub fn conversation_navigation(
+        &self,
+    ) -> neoism_ui::panels::agent_pane::conversation_header::ConversationNavigation<'_> {
+        neoism_ui::panels::agent_pane::conversation_header::navigation_targets(
+            self.is_subagent_session(),
+            self.session_id_str(),
+            self.conversation_root_id(),
+            self.side_panel.visible_subagents(),
+        )
+    }
+
+    pub fn conversation_navigation_at(&self, x: f32, y: f32) -> Option<&str> {
+        if self
+            .picker_card_rect()
+            .is_some_and(|rect| interaction_policy::rect_contains(rect, x, y))
+            || self
+                .composer_interactions
+                .occlusion_rects
+                .iter()
+                .any(|rect| interaction_policy::rect_contains(*rect, x, y))
+        {
+            return None;
+        }
+        let hit = self.conversation_header.hit_at(x, y)?;
+        (self.conversation_navigation().target(hit.direction) == Some(hit.target))
+            .then_some(hit.target)
+    }
+
+    pub fn activate_conversation_navigation(&mut self, x: f32, y: f32) -> bool {
+        let Some(target) = self.conversation_navigation_at(x, y).map(str::to_owned) else {
+            return false;
+        };
+        self.conversation_header.clear();
+        self.switch_session(target);
+        true
+    }
+
     pub fn conversation_root_id(&self) -> Option<&str> {
         self.session_tree_root_id.as_deref()
     }

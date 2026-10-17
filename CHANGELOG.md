@@ -2,6 +2,18 @@
 
 All notable user-facing changes to Neoism are documented here.
 
+## [0.7.128] - 2026-10-17
+
+### Conversation navigation and Windows validation hardening
+
+- Adds measured Back / Prev / Next navigation for child conversations, following visible nested-roster order without wrapping and falling back to the authoritative main conversation when a trusted roster is unavailable.
+- Shares navigation behavior across native and browser hosts, with clipped, occlusion-aware hit regions, live target revalidation, and stale-geometry clearing on session changes and resets.
+- Preserves unsent composer drafts alongside cached conversation state and keeps empty child conversations navigable before their first message arrives.
+- Uploads Windows installer/native-test evidence checkpoints before MSI smoke tests, adds timestamped phase/process logging, passes the expected version explicitly, and bounds redirected-output draining and process cleanup waits.
+- Retains strict installer checks and reboot suppression. This hardening improves failure bounds and diagnosis; it does not establish that the previous hosted-runner disconnection cause is fixed. Alternate validation workflows do not yet include every release-path safeguard.
+
+This is a stable production release, available through plain `neoism update` after the full platform matrix passes. Existing first-terminal directory following, trusted-user hosting limits, and Servo/CEF worker exclusion are preserved.
+
 ## [0.7.127] - 2026-10-16
 
 ### MCP authorization, subagent navigation, and rendering

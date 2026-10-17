@@ -703,6 +703,8 @@ pub struct NeoismAgentPane {
     link_hit_rects: Vec<(String, [f32; 4])>,
     mermaid_raw_blocks: BTreeSet<u64>,
     pub composer_interactions: crate::panels::agent_pane::composer_interactions::ComposerInteractions,
+    pub conversation_header:
+        crate::panels::agent_pane::conversation_header::ConversationHeader,
     usage_chip_rect: Option<[f32; 4]>,
     composer_control_rect: Option<[f32; 4]>,
     status_chip_rects: Vec<Option<[f32; 4]>>,
@@ -1099,6 +1101,7 @@ impl Default for NeoismAgentPane {
             link_hit_rects: Vec::new(),
             mermaid_raw_blocks: BTreeSet::new(),
             composer_interactions: Default::default(),
+            conversation_header: Default::default(),
             usage_chip_rect: None,
             composer_control_rect: None,
             status_chip_rects: vec![None; 4],
@@ -2834,6 +2837,8 @@ fn ease_out_cubic(t: f32) -> f32 {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod conversation_header_tests;
 #[cfg(test)]
 #[path = "state/footer_tests.rs"]
 mod footer_tests;

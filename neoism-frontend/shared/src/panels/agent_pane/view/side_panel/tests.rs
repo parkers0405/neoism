@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn catalog_branch_stems_touch_parent_and_join_siblings_across_nested_rows() {
+fn catalog_branch_stems_leave_parent_gap_and_join_siblings_across_nested_rows() {
     let root = NeoismAgentSessionEntry::new("root", "Parent", "");
     let mut child = NeoismAgentSessionEntry::new("child", "Child", "").with_depth(1);
     child.branch_root_id = Some("root".into());
@@ -17,9 +17,9 @@ fn catalog_branch_stems_touch_parent_and_join_siblings_across_nested_rows() {
             draw::branch_connector_top(&rows, index, index as f32 * row_h, row_h, scale)
                 .unwrap()
         };
-        assert_eq!(top(1), (23.0 + FONT_SIZE) * scale);
+        assert_eq!(top(1), (23.0 + FONT_SIZE + 4.0) * scale);
         assert!(top(1) < row_h);
-        assert_eq!(top(2), row_h + (23.0 + FONT_SIZE) * scale);
+        assert_eq!(top(2), row_h + (23.0 + FONT_SIZE + 4.0) * scale);
         assert_eq!(top(3), row_h + (23.0 + FONT_SIZE * 0.5) * scale);
         // Scrolling moves the whole connector without changing its attachment.
         assert_eq!(

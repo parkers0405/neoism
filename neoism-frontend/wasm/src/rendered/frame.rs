@@ -539,7 +539,8 @@ impl ChromeBridge {
                     || self.chrome.splash_overlay.wordmark_hit(x, y)))
             || (self.chrome.is_neoism_agent_tab_active()
                 && self.chrome.agent_pane().is_some_and(|pane| {
-                    pane.activity_status_contains(x, y)
+                    pane.conversation_navigation_at(x, y).is_some()
+                        || pane.activity_status_contains(x, y)
                         || pane.composer_pointer_at(x, y)
                         || pane.detail_sidebar_pointer_at(x, y)
                         || pane.usage_chip_contains(x, y)

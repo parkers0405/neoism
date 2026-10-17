@@ -1163,7 +1163,8 @@ impl Application<'_> {
                     .neoism_agent
                     .as_ref()
                     .is_some_and(|agent| {
-                        agent.composer_pointer_at(mx, my)
+                        agent.conversation_navigation_at(mx, my).is_some()
+                            || agent.composer_pointer_at(mx, my)
                             || agent.detail_sidebar_pointer_at(mx, my)
                             || agent.usage_chip_contains(mx, my)
                     })

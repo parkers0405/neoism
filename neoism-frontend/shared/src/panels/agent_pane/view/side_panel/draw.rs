@@ -103,7 +103,8 @@ pub(super) fn branch_connector_top(
             + if sibling {
                 sibling_offset
             } else {
-                23.0 + FONT_SIZE
+                // Keep a small gap below the parent title's ink.
+                23.0 + FONT_SIZE + 4.0
             } * scale,
     )
 }

@@ -73,6 +73,8 @@ public static class NeoismWindowProbe {
     $p = Start-Process (Join-Path $InstallDir 'neoism.exe') -PassThru -WorkingDirectory $workspace `
         -ArgumentList "--enable-log-file --working-dir `"$workspace`"" `
         -RedirectStandardOutput "$Evidence/gui.stdout.log" -RedirectStandardError "$Evidence/gui.stderr.log"
+    $null = $p.Handle
+    Write-ValidationPhase $Evidence "GUI started target-pid=$($p.Id); window/health sampling begin"
     $deadline = (Get-Date).AddSeconds(90)
     $agentBase = if ($env:NEOISM_AGENT_SERVER) { $env:NEOISM_AGENT_SERVER } elseif ($env:NEOISM_SERVER) { $env:NEOISM_SERVER } else { 'http://127.0.0.1:4096' }
     $healthUrl = $agentBase.TrimEnd('/') + '/v2/health'
@@ -125,29 +127,34 @@ public static class NeoismWindowProbe {
     'PASS: visible window replied for 150 samples, Agent health became ready, and no extra Neoism/console-helper window was observed. Sampling cannot exclude shorter-lived windows. NOT proof of rendered terminal, GPU correctness, composer, or keyboard execution.' |
         Set-Content "$Evidence/gui-passed.txt"
 } finally {
-    # Capture the interactive desktop even on startup failure; absence is recorded, not concealed.
     try {
-        Add-Type -AssemblyName System.Windows.Forms, System.Drawing
-        $bounds = [Windows.Forms.SystemInformation]::VirtualScreen
-        $bitmap = [Drawing.Bitmap]::new($bounds.Width, $bounds.Height)
-        $graphics = [Drawing.Graphics]::FromImage($bitmap)
+        Write-ValidationPhase $Evidence 'GUI evidence capture and process cleanup begin'
+        # Capture the interactive desktop even on startup failure; absence is recorded, not concealed.
         try {
-            $graphics.CopyFromScreen($bounds.Location, [Drawing.Point]::Empty, $bounds.Size)
-            $bitmap.Save("$Evidence/desktop.png")
-        } finally { $graphics.Dispose(); $bitmap.Dispose() }
-    } catch { "Screenshot unavailable: $_" | Set-Content "$Evidence/screenshot-error.txt" }
-    if ($null -ne $p) {
-        $p.Refresh()
-        if ($p.HasExited) { "exit=$($p.ExitCode)" | Set-Content "$Evidence/gui-exit.txt" }
-        else { Stop-ValidationProcessTree -Process $p -Log "$Evidence/gui-cleanup.log" }
+            Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+            $bounds = [Windows.Forms.SystemInformation]::VirtualScreen
+            $bitmap = [Drawing.Bitmap]::new($bounds.Width, $bounds.Height)
+            $graphics = [Drawing.Graphics]::FromImage($bitmap)
+            try {
+                $graphics.CopyFromScreen($bounds.Location, [Drawing.Point]::Empty, $bounds.Size)
+                $bitmap.Save("$Evidence/desktop.png")
+            } finally { $graphics.Dispose(); $bitmap.Dispose() }
+        } catch { "Screenshot unavailable: $_" | Set-Content "$Evidence/screenshot-error.txt" }
+        if ($null -ne $p) {
+            $p.Refresh()
+            if ($p.HasExited) { "exit=$($p.ExitCode)" | Set-Content "$Evidence/gui-exit.txt" }
+            else { Stop-ValidationProcessTree -Process $p -Log "$Evidence/gui-cleanup.log" }
+        }
+        # Catch detached installed daemon/agent children on this dedicated CI runner before uninstall.
+        Get-Process neoism, neoism-workspace-daemon, neoism-agent, neoism-agent-lua-runner -ErrorAction SilentlyContinue |
+            Where-Object { Test-InstalledProcess -Process $_ -InstallDir $InstallDir } |
+            Stop-Process -Force -ErrorAction Continue
+        Start-Sleep -Seconds 2
+        Get-WinEvent -FilterHashtable @{ LogName = 'Application'; StartTime = $started } -ErrorAction SilentlyContinue |
+            Where-Object { $_.ProviderName -in @('Application Error', 'Windows Error Reporting', 'Application Hang') } |
+            Format-List TimeCreated, Id, ProviderName, Message | Out-File "$Evidence/application-events.log"
+    } finally {
+        if ($null -ne $p) { $p.Dispose() }
+        $env:NEOISM_CONFIG_HOME = $oldConfig
     }
-    # Catch detached installed daemon/agent children on this dedicated CI runner before uninstall.
-    Get-Process neoism, neoism-workspace-daemon, neoism-agent, neoism-agent-lua-runner -ErrorAction SilentlyContinue |
-        Where-Object { Test-InstalledProcess -Process $_ -InstallDir $InstallDir } |
-        Stop-Process -Force -ErrorAction Continue
-    Start-Sleep -Seconds 2
-    Get-WinEvent -FilterHashtable @{ LogName = 'Application'; StartTime = $started } -ErrorAction SilentlyContinue |
-        Where-Object { $_.ProviderName -in @('Application Error', 'Windows Error Reporting', 'Application Hang') } |
-        Format-List TimeCreated, Id, ProviderName, Message | Out-File "$Evidence/application-events.log"
-    $env:NEOISM_CONFIG_HOME = $oldConfig
 }

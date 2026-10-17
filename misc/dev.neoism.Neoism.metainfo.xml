@@ -52,6 +52,12 @@
   </categories>
 
   <releases>
+    <release version="0.7.128" date="2026-10-17">
+      <description>
+        <p>Stable conversation back-navigation and header improvements, with bounded Windows validation waits and pre-installer evidence checkpoints.</p>
+      </description>
+      <url>https://github.com/parkers0405/neoism/releases/tag/v0.7.128</url>
+    </release>
     <release version="0.7.127" date="2026-10-16">
       <description>
         <p>Stable MCP authorization/catalog improvements, connected subagent navigation, settings/modal refinements, and renderer ring effects.</p>

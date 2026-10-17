@@ -393,6 +393,7 @@ fn render_agent_pane_with_responsive<P, D, I>(
 {
     let render_started = web_time::Instant::now();
     user_input::AgentUserInputPane::composer_interactions(pane).clear_rects();
+    chat::AgentChatPane::conversation_header(pane).clear();
     let [_, _, w, h] = rect;
     if w <= 8.0 || h <= 8.0 {
         return;
@@ -406,7 +407,8 @@ fn render_agent_pane_with_responsive<P, D, I>(
     // The conversation catalog is workspace chrome, not pane content. Only
     // the active chat's details may carve this Agent pane, on wide layouts.
     let main_rect = rect;
-    let has_conversation = chat::AgentChatPane::has_conversation(pane);
+    let has_conversation = chat::AgentChatPane::has_conversation(pane)
+        || chat::AgentChatPane::is_subagent_session(pane);
     let (main_rect, detail_rect) = if detail_rail_allowed(
         has_conversation,
         side_panel::AgentSidePanelPane::side_panel(pane).user_hidden(),

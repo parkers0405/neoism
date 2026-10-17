@@ -7,20 +7,34 @@ fn connected_mcp_done_closes_picker_without_changing_the_draft() {
     pane.input = "unsent draft".into();
     pane.cursor_byte = pane.input.len();
     let mut picker = NeoismAgentPicker::new(
-        NeoismAgentPickerKind::McpActions, "example actions", Vec::new(), 0,
+        NeoismAgentPickerKind::McpActions,
+        "example actions",
+        Vec::new(),
+        0,
     );
     picker.set_mcp_authorization(McpAuthorizationDetail {
-        name: "example".into(), body: "Waiting".into(), status: "Not connected".into(),
-        busy: true, url: None,
+        name: "example".into(),
+        body: "Waiting".into(),
+        status: "Not connected".into(),
+        busy: true,
+        url: None,
     });
     assert_eq!(picker.options().last().unwrap().title, "Back");
     pane.picker = Some(picker);
-    pane.execute_mcp_action(&serde_json::json!({"name":"example", "action":"oauth_done"}));
+    pane.execute_mcp_action(
+        &serde_json::json!({"name":"example", "action":"oauth_done"}),
+    );
     assert!(pane.picker.is_some());
-    pane.picker.as_mut().unwrap().set_mcp_authorization(McpAuthorizationDetail {
-        name: "example".into(), body: "Connected".into(), status: "Connected".into(),
-        busy: false, url: None,
-    });
+    pane.picker
+        .as_mut()
+        .unwrap()
+        .set_mcp_authorization(McpAuthorizationDetail {
+            name: "example".into(),
+            body: "Connected".into(),
+            status: "Connected".into(),
+            busy: false,
+            url: None,
+        });
     let options = pane.picker.as_ref().unwrap().options();
     assert_eq!(options.len(), 1);
     assert_eq!(options[0].title, "Done");
@@ -39,9 +53,13 @@ fn mcp_inline_authorization_lifecycle() {
     pane.input = "unsent draft".into();
     pane.cursor_byte = pane.input.len();
     let options = neoism_ui::panels::agent_pane::state::mcp_action_options(
-        &serde_json::json!({"name":"example", "enabled":true, "status":{"status":"needs_auth"}}));
+        &serde_json::json!({"name":"example", "enabled":true, "status":{"status":"needs_auth"}}),
+    );
     pane.picker = Some(NeoismAgentPicker::new(
-        NeoismAgentPickerKind::McpActions, "example actions", options.clone(), 0,
+        NeoismAgentPickerKind::McpActions,
+        "example actions",
+        options.clone(),
+        0,
     ));
     let activity = pane.open_mcp_oauth_activity("example".into(), false);
     assert!(pane.picker.as_ref().unwrap().mcp_authorization.is_some());
@@ -50,24 +68,44 @@ fn mcp_inline_authorization_lifecycle() {
     pane.backspace();
     pane.insert_paste("pasted filter");
     pane.set_picker_query("programmatic filter".into());
-    assert_eq!(pane.picker.as_ref().unwrap().options(), visible_actions.as_slice());
+    assert_eq!(
+        pane.picker.as_ref().unwrap().options(),
+        visible_actions.as_slice()
+    );
     assert!(pane.picker.as_ref().unwrap().query.is_empty());
     assert_eq!(pane.input, "unsent draft");
     assert!(pane.drain_ui_events().is_empty());
     pane.close_picker();
-    assert_eq!(pane.picker.as_ref().unwrap().kind, NeoismAgentPickerKind::McpActions);
+    assert_eq!(
+        pane.picker.as_ref().unwrap().kind,
+        NeoismAgentPickerKind::McpActions
+    );
     assert_eq!(pane.picker.as_ref().unwrap().options(), options.as_slice());
     assert!(pane.picker.as_ref().unwrap().mcp_authorization.is_none());
     assert!(!activity.is_cancelled());
     let detail = McpAuthorizationDetail {
-        name: "example".into(), body: "waiting".into(), status: "Not connected".into(), busy: true,
+        name: "example".into(),
+        body: "waiting".into(),
+        status: "Not connected".into(),
+        busy: true,
         url: Some("https://Example.com/oauth)?state=a)b#Frag)".into()),
     };
     assert!(pane.apply_mcp_oauth_progress(activity.clone(), detail.clone()));
     assert!(pane.picker.as_ref().unwrap().mcp_authorization.is_none());
     pane.reattach_mcp_oauth("example");
-    assert_eq!(pane.picker.as_ref().unwrap().mcp_authorization.as_ref().unwrap().url, detail.url);
-    pane.execute_mcp_action(&serde_json::json!({"name":"example", "action":"oauth_back"}));
+    assert_eq!(
+        pane.picker
+            .as_ref()
+            .unwrap()
+            .mcp_authorization
+            .as_ref()
+            .unwrap()
+            .url,
+        detail.url
+    );
+    pane.execute_mcp_action(
+        &serde_json::json!({"name":"example", "action":"oauth_back"}),
+    );
     assert!(pane.picker.as_ref().unwrap().mcp_authorization.is_none());
     pane.picker = None;
     pane.apply_mcp_oauth_progress(activity.clone(), detail);
@@ -80,24 +118,42 @@ fn mcp_inline_authorization_lifecycle() {
     assert!(activity.is_cancelled());
 }
 
-
 #[test]
 fn mcp_inline_authorization_ignores_stale_attempts_and_scopes() {
     use neoism_ui::panels::agent_pane::state::picker::McpAuthorizationDetail;
     let mut pane = NeoismAgentPane::default();
     pane.picker = Some(NeoismAgentPicker::new(
-        NeoismAgentPickerKind::McpActions, "example actions", Vec::new(), 0,
+        NeoismAgentPickerKind::McpActions,
+        "example actions",
+        Vec::new(),
+        0,
     ));
     let old = pane.open_mcp_oauth_activity("example".into(), false);
     let current = pane.open_mcp_oauth_activity("example".into(), false);
     assert!(old.is_cancelled());
     let detail = McpAuthorizationDetail {
-        name: "example".into(), body: "stale".into(), status: "Not connected".into(), busy: false, url: None,
+        name: "example".into(),
+        body: "stale".into(),
+        status: "Not connected".into(),
+        busy: false,
+        url: None,
     };
     assert!(!pane.apply_mcp_oauth_progress(old, detail.clone()));
-    assert_ne!(pane.picker.as_ref().unwrap().mcp_authorization.as_ref().unwrap().body, "stale");
+    assert_ne!(
+        pane.picker
+            .as_ref()
+            .unwrap()
+            .mcp_authorization
+            .as_ref()
+            .unwrap()
+            .body,
+        "stale"
+    );
     pane.picker = Some(NeoismAgentPicker::new(
-        NeoismAgentPickerKind::McpActions, "other actions", Vec::new(), 0,
+        NeoismAgentPickerKind::McpActions,
+        "other actions",
+        Vec::new(),
+        0,
     ));
     assert!(pane.apply_mcp_oauth_progress(current.clone(), detail.clone()));
     assert!(pane.picker.as_ref().unwrap().mcp_authorization.is_none());
@@ -117,21 +173,42 @@ fn completed_mcp_authorization_does_not_replace_reopened_management_actions() {
     use neoism_ui::panels::agent_pane::state::picker::McpAuthorizationDetail;
     let mut pane = NeoismAgentPane::default();
     pane.picker = Some(NeoismAgentPicker::new(
-        NeoismAgentPickerKind::McpActions, "example actions", Vec::new(), 0,
+        NeoismAgentPickerKind::McpActions,
+        "example actions",
+        Vec::new(),
+        0,
     ));
     let activity = pane.open_mcp_oauth_activity("example".into(), false);
     pane.picker = None;
-    assert!(pane.apply_mcp_oauth_progress(activity, McpAuthorizationDetail {
-        name: "example".into(), body: "Connected".into(),
-        status: "Connected".into(), busy: false, url: None,
-    }));
+    assert!(pane.apply_mcp_oauth_progress(
+        activity,
+        McpAuthorizationDetail {
+            name: "example".into(),
+            body: "Connected".into(),
+            status: "Connected".into(),
+            busy: false,
+            url: None,
+        }
+    ));
     pane.picker = Some(NeoismAgentPicker::new(
-        NeoismAgentPickerKind::McpActions, "example actions", Vec::new(), 0,
+        NeoismAgentPickerKind::McpActions,
+        "example actions",
+        Vec::new(),
+        0,
     ));
     pane.reattach_mcp_oauth("example");
     assert!(pane.picker.as_ref().unwrap().mcp_authorization.is_none());
     pane.open_mcp_oauth_activity("example".into(), true);
-    assert_eq!(pane.picker.as_ref().unwrap().mcp_authorization.as_ref().unwrap().status, "Connecting");
+    assert_eq!(
+        pane.picker
+            .as_ref()
+            .unwrap()
+            .mcp_authorization
+            .as_ref()
+            .unwrap()
+            .status,
+        "Connecting"
+    );
 }
 
 #[test]
@@ -239,10 +316,19 @@ fn provider_readiness_blocks_native_generation_bypasses_before_side_effects() {
         pane.provider_readiness = Some(Default::default());
         pane.input = "keep draft".into();
         pane.cursor_byte = pane.input.len();
-        assert!(pane.send_prepared_prompt("direct".into(), true, "message".into()).is_err());
+        assert!(pane
+            .send_prepared_prompt("direct".into(), true, "message".into())
+            .is_err());
         pane.queue_send_prompt_command(
-            "queued".into(), "direct".into(), vec![], None, None, "".into(), None,
-            neoism_protocol::agent::PromptDelivery::Steer, true,
+            "queued".into(),
+            "direct".into(),
+            vec![],
+            None,
+            None,
+            "".into(),
+            None,
+            neoism_protocol::agent::PromptDelivery::Steer,
+            true,
         );
         pane.execute_server_command("forwarded".into(), "args".into());
         pane.execute_slash_text("/init");
@@ -275,40 +361,77 @@ fn provider_readiness_checks_the_queued_model_and_exempts_current_external_sourc
     seed_prompt_catalog(&mut pane);
     pane.prompt_dispatch_in_flight = true;
     pane.queue_send_prompt_command(
-        "invalid".into(), "hello".into(), vec![], None, None, "other/model".into(), None,
-        neoism_protocol::agent::PromptDelivery::Steer, true,
+        "invalid".into(),
+        "hello".into(),
+        vec![],
+        None,
+        None,
+        "other/model".into(),
+        None,
+        neoism_protocol::agent::PromptDelivery::Steer,
+        true,
     );
     assert!(pane.pending_prompt_dispatches.is_empty());
     assert!(pane.ui_events.iter().any(|event| matches!(event,
         NeoismAgentUiEvent::Notice { message, .. } if message.contains("/models"))));
     pane.session_id = Some("external".into());
-    pane.new_chat_source = neoism_ui::panels::agent_pane::state::side_panel::ConversationSource::Codex;
+    pane.new_chat_source =
+        neoism_ui::panels::agent_pane::state::side_panel::ConversationSource::Codex;
     pane.provider_readiness = Some(Default::default());
     assert!(!pane.no_providers_connected());
-    assert!(pane.send_prepared_prompt("external".into(), true, "external-message".into()).is_ok());
+    assert!(pane
+        .send_prepared_prompt("external".into(), true, "external-message".into())
+        .is_ok());
     pane.queue_send_prompt_command(
-        "external-queued".into(), "hello".into(), vec![], None, None, "".into(), None,
-        neoism_protocol::agent::PromptDelivery::Steer, true,
+        "external-queued".into(),
+        "hello".into(),
+        vec![],
+        None,
+        None,
+        "".into(),
+        None,
+        neoism_protocol::agent::PromptDelivery::Steer,
+        true,
     );
     assert_eq!(pane.pending_prompt_dispatches.len(), 1);
 }
-
 
 #[test]
 fn provider_readiness_rejects_without_consuming_or_navigating() {
     use neoism_ui::panels::agent_pane::api_mapping::ProviderReadiness;
     for (catalog, model, action) in [
         (None, "", "/connect"),
-        (Some(json!({"all": [], "connected": []})), "stale/model", "/connect"),
-        (Some(json!({"all": [], "connected": ["env-provider"]})), "", "/models"),
-        (Some(json!({"all": [{"id": "env-provider", "models": {"good": {}}}], "connected": ["env-provider"], "default": {"env-provider": "good"}})), "", "/models"),
-        (Some(json!({"all": [{"id": "env-provider", "models": {"good": {}}}], "connected": ["env-provider"]})), "other/model", "/models"),
+        (
+            Some(json!({"all": [], "connected": []})),
+            "stale/model",
+            "/connect",
+        ),
+        (
+            Some(json!({"all": [], "connected": ["env-provider"]})),
+            "",
+            "/models",
+        ),
+        (
+            Some(
+                json!({"all": [{"id": "env-provider", "models": {"good": {}}}], "connected": ["env-provider"], "default": {"env-provider": "good"}}),
+            ),
+            "",
+            "/models",
+        ),
+        (
+            Some(
+                json!({"all": [{"id": "env-provider", "models": {"good": {}}}], "connected": ["env-provider"]}),
+            ),
+            "other/model",
+            "/models",
+        ),
     ] {
         for session_id in [None, Some("existing".to_string())] {
             let mut pane = NeoismAgentPane::default();
             pane.server = "invalid://agent-server".into();
             pane.session_id = session_id.clone();
-            pane.provider_readiness = catalog.as_ref().and_then(ProviderReadiness::from_json);
+            pane.provider_readiness =
+                catalog.as_ref().and_then(ProviderReadiness::from_json);
             pane.model = model.into();
             pane.insert_paste("large pasted prompt\nsecond line");
             let input = pane.input.clone();
@@ -321,8 +444,14 @@ fn provider_readiness_rejects_without_consuming_or_navigating() {
             assert_eq!(pane.session_id, session_id);
             assert!(pane.messages.is_empty());
             assert!(!pane.is_streaming());
-            assert!(pane.drain_pending_outbound().iter().all(|command| !matches!(command,
-                OutboundAgentCommand::EnsureSession | OutboundAgentCommand::SendPrompt { .. })));
+            assert!(pane
+                .drain_pending_outbound()
+                .iter()
+                .all(|command| !matches!(
+                    command,
+                    OutboundAgentCommand::EnsureSession
+                        | OutboundAgentCommand::SendPrompt { .. }
+                )));
             assert!(pane.ui_events.iter().any(|event| matches!(event,
                 NeoismAgentUiEvent::Notice { message, .. } if message.contains(action))));
         }
@@ -340,21 +469,25 @@ fn provider_readiness_keeps_local_connect_and_external_cli_available() {
     assert!(pane.pending_connect.is_some());
     assert!(pane.messages.is_empty());
     pane.close_connect();
-    pane.new_chat_source = neoism_ui::panels::agent_pane::state::side_panel::ConversationSource::Codex;
+    pane.new_chat_source =
+        neoism_ui::panels::agent_pane::state::side_panel::ConversationSource::Codex;
     assert!(!pane.no_providers_connected());
     pane.insert_text("external prompt");
     assert!(pane.submit());
-    assert!(pane.drain_pending_outbound().iter().any(|command| matches!(command,
-        OutboundAgentCommand::SendPrompt { .. })));
+    assert!(pane
+        .drain_pending_outbound()
+        .iter()
+        .any(|command| matches!(command, OutboundAgentCommand::SendPrompt { .. })));
 }
-
 
 fn seed_prompt_catalog(pane: &mut NeoismAgentPane) {
     pane.model = "test/model".into();
-    pane.provider_readiness = Some(neoism_ui::panels::agent_pane::api_mapping::ProviderReadiness {
-        connected: vec!["test".into()],
-        models: vec!["test/model".into()],
-    });
+    pane.provider_readiness = Some(
+        neoism_ui::panels::agent_pane::api_mapping::ProviderReadiness {
+            connected: vec!["test".into()],
+            models: vec!["test/model".into()],
+        },
+    );
 }
 
 fn composition_fixture() -> NeoismAgentMessage {
@@ -415,10 +548,7 @@ fn composition_two_children_toggle_independently_with_owner_archive_and_anchor()
     assert!(!pane.tool_expanded(two));
     assert!(!pane.tool_expanded("compose-root"));
     assert!(pane.timeline_view_anchor.is_some());
-    assert!(pane
-        .take_timeline_dirty_marks()
-        .indices
-        .contains(&0));
+    assert!(pane.take_timeline_dirty_marks().indices.contains(&0));
     assert!(pane.toggle_tool_at(10.0, 190.0));
     assert!(pane.tool_expanded(one) && pane.tool_expanded(two));
     assert!(pane.toggle_tool_at(10.0, 160.0));
@@ -429,17 +559,11 @@ fn composition_two_children_toggle_independently_with_owner_archive_and_anchor()
     assert!(pane.tool_expanded(&format!("{two}:0")));
     assert!(pane.tool_expanded(two));
     assert!(pane.tool_archived(&format!("{two}:0")));
-    assert!(pane
-        .take_timeline_dirty_marks()
-        .indices
-        .contains(&0));
+    assert!(pane.take_timeline_dirty_marks().indices.contains(&0));
     for animation in pane.tool_expand_anims.values_mut() {
         animation.started_at = Instant::now() - TOOL_EXPAND_ANIMATION;
     }
-    assert!(pane
-        .take_timeline_dirty_marks()
-        .indices
-        .contains(&0));
+    assert!(pane.take_timeline_dirty_marks().indices.contains(&0));
 }
 
 #[test]
@@ -461,10 +585,7 @@ fn composition_child_only_update_invalidates_measurement_and_records_live_motion
         pane.messages[0].composition_children,
         updated.composition_children
     );
-    assert!(pane
-        .take_timeline_dirty_marks()
-        .indices
-        .contains(&0));
+    assert!(pane.take_timeline_dirty_marks().indices.contains(&0));
     assert_eq!(
         pane.tool_motion_sample("compose-root/compose/one")
             .outgoing_status,
@@ -476,18 +597,27 @@ fn composition_child_only_update_invalidates_measurement_and_records_live_motion
 #[cfg(unix)]
 fn conditional_workspace_catalog_scope_is_local_home_or_filesystem_root_only() {
     let home = Path::new("/home/catalog-user");
-    let scope = |directory, joined| NeoismAgentPane::catalog_scope_for_workspace(
-        Some(directory), joined, Some(home),
-    );
+    let scope = |directory, joined| {
+        NeoismAgentPane::catalog_scope_for_workspace(Some(directory), joined, Some(home))
+    };
     assert_eq!(scope("/home/catalog-user", false), None);
     assert_eq!(scope("/", false), None);
     assert_eq!(scope("/", true), None);
     assert_eq!(scope("C:\\", true), None);
     assert_eq!(scope("D:/", true), None);
     assert_eq!(scope("C:\\project", true), Some("C:\\project".into()));
-    assert_eq!(scope("/home/catalog-user/project", false), Some("/home/catalog-user/project".into()));
-    assert_eq!(scope("/home/catalog-user", true), Some("/home/catalog-user".into()));
-    assert_eq!(scope("/remote/project", true), Some("/remote/project".into()));
+    assert_eq!(
+        scope("/home/catalog-user/project", false),
+        Some("/home/catalog-user/project".into())
+    );
+    assert_eq!(
+        scope("/home/catalog-user", true),
+        Some("/home/catalog-user".into())
+    );
+    assert_eq!(
+        scope("/remote/project", true),
+        Some("/remote/project".into())
+    );
 }
 
 #[test]
@@ -503,7 +633,10 @@ fn selecting_foreign_chat_keeps_workspace_catalog_scope() {
     pane.runtime_hydrated_sessions.insert("foreign".into());
     pane.switch_session("foreign".into());
     assert_eq!(pane.session_directory(), Some("/foreign/project"));
-    assert_eq!(pane.side_panel.catalog_directory(), Some("/workspace/project"));
+    assert_eq!(
+        pane.side_panel.catalog_directory(),
+        Some("/workspace/project")
+    );
 }
 
 #[test]
@@ -512,17 +645,20 @@ fn catalog_scope_change_discards_old_search_and_resets_stream() {
     let old_generation = pane.catalog_generation;
     pane.semantic_in_flight = true;
     pane.semantic_pending_query = Some("stale".into());
-    pane.session_catalog_stream = Some(AgentSessionCatalogStream::with_events_for_test([]));
+    pane.session_catalog_stream =
+        Some(AgentSessionCatalogStream::with_events_for_test([]));
     pane.set_catalog_directory(Some("/project".into()));
     assert!(pane.session_catalog_stream.is_none());
     assert!(!pane.semantic_in_flight);
     assert!(pane.semantic_pending_query.is_none());
-    pane.background_tx.send(NeoismAgentBackgroundUpdate::SemanticSessionHits {
-        catalog_generation: old_generation,
-        query: "stale".into(),
-        hits: Some(Vec::new()),
-        transcript_unavailable: true,
-    }).unwrap();
+    pane.background_tx
+        .send(NeoismAgentBackgroundUpdate::SemanticSessionHits {
+            catalog_generation: old_generation,
+            query: "stale".into(),
+            hits: Some(Vec::new()),
+            transcript_unavailable: true,
+        })
+        .unwrap();
     pane.drain_background_updates();
     assert!(!pane.semantic_unavailable);
     let generation = pane.catalog_generation;
@@ -541,14 +677,26 @@ fn catalog_callbacks_reject_endpoint_scope_and_generation_changes() {
     pane.set_catalog_directory(Some("/project".into()));
     assert!(!pane.catalog_callback_is_current(&server, generation, None));
     assert!(!pane.catalog_callback_is_current(&server, pane.catalog_generation, None));
-    assert!(pane.catalog_callback_is_current(&server, pane.catalog_generation, Some("/project")));
+    assert!(pane.catalog_callback_is_current(
+        &server,
+        pane.catalog_generation,
+        Some("/project")
+    ));
 
     let request = pane.side_panel.next_session_request_generation();
-    pane.background_tx.send(NeoismAgentBackgroundUpdate::SidePanelSessionsRefreshed {
-        server: "http://different".into(), catalog_generation: pane.catalog_generation,
-        directory: Some("/project".into()), generation: request, requested_cursor: None,
-        result: Ok((vec![NeoismAgentSessionEntry::new("stale", "Stale", "")], None)),
-    }).unwrap();
+    pane.background_tx
+        .send(NeoismAgentBackgroundUpdate::SidePanelSessionsRefreshed {
+            server: "http://different".into(),
+            catalog_generation: pane.catalog_generation,
+            directory: Some("/project".into()),
+            generation: request,
+            requested_cursor: None,
+            result: Ok((
+                vec![NeoismAgentSessionEntry::new("stale", "Stale", "")],
+                None,
+            )),
+        })
+        .unwrap();
     pane.drain_background_updates();
     assert!(pane.side_panel.catalog_session("stale").is_none());
 }
@@ -559,19 +707,36 @@ fn project_callbacks_cannot_populate_a_new_catalog_scope() {
     let server = pane.server.clone();
     let old_generation = pane.catalog_generation;
     pane.set_catalog_directory(Some("/new-project".into()));
-    pane.background_tx.send(NeoismAgentBackgroundUpdate::SessionProjectsRefreshed {
-        server: server.clone(), catalog_generation: old_generation, generation: 0,
-        result: Ok(crate::neoism::agent::api::SessionProjects {
-            projects: vec![("/old-project".into(), 10)],
-            pinned_sessions: vec![NeoismAgentSessionEntry::new("stale-pin", "Pin", "").with_pinned(true)],
-        }),
-    }).unwrap();
-    pane.background_tx.send(NeoismAgentBackgroundUpdate::ProjectSessionPage {
-        server, catalog_generation: old_generation, directory: "/old-project".into(),
-        requested_cursor: None, generation: 0,
-        result: Ok((vec![NeoismAgentSessionEntry::new("old", "Old", "")
-            .with_directory(Some("/old-project".into()))], None)),
-    }).unwrap();
+    pane.background_tx
+        .send(NeoismAgentBackgroundUpdate::SessionProjectsRefreshed {
+            server: server.clone(),
+            catalog_generation: old_generation,
+            generation: 0,
+            result: Ok(crate::neoism::agent::api::SessionProjects {
+                projects: vec![("/old-project".into(), 10)],
+                pinned_sessions: vec![NeoismAgentSessionEntry::new(
+                    "stale-pin",
+                    "Pin",
+                    "",
+                )
+                .with_pinned(true)],
+            }),
+        })
+        .unwrap();
+    pane.background_tx
+        .send(NeoismAgentBackgroundUpdate::ProjectSessionPage {
+            server,
+            catalog_generation: old_generation,
+            directory: "/old-project".into(),
+            requested_cursor: None,
+            generation: 0,
+            result: Ok((
+                vec![NeoismAgentSessionEntry::new("old", "Old", "")
+                    .with_directory(Some("/old-project".into()))],
+                None,
+            )),
+        })
+        .unwrap();
     pane.drain_background_updates();
     assert!(!pane.side_panel.project_pagination_enabled());
     assert!(pane.side_panel.catalog_session("old").is_none());
@@ -584,28 +749,58 @@ fn discovery_pins_share_endpoint_and_request_generation_guards() {
     let mut pane = NeoismAgentPane::default();
     let request = pane.side_panel.next_session_request_generation();
     for (server, catalog_generation, generation) in [
-        ("http://different".to_owned(), pane.catalog_generation, request),
-        (pane.server.clone(), pane.catalog_generation.wrapping_add(1), request),
-        (pane.server.clone(), pane.catalog_generation, request.wrapping_add(1)),
+        (
+            "http://different".to_owned(),
+            pane.catalog_generation,
+            request,
+        ),
+        (
+            pane.server.clone(),
+            pane.catalog_generation.wrapping_add(1),
+            request,
+        ),
+        (
+            pane.server.clone(),
+            pane.catalog_generation,
+            request.wrapping_add(1),
+        ),
     ] {
-        pane.background_tx.send(NeoismAgentBackgroundUpdate::SessionProjectsRefreshed {
-            server, catalog_generation, generation,
-            result: Ok(crate::neoism::agent::api::SessionProjects {
-                projects: vec![],
-                pinned_sessions: vec![NeoismAgentSessionEntry::new("rejected-pin", "Pin", "").with_pinned(true)],
-            }),
-        }).unwrap();
+        pane.background_tx
+            .send(NeoismAgentBackgroundUpdate::SessionProjectsRefreshed {
+                server,
+                catalog_generation,
+                generation,
+                result: Ok(crate::neoism::agent::api::SessionProjects {
+                    projects: vec![],
+                    pinned_sessions: vec![NeoismAgentSessionEntry::new(
+                        "rejected-pin",
+                        "Pin",
+                        "",
+                    )
+                    .with_pinned(true)],
+                }),
+            })
+            .unwrap();
     }
     pane.drain_background_updates();
     assert!(pane.side_panel.catalog_session("rejected-pin").is_none());
-    pane.background_tx.send(NeoismAgentBackgroundUpdate::SessionProjectsRefreshed {
-        server: pane.server.clone(), catalog_generation: pane.catalog_generation, generation: request,
-        result: Ok(crate::neoism::agent::api::SessionProjects {
-            projects: vec![],
-            pinned_sessions: vec![NeoismAgentSessionEntry::new("accepted-pin", "Pin", "")
-                .with_directory(Some("/archived".into())).with_pinned(true)],
-        }),
-    }).unwrap();
+    pane.background_tx
+        .send(NeoismAgentBackgroundUpdate::SessionProjectsRefreshed {
+            server: pane.server.clone(),
+            catalog_generation: pane.catalog_generation,
+            generation: request,
+            result: Ok(crate::neoism::agent::api::SessionProjects {
+                projects: vec![],
+                pinned_sessions: vec![NeoismAgentSessionEntry::new(
+                    "accepted-pin",
+                    "Pin",
+                    "",
+                )
+                .with_directory(Some("/archived".into()))
+                .with_pinned(true)],
+            }),
+        })
+        .unwrap();
     pane.drain_background_updates();
     assert!(pane.side_panel.catalog_session("accepted-pin").is_some());
 }
@@ -614,25 +809,28 @@ fn discovery_pins_share_endpoint_and_request_generation_guards() {
 fn scoped_catalog_rejects_foreign_upserts_from_all_scope_stream() {
     let mut pane = NeoismAgentPane::default();
     pane.set_catalog_directory(Some("/project".into()));
-    pane.session_catalog_stream = Some(AgentSessionCatalogStream::with_events_for_test([
-        serde_json::json!({"id":"foreign-update", "sequence":1, "source":"neoism-agent",
-            "schemaVersion":"1.0.0", "timestamp":1,
-            "type":"session.updated", "subject":{"kind":"session", "id":"foreign"}, "data":{"info":{
-                "id":"foreign", "title":"Foreign", "directory":"/other", "time":{"updated":1}
-        }}}),
-        serde_json::json!({"id":"local-update", "sequence":2, "source":"neoism-agent",
-            "schemaVersion":"1.0.0", "timestamp":1,
-            "type":"session.updated", "subject":{"kind":"session", "id":"local"}, "data":{"info":{
-                "id":"local", "title":"Local", "directory":"/project", "time":{"updated":1}
-        }}}),
-    ]));
+    pane.session_catalog_stream = Some(AgentSessionCatalogStream::with_events_for_test(
+        [
+            serde_json::json!({"id":"foreign-update", "sequence":1, "source":"neoism-agent",
+                "schemaVersion":"1.0.0", "timestamp":1,
+                "type":"session.updated", "subject":{"kind":"session", "id":"foreign"}, "data":{"info":{
+                    "id":"foreign", "title":"Foreign", "directory":"/other", "time":{"updated":1}
+            }}}),
+            serde_json::json!({"id":"local-update", "sequence":2, "source":"neoism-agent",
+                "schemaVersion":"1.0.0", "timestamp":1,
+                "type":"session.updated", "subject":{"kind":"session", "id":"local"}, "data":{"info":{
+                    "id":"local", "title":"Local", "directory":"/project", "time":{"updated":1}
+            }}}),
+        ],
+    ));
     pane.drain_live_session_updates();
     assert!(pane.side_panel.catalog_session("foreign").is_none());
     assert!(pane.side_panel.catalog_session("local").is_some());
 }
 
 #[test]
-fn old_project_search_hit_preserves_directory_and_titles_survive_unavailable_transcripts() {
+fn old_project_search_hit_preserves_directory_and_titles_survive_unavailable_transcripts()
+{
     use crate::neoism::agent::api::NeoismAgentSemanticSessionHit;
     use neoism_ui::panels::agent_pane::state::side_panel::ConversationSource;
     let mut pane = NeoismAgentPane::default();
@@ -641,17 +839,27 @@ fn old_project_search_hit_preserves_directory_and_titles_survive_unavailable_tra
     let entry = NeoismAgentSessionEntry::new("older", "Older chat", "")
         .with_directory(Some("/saved/old-project".into()))
         .with_source(ConversationSource::Codex);
-    pane.background_tx.send(NeoismAgentBackgroundUpdate::SemanticSessionHits {
-        catalog_generation: pane.catalog_generation,
-        query: "Older chat".into(),
-        hits: Some(vec![NeoismAgentSemanticSessionHit {
-            session_id: entry.id.clone(), title: entry.title.clone(), entry,
-            excerpt: String::new(), distance: 0.0,
-        }]),
-        transcript_unavailable: true,
-    }).unwrap();
+    pane.background_tx
+        .send(NeoismAgentBackgroundUpdate::SemanticSessionHits {
+            catalog_generation: pane.catalog_generation,
+            query: "Older chat".into(),
+            hits: Some(vec![NeoismAgentSemanticSessionHit {
+                session_id: entry.id.clone(),
+                title: entry.title.clone(),
+                entry,
+                excerpt: String::new(),
+                distance: 0.0,
+            }]),
+            transcript_unavailable: true,
+        })
+        .unwrap();
     assert!(pane.drain_background_updates());
-    let row = pane.side_panel.sessions().iter().find(|row| row.id == "older").unwrap();
+    let row = pane
+        .side_panel
+        .sessions()
+        .iter()
+        .find(|row| row.id == "older")
+        .unwrap();
     assert_eq!(row.directory.as_deref(), Some("/saved/old-project"));
     assert_eq!(row.source, ConversationSource::Codex);
     assert_eq!(pane.directory.as_deref(), Some("/active-project"));
@@ -660,7 +868,10 @@ fn old_project_search_hit_preserves_directory_and_titles_survive_unavailable_tra
     // stop the next server-filtered title query from entering the queue.
     pane.semantic_in_flight = true;
     pane.kick_semantic_session_search("another title".into());
-    assert_eq!(pane.semantic_pending_query.as_deref(), Some("another title"));
+    assert_eq!(
+        pane.semantic_pending_query.as_deref(),
+        Some("another title")
+    );
 }
 
 #[test]
@@ -2462,9 +2673,16 @@ fn activity_overlap_reserves_background_menu_without_disabling_primary_word() {
     let effect = pane.activity_animation_frame().unwrap().effect;
     for (x, y) in [(20.0, 45.0), (10.0, 40.0), (110.0, 50.0)] {
         assert!(pane.background_status_contains(x, y));
-        assert!(!pane.activity_status_contains(x, y), "child menu owns overlap and its boundary");
+        assert!(
+            !pane.activity_status_contains(x, y),
+            "child menu owns overlap and its boundary"
+        );
         assert!(!pane.pop_activity_status_click(x, y));
-        assert_eq!(pane.activity_animation_frame().unwrap().effect, effect, "menu press must not restart replay");
+        assert_eq!(
+            pane.activity_animation_frame().unwrap().effect,
+            effect,
+            "menu press must not restart replay"
+        );
     }
     // A menu-free primary word still replays, even when its label is Background.
     assert!(pane.pop_activity_status_click(20.0, 30.0));
@@ -2472,7 +2690,11 @@ fn activity_overlap_reserves_background_menu_without_disabling_primary_word() {
     pane.clear_tool_hit_rects();
     assert!(!pane.activity_status_contains(20.0, 30.0));
     assert!(!pane.pop_activity_status_click(20.0, 30.0));
-    assert_eq!(pane.animation_reason(), None, "skipping status render must not leave stale hit/redraw state");
+    assert_eq!(
+        pane.animation_reason(),
+        None,
+        "skipping status render must not leave stale hit/redraw state"
+    );
 }
 
 #[test]
@@ -2487,12 +2709,18 @@ fn activity_replay_bag_is_independent_and_restarts_in_conversation() {
         assert!(pane.pop_activity_status_click(20.0, 25.0));
         let frame = pane.activity_animation_frame().unwrap();
         assert!(frame.progress < 0.1, "a second click restarts immediately");
-        assert!(!effects.contains(&frame.effect), "one complete shuffled bag");
+        assert!(
+            !effects.contains(&frame.effect),
+            "one complete shuffled bag"
+        );
         effects.push(frame.effect);
         assert_eq!(pane.animation_reason(), Some("agent_activity_word"));
     }
     assert!(pane.pop_activity_status_click(20.0, 25.0));
-    assert_ne!(pane.activity_animation_frame().unwrap().effect, *effects.last().unwrap());
+    assert_ne!(
+        pane.activity_animation_frame().unwrap().effect,
+        *effects.last().unwrap()
+    );
     assert!(!pane.wordmark.animation.is_active());
 }
 
@@ -2514,8 +2742,15 @@ fn activity_hits_are_frame_local_clipped_and_preserve_background_menu() {
     assert!(pane.background_status_contains(70.0, 25.0));
     pane.clear_tool_hit_rects();
     assert!(!pane.activity_status_contains(20.0, 25.0));
-    assert!(pane.activity_animation_frame().is_some(), "clearing hits is not cancellation");
-    assert_eq!(pane.animation_reason(), None, "offscreen status cannot spin");
+    assert!(
+        pane.activity_animation_frame().is_some(),
+        "clearing hits is not cancellation"
+    );
+    assert_eq!(
+        pane.animation_reason(),
+        None,
+        "offscreen status cannot spin"
+    );
     pane.register_activity_status_rect([10.0, 20.0, 20.0, 12.0]);
     assert_eq!(pane.animation_reason(), Some("agent_activity_word"));
     pane.reset_transient_timeline_interactions();
@@ -2539,7 +2774,11 @@ fn activity_replay_scope_and_expiry_do_not_leave_idle_redraw() {
     assert!(pane.pop_activity_status_click(20.0, 25.0));
     std::thread::sleep(std::time::Duration::from_millis(2800));
     assert!(pane.activity_animation_frame().is_none());
-    assert_eq!(pane.animation_reason(), None, "expired replay leaves no idle redraw owner");
+    assert_eq!(
+        pane.animation_reason(),
+        None,
+        "expired replay leaves no idle redraw owner"
+    );
 }
 
 #[test]
@@ -3532,6 +3771,253 @@ fn switching_families_replaces_stale_event_stream_root() {
             .map(AgentSessionEventStream::session_id),
         Some("root-b")
     );
+}
+
+use neoism_ui::panels::agent_pane::conversation_header::Direction;
+
+fn set_navigation_roster(pane: &mut NeoismAgentPane, children: &[&str]) {
+    let mut roster = vec![NeoismAgentSessionEntry::new("root", "Main session", "")];
+    roster.extend(children.iter().map(|id| {
+        NeoismAgentSessionEntry::new(*id, *id, "")
+            .with_runtime_status(Some("running".into()))
+    }));
+    pane.side_panel.set_subagents(roster);
+    for id in children {
+        pane.side_panel
+            .set_branch_activity_status(*id, BranchStatus::Active);
+    }
+}
+
+#[test]
+fn conversation_navigation_follows_roster_including_nested_children_without_wrap() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_tree_root_id = Some("root".into());
+    pane.parent_session_id = Some("root".into());
+    set_navigation_roster(&mut pane, &["child", "nested", "sibling"]);
+    pane.session_id = Some("child".into());
+    let nav = pane.conversation_navigation();
+    assert_eq!(nav.previous, Some("root"));
+    assert!(nav.previous_is_main);
+    assert_eq!(nav.next, Some("nested"));
+
+    pane.session_id = Some("nested".into());
+    pane.parent_session_id = Some("child".into());
+    let nav = pane.conversation_navigation();
+    assert_eq!(nav.previous, Some("child"));
+    assert!(!nav.previous_is_main);
+    assert_eq!(nav.next, Some("sibling"));
+
+    pane.session_id = Some("sibling".into());
+    let nav = pane.conversation_navigation();
+    assert_eq!(nav.previous, Some("nested"));
+    assert_eq!(nav.next, None);
+
+    pane.session_id = Some("absent".into());
+    let nav = pane.conversation_navigation();
+    assert_eq!(nav.previous, Some("root"));
+    assert!(nav.previous_is_main);
+    assert_eq!(nav.next, None);
+
+    pane.session_id = Some("root".into());
+    pane.parent_session_id = None;
+    let nav = pane.conversation_navigation();
+    assert_eq!(nav.previous, None);
+    assert_eq!(nav.next, None);
+}
+
+#[test]
+fn conversation_navigation_rejects_stale_direction_after_roster_reorder() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("nested".into());
+    pane.parent_session_id = Some("child".into());
+    pane.session_tree_root_id = Some("root".into());
+    set_navigation_roster(&mut pane, &["child", "nested", "sibling"]);
+    let rect = [10., 10., 100., 24.];
+    pane.conversation_header
+        .register(Direction::Previous, "child", rect, rect, &[]);
+    assert_eq!(pane.conversation_navigation_at(15., 15.), Some("child"));
+    set_navigation_roster(&mut pane, &["sibling", "nested", "child"]);
+    assert_eq!(pane.conversation_navigation().next, Some("child"));
+    assert_eq!(pane.conversation_navigation_at(15., 15.), None);
+    assert!(!pane.activate_conversation_navigation(15., 15.));
+    let next_rect = [140., 10., 100., 24.];
+    pane.conversation_header.register(
+        Direction::Next,
+        "child",
+        next_rect,
+        next_rect,
+        &[],
+    );
+    assert_eq!(pane.conversation_navigation_at(150., 15.), Some("child"));
+    assert_eq!(pane.conversation_navigation_at(15., 15.), None);
+    assert_eq!(pane.conversation_navigation_at(300., 15.), None);
+}
+
+#[test]
+fn conversation_navigation_targets_true_root_and_rejects_missing_or_current() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("grandchild".into());
+    pane.parent_session_id = Some("child".into());
+    pane.session_tree_root_id = Some("root".into());
+    assert_eq!(pane.conversation_navigation().previous, Some("root"));
+    pane.session_tree_root_id = Some("grandchild".into());
+    assert_eq!(pane.conversation_navigation().previous, None);
+    pane.session_tree_root_id = Some(String::new());
+    assert_eq!(pane.conversation_navigation().previous, None);
+    pane.session_tree_root_id = None;
+    assert_eq!(pane.conversation_navigation().previous, None);
+    pane.session_tree_root_id = Some("root".into());
+    pane.parent_session_id = None;
+    assert_eq!(pane.conversation_navigation().previous, None);
+    pane.parent_session_id = Some("child".into());
+    pane.session_id = None;
+    assert_eq!(pane.conversation_navigation().previous, None);
+    assert!(!pane.activate_conversation_navigation(15., 15.));
+}
+
+#[test]
+fn conversation_navigation_rejects_stale_clipped_and_occluded_geometry() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("child".into());
+    pane.parent_session_id = Some("root".into());
+    pane.session_tree_root_id = Some("root".into());
+    let rect = [10., 10., 100., 24.];
+    let clip = [0., 0., 200., 100.];
+    pane.conversation_header
+        .register(Direction::Previous, "old-root", rect, clip, &[]);
+    assert_eq!(pane.conversation_navigation_at(15., 15.), None);
+    assert!(!pane.activate_conversation_navigation(15., 15.));
+    pane.conversation_header
+        .register(Direction::Previous, "root", rect, clip, &[]);
+    assert_eq!(pane.conversation_navigation_at(15., 15.), Some("root"));
+    assert!(pane.update_link_hover_at(15., 15.));
+    assert!(pane.link_hover_active());
+    pane.prompt_picker_rect = Some(rect);
+    assert_eq!(pane.conversation_navigation_at(15., 15.), None);
+    pane.prompt_picker_rect = None;
+    pane.composer_interactions.occlusion_rects.push(rect);
+    assert_eq!(pane.conversation_navigation_at(15., 15.), None);
+    pane.composer_interactions.occlusion_rects.clear();
+    assert_eq!(pane.conversation_navigation_at(150., 15.), None);
+    pane.conversation_header
+        .register(Direction::Previous, "root", rect, clip, &[rect]);
+    assert_eq!(pane.conversation_navigation_at(15., 15.), None);
+    pane.conversation_header.register(
+        Direction::Previous,
+        "root",
+        rect,
+        [120., 0., 80., 100.],
+        &[],
+    );
+    assert_eq!(pane.conversation_navigation_at(15., 15.), None);
+    pane.conversation_header.clear();
+    assert_eq!(pane.conversation_navigation_at(15., 15.), None);
+}
+
+#[test]
+fn conversation_navigation_geometry_clears_on_session_and_home_reset() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("child".into());
+    pane.parent_session_id = Some("root".into());
+    pane.session_tree_root_id = Some("root".into());
+    let rect = [10., 10., 100., 24.];
+    pane.conversation_header
+        .register(Direction::Previous, "root", rect, rect, &[]);
+    pane.switch_session("child".into());
+    assert_eq!(
+        pane.conversation_header
+            .hit_at(15., 15.)
+            .map(|hit| hit.target),
+        None
+    );
+    pane.conversation_header
+        .register(Direction::Previous, "root", rect, rect, &[]);
+    pane.create_new_session();
+    assert_eq!(
+        pane.conversation_header
+            .hit_at(15., 15.)
+            .map(|hit| hit.target),
+        None
+    );
+    assert_eq!(pane.conversation_navigation().previous, None);
+}
+
+#[test]
+fn conversation_navigation_restores_cached_root_draft_transcript_and_permissions() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("root".into());
+    pane.session_tree_root_id = Some("root".into());
+    pane.input = "unfinished parent draft".into();
+    pane.messages
+        .push(NeoismAgentMessage::user("parent transcript"));
+    set_navigation_roster(&mut pane, &["child", "grandchild"]);
+    pane.enqueue_pending_permission(child_permission("perm-back"));
+    let mut child = CachedAgentSession::live_only();
+    child.hydrated = true;
+    child.state.parent_id = Some("root".into());
+    pane.session_cache.insert("child".into(), child);
+    pane.runtime_hydrated_sessions.insert("child".into());
+    pane.session_preloads_in_flight.insert("child".into());
+    let mut nested = CachedAgentSession::live_only();
+    nested.hydrated = true;
+    nested.state.parent_id = Some("child".into());
+    nested
+        .messages
+        .push(NeoismAgentMessage::user("nested transcript"));
+    pane.session_cache.insert("grandchild".into(), nested);
+    pane.runtime_hydrated_sessions.insert("grandchild".into());
+    pane.runtime_hydrated_sessions.insert("root".into());
+    // Suppress background preload requests: navigation must use the cache now.
+    pane.session_preloads_in_flight.insert("grandchild".into());
+    pane.session_preloads_in_flight.insert("root".into());
+    pane.switch_session("grandchild".into());
+    assert_eq!(pane.parent_session_id.as_deref(), Some("child"));
+    assert_eq!(pane.conversation_navigation().previous, Some("child"));
+    assert!(!pane.conversation_navigation().previous_is_main);
+    assert_eq!(pane.conversation_navigation().next, None);
+    assert!(pane.input.is_empty());
+    pane.conversation_header.register(
+        Direction::Previous,
+        "child",
+        [10., 10., 100., 24.],
+        [0., 0., 200., 100.],
+        &[],
+    );
+    assert!(pane.activate_conversation_navigation(15., 15.));
+    assert_eq!(pane.session_id_str(), Some("child"));
+    assert_eq!(pane.conversation_navigation().previous, Some("root"));
+    assert!(pane.conversation_navigation().previous_is_main);
+    assert_eq!(pane.conversation_navigation().next, Some("grandchild"));
+    pane.conversation_header.register(
+        Direction::Previous,
+        "root",
+        [10., 10., 100., 24.],
+        [0., 0., 200., 100.],
+        &[],
+    );
+    assert!(pane.activate_conversation_navigation(15., 15.));
+    assert_eq!(pane.session_id_str(), Some("root"));
+    assert_eq!(pane.input, "unfinished parent draft");
+    assert!(pane
+        .messages
+        .iter()
+        .any(|message| message.text == "parent transcript"));
+    assert!(!pane
+        .messages
+        .iter()
+        .any(|message| message.text == "nested transcript"));
+    assert_eq!(
+        pane.pending_permission()
+            .map(|permission| permission.id.as_str()),
+        Some("perm-back")
+    );
+    assert_eq!(
+        pane.conversation_header
+            .hit_at(15., 15.)
+            .map(|hit| hit.target),
+        None
+    );
+    assert!(!pane.activate_conversation_navigation(15., 15.));
 }
 
 #[test]

@@ -1,6 +1,47 @@
 use super::*;
 
 impl NeoismAgentPane {
+    pub fn conversation_navigation(
+        &self,
+    ) -> crate::panels::agent_pane::conversation_header::ConversationNavigation<'_> {
+        crate::panels::agent_pane::conversation_header::navigation_targets(
+            self.is_subagent_session(),
+            self.session_id_str(),
+            self.conversation_root_id(),
+            self.side_panel.visible_subagents(),
+        )
+    }
+
+    pub fn conversation_navigation_at(&self, x: f32, y: f32) -> Option<&str> {
+        let overlay = self
+            .picker
+            .as_ref()
+            .and_then(|picker| picker.last_rect)
+            .or(self.prompt_picker_rect);
+        if overlay.is_some_and(|rect| interaction_policy::rect_contains(rect, x, y))
+            || self
+                .composer_interactions
+                .occlusion_rects
+                .iter()
+                .any(|rect| interaction_policy::rect_contains(*rect, x, y))
+        {
+            return None;
+        }
+        let hit = self.conversation_header.hit_at(x, y)?;
+        (self.conversation_navigation().target(hit.direction) == Some(hit.target))
+            .then_some(hit.target)
+    }
+
+    pub fn activate_conversation_navigation(&mut self, x: f32, y: f32) -> bool {
+        let Some(target) = self.conversation_navigation_at(x, y).map(str::to_owned)
+        else {
+            return false;
+        };
+        self.conversation_header.clear();
+        self.switch_session(target);
+        true
+    }
+
     pub fn open_usage_picker(&mut self) {
         let mut picker = NeoismAgentPicker::usage_loading();
         picker.set_usage_error("Usage is available in the native app".into());
@@ -702,6 +743,7 @@ impl NeoismAgentPane {
     /// Hosts also call this when the user explicitly re-invokes
     /// "Neoism" while a conversation is already showing.
     pub fn start_new_conversation(&mut self) {
+        self.conversation_header.clear();
         self.remember_current_provider_connection();
         self.new_chat_source = super::side_panel::ConversationSource::Neoism;
         self.session_id = None;
@@ -755,6 +797,7 @@ impl NeoismAgentPane {
         if self.session_id.as_deref() == Some(trimmed.as_str()) {
             return;
         }
+        self.conversation_header.clear();
         self.new_chat_source = self
             .side_panel
             .sessions()

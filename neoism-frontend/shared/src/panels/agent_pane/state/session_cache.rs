@@ -136,6 +136,7 @@ impl CachedAgentRuntime {
 /// mirror of desktop's `CachedAgentSession` (minus the desktop-only
 /// preload bookkeeping).
 pub(in crate::panels::agent_pane::state) struct CachedAgentSession {
+    pub input: String,
     pub state: crate::panels::agent_pane::api_mapping::SessionState,
     pub messages: Vec<NeoismAgentMessage>,
     pub pending_user_prompts: Vec<String>,
@@ -159,6 +160,7 @@ pub(in crate::panels::agent_pane::state) struct CachedAgentSession {
 impl CachedAgentSession {
     pub(in crate::panels::agent_pane::state) fn live_only() -> Self {
         Self {
+            input: String::new(),
             state: crate::panels::agent_pane::api_mapping::SessionState::default(),
             messages: Vec::new(),
             pending_user_prompts: Vec::new(),
@@ -452,6 +454,7 @@ impl NeoismAgentPane {
         self.session_cache.insert(
             session_id,
             CachedAgentSession {
+                input: std::mem::take(&mut self.input),
                 state,
                 messages,
                 pending_user_prompts: std::mem::take(&mut self.pending_user_prompts),
@@ -544,7 +547,7 @@ impl NeoismAgentPane {
         self.parent_session_id = state.parent_id.clone().or(roster_parent);
         self.side_panel
             .set_viewed_session_id(Some(session_id.to_string()));
-        self.input.clear();
+        self.input = cached.input;
         self.close_picker();
         self.reset_timeline_navigation_for_session_switch();
         // The restored timeline must render fresh — no raised/expanded

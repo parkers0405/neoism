@@ -1,3 +1,4 @@
+param([Parameter(Mandatory)][ValidatePattern('^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$')][string]$ExpectedVersion)
 $ErrorActionPreference = "Stop"
 . "$PSScriptRoot/windows-validation-process.ps1"
 $evidence = (New-Item -ItemType Directory -Force 'windows-validation').FullName
@@ -5,8 +6,10 @@ Start-Transcript -Path "$evidence/msi-transcript.log"
 $script:msiStep = 0
 function Invoke-Msi([string]$arguments) {
     $script:msiStep++
-    Invoke-CheckedProcess 'msiexec.exe' "$arguments /L*v `"$evidence/msi-$script:msiStep.log`"" `
-        "$evidence/msiexec-$script:msiStep" 180 @(0, 3010, 1641)
+    Write-ValidationPhase $evidence "MSI step=$script:msiStep begin arguments=$arguments"
+    Invoke-CheckedProcess 'msiexec.exe' "$arguments REBOOT=ReallySuppress /L*v `"$evidence/msi-$script:msiStep.log`"" `
+        "$evidence/msiexec-$script:msiStep" 180 @(0)
+    Write-ValidationPhase $evidence "MSI step=$script:msiStep complete"
 }
 $fixture = (Resolve-Path "Neoism-upgrade-fixture.msi").Path
 $installer = (Resolve-Path "Neoism-x86_64.msi").Path
@@ -17,10 +20,12 @@ Set-Content $userData "preserve"
 
 $upgraded = $false
 try {
+Write-ValidationPhase $evidence "fixture install begin expected=$ExpectedVersion"
 Invoke-Msi "/i `"$fixture`" /qn /norestart"
 $fixtureHash = (Get-FileHash (Join-Path $installDir "neoism.exe") -Algorithm SHA256).Hash
 Invoke-Msi "/i `"$installer`" /qn /norestart"
 $upgraded = $true
+Write-ValidationPhase $evidence 'installed payload hash/signature verification begin'
 $packagingDir = Join-Path $PWD 'target/x86_64-pc-windows-msvc/release'
 foreach ($binary in @('neoism.exe', 'neoism-workspace-daemon.exe', 'neoism-agent.exe', 'neoism-agent-lua-runner.exe')) {
     $sourceHash = (Get-FileHash (Join-Path $packagingDir $binary) -Algorithm SHA256).Hash
@@ -40,14 +45,14 @@ foreach ($binary in @("neoism.exe", "neoism-workspace-daemon.exe", "neoism-agent
 }
 if (-not (Test-Path (Join-Path $installDir "web\index.html"))) { throw "web UI was not installed" }
 if (-not (Test-Path (Join-Path $installDir "web\agent-gui\index.html"))) { throw "agent GUI was not installed" }
+Write-ValidationPhase $evidence 'installed version query begin'
 Invoke-CheckedProcess (Join-Path $installDir 'neoism.exe') '--version' "$evidence/version" 30
 $version = (Get-Content "$evidence/version.stdout.log" | Out-String).Trim()
 if ($version -notmatch "neoism") { throw "installed executable did not report its version" }
+Write-ValidationPhase $evidence 'registry/version/shortcut/PATH verification begin'
 $appPath = (Get-Item "HKCU:\Software\Microsoft\Windows\CurrentVersion\App Paths\neoism.exe").GetValue('')
 if ($appPath -ne (Join-Path $installDir "neoism.exe")) { throw "App Paths registration is wrong" }
 $registeredVersion = (Get-ItemProperty "HKCU:\Software\Neoism").InstalledVersion
-$expectedVersion = ((cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages |
-  Where-Object { $_.name -eq "neoism" }).version
 $expectedInstallerVersion = ($expectedVersion -split '[-+]', 2)[0]
 if ($registeredVersion -ne $expectedInstallerVersion) {
     throw "MSI major upgrade version mismatch: expected $expectedInstallerVersion, got $registeredVersion"
@@ -62,14 +67,21 @@ if (($userPath -split ';').TrimEnd('\') -notcontains $installDir.TrimEnd('\')) {
   throw "Neoism install directory was not added to the user PATH"
 }
 
+Write-ValidationPhase $evidence 'native updater validation begin'
 & "$PSScriptRoot/windows-updater-native-validation.ps1" -CandidateMsi $installer `
     -ManagedDir $installDir -PackagingDir $packagingDir -Version $expectedVersion -Evidence $evidence
+Write-ValidationPhase $evidence 'native updater complete; installed GUI smoke begin'
 & "$PSScriptRoot/windows-installed-gui-smoke.ps1" -InstallDir $installDir -Evidence $evidence
+Write-ValidationPhase $evidence 'installed GUI smoke complete'
 } finally {
     try {
+        Write-ValidationPhase $evidence 'uninstall cleanup begin'
         $remove = if ($upgraded) { $installer } else { $fixture }
         Invoke-Msi "/x `"$remove`" /qn /norestart"
-    } finally { Stop-Transcript }
+    } finally {
+        try { Write-ValidationSnapshot -Evidence $evidence -Name post-msi }
+        finally { Stop-Transcript }
+    }
 }
 foreach ($binary in @("neoism.exe", "neoism-workspace-daemon.exe", "neoism-agent.exe", "neoism-agent-lua-runner.exe")) {
   if (Test-Path (Join-Path $installDir $binary)) { throw "$binary remained after uninstall" }
@@ -86,3 +98,4 @@ if (($userPathAfter -split ';').TrimEnd('\') -contains $installDir.TrimEnd('\'))
 }
 if (-not (Test-Path $userData)) { throw "uninstall removed Neoism user data" }
 Remove-Item $userData -Force
+Write-ValidationPhase $evidence 'PASS: install/upgrade/updater/GUI/uninstall/preservation verified'

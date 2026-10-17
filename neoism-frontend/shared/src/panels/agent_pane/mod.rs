@@ -8,6 +8,7 @@
 pub mod api_mapping;
 pub mod attachment_policy;
 pub mod composer_interactions;
+pub mod conversation_header;
 pub mod background_runtime;
 pub mod bridge_policy;
 

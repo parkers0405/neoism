@@ -347,11 +347,34 @@ jobs:
           if ($errors.Count -ne 0) { $errors | Format-List; throw "install.ps1 has parse errors" }
           ./scripts/windows-validation-process-tests.ps1
 
+      # Upload BEFORE destructive MSI/updater/GUI checks. always() cannot upload
+      # from a lost runner; this checkpoint survives a later runner disconnect.
+      - name: Capture Windows pre-MSI evidence
+        if: matrix.goos == 'windows'
+        shell: pwsh
+        timeout-minutes: 2
+        run: |
+          . ./scripts/windows-validation-process.ps1
+          Write-ValidationSnapshot -Evidence windows-validation -Name pre-msi
+          Write-ValidationPhase -Evidence windows-validation -Phase 'pre-MSI checkpoint'
+          Get-FileHash Neoism-x86_64.msi, Neoism-upgrade-fixture.msi -Algorithm SHA256 |
+            ConvertTo-Json | Set-Content windows-validation/pre-msi-hashes.json
+
+      - name: Upload Windows pre-MSI checkpoint
+        if: matrix.goos == 'windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-pre-msi-${{ github.run_id }}-${{ github.run_attempt }}
+          include-hidden-files: true
+          path: windows-validation/
+          if-no-files-found: error
+          retention-days: 14
+
       - name: Smoke-test Windows install, upgrade, and uninstall
         if: matrix.goos == 'windows'
         shell: pwsh
         timeout-minutes: 12
-        run: ./scripts/windows-msi-validation.ps1
+        run: ./scripts/windows-msi-validation.ps1 -ExpectedVersion "$env:NEOISM_RELEASE_VERSION"
 
       - name: Upload Windows validation evidence
         if: always() && matrix.goos == 'windows'

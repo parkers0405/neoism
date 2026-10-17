@@ -15,6 +15,8 @@ struct Host {
     inputs: Mutex<Vec<Value>>,
     finished: Arc<AtomicBool>,
     cancelled_on_drop: Arc<AtomicBool>,
+    slow_started: Arc<tokio::sync::Notify>,
+    slow_release: Arc<tokio::sync::Notify>,
 }
 impl ToolHost for Host {
     fn catalog(&self) -> Vec<ToolDescriptor> {
@@ -43,13 +45,20 @@ impl ToolHost for Host {
         self.inputs.lock().unwrap().push(input.clone());
         let finished = self.finished.clone();
         let observed = self.cancelled_on_drop.clone();
+        let slow_started = self.slow_started.clone();
+        let slow_release = self.slow_release.clone();
         async move {
             if path == "test.unsafe" {
                 return Ok(json!({"id":9007199254740993u64}));
             }
             if path == "test.fail" {
-                tokio::time::sleep(Duration::from_millis(3)).await;
+                if input["waitForSlow"] == true {
+                    slow_started.notified().await;
+                }
                 return Err("fast rejection".into());
+            }
+            if path == "test.echo" && input["releaseSlow"] == true {
+                slow_release.notify_one();
             }
             if path == "test.slow" {
                 struct Guard {
@@ -66,12 +75,16 @@ impl ToolHost for Host {
                     cancel: cancel.clone(),
                     observed,
                 };
-                for _ in 0..100 {
-                    if cancel.load(Ordering::SeqCst) {
-                        return Err("cancelled".into());
-                    }
-                    tokio::time::sleep(Duration::from_millis(3)).await;
+                if input["cancelBeforeError"] == true {
+                    // Model cancellation arriving during the final host poll, after
+                    // Engine::wait's pre-poll checkpoint but before the host error.
+                    cancel.store(true, Ordering::SeqCst);
+                    return Err("cancelled".into());
                 }
+                slow_started.notify_one();
+                // Deliberately do not return a host error on cancellation: this
+                // branch tests runtime interruption, not cooperative host failure.
+                slow_release.notified().await;
                 finished.store(true, Ordering::SeqCst);
             }
             Ok(input)
@@ -202,24 +215,55 @@ async fn undefined_policy_is_explicit_at_each_boundary() {
 #[tokio::test]
 async fn promise_all_is_fail_fast_and_siblings_remain_owned() {
     let host = Arc::new(Host::default());
-    let start = Instant::now();
+    // Failure waits for the slow future to start; slow has no completion path
+    // unless explicitly released. Returning proves fail-fast behavior.
+    let r = tokio::time::timeout(Duration::from_secs(5), execute(
+        "return await Promise.all([tools.test.slow({}),tools.test.fail({waitForSlow:true})]);",
+        host.clone(),
+        Limits::default(),
+        cancel(),
+    ))
+    .await
+    .expect("Promise.all must reject without waiting for its pending sibling");
+    assert!(!r.ok);
+    assert!(r.error.as_ref().unwrap().message.contains("fast rejection"));
+    assert!(!host.finished.load(Ordering::SeqCst));
+    assert!(host.cancelled_on_drop.load(Ordering::SeqCst));
+    assert_eq!(r.tool_calls.len(), 2);
+    assert_eq!(r.tool_calls[0].path, "test.slow");
+    assert_eq!(r.tool_calls[0].status, "interrupted");
+    assert_eq!(r.tool_calls[1].path, "test.fail");
+    assert_eq!(r.tool_calls[1].status, "error");
+    let host = Arc::new(Host::default());
+    // Only the catch handler releases the sibling. Rejecting Promise.all must
+    // neither cancel p nor lose its result: it must remain owned and awaitable.
+    let r = tokio::time::timeout(Duration::from_secs(5), execute("const p=tools.test.slow({a:3});try{await Promise.all([p,tools.test.fail({waitForSlow:true})]);}catch(e){console.log(e.message);await tools.test.echo({releaseSlow:true});}return await p;",host.clone(),Limits::default(),cancel())).await.expect("caught rejection must leave its sibling awaitable");
+    assert_eq!(r.tool_calls[0].status, "completed");
+    assert_eq!(r.tool_calls[1].status, "error");
+    assert_eq!(value(r), json!({"a":3}));
+    assert!(host.finished.load(Ordering::SeqCst));
+    assert!(!host.cancelled_on_drop.load(Ordering::SeqCst));
+}
+#[tokio::test]
+async fn cooperative_host_error_can_win_the_cancellation_checkpoint_race() {
+    let host = Arc::new(Host::default());
+    // ToolHost returns untyped String errors. Force cancellation during the
+    // host's final poll, after wait's checkpoint, without scheduler timing.
+    // The settled host error is retained; cleanup must not overwrite it just
+    // because its guard also observed cancellation when the future was dropped.
     let r = execute(
-        "return await Promise.all([tools.test.slow({}),tools.test.fail({})]);",
+        "return await tools.test.slow({cancelBeforeError:true});",
         host.clone(),
         Limits::default(),
         cancel(),
     )
     .await;
     assert!(!r.ok);
-    assert!(start.elapsed() < Duration::from_millis(250));
     assert!(!host.finished.load(Ordering::SeqCst));
     assert!(host.cancelled_on_drop.load(Ordering::SeqCst));
-    assert!(r.tool_calls.iter().any(|r| r.status == "interrupted"));
-    let host = Arc::new(Host::default());
-    let r=execute("const p=tools.test.slow({a:3});try{await Promise.all([p,tools.test.fail({})]);}catch(e){console.log(e.message);}return await p;",host.clone(),Limits::default(),cancel()).await;
-    assert_eq!(value(r), json!({"a":3}));
-    assert!(host.finished.load(Ordering::SeqCst));
-    assert!(!host.cancelled_on_drop.load(Ordering::SeqCst));
+    assert_eq!(r.tool_calls.len(), 1);
+    assert_eq!(r.tool_calls[0].status, "error");
+    assert_eq!(r.tool_calls[0].error.as_deref(), Some("cancelled"));
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn concurrent_logging_rechecks_budget_atomically() {

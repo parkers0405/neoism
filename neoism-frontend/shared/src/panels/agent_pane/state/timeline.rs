@@ -1288,6 +1288,7 @@ impl NeoismAgentPane {
 
     #[allow(dead_code)]
     pub(in crate::panels::agent_pane) fn reset_session_runtime_ui(&mut self) {
+        self.pending_compact = None;
         self.queued_prompt_count = 0;
         self.queued_prompt_preview = None;
         self.streaming_state = NeoismAgentStreamingState::Idle;

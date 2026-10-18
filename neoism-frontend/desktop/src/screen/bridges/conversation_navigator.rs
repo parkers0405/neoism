@@ -41,14 +41,19 @@ struct SearchRequest {
     wake: AgentEventWake,
 }
 
+enum SearchCommand {
+    Query(SearchRequest),
+    Cancel,
+}
+
 struct SearchReply {
     identity: SearchIdentity,
-    result: Result<(Vec<(NeoismAgentSessionEntry, String)>, bool), String>,
+    result: Result<(Vec<(NeoismAgentSessionEntry, String)>, bool, bool), String>,
 }
 
 pub(crate) struct ConversationSearchState {
     identity: SearchIdentity,
-    requests: Option<Sender<SearchRequest>>,
+    requests: Option<Sender<SearchCommand>>,
     replies: (Sender<SearchReply>, Receiver<SearchReply>),
     project_rows: Vec<Row>,
     captured_buttons: Vec<neoism_window::event::MouseButton>,
@@ -101,7 +106,7 @@ fn fetch(request: &SearchRequest) -> SearchReply {
         if entries.is_empty() && error.is_some() {
             Err(error.unwrap())
         } else {
-            Ok((entries, false))
+            Ok((entries, false, false))
         }
     } else {
         fetch_session_search_hits(
@@ -111,12 +116,13 @@ fn fetch(request: &SearchRequest) -> SearchReply {
             None,
             request.transcript_enabled,
         )
-        .map(|(hits, unavailable)| {
+        .map(|(hits, unavailable, indexing)| {
             (
                 hits.into_iter()
                     .map(|hit| (hit.entry, hit.excerpt))
                     .collect(),
                 unavailable,
+                indexing,
             )
         })
     };
@@ -126,26 +132,42 @@ fn fetch(request: &SearchRequest) -> SearchReply {
 impl ConversationSearchState {
     fn submit(&mut self, request: SearchRequest) -> Result<(), String> {
         if self.requests.is_none() {
-            let (tx, rx) = mpsc::channel::<SearchRequest>();
+            let (tx, rx) = mpsc::channel::<SearchCommand>();
             let replies = self.replies.0.clone();
             std::thread::Builder::new()
                 .name("neoism-conversation-search".into())
                 .spawn(move || {
-                    while let Ok(mut request) = rx.recv() {
-                        // Single flight, debounce AND coalesce: typing while HTTP
-                        // runs queues only the latest query for the next fetch.
-                        loop {
-                            match rx.recv_timeout(Duration::from_millis(160)) {
-                                Ok(latest) => request = latest,
-                                Err(mpsc::RecvTimeoutError::Timeout) => break,
-                                Err(mpsc::RecvTimeoutError::Disconnected) => return,
+                    let mut pending: Option<SearchRequest> = None;
+                    let mut delay = Duration::from_millis(160);
+                    loop {
+                        let command = if pending.is_some() {
+                            rx.recv_timeout(delay)
+                        } else {
+                            rx.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected)
+                        };
+                        match command {
+                            Ok(SearchCommand::Query(request)) => {
+                                pending = Some(request);
+                                delay = Duration::from_millis(160);
+                            }
+                            Ok(SearchCommand::Cancel) => pending = None,
+                            Err(mpsc::RecvTimeoutError::Disconnected) => return,
+                            Err(mpsc::RecvTimeoutError::Timeout) => {
+                                let request = pending.take().unwrap();
+                                let reply = fetch(&request);
+                                let retry = matches!(&reply.result, Ok((_, false, true)));
+                                if replies.send(reply).is_err() {
+                                    return;
+                                }
+                                request.wake.wake();
+                                if retry {
+                                    // Same identity, one existing worker, interruptible wait.
+                                    // Cancel/query commands queued during HTTP win before retry.
+                                    pending = Some(request);
+                                    delay = Duration::from_secs(1);
+                                }
                             }
                         }
-                        let reply = fetch(&request);
-                        if replies.send(reply).is_err() {
-                            return;
-                        }
-                        request.wake.wake();
                     }
                 })
                 .map_err(|error| error.to_string())?;
@@ -154,7 +176,7 @@ impl ConversationSearchState {
         self.requests
             .as_ref()
             .unwrap()
-            .send(request)
+            .send(SearchCommand::Query(request))
             .map_err(|error| error.to_string())
     }
 }
@@ -285,6 +307,9 @@ impl Screen<'_> {
     }
 
     fn invalidate_conversation_search(&mut self) {
+        if let Some(requests) = &self.conversation_search.requests {
+            let _ = requests.send(SearchCommand::Cancel);
+        }
         self.conversation_search
             .identity
             .advance(String::new(), String::new());
@@ -381,7 +406,8 @@ impl Screen<'_> {
             }
             self.renderer.conversation_navigator.set_loading(false);
             match reply.result {
-                Ok((entries, unavailable)) => {
+                Ok((entries, unavailable, indexing)) => {
+                    self.renderer.conversation_navigator.set_indexing(indexing);
                     if unavailable {
                         self.conversation_search
                             .transcript_unavailable

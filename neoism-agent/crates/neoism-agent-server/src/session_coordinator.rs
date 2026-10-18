@@ -8,6 +8,11 @@ use crate::state::SessionRun;
 #[derive(Default)]
 pub(crate) struct SessionCoordinator {
     entries: Mutex<HashMap<String, Entry>>,
+    // Per-state, per-session handshake: tests must not infer a suspension point
+    // from a broadcast event (a ready stub can finish in the same task poll).
+    #[cfg(test)]
+    pub(crate) compaction_started_gates:
+        Mutex<HashMap<String, tokio::sync::oneshot::Receiver<()>>>,
 }
 
 struct Entry {
@@ -121,6 +126,20 @@ impl SessionCoordinator {
             entries.remove(session_id);
         }
         false
+    }
+
+    /// A store outage must not spin on an unremovable control. Durable work is
+    /// retained; a later admission/restart may retry after the store recovers.
+    pub(crate) async fn park_failed_worker(&self, session_id: &str) {
+        let mut entries = self.entries.lock().await;
+        if let Some(entry) = entries.get_mut(session_id) {
+            entry.worker = false;
+            entry.pending_wake = false;
+            entry.changed.notify_waiters();
+            if entry.run.is_none() {
+                entries.remove(session_id);
+            }
+        }
     }
 
     /// The active run for a session, if any. This is the single in-memory

@@ -240,7 +240,21 @@ pub(crate) async fn session_status_payload(
     session_id: &str,
     status: &SessionStatus,
 ) -> Value {
-    let mut payload = json!({ "sessionID": session_id, "status": status });
+    let compaction_queued = state
+        .inner
+        .store
+        .compaction_queued(session_id)
+        .await
+        .unwrap_or(false);
+    let mut payload = json!({
+        "sessionID": session_id,
+        "status": status,
+        "compactionQueued": compaction_queued,
+    });
+    if matches!(status, SessionStatus::Busy { .. }) {
+        payload["status"]["queue"] =
+            crate::session_queue::queue_status_snapshot(state, session_id).await;
+    }
     if let Some(run) = state.inner.session_coordinator.active_run(session_id).await {
         payload["runID"] = json!(run.id.clone());
         payload["startedAt"] = json!(run.started_at);

@@ -11,18 +11,18 @@ pub(super) fn provider_slash_draft(draft: &str, name: &str) -> String {
 impl NeoismAgentPane {
     pub(super) fn note_prompt_admission(&mut self, message_id: &str) {
         self.status_timing.admit(message_id);
-        if !self.status_timing.enabled() {
-            return;
-        }
         // A hydration request captured before Enter must not settle the new
         // optimistic run. Event revisions already guard live updates; include
-        // the local submit boundary on Windows as well.
+        // the local submit boundary on every platform.
         if let Some(session_id) = self.session_id.clone() {
             let revision = self
                 .session_runtime_revisions
                 .entry(session_id)
                 .or_default();
             *revision = revision.wrapping_add(1);
+        }
+        if !self.status_timing.enabled() {
+            return;
         }
         // Until the new execution event arrives, do not label the new turn
         // with the previous execution's final provider duration. Never discard

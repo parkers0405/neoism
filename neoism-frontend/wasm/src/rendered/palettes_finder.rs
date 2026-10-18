@@ -139,8 +139,9 @@ impl ChromeBridge {
         0
     }
 
-    /// Wheel / touch-drag scroll for the center modals. `delta`
-    /// uses DOM sign (positive scrolls the list down).
+    /// Wheel scroll for the center modals. Direct finger movement uses
+    /// `modal_touch_scroll` so it does not pick up wheel animation.
+    /// `delta` uses DOM sign (positive scrolls the list down).
     pub fn modal_scroll(&mut self, x: f32, y: f32, delta_pixels: f32) -> bool {
         let Some((pw, ph, sf)) = self.rendered.sugarloaf_mut().map(|s| {
             let size = s.window_size();
@@ -203,7 +204,7 @@ impl ChromeBridge {
             return false;
         };
         if self.chrome.conversation_navigator.is_active() {
-            self.chrome.conversation_navigator.scroll(-finger_delta);
+            self.chrome.conversation_navigator.scroll_immediate(-finger_delta);
             return true;
         }
         if self.chrome.file_browser.is_active() {

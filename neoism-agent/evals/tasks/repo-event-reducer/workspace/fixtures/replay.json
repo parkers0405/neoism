@@ -1,0 +1,1 @@
+{"state":{"entities":{},"seen":[]},"events":[{"id":"a","key":"doc","version":2,"op":"put","value":{"title":"Draft"}},{"id":"b","key":"doc","version":3,"op":"delete"}]}

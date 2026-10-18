@@ -649,6 +649,7 @@ impl NeoismAgentPane {
         let echo_prompt = echo_prompt.to_string();
         let message_id = crate::panels::agent_pane::outbound::next_prompt_message_id();
         if transcript_echo {
+            self.prompt_admission.admit(&message_id);
             let mut message =
                 NeoismAgentMessage::user(echo_prompt.clone()).with_id(message_id.clone());
             message.author = self.local_presence_name.clone();
@@ -1288,8 +1289,8 @@ impl NeoismAgentPane {
     }
 
     pub(in crate::panels::agent_pane::state) fn abort_session(&mut self) {
-        // A user-driven stop is a hard clear: the status label must not
-        // linger through the display grace hold, or Stop reads as lag.
+        // Never retain the stopped run's label through the display hold.
+        // Real queued work gets a neutral handoff; no ordinary queue is idle.
         self.side_panel.clear_status_display_hold();
         // Mirrors desktop `commands::abort_session`: without a session
         // there's nothing for the host to abort.
@@ -1298,8 +1299,7 @@ impl NeoismAgentPane {
             self.system_message("Abort", "no session has started yet");
             return;
         }
-        self.abort_requested_at = Some(Instant::now());
-        self.note_streaming(NeoismAgentStreamingState::Idle, None);
+        self.begin_queue_stop();
         self.settle_tracked_subagents(BranchStatus::Stopped);
         self.push_outbound(OutboundAgentCommand::AbortSession);
     }
@@ -1314,7 +1314,17 @@ impl NeoismAgentPane {
         // actual `/api/session/.../compact` POST. The pane enters Compacting
         // only after the backend emits the same compaction.started event used
         // by auto compaction.
-        self.push_outbound(OutboundAgentCommand::CompactSession);
+        if self.pending_compact.is_some()
+            || self.queued_prompt_preview.as_deref() == Some("Compaction queued")
+        {
+            return;
+        }
+        let request_id = crate::panels::agent_pane::outbound::next_prompt_message_id();
+        self.pending_compact = Some(request_id.clone());
+        self.push_outbound(OutboundAgentCommand::CompactSessionRequest {
+            session_id: self.session_id.clone().unwrap(),
+            request_id,
+        });
     }
 
     pub(in crate::panels::agent_pane) fn insert_skill_mention_by_name(

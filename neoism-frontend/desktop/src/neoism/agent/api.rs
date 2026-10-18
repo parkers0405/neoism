@@ -1165,31 +1165,53 @@ mod subagent_runtime_snapshot_tests {
             &HashMap::new(),
         )
         .unwrap();
-        let title = NeoismAgentSemanticSessionHit {
-            session_id: entry.id.clone(),
-            title: entry.title.clone(),
-            entry: entry.clone(),
-            excerpt: String::new(),
-            distance: 0.0,
-        };
-        let title_only = merge_session_search_hits(vec![title.clone()], Vec::new());
-        assert_eq!(
-            title_only.len(),
-            1,
-            "unavailable transcript search must retain titles"
-        );
-        assert_eq!(
-            title_only[0].entry.directory.as_deref(),
-            Some("/allowed/old-project")
-        );
-        let mut transcript = title;
-        transcript.excerpt = "matched transcript".into();
-        transcript.distance = 0.3;
-        let merged = merge_session_search_hits(title_only, vec![transcript]);
-        assert_eq!(merged.len(), 1);
-        assert_eq!(merged[0].excerpt, "matched transcript");
-        assert_eq!(merged[0].entry.source, entry.source);
-        assert_eq!(merged[0].entry.directory, entry.directory);
+        assert_eq!(entry.id, "older");
+        assert_eq!(entry.title, "Older chat");
+        assert_eq!(entry.directory.as_deref(), Some("/allowed/old-project"));
+    }
+
+    #[test]
+    fn embedded_search_session_never_fetches_and_preserves_authorized_metadata() {
+        let hit = serde_json::json!({"sessionId":"older", "session": {
+            "id":"older", "title":"Older chat", "directory":"/remote/project",
+            "externalAgent":{"historyState":"neoism_only", "provider":"codex"}
+        }});
+        let entry = semantic_hit_session_entry(&hit, "older", Some("/remote/project"), || {
+            panic!("embedded authorized session must not trigger HTTP")
+        }).unwrap();
+        assert_eq!(entry.id, "older");
+        assert_eq!(entry.title, "Older chat");
+        assert_eq!(entry.directory.as_deref(), Some("/remote/project"));
+        let expected = session_entry(&hit["session"], &HashMap::new()).unwrap();
+        assert_eq!(entry.source, expected.source);
+        for (id, directory) in [("other", None), ("older", Some("/different"))] {
+            assert!(semantic_hit_session_entry(&hit, id, directory, || {
+                panic!("invalid embedded metadata must not trigger HTTP")
+            }).is_none());
+        }
+        for session in [
+            serde_json::json!({"id":"older", "parentID":"parent"}),
+            serde_json::json!({"id":"older", "parentId":"parent"}),
+            serde_json::json!("malformed"),
+        ] {
+            assert!(semantic_hit_session_entry(&serde_json::json!({"session":session}), "older", None, || {
+                panic!("present embedded metadata must not trigger HTTP")
+            }).is_none());
+        }
+    }
+
+    #[test]
+    fn legacy_search_hit_fetches_session_detail_only_when_not_embedded() {
+        for hit in [serde_json::json!({"sessionId":"older"}), serde_json::json!({"session":null})] {
+            let mut calls = 0;
+            let entry = semantic_hit_session_entry(&hit, "older", None, || {
+                calls += 1;
+                Some(serde_json::json!({"id":"older", "title":"Legacy", "directory":"/remote"}))
+            }).unwrap();
+            assert_eq!(calls, 1);
+            assert_eq!(entry.title, "Legacy");
+        }
+        assert!(semantic_hit_session_entry(&serde_json::json!({}), "older", None, || None).is_none());
     }
 
     #[test]
@@ -1609,6 +1631,7 @@ mod subagent_runtime_snapshot_tests {
 pub(crate) struct SessionStatusSnapshot {
     pub kind: String,
     pub started_at: Option<u64>,
+    pub running: Option<bool>,
     pub queue_count: usize,
     pub preview: Option<String>,
     pub parent_session_id: Option<String>,
@@ -1756,7 +1779,10 @@ pub(super) fn fetch_session_statuses(
         .iter()
         .filter_map(|(session_id, status)| {
             let kind = status.get("type").and_then(Value::as_str)?;
-            let queue = status.get("queue");
+            let (queue_count, preview) =
+                neoism_ui::panels::agent_pane::stream_events::queue_snapshot_fields(
+                    status.get("queue").unwrap_or(&Value::Null),
+                );
             Some((
                 session_id.clone(),
                 SessionStatusSnapshot {
@@ -1765,14 +1791,12 @@ pub(super) fn fetch_session_statuses(
                         .get("startedAt")
                         .or_else(|| status.get("started"))
                         .and_then(Value::as_u64),
-                    queue_count: queue
-                        .and_then(|queue| queue.get("count"))
-                        .and_then(Value::as_u64)
-                        .unwrap_or(0) as usize,
-                    preview: queue
-                        .and_then(|queue| queue.get("preview"))
-                        .and_then(Value::as_str)
-                        .map(str::to_string),
+                    queue_count,
+                    running: status
+                        .get("queue")
+                        .and_then(|queue| queue.get("running"))
+                        .and_then(Value::as_bool),
+                    preview,
                     parent_session_id: status
                         .get("parentSessionID")
                         .or_else(|| status.get("parentSessionId"))
@@ -2321,16 +2345,24 @@ pub(crate) struct NeoismAgentSemanticSessionHit {
     pub distance: f64,
 }
 
-/// Search titles on the server, rather than filtering only the first loaded
-/// catalog page. At most two matching pages (100 roots) are read per query.
-/// Transcript/vector availability never disables this authorized title query.
+/// Search the authorized catalog, preserving grouped transcript relevance when available.
+/// Returns `(hits, transcript_unavailable, indexing)`; older servers default indexing
+/// to false. Title-only fallback reads at most two matching pages (100 roots).
 pub(crate) fn fetch_session_search_hits(
     server: &str,
     query: &str,
     current_session: Option<&str>,
     directory: Option<&str>,
     transcript_enabled: bool,
-) -> Result<(Vec<NeoismAgentSemanticSessionHit>, bool), String> {
+) -> Result<(Vec<NeoismAgentSemanticSessionHit>, bool, bool), String> {
+    // The grouped endpoint is authoritative for both title and message relevance.
+    // Only use the legacy title catalog when transcript search is unavailable;
+    // an empty ranked result is not a reason to append unrelated title matches.
+    if transcript_enabled {
+        if let Some((hits, indexing)) = fetch_semantic_session_hits(server, query, current_session, directory)? {
+            return Ok((hits, false, indexing));
+        }
+    }
     let mut titles = Vec::new();
     let mut cursor = None;
     let mut title_error = None;
@@ -2363,53 +2395,50 @@ pub(crate) fn fetch_session_search_hits(
         }
         cursor = page.next_cursor;
     }
-    let (transcript, unavailable) = if transcript_enabled {
-        match fetch_semantic_session_hits(server, query, current_session, directory) {
-            Ok(Some(hits)) => (hits, false),
-            Ok(None) => (Vec::new(), true),
-            // A transient transcript failure must not erase successful titles
-            // or permanently disable later transcript queries.
-            Err(_) => (Vec::new(), false),
-        }
-    } else {
-        (Vec::new(), true)
-    };
-    if titles.is_empty() && transcript.is_empty() {
+    if titles.is_empty() {
         if let Some(error) = title_error {
             return Err(error);
         }
     }
-    Ok((merge_session_search_hits(titles, transcript), unavailable))
+    Ok((titles, true, false))
 }
 
-fn merge_session_search_hits(
-    mut titles: Vec<NeoismAgentSemanticSessionHit>,
-    transcript: Vec<NeoismAgentSemanticSessionHit>,
-) -> Vec<NeoismAgentSemanticSessionHit> {
-    for hit in transcript {
-        if let Some(title) = titles
-            .iter_mut()
-            .find(|title| title.session_id == hit.session_id)
-        {
-            title.excerpt = hit.excerpt;
-        } else {
-            titles.push(hit);
-        }
+/// Search embeds the same authorized SessionInfo as session detail. Only older
+/// servers without that object require a separate request to the captured endpoint.
+fn semantic_hit_session_entry(
+    hit: &Value,
+    session_id: &str,
+    directory: Option<&str>,
+    fetch_legacy: impl FnOnce() -> Option<Value>,
+) -> Option<NeoismAgentSessionEntry> {
+    let session = match hit.get("session") {
+        Some(session) if !session.is_null() => session.clone(),
+        _ => fetch_legacy()?,
+    };
+    if session.get("id").and_then(Value::as_str) != Some(session_id)
+        || session
+            .get("parentId")
+            .or_else(|| session.get("parentID"))
+            .is_some_and(|parent| !parent.is_null())
+        || directory.is_some_and(|directory| {
+            session.get("directory").and_then(Value::as_str) != Some(directory)
+        })
+    {
+        return None;
     }
-    titles
+    session_entry(&session, &HashMap::new())
 }
 
-/// Query semantic transcript search and join hits with authorized root sessions.
-/// Resolve hits outside the first catalog page individually so old projects
-/// remain searchable without downloading the entire endpoint catalog.
+/// Query conversation search and retain server rank. Embedded authorized sessions
+/// avoid per-result HTTP requests; legacy servers still resolve session details.
 pub(crate) fn fetch_semantic_session_hits(
     server: &str,
     query: &str,
     current_session: Option<&str>,
     directory: Option<&str>,
-) -> Result<Option<Vec<NeoismAgentSemanticSessionHit>>, String> {
+) -> Result<Option<(Vec<NeoismAgentSemanticSessionHit>, bool)>, String> {
     let path = format!(
-        "/v2/plugins/dev.neoism.semantic/search?q={}&limit=20{}",
+        "/v2/plugins/dev.neoism.semantic/search?q={}&limit=20&conversation=true{}",
         percent_encode(query),
         directory
             .map(|directory| format!("&directory={}", percent_encode(directory)))
@@ -2424,46 +2453,39 @@ pub(crate) fn fetch_semantic_session_hits(
     {
         return Ok(None);
     }
+    let indexing = value.get("indexing").and_then(Value::as_bool).unwrap_or(false);
     let hits = value
         .get("hits")
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
     if hits.is_empty() {
-        return Ok(Some(Vec::new()));
+        return Ok(Some((Vec::new(), indexing)));
     }
     let _ = current_session;
     let mut entries = Vec::<NeoismAgentSessionEntry>::new();
-    let mut seen: std::collections::HashSet<String> =
-        entries.iter().map(|entry| entry.id.clone()).collect();
-    for session_id in hits
-        .iter()
-        .filter_map(|hit| hit.get("sessionId").and_then(Value::as_str))
-    {
+    let mut seen = std::collections::HashSet::new();
+    for hit in &hits {
+        let Some(session_id) = hit
+            .get("sessionId")
+            .or_else(|| hit.get("session_id"))
+            .and_then(Value::as_str)
+        else {
+            continue;
+        };
         if !seen.insert(session_id.to_owned()) {
             continue;
         }
-        // GET retains the endpoint's normal session authorization. Never trust
-        // search hit metadata as authority to admit a conversation.
-        let Ok(Some(session)) = api_request_json(
-            server,
-            "GET",
-            &format!("/v2/sessions/{}", percent_encode(session_id)),
-            None,
-        ) else {
-            continue;
-        };
-        if session
-            .get("parentId")
-            .or_else(|| session.get("parentID"))
-            .is_some_and(|parent| !parent.is_null())
-            || directory.is_some_and(|directory| {
-                session.get("directory").and_then(Value::as_str) != Some(directory)
-            })
-        {
-            continue;
-        }
-        if let Some(entry) = session_entry(&session, &HashMap::new()) {
+        if let Some(entry) = semantic_hit_session_entry(hit, session_id, directory, || {
+            api_request_json(
+                server,
+                "GET",
+                &format!("/v2/sessions/{}", percent_encode(session_id)),
+                None,
+            )
+            .ok()
+            .flatten()
+        }) {
             entries.push(entry);
         }
     }
@@ -2473,7 +2495,7 @@ pub(crate) fn fetch_semantic_session_hits(
         .collect();
     let mut best: Vec<NeoismAgentSemanticSessionHit> = Vec::new();
     for hit in &hits {
-        let Some(session_id) = hit.get("sessionId").and_then(Value::as_str) else {
+        let Some(session_id) = hit.get("sessionId").or_else(|| hit.get("session_id")).and_then(Value::as_str) else {
             continue;
         };
         let Some(title) = titles.get(session_id) else {
@@ -2481,31 +2503,24 @@ pub(crate) fn fetch_semantic_session_hits(
         };
         let distance = hit.get("distance").and_then(Value::as_f64).unwrap_or(1.0);
         let excerpt = hit
-            .get("excerpt")
+            .get("snippet")
+            .or_else(|| hit.get("excerpt"))
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
-        match best
-            .iter_mut()
-            .find(|existing| existing.session_id == session_id)
-        {
-            Some(existing) => {
-                if distance < existing.distance {
-                    existing.distance = distance;
-                    existing.excerpt = excerpt;
-                }
-            }
-            None => best.push(NeoismAgentSemanticSessionHit {
+        // Keep the first hit for a session. The server's rank is authoritative;
+        // distance/score are optional and must never reorder grouped results.
+        if !best.iter().any(|existing| existing.session_id == session_id) {
+            best.push(NeoismAgentSemanticSessionHit {
                 session_id: session_id.to_string(),
                 title: title.title.clone(),
                 entry: (*title).clone(),
                 excerpt,
                 distance,
-            }),
+            });
         }
     }
-    best.sort_by(|a, b| a.distance.total_cmp(&b.distance));
-    Ok(Some(best))
+    Ok(Some((best, indexing)))
 }
 
 /// Bind OAuth to the pane's actual HTTP endpoint, including debug ports and

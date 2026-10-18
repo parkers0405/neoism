@@ -1,18 +1,13 @@
-//! Windows desktop admission/timing correction. Other desktops deliberately keep
-//! their existing policy. Tests exercise both policies without requiring Windows.
+//! Platform-independent prompt admission and Windows-only clock correction.
 use super::{instant_from_epoch_millis, Instant};
-
-#[derive(Clone, Debug)]
-struct PromptAdmission {
-    message_id: String,
-    waiting_for_worker: bool,
-}
+use neoism_ui::panels::agent_pane::status_policy::PromptAdmission;
 
 #[derive(Clone, Debug)]
 pub(super) struct DesktopStatusTiming {
+    pub(super) handoff: neoism_ui::panels::agent_pane::status_policy::QueueHandoff,
     enabled: bool,
     local_run: bool,
-    admission: Option<PromptAdmission>,
+    admission: PromptAdmission,
     server_started_at: Option<u64>,
     retired_execution: Option<String>,
     execution_wall: Option<(String, Instant, u64)>,
@@ -21,9 +16,10 @@ pub(super) struct DesktopStatusTiming {
 impl Default for DesktopStatusTiming {
     fn default() -> Self {
         Self {
+            handoff: Default::default(),
             enabled: cfg!(target_os = "windows"),
             local_run: false,
-            admission: None,
+            admission: PromptAdmission::default(),
             server_started_at: None,
             retired_execution: None,
             execution_wall: None,
@@ -59,55 +55,35 @@ impl DesktopStatusTiming {
     }
 
     pub(super) fn admit(&mut self, message_id: &str) {
-        if self.enabled {
-            self.local_run = true;
-            self.admission = Some(PromptAdmission {
-                message_id: message_id.to_owned(),
-                waiting_for_worker: true,
-            });
-        }
+        self.local_run = true;
+        self.admission.admit(message_id);
     }
 
+    #[cfg(test)]
     pub(super) fn queue_count(&mut self, count: usize, started_at: Option<u64>) -> usize {
-        // A running snapshot ends the admission window even if its dequeue
-        // event was lost during reconnect. Otherwise a later between-run
-        // queue snapshot could incorrectly subtract a genuine follow-up.
-        if self.enabled && started_at.is_some() {
-            if let Some(admission) = self.admission.as_mut() {
-                admission.waiting_for_worker = false;
-            }
-        }
-        // enqueue_v2_prompt publishes busy BEFORE spawning the worker. The
-        // first prompt is then counted in the storage queue, but is already
-        // represented by our optimistic primary activity. After dequeue, even
-        // a status with no startedAt can contain real waiting follow-ups.
-        count.saturating_sub(usize::from(
-            self.enabled
-                && self
-                    .admission
-                    .as_ref()
-                    .is_some_and(|admission| admission.waiting_for_worker)
-                && started_at.is_none(),
-        ))
+        self.queue_snapshot_count(count, started_at.is_some(), None)
+    }
+
+    pub(super) fn queue_snapshot_count(
+        &mut self,
+        count: usize,
+        running: bool,
+        preview: Option<&str>,
+    ) -> usize {
+        self.admission.project(count, running, preview)
+    }
+
+    pub(super) fn queue_preview(&self, preview: Option<String>) -> Option<String> {
+        self.admission.project_preview(preview)
     }
 
     pub(super) fn dequeue(&mut self, message_id: Option<&str>) -> bool {
-        if self
-            .admission
-            .as_ref()
-            .is_some_and(|admission| Some(admission.message_id.as_str()) == message_id)
-        {
-            self.admission = None;
-            // This prompt wasn't part of the displayed waiting count.
-            true
-        } else {
-            false
-        }
+        self.admission.dequeue(message_id)
     }
 
     pub(super) fn settle(&mut self) {
         self.local_run = false;
-        self.admission = None;
+        self.admission.settle();
         self.server_started_at = None;
     }
 
@@ -202,12 +178,12 @@ mod tests {
     }
 
     #[test]
-    fn linux_macos_queue_and_wall_clock_semantics_unchanged() {
+    fn linux_macos_admission_changes_without_changing_wall_clock() {
         let mut status = policy(false);
         status.admit("first");
-        assert_eq!(status.queue_count(1, None), 1);
-        assert_eq!(status.queue_count(2, None), 2);
-        assert!(!status.dequeue(Some("first")));
+        assert_eq!(status.queue_count(1, None), 0);
+        assert_eq!(status.queue_count(2, None), 1);
+        assert!(status.dequeue(Some("first")));
         assert_eq!(status.queue_count(1, Some(100)), 1);
         let now = Instant::now();
         assert_eq!(status.execution_wall_ms("run", now, 100), 100);

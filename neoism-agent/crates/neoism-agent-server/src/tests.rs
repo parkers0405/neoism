@@ -30,6 +30,8 @@ mod interaction_tool_tests;
 
 #[path = "tests_computer_pipeline.rs"]
 mod computer_pipeline_tests;
+#[path = "tests_manual_compaction.rs"]
+mod manual_compaction_tests;
 #[path = "tests_session_queue.rs"]
 mod session_queue_tests;
 #[path = "tests_session_undo.rs"]
@@ -592,6 +594,7 @@ async fn transcript_search_route_serves_keyword_hits_without_embeddings() {
         .await
         .unwrap();
 
+    state.inner.store.flush_search_index().await.unwrap();
     let response = app(state.clone())
         .oneshot(
             Request::builder()
@@ -665,6 +668,7 @@ async fn transcript_search_falls_back_to_per_term_matches_for_multi_word_queries
             .unwrap();
     }
 
+    state.inner.store.flush_search_index().await.unwrap();
     let response = app(state.clone())
         .oneshot(
             Request::builder()
@@ -697,8 +701,194 @@ async fn transcript_search_falls_back_to_per_term_matches_for_multi_word_queries
     cleanup_sqlite_files(&path);
 }
 
+async fn search_route_json(state: &AppState, query: &str) -> serde_json::Value {
+    // Production search never drains the worker; tests explicitly synchronize writes.
+    state.inner.store.flush_search_index().await.unwrap();
+    let response = app(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v2/plugins/dev.neoism.semantic/search?{query}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    serde_json::from_slice(&body).unwrap()
+}
+
 #[tokio::test]
-async fn store_persists_sessions_and_searches_with_like() {
+async fn conversation_search_groups_before_limit_and_returns_normal_session_metadata() {
+    let path = std::env::temp_dir().join(format!(
+        "neoism-conversation-grouping-{}.turso.db", Id::ascending(IdKind::Event)
+    ));
+    let state = AppState::open_database(path.clone()).await.unwrap();
+    let now = now_millis();
+    let mut busy = store_test_session(&neoism_agent_core::new_session_id(), now);
+    busy.title = "Busy conversation".into();
+    let mut quiet = store_test_session(&neoism_agent_core::new_session_id(), now + 1);
+    quiet.title = "Quiet conversation".into();
+    for session in [&busy, &quiet] {
+        state.inner.store.insert_session(session).await.unwrap();
+    }
+    for index in 0..12 {
+        state.inner.store.append_message(
+            busy.id.as_str(),
+            &store_test_message(&busy.id, now + index, "groupneedle groupneedle focused discussion"),
+        ).await.unwrap();
+    }
+    let quiet_message = store_test_message(&quiet.id, now + 20, "groupneedle short discussion");
+    state.inner.store.append_message(quiet.id.as_str(), &quiet_message).await.unwrap();
+
+    // Exercise both wire spellings through the plugin dispatcher (string query values).
+    for mode in ["conversation", "conversations"] {
+        let response = search_route_json(&state, &format!("q=groupneedle&{mode}=true&limit=2")).await;
+        assert_eq!(response["available"], true);
+        let hits = response["hits"].as_array().unwrap();
+        assert_eq!(hits.len(), 2, "busy sessions must not consume the result budget: {response}");
+        let ids: std::collections::HashSet<_> = hits.iter()
+            .map(|hit| hit["sessionId"].as_str().unwrap()).collect();
+        assert_eq!(ids, std::collections::HashSet::from([busy.id.as_str(), quiet.id.as_str()]));
+        for hit in hits {
+            let expected = if hit["sessionId"] == busy.id.as_str() { &busy } else { &quiet };
+            let session: SessionInfo = serde_json::from_value(hit["session"].clone()).unwrap();
+            assert_eq!(serde_json::to_value(session).unwrap(), serde_json::to_value(expected).unwrap());
+            assert!(!hit["messageId"].as_str().unwrap().is_empty());
+            assert!(hit["excerpt"].as_str().unwrap().contains("groupneedle"));
+            assert!(hit["score"].as_f64().unwrap() > 0.0, "{hit}");
+        }
+        let hit = hits.iter().find(|hit| hit["sessionId"] == quiet.id.as_str()).unwrap();
+        assert_eq!(hit["messageId"], message_id_of(&quiet_message));
+    }
+    state.shutdown().await.unwrap();
+    cleanup_sqlite_files(&path);
+}
+
+#[tokio::test]
+async fn conversation_search_returns_metadata_and_scores_without_embedding_requests() {
+    let _guard = env_lock();
+    struct RestoreEnv(Vec<(&'static str, Option<std::ffi::OsString>)>);
+    impl Drop for RestoreEnv {
+        fn drop(&mut self) {
+            for (key, value) in &self.0 {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+    let keys = ["NEOISM_AGENT_DISABLE_EMBEDDINGS", "NEOISM_AGENT_EMBEDDINGS_MODEL",
+        "NEOISM_AGENT_EMBEDDINGS_URL", "SEARCH_REGRESSION_API_KEY"];
+    let _restore = RestoreEnv(keys.into_iter().map(|key| (key, std::env::var_os(key))).collect());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let calls = std::sync::Arc::new(AtomicUsize::new(0));
+    let observed = calls.clone();
+    let router = axum::Router::new().fallback(move || {
+        let observed = observed.clone();
+        async move {
+            observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            (StatusCode::INTERNAL_SERVER_ERROR, "embeddings must not be called")
+        }
+    });
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    // Configure a real reachable provider, not the disabled-provider fallback.
+    std::env::remove_var("NEOISM_AGENT_DISABLE_EMBEDDINGS");
+    std::env::set_var("NEOISM_AGENT_EMBEDDINGS_MODEL", "search-regression/test");
+    std::env::set_var("NEOISM_AGENT_EMBEDDINGS_URL", format!("http://{address}"));
+    std::env::set_var("SEARCH_REGRESSION_API_KEY", "test-key");
+    let path = std::env::temp_dir().join(format!(
+        "neoism-conversation-no-embeddings-{}.turso.db", Id::ascending(IdKind::Event)
+    ));
+    let state = AppState::open_database(path.clone()).await.unwrap();
+    let session = store_test_session(&neoism_agent_core::new_session_id(), now_millis());
+    state.inner.store.insert_session(&session).await.unwrap();
+    let message = store_test_message(&session.id, session.time.created, "offlineindexneedle local transcript");
+    state.inner.store.append_message(session.id.as_str(), &message).await.unwrap();
+    let response = search_route_json(&state, "q=offlineindexneedle&conversation=true&limit=1").await;
+    assert_eq!(response["available"], true);
+    let hits = response["hits"].as_array().unwrap();
+    assert_eq!(hits.len(), 1, "{response}");
+    assert_eq!(hits[0]["messageId"], message_id_of(&message));
+    assert_eq!(hits[0]["session"], serde_json::to_value(&session).unwrap());
+    assert!(hits[0]["score"].as_f64().unwrap() > 0.0);
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0,
+        "conversation retrieval must not consult an embedding provider");
+    state.shutdown().await.unwrap();
+    server.abort();
+    cleanup_sqlite_files(&path);
+}
+
+#[tokio::test]
+async fn conversation_search_matches_titles_and_excerpts_the_relevant_passage() {
+    let path = std::env::temp_dir().join(format!(
+        "neoism-conversation-snippets-{}.turso.db", Id::ascending(IdKind::Event)
+    ));
+    let state = AppState::open_database(path.clone()).await.unwrap();
+    let now = now_millis();
+    let mut title_only = store_test_session(&neoism_agent_core::new_session_id(), now);
+    title_only.title = "quartzneedle deployment notes".into();
+    state.inner.store.insert_session(&title_only).await.unwrap();
+    state.inner.store.append_message(title_only.id.as_str(),
+        &store_test_message(&title_only.id, now, "the body has no matching term"),
+    ).await.unwrap();
+    let response = search_route_json(&state, "q=quartzneedle&conversation=true&limit=1").await;
+    assert_eq!(response["hits"].as_array().unwrap().len(), 1, "{response}");
+    assert_eq!(response["hits"][0]["sessionId"], title_only.id.as_str());
+    assert_eq!(response["hits"][0]["session"]["title"], title_only.title);
+    assert!(response["hits"][0]["excerpt"].as_str().unwrap().contains("quartzneedle"));
+    assert!(response["hits"][0]["score"].as_f64().unwrap() > 0.0);
+
+    let body_session = store_test_session(&neoism_agent_core::new_session_id(), now + 1);
+    state.inner.store.insert_session(&body_session).await.unwrap();
+    let message = store_test_message(&body_session.id, now + 1, &format!(
+        "{} sapphiretarget retry policy fixes the deployment failure. {}",
+        "irrelevant preamble. ".repeat(300), "unrelated epilogue. ".repeat(300),
+    ));
+    state.inner.store.append_message(body_session.id.as_str(), &message).await.unwrap();
+    let response = search_route_json(&state, "q=sapphiretarget&conversation=true&limit=1").await;
+    let hit = &response["hits"][0];
+    assert_eq!(hit["messageId"], message_id_of(&message));
+    let excerpt = hit["excerpt"].as_str().unwrap();
+    assert!(excerpt.contains("sapphiretarget retry policy"), "must show the match, not the prefix: {excerpt}");
+    assert!(!excerpt.contains(">>") && !excerpt.contains("<<"), "{excerpt}");
+    assert!(excerpt.len() < 2000, "excerpt must be bounded, not the whole transcript");
+    state.shutdown().await.unwrap();
+    cleanup_sqlite_files(&path);
+}
+
+#[tokio::test]
+async fn conversation_search_ranks_older_detailed_match_above_new_incidental_mention() {
+    let path = std::env::temp_dir().join(format!(
+        "neoism-conversation-relevance-{}.turso.db", Id::ascending(IdKind::Event)
+    ));
+    let state = AppState::open_database(path.clone()).await.unwrap();
+    let now = now_millis();
+    let older = store_test_session(&neoism_agent_core::new_session_id(), now - 10_000);
+    let newer = store_test_session(&neoism_agent_core::new_session_id(), now);
+    for (session, text) in [
+        (&older, "cobaltneedle indexing: cobaltneedle requires a durable queue. The cobaltneedle worker refreshes changed documents and removes stale cobaltneedle entries.".to_string()),
+        (&newer, format!("{} cobaltneedle was mentioned in passing. {}", "unrelated status update ".repeat(200), "routine meeting notes ".repeat(200))),
+    ] {
+        state.inner.store.insert_session(session).await.unwrap();
+        state.inner.store.append_message(session.id.as_str(),
+            &store_test_message(&session.id, session.time.created, &text),
+        ).await.unwrap();
+    }
+    let response = search_route_json(&state, "q=cobaltneedle&conversation=true&limit=2").await;
+    let hits = response["hits"].as_array().unwrap();
+    assert_eq!(hits.len(), 2, "{response}");
+    assert_eq!(hits[0]["sessionId"], older.id.as_str(), "relevance precedes recency: {response}");
+    assert!(hits[0]["score"].as_f64().unwrap() > hits[1]["score"].as_f64().unwrap(), "{response}");
+    state.shutdown().await.unwrap();
+    cleanup_sqlite_files(&path);
+}
+
+#[tokio::test]
+async fn store_persists_sessions_and_searches_with_fts() {
     let path = std::env::temp_dir().join(format!(
         "neoism-agent-{}.turso.db",
         Id::ascending(IdKind::Event)
@@ -752,7 +942,8 @@ async fn store_persists_sessions_and_searches_with_like() {
         2
     );
 
-    // Transcript search ANDs terms in the bounded LIKE scan.
+    // Store FTS search retains strict AND semantics (API fallback is separate).
+    store.flush_search_index().await.unwrap();
     let hits = store
         .search_messages(TenantQueryScope::LocalAll, "quick fox", None, 10)
         .await
@@ -808,6 +999,117 @@ async fn store_persists_sessions_and_searches_with_like() {
 }
 
 #[tokio::test]
+async fn store_search_strict_and_finds_old_match_beyond_500_newer_seed_matches() {
+    let path = std::env::temp_dir().join(format!(
+        "neoism-search-candidate-cutoff-{}.turso.db",
+        Id::ascending(IdKind::Event)
+    ));
+    let store = SessionStore::open(path.clone()).await.unwrap();
+    let now = now_millis();
+    // Neither title nor other session metadata contains either query term.
+    let session = store_test_session(&neoism_agent_core::new_session_id(), now);
+    store.insert_session(&session).await.unwrap();
+    let old_message = store_test_message(
+        &session.id,
+        now,
+        "candidatecutoffneedle anchor documents the complete solution",
+    );
+    store.append_message(session.id.as_str(), &old_message).await.unwrap();
+    // The former LIKE implementation selected the longest term as a seed,
+    // capped its newest-first candidate scan at 500, then checked the other
+    // terms. These 501 newer partial matches must not hide the sole AND match.
+    for index in 0..501 {
+        store.append_message(
+            session.id.as_str(),
+            &store_test_message(
+                &session.id,
+                now + index + 1,
+                "candidatecutoffneedle incidental reference only",
+            ),
+        ).await.unwrap();
+    }
+    store.flush_search_index().await.unwrap();
+    let hits = store.search_messages(
+        TenantQueryScope::LocalAll,
+        "candidatecutoffneedle anchor",
+        None,
+        1,
+    ).await.unwrap();
+    assert_eq!(hits.len(), 1, "strict AND search must not truncate seed candidates");
+    assert_eq!(hits[0].session_id, session.id.to_string());
+    assert_eq!(hits[0].message_id, message_id_of(&old_message));
+    assert!(hits[0].excerpt.contains("anchor"));
+    store.close().await;
+    cleanup_sqlite_files(&path);
+}
+
+#[tokio::test]
+async fn transcript_fts_tracks_direct_and_event_writes_deletes_and_reimport() {
+    let path = std::env::temp_dir().join(format!(
+        "neoism-search-mutations-{}.turso.db", Id::ascending(IdKind::Event)
+    ));
+    let state = AppState::open_database(path.clone()).await.unwrap();
+    let store = &state.inner.store;
+    let now = now_millis();
+    let session = store_test_session(&neoism_agent_core::new_session_id(), now);
+    store.insert_session(&session).await.unwrap();
+    for event_path in [false, true] {
+        let mut message = store_test_message(&session.id, now, "oldmutationneedle original text");
+        let event = EventPayload::new(event_type::MESSAGE_UPDATED, json!({"info": message.info}));
+        if event_path {
+            state.append_message_with_event(session.id.as_str(), &message, event).await.unwrap();
+        } else {
+            store.append_message(session.id.as_str(), &message).await.unwrap();
+        }
+        store.flush_search_index().await.unwrap();
+        let hits = store.search_messages(TenantQueryScope::LocalAll, "oldmutationneedle", None, 10).await.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].message_id, message_id_of(&message));
+
+        let Part::Text(part) = &mut message.parts[0] else { panic!("text fixture") };
+        part.text = "newmutationneedle replacement text".into();
+        if event_path {
+            state.update_message_with_event(session.id.as_str(), &message,
+                EventPayload::new(event_type::MESSAGE_PART_UPDATED, json!({"part": message.parts[0]})),
+            ).await.unwrap();
+        } else {
+            assert!(store.update_message(session.id.as_str(), &message).await.unwrap());
+        }
+        store.flush_search_index().await.unwrap();
+        assert!(store.search_messages(TenantQueryScope::LocalAll, "oldmutationneedle", None, 10).await.unwrap().is_empty());
+        let hits = store.search_messages(TenantQueryScope::LocalAll, "newmutationneedle", None, 10).await.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].message_id, message_id_of(&message));
+        assert!(store.delete_message(session.id.as_str(), &message_id_of(&message)).await.unwrap());
+        store.flush_search_index().await.unwrap();
+        assert!(store.search_messages(TenantQueryScope::LocalAll, "newmutationneedle", None, 10).await.unwrap().is_empty());
+    }
+
+    let original = store_test_message(&session.id, now, "beforeimportneedle original transcript");
+    store.append_message(session.id.as_str(), &original).await.unwrap();
+    store.flush_search_index().await.unwrap();
+    assert_eq!(store.search_messages(TenantQueryScope::LocalAll, "beforeimportneedle", None, 10).await.unwrap().len(), 1);
+    let mut bundle = crate::session_transfer::export_session(&state, session.id.as_str()).await.unwrap();
+    bundle.messages = vec![store_test_message(&session.id, now + 1, "afterimportneedle imported replacement")];
+    // Re-import twice: replacement is idempotent and must never retain old FTS rows.
+    for _ in 0..2 {
+        crate::session_transfer::import_session(&state, bundle.clone(), std::env::temp_dir()).await.unwrap();
+        store.flush_search_index().await.unwrap();
+        assert!(store.search_messages(TenantQueryScope::LocalAll, "beforeimportneedle", None, 10).await.unwrap().is_empty());
+        let hits = store.search_messages(TenantQueryScope::LocalAll, "afterimportneedle", None, 10).await.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].message_id, message_id_of(&bundle.messages[0]));
+    }
+    assert!(store.delete_session(session.id.as_str()).await.unwrap());
+    store.flush_search_index().await.unwrap();
+    assert!(store.search_messages(TenantQueryScope::LocalAll, "afterimportneedle", None, 10).await.unwrap().is_empty());
+    let response = search_route_json(&state, "q=afterimportneedle&conversation=true").await;
+    assert!(response["hits"].as_array().unwrap().is_empty(), "{response}");
+    state.shutdown().await.unwrap();
+    cleanup_sqlite_files(&path);
+}
+
+#[tokio::test]
 async fn tenant_scoped_search_and_root_pagination_never_cross_tenants() {
     let path = std::env::temp_dir().join(format!(
         "neoism-tenant-query-scope-{}.sqlite3",
@@ -854,6 +1156,7 @@ async fn tenant_scoped_search_and_root_pagination_never_cross_tenants() {
         .await
         .unwrap();
 
+    store.flush_search_index().await.unwrap();
     let alpha_hits = store
         .search_messages(TenantQueryScope::Tenant("alpha"), "shared needle", None, 10)
         .await
@@ -1680,6 +1983,8 @@ async fn semantic_search_directory_filters_before_keyword_and_vector_limits() {
             &message_id_of(&message), session.id.as_str(), created as i64, "directory-test", vector,
         ).await.unwrap();
     }
+
+    store.flush_search_index().await.unwrap();
 
     // Deserialize the actual route query, including directory, then exercise
     // keyword search without depending on an external embeddings provider.

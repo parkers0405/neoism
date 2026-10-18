@@ -58,11 +58,13 @@ fn forwarded_part_delta_uses_part_id_not_message_id() {
         AgentServerMessage::ContentDelta {
             session_id,
             message_id,
+            parent_message_id,
             text,
             ..
         } => {
             assert_eq!(session_id, "sess-1");
             assert_eq!(message_id, "part-1");
+            assert_eq!(parent_message_id.as_deref(), Some("msg-1"));
             assert_eq!(text, "hello");
         }
         other => panic!("unexpected message: {other:?}"),
@@ -90,8 +92,9 @@ fn forwarded_part_update_uses_part_id() {
     );
 
     match rx.try_recv().expect("message update") {
-        AgentServerMessage::MessageUpdated { message, .. } => {
+        AgentServerMessage::MessageUpdated { message, parent_message_id, .. } => {
             assert_eq!(message.id, "part-1");
+            assert_eq!(parent_message_id.as_deref(), Some("msg-1"));
             assert_eq!(message.text, "hello");
         }
         other => panic!("unexpected message: {other:?}"),

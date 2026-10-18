@@ -15,6 +15,7 @@ mod session;
 mod session_cache;
 mod session_verbs;
 pub mod side_panel;
+mod queue;
 mod streaming;
 mod timeline;
 
@@ -672,8 +673,11 @@ pub struct NeoismAgentPane {
     /// timeline keeps ONE bubble instead of a token + expanded pair.
     /// Mirrors the desktop pane's `prompt_echo_aliases`.
     prompt_echo_aliases: Vec<(String, String)>,
+    queue_handoff: status_policy::QueueHandoff,
+    prompt_admission: status_policy::PromptAdmission,
     queued_prompt_count: usize,
     queued_prompt_preview: Option<String>,
+    pending_compact: Option<String>,
     sent_history: Vec<String>,
     history_index: Option<usize>,
     history_draft: String,
@@ -1076,8 +1080,11 @@ impl Default for NeoismAgentPane {
             ui_events: Vec::new(),
             pending_user_prompts: Vec::new(),
             prompt_echo_aliases: Vec::new(),
+            queue_handoff: Default::default(),
+            prompt_admission: status_policy::PromptAdmission::default(),
             queued_prompt_count: 0,
             queued_prompt_preview: None,
+            pending_compact: None,
             sent_history: Vec::new(),
             history_index: None,
             history_draft: String::new(),
@@ -1585,6 +1592,77 @@ impl NeoismAgentPane {
         }
     }
 
+    /// Clear only this request’s local admission feedback, never real queued prompts.
+    pub fn compact_admission_failed(&mut self, session_id: &str, request_id: &str) {
+        let pending = if self.session_id.as_deref() == Some(session_id) {
+            Some(&mut self.pending_compact)
+        } else {
+            self.session_cache.get_mut(session_id).map(|cached| &mut cached.runtime.pending_compact)
+        };
+        if let Some(pending) = pending {
+            if pending.as_deref() == Some(request_id) {
+                *pending = None;
+            }
+        }
+    }
+
+    /// Admission notification only; never interrupt an existing stream.
+    pub fn note_compaction_queued(&mut self) {
+        self.queued_prompt_count = self.queued_prompt_count.max(1);
+        if self.queued_prompt_preview.is_none() {
+            self.queued_prompt_preview = Some("Compaction queued".to_string());
+        }
+        if self.queued_prompt_preview.as_deref() == Some("Compaction queued") {
+            self.pending_compact = None;
+        }
+    }
+
+    /// Consume the canonical queue envelope on both active and parked sessions.
+    /// Keep identity and running evidence until after admission projection.
+    pub fn apply_queue_event(&mut self, session_id: &str, properties: serde_json::Value) {
+        use super::stream_events::{
+            classify_session_event, SessionEventUpdate, SessionEventUpdateState,
+        };
+        let updates = classify_session_event(
+            serde_json::json!({"type": "session.queue.updated", "properties": properties}),
+            session_id,
+            &mut SessionEventUpdateState::default(),
+        );
+        let active = self.session_id.as_deref() == Some(session_id);
+        for update in updates {
+            match update {
+                SessionEventUpdate::DequeuedPrompt { text, message_id, author } => {
+                    if active {
+                        self.note_dequeued_prompt(text, message_id, author);
+                    } else {
+                        let runtime = &mut self.cached_session_entry(session_id).runtime;
+                        runtime.promote_queue_handoff();
+                        runtime.prompt_admission.dequeue(message_id.as_deref());
+                    }
+                }
+                SessionEventUpdate::QueueSnapshot { count: Some(count), preview, running, action, .. } => {
+                    if active {
+                        self.pending_compact = None;
+                        self.queued_prompt_count = self.prompt_admission.project(
+                            count, running == Some(true), preview.as_deref(),
+                        );
+                        self.queued_prompt_preview = self.prompt_admission.project_preview(preview);
+                        self.reconcile_queue_handoff(None, running == Some(true), action.as_deref());
+                    } else {
+                        let runtime = &mut self.cached_session_entry(session_id).runtime;
+                        runtime.pending_compact = None;
+                        runtime.queued_prompt_count = runtime.prompt_admission.project(
+                            count, running == Some(true), preview.as_deref(),
+                        );
+                        runtime.queued_prompt_preview = runtime.prompt_admission.project_preview(preview);
+                        runtime.reconcile_queue_handoff(None, running == Some(true), action.as_deref());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// Update the queued-prompt indicator. Mirrors `QueueUpdate`.
     pub fn apply_queue(
         &mut self,
@@ -1593,17 +1671,26 @@ impl NeoismAgentPane {
         started_at: Option<u64>,
     ) {
         let decision = status_policy::queue_status_decision(
-            count as usize,
-            preview,
+            self.prompt_admission.project(
+                count as usize,
+                started_at.is_some(),
+                preview.as_deref(),
+            ),
+            self.prompt_admission.project_preview(preview),
             started_at,
             self.is_streaming(),
         );
+        self.pending_compact = None;
         self.queued_prompt_count = decision.count;
         self.queued_prompt_preview = decision.preview;
-        if decision.should_enter_generating {
+        self.reconcile_queue_handoff(decision.started_at, true, None);
+        if decision.should_enter_generating && !self.suppress_streaming_after_abort() {
             self.note_streaming(NeoismAgentStreamingState::Generating, None);
         }
-        if let Some(started_at) = decision.started_at {
+        if let Some(started_at) = decision
+            .started_at
+            .filter(|_| !self.suppress_streaming_after_abort())
+        {
             let started = instant_from_epoch_millis(started_at);
             self.streaming_started_at = Some(started);
             self.streaming_state_changed_at.get_or_insert(started);
@@ -1834,7 +1921,8 @@ impl NeoismAgentPane {
         // Clear unconditionally: an interrupted/reconnected stream can retain
         // a non-idle enum even when its local start clock was never restored.
         self.note_streaming(NeoismAgentStreamingState::Idle, None);
-        self.abort_requested_at = None;
+        // Keep an abort guard through the old run's idle edge. Local submit
+        // or the queued successor's dequeue/start releases it, not late parts.
     }
 
     pub fn note_dequeued_prompt(
@@ -1850,7 +1938,10 @@ impl NeoismAgentPane {
         if text.is_empty() {
             return;
         }
-        self.consume_dequeued_prompt_preview(&text);
+        self.promote_queue_handoff();
+        if !self.prompt_admission.dequeue(message_id.as_deref()) {
+            self.consume_dequeued_prompt_preview(&text);
+        }
         let current_turn_start = self
             .messages
             .iter()
@@ -2041,6 +2132,16 @@ impl NeoismAgentPane {
         text: Option<String>,
         reason: Option<String>,
     ) {
+        self.note_compaction_with_continuation(phase, text, reason, None);
+    }
+
+    pub fn note_compaction_with_continuation(
+        &mut self,
+        phase: CompactionPhase,
+        text: Option<String>,
+        reason: Option<String>,
+        run_continues: Option<bool>,
+    ) {
         match phase {
             CompactionPhase::Started => {
                 let reason_label = reason.unwrap_or_else(|| "auto".to_string());
@@ -2053,11 +2154,19 @@ impl NeoismAgentPane {
                 }
             }
             CompactionPhase::Ended => {
+                self.pending_compact = None;
                 let summary = text.unwrap_or_default();
                 let kind = reason.unwrap_or_else(|| "done".to_string());
                 self.finish_compaction_message(&summary, &kind);
                 if self.streaming_state == NeoismAgentStreamingState::Compacting {
-                    self.note_streaming(NeoismAgentStreamingState::Idle, None);
+                    self.note_streaming(
+                        if run_continues == Some(true) {
+                            NeoismAgentStreamingState::Generating
+                        } else {
+                            NeoismAgentStreamingState::Idle
+                        },
+                        None,
+                    );
                 }
             }
         }
@@ -2835,6 +2944,8 @@ fn ease_out_cubic(t: f32) -> f32 {
     1.0 - inv * inv * inv
 }
 
+#[cfg(test)]
+mod queue_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

@@ -39,6 +39,7 @@ export interface AvatarPeersByBufferEntry {
     display_name: string;
     color: [number, number, number];
     rainbow: boolean;
+    client_os?: string | null;
   }>;
 }
 

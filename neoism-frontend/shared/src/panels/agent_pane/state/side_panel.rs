@@ -93,7 +93,7 @@ mod navigation_header_tests {
             CatalogHeaderAction::AddWorkspace,
             [80., 30., 30., 30.],
         );
-        assert_eq!(panel.header_action_at(10., 10.), None);
+        assert_eq!(panel.header_action_at(10., 10.), Some(CatalogHeaderAction::Search));
         assert_eq!(
             panel.header_action_at(10., 40.),
             Some(CatalogHeaderAction::Projects)
@@ -120,7 +120,7 @@ mod navigation_header_tests {
         assert_eq!(panel.header_action_at(90., 40.), None);
         panel.set_header_action_rect(CatalogHeaderAction::AddWorkspace, add_rect);
         assert_eq!(panel.header_action_at(90., 40.), None);
-        assert_eq!(panel.header_action_at(10., 10.), None);
+        assert_eq!(panel.header_action_at(10., 10.), Some(CatalogHeaderAction::Search));
         assert_eq!(
             panel.header_action_at(10., 40.),
             Some(CatalogHeaderAction::Projects)
@@ -133,7 +133,7 @@ mod navigation_header_tests {
     }
 
     #[test]
-    fn projects_is_a_separate_stop_in_root_and_scoped_catalogs() {
+    fn search_and_projects_are_separate_stops_in_root_and_scoped_catalogs() {
         for scope in [None, Some("/work/a".to_owned())] {
             let mut panel = NeoismAgentSidePanel::default();
             panel.set_navigation_header_enabled(true);
@@ -142,6 +142,14 @@ mod navigation_header_tests {
             chat.directory = Some("/work/a".into());
             panel.set_sessions(vec![chat]);
             panel.select_new_chat();
+            panel.select_next();
+            assert_eq!(panel.selected_header_action(), Some(CatalogHeaderAction::Search));
+            assert!(!panel.search_focused());
+            assert!(panel.selected_session().is_none());
+            assert!(!panel.toggle_selected_project());
+            assert!(!panel.navigate_project(false));
+            panel.set_focused(true);
+            assert_eq!(panel.catalog_highlight_index(None), None);
             panel.select_next();
             assert!(panel.projects_selected());
             assert!(!panel.new_chat_selected());
@@ -158,13 +166,37 @@ mod navigation_header_tests {
             panel.select_prev();
             assert!(panel.projects_selected());
             panel.select_prev();
+            assert_eq!(panel.selected_header_action(), Some(CatalogHeaderAction::Search));
+            panel.select_prev();
             assert!(panel.new_chat_selected());
             panel.select_prev();
             assert!(panel.new_chat_selected());
-            panel.select_next();
+            panel.select_next_by(10);
+            assert_eq!(panel.selected_header_action(), Some(CatalogHeaderAction::Search));
+            panel.select_next_by(10);
+            assert!(panel.projects_selected());
             panel.select_next();
             assert_eq!(panel.selected_row().unwrap().stable_identity(), first);
         }
+    }
+
+    #[test]
+    fn search_header_focus_is_not_inline_input_and_survives_refresh() {
+        let mut panel = NeoismAgentSidePanel::default();
+        panel.set_navigation_header_enabled(true);
+        panel.set_focused(true);
+        panel.select_header_action(CatalogHeaderAction::Search);
+        panel.set_session_projects(vec![("/work/a".into(), 1)]);
+        panel.set_sessions(vec![NeoismAgentSessionEntry::new("chat", "Chat", "")]);
+        assert_eq!(panel.selected_header_action(), Some(CatalogHeaderAction::Search));
+        assert!(!panel.search_focused());
+        assert!(panel.selected_session().is_none());
+        assert_eq!(panel.catalog_highlight_index(None), None);
+        panel.select_prev_by(10);
+        assert!(panel.new_chat_selected());
+        panel.select_header_action(CatalogHeaderAction::Search);
+        panel.set_navigation_header_enabled(false);
+        assert_eq!(panel.selected_header_action(), None);
     }
 
     #[test]
@@ -172,6 +204,8 @@ mod navigation_header_tests {
         let mut panel = NeoismAgentSidePanel::default();
         panel.set_navigation_header_enabled(true);
         panel.select_new_chat();
+        panel.select_next();
+        assert_eq!(panel.selected_header_action(), Some(CatalogHeaderAction::Search));
         panel.select_next();
         assert!(panel.projects_selected());
         panel.select_next(); // Empty catalogs still expose Projects.
@@ -188,11 +222,13 @@ mod navigation_header_tests {
         assert!(panel.projects_selected());
         assert!(!panel.toggle_selected_project());
         panel.select_prev();
+        assert_eq!(panel.selected_header_action(), Some(CatalogHeaderAction::Search));
+        panel.select_prev();
         assert!(panel.new_chat_selected());
     }
 
     #[test]
-    fn hidden_search_cannot_register_hits_or_take_focus() {
+    fn modal_search_hit_is_enabled_without_legacy_inline_focus() {
         let mut panel = NeoismAgentSidePanel::default();
         panel.focus_search();
         panel.set_navigation_header_enabled(true);
@@ -201,10 +237,12 @@ mod navigation_header_tests {
         panel.focus_search();
         assert!(!panel.search_focused());
         assert!(!panel.session_search_contains(10., 10.));
-        assert_eq!(panel.header_action_at(10., 10.), None);
+        assert_eq!(panel.header_action_at(10., 10.), Some(CatalogHeaderAction::Search));
         panel.set_selected_cursor_rect([0., 0., 1., 20.]);
         panel.select_projects();
         assert_eq!(panel.selected_cursor_rect(), None);
+        panel.select_prev();
+        assert_eq!(panel.selected_header_action(), Some(CatalogHeaderAction::Search));
         panel.select_prev();
         assert!(panel.new_chat_selected());
     }
@@ -928,6 +966,44 @@ impl BranchActivity {
     }
 }
 
+/// Catalog feed bookkeeping is independent of the selected/open chat pane.
+/// Keep terminal activities even after row removal, so recovery cannot restart
+/// their completion grace. Retired executions reject delayed rollover traffic.
+#[derive(Default)]
+struct CatalogFamilyState {
+    directory: String,
+    execution_id: Option<String>,
+    revision: u64,
+    retired_executions: HashSet<Option<String>>,
+    activities: HashMap<String, BranchActivity>,
+    terminal_revisions: HashMap<String, u64>,
+    rows: Vec<NeoismAgentSessionEntry>,
+}
+
+impl CatalogFamilyState {
+    fn visible_rows(&self) -> Vec<NeoismAgentSessionEntry> {
+        self.rows
+            .iter()
+            .filter(|row| {
+                self.activities.get(&row.id).is_some_and(|activity| {
+                    match activity.status {
+                        BranchStatus::Active | BranchStatus::WaitingPermission => true,
+                        BranchStatus::Completed | BranchStatus::Stopped => {
+                            let grace = if activity.status == BranchStatus::Stopped {
+                                FAILED_SUBAGENT_HIDE_AFTER
+                            } else {
+                                SUBAGENT_HIDE_AFTER
+                            };
+                            activity.completed_at.is_some_and(|at| at.elapsed() < grace)
+                        }
+                    }
+                })
+            })
+            .cloned()
+            .collect()
+    }
+}
+
 /// How long a finished (`Completed` / `Stopped`) sub-agent lingers in
 /// the sidebar before it's auto-hidden, mirroring Claude's behaviour.
 /// A respawn (status back to active) clears the timer and the row
@@ -1199,6 +1275,7 @@ pub struct NeoismAgentSidePanel {
     catalog_viewed_root: Option<Option<String>>,
     catalog_viewed_session: Option<Option<String>>,
     catalog_subagents: HashMap<String, Vec<NeoismAgentSessionEntry>>,
+    catalog_families: HashMap<String, CatalogFamilyState>,
     detail_family_root: Option<String>,
     /// Keep the viewed child as a return-navigation affordance, even when
     /// opening a historical completion. Cleared when navigating away.
@@ -1242,7 +1319,7 @@ pub struct NeoismAgentSidePanel {
     header_rects: Vec<(CatalogHeaderAction, [f32; 4])>,
     new_chat_rect: Option<[f32; 4]>,
     new_chat_selected: bool,
-    projects_selected: bool,
+    selected_header: Option<CatalogHeaderAction>,
     provider_menu_open: bool,
     provider_selection: usize,
     hovered_session: Option<usize>,
@@ -1327,6 +1404,7 @@ impl Default for NeoismAgentSidePanel {
             catalog_viewed_root: None,
             catalog_viewed_session: None,
             catalog_subagents: HashMap::new(),
+            catalog_families: HashMap::new(),
             detail_family_root: None,
             retained_viewed_subagent_id: None,
             subagents_loaded: false,
@@ -1344,7 +1422,7 @@ impl Default for NeoismAgentSidePanel {
             header_rects: Vec::new(),
             new_chat_rect: None,
             new_chat_selected: false,
-            projects_selected: false,
+            selected_header: None,
             provider_menu_open: false,
             provider_selection: 0,
             hovered_session: None,
@@ -1373,7 +1451,7 @@ impl NeoismAgentSidePanel {
             return;
         }
         self.navigation_header_enabled = enabled;
-        self.projects_selected = false;
+        self.selected_header = None;
         self.selected_cursor_rect = None;
         self.clear_header_rects();
         if enabled {
@@ -1388,7 +1466,6 @@ impl NeoismAgentSidePanel {
 
     pub fn header_action_enabled(&self, action: CatalogHeaderAction) -> bool {
         self.navigation_header_enabled
-            && action != CatalogHeaderAction::Search
             && (action != CatalogHeaderAction::AddWorkspace
                 || self.catalog_directory.is_none())
     }
@@ -1450,7 +1527,7 @@ impl NeoismAgentSidePanel {
     pub fn hide_catalog_controls(&mut self) {
         self.clear_header_rects();
         self.new_chat_rect = None;
-        self.projects_selected = false;
+        self.selected_header = None;
         self.new_chat_selected = false;
         self.session_search_rect = None;
         self.provider_menu_open = false;
@@ -1494,21 +1571,30 @@ impl NeoismAgentSidePanel {
         self.new_chat_rect = Some(rect);
     }
 
-    pub fn projects_selected(&self) -> bool {
-        self.projects_selected
-            && self.navigation_header_enabled
-            && matches!(self.mode, SidePanelMode::Sessions)
+    pub fn selected_header_action(&self) -> Option<CatalogHeaderAction> {
+        (self.navigation_header_enabled && matches!(self.mode, SidePanelMode::Sessions))
+            .then_some(self.selected_header)
+            .flatten()
     }
 
-    pub fn select_projects(&mut self) {
+    pub fn projects_selected(&self) -> bool {
+        self.selected_header_action() == Some(CatalogHeaderAction::Projects)
+    }
+
+    pub fn select_header_action(&mut self, action: CatalogHeaderAction) {
         if self.navigation_header_enabled && matches!(self.mode, SidePanelMode::Sessions)
+            && matches!(action, CatalogHeaderAction::Search | CatalogHeaderAction::Projects)
         {
             self.new_chat_selected = false;
             self.search_focused = false;
-            self.projects_selected = true;
+            self.selected_header = Some(action);
             self.cursor_spring.reset();
             self.selected_cursor_rect = None;
         }
+    }
+
+    pub fn select_projects(&mut self) {
+        self.select_header_action(CatalogHeaderAction::Projects);
     }
 
     pub fn new_chat_selected(&self) -> bool {
@@ -1519,7 +1605,7 @@ impl NeoismAgentSidePanel {
         if matches!(self.mode, SidePanelMode::Sessions) {
             self.search_focused = false;
             self.new_chat_selected = true;
-            self.projects_selected = false;
+            self.selected_header = None;
             self.selected_cursor_rect = None;
             self.cursor_spring.reset();
         }
@@ -1794,7 +1880,7 @@ impl NeoismAgentSidePanel {
             return;
         }
         self.mode = mode;
-        self.projects_selected = false;
+        self.selected_header = None;
         self.new_chat_selected = false;
         self.selected = 0;
         self.scroll_top = 0;
@@ -1988,6 +2074,7 @@ impl NeoismAgentSidePanel {
         self.cursor_spring.reset();
         self.all_sessions.clear();
         self.catalog_subagents.clear();
+        self.catalog_families.clear();
         self.external_sessions.clear();
         self.external_errors.clear();
         self.external_importing_key = None;
@@ -2053,54 +2140,158 @@ impl NeoismAgentSidePanel {
             })
     }
 
-    /// Project the existing branch lifecycle into the workspace's selectable tree.
-    pub fn sync_catalog_subagents_from(&mut self, source: &Self, root: Option<&str>) {
-        let Some(root) = root.filter(|root| !root.is_empty()) else {
-            return;
-        };
-        if source.subagents.first().map(|entry| entry.id.as_str()) != Some(root) {
-            return;
-        }
-        let rows = source.catalog_subagent_rows(root);
-        self.set_catalog_subagent_rows(root, rows);
-    }
-
-    /// A single-pane host subscribes to one family at a time. Discard older
-    /// projections when it changes families rather than retaining stale spinners.
-    pub fn sync_catalog_subagents(&mut self, root: Option<&str>) {
-        let root = root.filter(|root| !root.is_empty());
-        let roots = root.into_iter().map(str::to_owned).collect();
-        self.retain_catalog_subagent_families(&roots);
-        let Some(root) = root else {
-            return;
-        };
-        if self.subagents.first().map(|entry| entry.id.as_str()) != Some(root) {
-            return;
-        }
-        let rows = self.catalog_subagent_rows(root);
-        self.set_catalog_subagent_rows(root, rows);
-    }
-
-    fn catalog_subagent_rows(&self, root: &str) -> Vec<NeoismAgentSessionEntry> {
-        self.subagents
-            .iter()
-            .skip(1)
-            .filter(|entry| !self.subagent_hidden(entry))
-            .map(|entry| {
-                let mut row = entry.clone();
-                let activity = self.branch_activity(&row.id);
-                row.branch_root_id = Some(root.to_owned());
-                row.branch_status = row
-                    .runtime_status
-                    .as_deref()
-                    .and_then(BranchStatus::from_runtime_status)
-                    .or_else(|| activity.map(|activity| activity.status));
-                row.branch_activity_label =
-                    activity.and_then(|activity| activity.current_tool.clone());
-                row.catalog_activity = None;
-                row
+    /// Apply a complete replacement for one root from the tab-independent feed.
+    /// Returns true when accepted (including duplicates and empty replacements),
+    /// false for lower revisions, retired executions, deleted roots, or out-of-scope
+    /// data. Equal revisions still refresh canonical metadata and permissions.
+    pub fn apply_catalog_family_snapshot(
+        &mut self,
+        root: &str,
+        snapshot: neoism_agent_core::CatalogFamilySnapshot,
+    ) -> bool {
+        if root.is_empty()
+            || self.deleted_session_ids.contains(root)
+            || self.catalog_directory.as_deref().is_some_and(|directory| {
+                directory != snapshot.directory
             })
-            .collect()
+        {
+            return false;
+        }
+        if let Some(family) = self.catalog_families.get(root) {
+            if family.execution_id == snapshot.execution_id {
+                if snapshot.family_revision < family.revision {
+                    return false;
+                }
+            } else if family.retired_executions.contains(&snapshot.execution_id) {
+                return false;
+            }
+        }
+        let family = self.catalog_families.entry(root.to_owned()).or_insert_with(|| {
+            CatalogFamilyState {
+                execution_id: snapshot.execution_id.clone(),
+                ..CatalogFamilyState::default()
+            }
+        });
+        if family.execution_id != snapshot.execution_id {
+            family.retired_executions.insert(family.execution_id.take());
+            family.execution_id = snapshot.execution_id;
+            family.activities.clear();
+            family.terminal_revisions.clear();
+        }
+        family.directory = snapshot.directory.clone();
+        family.revision = snapshot.family_revision;
+        family.rows.clear();
+        for branch in snapshot.branches {
+            if branch.session_id == root
+                || self.deleted_session_ids.contains(&branch.session_id)
+            {
+                continue;
+            }
+            let status = match branch.status.as_str() {
+                "outstanding" if branch.permission_pending => BranchStatus::WaitingPermission,
+                "outstanding" => BranchStatus::Active,
+                "completed" => BranchStatus::Completed,
+                "failed" => BranchStatus::Stopped,
+                _ => continue,
+            };
+            let terminal = matches!(status, BranchStatus::Completed | BranchStatus::Stopped);
+            let can_reopen = family.terminal_revisions.get(&branch.session_id)
+                .is_none_or(|revision| snapshot.family_revision > *revision);
+            if terminal {
+                family.terminal_revisions.insert(branch.session_id.clone(), snapshot.family_revision);
+            } else if can_reopen {
+                family.terminal_revisions.remove(&branch.session_id);
+            }
+            let activity = family.activities.entry(branch.session_id.clone())
+                .and_modify(|activity| {
+                    // Equal revisions can update canonical metadata/permissions,
+                    // but only a newer lifecycle revision can reopen a terminal
+                    // child (a Task follow-up within the same execution).
+                    if !activity.terminal_locked || terminal || can_reopen {
+                        activity.transition_status(status);
+                        activity.terminal_locked = matches!(
+                            status, BranchStatus::Completed | BranchStatus::Stopped
+                        );
+                        if !activity.terminal_locked {
+                            activity.started_at = branch.started_at;
+                        }
+                    }
+                })
+                .or_insert_with(|| {
+                    let mut activity = BranchActivity::new(status, None, branch.started_at);
+                    activity.terminal_locked = matches!(
+                        status, BranchStatus::Completed | BranchStatus::Stopped
+                    );
+                    activity
+                });
+            let mut row = NeoismAgentSessionEntry::new(
+                branch.session_id,
+                branch.title,
+                branch.agent.unwrap_or_default(),
+            )
+            .with_directory(Some(snapshot.directory.clone()))
+            .with_depth(branch.depth)
+            .with_runtime_status(Some(activity.status.runtime_status().to_owned()));
+            row.agent_kind = AgentKind::from_label(&row.time_label);
+            row.branch_root_id = Some(root.to_owned());
+            row.branch_status = Some(activity.status);
+            family.rows.push(row);
+        }
+        let rows = family.visible_rows();
+        self.set_catalog_subagent_rows(root, rows);
+        true
+    }
+
+    /// Reconnect/scope reset: discard both projections and lifecycle watermarks.
+    pub fn clear_catalog_families(&mut self) -> bool {
+        let changed = !self.catalog_families.is_empty() || !self.catalog_subagents.is_empty();
+        self.catalog_families.clear();
+        let roots: Vec<_> = self.catalog_subagents.keys().cloned().collect();
+        for root in roots {
+            self.set_catalog_subagent_rows(&root, Vec::new());
+        }
+        changed
+    }
+
+    /// Scoped catalog streams can reconnect independently in the browser.
+    pub fn clear_catalog_families_in_scope(&mut self, directory: Option<&str>) -> bool {
+        let Some(directory) = directory else {
+            return self.clear_catalog_families();
+        };
+        let roots: Vec<_> = self.catalog_families.iter()
+            .filter(|(_, family)| family.directory == directory)
+            .map(|(root, _)| root.clone())
+            .collect();
+        let changed = !roots.is_empty();
+        for root in roots {
+            self.catalog_families.remove(&root);
+            self.set_catalog_subagent_rows(&root, Vec::new());
+        }
+        changed
+    }
+
+    fn catalog_completion_pending(&self) -> bool {
+        self.catalog_subagents.values().flatten().any(|row| {
+            matches!(row.branch_status, Some(BranchStatus::Completed | BranchStatus::Stopped))
+        })
+    }
+
+    fn tick_catalog_families(&mut self) -> bool {
+        if !self.catalog_completion_pending() {
+            return false;
+        }
+        let updates: Vec<_> = self.catalog_families.iter()
+            .filter_map(|(root, family)| {
+                let rows = family.visible_rows();
+                (self.catalog_subagents.get(root).map(Vec::as_slice).unwrap_or_default()
+                    != rows.as_slice()).then(|| (root.clone(), rows))
+            })
+            .collect();
+        let changed = !updates.is_empty();
+        for (root, rows) in updates {
+            self.set_catalog_subagent_rows(&root, rows);
+        }
+        changed
     }
 
     fn set_catalog_subagent_rows(
@@ -2125,28 +2316,6 @@ impl NeoismAgentSidePanel {
         self.rebuild_session_display();
         self.restore_selected_session(selected.as_deref());
         self.restore_session_viewport_anchor(anchor);
-    }
-
-    /// Forget projections whose owning pane has closed, so stale running
-    /// snapshots cannot keep animating without a live family subscription.
-    pub fn retain_catalog_subagent_families(&mut self, roots: &HashSet<String>) -> bool {
-        if self
-            .catalog_subagents
-            .keys()
-            .all(|root| roots.contains(root))
-        {
-            return false;
-        }
-        let selected = self
-            .selected_catalog_row()
-            .map(|row| row.stable_identity().to_owned());
-        let anchor = self.session_viewport_anchor();
-        self.catalog_subagents
-            .retain(|root, _| roots.contains(root));
-        self.rebuild_session_display();
-        self.restore_selected_session(selected.as_deref());
-        self.restore_session_viewport_anchor(anchor);
-        true
     }
 
     pub fn set_catalog_viewed_session(&mut self, session: Option<&str>) {
@@ -2185,7 +2354,7 @@ impl NeoismAgentSidePanel {
     pub fn catalog_highlight_index(&self, legacy_root: Option<&str>) -> Option<usize> {
         if self.focused {
             return (!self.new_chat_selected()
-                && !self.projects_selected()
+                && self.selected_header_action().is_none()
                 && !self.search_focused()
                 && self.selected < self.sessions.len())
             .then_some(self.selected);
@@ -2361,8 +2530,9 @@ impl NeoismAgentSidePanel {
     /// main session at index 0 is always retained. Returns `true` if
     /// anything was removed (so the caller can mark the frame dirty).
     pub fn prune_expired_completed_subagents(&mut self) -> bool {
+        let catalog_changed = self.tick_catalog_families();
         if self.subagents.len() <= 1 {
-            return false;
+            return catalog_changed;
         }
         let selected_id = self
             .subagents
@@ -2375,7 +2545,7 @@ impl NeoismAgentSidePanel {
             .map(|(ix, entry)| ix != 0 && self.subagent_hidden(entry))
             .collect();
         if !hidden.iter().any(|&h| h) {
-            return false;
+            return catalog_changed;
         }
         let mut ix = 0;
         self.subagents.retain(|_| {
@@ -2531,7 +2701,7 @@ impl NeoismAgentSidePanel {
     /// Kept for the home-mode click path that always wants a session
     /// (not a subagent). Subagent click uses `selected_row()` instead.
     pub fn selected_session(&self) -> Option<&NeoismAgentSessionEntry> {
-        if self.search_focused() || self.new_chat_selected() || self.projects_selected() {
+        if self.search_focused() || self.new_chat_selected() || self.selected_header_action().is_some() {
             return None;
         }
         self.sessions.get(self.selected).filter(|e| !e.is_header)
@@ -2541,7 +2711,7 @@ impl NeoismAgentSidePanel {
         if !matches!(self.mode, SidePanelMode::Sessions)
             || self.search_focused()
             || self.new_chat_selected()
-            || self.projects_selected()
+            || self.selected_header_action().is_some()
         {
             return None;
         }
@@ -2723,6 +2893,12 @@ impl NeoismAgentSidePanel {
         self.deleted_session_ids.insert(session_id.to_owned());
         self.session_activity_overrides.remove(session_id);
         self.catalog_subagents.remove(session_id);
+        self.catalog_families.remove(session_id);
+        for family in self.catalog_families.values_mut() {
+            family.rows.retain(|entry| entry.id != session_id);
+            family.activities.remove(session_id);
+            family.terminal_revisions.remove(session_id);
+        }
         for children in self.catalog_subagents.values_mut() {
             children.retain(|entry| entry.id != session_id);
         }
@@ -3135,7 +3311,7 @@ impl NeoismAgentSidePanel {
         if !matches!(self.mode, SidePanelMode::Sessions)
             || self.search_focused()
             || self.new_chat_selected()
-            || self.projects_selected()
+            || self.selected_header_action().is_some()
         {
             return false;
         }
@@ -3166,7 +3342,7 @@ impl NeoismAgentSidePanel {
         if !matches!(self.mode, SidePanelMode::Sessions)
             || self.search_focused()
             || self.new_chat_selected()
-            || self.projects_selected()
+            || self.selected_header_action().is_some()
         {
             return false;
         }
@@ -3460,7 +3636,9 @@ impl NeoismAgentSidePanel {
             if let Some(children) = children {
                 for child in children {
                     let mut child = child.clone();
-                    child.directory.clone_from(&directory);
+                    if child.directory.is_none() {
+                        child.directory.clone_from(&directory);
+                    }
                     child.depth = depth + child.depth.max(1);
                     tree.push(child);
                 }
@@ -4166,7 +4344,7 @@ impl NeoismAgentSidePanel {
         if self.navigation_header_enabled {
             return;
         }
-        self.projects_selected = false;
+        self.selected_header = None;
         self.new_chat_selected = false;
         self.search_focused = true;
         self.cursor_spring.reset();
@@ -4179,6 +4357,10 @@ impl NeoismAgentSidePanel {
     pub fn select_next(&mut self) {
         let len = self.active_len();
         if self.new_chat_selected() && self.navigation_header_enabled {
+            self.select_header_action(CatalogHeaderAction::Search);
+            return;
+        }
+        if self.selected_header_action() == Some(CatalogHeaderAction::Search) {
             self.select_projects();
             return;
         }
@@ -4212,6 +4394,10 @@ impl NeoismAgentSidePanel {
 
     pub fn select_prev(&mut self) {
         if self.projects_selected() {
+            self.select_header_action(CatalogHeaderAction::Search);
+            return;
+        }
+        if self.selected_header_action() == Some(CatalogHeaderAction::Search) {
             self.select_new_chat();
             return;
         }
@@ -4250,7 +4436,7 @@ impl NeoismAgentSidePanel {
     }
 
     pub fn select_next_by(&mut self, rows: usize) {
-        if self.new_chat_selected() || self.projects_selected() {
+        if self.new_chat_selected() || self.selected_header_action().is_some() {
             self.select_next();
             return;
         }
@@ -4274,7 +4460,7 @@ impl NeoismAgentSidePanel {
     }
 
     pub fn select_prev_by(&mut self, rows: usize) {
-        if self.new_chat_selected() || self.projects_selected() {
+        if self.new_chat_selected() || self.selected_header_action().is_some() {
             self.select_prev();
             return;
         }
@@ -4308,7 +4494,7 @@ impl NeoismAgentSidePanel {
     }
 
     fn move_selection_to(&mut self, new_selected: usize) {
-        self.projects_selected = false;
+        self.selected_header = None;
         self.new_chat_selected = false;
         self.selected_cursor_rect = None;
         let len = self.active_len();
@@ -4456,6 +4642,7 @@ impl NeoismAgentSidePanel {
     /// top row + sub-row offset from it, so scrolling is pixel-smooth and
     /// scale-independent.
     pub fn tick_scroll(&mut self) -> f32 {
+        self.tick_catalog_families();
         if matches!(self.mode, SidePanelMode::Subagents) {
             self.scroll.reset();
             self.last_scroll_frame = Instant::now();
@@ -4507,6 +4694,7 @@ impl NeoismAgentSidePanel {
             && (matches!(self.session_catalog_state, SessionCatalogState::Loading)
                 || self.session_page_loading);
         self.scroll.is_animating()
+            || self.catalog_completion_pending()
             || self.cursor_spring.position != 0.0
             || sessions_loading
             || (self.semantic_searching && self.semantic_search_elapsed() < 1.5)
@@ -4527,6 +4715,7 @@ impl NeoismAgentSidePanel {
                 || self.session_page_loading);
         matches!(self.mode, SidePanelMode::Sessions)
             && (self.scroll.is_animating()
+                || self.catalog_completion_pending()
                 || self.cursor_spring.position != 0.0
                 || sessions_loading
                 || (!self.user_hidden && self.visible_running_indicator)

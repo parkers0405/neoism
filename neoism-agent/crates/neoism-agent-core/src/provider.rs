@@ -119,6 +119,9 @@ pub struct ProviderGenerationRequest {
     pub workspace_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    /// Scope-validated conversation lineage for Codex prompt-cache routing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_affinity: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub variant: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

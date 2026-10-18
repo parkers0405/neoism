@@ -184,7 +184,7 @@ impl NeoismAgentSidePanel {
                 matches!(self.mode, SidePanelMode::Sessions)
                     && !self.search_focused()
                     && !self.new_chat_selected()
-                    && !self.projects_selected()
+                    && self.selected_header_action().is_none()
             })
             .map(|e| e.stable_identity().to_owned());
         let anchor = if matches!(self.mode, SidePanelMode::Sessions) {
@@ -336,7 +336,7 @@ impl NeoismAgentSidePanel {
                 matches!(self.mode, SidePanelMode::Sessions)
                     && !self.search_focused()
                     && !self.new_chat_selected()
-                    && !self.projects_selected()
+                    && self.selected_header_action().is_none()
             })
             .map(|e| e.stable_identity().to_owned());
         let anchor = if matches!(self.mode, SidePanelMode::Sessions) {
@@ -432,7 +432,7 @@ impl NeoismAgentSidePanel {
         if !self.project_pagination_enabled()
             || self.search_focused()
             || self.new_chat_selected()
-            || self.projects_selected()
+            || self.selected_header_action().is_some()
         {
             return false;
         }

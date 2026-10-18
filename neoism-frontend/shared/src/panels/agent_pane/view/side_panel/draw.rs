@@ -5,6 +5,7 @@ use crate::panels::agent_pane::view::draw::measure_text_cached;
 #[derive(Clone, Copy)]
 enum CatalogIcon {
     Compose,
+    Search,
     Folder,
     Chevron,
 }
@@ -23,6 +24,7 @@ fn draw_catalog_icon(
 ) {
     let (glyph, color) = match icon {
         CatalogIcon::Compose => ("\u{f044}", theme.fg),
+        CatalogIcon::Search => ("\u{f002}", theme.fg),
         CatalogIcon::Folder => (
             crate::panels::file_tree::icons::folder_icon(false).0,
             theme.folder,
@@ -44,6 +46,24 @@ fn draw_catalog_icon(
         cuts,
         true,
     );
+}
+
+pub(super) fn catalog_action_layout(
+    rect: [f32; 4],
+    scale: f32,
+    font_size: f32,
+) -> ([f32; 4], [f32; 2]) {
+    let icon_side = 20.0 * scale;
+    let icon_x = rect[0] + 7.0 * scale;
+    (
+        [
+            icon_x,
+            rect[1] + (rect[3] - icon_side) / 2.0,
+            icon_side,
+            icon_side,
+        ],
+        [icon_x + 29.0 * scale, rect[1] + (rect[3] - font_size) / 2.0],
+    )
 }
 
 fn project_label_opts(theme: &IdeTheme, scale: f32, clip: [f32; 4]) -> DrawOpts {
@@ -495,9 +515,9 @@ pub(crate) fn render_sessions_list(
             ORDER_PANEL + 2,
         );
     }
-    let icon_side = 20.0 * s;
-    let icon_x = button_rect[0] + 7.0 * s;
-    let icon_y = button_rect[1] + (button_h - icon_side) / 2.0;
+    let label_size = FONT_SIZE * s * if navigation { 1.0 } else { 0.95 };
+    let ([icon_x, icon_y, icon_side, _], [label_x, label_y]) =
+        catalog_action_layout(button_rect, s, label_size);
     if !navigation && (button_hovered || button_selected) {
         sugarloaf.rounded_rect(
             None,
@@ -523,7 +543,6 @@ pub(crate) fn render_sessions_list(
         clip,
         occlusion_rects,
     );
-    let label_size = FONT_SIZE * s * if navigation { 1.0 } else { 0.95 };
     let label_opts = DrawOpts {
         font_size: label_size,
         color: theme.u8(theme.fg),
@@ -533,8 +552,8 @@ pub(crate) fn render_sessions_list(
     };
     draw_text_with_occlusion(
         sugarloaf,
-        icon_x + icon_side + 9.0 * s,
-        button_rect[1] + (button_h - label_size) / 2.0,
+        label_x,
+        label_y,
         "New chat",
         &label_opts,
         occlusion_rects,
@@ -554,38 +573,46 @@ pub(crate) fn render_sessions_list(
     if navigation {
         use crate::panels::agent_pane::state::side_panel::CatalogHeaderAction;
         let label = pane.side_panel().project_button_label().to_owned();
-        super::super::draw::draw_rect_clipped(
-            sugarloaf,
-            [text_x, y + 4.0 * s, text_w, s],
-            theme.f32_alpha(theme.muted, 0.22),
-            ORDER_PANEL + 2,
-            clip,
-        );
-        y += 8.0 * s;
-        for (action, title, icon) in [(
-            CatalogHeaderAction::Projects,
-            label.as_str(),
-            CatalogIcon::Folder,
-        )] {
-            let rect = [text_x, y, text_w.max(0.0), 34.0 * s];
+        for (action, title, icon) in [
+            (CatalogHeaderAction::Search, "Search", CatalogIcon::Search),
+            (CatalogHeaderAction::Projects, label.as_str(), CatalogIcon::Folder),
+        ] {
+            let rect = [text_x, y, text_w.max(0.0), button_h];
+            let ([icon_x, icon_y, _, _], [label_x, label_y]) =
+                catalog_action_layout(rect, s, label_size);
             if let Some(hit) = intersect_rect(rect, clip) {
                 pane.side_panel_mut().set_header_action_rect(action, hit);
+            }
+            let hovered = mouse.is_some_and(|(mx, my)| {
+                mx >= rect[0] && mx < rect[0] + rect[2]
+                    && my >= rect[1] && my < rect[1] + rect[3]
+            });
+            let selected = pane.side_panel().selected_header_action() == Some(action)
+                && pane.side_panel().is_focused();
+            if hovered || selected {
+                sugarloaf.rounded_rect(
+                    None, rect[0], rect[1], rect[2], rect[3],
+                    sidebar_background_opacity(theme.f32_alpha(
+                        theme.surface, if hovered { 0.78 } else { 0.55 },
+                    )),
+                    DEPTH, radius, ORDER_PANEL + 2,
+                );
             }
             draw_catalog_icon(
                 sugarloaf,
                 icon,
                 icon_x,
-                y + 7.0 * s,
+                icon_y,
                 s,
                 theme,
                 clip,
                 occlusion_rects,
             );
             let opts = DrawOpts {
-                font_size: FONT_SIZE * s,
+                font_size: label_size,
                 color: theme.u8(theme.fg),
                 clip_rect: intersect_rect(
-                    [icon_x + 29.0 * s, y, (rect[2] - 54.0 * s).max(0.0), rect[3]],
+                    [label_x, y, (rect[2] - 54.0 * s).max(0.0), rect[3]],
                     clip,
                 ),
                 ..DrawOpts::default()
@@ -593,14 +620,14 @@ pub(crate) fn render_sessions_list(
             if opts.clip_rect.is_some() {
                 draw_text_with_occlusion(
                     sugarloaf,
-                    icon_x + 29.0 * s,
-                    y + 10.0 * s,
+                    label_x,
+                    label_y,
                     title,
                     &opts,
                     occlusion_rects,
                 );
             }
-            if pane.side_panel().projects_selected() && pane.side_panel().is_focused() {
+            if selected {
                 let cursor_w = (FONT_SIZE * s * 0.6).max(2.0);
                 let cursor_h = (rect[3] - 8.0 * s).max(FONT_SIZE * s).min(rect[3]);
                 pane.side_panel_mut().set_selected_cursor_rect([
@@ -615,14 +642,14 @@ pub(crate) fn render_sessions_list(
                     sugarloaf,
                     CatalogIcon::Chevron,
                     rect[0] + rect[2] - 22.0 * s,
-                    y + 7.0 * s,
+                    icon_y,
                     s,
                     theme,
                     clip,
                     occlusion_rects,
                 );
             }
-            y += 34.0 * s;
+            y += button_h;
         }
         super::super::draw::draw_rect_clipped(
             sugarloaf,
@@ -1004,7 +1031,7 @@ pub(crate) fn render_sessions_list(
             let selected = pane.side_panel().selected_index() == absolute_ix
                 && !pane.side_panel().search_focused()
                 && !pane.side_panel().new_chat_selected()
-                && !pane.side_panel().projects_selected();
+                && pane.side_panel().selected_header_action().is_none();
             if selected || hovered_session == Some(absolute_ix) {
                 sugarloaf.quad(
                     None,
@@ -1238,7 +1265,6 @@ pub(crate) fn render_sessions_list(
             );
         }
 
-        // Idle/current conversations retain their quieter green status dot.
         if let Some(rgb) = activity_color {
             let spinner = 10.0 * s * hover_scale;
             let visible = draw_subagent_spinner(
@@ -1254,23 +1280,19 @@ pub(crate) fn render_sessions_list(
                 occlusion_rects,
             );
             running_indicator_visible |= visible;
-        } else if is_child || is_current {
+        } else if is_child {
             let scaled_dot = dot_diameter * hover_scale;
             let dot_y = row_y + (row_h - scaled_dot) / 2.0;
-            let (color, halo) = if is_child {
-                match catalog_branch_status(entry) {
-                    BranchStatus::WaitingPermission => {
-                        let blink = 0.55 + 0.45 * (now_seconds * 4.0).sin().abs();
-                        (
-                            theme.u8_alpha(theme.yellow, blink),
-                            Some((theme.u8(theme.yellow), (1.0 - blink) * 0.25)),
-                        )
-                    }
-                    BranchStatus::Stopped => (theme.u8(theme.red), None),
-                    _ => (theme.u8(theme.green), None),
+            let (color, halo) = match catalog_branch_status(entry) {
+                BranchStatus::WaitingPermission => {
+                    let blink = 0.55 + 0.45 * (now_seconds * 4.0).sin().abs();
+                    (
+                        theme.u8_alpha(theme.yellow, blink),
+                        Some((theme.u8(theme.yellow), (1.0 - blink) * 0.25)),
+                    )
                 }
-            } else {
-                (theme.u8(theme.green), Some((theme.u8(theme.green), 0.35)))
+                BranchStatus::Stopped => (theme.u8(theme.red), None),
+                _ => (theme.u8(theme.green), None),
             };
             draw_status_dot_text(
                 sugarloaf,

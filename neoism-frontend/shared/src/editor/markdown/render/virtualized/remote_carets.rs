@@ -126,10 +126,11 @@ fn draw_remote_markdown_carets(
         // coming while a peer is present).
         let orb_size = tag_h;
         let orb_gap = 2.0;
-        draw_presence_orb_clipped(
+        draw_presence_avatar_clipped(
             sugarloaf,
             clip,
             &cursor.name,
+            cursor.client_os.as_deref(),
             x,
             tag_y,
             orb_size,

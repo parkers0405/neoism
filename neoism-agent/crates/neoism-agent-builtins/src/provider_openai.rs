@@ -639,6 +639,78 @@ mod tests {
     use super::*;
 
     #[test]
+    fn codex_prompt_cache_request_affinity() {
+        let client = reqwest::Client::new();
+        let mut request: ProviderGenerationRequest = serde_json::from_value(json!({
+            "providerId":"openai", "modelId":"gpt-test", "messages":[],
+            "sessionId":"child", "cacheAffinity":"root", "tenantId":"tenant-a",
+            "workspaceId":"workspace-a", "connectionId":"connection-a"
+        }))
+        .unwrap();
+        let wire = |request: &ProviderGenerationRequest,
+                    token: &str,
+                    account: Option<&str>| {
+            let http = codex_request(
+                &client,
+                "https://example.invalid/responses",
+                token,
+                account,
+                request,
+            )
+            .build()
+            .unwrap();
+            let body: Value =
+                serde_json::from_slice(http.body().unwrap().as_bytes().unwrap()).unwrap();
+            let header = http
+                .headers()
+                .get("session-id")
+                .map(|v| v.to_str().unwrap().to_string());
+            (body, header)
+        };
+        let (body, header) = wire(&request, "synthetic-token", Some("account-a"));
+        let key = body["prompt_cache_key"].as_str().unwrap().to_string();
+        assert_eq!(header.as_deref(), Some(key.as_str()));
+        assert_eq!(wire(&request, "refreshed-token", Some("account-a")).0, body);
+        request.session_id = Some("deep-child".into());
+        assert_eq!(wire(&request, "synthetic-token", Some("account-a")).0, body);
+        for field in ["tenantId", "workspaceId", "connectionId", "cacheAffinity"] {
+            let mut changed = serde_json::to_value(&request).unwrap();
+            changed[field] = json!("different");
+            let changed = serde_json::from_value(changed).unwrap();
+            assert_ne!(
+                wire(&changed, "synthetic-token", Some("account-a")).0
+                    ["prompt_cache_key"],
+                key
+            );
+        }
+        assert_ne!(
+            wire(&request, "synthetic-token", Some("account-b")).0["prompt_cache_key"],
+            key
+        );
+        assert_ne!(
+            wire(&request, "token-a", None).0,
+            wire(&request, "token-b", None).0
+        );
+        // Non-Codex body construction retains the prior session-key policy.
+        assert_eq!(responses_body(&request)["prompt_cache_key"], "deep-child");
+        assert!(!request.headers.contains_key("session-id"));
+        request
+            .headers
+            .insert("Session-Id".into(), "conflicting".into());
+        for explicit in [json!("caller-key"), Value::Null, json!("")] {
+            request
+                .options
+                .insert("prompt_cache_key".into(), explicit.clone());
+            let (body, header) = wire(&request, "synthetic-token", Some("account-a"));
+            assert_eq!(body["prompt_cache_key"], explicit);
+            assert_eq!(
+                header.as_deref(),
+                explicit.as_str().filter(|s| !s.is_empty())
+            );
+        }
+    }
+
+    #[test]
     fn summary_capability_is_independent_of_effort_compatibility() {
         let mut request: ProviderGenerationRequest = serde_json::from_value(json!({
             "providerId":"openai", "modelId":"future-reasoner", "variant":"high", "messages":[],
@@ -960,6 +1032,66 @@ fn openai_api_key_responses_stream(
     })
 }
 
+// Only the ChatGPT OAuth backend routes prompt caches via `session-id`.
+// Explicit options retain their existing override semantics, including null/empty.
+fn codex_request(
+    client: &reqwest::Client,
+    endpoint: &str,
+    access: &str,
+    account_id: Option<&str>,
+    request: &ProviderGenerationRequest,
+) -> reqwest::RequestBuilder {
+    let mut body = responses_body(request);
+    if !request.options.contains_key("prompt_cache_key") {
+        if let Some(affinity) = request
+            .cache_affinity
+            .as_deref()
+            .or(request.session_id.as_deref())
+            .filter(|id| !id.is_empty())
+        {
+            // Account IDs survive token refresh. Without one, isolate by credential
+            // rather than accidentally sharing a cache across OAuth identities.
+            let scope = serde_json::to_string(&(
+                &request.tenant_id,
+                &request.workspace_id,
+                &request.connection_id,
+                affinity,
+            ))
+            .expect("cache scope is serializable");
+            body["prompt_cache_key"] = json!(codex_cache_identity(
+                account_id.unwrap_or(access),
+                account_id,
+                endpoint,
+                &scope,
+            ));
+        }
+    }
+    let mut http = client
+        .post(endpoint)
+        .bearer_auth(access)
+        .header("accept", "text/event-stream")
+        .header("originator", "neoism")
+        .header("user-agent", neoism_user_agent())
+        .json(&body);
+    for (name, value) in &request.headers {
+        // A caller cannot split the Codex header from the effective body key.
+        if !name.eq_ignore_ascii_case("session-id") {
+            http = http.header(name, value);
+        }
+    }
+    if let Some(key) = body
+        .get("prompt_cache_key")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
+        http = http.header("session-id", key);
+    }
+    if let Some(account_id) = account_id {
+        http = http.header("ChatGPT-Account-Id", account_id);
+    }
+    http
+}
+
 fn openai_oauth_responses_stream(
     client: OpenAiClient,
     auth_store: AuthStore,
@@ -977,21 +1109,9 @@ fn openai_oauth_responses_stream(
 
         let endpoint = std::env::var("NEOISM_AGENT_OPENAI_CODEX_RESPONSES_URL")
             .unwrap_or_else(|_| CODEX_RESPONSES_ENDPOINT.to_string());
-        let body = responses_body(&request);
-        let mut request_builder = client
-            .client
-            .post(&endpoint)
-            .bearer_auth(access)
-            .header("accept", "text/event-stream")
-            .header("originator", "neoism")
-            .header("user-agent", neoism_user_agent())
-            .json(&body);
-        for (name, value) in &request.headers {
-            request_builder = request_builder.header(name, value);
-        }
-        if let Some(account_id) = account_id {
-            request_builder = request_builder.header("ChatGPT-Account-Id", account_id);
-        }
+        let request_builder = codex_request(
+            &client.client, &endpoint, &access, account_id.as_deref(), &request,
+        );
 
         let response = request_builder
             .send()

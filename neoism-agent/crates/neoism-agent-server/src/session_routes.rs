@@ -1071,6 +1071,16 @@ pub(crate) async fn session_status(
     let mut out = HashMap::new();
     for (session_id, status) in statuses {
         let mut value = json!(status);
+        value["compactionQueued"] = json!(state
+            .inner
+            .store
+            .compaction_queued(&session_id)
+            .await
+            .unwrap_or(false));
+        if matches!(status, neoism_agent_core::SessionStatus::Busy { .. }) {
+            value["queue"] =
+                crate::session_queue::queue_status_snapshot(&state, &session_id).await;
+        }
         if let Some(run) = runs.get(&session_id) {
             value["runID"] = json!(run.id);
             value["startedAt"] = json!(run.started_at);

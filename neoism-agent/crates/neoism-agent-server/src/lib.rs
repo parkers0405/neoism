@@ -158,7 +158,9 @@ pub(crate) use server_util::{default_state_dir, now_millis, resolve_directory, s
 use session_context::build_session_summary;
 #[cfg(test)]
 use session_context::provider_messages_for_session;
-use session_context::{compact_session_context, title_from_parts};
+#[cfg(test)]
+use session_context::compact_session_context;
+use session_context::title_from_parts;
 pub(crate) use session_helpers::{
     ensure_session, filter_sessions, message_id_of, part_id_of,
 };

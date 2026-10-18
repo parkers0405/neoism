@@ -1,0 +1,1 @@
+{"category":"archive-safety","description":"Repair a private synthetic archive manifest builder with lexical path safety, parent synthesis and collision detection.","id":"repo-archive-manifest","suite":"repository","timeout_seconds":600,"verifier_timeout_seconds":60}

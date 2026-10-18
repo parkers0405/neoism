@@ -924,6 +924,77 @@ fn left_catalog_activity_without_a_chat_stream() {
 }
 
 #[test]
+fn left_catalog_families_survive_last_chat_view_close() {
+    use neoism_ui::panels::agent_pane::state::side_panel::BranchStatus;
+    let mut catalog = NeoismAgentPane::default();
+    catalog.set_catalog_directory(Some("/project".into()));
+    catalog.side_panel.set_sessions(vec![
+        NeoismAgentSessionEntry::new("root-a", "A", "")
+            .with_directory(Some("/project".into())),
+        NeoismAgentSessionEntry::new("root-b", "B", "")
+            .with_directory(Some("/project".into())),
+    ]);
+    let family_event = |root: &str, revision: u64, status: &str, permission: bool| {
+        serde_json::json!({
+            "id": format!("family-{root}-{revision}-{permission}"),
+            "sequence": revision, "source": "session", "schemaVersion": "1.0.0",
+            "timestamp": 1, "type": "session.catalog.family",
+            "subject": {"kind": "session", "id": root},
+            "data": {"sessionID": root, "snapshot": {
+                "directory": "/project", "executionId": format!("execution-{root}"),
+                "familyRevision": revision,
+                "branches": [{"sessionId": format!("{root}-child"),
+                    "parentSessionId": root, "status": status, "title": "Research",
+                    "agent": "explore", "depth": 1, "permissionPending": permission}]
+            }}
+        })
+    };
+    let mut chat = NeoismAgentPane::default();
+    chat.session_id = Some("root-a".into());
+    catalog.session_catalog_stream = Some(AgentSessionCatalogStream::with_events_for_test([
+        family_event("root-a", 1, "outstanding", false),
+        family_event("root-b", 1, "outstanding", false),
+    ]));
+    assert!(catalog.drain_live_session_updates());
+    let branch_status = |catalog: &NeoismAgentPane, id: &str| {
+        catalog.side_panel.sessions().iter()
+            .find(|row| row.id == id).and_then(|row| row.branch_status)
+    };
+    assert_eq!(branch_status(&catalog, "root-a-child"), Some(BranchStatus::Active));
+    assert_eq!(branch_status(&catalog, "root-b-child"), Some(BranchStatus::Active));
+
+    drop(chat);
+    assert!(catalog.event_stream.is_none());
+    assert_eq!(branch_status(&catalog, "root-a-child"), Some(BranchStatus::Active));
+    catalog.session_catalog_stream = Some(AgentSessionCatalogStream::with_events_for_test([
+        family_event("root-a", 1, "outstanding", true),
+    ]));
+    assert!(catalog.drain_live_session_updates());
+    assert_eq!(branch_status(&catalog, "root-a-child"), Some(BranchStatus::WaitingPermission));
+
+    catalog.session_catalog_stream = Some(AgentSessionCatalogStream::with_events_for_test([
+        family_event("root-a", 2, "completed", false),
+        family_event("root-a", 1, "outstanding", false),
+    ]));
+    assert!(catalog.drain_live_session_updates());
+    assert_eq!(branch_status(&catalog, "root-a-child"), Some(BranchStatus::Completed));
+    assert_eq!(branch_status(&catalog, "root-b-child"), Some(BranchStatus::Active));
+    assert!(catalog.event_stream.is_none());
+
+    catalog.session_catalog_stream = Some(AgentSessionCatalogStream::with_events_for_test([
+        serde_json::json!({
+            "id": "deleted-root-a", "sequence": 3, "source": "session",
+            "schemaVersion": "1.0.0", "timestamp": 1, "type": "session.deleted",
+            "subject": {"kind": "session", "id": "root-a"},
+            "data": {"info": {"id": "root-a"}}
+        }),
+    ]));
+    assert!(catalog.drain_live_session_updates());
+    assert_eq!(branch_status(&catalog, "root-a-child"), None);
+    assert_eq!(branch_status(&catalog, "root-b-child"), Some(BranchStatus::Active));
+}
+
+#[test]
 fn running_tool_animation_is_owned_only_by_the_last_visible_paint() {
     use neoism_ui::panels::agent_pane::view::{
         timeline::AgentTimelinePane, tool_message::AgentToolPane,
@@ -1394,7 +1465,7 @@ fn windows_admission_split_frames_and_batched_frames_converge() {
             pane.drain_live_session_updates();
             assert_eq!(pane.streaming_label(), "Crafting");
             if !batched {
-                assert_eq!(pane.queued_prompt_count, usize::from(!windows_policy));
+                assert_eq!(pane.queued_prompt_count, 0);
                 pane.event_stream = Some(AgentSessionEventStream::with_updates_for_test(
                     "root",
                     [AgentSessionUpdate::DequeuedPrompt {
@@ -1469,7 +1540,7 @@ fn windows_new_prompt_does_not_borrow_finished_execution_timer() {
         assert_eq!(pane.streaming_label(), "Crafting");
         assert_eq!(
             pane.session_runtime_revision("root"),
-            revision + u64::from(windows_policy)
+            revision + 1
         );
         if windows_policy {
             assert!(pane.streaming_elapsed_seconds().unwrap() < 1.0);
@@ -4108,7 +4179,7 @@ fn windows_local_submit_invalidates_pre_submit_idle_hydration_only() {
             })
             .unwrap();
         pane.drain_background_updates();
-        assert_eq!(pane.is_streaming(), windows_policy);
+        assert!(pane.is_streaming());
         assert!(!pane.runtime_status_requests.contains_key("root"));
     }
 }
@@ -4516,10 +4587,9 @@ fn compact_session_queues_outbound_command_for_runtime() {
 
     pane.execute_slash_text("/compact");
 
-    assert_eq!(
-        pane.drain_pending_outbound(),
-        vec![OutboundAgentCommand::CompactSession]
-    );
+    assert!(matches!(pane.drain_pending_outbound().as_slice(),
+        [OutboundAgentCommand::CompactSessionRequest { session_id, .. }] if session_id == "sess-1"
+    ));
     assert!(pane.messages.is_empty());
     assert_ne!(pane.streaming_label(), "Compacting");
 }
@@ -5052,10 +5122,9 @@ fn enter_still_runs_argumentless_slash_command_from_picker() {
     // No trailing space: Enter commits the highlighted command.
     assert!(pane.submit());
     assert!(pane.picker().is_none());
-    assert_eq!(
-        pane.drain_pending_outbound(),
-        vec![OutboundAgentCommand::CompactSession]
-    );
+    assert!(matches!(pane.drain_pending_outbound().as_slice(),
+        [OutboundAgentCommand::CompactSessionRequest { session_id, .. }] if session_id == "sess-1"
+    ));
 }
 
 #[test]
@@ -6078,12 +6147,272 @@ fn streaming_compaction_retains_activity_across_status_refresh_and_deltas() {
             session_id: "root".into(),
             summary: "first chunk second chunk".into(),
             kind: "model".into(),
+            run_continues: None,
         }],
     ));
     pane.drain_server_updates();
     pane.apply_runtime_status_for_session("root", &HashMap::new());
     assert!(!pane.is_streaming());
     assert_eq!(pane.streaming_state, NeoismAgentStreamingState::Idle);
+}
+
+#[test]
+fn dequeue_snapshot_preserves_remaining_compaction_indicator() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("root".into());
+    pane.queued_prompt_count = 2;
+    pane.queued_prompt_preview = Some("next turn".into());
+    pane.note_streaming(NeoismAgentStreamingState::Generating, None);
+    pane.event_stream = Some(AgentSessionEventStream::with_updates_for_test(
+        "root",
+        [
+            AgentSessionUpdate::DequeuedPrompt {
+                text: "next turn".into(),
+                message_id: Some("queued-followup".into()),
+                author: None,
+            },
+            AgentSessionUpdate::QueueSnapshot {
+                running: None,
+                action: None,
+                session_id: "root".into(),
+                count: Some(1),
+                preview: Some("Compaction queued".into()),
+            },
+        ],
+    ));
+    pane.drain_server_updates();
+    assert_eq!(pane.queued_prompt_count, 1);
+    assert_eq!(pane.queued_prompt_preview.as_deref(), Some("Compaction queued"));
+    assert_eq!(pane.streaming_state, NeoismAgentStreamingState::Generating);
+}
+
+#[test]
+fn local_compact_feedback_is_immediate_idempotent_and_reconciled() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("root".into());
+    pane.note_streaming(NeoismAgentStreamingState::Generating, None);
+    pane.execute_slash_text("/compact");
+    assert_eq!(pane.queued_prompt_count(), 1);
+    assert_eq!(pane.queued_prompt_preview(), Some("Compaction queued"));
+    assert_eq!(pane.queued_prompt_count, 0);
+    assert_eq!(pane.streaming_state, NeoismAgentStreamingState::Generating);
+    pane.execute_slash_text("/compact");
+    assert_eq!(pane.queued_prompt_count(), 1);
+    assert_eq!(pane.drain_pending_outbound().len(), 1);
+    pane.event_stream = Some(AgentSessionEventStream::with_updates_for_test(
+        "root", [AgentSessionUpdate::QueueSnapshot {
+                running: None,
+                action: None,
+            session_id: "root".into(), count: Some(1), preview: Some("Compaction queued".into()),
+        }],
+    ));
+    pane.drain_server_updates();
+    assert!(pane.pending_compact.is_none());
+    assert_eq!(pane.queued_prompt_count(), 1);
+    pane.execute_slash_text("/compact");
+    assert!(pane.drain_pending_outbound().is_empty());
+    pane.event_stream = Some(AgentSessionEventStream::with_updates_for_test(
+        "root", [AgentSessionUpdate::QueueSnapshot {
+                running: None,
+                action: None,
+            session_id: "root".into(), count: Some(0), preview: None,
+        }],
+    ));
+    pane.drain_server_updates();
+    let _ = pane.background_sender().send(NeoismAgentBackgroundUpdate::CompactAccepted {
+        session_id: "root".into(),
+    });
+    pane.drain_background_updates();
+    assert_eq!(pane.queued_prompt_count(), 0);
+    assert_eq!(pane.streaming_state, NeoismAgentStreamingState::Generating);
+}
+
+#[test]
+fn local_compact_failure_and_stop_preserve_real_prompts_and_newer_request() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("root".into());
+    pane.queued_prompt_count = 2;
+    pane.queued_prompt_preview = Some("ordinary".into());
+    pane.note_streaming(NeoismAgentStreamingState::Generating, None);
+    pane.execute_slash_text("/compact");
+    let first = pane.pending_compact.clone().unwrap();
+    assert_eq!(pane.queued_prompt_count(), 3);
+    assert_eq!(pane.queued_prompt_preview(), Some("ordinary"));
+    pane.compact_request_failed("root", Some(&first), "rejected".into());
+    assert_eq!(pane.queued_prompt_count(), 2);
+    assert_eq!(pane.streaming_state, NeoismAgentStreamingState::Generating);
+    pane.execute_slash_text("/compact");
+    let second = pane.pending_compact.clone().unwrap();
+    pane.compact_request_failed("root", Some(&first), "late failure".into());
+    assert_eq!(pane.pending_compact.as_deref(), Some(second.as_str()));
+    pane.abort_session();
+    assert_eq!(pane.queued_prompt_count(), 2);
+    assert_eq!(pane.queued_prompt_preview(), Some("ordinary"));
+    assert!(pane.pending_compact.is_none());
+}
+
+#[test]
+fn local_compact_feedback_parks_with_origin_and_clears_on_cached_failure() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("origin".into());
+    pane.note_streaming(NeoismAgentStreamingState::Generating, None);
+    pane.execute_slash_text("/compact");
+    let request_id = pane.pending_compact.clone().unwrap();
+    pane.cache_current_session(false);
+    pane.session_id = Some("other".into());
+    assert!(pane.pending_compact.is_none());
+    assert_eq!(pane.session_cache["origin"].runtime.pending_compact.as_deref(), Some(request_id.as_str()));
+    let _ = pane.background_sender().send(NeoismAgentBackgroundUpdate::CompactFailed {
+        session_id: "origin".into(), request_id: Some(request_id), error: "rejected".into(),
+    });
+    pane.drain_background_updates();
+    assert!(pane.session_cache["origin"].runtime.pending_compact.is_none());
+    assert_eq!(pane.queued_prompt_count(), 0);
+    assert_eq!(pane.session_cache["origin"].runtime.streaming_state, NeoismAgentStreamingState::Generating);
+}
+
+#[test]
+fn compaction_lifecycle_and_status_snapshot_reconcile_local_feedback() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("root".into());
+    pane.note_streaming(NeoismAgentStreamingState::Generating, None);
+    pane.execute_slash_text("/compact");
+    pane.event_stream = Some(AgentSessionEventStream::with_updates_for_test(
+        "root", [AgentSessionUpdate::CompactionStarted {
+            session_id: "root".into(), id: "compact".into(), reason: "manual".into(),
+        }],
+    ));
+    pane.drain_server_updates();
+    assert!(pane.pending_compact.is_none());
+    assert_eq!(pane.queued_prompt_count(), 0);
+    assert_eq!(pane.streaming_state, NeoismAgentStreamingState::Compacting);
+    pane.note_streaming(NeoismAgentStreamingState::Generating, None);
+    pane.execute_slash_text("/compact");
+    assert_eq!(pane.queued_prompt_count(), 1);
+    pane.apply_runtime_status_for_session("root", &HashMap::new());
+    assert!(pane.pending_compact.is_none());
+    assert_eq!(pane.queued_prompt_count(), 0);
+    let mut cached = CachedAgentRuntime::default();
+    cached.pending_compact = Some("cached".into());
+    cached.apply_queue_status(2, Some("ordinary".into()), None);
+    assert!(cached.pending_compact.is_none());
+    assert_eq!(cached.queued_prompt_count, 2);
+}
+
+#[test]
+fn compact_admission_and_late_failure_never_stop_an_active_stream() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("current".into());
+    pane.note_streaming(NeoismAgentStreamingState::Generating, None);
+    let _ = pane
+        .background_sender()
+        .send(NeoismAgentBackgroundUpdate::CompactAccepted {
+            session_id: "current".into(),
+        });
+    pane.drain_background_updates();
+    assert_eq!(pane.streaming_state, NeoismAgentStreamingState::Generating);
+    assert!(pane.messages.is_empty());
+
+    let _ = pane
+        .background_sender()
+        .send(NeoismAgentBackgroundUpdate::CompactFailed {
+            session_id: "origin".into(),
+            request_id: None,
+            error: "late admission failure".into(),
+        });
+    pane.drain_background_updates();
+    assert_eq!(pane.streaming_state, NeoismAgentStreamingState::Generating);
+    assert!(pane.messages.is_empty());
+    assert!(pane.session_cache["origin"]
+        .messages
+        .iter()
+        .any(|message| message.text.contains("late admission failure")));
+    pane.compact_request_failed("current", None, "current failure".into());
+    assert_eq!(pane.streaming_state, NeoismAgentStreamingState::Generating);
+}
+
+#[test]
+fn queued_compaction_and_continuation_do_not_idle_the_run() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("root".into());
+    pane.note_streaming(NeoismAgentStreamingState::Generating, None);
+    pane.event_stream = Some(AgentSessionEventStream::with_updates_for_test(
+        "root",
+        [
+            AgentSessionUpdate::QueueSnapshot {
+                running: None,
+                action: None,
+                session_id: "root".into(),
+                count: None,
+                preview: Some("Compaction queued".into()),
+            },
+            AgentSessionUpdate::QueueSnapshot {
+                running: None,
+                action: None,
+                session_id: "inactive".into(),
+                count: Some(1),
+                preview: Some("Compaction queued".into()),
+            },
+        ],
+    ));
+    pane.drain_server_updates();
+    assert_eq!(pane.streaming_state, NeoismAgentStreamingState::Generating);
+    assert_eq!(pane.queued_prompt_count, 1);
+    assert_eq!(pane.session_cache["inactive"].runtime.queued_prompt_count, 1);
+    assert!(pane.messages.is_empty());
+    pane.event_stream = Some(AgentSessionEventStream::with_updates_for_test(
+        "root",
+        [
+            AgentSessionUpdate::QueueSnapshot {
+                running: None,
+                action: None,
+                session_id: "root".into(),
+                count: Some(0),
+                preview: None,
+            },
+            AgentSessionUpdate::CompactionStarted {
+                session_id: "root".into(),
+                id: "compact".into(),
+                reason: "manual".into(),
+            },
+            AgentSessionUpdate::CompactionEnded {
+                session_id: "root".into(),
+                summary: "summary".into(),
+                kind: "model".into(),
+                run_continues: Some(true),
+            },
+        ],
+    ));
+    pane.drain_server_updates();
+    assert_eq!(pane.queued_prompt_count, 0);
+    assert_eq!(pane.streaming_state, NeoismAgentStreamingState::Generating);
+    assert!(pane.is_streaming());
+}
+
+#[test]
+fn abort_preserves_ordinary_queue_until_authoritative_snapshot() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("root".into());
+    pane.queued_prompt_count = 2;
+    pane.queued_prompt_preview = Some("ordinary queued prompt".into());
+    pane.note_streaming(NeoismAgentStreamingState::Generating, None);
+    pane.abort_session();
+    assert_eq!(pane.queued_prompt_count(), 2);
+    assert_eq!(pane.queued_prompt_preview(), Some("ordinary queued prompt"));
+
+    pane.event_stream = Some(AgentSessionEventStream::with_updates_for_test(
+        "root",
+        [AgentSessionUpdate::QueueSnapshot {
+                running: None,
+                action: None,
+            session_id: "root".into(),
+            count: Some(1),
+            preview: Some("ordinary queued prompt".into()),
+        }],
+    ));
+    pane.drain_server_updates();
+    assert_eq!(pane.queued_prompt_count(), 1);
+    assert_eq!(pane.queued_prompt_preview(), Some("ordinary queued prompt"));
 }
 
 #[test]

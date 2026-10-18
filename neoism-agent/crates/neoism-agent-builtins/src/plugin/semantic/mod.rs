@@ -27,12 +27,12 @@ impl PluginDefinition for SemanticPlugin {
     fn manifest(&self) -> PluginManifest {
         PluginManifest {
             id: ID.into(),
-            name: "Semantic search".into(),
+            name: "Conversation search".into(),
             version: env!("CARGO_PKG_VERSION").into(),
             internal: true,
             disableable: true,
             capabilities: vec!["neoism.semantic".into()],
-            requires: vec![super::providers::ID.into()],
+            requires: Vec::new(),
             event_namespaces: vec!["semantic".into()],
             api_prefix: Some(format!("/v2/plugins/{ID}")),
             config: BTreeMap::new(),
@@ -41,7 +41,7 @@ impl PluginDefinition for SemanticPlugin {
 
     fn required_capabilities(&self) -> Vec<neoism_agent_plugin_api::HostCapability> {
         use neoism_agent_plugin_api::HostCapability::*;
-        vec![WorkspaceRead, Network, SecretRead]
+        vec![WorkspaceRead]
     }
     fn contributions(
         &self,

@@ -117,10 +117,20 @@ pub fn map_outbound_command(
         Cmd::StopBackgroundTask { session_id, job_id } => {
             Mapping::Messages(vec![Msg::StopBackgroundTask { session_id, job_id }])
         }
+        Cmd::CompactSessionRequest {
+            session_id,
+            request_id,
+        } => Mapping::Messages(vec![Msg::Compact {
+            session_id,
+            request_id: Some(request_id),
+        }]),
         Cmd::CompactSession => context
             .active_session_id
             .clone()
-            .map(|session_id| vec![Msg::Compact { session_id }])
+            .map(|session_id| vec![Msg::Compact {
+                session_id,
+                request_id: None,
+            }])
             .map(Mapping::Messages)
             .unwrap_or(Mapping::Unsupported("compact requires an active session")),
         Cmd::UndoSession => context
@@ -503,6 +513,27 @@ mod tests {
         assert!(matches!(messages.as_slice(),
             [AgentClientMessage::ListSkills { directory: Some(directory) }]
                 if directory == "/active-project"
+        ));
+    }
+
+    #[test]
+    fn compact_request_keeps_origin_and_identity_after_switch() {
+        let mapped = map_outbound_command(
+            OutboundAgentCommand::CompactSessionRequest {
+                session_id: "origin".into(),
+                request_id: "request".into(),
+            },
+            &AgentProtocolMappingContext {
+                active_session_id: Some("other".into()),
+                ..AgentProtocolMappingContext::default()
+            },
+        );
+        let AgentProtocolMapping::Messages(messages) = mapped else {
+            panic!("expected messages");
+        };
+        assert!(matches!(messages.as_slice(),
+            [AgentClientMessage::Compact { session_id, request_id: Some(request_id) }]
+            if session_id == "origin" && request_id == "request"
         ));
     }
 

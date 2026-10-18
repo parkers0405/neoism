@@ -152,11 +152,13 @@ pub(crate) enum ExecutionSubtaskRegistration {
     Rejected,
 }
 
+mod conversation_search;
 mod hosting;
 
 #[derive(Clone)]
 pub(crate) struct SessionStore {
     db: Db,
+    _search_worker: Option<Arc<conversation_search::SearchWorker>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -172,6 +174,8 @@ pub(crate) enum TenantQueryScope<'a> {
 struct Db {
     database: turso::Database,
     write_gate: Arc<Mutex<()>>,
+    #[cfg(test)]
+    fail_next_assistant_insert: Arc<AtomicBool>,
 }
 
 /// A database row represented as column names plus libSQL values.
@@ -529,6 +533,24 @@ impl Db {
         statements: Vec<(String, Vec<SqlValue>)>,
     ) -> anyhow::Result<Vec<u64>> {
         let _writer = self.lock_writer().await;
+        #[cfg(test)]
+        if self.fail_next_assistant_insert.load(Ordering::SeqCst) {
+            let inserts_assistant = statements.iter().any(|(sql, params)| {
+                if !sql.starts_with("INSERT INTO messages ") {
+                    return false;
+                }
+                let Some(SqlValue::Text(message_json)) = params.get(3) else {
+                    return false;
+                };
+                serde_json::from_str::<MessageWithParts>(message_json)
+                    .is_ok_and(|message| matches!(message.info, MessageInfo::Assistant(_)))
+            });
+            if inserts_assistant
+                && self.fail_next_assistant_insert.swap(false, Ordering::SeqCst)
+            {
+                anyhow::bail!("injected assistant insert failure");
+            }
+        }
         let results = turso_busy_retry(|| {
             let statements = statements.clone();
             async move {
@@ -1561,6 +1583,9 @@ impl AppState {
     pub async fn shutdown(
         &self,
     ) -> Result<(), neoism_agent_plugin_api::PluginRuntimeError> {
+        if let Some(worker) = self.inner.store._search_worker.as_ref() {
+            worker.shutdown().await;
+        }
         if self.inner.services.workspace_worker.is_some() {
             for run in self
                 .inner
@@ -1748,6 +1773,7 @@ impl AppState {
                         ],
                     ),
                     session_list_index_statement(info)?,
+                    conversation_search::dirty_session(info.id.as_str()),
                 ],
                 &event,
                 None,
@@ -1778,7 +1804,7 @@ impl AppState {
                         int(store_i64(message_created(message))),
                         text(session_id),
                     ],
-                )],
+                ), conversation_search::dirty_message(&message_id(message))],
                 &event,
                 None,
             )
@@ -1808,6 +1834,7 @@ impl AppState {
                             text(message_id(message)),
                         ],
                     ),
+                    conversation_search::dirty_message(&message_id(message)),
                     (
                         "DELETE FROM message_embeddings WHERE message_id = ?".to_string(),
                         vec![text(message_id(message))],
@@ -1895,6 +1922,13 @@ impl AppState {
 
 impl SessionStore {
     #[cfg(test)]
+    pub(crate) fn fail_next_assistant_insert_for_test(&self) {
+        self.db
+            .fail_next_assistant_insert
+            .store(true, Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
     pub(crate) async fn lock_writer_for_test(&self) -> tokio::sync::OwnedMutexGuard<()> {
         self.db.write_gate.clone().lock_owned().await
     }
@@ -1940,6 +1974,7 @@ impl SessionStore {
             .context("turso database path is not valid UTF-8")?;
         let database_started = crate::perf::now();
         let database = turso::Builder::new_local(path)
+            .experimental_index_method(true)
             .build()
             .await
             .with_context(|| format!("failed to open turso database {path}"))?;
@@ -1951,10 +1986,17 @@ impl SessionStore {
         let db = Db {
             database,
             write_gate: Arc::new(Mutex::new(())),
+            #[cfg(test)]
+            fail_next_assistant_insert: Arc::new(AtomicBool::new(false)),
         };
-        let store = Self { db };
+        let mut store = Self {
+            db,
+            _search_worker: None,
+        };
         let migration_started = crate::perf::now();
         store.migrate().await?;
+        conversation_search::migrate(&store.db).await?;
+        store._search_worker = Some(Arc::new(conversation_search::spawn(store.db.clone())));
         tracing::info!(
             target: "neoism_agent::perf",
             migration_ms = crate::perf::elapsed_ms(migration_started),
@@ -2916,6 +2958,8 @@ impl SessionStore {
                 created,
                 excerpt,
                 distance: row.get_f64("distance")?,
+                score: 0.0,
+                session: None,
             });
         }
         Ok(hits)
@@ -3044,8 +3088,7 @@ impl SessionStore {
             .collect()
     }
 
-    /// Search recent session transcripts by AND-matching query terms
-    /// case-insensitively against each flattened message document.
+    /// Relevance-ranked transcript search over Turso's persistent full-text index.
     pub(crate) async fn search_messages(
         &self,
         scope: TenantQueryScope<'_>,
@@ -3066,100 +3109,64 @@ impl SessionStore {
         directory: Option<&str>,
         limit: usize,
     ) -> anyhow::Result<Vec<MessageSearchHit>> {
-        self.search_messages_like(scope, query, session_id, directory, limit.clamp(1, 50))
+        self.search_index(scope, query, session_id, directory, limit, false, None)
             .await
     }
 
-    /// Prefilter in SQL on the longest term, then
-    /// AND-matches every term against the same flattened searchable document
-    /// mirror indexes. Bounded to the most recent candidates, so it trades
-    /// recall on huge histories for predictable work.
-    async fn search_messages_like(
+    /// Ranked transcript or conversation retrieval shared by the navigator and tools.
+    pub(crate) async fn search_index(
         &self,
         scope: TenantQueryScope<'_>,
         query: &str,
         session_id: Option<&str>,
         directory: Option<&str>,
         limit: usize,
+        conversations: bool,
+        claims: Option<&crate::caller::CallerClaims>,
     ) -> anyhow::Result<Vec<MessageSearchHit>> {
-        const SCAN_CAP: i64 = 500;
-        let terms: Vec<&str> = query.split_whitespace().collect();
-        let Some(seed) = terms.iter().max_by_key(|term| term.len()) else {
-            return Ok(Vec::new());
-        };
-        let pattern = format!("%{}%", escape_like(seed));
-        let (sql, mut params) = match (scope, session_id) {
-            (TenantQueryScope::Tenant(tenant), Some(session)) => (
-                "SELECT m.session_id, m.id, m.message_json FROM messages m \
-                 WHERE m.message_json LIKE ? ESCAPE '\\' AND m.session_id = ? AND m.tenant_id = ? \
-                 ORDER BY created DESC LIMIT ?",
-                vec![text(pattern), text(session), text(tenant), int(SCAN_CAP)],
-            ),
-            (TenantQueryScope::Tenant(tenant), None) => (
-                "SELECT m.session_id, m.id, m.message_json FROM messages m \
-                 WHERE m.message_json LIKE ? ESCAPE '\\' AND m.tenant_id = ? \
-                 ORDER BY created DESC LIMIT ?",
-                vec![text(pattern), text(tenant), int(SCAN_CAP)],
-            ),
-            (TenantQueryScope::LocalAll, Some(session)) => (
-                "SELECT m.session_id, m.id, m.message_json FROM messages m \
-                 WHERE message_json LIKE ? ESCAPE '\\' AND session_id = ? \
-                 ORDER BY created DESC LIMIT ?",
-                vec![text(pattern), text(session), int(SCAN_CAP)],
-            ),
-            (TenantQueryScope::LocalAll, None) => (
-                "SELECT m.session_id, m.id, m.message_json FROM messages m \
-                 WHERE message_json LIKE ? ESCAPE '\\' \
-                 ORDER BY created DESC LIMIT ?",
-                vec![text(pattern), int(SCAN_CAP)],
-            ),
-        };
-        let sql = if let Some(directory) = directory {
-            params.insert(params.len() - 1, text(directory));
-            sql.replacen(
-                "ORDER BY",
-                "AND EXISTS (SELECT 1 FROM sessions s WHERE s.id = m.session_id \
-                 AND json_extract(s.info_json, '$.directory') = ?) ORDER BY",
-                1,
-            )
-        } else {
-            sql.to_string()
-        };
-        let rows = self.db.fetch_all(&sql, params).await?;
-        let mut hits = Vec::new();
-        for row in rows {
-            let json = row.get_str("message_json")?;
-            let Ok(message) = serde_json::from_str::<MessageWithParts>(&json) else {
-                continue;
-            };
-            let (role, created, content) = search_document(&message);
-            let matches: Vec<usize> = terms
-                .iter()
-                .map(|term| find_ignore_ascii_case(&content, term))
-                .collect::<Option<Vec<_>>>()
-                .unwrap_or_default();
-            let Some(&first) = matches.iter().min() else {
-                continue;
-            };
-            let matched_term = terms[matches
-                .iter()
-                .position(|&start| start == first)
-                .unwrap_or(0)];
-            hits.push(MessageSearchHit {
-                session_id: row.get_str("session_id")?,
-                message_id: row.get_str("id")?,
-                role,
-                created,
-                excerpt: like_excerpt(&content, first, matched_term.len()),
-            });
-            if hits.len() >= limit {
-                break;
-            }
-        }
-        Ok(hits)
+        let started = crate::perf::now();
+        let result = conversation_search::search(
+            &self.db, scope, query, session_id, directory, limit.clamp(1, 100),
+            conversations, claims,
+        )
+        .await;
+        tracing::debug!(
+            target: "neoism_agent::search",
+            duration_ms = crate::perf::elapsed_ms(started),
+            hits = result.as_ref().map_or(0, Vec::len),
+            conversations,
+            failed = result.is_err(),
+            "conversation search completed"
+        );
+        result
+    }
+
+    pub(crate) async fn search_result_sessions(&self, ids: &[String]) -> anyhow::Result<HashMap<String, SessionInfo>> {
+        if ids.is_empty() { return Ok(HashMap::new()); }
+        let placeholders = vec!["?"; ids.len()].join(",");
+        let rows = self.db.fetch_all(
+            &format!("SELECT info_json FROM sessions WHERE id IN ({placeholders})"),
+            ids.iter().map(text).collect(),
+        ).await?;
+        let mut sessions = rows.into_iter().map(|row| decode_json(row.get_str("info_json")?)).collect::<anyhow::Result<Vec<SessionInfo>>>()?;
+        self.hydrate_host_associations(&mut sessions).await?;
+        Ok(sessions.into_iter().map(|session| (session.id.to_string(), session)).collect())
+    }
+
+    pub(crate) async fn search_indexing(&self) -> anyhow::Result<bool> {
+        conversation_search::indexing(&self.db).await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn flush_search_index(&self) -> anyhow::Result<()> {
+        conversation_search::flush(&self.db).await
     }
 
     async fn ensure_prompt_queue_columns(&self) -> anyhow::Result<()> {
+        if !self.table_has_column("prompt_queue", "kind").await? {
+            self.db.execute("ALTER TABLE prompt_queue ADD COLUMN kind TEXT NOT NULL DEFAULT 'prompt'", Vec::new()).await?;
+        }
+        self.db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_prompt_queue_pending_compact ON prompt_queue(session_id) WHERE kind = 'compact'", Vec::new()).await?;
         if !self.table_has_column("prompt_queue", "delivery").await? {
             self.db
                 .execute(
@@ -3434,6 +3441,7 @@ impl SessionStore {
                     ],
                 ),
                 session_list_index_statement(info)?,
+                conversation_search::dirty_session(info.id.as_str()),
             ])
             .await?;
         Ok(())
@@ -3760,6 +3768,7 @@ impl SessionStore {
                     ],
                 ),
                 session_list_index_statement(info)?,
+                conversation_search::dirty_session(info.id.as_str()),
             ])
             .await?;
         Ok(())
@@ -4529,6 +4538,7 @@ impl SessionStore {
                 vec![text(session_id)],
             ));
         }
+        statements.extend(conversation_search::delete_session(session_id));
         statements.push((
             "DELETE FROM session_list_index WHERE session_id = ?".to_string(),
             vec![text(session_id)],
@@ -4716,25 +4726,21 @@ impl SessionStore {
         session_id: &str,
         message: &MessageWithParts,
     ) -> anyhow::Result<()> {
-        let position = self
-            .db
-            .fetch_scalar_i64(
-                "SELECT COALESCE(MAX(position), -1) + 1 FROM messages WHERE session_id = ?",
-                vec![text(session_id)],
-            )
-            .await?;
         self.db
-            .execute(
-                "INSERT INTO messages (id, tenant_id, session_id, message_json, created, position) VALUES (?, COALESCE((SELECT tenant_id FROM sessions WHERE id = ?), 'local'), ?, ?, ?, ?)",
-                vec![
-                    text(message_id(message)),
-                    text(session_id),
-                    text(session_id),
-                    text(serde_json::to_string(message)?),
-                    int(store_i64(message_created(message))),
-                    int(position),
-                ],
-            )
+            .execute_transaction(vec![
+                (
+                    "INSERT INTO messages (id, tenant_id, session_id, message_json, created, position) VALUES (?, COALESCE((SELECT tenant_id FROM sessions WHERE id = ?), 'local'), ?, ?, ?, (SELECT COALESCE(MAX(position), -1) + 1 FROM messages WHERE session_id = ?))".into(),
+                    vec![
+                        text(message_id(message)),
+                        text(session_id),
+                        text(session_id),
+                        text(serde_json::to_string(message)?),
+                        int(store_i64(message_created(message))),
+                        text(session_id),
+                    ],
+                ),
+                conversation_search::dirty_message(&message_id(message)),
+            ])
             .await?;
         Ok(())
     }
@@ -4760,28 +4766,18 @@ impl SessionStore {
         session_id: &str,
         message: &MessageWithParts,
     ) -> anyhow::Result<bool> {
-        let affected = self
-            .db
-            .execute(
-                "UPDATE messages SET message_json = ? WHERE session_id = ? AND id = ?",
-                vec![
-                    text(serde_json::to_string(message)?),
-                    text(session_id),
-                    text(message_id(message)),
-                ],
-            )
-            .await?;
-        if affected > 0 {
-            // Drop the stale embedding so the semantic indexer re-embeds the
-            // edited content once the session goes quiet.
-            self.db
-                .execute(
-                    "DELETE FROM message_embeddings WHERE message_id = ?",
-                    vec![text(message_id(message))],
-                )
-                .await?;
-        }
-        Ok(affected > 0)
+        let results = self.db.execute_transaction_with_results(vec![
+            (
+                "UPDATE messages SET message_json = ? WHERE session_id = ? AND id = ?".into(),
+                vec![text(serde_json::to_string(message)?), text(session_id), text(message_id(message))],
+            ),
+            conversation_search::dirty_message(&message_id(message)),
+            (
+                "DELETE FROM message_embeddings WHERE message_id = ? AND session_id = ?".into(),
+                vec![text(message_id(message)), text(session_id)],
+            ),
+        ]).await?;
+        Ok(results.first().copied().unwrap_or(0) > 0)
     }
 
     pub(crate) async fn delete_message(
@@ -4789,20 +4785,22 @@ impl SessionStore {
         session_id: &str,
         message_id: &str,
     ) -> anyhow::Result<bool> {
-        let affected = self
-            .db
-            .execute(
-                "DELETE FROM messages WHERE session_id = ? AND id = ?",
+        if self.db.fetch_optional("SELECT id FROM messages WHERE session_id = ? AND id = ?", vec![text(session_id), text(message_id)]).await?.is_none() {
+            return Ok(false);
+        }
+        let mut statements = vec![
+            (
+                "DELETE FROM messages WHERE session_id = ? AND id = ?".into(),
                 vec![text(session_id), text(message_id)],
-            )
-            .await?;
-        self.db
-            .execute(
-                "DELETE FROM message_embeddings WHERE message_id = ?",
-                vec![text(message_id)],
-            )
-            .await?;
-        Ok(affected > 0)
+            ),
+            (
+                "DELETE FROM message_embeddings WHERE message_id = ? AND session_id = ?".into(),
+                vec![text(message_id), text(session_id)],
+            ),
+        ];
+        statements.extend(conversation_search::delete_message(message_id));
+        let results = self.db.execute_transaction_with_results(statements).await?;
+        Ok(results.first().copied().unwrap_or(0) > 0)
     }
 
     /// Remove every transcript message for a session. Used by session import to
@@ -4812,20 +4810,20 @@ impl SessionStore {
         &self,
         session_id: &str,
     ) -> anyhow::Result<usize> {
-        let affected = self
-            .db
-            .execute(
-                "DELETE FROM messages WHERE session_id = ?",
+        let mut statements = vec![
+            (
+                "DELETE FROM messages WHERE session_id = ?".into(),
                 vec![text(session_id)],
-            )
-            .await?;
-        self.db
-            .execute(
-                "DELETE FROM message_embeddings WHERE session_id = ?",
+            ),
+            (
+                "DELETE FROM message_embeddings WHERE session_id = ?".into(),
                 vec![text(session_id)],
-            )
-            .await?;
-        Ok(affected as usize)
+            ),
+        ];
+        statements.extend(conversation_search::delete_session(session_id));
+        statements.push(conversation_search::dirty_session(session_id));
+        let results = self.db.execute_transaction_with_results(statements).await?;
+        Ok(results.first().copied().unwrap_or(0) as usize)
     }
 
     pub(crate) async fn list_permission_approvals(
@@ -4874,6 +4872,32 @@ impl SessionStore {
         Ok(())
     }
 
+    /// Compact controls are typed rows, never synthetic PromptRequests. The partial
+    /// unique index makes pending admission idempotent even across concurrent callers.
+    pub(crate) async fn enqueue_compact(&self, session_id: &str) -> anyhow::Result<bool> {
+        Ok(self.db.execute(
+            "INSERT OR IGNORE INTO prompt_queue (id, tenant_id, session_id, position, request_json, created, delivery, kind) VALUES (?, COALESCE((SELECT tenant_id FROM sessions WHERE id = ?), 'local'), ?, -1, '{}', ?, 'queue', 'compact')",
+            vec![text(Id::ascending(IdKind::Event).to_string()), text(session_id), text(session_id), int(store_i64(crate::now_millis()))],
+        ).await? > 0)
+    }
+
+    pub(crate) async fn compaction_queued(&self, session_id: &str) -> anyhow::Result<bool> {
+        Ok(self.db.fetch_scalar_i64("SELECT COUNT(*) FROM prompt_queue WHERE session_id = ? AND kind = 'compact'", vec![text(session_id)]).await? > 0)
+    }
+
+    pub(crate) async fn pending_compact_id(&self, session_id: &str) -> anyhow::Result<Option<String>> {
+        self.db.fetch_optional("SELECT id FROM prompt_queue WHERE session_id = ? AND kind = 'compact'", vec![text(session_id)]).await?.map(|row| row.get_str("id")).transpose()
+    }
+
+    pub(crate) async fn remove_compact_control(&self, id: &str) -> anyhow::Result<()> {
+        self.db.execute("DELETE FROM prompt_queue WHERE id = ? AND kind = 'compact'", vec![text(id)]).await?;
+        Ok(())
+    }
+
+    pub(crate) async fn take_queued_compact(&self, session_id: &str) -> anyhow::Result<bool> {
+        Ok(self.db.execute("DELETE FROM prompt_queue WHERE session_id = ? AND kind = 'compact'", vec![text(session_id)]).await? > 0)
+    }
+
     pub(crate) async fn enqueue_prompt_with_delivery(
         &self,
         session_id: &str,
@@ -4914,7 +4938,7 @@ impl SessionStore {
         let rows = self
             .db
             .fetch_all(
-                "SELECT request_json, delivery FROM prompt_queue WHERE session_id = ? ORDER BY position ASC, created ASC",
+                "SELECT request_json, delivery FROM prompt_queue WHERE session_id = ? AND kind = 'prompt' ORDER BY position ASC, created ASC",
                 vec![text(session_id)],
             )
             .await?;
@@ -4963,7 +4987,7 @@ impl SessionStore {
         let Some(row) = self
             .db
             .fetch_optional(
-                "SELECT id, request_json FROM prompt_queue WHERE session_id = ? AND delivery != 'continue' ORDER BY position ASC, created ASC LIMIT 1",
+                "SELECT id, request_json FROM prompt_queue WHERE session_id = ? AND kind = 'prompt' AND delivery != 'continue' ORDER BY position ASC, created ASC LIMIT 1",
                 vec![text(session_id)],
             )
             .await?
@@ -4985,7 +5009,7 @@ impl SessionStore {
         let Some(row) = self
             .db
             .fetch_optional(
-                "SELECT id, request_json FROM prompt_queue WHERE session_id = ? AND delivery IN ('steer', 'continue') ORDER BY position ASC, created ASC LIMIT 1",
+                "SELECT id, request_json FROM prompt_queue WHERE session_id = ? AND kind = 'prompt' AND delivery IN ('steer', 'continue') ORDER BY position ASC, created ASC LIMIT 1",
                 vec![text(session_id)],
             )
             .await?
@@ -5007,12 +5031,12 @@ impl SessionStore {
     ) -> anyhow::Result<Option<(PromptRequest, String)>> {
         let (sql, parameters) = if let Some(delivery) = delivery {
             (
-                "SELECT id, request_json, delivery FROM prompt_queue WHERE session_id = ? AND delivery = ? ORDER BY position ASC, created ASC LIMIT 1",
+                "SELECT id, request_json, delivery FROM prompt_queue WHERE session_id = ? AND kind = 'prompt' AND delivery = ? ORDER BY position ASC, created ASC LIMIT 1",
                 vec![text(session_id), text(delivery)],
             )
         } else {
             (
-                "SELECT id, request_json, delivery FROM prompt_queue WHERE session_id = ? ORDER BY position ASC, created ASC LIMIT 1",
+                "SELECT id, request_json, delivery FROM prompt_queue WHERE session_id = ? AND kind = 'prompt' ORDER BY position ASC, created ASC LIMIT 1",
                 vec![text(session_id)],
             )
         };
@@ -5985,6 +6009,7 @@ pub(crate) struct MessageSearchHit {
     pub(crate) role: String,
     pub(crate) created: u64,
     pub(crate) excerpt: String,
+    pub(crate) score: f64,
 }
 
 /// A message the semantic indexer still needs to embed.
@@ -6006,6 +6031,10 @@ pub(crate) struct SemanticSearchHit {
     pub(crate) created: u64,
     pub(crate) excerpt: String,
     pub(crate) distance: f64,
+    /// BM25 relevance for lexical hits; vector-only hits leave this at zero.
+    pub(crate) score: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) session: Option<SessionInfo>,
 }
 
 /// Flatten a message into `(role, created, searchable text)` for transcript
@@ -6057,19 +6086,6 @@ fn escape_like(input: &str) -> String {
         out.push(ch);
     }
     out
-}
-
-/// ASCII-case-insensitive substring search. A match can only start on a
-/// UTF-8 char boundary (a valid needle never begins with a continuation
-/// byte), so the returned byte offset is safe to slice with.
-fn find_ignore_ascii_case(haystack: &str, needle: &str) -> Option<usize> {
-    if needle.is_empty() || needle.len() > haystack.len() {
-        return None;
-    }
-    haystack
-        .as_bytes()
-        .windows(needle.len())
-        .position(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
 }
 
 /// Build a `>>match<<` excerpt around a match for the search tool and UI.

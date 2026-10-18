@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "stage": "built_for_lab_validation",
+  "plan_sha256": "fb9b4f76c616d0040abc98f65d5077716bc49106bea343b204b6f3e431d4b11a",
+  "tasks": 51,
+  "harnesses": 3,
+  "attempts_per_task_per_harness": 1,
+  "planned_trials": 153,
+  "prepared_source_configs": 153,
+  "prepared_pristine_regrade_configs": 153,
+  "model": "anthropic/claude-sonnet-5-5",
+  "paid_execution_enabled": false,
+  "budget_approved": false,
+  "syntax_compilation": "passed",
+  "immutable_config_generation": "completed",
+  "registry_metadata_resolution": "completed_without_image_pulls_or_execution",
+  "pinned_images": 51,
+  "unique_compressed_layer_bytes": 61763016086,
+  "lab_tests_run_for_this_build": false,
+  "container_probes_run_for_this_build": false,
+  "calibration_run_for_this_build": false,
+  "real_credentials_read_for_this_build": false,
+  "model_calls_for_this_build": 0,
+  "readiness_evidence": "not_generated_until_explicit_lab_execution",
+  "lab_requirements": [
+    "unit contract suite",
+    "frozen-native loopback wire fixtures",
+    "native automatic compaction and background-family behavior",
+    "51-task dynamic network and repository sanitation checks",
+    "all-three installation on representative official task images",
+    "51-task oracle and empty-patch calibration",
+    "51-task pristine oracle and empty-patch replay",
+    "new plan-bound budget approval before paid execution"
+  ],
+  "known_limitations": [
+    "OpenCode background-child completion is deliberately fail-closed until authoritative lifecycle support is established",
+    "Native auxiliary/compaction compatibility of the final relay build is not execution-validated",
+    "Unpacked official image disk usage is unmeasured; use explicit bounded image batches",
+    "Budget reservations bound frozen-catalog estimates, not actual provider invoices"
+  ],
+  "handoff": "README.md",
+  "unapproved_budget_template": ".cache/approval.template.json"
+}

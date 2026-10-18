@@ -1583,7 +1583,17 @@ impl NeoismAgentPane {
             self.system_message("Context", "no session has started yet");
             return;
         }
-        self.push_outbound(OutboundAgentCommand::CompactSession);
+        if self.pending_compact.is_some()
+            || self.queued_prompt_preview() == Some("Compaction queued")
+        {
+            return;
+        }
+        let request_id = neoism_ui::panels::agent_pane::outbound::next_prompt_message_id();
+        self.pending_compact = Some(request_id.clone());
+        self.push_outbound(OutboundAgentCommand::CompactSessionRequest {
+            session_id: self.session_id.clone().unwrap(),
+            request_id,
+        });
     }
 
     pub(super) fn execute_compact_session_command(&mut self) {
@@ -1591,48 +1601,47 @@ impl NeoismAgentPane {
             self.system_message("Context", "no session has started yet");
             return;
         };
-        self.start_session_updates(&session_id);
+        self.execute_compact_request(session_id, None);
+    }
+
+    pub(super) fn execute_compact_request(
+        &mut self,
+        session_id: String,
+        request_id: Option<String>,
+    ) {
+        if self.session_id.as_deref() == Some(session_id.as_str()) {
+            self.start_session_updates(&session_id);
+        }
         let server = self.server.clone();
         let background_tx = self.background_sender();
+        let origin_request_id = request_id.clone();
+        let origin_session_id = session_id.clone();
         if let Err(error) = thread::Builder::new()
             .name(format!("neoism-agent-compact-{session_id}"))
             .spawn(move || {
-                let mut last_error = None;
-                for attempt in 0..300 {
-                    match api_request_json_with_read_timeout(
-                        &server,
-                        "POST",
-                        &format!("/v2/sessions/{session_id}/compact"),
-                        None,
-                        Duration::from_secs(600),
-                    ) {
-                        Ok(_) => {
-                            let _ = background_tx
-                                .send(NeoismAgentBackgroundUpdate::CompactFinished);
-                            return;
-                        }
-                        Err(error)
-                            if error.contains("already running") && attempt < 299 =>
-                        {
-                            last_error = Some(error);
-                            thread::sleep(Duration::from_secs(1));
-                        }
-                        Err(error) => {
-                            last_error = Some(error);
-                            break;
-                        }
-                    }
-                }
-                let _ = background_tx.send(NeoismAgentBackgroundUpdate::CompactFailed(
-                    last_error.unwrap_or_else(|| {
-                        "compact request did not complete".to_string()
-                    }),
-                ));
+                // Admission only: lifecycle events own compaction and run state.
+                let update = match api_request_json_with_read_timeout(
+                    &server,
+                    "POST",
+                    &format!("/v2/sessions/{session_id}/compact"),
+                    None,
+                    Duration::from_secs(30),
+                ) {
+                    Ok(_) => NeoismAgentBackgroundUpdate::CompactAccepted { session_id },
+                    Err(error) => NeoismAgentBackgroundUpdate::CompactFailed {
+                        session_id,
+                        request_id,
+                        error,
+                    },
+                };
+                let _ = background_tx.send(update);
             })
         {
-            self.fail_compaction_message(format!(
-                "failed to start compact thread: {error}"
-            ));
+            self.compact_request_failed(
+                &origin_session_id,
+                origin_request_id.as_deref(),
+                format!("failed to start compact thread: {error}"),
+            );
         }
     }
 
@@ -1693,16 +1702,15 @@ impl NeoismAgentPane {
     }
 
     pub(super) fn abort_session(&mut self) {
-        // A user-driven stop is a hard clear: the status label must not
-        // linger through the display grace hold, or Stop reads as lag.
+        // Never retain the stopped run's label through the display hold.
+        // Real queued work gets a neutral handoff; no ordinary queue is idle.
         self.side_panel.clear_status_display_hold();
         if self.session_id.is_none() {
             self.note_streaming(NeoismAgentStreamingState::Idle, None);
             self.system_message("Abort", "no session has started yet");
             return;
         }
-        self.abort_requested_at = Some(Instant::now());
-        self.note_streaming(NeoismAgentStreamingState::Idle, None);
+        self.begin_queue_stop();
         self.settle_tracked_subagents(BranchStatus::Stopped);
         self.push_outbound(OutboundAgentCommand::AbortSession);
     }
@@ -1713,18 +1721,27 @@ impl NeoismAgentPane {
             self.system_message("Abort", "no session has started yet");
             return;
         };
-        match api_request_json(
-            &self.server,
-            "POST",
-            &format!("/v2/sessions/{session_id}/abort"),
-            None,
-        ) {
-            // Escape already updates the local running state immediately.
-            // A successful abort is intentionally silent: surfacing it as a
-            // system notice leaves an unnecessary "interrupted run" pill in
-            // the chat every time the user presses Escape.
-            Ok(_) => {}
-            Err(error) => self.system_message("Abort", error),
+        let server = self.server.clone();
+        let tx = self.background_sender();
+        if let Err(error) = thread::Builder::new()
+            .name(format!("neoism-agent-abort-{session_id}"))
+            .spawn(move || {
+                // Success is silent and cannot settle a successor run. Keep
+                // network/teardown latency off the input and render thread.
+                if let Err(error) = api_request_json(
+                    &server,
+                    "POST",
+                    &format!("/v2/sessions/{session_id}/abort"),
+                    None,
+                ) {
+                    let _ = tx.send(NeoismAgentBackgroundUpdate::AbortFailed {
+                        session_id,
+                        error,
+                    });
+                }
+            })
+        {
+            self.system_message("Abort", format!("failed to start abort request: {error}"));
         }
     }
 

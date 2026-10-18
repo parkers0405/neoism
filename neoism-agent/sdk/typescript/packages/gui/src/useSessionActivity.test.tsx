@@ -54,6 +54,22 @@ it("queue rows expose previews and only real remove-next / clear actions", async
     act(() => document.body.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true })));
     expect(document.querySelector('[role="dialog"]')).toBeNull();
 });
+it("renders queued compaction as control work rather than a prompt", async () => {
+    const pending: SessionQueueInfo = {
+        ...queue(1), compactionQueued: true, preview: "Compaction queued",
+        items: [{ type: "compact", preview: "Compaction queued" }],
+    };
+    await render(sdk(async () => pending));
+    expect(container.textContent).toContain("Compaction queued");
+    click(".native-activity-queue");
+    expect(document.querySelector(".activity-popover")?.textContent).toContain("next safe step boundary");
+    expect(document.querySelector(".activity-popover details")).toBeNull();
+    act(() => activity.onEvent({ type: "session.queue.updated", data: {
+        sessionID: "root", action: "cancel-compact", queue: queue(0),
+    } } as Event));
+    expect(activity.queue?.count).toBe(0);
+    expect(container.querySelector(".native-activity-queue")).toBeNull();
+});
 it("aborts old fetches, dismisses portals and denies old actions/results after a scope switch", async () => {
     let finish!: (value: any) => void;
     const request = vi.fn((r: any) => r.method === "DELETE" ? new Promise(resolve => { finish = resolve; }) : Promise.resolve(queue(1)));

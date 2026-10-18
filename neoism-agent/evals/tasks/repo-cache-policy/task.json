@@ -1,0 +1,1 @@
+{"category":"cache-policy","description":"Repair a private synthetic deterministic cache simulator with LRU, TTL, resizing and transactional validation.","id":"repo-cache-policy","suite":"repository","timeout_seconds":600,"verifier_timeout_seconds":60}

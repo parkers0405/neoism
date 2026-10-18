@@ -373,6 +373,9 @@ pub enum AgentClientMessage {
     /// Trigger a context-window compaction pass.
     Compact {
         session_id: String,
+        /// Client-local admission identity, echoed only on admission failure.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
     },
     /// Run an agent-server slash command for a session.
     SlashCommand {
@@ -538,6 +541,9 @@ pub enum AgentServerMessage {
     ContentDelta {
         session_id: String,
         message_id: String,
+        /// Assistant identity when message_id identifies a part instead.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_message_id: Option<String>,
         kind: ContentKind,
         text: String,
     },
@@ -660,6 +666,8 @@ pub enum AgentServerMessage {
     MessageUpdated {
         session_id: String,
         message: HistoryMessage,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_message_id: Option<String>,
     },
     /// One part of a message was removed (e.g. a streamed tool block
     /// the model interrupted). Maps to `message.part.removed`.
@@ -800,6 +808,16 @@ pub enum AgentServerMessage {
         title: Option<String>,
         #[serde(default)]
         pinned: Option<bool>,
+    },
+
+    /// Start a fresh catalog connection before its authoritative family baseline.
+    CatalogReset { directory: Option<String> },
+
+    /// Authoritative server-owned branch projection for a root catalog row.
+    /// Kept opaque here so the transport does not depend on agent-core.
+    CatalogFamily {
+        session_id: String,
+        snapshot: serde_json::Value,
     },
 
     /// Authoritative whole-family activity for a root catalog row, including
@@ -960,6 +978,9 @@ pub enum AgentServerMessage {
     Compaction {
         session_id: String,
         phase: CompactionPhase,
+        /// True only when the existing run resumes after this compaction.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run_continues: Option<bool>,
         #[serde(default)]
         text: Option<String>,
         #[serde(default)]

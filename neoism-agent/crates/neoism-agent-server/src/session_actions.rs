@@ -128,6 +128,13 @@ async fn abort_session_run_impl(
     session_id: &str,
     reconcile_completion: bool,
 ) -> bool {
+    let admission = crate::execution_activity::admission_guard(state, session_id).await;
+    let removed_compact = state
+        .inner
+        .store
+        .take_queued_compact(session_id)
+        .await
+        .unwrap_or(false);
     let cancelled = state
         .inner
         .session_coordinator
@@ -135,6 +142,21 @@ async fn abort_session_run_impl(
         .await;
     if let Some(cancelled) = cancelled.as_ref() {
         cancelled.cancel.store(true, Ordering::SeqCst);
+    }
+    if removed_compact {
+        crate::session_queue::publish_prompt_queue_changed(
+            state,
+            session_id,
+            "cancel-compact",
+            None,
+            None,
+            1,
+        )
+        .await;
+    }
+    drop(admission);
+    if removed_compact {
+        crate::session_queue::publish_prompt_queue_status(state, session_id, 0).await;
     }
     let was_busy = state.inner.statuses.read().await.contains_key(session_id);
     if cancelled.is_none() {

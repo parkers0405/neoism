@@ -529,6 +529,85 @@
         ],
         "type": "string"
       },
+      "CatalogBranchSnapshot": {
+        "additionalProperties": false,
+        "properties": {
+          "agent": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "depth": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "parentSessionId": {
+            "type": "string"
+          },
+          "permissionPending": {
+            "type": "boolean"
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "startedAt": {
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "status": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "sessionId",
+          "parentSessionId",
+          "status",
+          "startedAt",
+          "title",
+          "agent",
+          "depth",
+          "permissionPending"
+        ],
+        "type": "object"
+      },
+      "CatalogFamilySnapshot": {
+        "additionalProperties": false,
+        "properties": {
+          "branches": {
+            "items": {
+              "$ref": "#/components/schemas/CatalogBranchSnapshot"
+            },
+            "type": "array"
+          },
+          "directory": {
+            "type": "string"
+          },
+          "executionId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "familyRevision": {
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "directory",
+          "executionId",
+          "familyRevision",
+          "branches"
+        ],
+        "type": "object"
+      },
       "ClaimSessionControlRequest": {
         "additionalProperties": false,
         "properties": {
@@ -882,6 +961,9 @@
             "$ref": "#/components/schemas/EventPtyExited"
           },
           {
+            "$ref": "#/components/schemas/EventSessionCompactionQueued"
+          },
+          {
             "$ref": "#/components/schemas/EventSessionNextCompactionStarted"
           },
           {
@@ -907,6 +989,9 @@
           },
           {
             "$ref": "#/components/schemas/EventSessionCatalogActivity"
+          },
+          {
+            "$ref": "#/components/schemas/EventSessionCatalogFamily"
           },
           {
             "$ref": "#/components/schemas/EventSessionExecutionUpdated"
@@ -2196,6 +2281,59 @@
         ],
         "type": "object"
       },
+      "EventSessionCatalogFamily": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "additionalProperties": false,
+            "properties": {
+              "sessionID": {
+                "type": "string"
+              },
+              "snapshot": {
+                "$ref": "#/components/schemas/CatalogFamilySnapshot"
+              }
+            },
+            "required": [
+              "sessionID",
+              "snapshot"
+            ],
+            "type": "object"
+          },
+          "id": {
+            "type": "string"
+          },
+          "schemaVersion": {
+            "type": "string"
+          },
+          "sequence": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "source": {
+            "type": "string"
+          },
+          "subject": {
+            "$ref": "#/components/schemas/EventSubject"
+          },
+          "timestamp": {
+            "type": "integer"
+          },
+          "type": {
+            "const": "session.catalog.family"
+          }
+        },
+        "required": [
+          "id",
+          "sequence",
+          "type",
+          "source",
+          "schemaVersion",
+          "timestamp",
+          "data"
+        ],
+        "type": "object"
+      },
       "EventSessionCompacted": {
         "additionalProperties": false,
         "properties": {
@@ -2204,6 +2342,9 @@
             "properties": {
               "info": {
                 "$ref": "#/components/schemas/Session"
+              },
+              "runContinues": {
+                "type": "boolean"
               },
               "sessionID": {
                 "type": "string"
@@ -2265,6 +2406,55 @@
           },
           "type": {
             "const": "session.compacted"
+          }
+        },
+        "required": [
+          "id",
+          "sequence",
+          "type",
+          "source",
+          "schemaVersion",
+          "timestamp",
+          "data"
+        ],
+        "type": "object"
+      },
+      "EventSessionCompactionQueued": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "additionalProperties": false,
+            "properties": {
+              "sessionID": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "sessionID"
+            ],
+            "type": "object"
+          },
+          "id": {
+            "type": "string"
+          },
+          "schemaVersion": {
+            "type": "string"
+          },
+          "sequence": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "source": {
+            "type": "string"
+          },
+          "subject": {
+            "$ref": "#/components/schemas/EventSubject"
+          },
+          "timestamp": {
+            "type": "integer"
+          },
+          "type": {
+            "const": "session.compaction.queued"
           }
         },
         "required": [
@@ -2686,6 +2876,9 @@
               "messageID": {
                 "type": "string"
               },
+              "runContinues": {
+                "type": "boolean"
+              },
               "sessionID": {
                 "type": "string"
               },
@@ -2936,6 +3129,9 @@
           "data": {
             "additionalProperties": false,
             "properties": {
+              "compactionQueued": {
+                "type": "boolean"
+              },
               "parentSessionID": {
                 "type": "string"
               },
@@ -3360,6 +3556,12 @@
           },
           "rootSessionId": {
             "type": "string"
+          },
+          "sessionActivities": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/ProviderActivitySnapshot"
+            },
+            "type": "object"
           }
         },
         "required": [
@@ -3368,6 +3570,7 @@
           "rootMessageId",
           "completedMs",
           "activeSegments",
+          "sessionActivities",
           "revision",
           "finished"
         ],
@@ -5305,6 +5508,27 @@
         ],
         "type": "object"
       },
+      "ProviderActivitySnapshot": {
+        "additionalProperties": false,
+        "properties": {
+          "activeSegments": {
+            "additionalProperties": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": "object"
+          },
+          "completedMs": {
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "completedMs",
+          "activeSegments"
+        ],
+        "type": "object"
+      },
       "ProviderAuthAuthorization": {
         "additionalProperties": false,
         "properties": {
@@ -6056,6 +6280,9 @@
       "SessionBundle": {
         "additionalProperties": false,
         "properties": {
+          "compactionQueued": {
+            "type": "boolean"
+          },
           "messages": {
             "items": {
               "$ref": "#/components/schemas/Message"
@@ -6249,15 +6476,47 @@
       "SessionQueueInfo": {
         "additionalProperties": false,
         "properties": {
+          "compactionQueued": {
+            "type": "boolean"
+          },
           "count": {
             "minimum": 0,
             "type": "integer"
           },
           "items": {
             "items": {
-              "$ref": "#/components/schemas/SessionQueueItem"
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/SessionQueueItem"
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "preview": {
+                      "type": "string"
+                    },
+                    "type": {
+                      "enum": [
+                        "compact"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "preview"
+                  ],
+                  "type": "object"
+                }
+              ]
             },
             "type": "array"
+          },
+          "preview": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "running": {
             "type": "boolean"
@@ -6369,7 +6628,7 @@
               }
             ]
           },
-          "revision": {
+          "familyRevision": {
             "minimum": 0,
             "type": "integer"
           },
@@ -6402,7 +6661,7 @@
         },
         "required": [
           "rootSessionId",
-          "revision",
+          "familyRevision",
           "branches"
         ],
         "type": "object"
@@ -20151,7 +20410,7 @@
         ],
         "responses": {
           "204": {
-            "description": "Context compacted"
+            "description": "Compaction queued"
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"

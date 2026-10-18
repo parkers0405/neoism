@@ -1046,10 +1046,8 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                             pane.side_panel_mut().navigate_project(true);
                         }
                         LogicalKey::Named(NamedKey::Enter) => {
-                            if pane.side_panel().projects_selected() {
-                                self.pending_catalog_header = Some(
-                                    crate::panels::agent_pane::state::side_panel::CatalogHeaderAction::Projects,
-                                );
+                            if let Some(action) = pane.side_panel().selected_header_action() {
+                                self.pending_catalog_header = Some(action);
                             } else if pane.side_panel().new_chat_selected() {
                                 self.activate_new_conversation();
                             } else if !pane.side_panel_mut().toggle_selected_project() {
@@ -1569,7 +1567,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
     /// updates a bounded visual position immediately and creates no velocity.
     pub fn touch_scroll_at(&mut self, x: f32, y: f32, dx: f32, dy: f32) -> bool {
         if self.conversation_navigator.is_active() {
-            self.conversation_navigator.scroll(-dy);
+            self.conversation_navigator.scroll_immediate(-dy);
             return true;
         }
         if self.is_neoism_agent_tab_active()
@@ -1851,10 +1849,8 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                 .as_ref()
                 .and_then(|pane| pane.side_panel().header_action_at(*x, *y))
             {
-                if action == crate::panels::agent_pane::state::side_panel::CatalogHeaderAction::Projects {
-                    if let Some(pane) = self.agent_pane.as_mut() {
-                        pane.side_panel_mut().select_projects();
-                    }
+                if let Some(pane) = self.agent_pane.as_mut() {
+                    pane.side_panel_mut().select_header_action(action);
                 }
                 self.pending_catalog_header = Some(action);
                 return true;
@@ -2824,7 +2820,20 @@ mod tests {
                 .with_depth(1)
                 .with_runtime_status(Some("running".into())),
         ]);
-        panel.sync_catalog_subagents(Some("root"));
+        panel.apply_catalog_family_snapshot("root", neoism_agent_core::CatalogFamilySnapshot {
+            directory: "/work/a".into(),
+            execution_id: Some("execution".into()),
+            family_revision: 1,
+            branches: vec![neoism_agent_core::CatalogBranchSnapshot {
+                session_id: "child".into(),
+                parent_session_id: "root".into(),
+                status: "outstanding".into(),
+                title: "Research".into(),
+                agent: Some("explore".into()),
+                depth: 1,
+                ..Default::default()
+            }],
+        });
         let child = panel
             .sessions()
             .iter()

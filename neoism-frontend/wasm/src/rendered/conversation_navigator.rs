@@ -54,6 +54,9 @@ impl ChromeBridge {
     pub fn conversation_navigator_set_loading(&mut self, loading: bool) {
         self.chrome.conversation_navigator.set_loading(loading);
     }
+    pub fn conversation_navigator_set_indexing(&mut self, indexing: bool) {
+        self.chrome.conversation_navigator.set_indexing(indexing);
+    }
     pub fn conversation_navigator_set_error(&mut self, error: Option<String>) {
         self.chrome.conversation_navigator.set_error(error);
     }

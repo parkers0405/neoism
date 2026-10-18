@@ -91,24 +91,28 @@ fn server_message_start_roundtrip() {
 #[test]
 fn server_content_delta_roundtrip() {
     roundtrip_server(&AgentServerMessage::ContentDelta {
+        parent_message_id: None,
         session_id: "sess_01".into(),
         message_id: "msg_01".into(),
         kind: ContentKind::Text,
         text: "Hello".into(),
     });
     roundtrip_server(&AgentServerMessage::ContentDelta {
+        parent_message_id: None,
         session_id: "sess_01".into(),
         message_id: "msg_01".into(),
         kind: ContentKind::Reasoning,
         text: "Considering...".into(),
     });
     roundtrip_server(&AgentServerMessage::ContentDelta {
+        parent_message_id: None,
         session_id: "sess_01".into(),
         message_id: "msg_compaction".into(),
         kind: ContentKind::Compaction,
         text: "Summary".into(),
     });
     roundtrip_server(&AgentServerMessage::ContentDelta {
+        parent_message_id: None,
         session_id: "sess_01".into(),
         message_id: "msg_01".into(),
         kind: ContentKind::Tool {

@@ -207,6 +207,15 @@ impl SessionStore {
         ).await?.is_some())
     }
 
+    pub(crate) async fn hydrate_host_associations(
+        &self,
+        sessions: &mut [SessionInfo],
+    ) -> anyhow::Result<()> {
+        self.db.hydrate_host_associations(sessions).await
+    }
+}
+
+impl Db {
     /// Overlay authoritative associations on reads, not on history. Remove the
     /// reserved local-access marker first: imports/extra JSON cannot grant access.
     pub(crate) async fn hydrate_host_associations(
@@ -221,11 +230,11 @@ impl SessionStore {
         // Single-session timeline reads must not scan all hosted history.
         for chunk in sessions.chunks(200) {
             let placeholders = vec!["?"; chunk.len()].join(",");
-            rows.extend(self.db.fetch_all(
+            rows.extend(self.fetch_all(
                 &format!("SELECT session_id, workspace_id FROM hosted_chat_sessions WHERE session_id IN ({placeholders})"),
                 chunk.iter().map(|session| text(session.id.to_string())).collect(),
             ).await?);
-            revoked_rows.extend(self.db.fetch_all(
+            revoked_rows.extend(self.fetch_all(
                 &format!("SELECT session_id, workspace_id FROM hosted_chat_revocations WHERE session_id IN ({placeholders})"),
                 chunk.iter().map(|session| text(session.id.to_string())).collect(),
             ).await?);
@@ -239,7 +248,6 @@ impl SessionStore {
             associations.insert(row.get_str("session_id")?, row.get_str("workspace_id")?);
         }
         let rows = self
-            .db
             .fetch_all(
                 "SELECT directory, workspace_id FROM hosted_chat_directories",
                 vec![],

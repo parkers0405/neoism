@@ -1,5 +1,6 @@
 use super::*;
 use std::path::{Path, PathBuf};
+use neoism_ui::panels::agent_pane::state::side_panel::CatalogHeaderAction;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ConversationTabLocation {
@@ -348,9 +349,7 @@ impl Screen<'_> {
             }
             Key::Named(NamedKey::Escape) => panel.side_panel_mut().set_focused(false),
             Key::Named(NamedKey::Enter) => {
-                if panel.side_panel().navigation_header_enabled()
-                    && panel.side_panel().search_focused()
-                {
+                if panel.side_panel().selected_header_action() == Some(CatalogHeaderAction::Search) {
                     self.open_conversation_search();
                 } else if panel.side_panel().projects_selected() {
                     self.open_conversation_project_picker();
@@ -850,7 +849,10 @@ impl Screen<'_> {
         if let Some(action) = panel.side_panel().header_action_at(x, y) {
             use neoism_ui::panels::agent_pane::state::side_panel::CatalogHeaderAction;
             match action {
-                CatalogHeaderAction::Search => self.open_conversation_search(),
+                CatalogHeaderAction::Search => {
+                    panel.side_panel_mut().select_header_action(CatalogHeaderAction::Search);
+                    self.open_conversation_search();
+                }
                 CatalogHeaderAction::Projects => {
                     panel.side_panel_mut().select_projects();
                     self.open_conversation_project_picker();

@@ -694,7 +694,7 @@ pub fn canonical_openapi() -> Value {
     }
     for (suffix, operation, description) in [
         ("abort", "v2.sessions.abort", "Run aborted"),
-        ("compact", "v2.sessions.compact", "Context compacted"),
+        ("compact", "v2.sessions.compact", "Compaction queued"),
         ("wait", "v2.sessions.wait", "Session exists"),
     ] {
         paths.insert(format!("/v2/sessions/{{session_id}}/{suffix}"), json!({
@@ -2280,7 +2280,7 @@ fn apply_authoritative_contract(document: &mut Value) {
         ),
     );
     for (suffix, id, description) in [
-        ("compact", "v2.sessions.compact", "Context compacted"),
+        ("compact", "v2.sessions.compact", "Compaction queued"),
         ("wait", "v2.sessions.wait", "Session exists"),
     ] {
         add(
@@ -3297,6 +3297,16 @@ fn canonical_schemas() -> Value {
         "PermissionRule": { "type": "object", "additionalProperties": false, "required": ["permission", "pattern", "action"], "properties": { "permission": { "type": "string" }, "pattern": { "type": "string" }, "action": { "type": "string" } } },
         "SessionTime": { "type": "object", "additionalProperties": false, "required": ["created", "updated"], "properties": { "created": { "type": "integer", "minimum": 0 }, "updated": { "type": "integer", "minimum": 0 }, "compacting": { "type": "integer", "minimum": 0 }, "archived": { "type": "integer" } } },
         "CatalogActivity": { "type": "string", "enum": ["idle", "running", "background", "permission"], "description": "Transient family activity: permission > running > background > idle; never persisted." },
+        "CatalogFamilySnapshot": { "type": "object", "additionalProperties": false, "required": ["directory", "executionId", "familyRevision", "branches"], "properties": {
+            "directory": { "type": "string" }, "executionId": { "type": ["string", "null"] },
+            "familyRevision": { "type": "integer", "minimum": 0 },
+            "branches": { "type": "array", "items": { "$ref": "#/components/schemas/CatalogBranchSnapshot" } }
+        }},
+        "CatalogBranchSnapshot": { "type": "object", "additionalProperties": false, "required": ["sessionId", "parentSessionId", "status", "startedAt", "title", "agent", "depth", "permissionPending"], "properties": {
+            "sessionId": { "type": "string" }, "parentSessionId": { "type": "string" }, "status": { "type": "string" },
+            "startedAt": { "type": ["integer", "null"], "minimum": 0 }, "title": { "type": "string" },
+            "agent": { "type": ["string", "null"] }, "depth": { "type": "integer", "minimum": 0 }, "permissionPending": { "type": "boolean" }
+        }},
         "Session": { "type": "object", "additionalProperties": true, "required": ["id", "slug", "projectId", "directory", "title", "version", "time"], "properties": {
             "catalogActivity": { "$ref": "#/components/schemas/CatalogActivity", "readOnly": true },
             "id": { "type": "string" }, "slug": { "type": "string" }, "projectId": { "type": "string" }, "workspaceId": { "type": "string" }, "directory": { "type": "string" },
@@ -3317,9 +3327,10 @@ fn canonical_schemas() -> Value {
         "UpdateSessionRequest": { "type": "object", "additionalProperties": false, "properties": { "title": { "type": "string" }, "agent": { "type": "string" }, "model": { "$ref": "#/components/schemas/ModelRef" }, "directory": { "type": "string" }, "permission": { "type": "array", "items": { "$ref": "#/components/schemas/PermissionRule" } }, "time": { "type": "object", "properties": { "archived": { "type": "integer" } } } } },
         "PageCursor": { "type": "object", "additionalProperties": false, "properties": { "previous": { "type": "string" }, "next": { "type": "string" } } },
         "SessionPage": { "type": "object", "additionalProperties": false, "required": ["items", "cursor"], "properties": { "items": { "type": "array", "items": { "$ref": "#/components/schemas/Session" } }, "cursor": { "$ref": "#/components/schemas/PageCursor" } } },
-        "SessionRuntimeSnapshot": { "type": "object", "additionalProperties": false, "required": ["rootSessionId", "revision", "branches"], "properties": { "rootSessionId": { "type": "string" }, "revision": { "type": "integer", "minimum": 0 }, "branches": { "type": "array", "items": { "$ref": "#/components/schemas/SubtaskLifecycleSnapshot" } }, "execution": { "anyOf": [{ "$ref": "#/components/schemas/ExecutionActivitySnapshot" }, { "type": "null" }] }, "runningBackgroundTasks": { "type": "array", "items": { "type": "object", "required": ["jobId", "sessionId", "startedAt"], "properties": { "jobId": { "type": "string" }, "sessionId": { "type": "string" }, "startedAt": { "type": "integer", "minimum": 0 } } } }, "backgroundJobsEpoch": { "type": "string" }, "backgroundJobsRevision": { "type": "integer", "minimum": 0 } } },
+        "SessionRuntimeSnapshot": { "type": "object", "additionalProperties": false, "required": ["rootSessionId", "familyRevision", "branches"], "properties": { "rootSessionId": { "type": "string" }, "familyRevision": { "type": "integer", "minimum": 0 }, "branches": { "type": "array", "items": { "$ref": "#/components/schemas/SubtaskLifecycleSnapshot" } }, "execution": { "anyOf": [{ "$ref": "#/components/schemas/ExecutionActivitySnapshot" }, { "type": "null" }] }, "runningBackgroundTasks": { "type": "array", "items": { "type": "object", "required": ["jobId", "sessionId", "startedAt"], "properties": { "jobId": { "type": "string" }, "sessionId": { "type": "string" }, "startedAt": { "type": "integer", "minimum": 0 } } } }, "backgroundJobsEpoch": { "type": "string" }, "backgroundJobsRevision": { "type": "integer", "minimum": 0 } } },
         "SubtaskLifecycleSnapshot": { "type": "object", "additionalProperties": false, "required": ["sessionId", "parentSessionId", "status"], "properties": { "sessionId": { "type": "string" }, "parentSessionId": { "type": "string" }, "status": { "type": "string", "enum": ["outstanding", "completed", "failed"] }, "startedAt": { "type": ["integer", "null"], "minimum": 0 } } },
-        "ExecutionActivitySnapshot": { "type": "object", "additionalProperties": false, "required": ["executionId", "rootSessionId", "rootMessageId", "completedMs", "activeSegments", "revision", "finished"], "properties": { "executionId": { "type": "string" }, "rootSessionId": { "type": "string" }, "rootMessageId": { "type": "string" }, "completedMs": { "type": "integer", "minimum": 0 }, "activeSegments": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0 } }, "revision": { "type": "integer", "minimum": 0 }, "finished": { "type": "boolean" } } },
+        "ProviderActivitySnapshot": { "type": "object", "additionalProperties": false, "required": ["completedMs", "activeSegments"], "properties": { "completedMs": { "type": "integer", "minimum": 0 }, "activeSegments": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0 } } } },
+        "ExecutionActivitySnapshot": { "type": "object", "additionalProperties": false, "required": ["executionId", "rootSessionId", "rootMessageId", "completedMs", "activeSegments", "sessionActivities", "revision", "finished"], "properties": { "executionId": { "type": "string" }, "rootSessionId": { "type": "string" }, "rootMessageId": { "type": "string" }, "completedMs": { "type": "integer", "minimum": 0 }, "activeSegments": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0 } }, "sessionActivities": { "type": "object", "additionalProperties": { "$ref": "#/components/schemas/ProviderActivitySnapshot" } }, "revision": { "type": "integer", "minimum": 0 }, "finished": { "type": "boolean" } } },
         "Message": { "type": "object", "additionalProperties": false, "required": ["info", "parts"], "properties": { "info": { "type": "object", "additionalProperties": true }, "parts": { "type": "array", "items": { "type": "object", "additionalProperties": true } } } },
         "MessagePage": { "type": "object", "additionalProperties": false, "required": ["items", "cursor"], "properties": { "items": { "type": "array", "items": { "$ref": "#/components/schemas/Message" } }, "cursor": { "$ref": "#/components/schemas/PageCursor" } } },
         "MessageList": { "type": "array", "items": { "$ref": "#/components/schemas/Message" } },
@@ -3602,6 +3613,9 @@ fn event_data_schema(event_type: &str) -> Value {
                 "exitStatus": nullable(json!({ "type": "integer" }))
             }})
         }
+        _ if event_type == et::SESSION_COMPACTION_QUEUED => {
+            json!({"type": "object", "additionalProperties": false, "required": ["sessionID"], "properties": {"sessionID": {"type": "string"}}})
+        }
         _ if event_type == et::SESSION_COMPACTION_STARTED => {
             json!({ "type": "object", "additionalProperties": false, "required": ["sessionID", "messageID", "timestamp", "reason"], "properties": {
                 "sessionID": { "type": "string" }, "messageID": { "type": "string" },
@@ -3617,6 +3631,7 @@ fn event_data_schema(event_type: &str) -> Value {
             json!({ "type": "object", "additionalProperties": true, "required": ["sessionID"], "properties": {
                 "sessionID": { "type": "string" }, "messageID": { "type": "string" }, "timestamp": { "type": "integer" },
                 "text": { "type": "string" }, "kind": { "type": "string" }, "status": { "type": "string" },
+                "runContinues": { "type": "boolean" },
                 "summary": { "type": "object", "additionalProperties": true },
                 "error": { "type": "object", "additionalProperties": true }
             }})
@@ -3624,6 +3639,7 @@ fn event_data_schema(event_type: &str) -> Value {
         _ if event_type == et::SESSION_COMPACTED => {
             json!({ "type": "object", "additionalProperties": false, "required": ["sessionID", "info", "summary"], "properties": {
                 "sessionID": { "type": "string" }, "info": r("Session"),
+                "runContinues": { "type": "boolean" },
                 "summary": { "type": "object", "additionalProperties": false, "required": ["text", "messageID", "throughMessageID", "updated", "kind"], "properties": {
                     "text": { "type": "string" }, "messageID": { "type": "string" }, "throughMessageID": { "type": "string" },
                     "updated": { "type": "integer" }, "kind": { "type": "string" }
@@ -3638,6 +3654,11 @@ fn event_data_schema(event_type: &str) -> Value {
         _ if event_type == et::SESSION_CATALOG_ACTIVITY => {
             json!({ "type": "object", "additionalProperties": false, "required": ["sessionID", "activity"], "properties": {
                 "sessionID": { "type": "string" }, "activity": r("CatalogActivity")
+            }})
+        }
+        _ if event_type == et::SESSION_CATALOG_FAMILY => {
+            json!({ "type": "object", "additionalProperties": false, "required": ["sessionID", "snapshot"], "properties": {
+                "sessionID": { "type": "string" }, "snapshot": r("CatalogFamilySnapshot")
             }})
         }
         _ if event_type == et::SESSION_CREATED || event_type == et::SESSION_UPDATED => {
@@ -3702,6 +3723,7 @@ fn event_data_schema(event_type: &str) -> Value {
             json!({ "type": "object", "additionalProperties": false, "required": ["sessionID", "status"], "properties": {
                 "sessionID": { "type": "string" }, "status": r("SessionStatus"),
                 "runID": { "type": "string" }, "startedAt": { "type": "integer" }, "queue": { "type": "integer" },
+                "compactionQueued": { "type": "boolean" },
                 "parentSessionID": { "type": "string" }, "sourceSessionID": { "type": "string" },
                 "sourceTitle": { "type": "string" }, "sourceAgent": { "type": "string" }
             }})
@@ -3937,7 +3959,7 @@ fn authoritative_schemas() -> Value {
         "SessionStatus": { "type": "object", "additionalProperties": true, "required": ["type"], "properties": { "type": { "type": "string", "enum": ["idle", "busy", "retry"] } } },
         "SessionBundle": { "type": "object", "additionalProperties": false, "required": ["version", "session", "messages", "queuedPrompts"], "properties": {
             "version": { "type": "integer", "minimum": 1 }, "session": r("Session"), "messages": { "type": "array", "items": r("Message") },
-            "queuedPrompts": { "type": "array", "items": r("QueuedPromptBundleItem") }, "workspaceRoot": { "type": "string" }
+            "queuedPrompts": { "type": "array", "items": r("QueuedPromptBundleItem") }, "compactionQueued": { "type": "boolean" }, "workspaceRoot": { "type": "string" }
         }},
         "QueuedPromptBundleItem": { "type": "object", "additionalProperties": false, "required": ["request", "delivery"], "properties": { "request": r("QueuedPrompt"), "delivery": { "type": "string" } } },
         "QueuedPrompt": { "type": "object", "additionalProperties": false, "required": ["parts", "noReply"], "properties": {
@@ -3956,7 +3978,7 @@ fn authoritative_schemas() -> Value {
         }},
         "SessionUndoTree": { "type": "object", "additionalProperties": true, "required": ["sessionID", "nodes"], "properties": { "sessionID": { "type": "string" }, "nodes": { "type": "array", "items": { "type": "object", "additionalProperties": true } } } },
         "SessionQueueItem": { "type": "object", "additionalProperties": false, "required": ["index", "noReply", "partCount"], "properties": { "index": { "type": "integer", "minimum": 0 }, "text": { "type": ["string", "null"] }, "noReply": { "type": "boolean" }, "agent": { "type": ["string", "null"] }, "model": { "anyOf": [r("UserModel"), { "type": "null" }] }, "partCount": { "type": "integer", "minimum": 0 } } },
-        "SessionQueueInfo": { "type": "object", "additionalProperties": false, "required": ["sessionId", "count", "running", "worker", "items"], "properties": { "sessionId": { "type": "string" }, "count": { "type": "integer", "minimum": 0 }, "running": { "type": "boolean" }, "worker": { "type": "boolean" }, "items": { "type": "array", "items": r("SessionQueueItem") } } },
+        "SessionQueueInfo": { "type": "object", "additionalProperties": false, "required": ["sessionId", "count", "running", "worker", "items"], "properties": { "preview": { "type": ["string", "null"] }, "compactionQueued": { "type": "boolean" }, "sessionId": { "type": "string" }, "count": { "type": "integer", "minimum": 0 }, "running": { "type": "boolean" }, "worker": { "type": "boolean" }, "items": { "type": "array", "items": { "anyOf": [r("SessionQueueItem"), {"type": "object", "additionalProperties": false, "required": ["type", "preview"], "properties": {"type": {"type": "string", "enum": ["compact"]}, "preview": {"type": "string"}}}] } } } },
         "SessionQueueMutation": { "type": "object", "additionalProperties": false, "required": ["sessionId", "removed", "queue"], "properties": { "sessionId": { "type": "string" }, "removed": { "type": "integer", "minimum": 0 }, "queue": r("SessionQueueInfo") } },
         "SessionCommandRequest": { "type": "object", "additionalProperties": false, "required": ["command"], "properties": { "messageId": { "type": "string" }, "model": r("UserModel"), "agent": { "type": "string" }, "command": { "type": "string" }, "arguments": { "type": "string", "default": "" } } },
         "SessionShellRequest": { "type": "object", "additionalProperties": false, "required": ["command"], "properties": { "messageId": { "type": "string" }, "model": r("UserModel"), "agent": { "type": "string" }, "command": { "type": "string" } } },
@@ -4407,6 +4429,7 @@ mod tests {
             .as_object()
             .expect("schemas");
         let union = schemas["Event"]["oneOf"].as_array().expect("Event oneOf");
+        assert_eq!(union.len(), neoism_agent_core::event_type::ALL.len());
         let mut variant_types = BTreeSet::new();
         for reference in union {
             let name = reference["$ref"]
@@ -4437,6 +4460,117 @@ mod tests {
             variant_types, published,
             "the typed Event union and event_type::ALL drifted"
         );
+    }
+
+    #[test]
+    fn catalog_family_payload_matches_serialized_dtos() {
+        use neoism_agent_core::{CatalogBranchSnapshot, CatalogFamilySnapshot};
+
+        let document = canonical_openapi();
+        let mut schema = event_data_schema(neoism_agent_core::event_type::SESSION_CATALOG_FAMILY);
+        schema["components"] = document["components"].clone();
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        let snapshot = CatalogFamilySnapshot {
+            directory: "/workspace".into(),
+            execution_id: Some("execution".into()),
+            family_revision: 3,
+            branches: vec![
+                CatalogBranchSnapshot {
+                    session_id: "child".into(),
+                    parent_session_id: "root".into(),
+                    status: "outstanding".into(),
+                    started_at: Some(123),
+                    title: "Child".into(),
+                    agent: Some("explore".into()),
+                    depth: 1,
+                    permission_pending: true,
+                },
+                CatalogBranchSnapshot {
+                    session_id: "grandchild".into(),
+                    parent_session_id: "child".into(),
+                    status: "completed".into(),
+                    depth: 2,
+                    ..Default::default()
+                },
+            ],
+        };
+        let sample = json!({"sessionID": "root", "snapshot": snapshot});
+        assert!(validator.is_valid(&sample), "{sample}");
+        // Idle/deleted baselines serialize an empty roster and a null execution ID.
+        let empty = json!({"sessionID": "root", "snapshot": CatalogFamilySnapshot::default()});
+        assert!(validator.is_valid(&empty), "{empty}");
+        for pointer in [
+            "/sessionID", "/snapshot/directory", "/snapshot/executionId",
+            "/snapshot/familyRevision", "/snapshot/branches",
+            "/snapshot/branches/0/sessionId", "/snapshot/branches/0/parentSessionId",
+            "/snapshot/branches/0/status", "/snapshot/branches/0/startedAt",
+            "/snapshot/branches/0/title", "/snapshot/branches/0/agent",
+            "/snapshot/branches/0/depth", "/snapshot/branches/0/permissionPending",
+        ] {
+            let mut invalid = sample.clone();
+            *invalid.pointer_mut(pointer).unwrap() = json!({"unexpected": true});
+            assert!(!validator.is_valid(&invalid), "accepted invalid {pointer}");
+            let (parent, field) = pointer.rsplit_once('/').unwrap();
+            let mut missing = sample.clone();
+            missing.pointer_mut(parent).unwrap().as_object_mut().unwrap().remove(field);
+            assert!(!validator.is_valid(&missing), "accepted missing {pointer}");
+        }
+        for pointer in ["", "/snapshot", "/snapshot/branches/0"] {
+            let mut invalid = sample.clone();
+            invalid.pointer_mut(pointer).unwrap()["unexpected"] = json!(true);
+            assert!(!validator.is_valid(&invalid), "accepted extra field at {pointer}");
+        }
+        for pointer in ["/snapshot/familyRevision", "/snapshot/branches/0/depth", "/snapshot/branches/0/startedAt"] {
+            let mut invalid = sample.clone();
+            *invalid.pointer_mut(pointer).unwrap() = json!(-1);
+            assert!(!validator.is_valid(&invalid), "accepted negative {pointer}");
+        }
+    }
+
+    #[test]
+    fn session_runtime_payload_matches_serialized_dtos() {
+        use neoism_agent_core::{
+            BackgroundJobRuntimeSnapshot, ExecutionActivitySnapshot, ProviderActivitySnapshot,
+            SessionRuntimeSnapshot, SubtaskLifecycleSnapshot,
+        };
+
+        let document = canonical_openapi();
+        let schema = json!({
+            "$ref": "#/components/schemas/SessionRuntimeSnapshot",
+            "components": document["components"]
+        });
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        let mut runtime = SessionRuntimeSnapshot {
+            root_session_id: "root".into(),
+            family_revision: 3,
+            branches: vec![SubtaskLifecycleSnapshot {
+                session_id: "child".into(), parent_session_id: "root".into(),
+                status: "outstanding".into(), started_at: None,
+            }],
+            ..Default::default()
+        };
+        let minimal = serde_json::to_value(&runtime).unwrap();
+        assert!(validator.is_valid(&minimal), "{minimal}");
+        assert!(minimal.get("execution").is_none());
+        assert!(minimal.get("runningBackgroundTasks").is_none());
+        let mut execution = ExecutionActivitySnapshot::default();
+        execution.session_activities.insert("child".into(), ProviderActivitySnapshot::default());
+        runtime.execution = Some(execution);
+        runtime.branches[0].started_at = Some(123);
+        runtime.running_background_tasks = Some(vec![BackgroundJobRuntimeSnapshot {
+            job_id: "job".into(), session_id: "child".into(), started_at: 123,
+        }]);
+        runtime.background_jobs_epoch = Some("epoch".into());
+        runtime.background_jobs_revision = Some(1);
+        let populated = serde_json::to_value(runtime).unwrap();
+        assert!(validator.is_valid(&populated), "{populated}");
+        let mut stale = minimal;
+        stale.as_object_mut().unwrap().remove("familyRevision");
+        stale["revision"] = json!(3);
+        assert!(!validator.is_valid(&stale));
+        let mut invalid = populated;
+        invalid["execution"]["sessionActivities"]["child"]["completedMs"] = json!("bad");
+        assert!(!validator.is_valid(&invalid));
     }
 
     #[test]

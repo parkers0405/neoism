@@ -222,6 +222,14 @@ pub enum SessionEventUpdate {
         session_id: String,
         part_id: String,
     },
+    /// Queue-only update; None count is the idempotent queued notification.
+    QueueSnapshot {
+        session_id: String,
+        count: Option<usize>,
+        preview: Option<String>,
+        running: Option<bool>,
+        action: Option<String>,
+    },
     CompactionStarted {
         session_id: String,
         id: String,
@@ -235,6 +243,7 @@ pub enum SessionEventUpdate {
         session_id: String,
         summary: String,
         kind: String,
+        run_continues: Option<bool>,
         usage: Option<NeoismAgentUsage>,
     },
     System {
@@ -345,6 +354,19 @@ pub enum SessionEventUpdate {
     ExecutionUpdated(Value),
     RuntimeUpdated(Value),
     McpChanged,
+}
+
+/// Queue snapshots include compact control entries in count/preview. Accept the
+/// optional pending bit as a fallback for snapshots without a visible entry.
+pub fn queue_snapshot_fields(queue: &Value) -> (usize, Option<String>) {
+    let pending = queue.get("compactionQueued").and_then(Value::as_bool) == Some(true);
+    let count = queue.get("count").and_then(Value::as_u64).unwrap_or(0) as usize;
+    let preview = queue
+        .get("preview")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| pending.then(|| "Compaction queued".to_string()));
+    (count.max(usize::from(pending)), preview)
 }
 
 pub fn classify_session_event(
@@ -724,6 +746,14 @@ pub fn classify_session_event(
                 }]
             }
         }
+        "session.compaction.queued" => vec![SessionEventUpdate::QueueSnapshot {
+            session_id: source_session_id
+                .clone()
+                .unwrap_or_else(|| session_id.to_string()),
+            count: None,
+            preview: Some("Compaction queued".to_string()),
+            running: None, action: None,
+        }],
         event_type::SESSION_COMPACTION_STARTED => {
             vec![SessionEventUpdate::CompactionStarted {
                 session_id: source_session_id
@@ -786,6 +816,7 @@ pub fn classify_session_event(
                 session_id: source_session_id
                     .clone()
                     .unwrap_or_else(|| session_id.to_string()),
+                run_continues: properties.get("runContinues").and_then(Value::as_bool),
                 usage: compaction_usage_from_summary(&summary, &kind),
                 summary,
                 kind,
@@ -808,6 +839,7 @@ pub fn classify_session_event(
                 session_id: source_session_id
                     .clone()
                     .unwrap_or_else(|| session_id.to_string()),
+                run_continues: properties.get("runContinues").and_then(Value::as_bool),
                 usage: compaction_usage_from_summary(&summary, &kind),
                 summary,
                 kind,
@@ -859,16 +891,14 @@ pub fn classify_session_event(
                 }]
             } else if status_type == Some("busy") {
                 state.idle_messages_refreshed = false;
-                let queue = status.and_then(|status| status.get("queue"));
+                let (count, preview) = queue_snapshot_fields(
+                    status
+                        .and_then(|status| status.get("queue"))
+                        .unwrap_or(&Value::Null),
+                );
                 vec![SessionEventUpdate::QueueStatus {
-                    count: queue
-                        .and_then(|queue| queue.get("count"))
-                        .and_then(Value::as_u64)
-                        .unwrap_or(0) as usize,
-                    preview: queue
-                        .and_then(|queue| queue.get("preview"))
-                        .and_then(Value::as_str)
-                        .map(ToString::to_string),
+                    count,
+                    preview,
                     started_at: status
                         .and_then(|status| status.get("startedAt"))
                         .or_else(|| properties.get("startedAt"))
@@ -890,27 +920,47 @@ pub fn classify_session_event(
             }
         }
         event_type::SESSION_QUEUE_UPDATED => {
-            if is_child_event {
-                return Vec::new();
-            }
+            let queue = properties.get("queue");
+            let mut updates = queue
+                .map(|queue| {
+                    let (count, preview) = queue_snapshot_fields(queue);
+                    SessionEventUpdate::QueueSnapshot {
+                        session_id: source_session_id
+                            .clone()
+                            .unwrap_or_else(|| session_id.to_string()),
+                        count: Some(count),
+                        preview,
+                        running: queue.get("running").and_then(Value::as_bool),
+                        action: properties.get("action").and_then(Value::as_str).map(str::to_owned),
+                    }
+                })
+                .into_iter()
+                .collect::<Vec<_>>();
             let action = properties
                 .get("action")
                 .and_then(Value::as_str)
                 .unwrap_or_default();
-            if action != "dequeue" {
-                return Vec::new();
+            if is_child_event || action != "dequeue" {
+                return updates;
             }
             let request = properties.get("request").unwrap_or(&Value::Null);
+            // A compact queue entry is control work, never a synthetic prompt.
+            if request.get("type").and_then(Value::as_str) == Some("compact") {
+                return updates;
+            }
             // Background jobs resume the model by queueing a synthetic
             // user-role prompt containing command/output context. That
             // request is model input, not something the human submitted;
             // never turn its dequeue event into a visible user message.
             if is_background_task_completion_dequeue(properties, request) {
-                return Vec::new();
+                return updates;
             }
-            queued_request_text(request)
-                .map(|text| {
-                    vec![SessionEventUpdate::DequeuedPrompt {
+            if let Some(text) = queued_request_text(request) {
+                // Apply the prompt echo first: desktop may speculatively consume
+                // its queue preview. The authoritative snapshot must win last.
+                updates.insert(
+                    0,
+                    SessionEventUpdate::DequeuedPrompt {
                         text,
                         message_id: properties
                             .get("messageID")
@@ -925,9 +975,10 @@ pub fn classify_session_event(
                             .and_then(Value::as_str)
                             .filter(|value| !value.trim().is_empty())
                             .map(ToString::to_string),
-                    }]
-                })
-                .unwrap_or_default()
+                    },
+                );
+            }
+            updates
         }
         event_type::PERMISSION_ASKED => vec![SessionEventUpdate::PermissionAsked(
             permission_request_from_event(properties),
@@ -2094,6 +2145,7 @@ mod tests {
                 session_id: "ses_root".to_string(),
                 summary: "real summary".to_string(),
                 kind: "model".to_string(),
+                run_continues: None,
                 usage: Some(NeoismAgentUsage {
                     input: 3,
                     output: 0,
@@ -2240,6 +2292,87 @@ mod tests {
     }
 
     #[test]
+    fn canonical_queued_compaction_sse_decodes_scopes_and_classifies() {
+        let mut decoder = SseDecoder::default();
+        let frame = b"data: {\"id\":\"42\",\"sequence\":42,\"type\":\"session.compaction.queued\",\"source\":\"neoism.core\",\"schemaVersion\":\"1.0.0\",\"timestamp\":1,\"data\":{\"sessionID\":\"ses_root\"}}\n\n";
+        assert!(decoder.feed(&frame[..33]).is_empty());
+        let mut events = decoder.feed(&frame[33..]);
+        assert_eq!(events.len(), 1);
+        let event = events.pop().unwrap();
+        assert!(matches_session(&event, "ses_root", &HashSet::new()));
+        assert!(!matches_session(&event, "other", &HashSet::new()));
+        assert!(classify_session_event(event.clone(), "other", &mut SessionEventUpdateState::default()).is_empty());
+        assert_eq!(classify_session_event(event, "ses_root", &mut SessionEventUpdateState::default()),
+            vec![SessionEventUpdate::QueueSnapshot {
+                session_id: "ses_root".into(), count: None, preview: Some("Compaction queued".into()), running: None, action: None,
+            }]);
+    }
+
+    #[test]
+    fn queued_compaction_is_session_scoped_queue_work_not_a_prompt() {
+        let mut state = SessionEventUpdateState::default();
+        let queued = json!({
+            "type": "session.compaction.queued",
+            "properties": {"sessionID": "ses_root"}
+        });
+        assert_eq!(
+            classify_session_event(queued.clone(), "ses_root", &mut state),
+            vec![SessionEventUpdate::QueueSnapshot {
+                session_id: "ses_root".into(),
+                count: None,
+                preview: Some("Compaction queued".into()),
+                running: None, action: None,
+            }]
+        );
+        assert!(classify_session_event(queued, "other", &mut state).is_empty());
+        for action in ["dequeue", "clear", "pop"] {
+            let updates = classify_session_event(
+                json!({
+                    "type": "session.queue.updated",
+                    "properties": {"sessionID": "ses_root", "action": action,
+                        "request": {"type": "compact", "text": "not a prompt"},
+                        "queue": {"count": 0, "compactionQueued": false}}
+                }),
+                "ses_root",
+                &mut state,
+            );
+            assert_eq!(
+                updates,
+                vec![SessionEventUpdate::QueueSnapshot {
+                    session_id: "ses_root".into(),
+                    count: Some(0),
+                    preview: None,
+                    running: None,
+                    action: Some(action.into()),
+                }]
+            );
+        }
+        assert_eq!(
+            queue_snapshot_fields(&json!({"compactionQueued": true})),
+            (1, Some("Compaction queued".into()))
+        );
+    }
+
+    #[test]
+    fn compaction_end_preserves_optional_run_continuation() {
+        for kind in ["session.next.compaction.ended", "session.compacted"] {
+            let updates = classify_session_event(
+                json!({"type": kind,
+                    "properties": {"sessionID": "ses_root", "runContinues": true}}),
+                "ses_root",
+                &mut SessionEventUpdateState::default(),
+            );
+            assert!(matches!(
+                updates.as_slice(),
+                [SessionEventUpdate::CompactionEnded {
+                    run_continues: Some(true),
+                    ..
+                }]
+            ));
+        }
+    }
+
+    #[test]
     fn classify_session_event_reports_dequeued_prompt_identity() {
         let mut state = SessionEventUpdateState::default();
         let event = json!({
@@ -2265,6 +2398,31 @@ mod tests {
                 author: Some("Parker".to_string()),
             }]
         );
+    }
+
+    #[test]
+    fn dequeue_applies_authoritative_queue_snapshot_after_prompt_echo() {
+        let updates = classify_session_event(
+            json!({
+                "type": "session.queue.updated",
+                "properties": {
+                    "sessionID": "ses_root",
+                    "action": "dequeue",
+                    "request": {"parts": [{"type": "text", "text": "next turn"}]},
+                    "queue": {
+                        "count": 1,
+                        "preview": "Compaction queued",
+                        "compactionQueued": true
+                    }
+                }
+            }),
+            "ses_root",
+            &mut SessionEventUpdateState::default(),
+        );
+        assert!(matches!(updates.as_slice(), [
+            SessionEventUpdate::DequeuedPrompt { .. },
+            SessionEventUpdate::QueueSnapshot { count: Some(1), preview: Some(preview), .. }
+        ] if preview == "Compaction queued"));
     }
 
     #[test]

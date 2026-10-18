@@ -411,6 +411,96 @@ fn web_links_render_as_clickable_labels_or_blue_bare_urls() {
 }
 
 #[test]
+fn emphasized_list_links_keep_punctuation_and_wrapped_click_targets() {
+    for (label, target) in [
+        ("OpenCode Mobile by Alvaro Lorente", "https://getopencode.app/"),
+        (
+            "OpenCode Mobile by dzianisv",
+            "https://opencode-mobile-site.vercel.app/",
+        ),
+        (
+            "Reddit: \u{201c}OpenCode Mobile App now supports iOS & Android\u{201d}",
+            "https://www.reddit.com/r/opencodeCLI/comments/1rpd6rc/opencode_mobile_app_now_supports_ios_android/",
+        ),
+    ] {
+        for (marker, bold, italic) in [
+            ("", false, false),
+            ("**", true, false),
+            ("__", true, false),
+            ("*", false, true),
+            ("_", false, true),
+            ("***", true, true),
+            ("___", true, true),
+        ] {
+            for prefix in ["", "See "] {
+                let source = format!(
+                    "- {marker}{prefix}[{label}]({target}):{marker} Details. [Image 1](https://example.com/image)"
+                );
+                let (_, _, item) = markdown_list_item(&source).expect("bullet item");
+                assert_eq!(
+                    rendered_inline_text(item),
+                    format!("{prefix}{label}: Details. Image 1"),
+                    "{source}"
+                );
+                let segments = parsed_markdown_inline_line(item);
+                assert!(segments.iter().any(|segment| matches!(
+                    segment,
+                    MarkdownInlineSegment::MarkdownLink {
+                        label: actual_label,
+                        target: Some(actual_target),
+                        bold: actual_bold,
+                        italic: actual_italic,
+                        ..
+                    } if actual_label == label && actual_target == target
+                        && *actual_bold == bold && *actual_italic == italic
+                )), "{source}");
+
+                let tokens = inline_wrap_tokens(item);
+                let link_tokens: Vec<_> = tokens.iter().filter(|token| matches!(
+                    &token.style,
+                    InlineWrapStyle::MarkdownLink { target: actual, .. } if actual == target
+                )).collect();
+                assert_eq!(link_tokens.len(), label.split_whitespace().count(), "{source}");
+                for token in link_tokens {
+                    let reparsed = parsed_markdown_inline_line(&token.source());
+                    assert!(matches!(
+                        reparsed.as_slice(),
+                        [MarkdownInlineSegment::MarkdownLink {
+                            label,
+                            target: Some(actual_target),
+                            bold: actual_bold,
+                            italic: actual_italic,
+                            ..
+                        }] if label == &token.text && actual_target == target
+                            && *actual_bold == bold && *actual_italic == italic
+                    ), "{}", token.source());
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn emphasis_does_not_consume_link_or_code_delimiters() {
+    let source = "**See [*the docs*](https://example.com/a_b) and `a**b`:**";
+    assert_eq!(rendered_inline_text(source), "See the docs and a**b:");
+    assert!(parsed_markdown_inline_line(source)
+        .iter()
+        .any(|segment| matches!(
+            segment,
+            MarkdownInlineSegment::MarkdownLink {
+                bold: true,
+                italic: true,
+                ..
+            }
+        )));
+    assert_eq!(
+        rendered_inline_text(r"**See \*literal\*:**"),
+        "See *literal*:"
+    );
+}
+
+#[test]
 fn explicit_web_links_ignore_destination_edge_whitespace() {
     for source in [
         " [ZhangHanDong](https://github.com/ZhangHanDong) ",

@@ -803,6 +803,8 @@ export interface CrdtPresenceColor {
 }
 
 export interface CrdtPeerPresence {
+  /** OS of the originating client, absent for older peers. */
+  client_os?: string | null;
   buffer_id: string;
   peer_id: string;
   display_name: string;
@@ -1230,7 +1232,7 @@ export type AgentClientMessage =
       };
     }
   // -- Maintenance -------------------------------------------------
-  | { Compact: { session_id: string } }
+  | { Compact: { session_id: string; request_id?: string | null } }
   | { SetTitle: { session_id: string; title: string } }
   | "Ping";
 
@@ -1253,6 +1255,7 @@ export type AgentServerMessage =
       ContentDelta: {
         session_id: string;
         message_id: string;
+        parent_message_id?: string | null;
         kind: ContentKind;
         text: string;
       };
@@ -1316,6 +1319,7 @@ export type AgentServerMessage =
       MessageUpdated: {
         session_id: string;
         message: HistoryMessage;
+        parent_message_id?: string | null;
       };
     }
   | { PartRemoved: { session_id: string; part_id: string } }
@@ -1421,6 +1425,7 @@ export type AgentServerMessage =
       Compaction: {
         session_id: string;
         phase: CompactionPhase;
+        run_continues?: boolean | null;
         text?: string | null;
         reason?: string | null;
       };

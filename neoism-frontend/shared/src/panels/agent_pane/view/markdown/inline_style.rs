@@ -14,6 +14,13 @@ pub(crate) fn parsed_markdown_inline_line(line: &str) -> Rc<Vec<MarkdownInlineSe
 }
 
 fn parse_markdown_inline_line(line: &str) -> Vec<MarkdownInlineSegment> {
+    parse_markdown_inline_line_at_depth(line, 0)
+}
+
+fn parse_markdown_inline_line_at_depth(
+    line: &str,
+    depth: usize,
+) -> Vec<MarkdownInlineSegment> {
     let mut out = Vec::new();
     let mut rest = line;
     while !rest.is_empty() {
@@ -22,56 +29,14 @@ fn parse_markdown_inline_line(line: &str) -> Vec<MarkdownInlineSegment> {
             rest = &rest[consumed..];
             continue;
         }
-        if let Some((link, consumed, outer_bold, outer_italic)) =
-            emphasized_markdown_link(rest)
-        {
-            let source_target = link.target.trim();
-            let (label_bold, label_italic) = markdown_link_label_style(link.label);
-            out.push(MarkdownInlineSegment::MarkdownLink {
-                label: markdown_link_visible_label(link.label).to_string(),
-                source_target: source_target.to_string(),
-                target: md::rendered_link_target(source_target).map(str::to_string),
-                bold: outer_bold || label_bold,
-                italic: outer_italic || label_italic,
-            });
-            rest = &rest[consumed..];
-            continue;
-        }
-        if let Some(after) = rest.strip_prefix("***") {
-            if let Some(end) = after.find("***") {
-                out.push(MarkdownInlineSegment::BoldItalic(after[..end].to_string()));
-                rest = &after[end + 3..];
-                continue;
-            }
-        }
-        if let Some(after) = rest.strip_prefix("___") {
-            if let Some(end) = after.find("___") {
-                out.push(MarkdownInlineSegment::BoldItalic(after[..end].to_string()));
-                rest = &after[end + 3..];
-                continue;
-            }
-        }
-        if let Some(after) = rest.strip_prefix("**") {
-            if let Some(end) = after.find("**") {
-                out.push(MarkdownInlineSegment::Bold(after[..end].to_string()));
-                rest = &after[end + 2..];
-                continue;
-            }
-        }
-        if let Some(after) = rest.strip_prefix("__") {
-            if let Some(end) = after.find("__") {
-                out.push(MarkdownInlineSegment::Bold(after[..end].to_string()));
-                rest = &after[end + 2..];
-                continue;
-            }
-        }
-        if let Some((marker, after)) = ['*', '_']
-            .into_iter()
-            .find_map(|marker| rest.strip_prefix(marker).map(|after| (marker, after)))
-        {
-            if let Some(end) = after.find(marker) {
-                out.push(MarkdownInlineSegment::Italic(after[..end].to_string()));
-                rest = &after[end + marker.len_utf8()..];
+        // Emphasis may contain a link plus punctuation or surrounding prose.
+        // Keep child links structured so wrapping and hit testing retain them.
+        if depth < 32 {
+            if let Some((inner, consumed, bold, italic)) = markdown_emphasis(rest) {
+                for segment in parse_markdown_inline_line_at_depth(inner, depth + 1) {
+                    out.push(emphasize_inline_segment(segment, bold, italic));
+                }
+                rest = &rest[consumed..];
                 continue;
             }
         }
@@ -116,30 +81,91 @@ fn parse_markdown_inline_line(line: &str) -> Vec<MarkdownInlineSegment> {
     out
 }
 
-/// CommonMark permits emphasis around a complete link (`**[label](url)**`).
-/// Parse that form before the generic emphasis branches consume its interior
-/// as opaque text and leak the Markdown syntax into the rendered transcript.
-fn emphasized_markdown_link(
-    value: &str,
-) -> Option<(md::MarkdownLink<'_>, usize, bool, bool)> {
+fn markdown_emphasis(value: &str) -> Option<(&str, usize, bool, bool)> {
     [
-        ("***", "***", true, true),
-        ("___", "___", true, true),
-        ("**", "**", true, false),
-        ("__", "__", true, false),
-        ("*", "*", false, true),
-        ("_", "_", false, true),
+        ("***", true, true),
+        ("___", true, true),
+        ("**", true, false),
+        ("__", true, false),
+        ("*", false, true),
+        ("_", false, true),
     ]
     .into_iter()
-    .find_map(|(open, close, bold, italic)| {
-        let inner = value.strip_prefix(open)?;
-        let link = md::parse_markdown_link(inner)?;
-        let consumed = open.len() + link.consumed + close.len();
-        inner
-            .get(link.consumed..)?
-            .starts_with(close)
-            .then_some((link, consumed, bold, italic))
+    .find_map(|(marker, bold, italic)| {
+        let inner = value.strip_prefix(marker)?;
+        let mut offset = 0;
+        while offset < inner.len() {
+            let rest = &inner[offset..];
+            if rest.starts_with(marker) {
+                return Some((&inner[..offset], marker.len() * 2 + offset, bold, italic));
+            }
+            // Markers in a link label/destination, code, or an escape do not
+            // close the surrounding emphasis.
+            let consumed =
+                if let Some((_, consumed)) = md::backslash_escape_at_start(rest) {
+                    consumed
+                } else if let Some(link) = md::parse_markdown_link(rest) {
+                    link.consumed
+                } else if let Some(end) =
+                    rest.strip_prefix('`').and_then(|after| after.find('`'))
+                {
+                    end + 2
+                } else {
+                    rest.chars().next()?.len_utf8()
+                };
+            offset += consumed;
+        }
+        None
     })
+}
+
+fn emphasize_inline_segment(
+    segment: MarkdownInlineSegment,
+    bold: bool,
+    italic: bool,
+) -> MarkdownInlineSegment {
+    let (text, child_bold, child_italic) = match segment {
+        MarkdownInlineSegment::MarkdownLink {
+            label,
+            source_target,
+            target,
+            bold: child_bold,
+            italic: child_italic,
+        } => {
+            return MarkdownInlineSegment::MarkdownLink {
+                label,
+                source_target,
+                target,
+                bold: bold || child_bold,
+                italic: italic || child_italic,
+            }
+        }
+        MarkdownInlineSegment::PlainToken {
+            text,
+            target: Some(target),
+            ..
+        } => {
+            return MarkdownInlineSegment::MarkdownLink {
+                label: text,
+                source_target: target.clone(),
+                target: Some(target),
+                bold,
+                italic,
+            };
+        }
+        MarkdownInlineSegment::Text(text)
+        | MarkdownInlineSegment::PlainToken { text, .. } => (text, false, false),
+        MarkdownInlineSegment::Bold(text) => (text, true, false),
+        MarkdownInlineSegment::Italic(text) => (text, false, true),
+        MarkdownInlineSegment::BoldItalic(text) => (text, true, true),
+        other => return other,
+    };
+    match (bold || child_bold, italic || child_italic) {
+        (true, true) => MarkdownInlineSegment::BoldItalic(text),
+        (true, false) => MarkdownInlineSegment::Bold(text),
+        (false, true) => MarkdownInlineSegment::Italic(text),
+        (false, false) => MarkdownInlineSegment::Text(text),
+    }
 }
 
 fn next_agent_inline_marker(value: &str) -> Option<usize> {

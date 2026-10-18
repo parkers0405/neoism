@@ -83,6 +83,7 @@ mod tests {
     fn cursor(name: &str, color: [u8; 3], line: usize) -> MarkdownRemoteCursor {
         MarkdownRemoteCursor {
             name: name.to_string(),
+            client_os: None,
             color,
             rainbow: false,
             insert: false,

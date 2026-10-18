@@ -6,23 +6,33 @@ export type ConversationResult = NavigatorRow & { directory: string | null; meta
 const object = (v: unknown): Record<string, unknown> => v && typeof v === "object" ? v as Record<string, unknown> : {};
 const text = (v: unknown): string => typeof v === "string" ? v : "";
 
+export function conversationSearchIndexing(semantic: unknown): boolean {
+  return object(semantic).indexing === true;
+}
+
 /** Preserve full metadata independently of presentation and the visible catalog. */
 export function conversationSearchRows(sessions: unknown, semantic: unknown): ConversationResult[] {
   const root = object(sessions);
   const titles = Array.isArray(sessions) ? sessions : root.items ?? root.sessions ?? root.data;
-  const hits = object(semantic).hits;
+  const search = object(semantic);
+  const hits = search.hits;
+  const catalog = (Array.isArray(titles) ? titles : []).map(object);
+  const metadataById = new Map(catalog.map((item) => [text(item.id), item]));
+  // Ranked grouped results are authoritative, including an empty result. Titles
+  // only provide metadata; they must not insert/reorder matches ahead of hits.
+  const ranked = Array.isArray(hits) && search.available !== false;
   const results = new Map<string, ConversationResult>();
-  for (const raw of [...(Array.isArray(titles) ? titles : []), ...(Array.isArray(hits) ? hits : [])]) {
+  for (const raw of ranked ? hits : catalog) {
     const item = object(raw);
-    const id = text(item.session_id) || text(item.id);
-    if (!id) continue;
-    const prior = results.get(id);
-    const metadata = { ...prior?.metadata, ...item };
+    const id = text(item.sessionId) || text(item.session_id) || text(item.id);
+    if (!id || results.has(id)) continue;
+    const prior = metadataById.get(id);
+    const metadata = { ...prior, ...item };
     const directory = text(metadata.directory) || null;
     const source = text(metadata.source) || text(metadata.externalProvider) || "Neoism";
     const project = directory || text(metadata.projectID) || text(metadata.project_id);
-    results.set(id, { value: id, title: text(metadata.title) || prior?.title || "Untitled conversation",
-      description: text(metadata.excerpt) || project,
+    results.set(id, { value: id, title: text(metadata.title) || "Untitled conversation",
+      description: (text(metadata.snippet) || text(metadata.excerpt) || project).replace(/\s+/gu, " ").trim(),
       footer: [project, source, text(metadata.role)].filter(Boolean).join(" · "),
       is_current: false, is_disabled: false, directory, metadata });
   }

@@ -20,8 +20,11 @@ const MAX_CACHED_SESSIONS: usize = 40;
 /// subagent clocks) parked alongside the transcript. Mirrors desktop's
 /// `CachedAgentRuntime`.
 pub(in crate::panels::agent_pane::state) struct CachedAgentRuntime {
+    pub queue_handoff: status_policy::QueueHandoff,
+    pub prompt_admission: status_policy::PromptAdmission,
     pub queued_prompt_count: usize,
     pub queued_prompt_preview: Option<String>,
+    pub pending_compact: Option<String>,
     pub streaming_state: NeoismAgentStreamingState,
     pub streaming_started_at: Option<Instant>,
     pub streaming_state_changed_at: Option<Instant>,
@@ -37,8 +40,11 @@ pub(in crate::panels::agent_pane::state) struct CachedAgentRuntime {
 impl Default for CachedAgentRuntime {
     fn default() -> Self {
         Self {
+            queue_handoff: Default::default(),
+            prompt_admission: status_policy::PromptAdmission::default(),
             queued_prompt_count: 0,
             queued_prompt_preview: None,
+            pending_compact: None,
             streaming_state: NeoismAgentStreamingState::Idle,
             streaming_started_at: None,
             streaming_state_changed_at: None,
@@ -64,11 +70,24 @@ impl CachedAgentRuntime {
         tool: Option<String>,
     ) {
         if state == NeoismAgentStreamingState::Idle {
+            self.queue_handoff.empty_queue(
+                self.queued_prompt_count, self.queued_prompt_preview.as_deref(),
+            );
+        }
+        let (state, tool) = if self.queue_handoff.waiting() {
+            (NeoismAgentStreamingState::Generating, None)
+        } else {
+            (state, tool)
+        };
+        if state == NeoismAgentStreamingState::Compacting {
+            self.pending_compact = None;
+        }
+        if state == NeoismAgentStreamingState::Idle {
+            self.prompt_admission.settle();
             self.streaming_state = state;
             self.streaming_started_at = None;
             self.streaming_state_changed_at = None;
             self.streaming_tool_label = None;
-            self.abort_requested_at = None;
             return;
         }
         if self.streaming_started_at.is_none() {
@@ -85,9 +104,15 @@ impl CachedAgentRuntime {
         &mut self,
         messages: &[NeoismAgentMessage],
     ) {
+        if self.suppress_streaming_after_abort() {
+            return;
+        }
         let Some(tail) = messages.last() else {
             return;
         };
+        if !self.queue_handoff.stopped_parts.allows(&tail.id, None) {
+            return;
+        }
         let (state, tool) = match tail.kind {
             NeoismAgentMessageKind::Reasoning => {
                 (NeoismAgentStreamingState::Thinking, None)
@@ -114,17 +139,26 @@ impl CachedAgentRuntime {
         started_at: Option<u64>,
     ) {
         let decision = status_policy::queue_status_decision(
-            count,
-            preview,
+            self.prompt_admission.project(
+                count,
+                started_at.is_some(),
+                preview.as_deref(),
+            ),
+            self.prompt_admission.project_preview(preview),
             started_at,
             self.is_streaming(),
         );
+        self.pending_compact = None;
         self.queued_prompt_count = decision.count;
         self.queued_prompt_preview = decision.preview;
-        if decision.should_enter_generating {
+        self.reconcile_queue_handoff(decision.started_at, true, None);
+        if decision.should_enter_generating && !self.suppress_streaming_after_abort() {
             self.note_streaming(NeoismAgentStreamingState::Generating, None);
         }
-        if let Some(started_at) = decision.started_at {
+        if let Some(started_at) = decision
+            .started_at
+            .filter(|_| !self.suppress_streaming_after_abort())
+        {
             let started = instant_from_epoch_millis(started_at);
             self.streaming_started_at = Some(started);
             self.streaming_state_changed_at.get_or_insert(started);
@@ -620,7 +654,7 @@ impl NeoismAgentPane {
         self.session_cache.remove(session_id)
     }
 
-    fn cached_session_entry(&mut self, session_id: &str) -> &mut CachedAgentSession {
+    pub(super) fn cached_session_entry(&mut self, session_id: &str) -> &mut CachedAgentSession {
         self.session_cache
             .entry(session_id.to_string())
             .or_insert_with(CachedAgentSession::live_only)
@@ -653,6 +687,9 @@ impl NeoismAgentPane {
         &mut self,
     ) -> CachedAgentRuntime {
         CachedAgentRuntime {
+            queue_handoff: std::mem::take(&mut self.queue_handoff),
+            prompt_admission: std::mem::take(&mut self.prompt_admission),
+            pending_compact: self.pending_compact.take(),
             queued_prompt_count: std::mem::take(&mut self.queued_prompt_count),
             queued_prompt_preview: self.queued_prompt_preview.take(),
             streaming_state: std::mem::replace(
@@ -678,6 +715,9 @@ impl NeoismAgentPane {
         &mut self,
         runtime: CachedAgentRuntime,
     ) {
+        self.queue_handoff = runtime.queue_handoff;
+        self.prompt_admission = runtime.prompt_admission;
+        self.pending_compact = runtime.pending_compact;
         self.queued_prompt_count = runtime.queued_prompt_count;
         self.queued_prompt_preview = runtime.queued_prompt_preview;
         self.streaming_state = runtime.streaming_state;
@@ -796,9 +836,25 @@ impl NeoismAgentPane {
         session_id: &str,
         message: NeoismAgentMessage,
     ) {
+        self.cache_upsert_part_message_with_parent(session_id, message, None);
+    }
+
+    pub fn cache_upsert_part_message_with_parent(
+        &mut self,
+        session_id: &str,
+        message: NeoismAgentMessage,
+        parent_message_id: Option<&str>,
+    ) {
         let cached = self.cached_session_entry(session_id);
+        let can_drive = !matches!(message.kind, NeoismAgentMessageKind::User | NeoismAgentMessageKind::System)
+            && cached.runtime.queue_handoff.stopped_parts.observe(&message.id, parent_message_id);
+        if !can_drive && !matches!(message.kind, NeoismAgentMessageKind::User | NeoismAgentMessageKind::System) {
+            return;
+        }
         upsert_cached_part_message(&mut cached.messages, message);
-        cached.runtime.refresh_streaming_from_tail(&cached.messages);
+        if can_drive {
+            cached.runtime.refresh_streaming_from_tail(&cached.messages);
+        }
         cached.invalidate_timeline_layout();
         self.trim_session_cache();
     }
@@ -812,10 +868,27 @@ impl NeoismAgentPane {
         kind: Option<&str>,
         delta: &str,
     ) {
+        self.cache_apply_part_delta_with_parent(session_id, None, part_id, kind, delta);
+    }
+
+    pub fn cache_apply_part_delta_with_parent(
+        &mut self,
+        session_id: &str,
+        parent_message_id: Option<&str>,
+        part_id: Option<&str>,
+        kind: Option<&str>,
+        delta: &str,
+    ) {
         if delta.is_empty() {
             return;
         }
         let cached = self.cached_session_entry(session_id);
+        let can_drive = cached.runtime.queue_handoff.stopped_parts.observe(
+            part_id.unwrap_or_default(), parent_message_id,
+        );
+        if !can_drive {
+            return;
+        }
         apply_cached_part_delta(&mut cached.messages, part_id, kind, delta);
         cached.runtime.refresh_streaming_from_tail(&cached.messages);
         cached.invalidate_timeline_layout();
@@ -844,7 +917,9 @@ impl NeoismAgentPane {
         tool: Option<String>,
     ) {
         let cached = self.cached_session_entry(session_id);
-        cached.runtime.note_streaming(state, tool);
+        if state == NeoismAgentStreamingState::Idle || !cached.runtime.suppress_streaming_after_abort() {
+            cached.runtime.note_streaming(state, tool);
+        }
         cached.last_access = Instant::now();
         self.trim_session_cache();
     }
@@ -857,6 +932,38 @@ impl NeoismAgentPane {
                 .runtime
                 .note_streaming(NeoismAgentStreamingState::Idle, None);
             cached.last_access = Instant::now();
+        }
+    }
+
+    /// Queue-only admission notification for an inactive session.
+    pub fn cache_note_compaction_queued(&mut self, session_id: &str) {
+        let runtime = &mut self.cached_session_entry(session_id).runtime;
+        runtime.queued_prompt_count = runtime.queued_prompt_count.max(1);
+        if runtime.queued_prompt_preview.is_none() {
+            runtime.queued_prompt_preview = Some("Compaction queued".to_string());
+        }
+        if runtime.queued_prompt_preview.as_deref() == Some("Compaction queued") {
+            runtime.pending_compact = None;
+        }
+    }
+
+    /// Finish only the compaction state, preserving any newer stream evidence.
+    pub fn cache_note_compaction_ended(
+        &mut self,
+        session_id: &str,
+        run_continues: Option<bool>,
+    ) {
+        let runtime = &mut self.cached_session_entry(session_id).runtime;
+        runtime.pending_compact = None;
+        if runtime.streaming_state == NeoismAgentStreamingState::Compacting {
+            runtime.note_streaming(
+                if run_continues == Some(true) {
+                    NeoismAgentStreamingState::Generating
+                } else {
+                    NeoismAgentStreamingState::Idle
+                },
+                None,
+            );
         }
     }
 

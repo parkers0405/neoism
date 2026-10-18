@@ -58,6 +58,7 @@ pub mod event_type {
     pub const PTY_UPDATED: &str = "pty.updated";
     pub const PTY_DELETED: &str = "pty.deleted";
     pub const PTY_EXITED: &str = "pty.exited";
+    pub const SESSION_COMPACTION_QUEUED: &str = "session.compaction.queued";
     pub const SESSION_COMPACTION_STARTED: &str = "session.next.compaction.started";
     pub const SESSION_COMPACTION_DELTA: &str = "session.next.compaction.delta";
     pub const SESSION_COMPACTION_ENDED: &str = "session.next.compaction.ended";
@@ -67,6 +68,7 @@ pub mod event_type {
     pub const SESSION_DELETED: &str = "session.deleted";
     pub const SESSION_ERROR: &str = "session.error";
     pub const SESSION_CATALOG_ACTIVITY: &str = "session.catalog.activity";
+    pub const SESSION_CATALOG_FAMILY: &str = "session.catalog.family";
     pub const SESSION_EXECUTION_UPDATED: &str = "session.execution.updated";
     pub const SESSION_BACKGROUND_TASKS_UPDATED: &str = "session.background_tasks.updated";
     pub const SESSION_BACKGROUND_TASK_COMPLETED: &str =
@@ -101,6 +103,7 @@ pub mod event_type {
         PTY_UPDATED,
         PTY_DELETED,
         PTY_EXITED,
+        SESSION_COMPACTION_QUEUED,
         SESSION_COMPACTION_STARTED,
         SESSION_COMPACTION_DELTA,
         SESSION_COMPACTION_ENDED,
@@ -110,6 +113,7 @@ pub mod event_type {
         SESSION_DELETED,
         SESSION_ERROR,
         SESSION_CATALOG_ACTIVITY,
+        SESSION_CATALOG_FAMILY,
         SESSION_EXECUTION_UPDATED,
         SESSION_BACKGROUND_TASKS_UPDATED,
         SESSION_BACKGROUND_TASK_COMPLETED,

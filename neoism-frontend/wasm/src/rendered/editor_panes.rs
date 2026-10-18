@@ -953,6 +953,8 @@ impl ChromeBridge {
             color: [u8; 3],
             #[serde(default)]
             rainbow: bool,
+            #[serde(default)]
+            client_os: Option<String>,
             #[serde(default = "wire_cursor_insert_default")]
             insert: bool,
             line: usize,
@@ -969,6 +971,7 @@ impl ChromeBridge {
                     name: c.name,
                     color: c.color,
                     rainbow: c.rainbow,
+                    client_os: c.client_os,
                     insert: c.insert,
                     line: c.line,
                     col_utf16: c.col_utf16,

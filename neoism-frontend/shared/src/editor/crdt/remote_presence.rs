@@ -80,6 +80,7 @@ pub fn peer_presence_from_wire(presence: CrdtPeerPresence) -> PeerPresence {
         buffer_id: presence.buffer_id,
         peer_id: presence.peer_id,
         display_name: presence.display_name,
+        client_os: presence.client_os,
         color: PresenceColor {
             r: presence.color.r,
             g: presence.color.g,
@@ -98,6 +99,7 @@ pub fn peer_presence_to_wire(presence: PeerPresence) -> CrdtPeerPresence {
         buffer_id: presence.buffer_id,
         peer_id: presence.peer_id,
         display_name: presence.display_name,
+        client_os: presence.client_os,
         color: CrdtPresenceColor {
             r: presence.color.r,
             g: presence.color.g,
@@ -343,6 +345,7 @@ impl RemotePresenceStore {
 pub struct PresenceAvatarPeer {
     pub peer_id: String,
     pub display_name: String,
+    pub client_os: Option<String>,
     pub color: [u8; 3],
     pub rainbow: bool,
 }
@@ -351,6 +354,7 @@ fn avatar_peer_from(presence: &PeerPresence) -> PresenceAvatarPeer {
     PresenceAvatarPeer {
         peer_id: presence.peer_id.clone(),
         display_name: presence.display_name.clone(),
+        client_os: presence.client_os.clone(),
         color: [presence.color.r, presence.color.g, presence.color.b],
         rainbow: presence.rainbow,
     }
@@ -390,6 +394,7 @@ struct PublishedState {
 pub struct PresencePublisher {
     peer_id: PresencePeerId,
     display_name: String,
+    client_os: Option<String>,
     color: PresenceColor,
     rainbow: bool,
     min_interval_ms: u64,
@@ -412,6 +417,7 @@ impl PresencePublisher {
             color: stable_presence_color(&peer_id),
             peer_id,
             display_name: display_name.into(),
+            client_os: None,
             rainbow: false,
             min_interval_ms: PRESENCE_PUBLISH_MIN_INTERVAL_MS,
             heartbeat_interval_ms: PRESENCE_HEARTBEAT_INTERVAL_MS,
@@ -433,6 +439,17 @@ impl PresencePublisher {
     /// to stream an animation).
     pub fn set_rainbow(&mut self, rainbow: bool) {
         self.rainbow = rainbow;
+    }
+
+    /// Set client-reported OS metadata. Native hosts supply their OS; web
+    /// hosts detect the browser client OS in JavaScript, not the wasm target.
+    /// Changes propagate on the next publish, including idle heartbeats.
+    pub fn set_client_os(&mut self, client_os: Option<String>) {
+        self.client_os = client_os;
+    }
+
+    pub fn client_os(&self) -> Option<&str> {
+        self.client_os.as_deref()
     }
 
     #[must_use]
@@ -511,6 +528,7 @@ impl PresencePublisher {
                             buffer_id: next.buffer_id.clone(),
                             peer_id: self.peer_id.clone(),
                             display_name: self.display_name.clone(),
+                            client_os: self.client_os.clone(),
                             color: self.color,
                             cursor: next.cursor,
                             selection: next.selection,
@@ -542,6 +560,7 @@ mod tests {
             buffer_id: buffer_id.into(),
             peer_id: peer_id.into(),
             display_name: peer_id.to_uppercase(),
+            client_os: None,
             color: CrdtPresenceColor { r: 1, g: 2, b: 3 },
             cursor: CrdtCursorPosition {
                 line,
@@ -717,6 +736,61 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn client_os_roundtrips_and_survives_snapshot_and_avatar_projections() {
+        for client_os in [
+            None,
+            Some("macos".to_string()),
+            Some("future-os".to_string()),
+        ] {
+            let mut wire = wire_presence("buf-a", "alice", 3, 10);
+            wire.client_os = client_os.clone();
+            let shared = peer_presence_from_wire(wire.clone());
+            assert_eq!(shared.client_os, client_os);
+            assert_eq!(peer_presence_to_wire(shared), wire);
+
+            let mut store = RemotePresenceStore::new();
+            store.apply_server_message(&CrdtServerMessage::PresenceSnapshot {
+                buffer_id: "buf-a".into(),
+                peers: vec![wire],
+            });
+            assert_eq!(
+                store.cursors_for("buf-a").next().unwrap().client_os,
+                client_os
+            );
+            assert_eq!(store.avatar_peers()[0].client_os, client_os);
+            assert_eq!(store.avatar_peers_by_buffer()[0].1[0].client_os, client_os);
+
+            let mut changed = wire_presence("buf-a", "alice", 3, 10);
+            changed.client_os = Some("windows".into());
+            assert!(store.apply_server_message(&upsert(changed)));
+            assert_eq!(
+                store.avatar_peers()[0].client_os.as_deref(),
+                Some("windows")
+            );
+        }
+    }
+
+    #[test]
+    fn publisher_client_os_defaults_unknown_and_tracks_metadata_changes() {
+        let mut publisher = PresencePublisher::new("me", "My Laptop");
+        assert_eq!(publisher.client_os(), None);
+        let first = publisher.tick(Some(("buf-a", cursor(0, 0), None, false)), 1_000);
+        assert_eq!(published(&first)[0].client_os, None);
+
+        publisher.set_client_os(Some("linux".into()));
+        assert_eq!(publisher.client_os(), Some("linux"));
+        let heartbeat = publisher.tick(
+            Some(("buf-a", cursor(0, 0), None, false)),
+            1_000 + PRESENCE_HEARTBEAT_INTERVAL_MS,
+        );
+        assert_eq!(published(&heartbeat)[0].client_os.as_deref(), Some("linux"));
+
+        publisher.set_client_os(None);
+        let switched = publisher.tick(Some(("buf-b", cursor(0, 0), None, false)), 6_000);
+        assert_eq!(published(&switched)[0].client_os, None);
     }
 
     #[test]

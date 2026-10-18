@@ -172,37 +172,27 @@ pub(crate) async fn handle_search_threads(
         (json!([]), json!({"hits": []}), None)
     } else {
         let encoded = percent_encode(needle);
-        let titles = format!("/v2/sessions?roots=true&limit=100&search={encoded}");
-        let content =
-            format!("/v2/plugins/dev.neoism.semantic/search?q={encoded}&limit=100");
-        let (a, b) = tokio::join!(
-            http_get_json(&inner, &titles),
-            http_get_json(&inner, &content)
-        );
-        let error = match (&a, &b) {
-            (Err(a), Err(b)) => Some(format!("Search unavailable: {a}; {b}")),
-            (_, Err(b)) => Some(format!("Message search unavailable: {b}")),
-            (Err(a), _) => Some(format!("Title search unavailable: {a}")),
-            _ => None,
-        };
-        let mut semantic = b.unwrap_or(Value::Null);
+        let content = format!("/v2/plugins/dev.neoism.semantic/search?q={encoded}&limit=20&conversation=true");
+        let result = http_get_json(&inner, &content).await;
+        let error = result.as_ref().err().map(|error| format!("Search unavailable: {error}"));
+        let mut semantic = result.unwrap_or(Value::Null);
         if let Some(hits) = semantic.get_mut("hits").and_then(Value::as_array_mut) {
             let mut metadata = std::collections::HashMap::new();
             for hit in hits.iter_mut() {
                 let Some(id) = hit
-                    .get("session_id")
+                    .get("sessionId")
+                    .or_else(|| hit.get("session_id"))
                     .and_then(Value::as_str)
                     .map(str::to_owned)
                 else {
                     continue;
                 };
                 if !metadata.contains_key(&id) {
-                    let detail = http_get_json(
-                        &inner,
-                        &format!("/v2/sessions/{}", percent_encode(&id)),
-                    )
-                    .await
-                    .ok();
+                    let detail = if let Some(session) = hit.get("session").filter(|value| value.is_object()) {
+                        Some(session.clone())
+                    } else {
+                        http_get_json(&inner, &format!("/v2/sessions/{}", percent_encode(&id))).await.ok()
+                    };
                     metadata.insert(id.clone(), detail);
                 }
                 if let (Some(Some(detail)), Some(hit)) =
@@ -222,7 +212,7 @@ pub(crate) async fn handle_search_threads(
                 }
             }
         }
-        (a.unwrap_or(Value::Null), semantic, error)
+        (json!([]), semantic, error)
     };
     let _ = inner.tx.send(AgentServerMessage::ThreadSearchResult {
         generation,
@@ -1766,13 +1756,26 @@ pub(crate) async fn push_session_running_state(
     let Some(value) = fetch_session_statuses(&inner).await else {
         return;
     };
-    let Some(status) = value.get(&session_id) else {
-        return;
-    };
-    let Some(message) = running_state_message(session_id, status) else {
-        return;
-    };
+    // Idle sessions may be omitted from the status map. Still send an exact
+    // queue snapshot so reconnect reconciles local admission feedback, without
+    // inventing an Idle lifecycle edge over newer stream evidence.
+    let message = session_queue_hydration_message(session_id.clone(), value.get(&session_id));
     let _ = inner.tx.send(message);
+}
+
+fn session_queue_hydration_message(session_id: String, status: Option<&Value>) -> AgentServerMessage {
+    if let Some(message) = status.and_then(|status| running_state_message(session_id.clone(), status)) {
+        return message;
+    }
+    let (count, preview) = neoism_ui::panels::agent_pane::stream_events::queue_snapshot_fields(
+        status.and_then(|status| status.get("queue")).unwrap_or(&Value::Null),
+    );
+    AgentServerMessage::QueueUpdate {
+        session_id,
+        count: count as u32,
+        preview,
+        started_at: None,
+    }
 }
 
 pub(crate) fn running_state_message(
@@ -1786,17 +1789,14 @@ pub(crate) fn running_state_message(
     // metadata and clock, and let actual transcript parts promote Crafting to
     // Pondering/Tinkering. Claiming Working here made reconnect invent tool
     // activity that never happened.
-    let queue = status.get("queue");
+    let (count, preview) =
+        neoism_ui::panels::agent_pane::stream_events::queue_snapshot_fields(
+            status.get("queue").unwrap_or(&Value::Null),
+        );
     Some(AgentServerMessage::QueueUpdate {
         session_id,
-        count: queue
-            .and_then(|queue| queue.get("count"))
-            .and_then(Value::as_u64)
-            .unwrap_or(0) as u32,
-        preview: queue
-            .and_then(|queue| queue.get("preview"))
-            .and_then(Value::as_str)
-            .map(str::to_string),
+        count: count as u32,
+        preview,
         started_at: status
             .get("startedAt")
             .or_else(|| status.get("started"))
@@ -2255,11 +2255,29 @@ pub(crate) async fn handle_start_subagent(
 
 // -- Maintenance ------------------------------------------------------------
 
-pub(crate) async fn handle_compact(inner: Arc<AgentInner>, session_id: String) {
+pub(crate) async fn handle_compact(
+    inner: Arc<AgentInner>,
+    session_id: String,
+    request_id: Option<String>,
+) {
     if let Err(err) =
         post_no_body(&inner, &format!("/v2/sessions/{session_id}/compact")).await
     {
-        emit_error(&inner.tx, err);
+        if let Some(request_id) = request_id {
+            let _ = inner.tx.send(AgentServerMessage::SessionEvent {
+                session_id: session_id.clone(),
+                kind: "session.compaction.admission.failed".into(),
+                properties: json!({ "requestID": request_id }),
+            });
+        }
+        // Admission failure belongs to the origin, not whichever chat the
+        // client happens to be viewing when this HTTP request completes.
+        let _ = inner.tx.send(AgentServerMessage::Notice {
+            session_id,
+            title: "Compaction failed".into(),
+            body: err,
+            level: neoism_protocol::agent::NoticeLevel::Error,
+        });
     }
 }
 
@@ -2455,6 +2473,24 @@ mod canonical_route_tests {
             session_list_path(Some("/tmp/my project"), 50, Some("v1:42:ses_1")),
             "/v2/sessions?roots=true&limit=50&directory=%2Ftmp%2Fmy%20project&cursor=v1%3A42%3Ases_1"
         );
+    }
+
+    #[test]
+    fn idle_status_hydration_reconciles_queue_without_a_lifecycle_edge() {
+        assert!(matches!(
+            super::session_queue_hydration_message("origin".into(), None),
+            AgentServerMessage::QueueUpdate {
+                session_id, count: 0, preview: None, started_at: None,
+            } if session_id == "origin"
+        ));
+        assert!(matches!(
+            super::session_queue_hydration_message("origin".into(), Some(&json!({
+                "type": "idle", "queue": { "count": 2, "preview": "ordinary" }
+            }))),
+            AgentServerMessage::QueueUpdate {
+                count: 2, preview: Some(preview), started_at: None, ..
+            } if preview == "ordinary"
+        ));
     }
 
     #[test]

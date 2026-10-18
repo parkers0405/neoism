@@ -1,0 +1,1 @@
+{"category":"event-reduction","description":"Repair a private synthetic repository event reducer with replay, version ordering and tombstone semantics.","id":"repo-event-reducer","suite":"repository","timeout_seconds":600,"verifier_timeout_seconds":60}

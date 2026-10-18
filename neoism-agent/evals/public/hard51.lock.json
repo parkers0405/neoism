@@ -1,0 +1,577 @@
+{
+  "checksums_sha256": "9d84f8507c89241d42d8b3ef911600a1ec75dbbb32687ce9b45b93318502c0bd",
+  "dataset": {
+    "checksums_file": "v2/SHA256SUMS",
+    "commit": "66f92766bba642462d4bbe5479e83f91f9211862",
+    "expected_tasks": 51,
+    "name": "SWE-bench Pro V2 HARD-51",
+    "repository": "https://github.com/scaleapi/SWE-bench_Pro-os.git",
+    "subset_file": "v2/hard51_ids.txt",
+    "task_directory": "v2/tasks"
+  },
+  "subset_sha256": "6e35e84708a26443e1746ae928940555a3188654c90f3a2eb691f4f699482bd1",
+  "tasks": [
+    {
+      "id": "instance_NodeBB__NodeBB-8168c6c40707478f71b8af60300830fe554c778c-vf2cf3cbd463b7ad942381f1c6d077626485a1e9e",
+      "image_tag": "ghcr.io/scaleapi/swe-bench_pro-v2:instance_NodeBB__NodeBB-8168c6c40707478f71b8af60300830fe554c778c-vf2cf3cbd463b7ad942381f1c6d077626485a1e9e",
+      "instruction_sha256": "52de1203b5077923e832ebc37bd73e5a51bff564f027fd89bb4a6558540a5971",
+      "resources": {
+        "cpus": 1,
+        "memory_mb": 4096,
+        "storage_mb": 10240
+      },
+      "task_toml_sha256": "db729b373648ee7f24d8dd66ed777c40aef55458562fb60d156b02d9e6d833cc"
+    },
+    {
+      "id": "instance_ansible__ansible-40ade1f84b8bb10a63576b0ac320c13f57c87d34-v6382ea168a93d80a64aab1fbd8c4f02dc5ada5bf",
+      "image_tag": "ghcr.io/scaleapi/swe-bench_pro-v2:instance_ansible__ansible-40ade1f84b8bb10a63576b0ac320c13f57c87d34-v6382ea168a93d80a64aab1fbd8c4f02dc5ada5bf",
+      "instruction_sha256": "b29415050a1a07795fb0c1440322e6c641c36176b53d339ad47578f06c3b5ebe",
+      "resources": {
+        "cpus": 1,
+        "memory_mb": 4096,
+        "storage_mb": 10240
+      },
+      "task_toml_sha256": "6f1785dcd2155ef84c9c66b621d6828b60645b84111ac170f8abf178e0edae49"
+    },
+    {
+      "id": "instance_ansible__ansible-b748edea457a4576847a10275678127895d2f02f-v1055803c3a812189a1133297f7f5468579283f86",
+      "image_tag": "ghcr.io/scaleapi/swe-bench_pro-v2:instance_ansible__ansible-b748edea457a4576847a10275678127895d2f02f-v1055803c3a812189a1133297f7f5468579283f86",
+      "instruction_sha256": "1af88816c11462de0d2cfd5157e855c7c50db006e794521c658d0c9be106e8ec",
+      "resources": {
+        "cpus": 1,
+        "memory_mb": 4096,
+        "storage_mb": 10240
+      },
+      "task_toml_sha256": "ae8ae532b7c91894c019f46bddf1c615b0a1cf3271b8b46f11ad5950b820eb3e"
+    },
+    {
+      "id": "instance_ansible__ansible-c1f2df47538b884a43320f53e787197793b105e8-v906c969b551b346ef54a2c0b41e04f632b7b73c2",
+      "image_tag": "ghcr.io/scaleapi/swe-bench_pro-v2:instance_ansible__ansible-c1f2df47538b884a43320f53e787197793b105e8-v906c969b551b346ef54a2c0b41e04f632b7b73c2",
+      "instruction_sha256": "b8c3df7e7877544a1480fe209c88d879b3ec55382922429c16115e3c2302c7d9",
+      "resources": {
+        "cpus": 1,
+        "memory_mb": 4096,
+        "storage_mb": 10240
+      },
+      "task_toml_sha256": "b0cfa71c0f1cf40384d839ef884809ef5983c4cf3d6d2b6ffd23189074d1fe5a"
+    },
+    {
+      "id": "instance_ansible__ansible-d33bedc48fdd933b5abd65a77c081876298e2f07-v0f01c69f1e2528b935359cfe578530722bca2c59",
+      "image_tag": "ghcr.io/scaleapi/swe-bench_pro-v2:instance_ansible__ansible-d33bedc48fdd933b5abd65a77c081876298e2f07-v0f01c69f1e2528b935359cfe578530722bca2c59",
+      "instruction_sha256": "5379b1581e024fcf9ba14d29f6b6a7821031a17e1ed0d20b4141aa50c3c282d2",
+      "resources": {
+        "cpus": 1,
+        "memory_mb": 4096,
+        "storage_mb": 10240
+      },
+      "task_toml_sha256": "1a3c8842c8c8a1d527a943c6a7464f3a51c6cda01a509060d02caff3c5d24034"
+    },
+    {
+      "id": "instance_ansible__ansible-d62496fe416623e88b90139dc7917080cb04ce70-v0f01c69f1e2528b935359cfe578530722bca2c59",
+      "image_tag": "ghcr.io/scaleapi/swe-bench_pro-v2:instance_ansible__ansible-d62496fe416623e88b90139dc7917080cb04ce70-v0f01c69f1e2528b935359cfe578530722bca2c59",
+      "instruction_sha256": "e8538e435727e8f24bed64ba8ae84878fe6c876509d5176568c057777a8950b6",
+      "resources": {
+        "cpus": 1,
+        "memory_mb": 4096,
+        "storage_mb": 10240
+      },
+      "task_toml_sha256": "55393fa8edc09c1a4ed7b7db00bfae191e56d89ddab430f0212578be206a7d80"
+    },
+    {
+      "id": "instance_ansible__ansible-d72025be751c894673ba85caa063d835a0ad3a8c-v390e508d27db7a51eece36bb6d9698b63a5b638a",
+      "image_tag": "ghcr.io/scaleapi/swe-bench_pro-v2:instance_ansible__ansible-d72025be751c894673ba85caa063d835a0ad3a8c-v390e508d27db7a51eece36bb6d9698b63a5b638a",
+      "instruction_sha256": "2ff23898524d5dcdf614f7a335fac456778aaac3954e5331cb7e5f53f2da3224",
+      "resources": {
+        "cpus": 1,
+        "memory_mb": 4096,
+        "storage_mb": 10240
+      },
+      "task_toml_sha256": "fcbfd8d6429181a201681b00a093632b9aa1f427929e47feb636858342702d0c"
+    },
+    {
+      "id": "instance_ansible__ansible-de5858f48dc9e1ce9117034e0d7e76806f420ca8-v1055803c3a812189a1133297f7f5468579283f86",
+      "image_tag": "ghcr.io/scaleapi/swe-bench_pro-v2:instance_ansible__ansible-de5858f48dc9e1ce9117034e0d7e76806f420ca8-v1055803c3a812189a1133297f7f5468579283f86",
+      "instruction_sha256": "29c2d716704de616f08a8631814ff5869fa778d284a61420481e209375c1b016",
+      "resources": {
+        "cpus": 1,
+        "memory_mb": 4096,
+        "storage_mb": 10240
+      },
+      "task_toml_sha256": "e5d213a440a621fd48af37dfb15a6a11b03ce7e4b174a1aabf4e93e299a813bd"
+    },
+    {
+      "id": "instance_ansible__ansible-e9e6001263f51103e96e58ad382660df0f3d0e39-v30a923fb5c164d6cd18280c02422f75e611e8fb2",
+      "image_tag": "ghcr.io/scaleapi/swe-bench_pro-v2:instance_ansible__ansible-e9e6001263f51103e96e58ad382660df0f3d0e39-v30a923fb5c164d6cd18280c02422f75e611e8fb2",
+      "instruction_sha256": "23dd37e1ec4b5116d90b05b62398132c95a51c1b0f486961dbc35ebc33645f6f",
+      "resources": {
+        "cpus": 1,
+        "memory_mb": 4096,
+        "storage_mb": 10240
+      },
+      "task_toml_sha256": "3278aaa1e18871ae4bc1615aa0099d76233fc2b508b285954591ba8557c78e7f"
+    },
+    {
+      "id": "instance_element-hq__element-web-5dfde12c1c1c0b6e48f17e3405468593e39d9492-vnan",
+      "image_tag": "ghcr.io/scaleapi/swe-bench_pro-v2:instance_element-hq__element-web-5dfde12c1c1c0b6e48f17e3405468593e39d9492-vnan",
+      "instruction_sha256": "fc3412996cd956cb5a422d7126fe1a9850172a0933515b0e96a47868782c76c5",
+      "resources": {
+        "cpus": 1,
+        "memory_mb": 4096,
+        "storage_mb": 10240
+      },
+      "task_toml_sha256": "ec4359000ede68e1fd844716651f6c686392e8a1f6fb975a834a83685d41c319"
+    },
+    {
+      "id": "instance_element-hq__element-web-66d0b318bc6fee0d17b54c1781d6ab5d5d323135-vnan",
+      "image_tag": "ghcr.io/scaleapi/swe-bench_pro-v2:instance_element-hq__element-web-66d0b318bc6fee0d17b54c1781d6ab5d5d323135-vnan",
+      "instruction_sha256": "99940e870b59ff2f25ed8f4dd3c0dd87b37934a7de94e30c088c9fd0b6ec019c",
+      "resources": {
+        "cpus": 1,
+        "memory_mb": 4096,
+        "storage_mb": 10240
+      },
+      "task_toml_sha256": "363c91019d044cb42d917e5f4ed194527477dd6eee3f6bf2f7463be76cbf8222"
+    },
+    {
+      "id": "instance_element-hq__element-web-772df3021201d9c73835a626df8dcb6334ad9a3e-vnan",
+      "image_tag": "ghcr.io/scaleapi/swe-bench_pro-v2:instance_element-hq__element-web-772df3021201d9c73835a626df8dcb6334ad9a3e-vnan",
+      "instruction_sha256": "65160c88a09bb5827f02fa4d66ef428f0d9eaff8d0bef4f7f485b4bf14d17105",
+      "resources": {
+        "cpus": 1,
+        "memory_mb": 4096,
+        "storage_mb": 10240
+      },
+      "task_toml_sha256": "b12106d88724b24434263a863b5d87f293229a6d5a9d22197c0838a0d61d52e0"
+    },
+    {
+      "id": "instance_element-hq__element-web-ecfd1736e5dd9808e87911fc264e6c816653e1a9-vnan",
+      "image_tag": "ghcr.io/scaleapi/swe-bench_pro-v2:instance_element-hq__element-web-ecfd1736e5dd9808e87911fc264e6c816653e1a9-vnan",
+      "instruction_sha256": "ee9ae5cb0ceb125bc9ff635c1ae90cc8b7933903f0fa8b1e7fdf073e83855d18",
+      "resources": {
+        "cpus": 1,
+        "memory_mb": 4096,
+        "storage_mb": 10240
+      },
+      "task_toml_sha256": "35087aa878dad175a19de745d53aab2972f11acf558750e369208d0e646e4a0a"
+    },
+    {
+      "id": "instance_flipt-io__flipt-2ca5dfb3513e4e786d2b037075617cccc286d5c3",
+      "image_tag": "ghcr.io/scaleapi/swe-bench_pro-v2:instance_flipt-io__flipt-2ca5dfb3513e4e786d2b037075617cccc286d5c3",
+      "instruction_sha256": "bb81e79521bc3cbd9271c6db7e2c8cb4617336a0193103e438f52503d2d18021",
+      "resources": {
+        "cpus": 1,
+        "memory_mb": 4096,
+        "storage_mb": 10240
+      },
+      "task_toml_sha256": "a4db2493655a30e52bd2e231d8662a4788c24c0f9b854d6a5a81024a7bad5ac5"
+    },
+    {
+      "id": "instance_flipt-io__flipt-3d5a345f94c2adc8a0eaa102c189c08ad4c0f8e8",
+      "image_tag": "ghcr.io/scaleapi/swe-bench_pro-v2:instance_flipt-io__flipt-3d5a345f94c2adc8a0eaa102c189c08ad4c0f8e8",
+      "instruction_sha256": "181f6a603193b804da53ab74e4904851b9581c1216f88ceae1584858177c2581",
+      "resources": {
+        "cpus": 1,
+        "memory_mb": 4096,
+        "storage_mb": 10240
+      },
+      "task_toml_sha256": "7ab9ec62923117eaf5a2df8e86869fe440677929d194dbce445709048036ce0d"
+    },
+    {
+      "id": "instance_flipt-io__flipt-524f277313606f8cd29b299617d6565c01642e15",
+      "image_tag": "ghcr.io/scaleapi/swe-bench_pro-v2:instance_flipt-io__flipt-524f277313606f8cd29b299617d6565c01642e15",
+      "instruction_sha256": "2d4722ba7655e8d0ca06b89aff9ec597976324aea86b43dbd7af046b10658bbe",
+      "resources": {
+        "cpus": 1,
+        "memory_mb": 4096,
+        "storage_mb": 10240
+      },
+      "task_toml_sha256": "0efaf742f4ea48b5adc022ac17ebe33ad2d34246a619e8ca4c2c87b1f1fece27"
+    },
+    {
+      "id": "instance_flipt-io__flipt-c1728053367c753688f114ec26e703c8fdeda125",
+      "image_tag": "ghcr.io/scaleapi/swe-bench_pro-v2:instance_flipt-io__flipt-c1728053367c753688f114ec26e703c8fdeda125",
+      "instruction_sha256": "8687ad7f16f047248d98bc08ba4f0839bfafda05d9dcb99a9c7821a2dbdc882e",
+      "resources": {
+        "cpus": 1,
+        "memory_mb": 4096,
+        "storage_mb": 10240
+      },
+      "task_toml_sha256": "ddc6954d14e8fcdcfec8215f677acd33b755ea9d880ce883c2c71a4d4a5acada"
+    },
+    {
+      "id": "instance_flipt-io__flipt-c188284ff0c094a4ee281afebebd849555ebee59",
+      "image_tag": "ghcr.io/scaleapi/swe-bench_pro-v2:instance_flipt-io__flipt-c188284ff0c094a4ee281afebebd849555ebee59",
+      "instruction_sha256": "2118c192eb59efef24b7b009d85e34a0b5dc3ce7cc11222446901d0325dbe556",
+      "resources": {
+        "cpus": 1,
+        "memory_mb": 4096,
+        "storage_mb": 10240
+      },
+      "task_toml_sha256": "ee3beaad7b161072cc51eeb549a47e9630d79c9083c7528005be1e6be0d66209"
+    },
+    {
+      "id": "instance_flipt-io__flipt-cd18e54a0371fa222304742c6312e9ac37ea86c1",
+      "image_tag": "ghcr.io/scaleapi/swe-bench_pro-v2:instance_flipt-io__flipt-cd18e54a0371fa222304742c6312e9ac37ea86c1",
+      "instruction_sha256": "2309d9d2d04455c1575a2aa75311dfeab1b036706af5bb3539b0287a48a77153",
+      "resources": {
+        "cpus": 1,
+        "memory_mb": 4096,
+        "storage_mb": 10240
+      },
+      "task_toml_sha256": "36bc4f688bb4d31777d574155482479435274060bce41dd63a66b210058ca55e"
+    },
+    {
+      "id": "instance_flipt-io__flipt-e2bd19dafa7166c96b082fb2a59eb54b4be0d778",
+      "image_tag": "ghcr.io/scaleapi/swe-bench_pro-v2:instance_flipt-io__flipt-e2bd19dafa7166c96b082fb2a59eb54b4be0d778",
+      "instruction_sha256": "e5512437ab8ccfe0cf52fc4d86781db8987006f6cdb12c0047b8d789b4369ad7",
+      "resources": {
+        "cpus": 1,
+        "memory_mb": 4096,
+        "storage_mb": 10240
+      },
+      "task_toml_sha256": "74a0079963c7a78edbead65ec210283fa6a68c1787a636e0e704dcd0eeefaf99"
+    },
+    {
+      "id": "instance_future-architect__vuls-5af1a227339e46c7abf3f2815e4c636a0c01098e",
+      "image_tag": "ghcr.io/scaleapi/swe-bench_pro-v2:instance_future-architect__vuls-5af1a227339e46c7abf3f2815e4c636a0c01098e",
+      "instruction_sha256": "af6603b670df6eedfb4f9748597f3c13516f2c739d8c2a6a82780415d3a8ed28",
+      "resources": {
+        "cpus": 1,
+        "memory_mb": 4096,
+        "storage_mb": 10240
+      },
+      "task_toml_sha256": "f28e6d55df23044b8d87723c9cdbed141ffed63c588ab0b5edffc7413d2cb248"
+    },
+    {
+      "id": "instance_future-architect__vuls-ca3f6b1dbf2cd24d1537bfda43e788443ce03a0c",
+      "image_tag": "ghcr.io/scaleapi/swe-bench_pro-v2:instance_future-architect__vuls-ca3f6b1dbf2cd24d1537bfda43e788443ce03a0c",
+      "instruction_sha256": "64de849ef2cf3fc8bb7002e452f54d0c5f36a1557f5d24a997bd888dba3bdfbe",
+      "resources": {
+        "cpus": 1,
+        "memory_mb": 4096,
+        "storage_mb": 10240
+      },
+      "task_toml_sha256": "92bdd6151bfe0b0b541e0ed6f5462a2e3dd99ff92fbbd8df46559571d1677762"
+    },
+    {
+      "id": "instance_future-architect__vuls-e1fab805afcfc92a2a615371d0ec1e667503c254-v264a82e2f4818e30f5a25e4da53b27ba119f62b5",
+      "image_tag": "ghcr.io/scaleapi/swe-bench_pro-v2:instance_future-architect__vuls-e1fab805afcfc92a2a615371d0ec1e667503c254-v264a82e2f4818e30f5a25e4da53b27ba119f62b5",
+      "instruction_sha256": "3474a617e50efa037af5457ac534b647834c8c94cce87b34e4e7f5f1ff36ac3f",
+      "resources": {
+        "cpus": 1,
+        "memory_mb": 4096,
+        "storage_mb": 10240
+      },
+      "task_toml_sha256": "9b14cba26c4241c330f8a40b17401fa115c0a9d9e52a5384ab96da1891a3fc18"
+    },
+    {
+      "id": "instance_future-architect__vuls-ef2be3d6ea4c0a13674aaab08b182eca4e2b9a17-v264a82e2f4818e30f5a25e4da53b27ba119f62b5",
+      "image_tag": "ghcr.io/scaleapi/swe-bench_pro-v2:instance_future-architect__vuls-ef2be3d6ea4c0a13674aaab08b182eca4e2b9a17-v264a82e2f4818e30f5a25e4da53b27ba119f62b5",
+      "instruction_sha256": "5fbfbd559759cfec906a12effd0ac06f9c249bffeeaffd8aa4fb4ce58296b27e",
+      "resources": {
+        "cpus": 1,
+        "memory_mb": 4096,
+        "storage_mb": 10240
+      },
+      "task_toml_sha256": "9feb72b3e41d18111576b07220820d13f76156ada1f37d407d4461c07d90b398"
+    },
+    {
+      "id": "instance_gravitational__teleport-1316e6728a3ee2fc124e2ea0cc6a02044c87a144-v626ec2a48416b10a88641359a169d99e935ff037",
+      "image_tag": "ghcr.io/scaleapi/swe-bench_pro-v2:instance_gravitational__teleport-1316e6728a3ee2fc124e2ea0cc6a02044c87a144-v626ec2a48416b10a88641359a169d99e935ff037",
+      "instruction_sha256": "dff482a373984c9be10d26066d44e6a742affbaa259e90835680b72250ec8ebe",
+      "resources": {
+        "cpus": 1,
+        "memory_mb": 4096,
+        "storage_mb": 10240
+      },
+      "task_toml_sha256": "81fb105e9ab1b4f4001736109c460797d6a3a5337cbaed2297ffff28996d9d6d"
+    },
+    {
+      "id": "instance_gravitational__teleport-2b15263e49da5625922581569834eec4838a9257-vee9b09fb20c43af7e520f57e9239bbcf46b7113d",
+      "image_tag": "ghcr.io/scaleapi/swe-bench_pro-v2:instance_gravitational__teleport-2b15263e49da5625922581569834eec4838a9257-vee9b09fb20c43af7e520f57e9239bbcf46b7113d",
+      "instruction_sha256": "8a9aeafd26d9bde0c0d96f62c03fceec4cb47426dd1356a1ed16a7521c07afb2",
+      "resources": {
+        "cpus": 1,
+        "memory_mb": 4096,
+        "storage_mb": 10240
+      },
+      "task_toml_sha256": "3fcb7a9ce5c0bef8284680e378c1b3edb1552dbd6dfc73eb21cc1ffe3590a103"
+    },
+    {
+      "id": "instance_gravitational__teleport-65438e6e44b6ce51458d09b7bb028a2797cfb0ea-vce94f93ad1030e3136852817f2423c1b3ac37bc4",
+      "image_tag": "ghcr.io/scaleapi/swe-bench_pro-v2:instance_gravitational__teleport-65438e6e44b6ce51458d09b7bb028a2797cfb0ea-vce94f93ad1030e3136852817f2423c1b3ac37bc4",
+      "instruction_sha256": "e2e7333bab00e99557d44ea12fadd22f81b9e98dbdbcee1539946cb58013a1fe",
+      "resources": {
+        "cpus": 1,
+        "memory_mb": 4096,
+        "storage_mb": 10240
+      },
+      "task_toml_sha256": "c6ca31ae4d0722dfbcb5b56bd148fa65f7a3069c2fdeecbf94f6d6d641b1ce40"
+    },
+    {
+      "id": "instance_gravitational__teleport-7744f72c6eb631791434b648ba41083b5f6d2278-vce94f93ad1030e3136852817f2423c1b3ac37bc4",
+      "image_tag": "ghcr.io/scaleapi/swe-bench_pro-v2:instance_gravitational__teleport-7744f72c6eb631791434b648ba41083b5f6d2278-vce94f93ad1030e3136852817f2423c1b3ac37bc4",
+      "instruction_sha256": "22dc680321dc8f645117a605cd6c565437b537d82d99bca6b57a75304f9720c0",
+      "resources": {
+        "cpus": 1,
+        "memory_mb": 4096,
+        "storage_mb": 10240
+      },
+      "task_toml_sha256": "d75efe76e526a229670ff036e5a7cc821eb2803eb5a4c588f658259a0e9a4550"
+    },
+    {
+      "id": "instance_gravitational__teleport-eda668c30d9d3b56d9c69197b120b01013611186",
+      "image_tag": "ghcr.io/scaleapi/swe-bench_pro-v2:instance_gravitational__teleport-eda668c30d9d3b56d9c69197b120b01013611186",
+      "instruction_sha256": "0a4cd279f9826393dbd9f53ea7f3b2d3edb46b23d9c62c0d94af972fdcf11d92",
+      "resources": {
+        "cpus": 1,
+        "memory_mb": 4096,
+        "storage_mb": 10240
+      },
+      "task_toml_sha256": "69387781e07367909320d2c010620703b1c968b58a88863b0dd43ac4eb0d7c97"
+    },
+    {
+      "id": "instance_gravitational__teleport-f432a71a13e698b6e1c4672a2e9e9c1f32d35c12",
+      "image_tag": "ghcr.io/scaleapi/swe-bench_pro-v2:instance_gravitational__teleport-f432a71a13e698b6e1c4672a2e9e9c1f32d35c12",
+      "instruction_sha256": "e0cdc2d251246d012f5c835931cf1b87e7bfd65ec3b617907146a596ee2784fb",
+      "resources": {
+        "cpus": 1,
+        "memory_mb": 4096,
+        "storage_mb": 10240
+      },
+      "task_toml_sha256": "a2b81f078a069e806d309d1ae979bdead8b1c0c5e9723def8992d61384e11813"
+    },
+    {
+      "id": "instance_internetarchive__openlibrary-0dc5b20fa186f9714f8a838178597e69f549d026-v2d9a6c849c60ed19fd0858ce9e40b7cc8e097e59",
+      "image_tag": "ghcr.io/scaleapi/swe-bench_pro-v2:instance_internetarchive__openlibrary-0dc5b20fa186f9714f8a838178597e69f549d026-v2d9a6c849c60ed19fd0858ce9e40b7cc8e097e59",
+      "instruction_sha256": "a45af577fe6f15631ac7aec4833f8486293e0ea37cffd203cd49c1b688abc920",
+      "resources": {
+        "cpus": 1,
+        "memory_mb": 4096,
+        "storage_mb": 10240
+      },
+      "task_toml_sha256": "de413e370676af2f2e63b3c91e5e4f2e7bef266bbcabdb70954bb8b83321b160"
+    },
+    {
+      "id": "instance_internetarchive__openlibrary-322d7a46cdc965bfabbf9500e98fde098c9d95b2-v13642507b4fc1f8d234172bf8129942da2c2ca26",
+      "image_tag": "ghcr.io/scaleapi/swe-bench_pro-v2:instance_internetarchive__openlibrary-322d7a46cdc965bfabbf9500e98fde098c9d95b2-v13642507b4fc1f8d234172bf8129942da2c2ca26",
+      "instruction_sha256": "3402f67717d1903b935bc0f07ca16bb9e066cb42af0bc0c6e273168985334df3",
+      "resources": {
+        "cpus": 1,
+        "memory_mb": 4096,
+        "storage_mb": 10240
+      },
+      "task_toml_sha256": "85cf4d8d86aa6b47257b57774089b1bc585da72fbff10c1db5f2207f3c7391fd"
+    },
+    {
+      "id": "instance_internetarchive__openlibrary-53d376b148897466bb86d5accb51912bbbe9a8ed-v08d8e8889ec945ab821fb156c04c7d2e2810debb",
+      "image_tag": "ghcr.io/scaleapi/swe-bench_pro-v2:instance_internetarchive__openlibrary-53d376b148897466bb86d5accb51912bbbe9a8ed-v08d8e8889ec945ab821fb156c04c7d2e2810debb",
+      "instruction_sha256": "b1bac0666c501fe2cf9f17d5ce7de54b7a1d76fb8642d901599cbd24acedbd5a",
+      "resources": {
+        "cpus": 1,
+        "memory_mb": 4096,
+        "storage_mb": 10240
+      },
+      "task_toml_sha256": "d8942aabe86e918e148a445e1321e85ea3579a60f0865c7bb3d0b8ba90848c23"
+    },
+    {
+      "id": "instance_internetarchive__openlibrary-630221ab686c64e75a2ce253c893c033e4814b2e-v93c53c13d5f9b383ebb411ee7750b49dcd1a34c6",
+      "image_tag": "ghcr.io/scaleapi/swe-bench_pro-v2:instance_internetarchive__openlibrary-630221ab686c64e75a2ce253c893c033e4814b2e-v93c53c13d5f9b383ebb411ee7750b49dcd1a34c6",
+      "instruction_sha256": "d0b2c469892300c54bd636349a91cad587620c505ce6883e6502b4a9d6e5bad5",
+      "resources": {
+        "cpus": 1,
+        "memory_mb": 4096,
+        "storage_mb": 10240
+      },
+      "task_toml_sha256": "a2613b6d82cc4eaefc09672777ab1ac84de61aa3b9dc6357eb5812ca3045f97b"
+    },
+    {
+      "id": "instance_internetarchive__openlibrary-6e889f4a733c9f8ce9a9bd2ec6a934413adcedb9-ve8c8d62a2b60610a3c4631f5f23ed866bada9818",
+      "image_tag": "ghcr.io/scaleapi/swe-bench_pro-v2:instance_internetarchive__openlibrary-6e889f4a733c9f8ce9a9bd2ec6a934413adcedb9-ve8c8d62a2b60610a3c4631f5f23ed866bada9818",
+      "instruction_sha256": "a14e7e48a407931bd46376c05474df55f7ff92fb71a4320070041cbe34edd6d0",
+      "resources": {
+        "cpus": 1,
+        "memory_mb": 4096,
+        "storage_mb": 10240
+      },
+      "task_toml_sha256": "b36f9a8049fcffcf6f9b0dd89cb543429ed6225075fe59b1605c4a6d1c16a8a9"
+    },
+    {
+      "id": "instance_internetarchive__openlibrary-7cbfb812ef0e1f9716e2d6e85d538a96fcb79d13-vfa6ff903cb27f336e17654595dd900fa943dcd91",
+      "image_tag": "ghcr.io/scaleapi/swe-bench_pro-v2:instance_internetarchive__openlibrary-7cbfb812ef0e1f9716e2d6e85d538a96fcb79d13-vfa6ff903cb27f336e17654595dd900fa943dcd91",
+      "instruction_sha256": "fcf0f5bbec3446961d8c2d358435e15f69da1c436e2af389103a6f87eddb9594",
+      "resources": {
+        "cpus": 1,
+        "memory_mb": 4096,
+        "storage_mb": 10240
+      },
+      "task_toml_sha256": "9b742996cb23da5108741161a2d3c9f53b62a4ce3df680f559a816c7a67a9092"
+    },
+    {
+      "id": "instance_internetarchive__openlibrary-a48fd6ba9482c527602bc081491d9e8ae6e8226c-vfa6ff903cb27f336e17654595dd900fa943dcd91",
+      "image_tag": "ghcr.io/scaleapi/swe-bench_pro-v2:instance_internetarchive__openlibrary-a48fd6ba9482c527602bc081491d9e8ae6e8226c-vfa6ff903cb27f336e17654595dd900fa943dcd91",
+      "instruction_sha256": "7e25436e8996e18c45a70472ee240054c70b065c9d616eac678483ed4c7ee1dd",
+      "resources": {
+        "cpus": 1,
+        "memory_mb": 4096,
+        "storage_mb": 10240
+      },
+      "task_toml_sha256": "05202ed35e15cf87c139c3c99b6796859516552d35cb511e61b5d751c55c149c"
+    },
+    {
+      "id": "instance_internetarchive__openlibrary-b67138b316b1e9c11df8a4a8391fe5cc8e75ff9f-ve8c8d62a2b60610a3c4631f5f23ed866bada9818",
+      "image_tag": "ghcr.io/scaleapi/swe-bench_pro-v2:instance_internetarchive__openlibrary-b67138b316b1e9c11df8a4a8391fe5cc8e75ff9f-ve8c8d62a2b60610a3c4631f5f23ed866bada9818",
+      "instruction_sha256": "f335c2f35598b25cfff340a02dce6af59dc87bc0b7f78e3ab75ec90d62c5e97a",
+      "resources": {
+        "cpus": 1,
+        "memory_mb": 4096,
+        "storage_mb": 10240
+      },
+      "task_toml_sha256": "0b643381c712578447362f55f15ae770abdbfcdb68d536e877ea0e0fb549c1bf"
+    },
+    {
+      "id": "instance_navidrome__navidrome-69e0a266f48bae24a11312e9efbe495a337e4c84",
+      "image_tag": "ghcr.io/scaleapi/swe-bench_pro-v2:instance_navidrome__navidrome-69e0a266f48bae24a11312e9efbe495a337e4c84",
+      "instruction_sha256": "03b3d1228c0d0dcd1c7e2c7a4f94118352dcc75bf705749afd201c5e392783ff",
+      "resources": {
+        "cpus": 1,
+        "memory_mb": 4096,
+        "storage_mb": 10240
+      },
+      "task_toml_sha256": "03dcacaa4f4385af0251c1986125eac6e31b41efbe64c9546fcc5ef9cb90951c"
+    },
+    {
+      "id": "instance_navidrome__navidrome-874b17b8f614056df0ef021b5d4f977341084185",
+      "image_tag": "ghcr.io/scaleapi/swe-bench_pro-v2:instance_navidrome__navidrome-874b17b8f614056df0ef021b5d4f977341084185",
+      "instruction_sha256": "f97cd8e6d174d974c35b00e8d033d758e9774712452fe03077d9e3638d73391f",
+      "resources": {
+        "cpus": 1,
+        "memory_mb": 4096,
+        "storage_mb": 10240
+      },
+      "task_toml_sha256": "962105e6cbf11b50aa6508f336c15f137fd8a65f229b82b92a307e2caf6306ac"
+    },
+    {
+      "id": "instance_navidrome__navidrome-bf2bcb12799b21069f137749e0c331f761d1f693",
+      "image_tag": "ghcr.io/scaleapi/swe-bench_pro-v2:instance_navidrome__navidrome-bf2bcb12799b21069f137749e0c331f761d1f693",
+      "instruction_sha256": "2c468f82fbfe9286a1ddafef05dc68284f132e75b727d2649179f56a350b5823",
+      "resources": {
+        "cpus": 1,
+        "memory_mb": 4096,
+        "storage_mb": 10240
+      },
+      "task_toml_sha256": "a94c62d3d2113988133a9cf835d5c6cf7cea0b3b68d6c05ec8ab368a51fadaa2"
+    },
+    {
+      "id": "instance_protonmail__webclients-08bb09914d0d37b0cd6376d4cab5b77728a43e7b",
+      "image_tag": "ghcr.io/scaleapi/swe-bench_pro-v2:instance_protonmail__webclients-08bb09914d0d37b0cd6376d4cab5b77728a43e7b",
+      "instruction_sha256": "be55489e21e1fcf80f3f2a0ceb68c9c206d3ef6a15f312d94ec97346d9b636e8",
+      "resources": {
+        "cpus": 1,
+        "memory_mb": 4096,
+        "storage_mb": 10240
+      },
+      "task_toml_sha256": "e7810a674f1783b8302275ccd9adf631f8372246d3bb27538d328023eb131305"
+    },
+    {
+      "id": "instance_protonmail__webclients-5f0745dd6993bb1430a951c62a49807c6635cd77",
+      "image_tag": "ghcr.io/scaleapi/swe-bench_pro-v2:instance_protonmail__webclients-5f0745dd6993bb1430a951c62a49807c6635cd77",
+      "instruction_sha256": "757bb975fa545acaff58ab9046260ae79fe9a90910d6f7c1a6985c7e294d52f4",
+      "resources": {
+        "cpus": 1,
+        "memory_mb": 4096,
+        "storage_mb": 10240
+      },
+      "task_toml_sha256": "423800620d83f3d6a16db7de22e7400a678ea27bb60fccc549a189a8c0fb4560"
+    },
+    {
+      "id": "instance_protonmail__webclients-715dbd4e6999499cd2a576a532d8214f75189116",
+      "image_tag": "ghcr.io/scaleapi/swe-bench_pro-v2:instance_protonmail__webclients-715dbd4e6999499cd2a576a532d8214f75189116",
+      "instruction_sha256": "e6c614217dcf4856b3eaa9d491d908484f0da21c495684dec2c9507dd3fc1446",
+      "resources": {
+        "cpus": 1,
+        "memory_mb": 4096,
+        "storage_mb": 10240
+      },
+      "task_toml_sha256": "2a120da88d5639780ba5543b229d358df1d1e98bd43dcf702349950427ed1e3c"
+    },
+    {
+      "id": "instance_protonmail__webclients-c5a2089ca2bfe9aa1d85a664b8ad87ef843a1c9c",
+      "image_tag": "ghcr.io/scaleapi/swe-bench_pro-v2:instance_protonmail__webclients-c5a2089ca2bfe9aa1d85a664b8ad87ef843a1c9c",
+      "instruction_sha256": "957a448fb0dffe83353b87828761add8e97e13dcaeb5b9e70eddf1d4f522cb34",
+      "resources": {
+        "cpus": 1,
+        "memory_mb": 4096,
+        "storage_mb": 10240
+      },
+      "task_toml_sha256": "c53ddf0db5a442aabd2a561e6e7375fb40183968457a7524286d29ff92c3cb24"
+    },
+    {
+      "id": "instance_protonmail__webclients-e65cc5f33719e02e1c378146fb981d27bc24bdf4",
+      "image_tag": "ghcr.io/scaleapi/swe-bench_pro-v2:instance_protonmail__webclients-e65cc5f33719e02e1c378146fb981d27bc24bdf4",
+      "instruction_sha256": "9fc5e6dacf38b7fb6c798afcc692151fb7136637e966f71ac56da295757456fb",
+      "resources": {
+        "cpus": 1,
+        "memory_mb": 4096,
+        "storage_mb": 10240
+      },
+      "task_toml_sha256": "ec3c190976efd03d3ec2ba75fca12a5b91f639654b9e7a39f51905605602eaeb"
+    },
+    {
+      "id": "instance_qutebrowser__qutebrowser-3e21c8214a998cb1058defd15aabb24617a76402-v5fc38aaf22415ab0b70567368332beee7955b367",
+      "image_tag": "ghcr.io/scaleapi/swe-bench_pro-v2:instance_qutebrowser__qutebrowser-3e21c8214a998cb1058defd15aabb24617a76402-v5fc38aaf22415ab0b70567368332beee7955b367",
+      "instruction_sha256": "03a6962f4beefca85fec7e9a2eca9b377f267ff8ea1a1cf6b9c31f90947eb5b6",
+      "resources": {
+        "cpus": 1,
+        "memory_mb": 4096,
+        "storage_mb": 10240
+      },
+      "task_toml_sha256": "fe89eb6adffe5106b942bf7842f73c8349cf97367a065751b87e2866e45bd175"
+    },
+    {
+      "id": "instance_qutebrowser__qutebrowser-c09e1439f145c66ee3af574386e277dd2388d094-v2ef375ac784985212b1805e1d0431dc8f1b3c171",
+      "image_tag": "ghcr.io/scaleapi/swe-bench_pro-v2:instance_qutebrowser__qutebrowser-c09e1439f145c66ee3af574386e277dd2388d094-v2ef375ac784985212b1805e1d0431dc8f1b3c171",
+      "instruction_sha256": "8d42bdcc4b79b34a3f3e265f98901f4a5ee980cf76953ddde6e721a0b1f70411",
+      "resources": {
+        "cpus": 1,
+        "memory_mb": 4096,
+        "storage_mb": 10240
+      },
+      "task_toml_sha256": "5ce863f36fc4132e57b174538448a5cd239ce2fce93cc0aa612d3e00924dd027"
+    },
+    {
+      "id": "instance_qutebrowser__qutebrowser-deeb15d6f009b3ca0c3bd503a7cef07462bd16b4-v363c8a7e5ccdf6968fc7ab84a2053ac78036691d",
+      "image_tag": "ghcr.io/scaleapi/swe-bench_pro-v2:instance_qutebrowser__qutebrowser-deeb15d6f009b3ca0c3bd503a7cef07462bd16b4-v363c8a7e5ccdf6968fc7ab84a2053ac78036691d",
+      "instruction_sha256": "43cafe938402cac5221123690992e42e2984b4d8825a996cdbb25db51826ff36",
+      "resources": {
+        "cpus": 1,
+        "memory_mb": 4096,
+        "storage_mb": 10240
+      },
+      "task_toml_sha256": "9486e59aa5287a895675eccb7b1f527db7612471005b52fad32437308cbf9740"
+    },
+    {
+      "id": "instance_qutebrowser__qutebrowser-e70f5b03187bdd40e8bf70f5f3ead840f52d1f42-v02ad04386d5238fe2d1a1be450df257370de4b6a",
+      "image_tag": "ghcr.io/scaleapi/swe-bench_pro-v2:instance_qutebrowser__qutebrowser-e70f5b03187bdd40e8bf70f5f3ead840f52d1f42-v02ad04386d5238fe2d1a1be450df257370de4b6a",
+      "instruction_sha256": "3096a4735e61797a943e5131ec5e3b3ebc7efd37f667e5f3754bf0b9fd3e7a67",
+      "resources": {
+        "cpus": 1,
+        "memory_mb": 4096,
+        "storage_mb": 10240
+      },
+      "task_toml_sha256": "89f68c2ac056b882a7d525a350a8e5750913884f7921eb34ad0bf3a7175fae65"
+    },
+    {
+      "id": "instance_tutao__tutanota-f373ac3808deefce8183dad8d16729839cc330c1-v2939aa9f4356f0dc9f523ee5ce19d09e08ab979b",
+      "image_tag": "ghcr.io/scaleapi/swe-bench_pro-v2:instance_tutao__tutanota-f373ac3808deefce8183dad8d16729839cc330c1-v2939aa9f4356f0dc9f523ee5ce19d09e08ab979b",
+      "instruction_sha256": "e194da19b6c4ec3a1c7937afb01e98b659206096f4e2c014de8640576df323d9",
+      "resources": {
+        "cpus": 1,
+        "memory_mb": 4096,
+        "storage_mb": 10240
+      },
+      "task_toml_sha256": "a800b6a817091b9363358055b175e915d8220f482a52ad5ca68e5fd607cf091e"
+    }
+  ],
+  "verified_source_files": 6436
+}

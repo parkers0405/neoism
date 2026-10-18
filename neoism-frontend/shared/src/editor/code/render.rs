@@ -1379,12 +1379,13 @@ pub fn render(
         let flag_x = px + orb_size + orb_gap;
         {
             use crate::editor::markdown::render::draw::{
-                draw_presence_orb_clipped, draw_rounded_rect_clipped,
+                draw_presence_avatar_clipped, draw_rounded_rect_clipped,
             };
-            draw_presence_orb_clipped(
+            draw_presence_avatar_clipped(
                 sugarloaf,
                 clip,
                 &cursor.name,
+                cursor.client_os.as_deref(),
                 px,
                 tag_y,
                 orb_size,

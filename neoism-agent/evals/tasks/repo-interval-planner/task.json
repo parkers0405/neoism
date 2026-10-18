@@ -1,0 +1,1 @@
+{"category":"feature","description":"Private synthetic repository task: implement deterministic half-open capacity planning; not a public benchmark or upstream issue.","id":"repo-interval-planner","suite":"repository","timeout_seconds":600,"verifier_timeout_seconds":60}

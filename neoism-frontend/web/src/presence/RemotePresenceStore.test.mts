@@ -227,8 +227,9 @@ test("messages queue before the bundle loads and replay in order", () => {
   const store = new RemotePresenceStore(() => loaded);
 
   store.setLocalPeerId("me");
+  const windowsPeer = { ...wirePresence("buf-a", "alice", 1, 1), client_os: "windows" };
   assert.equal(
-    store.applyServerMessage(upsert(wirePresence("buf-a", "alice", 1, 1))),
+    store.applyServerMessage(upsert(windowsPeer)),
     false,
     "pre-load: nothing to draw yet",
   );
@@ -252,6 +253,7 @@ test("messages queue before the bundle loads and replay in order", () => {
     .filter((c) => c.method === "apply_server_message")
     .map((c) => (c.args[0] as { Presence: { update: { Upsert: CrdtPeerPresence } } }).Presence.update.Upsert.peer_id);
   assert.deepEqual(replayed, ["alice", "bob"]);
+  assert.deepEqual(calls.find((c) => c.method === "apply_server_message")?.args[0], upsert(windowsPeer), "OS metadata survives pre-WASM replay unchanged");
 });
 
 test("non-presence traffic short-circuits without queueing", () => {

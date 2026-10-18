@@ -1,0 +1,11 @@
+# Repair the dispatcher
+
+This is a private synthetic repository task, not a public benchmark or upstream issue. Fix this stdlib-only mini-project, preserving its JSON API.
+
+Callable: `router.dispatch(routes, request)`. A route is an object with `method`, `path`, and `handler` strings; extra fields are ignored. Methods must be nonempty ASCII letters and are case-insensitive. Paths must start with `/`, contain no query/fragment, and have no empty interior segments (root and one trailing slash are allowed and trailing slash is ignored). A segment is a literal, `:name`, or final `*name`; names match `[A-Za-z_][A-Za-z0-9_]*`, are unique within the route, and captures use raw path segments (no percent decoding). Colons/stars anywhere in a non-capture literal are invalid. Wildcards match zero or more segments and join their capture with `/`.
+
+Request is an object with string `method` and `target`. Target is an absolute path, optionally followed by `?query`, never a fragment. Request paths obey the same slash rules but treat colon/star as ordinary literal text. All routes and the request must be validated before matching, even unused routes. Bad shapes or syntax return exactly `{"error":"invalid"}`. Inputs must not change.
+
+Match methods ignoring case. Rank matching routes by lexicographic segment specificity (literal=2, parameter=1, wildcard=0); a completed path outranks a zero-length wildcard continuation. Break ties by original registration order. Thus `/a/:x/c` beats `/a/*rest`, literals beat captures, and `/a` beats `/a/*rest` on `/a`. Return `{"status":200,"handler":...,"params":{...},"query":{key:[values...]}}`. Query uses form decoding (plus becomes space, percent-decoded UTF-8 with replacement for invalid bytes); repeated keys retain value order, blanks and empty keys are retained, empty `&` fields ignored, and a field without `=` has an empty value. Malformed percent escapes remain literal as in urllib.parse.parse_qsl. Query parsing is independent of route matching.
+
+If no matching method exists but the path matches, return `{"status":405,"allowed":[sorted unique uppercase methods]}`; otherwise return `{"status":404}`. There is no automatic HEAD fallback. Use the existing pattern/query/router module separation, not a server or network library.

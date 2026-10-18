@@ -175,6 +175,7 @@ fn presence(buffer_id: &str, peer_id: &str, line: u32, column: u32) -> CrdtPeerP
         buffer_id: buffer_id.into(),
         peer_id: peer_id.into(),
         display_name: format!("{peer_id}-laptop"),
+        client_os: Some("windows".into()),
         color: CrdtPresenceColor {
             r: 0x2f,
             g: 0x80,
@@ -320,9 +321,16 @@ fn hub_publish_presence_returns_nothing_to_sender_but_broadcasts() {
     match rx.try_recv() {
         Ok(CrdtServerMessage::Presence {
             update: CrdtPresenceUpdate::Upsert(received),
-        }) => assert_eq!(received.peer_id, "peer-a"),
+        }) => {
+            assert_eq!(received.peer_id, "peer-a");
+            assert_eq!(received.client_os.as_deref(), Some("windows"));
+        }
         other => panic!("expected broadcast Presence upsert, got {other:?}"),
     }
+    assert_eq!(
+        hub.presence_snapshot("shared", None)[0].client_os.as_deref(),
+        Some("windows")
+    );
 }
 
 #[test]
@@ -397,6 +405,7 @@ async fn presence_publish_reaches_other_client_without_echoing_to_sender() {
     assert_eq!(received.cursor.line, 12);
     assert_eq!(received.cursor.column, 4);
     assert_eq!(received.display_name, "peer-a-laptop");
+    assert_eq!(received.client_os.as_deref(), Some("windows"));
     assert!(
         received.updated_at_ms > 0,
         "daemon must re-stamp updated_at_ms with its own clock"
@@ -464,6 +473,7 @@ async fn presence_publish_reaches_other_client_without_echoing_to_sender() {
     };
     assert_eq!(peers.len(), 1);
     assert_eq!(peers[0].peer_id, "peer-a");
+    assert_eq!(peers[0].client_os.as_deref(), Some("windows"));
 
     close(client_a).await;
     close(client_b).await;

@@ -30,6 +30,11 @@ pub(crate) fn handle_chat_sse_event(
         return Ok(ChatEventOutcome::default());
     }
     match kind {
+        "session.compacted" => {
+            prepare_stream_output(&mut ui, render_state)?;
+            crate::chat_command_handlers::print_compaction_marker(properties)?;
+            // Compaction is not run completion, especially for manual in-run controls.
+        }
         "message.part.delta" => {
             if properties.get("field").and_then(Value::as_str) == Some("text") {
                 if let Some(delta) = properties.get("delta").and_then(Value::as_str) {

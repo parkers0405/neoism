@@ -18,6 +18,8 @@
 // UTF-16 code units, matching the CRDT text offset policy used by the
 // daemon's authoritative replicas.
 
+import { detectClientOs } from "./clientOs";
+
 import type {
   CrdtClientMessage,
   CrdtCursorPosition,
@@ -67,6 +69,7 @@ export class PresencePublisher {
   /** Buffered until the bridge exists. */
   private pendingColor: CrdtPresenceColor | null = null;
   private pendingRainbow: boolean | null = null;
+  private pendingClientOs: string | null | undefined = detectClientOs();
 
   /** Test seam: a fake input-policy module, or a getter for one.
    *  Production resolves the live wasm module lazily per call. */
@@ -114,7 +117,18 @@ export class PresencePublisher {
       publisher.set_rainbow(this.pendingRainbow);
       this.pendingRainbow = null;
     }
+    if (this.pendingClientOs !== undefined) {
+      publisher.set_client_os?.(this.pendingClientOs);
+      this.pendingClientOs = undefined;
+    }
     return publisher;
+  }
+
+  /** Buffered like color until WASM is ready. Null explicitly clears the OS. */
+  setClientOs(clientOs: string | null): void {
+    const publisher = this.publisher();
+    if (publisher) publisher.set_client_os?.(clientOs);
+    else this.pendingClientOs = clientOs;
   }
 
   getPeerId(): string {

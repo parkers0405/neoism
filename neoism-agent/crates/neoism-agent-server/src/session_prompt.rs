@@ -410,6 +410,14 @@ pub(crate) async fn append_prompt(
     let run_id = run.id.clone();
     let cancellation = run.cancel.clone();
     let mut run_guard = SessionRunGuard::new(state, &session_id_text, &run_id);
+    if crate::session_context::drain_manual_compaction_for_run(state, &session_id_text, &run_id).await {
+        info = ensure_session(state, &session_id_text).await?;
+    }
+    if cancellation.load(Ordering::SeqCst) {
+        finish_session_run(state, &session_id_text, &run_id).await;
+        run_guard.disarm();
+        return Ok(user_message);
+    }
 
     let subtask_parts = user_message
         .parts
@@ -440,6 +448,14 @@ pub(crate) async fn append_prompt(
         provider_id: reply_model.provider_id.clone(),
         model_id: reply_model.model_id.clone(),
     };
+    if crate::session_context::drain_manual_compaction_for_run(state, &session_id_text, &run_id).await {
+        info = ensure_session(state, &session_id_text).await?;
+    }
+    if cancellation.load(Ordering::SeqCst) {
+        finish_session_run(state, &session_id_text, &run_id).await;
+        run_guard.disarm();
+        return Ok(user_message);
+    }
     let mut history = state.inner.store.list_messages(&session_id_text).await?;
     if let Err(error) =
         prune_old_tool_outputs_in_messages(state, &session_id_text, &mut history).await
@@ -2749,6 +2765,12 @@ async fn build_provider_generation_request(
         }
     }
     let (tenant_id, workspace_id) = provider_credential_scope(scope_session.as_ref());
+    let cache_affinity = match scope_session.as_ref() {
+        Some(session) => {
+            Some(crate::execution_activity::cache_root_session_id(state, session).await)
+        }
+        None => None,
+    };
     ProviderGenerationRequest {
         provider_id: model.provider_id.clone(),
         model_id: model.model_id.clone(),
@@ -2756,6 +2778,7 @@ async fn build_provider_generation_request(
         tenant_id,
         workspace_id,
         session_id: hook_ctx.map(|ctx| ctx.session_id.clone()),
+        cache_affinity,
         variant: model.variant.clone(),
         text_verbosity: workspace.and_then(|snapshot| snapshot.config().text_verbosity),
         api: metadata.api,

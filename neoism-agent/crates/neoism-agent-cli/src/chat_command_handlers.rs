@@ -368,9 +368,8 @@ pub(crate) async fn handle_chat_command(
         }
         "/compact" => {
             if let Some(ui) = ui.as_deref_mut() {
-                ui.render_status("Compacting session context", "")?;
+                ui.render_status("Queuing session compaction", "")?;
             }
-            abort_session_if_busy(client, server, session_id).await?;
             ensure_empty_response(
                 client
                     .post(format!("{server}/v2/sessions/{session_id}/compact"))
@@ -378,17 +377,11 @@ pub(crate) async fn handle_chat_command(
                     .await?,
             )
             .await?;
-            let session = response_json(
-                client
-                    .get(format!("{server}/v2/sessions/{session_id}"))
-                    .send()
-                    .await?,
-            )
-            .await?;
             if let Some(ui) = ui {
-                ui.before_output()?;
+                ui.render_status("Compaction queued", "")?;
+            } else {
+                println!("Compaction queued");
             }
-            print_compaction_marker(&session)?;
         }
         "/goal" => {
             let rest = parts.collect::<Vec<_>>().join(" ");
@@ -745,7 +738,7 @@ fn print_goal(value: &Value) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn print_compaction_marker(session: &Value) -> anyhow::Result<()> {
+pub(crate) fn print_compaction_marker(session: &Value) -> anyhow::Result<()> {
     let summary = session.get("summary").unwrap_or(&Value::Null);
     let kind = summary
         .get("kind")

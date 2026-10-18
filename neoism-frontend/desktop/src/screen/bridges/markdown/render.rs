@@ -105,6 +105,7 @@ impl Screen<'_> {
                 .map(
                     |presence| neoism_ui::editor::markdown::MarkdownRemoteCursor {
                         name: presence.display_name.clone(),
+                        client_os: presence.client_os.clone(),
                         color: [presence.color.r, presence.color.g, presence.color.b],
                         rainbow: presence.rainbow,
                         insert: presence.insert,

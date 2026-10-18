@@ -119,6 +119,65 @@ pub(crate) fn draw_presence_orb_clipped(
     });
 }
 
+/// Windows peers carry a locally animated stink cloud; the orb itself stays readable.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn draw_presence_avatar_clipped(
+    sugarloaf: &mut Sugarloaf,
+    clip: [f32; 4],
+    seed: &str,
+    client_os: Option<&str>,
+    ox: f32,
+    oy: f32,
+    size: f32,
+    t: f32,
+    depth: f32,
+    order: u8,
+) {
+    if client_os == Some("windows") {
+        let phase = seed.bytes().fold(0u32, |hash, byte| {
+            hash.wrapping_mul(31).wrapping_add(u32::from(byte))
+        }) % 1000;
+        // Staggered puffs rise, swell and fade on the existing presence clock.
+        // No per-peer timers or network particle traffic.
+        for i in 0..6 {
+            let age = (t / 2.8 + phase as f32 / 1000.0 + i as f32 / 6.0).rem_euclid(1.0);
+            let side = if i % 2 == 0 { -1.0 } else { 1.0 };
+            let drift = (age * std::f32::consts::TAU + i as f32).sin();
+            let radius = size * (0.15 + age * 0.13);
+            let cx = ox + size * (0.5 + side * (0.43 + age * 0.12) + drift * 0.08);
+            let cy = oy + size * (1.05 - age * 1.35);
+            let alpha = (1.0 - age) * 0.68;
+            draw_rounded_rect_clipped(
+                sugarloaf,
+                clip,
+                cx - radius,
+                cy - radius,
+                radius * 2.0,
+                radius * 2.0,
+                radius,
+                [0.20, 0.28, 0.07, alpha],
+                depth,
+                order,
+            );
+            let inset = size * 0.045;
+            let inner = (radius - inset).max(0.0);
+            draw_rounded_rect_clipped(
+                sugarloaf,
+                clip,
+                cx - inner,
+                cy - inner,
+                inner * 2.0,
+                inner * 2.0,
+                inner,
+                [0.59, 0.70, 0.21, alpha],
+                depth,
+                order,
+            );
+        }
+    }
+    draw_presence_orb_clipped(sugarloaf, clip, seed, ox, oy, size, t, depth, order);
+}
+
 pub(super) fn draw_if_visible(
     sugarloaf: &mut Sugarloaf,
     x: f32,

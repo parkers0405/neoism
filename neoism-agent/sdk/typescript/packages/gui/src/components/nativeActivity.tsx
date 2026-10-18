@@ -154,7 +154,7 @@ export const NativeActivity = memo(function NativeActivity({ busy, messages = EM
     return <div className="native-activity" style={paletteStyle} role="status" aria-live="polite" aria-atomic="true">
         <span className="native-activity-accessible">{label}</span>
         {label && <canvas ref={canvas} aria-hidden="true" />}
-        {queued > 0 && <button type="button" disabled={!sessionActivity} aria-haspopup="dialog" aria-expanded={popover?.kind === "queue"} onClick={e => open("queue", e.currentTarget)} className="native-activity-queue">{background ? "├─" : "╰─"} {queued === 1 ? "queued message" : `queued messages (${queued})`}</button>}
+        {queued > 0 && <button type="button" disabled={!sessionActivity} aria-haspopup="dialog" aria-expanded={popover?.kind === "queue"} onClick={e => open("queue", e.currentTarget)} className="native-activity-queue">{background ? "├─" : "╰─"} {sessionActivity?.queue?.compactionQueued ? (queued === 1 ? "Compaction queued" : `Compaction queued (${queued} queued)`) : queued === 1 ? "queued message" : `queued messages (${queued})`}</button>}
         {background > 0 && <button type="button" disabled={!sessionActivity} aria-haspopup="dialog" aria-expanded={popover?.kind === "background"} onClick={e => open("background", e.currentTarget)} className="native-activity-background">╰─ {background} background {background === 1 ? "task" : "tasks"} running</button>}
         {popover && sessionActivity && popover.scope === sessionActivity.scope && <ActivityPopover anchor={popover.anchor} kind={popover.kind} activity={sessionActivity} close={() => setPopover(undefined)} style={paletteStyle} />}
     </div>;

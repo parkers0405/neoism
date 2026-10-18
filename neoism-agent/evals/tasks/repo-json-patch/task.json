@@ -1,0 +1,1 @@
+{"category":"bugfix","description":"Private synthetic repository task: repair transactional JSON Patch, pointer escaping, and array insertion; not an upstream issue or public benchmark.","id":"repo-json-patch","suite":"repository","timeout_seconds":600,"verifier_timeout_seconds":60}

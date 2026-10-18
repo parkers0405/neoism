@@ -1,6 +1,33 @@
 use super::*;
 
 #[test]
+fn catalog_header_actions_share_spacing_and_centered_content() {
+    for scale in [0.75, 1.0, 1.25, 2.0] {
+        let height = 34.0 * scale;
+        let font_size = FONT_SIZE * scale;
+        let mut previous = None;
+        for index in 0..3 {
+            let rect = [
+                18.0 * scale,
+                (20.0 + index as f32 * 34.0) * scale,
+                200.0 * scale,
+                height,
+            ];
+            let (icon, label) = draw::catalog_action_layout(rect, scale, font_size);
+            assert_eq!(icon[0], rect[0] + 7.0 * scale);
+            assert_eq!(label[0], icon[0] + 29.0 * scale);
+            assert_eq!(icon[1] + icon[3] / 2.0, rect[1] + height / 2.0);
+            assert_eq!(label[1] + font_size / 2.0, rect[1] + height / 2.0);
+            if let Some((previous_icon_y, previous_label_y)) = previous {
+                assert_eq!(icon[1] - previous_icon_y, height);
+                assert_eq!(label[1] - previous_label_y, height);
+            }
+            previous = Some((icon[1], label[1]));
+        }
+    }
+}
+
+#[test]
 fn catalog_branch_stems_leave_parent_gap_and_join_siblings_across_nested_rows() {
     let root = NeoismAgentSessionEntry::new("root", "Parent", "");
     let mut child = NeoismAgentSessionEntry::new("child", "Child", "").with_depth(1);
@@ -165,7 +192,19 @@ fn passive_catalog_highlights_exact_child_and_focus_keeps_own_candidate() {
         NeoismAgentSessionEntry::new("child", "Child", "")
             .with_runtime_status(Some("running".into())),
     ]);
-    panel.sync_catalog_subagents(Some("root"));
+    panel.apply_catalog_family_snapshot("root", neoism_agent_core::CatalogFamilySnapshot {
+        directory: "/work".into(),
+        execution_id: Some("execution".into()),
+        family_revision: 1,
+        branches: vec![neoism_agent_core::CatalogBranchSnapshot {
+            session_id: "child".into(),
+            parent_session_id: "root".into(),
+            status: "outstanding".into(),
+            title: "Child".into(),
+            depth: 1,
+            ..Default::default()
+        }],
+    });
     panel.set_catalog_viewed_session(Some("child"));
     let child = panel
         .sessions()
@@ -330,7 +369,19 @@ fn root_indicator_is_independent_of_running_child_rows() {
         NeoismAgentSessionEntry::new("child", "Child", "")
             .with_runtime_status(Some("running".into())),
     ]);
-    panel.sync_catalog_subagents(Some("root"));
+    panel.apply_catalog_family_snapshot("root", neoism_agent_core::CatalogFamilySnapshot {
+        directory: "/work".into(),
+        execution_id: Some("execution".into()),
+        family_revision: 1,
+        branches: vec![neoism_agent_core::CatalogBranchSnapshot {
+            session_id: "child".into(),
+            parent_session_id: "root".into(),
+            status: "outstanding".into(),
+            title: "Child".into(),
+            depth: 1,
+            ..Default::default()
+        }],
+    });
     for (activity, expected) in [
         (CatalogActivity::Idle, None),
         (CatalogActivity::Running, Some([1.0; 3])),

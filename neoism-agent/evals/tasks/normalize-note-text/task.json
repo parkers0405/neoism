@@ -1,0 +1,6 @@
+{
+  "id": "normalize-note-text",
+  "description": "Implement a deterministic plain-text normalization feature. A small coding-agent smoke task, not a comparative benchmark.",
+  "timeout_seconds": 180,
+  "verifier_timeout_seconds": 30
+}

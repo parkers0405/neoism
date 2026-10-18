@@ -1,0 +1,172 @@
+{
+  "agents": {
+    "claude-code": {
+      "binary_path": "/home/parkersettle/projects/neoism/neoism-agent/evals/public/.cache/artifacts/a967e7b1d8b4e47ee421d5433027880347952b0c0857abf880e2c942a4ec93b3.elf",
+      "binary_sha256": "a967e7b1d8b4e47ee421d5433027880347952b0c0857abf880e2c942a4ec93b3",
+      "host_platform": {
+        "libc": [
+          "glibc",
+          "2.42"
+        ],
+        "machine": "x86_64",
+        "system": "Linux"
+      },
+      "source_path": "/home/parkersettle/.local/share/mise/installs/claude/latest/claude",
+      "version": "2.1.292",
+      "version_output": "2.1.292 (Claude Code)"
+    },
+    "neoism": {
+      "binary_path": "/home/parkersettle/projects/neoism/neoism-agent/evals/public/.cache/artifacts/163bca578a38d70e3bc22cc6a072bdaa2cfc51b50bc4add1f87571df9e07c489.elf",
+      "binary_sha256": "163bca578a38d70e3bc22cc6a072bdaa2cfc51b50bc4add1f87571df9e07c489",
+      "host_platform": {
+        "libc": [
+          "glibc",
+          "2.42"
+        ],
+        "machine": "x86_64",
+        "system": "Linux"
+      },
+      "runtime_bundle": "/home/parkersettle/projects/neoism/neoism-agent/evals/public/.cache/artifacts/96d659cc1a486bc7921a93f429938ba61ad5f64373b087780fff2f61b48d40d3.tar",
+      "source_path": "/home/parkersettle/.local/bin/neoism-agent",
+      "version": "0.7.128",
+      "version_output": "neoism-agent 0.7.128"
+    },
+    "opencode-v2": {
+      "binary_path": "/home/parkersettle/projects/neoism/neoism-agent/evals/public/.cache/artifacts/489b51816a77809e841310e80c88e834c28c19ad1639e12ba8a19f08b47ab607.elf",
+      "binary_sha256": "489b51816a77809e841310e80c88e834c28c19ad1639e12ba8a19f08b47ab607",
+      "host_platform": {
+        "libc": [
+          "glibc",
+          "2.42"
+        ],
+        "machine": "x86_64",
+        "system": "Linux"
+      },
+      "source_path": "/home/parkersettle/projects/neoism/neoism-agent/evals/public/.cache/opencode-v2/node_modules/@opencode/cli-linux-x64/bin/opencode",
+      "version": "2.0.32",
+      "version_output": "opencode v2.0.32"
+    }
+  },
+  "compatibility": {
+    "images": [
+      {
+        "checks": {
+          "claude-code": {
+            "output": "2.1.292 (Claude Code)",
+            "return_code": 0,
+            "status": "passed"
+          },
+          "neoism": {
+            "output": "neoism-agent 0.7.128",
+            "return_code": 0,
+            "status": "passed"
+          },
+          "opencode-v2": {
+            "output": "opencode v2.0.32",
+            "return_code": 0,
+            "status": "passed"
+          }
+        },
+        "image": "debian:bookworm-slim",
+        "image_id": "sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171",
+        "platform": "linux/amd64",
+        "repo_digests": [
+          "debian@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171"
+        ]
+      },
+      {
+        "checks": {
+          "claude-code": {
+            "output": "2.1.292 (Claude Code)",
+            "return_code": 0,
+            "status": "passed"
+          },
+          "neoism": {
+            "output": "neoism-agent 0.7.128",
+            "return_code": 0,
+            "status": "passed"
+          },
+          "opencode-v2": {
+            "output": "opencode v2.0.32",
+            "return_code": 0,
+            "status": "passed"
+          }
+        },
+        "image": "ubuntu:22.04",
+        "image_id": "sha256:5ec03bb3441e8b0bf3b4f9cd4629a1ae763010dc3035bb8da3ae6cf026486401",
+        "platform": "linux/amd64",
+        "repo_digests": [
+          "ubuntu@sha256:5ec03bb3441e8b0bf3b4f9cd4629a1ae763010dc3035bb8da3ae6cf026486401"
+        ]
+      }
+    ],
+    "scope": "--version only; not model calls or task execution"
+  },
+  "runtime_bundle": {
+    "analyzed_binary_sha256": "163bca578a38d70e3bc22cc6a072bdaa2cfc51b50bc4add1f87571df9e07c489",
+    "files": {
+      "bin/neoism-agent": {
+        "sha256": "c5acc7849528345d2d777d514c701b6e6776eb35d3752cc6c91457337adc2f4f",
+        "size": 235,
+        "source_path": "generated-wrapper"
+      },
+      "lib/ld-linux-x86-64.so.2": {
+        "sha256": "c20a2dc8917c755f02b94049356320fe1f62ac7d9f8994731f807d9df39302da",
+        "size": 236616,
+        "source_path": "/lib64/ld-linux-x86-64.so.2"
+      },
+      "lib/libc.so.6": {
+        "sha256": "3a15d66867d83762c7f2f1e37359cb8f6c5743edb369c65285cb0b1c4f7498bf",
+        "size": 2129424,
+        "source_path": "/lib/x86_64-linux-gnu/libc.so.6"
+      },
+      "lib/libdrm.so.2": {
+        "sha256": "ff39219aa058421e46afd36851342370cd1932d2557eb22f54e129755642bf67",
+        "size": 92760,
+        "source_path": "/lib/x86_64-linux-gnu/libdrm.so.2"
+      },
+      "lib/libexpat.so.1": {
+        "sha256": "286682ecbc5e59a638963b1a4e6351e65eb32fcf4bdcb9cb7569b6a61fe06a8d",
+        "size": 186624,
+        "source_path": "/lib/x86_64-linux-gnu/libexpat.so.1"
+      },
+      "lib/libgbm.so.1": {
+        "sha256": "3c781e20939adc578f1696980cb8a106cfc34da404e89d93faa887e995da2f14",
+        "size": 22976,
+        "source_path": "/lib/x86_64-linux-gnu/libgbm.so.1"
+      },
+      "lib/libgcc_s.so.1": {
+        "sha256": "d93224d2b0dab4247598be683adca02f5cf00586f99c187579cd7e92058fb7cb",
+        "size": 183024,
+        "source_path": "/lib/x86_64-linux-gnu/libgcc_s.so.1"
+      },
+      "lib/libm.so.6": {
+        "sha256": "fce00b6f25f459cf4ae0b7fae4257909a1a8a86f9149e7c029a5d617baf1ccd0",
+        "size": 952616,
+        "source_path": "/lib/x86_64-linux-gnu/libm.so.6"
+      },
+      "lib/libxkbcommon.so.0": {
+        "sha256": "3eb6c7315985803a7c72cb81aa3293b763e6cfc907b70b7b2f641c2827cd90f9",
+        "size": 293432,
+        "source_path": "/lib/x86_64-linux-gnu/libxkbcommon.so.0"
+      },
+      "lib/libz.so.1": {
+        "sha256": "86200da370f20476a2507e9097a789b5ef97269b4ca8d5e164ad82dab9d99892",
+        "size": 113000,
+        "source_path": "/lib/x86_64-linux-gnu/libz.so.1"
+      }
+    },
+    "ldd_output": "\tlinux-vdso.so.1 (0x00007f3e33e8d000)\n\tlibz.so.1 => /lib/x86_64-linux-gnu/libz.so.1 (0x00007f3e33e66000)\n\tlibgbm.so.1 => /lib/x86_64-linux-gnu/libgbm.so.1 (0x00007f3e33e5f000)\n\tlibxkbcommon.so.0 => /lib/x86_64-linux-gnu/libxkbcommon.so.0 (0x00007f3e33e16000)\n\tlibgcc_s.so.1 => /lib/x86_64-linux-gnu/libgcc_s.so.1 (0x00007f3e33de8000)\n\tlibm.so.6 => /lib/x86_64-linux-gnu/libm.so.6 (0x00007f3e33cff000)\n\tlibc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007f3e2dfed000)\n\t/lib64/ld-linux-x86-64.so.2 (0x00007f3e33e8f000)\n\tlibdrm.so.2 => /lib/x86_64-linux-gnu/libdrm.so.2 (0x00007f3e33ce6000)\n\tlibexpat.so.1 => /lib/x86_64-linux-gnu/libexpat.so.1 (0x00007f3e33cb8000)\n",
+    "path": "/home/parkersettle/projects/neoism/neoism-agent/evals/public/.cache/artifacts/96d659cc1a486bc7921a93f429938ba61ad5f64373b087780fff2f61b48d40d3.tar",
+    "sha256": "96d659cc1a486bc7921a93f429938ba61ad5f64373b087780fff2f61b48d40d3",
+    "source_image": {
+      "image_id": "sha256:3ad86febfc4438c0e30c79ea80d8704451bbd9a76c852a9edbc21cc669b7e7d6",
+      "platform": "linux/amd64",
+      "repo_digests": [
+        "neoism-eval-lab@sha256:3ad86febfc4438c0e30c79ea80d8704451bbd9a76c852a9edbc21cc669b7e7d6"
+      ],
+      "requested_reference": "neoism-eval-lab:local"
+    }
+  },
+  "schema_version": 1
+}

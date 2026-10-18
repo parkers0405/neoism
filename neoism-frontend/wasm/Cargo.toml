@@ -25,6 +25,7 @@ default = []
 neoism-terminal-core = { workspace = true }
 neoism-ui = { workspace = true }
 neoism-protocol = { workspace = true }
+neoism-agent-core = { workspace = true }
 neoism-neoworld-core = { workspace = true }
 neoism-lua = { workspace = true }
 wasm-bindgen = { workspace = true }

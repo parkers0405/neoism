@@ -1,0 +1,6 @@
+{
+  "id": "nested-config-merge",
+  "description": "Fix a recursive JSON-style configuration merge without mutating or aliasing its inputs. A small deterministic coding-agent smoke task, not a comparative benchmark.",
+  "timeout_seconds": 180,
+  "verifier_timeout_seconds": 30
+}

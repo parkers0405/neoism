@@ -1,0 +1,9 @@
+{
+  "name": "neoism-public-opencode-v2-locked",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Private evaluation-only OpenCode V2 CLI; never installs globally",
+  "dependencies": {
+    "@opencode/cli": "2.0.32"
+  }
+}

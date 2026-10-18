@@ -864,7 +864,7 @@ impl neoism_agent_builtins::plugin::semantic::SemanticHost for Semantic {
         request: neoism_agent_plugin_api::RouteRequest,
     ) -> PluginFuture<'a, neoism_agent_plugin_api::RouteResponse> {
         Box::pin(async move {
-            let tenant_id = request.tenant_id.clone();
+            let claims = route_caller_claims(&request);
             let query = request.query.into_iter().fold(
                 serde_json::Map::new(),
                 |mut output, (key, values)| {
@@ -877,16 +877,11 @@ impl neoism_agent_builtins::plugin::semantic::SemanticHost for Semantic {
             );
             let query = serde_json::from_value(serde_json::Value::Object(query))
                 .map_err(runtime_error)?;
-            let scope = match (request.hosted, tenant_id.as_deref()) {
-                (true, Some(tenant)) | (false, Some(tenant)) if tenant != "local" => {
-                    crate::state::TenantQueryScope::Tenant(tenant)
-                }
-                _ => crate::state::TenantQueryScope::LocalAll,
-            };
-            let response =
-                crate::semantic::semantic_search_with_scope(&self.0, query, scope)
-                    .await
-                    .map_err(api_error)?;
+            let response = crate::semantic::semantic_search_route(
+                axum::extract::State(self.0.clone()),
+                axum::extract::Query(query),
+                claims,
+            ).await.map_err(api_error)?;
             let body = serde_json::to_value(response.0).map_err(runtime_error)?;
             Ok(neoism_agent_plugin_api::RouteResponse::json(200, body))
         })

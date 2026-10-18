@@ -5,10 +5,25 @@ impl NeoismAgentPane {
     /// classified part. Hosts should use this instead of pairing an upsert
     /// with an independently-maintained status mapping.
     pub fn ingest_live_part_message(&mut self, message: NeoismAgentMessage) {
+        self.ingest_live_part_message_with_parent(message, None);
+    }
+
+    pub fn ingest_live_part_message_with_parent(
+        &mut self,
+        message: NeoismAgentMessage,
+        parent_message_id: Option<&str>,
+    ) {
         let kind = message.kind;
         let title = message.title.clone();
+        let can_drive = !matches!(kind, NeoismAgentMessageKind::User | NeoismAgentMessageKind::System)
+            && self.queue_handoff.stopped_parts.observe(&message.id, parent_message_id);
+        if !can_drive && !matches!(kind, NeoismAgentMessageKind::User | NeoismAgentMessageKind::System) {
+            return;
+        }
         self.upsert_part_message(message);
-        self.note_streaming_from_part(kind, &title);
+        if can_drive {
+            self.note_streaming_from_part(kind, &title);
+        }
     }
 
     /// Delta twin of [`Self::ingest_live_part_message`]. The wire delta kind
@@ -21,6 +36,12 @@ impl NeoismAgentPane {
         kind: Option<String>,
         delta: &str,
     ) {
+        let can_drive = self.queue_handoff.stopped_parts.observe(
+            part_id.as_deref().unwrap_or_default(), message_id.as_deref(),
+        );
+        if !can_drive {
+            return;
+        }
         let compaction_reasoning =
             matches!(kind.as_deref(), Some("reasoning" | "thinking"))
                 .then(|| message_id.clone().zip(part_id.clone()))
@@ -44,6 +65,9 @@ impl NeoismAgentPane {
                     self.invalidate_timeline_layout();
                 }
             }
+        }
+        if self.suppress_streaming_after_abort() {
+            return;
         }
         match kind.as_deref() {
             Some("reasoning" | "thinking") => {

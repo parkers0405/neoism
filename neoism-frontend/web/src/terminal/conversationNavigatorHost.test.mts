@@ -4,6 +4,24 @@ import { conversationSearchRows, projectNavigatorRows, navigatorContextCurrent, 
 import { TerminalPanel } from "./TerminalPanel.ts";
 import { ProtocolClient } from "../workspace/ProtocolClient.ts";
 
+test("conversation search preserves grouped server rank, snippets and first hit metadata", () => {
+  const titles = [{ id: "title-first", title: "Needle title", directory: "/a" },
+    { id: "best", title: "Other title", directory: "/remote/project" }];
+  const ranked = { available: true, hits: [
+    { sessionId: "best", messageId: "m1", snippet: "matching\nmessage", score: -10 },
+    { sessionId: "title-first", snippet: "second", score: -100 },
+    { sessionId: "best", snippet: "must not replace first" },
+  ] };
+  const rows = conversationSearchRows(titles, ranked);
+  assert.deepEqual(rows.map((row) => row.value), ["best", "title-first"]);
+  assert.equal(rows[0].description, "matching message");
+  assert.equal(rows[0].title, "Other title");
+  assert.equal(rows[0].directory, "/remote/project");
+  assert.deepEqual(conversationSearchRows(titles, { available: true, hits: [] }), []);
+  assert.equal(conversationSearchRows(titles, { available: false, hits: [] }).length, 2);
+  assert.equal(conversationSearchRows([], { hits: [{ session_id: "legacy", excerpt: "legacy text" }] })[0].description, "legacy text");
+});
+
 const project = (id: string) => ({ name: id, path: `/projects/${id}`, id, last_opened: 0 });
 
 function discoveryFixture(registry: Promise<ReturnType<typeof project>[]>) {
@@ -438,7 +456,10 @@ function fixture() {
     conversationNavigatorClose() {},
   };
   const panel = Object.create(TerminalPanel.prototype) as any;
-  const target = { adapter, client, identity: "endpoint-wa", generation: 1, workspaceId: "wa", mode: "search", serial: 12, query: "needle", results: new Map(), completed: false };
+  const target = { adapter, client, identity: "endpoint-wa", generation: 1, workspaceId: "wa", mode: "search", serial: 12, query: "needle", results: new Map(), completed: false,
+    inFlight: false, failed: false, refreshTimer: undefined as ReturnType<typeof setTimeout> | undefined,
+    timeoutTimer: undefined as ReturnType<typeof setTimeout> | undefined,
+    searchTimer: undefined as ReturnType<typeof setTimeout> | undefined };
   Object.assign(panel, { options: { client, activeWorkspaceId: "wa" }, wasmAdapter: adapter, conversationNavigation: target,
     scheduleDraw() {}, openNeoismAgentTab() {}, activeAgentRouteId: () => 1, bindAgentSessionToRoute() {} });
   const reply = (serial = 12) => panel.agentReply({ ThreadSearchResult: { generation: serial, query: "needle", sessions: [{ id: "outside", title: "Outside", directory: "/saved/project" }], semantic: {}, error: null } });
@@ -451,6 +472,112 @@ test("real host ignores dismissed, stale query and prior connection search repli
   }
   const f = fixture(); f.reply(11); assert.equal(f.rows.length, 0);
   f.reply(); assert.equal(f.rows.length, 1); assert.equal(f.target.completed, true);
+});
+
+test("host forwards indexing separately from real rows and rejects stale status", () => {
+  const f = fixture();
+  const statuses: boolean[] = [];
+  Object.assign(f.adapter, { conversationNavigatorSetIndexing: (value: boolean) => statuses.push(value) });
+  const reply = (indexing: boolean, hits: unknown[], generation = 12) => f.panel.agentReply({ ThreadSearchResult: {
+    generation, query: "needle", sessions: [], semantic: { available: true, indexing, hits }, error: null,
+  } });
+  reply(true, []);
+  assert.deepEqual(statuses, [true]);
+  assert.deepEqual(f.rows.at(-1), []);
+  reply(true, [{ sessionId: "real", title: "Real hit", excerpt: "needle" }]);
+  assert.deepEqual((f.rows.at(-1) as any[]).map((row) => row.value), ["real"]);
+  assert.equal(f.target.results.has("real"), true);
+  reply(false, [], 11);
+  assert.deepEqual(statuses, [true, true]);
+  reply(false, []);
+  assert.deepEqual(statuses, [true, true, false]);
+  f.reply();
+  assert.equal(statuses.at(-1), false, "older servers default to not indexing");
+});
+
+test("indexing refresh is single-flight, keeps request generation, and clears on completion", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const f = fixture();
+  const sent: any[] = [];
+  let requestId = 0;
+  Object.assign(f.target.client, { allocateRequestId: () => ++requestId, sendAgent: (_id: number, message: unknown) => sent.push(message) });
+  const reply = (indexing: boolean, hits: unknown[] = []) => f.panel.agentReply({ ThreadSearchResult: {
+    generation: 12, query: "needle", sessions: [], semantic: { available: true, indexing, hits }, error: null,
+  } });
+  reply(true);
+  t.mock.timers.tick(999);
+  assert.equal(sent.length, 0);
+  t.mock.timers.tick(1);
+  assert.deepEqual(sent, [{ SearchThreads: { query: "needle", generation: 12 } }]);
+  assert.equal(f.target.inFlight, true);
+  t.mock.timers.tick(5000);
+  assert.equal(sent.length, 1, "no overlapping poll while awaiting response");
+  reply(true, [{ sessionId: "new-hit", title: "New hit", excerpt: "needle" }]);
+  assert.equal(f.target.results.has("new-hit"), true);
+  t.mock.timers.tick(1000);
+  assert.equal(sent.length, 2);
+  assert.deepEqual(sent[1], sent[0]);
+  reply(false, [{ sessionId: "new-hit", excerpt: "needle" }]);
+  assert.equal(f.target.refreshTimer, undefined);
+  assert.equal(f.target.timeoutTimer, undefined);
+  t.mock.timers.tick(60000);
+  assert.equal(sent.length, 2);
+  f.panel.clearConversationNavigation();
+});
+
+test("indexing timers stop on dismissal, endpoint/query change, error and destruction cleanup", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  for (const invalidation of ["close", "dismiss", "endpoint", "query", "error", "timeout"]) {
+    const f = fixture();
+    const sent: unknown[] = [];
+    Object.assign(f.target.client, { allocateRequestId: () => 1, sendAgent: (_id: number, message: unknown) => sent.push(message) });
+    const reply = (error: string | null = null) => f.panel.agentReply({ ThreadSearchResult: {
+      generation: 12, query: "needle", sessions: [], semantic: { available: true, indexing: true, hits: [] }, error,
+    } });
+    reply();
+    if (invalidation === "close") {
+      f.panel.clearConversationNavigation(); // Same cleanup called by destroy.
+      assert.equal(f.target.refreshTimer, undefined);
+    } else if (invalidation === "dismiss") f.dismiss();
+    else if (invalidation === "endpoint") f.setGeneration(2);
+    else if (invalidation === "query") f.setQuery("new query");
+    else if (invalidation === "error") reply("offline");
+    t.mock.timers.tick(1000);
+    if (invalidation === "timeout") {
+      assert.equal(sent.length, 1);
+      t.mock.timers.tick(30000);
+      assert.equal(f.target.failed, true);
+      reply(); // Even a late indexing reply cannot restart polling after timeout.
+    } else assert.equal(sent.length, 0, invalidation);
+    t.mock.timers.tick(60000);
+    assert.equal(sent.length, invalidation === "timeout" ? 1 : 0, invalidation);
+    f.panel.clearConversationNavigation();
+    assert.equal(f.target.refreshTimer, undefined);
+    assert.equal(f.target.timeoutTimer, undefined);
+  }
+});
+
+test("query changes cancel the old poll and debounce only the new generation", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const f = fixture();
+  const sent: any[] = [];
+  Object.assign(f.target.client, { allocateRequestId: () => 1, sendAgent: (_id: number, message: unknown) => sent.push(message) });
+  f.panel.agentReply({ ThreadSearchResult: { generation: 12, query: "needle", sessions: [],
+    semantic: { available: true, indexing: true, hits: [] }, error: null } });
+  assert.notEqual(f.target.refreshTimer, undefined);
+  f.setQuery("replacement");
+  f.panel.pumpConversationNavigator();
+  assert.equal(f.target.refreshTimer, undefined);
+  const serial = f.target.serial;
+  assert.notEqual(serial, 12);
+  t.mock.timers.tick(180);
+  assert.deepEqual(sent, [{ SearchThreads: { query: "replacement", generation: serial } }]);
+  f.reply(); // Late result from the previous query must not reschedule its poll.
+  assert.equal(f.target.refreshTimer, undefined);
+  f.panel.clearConversationNavigation();
+  assert.equal(f.target.timeoutTimer, undefined);
+  t.mock.timers.tick(60000);
+  assert.equal(sent.length, 1);
 });
 
 test("search activation attaches by saved metadata without changing declared workspace", () => {

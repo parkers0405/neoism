@@ -230,6 +230,7 @@ fn presence(buffer: &str, peer: &str) -> CrdtPeerPresence {
         buffer_id: buffer.into(),
         peer_id: peer.into(),
         display_name: peer.into(),
+        client_os: None,
         color: CrdtPresenceColor {
             r: 12,
             g: 34,

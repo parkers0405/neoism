@@ -105,10 +105,11 @@ fn draw_row_presence_cluster(
             DEPTH,
             ORDER + 5,
         );
-        crate::editor::markdown::render::draw::draw_presence_orb_clipped(
+        crate::editor::markdown::render::draw::draw_presence_avatar_clipped(
             sugarloaf,
             panel_clip,
             &peers[i].display_name,
+            peers[i].client_os.as_deref(),
             ox,
             oy,
             av,

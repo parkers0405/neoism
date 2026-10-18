@@ -1,6 +1,8 @@
 //! Transport-only projection of existing conversation-family authorities.
 use crate::state::AppState;
-use neoism_agent_core::{CatalogActivity, SessionInfo, SessionStatus};
+use neoism_agent_core::{
+    CatalogActivity, CatalogBranchSnapshot, CatalogFamilySnapshot, SessionInfo, SessionStatus,
+};
 use std::collections::{HashMap, HashSet};
 
 #[derive(serde::Serialize)]
@@ -47,6 +49,41 @@ pub(crate) fn families(sessions: &[SessionInfo]) -> HashMap<String, HashSet<Stri
             .insert(session.id.to_string());
     }
     families
+}
+
+/// Stable iterative preorder. Each branch/edge is visited at most once after
+/// sorting siblings; disconnected/cyclic components are retained deterministically.
+fn branch_preorder(branches: &[neoism_agent_core::SubtaskLifecycleSnapshot], root: &str) -> Vec<usize> {
+    let ids: HashSet<_> = branches.iter().map(|branch| branch.session_id.as_str()).collect();
+    let mut sorted: Vec<_> = (0..branches.len()).collect();
+    sorted.sort_by(|&a, &b| {
+        branches[a].started_at.cmp(&branches[b].started_at)
+            .then_with(|| branches[a].session_id.cmp(&branches[b].session_id))
+    });
+    let mut children: HashMap<&str, Vec<usize>> = HashMap::new();
+    let mut roots = Vec::new();
+    for &index in &sorted {
+        let parent = branches[index].parent_session_id.as_str();
+        if parent == root || !ids.contains(parent) {
+            roots.push(index);
+        } else {
+            children.entry(parent).or_default().push(index);
+        }
+    }
+    let mut visited = HashSet::new();
+    let mut ordered = Vec::with_capacity(branches.len());
+    // All real roots precede fallback seeds for corrupt cyclic components.
+    for seed in roots.into_iter().chain(sorted) {
+        let mut stack = vec![seed];
+        while let Some(index) = stack.pop() {
+            if !visited.insert(index) { continue; }
+            ordered.push(index);
+            if let Some(descendants) = children.get(branches[index].session_id.as_str()) {
+                stack.extend(descendants.iter().rev().copied());
+            }
+        }
+    }
+    ordered
 }
 
 pub(crate) async fn activity(
@@ -106,6 +143,7 @@ pub(crate) async fn activity(
 /// Per-connection routing cache only; activity is always freshly read.
 pub(crate) struct CatalogProjection {
     sessions: Vec<SessionInfo>,
+    session_indices: HashMap<String, usize>,
     membership: HashMap<String, HashSet<String>>,
     requests: HashMap<String, String>,
 }
@@ -123,10 +161,21 @@ impl CatalogProjection {
             .map(|p| (p.id.clone(), p.session_id.clone()))
             .collect();
         Ok(Self {
+            session_indices: Self::index_sessions(&sessions),
             sessions,
             membership,
             requests,
         })
+    }
+
+    fn index_sessions(sessions: &[SessionInfo]) -> HashMap<String, usize> {
+        sessions.iter().enumerate()
+            .map(|(index, session)| (session.id.to_string(), index))
+            .collect()
+    }
+
+    fn session_metadata(&self, id: &str) -> Option<&SessionInfo> {
+        self.session_indices.get(id).and_then(|index| self.sessions.get(*index))
     }
 
     pub(crate) async fn baseline(
@@ -140,10 +189,66 @@ impl CatalogProjection {
             if let Some(root) =
                 authorized_root(state, root.clone(), directory, claims).await?
             {
+                events.push(self.family_event(state, &root, false).await?);
                 events.push(self.activity_event(state, root.id.as_str()).await?);
             }
         }
         Ok(events)
+    }
+
+    /// Runtime supplies the atomic execution/revision/branch roster; queued event
+    /// payloads are only invalidation signals, never lifecycle authority.
+    async fn family_event(
+        &self,
+        state: &AppState,
+        root: &SessionInfo,
+        deleted: bool,
+    ) -> anyhow::Result<neoism_agent_core::EventPayload> {
+        let runtime = state.inner.store.get_session_runtime_snapshot(root.id.as_str()).await?;
+        let parents: HashMap<_, _> = runtime.branches.iter()
+            .map(|branch| (branch.session_id.as_str(), branch.parent_session_id.as_str()))
+            .collect();
+        let pending: HashSet<_> = state.inner.permissions.read().await.values()
+            .map(|request| request.session_id.clone()).collect();
+        let branches = if deleted {
+            Vec::new()
+        } else {
+            branch_preorder(&runtime.branches, root.id.as_str()).into_iter().map(|index| {
+                let branch = &runtime.branches[index];
+                let metadata = self.session_metadata(&branch.session_id);
+                // Direct children are depth one. Bound traversal even for corrupt
+                // cycles or orphaned parents; never recurse through the roster.
+                let mut depth = 1usize;
+                let mut parent = branch.parent_session_id.as_str();
+                let mut visited = HashSet::from([branch.session_id.as_str()]);
+                while parent != root.id.as_str() && visited.insert(parent) {
+                    let Some(next) = parents.get(parent) else { break };
+                    depth = depth.saturating_add(1).min(32);
+                    if depth == 32 { break; }
+                    parent = next;
+                }
+                CatalogBranchSnapshot {
+                    session_id: branch.session_id.clone(),
+                    parent_session_id: branch.parent_session_id.clone(),
+                    status: branch.status.clone(),
+                    started_at: branch.started_at,
+                    title: metadata.map(|session| session.title.clone()).unwrap_or_default(),
+                    agent: metadata.and_then(|session| session.agent.clone()),
+                    depth,
+                    permission_pending: pending.contains(&branch.session_id),
+                }
+            }).collect()
+        };
+        let snapshot = CatalogFamilySnapshot {
+            directory: root.directory.clone(),
+            execution_id: runtime.execution.map(|execution| execution.execution_id),
+            family_revision: runtime.family_revision,
+            branches,
+        };
+        Ok(neoism_agent_core::EventPayload::new(
+            neoism_agent_core::event_type::SESSION_CATALOG_FAMILY,
+            serde_json::json!({"sessionID": root.id, "snapshot": snapshot}),
+        ))
     }
 
     async fn activity_event(
@@ -223,14 +328,18 @@ impl CatalogProjection {
                 .find(|(_, family)| family.contains(source))
                 .map(|(root, _)| root.clone())
         });
+        let prior_info = source.as_ref()
+            .and_then(|source| self.session_metadata(source)).cloned();
         if lifecycle {
-            self.sessions = state.inner.store.list_sessions().await?;
-            self.membership = families(&self.sessions);
+            let sessions = state.inner.store.list_sessions().await?;
+            self.session_indices = Self::index_sessions(&sessions);
+            self.membership = families(&sessions);
+            self.sessions = sessions;
         }
         let info = match source.as_ref() {
             Some(source) => state.inner.store.get_session(source).await?.or_else(|| {
                 (event.kind == et::SESSION_DELETED)
-                    .then_some(payload_info)
+                    .then_some(payload_info.or(prior_info))
                     .flatten()
             }),
             None => None,
@@ -261,6 +370,11 @@ impl CatalogProjection {
         let Some(root) = authorized_root(state, root, directory, claims).await? else {
             return Ok(Vec::new());
         };
+        let family_event = self.family_event(
+            state,
+            &root,
+            event.kind == et::SESSION_DELETED && source.as_deref() == Some(root_id.as_str()),
+        ).await?;
         // New cross-directory child may arrive without a lifecycle edge yet.
         if let Some(source) = source {
             self.membership
@@ -280,6 +394,7 @@ impl CatalogProjection {
             event.properties["info"] = value;
             events.push(event);
         }
+        events.push(family_event);
         events.push(projected);
         Ok(events)
     }

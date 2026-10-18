@@ -383,6 +383,7 @@ struct WireAvatarPeer {
     display_name: String,
     color: [u8; 3],
     rainbow: bool,
+    client_os: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -472,6 +473,7 @@ impl PresenceStoreBridge {
                         display_name: peer.display_name,
                         color: peer.color,
                         rainbow: peer.rainbow,
+                        client_os: peer.client_os,
                     })
                     .collect(),
             })
@@ -571,6 +573,11 @@ impl PresencePublisherBridge {
     /// Publish under the LOCAL THEME'S cursor color.
     pub fn set_color(&mut self, r: u8, g: u8, b: u8) {
         self.publisher.set_color(PresenceColor { r, g, b });
+    }
+
+    /// OS detected by the browser host, not the wasm compile target.
+    pub fn set_client_os(&mut self, client_os: Option<String>) {
+        self.publisher.set_client_os(client_os);
     }
 
     /// Publish the rainbow-preset flag (peers animate locally).

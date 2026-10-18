@@ -1,0 +1,1 @@
+{"config":{"capacity":2,"default_ttl":5},"operations":[{"op":"put","now":0,"key":"a","value":1},{"op":"get","now":5,"key":"a"}]}

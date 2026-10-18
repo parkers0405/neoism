@@ -1,0 +1,1 @@
+{"category":"migration-planning","description":"Repair a private synthetic dependency and version planner with atomic transaction groups.","id":"repo-migration-planner","suite":"repository","timeout_seconds":600,"verifier_timeout_seconds":60}

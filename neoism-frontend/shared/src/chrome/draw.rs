@@ -1032,10 +1032,6 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                 .then(|| pane.session_id_str().map(str::to_owned))
                 .flatten();
             let viewed_root = agent_buffer_in_view.then_some(root.as_deref()).flatten();
-            // The roster lives on this same pane on web. Project it independently
-            // of the detail rail, which may be hidden (or contain no child UI).
-            pane.side_panel_mut()
-                .sync_catalog_subagents(root.as_deref());
             pane.side_panel_mut().set_catalog_viewed_root(viewed_root);
             pane.side_panel_mut()
                 .set_catalog_viewed_session(viewed_session.as_deref());

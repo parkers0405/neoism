@@ -409,6 +409,11 @@ impl ChromeTopBar {
         layout_changed
     }
 
+    /// Presence effects share the frame clock and stop when the cluster disappears.
+    pub fn presence_animation_active(&self) -> bool {
+        self.is_visible() && !self.peers.is_empty() && !self.peer_rects.is_empty()
+    }
+
     pub fn set_left_safe_inset(&mut self, inset: f32) {
         self.left_safe_inset = inset.max(0.0);
     }
@@ -1054,10 +1059,11 @@ impl ChromeTopBar {
                 (r.w + 2.0 * ring_pad) * 0.5,
                 ORDER_ICON,
             );
-            crate::editor::markdown::render::draw::draw_presence_orb_clipped(
+            crate::editor::markdown::render::draw::draw_presence_avatar_clipped(
                 sugarloaf,
                 clip,
                 &self.peers[i].display_name,
+                self.peers[i].client_os.as_deref(),
                 r.x,
                 r.y,
                 r.w,
@@ -1119,7 +1125,12 @@ impl ChromeTopBar {
         };
         let pad_x = 7.0 * scale;
         let tip_h = 20.0 * scale;
-        let tip_w = sugarloaf.text_mut().measure(&peer.display_name, &opts) + pad_x * 2.0;
+        let label = if peer.client_os.as_deref() == Some("windows") {
+            format!("{} (Windows)", peer.display_name)
+        } else {
+            peer.display_name.clone()
+        };
+        let tip_w = sugarloaf.text_mut().measure(&label, &opts) + pad_x * 2.0;
         let margin = 4.0 * scale;
         let (tip_x, tip_y) = match dock {
             DockEdge::Top | DockEdge::Bottom => {
@@ -1159,7 +1170,7 @@ impl ChromeTopBar {
         sugarloaf.text_mut().draw(
             tip_x + pad_x,
             tip_y + (tip_h - font_size) * 0.5,
-            &peer.display_name,
+            &label,
             &opts,
         );
     }
@@ -1525,6 +1536,28 @@ mod tests {
         // Skip sugarloaf — only refresh hit rects, which is the part
         // the tests exercise.
         bar.refresh_rects(strip, 1.0);
+    }
+
+    #[test]
+    fn presence_animation_tracks_visible_cluster_and_stops_on_disconnect() {
+        let mut bar = ChromeTopBar::new();
+        let strip = Rect::new(0.0, 0.0, 800.0, CHROME_TOPBAR_HEIGHT);
+        assert!(!bar.presence_animation_active());
+        bar.set_peers(vec![PresenceAvatarPeer {
+            peer_id: "windows-peer".into(),
+            display_name: "Guest".into(),
+            client_os: Some("windows".into()),
+            color: [100, 150, 200],
+            rainbow: false,
+        }]);
+        paint_strip(&mut bar, strip);
+        assert!(bar.presence_animation_active());
+        bar.set_visible(false);
+        assert!(!bar.presence_animation_active());
+        bar.set_visible(true);
+        assert!(bar.presence_animation_active());
+        bar.set_peers(Vec::new());
+        assert!(!bar.presence_animation_active());
     }
 
     #[test]

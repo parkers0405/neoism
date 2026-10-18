@@ -382,9 +382,12 @@ pub fn dispatch(session: &AgentSession, msg: AgentClientMessage) {
                 handle_start_subagent(inner, session_id, agent, prompt).await;
             });
         }
-        AgentClientMessage::Compact { session_id } => {
+        AgentClientMessage::Compact {
+            session_id,
+            request_id,
+        } => {
             tokio::spawn(async move {
-                handle_compact(inner, session_id).await;
+                handle_compact(inner, session_id, request_id).await;
             });
         }
         AgentClientMessage::SlashCommand { session_id, text } => {

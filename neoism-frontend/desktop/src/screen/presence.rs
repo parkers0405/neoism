@@ -204,7 +204,9 @@ impl Screen<'_> {
             let (peer_id, display_name) =
                 local_presence_identity(self.presence_display_name_override.as_deref());
             self.remote_presence.set_local_peer_id(peer_id.clone());
-            self.presence_publisher = Some(PresencePublisher::new(peer_id, display_name));
+            let mut publisher = PresencePublisher::new(peer_id, display_name);
+            publisher.set_client_os(Some(std::env::consts::OS.to_string()));
+            self.presence_publisher = Some(publisher);
         }
         let publisher = self
             .presence_publisher

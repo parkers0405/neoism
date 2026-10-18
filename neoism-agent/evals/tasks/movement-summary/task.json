@@ -1,0 +1,6 @@
+{
+  "id": "movement-summary",
+  "description": "Refactor a small inventory aggregation routine to support one-pass iterables and signed movements. A deterministic coding-agent smoke task, not a comparative benchmark.",
+  "timeout_seconds": 180,
+  "verifier_timeout_seconds": 30
+}

@@ -1,0 +1,9 @@
+# Repository event reducer
+
+Repair this private synthetic stdlib project. Public API: `reducer.reduce_events(state, events)`. Do not change the API. The three source modules separate validation, event application, and transaction orchestration.
+
+State is exactly `{"entities": {key: {"version": n, "value": JSON, "deleted": bool}}, "seen": [event_id, ...]}`. Keys and event IDs are nonempty strings; versions are nonnegative integers (not bool); seen IDs are unique. Deleted records must have null value. Extra record/state/event keys are invalid. Events are exactly `{id, key, version, op, value}` for `op="put"` (any JSON value), or `{id, key, version, op}` for `op="delete"`. Events must be a list.
+
+Return `{state, applied, ignored, error}`. Process in input order. An already-seen ID is ignored, even if its key/version differs. An unseen ID is appended to seen even when its version is stale. Apply only if the key is absent or the event version is strictly greater than the stored version; equal versions are ignored. A delete creates a tombstone even for an absent key, retaining its version with null value; a later higher-version put resurrects it. `applied` and `ignored` contain event IDs in processing order, including repeated IDs. Do not sort.
+
+Validate the entire batch before processing: any invalid event aborts the whole batch and returns the unchanged state, empty applied/ignored, and `{"code":"invalid_event","index":i}` for the first invalid event. A non-list events argument uses index null. Invalid state takes precedence and returns the original supplied state with `{"code":"invalid_state","index":null}`. Success error is null. Inputs must never be mutated and the returned state must not alias input containers. No clocks, packages, files or network are needed. Run `python -m unittest discover -v` in workspace.

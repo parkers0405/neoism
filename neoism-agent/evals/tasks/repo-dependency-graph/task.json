@@ -1,0 +1,1 @@
+{"category":"feature","description":"Private synthetic repository task: deterministic dependency closure, cycle paths, topological ordering, and build layers; not an upstream issue or public benchmark.","id":"repo-dependency-graph","suite":"repository","timeout_seconds":600,"verifier_timeout_seconds":60}

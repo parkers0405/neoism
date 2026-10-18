@@ -59,10 +59,28 @@ Rules:
 - Do not quote raw transcript markup, tool output bodies, XML tags, or reasoning text. Summarize what matters from them instead.
 - Do not mention the summary process or that context was compacted."#;
 
+#[cfg(test)]
 pub(crate) async fn compact_session_context(
     state: &AppState,
     session_id: &str,
 ) -> Result<SessionInfo, ApiError> {
+    compact_owned(state, session_id, false)
+        .await?
+        .ok_or_else(|| ApiError::internal("missing compaction result"))
+}
+
+pub(crate) async fn compact_queued_session_context(
+    state: &AppState,
+    session_id: &str,
+) -> Result<Option<SessionInfo>, ApiError> {
+    compact_owned(state, session_id, true).await
+}
+
+async fn compact_owned(
+    state: &AppState,
+    session_id: &str,
+    queued: bool,
+) -> Result<Option<SessionInfo>, ApiError> {
     let admission = crate::execution_activity::admission_guard(state, session_id)
         .await
         .ok_or_else(|| ApiError::not_found(format!("session {session_id} not found")))?;
@@ -81,33 +99,95 @@ pub(crate) async fn compact_session_context(
         .map_err(|_| ApiError::conflict("Session is already running"))?;
     let mut run_guard =
         crate::session_run::SessionRunGuard::new(state, session_id, &run.id);
+    if queued {
+        // Internal clear-all callers need not hold admission. The delete, not
+        // the worker's earlier observation, is authoritative permission to run.
+        if !state.inner.store.take_queued_compact(session_id).await? {
+            state
+                .inner
+                .session_coordinator
+                .finish_run(session_id, &run.id)
+                .await;
+            run_guard.disarm();
+            drop(admission);
+            crate::session_queue::publish_prompt_queue_status(state, session_id, 0).await;
+            return Ok(None);
+        }
+        crate::session_queue::publish_prompt_queue_changed(
+            state, session_id, "dequeue", None, None, 1,
+        )
+        .await;
+    }
     if let Err(error) = state.inner.store.start_run(&run.id, session_id).await {
         drop(admission);
+        let error = ApiError::internal(error.to_string());
+        finish_manual_compaction_failure(
+            state, session_id, started, false, false, &error,
+        )
+        .await;
         crate::session_run::finish_session_run(state, session_id, &run.id).await;
         run_guard.disarm();
-        return Err(ApiError::internal(error.to_string()));
+        return Err(error);
     }
     if let Err(error) =
         crate::execution_activity::begin_manual_action(state, session_id, &run.id).await
     {
         drop(admission);
+        let error = ApiError::internal(error.to_string());
+        finish_manual_compaction_failure(
+            state, session_id, started, false, false, &error,
+        )
+        .await;
         crate::session_run::finish_session_run(state, session_id, &run.id).await;
         run_guard.disarm();
-        return Err(ApiError::internal(error.to_string()));
+        return Err(error);
     }
     crate::session_run::register_session_busy(state, session_id).await;
     drop(admission);
-    let result = run_compaction(
-        state,
-        session_id,
-        MANUAL_COMPACTION_REASON,
-        started,
-        &run.cancel,
-    )
-    .await;
+    let result =
+        run_manual_compaction(state, session_id, started, &run.cancel, false).await;
     release_owned_compaction_run(state, session_id, Some(run.id)).await;
     run_guard.disarm();
-    result
+    result.map(Some)
+}
+
+/// Only the owning run calls this at safe boundaries. Claim under admission,
+/// then release the lock before provider work; Stop shares the same lock.
+pub(crate) async fn drain_manual_compaction_for_run(
+    state: &AppState,
+    session_id: &str,
+    run_id: &str,
+) -> bool {
+    let admission = crate::execution_activity::admission_guard(state, session_id).await;
+    let Some(run) = state.inner.session_coordinator.active_run(session_id).await else {
+        return false;
+    };
+    if run.id != run_id || run.cancel.load(Ordering::SeqCst) {
+        return false;
+    }
+    match state.inner.store.take_queued_compact(session_id).await {
+        Ok(true) => {}
+        Ok(false) => return false,
+        Err(error) => {
+            tracing::warn!(%error, session_id, "failed to claim compact control");
+            return false;
+        }
+    }
+    drop(admission);
+    crate::session_queue::publish_prompt_queue_changed(
+        state, session_id, "dequeue", None, None, 1,
+    )
+    .await;
+    crate::session_queue::publish_prompt_queue_status(state, session_id, 0).await;
+    if let Err(error) =
+        run_manual_compaction(state, session_id, now_millis(), &run.cancel, true).await
+    {
+        // This control failed, not the owning run. Its ended lifecycle carries
+        // the compaction error; a session.error would falsely terminate clients
+        // that are still streaming the ordinary run.
+        tracing::warn!(%error, session_id, "manual in-run compaction failed");
+    }
+    true
 }
 
 pub(crate) async fn compact_session_context_for_run(
@@ -159,12 +239,104 @@ async fn compact_session_context_inner(
     // Always release the transient run afterwards — even if the body returns
     // early through a `?` — so a mid-compaction error can't wedge the session
     // in a permanent "already running" state.
-    let result = run_compaction(state, session_id, reason, started, &cancel).await;
+    let result = run_compaction(state, session_id, reason, started, &cancel, false).await;
     release_owned_compaction_run(state, session_id, owned_run_id).await;
     if let Some(guard) = run_guard.as_mut() {
         guard.disarm();
     }
     result
+}
+
+fn manual_compaction_end_payload(
+    mut payload: serde_json::Value,
+    run_continues: bool,
+) -> serde_json::Value {
+    if run_continues {
+        payload["runContinues"] = json!(true);
+    }
+    payload
+}
+
+/// Manual controls must always close their UI lifecycle, including storage
+/// errors outside the provider-failure path. AUTO intentionally bypasses this.
+async fn run_manual_compaction(
+    state: &AppState,
+    session_id: &str,
+    started: u64,
+    cancel: &Arc<AtomicBool>,
+    run_continues: bool,
+) -> Result<SessionInfo, ApiError> {
+    let mut ended = false;
+    let result = run_compaction_body(
+        state,
+        session_id,
+        MANUAL_COMPACTION_REASON,
+        started,
+        cancel,
+        run_continues,
+        Some(&mut ended),
+    )
+    .await;
+    if let Err(error) = &result {
+        finish_manual_compaction_failure(
+            state,
+            session_id,
+            started,
+            run_continues,
+            ended,
+            error,
+        )
+        .await;
+    }
+    result
+}
+
+/// Best effort even when the store itself caused the failure. Never release or
+/// publish idle for the owning run, and never clear a newer compaction's marker.
+async fn finish_manual_compaction_failure(
+    state: &AppState,
+    session_id: &str,
+    started: u64,
+    run_continues: bool,
+    ended: bool,
+    error: &ApiError,
+) {
+    match state.inner.store.get_session(session_id).await {
+        Ok(Some(mut info)) if info.time.compacting == Some(started) => {
+            info.time.compacting = None;
+            info.time.updated = now_millis();
+            match state.inner.store.update_session(&info).await {
+                Ok(()) => state.publish(EventPayload::new(
+                    event_type::SESSION_UPDATED,
+                    json!({ "sessionID": session_id, "info": info }),
+                )),
+                Err(cleanup_error) => {
+                    tracing::warn!(%cleanup_error, session_id, "failed to clear manual compaction marker");
+                }
+            }
+        }
+        Err(cleanup_error) => {
+            tracing::warn!(%cleanup_error, session_id, "failed to read manual compaction marker for cleanup");
+        }
+        _ => {}
+    }
+    if !ended {
+        state.publish(EventPayload::new(
+            event_type::SESSION_COMPACTION_ENDED,
+            manual_compaction_end_payload(
+                json!({
+                    "sessionID": session_id,
+                    "timestamp": now_millis(),
+                    "summary": { "text": "", "kind": "error" },
+                    "text": "",
+                    "kind": "error",
+                    "status": "error",
+                    "error": { "message": error.to_string() },
+                }),
+                run_continues,
+            ),
+        ));
+    }
 }
 
 async fn run_compaction(
@@ -173,6 +345,28 @@ async fn run_compaction(
     reason: &str,
     started: u64,
     cancel: &Arc<AtomicBool>,
+    manual_run_continues: bool,
+) -> Result<SessionInfo, ApiError> {
+    run_compaction_body(
+        state,
+        session_id,
+        reason,
+        started,
+        cancel,
+        manual_run_continues,
+        None,
+    )
+    .await
+}
+
+async fn run_compaction_body(
+    state: &AppState,
+    session_id: &str,
+    reason: &str,
+    started: u64,
+    cancel: &Arc<AtomicBool>,
+    manual_run_continues: bool,
+    mut manual_ended: Option<&mut bool>,
 ) -> Result<SessionInfo, ApiError> {
     let mut info = ensure_session(state, session_id).await?;
     info.time.compacting = Some(started);
@@ -228,6 +422,19 @@ async fn run_compaction(
             "reason": reason,
         }),
     ));
+    #[cfg(test)]
+    {
+        let gate = state
+            .inner
+            .session_coordinator
+            .compaction_started_gates
+            .lock()
+            .await
+            .remove(session_id);
+        if let Some(gate) = gate {
+            let _ = gate.await;
+        }
+    }
     let mut assistant_message = compaction_assistant_message(
         &info,
         &model,
@@ -282,8 +489,12 @@ async fn run_compaction(
                 &mut info,
                 &mut assistant_message,
                 &message,
+                manual_run_continues,
             )
             .await?;
+            if let Some(ended) = manual_ended.as_deref_mut() {
+                *ended = true;
+            }
             return Err(if aborted {
                 ApiError::conflict("compaction cancelled")
             } else {
@@ -336,21 +547,30 @@ async fn run_compaction(
     ));
     state.publish(EventPayload::new(
         event_type::SESSION_COMPACTION_ENDED,
-        json!({
-            "sessionID": session_id,
-            "messageID": compaction_message_id,
-            "timestamp": now,
-            "text": summary.clone(),
-            "kind": kind,
-        }),
+        manual_compaction_end_payload(
+            json!({
+                "sessionID": session_id,
+                "messageID": compaction_message_id,
+                "timestamp": now,
+                "text": summary.clone(),
+                "kind": kind,
+            }),
+            manual_run_continues,
+        ),
     ));
+    if let Some(ended) = manual_ended.as_deref_mut() {
+        *ended = true;
+    }
     state.publish(EventPayload::new(
         event_type::SESSION_COMPACTED,
-        json!({
-            "sessionID": session_id,
-            "info": info,
-            "summary": summary_payload,
-        }),
+        manual_compaction_end_payload(
+            json!({
+                "sessionID": session_id,
+                "info": info,
+                "summary": summary_payload,
+            }),
+            manual_run_continues,
+        ),
     ));
     Ok(info)
 }
@@ -519,6 +739,9 @@ async fn generate_model_compaction_summary(
         tenant_id: Some(crate::caller::session_tenant(info).to_string()),
         workspace_id: info.workspace_id.as_ref().map(ToString::to_string),
         session_id: Some(session_id.to_string()),
+        cache_affinity: Some(
+            crate::execution_activity::cache_root_session_id(state, &info).await,
+        ),
         variant: model.variant.clone(),
         text_verbosity: snapshot.config().text_verbosity,
         api: metadata.api,
@@ -1118,6 +1341,7 @@ async fn fail_compaction_assistant_message(
     info: &mut SessionInfo,
     assistant_message: &mut MessageWithParts,
     message: &str,
+    manual_run_continues: bool,
 ) -> Result<(), ApiError> {
     let now = now_millis();
     info.time.updated = now;
@@ -1149,14 +1373,17 @@ async fn fail_compaction_assistant_message(
     ));
     state.publish(EventPayload::new(
         event_type::SESSION_COMPACTION_ENDED,
-        json!({
-            "sessionID": session_id,
-            "summary": { "text": "", "kind": "error" },
-            "text": "",
-            "kind": "error",
-            "status": "error",
-            "error": { "message": message },
-        }),
+        manual_compaction_end_payload(
+            json!({
+                "sessionID": session_id,
+                "summary": { "text": "", "kind": "error" },
+                "text": "",
+                "kind": "error",
+                "status": "error",
+                "error": { "message": message },
+            }),
+            manual_run_continues,
+        ),
     ));
     Ok(())
 }
@@ -1532,6 +1759,100 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn manual_failure_cleanup_preserves_newer_marker_and_does_not_duplicate_end() {
+        let path = std::env::temp_dir().join(format!(
+            "neoism-manual-cleanup-{}.sqlite3",
+            Id::ascending(IdKind::Event)
+        ));
+        let state = AppState::open_database(path.clone()).await.unwrap();
+        let mut info = test_session_info();
+        info.time.compacting = Some(20);
+        state.inner.store.insert_session(&info).await.unwrap();
+        let run = SessionRun {
+            id: Id::ascending(IdKind::Event).to_string(),
+            started_at: 1,
+            cancel: Arc::new(AtomicBool::new(false)),
+        };
+        state
+            .inner
+            .session_coordinator
+            .install_run(info.id.as_str(), run.clone())
+            .await;
+        let mut events = state.subscribe();
+        let error = ApiError::internal("injected manual cleanup failure");
+        finish_manual_compaction_failure(
+            &state,
+            info.id.as_str(),
+            10,
+            true,
+            false,
+            &error,
+        )
+        .await;
+        assert_eq!(
+            state
+                .inner
+                .store
+                .get_session(info.id.as_str())
+                .await
+                .unwrap()
+                .unwrap()
+                .time
+                .compacting,
+            Some(20)
+        );
+        // The existing provider-failure path already ended this attempt. Cleanup
+        // must still be safe but must not publish another ended event.
+        finish_manual_compaction_failure(
+            &state,
+            info.id.as_str(),
+            20,
+            true,
+            true,
+            &error,
+        )
+        .await;
+        assert_eq!(
+            state
+                .inner
+                .store
+                .get_session(info.id.as_str())
+                .await
+                .unwrap()
+                .unwrap()
+                .time
+                .compacting,
+            None
+        );
+        let mut ended = 0;
+        while let Ok(event) = events.try_recv() {
+            if event.kind == event_type::SESSION_COMPACTION_ENDED {
+                assert_eq!(event.properties["runContinues"], true);
+                ended += 1;
+            }
+            assert_ne!(event.kind, event_type::SESSION_STATUS);
+        }
+        assert_eq!(ended, 1);
+        assert_eq!(
+            state
+                .inner
+                .session_coordinator
+                .active_run(info.id.as_str())
+                .await
+                .unwrap()
+                .id,
+            run.id
+        );
+        state
+            .inner
+            .session_coordinator
+            .finish_run(info.id.as_str(), &run.id)
+            .await;
+        drop(state);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
     async fn manual_compaction_reconciles_idle_execution_and_releases_admission() {
         for scenario in ["idle", "active", "child", "orphan-child"] {
             let directory = std::env::temp_dir().join(format!(
@@ -1825,6 +2146,7 @@ mod tests {
                     &mut info,
                     &mut message,
                     "compaction cancelled",
+                    false,
                 )
                 .await
                 .unwrap();

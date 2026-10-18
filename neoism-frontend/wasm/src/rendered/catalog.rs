@@ -130,16 +130,6 @@ pub(crate) fn apply_agent_event_to_pane(
     parsed: neoism_protocol::agent::AgentServerMessage,
 ) {
     apply_agent_event_to_pane_inner(pane, parsed);
-    project_catalog_subagents(pane);
-}
-
-/// Projection must not depend on preparing/painting the right detail rail.
-fn project_catalog_subagents(
-    pane: &mut neoism_ui::panels::agent_pane::state::NeoismAgentPane,
-) {
-    let root = pane.conversation_root_id().map(str::to_owned);
-    pane.side_panel_mut()
-        .sync_catalog_subagents(root.as_deref());
 }
 
 fn apply_agent_event_to_pane_inner(
@@ -226,6 +216,7 @@ fn apply_agent_event_to_pane_inner(
         }
         AgentServerMessage::ContentDelta {
             message_id,
+            parent_message_id,
             kind,
             text,
             ..
@@ -236,7 +227,7 @@ fn apply_agent_event_to_pane_inner(
                 ContentKind::Compaction => Some("compaction".to_string()),
                 ContentKind::Tool { name } => Some(name),
             };
-            pane.ingest_live_part_delta(None, Some(message_id), delta_kind, &text);
+            pane.ingest_live_part_delta(parent_message_id, Some(message_id), delta_kind, &text);
         }
         AgentServerMessage::MessageEnd { .. } => {
             // SessionIdle is the authoritative idle signal; this
@@ -292,6 +283,7 @@ fn apply_agent_event_to_pane_inner(
             pane.set_session_id(Some(session_id));
         }
         AgentServerMessage::ThreadDeleted { session_id } => {
+            pane.side_panel_mut().remove_session(&session_id);
             pane.clear_session_id_if(&session_id);
         }
         AgentServerMessage::SessionProjects {
@@ -418,6 +410,17 @@ fn apply_agent_event_to_pane_inner(
             kind,
             properties,
         } => {
+            if kind == "session.compaction.admission.failed" {
+                if let Some(request_id) = properties.get("requestID").and_then(serde_json::Value::as_str) {
+                    pane.compact_admission_failed(&session_id, request_id);
+                }
+            }
+            if kind == "session.queue.updated" {
+                pane.apply_queue_event(&session_id, properties.clone());
+            }
+            if kind == "session.compaction.queued" {
+                pane.note_compaction_queued();
+            }
             if kind == "session.moved"
                 && pane.session_id_str() == Some(session_id.as_str())
             {
@@ -431,8 +434,12 @@ fn apply_agent_event_to_pane_inner(
                 }
             }
         }
-        AgentServerMessage::MessageUpdated { message, .. } => {
-            pane.ingest_live_part_message(map_history(message));
+        AgentServerMessage::MessageUpdated {
+            message, parent_message_id, ..
+        } => {
+            pane.ingest_live_part_message_with_parent(
+                map_history(message), parent_message_id.as_deref(),
+            );
         }
         AgentServerMessage::PartRemoved { part_id, .. } => {
             pane.remove_part_message(&part_id);
@@ -517,7 +524,7 @@ fn apply_agent_event_to_pane_inner(
             if state == neoism_protocol::agent::StreamingState::WaitingSubagents {
                 pane.note_waiting_subagents_hint();
             } else {
-                pane.note_streaming(map_streaming(state), label);
+                pane.note_remote_streaming(map_streaming(state), label);
             }
         }
         AgentServerMessage::Notice {
@@ -643,6 +650,23 @@ fn apply_agent_event_to_pane_inner(
             pane.question_reply_failed(&request_id, error);
         }
 
+        AgentServerMessage::CatalogReset { directory } => {
+            pane.side_panel_mut().clear_catalog_families_in_scope(directory.as_deref());
+            if directory.is_none() {
+                pane.side_panel_mut().clear_session_activity_overrides();
+            }
+        }
+        AgentServerMessage::CatalogFamily {
+            session_id,
+            snapshot,
+        } => {
+            if let Ok(snapshot) =
+                serde_json::from_value::<neoism_agent_core::CatalogFamilySnapshot>(snapshot)
+            {
+                pane.side_panel_mut()
+                    .apply_catalog_family_snapshot(&session_id, snapshot);
+            }
+        }
         AgentServerMessage::CatalogActivity {
             session_id,
             activity,
@@ -822,9 +846,15 @@ fn apply_agent_event_to_pane_inner(
             phase,
             text,
             reason,
+            run_continues,
             ..
         } => {
-            pane.note_compaction(map_compaction_phase(phase), text, reason);
+            pane.note_compaction_with_continuation(
+                map_compaction_phase(phase),
+                text,
+                reason,
+                run_continues,
+            );
         }
 
         // -- Provider connect / auth flow ------------------------
@@ -972,9 +1002,7 @@ pub(crate) fn apply_agent_event_to_cache(
     pane: &mut neoism_ui::panels::agent_pane::state::NeoismAgentPane,
     parsed: neoism_protocol::agent::AgentServerMessage,
 ) -> bool {
-    let applied = apply_agent_event_to_cache_inner(pane, parsed);
-    project_catalog_subagents(pane);
-    applied
+    apply_agent_event_to_cache_inner(pane, parsed)
 }
 
 fn apply_agent_event_to_cache_inner(
@@ -1047,6 +1075,7 @@ fn apply_agent_event_to_cache_inner(
         AgentServerMessage::ContentDelta {
             session_id,
             message_id,
+            parent_message_id,
             kind,
             text,
         } => {
@@ -1056,8 +1085,9 @@ fn apply_agent_event_to_cache_inner(
                 ContentKind::Compaction => "compaction".to_string(),
                 ContentKind::Tool { name } => name,
             };
-            pane.cache_apply_part_delta(
+            pane.cache_apply_part_delta_with_parent(
                 &session_id,
+                parent_message_id.as_deref(),
                 Some(&message_id),
                 Some(delta_kind.as_str()),
                 &text,
@@ -1071,8 +1101,9 @@ fn apply_agent_event_to_cache_inner(
         AgentServerMessage::MessageUpdated {
             session_id,
             message,
+            parent_message_id,
         } => {
-            pane.cache_upsert_part_message(&session_id, map_history(message));
+            pane.cache_upsert_part_message_with_parent(&session_id, map_history(message), parent_message_id.as_deref());
             true
         }
         AgentServerMessage::PartRemoved {
@@ -1217,8 +1248,31 @@ fn apply_agent_event_to_cache_inner(
             pane.cache_push_system_message(&session_id, title, body);
             true
         }
+        AgentServerMessage::SessionEvent {
+            session_id, kind, properties,
+        } if kind == "session.compaction.admission.failed" => {
+            if let Some(request_id) = properties.get("requestID").and_then(serde_json::Value::as_str) {
+                pane.compact_admission_failed(&session_id, request_id);
+            }
+            true
+        }
+        AgentServerMessage::SessionEvent {
+            session_id, kind, properties,
+        } if kind == "session.queue.updated" => {
+            pane.apply_queue_event(&session_id, properties);
+            true
+        }
+        AgentServerMessage::SessionEvent {
+            session_id, kind, ..
+        } if kind == "session.compaction.queued" => {
+            pane.cache_note_compaction_queued(&session_id);
+            true
+        }
         AgentServerMessage::Compaction {
-            session_id, phase, ..
+            session_id,
+            phase,
+            run_continues,
+            ..
         } => {
             match phase {
                 CompactionPhase::Started => pane.cache_note_streaming(
@@ -1227,7 +1281,10 @@ fn apply_agent_event_to_cache_inner(
                     None,
                 ),
                 CompactionPhase::Delta => {}
-                CompactionPhase::Ended => pane.cache_note_session_idle(&session_id),
+                CompactionPhase::Ended => {
+                    pane.cache_note_compaction_ended(&session_id, run_continues)
+                }
+
             }
             true
         }
@@ -1345,7 +1402,6 @@ pub(crate) fn agent_event_session_id(
     match parsed {
         AgentServerMessage::ThreadCreated { session_id, .. }
         | AgentServerMessage::ThreadSwitched { session_id, .. }
-        | AgentServerMessage::ThreadDeleted { session_id, .. }
         | AgentServerMessage::HistoryChunk { session_id, .. }
         | AgentServerMessage::SessionEvent { session_id, .. }
         | AgentServerMessage::MessageUpdated { session_id, .. }
@@ -1380,7 +1436,10 @@ pub(crate) fn agent_event_session_id(
         // and their ack must reach the catalog-refresh trigger even
         // when the target isn't the active session. QuestionReplyFailed
         // and PermissionReplyFailed carry no session id at all.
-        AgentServerMessage::CatalogActivity { .. }
+        AgentServerMessage::CatalogReset { .. }
+        | AgentServerMessage::CatalogFamily { .. }
+        | AgentServerMessage::ThreadDeleted { .. }
+        | AgentServerMessage::CatalogActivity { .. }
         | AgentServerMessage::ThreadUpdated { .. }
         | AgentServerMessage::QuestionReplyFailed { .. }
         | AgentServerMessage::PermissionReplyFailed { .. }
@@ -1690,6 +1749,74 @@ mod activity_tests {
     use wasm_bindgen_test::wasm_bindgen_test;
 
     #[wasm_bindgen_test]
+    fn catalog_family_decodes_without_a_tab_or_pane_and_is_session_unscoped() {
+        let message: AgentServerMessage = serde_json::from_value(serde_json::json!({
+            "CatalogFamily": {
+                "session_id": "unopened-root",
+                "snapshot": {
+                    "executionId": "execution-1",
+                    "familyRevision": 7,
+                    "directory": "/work/other",
+                    "branches": [{
+                        "sessionId": "child",
+                        "parentSessionId": "unopened-root",
+                        "status": "outstanding",
+                        "startedAt": 123,
+                        "title": "Background task",
+                        "agent": "explore",
+                        "depth": 1,
+                        "permissionPending": true
+                    }]
+                }
+            }
+        })).unwrap();
+        assert_eq!(agent_event_session_id(&message), None);
+        let AgentServerMessage::CatalogFamily { session_id, snapshot } = message else {
+            panic!("expected catalog family");
+        };
+        assert_eq!(session_id, "unopened-root");
+        let snapshot: neoism_agent_core::CatalogFamilySnapshot =
+            serde_json::from_value(snapshot).unwrap();
+        assert_eq!(snapshot.execution_id.as_deref(), Some("execution-1"));
+        assert_eq!(snapshot.family_revision, 7);
+        assert_eq!(snapshot.directory, "/work/other");
+        assert_eq!(snapshot.branches.len(), 1);
+        assert_eq!(snapshot.branches[0].parent_session_id, "unopened-root");
+        assert!(snapshot.branches[0].permission_pending);
+    }
+
+    #[wasm_bindgen_test]
+    fn compact_admission_failure_event_rolls_back_only_matching_local_feedback() {
+        use neoism_ui::panels::agent_pane::outbound::OutboundAgentCommand;
+        let mut pane = NeoismAgentPane::default();
+        pane.set_session_id(Some("root".into()));
+        pane.note_streaming(NeoismAgentStreamingState::Generating, None);
+        pane.insert_text("/compact");
+        assert!(pane.submit());
+        assert_eq!(pane.queued_prompt_count(), 1);
+        assert_eq!(pane.queued_prompt_preview(), Some("Compaction queued"));
+        let request_id = pane.drain_pending_outbound().into_iter().find_map(|command| {
+            if let OutboundAgentCommand::CompactSessionRequest { request_id, .. } = command {
+                Some(request_id)
+            } else { None }
+        }).unwrap();
+        apply_agent_event_to_pane(&mut pane, AgentServerMessage::Notice {
+            session_id: "root".into(), title: "Unrelated failure".into(), body: "error".into(),
+            level: neoism_protocol::agent::NoticeLevel::Error,
+        });
+        assert_eq!(pane.queued_prompt_count(), 1);
+        for id in ["old-request", request_id.as_str()] {
+            apply_agent_event_to_pane(&mut pane, AgentServerMessage::SessionEvent {
+                session_id: "root".into(), kind: "session.compaction.admission.failed".into(),
+                properties: serde_json::json!({"requestID": id}),
+            });
+            assert_eq!(pane.queued_prompt_count(), usize::from(id == "old-request"));
+        }
+        assert_eq!(pane.queued_prompt_preview(), None);
+        assert_eq!(pane.streaming_state(), NeoismAgentStreamingState::Generating);
+    }
+
+    #[wasm_bindgen_test]
     fn discovery_pins_preserve_old_source_identity_and_never_enter_scoped_catalogs() {
         use neoism_protocol::agent::AgentServerMessage as M;
         let pin = serde_json::json!({"id":"old-pin", "title":"Archived", "directory":"/archived",
@@ -1945,6 +2072,7 @@ mod activity_tests {
                 &mut pane,
                 AgentServerMessage::MessageUpdated {
                     session_id: "root".to_string(),
+                    parent_message_id: None,
                     message: part(&format!("part-{index}"), kind, title, tool),
                 },
             );

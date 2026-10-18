@@ -236,11 +236,41 @@ pub(crate) async fn root_session_id(state: &AppState, session: &SessionInfo) -> 
     {
         return root.to_string();
     }
+    walk_session_root(state, session, false).await
+}
+
+/// Cache lineage follows native parent links (including forks), never unvalidated
+/// execution hints. Stop at tenant/project/workspace boundaries and fail closed
+/// on missing parents or cycles.
+pub(crate) async fn cache_root_session_id(
+    state: &AppState,
+    session: &SessionInfo,
+) -> String {
+    walk_session_root(state, session, true).await
+}
+
+async fn walk_session_root(
+    state: &AppState,
+    session: &SessionInfo,
+    scoped: bool,
+) -> String {
     let mut current = session.clone();
+    let mut seen = std::collections::BTreeSet::from([current.id.to_string()]);
     while let Some(parent) = current.parent_id.as_ref() {
         let Ok(Some(info)) = state.inner.store.get_session(parent.as_str()).await else {
             break;
         };
+        if !seen.insert(info.id.to_string()) {
+            return session.id.to_string();
+        }
+        if scoped
+            && (crate::caller::session_tenant(&info)
+                != crate::caller::session_tenant(session)
+                || info.project_id != session.project_id
+                || info.workspace_id != session.workspace_id)
+        {
+            break;
+        }
         current = info;
     }
     current.id.to_string()
@@ -767,6 +797,82 @@ mod tests {
     use super::*;
     use neoism_agent_core::{ExecutionActivitySnapshot, SessionInfo, TimeInfo};
     use std::collections::BTreeMap;
+
+    #[tokio::test]
+    async fn cache_affinity_follows_native_forks_and_scoped_parent_lineage() {
+        let path = std::env::temp_dir().join(format!(
+            "neoism-cache-{}.sqlite3",
+            Id::ascending(IdKind::Event)
+        ));
+        let state = AppState::open_database(path).await.unwrap();
+        let mut root: SessionInfo = serde_json::from_value(serde_json::json!({
+            "id":"cache-root", "slug":"cache", "projectId":"project-a",
+            "directory":"/synthetic", "title":"cache", "version":"test",
+            "time":{"created":1,"updated":1}
+        }))
+        .unwrap();
+        state.inner.store.insert_session(&root).await.unwrap();
+        let mut child = root.clone();
+        child.id = neoism_agent_core::new_session_id();
+        child.parent_id = Some(root.id.clone());
+        state.inner.store.insert_session(&child).await.unwrap();
+        // session_fork uses exactly this parent link, including for nested forks.
+        let mut deep = child.clone();
+        deep.id = neoism_agent_core::new_session_id();
+        deep.parent_id = Some(child.id.clone());
+        state.inner.store.insert_session(&deep).await.unwrap();
+        for session in [&root, &child, &deep] {
+            assert_eq!(
+                cache_root_session_id(&state, session).await,
+                root.id.as_str()
+            );
+        }
+        let mut independent = root.clone();
+        independent.id = neoism_agent_core::new_session_id();
+        independent
+            .extra
+            .insert("forkedFrom".into(), serde_json::json!(root.id));
+        independent
+            .extra
+            .insert(EXECUTION_ROOT_KEY.into(), serde_json::json!(root.id));
+        assert_eq!(
+            cache_root_session_id(&state, &independent).await,
+            independent.id.as_str()
+        );
+        independent.parent_id = Some(neoism_agent_core::new_session_id());
+        assert_eq!(
+            cache_root_session_id(&state, &independent).await,
+            independent.id.as_str()
+        );
+        assert_ne!(
+            cache_root_session_id(&state, &independent).await,
+            root.id.as_str()
+        );
+        // Neither forged execution hints nor cross-scope parent links authorize sharing.
+        for boundary in ["project", "workspace", "tenant"] {
+            let mut isolated = child.clone();
+            isolated
+                .extra
+                .insert(EXECUTION_ROOT_KEY.into(), serde_json::json!(root.id));
+            match boundary {
+                "project" => isolated.project_id = "project-b".into(),
+                "workspace" => isolated.workspace_id = Some("workspace-b".into()),
+                _ => {
+                    isolated.extra.insert(
+                        crate::caller::TENANT_EXTRA_KEY.into(),
+                        serde_json::json!("tenant-b"),
+                    );
+                }
+            }
+            assert_eq!(
+                cache_root_session_id(&state, &isolated).await,
+                child.id.as_str()
+            );
+        }
+        root.parent_id = Some(deep.id.clone());
+        state.inner.store.update_session(&root).await.unwrap();
+        assert_eq!(cache_root_session_id(&state, &deep).await, deep.id.as_str());
+    }
 
     #[tokio::test]
     async fn aggregate_snapshot_stream_covers_all_roots_and_replays_during_handshake() {

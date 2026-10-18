@@ -1151,6 +1151,7 @@ mod tests {
             buffer_id: "shared".into(),
             peer_id: "peer-a".into(),
             display_name: "Ada".into(),
+            client_os: Some("windows".into()),
             color: CrdtPresenceColor { r: 1, g: 2, b: 3 },
             cursor: CrdtCursorPosition {
                 line: 1,
@@ -1214,6 +1215,7 @@ mod tests {
                 buffer_id: "shared".into(),
                 peer_id: "old".into(),
                 display_name: "Old".into(),
+                client_os: None,
                 color: CrdtPresenceColor { r: 1, g: 1, b: 1 },
                 cursor: CrdtCursorPosition {
                     line: 0,

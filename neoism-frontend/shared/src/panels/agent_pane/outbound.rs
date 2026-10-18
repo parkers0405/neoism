@@ -88,6 +88,11 @@ pub enum OutboundAgentCommand {
 
     /// User asked to compact the active session's context window.
     CompactSession,
+    /// Correlated local admission; scope survives switching before host dispatch.
+    CompactSessionRequest {
+        session_id: String,
+        request_id: String,
+    },
 
     /// User asked to revert the active session by one undo step.
     UndoSession,

@@ -242,6 +242,8 @@ fn header_focus_walks_pins_folders_chats_and_show_more_in_both_directions() {
     p.set_navigation_header_enabled(true);
     p.select_new_chat();
     p.select_next();
+    assert_eq!(p.selected_header_action(), Some(CatalogHeaderAction::Search));
+    p.select_next();
     assert!(p.projects_selected());
     let expected: Vec<_> = p
         .sessions
@@ -265,6 +267,8 @@ fn header_focus_walks_pins_folders_chats_and_show_more_in_both_directions() {
     p.select_prev();
     assert!(p.projects_selected());
     assert!(!p.toggle_selected_project());
+    p.select_prev();
+    assert_eq!(p.selected_header_action(), Some(CatalogHeaderAction::Search));
     p.select_prev();
     assert!(p.new_chat_selected());
 }

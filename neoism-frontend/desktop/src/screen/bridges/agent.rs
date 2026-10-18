@@ -687,9 +687,8 @@ impl Screen<'_> {
                 .drain_live_session_updates();
             agent_animating |= self.renderer.conversations_pane.catalog_is_animating();
         }
-        // The catalog owns copies, not subscriptions. Reconcile ownership once
-        // after ALL contexts (including inactive workspaces/tabs) have drained.
-        let mut live_catalog_families = std::collections::HashSet::new();
+        // Chat views keep their own timelines current. The independent catalog
+        // stream owns sidebar family tracking, including families with no tab.
         let current_grid_index = self.context_manager.current_index();
         for (grid_index, grid) in
             self.context_manager.all_grids_mut().iter_mut().enumerate()
@@ -705,16 +704,6 @@ impl Screen<'_> {
                     // its bounded batch so reopening it cannot replay a long queue.
                     agent_animating |= agent.drain_live_session_updates();
                     agent.maybe_refresh_side_panel_subagents();
-                    if let Some(root) = self
-                        .renderer
-                        .conversations_pane
-                        .catalog_live_family_root(agent)
-                    {
-                        live_catalog_families.insert(root.to_owned());
-                    }
-                    self.renderer
-                        .conversations_pane
-                        .sync_catalog_subagents_from_pane(agent);
                 }
             }
         }
@@ -744,19 +733,8 @@ impl Screen<'_> {
             } else {
                 agent.drain_live_session_updates()
             };
-            // Family refresh is a lifecycle concern, not a detail-rail render
-            // concern. Hidden tabs/rails must still feed the independent catalog.
+            // Keep navigation and detail state current even in hidden views.
             agent.maybe_refresh_side_panel_subagents();
-            if let Some(root) = self
-                .renderer
-                .conversations_pane
-                .catalog_live_family_root(agent)
-            {
-                live_catalog_families.insert(root.to_owned());
-            }
-            self.renderer
-                .conversations_pane
-                .sync_catalog_subagents_from_pane(agent);
             agent.maybe_refresh_external_options();
             external_root_bound |= agent.take_external_root_bound_refresh();
             if agent_changed {
@@ -849,11 +827,6 @@ impl Screen<'_> {
             agent_animating |= animation_reason.is_some();
             agent_animating_reason = agent_animating_reason.or(animation_reason);
         }
-        agent_animating |= self
-            .renderer
-            .conversations_pane
-            .side_panel_mut()
-            .retain_catalog_subagent_families(&live_catalog_families);
         #[cfg(feature = "cef-artifacts")]
         {
             if self.sync_html_artifacts() {

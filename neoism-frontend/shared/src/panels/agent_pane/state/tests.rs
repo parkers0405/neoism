@@ -1863,6 +1863,84 @@ fn tab_mode_switch_rearms_agent_chip_transition() {
 }
 
 #[test]
+fn slash_compact_optimism_is_immediate_and_snapshot_owned() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("root".into());
+    pane.note_streaming(NeoismAgentStreamingState::Generating, None);
+    pane.execute_slash_text("/compact");
+    assert_eq!(pane.queued_prompt_count(), 1);
+    assert_eq!(pane.queued_prompt_preview(), Some("Compaction queued"));
+    assert_eq!(pane.queued_prompt_count, 0);
+    pane.execute_slash_text("/compact");
+    let commands = pane.drain_pending_outbound();
+    assert!(matches!(commands.as_slice(), [OutboundAgentCommand::CompactSessionRequest { session_id, request_id }]
+        if session_id == "root" && Some(request_id) == pane.pending_compact.as_ref()));
+    assert_eq!(pane.queued_prompt_count(), 1);
+    assert_eq!(pane.streaming_state, NeoismAgentStreamingState::Generating);
+    pane.apply_queue(1, Some("Compaction queued".into()), None);
+    assert!(pane.pending_compact.is_none());
+    assert_eq!(pane.queued_prompt_count(), 1);
+    pane.execute_slash_text("/compact");
+    assert!(pane.drain_pending_outbound().is_empty());
+    pane.apply_queue(0, None, None);
+    assert_eq!(pane.queued_prompt_count(), 0);
+    pane.execute_slash_text("/compact");
+    pane.note_compaction(CompactionPhase::Started, None, None);
+    assert!(pane.pending_compact.is_none());
+    assert_eq!(pane.queued_prompt_count(), 0);
+}
+
+#[test]
+fn compact_failure_is_correlated_and_preserves_ordinary_prompts() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("root".into());
+    pane.apply_queue(2, Some("ordinary".into()), None);
+    pane.note_streaming(NeoismAgentStreamingState::Generating, None);
+    pane.execute_slash_text("/compact");
+    let first = pane.pending_compact.clone().unwrap();
+    assert_eq!(pane.queued_prompt_count(), 3);
+    assert_eq!(pane.queued_prompt_preview(), Some("ordinary"));
+    pane.compact_admission_failed("root", &first);
+    assert_eq!(pane.queued_prompt_count(), 2);
+    assert_eq!(pane.streaming_state, NeoismAgentStreamingState::Generating);
+    pane.execute_slash_text("/compact");
+    let second = pane.pending_compact.clone().unwrap();
+    pane.compact_admission_failed("root", &first);
+    assert_eq!(pane.pending_compact.as_deref(), Some(second.as_str()));
+    pane.abort_session();
+    assert!(pane.pending_compact.is_none());
+    assert_eq!(pane.queued_prompt_count(), 2);
+    assert_eq!(pane.queued_prompt_preview(), Some("ordinary"));
+}
+
+#[test]
+fn compact_optimism_parks_restores_and_rolls_back_only_origin() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("origin".into());
+    pane.note_streaming(NeoismAgentStreamingState::Generating, None);
+    pane.execute_slash_text("/compact");
+    let request_id = pane.pending_compact.clone().unwrap();
+    pane.cache_current_session();
+    pane.session_id = Some("other".into());
+    assert!(pane.pending_compact.is_none());
+    assert_eq!(pane.session_cache["origin"].runtime.pending_compact.as_deref(), Some(request_id.as_str()));
+    assert!(pane.activate_cached_session("origin"));
+    assert_eq!(pane.queued_prompt_count(), 1);
+    assert_eq!(pane.queued_prompt_preview(), Some("Compaction queued"));
+    pane.cache_current_session();
+    pane.session_id = Some("other".into());
+    pane.compact_admission_failed("origin", &request_id);
+    assert!(pane.session_cache["origin"].runtime.pending_compact.is_none());
+    assert_eq!(pane.session_cache["origin"].runtime.streaming_state, NeoismAgentStreamingState::Generating);
+    assert_eq!(pane.queued_prompt_count(), 0);
+    pane.session_cache.get_mut("origin").unwrap().runtime.pending_compact = Some("snapshot".into());
+    pane.cache_apply_queue("origin", 1, Some("Compaction queued".into()), None);
+    assert!(pane.session_cache["origin"].runtime.pending_compact.is_none());
+    assert!(pane.activate_cached_session("origin"));
+    assert_eq!(pane.queued_prompt_count(), 1);
+}
+
+#[test]
 fn slash_compact_queues_compact_session_only_with_session() {
     // Call `execute_slash_text` directly to bypass the slash
     // picker (which `submit()` commits to its own selection). The
@@ -1877,7 +1955,7 @@ fn slash_compact_queues_compact_session_only_with_session() {
     assert!(
         drained
             .iter()
-            .any(|cmd| matches!(cmd, OutboundAgentCommand::CompactSession)),
+            .any(|cmd| matches!(cmd, OutboundAgentCommand::CompactSessionRequest { .. })),
         "expected CompactSession in drain: {drained:?}",
     );
 }
@@ -3543,6 +3621,42 @@ fn duplicate_compaction_end_does_not_idle_a_new_response() {
     );
 
     assert_eq!(pane.streaming_state, NeoismAgentStreamingState::Generating);
+}
+
+#[test]
+fn queued_compaction_uses_queue_state_and_preserves_active_run() {
+    let mut pane = NeoismAgentPane::default();
+    pane.note_streaming(NeoismAgentStreamingState::Generating, None);
+    pane.note_compaction_queued();
+    pane.note_compaction_queued();
+    assert_eq!(pane.queued_prompt_count(), 1);
+    assert_eq!(pane.queued_prompt_preview(), Some("Compaction queued"));
+    assert_eq!(pane.streaming_state, NeoismAgentStreamingState::Generating);
+    assert!(pane.messages.is_empty());
+    pane.apply_queue(0, None, None);
+    assert_eq!(pane.queued_prompt_count(), 0);
+    pane.note_compaction(CompactionPhase::Started, None, None);
+    pane.note_compaction_with_continuation(CompactionPhase::Ended, None, None, Some(true));
+    assert_eq!(pane.streaming_state, NeoismAgentStreamingState::Generating);
+    pane.cache_note_compaction_queued("inactive");
+    pane.cache_note_streaming("inactive", NeoismAgentStreamingState::Compacting, None);
+    pane.cache_note_compaction_ended("inactive", Some(true));
+    assert_eq!(
+        pane.session_cache["inactive"].runtime.streaming_state,
+        NeoismAgentStreamingState::Generating
+    );
+    pane.cache_apply_queue("inactive", 0, None, None);
+    assert_eq!(pane.session_cache["inactive"].runtime.queued_prompt_count, 0);
+    pane.session_id = Some("root".into());
+    pane.apply_queue(2, Some("ordinary queued prompt".into()), None);
+    pane.note_compaction_queued();
+    pane.abort_session();
+    // Stop must not optimistically erase ordinary queued prompts.
+    assert_eq!(pane.queued_prompt_count(), 2);
+    assert_eq!(pane.queued_prompt_preview(), Some("ordinary queued prompt"));
+    pane.apply_queue(1, Some("ordinary queued prompt".into()), None);
+    assert_eq!(pane.queued_prompt_count(), 1);
+    assert_eq!(pane.queued_prompt_preview(), Some("ordinary queued prompt"));
 }
 
 #[test]

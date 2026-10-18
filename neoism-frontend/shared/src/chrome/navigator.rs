@@ -374,6 +374,12 @@ mod tests {
             chrome.install_agent_pane(pane);
             chrome.conversations_visible = true;
             assert!(chrome.handle_chrome_key_shortcut(&key(NamedKey::ArrowDown)));
+            assert_eq!(chrome.agent_pane().unwrap().side_panel().selected_header_action(), Some(CatalogHeaderAction::Search));
+            assert!(!chrome.agent_pane().unwrap().side_panel().search_focused());
+            assert!(chrome.handle_chrome_key_shortcut(&key(NamedKey::Enter)));
+            assert_eq!(chrome.take_catalog_header_action(), Some(CatalogHeaderAction::Search));
+            assert!(chrome.pending_conversation_open.is_none());
+            assert!(chrome.handle_chrome_key_shortcut(&key(NamedKey::ArrowDown)));
             assert!(chrome
                 .agent_pane()
                 .unwrap()
@@ -385,6 +391,8 @@ mod tests {
                 Some(CatalogHeaderAction::Projects)
             );
             assert!(chrome.pending_conversation_open.is_none());
+            assert!(chrome.handle_chrome_key_shortcut(&key(NamedKey::ArrowUp)));
+            assert_eq!(chrome.agent_pane().unwrap().side_panel().selected_header_action(), Some(CatalogHeaderAction::Search));
             assert!(chrome.handle_chrome_key_shortcut(&key(NamedKey::ArrowUp)));
             assert!(chrome
                 .agent_pane()

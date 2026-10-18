@@ -486,6 +486,7 @@ pub(super) enum MarkdownListMarkerKind {
 #[derive(Clone, Debug, PartialEq)]
 pub struct MarkdownRemoteCursor {
     pub name: String,
+    pub client_os: Option<String>,
     pub color: [u8; 3],
     /// Peer uses the rainbow cursor preset → `color` is ignored and
     /// the caret animates through hues on the shared rainbow clock.

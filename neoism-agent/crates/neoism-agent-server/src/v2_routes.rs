@@ -26,8 +26,7 @@ use crate::session_queue::{
 };
 use crate::state::AppState;
 use crate::{
-    compact_session_context, ensure_session, filter_sessions, resolve_directory,
-    InstanceQuery, SessionListQuery,
+    ensure_session, filter_sessions, resolve_directory, InstanceQuery, SessionListQuery,
 };
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -824,20 +823,31 @@ pub(crate) async fn v2_session_projects(
         ));
     }
     let claims = claims.as_ref().map(|Extension(claims)| claims);
-    let scope = claims.map(|claims| {
-        if !claims.hosted && claims.workspace_id.is_none() && claims.tenant_id == "local" {
-            crate::state::TenantQueryScope::LocalAll
-        } else {
-            crate::state::TenantQueryScope::Tenant(&claims.tenant_id)
-        }
-    }).unwrap_or(crate::state::TenantQueryScope::LocalAll);
+    let scope = claims
+        .map(|claims| {
+            if !claims.hosted
+                && claims.workspace_id.is_none()
+                && claims.tenant_id == "local"
+            {
+                crate::state::TenantQueryScope::LocalAll
+            } else {
+                crate::state::TenantQueryScope::Tenant(&claims.tenant_id)
+            }
+        })
+        .unwrap_or(crate::state::TenantQueryScope::LocalAll);
     let items = state.inner.store.session_projects(scope, claims).await?;
-    let pinned = state.inner.store.pinned_root_sessions(scope, claims).await?;
+    let pinned = state
+        .inner
+        .store
+        .pinned_root_sessions(scope, claims)
+        .await?;
     // Return the compact list metadata directly: the live activity projection
     // would load every full session to discover families, defeating this query.
-    Ok(Json(serde_json::json!({"items": items.into_iter().map(|(directory, updated)| {
+    Ok(Json(
+        serde_json::json!({"items": items.into_iter().map(|(directory, updated)| {
         serde_json::json!({"directory": directory, "updatedMs": updated})
-    }).collect::<Vec<_>>(), "pinnedSessions": pinned})))
+    }).collect::<Vec<_>>(), "pinnedSessions": pinned}),
+    ))
 }
 
 pub(crate) async fn v2_session_list(
@@ -1250,9 +1260,14 @@ pub(crate) async fn v2_session_children(
         .into_iter()
         .filter(|session| {
             session.parent_id.as_ref().map(|id| id.as_str()) == Some(session_id.as_str())
-                && claims.as_ref().map(|Extension(claims)| {
-                    crate::caller::allows_session(claims, session)
-                }).unwrap_or_else(|| crate::caller::local_collaboration_session(false, session))
+                && claims
+                    .as_ref()
+                    .map(|Extension(claims)| {
+                        crate::caller::allows_session(claims, session)
+                    })
+                    .unwrap_or_else(|| {
+                        crate::caller::local_collaboration_session(false, session)
+                    })
         })
         .collect();
     Ok(Json(Page {
@@ -1265,7 +1280,7 @@ pub(crate) async fn v2_compact(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    compact_session_context(&state, &session_id).await?;
+    crate::session_queue::enqueue_manual_compaction(&state, &session_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

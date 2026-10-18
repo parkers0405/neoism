@@ -638,6 +638,24 @@ impl<A: Send + Copy + 'static> Chrome<A> {
 
     pub fn animations_active(&self) -> bool {
         self.editor_pane_animating
+            || (self.layout.top_bar.is_some() && self.top_bar.presence_animation_active())
+            || (!self.chrome_overlay_active()
+                && !self.is_terminal_tab_active()
+                && self.tab_lang == crate::syntax::Lang::Markdown
+                && self
+                    .markdown_pane
+                    .as_ref()
+                    .is_some_and(|pane| !pane.remote_cursors.is_empty()))
+            || (self.active_editor_pane_kind() == Some(EditorPaneKind::Code)
+                && self
+                    .code_pane
+                    .as_ref()
+                    .is_some_and(|pane| !pane.remote_cursors.is_empty()))
+            || (self.active_editor_pane_kind() == Some(EditorPaneKind::Notebook)
+                && self
+                    .notebook_pane
+                    .as_ref()
+                    .is_some_and(|pane| !pane.markdown.remote_cursors.is_empty()))
             || self.conversation_navigator.is_active()
             || self.chrome_pages_animating()
             || self.rainbow_cursor_active()
@@ -645,10 +663,9 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             || self.yank_flash.is_animating()
             || self.status_line.is_animating()
             || self.buffer_tabs.is_animating()
-            || self
-                .file_tree
-                .as_ref()
-                .is_some_and(|tree| tree.is_animating())
+            || self.file_tree.as_ref().is_some_and(|tree| {
+                tree.is_animating() || (tree.is_visible() && tree.has_presence())
+            })
             || self.file_browser.is_animating()
             || self.context_menu.is_animating()
             || self.command_palette.is_animating()

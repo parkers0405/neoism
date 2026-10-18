@@ -634,6 +634,7 @@ impl Screen<'_> {
                         neoism_ui::editor::crdt::PresenceAvatarPeer {
                             peer_id,
                             display_name,
+                            client_os: Some(std::env::consts::OS.to_string()),
                             // Orb is seeded by `display_name`; `color` only
                             // tints the ring, so a neutral value is fine.
                             color: [130, 130, 130],

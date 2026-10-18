@@ -2,6 +2,20 @@
 
 All notable user-facing changes to Neoism are documented here.
 
+## [0.7.129] - 2026-10-18
+
+### Search, compaction queues, presence, and provider caching
+
+- Adds durable manual-compaction queue controls, serialized admission/cancellation, restart and transfer persistence, and consistent desktop/shared status reconciliation.
+- Adds conversation full-text search backed by a durable Turso projection, bounded indexing/backfill, scoped ranking and filters, snippets, and navigator loading/error states across desktop and browser hosts.
+- Improves Codex OAuth prompt-cache affinity with account/tenant/workspace/connection scoping and matching request header/body cache keys, while preserving non-Codex behavior and explicit overrides.
+- Adds optional client-OS presence metadata through the protocol, daemon, browser publisher, and shared/native rendering while retaining legacy message compatibility.
+- Improves subagent activity retention, cached-session/sidebar state, pagination, queue/abort presentation, emphasized links, and input wrapping.
+- Includes evaluation-lab source, synthetic suites, and public HARD-51 setup/adapters/locks/tests. Paid/public experiment validation remains separate; generated downloads, environments, and run transcripts are not included. Local asset provenance may require preparation on another machine.
+- Includes the committed Nix release-runtime, launcher, source-packaging, shader-tooling, and build/test selection fixes.
+
+This is a stable production release, available through plain `neoism update` after the full platform matrix passes. Existing first-terminal directory following, trusted-user hosting boundaries, contributor credit, and Servo/CEF worker exclusion are preserved.
+
 ## [0.7.128] - 2026-10-17
 
 ### Conversation navigation and Windows validation hardening

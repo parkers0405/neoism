@@ -710,6 +710,7 @@ mod tests {
         });
         let request = ProviderGenerationRequest {
             session_id: None,
+            cache_affinity: None,
             connection_id: None,
             tenant_id: None,
             workspace_id: None,
@@ -764,6 +765,7 @@ mod tests {
         let request =
             crate::provider_transform::normalize_request(ProviderGenerationRequest {
                 session_id: None,
+                cache_affinity: None,
                 connection_id: None,
                 tenant_id: None,
                 workspace_id: None,
@@ -840,6 +842,7 @@ mod tests {
     fn anthropic_body_enables_thinking_for_reasoning_variant() {
         let request = ProviderGenerationRequest {
             session_id: None,
+            cache_affinity: None,
             connection_id: None,
             tenant_id: None,
             workspace_id: None,

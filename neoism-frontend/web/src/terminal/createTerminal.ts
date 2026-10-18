@@ -764,6 +764,7 @@ export interface TerminalAdapter {
     conversationNavigatorQuery?(): string;
     conversationNavigatorSetRows?(rows: string): void;
     conversationNavigatorSetLoading?(loading: boolean): void;
+    conversationNavigatorSetIndexing?(indexing: boolean): void;
     conversationNavigatorSetError?(error: string | null): void;
     drainConversationNavigatorAction?(): { kind: string; value?: string } | null;
     conversationNavigatorAttach?(id: string, directory: string | null): void;
@@ -1687,6 +1688,7 @@ interface ChromeBridgeInstance {
     conversation_navigator_query?(): string;
     conversation_navigator_set_rows?(rows: string): void;
     conversation_navigator_set_loading?(loading: boolean): void;
+    conversation_navigator_set_indexing?(indexing: boolean): void;
     conversation_navigator_set_error?(error: string | null): void;
     drain_conversation_navigator_action?(): { kind: string; value?: string } | null;
     conversation_navigator_attach?(id: string, directory: string | null): void;
@@ -1834,6 +1836,7 @@ export interface WasmPresencePublisherInstance {
     peer_id(): string;
     set_color(r: number, g: number, b: number): void;
     set_rainbow(rainbow: boolean): void;
+    set_client_os?(clientOs: string | null): void;
     tick(active: unknown, nowMs: number): unknown;
     free?(): void;
 }
@@ -3476,6 +3479,7 @@ class ChromeAdapter implements TerminalAdapter {
     conversationNavigatorQuery(): string { return this.inner.conversation_navigator_query?.() ?? ""; }
     conversationNavigatorSetRows(rows: string): void { this.inner.conversation_navigator_set_rows?.(rows); }
     conversationNavigatorSetLoading(loading: boolean): void { this.inner.conversation_navigator_set_loading?.(loading); }
+    conversationNavigatorSetIndexing(indexing: boolean): void { this.inner.conversation_navigator_set_indexing?.(indexing); }
     conversationNavigatorSetError(error: string | null): void { this.inner.conversation_navigator_set_error?.(error); }
     drainConversationNavigatorAction(): { kind: string; value?: string } | null { return this.inner.drain_conversation_navigator_action?.() ?? null; }
     conversationNavigatorAttach(id: string, directory: string | null): void { this.inner.conversation_navigator_attach?.(id, directory); }

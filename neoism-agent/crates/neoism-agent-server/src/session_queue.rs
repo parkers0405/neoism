@@ -18,7 +18,9 @@ pub(crate) struct SessionQueueInfo {
     count: usize,
     running: bool,
     worker: bool,
-    items: Vec<SessionQueueItem>,
+    compaction_queued: bool,
+    preview: Option<String>,
+    items: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -40,6 +42,30 @@ pub(crate) struct SessionQueueMutation {
     queue: SessionQueueInfo,
 }
 
+pub(crate) async fn enqueue_manual_compaction(
+    state: &AppState,
+    session_id: &str,
+) -> Result<(), ApiError> {
+    ensure_session(state, session_id).await?;
+    let admission = crate::execution_activity::admission_guard(state, session_id).await;
+    let inserted = state.inner.store.enqueue_compact(session_id).await?;
+    let start_worker = state.inner.session_coordinator.wake(session_id).await;
+    // Keep admission event/snapshot ordering consistent with Stop and claims.
+    if inserted {
+        state.publish(EventPayload::new(
+            event_type::SESSION_COMPACTION_QUEUED,
+            json!({"sessionID": session_id}),
+        ));
+    }
+    publish_prompt_queue_changed(state, session_id, "compact", None, None, 0).await;
+    drop(admission);
+    publish_prompt_queue_status(state, session_id, 0).await;
+    if start_worker {
+        spawn_drain_prompt_queue(state.clone(), session_id.to_string());
+    }
+    Ok(())
+}
+
 pub(crate) async fn session_queue(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
@@ -53,8 +79,12 @@ pub(crate) async fn session_queue_clear(
     Path(session_id): Path<String>,
 ) -> Result<Json<SessionQueueMutation>, ApiError> {
     ensure_session(&state, &session_id).await?;
+    // Visible cancellation shares admission with compact claims. Internal
+    // clear-all helpers deliberately remain lock-free for already-locked callers.
+    let admission = crate::execution_activity::admission_guard(&state, &session_id).await;
     let removed = clear_queued_prompts(&state, &session_id).await;
     publish_prompt_queue_changed(&state, &session_id, "clear", None, None, removed).await;
+    drop(admission);
     publish_prompt_queue_status(&state, &session_id, 0).await;
     Ok(Json(SessionQueueMutation {
         session_id: session_id.clone(),
@@ -68,14 +98,14 @@ pub(crate) async fn session_queue_pop(
     Path(session_id): Path<String>,
 ) -> Result<Json<SessionQueueMutation>, ApiError> {
     ensure_session(&state, &session_id).await?;
-    let popped = state
-        .inner
-        .store
-        .pop_user_queued_prompt(&session_id)
-        .await
-        .ok()
-        .flatten();
-    let removed = usize::from(popped.is_some());
+    let admission = crate::execution_activity::admission_guard(&state, &session_id).await;
+    let compact_removed = state.inner.store.take_queued_compact(&session_id).await?;
+    let popped = if compact_removed {
+        None
+    } else {
+        state.inner.store.pop_user_queued_prompt(&session_id).await?
+    };
+    let removed = usize::from(compact_removed || popped.is_some());
     publish_prompt_queue_changed(
         &state,
         &session_id,
@@ -86,6 +116,7 @@ pub(crate) async fn session_queue_pop(
     )
     .await;
     let queue_len = queued_prompt_count(&state, &session_id).await;
+    drop(admission);
     publish_prompt_queue_status(&state, &session_id, queue_len).await;
     Ok(Json(SessionQueueMutation {
         session_id: session_id.clone(),
@@ -147,6 +178,14 @@ pub(crate) async fn enqueue_prompt_request_with_delivery(
     Ok((start_worker, queue_len))
 }
 
+pub(crate) async fn queue_status_snapshot(
+    state: &AppState,
+    session_id: &str,
+) -> serde_json::Value {
+    let info = session_queue_info(state, session_id).await;
+    json!({"count": info.count, "preview": info.preview, "compactionQueued": info.compaction_queued})
+}
+
 async fn session_queue_info(state: &AppState, session_id: &str) -> SessionQueueInfo {
     let items = state
         .inner
@@ -168,16 +207,31 @@ async fn session_queue_info(state: &AppState, session_id: &str) -> SessionQueueI
         .session_coordinator
         .worker_active(session_id)
         .await;
+    let compaction_queued = state
+        .inner
+        .store
+        .compaction_queued(session_id)
+        .await
+        .unwrap_or(false);
+    let mut items = items
+        .into_iter()
+        .enumerate()
+        .map(|(index, request)| json!(queued_prompt_item(index, request)))
+        .collect::<Vec<_>>();
+    if compaction_queued {
+        items.insert(
+            0,
+            json!({"type": "compact", "preview": "Compaction queued"}),
+        );
+    }
     SessionQueueInfo {
         session_id: session_id.to_string(),
         count: items.len(),
         running,
         worker,
-        items: items
-            .into_iter()
-            .enumerate()
-            .map(|(index, request)| queued_prompt_item(index, request))
-            .collect(),
+        compaction_queued,
+        preview: queued_prompt_preview(state, session_id).await,
+        items,
     }
 }
 
@@ -266,6 +320,15 @@ pub(crate) async fn queued_prompt_preview(
     state: &AppState,
     session_id: &str,
 ) -> Option<String> {
+    if state
+        .inner
+        .store
+        .compaction_queued(session_id)
+        .await
+        .unwrap_or(false)
+    {
+        return Some("Compaction queued".to_string());
+    }
     state
         .inner
         .store
@@ -415,9 +478,21 @@ pub(crate) async fn drain_queued_prompts_into_active_run(
     session_id: &str,
 ) -> usize {
     let mut drained = 0;
-    while let Some((request, remaining)) =
-        next_active_continuation_prompt(state, session_id).await
-    {
+    loop {
+        if let Some(run) = state.inner.session_coordinator.active_run(session_id).await {
+            crate::session_context::drain_manual_compaction_for_run(
+                state, session_id, &run.id,
+            )
+            .await;
+            if run.cancel.load(std::sync::atomic::Ordering::SeqCst) {
+                break;
+            }
+        }
+        let Some((request, remaining)) =
+            next_active_continuation_prompt(state, session_id).await
+        else {
+            break;
+        };
         publish_prompt_queue_changed(
             state,
             session_id,
@@ -451,6 +526,56 @@ pub(crate) async fn drain_prompt_queue(state: AppState, session_id: String) {
     let mut prompt_failed = false;
     loop {
         wait_until_session_not_running(&state, &session_id).await;
+        if let Some(control_id) = state
+            .inner
+            .store
+            .pending_compact_id(&session_id)
+            .await
+            .unwrap_or(None)
+        {
+            match crate::session_context::compact_queued_session_context(
+                &state,
+                &session_id,
+            )
+            .await
+            {
+                Ok(_) => {}
+                // Claim-before-consume leaves the control durable on this race.
+                Err(error)
+                    if error.is_conflict()
+                        && error.to_string() == "Session is already running" =>
+                {
+                    continue;
+                }
+                Err(error) => {
+                    state.publish(EventPayload::new(event_type::SESSION_ERROR, json!({"sessionID": session_id, "error": {"code": "compaction.failed", "message": error.to_string(), "retryable": false, "details": {}}})));
+                    prompt_failed = true;
+                    // Terminally remove only the failed admission, never a new
+                    // compact admitted while its predecessor was executing.
+                    if let Err(cleanup_error) =
+                        state.inner.store.remove_compact_control(&control_id).await
+                    {
+                        tracing::warn!(%cleanup_error, session_id, "compact cleanup failed; parking worker until a later wake or restart");
+                        state
+                            .inner
+                            .session_coordinator
+                            .park_failed_worker(&session_id)
+                            .await;
+                        break;
+                    }
+                    publish_prompt_queue_changed(
+                        &state,
+                        &session_id,
+                        "compact-failed",
+                        None,
+                        None,
+                        0,
+                    )
+                    .await;
+                }
+            }
+            continue;
+        }
         let Some((request, delivery, remaining)) =
             next_queued_prompt(&state, &session_id).await
         else {

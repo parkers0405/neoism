@@ -325,6 +325,7 @@ pub(crate) struct CachedAgentRuntime {
     status_timing: status_timing::DesktopStatusTiming,
     queued_prompt_count: usize,
     queued_prompt_preview: Option<String>,
+    pending_compact: Option<String>,
     streaming_state: NeoismAgentStreamingState,
     streaming_started_at: Option<Instant>,
     streaming_state_changed_at: Option<Instant>,
@@ -342,6 +343,7 @@ impl Default for CachedAgentRuntime {
             status_timing: Default::default(),
             queued_prompt_count: 0,
             queued_prompt_preview: None,
+            pending_compact: None,
             streaming_state: NeoismAgentStreamingState::Idle,
             streaming_started_at: None,
             streaming_state_changed_at: None,
@@ -367,12 +369,24 @@ impl CachedAgentRuntime {
         tool: Option<String>,
     ) {
         if state == NeoismAgentStreamingState::Idle {
+            self.status_timing.handoff.empty_queue(
+                self.queued_prompt_count, self.queued_prompt_preview.as_deref(),
+            );
+        }
+        let (state, tool) = if self.status_timing.handoff.waiting() {
+            (NeoismAgentStreamingState::Generating, None)
+        } else {
+            (state, tool)
+        };
+        if state == NeoismAgentStreamingState::Compacting {
+            self.pending_compact = None;
+        }
+        if state == NeoismAgentStreamingState::Idle {
             self.status_timing.settle();
             self.streaming_state = state;
             self.streaming_started_at = None;
             self.streaming_state_changed_at = None;
             self.streaming_tool_label = None;
-            self.abort_requested_at = None;
             return;
         }
         if self.streaming_started_at.is_none() {
@@ -389,9 +403,15 @@ impl CachedAgentRuntime {
         &mut self,
         messages: &[NeoismAgentMessage],
     ) {
+        if self.suppress_streaming_after_abort() {
+            return;
+        }
         let Some(tail) = messages.last() else {
             return;
         };
+        if !self.status_timing.handoff.stopped_parts.allows(&tail.id, None) {
+            return;
+        }
         let (state, tool) = match tail.kind {
             NeoismAgentMessageKind::Reasoning => {
                 (NeoismAgentStreamingState::Thinking, None)
@@ -411,6 +431,37 @@ impl CachedAgentRuntime {
         self.note_streaming(state, tool);
     }
 
+    pub(super) fn suppress_streaming_after_abort(&self) -> bool {
+        self.status_timing.handoff.waiting()
+            || self.abort_requested_at.is_some_and(|requested| requested.elapsed() <= ABORT_STREAM_SUPPRESSION)
+    }
+
+    pub(super) fn promote_queue_handoff(&mut self) {
+        if self.status_timing.handoff.dequeue() {
+            self.abort_requested_at = None;
+            self.streaming_started_at = None;
+            self.status_timing.settle();
+            self.note_streaming(NeoismAgentStreamingState::Generating, None);
+        }
+    }
+
+    pub(super) fn reconcile_queue_handoff(
+        &mut self,
+        started_at: Option<u64>,
+        running: bool,
+        action: Option<&str>,
+    ) {
+        if self.status_timing.handoff.observe_start(started_at) {
+            self.abort_requested_at = None;
+            self.streaming_started_at = None;
+            self.note_streaming(NeoismAgentStreamingState::Generating, None);
+        } else if self.status_timing.handoff.settle_snapshot(
+            self.queued_prompt_count, self.queued_prompt_preview.as_deref(), running, action,
+        ) {
+            self.note_streaming(NeoismAgentStreamingState::Idle, None);
+        }
+    }
+
     pub(super) fn apply_queue_status(
         &mut self,
         count: usize,
@@ -418,17 +469,26 @@ impl CachedAgentRuntime {
         started_at: Option<u64>,
     ) {
         let decision = status_policy::queue_status_decision(
-            self.status_timing.queue_count(count, started_at),
-            preview,
+            self.status_timing.queue_snapshot_count(
+                count,
+                started_at.is_some(),
+                preview.as_deref(),
+            ),
+            self.status_timing.queue_preview(preview),
             started_at,
             self.is_streaming(),
         );
+        self.pending_compact = None;
         self.queued_prompt_count = decision.count;
         self.queued_prompt_preview = decision.preview;
-        if decision.should_enter_generating {
+        self.reconcile_queue_handoff(decision.started_at, true, None);
+        if decision.should_enter_generating && !self.suppress_streaming_after_abort() {
             self.note_streaming(NeoismAgentStreamingState::Generating, None);
         }
-        if let Some(started_at) = decision.started_at {
+        if let Some(started_at) = decision
+            .started_at
+            .filter(|_| !self.suppress_streaming_after_abort())
+        {
             let started = self
                 .status_timing
                 .started_at(self.streaming_started_at, started_at);
@@ -630,6 +690,10 @@ pub enum NeoismAgentUiEvent {
 }
 
 pub(crate) enum NeoismAgentBackgroundUpdate {
+    AbortFailed {
+        session_id: String,
+        error: String,
+    },
     McpCatalogRefreshed {
         token: u64,
         server: String,
@@ -653,8 +717,14 @@ pub(crate) enum NeoismAgentBackgroundUpdate {
         origin_draft_id: u64,
         error: String,
     },
-    CompactFinished,
-    CompactFailed(String),
+    CompactAccepted {
+        session_id: String,
+    },
+    CompactFailed {
+        session_id: String,
+        request_id: Option<String>,
+        error: String,
+    },
     ConfigDefaultsLoaded(neoism_ui::panels::agent_pane::api_mapping::ConfigDefaults),
     ConfigDefaultsFailed,
     ModelContextLimitRefreshed {
@@ -1091,6 +1161,7 @@ pub struct NeoismAgentPane {
     status_timing: status_timing::DesktopStatusTiming,
     queued_prompt_count: usize,
     queued_prompt_preview: Option<String>,
+    pub(super) pending_compact: Option<String>,
     sent_history: Vec<String>,
     history_index: Option<usize>,
     history_draft: String,
@@ -1414,6 +1485,7 @@ impl Default for NeoismAgentPane {
             status_timing: Default::default(),
             queued_prompt_count: 0,
             queued_prompt_preview: None,
+            pending_compact: None,
             sent_history: Vec::new(),
             history_index: None,
             history_draft: String::new(),
@@ -2414,6 +2486,8 @@ fn ease_out_cubic(t: f32) -> f32 {
     1.0 - inv * inv * inv
 }
 
+#[cfg(test)]
+mod admission_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

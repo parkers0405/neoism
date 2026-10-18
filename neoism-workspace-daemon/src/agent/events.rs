@@ -118,10 +118,14 @@ async fn run_event_stream_inner(
         };
 
         retry_delay = std::time::Duration::from_millis(250);
+        if catalog {
+            let _ = inner.tx.send(AgentServerMessage::CatalogReset {
+                directory: directory.clone(),
+            });
+        }
         if connected_once && catalog {
-            // The SSE baseline restores activity only. Re-read metadata too:
-            // roots may have been created/deleted while disconnected, including
-            // in a project not present in any previously loaded catalog page.
+            // The SSE baseline restores activity and family rows. Refresh root
+            // metadata too, including roots deleted while disconnected.
             if directory.is_none() {
                 // No unbounded/global head list in grouped mode. The client captures
                 // its current endpoint/root identity when requesting summaries.
@@ -215,7 +219,18 @@ fn forward_catalog_event(tx: &UnboundedSender<AgentServerMessage>, event: Value)
         .get("type")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    if kind == "session.catalog.activity" {
+    if kind == "session.catalog.family" {
+        let properties = event.get("properties").unwrap_or(&Value::Null);
+        if let (Some(session_id), Some(snapshot)) = (
+            properties.get("sessionID").and_then(Value::as_str),
+            properties.get("snapshot").filter(|snapshot| snapshot.is_object()),
+        ) {
+            let _ = tx.send(AgentServerMessage::CatalogFamily {
+                session_id: session_id.to_owned(),
+                snapshot: snapshot.clone(),
+            });
+        }
+    } else if kind == "session.catalog.activity" {
         let properties = event.get("properties").unwrap_or(&Value::Null);
         if let (Some(session_id), Some(activity)) = (
             properties.get("sessionID").and_then(Value::as_str),
@@ -447,6 +462,8 @@ pub(crate) fn forward_agent_server_event(
                     let _ = tx.send(AgentServerMessage::ContentDelta {
                         session_id: source_session.clone(),
                         message_id,
+                        parent_message_id: neoism_ui::panels::agent_pane::stream_events::event_message_id(&properties)
+                            .map(str::to_owned),
                         kind,
                         text: delta.to_string(),
                     });
@@ -502,6 +519,9 @@ pub(crate) fn forward_agent_server_event(
                     let _ = tx.send(AgentServerMessage::MessageUpdated {
                         session_id: source_session.clone(),
                         message,
+                        parent_message_id: neoism_ui::panels::agent_pane::stream_events::event_message_id(part)
+                            .or_else(|| neoism_ui::panels::agent_pane::stream_events::event_message_id(&properties))
+                            .map(str::to_owned),
                     });
                     return;
                 }
@@ -562,17 +582,16 @@ pub(crate) fn forward_agent_server_event(
                 }
             }
             if status_type == Some("busy") {
-                let queue = status.and_then(|status| status.get("queue"));
+                let (count, preview) =
+                    neoism_ui::panels::agent_pane::stream_events::queue_snapshot_fields(
+                        status
+                            .and_then(|status| status.get("queue"))
+                            .unwrap_or(&Value::Null),
+                    );
                 let _ = tx.send(AgentServerMessage::QueueUpdate {
                     session_id: source_session,
-                    count: queue
-                        .and_then(|queue| queue.get("count"))
-                        .and_then(Value::as_u64)
-                        .unwrap_or(0) as u32,
-                    preview: queue
-                        .and_then(|queue| queue.get("preview"))
-                        .and_then(Value::as_str)
-                        .map(str::to_string),
+                    count: count as u32,
+                    preview,
                     started_at: status
                         .and_then(|status| status.get("startedAt"))
                         .or_else(|| properties.get("startedAt"))
@@ -750,6 +769,7 @@ pub(crate) fn forward_agent_server_event(
             let _ = tx.send(AgentServerMessage::Compaction {
                 session_id: source_session,
                 phase: CompactionPhase::Started,
+                run_continues: None,
                 text: None,
                 reason: properties
                     .get("reason")
@@ -762,6 +782,7 @@ pub(crate) fn forward_agent_server_event(
             let _ = tx.send(AgentServerMessage::Compaction {
                 session_id: source_session,
                 phase: CompactionPhase::Delta,
+                run_continues: None,
                 text: properties
                     .get("text")
                     .and_then(Value::as_str)
@@ -774,6 +795,7 @@ pub(crate) fn forward_agent_server_event(
             let _ = tx.send(AgentServerMessage::Compaction {
                 session_id: source_session,
                 phase: CompactionPhase::Ended,
+                run_continues: properties.get("runContinues").and_then(Value::as_bool),
                 text: properties
                     .get("text")
                     .or_else(|| properties.get("summary").and_then(|s| s.get("text")))
@@ -1058,18 +1080,12 @@ pub(crate) fn forward_agent_server_event(
             return;
         }
         "session.queue.updated" => {
-            let queue = properties.get("queue").unwrap_or(&Value::Null);
-            let count = queue.get("count").and_then(Value::as_u64).unwrap_or(0) as u32;
-            let preview = queue
-                .get("preview")
-                .and_then(Value::as_str)
-                .map(str::to_string);
-            let started_at = queue.get("startedAt").and_then(Value::as_u64);
-            let _ = tx.send(AgentServerMessage::QueueUpdate {
+            // Queue admission needs action/message identity and running, not
+            // just the lossy count projection. Reuse the existing envelope.
+            let _ = tx.send(AgentServerMessage::SessionEvent {
                 session_id: source_session,
-                count,
-                preview,
-                started_at,
+                kind: event_type.to_string(),
+                properties: properties.clone(),
             });
             return;
         }
@@ -1176,6 +1192,51 @@ pub(crate) fn usage_from_value(value: Option<&Value>) -> Option<Usage> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn catalog_family_forwards_and_decodes_without_a_session_stream_or_pane() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let snapshot = json!({
+            "executionId": "execution-1",
+            "familyRevision": 7,
+            "directory": "/work/other",
+            "branches": [{
+                "sessionId": "child",
+                "parentSessionId": "another-root",
+                "status": "outstanding",
+                "startedAt": 123,
+                "title": "Background task",
+                "agent": "explore",
+                "depth": 1,
+                "permissionPending": false
+            }]
+        });
+        forward_catalog_event(
+            &tx,
+            normalize_v2_event(json!({
+                "type": "session.catalog.family",
+                "data": {"sessionID": "another-root", "snapshot": snapshot.clone()}
+            })),
+        );
+        let wire = serde_json::to_value(rx.try_recv().unwrap()).unwrap();
+        let decoded: AgentServerMessage = serde_json::from_value(wire).unwrap();
+        assert!(matches!(decoded, AgentServerMessage::CatalogFamily {
+            session_id, snapshot: received
+        } if session_id == "another-root" && received == snapshot));
+        assert!(rx.try_recv().is_err());
+
+        for properties in [
+            json!({"sessionID": "another-root"}),
+            json!({"sessionID": "another-root", "snapshot": null}),
+            json!({"snapshot": snapshot}),
+        ] {
+            forward_catalog_event(
+                &tx,
+                json!({"type": "session.catalog.family", "properties": properties}),
+            );
+        }
+        assert!(rx.try_recv().is_err());
+    }
 
     #[test]
     fn catalog_activity_is_global_and_does_not_forward_parent_idle_as_family_idle() {
@@ -1290,6 +1351,71 @@ mod tests {
             assert_eq!(message.kind, expected_kind);
         }
         assert!(rx.try_recv().is_err(), "generic busy emitted extra state");
+    }
+
+    #[test]
+    fn queued_compaction_transport_preserves_scope_and_continuation() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        forward_agent_server_event(
+            &tx,
+            "root",
+            json!({
+                "type": "session.compaction.queued", "properties": {"sessionID": "root"}
+            }),
+        );
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            AgentServerMessage::SessionEvent { session_id, kind, .. }
+                if session_id == "root" && kind == "session.compaction.queued"
+        ));
+        forward_agent_server_event(
+            &tx,
+            "root",
+            json!({
+                "type": "session.queue.updated", "properties": {"sessionID": "root",
+                    "queue": {"count": 1, "preview": "Compaction queued", "compactionQueued": true}}
+            }),
+        );
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            AgentServerMessage::SessionEvent { kind, properties, .. }
+                if kind == "session.queue.updated"
+                    && properties["queue"]["count"] == 1
+                    && properties["queue"]["preview"] == "Compaction queued"
+        ));
+        for kind in ["session.next.compaction.ended", "session.compacted"] {
+            forward_agent_server_event(
+                &tx,
+                "root",
+                json!({"type": kind,
+                    "properties": {"sessionID": "root", "runContinues": true}}),
+            );
+            assert!(matches!(
+                rx.try_recv().unwrap(),
+                AgentServerMessage::Compaction {
+                    run_continues: Some(true),
+                    phase: CompactionPhase::Ended,
+                    ..
+                }
+            ));
+        }
+    }
+
+    #[test]
+    fn queue_envelope_preserves_dequeue_identity_and_running_evidence() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let properties = json!({
+            "sessionID": "root", "action": "dequeue", "messageID": "primary",
+            "request": {"messageID": "primary", "parts": [{"type": "text", "text": "hello"}]},
+            "queue": {"count": 1, "preview": "next", "running": true, "startedAt": 123}
+        });
+        forward_agent_server_event(&tx, "root", json!({
+            "type": "session.queue.updated", "properties": properties.clone()
+        }));
+        assert!(matches!(rx.try_recv().unwrap(), AgentServerMessage::SessionEvent {
+            session_id, kind, properties: forwarded,
+        } if session_id == "root" && kind == "session.queue.updated" && forwarded == properties));
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]

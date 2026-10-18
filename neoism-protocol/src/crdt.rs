@@ -119,6 +119,9 @@ pub struct CrdtPeerPresence {
     pub buffer_id: CrdtBufferId,
     pub peer_id: CrdtPresencePeerId,
     pub display_name: String,
+    /// Client operating system, supplied by the client rather than the relay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_os: Option<String>,
     pub color: CrdtPresenceColor,
     pub cursor: CrdtCursorPosition,
     #[serde(default)]
@@ -331,11 +334,32 @@ mod tests {
     }
 
     #[test]
+    fn legacy_presence_json_defaults_client_os_and_omits_it_when_unknown() {
+        let json = serde_json::json!({
+            "buffer_id": "buffer-1",
+            "peer_id": "peer-a",
+            "display_name": "Ada",
+            "color": { "r": 1, "g": 2, "b": 3 },
+            "cursor": { "line": 0, "column": 0 },
+            "updated_at_ms": 42
+        });
+        let presence: CrdtPeerPresence = serde_json::from_value(json).unwrap();
+        assert_eq!(presence.client_os, None);
+        let encoded = serde_json::to_value(&presence).unwrap();
+        assert!(encoded.get("client_os").is_none());
+        let mut with_null = encoded;
+        with_null["client_os"] = serde_json::Value::Null;
+        let decoded: CrdtPeerPresence = serde_json::from_value(with_null).unwrap();
+        assert_eq!(decoded, presence);
+    }
+
+    #[test]
     fn crdt_presence_messages_roundtrip() {
         let presence = CrdtPeerPresence {
             buffer_id: "buffer-1".into(),
             peer_id: "peer-a".into(),
             display_name: "Ada".into(),
+            client_os: Some("macos".into()),
             color: CrdtPresenceColor {
                 r: 10,
                 g: 20,

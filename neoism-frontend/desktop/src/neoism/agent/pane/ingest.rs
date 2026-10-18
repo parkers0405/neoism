@@ -101,7 +101,17 @@ impl NeoismAgentPane {
             match update {
                 AgentSessionCatalogUpdate::Reconnected => {
                     self.side_panel.clear_session_activity_overrides();
+                    self.side_panel.clear_catalog_families();
+                    changed = true;
                     self.request_side_panel_session_page(None);
+                }
+                AgentSessionCatalogUpdate::Family {
+                    session_id,
+                    snapshot,
+                } => {
+                    changed |= self
+                        .side_panel
+                        .apply_catalog_family_snapshot(&session_id, snapshot);
                 }
                 AgentSessionCatalogUpdate::Activity {
                     session_id,
@@ -550,7 +560,9 @@ self.footer_growth.record_with_edge(
                             || self.streaming_state_changed_at.is_some()
                             || self.streaming_tool_label.is_some();
                         self.note_streaming(NeoismAgentStreamingState::Idle, None);
-                        self.abort_requested_at = None;
+                        if !self.status_timing.handoff.waiting() {
+                            self.abort_requested_at = None;
+                        }
                         changed |= had_root_activity;
                     } else if let Some(cached) =
                         self.session_cache.get_mut(&stream_session_id)
@@ -622,23 +634,27 @@ self.footer_growth.record_with_edge(
                         continue;
                     }
                     let decision = status_policy::queue_status_decision(
-                        self.status_timing.queue_count(count, started_at),
-                        preview,
+                        self.status_timing.queue_snapshot_count(
+                            count,
+                            started_at.is_some(),
+                            preview.as_deref(),
+                        ),
+                        self.status_timing.queue_preview(preview),
                         started_at,
                         self.is_streaming(),
                     );
-                    if self.queued_prompt_count != decision.count
-                        || self.queued_prompt_preview != decision.preview
-                    {
-                        self.queued_prompt_count = decision.count;
-                        self.queued_prompt_preview = decision.preview;
-                        changed = true;
-                    }
-                    if decision.should_enter_generating {
+                    self.pending_compact = None;
+                    self.queued_prompt_count = decision.count;
+                    self.queued_prompt_preview = decision.preview;
+                    self.reconcile_queue_handoff(decision.started_at, true, None);
+                    changed = true;
+                    if decision.should_enter_generating && !self.suppress_streaming_after_abort() {
                         self.note_streaming(NeoismAgentStreamingState::Generating, None);
-                        changed = true;
                     }
-                    if let Some(started_at) = decision.started_at {
+                    if let Some(started_at) = decision
+                        .started_at
+                        .filter(|_| !self.suppress_streaming_after_abort())
+                    {
                         let started = self
                             .status_timing
                             .started_at(self.streaming_started_at, started_at);
@@ -646,7 +662,6 @@ self.footer_growth.record_with_edge(
                         if self.streaming_state_changed_at.is_none() {
                             self.streaming_state_changed_at = Some(started);
                         }
-                        changed = true;
                     }
                 }
                 AgentSessionUpdate::DequeuedPrompt {
@@ -657,6 +672,7 @@ self.footer_growth.record_with_edge(
                     self.note_session_runtime_event(&stream_session_id);
                     self.terminal_idle_sessions.remove(&stream_session_id);
                     if stream_is_active {
+                        self.promote_queue_handoff();
                         changed |=
                             self.insert_dequeued_user_prompt(text, message_id, author);
                     } else {
@@ -664,6 +680,7 @@ self.footer_growth.record_with_edge(
                             .session_cache
                             .entry(stream_session_id.clone())
                             .or_insert_with(CachedAgentSession::live_only);
+                        cached.runtime.promote_queue_handoff();
                         if !cached.runtime.status_timing.dequeue(message_id.as_deref()) {
                             cached.runtime.consume_dequeued_prompt(&text);
                         }
@@ -1022,6 +1039,12 @@ self.footer_growth.record_with_edge(
                 } => {
                     delta_updates += 1;
                     delta_bytes += delta.len();
+                    let can_drive_streaming = self.observe_session_part(
+                        &stream_session_id, part_id.as_deref().unwrap_or_default(), message_id.as_deref(),
+                    );
+                    if !can_drive_streaming {
+                        continue;
+                    }
                     self.note_session_runtime_event(&stream_session_id);
                     self.remember_live_part_parent(
                         part_id.as_deref().unwrap_or_default(),
@@ -1033,7 +1056,7 @@ self.footer_growth.record_with_edge(
                             .flatten();
                     if stream_is_active {
                         self.apply_part_delta(message_id, part_id, kind, &delta);
-                        if !self.suppress_streaming_after_abort()
+                        if can_drive_streaming && !self.suppress_streaming_after_abort()
                             && !self.terminal_idle_sessions.contains(&stream_session_id)
                         {
                             self.refresh_streaming_from_tail();
@@ -1056,7 +1079,7 @@ self.footer_growth.record_with_edge(
                                 reasoning_part_id,
                             );
                         }
-                        if !self.terminal_idle_sessions.contains(&stream_session_id) {
+                        if can_drive_streaming && !self.terminal_idle_sessions.contains(&stream_session_id) {
                             cached.runtime.refresh_streaming_from_tail(&cached.messages);
                         }
                         cached.invalidate_timeline_layout();
@@ -1067,6 +1090,11 @@ self.footer_growth.record_with_edge(
                     message,
                     parent_message_id,
                 } => {
+                    let can_drive_streaming = !matches!(message.kind, NeoismAgentMessageKind::User | NeoismAgentMessageKind::System)
+                        && self.observe_session_part(&stream_session_id, &message.id, parent_message_id.as_deref());
+                    if !can_drive_streaming && !matches!(message.kind, NeoismAgentMessageKind::User | NeoismAgentMessageKind::System) {
+                        continue;
+                    }
                     self.note_session_runtime_event(&stream_session_id);
                     let part_id = message.id.clone();
                     let is_reasoning = message.kind == NeoismAgentMessageKind::Reasoning;
@@ -1078,7 +1106,7 @@ self.footer_growth.record_with_edge(
                             parent_message_id.as_deref(),
                         );
                         self.upsert_part_message(message);
-                        if !self.suppress_streaming_after_abort()
+                        if can_drive_streaming && !self.suppress_streaming_after_abort()
                             && !self.terminal_idle_sessions.contains(&stream_session_id)
                         {
                             self.note_streaming_from_part(kind, &title);
@@ -1100,7 +1128,7 @@ self.footer_growth.record_with_edge(
                                 &part_id,
                             );
                         }
-                        if !self.terminal_idle_sessions.contains(&stream_session_id) {
+                        if can_drive_streaming && !self.terminal_idle_sessions.contains(&stream_session_id) {
                             cached.runtime.refresh_streaming_from_tail(&cached.messages);
                         }
                         cached.invalidate_timeline_layout();
@@ -1128,9 +1156,14 @@ self.footer_growth.record_with_edge(
                 } => {
                     delta_updates += 1;
                     delta_bytes += delta.len();
+                    let part_allowed = self.observe_session_part(
+                        &session_id, part_id.as_deref().unwrap_or_default(), message_id.as_deref(),
+                    );
+                    if !part_allowed {
+                        continue;
+                    }
                     self.note_session_runtime_event(&session_id);
-                    let can_drive_streaming =
-                        self.child_part_can_drive_streaming(&session_id);
+                    let can_drive_streaming = self.child_part_can_drive_streaming(&session_id);
                     self.remember_live_part_parent(
                         part_id.as_deref().unwrap_or_default(),
                         message_id.as_deref(),
@@ -1174,9 +1207,12 @@ self.footer_growth.record_with_edge(
                     message,
                     parent_message_id,
                 } => {
+                    let assistant_part = !matches!(message.kind, NeoismAgentMessageKind::User | NeoismAgentMessageKind::System);
+                    if assistant_part && !self.observe_session_part(&session_id, &message.id, parent_message_id.as_deref()) {
+                        continue;
+                    }
                     self.note_session_runtime_event(&session_id);
-                    let can_drive_streaming =
-                        self.child_part_can_drive_streaming(&session_id);
+                    let can_drive_streaming = assistant_part && self.child_part_can_drive_streaming(&session_id);
                     let part_id = message.id.clone();
                     let is_reasoning = message.kind == NeoismAgentMessageKind::Reasoning;
                     self.remember_live_part_parent(
@@ -1223,6 +1259,60 @@ self.footer_growth.record_with_edge(
                     self.live_part_parent_ids.remove(&part_id);
                     changed = true;
                 }
+                AgentSessionUpdate::QueueSnapshot {
+                    session_id,
+                    count,
+                    preview,
+                    running,
+                    action,
+                } => {
+                    self.note_session_runtime_event(&session_id);
+                    // Queue changes have no lifecycle authority. Notifications
+                    // are idempotent; subsequent snapshots carry exact counts.
+                    if self.session_id.as_deref() == Some(session_id.as_str()) {
+                        if count.is_some()
+                            || self.queued_prompt_preview.is_none()
+                            || self.queued_prompt_preview.as_deref() == Some("Compaction queued")
+                        {
+                            self.pending_compact = None;
+                        }
+                        self.queued_prompt_count = count
+                            .map(|count| self.status_timing.queue_snapshot_count(
+                                count, running == Some(true), preview.as_deref(),
+                            ))
+                            .unwrap_or(self.queued_prompt_count.max(1));
+                        if count.is_some() || self.queued_prompt_preview.is_none() {
+                            self.queued_prompt_preview = self.status_timing.queue_preview(preview);
+                        }
+                        if count.is_some() {
+                            self.reconcile_queue_handoff(None, running == Some(true), action.as_deref());
+                        }
+                    } else {
+                        let runtime = &mut self
+                            .session_cache
+                            .entry(session_id)
+                            .or_insert_with(CachedAgentSession::live_only)
+                            .runtime;
+                        if count.is_some()
+                            || runtime.queued_prompt_preview.is_none()
+                            || runtime.queued_prompt_preview.as_deref() == Some("Compaction queued")
+                        {
+                            runtime.pending_compact = None;
+                        }
+                        runtime.queued_prompt_count = count
+                            .map(|count| runtime.status_timing.queue_snapshot_count(
+                                count, running == Some(true), preview.as_deref(),
+                            ))
+                            .unwrap_or(runtime.queued_prompt_count.max(1));
+                        if count.is_some() || runtime.queued_prompt_preview.is_none() {
+                            runtime.queued_prompt_preview = runtime.status_timing.queue_preview(preview);
+                        }
+                        if count.is_some() {
+                            runtime.reconcile_queue_handoff(None, running == Some(true), action.as_deref());
+                        }
+                    }
+                    changed = true;
+                }
                 AgentSessionUpdate::CompactionStarted {
                     session_id,
                     id,
@@ -1255,6 +1345,7 @@ self.footer_growth.record_with_edge(
                     session_id,
                     summary,
                     kind,
+                    run_continues,
                 } => {
                     self.note_session_runtime_event(&session_id);
                     if self.session_id.as_deref() != Some(session_id.as_str()) {
@@ -1264,17 +1355,33 @@ self.footer_growth.record_with_edge(
                             .entry(session_id)
                             .or_insert_with(CachedAgentSession::live_only)
                             .runtime;
+                        runtime.pending_compact = None;
                         if runtime.streaming_state
                             == NeoismAgentStreamingState::Compacting
                         {
-                            runtime.note_streaming(NeoismAgentStreamingState::Idle, None);
+                            runtime.note_streaming(
+                                if run_continues == Some(true) {
+                                    NeoismAgentStreamingState::Generating
+                                } else {
+                                    NeoismAgentStreamingState::Idle
+                                },
+                                None,
+                            );
                         }
                         changed = true;
                         continue;
                     }
+                    self.pending_compact = None;
                     self.finish_compaction_message(&summary, &kind);
                     if self.streaming_state == NeoismAgentStreamingState::Compacting {
-                        self.note_streaming(NeoismAgentStreamingState::Idle, None);
+                        self.note_streaming(
+                            if run_continues == Some(true) {
+                                NeoismAgentStreamingState::Generating
+                            } else {
+                                NeoismAgentStreamingState::Idle
+                            },
+                            None,
+                        );
                     }
                     changed = true;
                 }
@@ -1325,6 +1432,9 @@ self.footer_growth.record_with_edge(
                 OutboundAgentCommand::SwitchSession { session_id } => {
                     self.execute_switch_session_command(session_id);
                     changed = true;
+                }
+                OutboundAgentCommand::CompactSessionRequest { session_id, request_id } => {
+                    self.execute_compact_request(session_id, Some(request_id));
                 }
                 OutboundAgentCommand::CompactSession => {
                     self.execute_compact_session_command();
@@ -1801,14 +1911,30 @@ self.footer_growth.record_with_edge(
                     }
                     changed = true;
                 }
-                Ok(NeoismAgentBackgroundUpdate::CompactFinished) => {
-                    if self.is_streaming() {
-                        self.note_streaming(NeoismAgentStreamingState::Idle, None);
+                Ok(NeoismAgentBackgroundUpdate::AbortFailed { session_id, error }) => {
+                    // The request belongs to its origin, not whichever chat or
+                    // queued successor is displayed when HTTP finishes.
+                    if self.session_id.as_deref() == Some(session_id.as_str()) {
+                        self.system_message("Abort", error);
+                    } else {
+                        let cached = self.session_cache.entry(session_id)
+                            .or_insert_with(CachedAgentSession::live_only);
+                        cached.messages.push(NeoismAgentMessage::system("Abort", error));
+                        cached.invalidate_timeline_layout();
                     }
                     changed = true;
                 }
-                Ok(NeoismAgentBackgroundUpdate::CompactFailed(error)) => {
-                    self.fail_compaction_message(error);
+                Ok(NeoismAgentBackgroundUpdate::CompactAccepted { session_id }) => {
+                    // Accepted is not finished. Events/snapshots own the queue and
+                    // streaming state; a late HTTP reply must not resurrect it.
+                    let _ = session_id;
+                }
+                Ok(NeoismAgentBackgroundUpdate::CompactFailed {
+                    session_id,
+                    request_id,
+                    error,
+                }) => {
+                    self.compact_request_failed(&session_id, request_id.as_deref(), error);
                     changed = true;
                 }
                 Ok(NeoismAgentBackgroundUpdate::ConfigDefaultsLoaded(defaults)) => {
@@ -2863,10 +2989,34 @@ self.footer_growth.record_with_edge(
         self.event_wake.clone()
     }
 
-    pub(crate) fn fail_compaction_message(&mut self, error: impl Into<String>) {
-        self.finish_compaction_message("", "failed");
-        self.note_streaming(NeoismAgentStreamingState::Idle, None);
-        self.system_message("Compaction failed", error.into());
+    pub(crate) fn compact_request_failed(
+        &mut self,
+        session_id: &str,
+        request_id: Option<&str>,
+        error: String,
+    ) {
+        let pending = if self.session_id.as_deref() == Some(session_id) {
+            Some(&mut self.pending_compact)
+        } else {
+            self.session_cache.get_mut(session_id).map(|cached| &mut cached.runtime.pending_compact)
+        };
+        if let Some(pending) = pending {
+            if request_id.is_some() && pending.as_deref() == request_id {
+                *pending = None;
+            }
+        }
+        if self.session_id.as_deref() == Some(session_id) {
+            self.system_message("Compaction failed", error);
+        } else {
+            let cached = self
+                .session_cache
+                .entry(session_id.to_string())
+                .or_insert_with(CachedAgentSession::live_only);
+            cached
+                .messages
+                .push(NeoismAgentMessage::system("Compaction failed", error));
+            cached.invalidate_timeline_layout();
+        }
     }
 
     pub(crate) fn remember_pending_user_prompt(&mut self, text: &str) {
@@ -3127,6 +3277,7 @@ self.footer_growth.record_with_edge(
     pub(crate) fn take_session_runtime_ui(&mut self) -> CachedAgentRuntime {
         CachedAgentRuntime {
             status_timing: std::mem::take(&mut self.status_timing),
+            pending_compact: self.pending_compact.take(),
             queued_prompt_count: std::mem::take(&mut self.queued_prompt_count),
             queued_prompt_preview: self.queued_prompt_preview.take(),
             streaming_state: std::mem::replace(
@@ -3150,6 +3301,7 @@ self.footer_growth.record_with_edge(
 
     pub(crate) fn restore_session_runtime_ui(&mut self, runtime: CachedAgentRuntime) {
         self.status_timing = runtime.status_timing;
+        self.pending_compact = runtime.pending_compact;
         self.queued_prompt_count = runtime.queued_prompt_count;
         self.queued_prompt_preview = runtime.queued_prompt_preview;
         self.streaming_state = runtime.streaming_state;

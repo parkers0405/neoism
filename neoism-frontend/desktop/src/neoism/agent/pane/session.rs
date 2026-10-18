@@ -5,146 +5,21 @@ mod directory_browser_tests {
     use super::*;
 
     #[test]
-    fn catalog_retention_prunes_only_after_last_applicable_family_owner_closes() {
+    fn catalog_family_scope_uses_endpoint_and_owning_root_directory() {
         let mut catalog = NeoismAgentPane::with_directory(Some("/project".into()));
         catalog.server = "http://host/".into();
         catalog.set_catalog_directory(Some("/project".into()));
-        catalog.side_panel.set_sessions(vec![
-            NeoismAgentSessionEntry::new("root-a", "A", "")
-                .with_directory(Some("/project".into())),
-            NeoismAgentSessionEntry::new("root-b", "B", "")
-                .with_directory(Some("/project".into())),
-        ]);
-        let source = |root: &str, server: &str, directory: &str| {
-            let mut pane = NeoismAgentPane::with_directory(Some(directory.into()));
-            pane.server = server.into();
-            pane.session_id = Some(format!("{root}-child"));
-            pane.session_tree_root_id = Some(root.into());
-            pane.detail_panel.set_user_hidden(true);
-            pane.side_panel.set_subagents(vec![
-                NeoismAgentSessionEntry::new(root, "Root", "")
-                    .with_directory(Some(directory.into())),
-                NeoismAgentSessionEntry::new(format!("{root}-child"), "Child", "")
-                    .with_runtime_status(Some("running".into())),
-            ]);
-            pane
-        };
-        // Two contexts can own the same root, including an inactive workspace.
-        let mut owners = vec![
-            source("root-a", "http://host", "/project"),
-            source("root-a", "http://host", "/project"),
-            source("root-b", "http://host", "/project"),
-            source("root-b", "http://other", "/project"),
-            source("root-b", "http://host", "/other"),
-        ];
-        let reconcile = |catalog: &mut NeoismAgentPane, owners: &[NeoismAgentPane]| {
-            let mut roots = std::collections::HashSet::new();
-            for owner in owners {
-                if let Some(root) = catalog.catalog_live_family_root(owner) {
-                    roots.insert(root.to_owned());
-                }
-                catalog.sync_catalog_subagents_from_pane(owner);
-            }
-            catalog.side_panel.retain_catalog_subagent_families(&roots);
-            roots
-        };
-        assert_eq!(reconcile(&mut catalog, &owners).len(), 2);
-        owners.remove(0); // A remains represented in another context.
-        owners.remove(1); // Last applicable B owner closes; wrong scopes remain.
-        let roots = reconcile(&mut catalog, &owners);
-        assert_eq!(
-            roots,
-            std::collections::HashSet::from(["root-a".to_owned()])
-        );
-        assert!(catalog
-            .side_panel
-            .sessions()
-            .iter()
-            .any(|row| row.id == "root-a-child"));
-        assert!(!catalog
-            .side_panel
-            .sessions()
-            .iter()
-            .any(|row| row.id == "root-b-child"));
-        assert!(catalog
-            .side_panel
-            .sessions()
-            .iter()
-            .any(|row| row.id == "root-b"));
-        owners.remove(0);
-        assert!(reconcile(&mut catalog, &owners).is_empty());
-        assert!(!catalog
-            .side_panel
-            .sessions()
-            .iter()
-            .any(|row| row.branch_root_id.is_some()));
-    }
-
-    #[test]
-    fn catalog_live_family_root_requires_session_but_not_loaded_roster() {
-        let mut catalog = NeoismAgentPane::default();
-        catalog.set_catalog_directory(None);
-        let mut source = NeoismAgentPane::default();
-        source.session_tree_root_id = Some("stale-root".into());
-        assert_eq!(catalog.catalog_live_family_root(&source), None);
-        source.session_id = Some("child".into());
-        source.session_tree_root_id = Some("root".into());
-        assert_eq!(catalog.catalog_live_family_root(&source), Some("root"));
-        source.session_tree_root_id = None;
-        assert_eq!(catalog.catalog_live_family_root(&source), Some("child"));
-    }
-
-    #[test]
-    fn catalog_family_sync_is_endpoint_and_directory_scoped_even_with_hidden_rail() {
-        let mut catalog = NeoismAgentPane::with_directory(Some("/project".into()));
-        catalog.server = "http://host/".into();
-        catalog.set_catalog_directory(Some("/project".into()));
-        catalog
-            .side_panel
-            .set_sessions(vec![NeoismAgentSessionEntry::new("root", "Root", "")
-                .with_directory(Some("/project".into()))]);
         let mut source = NeoismAgentPane::with_directory(Some("/project".into()));
         source.server = "http://host".into();
         source.session_id = Some("child".into());
         source.session_tree_root_id = Some("root".into());
-        source.side_panel.set_subagents(vec![
-            NeoismAgentSessionEntry::new("root", "Root", ""),
-            NeoismAgentSessionEntry::new("child", "Child", "")
-                .with_runtime_status(Some("running".into())),
-        ]);
         source.detail_panel.set_user_hidden(true);
         assert!(catalog.catalog_accepts_family(&source));
-        catalog.sync_catalog_subagents_from_pane(&source);
-        let child = catalog
-            .side_panel
-            .sessions()
-            .iter()
-            .find(|row| row.id == "child")
-            .expect("hidden rail still projects child");
-        assert_eq!(child.branch_root_id.as_deref(), Some("root"));
-        assert_eq!(child.runtime_status.as_deref(), Some("running"));
-        assert!(child.branch_status.is_some());
-        source.side_panel.set_subagents(vec![
-            NeoismAgentSessionEntry::new("root", "Root", ""),
-            NeoismAgentSessionEntry::new("child", "Child", "")
-                .with_runtime_status(Some("completed".into())),
-        ]);
-        catalog.sync_catalog_subagents_from_pane(&source);
-        let child = catalog
-            .side_panel
-            .sessions()
-            .iter()
-            .find(|row| row.id == "child")
-            .expect("child remains in catalog");
-        assert_eq!(child.runtime_status.as_deref(), Some("completed"));
-        assert_eq!(source.session_id_str(), Some("child"));
-        assert!(catalog.session_id_str().is_none());
         source.server = "http://other".into();
         assert!(!catalog.catalog_accepts_family(&source));
         source.server = "http://host".into();
         source.directory = Some("/other".into());
         assert!(!catalog.catalog_accepts_family(&source));
-        // A child worktree must not move the owning family into another project.
         source.side_panel.set_subagents(vec![
             NeoismAgentSessionEntry::new("root", "Root", "")
                 .with_directory(Some("/project".into())),
@@ -539,33 +414,6 @@ impl NeoismAgentPane {
             })
     }
 
-    /// Retention follows live pane ownership, not whether its roster has loaded
-    /// or its tab/rail is visible. Never keep a cached root on an empty pane.
-    pub(crate) fn catalog_live_family_root<'a>(
-        &self,
-        source: &'a Self,
-    ) -> Option<&'a str> {
-        if !self.catalog_accepts_family(source) {
-            return None;
-        }
-        let session = source.session_id_str().filter(|id| !id.is_empty())?;
-        Some(
-            source
-                .conversation_root_id()
-                .filter(|id| !id.is_empty())
-                .unwrap_or(session),
-        )
-    }
-
-    pub(crate) fn sync_catalog_subagents_from_pane(&mut self, source: &Self) {
-        if self.catalog_accepts_family(source) {
-            self.side_panel.sync_catalog_subagents_from(
-                source.side_panel(),
-                source.conversation_root_id(),
-            );
-        }
-    }
-
     pub fn take_catalog_toggle_request(&mut self) -> bool {
         std::mem::take(&mut self.catalog_toggle_requested)
     }
@@ -927,7 +775,7 @@ impl NeoismAgentPane {
         std::thread::Builder::new()
             .name("neoism-agent-semantic".into())
             .spawn(move || {
-                let (hits, transcript_unavailable) =
+                let (hits, transcript_unavailable, _indexing) =
                     match crate::neoism::agent::api::fetch_session_search_hits(
                         &server,
                         &query,
@@ -938,7 +786,7 @@ impl NeoismAgentPane {
                         Ok(result) => result,
                         // Network hiccups yield "no results" rather than
                         // latching the feature off.
-                        Err(_) => (Vec::new(), !transcript_enabled),
+                        Err(_) => (Vec::new(), !transcript_enabled, false),
                     };
                 let _ = tx.send(NeoismAgentBackgroundUpdate::SemanticSessionHits {
                     catalog_generation,
@@ -1115,6 +963,7 @@ impl NeoismAgentPane {
         session_id: &str,
         statuses: &HashMap<String, super::super::api::SessionStatusSnapshot>,
     ) {
+        self.pending_compact = None;
         // Background jobs are owned by the separately versioned family
         // runtime snapshot. A failed runtime refresh must not erase warm state.
         let active_status = statuses
@@ -1122,15 +971,18 @@ impl NeoismAgentPane {
             .filter(|status| matches!(status.kind.as_str(), "busy" | "retry"));
         if let Some(status) = active_status {
             self.terminal_idle_sessions.remove(session_id);
-            self.queued_prompt_count = self
-                .status_timing
-                .queue_count(status.queue_count, status.started_at);
-            self.queued_prompt_preview = status.preview.clone();
+            self.queued_prompt_count = self.status_timing.queue_snapshot_count(
+                status.queue_count,
+                status.started_at.is_some() || status.running == Some(true),
+                status.preview.as_deref(),
+            );
+            self.queued_prompt_preview = self.status_timing.queue_preview(status.preview.clone());
+            self.reconcile_queue_handoff(status.started_at, true, None);
             self.refresh_streaming_from_tail();
-            if !self.is_streaming() {
+            if !self.is_streaming() && !self.suppress_streaming_after_abort() {
                 self.note_streaming(NeoismAgentStreamingState::Thinking, None);
             }
-            if let Some(started_at) = status.started_at {
+            if let Some(started_at) = status.started_at.filter(|_| !self.suppress_streaming_after_abort()) {
                 let started = self
                     .status_timing
                     .started_at(self.streaming_started_at, started_at);
@@ -1152,6 +1004,7 @@ impl NeoismAgentPane {
             // across a dropped event stream or history refresh.
             self.queued_prompt_count = 0;
             self.queued_prompt_preview = None;
+            self.reconcile_queue_handoff(None, false, None);
             self.note_streaming(NeoismAgentStreamingState::Idle, None);
         }
 
@@ -1521,6 +1374,7 @@ impl NeoismAgentPane {
     pub fn streaming_elapsed_seconds(&self) -> Option<f32> {
         if let Some(activity) = self.execution_activity.as_ref().filter(|activity| {
             self.status_timing.accepts_execution(&activity.execution_id)
+                && self.status_timing.handoff.accepts_clock(&activity.execution_id)
         }) {
             let viewed = self
                 .session_id
@@ -2173,12 +2027,89 @@ impl NeoismAgentPane {
     }
 
     pub fn queued_prompt_count(&self) -> usize {
-        self.queued_prompt_count
+        status_policy::visible_queue_count(
+            self.queued_prompt_count,
+            self.queued_prompt_preview.as_deref(),
+            self.pending_compact.is_some(),
+        )
+    }
+
+    pub fn queued_prompt_preview(&self) -> Option<&str> {
+        status_policy::visible_queue_preview(
+            self.queued_prompt_preview.as_deref(),
+            self.pending_compact.is_some(),
+        )
+    }
+
+    pub(crate) fn begin_queue_stop(&mut self) {
+        if let Some(session_id) = self.session_id.clone() {
+            self.note_session_runtime_event(&session_id);
+        }
+        for message in &self.messages {
+            if !matches!(message.kind, NeoismAgentMessageKind::User | NeoismAgentMessageKind::System) {
+                self.status_timing.handoff.stopped_parts.observe(
+                    &message.id,
+                    self.live_part_parent_ids.get(&message.id).map(String::as_str),
+                );
+            }
+        }
+        self.status_timing.handoff.stopped_parts.stop();
+        self.pending_compact = None;
+        self.status_timing.settle();
+        self.queued_prompt_count = status_policy::ordinary_queue_count(
+            self.queued_prompt_count, self.queued_prompt_preview.as_deref(),
+        );
+        if self.queued_prompt_preview.as_deref() == Some("Compaction queued") {
+            self.queued_prompt_preview = None;
+        }
+        let waiting = self.status_timing.handoff.begin(
+            self.queued_prompt_count, self.queued_prompt_preview.as_deref(),
+        );
+        self.status_timing.handoff.stop_execution(
+            self.execution_activity.as_ref().map(|activity| activity.execution_id.as_str()),
+        );
+        self.abort_requested_at = Some(Instant::now());
+        self.note_streaming(
+            if waiting {
+                NeoismAgentStreamingState::Generating
+            } else {
+                NeoismAgentStreamingState::Idle
+            },
+            None,
+        );
+    }
+
+    pub(super) fn promote_queue_handoff(&mut self) {
+        if self.status_timing.handoff.dequeue() {
+            self.abort_requested_at = None;
+            self.streaming_started_at = None;
+            self.status_timing.settle();
+            self.side_panel.clear_status_display_hold();
+            self.note_streaming(NeoismAgentStreamingState::Generating, None);
+        }
+    }
+
+    pub(super) fn reconcile_queue_handoff(
+        &mut self,
+        started_at: Option<u64>,
+        running: bool,
+        action: Option<&str>,
+    ) {
+        if self.status_timing.handoff.observe_start(started_at) {
+            self.abort_requested_at = None;
+            self.streaming_started_at = None;
+            self.note_streaming(NeoismAgentStreamingState::Generating, None);
+        } else if self.status_timing.handoff.settle_snapshot(
+            self.queued_prompt_count, self.queued_prompt_preview.as_deref(), running, action,
+        ) {
+            self.note_streaming(NeoismAgentStreamingState::Idle, None);
+        }
     }
 
     pub(crate) fn suppress_streaming_after_abort(&self) -> bool {
-        self.abort_requested_at
-            .is_some_and(|requested| requested.elapsed() <= ABORT_STREAM_SUPPRESSION)
+        self.status_timing.handoff.waiting()
+            || self.abort_requested_at
+                .is_some_and(|requested| requested.elapsed() <= ABORT_STREAM_SUPPRESSION)
     }
 
     /// Settle the local activity label when the conversation currently being
@@ -2214,10 +2145,30 @@ impl NeoismAgentPane {
             .is_some_and(|activity| activity.terminal_locked)
     }
 
+    pub(super) fn observe_session_part(
+        &mut self,
+        session_id: &str,
+        part_id: &str,
+        parent_message_id: Option<&str>,
+    ) -> bool {
+        if self.session_id.as_deref() == Some(session_id) {
+            self.status_timing.handoff.stopped_parts.observe(part_id, parent_message_id)
+        } else {
+            self.session_cache.entry(session_id.to_owned())
+                .or_insert_with(CachedAgentSession::live_only)
+                .runtime.status_timing.handoff.stopped_parts.observe(part_id, parent_message_id)
+        }
+    }
+
     pub(crate) fn refresh_streaming_from_tail(&mut self) {
         let Some(tail) = self.messages.last() else {
             return;
         };
+        if !self.status_timing.handoff.stopped_parts.allows(
+            &tail.id, self.live_part_parent_ids.get(&tail.id).map(String::as_str),
+        ) {
+            return;
+        }
         let kind = tail.kind;
         let title = tail.title.clone();
         self.note_streaming_from_part(kind, &title);
@@ -2228,6 +2179,9 @@ impl NeoismAgentPane {
         kind: NeoismAgentMessageKind,
         title: &str,
     ) {
+        if self.suppress_streaming_after_abort() {
+            return;
+        }
         if matches!(
             kind,
             NeoismAgentMessageKind::Reasoning
@@ -2260,7 +2214,18 @@ impl NeoismAgentPane {
         state: NeoismAgentStreamingState,
         tool: Option<String>,
     ) {
+        if state == NeoismAgentStreamingState::Idle {
+            self.status_timing.handoff.empty_queue(
+                self.queued_prompt_count, self.queued_prompt_preview.as_deref(),
+            );
+        }
+        let (state, tool) = if self.status_timing.handoff.waiting() {
+            (NeoismAgentStreamingState::Generating, None)
+        } else {
+            (state, tool)
+        };
         if state == NeoismAgentStreamingState::Compacting {
+            self.pending_compact = None;
             self.retain_current_turn_trace();
         }
         if state == NeoismAgentStreamingState::Idle {

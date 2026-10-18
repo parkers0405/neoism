@@ -500,6 +500,29 @@ pub struct BackgroundJobRuntimeSnapshot {
     pub started_at: u64,
 }
 
+/// Complete execution-scoped sidebar roster, independent of the selected tab.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct CatalogFamilySnapshot {
+    pub directory: String,
+    pub execution_id: Option<String>,
+    pub family_revision: u64,
+    pub branches: Vec<CatalogBranchSnapshot>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct CatalogBranchSnapshot {
+    pub session_id: String,
+    pub parent_session_id: String,
+    pub status: String,
+    pub started_at: Option<u64>,
+    pub title: String,
+    pub agent: Option<String>,
+    pub depth: usize,
+    pub permission_pending: bool,
+}
+
 /// Catalog indicator: the root's own foreground work, plus family-wide
 /// permission requests and background jobs that still need attention.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]

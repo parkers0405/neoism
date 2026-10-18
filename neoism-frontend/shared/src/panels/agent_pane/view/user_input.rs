@@ -461,6 +461,7 @@ pub trait AgentUserInputPane {
     fn streaming_elapsed_seconds(&self) -> Option<f32>;
     fn streaming_state_changed_elapsed(&self) -> Option<f32>;
     fn queued_prompt_count(&self) -> usize;
+    fn queued_prompt_preview(&self) -> Option<&str>;
     fn pending_permission(&self) -> Option<&Self::PendingPermission>;
     fn session_id_str(&self) -> Option<&str>;
     fn register_permission_choice_rect(
@@ -714,6 +715,10 @@ macro_rules! neoism_ui_impl_agent_user_input {
 
             fn queued_prompt_count(&self) -> usize {
                 <$pane>::queued_prompt_count(self)
+            }
+
+            fn queued_prompt_preview(&self) -> Option<&str> {
+                <$pane>::queued_prompt_preview(self)
             }
 
             fn pending_permission(&self) -> Option<&Self::PendingPermission> {
@@ -979,6 +984,10 @@ impl AgentUserInputPane for NeoismAgentPane {
 
     fn queued_prompt_count(&self) -> usize {
         NeoismAgentPane::queued_prompt_count(self)
+    }
+
+    fn queued_prompt_preview(&self) -> Option<&str> {
+        NeoismAgentPane::queued_prompt_preview(self)
     }
 
     fn pending_permission(&self) -> Option<&Self::PendingPermission> {
@@ -2588,10 +2597,17 @@ pub fn render_streaming_status_row(
     );
 
     if queued_count > 0 {
-        let queue_label = if queued_count == 1 {
-            "queued message".to_string()
+        let queue_label = if pane.queued_prompt_preview() == Some("Compaction queued") {
+            if queued_count == 1 {
+                "Compaction queued".to_string()
+            } else {
+                format!("Compaction queued ({queued_count} queued)")
+            }
+        } else if queued_count == 1 {
+            "queued item".to_string()
         } else {
-            format!("queued messages ({queued_count})")
+            // The count includes control work even when the head is a prompt.
+            format!("queued items ({queued_count})")
         };
         // Queue state is a child of the active streaming row. Keep the tree
         // branch here even though the root Crafting/Thinking row no longer

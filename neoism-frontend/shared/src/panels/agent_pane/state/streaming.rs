@@ -333,7 +333,9 @@ impl NeoismAgentPane {
     }
 
     pub fn streaming_elapsed_seconds(&self) -> Option<f32> {
-        if let Some(activity) = &self.execution_activity {
+        if let Some(activity) = self.execution_activity.as_ref().filter(|activity| {
+            self.queue_handoff.accepts_clock(&activity.execution_id)
+        }) {
             let viewed = self
                 .session_id
                 .as_deref()
@@ -1102,14 +1104,25 @@ impl NeoismAgentPane {
     }
 
     pub fn queued_prompt_count(&self) -> usize {
-        self.queued_prompt_count
+        status_policy::visible_queue_count(
+            self.queued_prompt_count,
+            self.queued_prompt_preview.as_deref(),
+            self.pending_compact.is_some(),
+        )
+    }
+
+    pub fn queued_prompt_preview(&self) -> Option<&str> {
+        status_policy::visible_queue_preview(
+            self.queued_prompt_preview.as_deref(),
+            self.pending_compact.is_some(),
+        )
     }
 
     #[allow(dead_code)]
     pub(in crate::panels::agent_pane::state) fn suppress_streaming_after_abort(
         &self,
     ) -> bool {
-        self.abort_requested_at.is_some_and(|requested| {
+        self.queue_handoff.waiting() || self.abort_requested_at.is_some_and(|requested| {
             Instant::now().saturating_duration_since(requested)
                 <= ABORT_STREAM_SUPPRESSION
         })
@@ -1120,6 +1133,9 @@ impl NeoismAgentPane {
         let Some(tail) = self.messages.last() else {
             return;
         };
+        if !self.queue_handoff.stopped_parts.allows(&tail.id, None) {
+            return;
+        }
         let kind = tail.kind;
         let title = tail.title.clone();
         self.note_streaming_from_part(kind, &title);
@@ -1131,6 +1147,9 @@ impl NeoismAgentPane {
         kind: NeoismAgentMessageKind,
         title: &str,
     ) {
+        if self.suppress_streaming_after_abort() {
+            return;
+        }
         if matches!(
             kind,
             NeoismAgentMessageKind::Reasoning
@@ -1163,10 +1182,22 @@ impl NeoismAgentPane {
         state: NeoismAgentStreamingState,
         tool: Option<String>,
     ) {
+        if state == NeoismAgentStreamingState::Idle {
+            self.queue_handoff.empty_queue(
+                self.queued_prompt_count, self.queued_prompt_preview.as_deref(),
+            );
+        }
+        let (state, tool) = if self.queue_handoff.waiting() {
+            (NeoismAgentStreamingState::Generating, None)
+        } else {
+            (state, tool)
+        };
         if state == NeoismAgentStreamingState::Compacting {
+            self.pending_compact = None;
             self.retain_current_turn_trace();
         }
         if state == NeoismAgentStreamingState::Idle {
+            self.prompt_admission.settle();
             self.streaming_state = state;
             self.streaming_started_at = None;
             self.streaming_state_changed_at = None;

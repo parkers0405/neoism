@@ -225,6 +225,8 @@ impl ChromeBridge {
             color: [u8; 3],
             #[serde(default)]
             rainbow: bool,
+            #[serde(default)]
+            client_os: Option<String>,
         }
         #[derive(serde::Deserialize)]
         struct WireBuffer {
@@ -236,6 +238,24 @@ impl ChromeBridge {
             Ok(wire) => wire,
             Err(_) => return,
         };
+        // Include terminal/agent workspace targets, even without a file tree.
+        let mut global = std::collections::BTreeMap::new();
+        for buffer in &wire {
+            for peer in &buffer.peers {
+                global
+                    .entry(peer.peer_id.clone())
+                    .or_insert_with(|| PresenceAvatarPeer {
+                        peer_id: peer.peer_id.clone(),
+                        display_name: peer.display_name.clone(),
+                        color: peer.color,
+                        rainbow: peer.rainbow,
+                        client_os: peer.client_os.clone(),
+                    });
+            }
+        }
+        if self.chrome.top_bar.set_peers(global.into_values().collect()) {
+            self.relayout_chrome();
+        }
         let Some(tree) = self.chrome.file_tree.as_mut() else {
             return;
         };
@@ -258,6 +278,7 @@ impl ChromeBridge {
                         display_name: p.display_name,
                         color: p.color,
                         rainbow: p.rainbow,
+                        client_os: p.client_os,
                     })
                     .collect(),
             );

@@ -1,0 +1,1 @@
+{"category":"streaming-csv","description":"Repair a private synthetic one-pass CSV reporting pipeline with filtering, exact totals and atomic fatal errors.","id":"repo-csv-pipeline","suite":"repository","timeout_seconds":600,"verifier_timeout_seconds":60}

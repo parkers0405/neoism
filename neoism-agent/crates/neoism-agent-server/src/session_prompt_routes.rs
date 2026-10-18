@@ -2,7 +2,6 @@ use axum::extract::{Path, State};
 use axum::Json;
 use serde_json::Value;
 
-use crate::compact_session_context;
 use crate::error::ApiError;
 use crate::session_actions::abort_session_run;
 use crate::state::AppState;
@@ -21,6 +20,6 @@ pub(crate) async fn session_summarize(
     Path(session_id): Path<String>,
     Json(_body): Json<Value>,
 ) -> Result<Json<bool>, ApiError> {
-    compact_session_context(&state, &session_id).await?;
+    crate::session_queue::enqueue_manual_compaction(&state, &session_id).await?;
     Ok(Json(true))
 }

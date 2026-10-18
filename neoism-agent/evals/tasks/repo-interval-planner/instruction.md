@@ -1,0 +1,9 @@
+# Add capacity-aware interval planning
+
+Private synthetic stdlib repository task; not an upstream issue or public benchmark. Implement `planner.plan(capacity, bookings, requests)` using the existing validation/timeline/planner modules. All input and output is JSON. Never mutate inputs.
+
+Capacity is a positive integer (booleans are not integers here). Bookings is a list of objects with nonempty string `id` and integer `start`, `end`, `units`; require `start < end` and `1 <= units <= capacity`. Negative times are allowed. Requests is a list of objects with nonempty string `id` and integer `earliest`, `latest`, `duration`, `units`; require positive duration, `earliest + duration <= latest`, and `1 <= units <= capacity`. IDs are unique across both lists. Ignore extra fields. All malformed input, duplicate IDs, and initial bookings whose simultaneous load exceeds capacity return exactly `{"error":"invalid"}`; validate every request before doing any scheduling.
+
+Intervals are half-open `[start,end)`: one booking ending at t does not overlap one starting at t. Process requests in input order without moving previous bookings/accepted requests. Each request must start at the earliest integer time >= earliest whose end is <= latest and whose entire duration fits capacity. If none exists reject it; continue processing later requests. Large time ranges must be handled using interval boundaries, not scanning every integer.
+
+Return `{"accepted":[{"id":...,"start":...,"end":...,"units":...}],"rejected":[ids...],"profile":[{"start":...,"end":...,"used":...}],"peak":integer}`. Accepted/rejected retain request order. Profile includes initial bookings plus accepted requests: sorted, positive-load, disjoint half-open spans, merging adjacent spans with the same load even if booking identities differ. Omit idle gaps; peak is max load or 0. Initial bookings never appear in accepted.

@@ -29,7 +29,9 @@ export function ActivityPopover({ anchor, kind, activity, close, style }: {
         {kind === "queue" ? <>
             {activity.loading ? <div className="activity-skeleton" aria-label="Loading queued messages" /> : <>
                 <small>{activity.queue?.running ? "Running" : "Idle"}{activity.queue?.worker ? " · Queue worker active" : ""}</small>
-                <ul>{activity.queue?.items.map(item => <li key={item.index}><details><summary>#{item.index + 1} · {item.text?.slice(0, 100) || `${item.partCount} non-text parts`}</summary><p>{item.text || "No text preview available"}</p>{item.agent && <small>{item.agent}</small>}</details></li>)}</ul>
+                <ul>{activity.queue?.items.map(item => "type" in item
+                    ? <li key="compact"><strong>{item.preview}</strong><p>Runs at the next safe step boundary, before pending steering messages.</p></li>
+                    : <li key={item.index}><details><summary>#{item.index + 1} · {item.text?.slice(0, 100) || `${item.partCount} non-text parts`}</summary><p>{item.text || "No text preview available"}</p>{item.agent && <small>{item.agent}</small>}</details></li>)}</ul>
                 {!activity.queue?.count && <p>No queued messages</p>}
                 <footer><button disabled={!activity.queue?.count || !!activity.pending} onClick={() => void activity.mutate("pop")}>{activity.pending === "pop" ? "Removing…" : "Remove next"}</button><button disabled={!activity.queue?.count || !!activity.pending} onClick={() => void activity.mutate("clear")}>{activity.pending === "clear" ? "Clearing…" : "Clear queue"}</button></footer>
             </>}

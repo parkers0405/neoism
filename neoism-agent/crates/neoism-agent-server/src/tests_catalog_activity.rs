@@ -151,8 +151,13 @@ async fn all_project_catalog_authorizes_baseline_new_directories_and_pagination(
         .baseline(&state, Some(&first.directory), Some(&claims))
         .await
         .unwrap();
-    assert_eq!(scoped.len(), 1);
-    assert_eq!(scoped[0].properties["sessionID"], first.id.as_str());
+    assert_eq!(scoped.len(), 2);
+    assert_eq!(scoped[0].kind, event_type::SESSION_CATALOG_FAMILY);
+    assert_eq!(scoped[1].kind, event_type::SESSION_CATALOG_ACTIVITY);
+    for event in &scoped {
+        assert_eq!(event.properties["sessionID"], first.id.as_str());
+    }
+    assert_eq!(scoped[0].properties["snapshot"]["directory"], first.directory);
     for session in [&first, &second, &hidden, &foreign] {
         state
             .inner
@@ -168,6 +173,7 @@ async fn all_project_catalog_authorizes_baseline_new_directories_and_pagination(
             .await
             .unwrap();
     }
+    state.inner.store.flush_search_index().await.unwrap();
     std::env::set_var("NEOISM_AGENT_DISABLE_EMBEDDINGS", "1");
     let search = crate::semantic::semantic_search_route(
         State(state.clone()),
@@ -195,6 +201,250 @@ async fn all_project_catalog_authorizes_baseline_new_directories_and_pagination(
     state.shutdown().await.unwrap();
     cleanup_sqlite_files(&path);
     std::fs::remove_dir_all(base).unwrap();
+}
+
+#[tokio::test]
+async fn conversation_search_authorizes_before_relevance_limit() {
+    use axum::{extract::{Query, State}, Extension};
+    let base = std::env::temp_dir().join(format!(
+        "catalog-search-claims-{}", Id::ascending(IdKind::Event)
+    ));
+    let allowed = base.join("allowed");
+    let denied = base.join("denied");
+    for directory in [&allowed, &denied] {
+        std::fs::create_dir_all(directory).unwrap();
+    }
+    let path = base.join("search.turso.db");
+    let state = AppState::open_database(path.clone()).await.unwrap();
+    let now = now_millis();
+    let mut authorized = store_test_session(&neoism_agent_core::new_session_id(), now);
+    authorized.directory = allowed.to_string_lossy().into_owned();
+    let mut hidden = store_test_session(&neoism_agent_core::new_session_id(), now + 1);
+    hidden.directory = denied.to_string_lossy().into_owned();
+    hidden.title = "claimneedle claimneedle claimneedle private discussion".into();
+    let mut foreign = store_test_session(&neoism_agent_core::new_session_id(), now + 2);
+    foreign.directory = authorized.directory.clone();
+    foreign.title = "claimneedle claimneedle claimneedle other tenant".into();
+    foreign.extra.insert(crate::caller::TENANT_EXTRA_KEY.into(), json!("other-tenant"));
+    for session in [&authorized, &hidden, &foreign] {
+        state.inner.store.insert_session(session).await.unwrap();
+        let text = if session.id == authorized.id {
+            format!("{} claimneedle incidental reference", "ordinary discussion ".repeat(100))
+        } else {
+            "claimneedle claimneedle claimneedle detailed claimneedle investigation".into()
+        };
+        state.inner.store.append_message(session.id.as_str(),
+            &store_test_message(&session.id, session.time.created, &text),
+        ).await.unwrap();
+    }
+    state.inner.store.flush_search_index().await.unwrap();
+    // Prove the denied fixtures actually outrank the authorized result, rather
+    // than accidentally testing a limit that would have selected it anyway.
+    let unscoped = search_route_json(&state, "q=claimneedle&conversation=true&limit=1").await;
+    assert_ne!(unscoped["hits"][0]["sessionId"], authorized.id.as_str(), "{unscoped}");
+    let claims = crate::caller::CallerClaims {
+        subject: "test".into(),
+        workspace_id: None,
+        tenant_id: "local".into(),
+        directory_prefixes: vec![allowed.to_string_lossy().into_owned()],
+        hosted: true,
+        max_sessions: None,
+        max_artifacts: None,
+        max_artifact_bytes: None,
+        artifact_retention_days: None,
+        requests_per_minute: None,
+        max_in_flight: None,
+        resolved: None,
+        worker: None,
+    };
+    for conversations in [false, true] {
+        let response = crate::semantic::semantic_search_route(
+            State(state.clone()),
+            Query(serde_json::from_value(json!({
+                "q": "claimneedle", "conversation": conversations, "limit": 1,
+            })).unwrap()),
+            Some(Extension(claims.clone())),
+        ).await.unwrap().0;
+        let response = serde_json::to_value(response).unwrap();
+        let hits = response["hits"].as_array().unwrap();
+        assert_eq!(hits.len(), 1, "unauthorized high scores must not exhaust the limit: {response}");
+        assert_eq!(hits[0]["sessionId"], authorized.id.as_str());
+        assert!(hits[0]["score"].as_f64().unwrap() > 0.0);
+        if conversations {
+            let session: SessionInfo = serde_json::from_value(hits[0]["session"].clone()).unwrap();
+            assert_eq!(session.id, authorized.id);
+            assert_eq!(session.directory, authorized.directory);
+        }
+    }
+    state.shutdown().await.unwrap();
+    cleanup_sqlite_files(&path);
+    std::fs::remove_dir_all(base).unwrap();
+}
+
+#[tokio::test]
+async fn catalog_family_preorder_places_parent_before_lower_id_grandchild() {
+    let path = std::env::temp_dir().join(format!(
+        "catalog-family-preorder-{}.sqlite3", Id::ascending(IdKind::Event)
+    ));
+    let state = AppState::open_database(path.clone()).await.unwrap();
+    let root = store_test_session(&neoism_agent_core::new_session_id(), now_millis());
+    let mut parent = store_test_session(&neoism_agent_core::new_session_id(), now_millis());
+    let mut grandchild = store_test_session(&neoism_agent_core::new_session_id(), now_millis());
+    if parent.id.as_str() < grandchild.id.as_str() {
+        std::mem::swap(&mut parent, &mut grandchild);
+    }
+    assert!(grandchild.id.as_str() < parent.id.as_str());
+    parent.parent_id = Some(root.id.clone());
+    grandchild.parent_id = Some(parent.id.clone());
+    for session in [&root, &parent, &grandchild] {
+        state.inner.store.insert_session(session).await.unwrap();
+    }
+    state.inner.store.admit_execution_activity(root.id.as_str(), "preorder-execution", "message", "")
+        .await.unwrap().unwrap();
+    for (owner, child) in [(&root, &parent), (&parent, &grandchild)] {
+        state.inner.store.register_execution_subtask(
+            "preorder-execution", root.id.as_str(), owner.id.as_str(), child.id.as_str(),
+            &state.inner.execution_owner_id, now_millis(),
+        ).await.unwrap();
+    }
+    let runtime = state.inner.store.get_session_runtime_snapshot(root.id.as_str()).await.unwrap();
+    assert_eq!(runtime.branches[0].session_id, grandchild.id.as_str(),
+        "fixture must exercise ID-sorted authority ordering");
+    let projection = crate::catalog_activity::CatalogProjection::load(&state).await.unwrap();
+    let events = projection.baseline(&state, Some(&root.directory), None).await.unwrap();
+    let family = events.iter().find(|event| event.kind == event_type::SESSION_CATALOG_FAMILY).unwrap();
+    let branches = family.properties["snapshot"]["branches"].as_array().unwrap();
+    assert_eq!(branches.len(), 2);
+    assert_eq!(branches[0]["sessionId"], parent.id.as_str());
+    assert_eq!(branches[0]["depth"], 1);
+    assert_eq!(branches[1]["sessionId"], grandchild.id.as_str());
+    assert_eq!(branches[1]["parentSessionId"], parent.id.as_str());
+    assert_eq!(branches[1]["depth"], 2);
+    state.shutdown().await.unwrap();
+    cleanup_sqlite_files(&path);
+}
+
+async fn next_family<S, T, E>(body: &mut S) -> Value
+where
+    S: futures::Stream<Item = Result<T, E>> + Unpin,
+    T: AsRef<[u8]>,
+    E: std::fmt::Debug,
+{
+    tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            let chunk = body.next().await.expect("SSE open").expect("SSE data");
+            let text = std::str::from_utf8(chunk.as_ref()).unwrap();
+            if text.contains("event: session.catalog.family") {
+                let data = text.lines().find_map(|line| line.strip_prefix("data: ")).unwrap();
+                let envelope: Value = serde_json::from_str(data).unwrap();
+                return envelope["data"].clone();
+            }
+        }
+    }).await.expect("catalog family arrives")
+}
+
+#[tokio::test]
+async fn catalog_family_sse_two_roots_scoping_lifecycle_permissions_and_clear() {
+    use axum::{extract::{Query, State}, response::IntoResponse, Extension};
+    let path = std::env::temp_dir().join(format!(
+        "catalog-family-{}.sqlite3", Id::ascending(IdKind::Event)
+    ));
+    let state = AppState::open_database(path.clone()).await.unwrap();
+    let root = store_test_session(&neoism_agent_core::new_session_id(), now_millis());
+    let other = store_test_session(&neoism_agent_core::new_session_id(), now_millis());
+    let mut hidden = store_test_session(&neoism_agent_core::new_session_id(), now_millis());
+    hidden.extra.insert(crate::caller::TENANT_EXTRA_KEY.into(), json!("other-tenant"));
+    let mut child = store_test_session(&neoism_agent_core::new_session_id(), now_millis());
+    child.parent_id = Some(root.id.clone());
+    child.directory = "/foreign-worktree".into();
+    child.title = "Inspect sidebar".into();
+    child.agent = Some("explore".into());
+    for session in [&root, &other, &hidden, &child] {
+        state.inner.store.insert_session(session).await.unwrap();
+    }
+    let claims = crate::caller::CallerClaims {
+        subject: "test".into(), workspace_id: None, tenant_id: "local".into(),
+        directory_prefixes: vec!["/tmp".into()], hosted: true,
+        max_sessions: None, max_artifacts: None, max_artifact_bytes: None,
+        artifact_retention_days: None, requests_per_minute: None, max_in_flight: None,
+        resolved: None, worker: None,
+    };
+    let open = || crate::v2_routes::v2_session_catalog_events(
+        State(state.clone()), Some(Extension(claims.clone())),
+        axum::http::HeaderMap::new(),
+        Query(crate::v2_routes::SessionCatalogQuery { directory: Some("/tmp".into()), scope: None }),
+    );
+    let mut body = open().await.into_response().into_body().into_data_stream();
+    let mut baseline = std::collections::HashMap::new();
+    for _ in 0..2 {
+        let event = next_family(&mut body).await;
+        baseline.insert(event["sessionID"].as_str().unwrap().to_string(), event["snapshot"].clone());
+    }
+    assert_eq!(baseline.len(), 2);
+    for session in [&root, &other] {
+        assert_eq!(baseline[session.id.as_str()]["branches"], json!([]));
+        assert_eq!(baseline[session.id.as_str()]["directory"], "/tmp");
+        assert!(baseline[session.id.as_str()]["executionId"].is_null());
+    }
+    state.inner.store.admit_execution_activity(root.id.as_str(), "family-execution", "message", "")
+        .await.unwrap().unwrap();
+    state.inner.store.register_execution_subtask(
+        "family-execution", root.id.as_str(), root.id.as_str(), child.id.as_str(),
+        &state.inner.execution_owner_id, now_millis(),
+    ).await.unwrap();
+    // Hidden root cannot leak; the cross-directory child is authorized by root.
+    for session in [&hidden, &child] {
+        state.publish(EventPayload::new(event_type::SESSION_CREATED, json!({"info": session})));
+    }
+    let started = next_family(&mut body).await;
+    assert_eq!(started["sessionID"], root.id.as_str());
+    let branch = &started["snapshot"]["branches"][0];
+    assert_eq!(branch["sessionId"], child.id.as_str());
+    assert_eq!(branch["parentSessionId"], root.id.as_str());
+    assert_eq!(branch["title"], child.title);
+    assert_eq!(branch["agent"], "explore");
+    assert_eq!(branch["depth"], 1);
+    assert_eq!(branch["permissionPending"], false);
+    assert_eq!(started["snapshot"]["executionId"], "family-execution");
+    let typed: neoism_agent_core::CatalogFamilySnapshot =
+        serde_json::from_value(started["snapshot"].clone()).unwrap();
+    assert_eq!(serde_json::to_value(&typed).unwrap(), started["snapshot"]);
+    assert!(typed.branches[0].started_at.is_some());
+    let request = pending(&child);
+    state.inner.permissions.write().await.insert(request.id.clone(), request.clone());
+    state.publish(EventPayload::new(event_type::PERMISSION_ASKED, json!(request)));
+    assert_eq!(next_family(&mut body).await["snapshot"]["branches"][0]["permissionPending"], true);
+    state.inner.permissions.write().await.clear();
+    state.publish(EventPayload::new(event_type::PERMISSION_REPLIED, json!({"requestID": request.id})));
+    assert_eq!(next_family(&mut body).await["snapshot"]["branches"][0]["permissionPending"], false);
+    child.title = "Updated sidebar task".into();
+    state.inner.store.update_session(&child).await.unwrap();
+    state.publish(EventPayload::new(event_type::SESSION_UPDATED, json!({"info": child})));
+    assert_eq!(next_family(&mut body).await["snapshot"]["branches"][0]["title"], child.title);
+    state.inner.store.finish_execution_subtask("family-execution", child.id.as_str(), "completed")
+        .await.unwrap();
+    // A stale queued runtime is just a trigger; completion must remain authoritative.
+    state.publish(EventPayload::new(event_type::SESSION_EXECUTION_UPDATED,
+        json!({"sessionID": root.id, "runtime": started["snapshot"]})));
+    let completed = next_family(&mut body).await;
+    assert_eq!(completed["snapshot"]["branches"][0]["status"], "completed");
+    assert!(completed["snapshot"]["familyRevision"].as_u64().unwrap()
+        > started["snapshot"]["familyRevision"].as_u64().unwrap());
+    assert_list(&state, root.id.as_str(), "idle").await;
+    drop(body);
+    let mut body = open().await.into_response().into_body().into_data_stream();
+    let mut reconnected = Vec::new();
+    for _ in 0..2 { reconnected.push(next_family(&mut body).await); }
+    assert!(reconnected.iter().any(|event| event == &completed));
+    state.inner.store.delete_session(root.id.as_str()).await.unwrap();
+    // Cached metadata authorizes a deletion even without an info payload.
+    state.publish(EventPayload::new(event_type::SESSION_DELETED, json!({"sessionID": root.id})));
+    let cleared = next_family(&mut body).await;
+    assert_eq!(cleared["sessionID"], root.id.as_str());
+    assert_eq!(cleared["snapshot"]["branches"], json!([]));
+    drop(body);
+    state.shutdown().await.unwrap();
+    cleanup_sqlite_files(&path);
 }
 
 async fn next_activity<S, T, E>(body: &mut S) -> Value

@@ -1,0 +1,1 @@
+{"catalog":[{"id":"tables","version":1,"requires":[],"transaction":"schema"},{"id":"indexes","version":2,"requires":["tables"],"transaction":"schema"}],"installed":{},"targets":["indexes"]}

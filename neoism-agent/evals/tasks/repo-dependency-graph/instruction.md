@@ -1,0 +1,11 @@
+# Dependency graph analysis
+
+Private synthetic Python stdlib repository task, not an upstream issue or public benchmark. Implement `graph.analyze(manifest, targets)` across the existing model/traversal/graph modules. No input mutation.
+
+Manifest is an object mapping nonempty string node names to lists of dependency names. Every dependency must be a nonempty string naming a key in manifest. Duplicate dependencies are harmless and deduplicated. Targets is null (select all nodes) or a list of existing node names (duplicates harmless). Malformed inputs, including dangling dependencies anywhere even outside the selection, return exactly `{"error":"invalid"}`. Extra nodes are allowed; names have no grammar beyond nonempty string. All sorting uses Python string lexicographic order, case-sensitive.
+
+Selection is targets plus ALL their transitive dependencies; empty targets selects nothing. Detect cycles ONLY in the selection. For deterministic cycle reporting, run depth-first search starting at sorted selected names, exploring each node’s sorted dependencies; maintain a recursion-stack path. On the first edge to a node already on that stack, return exactly `{"error":"cycle","cycle":[stack suffix starting at that node, then that node again]}`. Completed nodes are not revisited. Self-loop reports `[name,name]`. Do not rotate or sort the resulting cycle path.
+
+For acyclic selection return `{"order":[names],"layers":[[names],...],"dependents":{name:[names],...}}`. Order is a topological ordering with dependencies before dependents; at EVERY step choose lexicographically smallest currently-ready node (not a fixed initial sort and not flattened layers). Layers are simultaneous build rounds: each round contains sorted nodes with all dependencies in earlier rounds. Dependents maps each selected node to its sorted DISTINCT DIRECT dependents within the selection (not transitive dependents and no unselected nodes). Empty selection returns empty order/layers/object.
+
+Example: `{"a":["z"],"b":[],"z":[]}` gives order `["b","z","a"]`, layers `[["b","z"],["a"]]`. For `{"a":[],"b":["a"],"z":[]}` order is `["a","b","z"]` but layers are `[["a","z"],["b"]]`. Handle shared dependencies and disconnected components without losing or duplicating nodes; no network/files/dependencies required.

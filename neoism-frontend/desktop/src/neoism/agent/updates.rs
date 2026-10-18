@@ -117,6 +117,14 @@ pub(super) enum AgentSessionUpdate {
         session_id: String,
         part_id: String,
     },
+    /// Queue-only update; None count is the idempotent queued notification.
+    QueueSnapshot {
+        session_id: String,
+        count: Option<usize>,
+        preview: Option<String>,
+        running: Option<bool>,
+        action: Option<String>,
+    },
     CompactionStarted {
         session_id: String,
         id: String,
@@ -130,6 +138,7 @@ pub(super) enum AgentSessionUpdate {
         session_id: String,
         summary: String,
         kind: String,
+        run_continues: Option<bool>,
     },
     System {
         title: String,
@@ -270,6 +279,27 @@ impl AgentEventWake {
 
 impl AgentSessionEventStream {
     #[cfg(test)]
+    pub(super) fn with_events_for_test(
+        session_id: &str,
+        events: impl IntoIterator<Item = Value>,
+    ) -> Self {
+        let stream = Self::connected_for_test(session_id);
+        let mut decoder = SseDecoder::default();
+        let mut state = SessionEventUpdateState::default();
+        let epochs = Arc::new(MessageRefreshEpochs::default());
+        for envelope in events {
+            let data = format!("data: {envelope}\n\n");
+            for event in decoder.feed(data.as_bytes()) {
+                send_event_updates(
+                    event, "unused-test-server", session_id,
+                    stream._test_tx.as_ref().unwrap(), &mut state, &stream.wake, &epochs,
+                ).unwrap();
+            }
+        }
+        stream
+    }
+
+    #[cfg(test)]
     pub(super) fn connected_for_test(session_id: &str) -> Self {
         let (tx, rx) = mpsc::channel();
         Self {
@@ -390,6 +420,10 @@ pub(super) enum AgentSessionCatalogUpdate {
     Activity {
         session_id: String,
         activity: neoism_agent_core::CatalogActivity,
+    },
+    Family {
+        session_id: String,
+        snapshot: neoism_agent_core::CatalogFamilySnapshot,
     },
     Delete(String),
 }
@@ -517,12 +551,20 @@ fn session_catalog_update_from_event(event: &Value) -> Option<AgentSessionCatalo
             session_id: session_id.to_owned(),
             activity,
         })
+    } else if kind == neoism_agent_core::event_type::SESSION_CATALOG_FAMILY {
+        let session_id = properties.get("sessionID").and_then(Value::as_str)?;
+        let snapshot = serde_json::from_value(properties.get("snapshot")?.clone()).ok()?;
+        Some(AgentSessionCatalogUpdate::Family {
+            session_id: session_id.to_owned(),
+            snapshot,
+        })
     } else if kind == neoism_agent_core::event_type::SESSION_STATUS {
         // A root idle edge is not whole-family idle authority.
         None
     } else if kind == neoism_agent_core::event_type::SESSION_DELETED {
         properties
             .get("sessionID")
+            .or_else(|| properties.get("info").and_then(|info| info.get("id")))
             .and_then(Value::as_str)
             .map(|id| AgentSessionCatalogUpdate::Delete(id.to_owned()))
     } else {
@@ -1191,6 +1233,21 @@ fn send_event_updates(
                     part_id,
                 })?;
             }
+            SessionEventUpdate::QueueSnapshot {
+                session_id,
+                count,
+                preview,
+                running,
+                action,
+            } => {
+                tx.send(AgentSessionUpdate::QueueSnapshot {
+                    session_id,
+                    count,
+                    preview,
+                    running,
+                    action,
+                })?;
+            }
             SessionEventUpdate::CompactionStarted {
                 session_id,
                 id,
@@ -1212,6 +1269,7 @@ fn send_event_updates(
                 summary,
                 kind,
                 usage,
+                run_continues,
             } => {
                 message_refresh_epochs.advance(&owner_session_id);
                 let refresh_usage = usage.map(Into::into);
@@ -1222,6 +1280,7 @@ fn send_event_updates(
                     session_id: owner_session_id.clone(),
                     summary,
                     kind,
+                    run_continues,
                 })?;
                 spawn_message_refreshes(
                     server.to_string(),

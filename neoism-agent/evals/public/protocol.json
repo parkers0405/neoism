@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "setup_only": true,
+  "paid_execution_enabled": false,
+  "dataset": {
+    "name": "SWE-bench Pro V2 HARD-51",
+    "repository": "https://github.com/scaleapi/SWE-bench_Pro-os.git",
+    "commit": "66f92766bba642462d4bbe5479e83f91f9211862",
+    "task_directory": "v2/tasks",
+    "subset_file": "v2/hard51_ids.txt",
+    "checksums_file": "v2/SHA256SUMS",
+    "expected_tasks": 51
+  },
+  "tooling": {
+    "harbor_version": "0.22.0",
+    "harbor_commit": "4407eb5227a2ff4f0d3f16b2eb48849382fdf276",
+    "modal_version": "1.5.1"
+  },
+  "model": {
+    "provider": "anthropic",
+    "id": "claude-sonnet-5-5",
+    "api_base_url": "https://api.anthropic.com/v1",
+    "effort": "high",
+    "thinking": {"type": "adaptive"},
+    "max_output_tokens": 32000,
+    "all_model_calls_same_id": true,
+    "wire_validation_required": true
+  },
+  "harnesses": {
+    "neoism": {
+      "class": "neoism_harbor.neoism:NeoismSonnet",
+      "version": "0.7.128"
+    },
+    "opencode-v2": {
+      "class": "neoism_harbor.opencode_v2:OpenCodeV2Sonnet",
+      "package": "@opencode/cli",
+      "version": "2.0.32"
+    },
+    "claude-code": {
+      "class": "neoism_harbor.claude_code:ClaudeSonnet",
+      "version": "2.1.292"
+    }
+  },
+  "attempts_per_task_per_harness": 1,
+  "automatic_retries": 0,
+  "expected_trials": 153,
+  "agent_timeout_seconds": 3000,
+  "inference_deadline_seconds": 2955,
+  "cleanup_reserve_seconds": 45,
+  "network": {
+    "agent_mode": "allowlist",
+    "allowed_hosts": ["api.anthropic.com"],
+    "web_tools_enabled": false,
+    "setup_and_verifier_use_task_policy": true,
+    "dynamic_enforcement_probe_required": true
+  },
+  "grading": {
+    "capture_partial_patch_on_timeout": true,
+    "fresh_sandbox_regrade": true,
+    "authoritative_score": "pristine_regrade",
+    "publish_both_grades": true,
+    "oracle_and_empty_patch_calibration_required": true
+  },
+  "permissions": {
+    "human_prompts": false,
+    "isolated_allow_all": true,
+    "questions": "reject",
+    "host_profile_changes": false
+  },
+  "execution": {
+    "new_budget_required": true,
+    "default_concurrency": 1,
+    "resume_fresh_attempts": false,
+    "durable_single_attempt_ledger": true,
+    "per_request_budget_reservation": true,
+    "unknown_accounting_stops_inference": true,
+    "budget_basis": "frozen_catalog_prices_not_provider_invoice",
+    "explicit_lab_execution_required": true,
+    "tests_and_probes_run_during_build": false
+  }
+}

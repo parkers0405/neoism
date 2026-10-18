@@ -218,6 +218,7 @@ pub(crate) fn forward_sse_event(
                     accum.push_str(&seed_text);
                 }
                 let _ = tx.send(AgentServerMessage::ContentDelta {
+                    parent_message_id: None,
                     session_id: session_id.to_string(),
                     message_id,
                     kind,
@@ -242,6 +243,7 @@ pub(crate) fn forward_sse_event(
             let _ = tx.send(AgentServerMessage::ContentDelta {
                 session_id: session_id.to_string(),
                 message_id,
+                parent_message_id: None,
                 kind,
                 text,
             });

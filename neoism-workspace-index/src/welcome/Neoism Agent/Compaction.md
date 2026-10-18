@@ -4,9 +4,11 @@ Compaction keeps a long session usable when its accumulated messages approach th
 
 ## Manual compaction
 
-Run `/compact` or `/summarize`. The Agent server generates a structured handoff summary containing the active goal, constraints, progress, decisions, next steps, and critical context.
+Run `/compact` or `/summarize`. The request is durably queued, even while the model is responding. Neoism finishes the current model/tool step, then generates a structured handoff summary containing the active goal, constraints, progress, decisions, next steps, and critical context before the next model step. An idle session can compact immediately.
 
-The summary is stored in the session. It is not only transient text shown in the UI.
+Manual compaction takes priority over pending steering messages. Detached subagents and background tasks can keep running; a foreground tool must finish before the parent reaches a safe compaction boundary. Repeated requests while compaction is pending are deduplicated. Stop cancels pending manual compaction and interrupts an executing summary, without clearing ordinary queued messages.
+
+The queue shows pending compaction separately from actual summarization. Request acceptance does not mean the summary is finished, and compaction alone does not ask the model to produce another reply. The summary is stored in the session, not only shown as transient UI text. Automatic compaction uses its existing context-pressure triggers independently.
 
 ## Automatic compaction
 

@@ -1,4 +1,4 @@
-import { AuthorizedDashboardRootCache, conversationSearchRows, projectNavigatorRows, navigatorContextCurrent, NavigatorProjectDiscovery, ADD_NAVIGATOR_WORKSPACE, canAddNavigatorWorkspace, type ConversationResult } from "./conversationNavigatorHost";
+import { AuthorizedDashboardRootCache, conversationSearchRows, conversationSearchIndexing, projectNavigatorRows, navigatorContextCurrent, NavigatorProjectDiscovery, ADD_NAVIGATOR_WORKSPACE, canAddNavigatorWorkspace, type ConversationResult } from "./conversationNavigatorHost";
 import { ProtocolClient } from "../workspace/ProtocolClient";
 import type { ConnectionState } from "../workspace/ProtocolClient";
 import type { PtyService } from "../services/PtyService";
@@ -28,6 +28,7 @@ import {
   type ActivePresenceTarget,
 } from "../presence/PresencePublisher";
 import { RemotePresenceStore } from "../presence/RemotePresenceStore";
+import { remoteCursorProjection } from "../presence/projections";
 import { MobileKeyboard } from "../mobile/MobileKeyboard";
 import {
   focusCaptureOnTouchStart,
@@ -1771,14 +1772,27 @@ export class TerminalPanel {
     if (typeof payload === "object" && payload !== null && "ThreadSearchResult" in payload) {
       const reply = payload.ThreadSearchResult;
       const target = this.conversationNavigation;
-      if (target && target.mode === "search" && this.navigatorTargetCurrent(target)
+      if (target && target.mode === "search" && !target.failed && this.navigatorTargetCurrent(target)
         && target.serial === reply.generation && target.query === reply.query
         && target.adapter.conversationNavigatorQuery?.() === reply.query) {
         const rows = conversationSearchRows(reply.sessions, reply.semantic);
+        this.cancelNavigatorSearchTimers(target);
+        target.inFlight = false;
+        target.failed = !!reply.error;
         target.completed = true;
         target.results = new Map(rows.map((row) => [row.value, row]));
         target.adapter.conversationNavigatorSetRows?.(JSON.stringify(rows));
         target.adapter.conversationNavigatorSetLoading?.(false);
+        const indexing = !target.failed && conversationSearchIndexing(reply.semantic);
+        target.adapter.conversationNavigatorSetIndexing?.(indexing);
+        if (indexing) {
+          const serial = target.serial;
+          const query = target.query;
+          target.refreshTimer = setTimeout(() => {
+            target.refreshTimer = undefined;
+            if (target.serial === serial && target.query === query) this.sendNavigatorSearch(target);
+          }, 1000);
+        }
         target.adapter.conversationNavigatorSetError?.(rows.length ? null : reply.error);
         if (rows.length && reply.error) this.pushInAppNotification("Conversation search", reply.error, "warn");
         this.scheduleDraw();
@@ -3015,11 +3029,44 @@ export class TerminalPanel {
     projects: import("../workspace/types").ProjectRootSummary[];
     allowedProjects: Set<string>;
     discovery: NavigatorProjectDiscovery | null;
+    refreshTimer?: ReturnType<typeof setTimeout>;
+    searchTimer?: ReturnType<typeof setTimeout>;
+    timeoutTimer?: ReturnType<typeof setTimeout>;
+    inFlight?: boolean;
+    failed?: boolean;
   } | null = null;
+
+  private cancelNavigatorSearchTimers(target: NonNullable<TerminalPanel["conversationNavigation"]>): void {
+    clearTimeout(target.refreshTimer);
+    clearTimeout(target.searchTimer);
+    clearTimeout(target.timeoutTimer);
+    target.refreshTimer = target.searchTimer = target.timeoutTimer = undefined;
+  }
+
+  private sendNavigatorSearch(target: NonNullable<TerminalPanel["conversationNavigation"]>): void {
+    if (!this.navigatorTargetCurrent(target) || target.failed || target.inFlight
+      || !target.query.trim() || target.adapter.conversationNavigatorQuery?.() !== target.query) return;
+    const serial = target.serial;
+    const query = target.query;
+    target.inFlight = true;
+    target.completed = false;
+    target.client.sendAgent(target.client.allocateRequestId(), { SearchThreads: { query, generation: serial } });
+    target.timeoutTimer = setTimeout(() => {
+      target.timeoutTimer = undefined;
+      if (!this.navigatorTargetCurrent(target) || target.serial !== serial || target.query !== query || target.completed) return;
+      target.inFlight = false;
+      target.failed = true;
+      target.adapter.conversationNavigatorSetLoading?.(false);
+      target.adapter.conversationNavigatorSetIndexing?.(false);
+      if (target.results.size === 0) target.adapter.conversationNavigatorSetError?.("Search timed out or is unavailable on this host");
+      this.scheduleDraw();
+    }, 30000);
+  }
 
   private clearConversationNavigation(): void {
     const target = this.conversationNavigation;
     this.conversationNavigation = null;
+    if (target) this.cancelNavigatorSearchTimers(target);
     target?.discovery?.close();
     (target?.adapter ?? this.wasmAdapter)?.conversationNavigatorClose?.();
   }
@@ -3126,6 +3173,9 @@ export class TerminalPanel {
     if (target.mode === "projects") return;
     const query = adapter.conversationNavigatorQuery?.() ?? "";
     if (query === target.query) return;
+    this.cancelNavigatorSearchTimers(target);
+    target.inFlight = false;
+    target.failed = false;
     target.query = query;
     target.completed = false;
     target.serial = ++TerminalPanel.navigatorSerial;
@@ -3133,18 +3183,13 @@ export class TerminalPanel {
     adapter.conversationNavigatorSetRows?.("[]");
     adapter.conversationNavigatorSetError?.(null);
     adapter.conversationNavigatorSetLoading?.(query.trim().length > 0);
+    adapter.conversationNavigatorSetIndexing?.(false);
     const serial = target.serial;
     if (!query.trim()) return;
     // Debounce without letting an older timer submit a newer query accidentally.
-    setTimeout(() => {
-      if (!this.navigatorTargetCurrent(target) || target.serial !== serial || target.query !== query) return;
-      target.client.sendAgent(target.client.allocateRequestId(), { SearchThreads: { query, generation: serial } });
-      setTimeout(() => {
-        if (!this.navigatorTargetCurrent(target) || target.serial !== serial || target.completed) return;
-        adapter.conversationNavigatorSetLoading?.(false);
-        if (target.results.size === 0) adapter.conversationNavigatorSetError?.("Search timed out or is unavailable on this host");
-        this.scheduleDraw();
-      }, 30000);
+    target.searchTimer = setTimeout(() => {
+      target.searchTimer = undefined;
+      if (target.serial === serial && target.query === query) this.sendNavigatorSearch(target);
     }, 180);
   }
 
@@ -5292,14 +5337,7 @@ export class TerminalPanel {
       adapter.editorSetRemoteCursors([]);
       return;
     }
-    const peers = this.remotePresence.cursorsFor(bufferId).map((p) => ({
-      name: p.display_name,
-      color: [p.color.r, p.color.g, p.color.b],
-      rainbow: p.rainbow ?? false,
-      insert: p.insert ?? true,
-      line: p.cursor.line,
-      col_utf16: p.cursor.column,
-    }));
+    const peers = this.remotePresence.cursorsFor(bufferId).map(remoteCursorProjection);
     adapter.editorSetRemoteCursors(peers);
   }
 
@@ -5311,13 +5349,7 @@ export class TerminalPanel {
       // Real-renderer path: feed peers into the wasm pane so the shared
       // renderer draws exact carets + roster (same as desktop).
       this.markdownPresenceOverlay.clear();
-      const peers = this.remotePresence.cursorsFor(bufferId).map((p) => ({
-        name: p.display_name,
-        color: [p.color.r, p.color.g, p.color.b],
-        rainbow: p.rainbow ?? false,
-        line: p.cursor.line,
-        col_utf16: p.cursor.column,
-      }));
+      const peers = this.remotePresence.cursorsFor(bufferId).map(remoteCursorProjection);
       (this.wasmAdapter as { setMarkdownRemoteCursors?: (peers: unknown) => void })
         ?.setMarkdownRemoteCursors?.(peers);
       return;

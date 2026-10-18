@@ -38,9 +38,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::state::AppState;
 
-/// Wire format version for [`SessionBundle`]. Bumped if the shape changes in a
-/// way that older importers cannot read.
-pub const SESSION_BUNDLE_VERSION: u32 = 2;
+/// Wire format version for [`SessionBundle`]. Version 3 preserves pending manual
+/// compaction controls; older importers must reject rather than silently lose them.
+pub const SESSION_BUNDLE_VERSION: u32 = 3;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -68,6 +68,9 @@ pub struct SessionBundle {
     /// Prompts still queued for this session, in queue order. `import_session`
     /// re-enqueues them so the resume path drains them on the new host.
     pub queued_prompts: Vec<QueuedPromptBundleItem>,
+    /// Typed pending manual control; old bundles default to no pending control.
+    #[serde(default)]
+    pub compaction_queued: bool,
     /// Absolute workspace (git worktree) root on the exporting host, if known.
     /// Absolute paths inside the bundle are stripped of this prefix so the
     /// importer can re-root them under `target_workspace_root`. `None` when the
@@ -119,6 +122,7 @@ pub async fn export_session(
         session,
         messages,
         queued_prompts,
+        compaction_queued: store.compaction_queued(session_id).await?,
         workspace_root,
     })
 }
@@ -225,6 +229,9 @@ pub async fn import_session(
             .await?;
     }
 
+    if bundle.compaction_queued {
+        store.enqueue_compact(session_id.as_str()).await?;
+    }
     Ok(session_id)
 }
 

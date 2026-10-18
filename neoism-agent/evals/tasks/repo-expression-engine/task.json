@@ -1,0 +1,1 @@
+{"category":"refactor","description":"Private synthetic repository task: replace a flat calculator with a safe precedence parser and variable evaluation; not an upstream issue or public benchmark.","id":"repo-expression-engine","suite":"repository","timeout_seconds":600,"verifier_timeout_seconds":60}

@@ -244,6 +244,9 @@ pub struct PeerPresence {
     pub buffer_id: PresenceBufferId,
     pub peer_id: PresencePeerId,
     pub display_name: String,
+    /// Client-reported operating system; absent for older peers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_os: Option<String>,
     pub color: PresenceColor,
     pub cursor: PeerCursor,
     #[serde(default)]
@@ -276,6 +279,7 @@ impl PeerPresence {
             color: stable_presence_color(&peer_id),
             peer_id,
             display_name: display_name.into(),
+            client_os: None,
             cursor,
             selection: None,
             insert: false,

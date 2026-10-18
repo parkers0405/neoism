@@ -4,7 +4,7 @@ import { ACTIVITY, STATUS, activityLabel, dotFrame, elapsedLabel, glyphFrame, ph
 import { readFileSync } from "node:fs";
 const native = readFileSync(new URL("../../../../../../../neoism-frontend/shared/src/panels/agent_pane/view/user_input.rs", import.meta.url), "utf8");
 const message = (type: string, completed?: number) => [{ info: { id: "m", sessionId: "root", role: "assistant", time: { completed } }, parts: [{ id: "p", type, ...(type === "tool" ? { state: { status: "running" } } : {}) }] }] as unknown as MessageWithParts[];
-const runtime = (overrides: Partial<SessionRuntimeSnapshot> = {}): SessionRuntimeSnapshot => ({ rootSessionId: "root", revision: 1, branches: [], ...overrides });
+const runtime = (overrides: Partial<SessionRuntimeSnapshot> = {}): SessionRuntimeSnapshot => ({ rootSessionId: "root", familyRevision: 1, branches: [], ...overrides });
 describe("native activity motion port", () => {
     it("pins exact native constants and face, not sidebar orbit or generic pulse", () => {
         expect(ACTIVITY.scramble).toBe("|/-\\+!?>?<%#=@*~&^$");
@@ -34,7 +34,7 @@ describe("native activity motion port", () => {
     it("wraps monotonic phase safely and keeps epoch only in timer sampling", () => {
         expect(phaseSeconds(10_000_250)).toBe(.25);
         expect(phaseSeconds(-1)).toBe(0);
-        const r = runtime({ execution: { executionId: "e", rootSessionId: "root", rootMessageId: "m", revision: 1, finished: false, completedMs: 500, activeSegments: { a: 1000, b: 1500 } } });
+        const r = runtime({ execution: { executionId: "e", rootSessionId: "root", rootMessageId: "m", revision: 1, finished: false, completedMs: 500, activeSegments: { a: 1000, b: 1500 }, sessionActivities: { root: { completedMs: 500, activeSegments: { a: 1000 } }, child: { completedMs: 0, activeSegments: { b: 1500 } } } } });
         expect(runtimeElapsed(r, 2000)).toBe(2);
         expect(elapsedLabel(2)).toBe("2.0s"); expect(elapsedLabel(61)).toBe("1m 1s"); expect(elapsedLabel(5460)).toBe("1h 31m");
     });
@@ -51,16 +51,17 @@ describe("native status selection", () => {
         expect(resolveActivity(message("text", 1), true, r).status).toBe("waitingSubagents");
         expect(resolveActivity(message("text", 1), true, r, undefined, "child").status).toBe("working");
         expect(resolveActivity([], true, runtime({ runningBackgroundTasks: [{ sessionId: "root", jobId: "j", startedAt: 1 }] })).status).toBe("backgroundTasks");
-        r.execution = { executionId: "e", rootSessionId: "root", rootMessageId: "m", revision: 1, finished: false, completedMs: 0, activeSegments: {} };
+        r.execution = { executionId: "e", rootSessionId: "root", rootMessageId: "m", revision: 1, finished: false, completedMs: 0, activeSegments: {}, sessionActivities: { root: { completedMs: 0, activeSegments: {} } } };
         expect(resolveActivity(message("reasoning"), true, r).status).toBe("waitingSubagents");
     });
     it("uses provider segments, not unfinished execution or stale reasoning, for background-only activity", () => {
-        const r = runtime({ execution: { executionId: "e", rootSessionId: "root", rootMessageId: "u", revision: 1, finished: false, completedMs: 0, activeSegments: {} },
+        const r = runtime({ execution: { executionId: "e", rootSessionId: "root", rootMessageId: "u", revision: 1, finished: false, completedMs: 0, activeSegments: {}, sessionActivities: { root: { completedMs: 0, activeSegments: {} } } },
             runningBackgroundTasks: [{ sessionId: "root", jobId: "job", startedAt: 1 }] });
         for (const messages of [[], message("reasoning"), message("text", 1), [{ info: { role: "user" } }] as MessageWithParts[]]) {
             expect(resolveActivity(messages, true, r).status).toBe("backgroundTasks");
         }
         r.execution!.activeSegments = { provider: 1 };
+        r.execution!.sessionActivities.root.activeSegments = { provider: 1 };
         expect(resolveActivity(message("text"), true, r).status).toBe("generating");
         expect(resolveActivity(message("reasoning"), true, r).status).toBe("thinking");
         expect(resolveActivity(message("reasoning", 1), true, r).status).toBe("generating");
@@ -73,8 +74,7 @@ describe("native status selection", () => {
     });
     it("uses the viewed session's provider activity rather than family aggregate segments", () => {
         const r = runtime({ branches: [{ sessionId: "child", parentSessionId: "root", status: "outstanding" }],
-            execution: { executionId: "e", rootSessionId: "root", rootMessageId: "u", revision: 1, finished: false, completedMs: 0, activeSegments: { provider: 1 } } });
-        Object.assign(r.execution!, { sessionActivities: { root: { activeSegments: {} }, child: { activeSegments: { provider: 1 } } } });
+            execution: { executionId: "e", rootSessionId: "root", rootMessageId: "u", revision: 1, finished: false, completedMs: 0, activeSegments: { provider: 1 }, sessionActivities: { root: { completedMs: 0, activeSegments: {} }, child: { completedMs: 0, activeSegments: { provider: 1 } } } } });
         expect(resolveActivity(message("reasoning"), true, r, undefined, "root").status).toBe("waitingSubagents");
         const child = message("reasoning"); child[0].info.sessionId = "child";
         expect(resolveActivity(child, false, r, undefined, "child").status).toBe("thinking");

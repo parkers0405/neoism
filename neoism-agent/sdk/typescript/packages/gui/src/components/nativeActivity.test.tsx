@@ -54,19 +54,21 @@ it("isolates frames on canvas, changes reasoning status, and cancels on idle/unm
     expect(container.textContent).toBe(""); expect(callbacks.size).toBe(0);
 });
 it("animates Background for idle-with-jobs and switches to the live provider word then clears", () => {
-    const runtime = { rootSessionId: "root", revision: 1, branches: [],
-        execution: { executionId: "e", rootSessionId: "root", rootMessageId: "u", revision: 1, finished: false, completedMs: 0, activeSegments: {} as Record<string, number> },
+    const runtime = { rootSessionId: "root", familyRevision: 1, branches: [],
+        execution: { executionId: "e", rootSessionId: "root", rootMessageId: "u", revision: 1, finished: false, completedMs: 0, activeSegments: {} as Record<string, number>, sessionActivities: { root: { completedMs: 0, activeSegments: {} as Record<string, number> } } },
         runningBackgroundTasks: [{ sessionId: "root", jobId: "job", startedAt: 1 }] };
     const render = (busy = false) => act(() => root.render(<NativeActivity busy={busy} runtime={{ ...runtime }} sessionId="root" />));
     render();
     expect(container.textContent).toContain("Background");
     expect(container.querySelector("canvas")).not.toBeNull();
     expect(callbacks.size).toBe(1);
-    runtime.execution.activeSegments = { provider: 1 }; render(true);
+    runtime.execution.activeSegments = { provider: 1 };
+    runtime.execution.sessionActivities.root.activeSegments = { provider: 1 }; render(true);
     expect(container.textContent).toContain("Crafting");
     expect(container.textContent).toContain("1 background task running");
     expect(callbacks.size).toBe(1);
-    runtime.execution.activeSegments = {}; render();
+    runtime.execution.activeSegments = {};
+    runtime.execution.sessionActivities.root.activeSegments = {}; render();
     expect(container.textContent).toContain("Background");
     runtime.runningBackgroundTasks = []; render();
     expect(container.querySelector('[role="status"]')).toBeNull();

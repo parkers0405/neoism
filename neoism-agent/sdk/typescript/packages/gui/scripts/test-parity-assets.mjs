@@ -30,10 +30,25 @@ for (const theme of themes) {
 }
 assert.equal(themes.find(t => t.id === 'pastel_dark').colors.background, '#000000');
 assert.equal(themes.find(t => t.id === 'ayu_light').colors.background, '#fafafa');
-assert.equal(commands.length, 32);
+const nativeCommands = readFileSync(new URL('../../../../../../neoism-frontend/shared/src/panels/agent_pane/command_controller.rs', import.meta.url), 'utf8');
+const planner = nativeCommands.match(/pub fn plan_slash_command[\s\S]*?\n\}/)?.[0];
+const specs = nativeCommands.match(/fn slash_option_specs\(\)[\s\S]*?\n\}/)?.[0];
+assert(planner && specs, 'Native command planner and picker catalog must be present');
+const groups = [...planner.matchAll(/^\s*((?:"\/[^"\n]+"\s*\|\s*)*"\/[^"\n]+")\s*=>/gm)]
+  .map(m => [...m[1].matchAll(/"([^"]+)"/g)].map(n => n[1]));
+assert(groups.length > 0);
+const nativeEntries = [...specs.matchAll(/SlashOptionSpec \{([\s\S]*?)\}/g)].map(([, body]) => ({
+  name: body.match(/title:\s*"([^"]+)"/)[1],
+  description: JSON.parse(body.match(/description:\s*("(?:[^"\\]|\\.)*")/)[1]),
+}));
+assert.equal(commands.length, groups.length, 'One picker entry per native command group');
+assert.deepEqual(commands.map(({ name, description }) => ({ name, description })), nativeEntries);
 const spellings = commands.flatMap(c => [c.name, ...c.aliases]);
-assert.equal(spellings.length, 52);
-assert.equal(new Set(spellings).size, 52);
+assert.deepEqual([...spellings].sort(), groups.flat().sort(), 'Every native spelling must be represented');
+assert.equal(new Set(spellings).size, spellings.length);
+assert.deepEqual(commands.find(c => c.name === '/usage'), {
+  name: '/usage', description: 'View Codex account usage and reset times', aliases: [],
+});
 assert.deepEqual(commands.find(c => c.name === '/model').aliases, ['/models']);
 assert(commands.find(c => c.name === '/skills').aliases.includes('/skill'));
 assert(commands.find(c => c.name === '/compact').aliases.includes('/comapction'));

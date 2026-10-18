@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Event, MessageWithParts, SessionRuntimeSnapshot } from "@neoism/sdk";
-import { emptyChat, reconcileRecent, reduceEvent, runtimeIsOlder } from "./state";
+import { applyRuntime, emptyChat, reconcileRecent, reduceEvent, runtimeIsOlder } from "./state";
 
 const row = (text: string): MessageWithParts => ({
     info: { id: "m", sessionId: "s", role: "assistant", time: { created: 1 } },
@@ -16,14 +16,31 @@ const delta = (id: string, text: string) => event(id, "message.part.delta", {
 
 describe("live attachment baselines", () => {
     it("orders current familyRevision snapshots by execution before the branch revision", () => {
-        const runtime = (executionId: string, revision: number, familyRevision: number) => ({
-            rootSessionId: "s", branches: [], familyRevision,
-            execution: { executionId, revision },
-        }) as unknown as SessionRuntimeSnapshot;
+        const runtime = (executionId: string, revision: number, familyRevision: number): SessionRuntimeSnapshot => ({
+            rootSessionId: "s", branches: [{ sessionId: "child", parentSessionId: "s", status: familyRevision > 1 ? "completed" : "outstanding" }], familyRevision,
+            execution: { executionId, revision, rootSessionId: "s", rootMessageId: "u", finished: false,
+                completedMs: 0, activeSegments: {}, sessionActivities: { s: { completedMs: 0, activeSegments: {} } } },
+        });
         expect(runtimeIsOlder(runtime("run-1", 3, 1), runtime("run-1", 2, 1))).toBe(true);
         expect(runtimeIsOlder(runtime("run-1", 3, 2), runtime("run-1", 3, 1))).toBe(true);
         expect(runtimeIsOlder(runtime("run-1", 3, 2), runtime("run-2", 0, 0))).toBe(false);
         expect(runtimeIsOlder(runtime("run-2", 0, 0), runtime("run-1", 100, 100))).toBe(true);
+        // A timer update wins independently of a lower family revision; a family
+        // update wins when the execution revision is unchanged.
+        expect(runtimeIsOlder(runtime("run-1", 2, 10), runtime("run-1", 3, 1))).toBe(false);
+        expect(runtimeIsOlder(runtime("run-1", 3, 1), runtime("run-1", 3, 2))).toBe(false);
+        const current = { ...emptyChat, runtime: runtime("run-1", 3, 2) };
+        expect(applyRuntime(current, runtime("run-1", 3, 1))).toBe(current);
+        expect(current.runtime.branches[0].status).toBe("completed");
+    });
+    it("orders branch-only snapshots by familyRevision without an execution clock", () => {
+        const current: SessionRuntimeSnapshot = { rootSessionId: "s", familyRevision: 2,
+            branches: [{ sessionId: "child", parentSessionId: "s", status: "completed" }] };
+        const older: SessionRuntimeSnapshot = { rootSessionId: "s", familyRevision: 1,
+            branches: [{ sessionId: "child", parentSessionId: "s", status: "outstanding" }] };
+        expect(runtimeIsOlder(current, older)).toBe(true);
+        expect(runtimeIsOlder(older, current)).toBe(false);
+        expect(runtimeIsOlder(current, { ...older, rootSessionId: "another-root" })).toBe(false);
     });
     it("replaces a cached suffix, then applies subsequent tokens exactly once", () => {
         let state = reconcileRecent(emptyChat, [row("suffix")]);

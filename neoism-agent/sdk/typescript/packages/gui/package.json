@@ -7,7 +7,7 @@
         "dev": "vite --host 127.0.0.1",
         "build": "node --test scripts/check-module-paths.test.mjs && node scripts/check-module-paths.mjs && tsc --noEmit && vite build",
         "preview": "vite preview",
-        "test": "vitest run",
+        "test": "node --test scripts/check-module-paths.test.mjs && vitest run src",
         "assets:generate": "node scripts/generate-parity-assets.mjs && node scripts/generate-font-assets.mjs && node scripts/generate-wordmark.mjs",
         "assets:check": "node scripts/generate-parity-assets.mjs --check && node scripts/generate-font-assets.mjs --check && node scripts/generate-wordmark.mjs --check",
         "test:assets": "node scripts/test-parity-assets.mjs && node scripts/test-font-assets.mjs"

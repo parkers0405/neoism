@@ -33,13 +33,10 @@ export function resolveActivity(messages: MessageWithParts[], busy: boolean, run
     const children = runtime?.branches.some(b => b.status === "outstanding" && b.parentSessionId === viewed);
     const child = runtime?.branches.some(b => b.status === "outstanding" && b.sessionId === viewed);
     const execution = runtime?.execution;
-    // The server serializes per-session provider activity; older SDK contracts omit it.
-    const sessions = (execution as (NonNullable<typeof execution> & { sessionActivities?: Record<string, { activeSegments: Record<string, number> }> }) | undefined)?.sessionActivities;
-    const segments = sessions ? sessions[viewed ?? ""]?.activeSegments : execution?.activeSegments;
+    // Provider activity belongs to the viewed session, not the family aggregate.
+    const segments = execution?.sessionActivities[viewed ?? ""]?.activeSegments;
     const providerActive = !!execution && !execution.finished && !!segments && Object.keys(segments).length > 0;
-    // With an older aggregate-only snapshot, use the unaggregated session status to
-    // avoid attributing a child's provider segment to an idle root (or vice versa).
-    const main = runtime ? providerActive && (sessions ? true : busy) : busy;
+    const main = runtime ? providerActive : busy;
     let status: ActivityStatus = "idle";
     if (explicit && explicit.status !== "idle") status = explicit.status;
     else if (main) {

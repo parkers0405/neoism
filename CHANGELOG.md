@@ -2,6 +2,16 @@
 
 All notable user-facing changes to Neoism are documented here.
 
+## [0.7.130] - 2026-10-18
+
+### Production Agent GUI contract alignment
+
+- Aligns the production Agent GUI's runtime/activity snapshot fixtures and consumers with the generated catalog-family contract, including `familyRevision` and required per-session activity maps.
+- Carries all search, manual-compaction queue, prompt-cache, presence, evaluation-source, and Nix improvements prepared for v0.7.129. That release did not publish because the production GUI check failed; no feature work is omitted from this patch.
+- Validates the production GUI build and tests in addition to the SDK/core, native, WASM, and API contract checks.
+
+This is a stable production release. The failed v0.7.129 tag is not moved or reused; v0.7.130 becomes available through plain `neoism update` after all platform checks pass.
+
 ## [0.7.129] - 2026-10-18
 
 ### Search, compaction queues, presence, and provider caching

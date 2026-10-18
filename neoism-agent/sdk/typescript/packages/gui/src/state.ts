@@ -24,11 +24,8 @@ export function runtimeIsOlder(current: SessionRuntimeSnapshot | undefined, inco
         if (a.executionId !== b.executionId) return a.executionId > b.executionId;
         if (a.revision !== b.revision) return a.revision > b.revision;
     }
-    // Current servers separate branch revisions from execution timer revisions;
-    // `revision` is the field used by previously shipped SDK/server versions.
-    const family = (runtime: SessionRuntimeSnapshot) =>
-        (runtime as SessionRuntimeSnapshot & { familyRevision?: number }).familyRevision ?? runtime.revision ?? 0;
-    return family(current) > family(incoming);
+    // Branch roster revisions are independent of provider timer revisions.
+    return current.familyRevision > incoming.familyRevision;
 }
 export function applyRuntime(state: ChatState, runtime: SessionRuntimeSnapshot): ChatState {
     if (runtimeIsOlder(state.runtime, runtime)) return state;

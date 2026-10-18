@@ -37,7 +37,7 @@ it("keeps late SSE parts visible after completion without exposing historical si
 it("uses current outstanding runtime child IDs, never static metadata alone, to recover background tasks", () => {
     const rows = [message("historical", [task("OLD", "completed", { sessionId: "old-child", status: "running" })], 2),
         message("background", [task("ACTIVE", "completed", { sessionId: "child", status: "running" })], 3)];
-    const runtime: SessionRuntimeSnapshot = { rootSessionId: "s", revision: 1, branches: [{ parentSessionId: "s", sessionId: "child", status: "outstanding" }] };
+    const runtime: SessionRuntimeSnapshot = { rootSessionId: "s", familyRevision: 1, branches: [{ parentSessionId: "s", sessionId: "child", status: "outstanding" }] };
     expect(outstandingTaskParts(rows, runtime, "s").get("background")).toBe('["ACTIVE"]');
     const html = render(rows, false, runtime);
     expect(html).toContain("Task(ACTIVE)"); expect(html).not.toContain("Task(OLD)");

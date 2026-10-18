@@ -19,6 +19,11 @@ export const commands: SlashCommand[] = [
     "aliases": []
   },
   {
+    "name": "/usage",
+    "description": "View Codex account usage and reset times",
+    "aliases": []
+  },
+  {
     "name": "/think",
     "description": "Set reasoning effort",
     "aliases": [

@@ -8,7 +8,17 @@ import {
 } from "./commands";
 describe("native command picker", () => {
     it("offers every native entry", () =>
-        expect(filterCommands(commands, "/")).toHaveLength(32));
+        expect(filterCommands(commands, "/")).toEqual(commands));
+    it("offers native /usage and forwards it through the existing command dispatch", async () => {
+        expect(filterCommands(commands, "/usage")).toEqual([{
+            name: "/usage", description: "View Codex account usage and reset times", aliases: [],
+        }]);
+        expect(parseCommand("/usage", commands)).toEqual({ name: "usage", args: "", original: "/usage" });
+        const local = vi.fn(async () => false), forward = vi.fn();
+        await executeCommand("/usage", commands, { local, forward, confirm: () => true });
+        expect(local).toHaveBeenCalledWith("usage", "");
+        expect(forward).toHaveBeenCalledExactlyOnceWith("/usage");
+    });
     it("finds aliases and canonicalizes /models", () => {
         expect(
             filterCommands(commands, "/models").some(

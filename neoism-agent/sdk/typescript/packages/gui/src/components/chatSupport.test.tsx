@@ -24,7 +24,7 @@ function mockClient(handler: (op: string, input: any) => unknown, events: unknow
 }
 const message = (id: string, sessionId = "s", author?: string): MessageWithParts => ({ info: { id, sessionId, role: "user", time: {}, author }, parts: [] });
 const task = (status = "running"): SubagentTask => ({ id: "t", sessionId: "s", childSessionId: "child", agent: "explore", description: "Read sources", status, nested: false });
-const runtime = (status: "outstanding" | "completed" | "failed" = "outstanding"): SessionRuntimeSnapshot => ({ rootSessionId: "s", revision: 1, branches: [{ parentSessionId: "s", sessionId: "child", status }] });
+const runtime = (status: "outstanding" | "completed" | "failed" = "outstanding"): SessionRuntimeSnapshot => ({ rootSessionId: "s", familyRevision: 1, branches: [{ parentSessionId: "s", sessionId: "child", status }] });
 const child = { id: "child", parentId: "s", title: "Child", agent: "explore" } as Session;
 
 describe("assistant thinking/answer presentation", () => {
@@ -195,7 +195,7 @@ describe("task endpoints and independent lifecycle", () => {
     it("paints a runtime event immediately and rejects older REST lifecycle state", async () => {
         const tasks = deferred<SubagentTask[]>();
         const { client } = mockClient(op => op.endsWith("tasks.list") ? tasks.promise : op.endsWith("children") ? { items: [] } : runtime(), [
-            { id: "new", type: "session.execution.updated", data: { sessionID: "s", runtime: { ...runtime("completed"), revision: 2 } } },
+            { id: "new", type: "session.execution.updated", data: { sessionID: "s", runtime: { ...runtime("completed"), familyRevision: 2 } } },
         ]);
         let snapshot = emptySubagents();
         const store = createSubagentController(client, "s", () => true, value => { snapshot = value; });
@@ -215,7 +215,10 @@ describe("task endpoints and independent lifecycle", () => {
         for (const [, input] of request.mock.calls) expect(input).toMatchObject({ path: { session_id: "s" } });
     });
     it("does not mark children completed from an idle/finished root; missing status stays unknown", () => {
-        const rootFinished = { ...runtime(), execution: { finished: true } } as SessionRuntimeSnapshot;
+        const rootFinished: SessionRuntimeSnapshot = { ...runtime(), execution: {
+            executionId: "e", rootSessionId: "s", rootMessageId: "u", revision: 3, finished: true,
+            completedMs: 500, activeSegments: {}, sessionActivities: { s: { completedMs: 500, activeSegments: {} } },
+        } };
         expect(taskRows("s", [], [child], rootFinished)[0]).toMatchObject({ status: "outstanding", stoppable: true });
         expect(taskRows("s", [], [child])[0]).toMatchObject({ status: "unknown", stoppable: false });
         expect(taskRows("s", [task("running")], [], { ...runtime(), branches: [] })[0].status).toBe("running");

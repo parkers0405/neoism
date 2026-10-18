@@ -8,7 +8,7 @@ import { useSessionActivity, type SessionActivity } from "./useSessionActivity";
 import { NativeActivity } from "./components/nativeActivity";
 let root: Root, container: HTMLDivElement, activity: SessionActivity;
 const queue = (count: number, sessionId = "root"): SessionQueueInfo => ({ count, sessionId, running: false, worker: false, items: Array.from({ length: count }, (_, index) => ({ index, text: `Prompt ${index}`, noReply: false, partCount: 1 })) });
-const runtime: SessionRuntimeSnapshot = { revision: 1, rootSessionId: "root", branches: [], runningBackgroundTasks: [{ jobId: "job-1", sessionId: "child", startedAt: Date.now() - 3000 }] };
+const runtime: SessionRuntimeSnapshot = { familyRevision: 1, rootSessionId: "root", branches: [], runningBackgroundTasks: [{ jobId: "job-1", sessionId: "child", startedAt: Date.now() - 3000 }] };
 function Harness({ client, id = "root", jobs = false }: { client: NeoismClient; id?: string; jobs?: boolean }) {
     activity = useSessionActivity(client, id, jobs ? runtime : undefined);
     return <NativeActivity busy={false} sessionId={id} activity={{ status: "idle" }} sessionActivity={activity} />;

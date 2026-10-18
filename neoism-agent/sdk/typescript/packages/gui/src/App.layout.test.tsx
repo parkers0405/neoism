@@ -89,8 +89,8 @@ describe("application chrome and floating dock", () => {
     it("keeps the Background word at the transcript end, not in the pinned composer", () => {
         state.app.chat.state.busy = true; // Aggregate UI busy includes this job.
         state.app.chat.activityBusy = false;
-        state.app.chat.state.runtime = { rootSessionId: "session", revision: 1, branches: [],
-            execution: { executionId: "e", rootSessionId: "session", rootMessageId: "u", completedMs: 0, revision: 1, finished: false, activeSegments: {} },
+        state.app.chat.state.runtime = { rootSessionId: "session", familyRevision: 1, branches: [],
+            execution: { executionId: "e", rootSessionId: "session", rootMessageId: "u", completedMs: 0, revision: 1, finished: false, activeSegments: {}, sessionActivities: { session: { completedMs: 0, activeSegments: {} } } },
             runningBackgroundTasks: [{ sessionId: "session", jobId: "j", startedAt: 1 }] };
         render();
         const word = host.querySelector(".native-activity")!;
@@ -460,7 +460,7 @@ describe("subagent read-only layout", () => {
     it("removes the whole dock on child navigation and Back only opens the cached root", () => {
         render();
         state.app.active = { id: "session", parentId: "parent" };
-        state.app.chat.state.runtime = { rootSessionId: "root", branches: [], revision: 1 };
+        state.app.chat.state.runtime = { rootSessionId: "root", branches: [], familyRevision: 1 };
         state.app.picker = "directory";
         render(); noInput();
         expect(host.querySelector(".folder-picker")).toBeNull();

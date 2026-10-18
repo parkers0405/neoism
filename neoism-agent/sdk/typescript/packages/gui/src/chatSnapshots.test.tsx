@@ -11,7 +11,7 @@ function client() {
     const request = vi.fn(async (operation: string, input: any) => operation === 'v2.sessions.messages'
         ? { items: [row(input.query.cursor ? 'older' : input.path.session_id)], cursor: { next: input.query.cursor ? undefined : 'older-cursor' } }
         : operation === 'v2.sessions.queue.list' ? { sessionId: input.path.session_id, count: 0, items: [], running: false, worker: false }
-        : { sessionId: input.path.session_id, revision: 1, branches: [] });
+        : { rootSessionId: input.path.session_id, familyRevision: 1, branches: [] });
     return { operations: { request }, sessions: { status: vi.fn(async () => ({})) }, events: { async *subscribe({ signal }: { signal: AbortSignal }) { await new Promise<void>(resolve => signal.addEventListener('abort', () => resolve(), { once: true })); } } } as unknown as NeoismClient;
 }
 
@@ -79,7 +79,7 @@ describe('session-scoped history snapshots', () => {
         }) as any;
         const tool = { id: 'tool', type: 'tool', messageId: 'a', sessionId: 'a', callId: 'c', tool: 'bash', state: { status: 'completed', output: 'old' } };
         const initial = { ...row('a'), parts: [tool] } as unknown as MessageWithParts;
-        vi.mocked(api.operations.request).mockImplementation(async (op, input: any) => op === 'v2.sessions.messages' ? { items: input.path.session_id === 'a' ? [initial] : [row('b')], cursor: {} } : { sessionId: input.path.session_id, revision: 1, branches: [] } as any);
+        vi.mocked(api.operations.request).mockImplementation(async (op, input: any) => op === 'v2.sessions.messages' ? { items: input.path.session_id === 'a' ? [initial] : [row('b')], cursor: {} } : { rootSessionId: input.path.session_id, familyRevision: 1, branches: [] } as any);
         const root = createRoot(document.createElement('div')); let chat!: ReturnType<typeof useChat>; let firstLiveSize = -1;
         function Host({ id }: { id: string }) { chat = useChat(api, id, notify); if (firstLiveSize < 0) firstLiveSize = chat.liveParts.size; return null; }
         try {

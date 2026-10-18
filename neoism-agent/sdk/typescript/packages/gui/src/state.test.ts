@@ -205,14 +205,14 @@ describe("session history", () => {
 describe("SDK SSE reducer", () => {
     it("keeps outstanding child work active after the root becomes idle", () => {
         const state = applyRuntime(emptyChat, {
-            revision: 2, rootSessionId: "s",
+            familyRevision: 2, rootSessionId: "s",
             branches: [{ sessionId: "child", parentSessionId: "s", status: "outstanding" }],
         });
         const idle = reduceEvent(state, event("session.status", {sessionID:"s",status:{type:"idle"}}), "s");
         expect(idle.busy).toBe(false);
         expect(runtimeWorking(idle.runtime)).toBe(true);
-        expect(runtimeWorking(applyRuntime(idle, {revision:3,rootSessionId:"s",branches:[]}).runtime)).toBe(false);
-        expect(applyRuntime(state, {revision:1,rootSessionId:"s",branches:[]})).toBe(state);
+        expect(runtimeWorking(applyRuntime(idle, {familyRevision:3,rootSessionId:"s",branches:[]}).runtime)).toBe(false);
+        expect(applyRuntime(state, {familyRevision:1,rootSessionId:"s",branches:[]})).toBe(state);
     });
     it("uses sessionID event casing and ignores other sessions", () => {
         const e = event("message.part.delta", {

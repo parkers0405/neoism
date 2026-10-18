@@ -52,6 +52,12 @@
   </categories>
 
   <releases>
+    <release version="0.7.130" date="2026-10-18">
+      <description>
+        <p>Stable search, queued compaction, presence, and provider-cache changes with production Agent GUI snapshot-contract alignment.</p>
+      </description>
+      <url>https://github.com/parkers0405/neoism/releases/tag/v0.7.130</url>
+    </release>
     <release version="0.7.129" date="2026-10-18">
       <description>
         <p>Stable conversation search, queued compaction, provider cache, Agent activity, and cross-platform presence improvements.</p>

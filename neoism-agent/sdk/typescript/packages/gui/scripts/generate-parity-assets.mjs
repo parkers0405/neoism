@@ -63,7 +63,9 @@ const commands = [...specs.matchAll(/SlashOptionSpec \{([\s\S]*?)\}/g)].map(([, 
   assert.equal(group.length, 1, `No unique alias group for ${name}`);
   return { name, description, aliases: group[0].filter(alias => alias !== name) };
 });
-assert.equal(commands.length, 32);
+assert(groups.length > 0, 'Native command planner must contain command groups');
+assert.equal(commands.length, groups.length, 'Every native command group must have one picker entry');
+assert.equal(new Set(commands.map(c => c.name)).size, commands.length, 'Canonical command names must be unique');
 const spellings = commands.flatMap(c => [c.name, ...c.aliases]);
 assert.equal(new Set(spellings).size, spellings.length);
 assert.deepEqual([...spellings].sort(), groups.flat().sort(), 'All native aliases must be represented');
@@ -102,4 +104,4 @@ for (const [name, content] of files) {
   } else writeFileSync(url, content);
 }
 if (drift) process.exitCode = 1;
-else console.log(`${check ? 'Checked' : 'Generated'} 101 themes, 32 commands (${spellings.length} spellings), logo, avatar, and license.`);
+else console.log(`${check ? 'Checked' : 'Generated'} ${themes.length} themes, ${commands.length} commands (${spellings.length} spellings), logo, avatar, and license.`);

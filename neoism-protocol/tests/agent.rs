@@ -37,6 +37,25 @@ fn client_send_message_roundtrip() {
 }
 
 #[test]
+fn search_threads_scope_is_optional_and_roundtrips() {
+    let legacy: AgentClientMessage = serde_json::from_str(
+        r#"{"SearchThreads":{"query":"needle","generation":7}}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        legacy,
+        AgentClientMessage::SearchThreads { directory: None, .. }
+    ));
+    for directory in [None, Some("/work/project".into())] {
+        roundtrip_client(&AgentClientMessage::SearchThreads {
+            query: "needle".into(),
+            generation: 7,
+            directory,
+        });
+    }
+}
+
+#[test]
 fn client_cancel_roundtrip() {
     roundtrip_client(&AgentClientMessage::Cancel);
 }

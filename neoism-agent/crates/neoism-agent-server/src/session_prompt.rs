@@ -54,8 +54,8 @@ const TOOL_PRUNE_MINIMUM_TOKENS: u64 = 20_000;
 const TOOL_PRUNE_PROTECT_TOKENS: u64 = 40_000;
 
 /// Exact message of the transient conflict raised when a prompt lands
-/// while a run holds the session. The queue drain matches on it to
-/// requeue the popped prompt instead of dropping it.
+/// while a run holds the session. The queue drain matches on it to retry
+/// the retained admission after the active run releases ownership.
 pub(crate) const SESSION_RUNNING_CONFLICT: &str = "Session is already running";
 
 pub(crate) async fn append_prompt(
@@ -64,6 +64,22 @@ pub(crate) async fn append_prompt(
     request: PromptRequest,
     create_stub_reply: bool,
 ) -> Result<MessageWithParts, ApiError> {
+    append_prompt_admission(state, session_id, request, create_stub_reply, None).await
+}
+
+pub(crate) async fn append_prompt_admission(
+    state: &AppState,
+    session_id: &str,
+    request: PromptRequest,
+    create_stub_reply: bool,
+    admission: Option<(&str, bool, &str)>,
+) -> Result<MessageWithParts, ApiError> {
+    let queued_request = admission.map(|_| request.clone());
+    let admission_guard = state
+        .inner
+        .session_coordinator
+        .prompt_admission_guard(session_id)
+        .await;
     let mut info = state
         .inner
         .store
@@ -71,14 +87,38 @@ pub(crate) async fn append_prompt(
         .await?
         .ok_or_else(|| ApiError::not_found("Session not found"))?;
     if crate::external_agent::root_runtime(&info).is_some() {
-        return crate::external_agent::append_external_root_prompt(
+        drop(admission_guard);
+        let result = crate::external_agent::append_external_root_prompt(
             state,
             &info,
             request,
             create_stub_reply,
         )
-        .await;
+        .await?;
+        if let Some((id, _, delivery)) = admission {
+            crate::session_queue::acknowledge_prompt_admission(
+                state,
+                &session_id.to_string(),
+                id,
+                queued_request.as_ref(),
+                delivery,
+            )
+            .await?;
+        }
+        return Ok(result);
     }
+    let admission = if let Some((id, _, delivery)) = admission {
+        match state.inner.store.prompt_admission_saved(id).await? {
+            Some(saved) => Some((id, saved, delivery)),
+            None => {
+                return Err(ApiError::conflict(
+                    "Prompt admission was cancelled or handed off",
+                ))
+            }
+        }
+    } else {
+        None
+    };
     let now = now_millis();
     info.time.updated = now;
     info.extra.remove("revert");
@@ -263,7 +303,7 @@ pub(crate) async fn append_prompt(
         info: MessageInfo::User(user),
         parts,
     };
-    let resume_existing_runtime = create_stub_reply && broadcast_system.is_some();
+    let mut resume_saved_admission = admission.is_some_and(|(_, saved, _)| saved);
     let mut newly_persisted = false;
     if let Some(existing) = state
         .inner
@@ -272,10 +312,20 @@ pub(crate) async fn append_prompt(
         .await?
     {
         if same_user_prompt(&existing, &user_message)
-            || (resume_existing_runtime
+            || (resume_saved_admission
                 && same_runtime_user_prompt(&existing, &user_message))
         {
-            if !resume_existing_runtime {
+            if !resume_saved_admission {
+                if let Some((id, _, delivery)) = admission {
+                    crate::session_queue::acknowledge_prompt_admission(
+                        state,
+                        &session_id.to_string(),
+                        id,
+                        queued_request.as_ref(),
+                        delivery,
+                    )
+                    .await?;
+                }
                 return Ok(existing);
             }
         } else {
@@ -290,12 +340,27 @@ pub(crate) async fn append_prompt(
             json!({ "sessionID": session_id, "info": user_message.info }),
         );
         if let Err(error) = state
-            .append_message_with_event(&session_id_text, &user_message, message_event)
+            .append_queued_message_with_event(
+                &session_id_text,
+                &user_message,
+                message_event,
+                admission.map(|(id, _, _)| id),
+            )
             .await
         {
-            // Close the race between the lookup above and the unique message-id
-            // insert. Exact runtime-notification retries resume model generation
-            // from the durable user turn; ordinary exact retries remain no-ops.
+            // Close the lookup/insert race. Only a retained admission whose
+            // save marker committed with this user turn may resume initialization;
+            // a fresh admission of an existing message is an idempotent no-op.
+            // A commit acknowledgement itself may fail after commit; refresh
+            // the marker rather than treating that durable save as a duplicate.
+            if let Some((id, _, _)) = admission {
+                resume_saved_admission = state
+                    .inner
+                    .store
+                    .prompt_admission_saved(id)
+                    .await?
+                    .unwrap_or(false);
+            }
             if let Some(existing) = state
                 .inner
                 .store
@@ -303,10 +368,20 @@ pub(crate) async fn append_prompt(
                 .await?
             {
                 if same_user_prompt(&existing, &user_message)
-                    || (resume_existing_runtime
+                    || (resume_saved_admission
                         && same_runtime_user_prompt(&existing, &user_message))
                 {
-                    if !resume_existing_runtime {
+                    if !resume_saved_admission {
+                        if let Some((id, _, delivery)) = admission {
+                            crate::session_queue::acknowledge_prompt_admission(
+                                state,
+                                &session_id.to_string(),
+                                id,
+                                queued_request.as_ref(),
+                                delivery,
+                            )
+                            .await?;
+                        }
                         return Ok(existing);
                     }
                 } else {
@@ -321,6 +396,17 @@ pub(crate) async fn append_prompt(
         } else {
             newly_persisted = true;
         }
+    }
+    #[cfg(test)]
+    if state
+        .inner
+        .session_coordinator
+        .fail_prompt_after_save
+        .lock()
+        .await
+        .remove(&session_id_text)
+    {
+        return Err(ApiError::internal("injected post-save admission failure"));
     }
     // Execution ownership begins only after the user turn is durably
     // admitted. Validation failures, dedupe conflicts, and failed message
@@ -382,6 +468,48 @@ pub(crate) async fn append_prompt(
             ));
         }
     }
+    if !create_stub_reply {
+        if let Some((id, _, delivery)) = admission {
+            crate::session_queue::acknowledge_prompt_admission(
+                state,
+                &session_id.to_string(),
+                id,
+                queued_request.as_ref(),
+                delivery,
+            )
+            .await?;
+        }
+        return Ok(user_message);
+    }
+    let run = start_session_run(state, &session_id)
+        .await
+        .map_err(|_| ApiError::conflict(SESSION_RUNNING_CONFLICT))?;
+    let run_id = run.id.clone();
+    let cancellation = run.cancel.clone();
+    let mut run_guard = SessionRunGuard::new(state, &session_id_text, &run_id);
+    // Safe handoff boundary: never replay model/tool work using a retained row.
+    // A failure here drops the run guard and leaves initialization recoverable.
+    if let Some((id, _, delivery)) = admission {
+        state
+            .inner
+            .store
+            .handoff_prompt_admission(id, &session_id_text, &run_id)
+            .await?;
+        // This prompt is now the running turn, not a waiting queue item.
+        // Emit before any provider work, not when the entire reply returns.
+        crate::session_queue::publish_prompt_queue_changed(
+            state,
+            &session_id_text,
+            "dequeue",
+            queued_request.as_ref(),
+            Some(delivery),
+            1,
+        )
+        .await;
+        crate::session_queue::publish_prompt_queue_status(state, &session_id_text, 0)
+            .await;
+    }
+    drop(admission_guard);
     if create_stub_reply && newly_persisted {
         if let (Some(source), Some(fallback)) = (title_source, fallback_title) {
             let activity_segment = crate::execution_activity::begin_provider_segment(
@@ -400,17 +528,13 @@ pub(crate) async fn append_prompt(
         }
     }
 
-    if !create_stub_reply {
-        return Ok(user_message);
-    }
-
-    let run = start_session_run(state, &session_id)
-        .await
-        .map_err(|_| ApiError::conflict("Session is already running"))?;
-    let run_id = run.id.clone();
-    let cancellation = run.cancel.clone();
-    let mut run_guard = SessionRunGuard::new(state, &session_id_text, &run_id);
-    if crate::session_context::drain_manual_compaction_for_run(state, &session_id_text, &run_id).await {
+    if crate::session_context::drain_manual_compaction_for_run(
+        state,
+        &session_id_text,
+        &run_id,
+    )
+    .await
+    {
         info = ensure_session(state, &session_id_text).await?;
     }
     if cancellation.load(Ordering::SeqCst) {
@@ -448,7 +572,13 @@ pub(crate) async fn append_prompt(
         provider_id: reply_model.provider_id.clone(),
         model_id: reply_model.model_id.clone(),
     };
-    if crate::session_context::drain_manual_compaction_for_run(state, &session_id_text, &run_id).await {
+    if crate::session_context::drain_manual_compaction_for_run(
+        state,
+        &session_id_text,
+        &run_id,
+    )
+    .await
+    {
         info = ensure_session(state, &session_id_text).await?;
     }
     if cancellation.load(Ordering::SeqCst) {

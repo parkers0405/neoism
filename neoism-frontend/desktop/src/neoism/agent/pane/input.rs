@@ -164,7 +164,13 @@ impl NeoismAgentPane {
     }
 
     pub fn insert_text(&mut self, text: &str) {
-        if self.picker.as_ref().is_some_and(|p| p.mcp_authorization.is_some()) { return; }
+        if self
+            .picker
+            .as_ref()
+            .is_some_and(|p| p.mcp_authorization.is_some())
+        {
+            return;
+        }
         if self.is_subagent_session() && self.picker.is_none() {
             return;
         }
@@ -209,7 +215,13 @@ impl NeoismAgentPane {
         if self.question_type_str(&text) {
             return;
         }
-        if self.picker.as_ref().is_some_and(|p| p.mcp_authorization.is_some()) { return; }
+        if self
+            .picker
+            .as_ref()
+            .is_some_and(|p| p.mcp_authorization.is_some())
+        {
+            return;
+        }
         if self.is_subagent_session() && self.picker.is_none() {
             return;
         }
@@ -336,7 +348,13 @@ impl NeoismAgentPane {
     }
 
     pub fn backspace(&mut self) {
-        if self.picker.as_ref().is_some_and(|p| p.mcp_authorization.is_some()) { return; }
+        if self
+            .picker
+            .as_ref()
+            .is_some_and(|p| p.mcp_authorization.is_some())
+        {
+            return;
+        }
         if self.is_subagent_session() && self.picker.is_none() {
             return;
         }
@@ -791,11 +809,11 @@ impl NeoismAgentPane {
         let Some((id, _title, pinned)) = self.selected_session_row() else {
             return false;
         };
-        if let Err(error) = set_session_pinned(&self.server, &id, !pinned) {
-            self.system_message("Sessions", error);
-        } else {
-            self.refresh_sessions_after_mutation();
-        }
+        self.request_session_mutation(
+            self.server.clone(),
+            id,
+            super::AgentSessionMutation::Pin(!pinned),
+        );
         true
     }
 
@@ -804,14 +822,11 @@ impl NeoismAgentPane {
         let Some((id, _title, _pinned)) = self.selected_session_row() else {
             return false;
         };
-        if let Err(error) = delete_session(&self.server, &id) {
-            self.system_message("Sessions", error);
-            return true;
-        }
-        if self.session_id.as_deref() == Some(id.as_str()) {
-            self.create_new_session();
-        }
-        self.refresh_sessions_after_mutation();
+        self.request_session_mutation(
+            self.server.clone(),
+            id,
+            super::AgentSessionMutation::Delete,
+        );
         true
     }
 
@@ -859,11 +874,11 @@ impl NeoismAgentPane {
         if title.is_empty() {
             return true;
         }
-        if let Err(error) = rename_session(&self.server, &id, &title) {
-            self.system_message("Sessions", error);
-        } else {
-            self.refresh_sessions_after_mutation();
-        }
+        self.request_session_mutation(
+            self.server.clone(),
+            id,
+            super::AgentSessionMutation::Rename(title),
+        );
         true
     }
 
@@ -1035,7 +1050,11 @@ impl NeoismAgentPane {
                     return;
                 }
                 NeoismAgentPickerKind::McpActions => {
-                    if self.picker.as_mut().is_some_and(|p| p.clear_mcp_authorization()) {
+                    if self
+                        .picker
+                        .as_mut()
+                        .is_some_and(|p| p.clear_mcp_authorization())
+                    {
                         return;
                     }
                     self.picker = None;

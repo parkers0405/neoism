@@ -32,10 +32,10 @@ use serde_json::{json, Value};
 use super::api::{
     api_request_json, delete_session, fetch_agent_options, fetch_config_defaults,
     fetch_family_runtime, fetch_model_context_limit, fetch_model_options,
-    fetch_pending_permissions, fetch_pending_questions,
-    fetch_session_goal, fetch_session_options, fetch_session_statuses,
-    fetch_skill_options, fetch_subagent_entries, fetch_subagent_options,
-    neoism_agent_server, rename_session, set_session_pinned, SessionStatusSnapshot,
+    fetch_pending_permissions, fetch_pending_questions, fetch_session_goal,
+    fetch_session_options, fetch_session_statuses, fetch_skill_options,
+    fetch_subagent_entries, fetch_subagent_options, neoism_agent_server, rename_session,
+    set_session_pinned, SessionStatusSnapshot,
 };
 use super::commands::slash_options;
 use super::picker::{NeoismAgentPicker, NeoismAgentPickerKind, NeoismAgentPickerOption};
@@ -138,7 +138,8 @@ pub struct NeoismAgentMessage {
     /// seam in the shared `api_mapping::part_block` for the multiplayer path.
     pub author: Option<String>,
     pub images: Vec<neoism_ui::panels::agent_pane::state::NeoismAgentImage>,
-    pub composition_children: Vec<neoism_ui::panels::agent_pane::state::NeoismAgentMessage>,
+    pub composition_children:
+        Vec<neoism_ui::panels::agent_pane::state::NeoismAgentMessage>,
     pub composition_child: bool,
 }
 
@@ -370,7 +371,8 @@ impl CachedAgentRuntime {
     ) {
         if state == NeoismAgentStreamingState::Idle {
             self.status_timing.handoff.empty_queue(
-                self.queued_prompt_count, self.queued_prompt_preview.as_deref(),
+                self.queued_prompt_count,
+                self.queued_prompt_preview.as_deref(),
             );
         }
         let (state, tool) = if self.status_timing.handoff.waiting() {
@@ -409,7 +411,12 @@ impl CachedAgentRuntime {
         let Some(tail) = messages.last() else {
             return;
         };
-        if !self.status_timing.handoff.stopped_parts.allows(&tail.id, None) {
+        if !self
+            .status_timing
+            .handoff
+            .stopped_parts
+            .allows(&tail.id, None)
+        {
             return;
         }
         let (state, tool) = match tail.kind {
@@ -433,7 +440,9 @@ impl CachedAgentRuntime {
 
     pub(super) fn suppress_streaming_after_abort(&self) -> bool {
         self.status_timing.handoff.waiting()
-            || self.abort_requested_at.is_some_and(|requested| requested.elapsed() <= ABORT_STREAM_SUPPRESSION)
+            || self
+                .abort_requested_at
+                .is_some_and(|requested| requested.elapsed() <= ABORT_STREAM_SUPPRESSION)
     }
 
     pub(super) fn promote_queue_handoff(&mut self) {
@@ -456,7 +465,10 @@ impl CachedAgentRuntime {
             self.streaming_started_at = None;
             self.note_streaming(NeoismAgentStreamingState::Generating, None);
         } else if self.status_timing.handoff.settle_snapshot(
-            self.queued_prompt_count, self.queued_prompt_preview.as_deref(), running, action,
+            self.queued_prompt_count,
+            self.queued_prompt_preview.as_deref(),
+            running,
+            action,
         ) {
             self.note_streaming(NeoismAgentStreamingState::Idle, None);
         }
@@ -686,10 +698,40 @@ pub enum NeoismAgentUiEvent {
     SwitchWorkspace {
         directory: String,
     },
+    SessionMutationApplied {
+        server: String,
+        session_id: String,
+        deleted: bool,
+    },
     CloseTab,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) enum AgentSessionMutation {
+    Pin(bool),
+    Rename(String),
+    Delete,
+}
+
 pub(crate) enum NeoismAgentBackgroundUpdate {
+    InteractionReplyCompleted {
+        server: String,
+        id: String,
+        permission_reply: Option<String>,
+        result: Result<(), String>,
+    },
+    SessionMutationCompleted {
+        server: String,
+        session_id: String,
+        mutation: AgentSessionMutation,
+        result: Result<(), String>,
+    },
+    RequestFailed {
+        server: String,
+        session_id: Option<String>,
+        title: String,
+        error: String,
+    },
     AbortFailed {
         session_id: String,
         error: String,
@@ -705,6 +747,7 @@ pub(crate) enum NeoismAgentBackgroundUpdate {
         detail: neoism_ui::panels::agent_pane::state::picker::McpAuthorizationDetail,
     },
     PromptDispatched {
+        server: String,
         session_title: Option<String>,
         origin_session_id: Option<String>,
         origin_draft_id: u64,
@@ -712,9 +755,19 @@ pub(crate) enum NeoismAgentBackgroundUpdate {
         transcript_echo: Option<String>,
         event_stream: Option<AgentSessionEventStream>,
     },
+    PromptSessionCreated {
+        server: String,
+        origin_draft_id: u64,
+        session_id: String,
+        session_title: Option<String>,
+        event_stream: AgentSessionEventStream,
+    },
     PromptDispatchFailed {
+        server: String,
         origin_session_id: Option<String>,
         origin_draft_id: u64,
+        queued: bool,
+        request: Option<Box<PendingPromptDispatch>>,
         error: String,
     },
     CompactAccepted {
@@ -731,7 +784,15 @@ pub(crate) enum NeoismAgentBackgroundUpdate {
         model: String,
         limit: Option<u64>,
     },
-    ModelOptionsRefreshed(Result<(Vec<NeoismAgentPickerOption>, Option<neoism_ui::panels::agent_pane::api_mapping::ProviderReadiness>), String>),
+    ModelOptionsRefreshed(
+        Result<
+            (
+                Vec<NeoismAgentPickerOption>,
+                Option<neoism_ui::panels::agent_pane::api_mapping::ProviderReadiness>,
+            ),
+            String,
+        >,
+    ),
     AgentOptionsRefreshed(Result<Vec<NeoismAgentPickerOption>, String>),
     SessionOptionsRefreshed {
         catalog_generation: u64,
@@ -919,6 +980,7 @@ impl AgentBackgroundSender {
 }
 
 pub(crate) struct PendingPromptDispatch {
+    pub(crate) reconcile_before_send: bool,
     pub(crate) origin_session_id: Option<String>,
     pub(crate) origin_draft_id: u64,
     pub(crate) source:
@@ -1049,7 +1111,8 @@ pub struct NeoismAgentPane {
     /// buffer)`. `Some` diverts typed keys into the buffer until the user
     /// commits (Enter) or cancels (Esc).
     pub(super) session_rename: Option<(String, String)>,
-    provider_readiness: Option<neoism_ui::panels::agent_pane::api_mapping::ProviderReadiness>,
+    provider_readiness:
+        Option<neoism_ui::panels::agent_pane::api_mapping::ProviderReadiness>,
     recent_model_options: Vec<NeoismAgentPickerOption>,
     skill_options: Vec<NeoismAgentPickerOption>,
     skill_options_directory: Option<Option<String>>,
@@ -1099,6 +1162,8 @@ pub struct NeoismAgentPane {
     pub(super) session_goal_cache: HashMap<String, (Option<SessionGoal>, u64)>,
     background_tx: AgentBackgroundSender,
     background_rx: Receiver<NeoismAgentBackgroundUpdate>,
+    session_mutations_in_flight: HashSet<(String, String)>,
+    pub(super) uncertain_prompts: VecDeque<PendingPromptDispatch>,
     /// Semantic session-search coalescing: at most one fetch in flight; a
     /// query typed meanwhile waits in `semantic_pending_query` and is kicked
     /// when the current fetch lands. `semantic_unavailable` only suppresses
@@ -1190,7 +1255,8 @@ pub struct NeoismAgentPane {
     prompt_picker_rect: Option<[f32; 4]>,
     link_hit_rects: Vec<(String, [f32; 4])>,
     mermaid_raw_blocks: BTreeSet<u64>,
-    pub composer_interactions: neoism_ui::panels::agent_pane::composer_interactions::ComposerInteractions,
+    pub composer_interactions:
+        neoism_ui::panels::agent_pane::composer_interactions::ComposerInteractions,
     usage_chip_rect: Option<[f32; 4]>,
     composer_control_rect: Option<[f32; 4]>,
     status_chip_rects: Vec<Option<[f32; 4]>>,
@@ -1453,6 +1519,8 @@ impl Default for NeoismAgentPane {
             session_goal_cache: HashMap::new(),
             background_tx,
             background_rx,
+            session_mutations_in_flight: HashSet::new(),
+            uncertain_prompts: VecDeque::new(),
             semantic_in_flight: false,
             semantic_pending_query: None,
             semantic_unavailable: false,
@@ -1602,12 +1670,15 @@ impl Default for NeoismAgentPane {
 pub(super) mod connect;
 mod external_options;
 mod ingest;
+mod input;
 mod mcp_catalog;
 pub(super) mod mcp_oauth;
-mod input;
 mod permissions;
 mod questions;
 mod render_state;
+mod requests;
+#[cfg(test)]
+mod responsiveness_tests;
 mod selection;
 mod session;
 mod status_timing;
@@ -2064,6 +2135,11 @@ fn chronological_live_insert_index(
     parent_ids: &HashMap<String, String>,
     incoming: &NeoismAgentMessage,
 ) -> Option<usize> {
+    // A queued prompt's client ID predates its admission. Do not use that ID
+    // to move a human turn above assistant output already received live.
+    if incoming.kind == NeoismAgentMessageKind::User {
+        return None;
+    }
     let incoming_id = canonical_live_message_id(incoming, parent_ids)?;
     // An optimistic/queued human prompt is a hard turn boundary even before
     // its durable id arrives. Never move later output above what the user can
@@ -2489,6 +2565,6 @@ fn ease_out_cubic(t: f32) -> f32 {
 #[cfg(test)]
 mod admission_tests;
 #[cfg(test)]
-mod tests;
-#[cfg(test)]
 mod footer_tests;
+#[cfg(test)]
+mod tests;

@@ -160,19 +160,46 @@ pub(crate) async fn handle_delete_thread(inner: Arc<AgentInner>, session_id: Str
     }
 }
 
+fn conversation_search_path(query: &str, directory: Option<&str>) -> String {
+    let mut path = format!(
+        "/v2/plugins/dev.neoism.semantic/search?q={}&limit=20&conversation=true",
+        percent_encode(query)
+    );
+    if let Some(directory) = directory {
+        path.push_str("&directory=");
+        path.push_str(&percent_encode(directory));
+    }
+    path
+}
+
+#[cfg(test)]
+mod search_scope_tests {
+    use super::*;
+
+    #[test]
+    fn search_forwards_only_explicit_sidebar_directory() {
+        let global = conversation_search_path("needle & thread", None);
+        assert!(!global.contains("directory="));
+        assert!(global.contains("q=needle%20%26%20thread"));
+        let scoped = conversation_search_path("needle", Some("/work/a & b"));
+        assert!(scoped.ends_with("&directory=%2Fwork%2Fa%20%26%20b"));
+        assert!(scoped.contains("conversation=true"));
+    }
+}
+
 /// Search uses the same authenticated bridge as listing; never derives cwd or
 /// opens a second endpoint with broader credentials.
 pub(crate) async fn handle_search_threads(
     inner: Arc<AgentInner>,
     query: String,
     generation: u64,
+    directory: Option<String>,
 ) {
     let needle = query.trim();
     let (sessions, semantic, error) = if needle.is_empty() {
         (json!([]), json!({"hits": []}), None)
     } else {
-        let encoded = percent_encode(needle);
-        let content = format!("/v2/plugins/dev.neoism.semantic/search?q={encoded}&limit=20&conversation=true");
+        let content = conversation_search_path(needle, directory.as_deref());
         let result = http_get_json(&inner, &content).await;
         let error = result.as_ref().err().map(|error| format!("Search unavailable: {error}"));
         let mut semantic = result.unwrap_or(Value::Null);

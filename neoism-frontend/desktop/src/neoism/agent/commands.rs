@@ -25,6 +25,10 @@ use super::updates::{start_session_event_stream, AgentSessionEventStream};
 
 impl NeoismAgentPane {
     pub(super) fn execute_slash_text(&mut self, text: &str) {
+        if text.trim() == "/retry" {
+            self.retry_uncertain_prompt();
+            return;
+        }
         self.close_connect();
         match command_controller::plan_slash_command(text) {
             SlashCommandAction::Noop => {}
@@ -391,15 +395,7 @@ impl NeoismAgentPane {
         session_id: String,
         agent: String,
     ) {
-        let body = json!({ "agent": agent });
-        if let Err(error) = api_request_json(
-            &self.server,
-            "PATCH",
-            &format!("/v2/sessions/{session_id}"),
-            Some(&body),
-        ) {
-            self.system_message("Agent", error);
-        }
+        self.request_patch(session_id, "Agent", json!({ "agent": agent }));
     }
 
     /// Persist a renamed session title at the daemon level (right-click →
@@ -410,15 +406,11 @@ impl NeoismAgentPane {
         session_id: String,
         title: String,
     ) {
-        let body = json!({ "title": title });
-        if let Err(error) = api_request_json(
-            &self.server,
-            "PATCH",
-            &format!("/v2/sessions/{session_id}"),
-            Some(&body),
-        ) {
-            self.system_message("Rename", error);
-        }
+        self.request_session_mutation(
+            self.server.clone(),
+            session_id,
+            super::pane::AgentSessionMutation::Rename(title),
+        );
     }
 
     pub(super) fn apply_model(&mut self, value: String) {
@@ -464,15 +456,7 @@ impl NeoismAgentPane {
         session_id: String,
         model: Value,
     ) {
-        let body = json!({ "model": model });
-        if let Err(error) = api_request_json(
-            &self.server,
-            "PATCH",
-            &format!("/v2/sessions/{session_id}"),
-            Some(&body),
-        ) {
-            self.system_message("Model", error);
-        }
+        self.request_patch(session_id, "Model", json!({ "model": model }));
     }
 
     pub(super) fn apply_thinking(&mut self, value: String) {
@@ -508,15 +492,7 @@ impl NeoismAgentPane {
         ) else {
             return;
         };
-        let body = json!({ "model": model_json });
-        if let Err(error) = api_request_json(
-            &self.server,
-            "PATCH",
-            &format!("/v2/sessions/{session_id}"),
-            Some(&body),
-        ) {
-            self.system_message("Think", error);
-        }
+        self.request_patch(session_id, "Think", json!({ "model": model_json }));
     }
 
     pub(crate) fn switch_session(&mut self, session_id: String) {
@@ -624,11 +600,14 @@ impl NeoismAgentPane {
         }
         let selected_navigation =
             self.pending_session_switch.as_deref() == Some(session_id.as_str());
-        if self.session_preloads_in_flight.len() >= MAX_CONCURRENT_PRELOADS
-            && !selected_navigation
-        {
+        if self.session_preloads_in_flight.len() >= MAX_CONCURRENT_PRELOADS {
             let request = (session_id.clone(), force);
-            if force {
+            if selected_navigation {
+                // Keep only the newest navigation while the fixed workers are
+                // busy. Selection still paints its placeholder immediately.
+                self.session_preload_queue.clear();
+                self.session_preload_queue.push_front(request);
+            } else if force {
                 if self.session_preload_queue.len() >= MAX_QUEUED_PRELOADS {
                     self.session_preload_queue.pop_back();
                 }
@@ -974,17 +953,19 @@ impl NeoismAgentPane {
         }
         let parts = self.prompt_parts_for(&prompt);
         let system = self.prompt_system_for(&prompt);
-        self.push_outbound(OutboundAgentCommand::SendPrompt {
+        // Admission belongs to this input event, not whichever conversation is
+        // visible when a later frame drains outbound commands.
+        self.queue_send_prompt_command(
             message_id,
-            text: prompt,
+            prompt,
             parts,
             system,
-            agent: self.agent.clone(),
-            model: self.model.clone(),
-            thinking: self.thinking.clone(),
-            delivery: neoism_protocol::agent::PromptDelivery::Steer,
+            self.agent.clone(),
+            self.model.clone(),
+            self.thinking.clone(),
+            neoism_protocol::agent::PromptDelivery::Steer,
             transcript_echo,
-        });
+        );
         Ok(())
     }
 
@@ -1037,6 +1018,7 @@ impl NeoismAgentPane {
         };
         self.pending_prompt_dispatches
             .push_back(PendingPromptDispatch {
+                reconcile_before_send: false,
                 origin_session_id,
                 origin_draft_id,
                 source: self.new_chat_source,
@@ -1066,20 +1048,35 @@ impl NeoismAgentPane {
         if self.prompt_dispatch_in_flight {
             return;
         }
-        let Some(request) = self.pending_prompt_dispatches.pop_front() else {
+        let Some(index) = self.pending_prompt_dispatches.iter().position(|pending| {
+            !self.uncertain_prompts.iter().any(|uncertain| {
+                uncertain.origin_session_id.is_none()
+                    && pending.origin_session_id.is_none()
+                    && uncertain.server == pending.server
+                    && uncertain.origin_draft_id == pending.origin_draft_id
+            })
+        }) else {
             return;
         };
+        let request = self.pending_prompt_dispatches.remove(index).unwrap();
         self.prompt_dispatch_in_flight = true;
+        let failed_server = request.server.clone();
+        let failed_origin = request.origin_session_id.clone();
+        let failed_draft = request.origin_draft_id;
+        let failed_queued = request.transcript_echo.is_none();
         let tx = self.background_sender();
         if let Err(error) = thread::Builder::new()
             .name("neoism-agent-prompt".into())
             .spawn(move || {
-                let origin_session_id = request.origin_session_id.clone();
+                let mut request = request;
                 let origin_draft_id = request.origin_draft_id;
                 let transcript_echo = request.transcript_echo.clone();
-                let update = match dispatch_prompt_request(request) {
+                let result = dispatch_prompt_request(&mut request, &tx);
+                let origin_session_id = request.origin_session_id.clone();
+                let update = match result {
                     Ok((session_id, session_title, event_stream)) => {
                         NeoismAgentBackgroundUpdate::PromptDispatched {
+                            server: request.server.clone(),
                             session_title,
                             origin_session_id,
                             origin_draft_id,
@@ -1089,23 +1086,28 @@ impl NeoismAgentPane {
                         }
                     }
                     Err(error) => NeoismAgentBackgroundUpdate::PromptDispatchFailed {
+                        server: request.server.clone(),
                         origin_session_id,
                         origin_draft_id,
+                        queued: transcript_echo.is_none(),
+                        request: Some(Box::new(request)),
                         error,
                     },
                 };
                 let _ = tx.send(update);
             })
         {
-            self.prompt_dispatch_in_flight = false;
-            self.system_message(
-                "Prompt failed",
-                format!("failed to start prompt request: {error}"),
+            // Use the same identity-scoped settlement as a request failure.
+            let _ = self.background_sender().send(
+                NeoismAgentBackgroundUpdate::PromptDispatchFailed {
+                    server: failed_server,
+                    origin_session_id: failed_origin,
+                    origin_draft_id: failed_draft,
+                    queued: failed_queued,
+                    request: None,
+                    error: format!("failed to start prompt request: {error}"),
+                },
             );
-            self.start_next_prompt_dispatch();
-            if !self.prompt_dispatch_in_flight {
-                self.note_streaming(NeoismAgentStreamingState::Idle, None);
-            }
         }
     }
 
@@ -1256,11 +1258,17 @@ impl NeoismAgentPane {
     }
 
     pub(super) fn show_mcp(&mut self) {
-        if !self.picker.as_ref().is_some_and(|picker| matches!(
-            picker.kind, NeoismAgentPickerKind::Mcp | NeoismAgentPickerKind::McpActions
-        )) {
+        if !self.picker.as_ref().is_some_and(|picker| {
+            matches!(
+                picker.kind,
+                NeoismAgentPickerKind::Mcp | NeoismAgentPickerKind::McpActions
+            )
+        }) {
             let mut picker = NeoismAgentPicker::new(
-                NeoismAgentPickerKind::Mcp, "MCP servers", Vec::new(), 0,
+                NeoismAgentPickerKind::Mcp,
+                "MCP servers",
+                Vec::new(),
+                0,
             );
             picker.set_loading(true);
             self.picker = Some(picker);
@@ -1291,7 +1299,9 @@ impl NeoismAgentPane {
             return;
         }
         if action == "oauth_back" {
-            if let Some(picker) = self.picker.as_mut() { picker.clear_mcp_authorization(); }
+            if let Some(picker) = self.picker.as_mut() {
+                picker.clear_mcp_authorization();
+            }
             return;
         }
         if action == "oauth_open" {
@@ -1301,9 +1311,11 @@ impl NeoismAgentPane {
             }
             return;
         }
-        if action == "connect" && self.picker.as_ref().is_some_and(|p| {
-            p.mcp_authorization.as_ref().is_some_and(|d| d.name == name)
-        }) {
+        if action == "connect"
+            && self.picker.as_ref().is_some_and(|p| {
+                p.mcp_authorization.as_ref().is_some_and(|d| d.name == name)
+            })
+        {
             let activity = self.open_mcp_oauth_activity(name.to_string(), true);
             self.start_mcp_oauth_monitor(name.to_string(), activity, true);
             return;
@@ -1588,7 +1600,8 @@ impl NeoismAgentPane {
         {
             return;
         }
-        let request_id = neoism_ui::panels::agent_pane::outbound::next_prompt_message_id();
+        let request_id =
+            neoism_ui::panels::agent_pane::outbound::next_prompt_message_id();
         self.pending_compact = Some(request_id.clone());
         self.push_outbound(OutboundAgentCommand::CompactSessionRequest {
             session_id: self.session_id.clone().unwrap(),
@@ -1741,7 +1754,10 @@ impl NeoismAgentPane {
                 }
             })
         {
-            self.system_message("Abort", format!("failed to start abort request: {error}"));
+            self.system_message(
+                "Abort",
+                format!("failed to start abort request: {error}"),
+            );
         }
     }
 
@@ -2143,31 +2159,38 @@ mod native_prompt_author_tests {
 }
 
 fn dispatch_prompt_request(
-    request: PendingPromptDispatch,
+    request: &mut PendingPromptDispatch,
+    tx: &super::pane::AgentBackgroundSender,
 ) -> Result<(String, Option<String>, Option<AgentSessionEventStream>), String> {
-    let (session_id, session_title, event_stream) = match request
-        .origin_session_id
-        .as_deref()
-    {
-        Some(session_id) => (session_id.to_string(), None, None),
+    let session_id = match request.origin_session_id.clone() {
+        Some(session_id) => session_id,
         None => {
-            let (session_id, session_title) = create_prompt_session(&request)?;
-            // Subscribe before admitting the first prompt. The receiver can
-            // queue updates while this worker waits for the POST response, so
-            // a fast provider cannot emit the beginning of the turn before
-            // the pane knows which fresh session it belongs to.
+            let (session_id, session_title) = create_prompt_session(request)?;
             let mut event_stream =
                 start_session_event_stream(request.server.clone(), session_id.clone());
             if let Some(wake) = request.event_wake.clone() {
                 event_stream.set_wake(wake);
             }
-            (session_id, session_title, Some(event_stream))
+            // Creation is committed independently of prompt admission. Publish
+            // its identity even if the subsequent POST fails or times out.
+            request.origin_session_id = Some(session_id.clone());
+            let _ = tx.send(NeoismAgentBackgroundUpdate::PromptSessionCreated {
+                server: request.server.clone(),
+                origin_draft_id: request.origin_draft_id,
+                session_id: session_id.clone(),
+                session_title,
+                event_stream,
+            });
+            session_id
         }
     };
+    if request.reconcile_before_send && prompt_admission_confirmed(request)? {
+        return Ok((session_id, None, None));
+    }
     let body = json!({
         "messageId": request.message_id,
         "model": if request.source.provider().is_some() { None } else { prompt_model_json(request.model.as_str(), request.thinking.as_deref(), request.connection_id.as_deref()) },
-        "agent": if request.source.provider().is_some() { None } else { request.agent },
+        "agent": if request.source.provider().is_some() { None } else { request.agent.clone() },
         "noReply": false,
         "system": request.system,
         "tools": null,
@@ -2178,13 +2201,66 @@ fn dispatch_prompt_request(
             neoism_protocol::agent::PromptDelivery::Queue => "queue",
         },
     });
-    api_request_json(
+    if let Err(error) = api_request_json(
         &request.server,
         "POST",
         &format!("/v2/sessions/{session_id}/prompt"),
         Some(&body),
-    )?;
-    Ok((session_id, session_title, event_stream))
+    ) {
+        // A failed response is not proof that admission failed. Read only;
+        // never automatically replay the POST (including session creation).
+        if !prompt_admission_confirmed(request).unwrap_or(false) {
+            return Err(error);
+        }
+    }
+    Ok((session_id, None, None))
+}
+
+fn prompt_admission_confirmed(request: &PendingPromptDispatch) -> Result<bool, String> {
+    let session = request
+        .origin_session_id
+        .as_deref()
+        .ok_or("Session creation is uncertain")?;
+    // The exact-ID route can confirm an older turn outside the newest page.
+    if let Ok(Some(message)) = api_request_json(
+        &request.server,
+        "GET",
+        &format!(
+            "/v2/sessions/{session}/messages/{}",
+            percent_encode(&request.message_id)
+        ),
+        None,
+    ) {
+        if message
+            .get("info")
+            .and_then(|info| info.get("id"))
+            .and_then(Value::as_str)
+            == Some(request.message_id.as_str())
+        {
+            return Ok(true);
+        }
+    }
+    // A successful list establishes that the original session still exists.
+    // Absence is NOT proof of non-admission. Only explicit /retry may replay
+    // that same messageID, relying on backend idempotent admission.
+    let page = api_request_json(
+        &request.server,
+        "GET",
+        &format!("/v2/sessions/{session}/messages?order=desc&limit=100&slim=true"),
+        None,
+    )?
+    .ok_or("Cannot reconcile prompt admission: empty messages response")?;
+    let items = page
+        .get("items")
+        .and_then(Value::as_array)
+        .ok_or("Cannot reconcile prompt admission: malformed messages response")?;
+    Ok(items.iter().any(|message| {
+        message
+            .get("info")
+            .and_then(|info| info.get("id"))
+            .and_then(Value::as_str)
+            == Some(request.message_id.as_str())
+    }))
 }
 
 fn create_prompt_session(

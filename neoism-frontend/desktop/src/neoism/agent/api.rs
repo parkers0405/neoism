@@ -1303,6 +1303,21 @@ mod subagent_runtime_snapshot_tests {
     }
 
     #[test]
+    fn search_budget_errors_keep_the_actionable_message_visible() {
+        for (status, code, message) in [
+            (422, "search.deadline", "Conversation search exceeded its query budget; refine the query"),
+            (422, "search.too_broad", "Conversation search is too broad; refine the query"),
+            (429, "search.busy", "Conversation search is busy; retry shortly"),
+        ] {
+            let body = serde_json::json!({"code": code, "message": message}).to_string();
+            assert_eq!(http_error(status, "Error", &body), message);
+            assert!(http_error(500, "Internal Server Error", &body).starts_with("Neoism Agent HTTP 500"));
+        }
+        assert!(http_error(422, "Error", r#"{"code":"search.deadline"}"#)
+            .starts_with("Neoism Agent HTTP 422"));
+    }
+
+    #[test]
     fn http_error_uses_server_message_without_dumping_json() {
         let body = r#"{"code":"request.invalid","details":{},"message":"Codex ACP authentication required for session/new: Authentication required. Sign in with the provider's CLI, then retry.","retryable":false}"#;
         let error = http_error(400, "Bad Request", body);
@@ -2070,6 +2085,18 @@ fn ensure_request_server_ready(server: &str) -> Result<(), String> {
     Ok(())
 }
 
+// Total wire deadline, including retries and body consumption (not an idle
+// socket timeout). Admission can involve cold provider/adapter startup.
+fn request_deadline(method: &str, path: &str) -> Duration {
+    let path = path.split('?').next().unwrap_or(path).trim_end_matches('/');
+    if method == "POST" && (path == "/v2/sessions"
+        || path.ends_with("/prompt") || path.ends_with("/prompt_async")) {
+        Duration::from_secs(120)
+    } else {
+        Duration::from_secs(15)
+    }
+}
+
 pub(super) fn api_request_json(
     server: &str,
     method: &str,
@@ -2077,10 +2104,7 @@ pub(super) fn api_request_json(
     body: Option<&Value>,
 ) -> Result<Option<Value>, String> {
     ensure_request_server_ready(server)?;
-    // Cold Windows machines can still be finishing agent-store migrations
-    // when the listener first becomes healthy. Catalog/config requests are
-    // not latency-sensitive enough to justify failing after 900 ms.
-    let response = http_request(server, method, path, body, Duration::from_secs(5))?;
+    let response = http_request(server, method, path, body, request_deadline(method, path))?;
     response_json(response)
 }
 
@@ -2609,22 +2633,25 @@ fn open_sse_stream(
     ensure_request_server_ready(server)?;
     let server = server.trim().trim_end_matches('/');
     let (tls, host, port, base_path) = parse_http_server(server)?;
-    let addr = (host.as_str(), port)
+    let addresses = (host.as_str(), port)
         .to_socket_addrs()
-        .map_err(|error| format!("failed to resolve Neoism Agent server: {error}"))?
-        .next()
-        .ok_or_else(|| "failed to resolve Neoism Agent server".to_string())?;
-    // Bound shutdown/reconnect latency while the stream is quiet. Inbound
-    // events wake winit explicitly after they are enqueued for the pane.
-    let mut stream = super::transport::AgentTransport::connect(
-        &addr,
-        &host,
-        tls,
-        Duration::from_millis(900),
-        Duration::from_millis(40),
-        Duration::from_millis(900),
-    )
-    .map_err(|error| format!("Neoism Agent is not reachable at {server}: {error}"))?;
+        .map_err(|_| "Failed to resolve Neoism Agent server".to_string())?;
+    // Retain the polling read interface used for stream cancellation, but try
+    // every resolved address (localhost may resolve to IPv6 before IPv4).
+    let started = Instant::now();
+    let mut connected = None;
+    for addr in addresses {
+        let remaining = Duration::from_secs(10).saturating_sub(started.elapsed());
+        if remaining.is_zero() { break; }
+        if let Ok(stream) = super::transport::AgentTransport::connect(
+            &addr, &host, tls, remaining.min(Duration::from_secs(2)),
+            Duration::from_millis(40), Duration::from_secs(5),
+        ) {
+            connected = Some(stream);
+            break;
+        }
+    }
+    let mut stream = connected.ok_or_else(|| "Neoism Agent event connection failed".to_string())?;
 
     let path = request_path(&base_path, endpoint);
     let authority = http_authority(tls, &host, port);
@@ -2639,6 +2666,12 @@ fn open_sse_stream(
     let mut response = Vec::new();
     let header_started = Instant::now();
     loop {
+        if header_started.elapsed() > Duration::from_secs(15) {
+            return Err("Neoism Agent event stream timed out waiting for headers".into());
+        }
+        if response.len() > 64 * 1024 {
+            return Err("Neoism Agent event headers exceed size limit".into());
+        }
         let mut chunk = [0u8; 4096];
         match stream.read(&mut chunk) {
             Ok(0) => return Err("Neoism Agent closed the event stream".to_string()),
@@ -2686,7 +2719,7 @@ fn open_sse_stream(
                     std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
                 ) =>
             {
-                if header_started.elapsed() > Duration::from_secs(3) {
+                if header_started.elapsed() > Duration::from_secs(15) {
                     return Err(
                         "Neoism Agent event stream timed out waiting for headers"
                             .to_string(),
@@ -2764,96 +2797,49 @@ fn http_request_with_status(
     read_timeout: Duration,
 ) -> Result<HttpResponse, String> {
     let server = server.trim().trim_end_matches('/');
-    let (tls, host, port, base_path) = parse_http_server(server)?;
-    let addr = (host.as_str(), port)
-        .to_socket_addrs()
-        .map_err(|error| format!("failed to resolve Neoism Agent server: {error}"))?
-        .next()
-        .ok_or_else(|| "failed to resolve Neoism Agent server".to_string())?;
-    let mut stream = super::transport::AgentTransport::connect(
-        &addr,
-        &host,
-        tls,
-        Duration::from_millis(350),
-        read_timeout,
-        Duration::from_millis(900),
-    )
-    .map_err(|error| format!("Neoism Agent is not reachable at {server}: {error}"))?;
-
-    let request_path = request_path(&base_path, path);
-    let body_text = body
-        .map(serde_json::to_string)
-        .transpose()
-        .map_err(|error| format!("failed to encode Neoism Agent request: {error}"))?;
-    let authority = http_authority(tls, &host, port);
-    let mut request = format!(
-        "{method} {request_path} HTTP/1.1\r\nHost: {authority}\r\nAccept: application/json\r\n{}Connection: close\r\n",
-        authorization_header(server)
-    );
-    if let Some(body_text) = body_text.as_ref() {
-        request.push_str("Content-Type: application/json\r\n");
-        request.push_str(&format!("Content-Length: {}\r\n", body_text.len()));
-    }
-    request.push_str("\r\n");
-    if let Some(body_text) = body_text.as_ref() {
-        request.push_str(body_text);
-    }
-    stream
-        .write_all(request.as_bytes())
-        .map_err(|error| format!("failed to write Neoism Agent request: {error}"))?;
-
-    let mut response = Vec::new();
-    stream.read_to_end(&mut response).map_err(|error| {
-        if matches!(
-            error.kind(),
-            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-        ) {
-            "Neoism request timed out waiting for the server response".to_string()
-        } else {
-            format!("failed to read Neoism response: {error}")
-        }
-    })?;
-    let header_end = find_header_end(&response)
-        .ok_or_else(|| "Neoism Agent returned a malformed HTTP response".to_string())?;
-    let headers = String::from_utf8_lossy(&response[..header_end]);
-    let body = &response[header_end + 4..];
-    let mut lines = headers.lines();
-    let status_line = lines
-        .next()
-        .ok_or_else(|| "Neoism Agent returned an empty HTTP response".to_string())?;
-    let mut status_parts = status_line.splitn(3, ' ');
-    let _http = status_parts.next();
-    let status = status_parts
-        .next()
-        .and_then(|status| status.parse::<u16>().ok())
-        .ok_or_else(|| "Neoism Agent returned an invalid HTTP status".to_string())?;
-    let reason = status_parts.next().unwrap_or_default();
-    let body = if headers
-        .to_ascii_lowercase()
-        .contains("transfer-encoding: chunked")
-    {
-        decode_chunked_body(body)?
+    // Legacy callers specify a "read timeout"; it now bounds the entire wire
+    // operation. Never let a short caller override truncate session admission.
+    let operation_deadline = request_deadline(method, path);
+    let read_timeout = if operation_deadline >= Duration::from_secs(120) {
+        read_timeout.max(operation_deadline)
     } else {
-        body.to_vec()
+        read_timeout
     };
-    Ok(HttpResponse {
-        body,
-        status,
-        reason: reason.to_owned(),
-    })
+    let (tls, host, port, base_path) = parse_http_server(server)?;
+    let url = url::Url::parse(&format!(
+        "{}://{}{}",
+        if tls { "https" } else { "http" },
+        http_authority(tls, &host, port),
+        request_path(&base_path, path),
+    )).map_err(|_| "Invalid Neoism Agent request URL".to_string())?;
+    let method = reqwest::Method::from_bytes(method.as_bytes())
+        .map_err(|_| "Invalid Neoism Agent request method".to_string())?;
+    let body = body.map(serde_json::to_string).transpose()
+        .map_err(|_| "Failed to encode Neoism Agent request".to_string())?;
+    let credential = agent_server_credential(server)
+        .filter(|token| !token.contains(['\r', '\n']));
+    let (status, reason, body) = super::transport::request(url, method, credential, body, read_timeout)?;
+    Ok(HttpResponse { body, status, reason })
 }
 
 pub(super) fn http_error(status: u16, reason: &str, body: &str) -> String {
-    let message = serde_json::from_str::<Value>(body)
-        .ok()
-        .and_then(|value| {
-            value
-                .get("message")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        })
+    let envelope = serde_json::from_str::<Value>(body).ok();
+    let message = envelope
+        .as_ref()
+        .and_then(|value| value.get("message"))
+        .and_then(Value::as_str)
         .filter(|message| !message.trim().is_empty());
-    let detail = message.as_deref().unwrap_or(body.trim());
+    if matches!(status, 422 | 429)
+        && envelope.as_ref()
+            .and_then(|value| value.get("code"))
+            .and_then(Value::as_str)
+            .is_some_and(|code| matches!(code, "search.busy" | "search.deadline" | "search.too_broad"))
+    {
+        if let Some(message) = message {
+            return message.to_owned();
+        }
+    }
+    let detail = message.unwrap_or(body.trim());
     let suffix = if detail.is_empty() {
         String::new()
     } else {
@@ -2883,27 +2869,55 @@ fn http_authority(tls: bool, host: &str, port: u16) -> String {
 }
 
 fn parse_http_server(server: &str) -> Result<(bool, String, u16, String), String> {
-    let (tls, rest) = if let Some(rest) = server.strip_prefix("https://") {
-        (true, rest)
-    } else if let Some(rest) = server.strip_prefix("http://") {
-        (false, rest)
-    } else {
-        return Err(format!(
-            "unsupported Neoism Agent server '{server}'; expected http:// or https://"
-        ));
+    let endpoint = url::Url::parse(server)
+        .map_err(|_| "Invalid Neoism Agent endpoint".to_string())?;
+    if !matches!(endpoint.scheme(), "http" | "https")
+        || !endpoint.username().is_empty() || endpoint.password().is_some()
+        || endpoint.query().is_some() || endpoint.fragment().is_some() {
+        return Err("Neoism Agent requires HTTP(S) without URL credentials, query, or fragment".into());
+    }
+    let host = match endpoint.host() {
+        Some(url::Host::Domain(host)) => host.to_string(),
+        Some(url::Host::Ipv4(host)) => host.to_string(),
+        Some(url::Host::Ipv6(host)) => host.to_string(),
+        None => return Err("Neoism Agent endpoint requires a host".into()),
     };
-    let (host_port, base_path) = rest.split_once('/').unwrap_or((rest, ""));
-    let default_port = if tls { 443 } else { 80 };
-    let (host, port) = host_port
-        .split_once(':')
-        .map(|(host, port)| {
-            let port = port
-                .parse::<u16>()
-                .map_err(|_| format!("invalid Neoism Agent port '{port}'"))?;
-            Ok::<_, String>((host.to_string(), port))
-        })
-        .unwrap_or_else(|| Ok((host_port.to_string(), default_port)))?;
-    Ok((tls, host, port, base_path.to_string()))
+    Ok((endpoint.scheme() == "https", host, endpoint.port_or_known_default().unwrap(),
+        endpoint.path().trim_matches('/').to_string()))
+}
+
+#[cfg(test)]
+mod transport_policy_tests {
+    use super::*;
+
+    #[test]
+    fn ipv6_and_proxy_base_paths_are_preserved() {
+        assert_eq!(parse_http_server("http://[::1]:4096/agent/workspaces/abc").unwrap(),
+            (false, "::1".into(), 4096, "agent/workspaces/abc".into()));
+        assert_eq!(parse_http_server("https://[2001:db8::1]/agent/").unwrap(),
+            (true, "2001:db8::1".into(), 443, "agent".into()));
+        assert_eq!(http_authority(false, "::1", 4096), "[::1]:4096");
+        assert_eq!(request_path("agent/workspaces/abc", "/v2/sessions?q=a%2Fb"),
+            "/agent/workspaces/abc/v2/sessions?q=a%2Fb");
+    }
+
+    #[test]
+    fn endpoint_errors_do_not_disclose_credentials() {
+        for endpoint in ["ftp://secret:password@host", "http://host?token=secret", "http://secret:password@host", "secret"] {
+            let error = parse_http_server(endpoint).unwrap_err();
+            assert!(!error.contains("secret"));
+            assert!(!error.contains("password"));
+        }
+    }
+
+    #[test]
+    fn admission_has_long_bounded_deadline_but_reads_are_interactive() {
+        for path in ["/v2/sessions", "/v2/sessions?directory=x", "/v2/sessions/id/prompt", "/v2/sessions/id/prompt_async"] {
+            assert!(request_deadline("POST", path) >= Duration::from_secs(120));
+            assert_eq!(request_deadline("GET", path), Duration::from_secs(15));
+        }
+        assert_eq!(request_deadline("POST", "/v2/interactions/questions/id/reply"), Duration::from_secs(15));
+    }
 }
 
 fn request_path(base_path: &str, path: &str) -> String {
@@ -2921,30 +2935,6 @@ fn request_path(base_path: &str, path: &str) -> String {
 
 fn find_header_end(bytes: &[u8]) -> Option<usize> {
     bytes.windows(4).position(|window| window == b"\r\n\r\n")
-}
-
-fn decode_chunked_body(body: &[u8]) -> Result<Vec<u8>, String> {
-    let mut rest = body;
-    let mut out = Vec::new();
-    loop {
-        let line_end = rest
-            .windows(2)
-            .position(|window| window == b"\r\n")
-            .ok_or_else(|| "Neoism Agent returned malformed chunked data".to_string())?;
-        let size_line = String::from_utf8_lossy(&rest[..line_end]);
-        let size_hex = size_line.split(';').next().unwrap_or(&size_line).trim();
-        let size = usize::from_str_radix(size_hex, 16)
-            .map_err(|_| "Neoism Agent returned malformed chunk size".to_string())?;
-        rest = &rest[line_end + 2..];
-        if size == 0 {
-            return Ok(out);
-        }
-        if rest.len() < size + 2 {
-            return Err("Neoism Agent returned truncated chunked data".to_string());
-        }
-        out.extend_from_slice(&rest[..size]);
-        rest = &rest[size + 2..];
-    }
 }
 
 /// Build a `/sessions` picker option (title only — the date-group header

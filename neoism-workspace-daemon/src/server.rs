@@ -372,14 +372,32 @@ async fn agent_proxy_inner(
         }
         return StatusCode::BAD_REQUEST.into_response();
     }
-    let credential =
-        match agent_proxy_credential(&state.auth, &headers, &workspace_id, &root, shared)
+    let subject =
+        match agent_proxy_principal(&state.auth, &headers, Some((&workspace_id, shared)))
         {
-            Ok(identity) => identity,
+            Ok(subject) => subject,
             Err(response) => return response,
         };
     crate::agent::ensure_agent_server_started(state.workspaces.clone());
     let base = agent_handler::configured_agent_server();
+    let client = match agent_handler::agent_http_client(&base) {
+        Ok(client) => client,
+        Err(()) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+    // Health probes must stay short; actual work can wait off-thread for a
+    // slow cold boot rather than fail just because the socket is not up yet.
+    if path != "v2/health" && path != "global/health" {
+        if let Err(error) =
+            agent_handler::wait_for_configured_local_agent(client, &base).await
+        {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [(header::RETRY_AFTER, "1")],
+                error,
+            )
+                .into_response();
+        }
+    }
     let mut target = if path.is_empty() {
         base
     } else {
@@ -389,14 +407,6 @@ async fn agent_proxy_inner(
         target.push('?');
         target.push_str(&query);
     }
-    // Only owned temporary hosts opt in. Normal remote upstreams retain their
-    // existing environment proxy/redirect behavior.
-    let client = if std::env::var("NEOISM_FAST_SERVER").as_deref() == Ok("1") {
-        match reqwest::Client::builder().no_proxy().redirect(reqwest::redirect::Policy::none()).build() {
-            Ok(client) => client,
-            Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-        }
-    } else { reqwest::Client::new() };
     let method = match reqwest::Method::from_bytes(method.as_str().as_bytes()) {
         Ok(method) => method,
         Err(_) => return StatusCode::METHOD_NOT_ALLOWED.into_response(),
@@ -444,6 +454,17 @@ async fn agent_proxy_inner(
             .append_pair("redirectUri", callback.as_str());
         target = url.to_string();
     }
+    // Authenticate before waiting, but issue the 60-second upstream credential
+    // only when forwarding: a healthy cold boot can legitimately take longer.
+    let namespace = crate::agent_hosting::namespace(&workspace_id, &root);
+    let credential = match mint_agent_credential(
+        subject,
+        namespace.as_deref().unwrap_or(&workspace_id),
+        &root,
+    ) {
+        Ok(credential) => credential,
+        Err(response) => return response,
+    };
     let mut request = client.request(method.clone(), &target);
     // The inbound bearer and all caller-controlled scope headers terminate at
     // the daemon. Agent receives only the daemon-minted, short-lived identity.
@@ -464,12 +485,18 @@ async fn agent_proxy_inner(
     if !body.is_empty() {
         request = request.body(body);
     }
-    match request.send().await {
-        Ok(upstream) => {
+    // Bound response headers without placing a total deadline on healthy SSE.
+    match tokio::time::timeout(std::time::Duration::from_secs(120), request.send()).await
+    {
+        Ok(Ok(upstream)) => {
             let status = StatusCode::from_u16(upstream.status().as_u16())
                 .unwrap_or(StatusCode::BAD_GATEWAY);
             let mut response_headers = HeaderMap::new();
-            for name in [header::CONTENT_TYPE, header::CACHE_CONTROL] {
+            for name in [
+                header::CONTENT_TYPE,
+                header::CACHE_CONTROL,
+                header::RETRY_AFTER,
+            ] {
                 if let Some(value) = upstream.headers().get(name.as_str()) {
                     if let Ok(value) =
                         axum::http::HeaderValue::from_bytes(value.as_bytes())
@@ -484,13 +511,64 @@ async fn agent_proxy_inner(
             *response.headers_mut() = response_headers;
             response
         }
-        Err(error) => {
-            tracing::warn!(%error, target = %target, "agent proxy upstream error");
-            (
-                StatusCode::BAD_GATEWAY,
-                format!("agent server unreachable: {error}"),
-            )
-                .into_response()
+        Ok(Err(error)) => agent_proxy_failure(&method, !error.is_connect(), false),
+        Err(_) => agent_proxy_failure(&method, true, true),
+    }
+}
+
+fn agent_proxy_failure(
+    method: &reqwest::Method,
+    delivery_unknown: bool,
+    timed_out: bool,
+) -> Response {
+    if delivery_unknown
+        && method != reqwest::Method::GET
+        && method != reqwest::Method::HEAD
+    {
+        return (
+            if timed_out { StatusCode::GATEWAY_TIMEOUT } else { StatusCode::BAD_GATEWAY },
+            "Agent response unavailable; delivery outcome is unknown. Reconcile the request before retrying.",
+        ).into_response();
+    }
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [(header::RETRY_AFTER, "1")],
+        "Agent is starting or temporarily unavailable; retry shortly",
+    )
+        .into_response()
+}
+
+#[cfg(test)]
+mod agent_proxy_failure_tests {
+    use super::*;
+
+    #[test]
+    fn ambiguous_mutations_never_advertise_safe_replay() {
+        for method in [
+            reqwest::Method::POST,
+            reqwest::Method::PATCH,
+            reqwest::Method::DELETE,
+        ] {
+            for timed_out in [false, true] {
+                let response = agent_proxy_failure(&method, true, timed_out);
+                assert_eq!(
+                    response.status(),
+                    if timed_out {
+                        StatusCode::GATEWAY_TIMEOUT
+                    } else {
+                        StatusCode::BAD_GATEWAY
+                    }
+                );
+                assert!(response.headers().get(header::RETRY_AFTER).is_none());
+            }
+            let not_delivered = agent_proxy_failure(&method, false, false);
+            assert_eq!(not_delivered.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(not_delivered.headers()[header::RETRY_AFTER], "1");
+        }
+        for method in [reqwest::Method::GET, reqwest::Method::HEAD] {
+            let response = agent_proxy_failure(&method, true, true);
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(response.headers()[header::RETRY_AFTER], "1");
         }
     }
 }
@@ -554,6 +632,7 @@ fn forward_agent_upload_headers(
 
 const AGENT_CREDENTIAL_LIFETIME_SECS: i64 = 60;
 
+#[cfg(test)]
 fn agent_proxy_credential(
     auth: &AuthService,
     headers: &HeaderMap,
@@ -800,6 +879,41 @@ mod agent_proxy_auth_tests {
         .is_none());
     }
 
+    struct AuthPolicyGuard {
+        require_auth: Option<std::ffi::OsString>,
+        provision_token: Option<std::ffi::OsString>,
+    }
+
+    impl AuthPolicyGuard {
+        // Call while holding ENV_LOCK; a signing key alone does not enable auth.
+        fn set(required: bool) -> Self {
+            let previous = Self {
+                require_auth: std::env::var_os("NEOISM_REQUIRE_AUTH"),
+                provision_token: std::env::var_os("NEOISM_CLOUD_PROVISION_TOKEN"),
+            };
+            std::env::set_var(
+                "NEOISM_REQUIRE_AUTH",
+                if required { "1" } else { "0" },
+            );
+            std::env::remove_var("NEOISM_CLOUD_PROVISION_TOKEN");
+            previous
+        }
+    }
+
+    impl Drop for AuthPolicyGuard {
+        fn drop(&mut self) {
+            for (key, previous) in [
+                ("NEOISM_REQUIRE_AUTH", self.require_auth.take()),
+                ("NEOISM_CLOUD_PROVISION_TOKEN", self.provision_token.take()),
+            ] {
+                match previous {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+
     struct DaemonTokenGuard(Option<String>);
 
     impl DaemonTokenGuard {
@@ -870,6 +984,7 @@ mod agent_proxy_auth_tests {
     #[test]
     fn internal_daemon_token_does_not_require_password_for_joined_agent() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let _policy = AuthPolicyGuard::set(false);
         let _token = DaemonTokenGuard::set("internal-signing-key");
         let temp = tempfile::tempdir().unwrap();
         let auth = AuthService::bootstrap(temp.path()).unwrap();
@@ -1145,6 +1260,7 @@ mod agent_proxy_auth_tests {
     #[tokio::test]
     async fn every_agent_proxy_route_rejects_an_unauthenticated_request() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let _policy = AuthPolicyGuard::set(true);
         let _token = DaemonTokenGuard::set("daemon-test-key");
         let temp = tempfile::tempdir().unwrap();
         let app = router(test_state(AuthService::bootstrap(temp.path()).unwrap()));
@@ -1180,6 +1296,7 @@ mod agent_proxy_auth_tests {
     #[test]
     fn agent_proxy_denies_unauthenticated_and_mints_scoped_identities() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let _policy = AuthPolicyGuard::set(true);
         let _token = DaemonTokenGuard::set("daemon-test-key");
         let temp = tempfile::tempdir().unwrap();
         // Minting prefers the canonical on-disk token; point the runtime

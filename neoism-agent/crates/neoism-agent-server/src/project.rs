@@ -1,12 +1,59 @@
+use std::collections::HashMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
-use anyhow::Context;
 use neoism_agent_core::ProjectInfo;
 
+#[derive(Clone)]
 pub(crate) struct ProjectContext {
     pub(crate) info: ProjectInfo,
     pub(crate) directory: String,
     pub(crate) path: Option<String>,
+}
+
+// Owned by one AppState's registry, never shared across injected services or
+// admission domains. Short TTL also notices git init/repository replacement.
+type DiscoveryCell = Arc<tokio::sync::Mutex<Option<(Instant, ProjectContext)>>>;
+#[derive(Clone, Default)]
+pub(crate) struct DiscoveryCache {
+    entries: Arc<Mutex<HashMap<PathBuf, DiscoveryCell>>>,
+}
+
+impl DiscoveryCache {
+    pub(crate) async fn discover(
+        &self,
+        services: &neoism_agent_service_api::AgentServices,
+        directory: PathBuf,
+    ) -> Result<ProjectContext, tokio::task::JoinError> {
+        let directory =
+            tokio::task::spawn_blocking(move || canonicalize_lossy(&directory)).await?;
+        let cell = {
+            let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+            if entries.len() >= 128 {
+                entries.retain(|_, cell| Arc::strong_count(cell) > 1);
+            }
+            entries.entry(directory.clone()).or_default().clone()
+        };
+        // Waiters yield instead of consuming blocking-pool threads. The worker
+        // owns the guard: cancelling its HTTP caller cannot abandon publication
+        // or let another request start duplicate Git work.
+        let mut cached = cell.lock_owned().await;
+        if let Some((at, context)) = &*cached {
+            if at.elapsed() < Duration::from_secs(5) {
+                return Ok(context.clone());
+            }
+        }
+        let services = services.clone();
+        tokio::task::spawn_blocking(move || {
+            let context = discover(&services, directory);
+            *cached = Some((Instant::now(), context.clone()));
+            context
+        })
+        .await
+    }
 }
 
 pub(crate) fn discover(
@@ -47,7 +94,8 @@ fn project_id(
     services: &neoism_agent_service_api::AgentServices,
     directory: &Path,
 ) -> Option<String> {
-    if let Some(cached) = read_cached_id(services, directory) {
+    let cache = cache_path(services, directory);
+    if let Some(cached) = cache.as_deref().and_then(read_cached_id) {
         return Some(cached);
     }
     let mut roots = git_output(
@@ -62,30 +110,24 @@ fn project_id(
     .collect::<Vec<_>>();
     roots.sort();
     let id = roots.into_iter().next()?;
-    let _ = write_cached_id(services, directory, &id);
+    if let Some(path) = cache {
+        let _ = std::fs::write(path, &id);
+    }
     Some(id)
 }
 
-fn read_cached_id(
-    services: &neoism_agent_service_api::AgentServices,
-    directory: &Path,
-) -> Option<String> {
-    let path = cache_path(services, directory)?;
-    std::fs::read_to_string(path)
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-}
-
-fn write_cached_id(
-    services: &neoism_agent_service_api::AgentServices,
-    directory: &Path,
-    id: &str,
-) -> anyhow::Result<()> {
-    let Some(path) = cache_path(services, directory) else {
-        return Ok(());
-    };
-    std::fs::write(path, id).context("failed to cache project id")
+fn read_cached_id(path: &Path) -> Option<String> {
+    let mut value = String::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(129)
+        .read_to_string(&mut value)
+        .ok()?;
+    if value.len() > 128 {
+        return None;
+    }
+    let value = value.trim().to_string();
+    (!value.is_empty()).then_some(value)
 }
 
 fn cache_path(
@@ -140,13 +182,79 @@ fn git_output(
     directory: &Path,
     args: &[&str],
 ) -> Option<String> {
-    let mut command = git_command(services, directory, args).ok()?;
+    let command = git_command(services, directory, args).ok()?;
+    bounded_output(command, Duration::from_secs(2))
+}
+
+// No interactive input, discarded stderr and a strict stdout cap. In particular,
+// rev-list must not consume arbitrary memory or occupy a worker indefinitely.
+fn bounded_output(
+    mut command: std::process::Command,
+    timeout: Duration,
+) -> Option<String> {
+    const MAX_OUTPUT: u64 = 64 * 1024;
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
     crate::tool::process::set_new_process_group_std(&mut command);
-    let output = command.output().ok()?;
-    if !output.status.success() {
+    let mut child = command.spawn().ok()?;
+    let stdout = child.stdout.take()?;
+    let (send, receive) = std::sync::mpsc::sync_channel(1);
+    let reader = std::thread::Builder::new()
+        .name("project-git-output".into())
+        .spawn(move || {
+            let mut bytes = Vec::new();
+            let result = stdout.take(MAX_OUTPUT + 1).read_to_end(&mut bytes);
+            let _ = send.send(result.ok().map(|_| bytes));
+        });
+    let reader = match reader {
+        Ok(reader) => reader,
+        Err(_) => {
+            crate::tool::process::kill_process_group(Some(child.id()));
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+    };
+    let deadline = Instant::now() + timeout;
+    let output = loop {
+        match receive.try_recv() {
+            Ok(Some(bytes)) if bytes.len() as u64 <= MAX_OUTPUT => break Some(bytes),
+            Ok(_) | Err(std::sync::mpsc::TryRecvError::Disconnected) => break None,
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+        }
+        if Instant::now() >= deadline {
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    let status = if output.is_some() {
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Some(status),
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                _ => break None,
+            }
+        }
+    } else {
+        None
+    };
+    if status.is_none() {
+        crate::tool::process::kill_process_group(Some(child.id()));
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    // Never wait indefinitely on an escaped descendant holding the stdout pipe.
+    if reader.is_finished() {
+        let _ = reader.join();
+    }
+    if !status?.success() {
         return None;
     }
-    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let text = String::from_utf8_lossy(&output?).trim().to_string();
     (!text.is_empty()).then_some(text)
 }
 
@@ -246,6 +354,101 @@ mod tests {
             Some(path_text(&root).as_str())
         );
 
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn slow_git_and_oversized_output_are_bounded() {
+        let mut slow = std::process::Command::new("sh");
+        slow.args(["-c", "sleep 30 & wait"]);
+        let started = Instant::now();
+        assert!(bounded_output(slow, Duration::from_millis(100)).is_none());
+        assert!(started.elapsed() < Duration::from_secs(2));
+
+        let pid_file = std::env::temp_dir()
+            .join(format!("neoism-git-reap-{}", Id::ascending(IdKind::Event)));
+        let mut direct = std::process::Command::new("sh");
+        direct.args(["-c", "echo $$ > \"$1\"; exec sleep 30", "sh"]);
+        direct.arg(&pid_file);
+        assert!(bounded_output(direct, Duration::from_millis(200)).is_none());
+        let pid: libc::pid_t = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        // A live child returns 0 and an unreaped zombie returns its pid.
+        // ECHILD proves the timeout path has waited for this direct child.
+        assert_eq!(
+            unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) },
+            -1
+        );
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ECHILD)
+        );
+        let _ = std::fs::remove_file(pid_file);
+
+        let mut large = std::process::Command::new("sh");
+        large.args(["-c", "yes x"]);
+        assert!(bounded_output(large, Duration::from_secs(1)).is_none());
+    }
+
+    #[tokio::test]
+    async fn unavailable_git_discovery_falls_back() {
+        use crate::executable::test_support::FakeExecutableService;
+        let mut services = services();
+        services.executables = Arc::new(FakeExecutableService::default());
+        let context = DiscoveryCache::default()
+            .discover(&services, std::env::temp_dir())
+            .await
+            .unwrap();
+        assert_eq!(context.info.id, "global");
+        assert!(context.info.vcs.is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn concurrent_discovery_runs_git_once_without_blocking_executor() {
+        use crate::executable::test_support::FakeExecutableService;
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!(
+            "neoism-discovery-flight-{}",
+            Id::ascending(IdKind::Event)
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let git = root.join("git");
+        std::fs::write(&git, "#!/bin/sh\nprintf x >> calls\nsleep 0.2\nexit 1\n")
+            .unwrap();
+        std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut services = services();
+        services.executables = Arc::new(FakeExecutableService::with("git", &git));
+        let cache = DiscoveryCache::default();
+        let requests = (0..8).map(|_| cache.discover(&services, root.clone()));
+        let all = futures::future::join_all(requests);
+        tokio::pin!(all);
+        // This test uses a single-thread executor: the timer must beat slow Git.
+        tokio::select! {
+            _ = &mut all => panic!("Git did not wait"),
+            _ = tokio::time::sleep(Duration::from_millis(30)) => {}
+        }
+        for result in all.await {
+            assert_eq!(result.unwrap().info.id, "global");
+        }
+        assert_eq!(std::fs::read_to_string(root.join("calls")).unwrap(), "x");
+        {
+            let cell = cache
+                .entries
+                .lock()
+                .unwrap()
+                .get(&canonicalize_lossy(&root))
+                .unwrap()
+                .clone();
+            let mut cached = cell.lock().await;
+            cached.as_mut().unwrap().0 = Instant::now() - Duration::from_secs(6);
+        }
+        cache.discover(&services, root.clone()).await.unwrap();
+        assert_eq!(std::fs::read_to_string(root.join("calls")).unwrap(), "xx");
         let _ = std::fs::remove_dir_all(root);
     }
 

@@ -425,6 +425,8 @@ async fn search_transcripts(
     }
     let limit = query.limit.unwrap_or(20).clamp(1, 100);
     let conversations = query.conversations.unwrap_or(false);
+    // Keep search errors typed through `?`: ApiError recognizes expected busy /
+    // budget failures inside anyhow (including context); real store faults stay 500.
     let mut hits = store
         .search_index(
             scope, needle, query.session_id.as_deref(), query.directory.as_deref(),

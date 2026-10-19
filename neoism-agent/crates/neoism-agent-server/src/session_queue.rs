@@ -6,10 +6,10 @@ use neoism_agent_core::{
 use serde::Serialize;
 use serde_json::json;
 
+use crate::ensure_session;
 use crate::error::ApiError;
 use crate::session_run::{busy_status, publish_idle_if_no_run, session_status_payload};
 use crate::state::AppState;
-use crate::{append_prompt, ensure_session};
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -46,10 +46,21 @@ pub(crate) async fn enqueue_manual_compaction(
     state: &AppState,
     session_id: &str,
 ) -> Result<(), ApiError> {
+    let state = state.clone();
+    let session_id = session_id.to_string();
+    tokio::spawn(async move { admit_manual_compaction(&state, &session_id).await })
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?
+}
+
+async fn admit_manual_compaction(
+    state: &AppState,
+    session_id: &str,
+) -> Result<(), ApiError> {
     ensure_session(state, session_id).await?;
     let admission = crate::execution_activity::admission_guard(state, session_id).await;
     let inserted = state.inner.store.enqueue_compact(session_id).await?;
-    let start_worker = state.inner.session_coordinator.wake(session_id).await;
+    wake_prompt_queue(state, session_id).await;
     // Keep admission event/snapshot ordering consistent with Stop and claims.
     if inserted {
         state.publish(EventPayload::new(
@@ -60,9 +71,6 @@ pub(crate) async fn enqueue_manual_compaction(
     publish_prompt_queue_changed(state, session_id, "compact", None, None, 0).await;
     drop(admission);
     publish_prompt_queue_status(state, session_id, 0).await;
-    if start_worker {
-        spawn_drain_prompt_queue(state.clone(), session_id.to_string());
-    }
     Ok(())
 }
 
@@ -81,6 +89,13 @@ pub(crate) async fn session_queue_clear(
     ensure_session(&state, &session_id).await?;
     // Visible cancellation shares admission with compact claims. Internal
     // clear-all helpers deliberately remain lock-free for already-locked callers.
+    // Do not let a visible queue mutation remove a recovery token midway
+    // through initialization. Lock order matches append: prompt, then execution.
+    let _prompt_admission = state
+        .inner
+        .session_coordinator
+        .prompt_admission_guard(&session_id)
+        .await;
     let admission = crate::execution_activity::admission_guard(&state, &session_id).await;
     let removed = clear_queued_prompts(&state, &session_id).await;
     publish_prompt_queue_changed(&state, &session_id, "clear", None, None, removed).await;
@@ -98,12 +113,23 @@ pub(crate) async fn session_queue_pop(
     Path(session_id): Path<String>,
 ) -> Result<Json<SessionQueueMutation>, ApiError> {
     ensure_session(&state, &session_id).await?;
+    // Do not let a visible queue mutation remove a recovery token midway
+    // through initialization. Lock order matches append: prompt, then execution.
+    let _prompt_admission = state
+        .inner
+        .session_coordinator
+        .prompt_admission_guard(&session_id)
+        .await;
     let admission = crate::execution_activity::admission_guard(&state, &session_id).await;
     let compact_removed = state.inner.store.take_queued_compact(&session_id).await?;
     let popped = if compact_removed {
         None
     } else {
-        state.inner.store.pop_user_queued_prompt(&session_id).await?
+        state
+            .inner
+            .store
+            .pop_user_queued_prompt(&session_id)
+            .await?
     };
     let removed = usize::from(compact_removed || popped.is_some());
     publish_prompt_queue_changed(
@@ -125,6 +151,8 @@ pub(crate) async fn session_queue_pop(
     }))
 }
 
+/// Commit and schedule independently of the caller's lifetime. The legacy
+/// `start_worker` return slot is always false: ownership now includes spawning.
 pub(crate) async fn enqueue_prompt_request_with_delivery(
     state: &AppState,
     session_id: &str,
@@ -136,6 +164,24 @@ pub(crate) async fn enqueue_prompt_request_with_delivery(
             "delivery must be steer, queue, or continue, got {delivery}"
         )));
     }
+    // The detached admission owns commit -> wake -> spawn even if the HTTP
+    // caller goes away after the durable commit.
+    let state = state.clone();
+    let session_id = session_id.to_string();
+    let delivery = delivery.to_string();
+    tokio::spawn(
+        async move { admit_prompt(&state, &session_id, request, &delivery).await },
+    )
+    .await
+    .map_err(|error| ApiError::internal(error.to_string()))?
+}
+
+async fn admit_prompt(
+    state: &AppState,
+    session_id: &str,
+    request: PromptRequest,
+    delivery: &str,
+) -> Result<(bool, usize), ApiError> {
     let _execution_admission =
         crate::execution_activity::admission_guard(state, session_id).await;
     if let Some(message_id) = request.message_id.as_ref() {
@@ -156,8 +202,20 @@ pub(crate) async fn enqueue_prompt_request_with_delivery(
                     "message {message_id} is already queued with different prompt content"
                 )));
             }
+            wake_prompt_queue(state, session_id).await;
             return Ok((false, queued.len()));
         }
+    }
+    #[cfg(test)]
+    if let Some(started) = state
+        .inner
+        .session_coordinator
+        .prompt_admission_started
+        .lock()
+        .await
+        .remove(session_id)
+    {
+        let _ = started.send(());
     }
     let queue_len = state
         .enqueue_prompt_with_event(
@@ -174,8 +232,21 @@ pub(crate) async fn enqueue_prompt_request_with_delivery(
             ),
         )
         .await?;
-    let start_worker = state.inner.session_coordinator.wake(session_id).await;
-    Ok((start_worker, queue_len))
+    wake_prompt_queue(state, session_id).await;
+    let queue_len = state
+        .inner
+        .store
+        .queued_prompt_count(session_id)
+        .await
+        .unwrap_or(queue_len);
+    // Ownership and spawning are internal; legacy callers must not spawn twice.
+    Ok((false, queue_len))
+}
+
+async fn wake_prompt_queue(state: &AppState, session_id: &str) {
+    if state.inner.session_coordinator.wake(session_id).await {
+        spawn_drain_prompt_queue(state.clone(), session_id.to_string());
+    }
 }
 
 pub(crate) async fn queue_status_snapshot(
@@ -344,57 +415,6 @@ pub(crate) async fn queued_prompt_preview(
         .and_then(queued_prompt_text)
 }
 
-async fn next_queued_prompt(
-    state: &AppState,
-    session_id: &str,
-) -> Option<(PromptRequest, String, usize)> {
-    next_prompt_with_delivery(state, session_id, None).await
-}
-
-async fn next_prompt_with_delivery(
-    state: &AppState,
-    session_id: &str,
-    delivery: Option<&str>,
-) -> Option<(PromptRequest, String, usize)> {
-    let Some((request, delivery)) = state
-        .inner
-        .store
-        .pop_queued_prompt_with_delivery(session_id, delivery)
-        .await
-        .ok()
-        .flatten()
-    else {
-        return None;
-    };
-    let remaining = state
-        .inner
-        .store
-        .queued_prompt_count(session_id)
-        .await
-        .unwrap_or(0);
-    Some((request, delivery, remaining))
-}
-
-async fn next_active_continuation_prompt(
-    state: &AppState,
-    session_id: &str,
-) -> Option<(PromptRequest, usize)> {
-    let request = state
-        .inner
-        .store
-        .pop_active_continuation_prompt(session_id)
-        .await
-        .ok()
-        .flatten()?;
-    let remaining = state
-        .inner
-        .store
-        .queued_prompt_count(session_id)
-        .await
-        .unwrap_or(0);
-    Some((request, remaining))
-}
-
 pub(crate) async fn publish_prompt_queue_status(
     state: &AppState,
     session_id: &str,
@@ -444,6 +464,27 @@ pub(crate) async fn publish_prompt_queue_status(
     state.publish(EventPayload::new(event_type::SESSION_STATUS, payload));
 }
 
+pub(crate) async fn acknowledge_prompt_admission(
+    state: &AppState,
+    session_id: &str,
+    id: &str,
+    request: Option<&PromptRequest>,
+    delivery: &str,
+) -> Result<(), ApiError> {
+    state.inner.store.acknowledge_prompt_admission(id).await?;
+    publish_prompt_queue_changed(
+        state,
+        session_id,
+        "dequeue",
+        request,
+        Some(delivery),
+        1,
+    )
+    .await;
+    publish_prompt_queue_status(state, session_id, 0).await;
+    Ok(())
+}
+
 pub(crate) async fn publish_prompt_queue_changed(
     state: &AppState,
     session_id: &str,
@@ -488,28 +529,45 @@ pub(crate) async fn drain_queued_prompts_into_active_run(
                 break;
             }
         }
-        let Some((request, remaining)) =
-            next_active_continuation_prompt(state, session_id).await
-        else {
-            break;
+        let admission = state
+            .inner
+            .store
+            .peek_prompt_admission(session_id, true)
+            .await;
+        let (id, request, delivery, saved) = match admission {
+            Ok(Some(entry)) => entry,
+            Ok(None) => break,
+            Err(error) => {
+                tracing::warn!(%error, session_id, "cannot read active prompt admission");
+                break;
+            }
         };
+        if let Err(error) = crate::session_prompt::append_prompt_admission(
+            state,
+            session_id,
+            request.clone(),
+            false,
+            Some((&id, saved, &delivery)),
+        )
+        .await
+        {
+            state.publish(EventPayload::new(
+                event_type::SESSION_ERROR,
+                json!({ "sessionID": session_id, "error": { "code": "prompt.failed", "message": error.to_string(), "retryable": true, "details": {} } }),
+            ));
+            break; // Retain failed admission; never hot-loop it.
+        }
+        drained += 1;
         publish_prompt_queue_changed(
             state,
             session_id,
-            "dequeue",
+            "snapshot",
             Some(&request),
-            Some("steer"),
+            Some(&delivery),
             1,
         )
         .await;
-        publish_prompt_queue_status(state, session_id, remaining).await;
-        drained += 1;
-        if let Err(error) = append_prompt(state, session_id, request, false).await {
-            state.publish(EventPayload::new(
-                event_type::SESSION_ERROR,
-                json!({ "sessionID": session_id, "error": { "code": "prompt.failed", "message": error.to_string(), "retryable": false, "details": {} } }),
-            ));
-        }
+        publish_prompt_queue_status(state, session_id, 0).await;
     }
     drained
 }
@@ -526,13 +584,23 @@ pub(crate) async fn drain_prompt_queue(state: AppState, session_id: String) {
     let mut prompt_failed = false;
     loop {
         wait_until_session_not_running(&state, &session_id).await;
-        if let Some(control_id) = state
-            .inner
-            .store
-            .pending_compact_id(&session_id)
-            .await
-            .unwrap_or(None)
-        {
+        let compact = match state.inner.store.pending_compact_id(&session_id).await {
+            Ok(compact) => compact,
+            Err(error) => {
+                tracing::warn!(%error, session_id, "queue control read failed; retaining durable work");
+                prompt_failed = true;
+                if state
+                    .inner
+                    .session_coordinator
+                    .park_failed_worker(&session_id)
+                    .await
+                {
+                    continue;
+                }
+                break;
+            }
+        };
+        if let Some(control_id) = compact {
             match crate::session_context::compact_queued_session_context(
                 &state,
                 &session_id,
@@ -556,11 +624,14 @@ pub(crate) async fn drain_prompt_queue(state: AppState, session_id: String) {
                         state.inner.store.remove_compact_control(&control_id).await
                     {
                         tracing::warn!(%cleanup_error, session_id, "compact cleanup failed; parking worker until a later wake or restart");
-                        state
+                        if state
                             .inner
                             .session_coordinator
                             .park_failed_worker(&session_id)
-                            .await;
+                            .await
+                        {
+                            continue;
+                        }
                         break;
                     }
                     publish_prompt_queue_changed(
@@ -576,9 +647,28 @@ pub(crate) async fn drain_prompt_queue(state: AppState, session_id: String) {
             }
             continue;
         }
-        let Some((request, delivery, remaining)) =
-            next_queued_prompt(&state, &session_id).await
-        else {
+        let admission = state
+            .inner
+            .store
+            .peek_prompt_admission(&session_id, false)
+            .await;
+        let entry = match admission {
+            Ok(entry) => entry,
+            Err(error) => {
+                tracing::warn!(%error, session_id, "queue read failed; retaining durable work");
+                if state
+                    .inner
+                    .session_coordinator
+                    .park_failed_worker(&session_id)
+                    .await
+                {
+                    continue;
+                }
+                prompt_failed = true;
+                break;
+            }
+        };
+        let Some((id, request, delivery, saved)) = entry else {
             if state
                 .inner
                 .session_coordinator
@@ -589,19 +679,27 @@ pub(crate) async fn drain_prompt_queue(state: AppState, session_id: String) {
             }
             break;
         };
-        publish_prompt_queue_changed(
+        let create_reply = !request.no_reply;
+        match crate::session_prompt::append_prompt_admission(
             &state,
             &session_id,
-            "dequeue",
-            Some(&request),
-            None,
-            1,
+            request.clone(),
+            create_reply,
+            Some((&id, saved, &delivery)),
         )
-        .await;
-        publish_prompt_queue_status(&state, &session_id, remaining).await;
-        let create_reply = !request.no_reply;
-        match append_prompt(&state, &session_id, request.clone(), create_reply).await {
+        .await
+        {
             Ok(_) => {
+                publish_prompt_queue_changed(
+                    &state,
+                    &session_id,
+                    "snapshot",
+                    Some(&request),
+                    Some(&delivery),
+                    1,
+                )
+                .await;
+                publish_prompt_queue_status(&state, &session_id, 0).await;
                 if let Err(error) = crate::session_actions::acknowledge_parent_subtask_completion_delivery(
                     &state,
                     &session_id,
@@ -613,56 +711,36 @@ pub(crate) async fn drain_prompt_queue(state: AppState, session_id: String) {
                 }
             }
             Err(error) => {
-                // A run can claim the session between our idle observation and
-                // append_prompt's own runs check (e.g. the user submits a prompt
-                // right as the queue drains). The popped prompt — possibly a
-                // subagent/background-task completion notification — must NOT be
-                // dropped: put it back at the front of the durable queue and wait
-                // for the run to finish. Only this exact transient conflict
-                // requeues; content conflicts and hard errors surface as before,
-                // so a poisoned prompt can never hot-loop the worker.
+                // The original row remains durable until initialization hands
+                // off. Run-claim races can retry without deleting/reinserting.
                 let session_running = error.is_conflict()
                     && error.to_string()
                         == crate::session_prompt::SESSION_RUNNING_CONFLICT;
                 if session_running {
-                    match state
-                        .inner
-                        .store
-                        .requeue_prompt_front_with_delivery(
-                            &session_id,
-                            &request,
-                            &delivery,
-                        )
-                        .await
-                    {
-                        Ok(queue_len) => {
-                            publish_prompt_queue_changed(
-                                &state,
-                                &session_id,
-                                "requeue",
-                                Some(&request),
-                                Some(&delivery),
-                                0,
-                            )
-                            .await;
-                            publish_prompt_queue_status(&state, &session_id, queue_len)
-                                .await;
-                            continue;
-                        }
-                        Err(requeue_error) => {
-                            tracing::warn!(
-                                session_id = %session_id,
-                                error = %requeue_error,
-                                "failed to requeue prompt after run conflict; surfacing loss"
-                            );
-                        }
-                    }
+                    continue;
                 }
                 state.publish(EventPayload::new(
                 event_type::SESSION_ERROR,
                 json!({ "sessionID": session_id, "error": { "code": "prompt.failed", "message": error.to_string(), "retryable": false, "details": {} } }),
             ));
                 prompt_failed = true;
+                // Once handed off, an execution error must not strand unrelated
+                // later admissions, nor cause this turn to be replayed.
+                if matches!(
+                    state.inner.store.prompt_admission_saved(&id).await,
+                    Ok(None)
+                ) {
+                    continue;
+                }
+                if state
+                    .inner
+                    .session_coordinator
+                    .park_failed_worker(&session_id)
+                    .await
+                {
+                    continue;
+                }
+                break;
             }
         }
     }

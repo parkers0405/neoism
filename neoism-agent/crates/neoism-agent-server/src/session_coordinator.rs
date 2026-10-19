@@ -8,6 +8,12 @@ use crate::state::SessionRun;
 #[derive(Default)]
 pub(crate) struct SessionCoordinator {
     entries: Mutex<HashMap<String, Entry>>,
+    prompt_admissions: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    #[cfg(test)]
+    pub(crate) prompt_admission_started:
+        Mutex<HashMap<String, tokio::sync::oneshot::Sender<()>>>,
+    #[cfg(test)]
+    pub(crate) fail_prompt_after_save: Mutex<std::collections::HashSet<String>>,
     // Per-state, per-session handshake: tests must not infer a suspension point
     // from a broadcast event (a ready stub can finish in the same task poll).
     #[cfg(test)]
@@ -34,6 +40,21 @@ impl Default for Entry {
 }
 
 impl SessionCoordinator {
+    /// Serialize only prompt initialization, never model or tool execution.
+    pub(crate) async fn prompt_admission_guard(
+        &self,
+        session_id: &str,
+    ) -> tokio::sync::OwnedMutexGuard<()> {
+        let gate = self
+            .prompt_admissions
+            .lock()
+            .await
+            .entry(session_id.to_string())
+            .or_default()
+            .clone();
+        gate.lock_owned().await
+    }
+
     /// Claim the one execution slot for a session. Different session keys do
     /// not contend, while a duplicate caller receives the active run to join
     /// or reject without ever replacing its cancellation handle.
@@ -130,16 +151,10 @@ impl SessionCoordinator {
 
     /// A store outage must not spin on an unremovable control. Durable work is
     /// retained; a later admission/restart may retry after the store recovers.
-    pub(crate) async fn park_failed_worker(&self, session_id: &str) {
-        let mut entries = self.entries.lock().await;
-        if let Some(entry) = entries.get_mut(session_id) {
-            entry.worker = false;
-            entry.pending_wake = false;
-            entry.changed.notify_waiters();
-            if entry.run.is_none() {
-                entries.remove(session_id);
-            }
-        }
+    pub(crate) async fn park_failed_worker(&self, session_id: &str) -> bool {
+        // Do not lose an admission racing the failed attempt. Consume at most
+        // one coalesced wake, otherwise release ownership until a later wake.
+        self.finish_worker_cycle(session_id).await
     }
 
     /// The active run for a session, if any. This is the single in-memory
@@ -265,6 +280,18 @@ mod tests {
             .expect("idle waiter should be notified")
             .unwrap();
         assert!(coordinator.finish_run("two", "run-3").await);
+    }
+
+    #[tokio::test]
+    async fn failed_worker_preserves_a_racing_admission_wake() {
+        let coordinator = SessionCoordinator::default();
+        assert!(coordinator.wake("one").await);
+        assert!(!coordinator.wake("one").await);
+        assert!(coordinator.park_failed_worker("one").await);
+        assert!(coordinator.worker_active("one").await);
+        assert!(!coordinator.park_failed_worker("one").await);
+        assert!(!coordinator.worker_active("one").await);
+        assert!(coordinator.wake("one").await);
     }
 
     #[tokio::test]

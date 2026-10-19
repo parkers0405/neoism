@@ -371,17 +371,27 @@ async fn create_session_in_directory_inner(
     }
     let now = now_millis();
     let id = neoism_agent_core::new_session_id();
-    let directory = crate::windows_process::canonicalize_path(FsPath::new(directory))
+    let directory = directory.to_owned();
+    let directory = tokio::task::spawn_blocking(move || {
+        let directory = crate::windows_process::canonicalize_path(FsPath::new(
+            &directory,
+        ))
         .map_err(|error| {
             ApiError::bad_request(format!(
                 "workflow directory is not accessible: {error}"
             ))
         })?;
-    if !directory.is_dir() {
-        return Err(ApiError::bad_request(
-            "workflow directory is not a directory",
-        ));
-    }
+        if !directory.is_dir() {
+            return Err(ApiError::bad_request(
+                "workflow directory is not a directory",
+            ));
+        }
+        Ok(directory)
+    })
+    .await
+    .map_err(|error| {
+        ApiError::internal(format!("directory discovery failed: {error}"))
+    })??;
     if let (Some(runtime), Some(choices)) = (external, request.external_options.take()) {
         let draft = crate::external_agent::options::validate_draft(
             state,
@@ -402,7 +412,30 @@ async fn create_session_in_directory_inner(
             metadata[key] = draft[key].clone();
         }
     }
-    let project_context = project::discover(state.services(), directory);
+    if state
+        .services()
+        .workspace_worker
+        .as_ref()
+        .is_some_and(|worker| !worker.admits_path(&directory))
+    {
+        return Err(ApiError::forbidden(
+            "Session directory is outside the worker root",
+        ));
+    }
+    // Both are workspace-scoped and independent. Do not serialize cold Git
+    // discovery ahead of plugin initialization, or run Git on an async worker.
+    let directory_text = directory.to_string_lossy().to_string();
+    let (project_context, snapshot) = tokio::join!(
+        state
+            .inner
+            .workspace_runtimes
+            .project_discovery
+            .discover(state.services(), directory),
+        state.plugin_snapshot(&directory_text),
+    );
+    let project_context = project_context.map_err(|error| {
+        ApiError::internal(format!("project discovery failed: {error}"))
+    })?;
     let directory = project_context.directory.clone();
     if state
         .services()
@@ -414,7 +447,6 @@ async fn create_session_in_directory_inner(
             "Discovered project is outside the worker root",
         ));
     }
-    let snapshot = state.plugin_snapshot(&directory).await;
     let loaded_config = snapshot.config();
     let agents = crate::plugins::agent_catalog(&snapshot, &directory)?;
     let is_child = request.parent_id.is_some();

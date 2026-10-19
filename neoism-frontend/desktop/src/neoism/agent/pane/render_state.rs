@@ -729,9 +729,10 @@ impl NeoismAgentPane {
         // Reserve that entire row for its existing Background task menu.
         !self.background_status_contains(x, y)
             && self.activity_session_id == self.session_id
-            && self.activity_status_rects.iter().any(|rect| {
-                interaction_policy::rect_contains(*rect, x, y)
-            })
+            && self
+                .activity_status_rects
+                .iter()
+                .any(|rect| interaction_policy::rect_contains(*rect, x, y))
     }
 
     pub fn pop_activity_status_click(&mut self, x: f32, y: f32) -> bool {

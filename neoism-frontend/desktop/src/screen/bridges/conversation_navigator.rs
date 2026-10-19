@@ -20,17 +20,28 @@ struct SearchIdentity {
     generation: u64,
     server: String,
     query: String,
+    directory: Option<String>,
 }
 
 impl SearchIdentity {
-    fn advance(&mut self, server: String, query: String) {
+    fn advance(&mut self, server: String, query: String, directory: Option<String>) {
         self.generation = self.generation.wrapping_add(1);
         self.server = server;
         self.query = query;
+        self.directory = directory;
     }
 
-    fn accepts(&self, reply: &Self, active_search: bool, current_server: &str) -> bool {
-        active_search && self == reply && self.server == current_server
+    fn accepts(
+        &self,
+        reply: &Self,
+        active_search: bool,
+        current_server: &str,
+        directory: Option<&str>,
+    ) -> bool {
+        active_search
+            && self == reply
+            && self.server == current_server
+            && self.directory.as_deref() == directory
     }
 }
 
@@ -78,8 +89,8 @@ impl Default for ConversationSearchState {
 fn fetch(request: &SearchRequest) -> SearchReply {
     let identity = request.identity.clone();
     let result = if identity.query.trim().is_empty() {
-        // Initial view is a bounded, newest-first GLOBAL authorized root list.
-        // No directory is sent, and no transcript request is necessary.
+        // Initial view uses the same sidebar scope as transcript search.
+        // No transcript request is necessary.
         let mut cursor = None;
         let mut entries = Vec::new();
         let mut error = None;
@@ -87,7 +98,7 @@ fn fetch(request: &SearchRequest) -> SearchReply {
             match fetch_session_entries_page(
                 &identity.server,
                 request.current.as_deref(),
-                None,
+                identity.directory.as_deref(),
                 cursor.as_deref(),
             ) {
                 Ok((page, next)) => {
@@ -113,7 +124,7 @@ fn fetch(request: &SearchRequest) -> SearchReply {
             &identity.server,
             &identity.query,
             request.current.as_deref(),
-            None,
+            identity.directory.as_deref(),
             request.transcript_enabled,
         )
         .map(|(hits, unavailable, indexing)| {
@@ -312,7 +323,7 @@ impl Screen<'_> {
         }
         self.conversation_search
             .identity
-            .advance(String::new(), String::new());
+            .advance(String::new(), String::new(), None);
         self.conversation_search.entries.clear();
     }
 
@@ -325,9 +336,15 @@ impl Screen<'_> {
     fn queue_conversation_search(&mut self) {
         let server = self.conversation_search_endpoint();
         let query = self.renderer.conversation_navigator.query().to_owned();
+        let directory = self
+            .renderer
+            .conversations_pane
+            .side_panel()
+            .catalog_directory()
+            .map(str::to_owned);
         self.conversation_search
             .identity
-            .advance(server.clone(), query);
+            .advance(server.clone(), query, directory);
         self.conversation_search.entries.clear();
         self.renderer.conversation_navigator.set_rows(Vec::new());
         self.renderer.conversation_navigator.set_error(None);
@@ -389,7 +406,16 @@ impl Screen<'_> {
             self.renderer.conversation_navigator.mode(),
             Some(Mode::Search)
         );
-        if search && self.conversation_search.identity.server != server {
+        let directory = self
+            .renderer
+            .conversations_pane
+            .side_panel()
+            .catalog_directory()
+            .map(str::to_owned);
+        if search
+            && (self.conversation_search.identity.server != server
+                || self.conversation_search.identity.directory != directory)
+        {
             self.close_conversation_navigator();
         }
         while let Ok(reply) = self.conversation_search.replies.1.try_recv() {
@@ -401,6 +427,7 @@ impl Screen<'_> {
                 &reply.identity,
                 active,
                 &server,
+                directory.as_deref(),
             ) {
                 continue;
             }
@@ -434,7 +461,10 @@ impl Screen<'_> {
         match self.renderer.conversation_navigator.mode() {
             Some(Mode::Search) => {
                 let server = self.conversation_search.identity.server.clone();
-                if server != self.conversation_search_endpoint() {
+                if server != self.conversation_search_endpoint()
+                    || self.conversation_search.identity.directory.as_deref()
+                        != self.renderer.conversations_pane.side_panel().catalog_directory()
+                {
                     self.close_conversation_navigator();
                     return;
                 }
@@ -527,24 +557,37 @@ mod tests {
     #[test]
     fn generation_rejects_stale_same_query_and_endpoint() {
         let mut identity = SearchIdentity::default();
-        identity.advance("server-a".into(), "hello".into());
+        identity.advance("server-a".into(), "hello".into(), None);
         let old = identity.clone();
-        identity.advance("server-a".into(), "hello".into());
-        assert!(!identity.accepts(&old, true, "server-a"));
-        assert!(identity.accepts(&identity, true, "server-a"));
-        assert!(!identity.accepts(&identity, false, "server-a"));
-        assert!(!identity.accepts(&identity, true, "server-b"));
+        identity.advance("server-a".into(), "hello".into(), None);
+        assert!(!identity.accepts(&old, true, "server-a", None));
+        assert!(identity.accepts(&identity, true, "server-a", None));
+        assert!(!identity.accepts(&identity, false, "server-a", None));
+        assert!(!identity.accepts(&identity, true, "server-b", None));
     }
 
     #[test]
     fn dismiss_and_project_picker_invalidate_inflight_results() {
         let mut identity = SearchIdentity::default();
-        identity.advance("a".into(), "".into());
+        identity.advance("a".into(), "".into(), None);
         let inflight = identity.clone();
-        identity.advance(String::new(), String::new());
-        assert!(!identity.accepts(&inflight, false, "a"));
-        identity.advance("a".into(), "".into());
-        assert!(!identity.accepts(&inflight, true, "a"));
+        identity.advance(String::new(), String::new(), None);
+        assert!(!identity.accepts(&inflight, false, "a", None));
+        identity.advance("a".into(), "".into(), None);
+        assert!(!identity.accepts(&inflight, true, "a", None));
+    }
+
+    #[test]
+    fn same_server_scope_switch_rejects_replies_before_and_after_invalidation() {
+        let mut identity = SearchIdentity::default();
+        identity.advance("a".into(), "needle".into(), None);
+        let global = identity.clone();
+        assert!(!identity.accepts(&global, true, "a", Some("/project")));
+        identity.advance("a".into(), "needle".into(), Some("/project".into()));
+        assert!(!identity.accepts(&global, true, "a", Some("/project")));
+        assert!(identity.accepts(&identity, true, "a", Some("/project")));
+        assert!(!identity.accepts(&identity, true, "a", None));
+        assert!(!identity.accepts(&identity, true, "a", Some("/other")));
     }
 
     #[test]

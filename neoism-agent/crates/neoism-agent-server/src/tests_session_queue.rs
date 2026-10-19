@@ -1,5 +1,502 @@
 use super::*;
 
+/// Exercise the actual queue worker and streaming provider, not noReply or a
+/// synthetic installed run. The prompt lock lets the burst case commit both
+/// requests before the worker can claim either one, without timing sleeps.
+async fn stub_queue_rollover_after_settlement(burst: bool) {
+    let path = std::env::temp_dir().join(format!(
+        "neoism-stub-queue-rollover-{}.db",
+        Id::ascending(IdKind::Event)
+    ));
+    let state = AppState::open_database(path.clone()).await.unwrap();
+    let app = app(state.clone());
+    let session: SessionInfo = response_json(
+        app.clone()
+            .oneshot(request(
+                Method::POST,
+                "/v2/sessions",
+                Some(json!({
+                    "model": {"providerId": "neoism", "id": "stub"}
+                })),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    // This is the same ordered broadcast consumed by the SSE routes.
+    let mut events = state.subscribe();
+    let first_id = Id::ascending(IdKind::Message).to_string();
+    let post = |message_id: String, text: &'static str| {
+        let app = app.clone();
+        let uri = format!("/v2/sessions/{}/prompt-async", session.id);
+        async move {
+            let response = app
+                .oneshot(request(
+                    Method::POST,
+                    &uri,
+                    Some(json!({
+"messageId": message_id,
+                "model": {"providerId": "neoism", "modelId": "stub"},
+                        "parts": [{"type": "text", "text": text}]
+                    })),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        }
+    };
+    post(first_id.clone(), "first rollover turn").await;
+    let first = wait_for_stub_queue_settlement(&state, session.id.as_str(), 1).await;
+    assert_eq!(first.root_message_id, first_id);
+
+    let mut observed = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        observed.push(event);
+    }
+    let dequeue = observed
+        .iter()
+        .position(|event| {
+            event.kind == event_type::SESSION_QUEUE_UPDATED
+                && event.properties["action"] == "dequeue"
+                && event.properties["queue"]["count"] == 0
+        })
+        .expect("handoff must publish the empty queue");
+    let reply = observed
+        .iter()
+        .position(|event| event.kind == event_type::MESSAGE_PART_DELTA)
+        .expect("stub must stream a real provider reply");
+    assert!(
+        dequeue < reply,
+        "queue must dequeue before provider reply, not after completion"
+    );
+
+    let second_id = Id::ascending(IdKind::Message).to_string();
+    let third_id = Id::ascending(IdKind::Message).to_string();
+    if burst {
+        let admission = state
+            .inner
+            .session_coordinator
+            .prompt_admission_guard(session.id.as_str())
+            .await;
+        post(second_id.clone(), "second rollover turn").await;
+        post(third_id.clone(), "third rollover turn").await;
+        assert_eq!(
+            state
+                .inner
+                .store
+                .queued_prompt_count(session.id.as_str())
+                .await
+                .unwrap(),
+            2
+        );
+        drop(admission);
+    } else {
+        post(second_id.clone(), "second rollover turn").await;
+    }
+    let final_execution = wait_for_stub_queue_settlement(
+        &state,
+        session.id.as_str(),
+        if burst { 3 } else { 2 },
+    )
+    .await;
+    assert_ne!(
+        first.execution_id, final_execution.execution_id,
+        "a settled execution must roll over despite the retained admission row"
+    );
+    assert_eq!(final_execution.root_session_id, session.id.to_string());
+    // Queued turns may share their newly admitted execution, but never the
+    // already-finished first root.
+    assert!(
+        final_execution.root_message_id == second_id
+            || (burst && final_execution.root_message_id == third_id)
+    );
+    let messages = state
+        .inner
+        .store
+        .list_messages(session.id.as_str())
+        .await
+        .unwrap();
+    for id in [&first_id, &second_id]
+        .into_iter()
+        .chain(burst.then_some(&third_id))
+    {
+        assert_eq!(messages.iter().filter(|m| {
+            matches!(&m.info, MessageInfo::User(info) if info.id.to_string() == *id)
+        }).count(), 1, "each distinct messageID must be persisted once");
+    }
+    state.inner.store.close().await;
+    cleanup_sqlite_files(&path);
+}
+
+async fn wait_for_stub_queue_settlement(
+    state: &AppState,
+    session_id: &str,
+    turns: usize,
+) -> neoism_agent_core::ExecutionActivitySnapshot {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let messages = state.inner.store.list_messages(session_id).await.unwrap();
+            let replies = messages.iter().filter(|m| {
+                matches!(&m.info, MessageInfo::Assistant(_))
+                    && m.parts.iter().any(|p| matches!(p, Part::Text(t) if t.text.contains("Received:")))
+            }).count();
+            let execution = state.inner.store.get_execution_activity(session_id).await.unwrap();
+            if replies >= turns
+                && execution.as_ref().is_some_and(|e| e.finished && e.active_segments.is_empty())
+                && state.inner.store.queued_prompt_count(session_id).await.unwrap() == 0
+                && state.inner.session_coordinator.active_run(session_id).await.is_none()
+                && !state.inner.session_coordinator.worker_active(session_id).await
+            {
+                return execution.unwrap();
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.expect("stub replies, finished execution, empty queue and no run/worker must all settle")
+}
+
+#[tokio::test]
+async fn stub_queue_second_prompt_rolls_over_finished_execution() {
+    stub_queue_rollover_after_settlement(false).await;
+}
+
+#[tokio::test]
+async fn stub_queue_two_prompts_after_settlement_roll_over_finished_execution() {
+    stub_queue_rollover_after_settlement(true).await;
+}
+
+/// A failure after the durable user insert must not lose the turn or turn an
+/// exact retry into a no-op before execution initialization.
+#[tokio::test]
+async fn retained_admission_recovers_post_save_without_replaying_handoff() {
+    let path = std::env::temp_dir().join(format!(
+        "neoism-admission-{}.db",
+        Id::ascending(IdKind::Event)
+    ));
+    let state = AppState::open_database(path.clone()).await.unwrap();
+    let app = app(state.clone());
+    let session: SessionInfo = response_json(
+        app.clone()
+            .oneshot(request(
+                Method::POST,
+                "/v2/sessions",
+                Some(json!({"model": {"providerId": "neoism", "id": "stub"}})),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let prompt: PromptRequest = serde_json::from_value(json!({
+        "model": {"providerId": "neoism", "modelId": "stub"},
+        "parts": [{"type": "text", "text": "recover durable admission"}]
+    }))
+    .unwrap();
+    state
+        .inner
+        .store
+        .enqueue_prompt_with_delivery(session.id.as_str(), &prompt, "queue")
+        .await
+        .unwrap();
+    let (id, queued, _, saved) = state
+        .inner
+        .store
+        .peek_prompt_admission(session.id.as_str(), false)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!saved);
+    state
+        .inner
+        .session_coordinator
+        .fail_prompt_after_save
+        .lock()
+        .await
+        .insert(session.id.to_string());
+    let mut admission_events = state.subscribe();
+    let error = crate::session_prompt::append_prompt_admission(
+        &state,
+        session.id.as_str(),
+        queued.clone(),
+        true,
+        Some((&id, saved, "queue")),
+    )
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("injected post-save"));
+    assert_eq!(
+        state.inner.store.prompt_admission_saved(&id).await.unwrap(),
+        Some(true),
+        "the saved recovery token must survive until durable run handoff"
+    );
+    while let Ok(event) = admission_events.try_recv() {
+        assert!(
+            !(event.kind == event_type::SESSION_QUEUE_UPDATED
+                && event.properties["action"] == "dequeue"),
+            "a failed pre-handoff admission must not publish dequeue"
+        );
+    }
+    assert!(state
+        .inner
+        .session_coordinator
+        .active_run(session.id.as_str())
+        .await
+        .is_none());
+    assert_eq!(
+        state
+            .inner
+            .store
+            .queued_prompt_count(session.id.as_str())
+            .await
+            .unwrap(),
+        1
+    );
+    let (_, retry, _, saved) = state
+        .inner
+        .store
+        .peek_prompt_admission(session.id.as_str(), false)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        saved,
+        "user insert and recovery marker must commit together"
+    );
+    assert_eq!(retry.message_id, queued.message_id);
+    drop(app);
+    drop(state);
+    let state = AppState::open_database(path.clone()).await.unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        state
+            .inner
+            .session_coordinator
+            .wait_until_settled(session.id.as_str()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        state
+            .inner
+            .store
+            .queued_prompt_count(session.id.as_str())
+            .await
+            .unwrap(),
+        0
+    );
+    let messages = state
+        .inner
+        .store
+        .list_messages(session.id.as_str())
+        .await
+        .unwrap();
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|m| matches!(m.info, MessageInfo::User(_)))
+            .count(),
+        1
+    );
+    assert!(messages
+        .iter()
+        .any(|m| matches!(m.info, MessageInfo::Assistant(_))));
+    // A new admission of the same message must dedupe, not restart generation.
+    state
+        .inner
+        .store
+        .enqueue_prompt_with_delivery(session.id.as_str(), &retry, "queue")
+        .await
+        .unwrap();
+    let (id, retry, _, saved) = state
+        .inner
+        .store
+        .peek_prompt_admission(session.id.as_str(), false)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!saved);
+    crate::session_prompt::append_prompt_admission(
+        &state,
+        session.id.as_str(),
+        retry,
+        true,
+        Some((&id, saved, "queue")),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        state
+            .inner
+            .store
+            .list_messages(session.id.as_str())
+            .await
+            .unwrap()
+            .len(),
+        messages.len()
+    );
+    assert_eq!(
+        state
+            .inner
+            .store
+            .queued_prompt_count(session.id.as_str())
+            .await
+            .unwrap(),
+        0
+    );
+    cleanup_sqlite_files(&path);
+}
+
+#[tokio::test]
+async fn cancelled_admission_caller_cannot_strand_committed_work() {
+    let path = std::env::temp_dir().join(format!(
+        "neoism-admission-cancel-{}.db",
+        Id::ascending(IdKind::Event)
+    ));
+    let state = AppState::open_database(path.clone()).await.unwrap();
+    let app = app(state.clone());
+    let session: SessionInfo = response_json(
+        app.oneshot(request(Method::POST, "/v2/sessions", Some(json!({}))))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let prompt: PromptRequest = serde_json::from_value(json!({
+        "noReply": true, "parts": [{"type": "text", "text": "survive caller cancellation"}]
+    })).unwrap();
+    let (started, observed) = tokio::sync::oneshot::channel();
+    state
+        .inner
+        .session_coordinator
+        .prompt_admission_started
+        .lock()
+        .await
+        .insert(session.id.to_string(), started);
+    let writer = state.inner.store.lock_writer_for_test().await;
+    let caller = tokio::spawn({
+        let state = state.clone();
+        let id = session.id.to_string();
+        async move {
+            crate::session_queue::enqueue_prompt_request_with_delivery(
+                &state, &id, prompt, "queue",
+            )
+            .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(5), observed)
+        .await
+        .unwrap()
+        .unwrap();
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    drop(writer);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if state
+                .inner
+                .store
+                .list_messages(session.id.as_str())
+                .await
+                .unwrap()
+                .len()
+                == 1
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("detached admission must commit, wake and execute without its caller");
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        state
+            .inner
+            .session_coordinator
+            .wait_until_settled(session.id.as_str()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        state
+            .inner
+            .store
+            .queued_prompt_count(session.id.as_str())
+            .await
+            .unwrap(),
+        0
+    );
+    cleanup_sqlite_files(&path);
+}
+
+#[tokio::test]
+async fn duplicate_queued_submission_restarts_missing_worker() {
+    let path = std::env::temp_dir().join(format!(
+        "neoism-admission-wake-{}.db",
+        Id::ascending(IdKind::Event)
+    ));
+    let state = AppState::open_database(path.clone()).await.unwrap();
+    let app = app(state.clone());
+    let session: SessionInfo = response_json(
+        app.oneshot(request(Method::POST, "/v2/sessions", Some(json!({}))))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let prompt: PromptRequest = serde_json::from_value(json!({
+        "messageId": Id::ascending(IdKind::Message), "noReply": true,
+        "parts": [{"type": "text", "text": "wake retained work"}]
+    }))
+    .unwrap();
+    state
+        .inner
+        .store
+        .enqueue_prompt_with_delivery(session.id.as_str(), &prompt, "queue")
+        .await
+        .unwrap();
+    assert!(
+        !state
+            .inner
+            .session_coordinator
+            .worker_active(session.id.as_str())
+            .await
+    );
+    crate::session_queue::enqueue_prompt_request_with_delivery(
+        &state,
+        session.id.as_str(),
+        prompt,
+        "queue",
+    )
+    .await
+    .unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        state
+            .inner
+            .session_coordinator
+            .wait_until_settled(session.id.as_str()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        state
+            .inner
+            .store
+            .queued_prompt_count(session.id.as_str())
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        state
+            .inner
+            .store
+            .list_messages(session.id.as_str())
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    cleanup_sqlite_files(&path);
+}
+
 /// A normal root prompt may carry first-party per-turn system instructions
 /// (for example an explicitly attached skill). Those instructions must not
 /// make execution admission treat the prompt as a child/internal continuation.
@@ -267,9 +764,12 @@ async fn session_abort_cancels_running_bash_tool() {
     );
     // Cancellation may win while the process is starting (including during
     // one-time login-environment hydration), in which case no command output
-    // exists yet. If the command did start, already-emitted output is kept.
+    // exists yet and the error can be just `command aborted`. If the command
+    // did start, already-emitted output is kept.
     assert!(
-        error.contains("started") || error.contains("(no output)"),
+        error.contains("started")
+            || error.contains("(no output)")
+            || error.eq_ignore_ascii_case("command aborted"),
         "{error}"
     );
     assert!(!error.contains("finished"), "{error}");
@@ -1127,6 +1627,15 @@ async fn held_subtask_completion_delivers_when_parent_turn_ends() {
 
     // Finished child with a durable pending completion (the outbox entry
     // `mark_subtask_completion_pending` writes).
+    // Hold parent queue ownership while inspecting admission, rather than
+    // depending on projections delaying the worker's spawn.
+    assert!(
+        state
+            .inner
+            .session_coordinator
+            .wake(parent.id.as_str())
+            .await
+    );
     let child_id = neoism_agent_core::new_session_id();
     let completion_id = Id::ascending(IdKind::Message);
     let mut child_extra = BTreeMap::new();
@@ -1267,6 +1776,15 @@ async fn queued_continue_prompt_notifies_parent_when_child_goes_idle() {
     )
     .await;
 
+    // Hold parent queue ownership while inspecting admission, rather than
+    // depending on projections delaying the worker's spawn.
+    assert!(
+        state
+            .inner
+            .session_coordinator
+            .wake(parent.id.as_str())
+            .await
+    );
     let child_id = neoism_agent_core::new_session_id();
     let child = SessionInfo {
         id: child_id.clone(),
@@ -1396,6 +1914,15 @@ async fn queued_child_prompt_supersedes_older_wrapper_and_notifies_at_final_idle
             .unwrap(),
     )
     .await;
+    // Hold parent queue ownership while inspecting admission, rather than
+    // depending on projections delaying the worker's spawn.
+    assert!(
+        state
+            .inner
+            .session_coordinator
+            .wake(parent.id.as_str())
+            .await
+    );
     let child_id = neoism_agent_core::new_session_id();
     let child = SessionInfo {
         id: child_id.clone(),

@@ -2,7 +2,9 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 const DEFAULT_SERVER: &str = "http://127.0.0.1:4096";
-const STARTUP_TIMEOUT: Duration = Duration::from_secs(8);
+// Match the service owner's cold-start budget. This runs only on request
+// workers; a slow machine must not turn an ongoing boot into a failed prompt.
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(120);
 const PROBE_TIMEOUT: Duration = Duration::from_millis(500);
 const MAX_HEALTH_BYTES: usize = 16 * 1024;
 
@@ -51,17 +53,18 @@ fn ensure_started_for_request_inner(server: &str) -> Result<(), String> {
             .map_err(|_| "Could not create agent readiness probe".to_string())?;
         let wait = async {
             loop {
-                if probe_health(&client, &url).await {
+                let health = probe_health(&client, &url).await;
+                if health == HealthProbe::Ready {
                     return Ok(());
                 }
-                if !local {
+                if !local && health != HealthProbe::Starting {
                     return Err("The selected agent endpoint is not ready or did not return a valid agent health response".to_string());
                 }
                 // Healthy standalone agents need no workspace sidecar. Only
                 // acquire an owner after a failed LOCAL probe. Concurrent GUI
                 // and CLI-style requests share the same service registry.
                 static OWNER: OnceLock<crate::service_process::ServiceProcess> = OnceLock::new();
-                if OWNER.get().is_none() {
+                if local && OWNER.get().is_none() {
                     let owner = crate::service_process::spawn_daemon()
                         .map_err(|_| "Could not start the local workspace service".to_string())?;
                     let _ = OWNER.set(owner);
@@ -70,7 +73,7 @@ fn ensure_started_for_request_inner(server: &str) -> Result<(), String> {
             }
         };
         tokio::time::timeout(STARTUP_TIMEOUT, wait).await.unwrap_or_else(|_| {
-            Err("Local agent is still starting or unavailable; the service will keep retrying. Try again shortly (see log/workspace-service.log).".to_string())
+            Err("Agent is still starting or recovering; the request waited 120 seconds. The local service keeps retrying (see log/workspace-service.log).".to_string())
         })
     });
     // Tokio's ordinary Drop waits for outstanding blocking tasks. DNS lookup
@@ -129,15 +132,28 @@ fn matches_owned_local_endpoint(server: &str, configured: &str) -> bool {
         && actual.path() == configured.path()
 }
 
-async fn probe_health(client: &reqwest::Client, url: &url::Url) -> bool {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HealthProbe {
+    Ready,
+    Starting,
+    Invalid,
+}
+
+async fn probe_health(client: &reqwest::Client, url: &url::Url) -> HealthProbe {
     // timeout covers the complete body, not just connection/headers. Neither
     // a trickling response nor an arbitrary listener can claim readiness.
     tokio::time::timeout(PROBE_TIMEOUT, async {
-        let Ok(mut response) = client.get(url.clone()).send().await else {
-            return false;
+        let response = client.get(url.clone()).send().await;
+        let mut response = match response {
+            Ok(response) => response,
+            Err(error) if error.is_connect() => return HealthProbe::Starting,
+            Err(_) => return HealthProbe::Invalid,
         };
+        if matches!(response.status().as_u16(), 429 | 502 | 503 | 504) {
+            return HealthProbe::Starting;
+        }
         if response.status() != reqwest::StatusCode::OK {
-            return false;
+            return HealthProbe::Invalid;
         }
         let mut body = Vec::new();
         loop {
@@ -146,13 +162,17 @@ async fn probe_health(client: &reqwest::Client, url: &url::Url) -> bool {
                     body.extend_from_slice(&chunk)
                 }
                 Ok(None) => break,
-                _ => return false,
+                _ => return HealthProbe::Invalid,
             }
         }
-        valid_health(&body)
+        if valid_health(&body) {
+            HealthProbe::Ready
+        } else {
+            HealthProbe::Invalid
+        }
     })
     .await
-    .unwrap_or(false)
+    .unwrap_or(HealthProbe::Invalid)
 }
 
 fn valid_health(body: &[u8]) -> bool {
@@ -202,6 +222,28 @@ mod tests {
             let body =
                 r#"{"healthy":true,"version":"1","provider_credential_store":"test"}"#;
             write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        });
+        assert!(ensure_started_for_request(&server).is_ok());
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn proxied_startup_retries_without_acquiring_a_local_owner() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let server = format!("http://{}/agent", listener.local_addr().unwrap());
+        assert!(!is_owned_local_endpoint(&server));
+        let worker = std::thread::spawn(move || {
+            for status in ["503 Service Unavailable", "200 OK"] {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                let mut request = [0; 4096];
+                let _ = stream.read(&mut request).unwrap();
+                let body = r#"{"healthy":true,"version":"test","providerCredentialStore":"test"}"#;
+                write!(stream, "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            }
         });
         assert!(ensure_started_for_request(&server).is_ok());
         worker.join().unwrap();

@@ -1136,9 +1136,102 @@ impl SessionGoal {
     }
 }
 
-/// Per-pane side panel state. Holds animation springs, scroll cursor,
-/// and the cached session list. Refreshing the list is the pane's
-/// responsibility — see [`NeoismAgentPane::request_side_panel_refresh`].
+#[cfg(test)]
+mod resilience_tests {
+    use super::*;
+
+    fn chat(id: &str) -> NeoismAgentSessionEntry {
+        NeoismAgentSessionEntry::new(id, id, "now").with_directory(Some("/work".into()))
+    }
+
+    #[test]
+    fn ordered_mutations_delete_and_recreate_without_losing_other_rows() {
+        use CatalogSessionMutation::{Delete, Upsert};
+        let mut panel = NeoismAgentSidePanel::default();
+        panel.upsert_sessions([chat("a"), chat("b"), chat("c")]);
+        panel.selected = panel.sessions.iter().position(|e| e.id == "b").unwrap();
+        let anchor = panel.session_viewport_anchor();
+        panel.apply_session_mutations([
+            Delete("a".into()),
+            Upsert(chat("a")),
+            Upsert(chat("c")),
+            Delete("c".into()),
+        ]);
+        assert_eq!(
+            panel
+                .all_sessions
+                .iter()
+                .map(|e| e.id.as_str())
+                .collect::<Vec<_>>(),
+            ["b", "a"]
+        );
+        assert_eq!(panel.selected_catalog_row().unwrap().id, "b");
+        assert_eq!(panel.session_viewport_anchor(), anchor);
+        assert!(!panel.deleted_session_ids.contains("a"));
+        assert!(panel.deleted_session_ids.contains("c"));
+        panel.apply_session_mutations([]);
+        assert_eq!(panel.selected_catalog_row().unwrap().id, "b");
+    }
+
+    #[test]
+    fn mixed_batch_preserves_scrolled_anchor_and_selected_identity() {
+        let mut panel = NeoismAgentSidePanel::default();
+        panel.upsert_sessions((0..30).map(|n| {
+            let mut entry = chat(&format!("chat-{n}"));
+            entry.updated_ms = n;
+            entry
+        }));
+        panel.last_panel_height_rows = 3;
+        let index = panel.sessions.iter().position(|e| e.id == "chat-15").unwrap();
+        panel.selected = index;
+        panel.scroll_px = index as f32 * panel.row_height() + 5.0;
+        panel.scroll_top = index;
+        let anchor = panel.session_viewport_anchor();
+        let mut renamed = chat("chat-15");
+        renamed.title = "renamed".into();
+        renamed.updated_ms = 15;
+        panel.apply_session_mutations([
+            CatalogSessionMutation::Delete("chat-29".into()),
+            CatalogSessionMutation::Upsert(renamed),
+        ]);
+        assert_eq!(panel.selected_catalog_row().unwrap().id, "chat-15");
+        assert_eq!(panel.session_viewport_anchor(), anchor);
+        assert_eq!(panel.catalog_session("chat-15").unwrap().title, "renamed");
+    }
+
+    #[test]
+    fn catalog_retries_are_bounded_and_explicit_reopen_resets_budget() {
+        let mut panel = NeoismAgentSidePanel::default();
+        for attempt in 1..=3 {
+            panel.mark_refresh_kicked();
+            panel.set_sessions_error("offline");
+            assert!(!panel.should_refresh_sessions());
+            panel.last_sessions_refresh =
+                Some(Instant::now() - std::time::Duration::from_secs(10));
+            assert_eq!(panel.should_refresh_sessions(), attempt < 3);
+        }
+        panel.set_user_hidden(true);
+        panel.toggle_visibility();
+        assert!(panel.should_refresh_sessions());
+        panel.mark_refresh_kicked();
+        panel.set_sessions_error("offline");
+        assert!(!panel.should_refresh_sessions());
+        assert!(panel.retry_session_catalog());
+        assert!(panel.should_refresh_sessions());
+        panel.set_sessions(vec![chat("cached")]);
+        assert!(!panel.retry_session_catalog());
+        panel.set_sessions_error("offline with cached rows");
+        assert!(panel.catalog_session("cached").is_some());
+        assert!(panel.retry_session_catalog());
+    }
+}
+
+/// Ordered live catalog mutations. Later mutations for the same ID win.
+pub enum CatalogSessionMutation {
+    Upsert(NeoismAgentSessionEntry),
+    Delete(String),
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SessionCatalogState {
     Initial,
@@ -1828,6 +1921,9 @@ impl NeoismAgentSidePanel {
     }
 
     pub fn set_user_hidden(&mut self, hidden: bool) {
+        if self.user_hidden && !hidden {
+            self.retry_session_catalog();
+        }
         self.user_hidden = hidden;
         if hidden {
             self.reset_visible_running_indicator();
@@ -1839,12 +1935,7 @@ impl NeoismAgentSidePanel {
     /// Toggle the panel's visibility. When hiding, also drops keyboard
     /// focus so the cursor returns to the agent input.
     pub fn toggle_visibility(&mut self) {
-        self.user_hidden = !self.user_hidden;
-        if self.user_hidden {
-            self.reset_visible_running_indicator();
-            self.focused = false;
-            self.selected_cursor_rect = None;
-        }
+        self.set_user_hidden(!self.user_hidden);
     }
 
     #[allow(dead_code)]
@@ -2151,9 +2242,10 @@ impl NeoismAgentSidePanel {
     ) -> bool {
         if root.is_empty()
             || self.deleted_session_ids.contains(root)
-            || self.catalog_directory.as_deref().is_some_and(|directory| {
-                directory != snapshot.directory
-            })
+            || self
+                .catalog_directory
+                .as_deref()
+                .is_some_and(|directory| directory != snapshot.directory)
         {
             return false;
         }
@@ -2166,12 +2258,13 @@ impl NeoismAgentSidePanel {
                 return false;
             }
         }
-        let family = self.catalog_families.entry(root.to_owned()).or_insert_with(|| {
-            CatalogFamilyState {
+        let family = self
+            .catalog_families
+            .entry(root.to_owned())
+            .or_insert_with(|| CatalogFamilyState {
                 execution_id: snapshot.execution_id.clone(),
                 ..CatalogFamilyState::default()
-            }
-        });
+            });
         if family.execution_id != snapshot.execution_id {
             family.retired_executions.insert(family.execution_id.take());
             family.execution_id = snapshot.execution_id;
@@ -2188,7 +2281,9 @@ impl NeoismAgentSidePanel {
                 continue;
             }
             let status = match branch.status.as_str() {
-                "outstanding" if branch.permission_pending => BranchStatus::WaitingPermission,
+                "outstanding" if branch.permission_pending => {
+                    BranchStatus::WaitingPermission
+                }
                 "outstanding" => BranchStatus::Active,
                 "completed" => BranchStatus::Completed,
                 "failed" => BranchStatus::Stopped,
@@ -2758,13 +2853,9 @@ impl NeoismAgentSidePanel {
     /// Apply one live catalogue mutation without discarding continuation pages
     /// or moving the user's selection to a different session after re-sorting.
     pub fn upsert_session(&mut self, session: NeoismAgentSessionEntry) {
-        if !self.in_catalog_scope(&session) {
-            if self.all_sessions.iter().any(|entry| entry.id == session.id) {
-                self.remove_session(&session.id);
-            }
-            return;
-        }
-        self.upsert_sessions(std::iter::once(session));
+        self.apply_session_mutations(std::iter::once(CatalogSessionMutation::Upsert(
+            session,
+        )));
     }
 
     pub fn catalog_session(&self, id: &str) -> Option<&NeoismAgentSessionEntry> {
@@ -2805,20 +2896,60 @@ impl NeoismAgentSidePanel {
         &mut self,
         sessions: impl IntoIterator<Item = NeoismAgentSessionEntry>,
     ) {
-        let mut sessions = sessions
-            .into_iter()
-            .filter(|session| self.in_catalog_scope(session))
-            .collect::<Vec<_>>()
-            .into_iter()
-            .peekable();
-        if sessions.peek().is_none() {
+        self.apply_session_mutations(
+            sessions.into_iter().map(CatalogSessionMutation::Upsert),
+        );
+    }
+
+    /// Apply a drained event batch in arrival order, with indexed lookups and one
+    /// display rebuild. Deletes also fence stale snapshots; a later live upsert
+    /// clears that fence. Selection and the viewport follow stable identities.
+    pub fn apply_session_mutations(
+        &mut self,
+        mutations: impl IntoIterator<Item = CatalogSessionMutation>,
+    ) {
+        let mut mutations = mutations.into_iter().peekable();
+        if mutations.peek().is_none() {
             return;
         }
         let selected_id = self
             .selected_catalog_row()
             .map(|entry| entry.stable_identity().to_owned());
         let anchor = self.session_viewport_anchor();
-        for mut session in sessions {
+        let mut rows: Vec<_> = std::mem::take(&mut self.all_sessions)
+            .into_iter()
+            .map(Some)
+            .collect();
+        let mut indices: HashMap<_, _> = rows
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| (entry.as_ref().unwrap().id.clone(), index))
+            .collect();
+        let mut admitted = false;
+        for mutation in mutations {
+            let mut session = match mutation {
+                CatalogSessionMutation::Upsert(session)
+                    if self.in_catalog_scope(&session) =>
+                {
+                    session
+                }
+                CatalogSessionMutation::Upsert(session) => {
+                    if let Some(index) = indices.remove(&session.id) {
+                        rows[index] = None;
+                        self.remove_session_metadata(&session.id);
+                    }
+                    continue;
+                }
+                CatalogSessionMutation::Delete(id) => {
+                    if let Some(index) = indices.remove(&id) {
+                        rows[index] = None;
+                    }
+                    self.remove_session_metadata(&id);
+                    continue;
+                }
+            };
+            admitted = true;
+            self.deleted_session_ids.remove(&session.id);
             self.search_only_session_ids.remove(&session.id);
             if self.project_pagination_enabled() {
                 let directory = session.directory.clone().unwrap_or_default();
@@ -2826,11 +2957,8 @@ impl NeoismAgentSidePanel {
                 page.updated_ms = page.updated_ms.max(session.updated_ms);
             }
             self.apply_session_activity_override(&mut session);
-            if let Some(existing) = self
-                .all_sessions
-                .iter_mut()
-                .find(|existing| existing.id == session.id)
-            {
+            if let Some(index) = indices.get(&session.id).copied() {
+                let existing = rows[index].as_mut().unwrap();
                 if session.catalog_activity.is_none() {
                     session.catalog_activity = existing.catalog_activity;
                 }
@@ -2842,10 +2970,14 @@ impl NeoismAgentSidePanel {
                 }
                 *existing = session;
             } else {
-                self.all_sessions.push(session);
+                indices.insert(session.id.clone(), rows.len());
+                rows.push(Some(session));
             }
         }
-        self.session_catalog_state = SessionCatalogState::Ready;
+        self.all_sessions = rows.into_iter().flatten().collect();
+        if admitted {
+            self.session_catalog_state = SessionCatalogState::Ready;
+        }
         self.rebuild_session_display();
         self.restore_selected_session(selected_id.as_deref());
         self.restore_session_viewport_anchor(anchor);
@@ -2890,6 +3022,13 @@ impl NeoismAgentSidePanel {
     }
 
     pub fn remove_session(&mut self, session_id: &str) {
+        self.apply_session_mutations(std::iter::once(CatalogSessionMutation::Delete(
+            session_id.to_owned(),
+        )));
+    }
+
+    fn remove_session_metadata(&mut self, session_id: &str) {
+        self.search_only_session_ids.remove(session_id);
         self.deleted_session_ids.insert(session_id.to_owned());
         self.session_activity_overrides.remove(session_id);
         self.catalog_subagents.remove(session_id);
@@ -2902,15 +3041,8 @@ impl NeoismAgentSidePanel {
         for children in self.catalog_subagents.values_mut() {
             children.retain(|entry| entry.id != session_id);
         }
-        let selected_id = self
-            .selected_catalog_row()
-            .filter(|entry| entry.id != session_id)
-            .map(|entry| entry.id.clone());
-        self.all_sessions.retain(|entry| entry.id != session_id);
         self.semantic_results
             .retain(|entry| entry.session_id != session_id);
-        self.rebuild_session_display();
-        self.restore_selected_session(selected_id.as_deref());
     }
 
     fn restore_selected_session(&mut self, session_identity: Option<&str>) {
@@ -3146,6 +3278,8 @@ impl NeoismAgentSidePanel {
         self.session_page_loading = false;
         self.session_requested_cursor = None;
         if self.all_sessions.is_empty() {
+            self.last_sessions_refresh = Some(Instant::now());
+            self.session_refresh_attempts = self.session_refresh_attempts.max(1);
             self.session_catalog_state = SessionCatalogState::Error(message.into());
         }
     }
@@ -3847,6 +3981,18 @@ impl NeoismAgentSidePanel {
         true
     }
 
+    /// Start a fresh retry budget after an explicit retry or sidebar reopen.
+    /// Keeps cached rows and errors visible until a worker actually claims work.
+    /// Returns false unless the catalog is failed; never duplicates live work.
+    pub fn retry_session_catalog(&mut self) -> bool {
+        if !matches!(self.session_catalog_state, SessionCatalogState::Error(_)) {
+            return false;
+        }
+        self.session_refresh_attempts = 0;
+        self.last_sessions_refresh = None;
+        true
+    }
+
     /// True when the sessions list is stale enough to justify a refetch.
     /// Used by the pane to debounce the refresh worker.
     pub fn should_refresh_sessions(&self) -> bool {
@@ -3861,10 +4007,11 @@ impl NeoismAgentSidePanel {
         };
         let retry_after =
             if matches!(self.session_catalog_state, SessionCatalogState::Error(_)) {
-                if self.session_refresh_attempts >= 2 {
+                if self.session_refresh_attempts >= 3 {
                     return false;
                 }
-                0.75
+                0.75 * 2.0_f32
+                    .powi(i32::from(self.session_refresh_attempts.saturating_sub(1)))
             } else {
                 8.0
             };
@@ -3874,14 +4021,18 @@ impl NeoismAgentSidePanel {
     pub fn mark_refresh_kicked(&mut self) {
         self.session_refresh_attempts = self.session_refresh_attempts.saturating_add(1);
         self.last_sessions_refresh = Some(Instant::now());
+        self.session_catalog_state = SessionCatalogState::Loading;
         if self.all_sessions.is_empty() {
-            self.session_catalog_state = SessionCatalogState::Loading;
             self.sessions_loading_started = Instant::now();
         }
     }
 
     pub fn set_sessions_error(&mut self, message: impl Into<String>) {
-        self.settle_session_page_error(message);
+        self.session_page_loading = false;
+        self.session_requested_cursor = None;
+        self.last_sessions_refresh = Some(Instant::now());
+        self.session_refresh_attempts = self.session_refresh_attempts.max(1);
+        self.session_catalog_state = SessionCatalogState::Error(message.into());
     }
 
     pub fn should_refresh_subagents(&self) -> bool {

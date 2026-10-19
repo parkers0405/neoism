@@ -53,6 +53,25 @@ fn make_manager(td: &TempDir) -> WorkspaceManager {
 }
 
 #[test]
+fn late_local_endpoint_updates_host_and_notifies_only_on_change() {
+    let td = TempDir::new().unwrap();
+    let manager = make_manager(&td);
+    manager.inner.lock().hosts = bootstrap_hosts();
+    let mut changes = manager.subscribe_tree_changes();
+    let url = "ws://100.64.0.2:7878/session".to_owned();
+    manager.set_local_daemon_url(url.clone());
+    let hosts = manager.list_hosts();
+    let local = hosts
+        .iter()
+        .find(|host| host.id == machine_host_id())
+        .unwrap();
+    assert_eq!(local.daemon_url.as_deref(), Some(url.as_str()));
+    assert!(changes.try_recv().is_ok());
+    manager.set_local_daemon_url(url);
+    assert!(changes.try_recv().is_err());
+}
+
+#[test]
 fn first_and_later_terminal_cwd_never_reroot_workspace() {
     let td = TempDir::new().unwrap();
     let mgr = make_manager(&td);
@@ -640,8 +659,15 @@ fn workspace_root_change_resolves_relative_path_and_rejects_missing_directory() 
         .set_host_workspace_root("workspace-cd", PathBuf::from("-"))
         .expect("cd - returns to the previous workspace root");
     assert_eq!(previous.root_dir.as_deref(), Some(original.as_path()));
-    assert_eq!(updated.id, previous.id, "cwd changes preserve current workspace identity");
-    assert_eq!(mgr.list_host_workspaces(None).len(), 1, "no extra grid/workspace created");
+    assert_eq!(
+        updated.id, previous.id,
+        "cwd changes preserve current workspace identity"
+    );
+    assert_eq!(
+        mgr.list_host_workspaces(None).len(),
+        1,
+        "no extra grid/workspace created"
+    );
     let projects = mgr.list_workspaces();
     assert!(projects.iter().any(|p| p.path == original));
     assert!(projects.iter().any(|p| p.path == target));

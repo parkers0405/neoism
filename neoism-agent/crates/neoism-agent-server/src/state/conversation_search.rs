@@ -19,12 +19,12 @@ const MAX_CANDIDATES: usize = 16_384;
 const MAX_SESSIONS: usize = 16_384;
 const MAX_ANCESTORS: usize = 128;
 const SEARCH_TIMEOUT: Duration = Duration::from_secs(2);
-const TOO_BROAD: &str = "Conversation search is too broad; refine the query or select a conversation/directory and retry";
 
 #[derive(Default)]
 struct SearchBudget {
     candidates: usize,
     payloads: usize,
+    canonical_batches: usize,
     max_candidates: Option<usize>, // tests can exercise exhaustion cheaply
 }
 
@@ -530,6 +530,79 @@ struct CanonicalSession {
     allowed: bool,
 }
 
+// Hydrate a candidate page together: per-session hydration otherwise repeats
+// three hosting queries (including the full namespace map) for every match.
+async fn cache_canonical(
+    db: &Db,
+    ids: &[String],
+    cache: &mut HashMap<String, Option<CanonicalSession>>,
+    scope: TenantQueryScope<'_>,
+    claims: Option<&crate::caller::CallerClaims>,
+) -> anyhow::Result<usize> {
+    let missing: HashSet<_> = ids
+        .iter()
+        .filter(|id| !cache.contains_key(*id))
+        .cloned()
+        .collect();
+    anyhow::ensure!(
+        cache.len() + missing.len() <= MAX_SESSIONS,
+        crate::error::ConversationSearchError::TooBroad(format!(
+            "{MAX_SESSIONS} canonical session budget exceeded"
+        ))
+    );
+    let missing: Vec<_> = missing.into_iter().collect();
+    let tenant = match scope {
+        TenantQueryScope::Tenant(tenant) => Some(tenant),
+        TenantQueryScope::LocalAll => claims.map(|claims| claims.tenant_id.as_str()),
+    };
+    let mut batches = 0;
+    for chunk in missing.chunks(200) {
+        let mut params: Vec<_> = chunk.iter().map(text).collect();
+        let tenant_clause = if let Some(tenant) = tenant {
+            params.push(text(tenant));
+            format!(" AND {}", tenant_predicate("s", &format!("?{}", params.len())))
+        } else {
+            String::new()
+        };
+        let sql = format!(
+            "SELECT id, info_json FROM sessions s WHERE id IN ({}){tenant_clause}",
+            vec!["?"; chunk.len()].join(",")
+        );
+        let rows = db.fetch_all(&sql, params).await?;
+        batches += 1;
+        // Cache misses as well, including rows excluded by canonical tenant SQL.
+        for id in chunk {
+            cache.insert(id.clone(), None);
+        }
+        let mut sessions = Vec::with_capacity(rows.len());
+        for row in rows {
+            let id = row.get_str("id")?;
+            match serde_json::from_str::<SessionInfo>(&row.get_str("info_json")?) {
+                Ok(info) if info.id.as_str() == id => sessions.push(info),
+                Ok(_) => tracing::warn!(session_id=id, "skipping mismatched legacy search session"),
+                Err(error) => tracing::warn!(session_id=id, %error, "skipping invalid legacy search session"),
+            }
+        }
+        db.hydrate_host_associations(&mut sessions).await?;
+        for info in sessions {
+            let local_access = info.extra.get(crate::caller::HOST_LOCAL_ACCESS_KEY)
+                .and_then(Value::as_bool) == Some(true);
+            let scoped = match scope {
+                TenantQueryScope::LocalAll => true,
+                TenantQueryScope::Tenant(tenant) => {
+                    crate::caller::session_tenant(&info) == tenant
+                        || (tenant == "local" && local_access)
+                }
+            };
+            // Authorization remains canonical, after trusted hosting overlays.
+            let allowed = scoped
+                && claims.is_none_or(|claims| crate::caller::allows_session(claims, &info));
+            cache.insert(info.id.to_string(), Some(CanonicalSession { info, allowed }));
+        }
+    }
+    Ok(batches)
+}
+
 async fn canonical(
     db: &Db,
     id: &str,
@@ -537,65 +610,10 @@ async fn canonical(
     scope: TenantQueryScope<'_>,
     claims: Option<&crate::caller::CallerClaims>,
 ) -> anyhow::Result<Option<CanonicalSession>> {
-    if let Some(value) = cache.get(id) {
-        return Ok(value.clone());
+    if !cache.contains_key(id) {
+        cache_canonical(db, &[id.to_string()], cache, scope, claims).await?;
     }
-    anyhow::ensure!(cache.len() < MAX_SESSIONS, "{TOO_BROAD}");
-    // Push the cheap indexed tenant restriction into canonical SQL, before
-    // decoding metadata or doing filesystem-backed authorization. Other policy
-    // predicates remain exclusively owned by caller::allows_session.
-    let tenant = match scope {
-        TenantQueryScope::Tenant(tenant) => Some(tenant),
-        TenantQueryScope::LocalAll => claims.map(|claims| claims.tenant_id.as_str()),
-    };
-    let (sql, params) = if let Some(tenant) = tenant {
-        (
-            format!(
-                "SELECT tenant_id, info_json FROM sessions s WHERE id=?1 AND {}",
-                tenant_predicate("s", "?2")
-            ),
-            vec![text(id), text(tenant)],
-        )
-    } else {
-        (
-            "SELECT tenant_id, info_json FROM sessions WHERE id=?".to_string(),
-            vec![text(id)],
-        )
-    };
-    let value = if let Some(row) = db.fetch_optional(&sql, params).await? {
-        let mut info: SessionInfo = match serde_json::from_str(&row.get_str("info_json")?)
-        {
-            Ok(info) => info,
-            Err(error) => {
-                tracing::warn!(session_id=id, %error, "skipping invalid legacy search session");
-                cache.insert(id.to_string(), None);
-                return Ok(None);
-            }
-        };
-        db.hydrate_host_associations(std::slice::from_mut(&mut info))
-            .await?;
-        let local_access = info
-            .extra
-            .get(crate::caller::HOST_LOCAL_ACCESS_KEY)
-            .and_then(Value::as_bool)
-            == Some(true);
-        let scoped = match scope {
-            TenantQueryScope::LocalAll => true,
-            TenantQueryScope::Tenant(tenant) => {
-                crate::caller::session_tenant(&info) == tenant
-                    || (tenant == "local" && local_access)
-            }
-        };
-        // Cache canonicalize-aware policy once per session, after authoritative
-        // hosting overlays strip any untrusted local-access marker from JSON.
-        let allowed = scoped
-            && claims.is_none_or(|claims| crate::caller::allows_session(claims, &info));
-        Some(CanonicalSession { info, allowed })
-    } else {
-        None
-    };
-    cache.insert(id.to_string(), value.clone());
-    Ok(value)
+    Ok(cache.get(id).cloned().flatten())
 }
 
 fn admitted(
@@ -617,7 +635,7 @@ async fn root(
     let mut current = session;
     let mut visited = HashSet::new();
     loop {
-        anyhow::ensure!(visited.len() < MAX_ANCESTORS, "{TOO_BROAD}");
+        anyhow::ensure!(visited.len() < MAX_ANCESTORS, crate::error::ConversationSearchError::TooBroad(format!("{MAX_ANCESTORS} ancestor budget exceeded")));
         if !visited.insert(current.info.id.to_string())
             || !admitted(&current, scope, claims)
             || crate::caller::session_tenant(&current.info) != tenant
@@ -731,7 +749,7 @@ pub(super) async fn search(
     let semaphore = search_slots(db);
     let _permit = semaphore
         .try_acquire_owned()
-        .map_err(|_| anyhow::anyhow!("Conversation search is busy; retry shortly"))?;
+        .map_err(|_| crate::error::ConversationSearchError::Busy)?;
     let mut budget = SearchBudget::default();
     tokio::time::timeout(
         SEARCH_TIMEOUT,
@@ -748,7 +766,7 @@ pub(super) async fn search(
         ),
     )
     .await
-    .map_err(|_| anyhow::anyhow!("{TOO_BROAD} (2 second query budget exceeded)"))?
+    .map_err(|_| crate::error::ConversationSearchError::Deadline)?
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -814,6 +832,15 @@ async fn search_inner(
             conversations,
         )
         .await?;
+        let mut source_ids = Vec::new();
+        for row in &candidates {
+            let key = row.get_str("key")?;
+            if eligible.contains(&key) && !seen.contains(&key) {
+                source_ids.push(row.get_str("session_id")?);
+            }
+        }
+        budget.canonical_batches +=
+            cache_canonical(db, &source_ids, &mut sessions, scope, claims).await?;
         for row in candidates {
             let projection_key = row.get_str("key")?;
             if !seen.insert(projection_key.clone()) {
@@ -822,7 +849,7 @@ async fn search_inner(
             budget.candidates += 1;
             anyhow::ensure!(
                 budget.candidates <= cap,
-                "{TOO_BROAD} ({cap} candidate budget exceeded)"
+                crate::error::ConversationSearchError::TooBroad(format!("{cap} candidate budget exceeded"))
             );
             if !eligible.contains(&projection_key) {
                 continue;
@@ -976,7 +1003,7 @@ async fn search_inner(
         }
         anyhow::ensure!(
             prefix < cap,
-            "{TOO_BROAD} ({cap} candidate budget exhausted before relevance frontier)"
+            crate::error::ConversationSearchError::TooBroad(format!("{cap} candidate budget exhausted before relevance frontier"))
         );
         let next = prefix.saturating_mul(2).min(cap);
         anyhow::ensure!(next > prefix, "conversation search prefix overflow");
@@ -1617,6 +1644,14 @@ mod tests {
             "title-only result must stop at relevance frontier"
         );
         assert_eq!(budget.payloads, 1);
+        // A term repeated across many messages in fewer than twenty chats must
+        // still return the complete group set rather than require twenty roots.
+        let mut grouped_budget = SearchBudget::default();
+        let grouped = search_inner(db, TenantQueryScope::LocalAll, "needle", None,
+            None, 20, true, None, &mut grouped_budget).await.unwrap();
+        assert_eq!(grouped.len(), 2);
+        assert_eq!(grouped_budget.payloads, 2);
+        assert!(grouped_budget.canonical_batches <= 2);
         let mut budget = SearchBudget {
             max_candidates: Some(8),
             ..Default::default()
@@ -1656,6 +1691,46 @@ mod tests {
         .unwrap();
         assert_eq!(hits.len(), 3);
         assert_eq!(budget.payloads, 3, "only final topK bodies are loaded");
+    }
+
+    #[tokio::test]
+    async fn canonical_candidates_are_hydrated_in_batches_and_cached() {
+        let _search_test = SEARCH_TEST.lock().await;
+        let store = store().await;
+        let db = &store.db;
+        for i in 0..205 {
+            let id = format!("ses_batchscope{i:03}");
+            let directory = if i == 0 { "/other" } else { "/project" };
+            session(db, &id, "discussion", directory, None, "local").await;
+            message(db, &format!("msg_batchscope{i:03}"), &id, "firecrawl", "local").await;
+        }
+        // A foreign tenant must never become visible through the batch preload.
+        session(db, "ses_foreignbatch", "discussion", "/project", None, "foreign").await;
+        message(db, "msg_foreignbatch", "ses_foreignbatch", "firecrawl", "foreign").await;
+        flush(db).await.unwrap();
+        let mut budget = SearchBudget::default();
+        let hits = search_inner(db, TenantQueryScope::Tenant("local"), "firecrawl", None,
+            Some("/project"), 100, true, None, &mut budget).await.unwrap();
+        assert_eq!(hits.len(), 100);
+        assert!(hits.iter().all(|hit| hit.session_id != "ses_batchscope000"
+            && hit.session_id != "ses_foreignbatch"));
+        assert!(budget.canonical_batches <= 4, "not one hosting hydration per session: {}", budget.canonical_batches);
+        assert_eq!(budget.payloads, 100);
+
+        let ids: Vec<_> = (0..205).map(|i| format!("ses_batchscope{i:03}")).collect();
+        let mut cache = HashMap::new();
+        assert_eq!(cache_canonical(db, &ids, &mut cache, TenantQueryScope::Tenant("local"), None).await.unwrap(), 2);
+        assert_eq!(cache_canonical(db, &ids, &mut cache, TenantQueryScope::Tenant("local"), None).await.unwrap(), 0);
+        assert_eq!(cache.len(), 205);
+        let excessive: Vec<_> = (0..MAX_SESSIONS).map(|i| format!("ses_missing{i}")).collect();
+        let error = cache_canonical(db, &excessive, &mut cache, TenantQueryScope::Tenant("local"), None)
+            .await.unwrap_err();
+        assert!(matches!(error.downcast_ref::<crate::error::ConversationSearchError>(),
+            Some(crate::error::ConversationSearchError::TooBroad(_))));
+        // Production admission/deadline still applies; this is not just an
+        // unbounded search_inner success.
+        assert_eq!(search(db, TenantQueryScope::Tenant("local"), "firecrawl", None,
+            None, 100, true, None).await.unwrap().len(), 100);
     }
 
     #[tokio::test]

@@ -404,6 +404,25 @@ impl WorkspaceManager {
         out
     }
 
+    /// Publish a listener discovered after bootstrap without delaying local startup.
+    pub fn set_local_daemon_url(&self, url: String) {
+        let changed = {
+            let mut inner = self.inner.lock();
+            let Some(host) = inner.hosts.get_mut(&machine_host_id()) else {
+                return;
+            };
+            if host.daemon_url.as_deref() == Some(url.as_str()) {
+                false
+            } else {
+                host.daemon_url = Some(url);
+                true
+            }
+        };
+        if changed {
+            self.broadcast_tree_changed(None);
+        }
+    }
+
     pub(crate) fn upsert_host(&self, mut host: HostSummary) -> HostSummary {
         let mut inner = self.inner.lock();
         if let Some(active) = inner.active_workspace_by_host.get(&host.id).cloned() {
@@ -710,10 +729,16 @@ impl WorkspaceManager {
         // of chats and workspace grids. Never create/adopt another workspace.
         let mut registry_changed = false;
         for path in [current_root, dir.clone()] {
-            if !inner.workspaces.values().any(|project| project.path == path) {
+            if !inner
+                .workspaces
+                .values()
+                .any(|project| project.path == path)
+            {
                 let project = ProjectRootSummary {
                     id: Uuid::new_v4().to_string(),
-                    name: path.file_name().map(|name| name.to_string_lossy().into_owned())
+                    name: path
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
                         .unwrap_or_else(|| path.to_string_lossy().into_owned()),
                     path,
                     last_opened: now_secs(),
@@ -730,7 +755,9 @@ impl WorkspaceManager {
             .host_workspaces
             .insert(workspace.id.clone(), workspace.clone());
         drop(inner);
-        if registry_changed { self.persist(); }
+        if registry_changed {
+            self.persist();
+        }
         self.mark_dirty();
         watch_notes_link_dir(&dir);
         Some(workspace)

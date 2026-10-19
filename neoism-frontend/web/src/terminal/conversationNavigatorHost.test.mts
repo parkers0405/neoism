@@ -445,26 +445,55 @@ function fixture() {
   let generation = 1;
   let active = true;
   let query = "needle";
+  let directory: string | null = null;
   const rows: unknown[] = [];
   const attachments: unknown[] = [];
   const client = { agentCatalogIdentity: () => "endpoint-wa", getGeneration: () => generation };
   const adapter = {
     conversationNavigatorActive: () => active, conversationNavigatorQuery: () => query,
+    conversationNavigatorDirectory: () => directory,
     conversationNavigatorSetRows: (value: string) => rows.push(JSON.parse(value)),
     conversationNavigatorSetLoading() {}, conversationNavigatorSetError() {},
     conversationNavigatorAttach: (...args: unknown[]) => attachments.push(args),
     conversationNavigatorClose() {},
   };
   const panel = Object.create(TerminalPanel.prototype) as any;
-  const target = { adapter, client, identity: "endpoint-wa", generation: 1, workspaceId: "wa", mode: "search", serial: 12, query: "needle", results: new Map(), completed: false,
+  const target = { adapter, client, identity: "endpoint-wa", generation: 1, workspaceId: "wa", directory: null as string | null, mode: "search", serial: 12, query: "needle", results: new Map(), completed: false,
     inFlight: false, failed: false, refreshTimer: undefined as ReturnType<typeof setTimeout> | undefined,
     timeoutTimer: undefined as ReturnType<typeof setTimeout> | undefined,
     searchTimer: undefined as ReturnType<typeof setTimeout> | undefined };
   Object.assign(panel, { options: { client, activeWorkspaceId: "wa" }, wasmAdapter: adapter, conversationNavigation: target,
     scheduleDraw() {}, openNeoismAgentTab() {}, activeAgentRouteId: () => 1, bindAgentSessionToRoute() {} });
   const reply = (serial = 12) => panel.agentReply({ ThreadSearchResult: { generation: serial, query: "needle", sessions: [{ id: "outside", title: "Outside", directory: "/saved/project" }], semantic: {}, error: null } });
-  return { panel, target, adapter, rows, attachments, reply, setGeneration: (g: number) => generation = g, dismiss: () => active = false, setQuery: (q: string) => query = q };
+  return { panel, target, adapter, rows, attachments, reply, setGeneration: (g: number) => generation = g, dismiss: () => active = false, setQuery: (q: string) => query = q, setDirectory: (d: string | null) => directory = d };
 }
+
+test("search sends sidebar scope and rejects same-endpoint scope switches", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  for (const directory of [null, "/declared/project"]) {
+    const f = fixture();
+    const sent: any[] = [];
+    f.setDirectory(directory);
+    f.target.directory = directory;
+    // Neither the selected chat cwd nor the host root defines search scope.
+    Object.assign(f.adapter, { agentDirectory: () => "/selected/chat" });
+    Object.assign(f.target.client, { allocateRequestId: () => 1, sendAgent: (_id: number, message: unknown) => sent.push(message) });
+    f.panel.sendNavigatorSearch(f.target);
+    assert.deepEqual(sent, [{ SearchThreads: { query: "needle", generation: 12, directory } }]);
+    f.reply();
+    assert.equal(f.rows.length, 1);
+    f.setDirectory(directory === null ? "/new/project" : null);
+    f.reply();
+    assert.equal(f.rows.length, 1, "late reply rejected even before next pump");
+    f.target.inFlight = false;
+    f.panel.sendNavigatorSearch(f.target);
+    assert.equal(sent.length, 1, "stale request cannot be sent");
+    Object.assign(f.adapter, { drainConversationNavigatorAction: () => ({ kind: "activate", value: "outside" }) });
+    f.panel.pumpConversationNavigator();
+    assert.equal(f.attachments.length, 0, "stale rows cannot activate");
+    assert.equal(f.panel.conversationNavigation, null);
+  }
+});
 
 test("real host ignores dismissed, stale query and prior connection search replies", () => {
   for (const invalidate of [(f: ReturnType<typeof fixture>) => f.dismiss(), (f: ReturnType<typeof fixture>) => f.setGeneration(2), (f: ReturnType<typeof fixture>) => f.setQuery("newer")]) {
@@ -508,7 +537,7 @@ test("indexing refresh is single-flight, keeps request generation, and clears on
   t.mock.timers.tick(999);
   assert.equal(sent.length, 0);
   t.mock.timers.tick(1);
-  assert.deepEqual(sent, [{ SearchThreads: { query: "needle", generation: 12 } }]);
+  assert.deepEqual(sent, [{ SearchThreads: { query: "needle", generation: 12, directory: null } }]);
   assert.equal(f.target.inFlight, true);
   t.mock.timers.tick(5000);
   assert.equal(sent.length, 1, "no overlapping poll while awaiting response");
@@ -571,7 +600,7 @@ test("query changes cancel the old poll and debounce only the new generation", (
   const serial = f.target.serial;
   assert.notEqual(serial, 12);
   t.mock.timers.tick(180);
-  assert.deepEqual(sent, [{ SearchThreads: { query: "replacement", generation: serial } }]);
+  assert.deepEqual(sent, [{ SearchThreads: { query: "replacement", generation: serial, directory: null } }]);
   f.reply(); // Late result from the previous query must not reschedule its poll.
   assert.equal(f.target.refreshTimer, undefined);
   f.panel.clearConversationNavigation();

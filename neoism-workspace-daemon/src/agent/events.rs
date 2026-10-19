@@ -90,7 +90,7 @@ async fn run_event_stream_inner(
             return;
         }
         let resp = match inner
-            .authorize_agent_request(inner.http.get(&url))
+            .authorize_agent_request(inner.agent_http.get(&url))
             .send()
             .await
         {
@@ -223,7 +223,9 @@ fn forward_catalog_event(tx: &UnboundedSender<AgentServerMessage>, event: Value)
         let properties = event.get("properties").unwrap_or(&Value::Null);
         if let (Some(session_id), Some(snapshot)) = (
             properties.get("sessionID").and_then(Value::as_str),
-            properties.get("snapshot").filter(|snapshot| snapshot.is_object()),
+            properties
+                .get("snapshot")
+                .filter(|snapshot| snapshot.is_object()),
         ) {
             let _ = tx.send(AgentServerMessage::CatalogFamily {
                 session_id: session_id.to_owned(),
@@ -1409,12 +1411,18 @@ mod tests {
             "request": {"messageID": "primary", "parts": [{"type": "text", "text": "hello"}]},
             "queue": {"count": 1, "preview": "next", "running": true, "startedAt": 123}
         });
-        forward_agent_server_event(&tx, "root", json!({
-            "type": "session.queue.updated", "properties": properties.clone()
-        }));
-        assert!(matches!(rx.try_recv().unwrap(), AgentServerMessage::SessionEvent {
+        forward_agent_server_event(
+            &tx,
+            "root",
+            json!({
+                "type": "session.queue.updated", "properties": properties.clone()
+            }),
+        );
+        assert!(
+            matches!(rx.try_recv().unwrap(), AgentServerMessage::SessionEvent {
             session_id, kind, properties: forwarded,
-        } if session_id == "root" && kind == "session.queue.updated" && forwarded == properties));
+        } if session_id == "root" && kind == "session.queue.updated" && forwarded == properties)
+        );
         assert!(rx.try_recv().is_err());
     }
 

@@ -39,6 +39,10 @@ fn record_composition_motion(
 
 use super::*;
 
+#[cfg(test)]
+#[path = "late_empty_tests.rs"]
+mod late_empty_tests;
+
 pub(super) fn update_todos_message(
     messages: &mut Vec<NeoismAgentMessage>,
     todos: Vec<NeoismAgentTodo>,
@@ -97,7 +101,16 @@ impl NeoismAgentPane {
             .as_mut()
             .map(|stream| stream.drain(128))
             .unwrap_or_default();
+        let mut catalog_upserts = Vec::new();
         for update in catalog_updates {
+            // Preserve reconnect/delete/activity ordering while rebuilding only
+            // once for an adjacent catalog import/upsert burst.
+            if !matches!(&update, AgentSessionCatalogUpdate::Upsert(_))
+                && !catalog_upserts.is_empty()
+            {
+                self.side_panel
+                    .upsert_sessions(std::mem::take(&mut catalog_upserts));
+            }
             match update {
                 AgentSessionCatalogUpdate::Reconnected => {
                     self.side_panel.clear_session_activity_overrides();
@@ -121,16 +134,24 @@ impl NeoismAgentPane {
                         self.side_panel.set_session_activity(&session_id, activity);
                 }
                 AgentSessionCatalogUpdate::Upsert(session) => {
-                    if self.side_panel.catalog_directory().is_some_and(|directory| {
-                        session.directory.as_deref() != Some(directory)
-                    }) {
+                    if self
+                        .side_panel
+                        .catalog_directory()
+                        .is_some_and(|directory| {
+                            session.directory.as_deref() != Some(directory)
+                        })
+                    {
+                        if !catalog_upserts.is_empty() {
+                            self.side_panel
+                                .upsert_sessions(std::mem::take(&mut catalog_upserts));
+                        }
                         if self.side_panel.catalog_session(&session.id).is_some() {
                             self.side_panel.remove_session(&session.id);
                             changed = true;
                         }
                         continue;
                     }
-                    self.side_panel.upsert_session(session);
+                    catalog_upserts.push(session);
                     changed = true;
                 }
                 AgentSessionCatalogUpdate::Delete(session_id) => {
@@ -138,6 +159,9 @@ impl NeoismAgentPane {
                     changed = true;
                 }
             }
+        }
+        if !catalog_upserts.is_empty() {
+            self.side_panel.upsert_sessions(catalog_upserts);
         }
         self.tick_stream_liveness();
         let Some(event_stream) = self.event_stream.as_mut() else {
@@ -326,15 +350,18 @@ impl NeoismAgentPane {
                     }
                     if structural || !dirty_indices.is_empty() {
                         if footer_only {
-self.footer_growth.record_with_edge(
-                                messages.iter().zip(&self.messages)
+                            self.footer_growth.record_with_edge(
+                                messages
+                                    .iter()
+                                    .zip(&self.messages)
                                     .filter(|(new, old)| {
                                         old.status.trim().is_empty()
                                             && !new.status.trim().is_empty()
                                             && !new.text.trim().is_empty()
                                     })
                                     .map(|(new, _)| new.id.clone()),
-                                self.timeline_follow_bottom && !self.is_subagent_session(),
+                                self.timeline_follow_bottom
+                                    && !self.is_subagent_session(),
                                 self.timeline_viewport_rect,
                             );
                         }
@@ -343,10 +370,12 @@ self.footer_growth.record_with_edge(
                         neoism_ui::panels::agent_pane::response_footer::record_refresh(
                             &mut self.text_reveal,
                             &mut self.tool_motion,
-                            self.messages.iter()
+                            self.messages
+                                .iter()
                                 .filter(|m| m.kind == NeoismAgentMessageKind::Assistant)
                                 .map(|m| (m.id.as_str(), m.status.as_str())),
-                            messages.iter()
+                            messages
+                                .iter()
                                 .filter(|m| m.kind == NeoismAgentMessageKind::Assistant)
                                 .map(|m| (m.id.as_str(), m.status.as_str())),
                         );
@@ -354,12 +383,14 @@ self.footer_growth.record_with_edge(
                         self.text_reveal.scope(self.session_id.as_deref());
                         self.tool_motion.scope(self.session_id.as_deref());
                         self.text_reveal.reconcile_history_with_footers(
-                            self.messages
-                                .iter()
-                                .map(|m| (
-                        m.id.as_str(), m.tool_reveal_body(),
-                        (m.kind == NeoismAgentMessageKind::Assistant).then_some(m.status.as_str()),
-                    )),
+                            self.messages.iter().map(|m| {
+                                (
+                                    m.id.as_str(),
+                                    m.tool_reveal_body(),
+                                    (m.kind == NeoismAgentMessageKind::Assistant)
+                                        .then_some(m.status.as_str()),
+                                )
+                            }),
                         );
                         if let Some((prompt, first_live_id)) = optimistic_trace {
                             let end = first_live_id
@@ -442,30 +473,36 @@ self.footer_growth.record_with_edge(
                                 }
                                 let mut same = old.clone();
                                 same.status.clone_from(&new.status);
-                                old.kind == NeoismAgentMessageKind::Assistant && same == *new
+                                old.kind == NeoismAgentMessageKind::Assistant
+                                    && same == *new
                             });
                         self.text_reveal.scope(self.session_id.as_deref());
                         self.tool_motion.scope(self.session_id.as_deref());
                         neoism_ui::panels::agent_pane::response_footer::record_refresh(
                             &mut self.text_reveal,
                             &mut self.tool_motion,
-                            self.messages.iter()
+                            self.messages
+                                .iter()
                                 .filter(|m| m.kind == NeoismAgentMessageKind::Assistant)
                                 .map(|m| (m.id.as_str(), m.status.as_str())),
-                            messages.iter()
+                            messages
+                                .iter()
                                 .filter(|m| m.kind == NeoismAgentMessageKind::Assistant)
                                 .map(|m| (m.id.as_str(), m.status.as_str())),
                         );
                         if footer_only {
-self.footer_growth.record_with_edge(
-                                messages.iter().zip(&self.messages)
+                            self.footer_growth.record_with_edge(
+                                messages
+                                    .iter()
+                                    .zip(&self.messages)
                                     .filter(|(new, old)| {
                                         old.status.trim().is_empty()
                                             && !new.status.trim().is_empty()
                                             && !new.text.trim().is_empty()
                                     })
                                     .map(|(new, _)| new.id.clone()),
-                                self.timeline_follow_bottom && !self.is_subagent_session(),
+                                self.timeline_follow_bottom
+                                    && !self.is_subagent_session(),
                                 self.timeline_viewport_rect,
                             );
                         }
@@ -473,9 +510,13 @@ self.footer_growth.record_with_edge(
                             self.timeline_live_growth = false;
                         }
                         let footer_dirty: Vec<usize> = if footer_only {
-                            self.messages.iter().zip(&messages).enumerate()
+                            self.messages
+                                .iter()
+                                .zip(&messages)
+                                .enumerate()
                                 .filter(|(_, (old, new))| old != new)
-                                .map(|(index, _)| index).collect()
+                                .map(|(index, _)| index)
+                                .collect()
                         } else {
                             Vec::new()
                         };
@@ -484,7 +525,9 @@ self.footer_growth.record_with_edge(
                             std::mem::take(&mut self.messages),
                             self.timeline_history.oldest_loaded_cursor.is_some(),
                         );
-                        if !self.timeline_history_position_hydrated || (!footer_only && history_changed) {
+                        if !self.timeline_history_position_hydrated
+                            || (!footer_only && history_changed)
+                        {
                             self.prepare_timeline_history_position();
                         }
                         self.messages = merged;
@@ -648,7 +691,9 @@ self.footer_growth.record_with_edge(
                     self.queued_prompt_preview = decision.preview;
                     self.reconcile_queue_handoff(decision.started_at, true, None);
                     changed = true;
-                    if decision.should_enter_generating && !self.suppress_streaming_after_abort() {
+                    if decision.should_enter_generating
+                        && !self.suppress_streaming_after_abort()
+                    {
                         self.note_streaming(NeoismAgentStreamingState::Generating, None);
                     }
                     if let Some(started_at) = decision
@@ -1040,7 +1085,9 @@ self.footer_growth.record_with_edge(
                     delta_updates += 1;
                     delta_bytes += delta.len();
                     let can_drive_streaming = self.observe_session_part(
-                        &stream_session_id, part_id.as_deref().unwrap_or_default(), message_id.as_deref(),
+                        &stream_session_id,
+                        part_id.as_deref().unwrap_or_default(),
+                        message_id.as_deref(),
                     );
                     if !can_drive_streaming {
                         continue;
@@ -1056,7 +1103,8 @@ self.footer_growth.record_with_edge(
                             .flatten();
                     if stream_is_active {
                         self.apply_part_delta(message_id, part_id, kind, &delta);
-                        if can_drive_streaming && !self.suppress_streaming_after_abort()
+                        if can_drive_streaming
+                            && !self.suppress_streaming_after_abort()
                             && !self.terminal_idle_sessions.contains(&stream_session_id)
                         {
                             self.refresh_streaming_from_tail();
@@ -1079,7 +1127,9 @@ self.footer_growth.record_with_edge(
                                 reasoning_part_id,
                             );
                         }
-                        if can_drive_streaming && !self.terminal_idle_sessions.contains(&stream_session_id) {
+                        if can_drive_streaming
+                            && !self.terminal_idle_sessions.contains(&stream_session_id)
+                        {
                             cached.runtime.refresh_streaming_from_tail(&cached.messages);
                         }
                         cached.invalidate_timeline_layout();
@@ -1090,9 +1140,20 @@ self.footer_growth.record_with_edge(
                     message,
                     parent_message_id,
                 } => {
-                    let can_drive_streaming = !matches!(message.kind, NeoismAgentMessageKind::User | NeoismAgentMessageKind::System)
-                        && self.observe_session_part(&stream_session_id, &message.id, parent_message_id.as_deref());
-                    if !can_drive_streaming && !matches!(message.kind, NeoismAgentMessageKind::User | NeoismAgentMessageKind::System) {
+                    let can_drive_streaming = !matches!(
+                        message.kind,
+                        NeoismAgentMessageKind::User | NeoismAgentMessageKind::System
+                    ) && self.observe_session_part(
+                        &stream_session_id,
+                        &message.id,
+                        parent_message_id.as_deref(),
+                    );
+                    if !can_drive_streaming
+                        && !matches!(
+                            message.kind,
+                            NeoismAgentMessageKind::User | NeoismAgentMessageKind::System
+                        )
+                    {
                         continue;
                     }
                     self.note_session_runtime_event(&stream_session_id);
@@ -1106,7 +1167,8 @@ self.footer_growth.record_with_edge(
                             parent_message_id.as_deref(),
                         );
                         self.upsert_part_message(message);
-                        if can_drive_streaming && !self.suppress_streaming_after_abort()
+                        if can_drive_streaming
+                            && !self.suppress_streaming_after_abort()
                             && !self.terminal_idle_sessions.contains(&stream_session_id)
                         {
                             self.note_streaming_from_part(kind, &title);
@@ -1128,7 +1190,9 @@ self.footer_growth.record_with_edge(
                                 &part_id,
                             );
                         }
-                        if can_drive_streaming && !self.terminal_idle_sessions.contains(&stream_session_id) {
+                        if can_drive_streaming
+                            && !self.terminal_idle_sessions.contains(&stream_session_id)
+                        {
                             cached.runtime.refresh_streaming_from_tail(&cached.messages);
                         }
                         cached.invalidate_timeline_layout();
@@ -1157,13 +1221,16 @@ self.footer_growth.record_with_edge(
                     delta_updates += 1;
                     delta_bytes += delta.len();
                     let part_allowed = self.observe_session_part(
-                        &session_id, part_id.as_deref().unwrap_or_default(), message_id.as_deref(),
+                        &session_id,
+                        part_id.as_deref().unwrap_or_default(),
+                        message_id.as_deref(),
                     );
                     if !part_allowed {
                         continue;
                     }
                     self.note_session_runtime_event(&session_id);
-                    let can_drive_streaming = self.child_part_can_drive_streaming(&session_id);
+                    let can_drive_streaming =
+                        self.child_part_can_drive_streaming(&session_id);
                     self.remember_live_part_parent(
                         part_id.as_deref().unwrap_or_default(),
                         message_id.as_deref(),
@@ -1207,12 +1274,22 @@ self.footer_growth.record_with_edge(
                     message,
                     parent_message_id,
                 } => {
-                    let assistant_part = !matches!(message.kind, NeoismAgentMessageKind::User | NeoismAgentMessageKind::System);
-                    if assistant_part && !self.observe_session_part(&session_id, &message.id, parent_message_id.as_deref()) {
+                    let assistant_part = !matches!(
+                        message.kind,
+                        NeoismAgentMessageKind::User | NeoismAgentMessageKind::System
+                    );
+                    if assistant_part
+                        && !self.observe_session_part(
+                            &session_id,
+                            &message.id,
+                            parent_message_id.as_deref(),
+                        )
+                    {
                         continue;
                     }
                     self.note_session_runtime_event(&session_id);
-                    let can_drive_streaming = assistant_part && self.child_part_can_drive_streaming(&session_id);
+                    let can_drive_streaming = assistant_part
+                        && self.child_part_can_drive_streaming(&session_id);
                     let part_id = message.id.clone();
                     let is_reasoning = message.kind == NeoismAgentMessageKind::Reasoning;
                     self.remember_live_part_parent(
@@ -1272,20 +1349,30 @@ self.footer_growth.record_with_edge(
                     if self.session_id.as_deref() == Some(session_id.as_str()) {
                         if count.is_some()
                             || self.queued_prompt_preview.is_none()
-                            || self.queued_prompt_preview.as_deref() == Some("Compaction queued")
+                            || self.queued_prompt_preview.as_deref()
+                                == Some("Compaction queued")
                         {
                             self.pending_compact = None;
                         }
                         self.queued_prompt_count = count
-                            .map(|count| self.status_timing.queue_snapshot_count(
-                                count, running == Some(true), preview.as_deref(),
-                            ))
+                            .map(|count| {
+                                self.status_timing.queue_snapshot_count(
+                                    count,
+                                    running == Some(true),
+                                    preview.as_deref(),
+                                )
+                            })
                             .unwrap_or(self.queued_prompt_count.max(1));
                         if count.is_some() || self.queued_prompt_preview.is_none() {
-                            self.queued_prompt_preview = self.status_timing.queue_preview(preview);
+                            self.queued_prompt_preview =
+                                self.status_timing.queue_preview(preview);
                         }
                         if count.is_some() {
-                            self.reconcile_queue_handoff(None, running == Some(true), action.as_deref());
+                            self.reconcile_queue_handoff(
+                                None,
+                                running == Some(true),
+                                action.as_deref(),
+                            );
                         }
                     } else {
                         let runtime = &mut self
@@ -1295,20 +1382,30 @@ self.footer_growth.record_with_edge(
                             .runtime;
                         if count.is_some()
                             || runtime.queued_prompt_preview.is_none()
-                            || runtime.queued_prompt_preview.as_deref() == Some("Compaction queued")
+                            || runtime.queued_prompt_preview.as_deref()
+                                == Some("Compaction queued")
                         {
                             runtime.pending_compact = None;
                         }
                         runtime.queued_prompt_count = count
-                            .map(|count| runtime.status_timing.queue_snapshot_count(
-                                count, running == Some(true), preview.as_deref(),
-                            ))
+                            .map(|count| {
+                                runtime.status_timing.queue_snapshot_count(
+                                    count,
+                                    running == Some(true),
+                                    preview.as_deref(),
+                                )
+                            })
                             .unwrap_or(runtime.queued_prompt_count.max(1));
                         if count.is_some() || runtime.queued_prompt_preview.is_none() {
-                            runtime.queued_prompt_preview = runtime.status_timing.queue_preview(preview);
+                            runtime.queued_prompt_preview =
+                                runtime.status_timing.queue_preview(preview);
                         }
                         if count.is_some() {
-                            runtime.reconcile_queue_handoff(None, running == Some(true), action.as_deref());
+                            runtime.reconcile_queue_handoff(
+                                None,
+                                running == Some(true),
+                                action.as_deref(),
+                            );
                         }
                     }
                     changed = true;
@@ -1433,7 +1530,10 @@ self.footer_growth.record_with_edge(
                     self.execute_switch_session_command(session_id);
                     changed = true;
                 }
-                OutboundAgentCommand::CompactSessionRequest { session_id, request_id } => {
+                OutboundAgentCommand::CompactSessionRequest {
+                    session_id,
+                    request_id,
+                } => {
                     self.execute_compact_request(session_id, Some(request_id));
                 }
                 OutboundAgentCommand::CompactSession => {
@@ -1496,38 +1596,48 @@ self.footer_growth.record_with_edge(
                     {
                         continue;
                     }
-                    let Ok(defaults) =
-                        fetch_config_defaults(&self.server, self.directory.as_deref())
-                    else {
-                        continue;
-                    };
-                    for (key, value) in
-                        [("agent.model", model), ("agent.variant", thinking)]
-                    {
-                        let Some(value) = value.filter(|value| !value.trim().is_empty())
-                        else {
-                            continue;
-                        };
-                        let already_set = match key {
-                            "agent.model" => defaults.model.is_some(),
-                            _ => defaults.thinking.is_some(),
-                        };
-                        if already_set {
-                            continue;
-                        }
-                        if let Err(error) =
-                            neoism_backend::config::write_setting_if_absent(
-                                key,
-                                Value::String(value),
-                            )
-                        {
-                            tracing::warn!(
-                                target: "neoism::config",
-                                %error,
-                                key,
-                                "first-run agent preference write failed"
-                            );
-                        }
+                    let server = self.server.clone();
+                    let directory = self.directory.clone();
+                    let result = std::thread::Builder::new()
+                        .name("neoism-agent-preference".into())
+                        .spawn(move || {
+                            let Ok(defaults) =
+                                fetch_config_defaults(&server, directory.as_deref())
+                            else {
+                                return;
+                            };
+                            for (key, value) in
+                                [("agent.model", model), ("agent.variant", thinking)]
+                            {
+                                let Some(value) =
+                                    value.filter(|value| !value.trim().is_empty())
+                                else {
+                                    continue;
+                                };
+                                let already_set = match key {
+                                    "agent.model" => defaults.model.is_some(),
+                                    _ => defaults.thinking.is_some(),
+                                };
+                                if already_set {
+                                    continue;
+                                }
+                                if let Err(error) =
+                                    neoism_backend::config::write_setting_if_absent(
+                                        key,
+                                        Value::String(value),
+                                    )
+                                {
+                                    tracing::warn!(
+                                        target: "neoism::config",
+                                        %error,
+                                        key,
+                                        "first-run agent preference write failed"
+                                    );
+                                }
+                            }
+                        });
+                    if let Err(error) = result {
+                        tracing::warn!(%error, "could not start preference writer");
                     }
                     changed = true;
                 }
@@ -1659,30 +1769,20 @@ self.footer_growth.record_with_edge(
                     self.execute_set_title_command(session_id, title);
                     changed = true;
                 }
-                // The desktop key bridge drives pin/delete through the
-                // pane's synchronous methods (`toggle_selected_session_pin`
-                // / `delete_selected_session` in pane/input.rs), which call
-                // the agent-server directly — but the shared pane records
-                // these commands, so honour them if they ever land here.
                 OutboundAgentCommand::DeleteSession { session_id } => {
-                    if let Err(error) = delete_session(&self.server, &session_id) {
-                        self.system_message("Sessions", error);
-                    } else {
-                        if self.session_id.as_deref() == Some(session_id.as_str()) {
-                            self.create_new_session();
-                        }
-                        self.refresh_sessions_after_mutation();
-                    }
+                    self.request_session_mutation(
+                        self.server.clone(),
+                        session_id,
+                        super::AgentSessionMutation::Delete,
+                    );
                     changed = true;
                 }
                 OutboundAgentCommand::SetSessionPinned { session_id, pinned } => {
-                    if let Err(error) =
-                        set_session_pinned(&self.server, &session_id, pinned)
-                    {
-                        self.system_message("Sessions", error);
-                    } else {
-                        self.refresh_sessions_after_mutation();
-                    }
+                    self.request_session_mutation(
+                        self.server.clone(),
+                        session_id,
+                        super::AgentSessionMutation::Pin(pinned),
+                    );
                     changed = true;
                 }
                 // The desktop pane drives `/connect` through its own
@@ -1704,21 +1804,12 @@ self.footer_growth.record_with_edge(
     }
 
     pub(crate) fn execute_reply_permission_command(&mut self, id: String, reply: String) {
-        let body = json!({ "reply": reply });
-        match api_request_json(
-            &self.server,
-            "POST",
-            &format!("/v2/interactions/permissions/{id}/reply"),
-            Some(&body),
-        ) {
-            Ok(_) => {
-                let reply = body["reply"].as_str().unwrap_or("");
-                self.permission_reply_succeeded(&id, reply);
-            }
-            Err(error) => {
-                self.permission_reply_failed(&id, error);
-            }
-        }
+        self.request_interaction_reply(
+            id.clone(),
+            Some(reply.clone()),
+            format!("/v2/interactions/permissions/{id}/reply"),
+            Some(json!({"reply": reply})),
+        );
     }
 
     pub(crate) fn execute_reply_question_command(
@@ -1726,36 +1817,21 @@ self.footer_growth.record_with_edge(
         id: String,
         answers: Vec<Vec<String>>,
     ) {
-        let body = json!({ "answers": answers });
-        match api_request_json(
-            &self.server,
-            "POST",
-            &format!("/v2/interactions/questions/{id}/reply"),
-            Some(&body),
-        ) {
-            Ok(_) => {
-                self.question_reply_succeeded(&id);
-            }
-            Err(error) => {
-                self.question_reply_failed(&id, error);
-            }
-        }
+        self.request_interaction_reply(
+            id.clone(),
+            None,
+            format!("/v2/interactions/questions/{id}/reply"),
+            Some(json!({"answers": answers})),
+        );
     }
 
     pub(crate) fn execute_reject_question_command(&mut self, id: String) {
-        match api_request_json(
-            &self.server,
-            "POST",
-            &format!("/v2/interactions/questions/{id}/reject"),
+        self.request_interaction_reply(
+            id.clone(),
             None,
-        ) {
-            Ok(_) => {
-                self.question_reply_succeeded(&id);
-            }
-            Err(error) => {
-                self.question_reply_failed(&id, error);
-            }
-        }
+            format!("/v2/interactions/questions/{id}/reject"),
+            None,
+        );
     }
 
     pub(crate) fn permission_reply_succeeded(&mut self, id: &str, reply: &str) -> bool {
@@ -1814,7 +1890,130 @@ self.footer_growth.record_with_edge(
             }
             remaining -= 1;
             match self.background_rx.try_recv() {
+                Ok(NeoismAgentBackgroundUpdate::InteractionReplyCompleted {
+                    server,
+                    id,
+                    permission_reply,
+                    result,
+                }) => {
+                    if server != self.server {
+                        continue;
+                    }
+                    match (permission_reply, result) {
+                        (Some(reply), Ok(())) => {
+                            self.permission_reply_succeeded(&id, &reply);
+                        }
+                        (Some(_), Err(error)) => {
+                            self.permission_reply_failed(&id, error);
+                        }
+                        (None, Ok(())) => {
+                            self.question_reply_succeeded(&id);
+                        }
+                        (None, Err(error)) => {
+                            self.question_reply_failed(&id, error);
+                        }
+                    }
+                    changed = true;
+                }
+                Ok(NeoismAgentBackgroundUpdate::SessionMutationCompleted {
+                    server,
+                    session_id,
+                    mutation,
+                    result,
+                }) => {
+                    self.session_mutations_in_flight
+                        .remove(&(server.clone(), session_id.clone()));
+                    match result {
+                        Ok(()) => {
+                            if self.server == server {
+                                self.refresh_sessions_after_mutation();
+                                if matches!(mutation, super::AgentSessionMutation::Delete)
+                                    && self.session_id.as_deref()
+                                        == Some(session_id.as_str())
+                                {
+                                    self.create_new_session();
+                                }
+                            }
+                            self.ui_events.push(
+                                super::NeoismAgentUiEvent::SessionMutationApplied {
+                                    server,
+                                    session_id,
+                                    deleted: matches!(
+                                        mutation,
+                                        super::AgentSessionMutation::Delete
+                                    ),
+                                },
+                            );
+                        }
+                        Err(error) => {
+                            self.push_notice(error, NeoismAgentNoticeLevel::Error)
+                        }
+                    }
+                    changed = true;
+                }
+                Ok(NeoismAgentBackgroundUpdate::RequestFailed {
+                    server,
+                    session_id,
+                    title,
+                    error,
+                }) => {
+                    if server != self.server {
+                        continue;
+                    }
+                    if session_id == self.session_id {
+                        self.system_message(title, error);
+                    } else if let Some(id) = session_id {
+                        self.session_cache
+                            .entry(id)
+                            .or_insert_with(CachedAgentSession::live_only)
+                            .messages
+                            .push(NeoismAgentMessage::system(title, error));
+                    }
+                    changed = true;
+                }
+                Ok(NeoismAgentBackgroundUpdate::PromptSessionCreated {
+                    server,
+                    origin_draft_id,
+                    session_id,
+                    session_title,
+                    mut event_stream,
+                }) => {
+                    for pending in &mut self.pending_prompt_dispatches {
+                        if pending.server == server
+                            && pending.origin_session_id.is_none()
+                            && pending.origin_draft_id == origin_draft_id
+                        {
+                            pending.origin_session_id = Some(session_id.clone());
+                        }
+                    }
+                    if self.server != server {
+                        continue;
+                    }
+                    if self.session_id.is_none()
+                        && self.prompt_draft_id == origin_draft_id
+                    {
+                        self.session_id = Some(session_id.clone());
+                        self.session_title = session_title;
+                        self.parent_session_id = None;
+                        self.session_tree_root_id = Some(session_id.clone());
+                        self.side_panel.set_viewed_session_id(Some(session_id));
+                        if let Some(wake) = self.event_wake.clone() {
+                            event_stream.set_wake(wake);
+                        }
+                        self.event_stream = Some(event_stream);
+                        self.reset_external_options();
+                        self.maybe_refresh_external_options();
+                    } else {
+                        let cached = self
+                            .session_cache
+                            .entry(session_id)
+                            .or_insert_with(CachedAgentSession::live_only);
+                        cached.state.title = session_title;
+                    }
+                    changed = true;
+                }
                 Ok(NeoismAgentBackgroundUpdate::PromptDispatched {
+                    server,
                     session_title,
                     origin_session_id,
                     origin_draft_id,
@@ -1823,12 +2022,17 @@ self.footer_growth.record_with_edge(
                     event_stream,
                 }) => {
                     self.prompt_dispatch_in_flight = false;
+                    if self.server != server {
+                        self.start_next_prompt_dispatch();
+                        continue;
+                    }
                     let is_active_origin = self.session_id == origin_session_id
                         && (origin_session_id.is_some()
                             || self.prompt_draft_id == origin_draft_id);
                     if origin_session_id.is_none() {
                         for pending in &mut self.pending_prompt_dispatches {
-                            if pending.origin_session_id.is_none()
+                            if pending.server == server
+                                && pending.origin_session_id.is_none()
                                 && pending.origin_draft_id == origin_draft_id
                             {
                                 pending.origin_session_id = Some(session_id.clone());
@@ -1882,31 +2086,69 @@ self.footer_growth.record_with_edge(
                     changed = true;
                 }
                 Ok(NeoismAgentBackgroundUpdate::PromptDispatchFailed {
+                    server,
                     origin_session_id,
                     origin_draft_id,
+                    queued,
+                    request,
                     error,
                 }) => {
                     self.prompt_dispatch_in_flight = false;
+                    let rollback_queue = queued
+                        && request.as_ref().is_none_or(|r| !r.reconcile_before_send);
+                    let uncertain = request.is_some();
+                    if let Some(request) = request {
+                        self.uncertain_prompts.push_back(*request);
+                    }
+                    if self.server != server {
+                        self.start_next_prompt_dispatch();
+                        continue;
+                    }
+                    let title = if uncertain {
+                        "Delivery uncertain"
+                    } else {
+                        "Prompt failed"
+                    };
+                    let error = if uncertain {
+                        format!("{error}\nAdmission could not be confirmed. Use /retry to reconcile and retry the same message ID; do not resend as a new message.")
+                    } else {
+                        error
+                    };
                     let is_active_origin = self.session_id == origin_session_id
                         && (origin_session_id.is_some()
                             || self.prompt_draft_id == origin_draft_id);
                     if is_active_origin {
-                        self.system_message("Prompt failed", error);
+                        if rollback_queue {
+                            self.queued_prompt_count =
+                                self.queued_prompt_count.saturating_sub(1);
+                            if self.queued_prompt_count == 0 {
+                                self.queued_prompt_preview = None;
+                            }
+                        }
+                        self.system_message(title, error);
                     } else if let Some(origin_session_id) = origin_session_id.as_ref() {
                         let cached = self
                             .session_cache
                             .entry(origin_session_id.clone())
                             .or_insert_with(CachedAgentSession::live_only);
-                        cached
-                            .runtime
-                            .note_streaming(NeoismAgentStreamingState::Idle, None);
+                        if rollback_queue {
+                            cached.runtime.queued_prompt_count =
+                                cached.runtime.queued_prompt_count.saturating_sub(1);
+                            if cached.runtime.queued_prompt_count == 0 {
+                                cached.runtime.queued_prompt_preview = None;
+                            }
+                        } else if !queued {
+                            cached
+                                .runtime
+                                .note_streaming(NeoismAgentStreamingState::Idle, None);
+                        }
                         cached
                             .messages
-                            .push(NeoismAgentMessage::system("Prompt failed", error));
+                            .push(NeoismAgentMessage::system(title, error));
                         cached.invalidate_timeline_layout();
                     }
                     self.start_next_prompt_dispatch();
-                    if is_active_origin && !self.prompt_dispatch_in_flight {
+                    if is_active_origin && !queued && !self.prompt_dispatch_in_flight {
                         self.note_streaming(NeoismAgentStreamingState::Idle, None);
                     }
                     changed = true;
@@ -1917,9 +2159,13 @@ self.footer_growth.record_with_edge(
                     if self.session_id.as_deref() == Some(session_id.as_str()) {
                         self.system_message("Abort", error);
                     } else {
-                        let cached = self.session_cache.entry(session_id)
+                        let cached = self
+                            .session_cache
+                            .entry(session_id)
                             .or_insert_with(CachedAgentSession::live_only);
-                        cached.messages.push(NeoismAgentMessage::system("Abort", error));
+                        cached
+                            .messages
+                            .push(NeoismAgentMessage::system("Abort", error));
                         cached.invalidate_timeline_layout();
                     }
                     changed = true;
@@ -1934,7 +2180,11 @@ self.footer_growth.record_with_edge(
                     request_id,
                     error,
                 }) => {
-                    self.compact_request_failed(&session_id, request_id.as_deref(), error);
+                    self.compact_request_failed(
+                        &session_id,
+                        request_id.as_deref(),
+                        error,
+                    );
                     changed = true;
                 }
                 Ok(NeoismAgentBackgroundUpdate::ConfigDefaultsLoaded(defaults)) => {
@@ -2038,7 +2288,10 @@ self.footer_growth.record_with_edge(
                         changed = true;
                     }
                 }
-                Ok(NeoismAgentBackgroundUpdate::SessionOptionsRefreshed { catalog_generation, result }) => {
+                Ok(NeoismAgentBackgroundUpdate::SessionOptionsRefreshed {
+                    catalog_generation,
+                    result,
+                }) => {
                     if catalog_generation != self.catalog_generation {
                         continue;
                     }
@@ -2105,33 +2358,58 @@ self.footer_growth.record_with_edge(
                     );
                 }
                 Ok(NeoismAgentBackgroundUpdate::SessionProjectsRefreshed {
-                    server, catalog_generation, generation, result,
+                    server,
+                    catalog_generation,
+                    generation,
+                    result,
                 }) => {
-                    if !self.catalog_callback_is_current(&server, catalog_generation, None)
-                        || !self.side_panel.session_request_is_current(generation) {
+                    if !self.catalog_callback_is_current(
+                        &server,
+                        catalog_generation,
+                        None,
+                    ) || !self.side_panel.session_request_is_current(generation)
+                    {
                         continue;
                     }
                     match result {
                         Ok(discovery) => {
                             self.side_panel.set_session_projects(discovery.projects);
-                            self.side_panel.set_pinned_sessions(discovery.pinned_sessions);
+                            self.side_panel
+                                .set_pinned_sessions(discovery.pinned_sessions);
                         }
                         Err(error) => self.side_panel.settle_session_page_error(&error),
                     }
                     changed = true;
                 }
                 Ok(NeoismAgentBackgroundUpdate::ProjectSessionPage {
-                    server, catalog_generation, directory, requested_cursor, generation, result,
+                    server,
+                    catalog_generation,
+                    directory,
+                    requested_cursor,
+                    generation,
+                    result,
                 }) => {
-                    if !self.catalog_callback_is_current(&server, catalog_generation, None)
-                        || !self.side_panel.project_pagination_enabled() {
+                    if !self.catalog_callback_is_current(
+                        &server,
+                        catalog_generation,
+                        None,
+                    ) || !self.side_panel.project_pagination_enabled()
+                    {
                         continue;
                     }
                     match result {
-                        Ok((sessions, next_cursor)) => self.side_panel.set_project_session_page(
-                            &directory, requested_cursor.as_deref(), sessions, next_cursor, generation,
-                        ),
-                        Err(error) => self.side_panel.settle_project_session_error(&directory, generation, error),
+                        Ok((sessions, next_cursor)) => {
+                            self.side_panel.set_project_session_page(
+                                &directory,
+                                requested_cursor.as_deref(),
+                                sessions,
+                                next_cursor,
+                                generation,
+                            )
+                        }
+                        Err(error) => self
+                            .side_panel
+                            .settle_project_session_error(&directory, generation, error),
                     }
                     changed = true;
                 }
@@ -2143,8 +2421,12 @@ self.footer_growth.record_with_edge(
                     requested_cursor,
                     result,
                 }) => {
-                    if !self.catalog_callback_is_current(&server, catalog_generation, directory.as_deref())
-                        || !self.side_panel.session_request_is_current(generation) {
+                    if !self.catalog_callback_is_current(
+                        &server,
+                        catalog_generation,
+                        directory.as_deref(),
+                    ) || !self.side_panel.session_request_is_current(generation)
+                    {
                         continue;
                     }
                     match result {
@@ -2223,7 +2505,12 @@ self.footer_growth.record_with_edge(
                     self.sync_subagent_waiting_clock();
                     changed = true;
                 }
-                Ok(NeoismAgentBackgroundUpdate::SemanticSessionHits { catalog_generation, query, hits, transcript_unavailable }) => {
+                Ok(NeoismAgentBackgroundUpdate::SemanticSessionHits {
+                    catalog_generation,
+                    query,
+                    hits,
+                    transcript_unavailable,
+                }) => {
                     if catalog_generation != self.catalog_generation {
                         continue;
                     }
@@ -2231,20 +2518,30 @@ self.footer_growth.record_with_edge(
                     self.semantic_unavailable |= transcript_unavailable;
                     self.set_semantic_loading_indicators(false);
                     match hits {
-                        None => {},
+                        None => {}
                         Some(mut hits) => {
                             if let Some(directory) = self.side_panel.catalog_directory() {
-                                hits.retain(|hit| hit.entry.directory.as_deref() == Some(directory));
+                                hits.retain(|hit| {
+                                    hit.entry.directory.as_deref() == Some(directory)
+                                });
                             }
                             // Search can discover roots outside loaded catalog
                             // pages. Keep their saved directory/source for grouping.
-                            self.side_panel.admit_search_sessions(hits.iter().map(|hit| hit.entry.clone()));
-                            let hits = hits.into_iter().filter_map(|mut hit| {
-                                let entry = self.side_panel.catalog_session(&hit.session_id)?.clone();
-                                hit.title = entry.title.clone();
-                                hit.entry = entry;
-                                Some(hit)
-                            }).collect::<Vec<_>>();
+                            self.side_panel.admit_search_sessions(
+                                hits.iter().map(|hit| hit.entry.clone()),
+                            );
+                            let hits = hits
+                                .into_iter()
+                                .filter_map(|mut hit| {
+                                    let entry = self
+                                        .side_panel
+                                        .catalog_session(&hit.session_id)?
+                                        .clone();
+                                    hit.title = entry.title.clone();
+                                    hit.entry = entry;
+                                    Some(hit)
+                                })
+                                .collect::<Vec<_>>();
                             self.side_panel.set_semantic_results(
                                 query.clone(),
                                 hits.iter()
@@ -2565,12 +2862,14 @@ self.footer_growth.record_with_edge(
                         self.text_reveal.scope(self.session_id.as_deref());
                         self.tool_motion.scope(self.session_id.as_deref());
                         self.text_reveal.reconcile_history_with_footers(
-                            self.messages
-                                .iter()
-                                .map(|m| (
-                        m.id.as_str(), m.tool_reveal_body(),
-                        (m.kind == NeoismAgentMessageKind::Assistant).then_some(m.status.as_str()),
-                    )),
+                            self.messages.iter().map(|m| {
+                                (
+                                    m.id.as_str(),
+                                    m.tool_reveal_body(),
+                                    (m.kind == NeoismAgentMessageKind::Assistant)
+                                        .then_some(m.status.as_str()),
+                                )
+                            }),
                         );
                         self.invalidate_timeline_layout();
                         self.hydrate_runtime_status_for_session(&session_id);
@@ -2597,11 +2896,19 @@ self.footer_growth.record_with_edge(
                     self.finish_connect_request(token, result);
                     changed = true;
                 }
-                Ok(NeoismAgentBackgroundUpdate::McpCatalogRefreshed { token, server, directory, result }) => {
+                Ok(NeoismAgentBackgroundUpdate::McpCatalogRefreshed {
+                    token,
+                    server,
+                    directory,
+                    result,
+                }) => {
                     self.finish_mcp_catalog_refresh(token, server, directory, result);
                     changed = true;
                 }
-                Ok(NeoismAgentBackgroundUpdate::McpOAuthProgress { activity, detail }) => {
+                Ok(NeoismAgentBackgroundUpdate::McpOAuthProgress {
+                    activity,
+                    detail,
+                }) => {
                     changed |= self.apply_mcp_oauth_progress(activity, detail);
                 }
                 Err(TryRecvError::Empty) => break,
@@ -2998,7 +3305,9 @@ self.footer_growth.record_with_edge(
         let pending = if self.session_id.as_deref() == Some(session_id) {
             Some(&mut self.pending_compact)
         } else {
-            self.session_cache.get_mut(session_id).map(|cached| &mut cached.runtime.pending_compact)
+            self.session_cache
+                .get_mut(session_id)
+                .map(|cached| &mut cached.runtime.pending_compact)
         };
         if let Some(pending) = pending {
             if request_id.is_some() && pending.as_deref() == request_id {
@@ -3586,7 +3895,9 @@ self.footer_growth.record_with_edge(
     }
 
     pub(crate) fn upsert_part_message(&mut self, message: NeoismAgentMessage) {
-        let footer_only = self.messages.iter()
+        let footer_only = self
+            .messages
+            .iter()
             .find(|m| !message.id.is_empty() && m.id == message.id)
             .is_some_and(|old| {
                 let mut same = old.clone();
@@ -3598,12 +3909,18 @@ self.footer_growth.record_with_edge(
             // A subsequent real body/tool arrival owns the ordinary measured-tail path.
             self.footer_growth.clear();
         }
-        let footer_before = (message.kind == NeoismAgentMessageKind::Assistant).then(|| {
-            self.messages.iter().find(|m| m.id == message.id)
-                .map(|m| m.status.clone()).unwrap_or_default()
-        });
+        let footer_before =
+            (message.kind == NeoismAgentMessageKind::Assistant).then(|| {
+                self.messages
+                    .iter()
+                    .find(|m| m.id == message.id)
+                    .map(|m| m.status.clone())
+                    .unwrap_or_default()
+            });
         if footer_only
-            && footer_before.as_ref().is_some_and(|before| *before != message.status)
+            && footer_before
+                .as_ref()
+                .is_some_and(|before| *before != message.status)
         {
             // This revision owns only footer ink/space, not a latched body flag.
             self.timeline_live_growth = false;
@@ -3675,8 +3992,11 @@ self.footer_growth.record_with_edge(
         if let Some(before) = footer_before {
             if let Some(row) = self.messages.iter().find(|m| m.id == reveal_id) {
                 let born = neoism_ui::panels::agent_pane::response_footer::record(
-                    &mut self.text_reveal, &mut self.tool_motion,
-                    &row.id, &before, &row.status,
+                    &mut self.text_reveal,
+                    &mut self.tool_motion,
+                    &row.id,
+                    &before,
+                    &row.status,
                 );
                 if footer_only && born && !row.text.trim().is_empty() {
                     self.footer_growth.record_with_edge(
@@ -3807,9 +4127,14 @@ self.footer_growth.record_with_edge(
                 .iter()
                 .position(|existing| existing.id == message.id)
             {
-                self.retry_reset_pending = false;
-                self.messages[index].text.clear();
-                self.mark_timeline_message_dirty_at(index);
+                // An empty seed can arrive after this part's deltas. Only an
+                // explicit retry authorizes wiping the streamed text, and that
+                // authorization is consumed by the first matching reset.
+                if self.retry_reset_pending {
+                    self.retry_reset_pending = false;
+                    self.messages[index].text.clear();
+                    self.mark_timeline_message_dirty_at(index);
+                }
                 return;
             }
         }

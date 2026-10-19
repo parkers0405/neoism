@@ -298,10 +298,16 @@ async fn recv_marker_for_session(
             }
             PtyServerMessage::SessionCwd {
                 session_id: got_id, ..
+            }
+            | PtyServerMessage::TerminalDirectoryChanged {
+                session_id: got_id, ..
+            }
+            | PtyServerMessage::TerminalDirectoryChangeFailed {
+                session_id: got_id, ..
             } => {
                 assert_eq!(
                     got_id, session_id,
-                    "SessionCwd must carry the same shared session id as PTY output"
+                    "terminal directory events must carry the same shared session id as PTY output"
                 );
             }
             PtyServerMessage::Ack

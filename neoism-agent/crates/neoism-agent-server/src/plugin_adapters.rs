@@ -877,11 +877,14 @@ impl neoism_agent_builtins::plugin::semantic::SemanticHost for Semantic {
             );
             let query = serde_json::from_value(serde_json::Value::Object(query))
                 .map_err(runtime_error)?;
-            let response = crate::semantic::semantic_search_route(
+            let response = match crate::semantic::semantic_search_route(
                 axum::extract::State(self.0.clone()),
                 axum::extract::Query(query),
                 claims,
-            ).await.map_err(api_error)?;
+            ).await {
+                Ok(response) => response,
+                Err(error) => return Ok(error.into_plugin_response()),
+            };
             let body = serde_json::to_value(response.0).map_err(runtime_error)?;
             Ok(neoism_agent_plugin_api::RouteResponse::json(200, body))
         })

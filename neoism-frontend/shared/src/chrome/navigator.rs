@@ -26,6 +26,13 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         self.refresh_conversation_catalog_scope();
     }
 
+    /// Actual sidebar scope, independent of execution cwd and selected chat.
+    pub fn conversation_navigator_directory(&self) -> Option<&str> {
+        self.agent_pane
+            .as_ref()
+            .and_then(|pane| pane.side_panel().catalog_directory())
+    }
+
     pub fn conversation_catalog_directory(
         &self,
         root: &std::path::Path,
@@ -310,6 +317,27 @@ mod tests {
                 .catalog_directory(),
             None
         );
+    }
+
+    #[test]
+    fn navigator_reads_sidebar_scope_not_chat_directory() {
+        use crate::panels::agent_pane::state::NeoismAgentPane;
+        use std::path::Path;
+        let mut chrome = Chrome::<()>::new();
+        chrome.install_agent_pane(NeoismAgentPane::default());
+        chrome.set_conversation_dashboard_root(Some("/home/alice".into()));
+        for (root, expected) in [
+            ("/home/alice", None),
+            ("/work/project", Some("/work/project")),
+            ("/", None),
+        ] {
+            chrome.set_conversation_catalog_workspace_root(Path::new(root));
+            chrome
+                .agent_pane_mut()
+                .unwrap()
+                .set_directory(Some("/unrelated/chat".into()));
+            assert_eq!(chrome.conversation_navigator_directory(), expected);
+        }
     }
 
     #[test]

@@ -393,7 +393,7 @@ fn provider_readiness_checks_the_queued_model_and_exempts_current_external_sourc
         neoism_protocol::agent::PromptDelivery::Steer,
         true,
     );
-    assert_eq!(pane.pending_prompt_dispatches.len(), 1);
+    assert_eq!(pane.pending_prompt_dispatches.len(), 2);
 }
 
 #[test]
@@ -474,10 +474,11 @@ fn provider_readiness_keeps_local_connect_and_external_cli_available() {
     assert!(!pane.no_providers_connected());
     pane.insert_text("external prompt");
     assert!(pane.submit());
-    assert!(pane
-        .drain_pending_outbound()
-        .iter()
-        .any(|command| matches!(command, OutboundAgentCommand::SendPrompt { .. })));
+    assert!(
+        pane.prompt_dispatch_in_flight,
+        "submission starts the worker without a frame"
+    );
+    assert!(pane.drain_pending_outbound().is_empty());
 }
 
 fn seed_prompt_catalog(pane: &mut NeoismAgentPane) {
@@ -951,47 +952,76 @@ fn left_catalog_families_survive_last_chat_view_close() {
     };
     let mut chat = NeoismAgentPane::default();
     chat.session_id = Some("root-a".into());
-    catalog.session_catalog_stream = Some(AgentSessionCatalogStream::with_events_for_test([
-        family_event("root-a", 1, "outstanding", false),
-        family_event("root-b", 1, "outstanding", false),
-    ]));
+    catalog.session_catalog_stream =
+        Some(AgentSessionCatalogStream::with_events_for_test([
+            family_event("root-a", 1, "outstanding", false),
+            family_event("root-b", 1, "outstanding", false),
+        ]));
     assert!(catalog.drain_live_session_updates());
     let branch_status = |catalog: &NeoismAgentPane, id: &str| {
-        catalog.side_panel.sessions().iter()
-            .find(|row| row.id == id).and_then(|row| row.branch_status)
+        catalog
+            .side_panel
+            .sessions()
+            .iter()
+            .find(|row| row.id == id)
+            .and_then(|row| row.branch_status)
     };
-    assert_eq!(branch_status(&catalog, "root-a-child"), Some(BranchStatus::Active));
-    assert_eq!(branch_status(&catalog, "root-b-child"), Some(BranchStatus::Active));
+    assert_eq!(
+        branch_status(&catalog, "root-a-child"),
+        Some(BranchStatus::Active)
+    );
+    assert_eq!(
+        branch_status(&catalog, "root-b-child"),
+        Some(BranchStatus::Active)
+    );
 
     drop(chat);
     assert!(catalog.event_stream.is_none());
-    assert_eq!(branch_status(&catalog, "root-a-child"), Some(BranchStatus::Active));
-    catalog.session_catalog_stream = Some(AgentSessionCatalogStream::with_events_for_test([
-        family_event("root-a", 1, "outstanding", true),
-    ]));
+    assert_eq!(
+        branch_status(&catalog, "root-a-child"),
+        Some(BranchStatus::Active)
+    );
+    catalog.session_catalog_stream =
+        Some(AgentSessionCatalogStream::with_events_for_test([
+            family_event("root-a", 1, "outstanding", true),
+        ]));
     assert!(catalog.drain_live_session_updates());
-    assert_eq!(branch_status(&catalog, "root-a-child"), Some(BranchStatus::WaitingPermission));
+    assert_eq!(
+        branch_status(&catalog, "root-a-child"),
+        Some(BranchStatus::WaitingPermission)
+    );
 
-    catalog.session_catalog_stream = Some(AgentSessionCatalogStream::with_events_for_test([
-        family_event("root-a", 2, "completed", false),
-        family_event("root-a", 1, "outstanding", false),
-    ]));
+    catalog.session_catalog_stream =
+        Some(AgentSessionCatalogStream::with_events_for_test([
+            family_event("root-a", 2, "completed", false),
+            family_event("root-a", 1, "outstanding", false),
+        ]));
     assert!(catalog.drain_live_session_updates());
-    assert_eq!(branch_status(&catalog, "root-a-child"), Some(BranchStatus::Completed));
-    assert_eq!(branch_status(&catalog, "root-b-child"), Some(BranchStatus::Active));
+    assert_eq!(
+        branch_status(&catalog, "root-a-child"),
+        Some(BranchStatus::Completed)
+    );
+    assert_eq!(
+        branch_status(&catalog, "root-b-child"),
+        Some(BranchStatus::Active)
+    );
     assert!(catalog.event_stream.is_none());
 
-    catalog.session_catalog_stream = Some(AgentSessionCatalogStream::with_events_for_test([
-        serde_json::json!({
-            "id": "deleted-root-a", "sequence": 3, "source": "session",
-            "schemaVersion": "1.0.0", "timestamp": 1, "type": "session.deleted",
-            "subject": {"kind": "session", "id": "root-a"},
-            "data": {"info": {"id": "root-a"}}
-        }),
-    ]));
+    catalog.session_catalog_stream =
+        Some(AgentSessionCatalogStream::with_events_for_test([
+            serde_json::json!({
+                "id": "deleted-root-a", "sequence": 3, "source": "session",
+                "schemaVersion": "1.0.0", "timestamp": 1, "type": "session.deleted",
+                "subject": {"kind": "session", "id": "root-a"},
+                "data": {"info": {"id": "root-a"}}
+            }),
+        ]));
     assert!(catalog.drain_live_session_updates());
     assert_eq!(branch_status(&catalog, "root-a-child"), None);
-    assert_eq!(branch_status(&catalog, "root-b-child"), Some(BranchStatus::Active));
+    assert_eq!(
+        branch_status(&catalog, "root-b-child"),
+        Some(BranchStatus::Active)
+    );
 }
 
 #[test]
@@ -1033,9 +1063,11 @@ fn provider_slash_collision_inserts_draft_and_routes_as_prompt() {
     assert_eq!(pane.input, "/compact ");
     assert!(pane.drain_pending_outbound().is_empty());
     pane.input.push_str("keep this argument");
+    pane.prompt_dispatch_in_flight = true;
     assert!(pane.submit());
-    assert!(
-        matches!(&pane.drain_pending_outbound()[..], [OutboundAgentCommand::SendPrompt { text, .. }] if text == "/compact keep this argument")
+    assert_eq!(
+        pane.pending_prompt_dispatches.front().unwrap().parts[0]["text"],
+        "/compact keep this argument"
     );
     assert_eq!(
         super::submit::provider_slash_draft("/comp user args", "compact"),
@@ -1067,9 +1099,11 @@ fn opencode_compact_uses_verified_acp_action_without_duplicating_provider_comman
     );
     assert!(pane.commit_picker());
     assert_eq!(pane.input, "/compact ");
+    pane.prompt_dispatch_in_flight = true;
     assert!(pane.submit());
-    assert!(
-        matches!(&pane.drain_pending_outbound()[..], [OutboundAgentCommand::SendPrompt { text, .. }] if text == "/compact")
+    assert_eq!(
+        pane.pending_prompt_dispatches.front().unwrap().parts[0]["text"],
+        "/compact"
     );
     pane.external_options
         .as_mut()
@@ -1125,9 +1159,11 @@ fn provider_empty_slash_catalog_never_shows_neoism_commands() {
     pane.input = "/compact args".into();
     pane.sync_input_pickers();
     assert!(pane.picker.is_none());
+    pane.prompt_dispatch_in_flight = true;
     assert!(pane.submit());
-    assert!(
-        matches!(&pane.drain_pending_outbound()[..], [OutboundAgentCommand::SendPrompt { text, .. }] if text == "/compact args")
+    assert_eq!(
+        pane.pending_prompt_dispatches.front().unwrap().parts[0]["text"],
+        "/compact args"
     );
 }
 
@@ -1151,7 +1187,7 @@ fn external_model_slash_opens_confirmed_provider_choices() {
             .selected_option()
             .unwrap()
             .value,
-        "model"
+        "__external_config:provider-model"
     );
     assert!(pane.submit());
     assert_eq!(
@@ -1185,7 +1221,7 @@ fn exact_model_selects_provider_config_before_colliding_command() {
             .selected_option()
             .unwrap()
             .value,
-        "model"
+        "__external_config:model"
     );
     assert!(pane.commit_picker());
     assert_eq!(
@@ -1417,7 +1453,11 @@ fn live_baseline_replaces_cached_text_before_following_deltas() {
     pane.upsert_part_message(NeoismAgentMessage::assistant("prefix ").with_id("p"));
     pane.apply_part_delta(None, Some("p".into()), Some("text".into()), "new");
     assert_eq!(pane.messages[0].text, "prefix new");
+    // A deliberate retry reset, unlike a late empty normal snapshot, may
+    // clear the previous attempt before the retry's deltas arrive.
+    pane.retry_reset_pending = true;
     pane.upsert_part_message(NeoismAgentMessage::assistant("").with_id("p"));
+    assert!(!pane.retry_reset_pending);
     pane.apply_part_delta(None, Some("p".into()), Some("text".into()), "retry");
     assert_eq!(pane.messages[0].text, "retry");
     let mut cached = vec![NeoismAgentMessage::assistant("old").with_id("p")];
@@ -1538,10 +1578,7 @@ fn windows_new_prompt_does_not_borrow_finished_execution_timer() {
         pane.note_prompt_admission("next");
         pane.note_streaming(NeoismAgentStreamingState::Generating, None);
         assert_eq!(pane.streaming_label(), "Crafting");
-        assert_eq!(
-            pane.session_runtime_revision("root"),
-            revision + 1
-        );
+        assert_eq!(pane.session_runtime_revision("root"), revision + 1);
         if windows_policy {
             assert!(pane.streaming_elapsed_seconds().unwrap() < 1.0);
             assert!(!pane.apply_execution_activity(previous));
@@ -4128,6 +4165,8 @@ fn approval_card_persists_across_parent_child_navigation() {
 
 #[test]
 fn clicking_the_active_detail_child_returns_to_main() {
+    use neoism_ui::panels::agent_pane::state::side_panel::SidePanelMode;
+
     let mut pane = NeoismAgentPane::default();
     pane.session_id = Some("child".to_string());
     pane.parent_session_id = Some("root".to_string());
@@ -4136,6 +4175,7 @@ fn clicking_the_active_detail_child_returns_to_main() {
         NeoismAgentSessionEntry::new("child", "Worker", "general"),
     ]);
 
+    pane.detail_panel.set_mode(SidePanelMode::Subagents);
     assert!(pane.activate_clicked_detail_panel_subagent(1));
     assert_eq!(pane.session_id.as_deref(), Some("root"));
     assert_eq!(pane.detail_panel.selected_index(), 0);
@@ -4470,6 +4510,9 @@ fn inactive_prompt_failure_settles_the_origin_session() {
     pane.prompt_dispatch_in_flight = true;
     pane.background_sender()
         .send(NeoismAgentBackgroundUpdate::PromptDispatchFailed {
+            server: pane.server.clone(),
+            queued: false,
+            request: None,
             origin_session_id: Some("root".to_string()),
             origin_draft_id: 0,
             error: "offline".to_string(),
@@ -4505,6 +4548,7 @@ fn inactive_prompt_success_reconciles_server_echo_without_duplicate_user() {
     pane.prompt_dispatch_in_flight = true;
     pane.background_sender()
         .send(NeoismAgentBackgroundUpdate::PromptDispatched {
+            server: pane.server.clone(),
             session_title: None,
             origin_session_id: Some("root".to_string()),
             origin_draft_id: 0,
@@ -4562,8 +4606,16 @@ fn proactive_preload_queue_is_concurrency_and_memory_bounded() {
 
     pane.pending_session_switch = Some("child-19".to_string());
     pane.ensure_session_preloaded("child-19".to_string(), false);
-    assert!(pane.session_preloads_in_flight.contains("child-19"));
-    assert_eq!(pane.session_preloads_in_flight.len(), 3);
+    assert!(!pane.session_preloads_in_flight.contains("child-19"));
+    assert_eq!(pane.session_preloads_in_flight.len(), 2);
+    assert_eq!(pane.session_preload_queue.front().unwrap().0, "child-19");
+    for index in 20..100 {
+        pane.pending_session_switch = Some(format!("child-{index}"));
+        pane.ensure_session_preloaded(format!("child-{index}"), false);
+    }
+    assert_eq!(pane.session_preloads_in_flight.len(), 2);
+    assert_eq!(pane.session_preload_queue.len(), 1);
+    assert_eq!(pane.session_preload_queue.front().unwrap().0, "child-99");
 }
 
 #[test]
@@ -4595,39 +4647,32 @@ fn compact_session_queues_outbound_command_for_runtime() {
 }
 
 #[test]
-fn submit_prompt_queues_send_prompt_for_runtime() {
+fn submit_prompt_captures_origin_before_any_frame_drain() {
     let mut pane = NeoismAgentPane::default();
     seed_prompt_catalog(&mut pane);
+    pane.prompt_dispatch_in_flight = true; // hold the worker to inspect admission
+    pane.session_id = Some("origin".into());
     pane.insert_text("ship it");
-
     assert!(pane.submit());
-
-    let drained = pane.drain_pending_outbound();
-    assert_eq!(drained.len(), 1);
-    match &drained[0] {
-        OutboundAgentCommand::SendPrompt {
-            message_id,
-            text,
-            agent,
-            model,
-            thinking,
-            transcript_echo,
-            ..
-        } => {
-            assert_eq!(text, "ship it");
-            assert_eq!(pane.messages[0].id.as_str(), message_id);
-            assert_eq!(agent.as_deref(), Some(DEFAULT_AGENT));
-            assert_eq!(model, "test/model");
-            assert_eq!(thinking, &None);
-            assert!(
-                *transcript_echo,
-                "idle submissions should be echoed into the transcript"
-            );
-        }
-        other => panic!("expected SendPrompt, got {other:?}"),
-    }
-    assert_eq!(pane.messages[0].text, "ship it");
-    assert!(pane.is_streaming());
+    let request = pane.pending_prompt_dispatches.front().unwrap();
+    assert_eq!(request.origin_session_id.as_deref(), Some("origin"));
+    assert_eq!(request.parts[0]["text"], "ship it");
+    assert_eq!(request.message_id, pane.messages[0].id);
+    assert_eq!(request.agent.as_deref(), Some(DEFAULT_AGENT));
+    assert_eq!(request.model, "test/model");
+    assert!(request.thinking.is_none());
+    assert!(request.transcript_echo.is_some());
+    assert!(pane.drain_pending_outbound().is_empty());
+    pane.session_id = Some("different".into());
+    pane.create_new_session();
+    assert_eq!(
+        pane.pending_prompt_dispatches
+            .front()
+            .unwrap()
+            .origin_session_id
+            .as_deref(),
+        Some("origin")
+    );
 }
 
 #[test]
@@ -4639,7 +4684,7 @@ fn prompt_dispatch_is_off_thread_and_serialized() {
 
     pane.insert_text("first");
     assert!(pane.submit());
-    assert!(pane.drain_outbound_commands());
+    assert!(!pane.drain_outbound_commands());
     assert!(pane.prompt_dispatch_in_flight);
     assert!(pane.pending_prompt_dispatches.is_empty());
 
@@ -4647,7 +4692,7 @@ fn prompt_dispatch_is_off_thread_and_serialized() {
     // concurrent POST that could overtake it at the backend.
     pane.insert_text("second");
     assert!(pane.submit());
-    assert!(pane.drain_outbound_commands());
+    assert!(!pane.drain_outbound_commands());
     assert!(pane.prompt_dispatch_in_flight);
     assert_eq!(pane.pending_prompt_dispatches.len(), 1);
 }
@@ -4661,6 +4706,7 @@ fn completed_prompt_does_not_attach_to_a_replaced_draft() {
     pane.create_new_session();
     pane.background_sender()
         .send(NeoismAgentBackgroundUpdate::PromptDispatched {
+            server: pane.server.clone(),
             session_title: None,
             origin_session_id: None,
             origin_draft_id: original_draft_id,
@@ -4676,103 +4722,68 @@ fn completed_prompt_does_not_attach_to_a_replaced_draft() {
 }
 
 #[test]
-fn submit_prompt_with_session_queues_send_prompt_only() {
+fn submit_prompt_with_session_is_admitted_without_ensure_session() {
     let mut pane = NeoismAgentPane::default();
     seed_prompt_catalog(&mut pane);
+    pane.prompt_dispatch_in_flight = true;
     pane.session_id = Some("sess-1".to_string());
     pane.insert_text("continue");
-
     assert!(pane.submit());
-
-    let drained = pane.drain_pending_outbound();
-    assert_eq!(drained.len(), 1);
-    match &drained[0] {
-        OutboundAgentCommand::SendPrompt {
-            text,
-            transcript_echo,
-            ..
-        } => {
-            assert_eq!(text, "continue");
-            assert!(
-                *transcript_echo,
-                "idle submissions should be echoed into the transcript"
-            );
-        }
-        other => panic!("expected SendPrompt, got {other:?}"),
-    }
+    assert!(pane.drain_pending_outbound().is_empty());
+    let request = pane.pending_prompt_dispatches.front().unwrap();
+    assert_eq!(request.origin_session_id.as_deref(), Some("sess-1"));
+    assert_eq!(request.parts[0]["text"], "continue");
+    assert_eq!(request.transcript_echo.as_deref(), Some("continue"));
 }
 
 #[test]
 fn setting_goal_starts_an_agent_turn_with_the_goal_text() {
     let mut pane = NeoismAgentPane::default();
     seed_prompt_catalog(&mut pane);
+    pane.prompt_dispatch_in_flight = true;
     pane.session_id = Some("sess-1".to_string());
-
     pane.start_goal_prompt("ship the durable goal".to_string());
-
     assert_eq!(pane.messages.len(), 1);
     assert_eq!(pane.messages[0].text, "ship the durable goal");
     assert!(pane.is_streaming());
-    let drained = pane.drain_pending_outbound();
-    assert_eq!(drained.len(), 1);
-    assert!(matches!(
-        &drained[0],
-        OutboundAgentCommand::SendPrompt {
-            text,
-            transcript_echo: true,
-            ..
-        } if text == "ship the durable goal"
-    ));
+    let request = pane.pending_prompt_dispatches.front().unwrap();
+    assert_eq!(request.parts[0]["text"], "ship the durable goal");
+    assert!(request.transcript_echo.is_some());
 }
 
 #[test]
 fn setting_goal_during_a_run_queues_its_agent_turn() {
     let mut pane = NeoismAgentPane::default();
     seed_prompt_catalog(&mut pane);
+    pane.prompt_dispatch_in_flight = true;
     pane.session_id = Some("sess-1".to_string());
     pane.note_streaming(NeoismAgentStreamingState::Generating, None);
-
     pane.start_goal_prompt("next durable goal".to_string());
-
     assert!(pane.messages.is_empty());
     assert_eq!(pane.queued_prompt_count, 1);
     assert_eq!(
         pane.queued_prompt_preview.as_deref(),
         Some("next durable goal")
     );
-    assert!(matches!(
-        pane.drain_pending_outbound().as_slice(),
-        [OutboundAgentCommand::SendPrompt {
-            text,
-            transcript_echo: false,
-            ..
-        }] if text == "next durable goal"
-    ));
+    let request = pane.pending_prompt_dispatches.front().unwrap();
+    assert_eq!(request.parts[0]["text"], "next durable goal");
+    assert!(request.transcript_echo.is_none());
 }
 
 #[test]
 fn submit_pasted_text_expands_outbound_but_keeps_transcript_token() {
     let mut pane = NeoismAgentPane::default();
     seed_prompt_catalog(&mut pane);
+    pane.prompt_dispatch_in_flight = true;
     pane.session_id = Some("sess-1".to_string());
     pane.insert_paste("first line\nsecond line");
-
     assert!(pane.submit());
-
-    let drained = pane.drain_pending_outbound();
-    match &drained[0] {
-        OutboundAgentCommand::SendPrompt {
-            text,
-            parts,
-            transcript_echo,
-            ..
-        } => {
-            assert_eq!(text, "first line\nsecond line");
-            assert_eq!(parts[0]["text"], "first line\nsecond line");
-            assert!(*transcript_echo);
-        }
-        other => panic!("expected SendPrompt, got {other:?}"),
-    }
+    let request = pane.pending_prompt_dispatches.front().unwrap();
+    assert_eq!(request.parts[0]["text"], "first line\nsecond line");
+    assert_eq!(
+        request.transcript_echo.as_deref(),
+        Some("[pasted 2 lines]")
+    );
     assert_eq!(pane.messages[0].text, "[pasted 2 lines]");
 }
 
@@ -4824,6 +4835,7 @@ fn pending_question_paste_fills_the_typed_answer_not_the_composer() {
 fn submit_prompt_while_streaming_queues_bottom_preview_without_transcript_echo() {
     let mut pane = NeoismAgentPane::default();
     seed_prompt_catalog(&mut pane);
+    pane.prompt_dispatch_in_flight = true;
     pane.session_id = Some("sess-1".to_string());
     pane.messages = vec![
         NeoismAgentMessage::user("first"),
@@ -4844,28 +4856,16 @@ fn submit_prompt_while_streaming_queues_bottom_preview_without_transcript_echo()
     );
     assert_eq!(pane.queued_prompt_count, 1);
     assert_eq!(pane.queued_prompt_preview.as_deref(), Some("queued turn"));
-    let drained = pane.drain_pending_outbound();
-    assert_eq!(drained.len(), 1);
-    match &drained[0] {
-        OutboundAgentCommand::SendPrompt {
-            text,
-            transcript_echo,
-            ..
-        } => {
-            assert_eq!(text, "queued turn");
-            assert!(
-                !*transcript_echo,
-                "streaming submissions should remain in the queue preview"
-            );
-        }
-        other => panic!("expected SendPrompt, got {other:?}"),
-    }
+    let request = pane.pending_prompt_dispatches.front().unwrap();
+    assert_eq!(request.parts[0]["text"], "queued turn");
+    assert!(request.transcript_echo.is_none());
 }
 
 #[test]
 fn server_expanded_user_part_merges_into_pasted_token_echo() {
     let mut pane = NeoismAgentPane::default();
     seed_prompt_catalog(&mut pane);
+    pane.prompt_dispatch_in_flight = true;
     pane.insert_paste("first line\nsecond line");
     assert!(pane.submit());
     assert_eq!(pane.messages[0].text, "[pasted 2 lines]");
@@ -4932,6 +4932,7 @@ fn streamed_first_prompt_image_and_text_merge_in_either_order() {
 fn history_refresh_compacts_expanded_pasted_user_text() {
     let mut pane = NeoismAgentPane::default();
     seed_prompt_catalog(&mut pane);
+    pane.prompt_dispatch_in_flight = true;
     pane.insert_paste("first line\nsecond line");
     assert!(pane.submit());
 
@@ -4959,6 +4960,65 @@ fn backspace_removes_pasted_token_and_attachment_atomically() {
         pane.input_attachments.is_empty(),
         "deleting the token must drop its attachment"
     );
+}
+
+#[test]
+fn queued_steer_echo_follows_streamed_output_despite_older_client_id() {
+    let mut pane = NeoismAgentPane::default();
+    pane.messages = vec![NeoismAgentMessage::user("look around").with_id("msg_0100")];
+    pane.remember_live_part_parent("commentary", Some("msg_0300"));
+    pane.upsert_part_message(
+        NeoismAgentMessage::assistant("I'll look through the architecture")
+            .with_id("commentary"),
+    );
+
+    // Both steers were sent before this assistant step was created, but
+    // admitted only after its commentary had already appeared in the GUI.
+    for (id, text) in [("msg_0200", "not a subagent"), ("msg_0201", "you do it")] {
+        pane.upsert_part_message(NeoismAgentMessage::user(text).with_id(id));
+        pane.insert_dequeued_user_prompt(text.into(), Some(id.into()), None);
+    }
+    pane.remember_live_part_parent("thinking", Some("msg_0400"));
+    pane.upsert_part_message(
+        NeoismAgentMessage::reasoning("Inspecting the project myself").with_id("thinking"),
+    );
+    assert_eq!(
+        pane.messages.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+        ["msg_0100", "commentary", "msg_0200", "msg_0201", "thinking"],
+    );
+
+    // Updating an earlier streamed block must not regroup those user turns.
+    pane.upsert_part_message(
+        NeoismAgentMessage::assistant("I'll look through the architecture and core paths")
+            .with_id("commentary"),
+    );
+    assert_eq!(pane.messages[1].id, "commentary");
+    assert_eq!(pane.messages[2].id, "msg_0200");
+    assert_eq!(pane.messages[3].id, "msg_0201");
+}
+
+#[test]
+fn queued_steer_dequeue_before_echo_preserves_live_and_snapshot_order() {
+    let mut pane = NeoismAgentPane::default();
+    pane.messages = vec![NeoismAgentMessage::user("look around").with_id("msg_0100")];
+    pane.remember_live_part_parent("commentary", Some("msg_0300"));
+    pane.upsert_part_message(
+        NeoismAgentMessage::assistant("Starting the review").with_id("commentary"),
+    );
+    pane.queued_prompt_count = 2;
+    for (id, text) in [("msg_0200", "not a subagent"), ("msg_0201", "you do it")] {
+        pane.insert_dequeued_user_prompt(text.into(), Some(id.into()), Some("Parker".into()));
+        let mut echo = NeoismAgentMessage::user(text).with_id(id);
+        echo.author = Some("Parker".into());
+        pane.upsert_part_message(echo);
+    }
+    assert_eq!(pane.queued_prompt_count, 0);
+    let expected = ["msg_0100", "commentary", "msg_0200", "msg_0201"];
+    assert_eq!(pane.messages.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), expected);
+    let refreshed = pane.preserve_streamed_response_text(pane.messages.clone());
+    assert_eq!(refreshed.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), expected);
+    assert_eq!(refreshed.len(), 4);
+    assert_eq!(refreshed[2].author.as_deref(), Some("Parker"));
 }
 
 #[test]
@@ -5205,6 +5265,11 @@ fn tab_mode_switch_rearms_agent_chip_transition() {
 
     assert_eq!(pane.agent_label(), "Plan");
     assert!(pane.agent_label_changed_elapsed_ms().is_some());
+    // The status-chip click wave takes priority while both animations run.
+    assert_eq!(pane.animation_reason(), Some("status_chip_activation"));
+    let (chip, activated_at) = pane.status_chip_activated.as_mut().unwrap();
+    assert_eq!(*chip, 0);
+    *activated_at = Instant::now() - Duration::from_millis(280);
     assert_eq!(pane.animation_reason(), Some("agent_label_transition"));
 }
 
@@ -5428,9 +5493,15 @@ fn imported_history_preload_discloses_text_only_without_changing_title_or_source
     assert_eq!(pane.conversation_source(), ConversationSource::Codex);
     assert_eq!(
         pane.messages.len(),
-        1,
-        "disclosure is not a fake transcript card"
+        2,
+        "one imported reply plus the hidden authoritative plan marker"
     );
+    assert_eq!(pane.messages[0].kind, NeoismAgentMessageKind::Assistant);
+    assert_eq!(pane.messages[0].text, "actual imported text");
+    assert_eq!(pane.messages[1].id, "todos-snapshot");
+    assert_eq!(pane.messages[1].kind, NeoismAgentMessageKind::System);
+    assert_eq!(pane.messages[1].tool, "todowrite");
+    assert!(pane.messages[1].todos.is_empty());
     assert_eq!(pane.imported_history().unwrap().tool_events, 2);
     pane.cache_current_session(false);
     pane.session_id = Some("fresh".into());
@@ -6182,7 +6253,10 @@ fn dequeue_snapshot_preserves_remaining_compaction_indicator() {
     ));
     pane.drain_server_updates();
     assert_eq!(pane.queued_prompt_count, 1);
-    assert_eq!(pane.queued_prompt_preview.as_deref(), Some("Compaction queued"));
+    assert_eq!(
+        pane.queued_prompt_preview.as_deref(),
+        Some("Compaction queued")
+    );
     assert_eq!(pane.streaming_state, NeoismAgentStreamingState::Generating);
 }
 
@@ -6200,10 +6274,13 @@ fn local_compact_feedback_is_immediate_idempotent_and_reconciled() {
     assert_eq!(pane.queued_prompt_count(), 1);
     assert_eq!(pane.drain_pending_outbound().len(), 1);
     pane.event_stream = Some(AgentSessionEventStream::with_updates_for_test(
-        "root", [AgentSessionUpdate::QueueSnapshot {
-                running: None,
-                action: None,
-            session_id: "root".into(), count: Some(1), preview: Some("Compaction queued".into()),
+        "root",
+        [AgentSessionUpdate::QueueSnapshot {
+            running: None,
+            action: None,
+            session_id: "root".into(),
+            count: Some(1),
+            preview: Some("Compaction queued".into()),
         }],
     ));
     pane.drain_server_updates();
@@ -6212,16 +6289,21 @@ fn local_compact_feedback_is_immediate_idempotent_and_reconciled() {
     pane.execute_slash_text("/compact");
     assert!(pane.drain_pending_outbound().is_empty());
     pane.event_stream = Some(AgentSessionEventStream::with_updates_for_test(
-        "root", [AgentSessionUpdate::QueueSnapshot {
-                running: None,
-                action: None,
-            session_id: "root".into(), count: Some(0), preview: None,
+        "root",
+        [AgentSessionUpdate::QueueSnapshot {
+            running: None,
+            action: None,
+            session_id: "root".into(),
+            count: Some(0),
+            preview: None,
         }],
     ));
     pane.drain_server_updates();
-    let _ = pane.background_sender().send(NeoismAgentBackgroundUpdate::CompactAccepted {
-        session_id: "root".into(),
-    });
+    let _ = pane
+        .background_sender()
+        .send(NeoismAgentBackgroundUpdate::CompactAccepted {
+            session_id: "root".into(),
+        });
     pane.drain_background_updates();
     assert_eq!(pane.queued_prompt_count(), 0);
     assert_eq!(pane.streaming_state, NeoismAgentStreamingState::Generating);
@@ -6261,14 +6343,30 @@ fn local_compact_feedback_parks_with_origin_and_clears_on_cached_failure() {
     pane.cache_current_session(false);
     pane.session_id = Some("other".into());
     assert!(pane.pending_compact.is_none());
-    assert_eq!(pane.session_cache["origin"].runtime.pending_compact.as_deref(), Some(request_id.as_str()));
-    let _ = pane.background_sender().send(NeoismAgentBackgroundUpdate::CompactFailed {
-        session_id: "origin".into(), request_id: Some(request_id), error: "rejected".into(),
-    });
+    assert_eq!(
+        pane.session_cache["origin"]
+            .runtime
+            .pending_compact
+            .as_deref(),
+        Some(request_id.as_str())
+    );
+    let _ = pane
+        .background_sender()
+        .send(NeoismAgentBackgroundUpdate::CompactFailed {
+            session_id: "origin".into(),
+            request_id: Some(request_id),
+            error: "rejected".into(),
+        });
     pane.drain_background_updates();
-    assert!(pane.session_cache["origin"].runtime.pending_compact.is_none());
+    assert!(pane.session_cache["origin"]
+        .runtime
+        .pending_compact
+        .is_none());
     assert_eq!(pane.queued_prompt_count(), 0);
-    assert_eq!(pane.session_cache["origin"].runtime.streaming_state, NeoismAgentStreamingState::Generating);
+    assert_eq!(
+        pane.session_cache["origin"].runtime.streaming_state,
+        NeoismAgentStreamingState::Generating
+    );
 }
 
 #[test]
@@ -6278,8 +6376,11 @@ fn compaction_lifecycle_and_status_snapshot_reconcile_local_feedback() {
     pane.note_streaming(NeoismAgentStreamingState::Generating, None);
     pane.execute_slash_text("/compact");
     pane.event_stream = Some(AgentSessionEventStream::with_updates_for_test(
-        "root", [AgentSessionUpdate::CompactionStarted {
-            session_id: "root".into(), id: "compact".into(), reason: "manual".into(),
+        "root",
+        [AgentSessionUpdate::CompactionStarted {
+            session_id: "root".into(),
+            id: "compact".into(),
+            reason: "manual".into(),
         }],
     ));
     pane.drain_server_updates();
@@ -6358,7 +6459,10 @@ fn queued_compaction_and_continuation_do_not_idle_the_run() {
     pane.drain_server_updates();
     assert_eq!(pane.streaming_state, NeoismAgentStreamingState::Generating);
     assert_eq!(pane.queued_prompt_count, 1);
-    assert_eq!(pane.session_cache["inactive"].runtime.queued_prompt_count, 1);
+    assert_eq!(
+        pane.session_cache["inactive"].runtime.queued_prompt_count,
+        1
+    );
     assert!(pane.messages.is_empty());
     pane.event_stream = Some(AgentSessionEventStream::with_updates_for_test(
         "root",
@@ -6403,8 +6507,8 @@ fn abort_preserves_ordinary_queue_until_authoritative_snapshot() {
     pane.event_stream = Some(AgentSessionEventStream::with_updates_for_test(
         "root",
         [AgentSessionUpdate::QueueSnapshot {
-                running: None,
-                action: None,
+            running: None,
+            action: None,
             session_id: "root".into(),
             count: Some(1),
             preview: Some("ordinary queued prompt".into()),
@@ -6926,7 +7030,7 @@ fn tool_hover_uses_only_current_click_targets_without_expanding() {
 }
 
 #[test]
-fn diff_file_toggle_does_not_move_or_reanchor_the_timeline() {
+fn diff_file_toggle_keeps_position_and_anchors_reader_owned_remeasurement() {
     let mut pane = NeoismAgentPane::default();
     pane.messages.push(
         NeoismAgentMessage::tool(
@@ -6951,9 +7055,13 @@ fn diff_file_toggle_does_not_move_or_reanchor_the_timeline() {
 
     assert!(pane.tool_expanded("tool-1:0"));
     assert_eq!(pane.timeline_scroll_px, scroll_before);
-    assert_eq!(pane.timeline_velocity_px_s, velocity_before);
-    assert!(pane.pending_timeline_anchor.is_none());
-    assert!(pane.timeline_view_anchor.is_none());
+    assert_eq!(velocity_before, 75.0);
+    assert_eq!(pane.timeline_velocity_px_s, 0.0);
+    assert!(!pane.timeline_follow_bottom);
+    let anchor = pane.pending_timeline_anchor.as_ref().unwrap();
+    assert_eq!(anchor.content_y, 450.0);
+    assert_eq!(anchor.screen_y, 150.0);
+    assert_eq!(pane.timeline_view_anchor.as_ref().unwrap().screen_offset, 50.0);
     assert!(!pane.tool_expand_animating("tool-1"));
 }
 
@@ -6983,7 +7091,7 @@ fn read_group_expansion_tracks_source_and_remeasures_after_animation() {
             .unwrap()
             .started_at = Instant::now() - TOOL_EXPAND_ANIMATION;
         let settled = pane.take_timeline_dirty_marks();
-        assert!(settled.ids.contains("read-a"));
+        assert!(settled.indices.contains(&0));
         assert!(!pane.any_tool_expand_animating());
         assert_eq!(
             pane.tool_expand_progress("read-a.."),
@@ -8014,7 +8122,7 @@ fn tool_expansion_settled_and_stable_frames_keep_the_clicked_header() {
         );
         pane.tool_expand_anims.get_mut(id).unwrap().started_at =
             Instant::now() - TOOL_EXPAND_ANIMATION;
-        assert!(pane.take_timeline_dirty_marks().ids.contains("open-read"));
+        assert!(pane.take_timeline_dirty_marks().indices.contains(&0));
         pane.set_timeline_metrics([0.0, 100.0, 400.0, 300.0], 1100.0, 300.0);
         pane.restore_timeline_view_anchor(row_top, screen_offset);
         assert!(pane.pending_timeline_anchor.is_none());

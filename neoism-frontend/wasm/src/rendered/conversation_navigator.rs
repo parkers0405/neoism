@@ -43,6 +43,11 @@ impl ChromeBridge {
     pub fn conversation_navigator_active(&self) -> bool {
         self.chrome.conversation_navigator.is_active()
     }
+    pub fn conversation_navigator_directory(&self) -> Option<String> {
+        self.chrome
+            .conversation_navigator_directory()
+            .map(str::to_owned)
+    }
     pub fn conversation_navigator_query(&self) -> String {
         self.chrome.conversation_navigator.query().to_owned()
     }

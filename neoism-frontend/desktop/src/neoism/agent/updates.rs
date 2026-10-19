@@ -291,9 +291,15 @@ impl AgentSessionEventStream {
             let data = format!("data: {envelope}\n\n");
             for event in decoder.feed(data.as_bytes()) {
                 send_event_updates(
-                    event, "unused-test-server", session_id,
-                    stream._test_tx.as_ref().unwrap(), &mut state, &stream.wake, &epochs,
-                ).unwrap();
+                    event,
+                    "unused-test-server",
+                    session_id,
+                    stream._test_tx.as_ref().unwrap(),
+                    &mut state,
+                    &stream.wake,
+                    &epochs,
+                )
+                .unwrap();
             }
         }
         stream
@@ -553,7 +559,8 @@ fn session_catalog_update_from_event(event: &Value) -> Option<AgentSessionCatalo
         })
     } else if kind == neoism_agent_core::event_type::SESSION_CATALOG_FAMILY {
         let session_id = properties.get("sessionID").and_then(Value::as_str)?;
-        let snapshot = serde_json::from_value(properties.get("snapshot")?.clone()).ok()?;
+        let snapshot =
+            serde_json::from_value(properties.get("snapshot")?.clone()).ok()?;
         Some(AgentSessionCatalogUpdate::Family {
             session_id: session_id.to_owned(),
             snapshot,
@@ -632,7 +639,10 @@ pub(super) fn start_session_event_stream(
     server: String,
     session_id: String,
 ) -> AgentSessionEventStream {
-    start_session_event_stream_with_reconcile(server, session_id, false)
+    // Spawning the reader is not a subscription barrier: a fast prompt can
+    // finish before its first GET connects. Recover the durable baseline on
+    // the first subscribed connection as well as every reconnect.
+    start_session_event_stream_with_reconcile(server, session_id, true)
 }
 
 /// Start a stream whose FIRST successful connect already performs the

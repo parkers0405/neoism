@@ -1789,6 +1789,16 @@ impl AppState {
         message: &MessageWithParts,
         event: EventPayload,
     ) -> anyhow::Result<()> {
+        self.append_queued_message_with_event(session_id, message, event, None).await
+    }
+
+    pub(crate) async fn append_queued_message_with_event(
+        &self,
+        session_id: &str,
+        message: &MessageWithParts,
+        event: EventPayload,
+        queue_id: Option<&str>,
+    ) -> anyhow::Result<()> {
         let mut event = event;
         self.allocate_event_sequence(&mut event);
         self.inner
@@ -1804,7 +1814,10 @@ impl AppState {
                         int(store_i64(message_created(message))),
                         text(session_id),
                     ],
-                ), conversation_search::dirty_message(&message_id(message))],
+                ), conversation_search::dirty_message(&message_id(message)), (
+                    "UPDATE prompt_queue SET saved_message_id = ? WHERE id = ? AND session_id = ?".to_string(),
+                    vec![text(message_id(message)), text(queue_id.unwrap_or("")), text(session_id)],
+                )],
                 &event,
                 None,
             )
@@ -1916,7 +1929,7 @@ impl AppState {
             )
             .await?;
         self.publish_committed(event);
-        self.inner.store.queued_prompt_count(session_id).await
+        Ok(0) // Queue size is a best-effort projection, not part of admission.
     }
 }
 
@@ -3136,6 +3149,8 @@ impl SessionStore {
             hits = result.as_ref().map_or(0, Vec::len),
             conversations,
             failed = result.is_err(),
+            error = result.as_ref().err().map(|error| error.to_string()),
+            directory,
             "conversation search completed"
         );
         result
@@ -3163,6 +3178,9 @@ impl SessionStore {
     }
 
     async fn ensure_prompt_queue_columns(&self) -> anyhow::Result<()> {
+        if !self.table_has_column("prompt_queue", "saved_message_id").await? {
+            self.db.execute("ALTER TABLE prompt_queue ADD COLUMN saved_message_id TEXT", Vec::new()).await?;
+        }
         if !self.table_has_column("prompt_queue", "kind").await? {
             self.db.execute("ALTER TABLE prompt_queue ADD COLUMN kind TEXT NOT NULL DEFAULT 'prompt'", Vec::new()).await?;
         }
@@ -3906,6 +3924,21 @@ impl SessionStore {
         root_message_id: &str,
         allowed_run_id: &str,
     ) -> anyhow::Result<Option<neoism_agent_core::ExecutionActivitySnapshot>> {
+        self.admit_execution_activity_with_admission(
+            root_session_id, execution_id, root_message_id, allowed_run_id, None,
+        ).await
+    }
+
+    /// The admitting worker's pending rows belong to the incoming turn.
+    /// Other family queues, live runs, segments and subtasks remain blockers.
+    pub(crate) async fn admit_execution_activity_with_admission(
+        &self,
+        root_session_id: &str,
+        execution_id: &str,
+        root_message_id: &str,
+        allowed_run_id: &str,
+        admitting_session: Option<&str>,
+    ) -> anyhow::Result<Option<neoism_agent_core::ExecutionActivitySnapshot>> {
         let now = crate::now_millis();
         self.db.execute_transaction(vec![
             (
@@ -3922,9 +3955,9 @@ impl SessionStore {
                      AND NOT EXISTS (SELECT 1 FROM execution_activity_segments s WHERE s.root_session_id = ? AND s.execution_id = execution_activity.execution_id)
                      AND NOT EXISTS (SELECT 1 FROM execution_subtasks t WHERE t.execution_id = execution_activity.execution_id AND t.status = 'outstanding')
                      AND NOT EXISTS (SELECT 1 FROM session_runs r WHERE r.status = 'running' AND r.id <> ? AND (r.session_id = ? OR r.session_id IN (SELECT child_session_id FROM execution_subtasks WHERE execution_id = execution_activity.execution_id)))
-                     AND NOT EXISTS (SELECT 1 FROM prompt_queue q WHERE q.session_id = ? OR q.session_id IN (SELECT child_session_id FROM execution_subtasks WHERE execution_id = execution_activity.execution_id))
-                   ))"#.to_string(),
-                vec![text(root_message_id), text(execution_id), text(root_message_id), text(root_message_id), text(root_message_id), text(root_message_id), text(root_message_id), int(store_i64(now)), text(root_session_id), text(root_message_id), text(root_session_id), text(allowed_run_id), text(root_session_id), text(root_session_id)],
+                      AND NOT EXISTS (SELECT 1 FROM prompt_queue q WHERE (? = 0 OR q.session_id <> ?) AND (q.session_id = ? OR q.session_id IN (SELECT child_session_id FROM execution_subtasks WHERE execution_id = execution_activity.execution_id)))
+                    ))"#.to_string(),
+                vec![text(root_message_id), text(execution_id), text(root_message_id), text(root_message_id), text(root_message_id), text(root_message_id), text(root_message_id), int(store_i64(now)), text(root_session_id), text(root_message_id), text(root_session_id), text(allowed_run_id), text(root_session_id), int(i64::from(admitting_session.is_some())), text(admitting_session.unwrap_or_default()), text(root_session_id)],
             ),
             (
                 "INSERT OR IGNORE INTO execution_activity (root_session_id, execution_id, root_message_id, completed_ms, revision, family_revision, finished, updated) SELECT ?, ?, ?, 0, 1, 1, 0, ? WHERE NOT EXISTS (SELECT 1 FROM session_runs r WHERE r.session_id = ? AND r.status = 'running' AND r.id <> ?)".to_string(),
@@ -4078,6 +4111,15 @@ impl SessionStore {
         root_session_id: &str,
         execution_id: &str,
     ) -> anyhow::Result<bool> {
+        self.mark_execution_finished_with_admission(root_session_id, execution_id, None).await
+    }
+
+    pub(crate) async fn mark_execution_finished_with_admission(
+        &self,
+        root_session_id: &str,
+        execution_id: &str,
+        admitting_session: Option<&str>,
+    ) -> anyhow::Result<bool> {
         Ok(self
             .db
             .execute(
@@ -4102,12 +4144,12 @@ impl SessionStore {
                        )
                      )
                      AND NOT EXISTS (
-                       SELECT 1 FROM prompt_queue
-                       WHERE session_id = ? OR session_id IN (
-                         SELECT child_session_id FROM execution_subtasks
-                         WHERE execution_id = ?
-                       )
-                     )"#,
+                        SELECT 1 FROM prompt_queue
+                        WHERE (? = 0 OR session_id <> ?) AND (session_id = ? OR session_id IN (
+                          SELECT child_session_id FROM execution_subtasks
+                          WHERE execution_id = ?
+                        ))
+                      )"#,
                 vec![
                     int(store_i64(crate::now_millis())),
                     text(root_session_id),
@@ -4117,6 +4159,8 @@ impl SessionStore {
                     text(execution_id),
                     text(root_session_id),
                     text(execution_id),
+                    int(i64::from(admitting_session.is_some())),
+                    text(admitting_session.unwrap_or_default()),
                     text(root_session_id),
                     text(execution_id),
                 ],
@@ -4928,7 +4972,58 @@ impl SessionStore {
                 ],
             )
             .await?;
-        self.queued_prompt_count(session_id).await
+        Ok(self.queued_prompt_count(session_id).await.unwrap_or(1))
+    }
+
+    /// Peek a durable admission. The saved marker is written atomically with
+    /// the user turn, so only that admission may recover post-save initialization.
+    pub(crate) async fn peek_prompt_admission(
+        &self,
+        session_id: &str,
+        active: bool,
+    ) -> anyhow::Result<Option<(String, PromptRequest, String, bool)>> {
+        let sql = if active {
+            "SELECT id, request_json, delivery, saved_message_id FROM prompt_queue WHERE session_id = ? AND kind = 'prompt' AND delivery IN ('steer', 'continue') ORDER BY position, created, id LIMIT 1"
+        } else {
+            "SELECT id, request_json, delivery, saved_message_id FROM prompt_queue WHERE session_id = ? AND kind = 'prompt' ORDER BY position, created, id LIMIT 1"
+        };
+        let Some(row) = self.db.fetch_optional(sql, vec![text(session_id)]).await? else {
+            return Ok(None);
+        };
+        let id = row.get_str("id")?;
+        let mut request: PromptRequest = decode_json(row.get_str("request_json")?)?;
+        if request.message_id.is_none() {
+            request.message_id = Some(Id::ascending(IdKind::Message));
+            self.db.execute("UPDATE prompt_queue SET request_json = ? WHERE id = ? AND request_json = ?", vec![text(serde_json::to_string(&request)?), text(&id), text(row.get_str("request_json")?)]).await?;
+            let Some(current) = self.db.fetch_optional("SELECT request_json FROM prompt_queue WHERE id = ?", vec![text(&id)]).await? else {
+                return Ok(None);
+            };
+            request = decode_json(current.get_str("request_json")?)?;
+        }
+        let saved = row.get_opt_str("saved_message_id")?.is_some();
+        Ok(Some((id, request, row.get_str("delivery")?, saved)))
+    }
+
+    pub(crate) async fn prompt_admission_saved(&self, id: &str) -> anyhow::Result<Option<bool>> {
+        let row = self.db.fetch_optional("SELECT saved_message_id FROM prompt_queue WHERE id = ? AND kind = 'prompt'", vec![text(id)]).await?;
+        row.map(|row| Ok(row.get_opt_str("saved_message_id")?.is_some())).transpose()
+    }
+
+    pub(crate) async fn handoff_prompt_admission(&self, id: &str, session_id: &str, run_id: &str) -> anyhow::Result<()> {
+        let now = store_i64(crate::now_millis());
+        // start_session_run's store write is best effort. Confirm durable run
+        // ownership in the SAME transaction that retires this recovery token.
+        let changed = self.db.execute_transaction_with_results(vec![
+            ("INSERT INTO session_runs (id, session_id, status, created, updated, error_json) VALUES (?, ?, 'running', ?, ?, NULL) ON CONFLICT(id) DO UPDATE SET status = 'running', updated = excluded.updated, error_json = NULL".to_string(), vec![text(run_id), text(session_id), int(now), int(now)]),
+            ("DELETE FROM prompt_queue WHERE id = ? AND session_id = ? AND kind = 'prompt'".to_string(), vec![text(id), text(session_id)]),
+        ]).await?;
+        anyhow::ensure!(changed.get(1) == Some(&1), "Prompt admission was cancelled or handed off");
+        Ok(())
+    }
+
+    pub(crate) async fn acknowledge_prompt_admission(&self, id: &str) -> anyhow::Result<()> {
+        self.db.execute("DELETE FROM prompt_queue WHERE id = ? AND kind = 'prompt'", vec![text(id)]).await?;
+        Ok(())
     }
 
     pub(crate) async fn list_queued_prompt_entries(
@@ -4988,28 +5083,6 @@ impl SessionStore {
             .db
             .fetch_optional(
                 "SELECT id, request_json FROM prompt_queue WHERE session_id = ? AND kind = 'prompt' AND delivery != 'continue' ORDER BY position ASC, created ASC LIMIT 1",
-                vec![text(session_id)],
-            )
-            .await?
-        else {
-            return Ok(None);
-        };
-        let id = row.get_str("id")?;
-        let request = decode_json(row.get_str("request_json")?)?;
-        self.db
-            .execute("DELETE FROM prompt_queue WHERE id = ?", vec![text(id)])
-            .await?;
-        Ok(Some(request))
-    }
-
-    pub(crate) async fn pop_active_continuation_prompt(
-        &self,
-        session_id: &str,
-    ) -> anyhow::Result<Option<PromptRequest>> {
-        let Some(row) = self
-            .db
-            .fetch_optional(
-                "SELECT id, request_json FROM prompt_queue WHERE session_id = ? AND kind = 'prompt' AND delivery IN ('steer', 'continue') ORDER BY position ASC, created ASC LIMIT 1",
                 vec![text(session_id)],
             )
             .await?
@@ -5086,7 +5159,7 @@ impl SessionStore {
                 ],
             )
             .await?;
-        self.queued_prompt_count(session_id).await
+        Ok(self.queued_prompt_count(session_id).await.unwrap_or(1))
     }
 
     pub(crate) async fn clear_queued_prompts(

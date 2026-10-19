@@ -1185,7 +1185,7 @@ async fn enqueue_v2_prompt(
 ) -> Result<(), ApiError> {
     ensure_session(state, session_id).await?;
     let event_request = request.clone();
-    let (start_worker, queue_len) =
+    let (_, queue_len) =
         enqueue_prompt_request_with_delivery(state, session_id, request, delivery)
             .await?;
     publish_prompt_queue_changed(
@@ -1198,12 +1198,6 @@ async fn enqueue_v2_prompt(
     )
     .await;
     publish_prompt_queue_status(state, session_id, queue_len).await;
-    if start_worker {
-        tokio::spawn(crate::session_queue::drain_prompt_queue(
-            state.clone(),
-            session_id.to_string(),
-        ));
-    }
     Ok(())
 }
 

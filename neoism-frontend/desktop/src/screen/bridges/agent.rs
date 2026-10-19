@@ -677,14 +677,22 @@ impl Screen<'_> {
             self.context_manager.event_proxy(),
             self.context_manager.window_id(),
         );
-        if self.renderer.conversations_visible {
+        // Background mutations own completion even after the sidebar is closed.
+        self.renderer
+            .conversations_pane
+            .set_event_wake(agent_event_wake.clone());
+        agent_animating |= self
+            .renderer
+            .conversations_pane
+            .drain_live_session_updates();
+        agent_ui_events.extend(
             self.renderer
                 .conversations_pane
-                .set_event_wake(agent_event_wake.clone());
-            agent_animating |= self
-                .renderer
-                .conversations_pane
-                .drain_live_session_updates();
+                .drain_ui_events()
+                .into_iter()
+                .map(|event| (0, event)),
+        );
+        if self.renderer.conversations_visible {
             agent_animating |= self.renderer.conversations_pane.catalog_is_animating();
         }
         // Chat views keep their own timelines current. The independent catalog
@@ -925,6 +933,35 @@ impl Screen<'_> {
         }
         for (route_id, event) in agent_ui_events {
             match event {
+                crate::neoism::agent::NeoismAgentUiEvent::SessionMutationApplied {
+                    server,
+                    session_id,
+                    deleted,
+                } => {
+                    if self.renderer.conversations_pane.server_address() == server {
+                        self.renderer
+                            .conversations_pane
+                            .refresh_sessions_after_mutation();
+                    }
+                    for grid in self.context_manager.all_grids_mut().iter_mut() {
+                        for item in grid.contexts_mut().values_mut() {
+                            if let Some(agent) = item
+                                .val
+                                .neoism_agent
+                                .as_mut()
+                                .filter(|a| a.server_address() == server)
+                            {
+                                if deleted
+                                    && agent.session_id_str() == Some(session_id.as_str())
+                                {
+                                    agent.create_new_session();
+                                }
+                                agent.refresh_sessions_after_mutation();
+                            }
+                        }
+                    }
+                    self.mark_dirty();
+                }
                 crate::neoism::agent::NeoismAgentUiEvent::Notice { message, level } => {
                     let level = match level {
                         crate::neoism::agent::NeoismAgentNoticeLevel::Info => {
@@ -940,9 +977,15 @@ impl Screen<'_> {
                     self.renderer.notifications.push(message, level);
                     self.mark_dirty();
                 }
-                crate::neoism::agent::NeoismAgentUiEvent::Dialog { title, body, link } => {
+                crate::neoism::agent::NeoismAgentUiEvent::Dialog {
+                    title,
+                    body,
+                    link,
+                } => {
                     if let Some((label, url)) = link {
-                        self.renderer.modal.open_link_message(title, body, label, url);
+                        self.renderer
+                            .modal
+                            .open_link_message(title, body, label, url);
                     } else {
                         self.renderer.modal.open_message(title, body);
                     }
@@ -1534,7 +1577,11 @@ impl Screen<'_> {
             self.mark_dirty();
             return true;
         }
-        if self.context_manager.current_mut().neoism_agent.as_mut()
+        if self
+            .context_manager
+            .current_mut()
+            .neoism_agent
+            .as_mut()
             .is_some_and(|agent| agent.pop_activity_status_click(mx, my))
         {
             self.mark_dirty();

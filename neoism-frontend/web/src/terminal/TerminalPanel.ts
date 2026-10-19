@@ -3025,6 +3025,7 @@ export class TerminalPanel {
   private conversationNavigation: {
     adapter: TerminalAdapter; client: ProtocolClient; identity: string; generation: number;
     workspaceId: string | null; root: string | null | undefined; mode: "search" | "projects"; serial: number;
+    directory: string | null;
     query: string; completed: boolean; results: Map<string, ConversationResult>; homePath: string | null;
     projects: import("../workspace/types").ProjectRootSummary[];
     allowedProjects: Set<string>;
@@ -3050,7 +3051,7 @@ export class TerminalPanel {
     const query = target.query;
     target.inFlight = true;
     target.completed = false;
-    target.client.sendAgent(target.client.allocateRequestId(), { SearchThreads: { query, generation: serial } });
+    target.client.sendAgent(target.client.allocateRequestId(), { SearchThreads: { query, generation: serial, directory: target.directory } });
     target.timeoutTimer = setTimeout(() => {
       target.timeoutTimer = undefined;
       if (!this.navigatorTargetCurrent(target) || target.serial !== serial || target.query !== query || target.completed) return;
@@ -3075,6 +3076,7 @@ export class TerminalPanel {
     const client = this.options.client;
     return this.conversationNavigation === target && this.wasmAdapter === target.adapter
       && target.root === this.options.workspaceRoot
+      && (target.mode !== "search" || target.directory === (target.adapter.conversationNavigatorDirectory?.() ?? null))
       && (!requireActive || target.adapter.conversationNavigatorActive?.() === true)
       && navigatorContextCurrent(target, { client, identity: client.agentCatalogIdentity(this.options.activeWorkspaceId ?? null),
         generation: client.getGeneration(), workspaceId: this.options.activeWorkspaceId ?? null });
@@ -3110,6 +3112,7 @@ export class TerminalPanel {
       const target: NonNullable<TerminalPanel["conversationNavigation"]> = {
         adapter, client, workspaceId, root: this.options.workspaceRoot, identity: client.agentCatalogIdentity(workspaceId), generation: client.getGeneration(),
         mode: header === "projects" ? "projects" : "search", serial: ++TerminalPanel.navigatorSerial,
+        directory: adapter.conversationNavigatorDirectory?.() ?? null,
         query: "", completed: false, results: new Map(), homePath: null, projects: [], allowedProjects: new Set(), discovery: null,
       };
       this.conversationNavigation = target;

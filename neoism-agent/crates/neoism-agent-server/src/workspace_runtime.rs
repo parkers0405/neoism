@@ -1355,6 +1355,10 @@ impl WorkspaceRuntime {
 }
 
 pub(crate) struct WorkspaceRuntimeRegistry {
+    pub(crate) project_discovery: crate::project::DiscoveryCache,
+    // Weak gates disappear after the last caller; unrelated roots/tenants build
+    // independently, and cancellation releases the gate for a retry.
+    initialization: StdMutex<HashMap<TenantRuntimeKey, Weak<Mutex<()>>>>,
     entries: Mutex<HashMap<TenantRuntimeKey, RuntimeEntry>>,
     failed_shutdowns: Mutex<Vec<Arc<WorkspaceRuntime>>>,
     generation_quarantine: Arc<StdMutex<Vec<GenerationQuarantine>>>,
@@ -1365,6 +1369,8 @@ pub(crate) struct WorkspaceRuntimeRegistry {
 impl Default for WorkspaceRuntimeRegistry {
     fn default() -> Self {
         Self {
+            project_discovery: Default::default(),
+            initialization: StdMutex::new(HashMap::new()),
             entries: Mutex::new(HashMap::new()),
             failed_shutdowns: Mutex::new(Vec::new()),
             generation_quarantine: Arc::new(StdMutex::new(Vec::new())),
@@ -1412,6 +1418,22 @@ impl WorkspaceRuntimeRegistry {
             }
         }
         let key = TenantRuntimeKey::new(tenant_id, directory);
+        let gate = {
+            let mut gates = self
+                .initialization
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            gates.retain(|_, gate| gate.strong_count() > 0);
+            match gates.get(&key).and_then(Weak::upgrade) {
+                Some(gate) => gate,
+                None => {
+                    let gate = Arc::new(Mutex::new(()));
+                    gates.insert(key.clone(), Arc::downgrade(&gate));
+                    gate
+                }
+            }
+        };
+        let _initialization = gate.lock().await;
         let root = key.root.clone();
         let now = Instant::now();
         let entries = self.entries.lock().await;
@@ -1556,8 +1578,8 @@ impl WorkspaceRuntimeRegistry {
             key,
             RuntimeEntry {
                 runtime: runtime.clone(),
-                last_used: now,
-                last_config_refresh: now,
+                last_used: Instant::now(),
+                last_config_refresh: Instant::now(),
             },
         );
         Ok((runtime, evicted))
@@ -2271,6 +2293,93 @@ mod tests {
             .unwrap();
         assert!(Arc::ptr_eq(&first, &alias));
         assert!(!Arc::ptr_eq(&first, &second));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_cold_acquires_build_one_host() {
+        use neoism_agent_service_api::{
+            ConfigSnapshot, ConfigSnapshotRequest, ConfigSourceService,
+            ConfigUpdateRequest, ServiceError, ServiceFuture,
+        };
+        struct CountConfig {
+            inner: Arc<dyn ConfigSourceService>,
+            calls: AtomicUsize,
+        }
+        impl ConfigSourceService for CountConfig {
+            fn snapshot(
+                &self,
+                request: &ConfigSnapshotRequest,
+            ) -> Result<ConfigSnapshot, ServiceError> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                // Make overlapping builders observable even when plugin futures
+                // happen to complete without yielding on this platform.
+                std::thread::sleep(Duration::from_millis(10));
+                self.inner.snapshot(request)
+            }
+            fn update<'a>(
+                &'a self,
+                request: &'a ConfigUpdateRequest,
+            ) -> ServiceFuture<'a, Result<ConfigSnapshot, ServiceError>> {
+                self.inner.update(request)
+            }
+        }
+        let root = std::env::temp_dir().join(format!(
+            "neoism-runtime-flight-{}",
+            neoism_agent_core::Id::ascending(neoism_agent_core::IdKind::Event)
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut services = crate::standard_services();
+        let config = Arc::new(CountConfig {
+            inner: services.config.clone(),
+            calls: AtomicUsize::new(0),
+        });
+        services.config = config.clone();
+        let state = crate::state::AppState::open_database_with_services(
+            root.join("state.sqlite3"),
+            services,
+        )
+        .await
+        .unwrap();
+        let directory = root.to_string_lossy().to_string();
+        // Establish the number of config reads for exactly one cold host build,
+        // rather than coupling the test to build_host's internal read count.
+        let baseline = WorkspaceRuntimeRegistry::default();
+        config.calls.store(0, Ordering::SeqCst);
+        baseline.acquire(&directory, &state).await.unwrap();
+        let single = config.calls.load(Ordering::SeqCst);
+        assert!(single > 0);
+        let registry = Arc::new(WorkspaceRuntimeRegistry::default());
+        config.calls.store(0, Ordering::SeqCst);
+        let barrier = Arc::new(tokio::sync::Barrier::new(8));
+        let tasks = (0..8).map(|_| {
+            let registry = registry.clone();
+            let barrier = barrier.clone();
+            let state = state.clone();
+            let directory = directory.clone();
+            tokio::spawn(async move {
+                barrier.wait().await;
+                registry.acquire(&directory, &state).await
+            })
+        });
+        let results = futures::future::join_all(tasks).await;
+        let runtimes = results
+            .into_iter()
+            .map(|r| r.unwrap().unwrap().0)
+            .collect::<Vec<_>>();
+        assert!(runtimes
+            .iter()
+            .all(|runtime| Arc::ptr_eq(runtime, &runtimes[0])));
+        assert_eq!(config.calls.load(Ordering::SeqCst), single);
+        drop(runtimes);
+        for runtime in registry
+            .close()
+            .await
+            .into_iter()
+            .chain(baseline.close().await)
+        {
+            runtime.teardown(&state).await.unwrap();
+        }
         let _ = std::fs::remove_dir_all(root);
     }
 

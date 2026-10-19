@@ -239,34 +239,9 @@ impl Screen<'_> {
                         {
                             return;
                         }
-                        match crate::neoism::agent::set_session_pinned(
-                            &server,
-                            &session_id,
-                            pinned,
-                        ) {
-                            Ok(_) => {
-                                self.renderer
-                                    .conversations_pane
-                                    .refresh_sessions_after_mutation();
-                                for grid in self.context_manager.contexts_mut() {
-                                    for item in grid.contexts_mut().values_mut() {
-                                        if let Some(agent) =
-                                            item.val.neoism_agent.as_mut().filter(|agent| {
-                                                agent.server_address() == server
-                                                    && agent.session_directory()
-                                                        == directory.as_deref()
-                                            })
-                                        {
-                                            agent.refresh_sessions_after_mutation();
-                                        }
-                                    }
-                                }
-                            }
-                            Err(error) => self.renderer.notifications.push(
-                                error,
-                                neoism_ui::panels::notifications::NotificationLevel::Warn,
-                            ),
-                        }
+                        self.renderer.conversations_pane.request_session_mutation(
+                            server, session_id, crate::neoism::agent::AgentSessionMutation::Pin(pinned),
+                        );
                     }
                     neoism_ui::panels::context_menu::AgentContextAction::RenameSession { session_id, title, server, directory } => {
                         if !self.conversation_context_scope_matches(&server, directory.as_deref()) { return; }

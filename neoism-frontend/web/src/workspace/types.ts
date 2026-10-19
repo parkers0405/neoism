@@ -1158,7 +1158,7 @@ export type AgentClientMessage =
   | { SetPinned: { session_id: string; pinned: boolean } }
   | { ListSessionProjects: { catalog_identity: string; generation: number } }
   | { ListProjectSessions: { catalog_identity: string; directory: string; cursor: string | null; generation: number } }
-  | { SearchThreads: { query: string; generation: number } }
+  | { SearchThreads: { query: string; generation: number; directory?: string | null } }
   | {
       ListThreads: {
         directory?: string | null;

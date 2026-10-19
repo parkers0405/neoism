@@ -762,6 +762,7 @@ export interface TerminalAdapter {
     conversationNavigatorClose?(): void;
     conversationNavigatorActive?(): boolean;
     conversationNavigatorQuery?(): string;
+    conversationNavigatorDirectory?(): string | null;
     conversationNavigatorSetRows?(rows: string): void;
     conversationNavigatorSetLoading?(loading: boolean): void;
     conversationNavigatorSetIndexing?(indexing: boolean): void;
@@ -1686,6 +1687,7 @@ interface ChromeBridgeInstance {
     conversation_navigator_close?(): void;
     conversation_navigator_active?(): boolean;
     conversation_navigator_query?(): string;
+    conversation_navigator_directory?(): string | null | undefined;
     conversation_navigator_set_rows?(rows: string): void;
     conversation_navigator_set_loading?(loading: boolean): void;
     conversation_navigator_set_indexing?(indexing: boolean): void;
@@ -3477,6 +3479,7 @@ class ChromeAdapter implements TerminalAdapter {
     conversationNavigatorClose(): void { this.inner.conversation_navigator_close?.(); }
     conversationNavigatorActive(): boolean { return this.inner.conversation_navigator_active?.() === true; }
     conversationNavigatorQuery(): string { return this.inner.conversation_navigator_query?.() ?? ""; }
+    conversationNavigatorDirectory(): string | null { return this.inner.conversation_navigator_directory?.() ?? null; }
     conversationNavigatorSetRows(rows: string): void { this.inner.conversation_navigator_set_rows?.(rows); }
     conversationNavigatorSetLoading(loading: boolean): void { this.inner.conversation_navigator_set_loading?.(loading); }
     conversationNavigatorSetIndexing(indexing: boolean): void { this.inner.conversation_navigator_set_indexing?.(indexing); }

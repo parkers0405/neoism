@@ -111,8 +111,6 @@ pub enum AgentClientMessage {
         #[serde(default)]
         cursor: Option<String>,
     },
-    /// Global title/message search on this connection's authorized agent endpoint.
-    /// Deliberately has no directory argument: search is independent of execution cwd.
     /// Discover authorized project directories, independently of session pages.
     ListSessionProjects {
         catalog_identity: String,
@@ -125,9 +123,13 @@ pub enum AgentClientMessage {
         cursor: Option<String>,
         generation: u64,
     },
+    /// Title/message search on this connection's authorized agent endpoint.
     SearchThreads {
         query: String,
         generation: u64,
+        /// Sidebar catalog scope; absent means all authorized conversations.
+        #[serde(default)]
+        directory: Option<String>,
     },
     /// Replay the persisted message timeline for a session. Useful
     /// for restoring chrome state on reload. The reply is one or

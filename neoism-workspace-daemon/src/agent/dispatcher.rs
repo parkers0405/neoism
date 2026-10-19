@@ -54,9 +54,13 @@ pub fn dispatch(session: &AgentSession, msg: AgentClientMessage) {
                 handle_delete_thread(inner, session_id).await;
             });
         }
-        AgentClientMessage::SearchThreads { query, generation } => {
+        AgentClientMessage::SearchThreads {
+            query,
+            generation,
+            directory,
+        } => {
             tokio::spawn(async move {
-                handle_search_threads(inner, query, generation).await;
+                handle_search_threads(inner, query, generation, directory).await;
             });
         }
         AgentClientMessage::ListSessionProjects {

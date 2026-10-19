@@ -245,10 +245,8 @@ impl EmbeddedDaemonHandle {
                             return;
                         }
                     };
-                    // Resolve bind addresses before workspace bootstrap so the
-                    // local HostSummary advertises the same Tailscale endpoint
-                    // this daemon is about to listen on. Previously the bind
-                    // succeeded but Share with phone saw no daemon_url.
+                    // Optional network discovery must not gate local startup.
+                    // Its background result is bound and advertised below.
                     let tcp_port = default_tcp_port();
                     let embedded_bind_addrs = embedded_tcp_bind_addrs();
                     if std::env::var_os("NEOISM_HOST_URL").is_none() {
@@ -285,7 +283,7 @@ impl EmbeddedDaemonHandle {
                         ),
                         auth: auth_service,
                         sessions: neoism_workspace_daemon::sessions::SessionRegistry::shared(),
-                        workspaces,
+                        workspaces: workspaces.clone(),
                         pairing_tokens,
                         crdt: neoism_workspace_daemon::crdt::sync::CrdtSyncHub::default(),
                         paired_hosts,
@@ -400,11 +398,16 @@ impl EmbeddedDaemonHandle {
                         let app = app.clone();
                         tokio::spawn(async move {
                             let mut bound = bound_addrs;
+                            let started = tokio::time::Instant::now();
                             loop {
-                                tokio::time::sleep(std::time::Duration::from_secs(
-                                    60,
-                                ))
-                                .await;
+                                // Pick up the initial asynchronous probe promptly;
+                                // retain the existing low-rate watch after boot.
+                                let poll = if started.elapsed() < std::time::Duration::from_secs(10) {
+                                    std::time::Duration::from_millis(250)
+                                } else {
+                                    std::time::Duration::from_secs(60)
+                                };
+                                tokio::time::sleep(poll).await;
                                 let Some(ip) = crate::tailscale::cached_ipv4()
                                 else {
                                     continue;
@@ -422,6 +425,11 @@ impl EmbeddedDaemonHandle {
                                             "embedded daemon: late tailnet bind on TCP"
                                         );
                                         bound.push(ip);
+                                        if std::env::var_os("NEOISM_HOST_URL").is_none() {
+                                            let url = format!("ws://{ip}:{tcp_port}/session");
+                                            std::env::set_var("NEOISM_HOST_URL", &url);
+                                            workspaces.set_local_daemon_url(url);
+                                        }
                                         let app = app.clone();
                                         tokio::spawn(async move {
                                             loop {
@@ -557,10 +565,9 @@ pub fn default_tcp_port() -> u16 {
 
 fn embedded_tcp_bind_addrs() -> Vec<(&'static str, IpAddr)> {
     let mut addrs = vec![("loopback", IpAddr::from([127, 0, 0, 1]))];
-    // Blocking is fine here (daemon startup, off the UI hot path) and
-    // primes the process-wide cache so the workspace-sync path never
-    // shells out to the ~2s-when-down tailscale CLI itself.
-    if let Some(tailscale_ip) = crate::tailscale::blocking_ipv4() {
+    // Prime discovery without waiting for the CLI (which may take seconds
+    // when Tailscale is absent). The late-bind task consumes the cached result.
+    if let Some(tailscale_ip) = crate::tailscale::cached_ipv4() {
         if !addrs.iter().any(|(_, addr)| *addr == tailscale_ip) {
             addrs.push(("tailscale", tailscale_ip));
         }

@@ -312,11 +312,12 @@ pub(crate) async fn ensure_for_prompt(
         _ if allow_new => state
             .inner
             .store
-            .admit_execution_activity(
+            .admit_execution_activity_with_admission(
                 &root,
                 &Id::ascending(IdKind::Event).to_string(),
                 message_id,
                 "",
+                Some(info.id.as_str()),
             )
             .await?
             .ok_or_else(|| anyhow::anyhow!("execution {root} still has active work"))?,
@@ -784,7 +785,11 @@ pub(crate) async fn finish_if_quiescent_locked(
     if state
         .inner
         .store
-        .mark_execution_finished(&root_id, &execution.execution_id)
+        .mark_execution_finished_with_admission(
+            &root_id,
+            &execution.execution_id,
+            admitting_session,
+        )
         .await
         .unwrap_or(false)
     {
@@ -1102,6 +1107,15 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(!previous.finished);
+        // A durable admission belongs to the incoming turn, not the old
+        // quiescent execution. Settlement and rollover must both exempt it.
+        let queued: neoism_agent_core::PromptRequest = serde_json::from_value(json!({
+            "parts": [{"type": "text", "text": "next turn"}],
+            "model": {"providerId": "neoism", "modelId": "stub"},
+            "noReply": false,
+        })).unwrap();
+        state.inner.store.enqueue_prompt_with_delivery(&root, &queued, "queue").await.unwrap();
+        assert!(!state.inner.store.mark_execution_finished(&root, &previous.execution_id).await.unwrap());
 
         let next = ensure_for_prompt(&state, &mut session, "message-new", true)
             .await

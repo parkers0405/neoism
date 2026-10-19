@@ -16,10 +16,21 @@ mod url_tests {
 
     #[test]
     fn modal_urls_only_allow_absolute_http_and_https() {
-        for url in ["https://example.com/a%2Fb?x=%2f#Frag", "HTTP://example.com/"] {
+        for url in [
+            "https://example.com/a%2Fb?x=%2f#Frag",
+            "HTTP://example.com/",
+        ] {
             assert!(validate_modal_url(url).is_ok(), "{url}");
         }
-        for url in ["javascript:alert(1)", "file:///tmp/test", "mailto:a@example.com", "/relative", "//example.com", "https://", ""] {
+        for url in [
+            "javascript:alert(1)",
+            "file:///tmp/test",
+            "mailto:a@example.com",
+            "/relative",
+            "//example.com",
+            "https://",
+            "",
+        ] {
             assert!(validate_modal_url(url).is_err(), "{url}");
         }
     }
@@ -156,7 +167,11 @@ impl Screen<'_> {
         match action {
             ModalAction::CopyInvite { url } => {
                 self.context_manager.event_proxy().send_event(
-                    neoism_backend::event::RioEvent::ClipboardStore(ClipboardType::Clipboard, url).into(),
+                    neoism_backend::event::RioEvent::ClipboardStore(
+                        ClipboardType::Clipboard,
+                        url,
+                    )
+                    .into(),
                     self.context_manager.window_id(),
                 );
                 self.renderer.modal.mark_invite_copied();
@@ -652,31 +667,12 @@ impl Screen<'_> {
                     );
                     return;
                 }
-                match crate::neoism::agent::rename_session(&server, &session_id, name) {
-                    Ok(()) => {
-                        self.renderer.modal.close();
-                        self.renderer
-                            .conversations_pane
-                            .refresh_sessions_after_mutation();
-                        for grid in self.context_manager.contexts_mut() {
-                            for item in grid.contexts_mut().values_mut() {
-                                if let Some(agent) =
-                                    item.val.neoism_agent.as_mut().filter(|agent| {
-                                        agent.server_address() == server
-                                            && agent.session_directory()
-                                                == directory.as_deref()
-                                    })
-                                {
-                                    agent.refresh_sessions_after_mutation();
-                                }
-                            }
-                        }
-                    }
-                    Err(error) => self.renderer.notifications.push(
-                        error,
-                        neoism_ui::panels::notifications::NotificationLevel::Warn,
-                    ),
-                }
+                self.renderer.conversations_pane.request_session_mutation(
+                    server,
+                    session_id,
+                    crate::neoism::agent::AgentSessionMutation::Rename(name.to_string()),
+                );
+                self.renderer.modal.close();
             }
             ModalAction::AgentDeleteSession {
                 session_id,
@@ -688,34 +684,12 @@ impl Screen<'_> {
                     self.renderer.modal.close();
                     return;
                 }
-                match crate::neoism::agent::delete_session(&server, &session_id) {
-                    Ok(()) => {
-                        self.renderer.modal.close();
-                        self.renderer
-                            .conversations_pane
-                            .refresh_sessions_after_mutation();
-                        for grid in self.context_manager.contexts_mut() {
-                            for item in grid.contexts_mut().values_mut() {
-                                if let Some(agent) =
-                                    item.val.neoism_agent.as_mut().filter(|agent| {
-                                        agent.server_address() == server
-                                            && agent.session_directory()
-                                                == directory.as_deref()
-                                    })
-                                {
-                                    if agent.session_id_str() == Some(&session_id) {
-                                        agent.create_new_session();
-                                    }
-                                    agent.refresh_sessions_after_mutation();
-                                }
-                            }
-                        }
-                    }
-                    Err(error) => self.renderer.notifications.push(
-                        error,
-                        neoism_ui::panels::notifications::NotificationLevel::Warn,
-                    ),
-                }
+                self.renderer.conversations_pane.request_session_mutation(
+                    server,
+                    session_id,
+                    crate::neoism::agent::AgentSessionMutation::Delete,
+                );
+                self.renderer.modal.close();
             }
             ModalAction::RenameTab {
                 index,
@@ -769,11 +743,29 @@ impl Screen<'_> {
                     }
                     return;
                 }
-                let has_server_target = values.iter().any(|(id, _)| matches!(id.as_str(),
-                    "fast_invite_address" | "fast_host_dir" | "fast_join_address" | "create_dir" | "address"));
-                let locked_invite = self.server_form_draft.as_ref().is_some_and(|draft| draft.invite);
-                if locked_invite || (has_server_target && !values.iter().any(|(id, _)| id == "server_id")) {
-                    if self.server_form_draft.as_ref().is_none_or(|draft| !draft.accepts(&values)) {
+                let has_server_target = values.iter().any(|(id, _)| {
+                    matches!(
+                        id.as_str(),
+                        "fast_invite_address"
+                            | "fast_host_dir"
+                            | "fast_join_address"
+                            | "create_dir"
+                            | "address"
+                    )
+                });
+                let locked_invite = self
+                    .server_form_draft
+                    .as_ref()
+                    .is_some_and(|draft| draft.invite);
+                if locked_invite
+                    || (has_server_target
+                        && !values.iter().any(|(id, _)| id == "server_id"))
+                {
+                    if self
+                        .server_form_draft
+                        .as_ref()
+                        .is_none_or(|draft| !draft.accepts(&values))
+                    {
                         self.renderer.notifications.push(
                             "Server form mode does not match the submitted fields",
                             neoism_ui::panels::notifications::NotificationLevel::Warn,
@@ -781,23 +773,36 @@ impl Screen<'_> {
                         return;
                     }
                 }
-                let password = values.iter().find(|(id, _)| id == "token")
-                    .map(|(_, password)| password.clone()).filter(|password| !password.is_empty());
+                let password = values
+                    .iter()
+                    .find(|(id, _)| id == "token")
+                    .map(|(_, password)| password.clone())
+                    .filter(|password| !password.is_empty());
                 // Native invitation forms never fall through to host or saved
                 // server paths. Validation failure keeps the masked form open.
                 if values.iter().any(|(id, _)| id == "fast_invite_address") {
                     let link = value("fast_invite_address").unwrap_or_default();
-                    let password = values.iter().find(|(id, _)| id == "token")
-                        .map(|(_, password)| password.clone()).filter(|password| !password.is_empty());
-                    let valid = crate::invite_links::validate_invite_link(&link).and_then(|join| {
-                        if join.token.is_none() && password.is_none() {
-                            Err("Enter the host's password before joining".into())
-                        } else {
-                            crate::fast_servers::normalize_fast_join(link.clone(), password.clone())
-                        }
-                    });
+                    let password = values
+                        .iter()
+                        .find(|(id, _)| id == "token")
+                        .map(|(_, password)| password.clone())
+                        .filter(|password| !password.is_empty());
+                    let valid = crate::invite_links::validate_invite_link(&link)
+                        .and_then(|join| {
+                            if join.token.is_none() && password.is_none() {
+                                Err("Enter the host's password before joining".into())
+                            } else {
+                                crate::fast_servers::normalize_fast_join(
+                                    link.clone(),
+                                    password.clone(),
+                                )
+                            }
+                        });
                     if let Err(error) = valid {
-                        self.renderer.notifications.push(error, neoism_ui::panels::notifications::NotificationLevel::Warn);
+                        self.renderer.notifications.push(
+                            error,
+                            neoism_ui::panels::notifications::NotificationLevel::Warn,
+                        );
                         return;
                     }
                     self.renderer.modal.close();
@@ -830,7 +835,12 @@ impl Screen<'_> {
                         return;
                     }
                     self.renderer.modal.close();
-                    self.request_fast_server_add(host, target, value("name"), password.clone());
+                    self.request_fast_server_add(
+                        host,
+                        target,
+                        value("name"),
+                        password.clone(),
+                    );
                     // Hosting starts in the background with a toast, not a
                     // picker stacked with its eventual ready/error dialog.
                     if !host {
@@ -842,7 +852,10 @@ impl Screen<'_> {
                 // (no address — we spawn the server ourselves and join).
                 if values.iter().any(|(id, _)| id == "create_dir") {
                     let Some(dir) = value("create_dir") else {
-                        self.renderer.notifications.push("Project folder is required", neoism_ui::panels::notifications::NotificationLevel::Warn);
+                        self.renderer.notifications.push(
+                            "Project folder is required",
+                            neoism_ui::panels::notifications::NotificationLevel::Warn,
+                        );
                         return;
                     };
                     self.renderer.modal.close();

@@ -2,6 +2,20 @@
 
 All notable user-facing changes to Neoism are documented here.
 
+## [0.7.132] - 2026-10-19
+
+### Agent startup, request handling, and queue recovery
+
+- Improves cold-start readiness waits and health validation while moving optional Tailscale discovery off the local-startup critical path.
+- Uses pooled desktop HTTP clients on a dedicated runtime, bounded responses, request deadlines, and HTTP message framing rather than waiting for connection closure. SSE retains separate polling/cancellation behavior.
+- Moves native prompt admission and session preference/interaction writes off the UI thread, captures request ownership at submission, and preserves uncertain-delivery state for reconciliation and explicit retry instead of blindly replaying writes.
+- Improves durable queue admission and run handoff, startup cancellation recovery, retained-prompt execution rollover, and dequeue-before-provider-output ordering.
+- Carries directory scope through native/browser conversation search, batches canonical authorization hydration, and classifies expected busy/budget errors without false 500 responses. Improves bounded sidebar history preloads and catalog reconciliation.
+- Preserves streamed assistant text when a late empty snapshot arrives without an explicit retry reset; explicit retries still clear their previous baseline once, and nonempty corrections keep their existing merge behavior.
+- Includes the committed Windows candidate/fixture MSI checkpoint and standalone validation recovery workflow, allowing future saved-package validation retries without recompiling. This does not establish the cause of previous runner losses.
+
+Readiness and request deadlines are separate budgets, not a single end-to-end latency promise. Agent structured errors and daemon proxy responses have different envelopes; uncertain mutations require reconciliation. This is a stable production release, available through plain `neoism update` after the platform matrix passes. Existing first-terminal behavior, trusted-user hosting boundaries, and browser-worker exclusions are preserved.
+
 ## [0.7.131] - 2026-10-19
 
 ### Background preparation, framing, and startup presentation

@@ -49,8 +49,10 @@ const DEFAULT_MAX_TOKENS: u32 = 4096;
 /// Default agent-server base URL when `NEOISM_AGENT_SERVER` is unset.
 const DEFAULT_AGENT_SERVER: &str = "http://127.0.0.1:4096";
 const AGENT_SERVER_HEALTH_PATH: &str = "/v2/health";
-const AGENT_SERVER_READY_TIMEOUT: Duration = Duration::from_millis(1500);
-const AGENT_SERVER_READY_POLL: Duration = Duration::from_millis(50);
+const AGENT_SERVER_READY_TIMEOUT: Duration = Duration::from_secs(120);
+const AGENT_SERVER_READY_POLL: Duration = Duration::from_millis(100);
+const AGENT_READ_TIMEOUT: Duration = Duration::from_secs(30);
+const AGENT_MUTATION_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// One-shot guard that boots the embedded agent-server exactly once
 /// per process. Mirrors `frontends/neoism/src/agent_server.rs::ensure_started`.
@@ -229,6 +231,31 @@ pub(crate) fn configured_agent_server() -> String {
         .unwrap_or_else(|| DEFAULT_AGENT_SERVER.to_string())
 }
 
+pub(crate) fn agent_http_client(base: &str) -> Result<&'static reqwest::Client, ()> {
+    // Separate local and remote pools so loopback never traverses a system
+    // proxy, while configured remote upstreams retain environment proxy support.
+    static LOCAL: OnceLock<Result<reqwest::Client, reqwest::Error>> = OnceLock::new();
+    static REMOTE: OnceLock<Result<reqwest::Client, reqwest::Error>> = OnceLock::new();
+    let local = std::env::var("NEOISM_FAST_SERVER").as_deref() == Ok("1")
+        || reqwest::Url::parse(base).ok().is_some_and(|url| {
+            matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "[::1]"))
+        });
+    let pool = if local { &LOCAL } else { &REMOTE };
+    pool.get_or_init(|| {
+        let mut builder = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(5))
+            .redirect(reqwest::redirect::Policy::none())
+            .retry(reqwest::retry::never())
+            .pool_idle_timeout(Duration::from_secs(60));
+        if local {
+            builder = builder.no_proxy();
+        }
+        builder.build()
+    })
+    .as_ref()
+    .map_err(|_| ())
+}
+
 fn local_bind_target(server: &str) -> Option<(String, u16)> {
     let url = url::Url::parse(server).ok()?;
     if url.scheme() != "http"
@@ -267,9 +294,10 @@ pub(crate) struct AgentInner {
     /// Outbound channel; cloned into the spawned task so it can
     /// stream events back without holding the session lock.
     tx: UnboundedSender<AgentServerMessage>,
-    /// HTTP client built once on spawn and reused for direct-proxy
-    /// turns and agent-server traffic alike.
+    /// HTTP client for the direct provider proxy.
     http: reqwest::Client,
+    /// Shared agent pool; loopback traffic bypasses environment proxies.
+    agent_http: reqwest::Client,
     /// Conversation history accumulated across direct-proxy turns.
     history: Mutex<Vec<HistoryTurn>>,
     /// Handle to the most recently spawned direct-proxy turn.
@@ -320,18 +348,25 @@ impl AgentSession {
             });
         }
         let http = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(5))
+            .redirect(reqwest::redirect::Policy::none())
             .pool_idle_timeout(Some(std::time::Duration::from_secs(30)))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
+        let agent_server = configured_agent_server();
+        let agent_http = agent_http_client(&agent_server)
+            .cloned()
+            .unwrap_or_else(|_| http.clone());
         AgentSession {
             inner: Arc::new(AgentInner {
                 api_key: api_key.filter(|s| !s.is_empty()),
                 model,
                 tx,
                 http,
+                agent_http,
                 history: Mutex::new(Vec::new()),
                 current: Mutex::new(None),
-                agent_server: configured_agent_server(),
+                agent_server,
                 agent_server_token: std::env::var("NEOISM_AGENT_TOKEN")
                     .ok()
                     .filter(|token| !token.trim().is_empty()),

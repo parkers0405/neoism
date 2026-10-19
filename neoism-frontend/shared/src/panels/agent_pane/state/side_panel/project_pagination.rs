@@ -10,6 +10,44 @@ mod loading_query_tests {
     use super::*;
 
     #[test]
+    fn failed_pages_retry_with_backoff_then_require_explicit_action() {
+        let mut panel = NeoismAgentSidePanel::default();
+        panel.set_session_projects(vec![("/pending".into(), 1)]);
+        for failure in 1..=3 {
+            let requests = panel.begin_project_session_requests();
+            assert_eq!(requests.len(), 1);
+            let (directory, cursor, token) = &requests[0];
+            assert!(cursor.is_none());
+            panel.settle_project_session_error(directory, *token, "offline".into());
+            assert!(panel.begin_project_session_requests().is_empty());
+            let page = panel.project_pages.get_mut("/pending").unwrap();
+            page.last_failure = Some(Instant::now() - std::time::Duration::from_secs(10));
+            assert_eq!(page.retry_due(Instant::now()), failure < 3);
+        }
+        assert!(panel.begin_project_session_requests().is_empty());
+        panel.selected = panel
+            .sessions
+            .iter()
+            .position(|e| e.is_project_page())
+            .unwrap();
+        assert!(panel.activate_selected_project_page());
+        let requests = panel.begin_project_session_requests();
+        assert_eq!(requests.len(), 1);
+        panel.set_project_session_page(
+            "/pending",
+            None,
+            vec![],
+            Some("next".into()),
+            requests[0].2,
+        );
+        let page = panel.project_pages.get("/pending").unwrap();
+        assert_eq!(page.failures, 0);
+        assert!(page.last_failure.is_none());
+        // Successful Show more pages must not be automatically drained.
+        assert!(panel.begin_project_session_requests().is_empty());
+    }
+
+    #[test]
     fn project_loading_query_tracks_state_not_placeholder_title() {
         let mut panel = NeoismAgentSidePanel::default();
         panel.set_session_projects(vec![("/pending".into(), 1)]);
@@ -97,6 +135,19 @@ pub(super) struct ProjectSessionPage {
     pub request: Option<(Option<String>, u64)>,
     pub error: Option<String>,
     pub queued: bool,
+    failures: u8,
+    last_failure: Option<Instant>,
+}
+
+impl ProjectSessionPage {
+    fn retry_due(&self, now: Instant) -> bool {
+        self.error.is_some()
+            && self.failures < 3
+            && self.last_failure.is_some_and(|last| {
+                now.saturating_duration_since(last).as_secs_f32()
+                    >= 0.75 * 2.0_f32.powi(i32::from(self.failures.saturating_sub(1)))
+            })
+    }
 }
 
 impl NeoismAgentSidePanel {
@@ -274,6 +325,7 @@ impl NeoismAgentSidePanel {
                 candidates.push(directory);
             }
         }
+        let now = Instant::now();
         let mut requests = Vec::new();
         for directory in candidates {
             if slots == 0 {
@@ -283,7 +335,9 @@ impl NeoismAgentSidePanel {
                 continue;
             };
             if page.request.is_some()
-                || (!page.queued && (page.loaded || page.error.is_some()))
+                || (!page.queued
+                    && !page.retry_due(now)
+                    && (page.loaded || page.error.is_some()))
             {
                 continue;
             }
@@ -371,6 +425,8 @@ impl NeoismAgentSidePanel {
         }
         let page = self.project_pages.get_mut(directory).unwrap();
         page.loaded = true;
+        page.failures = 0;
+        page.last_failure = None;
         // A broken server must not leave Show more repeatedly claiming the same cursor.
         page.next_cursor =
             next_cursor.filter(|cursor| Some(cursor.as_str()) != requested_cursor);
@@ -405,6 +461,8 @@ impl NeoismAgentSidePanel {
         }
         page.request = None;
         page.error = Some(message);
+        page.failures = page.failures.saturating_add(1);
+        page.last_failure = Some(Instant::now());
         page.queued = false;
         self.rebuild_session_display();
     }
@@ -448,6 +506,8 @@ impl NeoismAgentSidePanel {
             if page.request.is_none()
                 && (page.error.is_some() || page.next_cursor.is_some())
             {
+                page.failures = 0;
+                page.last_failure = None;
                 page.queued = true;
             }
         }

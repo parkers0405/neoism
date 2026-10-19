@@ -1,19 +1,22 @@
 name: Validate existing Windows MSI
 
-# Diagnostic only: no build, upgrade fixture, release, or publishing.
+# Diagnostic only: replay the complete native smoke. No build, tag, or publishing.
 on:
   workflow_dispatch:
     inputs:
       source_run_id:
-        description: Run containing the neoism-windows-x86_64 artifact
+        description: Release run containing a package-bearing pre-MSI checkpoint
         required: true
         type: string
-        default: '34182827453'
+      source_run_attempt:
+        description: Exact source attempt (diagnostics-only older checkpoints cannot recover MSIs)
+        required: true
+        type: string
+        default: '1'
       version:
-        description: Exact installed version expected (without v)
+        description: Exact original binary version expected (without v; never relabel a binary)
         required: true
         type: string
-        default: '0.7.97'
 
 permissions:
   contents: read
@@ -22,62 +25,40 @@ permissions:
 jobs:
   validate:
     runs-on: windows-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
-      # Use the dispatched ref's corrected smoke, NOT the source artifact's ref.
+      # Use the dispatched ref's smoke, NOT the source artifact's scripts.
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@v4
-        with:
-          name: neoism-windows-x86_64
-          run-id: ${{ inputs.source_run_id }}
-          github-token: ${{ github.token }}
-          path: candidate
-      - name: Install existing MSI and validate updater and GUI
+      - name: Check dispatch identity
         shell: pwsh
         env:
           SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          SOURCE_ATTEMPT: ${{ inputs.source_run_attempt }}
           EXPECTED_VERSION: ${{ inputs.version }}
         run: |
-          $ErrorActionPreference = 'Stop'
-          . ./scripts/windows-validation-process.ps1
-          $evidence = (New-Item -ItemType Directory -Force 'windows-validation').FullName
-          Start-Transcript -Path "$evidence/transcript.log"
-          try {
-            if ($env:SOURCE_RUN_ID -notmatch '^\d+$' -or $env:EXPECTED_VERSION -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$') { throw 'Invalid source run ID or version' }
-            [pscustomobject]@{ sourceRun = $env:SOURCE_RUN_ID; version = $env:EXPECTED_VERSION; validationCommit = $env:GITHUB_SHA } | ConvertTo-Json | Set-Content "$evidence/provenance.json"
-            Get-FileHash ./scripts/windows-installed-gui-smoke.ps1, ./scripts/windows-validation-process.ps1 | Format-List | Out-File "$evidence/script-hashes.log"
-            $installer = (Resolve-Path 'candidate/Neoism-x86_64.msi').Path
-            $hash = (Get-FileHash $installer -Algorithm SHA256).Hash
-            $sum = (Get-Content 'candidate/Neoism-x86_64.msi.sha256' -Raw).Trim()
-            "MSI SHA256=$hash" | Set-Content "$evidence/msi-hash.log"
-            if ($sum -notmatch '^([a-fA-F0-9]{64})\s+\*?Neoism-x86_64\.msi$' -or $hash -ne $Matches[1]) { throw 'MSI checksum mismatch' }
-            $installDir = Join-Path $env:LOCALAPPDATA 'Programs\Neoism'
-            try {
-              Invoke-CheckedProcess 'msiexec.exe' "/i `"$installer`" /qn /norestart /L*v `"$evidence/install.log`"" "$evidence/install" 180 @(0, 3010)
-              foreach ($binary in @('neoism.exe', 'neoism-workspace-daemon.exe', 'neoism-agent.exe', 'neoism-agent-lua-runner.exe')) {
-                $file = Join-Path $installDir $binary
-                $signature = Get-AuthenticodeSignature $file
-                [pscustomobject]@{ binary = $binary; sha256 = (Get-FileHash $file).Hash; signature = "$($signature.Status)"; signer = "$($signature.SignerCertificate.Thumbprint)" } | ConvertTo-Json -Compress | Add-Content "$evidence/installed-binaries.jsonl"
-                # Record signing as shipped; the source run may not have signing credentials.
-              }
-              Invoke-CheckedProcess (Join-Path $installDir 'neoism.exe') '--version' "$evidence/version" 30
-              if ((Get-Content "$evidence/version.stdout.log" -Raw).Trim() -cne "neoism $env:EXPECTED_VERSION") { throw 'Installed version differs from requested version' }
-              $baseline = New-Item -ItemType Directory -Force (Join-Path $env:RUNNER_TEMP 'neoism-update-baseline')
-              foreach ($name in @('neoism.exe', 'neoism-workspace-daemon.exe', 'neoism-agent.exe', 'neoism-agent-lua-runner.exe', 'web')) {
-                Copy-Item -LiteralPath (Join-Path $installDir $name) -Destination $baseline.FullName -Recurse
-              }
-              & ./scripts/windows-updater-native-validation.ps1 -CandidateMsi $installer -ManagedDir $installDir -PackagingDir $baseline.FullName -Version $env:EXPECTED_VERSION -Evidence $evidence
-              & ./scripts/windows-installed-gui-smoke.ps1 -InstallDir $installDir -Evidence $evidence
-            } finally {
-              Invoke-CheckedProcess 'msiexec.exe' "/x `"$installer`" /qn /norestart /L*v `"$evidence/uninstall.log`"" "$evidence/uninstall" 180 @(0, 3010, 1605)
-            }
-            foreach ($binary in @('neoism.exe', 'neoism-workspace-daemon.exe', 'neoism-agent.exe', 'neoism-agent-lua-runner.exe')) {
-              if (Test-Path (Join-Path $installDir $binary)) { throw "$binary remained after uninstall" }
-            }
-          } finally { Stop-Transcript }
-      - name: Retain full logs and original artifact evidence
+          if ($env:SOURCE_RUN_ID -notmatch '^\d+$' -or $env:SOURCE_ATTEMPT -notmatch '^\d+$' -or
+              $env:EXPECTED_VERSION -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$') {
+            throw 'Invalid source run ID, attempt, or version'
+          }
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-pre-msi-${{ inputs.source_run_id }}-${{ inputs.source_run_attempt }}
+          run-id: ${{ inputs.source_run_id }}
+          github-token: ${{ github.token }}
+          path: candidate
+      - name: Verify checkpoint and replay full install, upgrade, updater, GUI and uninstall smoke
+        shell: pwsh
+        timeout-minutes: 15
+        env:
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          SOURCE_ATTEMPT: ${{ inputs.source_run_attempt }}
+          EXPECTED_VERSION: ${{ inputs.version }}
+        run: |
+          ./scripts/windows-msi-checkpoint.ps1 -Mode Validate -Directory candidate `
+            -ExpectedVersion $env:EXPECTED_VERSION -SourceRun $env:SOURCE_RUN_ID -SourceAttempt $env:SOURCE_ATTEMPT
+      - name: Retain full logs and original checkpoint evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -86,7 +67,11 @@ jobs:
           path: |
             windows-validation/
             candidate/
+            scripts/windows-msi-checkpoint.ps1
+            scripts/windows-msi-validation.ps1
             scripts/windows-installed-gui-smoke.ps1
             scripts/windows-validation-process.ps1
             scripts/windows-updater-native-validation.ps1
             neoism-frontend/desktop/src/windows_update.ps1
+          if-no-files-found: error
+          retention-days: 14

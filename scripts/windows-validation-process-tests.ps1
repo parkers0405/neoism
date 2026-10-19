@@ -1,6 +1,7 @@
 # No Pester dependency; also runnable under PowerShell on Linux.
 $ErrorActionPreference = 'Stop'
 foreach ($name in @('windows-validation-process.ps1', 'windows-msi-validation.ps1',
+        'windows-msi-checkpoint.ps1', 'windows-msi-checkpoint-tests.ps1',
         'windows-updater-native-validation.ps1', 'windows-installed-gui-smoke.ps1')) {
     $tokens = $null; $parseErrors = $null
     $null = [Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot $name), [ref]$tokens, [ref]$parseErrors)
@@ -194,3 +195,4 @@ try {
     Remove-Item -LiteralPath $testRoot -Recurse -Force
 }
 'PASS: process identity guards, bounded waits, timeout/exit propagation, and real redirected subprocess regression tests'
+& "$PSScriptRoot/windows-msi-checkpoint-tests.ps1"

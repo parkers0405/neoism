@@ -1,4 +1,8 @@
-param([Parameter(Mandatory)][ValidatePattern('^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$')][string]$ExpectedVersion)
+param(
+    [Parameter(Mandatory)][ValidatePattern('^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$')][string]$ExpectedVersion,
+    [string]$PackagingDir = (Join-Path $PWD 'target/x86_64-pc-windows-msvc/release'),
+    [string]$PackageDir = '.'
+)
 $ErrorActionPreference = "Stop"
 . "$PSScriptRoot/windows-validation-process.ps1"
 $evidence = (New-Item -ItemType Directory -Force 'windows-validation').FullName
@@ -11,8 +15,8 @@ function Invoke-Msi([string]$arguments) {
         "$evidence/msiexec-$script:msiStep" 180 @(0)
     Write-ValidationPhase $evidence "MSI step=$script:msiStep complete"
 }
-$fixture = (Resolve-Path "Neoism-upgrade-fixture.msi").Path
-$installer = (Resolve-Path "Neoism-x86_64.msi").Path
+$fixture = (Resolve-Path -LiteralPath (Join-Path $PackageDir 'Neoism-upgrade-fixture.msi')).Path
+$installer = (Resolve-Path -LiteralPath (Join-Path $PackageDir 'Neoism-x86_64.msi')).Path
 $installDir = Join-Path $env:LOCALAPPDATA "Programs\Neoism"
 $userData = Join-Path $env:LOCALAPPDATA "neoism\installer-preserve-test"
 New-Item -ItemType Directory -Force (Split-Path $userData) | Out-Null
@@ -26,7 +30,7 @@ $fixtureHash = (Get-FileHash (Join-Path $installDir "neoism.exe") -Algorithm SHA
 Invoke-Msi "/i `"$installer`" /qn /norestart"
 $upgraded = $true
 Write-ValidationPhase $evidence 'installed payload hash/signature verification begin'
-$packagingDir = Join-Path $PWD 'target/x86_64-pc-windows-msvc/release'
+$packagingDir = (Resolve-Path -LiteralPath $PackagingDir).Path
 foreach ($binary in @('neoism.exe', 'neoism-workspace-daemon.exe', 'neoism-agent.exe', 'neoism-agent-lua-runner.exe')) {
     $sourceHash = (Get-FileHash (Join-Path $packagingDir $binary) -Algorithm SHA256).Hash
     $installedHash = (Get-FileHash (Join-Path $installDir $binary) -Algorithm SHA256).Hash

@@ -359,6 +359,7 @@ jobs:
           Write-ValidationPhase -Evidence windows-validation -Phase 'pre-MSI checkpoint'
           Get-FileHash Neoism-x86_64.msi, Neoism-upgrade-fixture.msi -Algorithm SHA256 |
             ConvertTo-Json | Set-Content windows-validation/pre-msi-hashes.json
+          ./scripts/windows-msi-checkpoint.ps1 -Mode Capture -ExpectedVersion "$env:NEOISM_RELEASE_VERSION"
 
       - name: Upload Windows pre-MSI checkpoint
         if: matrix.goos == 'windows'
@@ -366,7 +367,14 @@ jobs:
         with:
           name: windows-pre-msi-${{ github.run_id }}-${{ github.run_attempt }}
           include-hidden-files: true
-          path: windows-validation/
+          # Recovery packages are UNVALIDATED, not publishable release assets.
+          # Keep both exact MSIs, checksums, provenance and build-input hashes.
+          path: |
+            windows-validation/
+            Neoism-x86_64.msi
+            Neoism-x86_64.msi.sha256
+            Neoism-upgrade-fixture.msi
+            Neoism-upgrade-fixture.msi.sha256
           if-no-files-found: error
           retention-days: 14
 

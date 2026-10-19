@@ -279,6 +279,21 @@ impl Screen<'_> {
         }
     }
 
+    /// Drain worker completion before the common redraw gate, including Welcome.
+    pub(crate) fn poll_background_image(&mut self) {
+        match self.sugarloaf.poll_background_image() {
+            Ok(true) => self.mark_dirty(),
+            Ok(false) => {}
+            Err(message) => {
+                self.renderer.assistant.set_error(RioError {
+                    level: RioErrorLevel::Warning,
+                    report: RioErrorType::BackgroundImageLoadFailure(message),
+                });
+                self.mark_dirty();
+            }
+        }
+    }
+
     pub(crate) fn render(
         &mut self,
         animation_dt: std::time::Duration,

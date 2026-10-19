@@ -866,6 +866,9 @@ impl EventProcessor {
             window
                 .is_mapped
                 .store(true, std::sync::atomic::Ordering::Release);
+            window
+                .initial_hidden_redraw
+                .store(false, std::sync::atomic::Ordering::Release);
         });
         let wt = Self::window_target(&self.target);
         wt.update_refresh_loop(WindowId(window as _));

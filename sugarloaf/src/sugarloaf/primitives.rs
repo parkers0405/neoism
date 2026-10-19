@@ -88,6 +88,16 @@ pub struct SugarCursor {
     pub order: u8,
 }
 
+#[derive(Clone, Copy, Serialize, Deserialize, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum BackgroundImageFit {
+    /// Fill the window without distortion, cropping overflow.
+    #[default]
+    Cover,
+    /// Show the whole image, leaving the window background visible around it.
+    Contain,
+}
+
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
 pub struct ImageProperties {
     #[serde(default = "String::default")]
@@ -97,6 +107,43 @@ pub struct ImageProperties {
     /// lower values let the terminal background show through.
     #[serde(default = "default_image_opacity")]
     pub opacity: f32,
+    /// Approximate Gaussian sigma in source-image pixels; 0 disables blur.
+    #[serde(
+        default = "default_image_blur",
+        deserialize_with = "deserialize_image_blur"
+    )]
+    pub blur: f32,
+    #[serde(default)]
+    pub fit: BackgroundImageFit,
+    /// Horizontal alignment: 0 = left, 0.5 = center, 1 = right.
+    #[serde(default = "default_image_position", rename = "position-x")]
+    pub position_x: f32,
+    /// Vertical alignment: 0 = top, 0.5 = center, 1 = bottom.
+    #[serde(default = "default_image_position", rename = "position-y")]
+    pub position_y: f32,
+}
+
+#[inline]
+fn default_image_blur() -> f32 {
+    0.0
+}
+
+fn deserialize_image_blur<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<f32, D::Error> {
+    let blur = f32::deserialize(deserializer)?;
+    if (0.0..=100.0).contains(&blur) {
+        Ok(blur)
+    } else {
+        Err(serde::de::Error::custom(
+            "image blur must be between 0 and 100 pixels",
+        ))
+    }
+}
+
+#[inline]
+fn default_image_position() -> f32 {
+    0.5
 }
 
 #[inline]
@@ -109,6 +156,10 @@ impl Default for ImageProperties {
         Self {
             path: String::new(),
             opacity: default_image_opacity(),
+            blur: default_image_blur(),
+            fit: BackgroundImageFit::default(),
+            position_x: default_image_position(),
+            position_y: default_image_position(),
         }
     }
 }

@@ -132,6 +132,9 @@ pub struct UnownedWindow {
     pub shared_state: Mutex<SharedState>,
     activation_sender: WakeSender<super::ActivationToken>,
     pub(crate) redraw_pending: std::sync::atomic::AtomicBool,
+    /// Explicit redraws may prepare a created-hidden window before its first map.
+    /// Cleared permanently by MapNotify; later hiding keeps normal vsync policy.
+    pub(crate) initial_hidden_redraw: std::sync::atomic::AtomicBool,
     redraw_flag: Arc<std::sync::atomic::AtomicBool>,
     waker: calloop::ping::Ping,
     /// Per-window vsync timer state. Mirrors zed's `RefreshState`
@@ -405,6 +408,7 @@ impl UnownedWindow {
             shared_state: SharedState::new(guessed_monitor, &window_attrs),
             activation_sender: event_loop.activation_sender.clone(),
             redraw_pending: std::sync::atomic::AtomicBool::new(false),
+            initial_hidden_redraw: std::sync::atomic::AtomicBool::new(!window_attrs.visible),
             redraw_flag: event_loop.redraw_flag.clone(),
             waker: event_loop.waker.clone(),
             refresh_state: std::sync::Mutex::new(None),

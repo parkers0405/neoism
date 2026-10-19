@@ -107,14 +107,59 @@ impl<'de> Deserialize<'de> for Margin {
     where
         D: Deserializer<'de>,
     {
-        let values: Vec<f32> = Vec::deserialize(deserializer)?;
-        Self::from_css_values(&values).map_err(serde::de::Error::custom)
+        // Keep accepting CSS-style user input as well as the named sides
+        // emitted by our derived Serialize implementation (used by Lua patches).
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Representation {
+            Values(Vec<f32>),
+            Sides {
+                top: f32,
+                right: f32,
+                bottom: f32,
+                left: f32,
+            },
+        }
+
+        match Representation::deserialize(deserializer)? {
+            Representation::Values(values) => {
+                Self::from_css_values(&values).map_err(serde::de::Error::custom)
+            }
+            Representation::Sides {
+                top,
+                right,
+                bottom,
+                left,
+            } => Ok(Self::new(top, right, bottom, left)),
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn margin_json_roundtrip_and_css_input() {
+        let margin = Margin::new(3.0, 7.0, 11.0, 13.0);
+        let value = serde_json::to_value(margin).unwrap();
+        assert_eq!(serde_json::from_value::<Margin>(value).unwrap(), margin);
+        for (input, expected) in [
+            (serde_json::json!([3]), Margin::all(3.0)),
+            (serde_json::json!([3, 7]), Margin::new(3.0, 7.0, 3.0, 7.0)),
+            (serde_json::json!([3, 7, 11, 13]), margin),
+        ] {
+            assert_eq!(serde_json::from_value::<Margin>(input).unwrap(), expected);
+        }
+        for input in [
+            serde_json::json!([]),
+            serde_json::json!([1, 2, 3]),
+            serde_json::json!({"top": 1}),
+            serde_json::json!({"top": "bad", "right": 2, "bottom": 3, "left": 4}),
+        ] {
+            assert!(serde_json::from_value::<Margin>(input).is_err());
+        }
+    }
 
     #[test]
     fn test_margin_all() {

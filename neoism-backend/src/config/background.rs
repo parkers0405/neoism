@@ -56,7 +56,7 @@ fn normalize_image(image: &ImageProperties, base: &Path) -> ImageProperties {
         path: normalize_path(&image.path, base)
             .to_string_lossy()
             .into_owned(),
-        opacity: image.opacity,
+        ..image.clone()
     }
 }
 
@@ -69,14 +69,19 @@ pub fn resolve_background(
     if config.ui.window.background_image_disabled {
         return None;
     }
-    config
-        .ui
-        .window
-        .background_image
-        .as_ref()
-        .filter(|image| !image.path.trim().is_empty())
-        .or_else(|| pack.and_then(|pack| pack.wallpaper.as_ref()))
-        .map(|image| normalize_image(image, &super::config_dir_path()))
+    let configured = config.ui.window.background_image.as_ref();
+    if let Some(image) = configured.filter(|image| !image.path.trim().is_empty()) {
+        return Some(normalize_image(image, &super::config_dir_path()));
+    }
+    let mut image = pack.and_then(|pack| pack.wallpaper.clone())?;
+    // Settings can adjust blur and framing without replacing the inherited pack image.
+    if let Some(framing) = configured {
+        image.blur = framing.blur;
+        image.fit = framing.fit;
+        image.position_x = framing.position_x;
+        image.position_y = framing.position_y;
+    }
+    Some(normalize_image(&image, &super::config_dir_path()))
 }
 
 /// Supported formats match Sugarloaf's image decoder features.
@@ -135,12 +140,12 @@ fn entries_at(
                 "Installed background".into(),
                 ImageProperties {
                     path: path.to_string_lossy().into_owned(),
-                    opacity: config
+                    ..config
                         .ui
                         .window
                         .background_image
-                        .as_ref()
-                        .map_or(1.0, |image| image.opacity),
+                        .clone()
+                        .unwrap_or_default()
                 },
             );
         }
@@ -191,10 +196,19 @@ fn selection_updates(
         BackgroundSelection::Inherit => (false, serde_json::Value::Null),
         BackgroundSelection::None => (true, serde_json::Value::Null),
         BackgroundSelection::Image(image) => {
-            if !image.opacity.is_finite() {
+            if ![image.opacity, image.position_x, image.position_y]
+                .into_iter()
+                .all(f32::is_finite)
+            {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
-                    "background opacity must be finite",
+                    "background opacity and position must be finite",
+                ));
+            }
+            if !image.blur.is_finite() || !(0.0..=100.0).contains(&image.blur) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "background image blur must be finite and between 0 and 100",
                 ));
             }
             (
@@ -244,6 +258,7 @@ mod tests {
         ImageProperties {
             path: path.into(),
             opacity,
+            ..Default::default()
         }
     }
     fn pack(image: ImageProperties) -> ResolvedMashUpPack {
@@ -260,6 +275,142 @@ mod tests {
             ui: Default::default(),
             editor_plugins: None,
             dir: PathBuf::new(),
+        }
+    }
+
+    #[test]
+    fn legacy_images_default_to_centered_cover() {
+        let legacy: ImageProperties = serde_json::from_value(json!({
+            "path": "legacy.png", "opacity": 0.7
+        }))
+        .unwrap();
+        assert_eq!(legacy.blur, 0.0);
+        assert_eq!(ImageProperties::default().blur, 0.0);
+        assert_eq!(legacy.fit, sugarloaf::BackgroundImageFit::Cover);
+        assert_eq!(legacy.position_x, 0.5);
+        assert_eq!(legacy.position_y, 0.5);
+    }
+
+    #[test]
+    fn fit_and_position_survive_resolution_catalog_platform_and_writer() {
+        let dir = TempDir::new();
+        let selected = ImageProperties {
+            blur: 3.0,
+            fit: sugarloaf::BackgroundImageFit::Contain,
+            position_x: 0.2,
+            position_y: 0.85,
+            ..image("chosen.png", 0.6)
+        };
+        let mut config = Config::default();
+        let pack = pack(selected.clone());
+        let resolved = resolve_background(&config, Some(&pack)).unwrap();
+        assert_eq!(
+            resolved,
+            normalize_image(&selected, &super::super::config_dir_path())
+        );
+        assert_eq!(
+            entries_at(&config, &dir.0, &[pack])[0].image,
+            normalize_image(&selected, &dir.0)
+        );
+        config.ui.window.background_image = Some(selected.clone());
+        std::fs::create_dir(dir.0.join("bg")).unwrap();
+        std::fs::write(dir.0.join("bg/new.png"), b"fixture").unwrap();
+        let entries = entries_at(&config, &dir.0, &[]);
+        assert_eq!(entries.len(), 2);
+        for entry in entries {
+            assert_eq!(entry.image.blur, selected.blur);
+            assert_eq!(entry.image.fit, selected.fit);
+            assert_eq!(entry.image.position_x, selected.position_x);
+            assert_eq!(entry.image.position_y, selected.position_y);
+        }
+        let serialized = serde_json::to_value(&selected).unwrap();
+        assert_eq!(serialized["blur"], json!(3.0));
+        assert_eq!(serialized["fit"], "contain");
+        assert_eq!(serialized["position-x"], json!(selected.position_x));
+        assert_eq!(serialized["position-y"], json!(selected.position_y));
+        config.overwrite_with_platform_config(
+            serde_json::from_value(json!({
+                "window": {"background-image": serialized}
+            }))
+            .unwrap(),
+        );
+        assert_eq!(config.ui.window.background_image, Some(selected.clone()));
+        let roundtrip: super::super::window::Window =
+            serde_json::from_value(serde_json::to_value(&config.ui.window).unwrap())
+                .unwrap();
+        assert_eq!(roundtrip.background_image, Some(selected.clone()));
+        let updates = selection_updates(&BackgroundSelection::Image(selected)).unwrap();
+        assert_eq!(updates[1].1, serialized);
+    }
+
+    #[test]
+    fn pathless_framing_applies_to_inherited_pack_without_changing_opacity() {
+        let mut config = Config::default();
+        let pack = pack(image("pack.png", 0.4));
+        config.ui.window.background_image = Some(ImageProperties {
+            blur: 3.0,
+            fit: sugarloaf::BackgroundImageFit::Contain,
+            position_x: 0.2,
+            position_y: 1.0,
+            ..Default::default()
+        });
+        let resolved = resolve_background(&config, Some(&pack)).unwrap();
+        assert!(resolved.path.ends_with("pack.png"));
+        assert_eq!(resolved.opacity, 0.4);
+        assert_eq!(resolved.blur, 3.0);
+        assert_eq!(resolved.fit, sugarloaf::BackgroundImageFit::Contain);
+        assert_eq!(resolved.position_x, 0.2);
+        assert_eq!(resolved.position_y, 1.0);
+        assert!(resolve_background(&config, None).is_none());
+        config.ui.window.background_image_disabled = true;
+        assert!(resolve_background(&config, Some(&pack)).is_none());
+    }
+
+    #[test]
+    fn writer_validates_image_blur_and_preserves_zero_bypass() {
+        for blur in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -0.5, 100.5] {
+            let selected = ImageProperties {
+                blur,
+                ..image("bad.png", 0.35)
+            };
+            assert_eq!(
+                selection_updates(&BackgroundSelection::Image(selected))
+                    .unwrap_err()
+                    .kind(),
+                std::io::ErrorKind::InvalidInput
+            );
+        }
+        for blur in [0.0, 3.0, 100.0] {
+            let selected = ImageProperties {
+                blur,
+                ..image("valid.png", 0.35)
+            };
+            let updates =
+                selection_updates(&BackgroundSelection::Image(selected.clone())).unwrap();
+            assert_eq!(updates[1].1["blur"], json!(blur));
+            let roundtrip: ImageProperties =
+                serde_json::from_value(updates[1].1.clone()).unwrap();
+            assert_eq!(roundtrip, selected);
+        }
+    }
+
+    #[test]
+    fn writer_rejects_nonfinite_positions() {
+        for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            for axis in [0, 1] {
+                let mut selected = image("bad.png", 1.0);
+                if axis == 0 {
+                    selected.position_x = value;
+                } else {
+                    selected.position_y = value;
+                }
+                assert_eq!(
+                    selection_updates(&BackgroundSelection::Image(selected))
+                        .unwrap_err()
+                        .kind(),
+                    std::io::ErrorKind::InvalidInput
+                );
+            }
         }
     }
 

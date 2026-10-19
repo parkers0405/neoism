@@ -871,6 +871,73 @@ pub fn config_descriptors() -> Vec<D> {
 }
 
 fn apply_schema_metadata(rows: &mut Vec<D>) {
+    // Optional images serialize as null, so their leaves need explicit descriptors.
+    for prefix in [
+        "ui.window",
+        "platform.linux.window",
+        "platform.windows.window",
+        "platform.macos.window",
+    ] {
+        let mut blur = d(
+            &format!("{prefix}.background-image.blur"),
+            "Image blur",
+            "Approximate Gaussian sigma in source-image pixels (0-100). Zero disables image blur; independent of OS window blur.",
+            Kind::Number,
+            json!(0.0),
+            &[],
+            false,
+            C::Ui,
+            Control::Number,
+        );
+        blur.constraints.min = Some(0.0);
+        blur.constraints.max = Some(100.0);
+        blur.constraints.step = Some(0.5);
+        blur.constraints.unit = Some("px".to_string());
+        blur.settings_visible = prefix == "ui.window";
+        rows.push(blur);
+        let mut fit = d(
+            &format!("{prefix}.background-image.fit"),
+            "Background image fit",
+            "Cover fills the window with cropping; contain shows the entire image. Both preserve aspect ratio without stretching.",
+            Kind::String,
+            json!("cover"),
+            &["cover", "contain"],
+            false,
+            C::Ui,
+            Control::Select,
+        );
+        fit.settings_visible = prefix == "ui.window";
+        rows.push(fit);
+        for (axis, label, description) in [
+            (
+                "x",
+                "Background horizontal position",
+                "Horizontal alignment from 0 (left) to 1 (right); 0.5 centers the image.",
+            ),
+            (
+                "y",
+                "Background vertical position",
+                "Vertical alignment from 0 (top) to 1 (bottom); 0.5 centers the image.",
+            ),
+        ] {
+            let mut position = d(
+                &format!("{prefix}.background-image.position-{axis}"),
+                label,
+                description,
+                Kind::Number,
+                json!(0.5),
+                &[],
+                false,
+                C::Ui,
+                Control::Number,
+            );
+            position.constraints.min = Some(0.0);
+            position.constraints.max = Some(1.0);
+            position.constraints.step = Some(0.05);
+            position.settings_visible = prefix == "ui.window";
+            rows.push(position);
+        }
+    }
     set_kind(
         rows,
         "ui.window.background-image",
@@ -1420,6 +1487,55 @@ fn installed_agents() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn background_fit_and_position_descriptors_are_explicit_for_all_platforms() {
+        let rows = config_descriptors();
+        for prefix in [
+            "ui.window",
+            "platform.linux.window",
+            "platform.windows.window",
+            "platform.macos.window",
+        ] {
+            let blur_path = format!("{prefix}.background-image.blur");
+            let blur = rows.iter().find(|row| row.path == blur_path).unwrap();
+            assert_eq!(rows.iter().filter(|row| row.path == blur_path).count(), 1);
+            assert_eq!(blur.label, "Image blur");
+            assert_eq!(blur.control, Control::Number);
+            assert_eq!(blur.value_kind, Kind::Number);
+            assert_eq!(blur.default, json!(0.0));
+            assert_eq!(blur.constraints.min, Some(0.0));
+            assert_eq!(blur.constraints.max, Some(100.0));
+            assert_eq!(blur.constraints.step, Some(0.5));
+            assert_eq!(blur.constraints.unit.as_deref(), Some("px"));
+            assert_eq!(blur.settings_visible, prefix == "ui.window");
+            let fit_path = format!("{prefix}.background-image.fit");
+            let fit = rows.iter().find(|row| row.path == fit_path).unwrap();
+            assert_eq!(rows.iter().filter(|row| row.path == fit_path).count(), 1);
+            assert_eq!(fit.control, Control::Select);
+            assert_eq!(fit.default, json!("cover"));
+            assert!(!fit.extensible);
+            assert_eq!(
+                fit.options
+                    .iter()
+                    .map(|option| option.value.clone())
+                    .collect::<Vec<_>>(),
+                vec![json!("cover"), json!("contain")]
+            );
+            assert_eq!(fit.settings_visible, prefix == "ui.window");
+            for axis in ["x", "y"] {
+                let path = format!("{prefix}.background-image.position-{axis}");
+                let row = rows.iter().find(|row| row.path == path).unwrap();
+                assert_eq!(row.control, Control::Number);
+                assert_eq!(row.value_kind, Kind::Number);
+                assert_eq!(row.default, json!(0.5));
+                assert_eq!(row.constraints.min, Some(0.0));
+                assert_eq!(row.constraints.max, Some(1.0));
+                assert_eq!(row.constraints.step, Some(0.05));
+                assert_eq!(row.settings_visible, prefix == "ui.window");
+            }
+        }
+    }
 
     #[test]
     fn default_chat_source_descriptor_is_closed_enum() {

@@ -2,6 +2,18 @@
 
 All notable user-facing changes to Neoism are documented here.
 
+## [0.7.131] - 2026-10-19
+
+### Background preparation, framing, and startup presentation
+
+- Adds configurable wallpaper blur, centered aspect-preserving cover/optional contain fitting, normalized positioning, platform overrides, and Settings/Lua/documentation integration. Pathless framing can adjust an inherited pack wallpaper without replacing its opacity.
+- Prepares native startup wallpaper decode/blur on a background worker with request coalescing, generation checks, source-aware cache keys, validated cache contents, bounded image dimensions, and optional-cache fallback. GPU upload remains on the render thread; picker/pack transaction paths can still prepare images synchronously.
+- Coordinates initial window reveal with successful presentation and background preparation, including completion wakeups, returned-error/cleared-image fallthrough, and X11 hidden-window redraw handling.
+- Improves configuration round trips for color arrays/null and named margin sides so Lua patches preserve nonempty serialized appearance settings.
+- Preserves existing terminal initialization and browser-worker exclusions. First-frame presentation is platform-sensitive; permanently stalled background preparation is not currently governed by a reveal timeout.
+
+This is a stable production release, available through plain `neoism update` after all platform builds and packaging checks pass. Servo and CEF workers remain separate experimental components and are not packaged.
+
 ## [0.7.130] - 2026-10-18
 
 ### Production Agent GUI contract alignment

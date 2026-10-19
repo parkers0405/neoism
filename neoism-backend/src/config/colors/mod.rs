@@ -636,10 +636,18 @@ pub fn deserialize_to_arr<'de, D>(deserializer: D) -> Result<ColorArray, D::Erro
 where
     D: de::Deserializer<'de>,
 {
-    let s = String::deserialize(deserializer)?;
-    match ColorBuilder::from_hex(s, Format::SRGB0_1) {
-        Ok(color) => Ok(color.to_arr()),
-        Err(e) => Err(serde::de::Error::custom(e)),
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Representation {
+        Hex(String),
+        Array(ColorArray),
+    }
+
+    match Representation::deserialize(deserializer)? {
+        Representation::Hex(s) => ColorBuilder::from_hex(s, Format::SRGB0_1)
+            .map(|color| color.to_arr())
+            .map_err(serde::de::Error::custom),
+        Representation::Array(color) => Ok(color),
     }
 }
 
@@ -649,16 +657,37 @@ pub fn deserialize_to_arr_opt<'de, D>(
 where
     D: de::Deserializer<'de>,
 {
-    let s = String::deserialize(deserializer)?;
-    match ColorBuilder::from_hex(s, Format::SRGB0_1) {
-        Ok(color) => Ok(Some(color.to_arr())),
-        Err(e) => Err(serde::de::Error::custom(e)),
-    }
+    #[derive(Deserialize)]
+    struct Color(#[serde(deserialize_with = "deserialize_to_arr")] ColorArray);
+
+    Option::<Color>::deserialize(deserializer).map(|color| color.map(|color| color.0))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn optional_color_accepts_serialized_forms_and_hex() {
+        #[derive(Debug, PartialEq, Serialize, Deserialize)]
+        struct Config {
+            #[serde(deserialize_with = "deserialize_to_arr_opt")]
+            color: Option<ColorArray>,
+        }
+
+        for color in [None, Some([0.25, 0.5, 0.75, 1.0])] {
+            let config = Config { color };
+            let value = serde_json::to_value(&config).unwrap();
+            assert_eq!(serde_json::from_value::<Config>(value).unwrap(), config);
+        }
+        let hex: Config =
+            serde_json::from_value(serde_json::json!({"color": "#ffffff"})).unwrap();
+        assert_eq!(hex.color, Some([1.0; 4]));
+        assert!(serde_json::from_value::<Config>(
+            serde_json::json!({"color": "invalid"})
+        )
+        .is_err());
+    }
 
     #[test]
     fn test_conversion_from_hex_invalid_character() {

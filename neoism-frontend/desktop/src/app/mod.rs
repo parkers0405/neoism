@@ -8912,12 +8912,40 @@ impl Application<'_> {
     }
 
     fn request_event_loop_redraws(&mut self) -> Option<Instant> {
-        if self.config.renderer.strategy.is_game() {
+        if self.config.renderer.strategy.is_game()
+            && self.router.routes.values().all(|route| !route.window.initial_reveal_pending)
+        {
             return None;
         }
 
         let mut next_deadline: Option<Instant> = None;
         for (window_id, route) in self.router.routes.iter_mut() {
+            if route.window.initial_reveal_pending {
+                // Do not poll the worker or spin on dirty/Welcome while waiting.
+                // Its RioEvent::Render wake is accepted even for a hidden window.
+                if route.window.initial_presentation_blocked() {
+                    continue;
+                }
+                let now = Instant::now();
+                let deadline = if route.redraw_request_pending() {
+                    route.redraw_retry_deadline().unwrap_or(now)
+                } else {
+                    route.window.render_timestamp
+                        + route.window.vblank_interval.max(Duration::from_millis(1))
+                };
+                if deadline <= now {
+                    route.request_redraw_with_reason("event_loop:initial_reveal");
+                    if let Some(retry) = route.redraw_retry_deadline() {
+                        next_deadline = Some(next_deadline.map_or(retry, |old| old.min(retry)));
+                    }
+                } else {
+                    next_deadline = Some(next_deadline.map_or(deadline, |old| old.min(deadline)));
+                }
+                continue;
+            }
+            if self.config.renderer.strategy.is_game() {
+                continue;
+            }
             if self.config.renderer.disable_unfocused_render && !route.window.is_focused {
                 continue;
             }

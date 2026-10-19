@@ -2465,6 +2465,10 @@ fn background_entries() -> Vec<super::PaletteBackgroundEntry> {
             description: description.into(),
             path: path.map(str::to_owned),
             opacity: 0.7,
+            blur: if id == "forest" { 0.0 } else { 3.0 },
+            fit: sugarloaf::BackgroundImageFit::Contain,
+            position_x: 0.25,
+            position_y: 0.75,
         },
     )
     .collect()
@@ -2480,12 +2484,17 @@ fn backgrounds_mode_resets_cursor_filters_and_returns_owned_selection() {
     assert!(palette.is_appearance_picker());
     assert_eq!(palette.query_cursor(), 0);
     assert_eq!(palette.selected_background().unwrap().id, "inherit");
+    assert_eq!(palette.selected_background().unwrap().blur, 3.0);
     palette.move_selection_down();
     assert_eq!(palette.selected_background().unwrap().id, "none");
     palette.insert_query_text("trees");
     assert_eq!(palette.selected_index, 0);
     let mut selected = palette.selected_background().unwrap();
     assert_eq!(selected.id, "forest");
+    assert_eq!(selected.blur, 0.0);
+    assert_eq!(selected.fit, sugarloaf::BackgroundImageFit::Contain);
+    assert_eq!(selected.position_x, 0.25);
+    assert_eq!(selected.position_y, 0.75);
     selected.name.clear();
     assert_eq!(palette.selected_background().unwrap().name, "Forest");
     palette.set_enabled(false);
@@ -2517,9 +2526,10 @@ fn backgrounds_native_only_capability() {
 fn backgrounds_split_geometry_matches_themes() {
     let mut palette = CommandPalette::new();
     palette.enter_themes_mode(vec!["pastel_dark".into(); 3]);
-    let theme_rect = palette.active_visual_rect(1200.0, 1.0);
+    // Compare settled geometry, not two different wall-clock animation samples.
+    let theme_rect = palette.palette_rect(1200.0, 1.0);
     palette.enter_backgrounds_mode(background_entries());
-    assert_eq!(palette.active_visual_rect(1200.0, 1.0), theme_rect);
+    assert_eq!(palette.palette_rect(1200.0, 1.0), theme_rect);
     palette.enter_backgrounds_mode(Vec::new());
     assert!(palette.selected_background().is_none());
 }

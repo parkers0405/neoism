@@ -570,6 +570,10 @@ fn load_mashup_pack_dirs(dirs: Vec<PathBuf>) -> Vec<MashupPack> {
                     .map(|value| sugarloaf::ImageProperties {
                         path: resolve_asset(&dir, &value),
                         opacity: section.wallpaper_opacity.unwrap_or(1.0).clamp(0.0, 1.0),
+                        blur: 0.0,
+                        fit: Default::default(),
+                        position_x: 0.5,
+                        position_y: 0.5,
                     }),
                 look: file.look,
                 ui: file.ui,

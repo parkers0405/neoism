@@ -1,6 +1,37 @@
+#[cfg(not(target_arch = "wasm32"))]
+mod background_loader;
 pub mod graphics;
 pub mod primitives;
 pub mod state;
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Default)]
+struct BackgroundImageRequests {
+    generation: u64,
+    pending: Option<crate::ImageProperties>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl BackgroundImageRequests {
+    fn begin(&mut self, image: crate::ImageProperties) -> u64 {
+        self.generation = self.generation.wrapping_add(1);
+        self.pending = Some(image);
+        self.generation
+    }
+
+    fn cancel(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.pending = None;
+    }
+
+    fn take(&mut self, generation: u64) -> Option<crate::ImageProperties> {
+        if generation == self.generation {
+            self.pending.take()
+        } else {
+            None
+        }
+    }
+}
 
 use crate::components::core::image::Handle;
 #[cfg(all(feature = "wgpu", not(target_arch = "wasm32")))]
@@ -24,6 +55,39 @@ use raw_window_handle::{
     DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, WindowHandle,
 };
 use state::SugarState;
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod background_request_tests {
+    use super::BackgroundImageRequests;
+    use crate::{BackgroundImageFit, ImageProperties};
+
+    #[test]
+    fn cleared_uninstalled_requests_cannot_resurrect_the_wallpaper() {
+        let mut requests = BackgroundImageRequests::default();
+        let generation = requests.begin(ImageProperties::default());
+        requests.cancel();
+        assert!(requests.take(generation).is_none());
+        assert!(requests.pending.is_none());
+    }
+
+    #[test]
+    fn newest_request_and_layout_win_over_delayed_completions() {
+        let mut requests = BackgroundImageRequests::default();
+        let first = requests.begin(ImageProperties::default());
+        let latest = ImageProperties {
+            path: "new.png".into(),
+            blur: 3.0,
+            fit: BackgroundImageFit::Contain,
+            position_x: 0.25,
+            ..Default::default()
+        };
+        let second = requests.begin(latest.clone());
+        assert!(requests.take(first).is_none());
+        assert_eq!(requests.pending.as_ref(), Some(&latest));
+        assert_eq!(requests.take(second), Some(latest));
+        assert!(requests.take(second).is_none());
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct BackgroundFileIdentity {
@@ -51,6 +115,109 @@ impl BackgroundFileIdentity {
                 )
             },
         })
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn blur_background_image(
+    mut image: image_rs::RgbaImage,
+    sigma: f32,
+) -> image_rs::RgbaImage {
+    if sigma == 0.0 {
+        return image;
+    }
+    let has_alpha = image.pixels().any(|pixel| pixel[3] != 255);
+    if has_alpha {
+        // Filter premultiplied colors so hidden RGB cannot bleed into visible edges.
+        for pixel in image.pixels_mut() {
+            let alpha = u16::from(pixel[3]);
+            for channel in &mut pixel.0[..3] {
+                *channel = ((u16::from(*channel) * alpha + 127) / 255) as u8;
+            }
+        }
+    }
+    // Three box-filter passes approximate Gaussian blur in linear time, even at
+    // large sigma. Only run on image changes, never on redraw or window resize.
+    let mut blurred = image_rs::imageops::fast_blur(&image, sigma);
+    if has_alpha {
+        for pixel in blurred.pixels_mut() {
+            let alpha = u16::from(pixel[3]);
+            for channel in &mut pixel.0[..3] {
+                *channel = if alpha == 0 {
+                    0
+                } else {
+                    ((u16::from(*channel) * 255 + alpha / 2) / alpha).min(255) as u8
+                };
+            }
+        }
+    }
+    blurred
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod background_blur_tests {
+    use super::blur_background_image;
+    use image_rs::{Rgba, RgbaImage};
+
+    #[test]
+    fn image_blur_defaults_and_typed_validation() {
+        let defaults: crate::ImageProperties = serde_json::from_str("{}").unwrap();
+        assert_eq!(defaults.blur, 0.0);
+        for blur in ["0", "3", "100"] {
+            let image: crate::ImageProperties =
+                serde_json::from_str(&format!("{{\"blur\":{blur}}}")).unwrap();
+            assert_eq!(image.blur, blur.parse::<f32>().unwrap());
+        }
+        for blur in ["-1", "101", "1e100", "null"] {
+            assert!(serde_json::from_str::<crate::ImageProperties>(&format!(
+                "{{\"blur\":{blur}}}"
+            ))
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn zero_blur_preserves_every_source_byte() {
+        let image = RgbaImage::from_fn(8, 6, |x, y| {
+            Rgba([(x * 30) as u8, (y * 40) as u8, 180, (x * y * 5) as u8])
+        });
+        assert_eq!(blur_background_image(image.clone(), 0.0), image);
+    }
+
+    #[test]
+    fn gaussian_blur_spreads_detail_without_changing_dimensions_or_opaque_alpha() {
+        let mut image = RgbaImage::from_pixel(31, 31, Rgba([0, 0, 0, 255]));
+        image.put_pixel(15, 15, Rgba([255, 255, 255, 255]));
+        let blurred = blur_background_image(image, 3.0);
+        assert_eq!(blurred.dimensions(), (31, 31));
+        assert!(blurred.get_pixel(15, 15)[0] < 255);
+        assert!(blurred.get_pixel(14, 15)[0] > 0);
+        assert!(blurred.pixels().all(|pixel| pixel[3] == 255));
+    }
+
+    #[test]
+    fn transparent_rgb_does_not_bleed_into_visible_edges() {
+        let mut image = RgbaImage::from_pixel(15, 15, Rgba([255, 0, 0, 0]));
+        image.put_pixel(7, 7, Rgba([0, 0, 255, 255]));
+        let blurred = blur_background_image(image, 1.0);
+        assert!(blurred.pixels().any(|pixel| pixel[3] > 0 && pixel[3] < 255));
+        for pixel in blurred.pixels() {
+            assert_eq!(pixel[0], 0);
+            assert_eq!(pixel[1], 0);
+            if pixel[3] > 0 {
+                assert_eq!(pixel[2], 255);
+            }
+        }
+    }
+
+    #[test]
+    fn constant_images_keep_their_color_and_empty_images_are_safe() {
+        let image = RgbaImage::from_pixel(7, 5, Rgba([30, 80, 150, 255]));
+        assert_eq!(blur_background_image(image.clone(), 100.0), image);
+        assert_eq!(
+            blur_background_image(RgbaImage::new(0, 0), 3.0).dimensions(),
+            (0, 0)
+        );
     }
 }
 
@@ -104,6 +271,10 @@ pub struct Sugarloaf<'a> {
     pub background_color: Option<Color>,
     pub background_image: Option<ImageProperties>,
     background_image_identity: Option<BackgroundFileIdentity>,
+    #[cfg(not(target_arch = "wasm32"))]
+    background_image_loader: Option<background_loader::BackgroundImageLoader>,
+    #[cfg(not(target_arch = "wasm32"))]
+    background_image_requests: BackgroundImageRequests,
     pub graphics: Graphics,
     #[cfg(all(feature = "wgpu", not(target_arch = "wasm32")))]
     filters_brush: Option<FiltersBrush>,
@@ -408,6 +579,10 @@ impl Sugarloaf<'_> {
             background_color: Some(Color::BLACK),
             background_image: None,
             background_image_identity: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            background_image_loader: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            background_image_requests: BackgroundImageRequests::default(),
             renderer,
             graphics: Graphics::default(),
             #[cfg(all(feature = "wgpu", not(target_arch = "wasm32")))]
@@ -472,6 +647,10 @@ impl Sugarloaf<'_> {
             background_color: Some(Color::BLACK),
             background_image: None,
             background_image_identity: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            background_image_loader: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            background_image_requests: BackgroundImageRequests::default(),
             renderer,
             graphics: Graphics::default(),
             #[cfg(all(feature = "wgpu", not(target_arch = "wasm32")))]
@@ -845,6 +1024,96 @@ impl Sugarloaf<'_> {
         self
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    fn cancel_background_image_request(&mut self) {
+        self.background_image_requests.cancel();
+        if let Some(loader) = &self.background_image_loader {
+            loader.cancel_pending();
+        }
+    }
+
+    /// Queue native image preparation without blocking the UI on decode, blur or cache I/O.
+    /// The completion callback must wake the host so it can call `poll_background_image`.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn request_background_image(
+        &mut self,
+        image: &ImageProperties,
+        cache_dir: std::path::PathBuf,
+        wake: std::sync::Arc<dyn Fn() + Send + Sync>,
+    ) -> Result<(), String> {
+        if !(0.0..=100.0).contains(&image.blur) {
+            return Err("image blur must be between 0 and 100 pixels".into());
+        }
+        // Preserve the layout-only fast path for an already installed local image.
+        // Initial loading never stats or reads the source on the UI thread.
+        if let Some(current) = &self.background_image {
+            if current.path == image.path
+                && current.opacity == image.opacity
+                && current.blur == image.blur
+                && self.background_image_identity.is_some()
+                && BackgroundFileIdentity::read(&image.path)
+                    == self.background_image_identity
+            {
+                self.cancel_background_image_request();
+                self.renderer.set_background_image_layout(image);
+                self.background_image = Some(image.clone());
+                return Ok(());
+            }
+        }
+        if self.background_image_loader.is_none() {
+            self.background_image_loader =
+                Some(background_loader::BackgroundImageLoader::new()?);
+        }
+        let generation = self.background_image_requests.generation.wrapping_add(1);
+        self.background_image_loader.as_ref().unwrap().request(
+            generation,
+            image.clone(),
+            cache_dir,
+            wake,
+        )?;
+        self.background_image_requests.begin(image.clone());
+        Ok(())
+    }
+
+    /// Install only the newest worker completion. GPU upload stays on the render thread.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn poll_background_image(&mut self) -> Result<bool, String> {
+        let mut changed = false;
+        while let Some(result) = self
+            .background_image_loader
+            .as_ref()
+            .and_then(|loader| loader.try_recv())
+        {
+            let Some(image) = self.background_image_requests.take(result.generation)
+            else {
+                continue;
+            };
+            let prepared = result.prepared?;
+            tracing::debug!(
+                target: "sugarloaf::background_loader",
+                cache_hit = prepared.cache_hit,
+                path = %result.image.path,
+                "background image installed"
+            );
+            self.renderer
+                .set_background_image_pixels(Some(prepared.pixels));
+            self.renderer.set_background_image_layout(&image);
+            self.background_image = Some(image);
+            self.background_image_identity = Some(prepared.identity);
+            changed = true;
+        }
+        Ok(changed)
+    }
+
+    /// Whether the selected wallpaper has finished loading and can be presented.
+    pub fn background_image_ready(&self) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.background_image_requests.pending.is_some() {
+            return false;
+        }
+        self.background_image.is_some()
+    }
+
     /// Try to load and install a window background image. Returns `Err`
     /// with a human-readable message on failure (file missing, decode
     /// failed, decoded image is empty, etc.) so callers can surface the
@@ -861,16 +1130,24 @@ impl Sugarloaf<'_> {
         &mut self,
         image: &ImageProperties,
     ) -> Result<(), String> {
-        // Opacity is baked into alpha at upload. File identity also matters:
+        if !(0.0..=100.0).contains(&image.blur) {
+            return Err("image blur must be between 0 and 100 pixels".to_string());
+        }
+        // Opacity and blur are baked into pixels at upload. File identity also matters:
         // a watcher may request a reload after replacing bytes at the same path.
         #[cfg(not(target_arch = "wasm32"))]
         let identity = BackgroundFileIdentity::read(&image.path);
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(current) = &self.background_image {
-            if current == image
+            if current.path == image.path
+                && current.opacity == image.opacity
+                && current.blur == image.blur
                 && identity.is_some()
                 && self.background_image_identity == identity
             {
+                self.cancel_background_image_request();
+                self.renderer.set_background_image_layout(image);
+                self.background_image = Some(image.clone());
                 return Ok(());
             }
         }
@@ -907,6 +1184,8 @@ impl Sugarloaf<'_> {
                 return Err(msg);
             }
 
+            decoded = blur_background_image(decoded, image.blur);
+
             // Apply per-image opacity by scaling the alpha channel before
             // upload. The image fragment shader premultiplies alpha at sample
             // time, so the GPU does the right thing for both fully-opaque and
@@ -919,6 +1198,7 @@ impl Sugarloaf<'_> {
                 }
             }
 
+            self.cancel_background_image_request();
             self.renderer.set_background_image_pixels(Some(
                 crate::renderer::BackgroundImagePixels {
                     width: img_w,
@@ -926,22 +1206,30 @@ impl Sugarloaf<'_> {
                     pixels: decoded.into_raw(),
                 },
             ));
+            self.renderer.set_background_image_layout(image);
             self.background_image = Some(image.clone());
             self.background_image_identity = identity;
             Ok(())
         }
     }
 
-    /// Currently accepted background-image properties. Callers that stage a
-    /// multi-slot visual transaction may clone this value for rollback.
+    /// Installed background properties for transaction rollback.
     #[inline]
     pub fn background_image(&self) -> Option<&ImageProperties> {
         self.background_image.as_ref()
     }
 
-    /// Drop the current background image, if any.
+    /// Pending intent is separate from the installed image: rollback must not decode it.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn pending_background_image(&self) -> Option<&ImageProperties> {
+        self.background_image_requests.pending.as_ref()
+    }
+
+    /// Drop the current background image and invalidate even an uninstalled request.
     #[inline]
     pub fn clear_background_image(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.cancel_background_image_request();
         if self.background_image.is_none() {
             return;
         }
@@ -1818,7 +2106,7 @@ impl Sugarloaf<'_> {
         let bg_color = self
             .background_color
             .map(|c| [c.r as f32, c.g as f32, c.b as f32, c.a as f32]);
-        self.renderer.render_metal(
+        self.last_frame_presented = self.renderer.render_metal(
             ctx,
             bg_color,
             grids,
@@ -1826,7 +2114,6 @@ impl Sugarloaf<'_> {
             &mut self.overlay_text,
         );
 
-        self.last_frame_presented = true;
         self.reset();
     }
 

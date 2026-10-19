@@ -15,7 +15,7 @@ struct InstanceInput {
     @location(0) dest_pos: vec2<f32>,
     // Size of the image on screen (physical pixels).
     @location(1) dest_size: vec2<f32>,
-    // Source rectangle in the texture: xy = origin, zw = size (normalized 0..1).
+    // Source rectangle in the texture: xy = origin, zw = end (normalized 0..1).
     @location(2) source_rect: vec4<f32>,
 }
 

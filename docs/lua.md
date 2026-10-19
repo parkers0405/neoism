@@ -9,7 +9,19 @@ This page is the editor Lua quick reference. Plugin authors and coding agents sh
 ```lua
 local neoism = require("neoism")
 
-neoism.setup({ ui = { window = { opacity = 0.96 } } })
+neoism.setup({
+  ui = {
+    window = {
+      opacity = 0.96,
+      background_image = {
+        path = "/absolute/path/to/painting.png",
+        opacity = 0.35,
+        blur = 3,
+        fit = "cover",
+      },
+    },
+  },
+})
 
 neoism.ui.style("file-tree.row.selected", {
   background = "#252a38",
@@ -74,6 +86,10 @@ neoism.ui.item("chrome.explorer", { order = 20 })
 Surface fields are `visible`, `dock` (`top`, `bottom`, `left`, or `right`), `thickness`, and `order`. Item fields are `visible`, `surface`, `align` (`start` or `end`), and `order`. The current built-in surface is `chrome.actions`; its items are `chrome.menu`, `chrome.explorer`, `chrome.notes`, `chrome.new-agent`, `chrome.search`, `chrome.presence`, `chrome.agent-details`, `chrome.agent`, and `chrome.servers`. Invalid surface geometry or unknown IDs reject the candidate reload and preserve the last working plugin generation.
 
 `neoism.panel.register(id, { title, icon, location, visible, content, render })` registers a declarative `left`, `right`, `bottom`, `center`, or `overlay` panel. A `render(event)` callback is evaluated only at startup or on events and returns contribution rows.
+
+## Wallpaper
+
+`neoism.setup` normalizes underscore-separated configuration keys to kebab-case: Lua `background_image` maps to JSON `background-image` (and `position_x` to `position-x`). Image `opacity = 0.35` blends only the wallpaper at 35% opacity, independently of whole-window `opacity`. Image `blur` is approximate Gaussian sigma in source-image pixels, defaults to `0` (disabled), accepts finite values from `0` to `100`, and is disabled by `0`. The example's `blur = 3` explicitly opts into image blur. The separate `ui.window.blur` boolean requests OS compositor blur behind translucent windows; it is not image blur.
 
 ## Commands, keys, and events
 

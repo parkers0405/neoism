@@ -780,8 +780,84 @@ pub struct ImageInstance {
     pub dest_pos: [f32; 2],
     /// Size of the image on screen (physical pixels).
     pub dest_size: [f32; 2],
-    /// Source rectangle in the texture: xy = origin, zw = size (normalized 0..1).
+    /// Source rectangle in the texture: xy = origin, zw = end (normalized 0..1).
     pub source_rect: [f32; 4],
+}
+
+#[derive(Clone, Copy)]
+struct BackgroundImageLayout {
+    size: [f32; 2],
+    fit: crate::BackgroundImageFit,
+    position: [f32; 2],
+}
+
+impl Default for BackgroundImageLayout {
+    fn default() -> Self {
+        Self {
+            size: [0.0; 2],
+            fit: crate::BackgroundImageFit::default(),
+            position: [0.5; 2],
+        }
+    }
+}
+
+impl BackgroundImageLayout {
+    fn instance(self, viewport: [f32; 2]) -> Option<ImageInstance> {
+        if viewport
+            .iter()
+            .chain(self.size.iter())
+            .any(|v| !v.is_finite() || *v <= 0.0)
+        {
+            return None;
+        }
+        let position = self.position.map(|p| {
+            if p.is_finite() {
+                p.clamp(0.0, 1.0)
+            } else {
+                0.5
+            }
+        });
+        let ratios = [viewport[0] / self.size[0], viewport[1] / self.size[1]];
+        let scale = match self.fit {
+            crate::BackgroundImageFit::Cover => ratios[0].max(ratios[1]),
+            crate::BackgroundImageFit::Contain => ratios[0].min(ratios[1]),
+        };
+        let scaled = [self.size[0] * scale, self.size[1] * scale];
+        if scaled.iter().any(|v| !v.is_finite() || *v <= 0.0) {
+            return None;
+        }
+        match self.fit {
+            crate::BackgroundImageFit::Cover => {
+                // Crop UVs rather than drawing beyond the viewport: no backend-specific clipping.
+                let visible = [
+                    (viewport[0] / scaled[0]).min(1.0),
+                    (viewport[1] / scaled[1]).min(1.0),
+                ];
+                let origin = [
+                    (1.0 - visible[0]) * position[0],
+                    (1.0 - visible[1]) * position[1],
+                ];
+                Some(ImageInstance {
+                    dest_pos: [0.0; 2],
+                    dest_size: viewport,
+                    source_rect: [
+                        origin[0],
+                        origin[1],
+                        origin[0] + visible[0],
+                        origin[1] + visible[1],
+                    ],
+                })
+            }
+            crate::BackgroundImageFit::Contain => Some(ImageInstance {
+                dest_pos: [
+                    (viewport[0] - scaled[0]) * position[0],
+                    (viewport[1] - scaled[1]) * position[1],
+                ],
+                dest_size: scaled,
+                source_rect: [0.0, 0.0, 1.0, 1.0],
+            }),
+        }
+    }
 }
 
 /// Which layer to render the image in (relative to text).
@@ -855,6 +931,7 @@ pub struct Renderer {
     /// Dedicated GPU texture for the background image, sized to the
     /// image dimensions instead of going through the glyph atlas.
     background_image_texture: Option<ImageTextureEntry>,
+    background_image_layout: BackgroundImageLayout,
 }
 
 /// Upload `pixels` to a fresh GPU texture using whatever backend `context`
@@ -1019,6 +1096,7 @@ impl Renderer {
             image_draws: Vec::new(),
             background_image_dirty: None,
             background_image_texture: None,
+            background_image_layout: BackgroundImageLayout::default(),
         }
     }
 
@@ -1038,12 +1116,20 @@ impl Renderer {
     /// are uploaded into a dedicated GPU texture on the next `prepare`
     /// call (so we don't go through the glyph atlas).
     pub fn set_background_image_pixels(&mut self, pixels: Option<BackgroundImagePixels>) {
-        if pixels.is_some() {
-            self.background_image_dirty = pixels;
+        if let Some(pixels) = pixels {
+            self.background_image_layout.size =
+                [pixels.width as f32, pixels.height as f32];
+            self.background_image_dirty = Some(pixels);
         } else {
             self.background_image_dirty = None;
             self.background_image_texture = None;
+            self.background_image_layout = BackgroundImageLayout::default();
         }
+    }
+
+    pub fn set_background_image_layout(&mut self, image: &crate::ImageProperties) {
+        self.background_image_layout.fit = image.fit;
+        self.background_image_layout.position = [image.position_x, image.position_y];
     }
 
     #[cfg(target_os = "macos")]
@@ -1689,7 +1775,7 @@ impl Renderer {
         true
     }
 
-    /// Draw a single fullscreen background image quad through the image
+    /// Draw a single fitted background image quad through the image
     /// pipeline. Mirrors `draw_images_metal` but uses the dedicated
     /// `background_image_vertex_buffer` so it never collides with kitty
     /// placements, and reads the bg texture from `background_image_texture`.
@@ -1699,7 +1785,7 @@ impl Renderer {
         background_image_texture: &Option<ImageTextureEntry>,
         brush: &MetalRenderer,
         render_encoder: &metal::RenderCommandEncoderRef,
-        physical_size: (f32, f32),
+        instance: Option<ImageInstance>,
         instance_buffer: &InstanceBuffer,
         instance_offset: &mut usize,
         globals: &Globals,
@@ -1713,10 +1799,8 @@ impl Renderer {
             _ => return true,
         };
 
-        let instance = ImageInstance {
-            dest_pos: [0.0, 0.0],
-            dest_size: [physical_size.0, physical_size.1],
-            source_rect: [0.0, 0.0, 1.0, 1.0],
+        let Some(instance) = instance else {
+            return true;
         };
         align_offset(instance_offset);
         let offset = match unsafe {
@@ -2214,6 +2298,7 @@ impl Renderer {
             image_draws,
             image_textures,
             background_image_texture,
+            background_image_layout,
             ..
         } = self;
 
@@ -2231,15 +2316,13 @@ impl Renderer {
             }
 
             // Background image: drawn first so all subsequent text/rects
-            // composite on top. Single fullscreen instance, dedicated
+            // composite on top. Single aspect-preserving instance, dedicated
             // vertex buffer, reuses the kitty image pipeline + sampler.
-            if let Some(bg_tex) = background_image_texture.as_ref() {
+            if let (Some(bg_tex), Some(instance)) = (
+                background_image_texture.as_ref(),
+                background_image_layout.instance([ctx.size.width, ctx.size.height]),
+            ) {
                 if let ImageTexture::Wgpu { view, .. } = &bg_tex.gpu {
-                    let instance = ImageInstance {
-                        dest_pos: [0.0, 0.0],
-                        dest_size: [ctx.size.width, ctx.size.height],
-                        source_rect: [0.0, 0.0, 1.0, 1.0],
-                    };
                     ctx.queue.write_buffer(
                         &brush.background_image_vertex_buffer,
                         0,
@@ -2807,6 +2890,7 @@ impl Renderer {
     /// finishes — this is what makes 3 frames safely in-flight: each
     /// frame owns its own buffer for the lifetime of GPU execution, so
     /// the CPU can write the next frame's data without racing.
+    /// Returns false when no drawable/frame could be submitted for presentation.
     #[cfg(target_os = "macos")]
     pub fn render_metal(
         &mut self,
@@ -2815,20 +2899,20 @@ impl Renderer {
         grids: &mut [(&mut crate::grid::GridRenderer, crate::grid::GridUniforms)],
         text: &mut crate::text::Text,
         overlay_text: &mut crate::text::Text,
-    ) {
+    ) -> bool {
         use block::ConcreteBlock;
         use std::cell::Cell as StdCell;
 
         let brush = match &mut self.brush_type {
             RendererType::Metal(b) => b,
-            _ => return,
+            _ => return false,
         };
 
         let surface_texture = match context.get_current_texture() {
             Ok(t) => t,
             Err(e) => {
                 tracing::error!("Metal surface error: {}", e);
-                return;
+                return false;
             }
         };
 
@@ -2898,7 +2982,8 @@ impl Renderer {
                     &self.background_image_texture,
                     brush,
                     render_encoder,
-                    physical_size,
+                    self.background_image_layout
+                        .instance([physical_size.0, physical_size.1]),
                     &instance_buffer,
                     &mut instance_offset,
                     &globals,
@@ -3016,7 +3101,7 @@ impl Renderer {
                          dropping frame",
                         prev
                     );
-                    return;
+                    return false;
                 }
                 tracing::info!(
                     "instance buffer grew {} → {} bytes",
@@ -3047,7 +3132,7 @@ impl Renderer {
 
             command_buffer.present_drawable(&surface_texture.drawable);
             command_buffer.commit();
-            return;
+            return true;
         }
     }
 
@@ -3085,7 +3170,7 @@ impl Renderer {
 
     /// Record sugarloaf's own draws inside the active dynamic-rendering
     /// pass that `Sugarloaf::render_vulkan` opens. Order:
-    /// 1. Background image (full-screen quad).
+    /// 1. Background image (aspect-preserving quad).
     /// 2. BelowText image overlays (kitty / sixel placements with
     /// `dest_pos.z < 0`).
     /// 3. Rich-text quad pass — `quad()` / `rect()` calls + cell
@@ -3121,13 +3206,17 @@ impl Renderer {
             // Allocate once before recording ANY image pass: growing the shared
             // buffer in a later pass would invalidate earlier recorded bindings.
             brush.reserve_image_instances(slot, below.len() + above.len() + late_count);
-            if let Some(bg) = &self.background_image_texture {
+            if let (Some(bg), Some(instance)) = (
+                &self.background_image_texture,
+                self.background_image_layout.instance(viewport),
+            ) {
                 if let ImageTexture::Vulkan(tex) = &bg.gpu {
                     brush.render_background_image(
                         cmd,
                         slot,
                         viewport,
                         tex.descriptor_set,
+                        instance,
                     );
                 }
             }
@@ -3872,6 +3961,129 @@ impl WgpuRenderer {
                 ],
                 label: Some("rich_text::Pipeline uniforms"),
             });
+    }
+}
+
+#[cfg(test)]
+mod background_image_tests {
+    use super::BackgroundImageLayout;
+    use crate::BackgroundImageFit;
+
+    #[test]
+    fn cover_crops_landscape_and_portrait_without_stretching() {
+        let landscape = BackgroundImageLayout {
+            size: [200.0, 100.0],
+            ..Default::default()
+        };
+        let instance = landscape.instance([100.0, 100.0]).unwrap();
+        assert_eq!(instance.dest_pos, [0.0, 0.0]);
+        assert_eq!(instance.dest_size, [100.0, 100.0]);
+        assert_eq!(instance.source_rect, [0.25, 0.0, 0.75, 1.0]);
+        let portrait = BackgroundImageLayout {
+            size: [100.0, 200.0],
+            ..Default::default()
+        };
+        assert_eq!(
+            portrait.instance([100.0, 100.0]).unwrap().source_rect,
+            [0.0, 0.25, 1.0, 0.75]
+        );
+        assert_eq!(
+            landscape.instance([200.0, 100.0]).unwrap().source_rect,
+            [0.0, 0.0, 1.0, 1.0]
+        );
+    }
+
+    #[test]
+    fn cover_position_selects_crop_and_clamps_invalid_positions() {
+        for (position, expected) in [
+            (0.0, [0.0, 0.0, 0.5, 1.0]),
+            (1.0, [0.5, 0.0, 1.0, 1.0]),
+            (-2.0, [0.0, 0.0, 0.5, 1.0]),
+            (2.0, [0.5, 0.0, 1.0, 1.0]),
+            (f32::NAN, [0.25, 0.0, 0.75, 1.0]),
+            (f32::INFINITY, [0.25, 0.0, 0.75, 1.0]),
+        ] {
+            let layout = BackgroundImageLayout {
+                size: [200.0, 100.0],
+                position: [position; 2],
+                ..Default::default()
+            };
+            assert_eq!(
+                layout.instance([100.0, 100.0]).unwrap().source_rect,
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn contain_preserves_full_image_and_aligns_unused_space() {
+        for (size, position, expected_pos, expected_size) in [
+            ([200.0, 100.0], [0.5; 2], [0.0, 25.0], [100.0, 50.0]),
+            ([200.0, 100.0], [1.0; 2], [0.0, 50.0], [100.0, 50.0]),
+            ([100.0, 200.0], [0.5; 2], [25.0, 0.0], [50.0, 100.0]),
+            ([100.0, 200.0], [0.0; 2], [0.0, 0.0], [50.0, 100.0]),
+        ] {
+            let layout = BackgroundImageLayout {
+                size,
+                position,
+                fit: BackgroundImageFit::Contain,
+            };
+            let instance = layout.instance([100.0, 100.0]).unwrap();
+            assert_eq!(instance.dest_pos, expected_pos);
+            assert_eq!(instance.dest_size, expected_size);
+            assert_eq!(instance.source_rect, [0.0, 0.0, 1.0, 1.0]);
+        }
+    }
+
+    #[test]
+    fn resize_preserves_source_aspect_ratio_for_both_fit_modes() {
+        for fit in [BackgroundImageFit::Cover, BackgroundImageFit::Contain] {
+            let layout = BackgroundImageLayout {
+                size: [3840.0, 2160.0],
+                fit,
+                position: [0.3, 0.8],
+            };
+            for viewport in [
+                [1920.0, 1080.0],
+                [500.0, 900.0],
+                [2500.0, 400.0],
+                [1.0, 1.0],
+            ] {
+                let instance = layout.instance(viewport).unwrap();
+                let uv = instance.source_rect;
+                let source_aspect =
+                    (uv[2] - uv[0]) * layout.size[0] / ((uv[3] - uv[1]) * layout.size[1]);
+                let dest_aspect = instance.dest_size[0] / instance.dest_size[1];
+                assert!((source_aspect / dest_aspect - 1.0).abs() < 0.00001);
+                assert!(uv.iter().all(|v| (0.0..=1.0).contains(v)));
+                if fit == BackgroundImageFit::Cover {
+                    assert_eq!(instance.dest_size, viewport);
+                } else {
+                    assert!(instance.dest_size[0] <= viewport[0] + 0.001);
+                    assert!(instance.dest_size[1] <= viewport[1] + 0.001);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn empty_or_nonfinite_dimensions_skip_drawing() {
+        for invalid in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+            for axis in 0..2 {
+                let mut size = [100.0; 2];
+                size[axis] = invalid;
+                let layout = BackgroundImageLayout {
+                    size,
+                    ..Default::default()
+                };
+                assert!(layout.instance([100.0; 2]).is_none());
+                let layout = BackgroundImageLayout {
+                    size: [100.0; 2],
+                    ..Default::default()
+                };
+                assert!(layout.instance(size).is_none());
+            }
+        }
     }
 }
 

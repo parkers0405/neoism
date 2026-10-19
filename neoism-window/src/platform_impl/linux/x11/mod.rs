@@ -133,6 +133,43 @@ impl<T> PeekableReceiver<T> {
     }
 }
 
+/// Consume only explicit work for a window created hidden and not yet mapped.
+/// Ordinary hidden/occluded windows leave dirty state for their normal vsync path.
+fn take_initial_hidden_redraw(
+    initial_hidden: bool,
+    pending: &std::sync::atomic::AtomicBool,
+) -> bool {
+    initial_hidden && pending.swap(false, std::sync::atomic::Ordering::AcqRel)
+}
+
+#[cfg(test)]
+mod initial_hidden_redraw_tests {
+    use super::take_initial_hidden_redraw;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn hidden_window_requires_an_explicit_request_and_consumes_it_once() {
+        let pending = AtomicBool::new(false);
+        assert!(!take_initial_hidden_redraw(true, &pending));
+        pending.store(true, Ordering::Release);
+        pending.store(true, Ordering::Release);
+        assert!(take_initial_hidden_redraw(true, &pending));
+        assert!(!take_initial_hidden_redraw(true, &pending));
+        // A later worker wake gets a fresh event, even if an earlier frame skipped.
+        pending.store(true, Ordering::Release);
+        assert!(take_initial_hidden_redraw(true, &pending));
+    }
+
+    #[test]
+    fn mapped_then_hidden_or_obscured_windows_keep_normal_dirty_policy() {
+        let pending = AtomicBool::new(true);
+        // MapNotify permanently clears the initial-hidden permission.
+        assert!(!take_initial_hidden_redraw(false, &pending));
+        assert!(pending.load(Ordering::Acquire));
+        assert!(!take_initial_hidden_redraw(false, &pending));
+    }
+}
+
 pub struct ActiveEventLoop {
     xconn: Arc<XConnection>,
     wm_delete_window: xproto::Atom,
@@ -657,7 +694,10 @@ impl<T: 'static> EventLoop<T> {
         // have any pending `_receiver` events and if not we return without
         // running a loop iteration.
         // If we don't have any pending `_receiver`
-        if !self.has_pending()
+        // The first check may already have consumed redraw_flag. Retain that
+        // readiness so a redraw-only wake is not mistaken for a spurious ping.
+        if !has_pending
+            && !self.has_pending()
             && !matches!(
                 &cause,
                 StartCause::ResumeTimeReached { .. } | StartCause::Poll
@@ -722,6 +762,25 @@ impl<T: 'static> EventLoop<T> {
         {
             while let Ok(event) = self.user_receiver.try_recv() {
                 callback(Event::UserEvent(event), &self.event_processor.target);
+            }
+        }
+
+        // Explicit requests must also reach created-hidden windows: they have no
+        // vsync source until mapped, but may need to present before being shown.
+        // Snapshot once after user events so requests coalesce per event group;
+        // callbacks below cannot recursively feed this drain in the same group.
+        {
+            let wt = EventProcessor::window_target(&self.event_processor.target);
+            let windows = wt.windows.borrow();
+            for (id, weak) in windows.iter() {
+                if let Some(window) = weak.upgrade() {
+                    if take_initial_hidden_redraw(
+                        window.initial_hidden_redraw.load(std::sync::atomic::Ordering::Acquire),
+                        &window.redraw_pending,
+                    ) {
+                        let _ = wt.redraw_sender.sender.send(*id);
+                    }
+                }
             }
         }
 

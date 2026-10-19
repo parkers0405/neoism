@@ -808,6 +808,12 @@ impl Screen<'_> {
                 description: "Use the active Mash Up Pack's background".into(),
                 path: inherited.as_ref().map(|image| image.path.clone()),
                 opacity: inherited.as_ref().map_or(1.0, |image| image.opacity),
+                blur: inherited.as_ref().map_or(0.0, |image| image.blur),
+                fit: inherited
+                    .as_ref()
+                    .map_or(Default::default(), |image| image.fit),
+                position_x: inherited.as_ref().map_or(0.5, |image| image.position_x),
+                position_y: inherited.as_ref().map_or(0.5, |image| image.position_y),
             },
             PaletteBackgroundEntry {
                 id: "none".into(),
@@ -816,6 +822,10 @@ impl Screen<'_> {
                     "Disable the background image without changing the active pack".into(),
                 path: None,
                 opacity: 1.0,
+                blur: 0.0,
+                fit: Default::default(),
+                position_x: 0.5,
+                position_y: 0.5,
             },
         ];
         entries.extend(
@@ -827,6 +837,10 @@ impl Screen<'_> {
                     description: entry.description,
                     path: Some(entry.image.path),
                     opacity: entry.image.opacity,
+                    blur: entry.image.blur,
+                    fit: entry.image.fit,
+                    position_x: entry.image.position_x,
+                    position_y: entry.image.position_y,
                 }),
         );
         let selected = if config.ui.window.background_image_disabled {
@@ -868,6 +882,10 @@ impl Screen<'_> {
                     neoism_backend::sugarloaf::ImageProperties {
                         path,
                         opacity: entry.opacity,
+                        blur: entry.blur,
+                        fit: entry.fit,
+                        position_x: entry.position_x,
+                        position_y: entry.position_y,
                     },
                 ),
                 None => return,
@@ -887,6 +905,7 @@ impl Screen<'_> {
             .and_then(neoism_backend::config::mashup::find_mashup_pack);
         let wallpaper = resolve_background(&config, pack.as_ref());
         let previous = self.sugarloaf.background_image().cloned();
+        let previous_pending = self.sugarloaf.pending_background_image().cloned();
         let result = match wallpaper.as_ref() {
             Some(image) => self.sugarloaf.set_background_image(image),
             None => {
@@ -896,10 +915,10 @@ impl Screen<'_> {
         };
         let result = result.and_then(|()| {
             write_background_selection(&selection).map_err(|error| {
-                let rollback = match previous.as_ref() {
-                    Some(image) => self.sugarloaf.set_background_image(image),
-                    None => { self.sugarloaf.clear_background_image(); Ok(()) },
-                };
+                let rollback = self.rollback_background_image(
+                    previous.as_ref(),
+                    previous_pending.as_ref(),
+                );
                 match rollback {
                     Ok(()) => format!("Could not save background: {error}"),
                     Err(rollback) => format!("Could not save background: {error}; could not restore previous background: {rollback}"),

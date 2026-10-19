@@ -85,6 +85,16 @@ impl Application<'_> {
     /// (honouring the per-route render gating and post-occlusion
     /// redraw).
     pub(super) fn apply_render_arm(&mut self, window_id: WindowId) {
+        // Worker completion must wake hidden/unfocused/occluded first windows,
+        // even while pending is Some: only the redraw handler drains the result.
+        if let Some(route) = self.router.routes.get_mut(&window_id) {
+            if route.window.initial_reveal_pending {
+                // Do not coalesce this wake behind an old, undelivered hidden
+                // redraw: polling redraws intentionally sleep while image-pending.
+                route.window.winit_window.request_redraw();
+                return;
+            }
+        }
         let disable_unfocused_render = self.config.renderer.disable_unfocused_render;
         let disable_occluded_render = self.config.renderer.disable_occluded_render;
         let Some(route) = self.router.routes.get_mut(&window_id) else {

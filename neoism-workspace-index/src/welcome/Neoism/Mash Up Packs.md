@@ -94,7 +94,7 @@ Editor Lua plugins and personal `init.lua` use the same patches through `neoism.
 
 ## Standalone background overrides
 
-Pack wallpapers remain optional pack assets. The desktop **Backgrounds** picker also lists their images, allowing an image to be selected independently without applying the rest of its pack. A standalone `ui.window.background-image` takes precedence over the active pack's wallpaper. **Use pack/default** clears that override; **None** sets `ui.window.background-image-disabled` to suppress wallpaper without changing the pack's theme, shaders, or styles. See [[Appearance#Backgrounds|Backgrounds]] for the picker and config example.
+Pack wallpapers remain optional pack assets and default to centered cover, preserving aspect ratio without stretching. A standalone image override can use `fit: "contain"` to show the whole image, plus `position-x` and `position-y` (0–1, default 0.5) to adjust alignment. The desktop **Backgrounds** picker also lists their images, allowing an image to be selected independently without applying the rest of its pack. A standalone `ui.window.background-image` takes precedence over the active pack's wallpaper. **Use pack/default** clears that override; **None** sets `ui.window.background-image-disabled` to suppress wallpaper without changing the pack's theme, shaders, or styles. See [[Appearance#Backgrounds|Backgrounds]] for the picker and config example.
 
 ## User overrides
 

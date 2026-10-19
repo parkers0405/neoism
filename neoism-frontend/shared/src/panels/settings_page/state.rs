@@ -892,7 +892,8 @@ impl NeoismSettingsPane {
             .filter(|descriptor| {
                 descriptor.settings_visible
                     && (!cfg!(target_arch = "wasm32")
-                        || descriptor.path != "ui.window.background-image")
+                        || !(descriptor.path == "ui.window.background-image"
+                            || descriptor.path.starts_with("ui.window.background-image.")))
                     && !descriptor.path.split('.').any(|segment| segment == "*")
             })
             .map(SettingRow::from_descriptor)

@@ -71,6 +71,13 @@ impl Application<'_> {
                 .is_dirty(),
             "RedrawRequested received"
         );
+        // Drain completion even for Welcome and before requesting any frame callback.
+        route.window.screen.poll_background_image();
+        if route.window.initial_presentation_blocked() {
+            crate::app::freeze_watchdog::mark_render_done(window_id);
+            return;
+        }
+        let mut before_present_called = false;
         route.begin_render();
         crate::app::freeze_watchdog::mark_render_stage(window_id, "route.begin_render");
 
@@ -84,7 +91,10 @@ impl Application<'_> {
                 route
                     .window
                     .screen
-                    .render_welcome(|| winit_window.pre_present_notify());
+                    .render_welcome(|| {
+                        before_present_called = true;
+                        winit_window.pre_present_notify();
+                    });
                 crate::app::freeze_watchdog::mark_render_stage(
                     window_id,
                     "render_welcome.end",
@@ -111,6 +121,7 @@ impl Application<'_> {
                 let is_fullscreen = winit_window.fullscreen().is_some();
                 let window_update =
                     route.window.screen.render(animation_dt, is_fullscreen, || {
+                        before_present_called = true;
                         winit_window.pre_present_notify()
                     });
                 crate::app::freeze_watchdog::mark_render_stage(
@@ -122,6 +133,9 @@ impl Application<'_> {
                     ?window_id,
                     current_route = route.window.screen.ctx().current_route(),
                     has_window_update = window_update.is_some(),
+                    frame_presented = before_present_called
+                        && route.window.screen.sugarloaf.last_frame_presented(),
+                    background_image_ready = route.window.screen.sugarloaf.background_image_ready(),
                     pending_dirty = route
                         .window
                         .screen
@@ -181,6 +195,7 @@ impl Application<'_> {
             }
         }
 
+        route.window.reveal_after_present(before_present_called);
         route.window.finish_frame_cadence(Instant::now());
 
         // let duration = start.elapsed();
@@ -194,7 +209,7 @@ impl Application<'_> {
         // OS parks the thread until that event arrives. Busy-
         // polling between vsyncs here would burn CPU without
         // delivering more frames.
-        if self.config.renderer.strategy.is_game() {
+        if self.config.renderer.strategy.is_game() && !route.window.initial_reveal_pending {
             route.request_redraw();
             event_loop.set_control_flow(ControlFlow::Poll);
         } else {

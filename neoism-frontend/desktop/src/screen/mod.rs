@@ -30,6 +30,66 @@ const TERMINAL_TOP_BREATHING_PX: f32 = 6.0;
 const CHROME_SAFETY_PAD: f32 = 0.0;
 const BLOCK_LOG_ENV: &str = "NEOISM_BLOCK_LOG";
 
+/// Queue decoding/cache work off-thread; completion only wakes the UI event loop.
+fn request_background_image(
+    sugarloaf: &mut Sugarloaf,
+    image: &neoism_backend::sugarloaf::ImageProperties,
+    proxy: EventProxy,
+    window_id: neoism_window::window::WindowId,
+) -> Result<(), String> {
+    let cache_dir = std::env::var_os("NEOISM_BACKGROUND_CACHE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            dirs::cache_dir()
+                .unwrap_or_else(std::env::temp_dir)
+                .join("neoism/backgrounds")
+        });
+    sugarloaf.request_background_image(
+        image,
+        cache_dir,
+        std::sync::Arc::new(move || {
+            proxy.send_event(neoism_backend::event::RioEvent::Render.into(), window_id);
+        }),
+    )
+}
+
+impl Screen<'_> {
+    /// Restore displayed pixels independently of any background preparation intent.
+    fn rollback_background_image(
+        &mut self,
+        installed: Option<&neoism_backend::sugarloaf::ImageProperties>,
+        pending: Option<&neoism_backend::sugarloaf::ImageProperties>,
+    ) -> Result<(), String> {
+        let mut errors = Vec::new();
+        match installed {
+            Some(image) => {
+                if let Err(error) = self.sugarloaf.set_background_image(image) {
+                    // A rejected transaction must never leave its wallpaper installed.
+                    self.sugarloaf.clear_background_image();
+                    errors.push(format!("restore installed background: {error}"));
+                }
+            }
+            None => self.sugarloaf.clear_background_image(),
+        }
+        // Resume prior intent even when restoring the installed source failed.
+        if let Some(image) = pending {
+            if let Err(error) = request_background_image(
+                &mut self.sugarloaf,
+                image,
+                self.context_manager.event_proxy(),
+                self.context_manager.window_id(),
+            ) {
+                errors.push(format!("resume pending background: {error}"));
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
+        }
+    }
+}
+
 pub(crate) type WorkspaceKey = String;
 
 fn block_log_enabled() -> bool {
@@ -1800,7 +1860,12 @@ impl Screen<'_> {
             startup_pack.as_ref(),
         );
         if let Some(image) = wallpaper.as_ref() {
-            if let Err(message) = sugarloaf.set_background_image(image) {
+            if let Err(message) = request_background_image(
+                &mut sugarloaf,
+                image,
+                context_manager.event_proxy(),
+                context_manager.window_id(),
+            ) {
                 renderer.assistant.set_error(RioError {
                     level: RioErrorLevel::Warning,
                     report: RioErrorType::BackgroundImageLoadFailure(message),

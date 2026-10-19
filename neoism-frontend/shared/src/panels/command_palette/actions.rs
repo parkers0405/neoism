@@ -886,6 +886,10 @@ pub struct PaletteBackgroundEntry {
     pub description: String,
     pub path: Option<String>,
     pub opacity: f32,
+    pub blur: f32,
+    pub fit: sugarloaf::BackgroundImageFit,
+    pub position_x: f32,
+    pub position_y: f32,
 }
 
 impl PaletteAction {

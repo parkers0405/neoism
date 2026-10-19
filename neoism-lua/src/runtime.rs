@@ -1476,6 +1476,45 @@ mod tests {
     }
 
     #[test]
+    fn setup_preserves_background_image_opacity_blur_and_normalizes_keys() {
+        let lua = Lua::new();
+        let owner = PluginOwner {
+            plugin_id: "dev.neoism.wallpaper-test".into(),
+            revision: crate::PluginRevision("r1".into()),
+        };
+        let state = Arc::new(Mutex::new(BuildState {
+            snapshot: PluginSnapshot::empty(),
+            owner: owner.clone(),
+            ..BuildState::default()
+        }));
+        let module =
+            build_module(&lua, state.clone(), Arc::new(crate::InertHost), owner).unwrap();
+        lua.globals().set("neoism", module).unwrap();
+        lua.load(
+            r#"
+            neoism.setup({ ui = { window = {
+                blur = false,
+                background_image = {
+                    path = '/wallpaper.png', opacity = 0.35, blur = 3,
+                    fit = 'cover', position_x = 0.2, position_y = 0.8,
+                },
+            } } })
+        "#,
+        )
+        .exec()
+        .unwrap();
+        let state = state.lock().unwrap();
+        assert_eq!(
+            state.snapshot.config_patch["ui"]["window"]["background-image"],
+            serde_json::json!({
+                "path": "/wallpaper.png", "opacity": 0.35, "blur": 3,
+                "fit": "cover", "position-x": 0.2, "position-y": 0.8
+            })
+        );
+        assert_eq!(state.snapshot.config_patch["ui"]["window"]["blur"], false);
+    }
+
+    #[test]
     fn runtime_module_exposes_every_registered_namespace_and_method() {
         let lua = Lua::new();
         let owner = PluginOwner {

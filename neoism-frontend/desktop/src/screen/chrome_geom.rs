@@ -411,7 +411,12 @@ impl Screen<'_> {
         let wallpaper =
             neoism_backend::config::background::resolve_background(config, pack.as_ref());
         if let Some(image) = wallpaper.as_ref() {
-            if let Err(message) = self.sugarloaf.set_background_image(image) {
+            if let Err(message) = request_background_image(
+                &mut self.sugarloaf,
+                image,
+                self.context_manager.event_proxy(),
+                self.context_manager.window_id(),
+            ) {
                 self.renderer.assistant.set_error(RioError {
                     level: RioErrorLevel::Warning,
                     report: RioErrorType::BackgroundImageLoadFailure(message),
@@ -1273,21 +1278,20 @@ impl Screen<'_> {
         let wallpaper =
             neoism_backend::config::background::resolve_background(config, pack);
         let previous_wallpaper = self.sugarloaf.background_image().cloned();
+        let previous_pending = self.sugarloaf.pending_background_image().cloned();
         match wallpaper.as_ref() {
             Some(image) => self.sugarloaf.set_background_image(image)?,
             None => self.sugarloaf.clear_background_image(),
         }
         let shader = pack.and_then(|pack| pack.shader_overlay.clone());
         if let Err(error) = self.try_apply_shader_overlay(shader) {
-            let rollback = match previous_wallpaper.as_ref() {
-                Some(image) => self.sugarloaf.set_background_image(image),
-                None => {
-                    self.sugarloaf.clear_background_image();
-                    Ok(())
-                }
-            };
+            let rollback = self.rollback_background_image(
+                previous_wallpaper.as_ref(),
+                previous_pending.as_ref(),
+            );
             if let Err(rollback_error) = rollback {
                 tracing::error!(target: "neoism::mashup", %rollback_error, "failed to restore prior wallpaper after rejected pack visual commit");
+                return Err(format!("{error}; could not restore previous background: {rollback_error}"));
             }
             return Err(error);
         }

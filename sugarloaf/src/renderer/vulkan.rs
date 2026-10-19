@@ -695,17 +695,15 @@ impl VulkanRenderer {
         }
     }
 
-    /// Draw the background image, if any. Caller passes the per-image
-    /// descriptor set (allocated at upload time via
-    /// `VulkanImageTexture::new`). Writes a single ImageInstance with
-    /// `dest_pos = [0, 0]` and `dest_size = viewport` so the image
-    /// covers the whole window.
+    /// Draw the background image using the shared aspect-preserving layout.
+    /// Caller supplies the descriptor set allocated at upload time.
     pub fn render_background_image(
         &mut self,
         cmd: vk::CommandBuffer,
         slot: usize,
         viewport: [f32; 2],
         image_texture_descriptor_set: vk::DescriptorSet,
+        instance: ImageInstance,
     ) {
         debug_assert!(slot < FRAMES_IN_FLIGHT);
 
@@ -722,12 +720,6 @@ impl VulkanRenderer {
             std::ptr::write(dst, globals);
         }
 
-        // Build a single full-screen ImageInstance.
-        let instance = ImageInstance {
-            dest_pos: [0.0, 0.0],
-            dest_size: viewport,
-            source_rect: [0.0, 0.0, 1.0, 1.0],
-        };
         unsafe {
             let dst =
                 self.image_bg_vertex_buffers[slot].as_mut_ptr() as *mut ImageInstance;

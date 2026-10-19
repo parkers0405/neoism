@@ -77,6 +77,10 @@ impl ApplicationHandler for Application {
         let _ = sugarloaf.set_background_image(&sugarloaf::ImageProperties {
             path: String::from("resources/demo-sugarloaf-1.png"),
             opacity: 1.0,
+            blur: 0.0,
+            fit: sugarloaf::BackgroundImageFit::Cover,
+            position_x: 0.5,
+            position_y: 0.5,
         });
 
         window.request_redraw();

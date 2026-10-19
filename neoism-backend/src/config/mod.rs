@@ -1446,6 +1446,56 @@ mod tests {
     }
 
     #[test]
+    fn config_roundtrip_and_nonempty_lua_patch_preserve_margins() {
+        let mut config = Config::default();
+        config.ui.margin = Margin::new(3.0, 7.0, 11.0, 13.0);
+        config.ui.panel.margin = Margin::new(2.0, 4.0, 6.0, 8.0);
+        config.ui.panel.padding = Margin::new(1.0, 5.0, 9.0, 12.0);
+        config.ui.navigation.unfocused_split_fill = Some([0.25, 0.5, 0.75, 1.0]);
+        let before = serde_json::to_value(&config).unwrap();
+        let restored: Config = serde_json::from_value(before.clone()).unwrap();
+        assert_eq!(serde_json::to_value(restored).unwrap(), before);
+
+        config
+            .apply_json_patch(&serde_json::json!({"ui": {"window": {"blur": true}}}))
+            .unwrap();
+        let mut expected = before;
+        expected["ui"]["window"]["blur"] = serde_json::json!(true);
+        assert_eq!(serde_json::to_value(&config).unwrap(), expected);
+
+        config
+            .apply_json_patch(&serde_json::json!({"ui": {"margin": [4, 8]}}))
+            .unwrap();
+        assert_eq!(config.ui.margin, Margin::new(4.0, 8.0, 4.0, 8.0));
+    }
+
+    #[test]
+    fn lua_background_image_patch_validates_blur_without_partial_application() {
+        let mut config = Config::default();
+        for blur in [0.0, 3.0, 100.0] {
+            config
+                .apply_json_patch(&serde_json::json!({
+                    "ui": {"window": {"background-image": {
+                        "path": "wallpaper.png", "opacity": 0.35, "blur": blur
+                    }}}
+                }))
+                .unwrap();
+            let image = config.ui.window.background_image.as_ref().unwrap();
+            assert_eq!(image.blur, blur as f32);
+            assert_eq!(image.opacity, 0.35);
+        }
+        let before = serde_json::to_value(&config).unwrap();
+        for blur in [-1.0, 101.0, 1e100] {
+            assert!(config
+                .apply_json_patch(&serde_json::json!({
+                    "ui": {"window": {"background-image": {"blur": blur, "opacity": 0.9}}}
+                }))
+                .is_err());
+            assert_eq!(serde_json::to_value(&config).unwrap(), before);
+        }
+    }
+
+    #[test]
     fn style_only_lua_empty_config_patch_is_a_noop() {
         let mut config = parse("{}");
         config.ui.margin = Margin::new(3.0, 7.0, 11.0, 13.0);

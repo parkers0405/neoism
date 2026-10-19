@@ -170,6 +170,13 @@ pub fn create_window_builder(
         window_builder = window_builder.with_cloaked(true);
     }
 
+    // Wayland ignores visibility; the common redraw gate withholds its first buffer.
+    // Windows must stay visible-but-cloaked so swapchain presentation can proceed.
+    #[cfg(not(target_os = "windows"))]
+    {
+        window_builder = window_builder.with_visible(false);
+    }
+
     match config.ui.window.mode {
         WindowMode::Fullscreen => {
             window_builder =
@@ -311,6 +318,43 @@ mod frame_wait_tests {
     }
 }
 
+fn initial_presentation_blocked(initial_reveal_pending: bool, image_pending: bool) -> bool {
+    initial_reveal_pending && image_pending
+}
+
+fn take_initial_reveal(pending: &mut bool, before_present_called: bool, presented: bool) -> bool {
+    if *pending && before_present_called && presented {
+        *pending = false;
+        true
+    } else {
+        false
+    }
+}
+
+#[cfg(test)]
+mod initial_reveal_tests {
+    use super::{initial_presentation_blocked, take_initial_reveal};
+
+    #[test]
+    fn pending_image_blocks_but_no_image_error_or_clear_falls_through() {
+        assert!(initial_presentation_blocked(true, true));
+        // No configuration, a drained worker error, and clear all leave no pending image.
+        assert!(!initial_presentation_blocked(true, false));
+        assert!(!initial_presentation_blocked(false, true));
+    }
+
+    #[test]
+    fn reveal_requires_this_frames_callback_and_success_and_is_one_shot() {
+        let mut pending = true;
+        assert!(!take_initial_reveal(&mut pending, false, true));
+        assert!(!take_initial_reveal(&mut pending, true, false));
+        assert!(pending);
+        assert!(take_initial_reveal(&mut pending, true, true));
+        assert!(!pending);
+        assert!(!take_initial_reveal(&mut pending, true, true));
+    }
+}
+
 pub struct RouteWindow<'a> {
     pub is_focused: bool,
     pub is_occluded: bool,
@@ -322,6 +366,8 @@ pub struct RouteWindow<'a> {
     vblank_refresh_rate_millihertz: Option<u32>,
     frame_cadence: FrameCadenceStats,
     pub has_rendered_frame: bool,
+    /// Separate from cadence bookkeeping: only a successful present ends this gate.
+    pub initial_reveal_pending: bool,
     pub winit_window: Window,
     current_mouse_cursor: CursorIcon,
     cursor_visible: bool,
@@ -431,6 +477,36 @@ impl<'a> RouteWindow<'a> {
             self.winit_window.id(),
             self.vblank_interval,
             self.vblank_refresh_rate_millihertz,
+        );
+    }
+
+    pub fn initial_presentation_blocked(&self) -> bool {
+        initial_presentation_blocked(
+            self.initial_reveal_pending,
+            self.screen.sugarloaf.pending_background_image().is_some(),
+        )
+    }
+
+    pub fn reveal_after_present(&mut self, before_present_called: bool) {
+        if !take_initial_reveal(
+            &mut self.initial_reveal_pending,
+            before_present_called,
+            self.screen.sugarloaf.last_frame_presented(),
+        ) {
+            return;
+        }
+        #[cfg(target_os = "windows")]
+        {
+            use neoism_window::platform::windows::WindowExtWindows;
+            self.winit_window.set_cloaked(false);
+        }
+        #[cfg(not(target_os = "windows"))]
+        self.winit_window.set_visible(true);
+        tracing::trace!(
+            target: "neoism::render_event",
+            window_id = ?self.winit_window.id(),
+            background_image_ready = self.screen.sugarloaf.background_image_ready(),
+            "initial window revealed"
         );
     }
 
@@ -565,14 +641,6 @@ impl<'a> RouteWindow<'a> {
             }
         }
 
-        #[cfg(target_os = "windows")]
-        {
-            // On windows cloak (hide) the window initially, we later reveal it after the first draw.
-            // This is a workaround to hide the "white flash" that occurs during application startup.
-            use neoism_window::platform::windows::WindowExtWindows;
-            winit_window.set_cloaked(false);
-        }
-
         let (
             monitor_vblank_interval,
             refresh_rate_millihertz,
@@ -597,6 +665,7 @@ impl<'a> RouteWindow<'a> {
             vblank_refresh_rate_millihertz: refresh_rate_millihertz,
             frame_cadence: FrameCadenceStats::new(now),
             has_rendered_frame: false,
+            initial_reveal_pending: true,
             render_timestamp: now,
             last_animation_frame_at: now,
             is_focused: true,

@@ -637,6 +637,7 @@ pub struct NeoismAgentPane {
     /// In-progress `/connect` provider-auth flow (catalog + chosen
     /// provider/method), held while any connect picker stage is open.
     connect: Option<connect::ConnectFlow>,
+    pending_connect: Option<connect::PendingConnect>,
     file_mention_anchor: Option<usize>,
     /// `@`-mention candidate paths (mention-root-relative, `/`-separated).
     /// Hosts without a local filesystem (web) feed these through
@@ -1065,6 +1066,7 @@ impl Default for NeoismAgentPane {
             picker: None,
             mcp_catalog_refresh: Default::default(),
             connect: None,
+            pending_connect: None,
             file_mention_anchor: None,
             file_mention_candidates: Vec::new(),
             event_stream: None,
@@ -1452,6 +1454,7 @@ impl NeoismAgentPane {
                 .or_insert(self.new_chat_source);
         }
         if self.session_id != session_id {
+            self.dismiss_connect_for_scope_change();
             self.activity_animation.cancel();
             self.clear_activity_status_rects();
         }
@@ -1489,6 +1492,7 @@ impl NeoismAgentPane {
     /// catalog scope is retained until the host changes it.
     pub fn set_catalog_endpoint(&mut self, endpoint: String) {
         if self.server != endpoint {
+            self.dismiss_connect_for_scope_change();
             self.server = endpoint;
             self.side_panel.invalidate_session_catalog();
             self.session_picker_next_cursor = None;
@@ -1506,6 +1510,7 @@ impl NeoismAgentPane {
     pub fn set_directory(&mut self, directory: Option<String>) {
         let directory = directory.and_then(|d| (!d.trim().is_empty()).then_some(d));
         if self.directory != directory {
+            self.dismiss_connect_for_scope_change();
             self.skill_options.clear();
             // Execution-directory changes never change workspace catalog scope.
             // Only the authoritative host updates it (or the endpoint identity).

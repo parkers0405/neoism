@@ -721,6 +721,7 @@ export interface TerminalAdapter {
     agentSessionId?(): string | null;
     /** Coarse timer hook for visible MCP catalog reads, independent of paint. */
     pumpMcpCatalog?(): number;
+    agentConnectTransportClosed?(): void;
     agentConversationRootId?(): string | null;
     agentHasPendingPermission?(): boolean;
     agentIsStreaming?(): boolean;
@@ -1712,6 +1713,7 @@ interface ChromeBridgeInstance {
     agent_new_thread(directory?: string | null): void;
     agent_session_id?(): string | null;
     pump_mcp_catalog?(): number;
+    agent_connect_transport_closed?(): void;
     agent_conversation_root_id?(): string | null;
     agent_switch_thread?(sessionId: string): void;
     agent_wordmark_click?(x: number, y: number): boolean;
@@ -3422,6 +3424,9 @@ class ChromeAdapter implements TerminalAdapter {
     }
     pumpMcpCatalog(): number {
         return this.inner.pump_mcp_catalog?.() ?? 0;
+    }
+    agentConnectTransportClosed(): void {
+        this.inner.agent_connect_transport_closed?.();
     }
     agentSessionId(): string | null {
         const value = this.inner.agent_session_id?.();

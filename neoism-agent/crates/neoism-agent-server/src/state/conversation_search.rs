@@ -11,20 +11,28 @@ const BATCH: usize = 16;
 const BATCH_SOURCE_BYTES: usize = 2 * 1024 * 1024;
 const BODY_BYTES: usize = 64 * 1024;
 const SETTLE_MS: u64 = 500;
-const PREFIX: usize = 64;
+const PAGE: usize = 64;
 const MAX_BOOST: f64 = 1.25;
 const MAX_RECENCY_BOOST: f64 = 0.05;
 const RECENCY_WINDOW_MS: u64 = 30 * 24 * 60 * 60 * 1000;
 const MAX_CANDIDATES: usize = 16_384;
 const MAX_SESSIONS: usize = 16_384;
 const MAX_ANCESTORS: usize = 128;
-const SEARCH_TIMEOUT: Duration = Duration::from_secs(2);
+const OPTIMIZE_IDLE: Duration = Duration::from_secs(30);
+const OPTIMIZE_INTERVAL: Duration = Duration::from_secs(15 * 60);
 
 #[derive(Default)]
 struct SearchBudget {
     candidates: usize,
     payloads: usize,
     canonical_batches: usize,
+    native_queries: usize,
+    root_resolutions: usize,
+    payload_batches: usize,
+    native_time: Duration,
+    canonical_time: Duration,
+    eligibility_time: Duration,
+    hydration_time: Duration,
     max_candidates: Option<usize>, // tests can exercise exhaustion cheaply
 }
 
@@ -50,8 +58,9 @@ pub(super) struct SearchWorker {
 impl SearchWorker {
     /// Idempotent, including concurrent callers. Cancellation is observed at
     /// transaction boundaries; never abort a Turso commit/rollback future.
-    /// The remaining work is one bounded projection batch (16 documents / 2 MiB
+    /// The remaining projection work is one bounded batch (16 documents / 2 MiB
     /// source JSON, or one oversized document) or a bounded backfill unit.
+    /// An already-started idle native merge must also finish; it cannot be aborted.
     /// Db bounds busy retries; shutdown never drains the rest of history.
     pub(super) async fn shutdown(&self) {
         let _ = self.cancel.send(true);
@@ -77,6 +86,8 @@ pub(super) fn spawn(db: Db) -> SearchWorker {
     let (cancel, mut receiver) = tokio::sync::watch::channel(false);
     let task = tokio::spawn(async move {
         let mut delay = Duration::from_millis(100);
+        let mut idle_since = std::time::Instant::now();
+        let mut optimized_at: Option<std::time::Instant> = None;
         loop {
             tokio::select! {
                 _ = tokio::time::sleep(delay) => {},
@@ -86,8 +97,27 @@ pub(super) fn spawn(db: Db) -> SearchWorker {
                 break;
             }
             delay = match tick_inner(&db, false, Some(&receiver)).await {
-                Ok(true) => Duration::from_millis(100),
-                Ok(false) => Duration::from_secs(1),
+                Ok(true) => {
+                    idle_since = std::time::Instant::now();
+                    Duration::from_millis(100)
+                }
+                Ok(false) => {
+                    if idle_since.elapsed() >= OPTIMIZE_IDLE
+                        && optimized_at.is_none_or(|at| at.elapsed() >= OPTIMIZE_INTERVAL)
+                        && !*receiver.borrow()
+                    {
+                        match optimize_idle(&db).await {
+                            Ok(true) => optimized_at = Some(std::time::Instant::now()),
+                            Ok(false) => {},
+                            Err(error) => {
+                                tracing::warn!(%error, "conversation search index maintenance retrying");
+                                // Do not spin/repeatedly rebuild a broken index.
+                                optimized_at = Some(std::time::Instant::now());
+                            }
+                        }
+                    }
+                    Duration::from_secs(1)
+                }
                 Err(error) => {
                     tracing::warn!(%error, "conversation search projection retrying");
                     Duration::from_secs(1)
@@ -100,6 +130,35 @@ pub(super) fn spawn(db: Db) -> SearchWorker {
         cancel,
         task: tokio::sync::Mutex::new(Some(task)),
     }
+}
+
+// Turso 0.6.1 disables Tantivy's automatic merges. Small projection commits
+// otherwise accumulate segments forever, including indexes from older releases.
+// Only start after the worker has been idle; never queue ahead of canonical writes
+// or perform the native blocking merge on an async executor thread.
+async fn optimize_idle(db: &Db) -> anyhow::Result<bool> {
+    if search_slots(db).available_permits() < 2 || indexing(db).await? {
+        return Ok(false);
+    }
+    let Ok(writer) = db.write_gate.clone().try_lock_owned() else {
+        return Ok(false);
+    };
+    let database = db.database.clone();
+    let runtime = tokio::runtime::Handle::current();
+    let started = std::time::Instant::now();
+    tokio::task::spawn_blocking(move || {
+        // Once native maintenance starts, finish it even during worker shutdown.
+        // This guard owns the writer gate; do not call Db::execute and re-lock it.
+        let _writer = writer;
+        runtime.block_on(async {
+            let connection = database.connect()?;
+            connection.execute("OPTIMIZE INDEX conversation_search_fts", ()).await
+        })
+    }).await??;
+    tracing::debug!(target: "neoism_agent::search",
+        duration_ms = started.elapsed().as_millis() as u64,
+        "conversation search index optimized");
+    Ok(true)
 }
 
 pub(super) async fn migrate(db: &Db) -> anyhow::Result<()> {
@@ -524,7 +583,6 @@ fn excerpt(body: &str, query: &[String]) -> String {
     body[..end].replace('\n', " ")
 }
 
-#[derive(Clone)]
 struct CanonicalSession {
     info: SessionInfo,
     allowed: bool,
@@ -535,7 +593,7 @@ struct CanonicalSession {
 async fn cache_canonical(
     db: &Db,
     ids: &[String],
-    cache: &mut HashMap<String, Option<CanonicalSession>>,
+    cache: &mut HashMap<String, Option<Arc<CanonicalSession>>>,
     scope: TenantQueryScope<'_>,
     claims: Option<&crate::caller::CallerClaims>,
 ) -> anyhow::Result<usize> {
@@ -597,7 +655,7 @@ async fn cache_canonical(
             // Authorization remains canonical, after trusted hosting overlays.
             let allowed = scoped
                 && claims.is_none_or(|claims| crate::caller::allows_session(claims, &info));
-            cache.insert(info.id.to_string(), Some(CanonicalSession { info, allowed }));
+            cache.insert(info.id.to_string(), Some(Arc::new(CanonicalSession { info, allowed })));
         }
     }
     Ok(batches)
@@ -606,10 +664,10 @@ async fn cache_canonical(
 async fn canonical(
     db: &Db,
     id: &str,
-    cache: &mut HashMap<String, Option<CanonicalSession>>,
+    cache: &mut HashMap<String, Option<Arc<CanonicalSession>>>,
     scope: TenantQueryScope<'_>,
     claims: Option<&crate::caller::CallerClaims>,
-) -> anyhow::Result<Option<CanonicalSession>> {
+) -> anyhow::Result<Option<Arc<CanonicalSession>>> {
     if !cache.contains_key(id) {
         cache_canonical(db, &[id.to_string()], cache, scope, claims).await?;
     }
@@ -626,11 +684,11 @@ fn admitted(
 
 async fn root(
     db: &Db,
-    session: CanonicalSession,
-    cache: &mut HashMap<String, Option<CanonicalSession>>,
+    session: Arc<CanonicalSession>,
+    cache: &mut HashMap<String, Option<Arc<CanonicalSession>>>,
     scope: TenantQueryScope<'_>,
     claims: Option<&crate::caller::CallerClaims>,
-) -> anyhow::Result<Option<CanonicalSession>> {
+) -> anyhow::Result<Option<Arc<CanonicalSession>>> {
     let tenant = crate::caller::session_tenant(&session.info).to_string();
     let mut current = session;
     let mut visited = HashSet::new();
@@ -665,74 +723,62 @@ fn tenant_predicate(alias: &str, parameter: &str) -> String {
     format!("((({alias}.tenant_id={parameter} OR ({alias}.tenant_id='local' AND EXISTS (SELECT 1 FROM hosted_chat_sessions h WHERE h.session_id={alias}.id AND 'workspace:' || h.workspace_id={parameter}))) AND NOT EXISTS (SELECT 1 FROM hosted_chat_revocations r WHERE r.session_id={alias}.id AND 'workspace:' || r.workspace_id={parameter})) OR ({parameter}='local' AND (EXISTS (SELECT 1 FROM hosted_chat_revocations r WHERE r.session_id={alias}.id AND 'workspace:' || r.workspace_id={alias}.tenant_id) OR EXISTS (SELECT 1 FROM hosted_chat_directories d WHERE 'workspace:' || d.workspace_id={alias}.tenant_id))))")
 }
 
-// Do NOT attach these predicates to the native FTS SELECT: Turso 0.6.1
-// otherwise drops TopDocs LIMIT pushdown and may allocate a million hits.
-// This second stage performs bounded primary-key lookups (256 IDs per query).
-fn eligibility_query(
-    keys: &[String],
-    scope: TenantQueryScope<'_>,
-    claims: Option<&crate::caller::CallerClaims>,
-    session_id: Option<&str>,
-    conversations: bool,
-) -> (String, Vec<SqlValue>) {
-    let mut params: Vec<_> = keys.iter().map(text).collect();
-    let tenant = match scope {
-        TenantQueryScope::Tenant(tenant) => Some(tenant),
-        TenantQueryScope::LocalAll => claims.map(|claims| claims.tenant_id.as_str()),
-    };
-    let tenant_clause = if let Some(tenant) = tenant {
-        params.push(text(tenant));
-        format!(
-            " AND {}",
-            tenant_predicate("s", &format!("?{}", params.len()))
-        )
-    } else {
-        String::new()
-    };
-    let mut sql = format!("SELECT d.key FROM conversation_search_docs d WHERE d.key IN ({}) AND EXISTS (SELECT 1 FROM sessions s WHERE s.id=d.session_id{tenant_clause} AND (d.message_id='' OR EXISTS (SELECT 1 FROM messages m WHERE m.id=d.message_id AND m.session_id=s.id AND m.tenant_id=s.tenant_id)))", vec!["?";keys.len()].join(","));
-    if !conversations {
-        sql.push_str(" AND d.message_id<>''");
-        if let Some(session) = session_id {
-            params.push(text(session));
-            sql.push_str(&format!(" AND d.session_id=?{}", params.len()));
-        }
-    }
-    (sql, params)
+// Keep canonical checks separate from native FTS so its LIMIT stays pushed down.
+// Look up messages directly, not docs -> correlated sessions -> messages EXISTS:
+// that query shape repeatedly scans canonical history in Turso 0.6.1. Tenant and
+// caller authorization is enforced once per session by cache_canonical below.
+fn eligibility_query(message_ids: &[String]) -> (String, Vec<SqlValue>) {
+    (
+        format!("SELECT m.id, m.session_id FROM messages m JOIN sessions s ON s.id=m.session_id AND s.tenant_id=m.tenant_id WHERE m.id IN ({})", vec!["?"; message_ids.len()].join(",")),
+        message_ids.iter().map(text).collect(),
+    )
 }
 
 async fn eligible_keys(
     db: &Db,
     candidates: &[DbRow],
-    seen: &HashSet<String>,
-    scope: TenantQueryScope<'_>,
-    claims: Option<&crate::caller::CallerClaims>,
     session_id: Option<&str>,
     conversations: bool,
 ) -> anyhow::Result<HashSet<String>> {
-    let keys = candidates
-        .iter()
-        .map(|row| row.get_str("key"))
-        .collect::<anyhow::Result<Vec<_>>>()?;
-    let keys: Vec<_> = keys.into_iter().filter(|key| !seen.contains(key)).collect();
+    let mut messages = HashMap::new();
     let mut eligible = HashSet::new();
-    for chunk in keys.chunks(256) {
-        let (sql, params) =
-            eligibility_query(chunk, scope, claims, session_id, conversations);
+    for row in candidates {
+        let source = row.get_str("session_id")?;
+        if !conversations && session_id.is_some_and(|id| id != source) {
+            continue;
+        }
+        let id = row.get_str("message_id")?;
+        let key = row.get_str("key")?;
+        if id.is_empty() {
+            if conversations {
+                // The title's session must still pass canonical hydration and
+                // authorization; a missing/deleted session never becomes a hit.
+                eligible.insert(key);
+            }
+        } else {
+            messages.insert(id, (source, key));
+        }
+    }
+    let ids: Vec<_> = messages.keys().cloned().collect();
+    for chunk in ids.chunks(256) {
+        let (sql, params) = eligibility_query(chunk);
         for row in db.fetch_all(&sql, params).await? {
-            eligible.insert(row.get_str("key")?);
+            if let Some((source, key)) = messages.get(&row.get_str("id")?) {
+                if row.get_str("session_id")? == *source {
+                    eligible.insert(key.clone());
+                }
+            }
         }
         tokio::task::yield_now().await;
     }
     Ok(eligible)
 }
 
-/// Score-frontier retrieval, NOT a small message topK followed by deduplication.
-/// All metadata and authorization are canonical and applied before counting hits.
-/// With K admitted roots/messages, stop only if Kth score exceeds the last
-/// raw score times the maximum role/recency boost, or the index is exhausted.
-/// Strict > includes all boundary ties.
-/// Prefixes double up to 16,384 candidates. If the frontier cannot be proved,
-/// return an explicit refine-query error, NEVER silently truncate recall.
+/// One bounded native TopDocs cursor, consumed in small canonical metadata pages.
+/// Stop at the proved score frontier or index exhaustion, without rerunning FTS
+/// for successively larger prefixes. The native collector and canonical work are
+/// still capped; there is no wall-clock cutoff that discards valid search work.
+/// Strict > includes all boundary ties. Authorization precedes counting results.
 /// Title excerpts are valid; prefer a genuine message only when encountered
 /// within the proved score frontier. No special exhaustive title-only walk.
 #[allow(clippy::too_many_arguments)]
@@ -750,23 +796,29 @@ pub(super) async fn search(
     let _permit = semaphore
         .try_acquire_owned()
         .map_err(|_| crate::error::ConversationSearchError::Busy)?;
+    let started = std::time::Instant::now();
     let mut budget = SearchBudget::default();
-    tokio::time::timeout(
-        SEARCH_TIMEOUT,
-        search_inner(
-            db,
-            scope,
-            query,
-            session_id,
-            directory,
-            limit,
-            conversations,
-            claims,
-            &mut budget,
-        ),
-    )
-    .await
-    .map_err(|_| crate::error::ConversationSearchError::Deadline)?
+    let result = search_inner(
+        db, scope, query, session_id, directory, limit, conversations, claims,
+        &mut budget,
+    ).await;
+    tracing::debug!(
+        target: "neoism_agent::search",
+        duration_ms = started.elapsed().as_millis() as u64,
+        native_ms = budget.native_time.as_millis() as u64,
+        canonical_ms = budget.canonical_time.as_millis() as u64,
+        eligibility_ms = budget.eligibility_time.as_millis() as u64,
+        hydration_ms = budget.hydration_time.as_millis() as u64,
+        native_queries = budget.native_queries,
+        candidates = budget.candidates,
+        canonical_batches = budget.canonical_batches,
+        root_resolutions = budget.root_resolutions,
+        payload_batches = budget.payload_batches,
+        hits = result.as_ref().map_or(0, Vec::len),
+        failed = result.is_err(),
+        "conversation search work"
+    );
+    result
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -801,51 +853,81 @@ async fn search_inner(
         .max_candidates
         .unwrap_or(MAX_CANDIDATES)
         .clamp(1, MAX_CANDIDATES);
-    let mut prefix = PREFIX.max(limit).min(cap);
+    // Native TopDocs is bounded even if the score frontier needs every candidate.
+    // Keep its cursor alive: LIMIT/OFFSET or doubling LIMIT reruns the native
+    // search and repeatedly opens every segment. Only materialize a page at a time.
+    // The extra row distinguishes exact exhaustion at cap from truncated recall.
+    let native_started = std::time::Instant::now();
+    budget.native_queries += 1;
+    let (mut rows, mut pending) = turso_busy_retry(|| async {
+        let connection = db.database.connect()?;
+        let mut rows = connection.query(CANDIDATES, vec![text(&query), int((cap + 1) as i64)]).await?;
+        let first = rows.next().await?;
+        Ok((rows, first))
+    }).await?;
+    budget.native_time += native_started.elapsed();
+    let columns = Arc::new(rows.column_names());
+    let mut page_size = PAGE.max(limit).min(cap);
     let mut sessions = HashMap::new();
-    let mut seen = HashSet::new();
+    let mut roots: HashMap<String, Option<Arc<CanonicalSession>>> = HashMap::new();
     let mut hits: HashMap<String, MessageSearchHit> = HashMap::new();
     // Group rank can come from a title, independently of the chosen transcript
     // excerpt. Do not compare later message excerpts against a boosted title.
     let mut excerpt_scores: HashMap<String, f64> = HashMap::new();
     let mut projection_keys: HashMap<String, String> = HashMap::new();
     loop {
-        let candidates = db
-            .fetch_all(
-                CANDIDATES,
-                vec![text(&query), int(prefix.min(i64::MAX as usize) as i64)],
-            )
-            .await?;
-        let exhausted = candidates.len() < prefix;
+        let native_started = std::time::Instant::now();
+        let page_limit = page_size.min(cap - budget.candidates);
+        let mut candidates = Vec::with_capacity(page_limit);
+        while candidates.len() < page_limit {
+            let Some(row) = pending.take() else { break };
+            let values = (0..row.column_count())
+                .map(|index| row.get_value(index))
+                .collect::<Result<Vec<_>, _>>()?;
+            candidates.push(DbRow { columns: columns.clone(), values });
+            pending = rows.next().await?;
+        }
+        budget.native_time += native_started.elapsed();
+        let exhausted = pending.is_none();
         let frontier = candidates
             .last()
             .map(|row| row.get_f64("score"))
             .transpose()?
             .unwrap_or(0.0);
-        let eligible = eligible_keys(
-            db,
-            &candidates,
-            &seen,
-            scope,
-            claims,
-            session_id,
-            conversations,
-        )
-        .await?;
+        let canonical_started = std::time::Instant::now();
+        let eligible = eligible_keys(db, &candidates, session_id, conversations).await?;
+        budget.eligibility_time += canonical_started.elapsed();
+        let hydration_started = std::time::Instant::now();
         let mut source_ids = Vec::new();
         for row in &candidates {
             let key = row.get_str("key")?;
-            if eligible.contains(&key) && !seen.contains(&key) {
+            if eligible.contains(&key) {
                 source_ids.push(row.get_str("session_id")?);
             }
         }
         budget.canonical_batches +=
             cache_canonical(db, &source_ids, &mut sessions, scope, claims).await?;
+        if conversations {
+            // Batch each ancestry level too: independent child chats otherwise
+            // reintroduce one canonical/hosting round-trip per result root.
+            let mut level = source_ids;
+            for _ in 0..MAX_ANCESTORS {
+                let parents: Vec<_> = level.iter()
+                    .filter_map(|id| sessions.get(id).and_then(Option::as_ref))
+                    .filter(|session| session.allowed)
+                    .filter_map(|session| session.info.parent_id.as_ref())
+                    .map(ToString::to_string)
+                    .filter(|id| !sessions.contains_key(id))
+                    .collect();
+                if parents.is_empty() { break; }
+                budget.canonical_batches +=
+                    cache_canonical(db, &parents, &mut sessions, scope, claims).await?;
+                level = parents;
+            }
+        }
+        budget.hydration_time += hydration_started.elapsed();
         for row in candidates {
             let projection_key = row.get_str("key")?;
-            if !seen.insert(projection_key.clone()) {
-                continue;
-            }
             budget.candidates += 1;
             anyhow::ensure!(
                 budget.candidates <= cap,
@@ -871,8 +953,12 @@ async fn search_inner(
                 continue;
             }
             let result = if conversations {
-                let Some(root) = root(db, source, &mut sessions, scope, claims).await?
-                else {
+                if !roots.contains_key(&source_id) {
+                    budget.root_resolutions += 1;
+                    let resolved = root(db, source, &mut sessions, scope, claims).await?;
+                    roots.insert(source_id.clone(), resolved);
+                }
+                let Some(root) = roots.get(&source_id).cloned().flatten() else {
                     continue;
                 };
                 root
@@ -947,6 +1033,7 @@ async fn search_inner(
                 }
             }
         }
+        budget.canonical_time += canonical_started.elapsed();
         let mut ranked: Vec<_> = hits.values().cloned().collect();
         let latest_activity = |hit: &MessageSearchHit| {
             if conversations {
@@ -970,27 +1057,28 @@ async fn search_inner(
         let complete_frontier =
             ranked.len() >= limit && ranked[limit - 1].score > frontier * maximum_boost;
         if exhausted || complete_frontier {
+            // Release the read cursor before fetching final payloads; no bodies
+            // were hydrated for losing candidates. At most 100 winners, one query.
+            drop(rows);
             ranked.truncate(limit);
+            if ranked.is_empty() {
+                return Ok(Vec::new());
+            }
+            let keys = ranked.iter().map(|hit| {
+                let identity = if conversations { &hit.session_id } else { &hit.message_id };
+                projection_keys.get(identity).cloned().context("missing winning search projection")
+            }).collect::<anyhow::Result<Vec<_>>>()?;
+            budget.payloads += keys.len();
+            budget.payload_batches += 1;
+            let payloads = db.fetch_all(
+                &format!("SELECT key, title, body FROM conversation_search_docs WHERE key IN ({})", vec!["?"; keys.len()].join(",")),
+                keys.iter().map(text).collect(),
+            ).await?;
+            let mut payloads = payloads.into_iter().map(|row| Ok((row.get_str("key")?, row)))
+                .collect::<anyhow::Result<HashMap<_, _>>>()?;
             let mut results = Vec::with_capacity(ranked.len());
-            for mut hit in ranked {
-                let identity = if conversations {
-                    &hit.session_id
-                } else {
-                    &hit.message_id
-                };
-                let key = projection_keys
-                    .get(identity)
-                    .context("missing winning search projection")?;
-                budget.payloads += 1;
-                let Some(payload) = db
-                    .fetch_optional(
-                        "SELECT title, body FROM conversation_search_docs WHERE key=?",
-                        vec![text(key)],
-                    )
-                    .await?
-                else {
-                    continue;
-                };
+            for (mut hit, key) in ranked.into_iter().zip(keys) {
+                let Some(payload) = payloads.remove(&key) else { continue };
                 let content = if hit.role == "title" {
                     payload.get_str("title")?
                 } else {
@@ -1002,12 +1090,10 @@ async fn search_inner(
             return Ok(results);
         }
         anyhow::ensure!(
-            prefix < cap,
+            budget.candidates < cap,
             crate::error::ConversationSearchError::TooBroad(format!("{cap} candidate budget exhausted before relevance frontier"))
         );
-        let next = prefix.saturating_mul(2).min(cap);
-        anyhow::ensure!(next > prefix, "conversation search prefix overflow");
-        prefix = next;
+        page_size = page_size.saturating_mul(2).min(cap);
         tokio::task::yield_now().await;
     }
 }
@@ -1019,7 +1105,7 @@ mod tests {
     // Separate databases still share the production process-global admission
     // slots. Coordinate whole test lifetimes (including reopen/after-drop reads)
     // so unrelated tests cannot consume slots or race the saturation assertion.
-    // Do not change production admission, deadlines, or retry busy searches.
+    // Keep production admission unchanged; serialize saturation assertions.
     static SEARCH_TEST: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     async fn running_store() -> SessionStore {
@@ -1577,24 +1663,36 @@ mod tests {
             (TenantQueryScope::Tenant("local"), true),
             (TenantQueryScope::Tenant("foreign"), false),
         ] {
-            let (sql, params) = eligibility_query(
-                &["message:msg_native".into()],
-                scope,
-                None,
-                None,
-                conversations,
-            );
+            let (sql, params) = eligibility_query(&["msg_native".into()]);
             assert!(!sql.contains("fts_"));
             let rows = db.fetch_all(&sql, params).await.unwrap();
-            assert_eq!(
-                rows.len(),
-                if scope == TenantQueryScope::Tenant("foreign") {
-                    0
-                } else {
-                    1
-                }
-            );
+            assert_eq!(rows.len(), 1);
+            // Message existence is only a prefilter; canonical hydration remains
+            // the authoritative tenant/caller boundary for messages AND titles.
+            let hits = search(db, scope, "needle", None, None, 10, conversations, None).await.unwrap();
+            assert_eq!(hits.len(), if scope == TenantQueryScope::Tenant("foreign") { 0 } else { 1 });
         }
+    }
+
+    #[tokio::test]
+    async fn canonical_message_integrity_is_checked_before_hits() {
+        let _search_test = SEARCH_TEST.lock().await;
+        let store = store().await;
+        let db = &store.db;
+        session(db, "ses_integrity", "integritytitle", "/project", None, "local").await;
+        session(db, "ses_other_source", "other", "/project", None, "local").await;
+        message(db, "msg_integrity", "ses_integrity", "integrityword", "local").await;
+        flush(db).await.unwrap();
+        assert_eq!(find(db, "integrityword", true, 20).await.len(), 1);
+        db.execute("UPDATE messages SET tenant_id='foreign' WHERE id='msg_integrity'", vec![]).await.unwrap();
+        assert!(find(db, "integrityword", true, 20).await.is_empty());
+        db.execute("UPDATE messages SET tenant_id='local', session_id='ses_other_source' WHERE id='msg_integrity'", vec![]).await.unwrap();
+        assert!(find(db, "integrityword", true, 20).await.is_empty());
+        db.execute("DELETE FROM messages WHERE id='msg_integrity'", vec![]).await.unwrap();
+        assert!(find(db, "integrityword", false, 20).await.is_empty());
+        // Deliberately leave stale projection rows, as during eventual indexing.
+        db.execute("DELETE FROM sessions WHERE id='ses_integrity'", vec![]).await.unwrap();
+        assert!(find(db, "integritytitle", true, 20).await.is_empty());
     }
 
     #[tokio::test]
@@ -1652,6 +1750,19 @@ mod tests {
         assert_eq!(grouped.len(), 2);
         assert_eq!(grouped_budget.payloads, 2);
         assert!(grouped_budget.canonical_batches <= 2);
+        assert_eq!(grouped_budget.native_queries, 1);
+        assert_eq!(grouped_budget.payload_batches, 1);
+        assert_eq!(grouped_budget.root_resolutions, 2);
+        // One lookahead row distinguishes genuine exhaustion exactly at the
+        // work cap from truncation; neither case may restart the FTS query.
+        for (cap, complete) in [(151, true), (150, false)] {
+            let mut capped = SearchBudget { max_candidates: Some(cap), ..Default::default() };
+            let result = search_inner(db, TenantQueryScope::LocalAll, "needle", None,
+                None, 20, true, None, &mut capped).await;
+            assert_eq!(result.is_ok(), complete);
+            assert_eq!(capped.native_queries, 1);
+            assert_eq!(capped.candidates, cap);
+        }
         let mut budget = SearchBudget {
             max_candidates: Some(8),
             ..Default::default()
@@ -1694,6 +1805,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dense_common_term_search_uses_one_native_cursor() {
+        let _search_test = SEARCH_TEST.lock().await;
+        let path = std::env::temp_dir().join(format!("neoism-search-dense-{}.db", neoism_agent_core::new_session_id()));
+        let store = SessionStore::open(path.clone()).await.unwrap();
+        store._search_worker.as_ref().unwrap().shutdown().await;
+        let db = &store.db;
+        session(db, "ses_dense_root", "discussion", "/project", None, "local").await;
+        session(db, "ses_dense_child", "child", "/project", Some("ses_dense_root"), "local").await;
+        session(db, "ses_dense_other", "discussion", "/project", None, "local").await;
+        session(db, "ses_dense_denied", "discussion", "/elsewhere", None, "foreign").await;
+        for i in 0..1024 {
+            message(db, &format!("msg_dense{i:04}"), "ses_dense_child", "fire", "local").await;
+        }
+        message(db, "msg_dense_other", "ses_dense_other", "fire amid a longer lower scoring document", "local").await;
+        message(db, "msg_dense_denied", "ses_dense_denied", "fire", "foreign").await;
+        flush(db).await.unwrap();
+        let ids: Vec<_> = (0..256).map(|i| format!("msg_dense{i:04}")).collect();
+        let (sql, params) = eligibility_query(&ids);
+        let plan = db.fetch_all(&format!("EXPLAIN QUERY PLAN {sql}"), params).await.unwrap();
+        assert!(plan.iter().any(|row| row.values.iter().any(|value| matches!(value,
+            SqlValue::Text(detail) if detail.contains("SEARCH m USING INDEX sqlite_autoindex_messages_1 (id=?)")))),
+            "canonical message checks must seek message IDs, not walk the entire session per candidate");
+        let started = std::time::Instant::now();
+        let mut budget = SearchBudget::default();
+        let hits = search_inner(db, TenantQueryScope::Tenant("local"), "fire", None,
+            Some("/project"), 20, true, None, &mut budget).await.unwrap();
+        let streamed = started.elapsed();
+        assert_eq!(hits.len(), 2);
+        assert!(hits.iter().all(|hit| hit.session_id == "ses_dense_root" || hit.session_id == "ses_dense_other"));
+        assert!(hits.iter().all(|hit| hit.excerpt.contains("fire")));
+        assert_eq!(budget.candidates, 1026);
+        assert_eq!(budget.native_queries, 1, "dense chats must not rerun increasing FTS prefixes");
+        assert_eq!(budget.root_resolutions, 2, "resolve ancestry once per source, not per message");
+        assert_eq!(budget.payload_batches, 1);
+        assert_eq!(budget.payloads, 2);
+        // Native-only lower bound on the previous approach (excludes all of its
+        // repeated canonical queries and session cloning). No timing assertion.
+        let started = std::time::Instant::now();
+        let mut prefix = 64;
+        loop {
+            let rows = db.fetch_all(CANDIDATES, vec![text("\"fire\""), int(prefix)]).await.unwrap();
+            if rows.len() < prefix as usize { break; }
+            prefix *= 2;
+        }
+        eprintln!("dense fire search: streamed={streamed:?}, repeated native prefixes={:?}, native={:?}, canonical={:?}, eligibility={:?}, hydration={:?}",
+            started.elapsed(), budget.native_time, budget.canonical_time, budget.eligibility_time, budget.hydration_time);
+        let writer = db.lock_writer().await;
+        assert!(!optimize_idle(db).await.unwrap(), "maintenance must not queue ahead of a writer");
+        drop(writer);
+        let slots = search_slots(db);
+        let permit = slots.try_acquire().unwrap();
+        assert!(!optimize_idle(db).await.unwrap(), "maintenance yields to active searches");
+        drop(permit);
+        let started = std::time::Instant::now();
+        assert!(optimize_idle(db).await.unwrap());
+        let merge_time = started.elapsed();
+        let started = std::time::Instant::now();
+        let compacted = find(db, "fire", true, 20).await;
+        assert_eq!(compacted.len(), 3);
+        assert!(compacted.iter().all(|hit| hit.excerpt.contains("fire")));
+        eprintln!("dense fire search: merge={merge_time:?}, compacted search={:?}", started.elapsed());
+        message(db, "msg_dense_after_merge", "ses_dense_other", "aftermerge", "local").await;
+        assert!(!optimize_idle(db).await.unwrap(), "maintenance yields to pending projection work");
+        flush(db).await.unwrap();
+        assert_eq!(find(db, "aftermerge", true, 20).await.len(), 1);
+        drop(store);
+        let reopened = SessionStore::open(path).await.unwrap();
+        reopened._search_worker.as_ref().unwrap().shutdown().await;
+        assert_eq!(find(&reopened.db, "fire", true, 20).await.len(), 3);
+        assert_eq!(find(&reopened.db, "aftermerge", true, 20).await.len(), 1);
+    }
+
+    #[tokio::test]
     async fn canonical_candidates_are_hydrated_in_batches_and_cached() {
         let _search_test = SEARCH_TEST.lock().await;
         let store = store().await;
@@ -1727,8 +1911,7 @@ mod tests {
             .await.unwrap_err();
         assert!(matches!(error.downcast_ref::<crate::error::ConversationSearchError>(),
             Some(crate::error::ConversationSearchError::TooBroad(_))));
-        // Production admission/deadline still applies; this is not just an
-        // unbounded search_inner success.
+        // Exercise the production entry point as well as instrumented retrieval.
         assert_eq!(search(db, TenantQueryScope::Tenant("local"), "firecrawl", None,
             None, 100, true, None).await.unwrap().len(), 100);
     }

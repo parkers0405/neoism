@@ -39,7 +39,7 @@ fn provider_readiness_rejects_without_consuming_or_navigating() {
 #[test]
 fn provider_readiness_keeps_local_connect_and_external_cli_available() {
     let mut pane = NeoismAgentPane::default();
-    pane.apply_connect_catalog(serde_json::json!({"all": [], "connected": []}), serde_json::json!({}));
+    pane.apply_test_connect_catalog(serde_json::json!({"all": [], "connected": []}), serde_json::json!({}));
     assert!(pane.no_providers_connected());
     pane.input = "/connect ".into();
     assert!(pane.submit());
@@ -58,7 +58,7 @@ fn provider_readiness_keeps_local_connect_and_external_cli_available() {
 #[test]
 fn provider_readiness_uses_connected_env_and_no_auth_catalog_after_picker_closes() {
     let mut pane = NeoismAgentPane::default();
-    pane.apply_connect_catalog(serde_json::json!({
+    pane.apply_test_connect_catalog(serde_json::json!({
         "all": [{"id": "local", "models": {"model": {}}}],
         "connected": ["local"], "default": {"local": "model"}
     }), serde_json::json!({}));
@@ -6211,7 +6211,7 @@ fn connect_catalog_populates_provider_rows_with_connected_marker() {
     let mut pane = NeoismAgentPane::default();
     pane.open_connect_picker();
     let (providers, auth) = sample_connect_catalog();
-    pane.apply_connect_catalog(providers, auth);
+    pane.apply_test_connect_catalog(providers, auth);
     let picker = pane.picker().expect("connect picker stays open");
     assert_eq!(picker.kind, NeoismAgentPickerKind::Connect);
     assert!(picker
@@ -6232,7 +6232,7 @@ fn connect_api_key_path_queues_store_command() {
     let mut pane = NeoismAgentPane::default();
     pane.open_connect_picker();
     let (providers, auth) = sample_connect_catalog();
-    pane.apply_connect_catalog(providers, auth);
+    pane.apply_test_connect_catalog(providers, auth);
     let _ = pane.drain_pending_outbound();
 
     // Stage 1 → 2: pick Anthropic.
@@ -6282,8 +6282,11 @@ fn connect_api_key_path_queues_store_command() {
             if provider_id == "anthropic" && key == "sk-test-123"
     )));
 
-    // Host confirms → flow closes.
-    pane.note_connect_finished("Anthropic".to_string());
+    // Host confirms credential persistence; show terminal status until Done.
+    pane.note_connect_finished("anthropic".to_string());
+    assert_eq!(pane.picker().unwrap().activity().unwrap().status, "Connected");
+    assert!(!pane.picker().unwrap().is_animating());
+    assert!(pane.commit_picker());
     assert!(pane.picker().is_none());
 }
 
@@ -6292,7 +6295,7 @@ fn connect_secret_paste_fills_the_secret_field_not_the_composer() {
     let mut pane = NeoismAgentPane::default();
     pane.open_connect_picker();
     let (providers, auth) = sample_connect_catalog();
-    pane.apply_connect_catalog(providers, auth);
+    pane.apply_test_connect_catalog(providers, auth);
 
     pane.commit_picker(); // Connect -> request Anthropic accounts.
     pane.apply_provider_connections("anthropic".to_string(), Vec::new());
@@ -6341,7 +6344,7 @@ fn connect_secret_escape_steps_back_to_auth_method() {
     let mut pane = NeoismAgentPane::default();
     pane.open_connect_picker();
     let (providers, auth) = sample_connect_catalog();
-    pane.apply_connect_catalog(providers, auth);
+    pane.apply_test_connect_catalog(providers, auth);
     pane.commit_picker(); // Connect → request Anthropic accounts
     pane.apply_provider_connections("anthropic".to_string(), Vec::new());
     pane.commit_picker(); // ConnectAccount → ConnectLabel
@@ -6395,7 +6398,7 @@ fn connect_provider_always_opens_account_manager_with_add_first() {
     let mut pane = NeoismAgentPane::default();
     pane.open_connect_picker();
     let (providers, auth) = sample_connect_catalog();
-    pane.apply_connect_catalog(providers, auth);
+    pane.apply_test_connect_catalog(providers, auth);
     pane.commit_picker();
     pane.apply_provider_connections(
         "anthropic".to_string(),
@@ -6423,7 +6426,7 @@ fn model_account_reconciliation_keeps_one_account_stage_free() {
     let mut pane = NeoismAgentPane::default();
     pane.set_session_id(Some("session-1".to_string()));
     pane.apply_model("anthropic/claude-sonnet".to_string());
-    assert!(pane.picker().is_none());
+    assert!(pane.picker().is_none(), "model account discovery must not flash a loading chooser");
     pane.apply_provider_connections(
         "anthropic".to_string(),
         vec![provider_connection("conn_one", "Work", "oauth", true)],

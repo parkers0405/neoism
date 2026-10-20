@@ -455,9 +455,9 @@ pub fn dispatch(session: &AgentSession, msg: AgentClientMessage) {
         }
 
         // -- Provider connect / auth flow (`/connect` picker) ------
-        AgentClientMessage::ConnectListProviders { directory } => {
+        AgentClientMessage::ConnectListProviders { directory, request_id } => {
             tokio::spawn(async move {
-                handle_connect_list_providers(inner, directory).await;
+                handle_connect_list_providers(inner, directory, request_id).await;
             });
         }
         AgentClientMessage::ConnectListConnections { provider_id } => {

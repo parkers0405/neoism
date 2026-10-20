@@ -2120,6 +2120,23 @@ pub(super) fn api_request_json_while_active(
     read_timeout: Duration,
     active: &std::sync::atomic::AtomicBool,
 ) -> Result<Option<Value>, String> {
+    api_request_json_with_readiness(
+        server, method, path, body, read_timeout, active,
+        || ensure_request_server_ready(server),
+    )
+}
+
+/// The production path and barrier tests share both cancellation checks and
+/// the real HTTP send; only readiness is injectable, with no global test hook.
+pub(super) fn api_request_json_with_readiness(
+    server: &str,
+    method: &str,
+    path: &str,
+    body: Option<&Value>,
+    read_timeout: Duration,
+    active: &std::sync::atomic::AtomicBool,
+    readiness: impl FnOnce() -> Result<(), String>,
+) -> Result<Option<Value>, String> {
     let check_active = || {
         if active.load(std::sync::atomic::Ordering::Acquire) {
             Ok(())
@@ -2128,7 +2145,7 @@ pub(super) fn api_request_json_while_active(
         }
     };
     check_active()?;
-    ensure_request_server_ready(server)?;
+    readiness()?;
     check_active()?;
     let response = http_request(server, method, path, body, read_timeout)?;
     response_json(response)

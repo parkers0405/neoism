@@ -49,6 +49,9 @@ impl NeoismAgentPane {
     }
 
     pub fn commit_picker(&mut self) -> bool {
+        if self.pending_account_model.is_some() && self.pending_connect.as_ref().is_some_and(|pending| pending.is_resolving_accounts() && pending.owns_picker(self.picker.as_ref())) {
+            return true;
+        }
         if self
             .picker
             .as_ref()
@@ -57,7 +60,8 @@ impl NeoismAgentPane {
             return true; // Read-only; never fall through to sending the composer.
         }
         if self.picker.as_ref().is_some_and(|picker| {
-            picker.kind == NeoismAgentPickerKind::McpActions && picker.loading
+            (matches!(picker.kind, NeoismAgentPickerKind::McpActions | NeoismAgentPickerKind::Connect) && picker.loading)
+                || picker.connect_activity.as_ref().is_some_and(|detail| detail.busy)
         }) {
             return true;
         }
@@ -67,6 +71,10 @@ impl NeoismAgentPane {
         // The `/connect` secret stage has no selectable rows — its query row is
         // the input field, so commit reads the typed query directly.
         if picker.kind == NeoismAgentPickerKind::ConnectSecret {
+            if picker.query.trim().is_empty() {
+                self.picker = Some(picker);
+                return true;
+            }
             self.submit_connect_secret(picker.query.clone());
             return true;
         }
@@ -134,6 +142,7 @@ impl NeoismAgentPane {
             NeoismAgentPickerKind::Agent => self.apply_agent(option.value),
             NeoismAgentPickerKind::Model => {
                 self.remember_model_option(&option);
+                self.picker = Some(picker);
                 self.apply_model(option.value)
             }
             NeoismAgentPickerKind::Mcp => {
@@ -272,6 +281,7 @@ impl NeoismAgentPane {
                 self.push_notice(error, NeoismAgentNoticeLevel::Warn);
                 if self.provider_readiness.is_none() {
                     self.push_outbound(OutboundAgentCommand::RefreshConnectProviders {
+                        request_id: None,
                         directory: self.directory.clone(),
                     });
                 }
@@ -798,6 +808,7 @@ impl NeoismAgentPane {
         if self.session_id.as_deref() == Some(trimmed.as_str()) {
             return;
         }
+        self.dismiss_connect_for_scope_change();
         self.conversation_header.clear();
         self.new_chat_source = self
             .side_panel
@@ -1161,13 +1172,14 @@ impl NeoismAgentPane {
             .map(|(provider, _)| provider)
             .unwrap_or("openai")
             .to_string();
+        if !self.connect_request_available() { return; }
         self.pending_account_model = Some(value);
         if self.connect.is_none() {
             self.connect = Some(super::connect::ConnectFlow::default());
         }
-        self.push_outbound(OutboundAgentCommand::RefreshProviderConnections {
-            provider_id,
-        });
+        self.queue_connect_request(OutboundAgentCommand::RefreshProviderConnections {
+            provider_id: provider_id.clone(),
+        }, super::connect::ConnectReply::Accounts(provider_id), "", "");
     }
 
     pub(in crate::panels::agent_pane::state) fn apply_model_with_connection(

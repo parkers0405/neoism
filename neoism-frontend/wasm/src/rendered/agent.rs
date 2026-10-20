@@ -1,5 +1,13 @@
 use super::*;
 
+fn is_connect_envelope(envelope: &neoism_protocol::agent::AgentClientMessage) -> bool {
+    use neoism_protocol::agent::AgentClientMessage as Msg;
+    matches!(envelope, Msg::ConnectListProviders { .. } | Msg::ConnectListConnections { .. }
+        | Msg::ConnectOauthAuthorize { .. } | Msg::ConnectOauthCallback { .. }
+        | Msg::ConnectStoreApiKey { .. } | Msg::ConnectDisconnect { .. }
+        | Msg::ConnectRename { .. } | Msg::ConnectSetDefault { .. })
+}
+
 pub(super) fn open_agent_usage_menu(
     bridge: &mut ChromeBridge,
     lines: Vec<String>,
@@ -1474,7 +1482,9 @@ impl ChromeBridge {
         );
         // Older hosts return undefined; only an explicit false (or callback
         // exception) rejects a catalog read. Do not change other send paths.
-        if matches!(envelope, neoism_protocol::agent::AgentClientMessage::ShowMcp { .. }) {
+        if matches!(envelope, neoism_protocol::agent::AgentClientMessage::ShowMcp { .. })
+            || is_connect_envelope(envelope)
+        {
             return sent.is_ok_and(|value| value.as_bool() != Some(false));
         }
         true
@@ -1601,13 +1611,24 @@ impl ChromeBridge {
         }
     }
 
+    /// Called after the host invalidates the old socket generation. No reply
+    /// from that transport can be delivered, so release its connect tombstone.
+    pub fn agent_connect_transport_closed(&mut self) {
+        if let Some(pane) = self.chrome.agent_pane_mut() {
+            pane.connect_send_failed();
+        }
+    }
+
     /// Coarse host-timer hook: catalog polling must not depend on paint or
     /// animation activity. Closed/non-MCP pickers do not enqueue any work.
     pub fn pump_mcp_catalog(&mut self) -> u32 {
-        if !self.chrome.agent_pane().is_some_and(|pane| pane.mcp_picker_visible()) {
-            return 0;
-        }
-        self.drain_agent_outbound()
+        // The existing host timer also bounds provider activity animation;
+        // it does not enqueue provider polling or change auth semantics.
+        let changed = self.chrome.agent_pane_mut().is_some_and(|pane| pane.poll_connect_activity());
+        let delivered = if self.chrome.agent_pane().is_some_and(|pane| pane.mcp_picker_visible()) {
+            self.drain_agent_outbound()
+        } else { 0 };
+        delivered.saturating_add(u32::from(changed))
     }
 
     pub fn drain_agent_outbound(&mut self) -> u32 {
@@ -1652,6 +1673,14 @@ impl ChromeBridge {
                 local_author: self.agent_state.local_presence_name.clone(),
             };
             match map_outbound_command(command, &context) {
+                AgentProtocolMapping::OpenUrl(url) => {
+                    if url.starts_with("https://") || url.starts_with("http://") {
+                        if let Some(window) = web_sys::window() {
+                            let _ = window.open_with_url_and_target_and_features(&url, "_blank", "noopener,noreferrer");
+                        }
+                    }
+                    delivered = delivered.saturating_add(1);
+                }
                 AgentProtocolMapping::EnsureSession => {
                     if self.agent_state.session_id.is_none() {
                         self.create_agent_thread_with_defaults();
@@ -1706,6 +1735,10 @@ impl ChromeBridge {
                         } else if matches!(envelope, neoism_protocol::agent::AgentClientMessage::ShowMcp { .. }) {
                             if let Some(pane) = self.chrome.agent_pane_mut() {
                                 pane.mcp_catalog_send_failed();
+                            }
+                        } else if is_connect_envelope(&envelope) {
+                            if let Some(pane) = self.chrome.agent_pane_mut() {
+                                pane.connect_send_failed();
                             }
                         }
                     }

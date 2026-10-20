@@ -103,12 +103,15 @@ pub struct InlinePickerView<'a> {
     pub loading_elapsed: f32,
 }
 
-/// Read-only progress content replacing the search field, inside the same shell.
+/// Progress content inside the same shell. Manual auth may retain its input row.
 #[derive(Clone, Copy, Debug)]
 pub struct InlinePickerActivity<'a> {
     pub body: &'a str,
     pub status: &'a str,
     pub busy: bool,
+    /// Keep the existing query/secret field below the status, not hidden behind it.
+    pub show_input: bool,
+    pub authorization_url: Option<&'a str>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -124,7 +127,18 @@ pub struct InlinePickerRenderState {
     pub header_h: f32,
 }
 
+fn activity_link_rect(rect: [f32; 4], header_h: f32, scale: f32, show_input: bool) -> [f32; 4] {
+    let s = scale.clamp(0.5, 3.0);
+    let input_h = if show_input { 22.0 * s } else { 0.0 };
+    [rect[0] + 14.0 * s, rect[1] + header_h - input_h - 24.0 * s, (rect[2] - 28.0 * s).max(0.0), 24.0 * s]
+}
+
 impl InlinePickerRenderState {
+    /// Shared measured hit geometry for a compact authorization link in the header.
+    pub fn activity_link_rect(self, scale: f32, show_input: bool) -> [f32; 4] {
+        activity_link_rect(self.rect, self.header_h, scale, show_input)
+    }
+
     pub fn row_rect(self, visible_ix: usize, scale: f32) -> [f32; 4] {
         let s = scale.clamp(0.5, 3.0);
         [
@@ -460,7 +474,7 @@ fn render_limited_content(
     } else {
         view.rows.len()
     };
-    let reserve_empty_row = view.loading || view.empty_message.is_some();
+    let reserve_empty_row = view.loading || (activity.is_none() && view.empty_message.is_some());
     let title_opts = DrawOpts {
         font_size: 13.0 * s,
         color: theme.u8(theme.fg),
@@ -486,7 +500,9 @@ fn render_limited_content(
         // the latest wrapped lines (where connection errors usually end), not
         // a single ellipsized search row. Mark any omitted earlier context.
         let actions_h = layout_rows.min(available_rows).max(1) as f32 * row_h;
-        let room = (input_rect[1] - min_y - 40.0 * s - actions_h - footer_h - 6.0 * s).max(18.0 * s);
+        let input_h = if activity.show_input { 22.0 * s } else { 0.0 };
+        let link_h = if activity.authorization_url.is_some() { 24.0 * s } else { 0.0 };
+        let room = (input_rect[1] - min_y - 40.0 * s - actions_h - footer_h - 6.0 * s - input_h - link_h).max(18.0 * s);
         let line_cap = ((room / (18.0 * s)).floor() as usize).clamp(1, 12);
         if activity_lines.len() > line_cap {
             activity_lines = activity_lines.split_off(activity_lines.len() - line_cap);
@@ -494,7 +510,7 @@ fn render_limited_content(
                 activity_lines[0] = "Earlier detail omitted; latest status below".into();
             }
         }
-        header_h = (36.0 + activity_lines.len() as f32 * 18.0) * s;
+        header_h = (36.0 + activity_lines.len() as f32 * 18.0) * s + input_h + link_h;
         available_rows = row_limit_for_space(
             input_rect[1] - (header_h - title_h), min_y, s, has_footer, available_rows,
         );
@@ -673,7 +689,15 @@ fn render_limited_content(
                 );
             }
         }
-    } else if let Some(rename) = view.rename {
+    }
+    if let Some(detail) = activity.filter(|detail| detail.authorization_url.is_some()) {
+        let link = activity_link_rect([x, y, width, height], header_h, s, detail.show_input);
+        sugarloaf.overlay_text_mut().draw(link[0], link[1] + 3.0 * s, "Open sign-in page", &DrawOpts {
+            font_size: 12.0 * s, color: theme.u8(theme.accent), clip_rect: Some(link), ..DrawOpts::default()
+        });
+    }
+    if activity.is_none() && view.rename.is_some() {
+        let rename = view.rename.unwrap();
         // Inline rename editor takes over the search row: an accent label
         // plus the live buffer with a trailing caret block.
         let label_opts = DrawOpts {
@@ -704,9 +728,9 @@ fn render_limited_content(
                 ..DrawOpts::default()
             },
         );
-    } else {
-        let query_y = y + (31.0 + title_lines.len().saturating_sub(1) as f32 * 18.0) * s;
-        let answer_clip = if view.wrap_prompt {
+    } else if activity.is_none_or(|detail| detail.show_input) {
+        let query_y = if activity.is_some() { y + header_h - 22.0 * s } else { y + (31.0 + title_lines.len().saturating_sub(1) as f32 * 18.0) * s };
+        let answer_clip = if view.wrap_prompt || activity.is_some() {
             [x + 14.0 * s, query_y, (width - 28.0 * s).max(0.0), (y + header_h - query_y).max(0.0)]
         } else {
             header_clip
@@ -747,7 +771,7 @@ fn render_limited_content(
         } else if view.query.is_empty() {
             sugarloaf.overlay_text_mut().draw(
                 x + 14.0 * s + 5.0 * s,
-                y + 31.0 * s,
+                query_y,
                 view.search_placeholder,
                 &DrawOpts {
                     color: theme.u8(theme.muted),
@@ -758,7 +782,7 @@ fn render_limited_content(
         } else {
             sugarloaf.overlay_text_mut().draw(
                 x + 14.0 * s,
-                y + 31.0 * s,
+                query_y,
                 view.query,
                 &search_opts,
             );
@@ -778,7 +802,7 @@ fn render_limited_content(
                 if view.wrap_prompt {
                     query_y + query_lines.len().saturating_sub(1) as f32 * 18.0 * s
                 } else {
-                    y + 31.0 * s
+                    query_y
                 },
                 caret_w,
                 13.0 * s,
@@ -1022,7 +1046,7 @@ fn render_limited_content(
     }
     // Empty state — keep the modal open and legible instead of collapsing
     // to nothing when a filter (or an empty catalog) yields no rows.
-    if view.rows.is_empty() {
+    if view.rows.is_empty() && activity.is_none() {
         if view.loading {
             render_loading_skeleton(
                 sugarloaf,
@@ -1097,6 +1121,33 @@ fn render_limited_content(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn activity_link_geometry_stays_above_manual_input_and_uses_exact_hits_at_all_scales() {
+        use crate::panels::agent_pane::state::picker::{NeoismAgentPicker, NeoismAgentPickerKind};
+        for scale in [0.5, 1.0, 1.25, 2.0, 3.0] {
+            for manual in [false, true] {
+                let mut picker = NeoismAgentPicker::new(if manual { NeoismAgentPickerKind::ConnectSecret } else { NeoismAgentPickerKind::Connect }, "Sign in", Vec::new(), 0);
+                picker.set_connect_activity("Enter code ABCD", "Waiting for authorization", !manual);
+                picker.set_connect_authorization_url("https://example.invalid/oauth?state=opaque");
+                let header_h = (36.0 + 18.0 + 24.0 + if manual { 22.0 } else { 0.0 }) * scale;
+                let state = InlinePickerRenderState {
+                    rect: [10.0, 20.0, 300.0 * scale, header_h], header_h,
+                    footer_h: 0.0, first_row: 0, visible_rows: 0, selected_cursor_rect: None,
+                };
+                let link = state.activity_link_rect(scale, manual);
+                let input_top = state.rect[1] + header_h - if manual { 22.0 * scale } else { 0.0 };
+                assert!((link[1] + link[3] - input_top).abs() < 0.001);
+                picker.set_render_geometry(state, scale, 0.0);
+                assert_eq!(picker.authorization_url_at(link[0] + 1.0, link[1] + 1.0).as_deref(), Some("https://example.invalid/oauth?state=opaque"));
+                assert!(picker.authorization_url_at(link[0] + 1.0, input_top + 1.0).is_none());
+                assert!(picker.empty_message().is_none(), "activity is not an empty results list");
+                picker.set_connect_authorization_url("javascript:alert(1)");
+                assert!(picker.activity().unwrap().authorization_url.is_none());
+                assert!(picker.authorization_url_at(link[0] + 1.0, link[1] + 1.0).is_none());
+            }
+        }
+    }
 
     #[test]
     fn activity_errors_wrap_without_ellipsis_including_oversized_tokens() {

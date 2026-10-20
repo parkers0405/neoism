@@ -423,6 +423,7 @@ impl NeoismAgentPane {
     /// other `&mut` borrows on the pane while it processes commands
     /// (e.g. pushing notices on failure).
     pub fn drain_pending_outbound(&mut self) -> Vec<OutboundAgentCommand> {
+        self.discard_replaced_connect_request();
         if self.mcp_catalog_poll_due() {
             self.refresh_mcp_if_visible();
         }
@@ -499,6 +500,7 @@ impl NeoismAgentPane {
         self.config_chip_hydration.begin();
         self.push_outbound(OutboundAgentCommand::ApplyConfigDefaults);
         self.push_outbound(OutboundAgentCommand::RefreshConnectProviders {
+            request_id: None,
             directory: self.directory.clone(),
         });
     }

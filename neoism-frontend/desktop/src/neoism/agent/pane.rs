@@ -695,6 +695,7 @@ pub enum NeoismAgentUiEvent {
         /// Structured link metadata; never interpolate arbitrary URLs into Markdown.
         link: Option<(String, String)>,
     },
+    OpenUrl { url: String },
     SwitchWorkspace {
         directory: String,
     },

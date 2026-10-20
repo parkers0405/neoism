@@ -1107,6 +1107,10 @@ impl NeoismAgentPane {
     /// commit it (the conventional "single-click picks" UX). Returns true
     /// when the click was handled by the picker overlay.
     pub fn pick_at(&mut self, x: f32, y: f32) -> bool {
+        if let Some(url) = self.picker.as_ref().and_then(|picker| picker.authorization_url_at(x, y)) {
+            self.ui_events.push(NeoismAgentUiEvent::OpenUrl { url });
+            return true;
+        }
         let Some(picker) = self.picker.as_mut() else {
             return false;
         };

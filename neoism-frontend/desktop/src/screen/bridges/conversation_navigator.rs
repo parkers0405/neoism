@@ -2,7 +2,8 @@
 //! Search never mutates the workspace-scoped sidebar catalog.
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::time::Duration;
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 use neoism_ui::widgets::conversation_navigator::{
     ConversationNavigatorAction as Action, ConversationNavigatorMode as Mode,
@@ -52,9 +53,97 @@ struct SearchRequest {
     wake: AgentEventWake,
 }
 
-enum SearchCommand {
-    Query(SearchRequest),
-    Cancel,
+const SEARCH_DEBOUNCE: Duration = Duration::from_millis(160);
+
+// One replaceable pending query, shared by exactly two workers. The synchronous
+// HTTP API cannot abort an in-flight request: the spare worker bypasses one slow
+// obsolete fetch, but if both are blocked the latest query must wait for a slot.
+// Never detach additional per-query workers to work around that transport limit.
+struct SearchQueue<T> {
+    state: Mutex<SearchQueueState<T>>,
+    changed: Condvar,
+}
+
+struct SearchQueueState<T> {
+    generation: u64,
+    pending: Option<(T, Instant)>,
+    closed: bool,
+}
+
+impl<T> Default for SearchQueue<T> {
+    fn default() -> Self {
+        Self {
+            state: Mutex::new(SearchQueueState {
+                generation: 0,
+                pending: None,
+                closed: false,
+            }),
+            changed: Condvar::new(),
+        }
+    }
+}
+
+impl<T> SearchQueue<T> {
+    fn replace(&self, request: Option<T>) {
+        let mut state = self.state.lock().unwrap();
+        state.generation = state.generation.wrapping_add(1);
+        state.pending =
+            request.map(|request| (request, Instant::now() + SEARCH_DEBOUNCE));
+        self.changed.notify_all();
+    }
+
+    fn take(&self) -> Option<(u64, T)> {
+        let mut state = self.state.lock().unwrap();
+        loop {
+            if state.closed {
+                return None;
+            }
+            if let Some((_, ready)) = &state.pending {
+                let delay = ready.saturating_duration_since(Instant::now());
+                if delay.is_zero() {
+                    return Some((state.generation, state.pending.take().unwrap().0));
+                }
+                state = self.changed.wait_timeout(state, delay).unwrap().0;
+            } else {
+                state = self.changed.wait(state).unwrap();
+            }
+        }
+    }
+
+    // Publication and retry must be atomic with query replacement. The publish
+    // closure only sends to the reply channel; render callbacks run after return.
+    fn complete(
+        &self,
+        generation: u64,
+        retry: Option<T>,
+        publish: impl FnOnce() -> bool,
+    ) -> bool {
+        let mut state = self.state.lock().unwrap();
+        if state.closed || generation != state.generation || !publish() {
+            return false;
+        }
+        if let Some(request) = retry {
+            state.pending = Some((request, Instant::now() + Duration::from_secs(1)));
+            self.changed.notify_all();
+        }
+        true
+    }
+
+    fn close(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.closed = true;
+        state.pending = None;
+        self.changed.notify_all();
+    }
+}
+
+struct SearchWorkers(Arc<SearchQueue<SearchRequest>>);
+
+impl Drop for SearchWorkers {
+    fn drop(&mut self) {
+        // Idle workers exit immediately; blocked workers exit after HTTP returns.
+        self.0.close();
+    }
 }
 
 struct SearchReply {
@@ -64,7 +153,7 @@ struct SearchReply {
 
 pub(crate) struct ConversationSearchState {
     identity: SearchIdentity,
-    requests: Option<Sender<SearchCommand>>,
+    requests: Option<SearchWorkers>,
     replies: (Sender<SearchReply>, Receiver<SearchReply>),
     project_rows: Vec<Row>,
     captured_buttons: Vec<neoism_window::event::MouseButton>,
@@ -143,52 +232,38 @@ fn fetch(request: &SearchRequest) -> SearchReply {
 impl ConversationSearchState {
     fn submit(&mut self, request: SearchRequest) -> Result<(), String> {
         if self.requests.is_none() {
-            let (tx, rx) = mpsc::channel::<SearchCommand>();
-            let replies = self.replies.0.clone();
-            std::thread::Builder::new()
-                .name("neoism-conversation-search".into())
-                .spawn(move || {
-                    let mut pending: Option<SearchRequest> = None;
-                    let mut delay = Duration::from_millis(160);
-                    loop {
-                        let command = if pending.is_some() {
-                            rx.recv_timeout(delay)
-                        } else {
-                            rx.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected)
-                        };
-                        match command {
-                            Ok(SearchCommand::Query(request)) => {
-                                pending = Some(request);
-                                delay = Duration::from_millis(160);
-                            }
-                            Ok(SearchCommand::Cancel) => pending = None,
-                            Err(mpsc::RecvTimeoutError::Disconnected) => return,
-                            Err(mpsc::RecvTimeoutError::Timeout) => {
-                                let request = pending.take().unwrap();
-                                let reply = fetch(&request);
-                                let retry = matches!(&reply.result, Ok((_, false, true)));
-                                if replies.send(reply).is_err() {
-                                    return;
-                                }
-                                request.wake.wake();
-                                if retry {
-                                    // Same identity, one existing worker, interruptible wait.
-                                    // Cancel/query commands queued during HTTP win before retry.
-                                    pending = Some(request);
-                                    delay = Duration::from_secs(1);
-                                }
+            let workers =
+                SearchWorkers(Arc::new(SearchQueue::<SearchRequest>::default()));
+            for index in 0..2 {
+                let queue = Arc::clone(&workers.0);
+                let replies = self.replies.0.clone();
+                std::thread::Builder::new()
+                    .name(format!("neoism-conversation-search-{index}"))
+                    .spawn(move || {
+                        while let Some((generation, request)) = queue.take() {
+                            let reply = fetch(&request);
+                            let retry = matches!(&reply.result, Ok((_, false, true)));
+                            let wake = request.wake.clone();
+                            // Only the nonblocking channel send runs under the queue lock.
+                            // The UI identity guard covers already-published replies.
+                            if queue.complete(
+                                generation,
+                                retry.then_some(request),
+                                || replies.send(reply).is_ok(),
+                            ) {
+                                // Each completion needs an event, including indexing
+                                // retries sharing this wake's coalescing flag.
+                                wake.begin_drain();
+                                wake.wake();
                             }
                         }
-                    }
-                })
-                .map_err(|error| error.to_string())?;
-            self.requests = Some(tx);
+                    })
+                    .map_err(|error| error.to_string())?;
+            }
+            self.requests = Some(workers);
         }
-        self.requests
-            .as_ref()
-            .unwrap()
-            .send(SearchCommand::Query(request))
-            .map_err(|error| error.to_string())
+        self.requests.as_ref().unwrap().0.replace(Some(request));
+        Ok(())
     }
 }
 
@@ -319,7 +394,7 @@ impl Screen<'_> {
 
     fn invalidate_conversation_search(&mut self) {
         if let Some(requests) = &self.conversation_search.requests {
-            let _ = requests.send(SearchCommand::Cancel);
+            requests.0.replace(None);
         }
         self.conversation_search
             .identity
@@ -463,7 +538,11 @@ impl Screen<'_> {
                 let server = self.conversation_search.identity.server.clone();
                 if server != self.conversation_search_endpoint()
                     || self.conversation_search.identity.directory.as_deref()
-                        != self.renderer.conversations_pane.side_panel().catalog_directory()
+                        != self
+                            .renderer
+                            .conversations_pane
+                            .side_panel()
+                            .catalog_directory()
                 {
                     self.close_conversation_navigator();
                     return;
@@ -545,6 +624,158 @@ impl Screen<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ready<T>(queue: &SearchQueue<T>) {
+        queue.state.lock().unwrap().pending.as_mut().unwrap().1 = Instant::now();
+        queue.changed.notify_all();
+    }
+
+    #[test]
+    fn pending_queries_coalesce_and_keep_the_debounce() {
+        let queue = SearchQueue::default();
+        for query in 0..100 {
+            let before = Instant::now();
+            queue.replace(Some(query));
+            let state = queue.state.lock().unwrap();
+            let (pending, deadline) = state.pending.as_ref().unwrap();
+            assert_eq!(*pending, query);
+            assert!(*deadline >= before + Duration::from_millis(160));
+        }
+        ready(&queue);
+        assert_eq!(queue.take(), Some((100, 99)));
+        assert!(queue.state.lock().unwrap().pending.is_none());
+    }
+
+    #[test]
+    fn spare_worker_bypasses_blocked_fetch_and_saturation_keeps_only_latest() {
+        let queue = Arc::new(SearchQueue::default());
+        let (started, starts) = mpsc::channel();
+        let mut workers = Vec::new();
+        let mut releases = Vec::new();
+        for _ in 0..2 {
+            let queue = Arc::clone(&queue);
+            let started = started.clone();
+            let (release, blocked) = mpsc::channel();
+            releases.push(release);
+            workers.push(std::thread::spawn(move || {
+                let request = queue.take().unwrap();
+                started.send(request).unwrap();
+                // Fake synchronous HTTP: no completion until explicitly released.
+                blocked.recv().unwrap();
+                assert!(queue.take().is_none());
+            }));
+        }
+        queue.replace(Some("slow"));
+        ready(&queue);
+        let (old, query) = starts.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(query, "slow");
+        queue.replace(Some("new"));
+        ready(&queue);
+        let (new, query) = starts.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(query, "new");
+        assert_ne!(old, new);
+        // Both slots are occupied. No additional worker is created; only the
+        // newest debounced request is retained, not a FIFO of obsolete queries.
+        for query in ["third", "fourth", "latest"] {
+            queue.replace(Some(query));
+        }
+        assert_eq!(
+            queue.state.lock().unwrap().pending.as_ref().unwrap().0,
+            "latest"
+        );
+        queue.close();
+        for release in releases {
+            release.send(()).unwrap();
+        }
+        for worker in workers {
+            worker.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn cancel_invalidates_inflight_and_clears_pending_without_waiting() {
+        let queue = SearchQueue::default();
+        queue.replace(Some("inflight"));
+        ready(&queue);
+        let (generation, _) = queue.take().unwrap();
+        queue.replace(Some("pending"));
+        queue.replace(None);
+        let state = queue.state.lock().unwrap();
+        assert_ne!(generation, state.generation);
+        assert!(state.pending.is_none());
+        drop(state);
+        queue.close();
+        assert!(queue.take().is_none());
+    }
+
+    #[test]
+    fn stale_completion_cannot_publish_or_replace_newer_pending_query() {
+        let queue = SearchQueue::default();
+        queue.replace(Some("old"));
+        ready(&queue);
+        let (generation, _) = queue.take().unwrap();
+        queue.replace(Some("latest"));
+        assert!(!queue.complete(generation, Some("old retry"), || {
+            panic!("obsolete completion must not publish")
+        }));
+        ready(&queue);
+        assert_eq!(queue.take().unwrap().1, "latest");
+        queue.replace(None);
+        assert!(!queue.complete(generation, None, || {
+            panic!("cancelled completion must not publish")
+        }));
+    }
+
+    #[test]
+    fn completion_retry_is_interruptible_and_wake_can_reenter_queue() {
+        let queue = Arc::new(SearchQueue::default());
+        queue.replace(Some("indexing"));
+        ready(&queue);
+        let (generation, request) = queue.take().unwrap();
+        let reentrant_queue = Arc::clone(&queue);
+        let wake = AgentEventWake::for_test(move || {
+            // A render callback must not run with the queue lock held.
+            reentrant_queue.replace(Some("new query"));
+        });
+        assert!(queue.complete(generation, Some(request), || true));
+        {
+            let state = queue.state.lock().unwrap();
+            assert_eq!(state.pending.as_ref().unwrap().0, "indexing");
+        }
+        wake.begin_drain();
+        wake.wake();
+        ready(&queue);
+        let (next_generation, next_request) = queue.take().unwrap();
+        assert_eq!(next_request, "new query");
+        // Reuse the same coalescing wake as an indexing retry would. It must
+        // emit again, rather than strand the second completion without a frame.
+        assert!(queue.complete(next_generation, None, || true));
+        wake.begin_drain();
+        wake.wake();
+        ready(&queue);
+        assert_eq!(queue.take().unwrap().1, "new query");
+        queue.close();
+        assert!(!queue.complete(generation, Some(request), || {
+            panic!("closed queue must not publish or retry")
+        }));
+    }
+
+    #[test]
+    fn dropping_worker_owner_releases_idle_workers() {
+        let owner = SearchWorkers(Arc::new(SearchQueue::default()));
+        let queue = Arc::clone(&owner.0);
+        let workers: Vec<_> = (0..2)
+            .map(|_| {
+                let queue = Arc::clone(&queue);
+                std::thread::spawn(move || assert!(queue.take().is_none()))
+            })
+            .collect();
+        drop(owner);
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        assert_eq!(Arc::strong_count(&queue), 1);
+    }
 
     #[test]
     fn add_workspace_is_root_dashboard_only_including_stale_activation() {

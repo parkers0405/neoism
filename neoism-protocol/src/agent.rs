@@ -455,6 +455,9 @@ pub enum AgentClientMessage {
     ConnectListProviders {
         #[serde(default)]
         directory: Option<String>,
+        /// Echoed on success and failure. Absent for legacy passive refreshes.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
     },
     /// Fetch secret-free account summaries for one provider.
     ConnectListConnections {
@@ -997,6 +1000,13 @@ pub enum AgentServerMessage {
     ConnectProviderCatalog {
         providers: serde_json::Value,
         auth: serde_json::Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
+    /// Terminal failure for an explicitly correlated catalog request.
+    ConnectProviderCatalogFailed {
+        request_id: String,
+        error: String,
     },
     /// Secret-free summaries from `/v2/providers/:id/connections`.
     ConnectConnections {
@@ -1380,6 +1390,30 @@ pub struct Usage {
     pub cost_micros: u64,
     #[serde(default)]
     pub context_limit: Option<u64>,
+}
+
+#[cfg(test)]
+mod connect_catalog_tests {
+    use super::*;
+
+    #[test]
+    fn connect_catalog_optional_correlation_preserves_legacy_wire_forms() {
+        let legacy = serde_json::json!({"ConnectListProviders": {"directory": null}});
+        let request: AgentClientMessage = serde_json::from_value(legacy.clone()).unwrap();
+        assert!(matches!(&request, AgentClientMessage::ConnectListProviders { request_id: None, .. }));
+        assert_eq!(serde_json::to_value(request).unwrap(), legacy);
+        let legacy = serde_json::json!({"ConnectProviderCatalog": {"providers": {}, "auth": {}}});
+        let reply: AgentServerMessage = serde_json::from_value(legacy.clone()).unwrap();
+        assert!(matches!(&reply, AgentServerMessage::ConnectProviderCatalog { request_id: None, .. }));
+        assert_eq!(serde_json::to_value(reply).unwrap(), legacy);
+        for message in [
+            AgentServerMessage::ConnectProviderCatalog { request_id: Some("catalog-7".into()), providers: serde_json::json!({}), auth: serde_json::json!({}) },
+            AgentServerMessage::ConnectProviderCatalogFailed { request_id: "catalog-7".into(), error: "HTTP 500".into() },
+        ] {
+            let wire = serde_json::to_string(&message).unwrap();
+            assert_eq!(serde_json::from_str::<AgentServerMessage>(&wire).unwrap(), message);
+        }
+    }
 }
 
 #[cfg(test)]

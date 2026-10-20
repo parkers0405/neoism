@@ -66,7 +66,7 @@ pub(super) fn openai_browser_callback_outcome(
     if route == "/cancel" {
         return BrowserCallbackOutcome {
             status: "200 OK",
-            body: "Login cancelled".to_string(),
+            body: neoism_agent_service_api::browser_pages::provider_authorization_cancelled(),
             result: Some(Err("Login cancelled".to_string())),
         };
     }
@@ -123,14 +123,11 @@ async fn write_http_response(
 }
 
 fn html_success() -> String {
-    "<!doctype html><title>Neoism Authorization Successful</title><h1>Authorization Successful</h1><p>You can close this window and return to Neoism.</p>".to_string()
+    neoism_agent_service_api::browser_pages::provider_authorization_received()
 }
 
 fn html_error(error: &str) -> String {
-    format!(
-        "<!doctype html><title>Neoism Authorization Failed</title><h1>Authorization Failed</h1><pre>{}</pre>",
-        html_escape(error)
-    )
+    neoism_agent_service_api::browser_pages::provider_authorization_failed(error)
 }
 
 fn parse_query(query: &str) -> BTreeMap<String, String> {
@@ -170,12 +167,4 @@ fn percent_decode(value: &str) -> String {
         }
     }
     String::from_utf8_lossy(&output).to_string()
-}
-
-fn html_escape(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
 }

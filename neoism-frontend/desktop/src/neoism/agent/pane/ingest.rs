@@ -1518,6 +1518,12 @@ impl NeoismAgentPane {
         let mut changed = false;
         for command in self.drain_pending_outbound() {
             match command {
+                OutboundAgentCommand::OpenUrl { url } => {
+                    if url.starts_with("https://") || url.starts_with("http://") {
+                        self.ui_events.push(NeoismAgentUiEvent::OpenUrl { url });
+                        changed = true;
+                    }
+                }
                 OutboundAgentCommand::AbortSession => {
                     self.execute_abort_session_command();
                     changed = true;

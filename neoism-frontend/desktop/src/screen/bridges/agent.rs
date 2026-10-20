@@ -977,6 +977,11 @@ impl Screen<'_> {
                     self.renderer.notifications.push(message, level);
                     self.mark_dirty();
                 }
+                crate::neoism::agent::NeoismAgentUiEvent::OpenUrl { url } => {
+                    if url.starts_with("https://") || url.starts_with("http://") {
+                        std::thread::spawn(move || { let _ = crate::neoism::agent::NeoismAgentPane::open_sign_in_url(&url); });
+                    }
+                }
                 crate::neoism::agent::NeoismAgentUiEvent::Dialog {
                     title,
                     body,

@@ -54,6 +54,9 @@ impl NeoismAgentPane {
         {
             return true;
         }
+        if self.pending_connect.as_ref().is_some_and(|pending| pending.owns_picker(self.picker.as_ref()) && self.connect_request_loading()) {
+            return true;
+        }
         if !self
             .picker
             .as_ref()
@@ -61,15 +64,16 @@ impl NeoismAgentPane {
         {
             self.pending_connect = None;
         }
-        if self.connect_request_loading() {
-            return true;
-        }
         let Some(picker) = self.picker.take() else {
             return false;
         };
         // The `/connect` secret stage has no selectable rows — its query row is
         // the input field, so commit reads the typed query directly.
         if picker.kind == NeoismAgentPickerKind::ConnectSecret {
+            if picker.query.trim().is_empty() {
+                self.picker = Some(picker);
+                return true;
+            }
             self.submit_connect_secret(picker.query.clone());
             return true;
         }
@@ -177,6 +181,7 @@ impl NeoismAgentPane {
             NeoismAgentPickerKind::Agent => self.apply_agent(option.value),
             NeoismAgentPickerKind::Model => {
                 self.remember_model_option(&option);
+                self.picker = Some(picker);
                 self.apply_model(option.value)
             }
             NeoismAgentPickerKind::Mcp => {

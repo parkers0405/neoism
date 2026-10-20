@@ -7,7 +7,6 @@ use serde_json::json;
 #[derive(Debug)]
 pub(crate) enum ConversationSearchError {
     Busy,
-    Deadline,
     TooBroad(String),
 }
 
@@ -15,7 +14,6 @@ impl std::fmt::Display for ConversationSearchError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Busy => f.write_str("Conversation search is busy; retry shortly"),
-            Self::Deadline => f.write_str("Conversation search exceeded its 2 second query budget; refine the query or select a conversation/directory and retry"),
             Self::TooBroad(detail) => write!(f, "Conversation search is too broad ({detail}); refine the query or select a conversation/directory and retry"),
         }
     }
@@ -126,9 +124,6 @@ impl From<&ConversationSearchError> for ApiError {
             ConversationSearchError::Busy => {
                 (StatusCode::TOO_MANY_REQUESTS, "search.busy", true)
             }
-            ConversationSearchError::Deadline => {
-                (StatusCode::UNPROCESSABLE_ENTITY, "search.deadline", false)
-            }
             ConversationSearchError::TooBroad(_) => {
                 (StatusCode::UNPROCESSABLE_ENTITY, "search.too_broad", false)
             }
@@ -189,12 +184,6 @@ mod tests {
     async fn conversation_search_expected_failures_preserve_status_and_envelope() {
         let cases = [
             (ConversationSearchError::Busy, 429, "search.busy", true),
-            (
-                ConversationSearchError::Deadline,
-                422,
-                "search.deadline",
-                false,
-            ),
             (
                 ConversationSearchError::TooBroad("128 ancestor budget exceeded".into()),
                 422,

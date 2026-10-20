@@ -858,8 +858,11 @@ fn apply_agent_event_to_pane_inner(
         }
 
         // -- Provider connect / auth flow ------------------------
-        AgentServerMessage::ConnectProviderCatalog { providers, auth } => {
-            pane.apply_connect_catalog(providers, auth);
+        AgentServerMessage::ConnectProviderCatalog { providers, auth, request_id } => {
+            pane.apply_connect_catalog_result(request_id, providers, auth);
+        }
+        AgentServerMessage::ConnectProviderCatalogFailed { request_id, error } => {
+            pane.apply_connect_catalog_failed(request_id, error);
         }
         AgentServerMessage::ConnectConnections {
             provider,
@@ -1464,6 +1467,7 @@ pub(crate) fn agent_event_session_id(
         | AgentServerMessage::McpFailed { .. }
         | AgentServerMessage::McpChanged { .. }
         | AgentServerMessage::ConnectProviderCatalog { .. }
+        | AgentServerMessage::ConnectProviderCatalogFailed { .. }
         | AgentServerMessage::ConnectConnections { .. }
         | AgentServerMessage::ConnectOauthUrl { .. }
         | AgentServerMessage::ConnectFinished { .. }

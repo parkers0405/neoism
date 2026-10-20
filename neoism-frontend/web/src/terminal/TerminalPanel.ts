@@ -653,7 +653,8 @@ export class TerminalPanel {
       // Passive MCP reads must continue when the dropdown and conversation
       // are settled and no animation frame is scheduled. Rust gates visibility
       // and the two-second/single-flight cadence; this creates no session.
-      this.wasmAdapter?.pumpMcpCatalog?.();
+      // Also settles long-running /connect activity without inventing auth polling.
+      if ((this.wasmAdapter?.pumpMcpCatalog?.() ?? 0) > 0) this.scheduleDraw();
       if (this.remotePresence.pruneStale(Date.now(), 15_000)) {
         this.syncMarkdownPresenceOverlay();
         this.syncFileTreePresence();
@@ -1345,6 +1346,9 @@ export class TerminalPanel {
     this.blameConfigLastPoll = 0;
     this.blameConfigJson = "";
     this.transportAvailable = false;
+    // ProtocolClient has invalidated the old socket generation. Its connect
+    // replies cannot reach this pane, so retries need not wait for a lost reply.
+    this.wasmAdapter?.agentConnectTransportClosed?.();
     this.notesWorkspaceBarrierReady = false;
     this.crdtTransportAvailable = false;
     this.pendingReconnectSnapshots.clear();
@@ -1856,7 +1860,7 @@ export class TerminalPanel {
       // bridge fan it out.
       // OAuth runs on the daemon, but the authorization page belongs on the
       // initiating device. Browsers may block an asynchronous popup; the
-      // agent timeline keeps the clickable URL as a fallback.
+      // inline picker keeps the clickable URL as a fallback.
       const authUrl = typeof payload === "object" && payload !== null
         ? ("ConnectOauthUrl" in payload ? payload.ConnectOauthUrl.url
           : "McpOauthUrl" in payload ? payload.McpOauthUrl.url : null)

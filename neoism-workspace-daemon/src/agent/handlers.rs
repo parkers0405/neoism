@@ -1046,24 +1046,32 @@ pub(crate) async fn handle_list_providers(inner: Arc<AgentInner>) {
 pub(crate) async fn handle_connect_list_providers(
     inner: Arc<AgentInner>,
     _directory: Option<String>,
+    request_id: Option<String>,
 ) {
-    let providers = match http_get_json(&inner, "/v2/providers").await {
-        Ok(value) => value,
-        Err(err) => {
-            emit_error(&inner.tx, err);
-            return;
-        }
-    };
-    let auth = match http_get_json(&inner, "/v2/providers/auth-methods").await {
-        Ok(value) => value,
-        Err(err) => {
-            emit_error(&inner.tx, err);
-            return;
-        }
-    };
-    let _ = inner
-        .tx
-        .send(AgentServerMessage::ConnectProviderCatalog { providers, auth });
+    let reply = connect_catalog_reply(request_id, |path| http_get_json(&inner, path)).await;
+    let _ = inner.tx.send(reply);
+}
+
+/// Exactly one terminal response, including either HTTP failure. Correlation is
+/// inside the agent payload: the outer websocket request ID tracks the latest
+/// command and cannot identify an asynchronous catalog completion.
+async fn connect_catalog_reply<F, Fut>(request_id: Option<String>, mut get: F) -> AgentServerMessage
+where
+    F: FnMut(&'static str) -> Fut,
+    Fut: std::future::Future<Output = Result<Value, String>>,
+{
+    let result = async {
+        let providers = get("/v2/providers").await?;
+        let auth = get("/v2/providers/auth-methods").await?;
+        Ok::<_, String>((providers, auth))
+    }.await;
+    match result {
+        Ok((providers, auth)) => AgentServerMessage::ConnectProviderCatalog { providers, auth, request_id },
+        Err(error) => match request_id {
+            Some(request_id) => AgentServerMessage::ConnectProviderCatalogFailed { request_id, error },
+            None => AgentServerMessage::Error { message: error },
+        },
+    }
 }
 
 pub(crate) async fn handle_connect_list_connections(
@@ -2352,6 +2360,10 @@ pub(crate) async fn handle_set_pinned(
         Err(err) => emit_error(&inner.tx, err),
     }
 }
+
+#[cfg(test)]
+#[path = "catalog_tests.rs"]
+mod connect_catalog_tests;
 
 #[cfg(test)]
 mod canonical_route_tests {

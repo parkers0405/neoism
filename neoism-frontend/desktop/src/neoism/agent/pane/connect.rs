@@ -160,8 +160,20 @@ pub(super) struct PendingConnect {
     token: Arc<AtomicBool>,
     server: String,
     session_id: Option<String>,
+    directory: Option<String>,
+    picker_identity: Option<Arc<()>>,
     request: ConnectRequest,
     loading: bool,
+}
+
+impl PendingConnect {
+    pub(super) fn owns_picker(&self, picker: Option<&NeoismAgentPicker>) -> bool {
+        match (picker, &self.picker_identity) {
+            (Some(picker), Some(identity)) => Arc::ptr_eq(&picker.activity_identity, identity),
+            (None, None) => true,
+            _ => false,
+        }
+    }
 }
 
 impl Drop for PendingConnect {
@@ -174,6 +186,10 @@ impl Drop for PendingConnect {
 
 impl ConnectRequest {
     fn run(&self, server: &str, token: &AtomicBool) -> Result<ConnectOutcome, String> {
+        self.run_with_launcher(server, token, open_auth_url)
+    }
+
+    fn run_with_launcher(&self, server: &str, token: &AtomicBool, launch: impl FnOnce(&str) -> Result<(), String>) -> Result<ConnectOutcome, String> {
         if !token.load(Ordering::Acquire) {
             return Err("Connect cancelled".into());
         }
@@ -183,7 +199,7 @@ impl ConnectRequest {
             }
             Self::Accounts { provider_id, model } => {
                 let connections = fetch_provider_connections(server, provider_id, token)?;
-                let flow = if model.is_some() && connections.len() > 1 {
+                let flow = if model.is_some() && connections.len() != 1 {
                     Some(fetch_connect_flow(server, token)?)
                 } else {
                     None
@@ -229,7 +245,7 @@ impl ConnectRequest {
                         .filter(|url| {
                             url.starts_with("http://") || url.starts_with("https://")
                         })
-                        .and_then(|url| open_auth_url(url).err())
+                        .and_then(|url| launch(url).err())
                 } else {
                     None
                 };
@@ -272,24 +288,49 @@ fn open_auth_url(url: &str) -> Result<(), String> {
 }
 
 impl NeoismAgentPane {
+    /// Use the same COM-aware launcher for automatic and fallback sign-in links.
+    pub(crate) fn open_sign_in_url(url: &str) -> Result<(), String> {
+        open_auth_url(url)
+    }
+
     fn start_connect_request(&mut self, request: ConnectRequest) {
         let token = Arc::new(AtomicBool::new(true));
         let server = self.server.clone();
+        let previous_body = self.picker.as_ref().and_then(|p| p.connect_activity.as_ref()).map(|d| d.body.clone());
+        let previous_url = self.picker.as_ref().and_then(|p| p.connect_activity.as_ref()).and_then(|detail| detail.authorization_url.clone());
+        // Model selection resolves accounts quietly: a single account needs no chooser.
+        // /connect always loads its account-management list as a skeleton.
+        let quiet_accounts = matches!(&request, ConnectRequest::Accounts { model: Some(_), .. });
+        let picker = if quiet_accounts {
+            self.picker.take()
+        } else if matches!(&request, ConnectRequest::Catalog) {
+            Some(NeoismAgentPicker::new_loading(NeoismAgentPickerKind::Connect, "Connect a provider"))
+        } else if matches!(&request, ConnectRequest::Accounts { .. }) {
+            Some(NeoismAgentPicker::new_loading(NeoismAgentPickerKind::Connect, "Choose an account"))
+        } else {
+            let mut picker = NeoismAgentPicker::new(
+                NeoismAgentPickerKind::Connect,
+                "Provider connection — Esc to cancel",
+                Vec::new(),
+                0,
+            );
+            let (body, status) = match &request {
+                ConnectRequest::Mutation { effect: ConnectEffect::Authorized { provider, .. }, .. } => (format!("Preparing sign-in to {}", provider.name), "Preparing authorization"),
+                ConnectRequest::Mutation { effect: ConnectEffect::Oauth { .. }, .. } => (previous_body.unwrap_or_else(|| "Finish signing in in your browser. Neoism will connect automatically.".into()), "Waiting for authorization"),
+                _ => ("Saving the provider connection".to_string(), "Connecting"),
+            };
+            picker.set_connect_activity(body, status, true);
+            if matches!(&request, ConnectRequest::Mutation { effect: ConnectEffect::Oauth { .. }, .. }) {
+                if let Some(url) = previous_url { picker.set_connect_authorization_url(&url); }
+            }
+            Some(picker)
+        };
         self.pending_connect = Some(PendingConnect {
-            token: token.clone(),
-            server: server.clone(),
-            session_id: self.session_id.clone(),
-            request: request.clone(),
-            loading: true,
+            token: token.clone(), server: server.clone(), session_id: self.session_id.clone(),
+            directory: self.directory.clone(), picker_identity: picker.as_ref().map(|picker| picker.activity_identity.clone()),
+            request: request.clone(), loading: true,
         });
-        let mut picker = NeoismAgentPicker::new(
-            NeoismAgentPickerKind::Connect,
-            "Connect — loading… (Esc to cancel)",
-            Vec::new(),
-            0,
-        );
-        picker.set_loading(true);
-        self.picker = Some(picker);
+        self.picker = picker;
         let tx = self.background_sender();
         let worker_token = token.clone();
         if let Err(error) = std::thread::Builder::new()
@@ -343,24 +384,20 @@ impl NeoismAgentPane {
         if !Arc::ptr_eq(&pending.token, &token) {
             return;
         }
-        if !token.load(Ordering::Acquire)
+        let owns_picker = pending.owns_picker(self.picker.as_ref());
+        if !owns_picker || !token.load(Ordering::Acquire)
             || pending.server != self.server
             || pending.session_id != self.session_id
-            || !self
-                .picker
-                .as_ref()
-                .is_some_and(|picker| picker.kind == NeoismAgentPickerKind::Connect)
+            || pending.directory != self.directory
+            || (!matches!(&pending.request, ConnectRequest::Accounts { model: Some(_), .. })
+                && !self.picker.as_ref().is_some_and(|picker| picker.kind == NeoismAgentPickerKind::Connect))
         {
             self.pending_connect = None;
             // Session creation can also arrive as a background event. If the
             // old request still owns the loading picker, dismiss it rather
             // than leaving a permanently-loading orphan behind. Never close
             // an unrelated replacement picker.
-            if self
-                .picker
-                .as_ref()
-                .is_some_and(|picker| picker.kind == NeoismAgentPickerKind::Connect)
-            {
+            if owns_picker {
                 self.close_connect();
             }
             return;
@@ -368,7 +405,6 @@ impl NeoismAgentPane {
         let request = pending.request.clone();
         match result {
             Err(error) => {
-                self.system_message("Connect", &error);
                 // Do not retain an entered credential as a retry payload.
                 if let ConnectRequest::Mutation {
                     effect: ConnectEffect::Secret { method, .. },
@@ -376,7 +412,18 @@ impl NeoismAgentPane {
                 } = request
                 {
                     self.pending_connect = None;
-                    self.open_connect_secret_entry(&method);
+                    if method.is_api {
+                        self.open_connect_secret_entry(&method);
+                        if let Some(picker) = self.picker.as_mut() {
+                            picker.set_connect_activity(&error, "Connection failed", false);
+                        }
+                    } else {
+                        // OAuth callback attempts are single-use. Do not retain
+                        // the code or retry against the spent attempt.
+                        let mut picker = NeoismAgentPicker::new(NeoismAgentPickerKind::Connect, "Provider connection", vec![NeoismAgentPickerOption::new("Retry authorization", "", "Esc to cancel", "__connect_oauth_retry__")], 0);
+                        picker.set_connect_activity(&error, "Connection failed", false);
+                        self.picker = Some(picker);
+                    }
                 } else {
                     self.pending_connect.as_mut().unwrap().loading = false;
                     self.picker = Some(NeoismAgentPicker::new(
@@ -390,6 +437,7 @@ impl NeoismAgentPane {
                         )],
                         0,
                     ));
+                    if let Some(picker) = self.picker.as_mut() { picker.set_connect_activity(&error, "Connection failed", false); }
                 }
             }
             Ok(outcome) => {
@@ -501,25 +549,9 @@ impl NeoismAgentPane {
         let selected_for_provider =
             self.model.split_once('/').map(|(provider, _)| provider)
                 == Some(provider_id.as_str());
-        if let Some(selected) =
-            self.connection_id.clone().filter(|_| selected_for_provider)
-        {
-            if connections
-                .iter()
-                .any(|connection| connection.id == selected)
-            {
-                self.apply_model_with_connection(model, Some(selected));
-            } else {
-                self.close_connect();
-                self.system_message("Account", "The selected provider connection no longer exists. Choose an account explicitly.");
-            }
-            return;
-        }
-        if connections.len() <= 1 {
-            self.apply_model_with_connection(
-                model,
-                connections.first().map(|connection| connection.id.clone()),
-            );
+        let selected = self.connection_id.clone().filter(|_| selected_for_provider);
+        if connections.len() == 1 {
+            self.apply_model_with_connection(model, Some(connections[0].id.clone()));
             return;
         }
         let Some(mut flow) = flow else {
@@ -532,12 +564,22 @@ impl NeoismAgentPane {
             .cloned();
         flow.connections = connections.clone();
         self.connect = Some(flow);
+        if connections.is_empty() {
+            // No credential exists yet: use the normal Add account/auth route.
+            self.open_account_picker(NeoismAgentPickerKind::ConnectAccount, &provider_id, &connections);
+            return;
+        }
         self.pending_account_model = Some(model);
         self.open_account_picker(
             NeoismAgentPickerKind::ModelAccount,
             &provider_id,
             &connections,
         );
+        // Keep an existing explicit choice highlighted, but multiple accounts
+        // still require the user to confirm rather than silently skipping the list.
+        if let Some(index) = connections.iter().position(|connection| Some(&connection.id) == selected.as_ref()) {
+            if let Some(picker) = self.picker.as_mut() { picker.selected = index; }
+        }
     }
 
     /// `/connect` entry point: fetch the provider catalog + auth methods and
@@ -571,9 +613,24 @@ impl NeoismAgentPane {
 
     /// Stage 1 → 2: the user picked a provider; show account management.
     pub(in crate::neoism::agent) fn enter_connect_auth(&mut self, provider_id: &str) {
+        if provider_id == "__connect_done__" {
+            self.close_connect();
+            return;
+        }
+        if provider_id == "__connect_oauth_retry__" {
+            let index = self.connect.as_ref().and_then(|flow| flow.method.as_ref()).map(|method| method.index);
+            if let Some(index) = index { self.start_connect_method(index); }
+            return;
+        }
         if provider_id == RETRY_VALUE {
             if let Some(pending) = self.pending_connect.take() {
-                self.start_connect_request(pending.request.clone());
+                if matches!(&pending.request, ConnectRequest::Mutation { effect: ConnectEffect::Oauth { .. }, .. }) {
+                    // Callback attempts are single-use, including failures. Start fresh.
+                    let selection = self.connect.as_ref().and_then(|flow| flow.method.as_ref()).map(|method| method.index);
+                    if let Some(index) = selection { self.start_connect_method(index); }
+                } else {
+                    self.start_connect_request(pending.request.clone());
+                }
             }
             return;
         }
@@ -1046,54 +1103,29 @@ impl NeoismAgentPane {
                 .and_then(Value::as_str)
                 .map(str::to_string);
         }
-        let authorization_link = (url.starts_with("http://")
-            || url.starts_with("https://"))
-        .then(|| format!("[{url}]({url})"));
+        let mut body = if instructions.trim().is_empty() {
+            if auto { "Complete sign-in in your browser. Neoism connects automatically.".to_string() }
+            else { "Authorize in your browser, then paste the token below.".to_string() }
+        } else { instructions.trim().to_string() };
+        if let Some(error) = browser_error {
+            body.push_str(&format!("\nCould not open your browser: {error}. Use Open sign-in page below."));
+        }
         if auto {
-            let mut message = match browser_error {
-                Some(error) => format!(
-                    "Could not open your browser ({error}). Use the authorization URL below to sign in to {}.",
-                    provider.name
-                ),
-                None => format!(
-                    "Opened your browser to sign in to {}. Finish there — neoism connects automatically, and you can close the tab when it's done.",
-                    provider.name
-                ),
-            };
-            if !instructions.trim().is_empty() {
-                message.push('\n');
-                message.push_str(instructions.trim());
+            if let Some(picker) = self.picker.as_mut() {
+                picker.set_connect_activity(body, "Waiting for authorization", true);
+                picker.set_connect_authorization_url(&url);
             }
-            if let Some(link) = &authorization_link {
-                message
-                    .push_str("\n\nAuthorization URL (click to open; drag to copy):\n");
-                message.push_str(link);
-            }
-            self.system_message(&provider.name, message);
             self.spawn_connect_oauth_wait(
                 provider,
                 method.index,
-                self.connect
-                    .as_ref()
-                    .and_then(|flow| flow.attempt_id.clone()),
+                self.connect.as_ref().and_then(|flow| flow.attempt_id.clone()),
             );
-            // Keep a cancellable loading picker until the browser callback settles.
         } else {
-            let mut message = if instructions.trim().is_empty() {
-                "Authorize in your browser, then paste the token below.".to_string()
-            } else {
-                instructions
-            };
-            if let Some(error) = browser_error {
-                message.push_str(&format!("\nCould not open your browser: {error}"));
-            }
-            if let Some(link) = authorization_link {
-                message
-                    .push_str("\n\nAuthorization URL (click to open; drag to copy):\n");
-                message.push_str(&link);
-            }
-            self.system_message(&provider.name, message);
             self.open_connect_secret_entry(method);
+            if let Some(picker) = self.picker.as_mut() {
+                picker.set_connect_activity(body, "Awaiting token", false);
+                picker.set_connect_authorization_url(&url);
+            }
         }
     }
 
@@ -1202,14 +1234,11 @@ impl NeoismAgentPane {
             self.connection_id = connection_id;
         }
         self.close_connect();
+        let mut picker = NeoismAgentPicker::new(NeoismAgentPickerKind::Connect, "Provider connection", vec![NeoismAgentPickerOption::new("Done", "", "", "__connect_done__")], 0);
+        picker.set_connect_activity(format!("{provider_name} connected. Open /model to pick a model."), "Connected", false);
+        self.picker = Some(picker);
         self.provider_readiness = None;
         self.refresh_model_catalog();
-        self.system_message(
-            "Connected",
-            format!(
-                "{provider_name} is connected. Open /model to pick one of its models."
-            ),
-        );
     }
 
     pub(in crate::neoism::agent) fn close_connect(&mut self) {

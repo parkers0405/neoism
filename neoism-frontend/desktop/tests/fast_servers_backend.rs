@@ -42,6 +42,13 @@ async fn render_browser_page_previews() {
         directory.join("mcp.html"),
         neoism_agent_service_api::browser_pages::mcp_connected(),
     ).unwrap();
+    for (name, html) in [
+        ("provider-received.html", neoism_agent_service_api::browser_pages::provider_authorization_received()),
+        ("provider-failed.html", neoism_agent_service_api::browser_pages::provider_authorization_failed("The provider declined authorization. Return to Neoism to try again.")),
+        ("provider-cancelled.html", neoism_agent_service_api::browser_pages::provider_authorization_cancelled()),
+    ] {
+        std::fs::write(directory.join(name), html).unwrap();
+    }
 }
 
 #[tokio::test]

@@ -27,6 +27,7 @@ pub enum AgentProtocolMapping {
     Messages(Vec<AgentClientMessage>),
     PendingPrompt(PendingAgentProtocolPrompt),
     EnsureSession,
+    OpenUrl(String),
     Unsupported(&'static str),
 }
 
@@ -339,9 +340,11 @@ pub fn map_outbound_command(
         // flow back through the pane's `apply_connect_catalog` /
         // `apply_connect_oauth_url` / `note_connect_finished` /
         // `note_connect_failed` setters.
-        Cmd::RefreshConnectProviders { directory } => {
+        Cmd::OpenUrl { url } => Mapping::OpenUrl(url),
+        Cmd::RefreshConnectProviders { directory, request_id } => {
             Mapping::Messages(vec![Msg::ConnectListProviders {
                 directory: directory.or_else(|| context.default_directory.clone()),
+                request_id,
             }])
         }
         Cmd::RefreshProviderConnections { provider_id } => {

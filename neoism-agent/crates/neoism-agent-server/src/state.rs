@@ -3113,7 +3113,7 @@ impl SessionStore {
             .await
     }
 
-    /// Exact project selection is applied before the bounded candidate scan.
+    /// Exact project selection is applied to canonical roots before counting hits.
     pub(crate) async fn search_messages_in_directory(
         &self,
         scope: TenantQueryScope<'_>,

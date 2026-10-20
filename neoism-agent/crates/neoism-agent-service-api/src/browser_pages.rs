@@ -52,6 +52,34 @@ pub fn mcp_connected() -> String {
     )
 }
 
+/// The loopback callback only receives a code; token exchange happens afterward.
+pub fn provider_authorization_received() -> String {
+    render(
+        "Authorization received | Neoism",
+        r#"<section class="content" aria-labelledby="page-title"><h2 id="page-title">Authorization received</h2><p>Return to Neoism to finish connecting your provider and check its connection status.</p><p class="note completion">You can close this tab.</p></section>"#,
+        "",
+    )
+}
+
+pub fn provider_authorization_failed(error: &str) -> String {
+    render(
+        "Authorization failed | Neoism",
+        &format!(
+            r#"<section class="content" aria-labelledby="page-title"><h2 id="page-title">Authorization failed</h2><p>{}</p><p class="note completion">Return to Neoism to try connecting again.</p></section>"#,
+            escape_html(error),
+        ),
+        "",
+    )
+}
+
+pub fn provider_authorization_cancelled() -> String {
+    render(
+        "Authorization cancelled | Neoism",
+        r#"<section class="content" aria-labelledby="page-title"><h2 id="page-title">Authorization cancelled</h2><p>Your provider was not connected. Return to Neoism whenever you are ready to try again.</p><p class="note completion">You can close this tab.</p></section>"#,
+        "",
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -82,6 +110,27 @@ mod tests {
         assert!(html.contains("MCP authorization complete"));
         assert!(html.contains("connection status"));
         assert!(!html.contains("MCP server connected"));
+    }
+
+    #[test]
+    fn provider_callbacks_share_assets_without_claiming_a_completed_connection() {
+        let received = provider_authorization_received();
+        assert!(received.contains("Authorization received"));
+        assert!(received.contains("finish connecting"));
+        assert!(!received.contains("Authorization Successful"));
+        let cancelled = provider_authorization_cancelled();
+        assert!(cancelled.contains("Your provider was not connected"));
+        let failed = provider_authorization_failed("<script>alert('x')</script> & \"denied\"");
+        assert!(failed.contains("&lt;script&gt;alert(&#39;x&#39;)&lt;/script&gt; &amp; &quot;denied&quot;"));
+        for html in [received, cancelled, failed] {
+            assert!(html.contains(WORDMARK));
+            assert!(html.contains(WORDMARK_SCRIPT));
+            assert!(html.contains("data:image/svg+xml;base64,"));
+            assert!(html.contains("data:font/woff2;base64,"));
+            assert_eq!(html.matches("<script>").count(), 1);
+            assert!(!html.contains("window.close"));
+            assert!(!html.contains("http-equiv=\"refresh\""));
+        }
     }
 
     #[test]

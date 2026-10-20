@@ -50,7 +50,7 @@ pub fn render_picker(
         render_usage_picker(sugarloaf, picker, input_rect, theme, s, max_rows, min_y);
         return;
     }
-    if picker.mcp_authorization.is_none() {
+    if picker.activity().is_none() {
         picker.set_visible_row_limit(max_rows);
     }
     let is_session = picker.kind == NeoismAgentPickerKind::Session;
@@ -65,11 +65,7 @@ pub fn render_picker(
             | NeoismAgentPickerKind::FileMention
             | NeoismAgentPickerKind::SkillMention
     );
-    let empty_message = (!matches!(
-        picker.kind,
-        NeoismAgentPickerKind::ConnectLabel | NeoismAgentPickerKind::ConnectSecret
-    ))
-    .then_some("No results");
+    let empty_message = picker.empty_message();
     let list_scroll_offset = picker.tick_list_scroll();
     let cursor_offset = picker.tick_cursor();
     let rows = picker
@@ -126,15 +122,11 @@ pub fn render_picker(
         s,
         max_rows,
         min_y,
-        picker.mcp_authorization.as_ref().map(|detail| crate::widgets::inline_picker::InlinePickerActivity {
-            body: &detail.body,
-            status: &detail.status,
-            busy: detail.busy,
-        }),
+        picker.activity(),
         &row_icons,
         header_icon,
     ) {
-        if picker.mcp_authorization.is_some() {
+        if picker.activity().is_some() {
             picker.set_visible_row_limit(render_state.visible_rows.max(1));
         }
         picker.set_render_geometry(render_state, s, list_scroll_offset);

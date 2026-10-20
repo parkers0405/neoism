@@ -119,4 +119,43 @@ fn openai_browser_callback_validates_state_and_extracts_code() {
     );
     assert_eq!(bad.status, "400 Bad Request");
     assert!(bad.result.unwrap().unwrap_err().contains("state"));
+    assert!(ok.body.contains("Authorization received"));
+    assert!(!ok.body.contains("abc 123"));
+    assert!(!ok.body.contains("state=expected"));
+}
+
+#[test]
+fn openai_browser_callback_preserves_error_cancel_and_unrelated_outcomes() {
+    for (path, status, message) in [
+        ("/auth/callback?state=expected", "400 Bad Request", "Missing authorization code"),
+        ("/auth/callback?code=&state=expected", "400 Bad Request", "Missing authorization code"),
+        ("/auth/callback?code=secret", "400 Bad Request", "Invalid OAuth state"),
+        ("/auth/callback?code=secret&state=wrong", "400 Bad Request", "Invalid OAuth state"),
+        ("/auth/callback?error=access_denied", "200 OK", "access_denied"),
+        ("/cancel", "200 OK", "Login cancelled"),
+    ] {
+        let outcome = openai_browser_callback_outcome(path, "/auth/callback", "expected");
+        assert_eq!(outcome.status, status);
+        assert_eq!(outcome.result.unwrap().unwrap_err(), message);
+        assert!(outcome.body.contains(neoism_agent_service_api::browser_pages::WORDMARK));
+        assert!(outcome.body.contains(neoism_agent_service_api::browser_pages::WORDMARK_SCRIPT));
+        assert!(!outcome.body.contains("secret"));
+    }
+    let unrelated = openai_browser_callback_outcome("/favicon.ico", "/auth/callback", "expected");
+    assert_eq!(unrelated.status, "404 Not Found");
+    assert_eq!(unrelated.body, "Not found");
+    assert!(unrelated.result.is_none());
+}
+
+#[test]
+fn openai_browser_callback_escapes_provider_error_description() {
+    let outcome = openai_browser_callback_outcome(
+        "/auth/callback?error=access_denied&error_description=%3Cscript%3Ebad%3C%2Fscript%3E",
+        "/auth/callback",
+        "expected",
+    );
+    assert_eq!(outcome.status, "200 OK");
+    assert_eq!(outcome.result.unwrap().unwrap_err(), "<script>bad</script>");
+    assert!(outcome.body.contains("&lt;script&gt;bad&lt;/script&gt;"));
+    assert!(!outcome.body.contains("<script>bad</script>"));
 }

@@ -255,10 +255,16 @@ fn slash_connect_returns_while_catalog_is_blocked_and_completion_wakes_picker() 
     }));
     assert_prompt(|| pane.execute_slash_text("/connect"));
     assert!(pane.picker.as_ref().unwrap().loading);
+    assert!(pane.picker.as_ref().unwrap().activity().is_none());
+    assert!(pane.picker.as_ref().unwrap().empty_message().is_none());
+    assert_eq!(pane.picker.as_ref().unwrap().title, "Connect a provider");
     entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
     // Enter on a loading picker must not consume it or dispatch a second request.
     assert!(pane.commit_picker());
     assert!(pane.picker.as_ref().unwrap().loading);
+    assert!(pane.picker.as_ref().unwrap().activity().is_none());
+    assert!(pane.picker.as_ref().unwrap().empty_message().is_none());
+    assert_eq!(pane.picker.as_ref().unwrap().title, "Connect a provider");
     assert!(wake_rx.try_recv().is_err());
     release_tx.send(()).unwrap();
     wake_rx.recv_timeout(Duration::from_secs(2)).unwrap();
@@ -316,6 +322,78 @@ fn connect_unreachable_health_becomes_error_without_blocking_ui() {
     assert!(pane.connect.is_none());
 }
 
+fn assert_account_skeleton(pane: &NeoismAgentPane) {
+    let picker = pane.picker.as_ref().unwrap();
+    assert!(picker.loading);
+    assert!(picker.activity().is_none());
+    assert!(picker.options().is_empty());
+    assert_eq!(picker.empty_message(), None);
+    assert_eq!(picker.title, "Choose an account");
+}
+
+#[test]
+fn connect_provider_always_shows_accounts_for_zero_one_and_multiple() {
+    for count in [0, 1, 2] {
+        let server = MockServer::new(move |_, path| {
+            if path.ends_with("/connections") {
+                (200, Value::Array((0..count).map(|index| json!({"connectionId":format!("account-{index}"),"label":format!("Account {index}"),"authType":"api","isDefault":index == 0})).collect()))
+            } else { catalog(path) }
+        });
+        let mut pane = pane_for(&server);
+        pane.open_connect_picker();
+        settle(&mut pane);
+        pane.enter_connect_auth("openai");
+        assert_account_skeleton(&pane);
+        settle(&mut pane);
+        let picker = pane.picker.as_ref().unwrap();
+        assert_eq!(picker.kind, NeoismAgentPickerKind::ConnectAccount);
+        assert!(!picker.loading);
+        assert!(picker.activity().is_none());
+        assert_eq!(picker.options()[0].title, "Add account");
+        assert_eq!(picker.options().iter().filter(|option| option.value.starts_with("account-")).count(), count);
+        assert!(pane.connection_id.is_none(), "/connect must never auto-select even one account");
+        if count == 0 {
+            assert!(pane.commit_picker());
+            assert_eq!(pane.picker.as_ref().unwrap().kind, NeoismAgentPickerKind::ConnectLabel);
+        }
+    }
+}
+
+#[test]
+fn connect_account_skeleton_settles_to_error_retry_and_list() {
+    let fail = Arc::new(AtomicBool::new(true));
+    let failure = fail.clone();
+    let server = MockServer::new(move |_, path| {
+        if path.ends_with("/connections") && failure.load(Ordering::Acquire) {
+            (503, json!({"error":"Accounts unavailable"}))
+        } else {
+            catalog(path)
+        }
+    });
+    let mut pane = pane_for(&server);
+    pane.open_connect_picker();
+    settle(&mut pane);
+    assert_prompt(|| pane.enter_connect_auth("openai"));
+    assert_account_skeleton(&pane);
+    assert!(pane.commit_picker());
+    assert_account_skeleton(&pane);
+    settle(&mut pane);
+    let picker = pane.picker.as_ref().unwrap();
+    assert!(!picker.loading);
+    assert_eq!(picker.activity().unwrap().status, "Connection failed");
+    assert_eq!(picker.empty_message(), None);
+    fail.store(false, Ordering::Release);
+    assert!(pane.commit_picker());
+    assert_account_skeleton(&pane);
+    settle(&mut pane);
+    let picker = pane.picker.as_ref().unwrap();
+    assert_eq!(picker.kind, NeoismAgentPickerKind::ConnectAccount);
+    assert!(!picker.loading);
+    assert!(picker.activity().is_none());
+    assert_eq!(picker.options()[0].title, "Add account");
+    assert!(pane.ui_events.iter().all(|event| !matches!(event, NeoismAgentUiEvent::Dialog { .. })));
+}
+
 #[test]
 fn connect_accounts_and_secret_submission_are_async_and_keep_retry_semantics() {
     let reject_secret = Arc::new(AtomicBool::new(true));
@@ -360,7 +438,8 @@ fn connect_accounts_and_secret_submission_are_async_and_keep_retry_semantics() {
     reject_secret.store(false, Ordering::Release);
     assert_prompt(|| pane.submit_connect_secret("replacement-secret".into()));
     settle(&mut pane);
-    assert!(pane.picker.is_none());
+    assert_eq!(pane.picker.as_ref().unwrap().activity().unwrap().status, "Connected");
+    assert!(!pane.picker.as_ref().unwrap().is_animating());
     assert_eq!(pane.connection_id.as_deref(), Some("new-account"));
 }
 
@@ -387,8 +466,19 @@ fn connect_oauth_authorize_and_callback_do_not_block_ui() {
     pane.enter_connect_auth("openai");
     settle(&mut pane);
     assert_prompt(|| pane.start_connect_method(1));
+    assert_eq!(pane.picker.as_ref().unwrap().activity().unwrap().status, "Preparing authorization");
+    assert!(pane.picker.as_ref().unwrap().is_animating());
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while pane.picker.as_ref().and_then(|picker| picker.activity()).is_some_and(|activity| activity.status != "Waiting for authorization") {
+        assert!(Instant::now() < deadline);
+        pane.drain_background_updates();
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(pane.picker.as_ref().unwrap().is_animating());
+    assert_ne!(pane.connection_id.as_deref(), Some("oauth-account"));
     settle(&mut pane);
-    assert!(pane.picker.is_none());
+    assert_eq!(pane.picker.as_ref().unwrap().activity().unwrap().status, "Connected");
+    assert!(!pane.picker.as_ref().unwrap().is_animating());
     assert_eq!(pane.connection_id.as_deref(), Some("oauth-account"));
     let requests = server.requests.lock().unwrap();
     assert!(requests
@@ -404,19 +494,17 @@ fn install_pending(
     request: ConnectRequest,
 ) -> Arc<AtomicBool> {
     let token = Arc::new(AtomicBool::new(true));
+    let picker = NeoismAgentPicker::new(NeoismAgentPickerKind::Connect, "Loading", Vec::new(), 0);
     pane.pending_connect = Some(PendingConnect {
         token: token.clone(),
         server: pane.server.clone(),
         session_id: pane.session_id.clone(),
+        directory: pane.directory.clone(),
+        picker_identity: Some(picker.activity_identity.clone()),
         request,
         loading: true,
     });
-    pane.picker = Some(NeoismAgentPicker::new(
-        NeoismAgentPickerKind::Connect,
-        "Loading",
-        Vec::new(),
-        0,
-    ));
+    pane.picker = Some(picker);
     token
 }
 
@@ -435,7 +523,7 @@ fn late_success(pane: &mut NeoismAgentPane, token: Arc<AtomicBool>) {
 
 #[test]
 fn connect_late_auth_results_cannot_restore_cancelled_replaced_or_switched_ui() {
-    for cancellation in ["escape", "server", "session", "picker", "new-request"] {
+    for cancellation in ["escape", "server", "session", "directory", "picker", "same-kind", "new-request"] {
         let mut pane = NeoismAgentPane::default();
         pane.session_id = Some("first".into());
         let request = ConnectRequest::Mutation {
@@ -453,6 +541,8 @@ fn connect_late_auth_results_cannot_restore_cancelled_replaced_or_switched_ui() 
             "session" => {
                 pane.session_id = Some("second".into());
             }
+            "directory" => pane.directory = Some("/other".into()),
+            "same-kind" => pane.picker = Some(NeoismAgentPicker::new(NeoismAgentPickerKind::Connect, "Replacement connect", Vec::new(), 0)),
             "picker" => {
                 pane.picker = Some(NeoismAgentPicker::new(
                     NeoismAgentPickerKind::Model,
@@ -466,7 +556,7 @@ fn connect_late_auth_results_cannot_restore_cancelled_replaced_or_switched_ui() 
             }
             _ => unreachable!(),
         }
-        let title = if cancellation == "session" {
+        let title = if cancellation == "session" || cancellation == "directory" {
             None
         } else {
             pane.picker.as_ref().map(|p| p.title.clone())
@@ -558,6 +648,179 @@ fn connect_healthy_remote_works_while_configured_local_is_down() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[test]
+fn connect_manual_oauth_failure_shows_retry_and_drops_submitted_code() {
+    let server = MockServer::new(|_, path| {
+        if path.ends_with("/oauth/authorize") {
+            (200, json!({"method":"code","attemptId":"manual-attempt","instructions":"Paste the returned token"}))
+        } else if path.ends_with("/oauth/callback") {
+            (401, json!({"error":"Token rejected"}))
+        } else {
+            catalog(path)
+        }
+    });
+    let mut pane = pane_for(&server);
+    pane.open_connect_picker();
+    settle(&mut pane);
+    pane.enter_connect_auth("openai");
+    settle(&mut pane);
+    pane.start_connect_method(1);
+    settle(&mut pane);
+    let activity = pane.picker.as_ref().unwrap().activity().unwrap();
+    assert_eq!(activity.status, "Awaiting token");
+    assert!(activity.show_input, "manual entry must remain visible below status");
+    pane.insert_text("synthetic-");
+    pane.insert_paste("code");
+    assert_eq!(pane.picker.as_ref().unwrap().query, "synthetic-code");
+    assert!(pane.commit_picker());
+    let ConnectRequest::Mutation { body: Some(body), .. } = &pane.pending_connect.as_ref().unwrap().request else { panic!("expected callback") };
+    assert_eq!(body["code"], "synthetic-code");
+    assert_eq!(pane.picker.as_ref().unwrap().activity().unwrap().status, "Connecting");
+    settle(&mut pane);
+    assert!(pane.pending_connect.is_none(), "must not keep a failed code as retry payload");
+    assert_eq!(pane.picker.as_ref().unwrap().activity().unwrap().status, "Connection failed");
+    assert!(!pane.picker.as_ref().unwrap().is_animating());
+    assert!(pane.commit_picker());
+    settle(&mut pane);
+    assert_eq!(pane.picker.as_ref().unwrap().kind, NeoismAgentPickerKind::ConnectSecret);
+    assert_eq!(server.requests.lock().unwrap().iter().filter(|(_, path)| path.ends_with("/oauth/authorize")).count(), 2, "retry must create a fresh OAuth attempt");
+    pane.insert_paste("retry-");
+    pane.insert_text("code");
+    assert_eq!(pane.picker.as_ref().unwrap().query, "retry-code");
+    assert!(pane.commit_picker());
+    let ConnectRequest::Mutation { body: Some(body), .. } = &pane.pending_connect.as_ref().unwrap().request else { panic!("expected callback") };
+    assert_eq!(body["code"], "retry-code");
+    settle(&mut pane);
+    assert_eq!(pane.picker.as_ref().unwrap().activity().unwrap().status, "Connection failed");
+    pane.close_picker();
+    assert!(pane.picker.is_none());
+}
+
+#[test]
+fn connect_api_key_retry_accepts_typing_and_paste_through_commit_picker() {
+    let failing = Arc::new(AtomicBool::new(true));
+    let failure = failing.clone();
+    let server = MockServer::new(move |verb, path| {
+        if verb == "PUT" && path.ends_with("/auth") {
+            if failure.load(Ordering::Acquire) { (401, json!({"error":"Key rejected"})) }
+            else { (200, json!({"connectionId":"retried"})) }
+        } else { catalog(path) }
+    });
+    let mut pane = pane_for(&server);
+    pane.open_connect_picker();
+    settle(&mut pane);
+    pane.enter_connect_auth("openai");
+    settle(&mut pane);
+    pane.start_connect_method(0);
+    pane.insert_text("synthetic-");
+    pane.insert_paste("key");
+    assert_eq!(pane.picker.as_ref().unwrap().query, "synthetic-key");
+    assert!(pane.commit_picker());
+    settle(&mut pane);
+    let picker = pane.picker.as_ref().unwrap();
+    assert_eq!(picker.kind, NeoismAgentPickerKind::ConnectSecret);
+    assert_eq!(picker.activity().unwrap().status, "Connection failed");
+    assert!(picker.activity().unwrap().show_input);
+    assert!(picker.query.is_empty());
+    failing.store(false, Ordering::Release);
+    pane.insert_paste("retry-");
+    pane.insert_text("key");
+    assert_eq!(pane.picker.as_ref().unwrap().query, "retry-key");
+    assert!(pane.commit_picker());
+    let ConnectRequest::Mutation { body: Some(body), .. } = &pane.pending_connect.as_ref().unwrap().request else { panic!("expected key write") };
+    assert_eq!(body["key"], "retry-key");
+    settle(&mut pane);
+    assert_eq!(pane.connection_id.as_deref(), Some("retried"));
+    assert_eq!(pane.picker.as_ref().unwrap().activity().unwrap().status, "Connected");
+}
+
+#[test]
+fn connect_authorization_effects_keep_browser_launch_and_inline_fallback_without_dialogs() {
+    for mode in ["browser", "device", "manual"] {
+        let release = Arc::new(AtomicBool::new(false));
+        let released = release.clone();
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = attempts.clone();
+        let server = MockServer::new(move |_, path| {
+            if path.ends_with("/oauth/authorize") {
+                let n = counter.fetch_add(1, Ordering::Relaxed) + 1;
+                (200, json!({"url":format!("https://example.invalid/sign-in?attempt={n}"), "method":if mode == "manual" { "code" } else { "auto" }, "instructions":"Enter code ABCD\nComplete sign-in in your browser", "attemptId":format!("attempt-{n}")}))
+            } else if path.ends_with("/oauth/callback") {
+                if mode == "manual" { return (401, json!({"error":"Token rejected"})); }
+                let deadline = Instant::now() + Duration::from_secs(4);
+                while !released.load(Ordering::Acquire) {
+                    assert!(Instant::now() < deadline);
+                    thread::sleep(Duration::from_millis(2));
+                }
+                (200, json!({"connectionId":"connected"}))
+            } else { catalog(path) }
+        });
+        let mut pane = pane_for(&server);
+        pane.open_connect_picker();
+        settle(&mut pane);
+        pane.enter_connect_auth("openai");
+        settle(&mut pane);
+        let flow = pane.connect.as_mut().unwrap();
+        let provider = flow.provider.clone().unwrap();
+        let method = flow.methods_by_provider[&provider.id][1].clone();
+        flow.method = Some(method.clone());
+        pane.ui_events.clear();
+        for attempt in 1..=if mode == "manual" { 2 } else { 1 } {
+            let request = ConnectRequest::Mutation {
+                verb: "POST", path: "/v2/providers/openai/oauth/authorize".into(), body: Some(json!({"method":method.index})),
+                effect: ConnectEffect::Authorized { provider: provider.clone(), method: method.clone() },
+            };
+            let token = install_pending(&mut pane, request.clone());
+            let url = format!("https://example.invalid/sign-in?attempt={attempt}");
+            let mut launched = Vec::new();
+            let outcome = request.run_with_launcher(&server.endpoint, &token, |url| {
+                launched.push(url.to_string());
+                Err("mock browser launch failure".into())
+            });
+            assert_eq!(launched, [url.clone()], "production authorize path must still attempt browser launch");
+            pane.finish_connect_request(token, outcome);
+            let picker = pane.picker.as_ref().unwrap();
+            let detail = picker.activity().unwrap();
+            assert_eq!(detail.authorization_url, Some(url.as_str()));
+            assert!(detail.body.contains("ABCD"));
+            assert!(detail.body.contains("mock browser launch failure"));
+            assert!(!detail.body.contains(&url));
+            assert_eq!(picker.empty_message(), None);
+            assert!(pane.ui_events.iter().all(|event| !matches!(event, NeoismAgentUiEvent::Dialog { .. })));
+            if mode == "manual" {
+                assert!(pane.commit_picker(), "empty Enter must preserve the inline sign-in prompt");
+                let detail = pane.picker.as_ref().unwrap().activity().unwrap();
+                assert_eq!(detail.authorization_url, Some(url.as_str()));
+                assert!(detail.body.contains("ABCD"));
+                pane.insert_text("synthetic-code");
+            }
+            let picker = pane.picker.as_mut().unwrap();
+            let show_input = picker.activity().unwrap().show_input;
+            let state = neoism_ui::widgets::inline_picker::InlinePickerRenderState {
+                rect: [10.0, 20.0, 400.0, 160.0], header_h: if show_input { 118.0 } else { 96.0 },
+                footer_h: 0.0, first_row: 0, visible_rows: 0, selected_cursor_rect: None,
+            };
+            let link = state.activity_link_rect(1.0, show_input);
+            picker.set_render_geometry(state, 1.0, 0.0);
+            assert!(pane.pick_at(link[0] + 5.0, link[1] + 5.0));
+            assert!(matches!(pane.ui_events.as_slice(), [NeoismAgentUiEvent::OpenUrl { url: target }] if target == &url));
+            pane.ui_events.clear();
+            if mode == "manual" {
+                assert_eq!(pane.picker.as_ref().unwrap().query, "synthetic-code");
+                assert!(pane.commit_picker());
+                settle(&mut pane);
+                assert!(pane.ui_events.iter().all(|event| !matches!(event, NeoismAgentUiEvent::Dialog { .. })), "long failures must also stay inline");
+                assert_eq!(pane.picker.as_ref().unwrap().activity().unwrap().status, "Connection failed");
+            } else {
+                release.store(true, Ordering::Release);
+                settle(&mut pane);
+                assert_eq!(pane.picker.as_ref().unwrap().activity().unwrap().status, "Connected");
+                assert!(pane.ui_events.iter().all(|event| !matches!(event, NeoismAgentUiEvent::Dialog { .. })));
+            }
+        }
+    }
 }
 
 #[test]
@@ -672,7 +935,7 @@ fn connect_manual_oauth_retains_attempt_and_escape_navigation() {
 
 #[test]
 fn connect_model_account_reconciliation_is_async_and_preserves_explicit_selection() {
-    for count in [0, 1, 2] {
+    for (count, previous_choice) in [(0, false), (1, false), (2, false), (2, true)] {
         let server = MockServer::new(move |_, path| {
             if path.ends_with("/connections") {
                 thread::sleep(Duration::from_millis(200));
@@ -682,17 +945,40 @@ fn connect_model_account_reconciliation_is_async_and_preserves_explicit_selectio
             }
         });
         let mut pane = pane_for(&server);
-        assert_prompt(|| pane.apply_model("openai/test-model".into()));
+        if previous_choice {
+            pane.model = "openai/prior-model".into();
+            pane.connection_id = Some("account-1".into());
+        }
+        pane.picker = Some(NeoismAgentPicker::new(NeoismAgentPickerKind::Model, "Models", vec![NeoismAgentPickerOption::new("Test model", "", "", "openai/test-model")], 0));
+        let identity = pane.picker.as_ref().unwrap().activity_identity.clone();
+        assert_prompt(|| assert!(pane.commit_picker()));
+        let picker = pane.picker.as_ref().unwrap();
+        assert_eq!(picker.kind, NeoismAgentPickerKind::Model);
+        assert!(Arc::ptr_eq(&picker.activity_identity, &identity));
+        assert!(!picker.loading);
+        assert!(picker.activity().is_none());
+        assert!(pane.commit_picker(), "Enter while resolving must not resubmit or dismiss the model list");
         assert!(
             pane.drain_pending_outbound().is_empty(),
             "do not persist a model before accounts arrive"
         );
         settle(&mut pane);
+        if count == 0 {
+            let picker = pane.picker.as_ref().unwrap();
+            assert_eq!(picker.kind, NeoismAgentPickerKind::ConnectAccount);
+            assert_eq!(picker.options()[0].title, "Add account");
+            assert_ne!(pane.model, "openai/test-model");
+            assert!(pane.commit_picker());
+            assert_eq!(pane.picker.as_ref().unwrap().kind, NeoismAgentPickerKind::ConnectLabel);
+            continue;
+        }
         if count > 1 {
             assert_eq!(
                 pane.picker.as_ref().unwrap().kind,
                 NeoismAgentPickerKind::ModelAccount
             );
+            assert_eq!(pane.picker.as_ref().unwrap().selected, usize::from(previous_choice));
+            assert_ne!(pane.model, "openai/test-model", "even a previous account choice must not silently skip a multi-account list");
             pane.choose_model_account("account-1".into());
             assert_eq!(pane.connection_id.as_deref(), Some("account-1"));
         } else {
@@ -710,47 +996,83 @@ fn connect_model_account_reconciliation_is_async_and_preserves_explicit_selectio
 }
 
 #[test]
+fn connect_quiet_model_account_replies_respect_dismissal_scope_and_replacement() {
+    for dismissal in ["escape", "scope", "replacement"] {
+        let server = MockServer::new(|_, path| catalog(path));
+        let mut pane = pane_for(&server);
+        let original_model = pane.model.clone();
+        pane.apply_model("openai/test-model".into());
+        assert!(pane.picker.is_none());
+        let token = pane.pending_connect.as_ref().unwrap().token.clone();
+        match dismissal {
+            "escape" => pane.close_picker(),
+            "scope" => pane.directory = Some("/other".into()),
+            _ => pane.picker = Some(NeoismAgentPicker::new(NeoismAgentPickerKind::Model, "Replacement", Vec::new(), 0)),
+        }
+        pane.finish_connect_request(token, Ok(ConnectOutcome::Accounts {
+            provider_id: "openai".into(), model: Some("openai/test-model".into()),
+            connections: vec![ProviderConnection { id: "account-0".into(), label: "Work".into(), auth_type: "api".into(), is_default: true }], flow: None,
+        }));
+        assert_eq!(pane.model, original_model);
+        assert!(pane.connection_id.is_none());
+        assert_eq!(pane.picker.as_ref().map(|picker| picker.title.as_str()), (dismissal == "replacement").then_some("Replacement"));
+    }
+}
+
+#[test]
 fn connect_cancel_during_readiness_does_not_issue_credential_write() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let endpoint = format!("http://{}/agent", listener.local_addr().unwrap());
     let (ready_tx, ready_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
-    let server = thread::spawn(move || {
-        let (mut health, _) = listener.accept().unwrap();
-        assert!(read_request(&mut health).starts_with("GET /agent/v2/health "));
-        ready_tx.send(()).unwrap();
-        release_rx.recv_timeout(Duration::from_secs(2)).unwrap();
-        let body =
-            r#"{"healthy":true,"version":"test","providerCredentialStore":"test"}"#;
-        write!(
-            health,
-            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-            body.len()
-        )
-        .unwrap();
-        drop(health);
-        listener
-    });
     let token = Arc::new(AtomicBool::new(true));
     let active = token.clone();
     let worker = thread::spawn(move || {
-        api_request_json_while_active(
+        crate::neoism::agent::api::api_request_json_with_readiness(
             &endpoint,
             "PUT",
             "/v2/providers/openai/auth",
             Some(&json!({"type":"api","key":"test"})),
             Duration::from_secs(5),
             &active,
+            || {
+                ready_tx.send(()).unwrap();
+                release_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+                Ok(())
+            },
         )
     });
     ready_rx.recv_timeout(Duration::from_secs(2)).unwrap();
     token.store(false, Ordering::Release);
     release_tx.send(()).unwrap();
     assert_eq!(worker.join().unwrap().unwrap_err(), "Connect cancelled");
+    listener.set_nonblocking(true).unwrap();
+    assert_eq!(listener.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+}
+
+#[test]
+fn connect_pre_cancelled_nonowned_request_sends_nothing() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}/agent", listener.local_addr().unwrap());
+    let active = AtomicBool::new(false);
+    assert_eq!(api_request_json_while_active(&endpoint, "PUT", "/v2/providers/openai/auth", Some(&json!({"type":"api","key":"test"})), Duration::from_secs(1), &active).unwrap_err(), "Connect cancelled");
+    listener.set_nonblocking(true).unwrap();
+    assert_eq!(listener.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+}
+
+#[test]
+fn connect_active_nonowned_request_sends_directly_without_health_probe() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}/agent", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        let request = read_request(&mut socket);
+        assert!(request.starts_with("PUT /agent/v2/providers/openai/auth "), "{request}");
+        write!(socket, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}").unwrap();
+        listener
+    });
+    api_request_json_while_active(&endpoint, "PUT", "/v2/providers/openai/auth", Some(&json!({"type":"api","key":"test"})), Duration::from_secs(2), &AtomicBool::new(true)).unwrap();
     let listener = server.join().unwrap();
     listener.set_nonblocking(true).unwrap();
-    assert_eq!(
-        listener.accept().unwrap_err().kind(),
-        std::io::ErrorKind::WouldBlock
-    );
+    assert_eq!(listener.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
 }

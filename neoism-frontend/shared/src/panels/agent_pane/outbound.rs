@@ -331,10 +331,14 @@ pub enum OutboundAgentCommand {
     // these map to the `GET /provider`, `GET /provider/auth`, `PUT /auth/:id`,
     // `DELETE /auth/:id`, and `POST /provider/:id/oauth/{authorize,callback}`
     // endpoints.
+    /// Host-local browser action; never sent to the provider/daemon.
+    OpenUrl { url: String },
+
     /// Fetch the provider catalog + per-provider auth methods so the connect
     /// picker can populate. Result → `apply_connect_catalog`.
     RefreshConnectProviders {
         directory: Option<String>,
+        request_id: Option<String>,
     },
     RefreshProviderConnections {
         provider_id: String,

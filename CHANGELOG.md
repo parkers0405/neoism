@@ -2,6 +2,19 @@
 
 All notable user-facing changes to Neoism are documented here.
 
+## [0.7.133] - 2026-10-20
+
+### Windows startup, provider connection, and search scheduling
+
+- Preserves the initial optimistic prompt through Windows session hydration/binding, fences pre-admission idle snapshots, and corrects queue ownership/busy projections. Aligns Windows daemon signing-key location with desktop/Agent conventions.
+- Adds provider-connection progress, browser fallback, explicit retry, cancellation and late-result suppression, secret clearing, transport-failure settlement, and account/model reconciliation across native/shared hosts.
+- Correlates catalog requests and failures across the protocol, daemon, WASM, and browser. Both HTTP failure paths now terminate their correlated request while retaining legacy uncorrelated forms.
+- Improves conversation-search eligibility lookup, ancestry reuse, bounded cursor work, and batched payload hydration without dropping canonical authorization. Removes the fixed two-second search deadline while retaining admission and work caps; idle index optimization runs off-thread.
+- Bounds native navigator fetch concurrency and pending-query replacement, with debounce, stale-generation rejection, and interruptible retry.
+- Uses shared branded provider callback pages with escaped failure text and accurate authorization-received wording rather than claiming an unverified connection.
+
+This is a stable production release, available through plain `neoism update` after the platform matrix passes. Existing first-terminal behavior, trusted-user hosting boundaries, and Servo/CEF worker exclusions are preserved.
+
 ## [0.7.132] - 2026-10-19
 
 ### Agent startup, request handling, and queue recovery

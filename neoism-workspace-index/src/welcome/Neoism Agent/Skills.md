@@ -10,7 +10,7 @@ Create a directory containing `SKILL.md`, add the frontmatter shown below, then 
 <project>/.neoism/skills/database-migrations/SKILL.md
 ```
 
-For a user-wide skill, use `~/.config/neoism/skills/database-migrations/SKILL.md`. Run `/skills` in the agent composer to verify that Neoism discovered it. Use `agent.skills.paths` only when the skill lives somewhere else.
+For a user-wide skill, use `~/.config/neoism/skills/database-migrations/SKILL.md` on Linux/macOS or `%USERPROFILE%\AppData\Local\neoism\skills\database-migrations\SKILL.md` on Windows. Run `/skills` in the agent composer to verify that Neoism discovered it. Use `agent.skills.paths` only when the skill lives somewhere else.
 
 ## Skill format
 

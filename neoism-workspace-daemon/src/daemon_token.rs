@@ -13,8 +13,8 @@
 //!
 //!   * Path: Unix uses `$XDG_RUNTIME_DIR/neoism/daemon-token`
 //!     (or `/tmp/neoism-$UID/daemon-token` when `XDG_RUNTIME_DIR` is
-//!     unset). Windows uses the user's data directory under
-//!     `neoism-daemon/daemon-token`.
+//!     unset). Windows uses `%TEMP%/neoism-<sanitized USERNAME>/daemon-token`,
+//!     matching the desktop bootstrap and Agent credential verifier.
 //!     Unix parent dirs/files are tightened to `0o700`/`0o600`.
 //!   * Env var: `NEOISM_DAEMON_TOKEN` — set in-process if absent so the
 //!     legacy `?token=` upgrade path (`auth::verify`) has something to
@@ -194,11 +194,28 @@ pub fn daemon_token_path() -> PathBuf {
 
     #[cfg(windows)]
     {
-        dirs::data_dir()
-            .unwrap_or_else(std::env::temp_dir)
-            .join("neoism-daemon")
-            .join("daemon-token")
+        // This is also the signing key for credentials sent to the shared
+        // Agent. It MUST match desktop::embedded_daemon_token_path and
+        // agent_server::caller::canonical_daemon_token_from_disk. Using
+        // dirs::data_dir here made hosted children fall back to their private
+        // password/Fast master token, which the shared Agent cannot verify.
+        windows_daemon_token_path(std::env::var("USERNAME").ok().as_deref())
     }
+}
+
+#[cfg(any(windows, test))]
+fn windows_daemon_token_path(username: Option<&str>) -> PathBuf {
+    let user = username
+        .filter(|name| !name.is_empty())
+        .map(|name| {
+            name.chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+                .collect::<String>()
+        })
+        .unwrap_or_else(|| "default".to_string());
+    std::env::temp_dir()
+        .join(format!("neoism-{user}"))
+        .join("daemon-token")
 }
 
 #[cfg(test)]
@@ -245,6 +262,33 @@ mod tests {
     }
 
     #[test]
+    fn windows_token_path_matches_desktop_and_agent_convention() {
+        for (username, suffix) in [
+            (Some("Alice"), "Alice"),
+            (Some("First Last_é"), "First-Last--"),
+            (Some(""), "default"),
+            (None, "default"),
+        ] {
+            assert_eq!(
+                windows_daemon_token_path(username),
+                std::env::temp_dir()
+                    .join(format!("neoism-{suffix}"))
+                    .join("daemon-token")
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_daemon_uses_shared_token_path() {
+        assert_eq!(
+            daemon_token_path(),
+            windows_daemon_token_path(std::env::var("USERNAME").ok().as_deref())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn token_path_uses_xdg_runtime_dir_when_set() {
         let _guard = env_lock();
         let _scope = EnvScope::capture();
@@ -268,6 +312,9 @@ mod tests {
         );
     }
 
+    // This test redirects the runtime path with XDG_RUNTIME_DIR and checks
+    // Unix mode bits; it must never bootstrap a user's real Windows token.
+    #[cfg(unix)]
     #[test]
     fn ensure_mints_persists_and_reloads_same_token() {
         let _guard = env_lock();

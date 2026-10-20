@@ -14,6 +14,8 @@ An editor-only package, Agent-only package, dual-target package, existing `init.
 
 The exhaustive source references are `docs/plugins.md`, `docs/editor-plugin-api.md`, `docs/agent-plugins.md`, and generated `docs/lua-api.lua`. Coding agents should read those files before inventing a manifest field, method, event, contribution or capability name.
 
+Config paths below use the Linux/macOS default `~/.config/neoism`. On Windows, use `%USERPROFILE%\AppData\Local\neoism` instead (for example, `%USERPROFILE%\AppData\Local\neoism\plugins\<id>`). See [[Getting Started/06 Configure Neoism|Configure Neoism]] for config-directory overrides. These are desktop paths; Agent user-package discovery on Windows instead uses `%APPDATA%\neoism\plugins` (Roaming AppData), as described in [[Neoism Agent/Plugins]].
+
 ## Package shape
 
 ```text

@@ -2,25 +2,23 @@ NEOISM(5)
 
 # NAME
 
-Neoism - TOML configuration file format.
+Neoism - Configuration file format.
 
 # SYNTAX
 
-Neoism's configuration file uses the TOML format. The format's specification
-can be found at _https://toml.io/en/v1.0.0_.
+Neoism's active configuration file is config.json and uses JSONC (JSON with comments and trailing commas). The legacy TOML option examples below are not the current config.json schema; use the bundled Configure Neoism guide for current domain-based examples.
 
 # LOCATION
 
-Neoism doesn't create the config file for you, but it looks for one in the
-following locations on UNIX systems:
+The default config location is selected in this order on Linux:
 
-. _$NEOISM_CONFIG_HOME/config.toml_
-. _$XDG_CONFIG_HOME/neoism/config.toml_
-. _$HOME/.config/neoism/config.toml_
+. _$NEOISM_CONFIG_HOME/config.json_
+. _$XDG_CONFIG_HOME/neoism/config.json_
+. _$HOME/.config/neoism/config.json_
 
-On Windows, the config file will be looked for in:
+On macOS, use _$NEOISM_CONFIG_HOME/config.json_ when set, otherwise _$HOME/.config/neoism/config.json_. On Windows, _$NEOISM_CONFIG_HOME/config.json_ also takes precedence over the default:
 
-. _%USERPROFILE%\\AppData\\Local\\neoism\\config.toml_
+. _%USERPROFILE%\\AppData\\Local\\neoism\\config.json_
 
 # GENERAL
 

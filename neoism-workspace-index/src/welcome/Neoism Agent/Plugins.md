@@ -14,7 +14,7 @@ The exhaustive repository references are `docs/plugins.md` for packages, lifecyc
 
 ## Shared package manifest
 
-User packages live at `~/.config/neoism/plugins/<id>/`. Workspace packages live at `<workspace>/.neoism/plugins/<id>/`. Only immediate child directories containing `neoism-plugin.json` are discovered.
+Agent user packages are discovered through the platform config directory (`dirs::config_dir()`): `~/.config/neoism/plugins/<id>/` by default on Linux, and `%APPDATA%\neoism\plugins\<id>\` (Roaming AppData) on Windows. This Agent package discovery root is separate from the desktop config root `%USERPROFILE%\AppData\Local\neoism`. Workspace packages live at `<workspace>/.neoism/plugins/<id>/`. Only immediate child directories containing `neoism-plugin.json` are discovered.
 
 ```json
 {

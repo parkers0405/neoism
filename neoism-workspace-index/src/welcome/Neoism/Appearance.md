@@ -56,7 +56,7 @@ You can also toggle **Splash startup animation** under Appearance in Settings. C
 
 On desktop, choose **Backgrounds** from the hamburger menu or search for **Backgrounds** in the command palette. The picker uses the same searchable list and split layout as Themes, with the selected image displayed on the right. Arrow keys browse, Enter or a result click applies, and Escape closes without changing your background. Narrow windows show the list without the preview pane.
 
-Images placed in `~/.config/neoism/bg/` appear alongside wallpaper images declared by installed Mash Up Packs and your currently configured background. Folder images retain the current standalone wallpaper opacity, blur, fit, and position when switching, while pack images retain their declared properties. The right-hand preview shows the artwork at full opacity so it remains easy to compare. On Windows this folder is under `%LOCALAPPDATA%\neoism\bg`; relocated configuration homes use their own `bg` folder. Selecting a pack's image does not activate that pack or change its theme, font, or panel colors.
+Images placed in `~/.config/neoism/bg/` appear alongside wallpaper images declared by installed Mash Up Packs and your currently configured background. Folder images retain the current standalone wallpaper opacity, blur, fit, and position when switching, while pack images retain their declared properties. The right-hand preview shows the artwork at full opacity so it remains easy to compare. On Windows this folder is under `%USERPROFILE%\AppData\Local\neoism\bg`; relocated configuration homes use their own `bg` folder. Selecting a pack's image does not activate that pack or change its theme, font, or panel colors.
 
 You can also configure an image directly, with no active pack:
 

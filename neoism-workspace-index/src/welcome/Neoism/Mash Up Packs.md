@@ -12,7 +12,7 @@ A direct desktop theme-picker choice made while a pack is active updates the bas
 
 ## Pack manifest
 
-Each pack lives under `~/.config/neoism/packs/<id>/` with a `pack.json` manifest. JSONC comments and trailing commas are accepted.
+Each pack lives under `~/.config/neoism/packs/<id>/` on Linux/macOS or `%USERPROFILE%\AppData\Local\neoism\packs\<id>\` on Windows, with a `pack.json` manifest. Other `~/.config/neoism` paths below likewise use `%USERPROFILE%\AppData\Local\neoism` on Windows; `NEOISM_CONFIG_HOME` overrides this config directory on all platforms. JSONC comments and trailing commas are accepted.
 
 ```jsonc
 {

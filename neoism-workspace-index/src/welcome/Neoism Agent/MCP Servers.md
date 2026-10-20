@@ -6,7 +6,7 @@ Model Context Protocol servers extend Neoism with tools, resources, and prompts.
 
 The easiest route is **hamburger menu -> Extensions**. Find an MCP extension and choose **Install**. The Extensions page writes its definition and shows live status.
 
-For a custom server, add its definition to one of these locations:
+For a custom server, add its definition to one of these locations. Global paths below use the Linux/macOS default `~/.config/neoism`; on Windows use `%USERPROFILE%\AppData\Local\neoism` instead (`%USERPROFILE%\AppData\Local\neoism\config.json` or `%USERPROFILE%\AppData\Local\neoism\mcp.json`). See [[Getting Started/06 Configure Neoism|Configure Neoism]] for config-directory overrides:
 
 | Scope | File and shape |
 |---|---|

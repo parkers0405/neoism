@@ -4,6 +4,8 @@ Neoism Agent reads the Agent domain from Neoism's unified JSONC configuration an
 
 ## Global configuration
 
+Global paths below use the Linux/macOS default `~/.config/neoism`. On Windows, use `%USERPROFILE%\AppData\Local\neoism` instead: the application config is `%USERPROFILE%\AppData\Local\neoism\config.json` and the MCP catalog is `%USERPROFILE%\AppData\Local\neoism\mcp.json`. See [[Getting Started/06 Configure Neoism|Configure Neoism]] for config-directory overrides.
+
 Neoism's application configuration uses domain blocks. Agent settings belong under `"agent"`:
 
 ```jsonc

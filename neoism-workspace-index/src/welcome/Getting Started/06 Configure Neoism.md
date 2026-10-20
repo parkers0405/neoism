@@ -5,10 +5,10 @@ Neoism keeps terminal, editor, UI, presence, keybinding, agent, renderer, and de
 ```text
 Linux    ~/.config/neoism/config.json
 macOS    ~/.config/neoism/config.json
-Windows  %LOCALAPPDATA%\neoism\config.json
+Windows  %USERPROFILE%\AppData\Local\neoism\config.json
 ```
 
-On Linux, `NEOISM_CONFIG_HOME` or `$XDG_CONFIG_HOME/neoism` can relocate it. Press `Alt + ,` or choose **Open Neoism Config** from the command palette. Neoism creates the file on first open and opens it in the native editor without changing your workspace root or terminal directory.
+`NEOISM_CONFIG_HOME` overrides the config directory on all platforms. On Linux, `$XDG_CONFIG_HOME/neoism` is used when that override is unset. The Windows default is constructed from the user home directory plus `AppData\Local\neoism` (normally `%LOCALAPPDATA%\neoism`, not `%APPDATA%\neoism`); Neoism does not read `LOCALAPPDATA` to resolve this directory. Press `Alt + ,` or choose **Open Neoism Config** from the command palette. Neoism creates the file on first open and opens it in the native editor without changing your workspace root or terminal directory.
 
 JSONC permits `//` and `/* ... */` comments and trailing commas. Neoism hot-reloads the file after a save. Keys use **kebab-case**, and every setting belongs inside a domain block; there are no loose top-level settings.
 
@@ -107,6 +107,8 @@ Agent settings are nested under `agent`:
 Choose a model through the agent model picker before hard-coding `agent.model`; available identifiers depend on configured providers. A workspace can override the same domain-based schema in `.neoism/config.json`.
 
 ## Related files and overrides
+
+The global paths below use the Linux/macOS default `~/.config/neoism`. On Windows, substitute `%USERPROFILE%\AppData\Local\neoism` (for example, `%USERPROFILE%\AppData\Local\neoism\mcp.json`); config-directory overrides use the same relative paths.
 
 - `.neoism/workspace.json` stores per-workspace identity and notes settings and is written automatically.
 - `~/.config/neoism/mcp.json` and workspace `.neoism/mcp.json` can hold a bare MCP server map or `{ "mcp": {...} }`; each merges after `config.json` in the same scope. See [[Neoism Agent/MCP Servers]].

@@ -4,6 +4,8 @@ Scheduled workflows are agent prompts stored as Markdown files. YAML frontmatter
 
 ## Locations
 
+Global paths below use the Linux/macOS default `~/.config/neoism`. On Windows the global workflow directory is `%USERPROFILE%\AppData\Local\neoism\workflows\`.
+
 | Scope | Canonical directory |
 |---|---|
 | Project | `<workspace>/.neoism/workflows/` |

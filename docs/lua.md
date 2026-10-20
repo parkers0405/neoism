@@ -1,6 +1,6 @@
 # Lua customization
 
-Neoism loads `~/.config/neoism/init.lua` and modules from `~/.config/neoism/lua`. Without `init.lua`, native Rust behavior and appearance are unchanged. Reloads are transactional: an invalid config leaves the last working runtime active.
+Neoism loads `~/.config/neoism/init.lua` and modules from `~/.config/neoism/lua` on Linux/macOS. On Windows, these are `%USERPROFILE%\AppData\Local\neoism\init.lua` and `%USERPROFILE%\AppData\Local\neoism\lua`. All `~/.config/neoism` examples below use that Windows config directory instead; `NEOISM_CONFIG_HOME` overrides the config directory on all platforms. Without `init.lua`, native Rust behavior and appearance are unchanged. Reloads are transactional: an invalid config leaves the last working runtime active.
 
 ## Canonical plugin documentation
 

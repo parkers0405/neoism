@@ -31,7 +31,7 @@ File-tree/note creation and mutation and workspace/tab topology changes use work
 
 `setup` replaces this runtime snapshot's config patch. It recursively converts `_` in object keys to `-`, so `font_size` becomes `font-size`; it does not mutate array elements except by recursively normalizing contained objects.
 
-Personal `~/.config/neoism/init.lua` is a trusted user overlay loaded only when present. Package defaults are combined first and the personal runtime overlays them; invalid replacement candidates preserve the last working generation.
+Personal `~/.config/neoism/init.lua` on Linux/macOS, or `%USERPROFILE%\AppData\Local\neoism\init.lua` on Windows, is a trusted user overlay loaded only when present. `NEOISM_CONFIG_HOME` overrides its parent config directory on all platforms. Package defaults are combined first and the personal runtime overlays them; invalid replacement candidates preserve the last working generation.
 
 ### `neoism.ui.style(selector, patch)`
 

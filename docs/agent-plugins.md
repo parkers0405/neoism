@@ -81,7 +81,7 @@ For Lua, and for a process package with an empty `command`, `entrypoint` must be
 
 Agent discovery scans exactly these roots:
 
-1. `<platform config directory>/neoism/plugins` with location `"user"`.
+1. `<platform config directory>/neoism/plugins` with location `"user"`, resolved through `dirs::config_dir()`: normally `~/.config/neoism/plugins` on Linux and `%APPDATA%\neoism\plugins` (Roaming AppData) on Windows. This Agent package discovery root is separate from the desktop config root `%USERPROFILE%\AppData\Local\neoism`.
 2. `<workspace>/.neoism/plugins` with location `"workspace"`.
 
 Only immediate child directories containing `neoism-plugin.json` are candidates; discovery does not recursively search arbitrary descendants. Entries are sorted by directory name within each root, and the user root is visited before the workspace root.

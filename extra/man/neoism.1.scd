@@ -32,16 +32,15 @@ Neoism is a modern terminal emulator built with Rust and WebGPU that provides hi
 
 	Writes the config to a given path or the default location.
 
-	Neoism doesn't create the config file for you, but it looks for one in the
-	following locations on UNIX systems:
+	The default config location is selected in this order on Linux:
 
-		. _$NEOISM_CONFIG_HOME/config.toml_
-		. _$XDG_CONFIG_HOME/neoism/config.toml_
-		. _$HOME/.config/neoism/config.toml_
+		. _$NEOISM_CONFIG_HOME/config.json_
+		. _$XDG_CONFIG_HOME/neoism/config.json_
+		. _$HOME/.config/neoism/config.json_
 
-	On Windows, the config file will be looked for in:
+	On macOS, use _$NEOISM_CONFIG_HOME/config.json_ when set, otherwise _$HOME/.config/neoism/config.json_. On Windows, _$NEOISM_CONFIG_HOME/config.json_ also takes precedence over the default:
 
-		. _%USERPROFILE%\\AppData\\Local\\neoism\\config.toml_
+		. _%USERPROFILE%\\AppData\\Local\\neoism\\config.json_
 
 *--enable-log-file*
 
@@ -53,8 +52,7 @@ Neoism is a modern terminal emulator built with Rust and WebGPU that provides hi
 
 # CONFIGURATION
 
-Neoism uses TOML format for configuration. The configuration file is automatically
-reloaded when changed. See *neoism*(5) for detailed configuration documentation.
+Neoism uses JSONC (JSON with comments and trailing commas) for configuration. The configuration file is automatically reloaded when changed. See *neoism*(5) for detailed configuration documentation.
 
 # FEATURES
 

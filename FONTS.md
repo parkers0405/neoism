@@ -33,8 +33,7 @@ first-letters via:
 
 ## UI & editor fonts
 
-These are set in `~/.config/neoism/config.toml` under `[fonts]` (`family` + `size`), not the
-`::illuminate` syntax:
+These are set in `~/.config/neoism/config.json` on Linux/macOS or `%USERPROFILE%\AppData\Local\neoism\config.json` on Windows, under `appearance.fonts` (`family` + `size`), not the `::illuminate` syntax. `NEOISM_CONFIG_HOME` overrides the config directory on all platforms:
 
 - **Cascadia Code** (`cascadiacode`) — the default UI + terminal + editor font.
 - **Geist Mono** — bundled monospace (used on the web build).
@@ -49,8 +48,10 @@ These are set in `~/.config/neoism/config.toml` under `[fonts]` (`family` + `siz
   instead of ~10 MB and rasterises through swash's existing colour-glyph path.
 
 > Tip: change the editor/terminal font with:
-> ```toml
-> [fonts]
-> family = "cascadiacode"
-> size = 14.0
+> ```jsonc
+> {
+>   "appearance": {
+>     "fonts": { "family": "cascadiacode", "size": 14.0 }
+>   }
+> }
 > ```

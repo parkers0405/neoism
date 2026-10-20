@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use tokio::sync::{Mutex, Notify};
@@ -8,12 +9,20 @@ use crate::state::SessionRun;
 #[derive(Default)]
 pub(crate) struct SessionCoordinator {
     entries: Mutex<HashMap<String, Entry>>,
+    // Read and advanced only under entries. Global so removed session entries
+    // need no retained tombstone to detect idle -> run -> idle snapshot ABA.
+    ownership_generation: AtomicU64,
     prompt_admissions: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     #[cfg(test)]
     pub(crate) prompt_admission_started:
         Mutex<HashMap<String, tokio::sync::oneshot::Sender<()>>>,
     #[cfg(test)]
     pub(crate) fail_prompt_after_save: Mutex<std::collections::HashSet<String>>,
+    #[cfg(test)]
+    pub(crate) queue_snapshot_gates: Mutex<HashMap<String, (
+        tokio::sync::oneshot::Sender<()>,
+        tokio::sync::oneshot::Receiver<()>,
+    )>>,
     // Per-state, per-session handshake: tests must not infer a suspension point
     // from a broadcast event (a ready stub can finish in the same task poll).
     #[cfg(test)]
@@ -23,6 +32,7 @@ pub(crate) struct SessionCoordinator {
 
 struct Entry {
     run: Option<SessionRun>,
+    primary_message_id: Option<String>,
     worker: bool,
     pending_wake: bool,
     changed: Arc<Notify>,
@@ -32,6 +42,7 @@ impl Default for Entry {
     fn default() -> Self {
         Self {
             run: None,
+            primary_message_id: None,
             worker: false,
             pending_wake: false,
             changed: Arc::new(Notify::new()),
@@ -63,12 +74,24 @@ impl SessionCoordinator {
         session_id: &str,
         run: SessionRun,
     ) -> Result<(), SessionRun> {
+        self.try_start_prompt_run(session_id, run, None).await
+    }
+
+    pub(crate) async fn try_start_prompt_run(
+        &self,
+        session_id: &str,
+        run: SessionRun,
+        primary_message_id: Option<String>,
+    ) -> Result<(), SessionRun> {
         let mut entries = self.entries.lock().await;
         let entry = entries.entry(session_id.to_string()).or_default();
         if let Some(active) = &entry.run {
             return Err(active.clone());
         }
+        // Install identity with ownership, before Busy publication or handoff.
+        entry.primary_message_id = primary_message_id;
         entry.run = Some(run);
+        self.ownership_generation.fetch_add(1, Ordering::Relaxed);
         entry.changed.notify_waiters();
         Ok(())
     }
@@ -82,6 +105,8 @@ impl SessionCoordinator {
             return false;
         }
         entry.run = None;
+        entry.primary_message_id = None;
+        self.ownership_generation.fetch_add(1, Ordering::Relaxed);
         entry.changed.notify_waiters();
         if !entry.worker {
             entries.remove(session_id);
@@ -94,6 +119,10 @@ impl SessionCoordinator {
         let mut entries = self.entries.lock().await;
         let entry = entries.get_mut(session_id)?;
         let run = entry.run.take();
+        entry.primary_message_id = None;
+        if run.is_some() {
+            self.ownership_generation.fetch_add(1, Ordering::Relaxed);
+        }
         entry.changed.notify_waiters();
         if !entry.worker {
             entries.remove(session_id);
@@ -187,7 +216,30 @@ impl SessionCoordinator {
         let mut entries = self.entries.lock().await;
         let entry = entries.entry(session_id.to_string()).or_default();
         entry.run = Some(run);
+        entry.primary_message_id = None;
+        self.ownership_generation.fetch_add(1, Ordering::Relaxed);
         entry.changed.notify_waiters();
+    }
+
+    /// Run identity and the global ownership generation share one lock. The
+    /// generation detects complete idle -> run -> idle cycles across store I/O,
+    /// even if the session entry was removed, without taking admission locks.
+    pub(crate) async fn queue_identity(
+        &self,
+        session_id: &str,
+    ) -> (Option<(String, Option<String>)>, bool, u64) {
+        let entries = self.entries.lock().await;
+        let generation = self.ownership_generation.load(Ordering::Relaxed);
+        let Some(entry) = entries.get(session_id) else {
+            return (None, false, generation);
+        };
+        (
+            entry.run.as_ref().map(|run| {
+                (run.id.clone(), entry.primary_message_id.clone())
+            }),
+            entry.worker,
+            generation,
+        )
     }
 
     pub(crate) async fn worker_active(&self, session_id: &str) -> bool {
@@ -246,6 +298,40 @@ mod tests {
             started_at: 1,
             cancel: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    #[tokio::test]
+    async fn queue_identity_tracks_only_the_owned_primary() {
+        let coordinator = SessionCoordinator::default();
+        coordinator
+            .try_start_prompt_run("one", run("run-1"), Some("primary-1".into()))
+            .await
+            .unwrap();
+        let first = coordinator.queue_identity("one").await.0;
+        assert_eq!(first, Some(("run-1".into(), Some("primary-1".into()))));
+        coordinator
+            .try_start_prompt_run("one", run("run-2"), Some("primary-2".into()))
+            .await
+            .expect_err("a rejected claim must not replace primary identity");
+        assert_eq!(coordinator.queue_identity("one").await.0, first);
+        // Retain the Entry through teardown, exercising identity clearing too.
+        assert!(coordinator.wake("one").await);
+        assert!(coordinator.finish_run("one", "run-1").await);
+        let (identity, worker, generation) = coordinator.queue_identity("one").await;
+        assert_eq!((identity, worker), (None, true));
+        assert_eq!(generation, 2);
+        coordinator.try_start_run("one", run("run-3")).await.unwrap();
+        assert_eq!(
+            coordinator.queue_identity("one").await.0,
+            Some(("run-3".into(), None)),
+        );
+        assert_eq!(coordinator.queue_identity("one").await.2, 3);
+        assert!(coordinator.finish_run("one", "run-3").await);
+        assert!(!coordinator.finish_worker_cycle("one").await);
+        assert!(coordinator.entries.lock().await.is_empty());
+        // Recreating an entry must not reset the snapshot generation.
+        coordinator.try_start_run("one", run("run-4")).await.unwrap();
+        assert_eq!(coordinator.queue_identity("one").await.2, 5);
     }
 
     #[tokio::test]

@@ -997,11 +997,10 @@ impl NeoismAgentPane {
             // this runtime snapshot arrives. Open the existing trace as soon
             // as the snapshot confirms the child is ongoing.
             self.reveal_ongoing_session_trace();
-        } else {
+        } else if !self.status_timing.awaiting_admission() {
             self.terminal_idle_sessions.insert(session_id.to_string());
-            // Runtime status is authoritative. Idle sessions are omitted from
-            // the map, so explicitly settle any optimistic activity retained
-            // across a dropped event stream or history refresh.
+            // Once admission is confirmed, idle is authoritative. Before that,
+            // a new session can still be empty while its first POST is pending.
             self.queued_prompt_count = 0;
             self.queued_prompt_preview = None;
             self.reconcile_queue_handoff(None, false, None);
@@ -1389,6 +1388,12 @@ impl NeoismAgentPane {
                     |anchor| anchor.elapsed_ms_at(Instant::now()),
                 );
             return Some(elapsed as f32 / 1000.0);
+        }
+        // The footer labels this clock as model time. A local Windows submit
+        // has no provider duration until execution activity arrives; showing
+        // admission wall time here would jump backwards at that handoff.
+        if self.status_timing.pending_model_clock() && self.is_streaming() {
+            return Some(0.0);
         }
         // Display clock: raw clocks while active, then the held clock so
         // the timer/animation phase stays continuous through a transient

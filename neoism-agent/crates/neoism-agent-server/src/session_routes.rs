@@ -1098,8 +1098,21 @@ pub(crate) async fn session_fork(
 pub(crate) async fn session_status(
     State(state): State<AppState>,
 ) -> Json<HashMap<String, Value>> {
-    let statuses = state.inner.statuses.read().await.clone();
+    let mut statuses = state.inner.statuses.read().await.clone();
+    // The status cache is not admission authority. A committed first prompt
+    // must hydrate as Busy even before its worker publishes or if an older
+    // idle publisher removed the cache entry. Sample the queue before runs:
+    // a handoff between these reads remains represented by one or both.
+    let queued = state.inner.store.queued_session_ids().await.unwrap_or_default();
     let runs = state.inner.session_coordinator.active_runs().await;
+    for session_id in queued.iter().chain(runs.keys()) {
+        let status = statuses
+            .entry(session_id.clone())
+            .or_insert(neoism_agent_core::SessionStatus::Idle);
+        if matches!(status, neoism_agent_core::SessionStatus::Idle) {
+            *status = neoism_agent_core::SessionStatus::Busy { queue: None };
+        }
+    }
     let mut out = HashMap::new();
     for (session_id, status) in statuses {
         let mut value = json!(status);

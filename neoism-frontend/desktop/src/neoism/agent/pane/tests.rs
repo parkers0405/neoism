@@ -1472,6 +1472,78 @@ use neoism_ui::panels::agent_pane::state::side_panel::STATUS_LABEL_GRACE;
 use std::fs;
 
 #[test]
+fn new_draft_idle_hydration_cannot_settle_unconfirmed_primary() {
+    for windows_policy in [false, true] {
+        let mut pane = NeoismAgentPane::default();
+        pane.status_timing = status_timing::DesktopStatusTiming::for_test(windows_policy);
+        pane.note_prompt_admission("first");
+        pane.note_streaming(NeoismAgentStreamingState::Generating, None);
+        let started = pane.streaming_started_at;
+        // Session creation is visible before its first prompt POST is admitted.
+        pane.session_id = Some("root".into());
+        pane.apply_runtime_status_for_session("root", &HashMap::new());
+        assert!(pane.is_streaming());
+        assert_eq!(pane.streaming_started_at, started);
+        assert!(!pane.terminal_idle_sessions.contains("root"));
+        assert_eq!(pane.status_timing.queue_count(1, None), 0);
+        assert_eq!(pane.status_timing.queue_count(3, None), 2);
+        assert!(!pane.status_timing.dequeue(Some("followup")));
+        pane.apply_runtime_status_for_session("root", &HashMap::new());
+        assert_eq!(pane.streaming_started_at, started);
+        assert!(pane.status_timing.dequeue(Some("first")));
+        assert_eq!(pane.status_timing.queue_count(2, None), 2);
+        // Once the primary is admitted, real authoritative idle still settles.
+        pane.apply_runtime_status_for_session("root", &HashMap::new());
+        assert!(!pane.is_streaming());
+        assert!(pane.terminal_idle_sessions.contains("root"));
+    }
+}
+
+#[test]
+fn confirmed_admission_allows_idle_recovery_without_dequeue() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("root".into());
+    pane.note_prompt_admission("first");
+    pane.note_streaming(NeoismAgentStreamingState::Generating, None);
+    pane.status_timing.confirm_admission();
+    pane.apply_runtime_status_for_session("root", &HashMap::new());
+    assert!(!pane.is_streaming());
+    assert!(!pane.status_timing.awaiting_admission());
+}
+
+#[test]
+fn windows_first_model_clock_does_not_count_admission_wall_time() {
+    let mut pane = NeoismAgentPane::default();
+    pane.status_timing = status_timing::DesktopStatusTiming::for_test(true);
+    pane.note_prompt_admission("first");
+    pane.note_streaming(NeoismAgentStreamingState::Generating, None);
+    pane.streaming_started_at = Some(Instant::now() - Duration::from_secs(5));
+    assert_eq!(pane.streaming_label(), "Crafting");
+    assert_eq!(pane.streaming_elapsed_seconds(), Some(0.0));
+    pane.status_timing.confirm_admission();
+    assert_eq!(pane.streaming_elapsed_seconds(), Some(0.0));
+    pane.session_id = Some("root".into());
+    let activity = neoism_ui::panels::agent_pane::state::ExecutionActivityState {
+        execution_id: "execution".into(),
+        root_session_id: "root".into(),
+        revision: 1,
+        ..Default::default()
+    };
+    assert!(pane.apply_execution_activity(activity.clone()));
+    assert_eq!(pane.streaming_elapsed_seconds(), Some(0.0));
+    assert!(pane.apply_execution_activity(
+        neoism_ui::panels::agent_pane::state::ExecutionActivityState {
+            completed_ms: 2_000,
+            revision: 2,
+            ..activity.clone()
+        }
+    ));
+    assert_eq!(pane.streaming_elapsed_seconds(), Some(2.0));
+    assert!(!pane.apply_execution_activity(activity));
+    assert_eq!(pane.streaming_elapsed_seconds(), Some(2.0));
+}
+
+#[test]
 fn windows_admission_split_frames_and_batched_frames_converge() {
     for windows_policy in [false, true] {
         for batched in [false, true] {
@@ -4537,6 +4609,7 @@ fn inactive_prompt_success_reconciles_server_echo_without_duplicate_user() {
     pane.session_id = Some("root".to_string());
     pane.session_tree_root_id = Some("root".to_string());
     pane.messages = vec![NeoismAgentMessage::user("ship it")];
+    pane.remember_pending_user_prompt("ship it");
     pane.note_streaming(NeoismAgentStreamingState::Generating, None);
     pane.event_stream = Some(AgentSessionEventStream::connected_for_test("root"));
     let mut child = CachedAgentSession::live_only();

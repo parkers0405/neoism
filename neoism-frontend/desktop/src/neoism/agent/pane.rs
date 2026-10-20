@@ -979,6 +979,11 @@ impl AgentBackgroundSender {
     }
 }
 
+pub(super) struct PendingDraftUserPrompt {
+    message: NeoismAgentMessage,
+    echo_alias: Option<(String, String)>,
+}
+
 pub(crate) struct PendingPromptDispatch {
     pub(crate) reconcile_before_send: bool,
     pub(crate) origin_session_id: Option<String>,
@@ -1369,6 +1374,10 @@ pub struct NeoismAgentPane {
     /// delayed session-creation result cannot attach an older prompt to the
     /// replacement draft merely because both have `session_id == None`.
     pub(super) prompt_draft_id: u64,
+    /// Optimistic draft bubbles awaiting their first durable session identity.
+    /// Kept separately because switching conversations clears the visible draft.
+    pub(super) pending_draft_user_prompts:
+        HashMap<(String, u64), Vec<PendingDraftUserPrompt>>,
     pub(super) model_context_limit: Option<u64>,
     pub wordmark: NeoismWordmarkState,
     pub activity_animation: neoism_ui::primitives::wordmark_animation::WordmarkAnimation,
@@ -1651,6 +1660,7 @@ impl Default for NeoismAgentPane {
             pending_prompt_dispatches: VecDeque::new(),
             prompt_dispatch_in_flight: false,
             prompt_draft_id: 0,
+            pending_draft_user_prompts: HashMap::new(),
             model_context_limit: None,
             wordmark: NeoismWordmarkState::default(),
             activity_animation: Default::default(),

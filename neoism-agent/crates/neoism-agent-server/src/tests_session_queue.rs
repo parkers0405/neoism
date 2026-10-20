@@ -1,5 +1,198 @@
 use super::*;
 
+#[tokio::test]
+async fn queue_snapshot_retries_after_a_complete_idle_run_idle_cycle() {
+    let path = std::env::temp_dir().join(format!(
+        "neoism-queue-snapshot-aba-{}.db", Id::ascending(IdKind::Event)
+    ));
+    let state = AppState::open_database(path.clone()).await.unwrap();
+    let session: SessionInfo = response_json(
+        app(state.clone()).oneshot(request(Method::POST, "/v2/sessions", Some(json!({}))))
+            .await.unwrap(),
+    ).await;
+    let session_id = session.id.as_str();
+    for text in ["primary", "waiting followup"] {
+        let prompt: PromptRequest = serde_json::from_value(json!({
+            "parts": [{"type": "text", "text": text}]
+        })).unwrap();
+        state.inner.store.enqueue_prompt_with_delivery(session_id, &prompt, "queue")
+            .await.unwrap();
+    }
+    let (admission_id, primary, _, _) = state.inner.store
+        .peek_prompt_admission(session_id, false).await.unwrap().unwrap();
+    let (sampled_tx, sampled_rx) = tokio::sync::oneshot::channel();
+    let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
+    state.inner.session_coordinator.queue_snapshot_gates.lock().await
+        .insert(session_id.to_string(), (sampled_tx, resume_rx));
+    let reader = {
+        let state = state.clone();
+        let session_id = session_id.to_string();
+        tokio::spawn(async move {
+            crate::session_queue::session_queue(
+                axum::extract::State(state), axum::extract::Path(session_id),
+            ).await.unwrap().0
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(2), sampled_rx)
+        .await.expect("reader must sample the original queue").unwrap();
+    let before = state.inner.session_coordinator.queue_identity(session_id).await;
+    assert!(before.0.is_none());
+    // Complete the entire ownership cycle while the snapshot holds stale rows.
+    // No worker is spawned, so finish removes the coordinator Entry entirely.
+    let run = crate::session_run::start_session_run_for_prompt(
+        &state, &session.id, primary.message_id.as_ref().map(ToString::to_string),
+    ).await.unwrap();
+    state.inner.store.handoff_prompt_admission(&admission_id, session_id, &run.id)
+        .await.unwrap();
+    crate::session_run::finish_session_run(&state, session_id, &run.id).await;
+    let after = state.inner.session_coordinator.queue_identity(session_id).await;
+    assert!(after.0.is_none());
+    assert_ne!(before.2, after.2, "idle ABA must change the ownership generation");
+    resume_tx.send(()).unwrap();
+    let info = tokio::time::timeout(Duration::from_secs(2), reader)
+        .await.expect("reader must retry without deadlocking").unwrap();
+    let info = serde_json::to_value(info).unwrap();
+    assert_eq!(info["running"], false);
+    assert_eq!(info["count"], 1, "stale primary must not survive the retry");
+    assert_eq!(info["preview"], "waiting followup");
+    assert_eq!(info["items"].as_array().unwrap().len(), 1);
+    state.inner.store.close().await;
+    cleanup_sqlite_files(&path);
+}
+
+#[tokio::test]
+async fn status_hydration_includes_admitted_work_before_worker_start() {
+    let path = std::env::temp_dir().join(format!(
+        "neoism-admitted-status-{}.db", Id::ascending(IdKind::Event)
+    ));
+    let state = AppState::open_database(path.clone()).await.unwrap();
+    let app = app(state.clone());
+    let session: SessionInfo = response_json(
+        app.clone().oneshot(request(
+            Method::POST,
+            "/v2/sessions",
+            Some(json!({"model": {"providerId": "neoism", "id": "stub"}})),
+        )).await.unwrap(),
+    ).await;
+    let session_id = session.id.as_str();
+    let startup = state.inner.session_coordinator.prompt_admission_guard(session_id).await;
+    let response = tokio::time::timeout(
+        Duration::from_secs(2),
+        app.clone().oneshot(request(
+            Method::POST,
+            &format!("/v2/sessions/{session_id}/prompt-async"),
+            Some(json!({
+                "model": {"providerId": "neoism", "modelId": "stub"},
+                "parts": [{"type": "text", "text": "admitted before startup"}]
+            })),
+        )),
+    ).await.expect("POST admission must not wait for worker startup").unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert!(state.inner.session_coordinator.active_run(session_id).await.is_none());
+    // Check normal POST-success hydration, then missing and explicitly stale
+    // Idle cache entries. Durable admission must win in all three cases.
+    for cache in [None, Some(None), Some(Some(SessionStatus::Idle))] {
+        if let Some(cache) = cache {
+            let mut statuses = state.inner.statuses.write().await;
+            if let Some(status) = cache {
+                statuses.insert(session_id.to_string(), status);
+            } else {
+                statuses.remove(session_id);
+            }
+        }
+        let statuses: serde_json::Value = response_json(
+            app.clone().oneshot(request(Method::GET, "/v2/sessions/status", None))
+                .await.unwrap(),
+        ).await;
+        assert_eq!(statuses[session_id]["type"], "busy");
+        assert_eq!(statuses[session_id]["queue"]["count"], 1);
+        assert_eq!(statuses[session_id]["queue"]["preview"], "admitted before startup");
+    }
+    drop(startup);
+    wait_for_stub_queue_settlement(&state, session_id, 1).await;
+    state.inner.store.close().await;
+    cleanup_sqlite_files(&path);
+}
+
+/// Freeze the real startup boundary: ownership is claimed, but the durable
+/// recovery row has not yet been handed off. No worker/provider timing involved.
+#[tokio::test]
+async fn queue_snapshot_excludes_only_the_claimed_primary_before_handoff() {
+    async fn snapshot(state: &AppState, session_id: &str) -> serde_json::Value {
+        let info = tokio::time::timeout(
+            Duration::from_secs(2),
+            crate::session_queue::session_queue(
+                axum::extract::State(state.clone()),
+                axum::extract::Path(session_id.to_string()),
+            ),
+        )
+        .await
+        .expect("snapshots must not reacquire admission locks")
+        .unwrap();
+        serde_json::to_value(info.0).unwrap()
+    }
+
+    let path = std::env::temp_dir().join(format!(
+        "neoism-queue-snapshot-{}.db", Id::ascending(IdKind::Event)
+    ));
+    let state = AppState::open_database(path.clone()).await.unwrap();
+    let app = app(state.clone());
+    let session: SessionInfo = response_json(
+        app.oneshot(request(Method::POST, "/v2/sessions", Some(json!({}))))
+            .await.unwrap(),
+    ).await;
+    let session_id = session.id.as_str();
+    // Legacy requests without a message ID receive one when peeked. Snapshot
+    // identity must work for those too, not just IDs supplied by V2 clients.
+    let primary: PromptRequest = serde_json::from_value(json!({
+        "parts": [{"type": "text", "text": "same text"}]
+    })).unwrap();
+    state.inner.store.enqueue_prompt_with_delivery(session_id, &primary, "queue")
+        .await.unwrap();
+    let (admission_id, primary, _, _) = state.inner.store
+        .peek_prompt_admission(session_id, false).await.unwrap().unwrap();
+    assert_eq!(snapshot(&state, session_id).await["count"], 1);
+    let mut events = state.subscribe();
+    let run = crate::session_run::start_session_run_for_prompt(
+        &state, &session.id, primary.message_id.as_ref().map(ToString::to_string),
+    ).await.unwrap();
+    assert_eq!(state.inner.store.queued_prompt_count(session_id).await.unwrap(), 1);
+    let info = snapshot(&state, session_id).await;
+    assert_eq!(info["running"], true);
+    assert_eq!(info["count"], 0);
+    assert!(info["preview"].is_null());
+    while let Ok(event) = events.try_recv() {
+        if event.kind == event_type::SESSION_STATUS {
+            assert_eq!(event.properties["status"]["queue"]["count"], 0);
+        }
+    }
+
+    // Distinct identities, even identical text, are genuine waiting followups.
+    for delivery in ["queue", "steer"] {
+        let followup: PromptRequest = serde_json::from_value(json!({
+            "messageId": Id::ascending(IdKind::Message),
+            "parts": [{"type": "text", "text": "same text"}]
+        })).unwrap();
+        state.inner.store.enqueue_prompt_with_delivery(session_id, &followup, delivery)
+            .await.unwrap();
+    }
+    let prompt_guard = state.inner.session_coordinator.prompt_admission_guard(session_id).await;
+    let execution_guard = crate::execution_activity::admission_guard(&state, session_id).await;
+    let before = snapshot(&state, session_id).await;
+    assert_eq!(before["count"], 2);
+    assert_eq!(before["preview"], "same text");
+    assert_eq!(before["items"].as_array().unwrap().len(), 2);
+    state.inner.store.handoff_prompt_admission(&admission_id, session_id, &run.id)
+        .await.unwrap();
+    assert_eq!(snapshot(&state, session_id).await, before);
+    drop(execution_guard);
+    drop(prompt_guard);
+    crate::session_run::finish_session_run(&state, session_id, &run.id).await;
+    assert_eq!(snapshot(&state, session_id).await["count"], 2);
+    state.inner.store.close().await;
+    cleanup_sqlite_files(&path);
+}
+
 /// Exercise the actual queue worker and streaming provider, not noReply or a
 /// synthetic installed run. The prompt lock lets the burst case commit both
 /// requests before the worker can claim either one, without timing sleeps.

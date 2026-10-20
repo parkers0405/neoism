@@ -1989,6 +1989,10 @@ impl NeoismAgentPane {
                     if self.server != server {
                         continue;
                     }
+                    let draft_prompts = self
+                        .pending_draft_user_prompts
+                        .remove(&(server, origin_draft_id))
+                        .unwrap_or_default();
                     if self.session_id.is_none()
                         && self.prompt_draft_id == origin_draft_id
                     {
@@ -2009,6 +2013,36 @@ impl NeoismAgentPane {
                             .entry(session_id)
                             .or_insert_with(CachedAgentSession::live_only);
                         cached.state.title = session_title;
+                        // A session-less draft has no session-cache slot when the
+                        // user switches away. Bind its original bubbles exactly
+                        // once, before success or an empty history can arrive.
+                        for prompt in draft_prompts {
+                            if let Some(alias) = prompt.echo_alias {
+                                if !cached.prompt_echo_aliases.contains(&alias) {
+                                    cached.prompt_echo_aliases.push(alias);
+                                }
+                            }
+                            let message = prompt.message;
+                            if let Some(index) = cached
+                                .messages
+                                .iter()
+                                .position(|existing| existing.id == message.id)
+                            {
+                                // The durable echo may already be present. Merge
+                                // missing metadata, but do not re-register it.
+                                if cached.messages[index].author.is_none() {
+                                    cached.messages[index].author = message.author.clone();
+                                }
+                                cached.messages[index] = merge_part_message(
+                                    message,
+                                    cached.messages[index].clone(),
+                                );
+                            } else {
+                                cached.pending_user_prompts.push(message.text.clone());
+                                cached.messages.push(message);
+                            }
+                        }
+                        cached.invalidate_timeline_layout();
                     }
                     changed = true;
                 }
@@ -2018,7 +2052,7 @@ impl NeoismAgentPane {
                     origin_session_id,
                     origin_draft_id,
                     session_id,
-                    transcript_echo,
+                    transcript_echo: _transcript_echo,
                     event_stream,
                 }) => {
                     self.prompt_dispatch_in_flight = false;
@@ -2051,22 +2085,34 @@ impl NeoismAgentPane {
                             self.side_panel
                                 .set_viewed_session_id(Some(session_id.clone()));
                         }
-                        if let Some(event_stream) = event_stream {
-                            let mut event_stream = event_stream;
-                            if let Some(wake) = self.event_wake.clone() {
-                                event_stream.set_wake(wake);
+                        // Creation may already have installed the subscription.
+                        let already_bound =
+                            self.event_stream.as_ref().is_some_and(|stream| {
+                                stream.session_id() == session_id
+                                    && !stream.is_disconnected()
+                            });
+                        if !already_bound {
+                            if let Some(mut event_stream) = event_stream {
+                                if let Some(wake) = self.event_wake.clone() {
+                                    event_stream.set_wake(wake);
+                                }
+                                self.event_stream = Some(event_stream);
+                            } else {
+                                self.start_session_updates(&session_id);
                             }
-                            self.event_stream = Some(event_stream);
-                        } else {
-                            self.start_session_updates(&session_id);
                         }
-                        if let Some(echo) = transcript_echo {
-                            self.remember_pending_user_prompt(&echo);
+                        // Pending preservation is registered at optimistic insertion,
+                        // not here: an echo may already have resolved it before HTTP.
+                        if self.status_timing.awaiting_admission() {
+                            self.status_timing.confirm_admission();
+                            self.note_session_runtime_event(&session_id);
+                            self.hydrate_runtime_status_for_session(&session_id);
                         }
                     } else {
                         let cache_session_id = origin_session_id
                             .clone()
                             .unwrap_or_else(|| session_id.clone());
+                        self.note_session_runtime_event(&cache_session_id);
                         let cached = self
                             .session_cache
                             .entry(cache_session_id)
@@ -2075,9 +2121,9 @@ impl NeoismAgentPane {
                             cached.state.title = session_title;
                             cached.state.parent_id = None;
                         }
-                        if let Some(echo) = transcript_echo {
-                            cached.pending_user_prompts.push(echo);
-                        }
+                        // Session caching carries the synchronously registered
+                        // pending prompt; dispatch must not register it a second time.
+                        cached.runtime.status_timing.confirm_admission();
                         cached
                             .runtime
                             .note_streaming(NeoismAgentStreamingState::Generating, None);
@@ -2104,6 +2150,15 @@ impl NeoismAgentPane {
                         self.start_next_prompt_dispatch();
                         continue;
                     }
+                    if !uncertain && !queued && origin_session_id.is_none() {
+                        let key = (server.clone(), origin_draft_id);
+                        if let Some(mut prompts) = self.pending_draft_user_prompts.remove(&key) {
+                            prompts.pop();
+                            if !prompts.is_empty() {
+                                self.pending_draft_user_prompts.insert(key, prompts);
+                            }
+                        }
+                    }
                     let title = if uncertain {
                         "Delivery uncertain"
                     } else {
@@ -2118,6 +2173,11 @@ impl NeoismAgentPane {
                         && (origin_session_id.is_some()
                             || self.prompt_draft_id == origin_draft_id);
                     if is_active_origin {
+                        if !uncertain && !queued {
+                            // A worker-start failure cannot have reached the server.
+                            // Keep the visible failed bubble, but stop resurrecting it.
+                            self.pending_user_prompts.pop();
+                        }
                         if rollback_queue {
                             self.queued_prompt_count =
                                 self.queued_prompt_count.saturating_sub(1);
@@ -2131,6 +2191,9 @@ impl NeoismAgentPane {
                             .session_cache
                             .entry(origin_session_id.clone())
                             .or_insert_with(CachedAgentSession::live_only);
+                        if !uncertain && !queued {
+                            cached.pending_user_prompts.pop();
+                        }
                         if rollback_queue {
                             cached.runtime.queued_prompt_count =
                                 cached.runtime.queued_prompt_count.saturating_sub(1);
@@ -3331,6 +3394,37 @@ impl NeoismAgentPane {
     pub(crate) fn remember_pending_user_prompt(&mut self, text: &str) {
         if !text.trim().is_empty() {
             self.pending_user_prompts.push(text.to_string());
+            if self.session_id.is_none() {
+                if let Some(message) = self.messages.last().filter(|message| {
+                    !message.id.is_empty() && is_user_prompt(message, text)
+                }) {
+                    self.pending_draft_user_prompts
+                        .entry((self.server.clone(), self.prompt_draft_id))
+                        .or_default()
+                        .push(PendingDraftUserPrompt {
+                            message: message.clone(),
+                            echo_alias: self
+                                .prompt_echo_aliases
+                                .iter()
+                                .rev()
+                                .find(|(_, echo)| echo == text)
+                                .cloned(),
+                        });
+                }
+            }
+        }
+    }
+
+    pub(super) fn forget_last_pending_user_prompt(&mut self) {
+        self.pending_user_prompts.pop();
+        if self.session_id.is_none() {
+            let key = (self.server.clone(), self.prompt_draft_id);
+            if let Some(messages) = self.pending_draft_user_prompts.get_mut(&key) {
+                messages.pop();
+                if messages.is_empty() {
+                    self.pending_draft_user_prompts.remove(&key);
+                }
+            }
         }
     }
 

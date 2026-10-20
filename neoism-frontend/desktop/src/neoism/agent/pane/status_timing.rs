@@ -8,6 +8,7 @@ pub(super) struct DesktopStatusTiming {
     enabled: bool,
     local_run: bool,
     admission: PromptAdmission,
+    awaiting_admission: bool,
     server_started_at: Option<u64>,
     retired_execution: Option<String>,
     execution_wall: Option<(String, Instant, u64)>,
@@ -20,6 +21,7 @@ impl Default for DesktopStatusTiming {
             enabled: cfg!(target_os = "windows"),
             local_run: false,
             admission: PromptAdmission::default(),
+            awaiting_admission: false,
             server_started_at: None,
             retired_execution: None,
             execution_wall: None,
@@ -57,6 +59,19 @@ impl DesktopStatusTiming {
     pub(super) fn admit(&mut self, message_id: &str) {
         self.local_run = true;
         self.admission.admit(message_id);
+        self.awaiting_admission = true;
+    }
+
+    pub(super) fn awaiting_admission(&self) -> bool {
+        self.awaiting_admission
+    }
+
+    pub(super) fn confirm_admission(&mut self) {
+        self.awaiting_admission = false;
+    }
+
+    pub(super) fn pending_model_clock(&self) -> bool {
+        self.enabled && self.local_run
     }
 
     #[cfg(test)]
@@ -78,11 +93,16 @@ impl DesktopStatusTiming {
     }
 
     pub(super) fn dequeue(&mut self, message_id: Option<&str>) -> bool {
-        self.admission.dequeue(message_id)
+        let primary = self.admission.dequeue(message_id);
+        if primary {
+            self.confirm_admission();
+        }
+        primary
     }
 
     pub(super) fn settle(&mut self) {
         self.local_run = false;
+        self.awaiting_admission = false;
         self.admission.settle();
         self.server_started_at = None;
     }

@@ -257,33 +257,72 @@ pub(crate) async fn queue_status_snapshot(
     json!({"count": info.count, "preview": info.preview, "compactionQueued": info.compaction_queued})
 }
 
+pub(crate) async fn visible_prompt_queue(
+    state: &AppState,
+    session_id: &str,
+) -> (usize, Option<String>) {
+    let info = session_queue_info(state, session_id).await;
+    (info.count, info.preview)
+}
+
 async fn session_queue_info(state: &AppState, session_id: &str) -> SessionQueueInfo {
-    let items = state
-        .inner
-        .store
-        .list_queued_prompt_entries(session_id)
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|(request, delivery)| (delivery != "continue").then_some(request))
+    // Never take admission locks here: publishers also call us while holding
+    // them. Read ownership on both sides of I/O instead. The generation also
+    // invalidates rows if a whole run starts and finishes between observations.
+    let (entries, identity, worker, compaction_queued) = loop {
+        let (before, _, before_generation) = state
+            .inner
+            .session_coordinator
+            .queue_identity(session_id)
+            .await;
+        let entries = state
+            .inner
+            .store
+            .list_queued_prompt_entries(session_id)
+            .await
+            .unwrap_or_default();
+        let compaction_queued = state
+            .inner
+            .store
+            .compaction_queued(session_id)
+            .await
+            .unwrap_or(false);
+        #[cfg(test)]
+        {
+            // One-shot handshake after reading rows, without holding any lock
+            // while the test drives a complete ownership cycle.
+            let gate = state.inner.session_coordinator.queue_snapshot_gates
+                .lock().await.remove(session_id);
+            if let Some((sampled, resume)) = gate {
+                let _ = sampled.send(());
+                let _ = resume.await;
+            }
+        }
+        let (after, worker, after_generation) = state
+            .inner
+            .session_coordinator
+            .queue_identity(session_id)
+            .await;
+        if before_generation == after_generation && before == after {
+            break (entries, after, worker, compaction_queued);
+        }
+    };
+    let primary_message_id = identity.as_ref().and_then(|(_, primary)| primary.as_deref());
+    let items = entries.into_iter()
+        .filter_map(|(request, delivery)| {
+            let is_primary = primary_message_id.is_some_and(|primary| {
+                request.message_id.as_ref().is_some_and(|id| id.as_str() == primary)
+            });
+            (delivery != "continue" && !is_primary).then_some(request)
+        })
         .collect::<Vec<_>>();
-    let running = state
-        .inner
-        .session_coordinator
-        .active_run(session_id)
-        .await
-        .is_some();
-    let worker = state
-        .inner
-        .session_coordinator
-        .worker_active(session_id)
-        .await;
-    let compaction_queued = state
-        .inner
-        .store
-        .compaction_queued(session_id)
-        .await
-        .unwrap_or(false);
+    // Preview and count must describe the same rows, not a second store read.
+    let preview = if compaction_queued {
+        Some("Compaction queued".to_string())
+    } else {
+        items.first().and_then(queued_prompt_text)
+    };
+    let running = identity.is_some();
     let mut items = items
         .into_iter()
         .enumerate()
@@ -301,7 +340,7 @@ async fn session_queue_info(state: &AppState, session_id: &str) -> SessionQueueI
         running,
         worker,
         compaction_queued,
-        preview: queued_prompt_preview(state, session_id).await,
+        preview,
         items,
     }
 }
@@ -431,7 +470,7 @@ pub(crate) async fn publish_prompt_queue_status(
         .queued_prompt_count(session_id)
         .await
         .unwrap_or(queue_len);
-    let visible_queue_len = queued_prompt_count(state, session_id).await;
+    let (visible_queue_len, preview) = visible_prompt_queue(state, session_id).await;
     let status = if active_worker
         || total_queue_len > 0
         || state
@@ -441,10 +480,7 @@ pub(crate) async fn publish_prompt_queue_status(
             .await
             .is_some()
     {
-        busy_status(
-            visible_queue_len,
-            queued_prompt_preview(state, session_id).await,
-        )
+        busy_status(visible_queue_len, preview)
     } else {
         SessionStatus::Idle
     };

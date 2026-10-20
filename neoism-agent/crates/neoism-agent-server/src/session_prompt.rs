@@ -34,7 +34,7 @@ use crate::session_context::{
     provider_messages_for_session_with_plugins, title_from_parts,
 };
 use crate::session_retry;
-use crate::session_run::{finish_session_run, start_session_run, SessionRunGuard};
+use crate::session_run::{finish_session_run, SessionRunGuard};
 use crate::state::AppState;
 use crate::tool_selection::provider_tool_map;
 use crate::{permission, plugin, provider_tools_for_agent};
@@ -481,9 +481,13 @@ pub(crate) async fn append_prompt_admission(
         }
         return Ok(user_message);
     }
-    let run = start_session_run(state, &session_id)
-        .await
-        .map_err(|_| ApiError::conflict(SESSION_RUNNING_CONFLICT))?;
+    let run = crate::session_run::start_session_run_for_prompt(
+        state,
+        &session_id,
+        admission.map(|_| message_id.to_string()),
+    )
+    .await
+    .map_err(|_| ApiError::conflict(SESSION_RUNNING_CONFLICT))?;
     let run_id = run.id.clone();
     let cancellation = run.cancel.clone();
     let mut run_guard = SessionRunGuard::new(state, &session_id_text, &run_id);

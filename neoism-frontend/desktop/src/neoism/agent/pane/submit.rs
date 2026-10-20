@@ -333,6 +333,9 @@ impl NeoismAgentPane {
             ));
             message.images = self.input_images();
             self.messages.push(message);
+            // History can arrive before the worker reports PromptDispatched.
+            // Register now so reconciliation retains this exact bubble.
+            self.remember_pending_user_prompt(&text);
             self.mark_timeline_message_dirty_at(self.messages.len().saturating_sub(1));
         }
         self.abort_requested_at = None;
@@ -360,6 +363,8 @@ impl NeoismAgentPane {
             Err(error) => {
                 self.system_message("Prompt failed", error);
                 if !was_streaming {
+                    // This synchronous failure never admitted the new prompt.
+                    self.forget_last_pending_user_prompt();
                     self.note_streaming(NeoismAgentStreamingState::Idle, None);
                 }
             }
@@ -387,6 +392,7 @@ impl NeoismAgentPane {
             self.messages.push(
                 NeoismAgentMessage::user(prompt.clone()).with_id(message_id.clone()),
             );
+            self.remember_pending_user_prompt(&prompt);
             self.mark_timeline_message_dirty_at(self.messages.len().saturating_sub(1));
             if let Some(session_id) = self.session_id.as_ref() {
                 self.terminal_idle_sessions.remove(session_id);
@@ -405,6 +411,8 @@ impl NeoismAgentPane {
             Err(error) => {
                 self.system_message("Prompt failed", error);
                 if !was_streaming {
+                    // This synchronous failure never admitted the new prompt.
+                    self.forget_last_pending_user_prompt();
                     self.note_streaming(NeoismAgentStreamingState::Idle, None);
                 }
             }

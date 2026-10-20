@@ -70,6 +70,14 @@ pub(crate) async fn start_session_run(
     state: &AppState,
     session_id: &Id,
 ) -> Result<SessionRun, SessionRun> {
+    start_session_run_for_prompt(state, session_id, None).await
+}
+
+pub(crate) async fn start_session_run_for_prompt(
+    state: &AppState,
+    session_id: &Id,
+    primary_message_id: Option<String>,
+) -> Result<SessionRun, SessionRun> {
     let _execution_admission =
         crate::execution_activity::admission_guard(state, session_id.as_str()).await;
     let run = SessionRun {
@@ -81,7 +89,7 @@ pub(crate) async fn start_session_run(
     state
         .inner
         .session_coordinator
-        .try_start_run(&session_key, run.clone())
+        .try_start_prompt_run(&session_key, run.clone(), primary_message_id)
         .await?;
     let _ = state.inner.store.start_run(&run.id, &session_key).await;
     register_session_busy(state, &session_key).await;
@@ -90,8 +98,9 @@ pub(crate) async fn start_session_run(
 
 /// Publish Busy after the caller has admitted its run; never acquires admission.
 pub(crate) async fn register_session_busy(state: &AppState, session_id: &str) {
-    let queue_count = queued_prompt_count(state, session_id).await;
-    let status = busy_status(queue_count, queued_prompt_preview(state, session_id).await);
+    let (queue_count, preview) =
+        crate::session_queue::visible_prompt_queue(state, session_id).await;
+    let status = busy_status(queue_count, preview);
     state
         .inner
         .statuses

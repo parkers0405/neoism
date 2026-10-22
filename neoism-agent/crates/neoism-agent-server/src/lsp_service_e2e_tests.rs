@@ -118,8 +118,17 @@ fn cold_navigation_cache_never_waits_for_root_or_launch_discovery() {
     let file = workspace.path.join("main.ts");
     fs::write(&file, "const x = 1").unwrap();
     fs::write(workspace.path.join("Cargo.toml"), "[workspace]\n").unwrap();
-    let base = workspace.runtime.adapters_for_root(&workspace.path)
-        .into_iter().next().expect("built-in adapter");
+    // Minimal services have no built-in language registry. Declare the adapter
+    // through workspace configuration, just like the other protocol fixtures.
+    // This executable must never be launched by a cold cache lookup.
+    write_lsp_config_with_extension(
+        &workspace.path,
+        &workspace.path.join("must-not-launch"),
+        &workspace.path.join("must-not-create.log"),
+        "serve",
+        "ts",
+    );
+    let base = configured_test_spec(&workspace.runtime, &workspace.path);
     for strategy in [
         WorkspaceRootStrategy::CargoMetadata { manifest: "Cargo.toml".into() },
         WorkspaceRootStrategy::NearestMarker,

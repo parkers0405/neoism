@@ -5,6 +5,16 @@
 
 use serde::{Deserialize, Serialize};
 
+/// One maximal contiguous Add/Remove run, excluding EOF metadata.
+/// Starts are zero-based insertion anchors; text has no LF terminator or optional CR.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GitChangeBlock {
+    pub old_start: usize,
+    pub new_start: usize,
+    pub old_lines: Vec<String>,
+    pub new_lines: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum GitClientMessage {
     /// Read-only HEAD attribution. Path is workspace-relative or an absolute host path.
@@ -22,6 +32,8 @@ pub enum GitClientMessage {
     Diff {
         path: Option<String>,
     },
+    /// Immutable commit metadata and first-parent patches. Read permission only.
+    ReadCommit { revision: String },
     Log {
         max_count: Option<u32>,
     },
@@ -34,6 +46,8 @@ pub enum GitClientMessage {
     /// per-file add/del counts AND the real staged bit derived from
     /// `git status --porcelain=v1` (index column non-empty).
     ChangedFiles,
+    /// Full UTF-8 HEAD baseline, at most 2 MiB; absent HEAD/path yields empty text.
+    ReadBase { path: String },
     /// `git add -- <path>`. Replies with a refreshed [`GitServerMessage::ChangedFiles`].
     Stage {
         path: String,
@@ -43,6 +57,15 @@ pub enum GitClientMessage {
     Unstage {
         path: String,
     },
+    /// Restore one tracked working-tree file from the index, preserving staged changes.
+    /// Hosts must confirm this destructive action before sending it.
+    /// Untracked files are refused; replies with refreshed `ChangedFiles`.
+    Restore {
+        path: String,
+    },
+    /// Apply exactly one HEAD→worktree selection to the index, or restore it
+    /// from the index. Hosts must confirm restore. Replies with ChangedFiles.
+    ApplyBlock { path: String, block: GitChangeBlock, restore: bool },
     /// `git commit -m <message>`. Replies with a refreshed `ChangedFiles`.
     Commit {
         message: String,
@@ -61,6 +84,8 @@ pub enum GitClientMessage {
     Pull,
     /// `git push`. Replies with refreshed `ChangedFiles`.
     Push,
+    /// Publish the current branch and configure its upstream.
+    Publish,
     /// Per-file patch text with desktop `load_diff` parity: `git diff
     /// HEAD --no-color -- <path>` for tracked files, `git diff
     /// --no-index /dev/null <path>` for untracked ones — so a staged
@@ -80,17 +105,47 @@ impl GitClientMessage {
             self,
             GitClientMessage::Stage { .. }
                 | GitClientMessage::Unstage { .. }
+                | GitClientMessage::Restore { .. }
+                | GitClientMessage::ApplyBlock { .. }
                 | GitClientMessage::Commit { .. }
                 | GitClientMessage::Checkout { .. }
                 | GitClientMessage::Fetch
                 | GitClientMessage::Pull
                 | GitClientMessage::Push
+                | GitClientMessage::Publish
         )
+    }
+}
+
+#[cfg(test)]
+mod restore_tests {
+    use super::*;
+
+    #[test]
+    fn baseline_wire_contract_is_read_only() {
+        let json = r#"{"ReadBase":{"path":"src/file.rs"}}"#;
+        let message: GitClientMessage = serde_json::from_str(json).unwrap();
+        assert!(!message.is_mutation());
+        assert_eq!(serde_json::to_string(&message).unwrap(), json);
+        let reply = GitServerMessage::BaseFile { path: "src/file.rs".into(), text: "exact\r\n\n".into() };
+        let encoded = serde_json::to_string(&reply).unwrap();
+        assert!(matches!(serde_json::from_str::<GitServerMessage>(&encoded).unwrap(), GitServerMessage::BaseFile { text, .. } if text == "exact\r\n\n"));
+    }
+
+    #[test]
+    fn restore_wire_contract_and_mutation_gate() {
+        let json = r#"{"Restore":{"path":"src/file.rs"}}"#;
+        let message: GitClientMessage = serde_json::from_str(json).unwrap();
+        assert!(matches!(&message, GitClientMessage::Restore { path } if path == "src/file.rs"));
+        assert!(message.is_mutation());
+        assert_eq!(serde_json::to_string(&message).unwrap(), json);
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum GitServerMessage {
+    CommitDetail { detail: GitCommitDetail },
+    BaseFile { path: String, text: String },
     Blame {
         snapshot: GitBlameSnapshot,
     },
@@ -139,6 +194,9 @@ pub enum GitServerMessage {
         /// Current branch after the operation (`None` when detached /
         /// not a repo).
         branch: Option<String>,
+        /// Configured upstream ref (also present when its remote ref is missing).
+        #[serde(default)]
+        upstream: Option<String>,
         /// stderr of a failed mutation; `None` on success and for
         /// plain refreshes.
         error: Option<String>,
@@ -260,6 +318,22 @@ pub struct GitRepoStatus {
     pub workspace_root: String,
     pub repo_root: Option<String>,
     pub branch: Option<String>,
+    #[serde(default)]
+    pub upstream: Option<String>,
     pub files: Vec<GitFileChange>,
     pub error: Option<String>,
+}
+
+/// A commit snapshot, independent of the current index and working tree.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitCommitDetail {
+    pub sha: String,
+    pub author: String,
+    pub email: String,
+    pub timestamp: i64,
+    pub offset_minutes: i32,
+    pub message: String,
+    /// First-parent diff; root commits are compared with the empty tree.
+    pub files: Vec<GitFileChange>,
+    pub diffs: Vec<GitFileDiff>,
 }

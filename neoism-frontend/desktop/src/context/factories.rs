@@ -84,6 +84,9 @@ pub fn create_dead_context<T: neoism_backend::event::EventListener>(
         neoism_tags: None,
         neoism_extensions: None,
         neoworld: None,
+        git_diff_view: None,
+        git_diff_cache_generation: None,
+        git_diff_load_deadline: None,
     }
 }
 
@@ -216,6 +219,23 @@ pub fn create_neoism_extensions_context<T: neoism_backend::event::EventListener>
         create_dead_context(event_proxy, window_id, route_id, rich_text_id, dimension);
     context.neoism_extensions =
         Some(crate::workspace::extensions::NeoismExtensionsPane::new());
+    context
+}
+
+pub fn create_git_diff_context<T: neoism_backend::event::EventListener>(
+    event_proxy: T,
+    window_id: WindowId,
+    rich_text_id: usize,
+    dimension: ContextDimension,
+    root: PathBuf,
+    path: PathBuf,
+) -> Context<T> {
+    let route_id = ROUTE_ID_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let mut context =
+        create_dead_context(event_proxy, window_id, route_id, rich_text_id, dimension);
+    context.git_diff_view = Some(neoism_ui::panels::git_diff_view::GitDiffView::new(
+        root, path,
+    ));
     context
 }
 

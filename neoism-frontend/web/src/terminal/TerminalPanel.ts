@@ -161,9 +161,15 @@ const WEB_SHADER_FILTERS = [
 // the wasm bridge's own counter range so the two never collide.
 let nextFileReadRequestId = 0x4000_0000;
 
-type BufferTabKind = "terminal" | "file" | "neoism-agent";
+type BufferTabKind = "terminal" | "file" | "neoism-agent" | "chrome-extensions" | "chrome-neoworld" | "chrome-git-diff";
 
 interface WebBufferTab {
+  sourceCode?: boolean;
+  chromePage?: "git_diff";
+  diffRoot?: string;
+  diffCommit?: string;
+  diffPath?: string;
+  diffRouteId?: number;
   title: string;
   kind: BufferTabKind;
   path?: string;
@@ -748,6 +754,9 @@ export class TerminalPanel {
       // optional methods are no-ops thanks to the `?` chain in
       // `SearchService.install()`.
       if (this.wasmAdapter) {
+        const gitAdapter = this.wasmAdapter;
+        gitAdapter.gitPanelContext = () => this.wasmAdapter === gitAdapter
+          ? this.options.workspaceRoot ?? "" : null;
         try {
           this.options.onBridgeReady?.(
             this.wasmAdapter as unknown as ServiceRegistryBridge,
@@ -1481,6 +1490,8 @@ export class TerminalPanel {
   }
 
   dispose(): void {
+    if (this.wasmAdapter) this.wasmAdapter.gitPanelContext = () => null;
+    this.pendingDiffSaveStages.clear();
     this.clearConversationNavigation();
     this.fileBrowserTarget = null;
     this.fileBrowserQueue = [];
@@ -1720,6 +1731,7 @@ export class TerminalPanel {
       payload.Error.buffer_id &&
       payload.Error.message.startsWith("save failed")
     ) {
+      this.pendingDiffSaveStages?.delete(payload.Error.buffer_id);
       const pending = this.vimExSaveClose.peek();
       if (pending?.bufferId === payload.Error.buffer_id) {
         this.vimExSaveClose.cancel(pending.tabKey);
@@ -3539,6 +3551,52 @@ export class TerminalPanel {
     this.scheduleDraw();
   }
 
+  private pendingDiffSaveStages = new Map<string, { root: string; path: string; adapter: TerminalAdapter | null; scope: string; revision?: string; block?: import("../workspace/types").GitChangeBlock }[]>();
+  private nextGitDiffRouteId = 1;
+
+  private openGitCommitTab(root: string, detail: import("../workspace/types").GitCommitDetail): void {
+    let index = this.bufferTabs.findIndex(tab => tab.chromePage === "git_diff" && tab.diffRoot === root && tab.diffCommit === detail.sha);
+    if (index < 0) {
+      index = this.bufferTabs.length;
+      this.bufferTabs.push({ title: `${detail.sha.slice(0, 7)} - ${detail.message.split("\n")[0]}`, kind: "chrome-git-diff", chromePage: "git_diff", diffRoot: root, diffCommit: detail.sha, diffPath: "", diffRouteId: this.nextGitDiffRouteId++ });
+    }
+    this.activeTabIndex = index;
+    this.assignActiveTabToFocusedEditorPane();
+    this.replayBufferTabs();
+    this.wasmAdapter?.setGitCommitView?.(this.bufferTabs[index].diffRouteId!, root, JSON.stringify(detail));
+    this.activateCurrentTabContents(false);
+    this.scheduleDraw();
+  }
+
+  private openGitDiffTab(root: string, path: string): void {
+    const existing = this.bufferTabs.findIndex(tab =>
+      tab.chromePage === "git_diff" && tab.diffRoot === root && !tab.diffCommit);
+    if (existing >= 0) {
+      this.bufferTabs[existing].diffPath = path;
+      this.activeTabIndex = existing;
+    } else {
+      this.bufferTabs.push({
+        title: "Uncommitted Changes",
+        kind: "chrome-git-diff",
+        chromePage: "git_diff",
+        diffRoot: root,
+        diffPath: path,
+        diffRouteId: this.nextGitDiffRouteId++,
+      });
+      this.activeTabIndex = this.bufferTabs.length - 1;
+    }
+    // Diff metadata deliberately does not use `path`: deleted files work,
+    // editable tabs can coexist, and .md patches cannot enter Live Preview.
+    this.assignActiveTabToFocusedEditorPane();
+    this.replayBufferTabs();
+    // This is explicit sidebar navigation. Normal tab replay deliberately does
+    // not reveal diffPath, preserving review scroll and collapsed sections.
+    const route = this.bufferTabs[this.activeTabIndex].diffRouteId;
+    if (route !== undefined) this.wasmAdapter?.revealGitDiffFile?.(route, path);
+    this.activateCurrentTabContents(false);
+    this.scheduleDraw();
+  }
+
   /** Fetch the daemon host's read-only extensions inventory and seed
    *  the shared Extensions page. Statuses reflect the DAEMON machine;
    *  install/uninstall stay desktop-host actions. */
@@ -3697,11 +3755,140 @@ export class TerminalPanel {
   /** Note rows / git-panel rows the user activated — same open
    *  pipeline as file-tree picks. */
   private drainSidePanelOpens(): void {
+    const stages = [
+      ...(this.wasmAdapter?.takeGitDiffSaveStages?.() ?? []),
+      ...(this.wasmAdapter?.takeGitDiffBlockSaveStages?.() ?? []),
+    ];
+    for (const stage of stages) {
+      const bufferId = this.activeCodeBufferId();
+      if (!bufferId || bufferId !== presenceBufferIdForPath(stage.absolute, this.options.workspaceRoot)) {
+        this.pushInAppNotification("Not staged", "Save this file's source edits before staging.", "error");
+        continue;
+      }
+      const revision = "revision" in stage ? stage.revision : this.wasmAdapter?.editorRevision?.();
+      if ("block" in stage && (revision === undefined || revision !== this.wasmAdapter?.editorRevision?.())) {
+        this.pushInAppNotification("Not staged", "The source changed after selecting this block. Select it again.", "error");
+        continue;
+      }
+      const pending = this.pendingDiffSaveStages.get(bufferId) ?? [];
+      if (pending.length) {
+        this.pushInAppNotification("Not staged", "A source save/stage is already pending for this file. Wait for it before selecting another block.", "error");
+        continue;
+      }
+      pending.push({root: stage.root, path: stage.path, adapter: this.wasmAdapter, scope: this.options.workspaceRoot ?? "", revision, ...("block" in stage ? {block: stage.block} : {})});
+      this.pendingDiffSaveStages.set(bufferId, pending);
+      if (pending.length === 1 && !this.saveActiveEditorPane()) this.pendingDiffSaveStages.delete(bufferId);
+    }
+    for (const source of this.wasmAdapter?.drainGitDiffSourceOpens?.() ?? []) {
+      this.openGitDiffSource(source);
+    }
+    const edit = this.wasmAdapter?.takeGitDiffEditRequest?.();
+    if (edit) this.beginGitDiffEdit(edit);
+    const commitRows = this.wasmAdapter?.drainGitCommitOpens?.();
+    if (Array.isArray(commitRows)) {
+      for (const row of commitRows) if (typeof row?.root === "string" && row.detail?.sha) this.openGitCommitTab(row.root, row.detail);
+    }
+    const sha = this.wasmAdapter?.takeGitCommitCopy?.();
+    if (sha) void this.writeClipboard(sha);
+    const diffs = this.wasmAdapter?.drainGitDiffOpens?.();
+    if (Array.isArray(diffs)) {
+      for (const row of diffs) {
+        if (row && typeof row.root === "string" && typeof row.path === "string") {
+          this.openGitDiffTab(row.root, row.path);
+        }
+      }
+    }
     const opens = this.wasmAdapter?.drainPanelOpenPaths?.();
     if (!opens || !Array.isArray(opens) || opens.length === 0) return;
     this.openActivatedPaths(opens.filter(
       (raw): raw is string => typeof raw === "string" && raw.length > 0,
     ));
+  }
+
+  /** A gutter source-open leaves review. Publish tab identity before activating
+   * the canonical pane: activating first can leave Chrome on the review page. */
+  private openGitDiffSource(source: { path: string; line: number; column: number }): void {
+    const adapter = this.wasmAdapter;
+    if (!adapter) return;
+    this.pumpCrdtOutbox();
+    this.pumpCodeCrdt();
+    this.syncActiveTabModified();
+    const identity = this.tabIdentityPath(source.path);
+    const existingOwner = this.bufferTabs.find((tab) => tab.kind === "file" && !!tab.path
+      && this.tabIdentityPath(tab.path) === identity);
+    const special = isMarkdownPath(source.path) || /\.(ipynb|neodraw)$/i.test(source.path);
+    const policy = adapter.sourceEditorPolicy?.(existingOwner?.path ?? source.path);
+    if (policy === "unsupported" || (special && existingOwner?.modified && !existingOwner.sourceCode)) {
+      this.pushInAppNotification("Cannot navigate source", `Exact source navigation to ${source.path}:${source.line + 1}:${source.column + 1} is unsupported while a special editor owns this file. Existing edits were left unchanged.`, "error");
+      return;
+    }
+    this.explicitlyReopenTabKey(`file:${identity}`);
+    let index = this.bufferTabs.findIndex((tab) =>
+      tab.kind === "file" && !!tab.path && this.tabIdentityPath(tab.path) === identity);
+    if (index < 0) {
+      this.bufferTabs.push({ title: source.path.split(/[\\/]/).pop() || source.path, kind: "file", path: source.path });
+      index = this.bufferTabs.length - 1;
+    }
+    const path = this.bufferTabs[index].path!;
+    this.bufferTabs[index].sourceCode = true;
+    this.activeTabIndex = index;
+    // setBufferTabs must precede source activation, including for a newly
+    // created tab; setActiveTab alone still sees the old review metadata.
+    this.replayBufferTabs();
+    const retained = adapter.activateSourceEditor?.(index, path, source.line, source.column) === true;
+    this.ensureSessionLayoutState();
+    this.assignActiveTabToFocusedEditorPane();
+    adapter.focusEditorInput?.();
+    this.setMarkdownLayerVisible(false);
+    if (!retained) this.requestFileContent(path, index);
+    this.openFileTabContent(path);
+    this.pumpCodeCrdt();
+    if (this.syncActiveTabModified()) this.replayBufferTabs();
+    this.scheduleDraw();
+  }
+
+  /** The review owns presentation only; source bytes and edits belong to
+   * the ordinary CodePane and daemon document, never to patch rows. */
+  private beginGitDiffEdit(edit: { path: string; line: number; column: number }): void {
+    const adapter = this.wasmAdapter;
+    const index = this.activeTabIndex;
+    const tab = this.bufferTabs[index];
+    if (!adapter || tab?.chromePage !== "git_diff") return;
+    this.pumpCrdtOutbox();
+    this.pumpCodeCrdt();
+    const activate = (): boolean => {
+      if (this.wasmAdapter !== adapter || this.activeTabIndex !== index || this.bufferTabs[index] !== tab) return false;
+      if (!adapter.activateGitDiffEditor?.(edit.path, edit.line, edit.column)) return false;
+      const externalId = this.activePaneExternalId();
+      if (externalId !== null) this.bindEditorSurface(externalId, edit.path);
+      this.pumpCodeCrdt();
+      this.scheduleDraw();
+      return true;
+    };
+    if (activate()) return;
+    const requestId = nextFileReadRequestId++;
+    this.pendingServiceMappers.set(requestId, (payload) => {
+      if ("Error" in payload) {
+        this.pushInAppNotification("Cannot edit diff", payload.Error.message, "error");
+        return null;
+      }
+      if (!("FileContent" in payload)) return null;
+      if (this.wasmAdapter !== adapter || this.activeTabIndex !== index || this.bufferTabs[index] !== tab) return null;
+      try {
+        // Another open may have loaded this path while the read was in flight.
+        if (activate()) return null;
+        const text = new TextDecoder("utf-8", { fatal: true }).decode(new Uint8Array(payload.FileContent.bytes));
+        if (text.includes("\u0000")) throw new Error("Binary files cannot be edited in review.");
+        adapter.editorOpenFile?.(index, edit.path, text);
+        activate();
+        return text.length;
+      } catch (error) {
+        this.pushInAppNotification("Cannot edit diff", String(error), "error");
+        return null;
+      }
+    });
+    this.options.client.sendFiles(requestId,
+      { ReadFile: { path: this.toDaemonWorkspacePath(edit.path) } }, this.filesRootForPath(edit.path));
   }
 
   /** Fetch `git status` + whole-repo diff from the daemon and push
@@ -4693,6 +4880,7 @@ export class TerminalPanel {
 
   private tabLifecycleKey(tab: WebBufferTab | undefined): string | null {
     if (!tab) return null;
+    if (tab.chromePage === "git_diff") return `git_diff:${tab.diffRoot}:${tab.diffCommit ?? "worktree"}`;
     if (tab.kind === "terminal") return tab.sessionId ? `terminal:${tab.sessionId}` : null;
     if (tab.kind === "file" && tab.path) return `file:${this.tabIdentityPath(tab.path)}`;
     if (tab.kind === "neoism-agent" && tab.neoismAgentRouteId !== undefined) {
@@ -4834,7 +5022,7 @@ export class TerminalPanel {
 
   private syncActiveTabModified(): boolean {
     const tab = this.bufferTabs[this.activeTabIndex];
-    if (!tab || tab.kind !== "file") return false;
+    if (!tab || (tab.kind !== "file" && tab.chromePage !== "git_diff")) return false;
     let modified = tab.modified === true;
     if (this.activeTabIsMarkdown() && this.useWasmMarkdown()) {
       modified = this.wasmAdapter?.markdownDirty?.() === true;
@@ -4842,6 +5030,14 @@ export class TerminalPanel {
       modified = this.wasmAdapter?.editorDirty?.() === true;
     }
     tab.modified = modified;
+    if (tab.chromePage === "git_diff") {
+      const path = this.wasmAdapter?.gitDiffEditingPath?.();
+      if (path) {
+        for (const sourceTab of this.bufferTabs) {
+          if (!sourceTab.chromePage && sourceTab.path === path) sourceTab.modified = modified;
+        }
+      }
+    }
     return modified;
   }
 
@@ -4856,13 +5052,37 @@ export class TerminalPanel {
   }
 
   private markBufferSaved(bufferId: string): void {
+    const stages = this.pendingDiffSaveStages?.get(bufferId) ?? [];
+    this.pendingDiffSaveStages?.delete(bufferId);
+    for (const stage of stages) {
+      if (stage.adapter === this.wasmAdapter && stage.scope === (this.options.workspaceRoot ?? "")
+          && this.activeCodeBufferId() === bufferId && this.wasmAdapter?.editorDirty?.() !== true
+          && (stage.revision === undefined || stage.revision === this.wasmAdapter?.editorRevision?.())) {
+        const message = stage.block
+          ? { ApplyBlock: { path: stage.path, block: stage.block, restore: false } }
+          : { Stage: { path: stage.path } };
+        void this.options.client.requestGit(message, stage.root).then((reply) => {
+          if (stage.adapter !== this.wasmAdapter || stage.scope !== (this.options.workspaceRoot ?? "")) return;
+          const error = "Error" in reply ? reply.Error.message : "ChangedFiles" in reply ? reply.ChangedFiles.error : null;
+          if (error) {
+            this.pushInAppNotification("Stage failed", error, "error");
+            return;
+          }
+          if ("ChangedFiles" in reply) stage.adapter?.gitPanelApplyChangedFiles?.(JSON.stringify(reply.ChangedFiles));
+          void this.refreshGitSidePanelData();
+          this.scheduleDraw();
+        }).catch((error) => this.pushInAppNotification("Stage failed", String(error), "error"));
+      } else {
+        this.pushInAppNotification("Not staged", "The source changed again during save. Save and stage again.", "error");
+      }
+    }
     for (const tab of this.bufferTabs) {
       if (
         tab.kind === "file" &&
         tab.path &&
         presenceBufferIdForPath(tab.path, this.options.workspaceRoot) === bufferId
       ) {
-        tab.modified = false;
+        tab.modified = this.activeCodeBufferId() === bufferId && this.wasmAdapter?.editorDirty?.() === true;
       }
     }
   }
@@ -5040,6 +5260,10 @@ export class TerminalPanel {
   private activeCodeBufferId(): string | null {
     if (this.activeEditorPaneKind() !== "code") return null;
     const tab = this.bufferTabs[this.activeTabIndex];
+    if (tab?.chromePage === "git_diff") {
+      const path = this.wasmAdapter?.gitDiffEditingPath?.();
+      return path ? presenceBufferIdForPath(path, this.options.workspaceRoot) : null;
+    }
     if (tab?.kind !== "file" || !tab.path) return null;
     if (tab.configRevision !== undefined) return null;
     return presenceBufferIdForPath(tab.path, this.options.workspaceRoot);
@@ -5099,8 +5323,9 @@ export class TerminalPanel {
     if (bufferId) {
       const tab = this.bufferTabs[this.activeTabIndex];
       const text = adapter.editorSavePayload?.();
-      if (tab?.path && text !== null && text !== undefined) {
-        this.requestCodeHighlight(tab.path, text);
+      const path = tab?.chromePage === "git_diff" ? this.wasmAdapter?.gitDiffEditingPath?.() : tab?.path;
+      if (path && text !== null && text !== undefined) {
+        this.requestCodeHighlight(path, text);
       }
     }
     if (!json) return;
@@ -5397,19 +5622,22 @@ export class TerminalPanel {
   private bindEditorSurfaceForTab(externalId: number, tabIndex: number): void {
     const tab = this.bufferTabs[tabIndex];
     if (!this.isEditorLikeTab(tab)) return;
-    this.bindEditorSurface(externalId, tab?.kind === "file" ? tab.path ?? null : null);
+    this.bindEditorSurface(externalId, tab?.chromePage === "git_diff"
+      ? this.wasmAdapter?.gitDiffEditingPath?.() ?? null
+      : tab?.kind === "file" ? tab.path ?? null : null);
   }
 
   private isEditorLikeTab(tab: WebBufferTab | undefined): boolean {
     return (
-      (tab?.kind === "file" && !isMarkdownPath(tab.path)) ||
+      (tab?.kind === "file" && (tab.sourceCode || !isMarkdownPath(tab.path))) ||
+      tab?.chromePage === "git_diff" ||
       tab?.kind === "neoism-agent"
     );
   }
 
   private activeTabIsMarkdown(): boolean {
     const tab = this.bufferTabs[this.activeTabIndex];
-    return tab?.kind === "file" && isMarkdownPath(tab.path);
+    return tab?.kind === "file" && !tab.sourceCode && isMarkdownPath(tab.path);
   }
 
   /** Which chrome-hosted editor pane serves the active tab: "code" /
@@ -5419,7 +5647,10 @@ export class TerminalPanel {
   private activeEditorPaneKind(): string | null {
     if (!this.useWasmMarkdown()) return null;
     const tab = this.bufferTabs[this.activeTabIndex];
-    if (tab?.kind !== "file" || !tab.path || isMarkdownPath(tab.path)) return null;
+    if (tab?.chromePage === "git_diff") {
+      return this.wasmAdapter?.editorActiveKind?.() ?? null;
+    }
+    if (tab?.kind !== "file" || !tab.path || (!tab.sourceCode && isMarkdownPath(tab.path))) return null;
     const adapter = this.wasmAdapter as {
       editorActiveKind?: () => string | null;
     };
@@ -5548,7 +5779,7 @@ export class TerminalPanel {
   }
 
   private openFileTabContent(path: string): void {
-    if (isMarkdownPath(path)) {
+    if (isMarkdownPath(path) && !this.bufferTabs[this.activeTabIndex]?.sourceCode) {
       this.showMarkdownTab();
     } else {
       this.sendEditorOpenBuffer(path);
@@ -5991,6 +6222,11 @@ export class TerminalPanel {
       kind: t.kind,
       modified: t.modified === true,
       session_id: t.sessionId ?? null,
+      sourceCode: t.sourceCode === true,
+      chromePage: t.chromePage ?? null,
+      diffRoot: t.diffRoot ?? null,
+      diffPath: t.diffPath ?? null,
+      diffRouteId: t.diffRouteId ?? null,
       neoism_agent_route_id: t.neoismAgentRouteId ?? null,
     }));
     this.wasmAdapter?.setBufferTabs?.(
@@ -7062,26 +7298,35 @@ export class TerminalPanel {
 
   private requestFileContent(path: string, tabIdx: number): void {
     if (!this.wasmAdapter) return;
-    if (isMarkdownPath(path) && this.bufferTabs[tabIdx]?.path === path) {
+    const sourceCode = this.bufferTabs[tabIdx]?.sourceCode === true;
+    const adapter = this.wasmAdapter;
+    const markdown = isMarkdownPath(path) && !sourceCode;
+    if (markdown && this.bufferTabs[tabIdx]?.path === path) {
       this.wasmAdapter.setTabContent?.(tabIdx, "Loading markdown...", path);
       this.renderMarkdownLayer(tabIdx, "Loading markdown...");
       this.scheduleDraw();
     }
     const requestId = nextFileReadRequestId++;
     this.pendingServiceMappers.set(requestId, (payload) => {
+      // A source jump's late read must not activate a pane under another
+      // selected file (or a replacement workspace/adapter). Retry on selection.
+      if (sourceCode && (this.wasmAdapter !== adapter || this.activeTabIndex !== tabIdx)) return null;
+      if (this.bufferTabs[tabIdx]?.path !== path
+          || (this.bufferTabs[tabIdx]?.sourceCode === true) !== sourceCode) return null;
       if ("FileContent" in payload) {
-        if (this.bufferTabs[tabIdx]?.path !== path) {
+        if (sourceCode && adapter.sourceEditorPolicy?.(path) === "unsupported") {
+          this.pushInAppNotification("Cannot navigate source", `Exact source navigation to ${path} is unsupported because a special editor now owns the file. Existing edits were left unchanged.`, "error");
           return null;
         }
         const bytes = payload.FileContent.bytes;
         const decoded = new TextDecoder("utf-8", { fatal: false }).decode(
           new Uint8Array(bytes),
         );
-        if (isMarkdownPath(path)) {
+        if (markdown) {
           this.markdownContentCache.set(path, decoded);
         }
         this.wasmAdapter?.setTabContent?.(tabIdx, decoded, path);
-        if (isMarkdownPath(path)) {
+        if (markdown) {
           this.renderMarkdownLayer(tabIdx, decoded);
         } else {
           if (this.markdownLayerTabIndex === tabIdx) {
@@ -7114,7 +7359,7 @@ export class TerminalPanel {
             errorText,
             path,
           );
-          if (isMarkdownPath(path)) {
+          if (markdown) {
             this.renderMarkdownLayer(tabIdx, errorText);
           }
         }
@@ -7134,7 +7379,7 @@ export class TerminalPanel {
     if (!this.wasmAdapter || this.bufferTabs.length === 0) return;
     const markdownTabs = this.bufferTabs
       .map((tab, index) => ({ tab, index }))
-      .filter(({ tab }) => tab.kind === "file" && !!tab.path && isMarkdownPath(tab.path));
+      .filter(({ tab }) => tab.kind === "file" && !tab.sourceCode && !!tab.path && isMarkdownPath(tab.path));
     if (markdownTabs.length === 0) return;
 
     this.markdownReloadCursor %= markdownTabs.length;
@@ -7306,7 +7551,7 @@ export class TerminalPanel {
       return;
     }
     if (tab.kind === "file" && tab.path) {
-      if (isMarkdownPath(tab.path)) {
+      if (!tab.sourceCode && isMarkdownPath(tab.path)) {
         this.requestFileContent(tab.path, this.activeTabIndex);
         this.syncActiveMarkdownLayer();
         this.scheduleDraw();
@@ -7457,7 +7702,7 @@ export class TerminalPanel {
     // adapted to the browser. Alt combos stay with the chrome
     // shortcuts EXCEPT Ctrl+Alt (multi-cursor caret stacking).
     if (
-      !event.metaKey &&
+      (!event.metaKey || event.key.toLowerCase() === "c") &&
       (!event.altKey || event.ctrlKey) &&
       // A focused chrome surface (palette / finder / tree / tabs /
       // composer) owns the keyboard first — desktop parity: keys
@@ -7485,7 +7730,7 @@ export class TerminalPanel {
       if (
         adapter?.editorKey?.(
           event.key,
-          event.ctrlKey,
+          event.ctrlKey || event.metaKey,
           event.shiftKey,
           event.altKey,
         )
@@ -8762,7 +9007,7 @@ export class TerminalPanel {
       if (split && adapter.setPaneTabs) {
         // Local strip entries: the pane's assigned editor-like tabs,
         // or a single sticky terminal tab for a bound shell.
-        const entries: Array<{ title: string; path: string | null; kind: string }> =
+        const entries: Array<{ title: string; path: string | null; kind: string; chromePage?: string; diffRouteId?: number }> =
           (state?.tabIndices ?? [])
             .filter(
               (ix) =>
@@ -8774,6 +9019,9 @@ export class TerminalPanel {
               title: this.bufferTabs[ix].title,
               path: this.bufferTabs[ix].path ?? null,
               kind: this.bufferTabs[ix].kind,
+               sourceCode: this.bufferTabs[ix].sourceCode,
+               chromePage: this.bufferTabs[ix].chromePage,
+              diffRouteId: this.bufferTabs[ix].diffRouteId,
             }));
         if (entries.length === 0 && session) {
           const sessionTab = this.bufferTabs.find(
@@ -9633,9 +9881,15 @@ export class TerminalPanel {
     if (this.activeEditorPaneKind() !== null) {
       // Ends code selections / scrollbar drags, finalizes draw
       // gestures (which also snapshots undo history + dirty state).
-      const adapter = this.wasmAdapter as { editorPointerUp?: () => boolean };
-      if (adapter?.editorPointerUp?.()) {
+      const adapter = this.wasmAdapter as {
+        editorPointerUp?: (x?: number, y?: number) => boolean;
+        editorDrainClipboardOut?: () => string | null;
+      };
+      const { x, y } = this.canvasLogicalPoint(event);
+      if (adapter?.editorPointerUp?.(x, y)) {
         event.preventDefault();
+        const copyOut = adapter.editorDrainClipboardOut?.();
+        if (copyOut) void this.writeClipboard(copyOut);
         this.pumpCodeCrdt();
         this.scheduleDraw();
         return;

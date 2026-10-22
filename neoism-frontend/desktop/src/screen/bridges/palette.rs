@@ -8,7 +8,10 @@ use neoism_ui::panels::command_palette::PaletteAction;
 use neoism_window::keyboard::{Key, ModifiersState};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ServerFormMode { Host, Join }
+pub(crate) enum ServerFormMode {
+    Host,
+    Join,
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct ServerFormDraft {
@@ -24,9 +27,20 @@ pub(crate) struct ServerFormDraft {
 
 impl ServerFormDraft {
     fn new(directory: String, host: bool, fast: bool) -> Self {
-        Self { mode: if host { ServerFormMode::Host } else { ServerFormMode::Join },
-            fast, invite: false, name: String::new(), password: String::new(),
-            directory, address: String::new(), link: String::new() }
+        Self {
+            mode: if host {
+                ServerFormMode::Host
+            } else {
+                ServerFormMode::Join
+            },
+            fast,
+            invite: false,
+            name: String::new(),
+            password: String::new(),
+            directory,
+            address: String::new(),
+            link: String::new(),
+        }
     }
 
     fn capture(&mut self, values: Vec<(String, String)>) {
@@ -37,19 +51,27 @@ impl ServerFormDraft {
                 "create_dir" | "fast_host_dir" => self.directory = value,
                 "address" => self.address = value,
                 "fast_join_address" | "fast_invite_address" => self.link = value,
-                _ => {},
+                _ => {}
             }
         }
     }
 
     fn switch_mode(&mut self, host: bool) -> bool {
-        if self.invite { return false; }
-        self.mode = if host { ServerFormMode::Host } else { ServerFormMode::Join };
+        if self.invite {
+            return false;
+        }
+        self.mode = if host {
+            ServerFormMode::Host
+        } else {
+            ServerFormMode::Join
+        };
         true
     }
 
     fn toggle_fast(&mut self, checked: bool) -> bool {
-        if self.invite { return false; }
+        if self.invite {
+            return false;
+        }
         self.fast = checked;
         true
     }
@@ -63,8 +85,19 @@ impl ServerFormDraft {
             (ServerFormMode::Host, false, false) => "create_dir",
             (ServerFormMode::Join, false, false) => "address",
         };
-        let targets: Vec<_> = values.iter().filter(|(id, _)| matches!(id.as_str(),
-            "fast_invite_address" | "fast_host_dir" | "fast_join_address" | "create_dir" | "address")).collect();
+        let targets: Vec<_> = values
+            .iter()
+            .filter(|(id, _)| {
+                matches!(
+                    id.as_str(),
+                    "fast_invite_address"
+                        | "fast_host_dir"
+                        | "fast_join_address"
+                        | "create_dir"
+                        | "address"
+                )
+            })
+            .collect();
         targets.len() == 1 && targets[0].0 == expected
     }
 }
@@ -80,11 +113,17 @@ mod server_form_tests {
     #[test]
     fn transport_keeps_independent_targets_and_raw_credentials() {
         let mut draft = ServerFormDraft::new("/workspace".into(), false, false);
-        draft.capture(vec![("address".into(), "ws://saved/session".into()),
-            ("name".into(), "Desk".into()), ("token".into(), "  secret  ".into())]);
+        draft.capture(vec![
+            ("address".into(), "ws://saved/session".into()),
+            ("name".into(), "Desk".into()),
+            ("token".into(), "  secret  ".into()),
+        ]);
         assert!(draft.toggle_fast(true));
         assert!(draft.link.is_empty());
-        draft.capture(values("fast_join_address", "https://fast.example/#neoism-fast=cap"));
+        draft.capture(values(
+            "fast_join_address",
+            "https://fast.example/#neoism-fast=cap",
+        ));
         assert!(draft.switch_mode(true));
         assert_eq!(draft.directory, "/workspace");
         draft.capture(values("fast_host_dir", "/other"));
@@ -108,7 +147,12 @@ mod server_form_tests {
         assert_eq!(draft.mode, ServerFormMode::Join);
         assert!(draft.fast);
         assert!(draft.accepts(&values("fast_invite_address", "")));
-        for id in ["address", "create_dir", "fast_host_dir", "fast_join_address"] {
+        for id in [
+            "address",
+            "create_dir",
+            "fast_host_dir",
+            "fast_join_address",
+        ] {
             assert!(!draft.accepts(&values(id, "")));
         }
         let mut mixed = values("fast_invite_address", "invalid");
@@ -299,7 +343,9 @@ impl Screen<'_> {
                     .set_cd_error("No active workspace");
                 return false;
             };
-            if let Err(error) = self.commit_workspace_directory(PathBuf::from(intent.destination)) {
+            if let Err(error) =
+                self.commit_workspace_directory(PathBuf::from(intent.destination))
+            {
                 self.renderer.command_palette.set_cd_error(error);
                 return false;
             }
@@ -403,22 +449,30 @@ impl Screen<'_> {
     }
 
     fn begin_server_form(&mut self, host: bool, fast: bool) {
-        let directory = self.workspace_root_for_new_shell()
-            .map(|root| root.display().to_string()).unwrap_or_default();
+        let directory = self
+            .workspace_root_for_new_shell()
+            .map(|root| root.display().to_string())
+            .unwrap_or_default();
         self.server_form_draft = Some(ServerFormDraft::new(directory, host, fast));
         self.render_server_form();
     }
 
     pub(crate) fn switch_server_form_mode(&mut self, host: bool) {
         let values = self.renderer.modal.form_values();
-        let Some(draft) = self.server_form_draft.as_mut() else { return; };
+        let Some(draft) = self.server_form_draft.as_mut() else {
+            return;
+        };
         draft.capture(values);
-        if draft.switch_mode(host) { self.render_server_form(); }
+        if draft.switch_mode(host) {
+            self.render_server_form();
+        }
     }
 
     pub(crate) fn toggle_server_form_fast(&mut self, checked: bool) {
         let values = self.renderer.modal.form_values();
-        let Some(draft) = self.server_form_draft.as_mut() else { return; };
+        let Some(draft) = self.server_form_draft.as_mut() else {
+            return;
+        };
         draft.capture(values);
         if draft.toggle_fast(checked) {
             self.render_server_form();
@@ -436,29 +490,86 @@ impl Screen<'_> {
 
     fn render_server_form(&mut self) {
         use neoism_ui::widgets::modal::{ModalFormField, ModalFormSpec};
-        let Some(draft) = self.server_form_draft.as_ref() else { return; };
+        let Some(draft) = self.server_form_draft.as_ref() else {
+            return;
+        };
         let host = draft.mode == ServerFormMode::Host;
-        let needs_password = draft.fast && (host || (draft.invite && !crate::invite_links::validate_invite_link(&draft.link)
-            .is_ok_and(|join| join.token.is_some())));
+        let needs_password = draft.fast
+            && (host
+                || (draft.invite
+                    && !crate::invite_links::validate_invite_link(&draft.link)
+                        .is_ok_and(|join| join.token.is_some())));
         let (id, label, value, placeholder) = if host {
-            (if draft.fast { "fast_host_dir" } else { "create_dir" }, "Project folder", draft.directory.clone(), "~/code/myproject")
+            (
+                if draft.fast {
+                    "fast_host_dir"
+                } else {
+                    "create_dir"
+                },
+                "Project folder",
+                draft.directory.clone(),
+                "~/code/myproject",
+            )
         } else if draft.fast {
-            (if draft.invite { "fast_invite_address" } else { "fast_join_address" }, "Server link", draft.link.clone(), "Paste the Fast Server invite link")
+            (
+                if draft.invite {
+                    "fast_invite_address"
+                } else {
+                    "fast_join_address"
+                },
+                "Server link",
+                draft.link.clone(),
+                "Paste the Fast Server invite link",
+            )
         } else {
-            ("address", "Server address", draft.address.clone(), "ws://192.168.1.20:7981/session")
+            (
+                "address",
+                "Server address",
+                draft.address.clone(),
+                "ws://192.168.1.20:7981/session",
+            )
         };
         self.renderer.modal.open_form(ModalFormSpec {
             title: "Add Server".into(),
             fields: vec![
-                ModalFormField { id: id.into(), label: label.into(), value, placeholder: placeholder.into(), secret: false },
-                ModalFormField { id: "name".into(), label: "Server name (optional)".into(), value: draft.name.clone(), placeholder: "Team server".into(), secret: false },
-                ModalFormField { id: "token".into(), label: if draft.fast && !host && !draft.invite { "Password (unless invite includes access code)" } else if needs_password { "Password (required)" } else { "Password (optional)" }.into(), value: draft.password.clone(), placeholder: "password".into(), secret: true },
+                ModalFormField {
+                    id: id.into(),
+                    label: label.into(),
+                    value,
+                    placeholder: placeholder.into(),
+                    secret: false,
+                },
+                ModalFormField {
+                    id: "name".into(),
+                    label: "Server name (optional)".into(),
+                    value: draft.name.clone(),
+                    placeholder: "Team server".into(),
+                    secret: false,
+                },
+                ModalFormField {
+                    id: "token".into(),
+                    label: if draft.fast && !host && !draft.invite {
+                        "Password (unless invite includes access code)"
+                    } else if needs_password {
+                        "Password (required)"
+                    } else {
+                        "Password (optional)"
+                    }
+                    .into(),
+                    value: draft.password.clone(),
+                    placeholder: "password".into(),
+                    secret: true,
+                },
             ],
             submit_label: if host { "Host server" } else { "Join server" }.into(),
         });
-        self.renderer.modal.set_form_tabs(vec!["Host".into(), "Join".into()], if host { 0 } else { 1 });
+        self.renderer
+            .modal
+            .set_form_tabs(vec!["Host".into(), "Join".into()], if host { 0 } else { 1 });
         self.renderer.modal.set_form_tabs_enabled(!draft.invite);
-        self.renderer.modal.set_form_switch("Fast tunnel", draft.fast, !draft.invite);
+        self.renderer
+            .modal
+            .set_form_switch("Fast tunnel", draft.fast, !draft.invite);
         self.mark_dirty();
     }
 
@@ -537,7 +648,9 @@ impl Screen<'_> {
         };
         let proxy = self.context_manager.event_proxy();
         let window = self.context_manager.window_id();
-        self.renderer.notifications.push("Starting persistent server…", NotificationLevel::Info);
+        self.renderer
+            .notifications
+            .push("Starting persistent server…", NotificationLevel::Info);
         self.mark_dirty();
         let (tx, rx) = std::sync::mpsc::channel();
         self.hosted_server_completions.0.push(rx);
@@ -545,9 +658,19 @@ impl Screen<'_> {
             let result = spawn_hosted_daemon(&spec, password.as_deref());
             // Readiness AND durable metadata are complete even if the Screen
             // has closed. A dropped receiver discards UI work, not the daemon.
-            if tx.send(HostedCompletion { spec, name, password, result }).is_ok() {
+            if tx
+                .send(HostedCompletion {
+                    spec,
+                    name,
+                    password,
+                    result,
+                })
+                .is_ok()
+            {
                 proxy.send_event(
-                    neoism_backend::event::RioEventType::Rio(neoism_backend::event::RioEvent::Render),
+                    neoism_backend::event::RioEventType::Rio(
+                        neoism_backend::event::RioEvent::Render,
+                    ),
                     window,
                 );
             }
@@ -564,10 +687,17 @@ impl Screen<'_> {
 
     fn finish_hosted_server(&mut self, completion: HostedCompletion) {
         use neoism_ui::panels::notifications::NotificationLevel;
-        let HostedCompletion { spec, name, password, result, .. } = completion;
+        let HostedCompletion {
+            spec,
+            name,
+            password,
+            result,
+            ..
+        } = completion;
         if let Err(error) = result {
             self.renderer.notifications.push(
-                format!("Could not start the server daemon: {error}"), NotificationLevel::Error,
+                format!("Could not start the server daemon: {error}"),
+                NotificationLevel::Error,
             );
             self.mark_dirty();
             return;
@@ -710,9 +840,7 @@ impl Screen<'_> {
         pill: neoism_ui::panels::status_line::DiagnosticPill,
     ) -> Vec<neoism_ui::panels::diagnostics_popup::PopupItem> {
         self.context_manager
-            .current()
-            .code
-            .as_ref()
+            .active_code_pane()
             .map(|code| code.path.clone())
             .map(|path| self.code_diagnostic_popup_items(&path, pill))
             .unwrap_or_default()
@@ -1399,7 +1527,7 @@ impl Screen<'_> {
                 self.open_finder_symbols();
             }
             PaletteAction::ToggleGitBlame => {
-                if let Some(code) = self.context_manager.current_mut().code.as_mut() {
+                if let Some(code) = self.context_manager.active_code_pane_mut() {
                     code.blame.apply_default(self.renderer.code_git_blame);
                     code.blame.toggle();
                 }
@@ -1968,7 +2096,10 @@ impl HostedCompletions {
     fn drain(&mut self) -> Vec<HostedCompletion> {
         let mut completed = Vec::new();
         self.0.retain(|rx| match rx.try_recv() {
-            Ok(result) => { completed.push(result); false }
+            Ok(result) => {
+                completed.push(result);
+                false
+            }
             Err(std::sync::mpsc::TryRecvError::Empty) => true,
             Err(std::sync::mpsc::TryRecvError::Disconnected) => false,
         });
@@ -1987,7 +2118,8 @@ pub(crate) fn spawn_hosted_daemon(
     let _ = std::fs::create_dir_all(&spec.state_dir);
 
     // Use this build's standalone implementation, never a stale installed sibling.
-    let mut daemon = std::process::Command::new(crate::service_process::standalone_executable()?);
+    let mut daemon =
+        std::process::Command::new(crate::service_process::standalone_executable()?);
     daemon.arg(neoism_workspace_daemon::standalone::HOSTED_WORKSPACE_DAEMON_FLAG);
     daemon
         .arg("--addr")
@@ -2002,14 +2134,20 @@ pub(crate) fn spawn_hosted_daemon(
         .stderr(std::process::Stdio::null());
     // Never inherit Fast policy or a parent-death leash into a persistent host.
     daemon.env_remove(neoism_workspace_daemon::standalone::FAST_READINESS_NONCE_ENV);
-    daemon.env("NEOISM_REQUIRE_AUTH", if spec.require_auth { "1" } else { "0" });
+    daemon.env(
+        "NEOISM_REQUIRE_AUTH",
+        if spec.require_auth { "1" } else { "0" },
+    );
     if spec.require_auth {
         if let Some(token) = token {
             daemon.env("NEOISM_DAEMON_TOKEN", token);
         }
     }
     detach_hosted_daemon(&mut daemon);
-    crate::service_process::launch_persistent_host(&mut daemon, spec.port, token, || write_hosted_sidecar(spec)).map(|_| ())
+    crate::service_process::launch_persistent_host(&mut daemon, spec.port, token, || {
+        write_hosted_sidecar(spec)
+    })
+    .map(|_| ())
 }
 
 /// Best-effort: STOP the detached hosted daemon serving `spec.port` when its
@@ -2021,7 +2159,10 @@ pub(crate) fn spawn_hosted_daemon(
 /// `:98770`), so we can never signal an unrelated process.
 #[cfg(unix)]
 pub(crate) fn stop_hosted_daemon(spec: &crate::server_registry::HostedServerSpec) {
-    let pattern = format!("(neoism-workspace-daemon|neoism-internal-hosted-workspace-daemon).*:{} ", spec.port);
+    let pattern = format!(
+        "(neoism-workspace-daemon|neoism-internal-hosted-workspace-daemon).*:{} ",
+        spec.port
+    );
     let _ = std::process::Command::new("pkill")
         .arg("-TERM")
         .arg("-f")
@@ -2099,13 +2240,16 @@ fn detach_hosted_daemon(_command: &mut std::process::Command) {}
 
 /// Atomically commit relaunch metadata AFTER readiness, before relinquishing
 /// the child. Errors are startup failures, not a falsely successful host.
-fn write_hosted_sidecar(spec: &crate::server_registry::HostedServerSpec) -> std::io::Result<()> {
+fn write_hosted_sidecar(
+    spec: &crate::server_registry::HostedServerSpec,
+) -> std::io::Result<()> {
     use std::io::Write;
     let bytes = serde_json::to_vec_pretty(spec)?;
     let mut temporary = tempfile::NamedTempFile::new_in(&spec.state_dir)?;
     temporary.write_all(&bytes)?;
     temporary.as_file().sync_all()?;
-    temporary.persist(spec.state_dir.join(HOSTED_SIDECAR_FILE))
+    temporary
+        .persist(spec.state_dir.join(HOSTED_SIDECAR_FILE))
         .map_err(|error| error.error)?;
     #[cfg(unix)]
     std::fs::File::open(&spec.state_dir)?.sync_all()?;
@@ -2118,8 +2262,10 @@ mod hosted_metadata_tests {
 
     fn spec(root: &std::path::Path) -> crate::server_registry::HostedServerSpec {
         crate::server_registry::HostedServerSpec {
-            state_dir: root.join("state"), workspace_dir: root.to_path_buf(),
-            port: 9877, require_auth: true,
+            state_dir: root.join("state"),
+            workspace_dir: root.to_path_buf(),
+            port: 9877,
+            require_auth: true,
         }
     }
 
@@ -2133,10 +2279,17 @@ mod hosted_metadata_tests {
         drop(queue); // Screen has closed while the worker was still starting.
         write_hosted_sidecar(&spec).unwrap(); // Worker commits before sending.
         let path = spec.state_dir.join(HOSTED_SIDECAR_FILE);
-        assert!(tx.send(HostedCompletion { spec, name: None,
-            password: Some("not-in-sidecar".into()), result: Ok(()) }).is_err());
+        assert!(tx
+            .send(HostedCompletion {
+                spec,
+                name: None,
+                password: Some("not-in-sidecar".into()),
+                result: Ok(())
+            })
+            .is_err());
         let bytes = std::fs::read(path).unwrap();
-        let restored: crate::server_registry::HostedServerSpec = serde_json::from_slice(&bytes).unwrap();
+        let restored: crate::server_registry::HostedServerSpec =
+            serde_json::from_slice(&bytes).unwrap();
         assert_eq!(restored.port, 9877);
         assert!(restored.require_auth);
         assert!(!String::from_utf8(bytes).unwrap().contains("not-in-sidecar"));

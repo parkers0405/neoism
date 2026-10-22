@@ -75,12 +75,18 @@ use crate::panels::splash_overlay::SplashOverlay;
 use crate::panels::trail_cursor::TrailCursor;
 use crate::panels::yank_flash::YankFlash;
 
+#[cfg(test)]
+mod code_doc_tests;
 mod config;
-mod navigator;
 mod content;
 mod draw;
 mod events;
+mod git_diff_focus;
+#[cfg(test)]
+mod git_diff_tests;
+mod navigator;
 mod pages;
+pub use pages::GitDiffSourceOpenRequest;
 mod paint;
 pub use content::EditorPaneKind;
 pub(crate) use paint::*;
@@ -348,9 +354,15 @@ pub struct Chrome<A: Send + Copy + 'static = ()> {
     editor_pane_animating: bool,
     /// CRDT binding for the hosted code pane (web co-editing + the
     /// daemon-owned single-writer save). Lives next to the pane so
-    /// both are dropped/re-bound together on tab switches. The wasm
-    /// bridge drives it through [`Chrome::code_editor_parts_mut`].
+    /// both are retained together across tab switches. The wasm bridge drives
+    /// it through [`Chrome::code_editor_parts_mut`].
     code_doc_binding: Option<crate::editor::code::doc_sync::CodeDocBinding>,
+    /// Canonical document replicas travel with parked panes, retaining origin
+    /// history and dirty baselines across presentation/focus changes.
+    parked_code_doc_bindings: std::collections::HashMap<
+        std::path::PathBuf,
+        crate::editor::code::doc_sync::CodeDocBinding,
+    >,
     /// Shared LSP session layer for the hosted code pane — desktop's
     /// `Renderer::code_lsp` twin (completion / hover / actions /
     /// rename / diagnostics state machines). The host installs an
@@ -392,6 +404,19 @@ pub struct Chrome<A: Send + Copy + 'static = ()> {
     /// `GitDiffIo` provider on desktop and from daemon pushes
     /// (`host_set_files` / `host_set_diff_text`) on web.
     pub git_diff_panel: GitDiffPanel,
+    /// Diff bodies are route-owned, independent of the sidebar's lifetime/selection.
+    git_diff_views:
+        std::collections::HashMap<usize, crate::panels::git_diff_view::GitDiffView>,
+    pending_git_diff_save_stages: Vec<(std::path::PathBuf, std::path::PathBuf, bool)>,
+    pending_git_diff_block_save_stages: Vec<(
+        std::path::PathBuf,
+        std::path::PathBuf,
+        neoism_protocol::git::GitChangeBlock,
+        u64,
+    )>,
+    pending_git_diff_source_opens: Vec<pages::GitDiffSourceOpenRequest>,
+    pending_git_diff_opens: Vec<(std::path::PathBuf, std::path::PathBuf)>,
+    git_diff_view_generations: std::collections::HashMap<usize, u64>,
     /// Left notes sidebar — desktop's Alt+N column. Docks right of
     /// the file tree; entry data comes from local fs on desktop and
     /// from daemon listings (`set_entries_from_host`) on web.
@@ -496,11 +521,14 @@ pub struct Chrome<A: Send + Copy + 'static = ()> {
     connection_gate_active: bool,
     /// Workspace-scoped, reusable file chooser. Unlike the generic modal it
     /// dims but does not suppress the canvas beneath it.
-    pub conversation_navigator: crate::widgets::conversation_navigator::ConversationNavigator,
+    pub conversation_navigator:
+        crate::widgets::conversation_navigator::ConversationNavigator,
     pub(crate) conversation_dashboard_root: Option<std::path::PathBuf>,
     pub(crate) conversation_dashboard_endpoint: Option<String>,
-    pub(crate) pending_catalog_header: Option<crate::panels::agent_pane::state::side_panel::CatalogHeaderAction>,
-    pub(crate) pending_navigator_action: Option<crate::widgets::conversation_navigator::ConversationNavigatorAction>,
+    pub(crate) pending_catalog_header:
+        Option<crate::panels::agent_pane::state::side_panel::CatalogHeaderAction>,
+    pub(crate) pending_navigator_action:
+        Option<crate::widgets::conversation_navigator::ConversationNavigatorAction>,
     pub file_browser: crate::panels::file_browser::FileBrowserModal,
     /// Settings actions queued for the host to persist/route —
     /// drained via [`Chrome::drain_settings_actions`].

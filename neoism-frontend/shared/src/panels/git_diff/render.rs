@@ -3,22 +3,131 @@ use sugarloaf::Sugarloaf;
 
 use crate::primitives::ide_theme::IdeTheme;
 pub(super) use crate::primitives::{snap_to_device_px, truncate_to_fit};
-use crate::widgets::diff_card::CardSpec;
 use crate::widgets::{diff_card, scrollbar};
 
 use super::state::GitDiffPanel;
-use super::types::{FocusSection, Rect, VisualRowKind};
+use super::types::{Rect, VisualRowKind};
 use super::{
     branch_glyph, check_glyph, chevron_down_glyph, chevron_right_glyph, close_glyph,
-    folder_glyph, folder_open_glyph, BRANCH_MENU_MAX_ROWS, CARD_GAP_TOP, CARD_PAD_X,
-    CARD_VGAP, CHECKBOX_SIZE, CLOSE_HIT, COMMIT_BUTTON_HEIGHT, COMMIT_FONT_SIZE,
-    COMMIT_INPUT_HEIGHT, COMMIT_INPUT_MAX_LINES, DEPTH, FILES_CARD_MAX_VISIBLE_ROWS,
-    FILES_CARD_MIN_VISIBLE_ROWS, FILE_FONT_SIZE, FILE_ROW_HEIGHT, FRAME_RADIUS,
-    FRAME_STROKE, HEADER_FONT_SIZE, HEADER_HEIGHT, ORDER_ACCENT, ORDER_FRAME,
-    ORDER_INNER, ORDER_LINE_BG, ORDER_MENU_BG, ORDER_MENU_ROW, ORDER_MENU_TEXT,
-    ORDER_ROW_BG, ORDER_SCROLL, PADDING_X, SCROLLBAR_HIT_PAD, STATS_FONT_SIZE,
-    STATS_HEIGHT, TREE_INDENT,
+    BRANCH_MENU_MAX_ROWS, CARD_GAP_TOP, CARD_PAD_X, CARD_VGAP, CHECKBOX_SIZE, CLOSE_HIT,
+    COMMIT_BUTTON_HEIGHT, COMMIT_FONT_SIZE, COMMIT_INPUT_HEIGHT, COMMIT_INPUT_MAX_LINES,
+    DEPTH, FILE_FONT_SIZE, FILE_ROW_HEIGHT, FRAME_RADIUS, FRAME_STROKE, HEADER_FONT_SIZE,
+    HEADER_HEIGHT, ORDER_ACCENT, ORDER_FRAME, ORDER_INNER, ORDER_LINE_BG, ORDER_MENU_BG,
+    ORDER_MENU_ROW, ORDER_MENU_TEXT, ORDER_ROW_BG, ORDER_SCROLL, PADDING_X,
+    SCROLLBAR_HIT_PAD, STATS_FONT_SIZE, STATS_HEIGHT, TREE_INDENT,
 };
+
+/// Padded, whole-line viewport for the shared append-only commit input.
+/// Always follow its tail, including the empty line after Shift+Enter.
+fn commit_text_viewport(box_rect: Rect, scale: f32, line_count: usize) -> (Rect, usize, usize) {
+    let pad_x = (8.0 * scale).min(box_rect.w * 0.5);
+    let pad_y = (6.0 * scale).min(box_rect.h * 0.5);
+    let text_rect = Rect {
+        x: box_rect.x + pad_x,
+        y: box_rect.y + pad_y,
+        w: (box_rect.w - pad_x * 2.0).max(0.0),
+        h: (box_rect.h - pad_y * 2.0).max(0.0),
+    };
+    let visible_lines = (text_rect.h / (COMMIT_FONT_SIZE * scale * 1.35))
+        .floor()
+        .max(1.0) as usize;
+    let first_line = line_count.saturating_sub(visible_lines);
+    (text_rect, first_line, visible_lines)
+}
+
+fn commit_placeholder(message: &str) -> Option<&'static str> {
+    message.is_empty().then_some("Type a commit message...")
+}
+
+/// Footer selector and split button share a row, with distinct hit regions.
+pub(super) fn footer_control_rects(x: f32, y: f32, width: f32, scale: f32) -> [Rect; 3] {
+    let width = width.max(0.0);
+    let split_w = (110.0 * scale).min(width * 0.55);
+    let arrow_w = (28.0 * scale).min(split_w * 0.3);
+    let gap = (8.0 * scale).min((width - split_w).max(0.0));
+    let branch_w = (width - split_w - gap).max(0.0);
+    let h = COMMIT_BUTTON_HEIGHT * scale;
+    [
+        Rect {
+            x,
+            y,
+            w: branch_w,
+            h,
+        },
+        Rect {
+            x: x + branch_w + gap,
+            y,
+            w: split_w - arrow_w,
+            h,
+        },
+        Rect {
+            x: x + width - arrow_w,
+            y,
+            w: arrow_w,
+            h,
+        },
+    ]
+}
+
+#[cfg(test)]
+mod commit_layout_tests {
+    use super::*;
+
+    #[test]
+    fn commit_text_starts_at_padded_top_left_at_all_scales() {
+        for scale in [1.0, 1.5, 2.0] {
+            let box_rect = Rect {
+                x: 30.0,
+                y: 200.0,
+                w: 280.0 * scale,
+                h: COMMIT_INPUT_HEIGHT * scale,
+            };
+            for text in ["", "Typing a commit", " ", "one\ntwo"] {
+                let (rect, first, _) =
+                    commit_text_viewport(box_rect, scale, text.split('\n').count());
+                assert_eq!(rect.x, box_rect.x + 8.0 * scale);
+                assert_eq!(rect.y, box_rect.y + 6.0 * scale);
+                assert_eq!(rect.w, box_rect.w - 16.0 * scale);
+                assert_eq!(rect.h, box_rect.h - 12.0 * scale);
+                assert_eq!(first, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn commit_viewport_follows_tail_without_partial_lower_lines() {
+        for scale in [1.0, 1.5, 2.0] {
+            let line_h = COMMIT_FONT_SIZE * scale * 1.35;
+            let box_rect = Rect {
+                x: 0.0,
+                y: 100.0,
+                w: 280.0 * scale,
+                h: COMMIT_INPUT_MAX_LINES as f32 * line_h + 12.0 * scale,
+            };
+            // A trailing newline must leave the new empty insertion row visible.
+            let text = "one\ntwo\nthree\nfour\nfive\nsix\nseven\n";
+            let count = text.split('\n').count();
+            let (rect, first, visible) = commit_text_viewport(box_rect, scale, count);
+            assert!(first > 0);
+            assert_eq!(first + visible, count);
+            assert!(visible as f32 * line_h <= rect.h + 0.001);
+            let caret_bottom = rect.y + (count - first - 1) as f32 * line_h
+                + (COMMIT_FONT_SIZE + 2.0) * scale;
+            assert!(caret_bottom <= rect.y + rect.h + 0.001);
+            assert_eq!(text.split('\n').last(), Some(""));
+            // Deleting back to a single line restores the original top origin.
+            assert_eq!(commit_text_viewport(box_rect, scale, 1).1, 0);
+        }
+    }
+
+    #[test]
+    fn commit_placeholder_only_appears_for_exactly_empty_buffer() {
+        assert_eq!(commit_placeholder(""), Some("Type a commit message..."));
+        for message in ["a", "Typing a commit", " ", "\t", "\n", "one\ntwo", "one\n"] {
+            assert_eq!(commit_placeholder(message), None, "{message:?}");
+        }
+    }
+}
 
 impl GitDiffPanel {
     pub fn render(
@@ -42,6 +151,7 @@ impl GitDiffPanel {
             self.selected_cursor_rect = None;
             self.commit_box_rect = Rect::ZERO;
             self.commit_button_rect = Rect::ZERO;
+            self.push_button_rect = Rect::ZERO;
             self.actions_button_rect = Rect::ZERO;
             self.actions_menu_rect = Rect::ZERO;
             self.actions_menu_row_rects.clear();
@@ -53,6 +163,7 @@ impl GitDiffPanel {
             return;
         }
 
+        self.apply_commit_confirmation();
         let s = self.scale;
         // Use the same width the chrome layout already reserved on
         // the right edge — `effective_width` honours the user-resized
@@ -136,27 +247,6 @@ impl GitDiffPanel {
         // ── Top chrome: branch selector + close ──────────────────────
         let header_h = HEADER_HEIGHT * s;
         let header_clip = [content_x, cursor_y, content_w, header_h];
-        let icon_opts = DrawOpts {
-            font_size: HEADER_FONT_SIZE * s,
-            color: theme.u8(theme.dim),
-            clip_rect: Some(header_clip),
-            ..DrawOpts::default()
-        };
-        let branch_name_opts = DrawOpts {
-            font_size: HEADER_FONT_SIZE * s,
-            color: theme.u8(theme.fg),
-            bold: true,
-            clip_rect: Some(header_clip),
-            ..DrawOpts::default()
-        };
-        let branch_label = self
-            .data
-            .lock()
-            .ok()
-            .and_then(|d| d.branch.clone())
-            .unwrap_or_default();
-        let branch_menu_open = self.branch_menu_open;
-        let branch_focused = self.focused && self.section == FocusSection::Branch;
 
         // Close button (top-right) — drawn first so the branch button's
         // width budget can stop short of it.
@@ -204,119 +294,27 @@ impl GitDiffPanel {
             ..DrawOpts::default()
         };
         let title_y = cursor_y + (header_h - HEADER_FONT_SIZE * s) / 2.0 - 1.0 * s;
-        let title_w = sugarloaf
+        sugarloaf
             .text_mut()
             .draw(inner_x, title_y, "Git", &title_opts);
-        let title_right = inner_x + title_w;
-
-        // Branch selector button — branch glyph + name + ▾ chevron.
-        // Anchored on the RIGHT, immediately left of the close button;
-        // clicking it opens the branch dropdown.
-        let display_branch = if branch_label.is_empty() {
-            "detached".to_string()
-        } else {
-            branch_label.clone()
-        };
-        let btn_pad_x = 8.0 * s;
-        let icon_w = sugarloaf.text_mut().measure(branch_glyph(), &icon_opts);
-        let chevron_w = sugarloaf
-            .text_mut()
-            .measure(chevron_down_glyph(), &icon_opts);
-        // Available span: between the title (+ gap) on the left and the
-        // close button (− gap) on the right.
-        let btn_right = close_x - 8.0 * s;
-        let btn_left_bound = title_right + 12.0 * s;
-        let max_btn_w = (btn_right - btn_left_bound).max(0.0);
-        let fixed_w = btn_pad_x * 2.0 + icon_w + 6.0 * s + 8.0 * s + chevron_w;
-        let name_budget = (max_btn_w - fixed_w).max(0.0);
-        let name_fit =
-            truncate_to_fit(&display_branch, name_budget, sugarloaf, &branch_name_opts);
-        let name_w = sugarloaf
-            .text_mut()
-            .measure(name_fit.as_str(), &branch_name_opts);
-        let btn_w = (btn_pad_x * 2.0 + icon_w + 6.0 * s + name_w + 8.0 * s + chevron_w)
-            .min(max_btn_w);
-        let btn_h = (header_h - 8.0 * s).max(HEADER_FONT_SIZE * s + 6.0 * s);
-        // Right-align so the button's trailing edge hugs the close "x".
-        let btn_x = btn_right - btn_w;
-        let btn_y = cursor_y + (header_h - btn_h) / 2.0;
-        let btn_radius = 6.0 * s;
-        if branch_focused {
-            let ring = (1.5 * s).max(1.0);
-            git_border_backing(
-                sugarloaf,
-                btn_x - ring,
-                btn_y - ring,
-                btn_w + ring * 2.0,
-                btn_h + ring * 2.0,
-                theme.f32(theme.accent),
-                DEPTH,
-                btn_radius + ring,
-                ORDER_ROW_BG,
-                ring,
-            );
-        }
-        let btn_bg = if branch_menu_open || branch_focused {
-            git_background_opacity(theme.f32(theme.hover))
-        } else {
-            git_background_opacity(theme.f32(theme.surface))
-        };
-        sugarloaf.rounded_rect(
-            None,
-            btn_x,
-            btn_y,
-            btn_w,
-            btn_h,
-            btn_bg,
-            DEPTH,
-            btn_radius,
-            ORDER_ROW_BG + 1,
-        );
-        self.branch_button_rect = Rect {
-            x: btn_x,
-            y: btn_y,
-            w: btn_w,
-            h: btn_h,
-        };
-        let btn_text_y = btn_y + (btn_h - HEADER_FONT_SIZE * s) / 2.0 - 1.0 * s;
-        let mut bx = btn_x + btn_pad_x;
-        bx += sugarloaf
-            .text_mut()
-            .draw(bx, btn_text_y, branch_glyph(), &icon_opts);
-        bx += 6.0 * s;
-        bx += sugarloaf.text_mut().draw(
-            bx,
-            btn_text_y,
-            name_fit.as_str(),
-            &branch_name_opts,
-        );
-        bx += 8.0 * s;
-        let _ =
-            sugarloaf
-                .text_mut()
-                .draw(bx, btn_text_y, chevron_down_glyph(), &icon_opts);
 
         cursor_y += header_h;
 
         // ── Stats row ────────────────────────────────────────────────
-        let (loading, error, files, total_add, total_del, current_diff) = {
+        let (loading, error, files, total_add, total_del) = {
             let data = match self.data.lock() {
                 Ok(g) => g,
                 Err(_) => return,
             };
             let total_add: u32 = data.files.iter().map(|f| f.additions).sum();
             let total_del: u32 = data.files.iter().map(|f| f.deletions).sum();
-            let current_diff = data
-                .files
-                .get(self.selected)
-                .and_then(|f| data.diffs.get(&f.path).cloned());
+
             (
                 data.loading,
                 data.error.clone(),
                 data.files.clone(),
                 total_add,
                 total_del,
-                current_diff,
             )
         };
 
@@ -387,21 +385,10 @@ impl GitDiffPanel {
         let card_w = (content_w - CARD_PAD_X * 2.0 * s).max(0.0);
         let row_h = FILE_ROW_HEIGHT * s;
         let files_header_h = diff_card::HEADER_HEIGHT * s;
-        let max_files_visible = files
-            .len()
-            .clamp(FILES_CARD_MIN_VISIBLE_ROWS, FILES_CARD_MAX_VISIBLE_ROWS);
-        // Files card body: enough rows for `max_files_visible`, plus
-        // its header. Diff card gets everything left over.
-        let default_files_body_h = max_files_visible as f32 * row_h
-            + (diff_card::BODY_TOP_PAD + diff_card::BODY_BOTTOM_PAD) * s;
+        // The file list owns all space between the header and footer.
         let files_card_y = body_top;
-        // Reserve the bottom band for the commit region (branch line +
-        // message box + Commit / Git actions). The message box grows with
-        // the number of lines in the commit message (Shift+Enter inserts
-        // newlines), so the reserved band height is computed from the
-        // current message, capped at `COMMIT_INPUT_MAX_LINES`.
         let ca_pad = 8.0 * s;
-        let branch_line_h = 16.0 * s;
+        let branch_line_h = COMMIT_BUTTON_HEIGHT * s;
         let commit_line_h = COMMIT_FONT_SIZE * s * 1.35;
         let commit_lines = self
             .commit_input
@@ -409,55 +396,28 @@ impl GitDiffPanel {
             .split('\n')
             .count()
             .clamp(1, COMMIT_INPUT_MAX_LINES);
-        let commit_box_h = (COMMIT_INPUT_HEIGHT * s)
-            .max(commit_lines as f32 * commit_line_h + 2.0 * (6.0 * s));
+        let commit_box_h =
+            (COMMIT_INPUT_HEIGHT * s).max(commit_lines as f32 * commit_line_h + 12.0 * s);
         let commit_area_h = ca_pad * 2.0
             + branch_line_h
-            + 6.0 * s
+            + 8.0 * s
             + commit_box_h
             + 8.0 * s
             + COMMIT_BUTTON_HEIGHT * s;
         let commit_area_y = (content_bottom - frame_stroke - commit_area_h).max(body_top);
-        let min_files_h = files_header_h + row_h * 2.0;
-        let max_files_h =
-            (commit_area_y - body_top - 2.0 * CARD_VGAP * s - 72.0 * s).max(min_files_h);
-        let files_body_h = self
-            .files_height_override
-            .map(|h| h * s)
-            .unwrap_or(default_files_body_h)
-            .clamp(row_h * 2.0, (max_files_h - files_header_h).max(row_h * 2.0));
-        let files_card_h = files_header_h + files_body_h;
-        let diff_card_y = files_card_y + files_card_h + CARD_VGAP * s;
-        let diff_card_h = (commit_area_y - CARD_VGAP * s - diff_card_y).max(0.0);
-        self.divider_rect = Rect {
-            x: card_x,
-            y: files_card_y + files_card_h - 3.0 * s,
-            w: card_w,
-            h: (CARD_VGAP + 6.0) * s,
-        };
-        sugarloaf.rounded_rect(
-            None,
-            card_x + card_w * 0.5 - 16.0 * s,
-            files_card_y + files_card_h + CARD_VGAP * s * 0.5 - 1.0 * s,
-            32.0 * s,
-            2.0 * s,
-            theme.f32(theme.muted),
-            DEPTH,
-            1.0 * s,
-            ORDER_SCROLL,
-        );
+        let files_card_h = (commit_area_y - body_top - CARD_VGAP * s).max(0.0);
+        let files_header_h = files_header_h.min(files_card_h);
+        let files_body_h = (files_card_h - files_header_h).max(0.0);
+        self.divider_rect = Rect::ZERO;
+        self.divider_dragging = false;
+        self.diff_card_rect = Rect::ZERO;
+        self.diff_scrollbar_thumb_rect = Rect::ZERO;
 
         self.files_card_rect = Rect {
             x: card_x,
             y: files_card_y,
             w: card_w,
             h: files_card_h,
-        };
-        self.diff_card_rect = Rect {
-            x: card_x,
-            y: diff_card_y,
-            w: card_w,
-            h: diff_card_h,
         };
 
         // ── Files card chrome ────────────────────────────────────────
@@ -551,11 +511,18 @@ impl GitDiffPanel {
 
         // ── Files body rows (tree) ───────────────────────────────────
         let files_body_y = files_card_y + files_header_h;
+        // Keep rows clear of the rounded bottom corners. This exact viewport
+        // drives rendering, hit testing, keyboard reveal and scrollbar bounds.
+        let inset = (diff_card::BODY_TOP_PAD * s)
+            .max(card_radius)
+            .min(files_body_h / 2.0);
+        let viewport_y = files_body_y + inset;
+        let viewport_h = (files_body_h - inset * 2.0).max(0.0);
         self.files_body_rect = Rect {
             x: card_x,
-            y: files_body_y,
+            y: viewport_y,
             w: card_w,
-            h: files_body_h,
+            h: viewport_h,
         };
         if let Some(message) = error.as_deref().or_else(|| {
             if files.is_empty() {
@@ -589,15 +556,19 @@ impl GitDiffPanel {
         self.visual_rows = visual_rows.clone();
         let total_rows = visual_rows.len();
 
-        let files_body_inner_y = files_body_y + diff_card::BODY_TOP_PAD * s;
-        let visible_rows = ((files_body_h / row_h).floor() as usize).max(1);
-        let max_top = total_rows.saturating_sub(visible_rows);
-        let max_scroll = max_top as f32 * row_h;
-        if self.file_scroll > max_scroll {
-            self.file_scroll = max_scroll;
-        }
+        let files_body_inner_y = viewport_y;
+        let visible_rows = (viewport_h / row_h).ceil() as usize;
+        let max_scroll = self.max_file_scroll();
+        self.clamp_file_scroll();
         let device_scale = sugarloaf.scale_factor();
-        let scroll_offset = snap_to_device_px(self.tick_file_scroll(), device_scale);
+        let spring_offset = self.tick_file_scroll();
+        // The spring may retain an old range after a resize or group collapse.
+        let rendered_scroll = snap_to_device_px(
+            (self.file_scroll - spring_offset).clamp(0.0, max_scroll),
+            device_scale,
+        )
+        .clamp(0.0, max_scroll);
+        let scroll_offset = self.file_scroll - rendered_scroll;
 
         self.file_row_rects.clear();
         self.file_checkbox_rects.clear();
@@ -605,8 +576,8 @@ impl GitDiffPanel {
         self.folder_row_rects.clear();
         self.selected_cursor_rect = None;
 
-        let row_clip_top = files_body_y;
-        let row_clip_bot = files_body_y + files_body_h;
+        let row_clip_top = viewport_y;
+        let row_clip_bot = viewport_y + viewport_h;
         let indent_px = TREE_INDENT * s;
         let checkbox_focused = self.checkbox_focused;
 
@@ -708,11 +679,14 @@ impl GitDiffPanel {
             let base_x =
                 card_x + diff_card::HEADER_PAD_X * s + vr.depth as f32 * indent_px;
             let text_y = row_y + (row_h - FILE_FONT_SIZE * s) / 2.0;
-            let icon_size = FILE_FONT_SIZE * s;
-            let icon_y = row_y + (row_h - icon_size) / 2.0;
 
             match &vr.kind {
-                VisualRowKind::Dir { path, collapsed } => {
+                VisualRowKind::Group {
+                    label,
+                    path,
+                    file_indices,
+                    collapsed,
+                } => {
                     self.folder_row_rects.push((
                         absolute_ix,
                         Rect {
@@ -727,20 +701,9 @@ impl GitDiffPanel {
                     } else {
                         chevron_down_glyph()
                     };
-                    let folder_glyph = if *collapsed {
-                        folder_glyph()
-                    } else {
-                        folder_open_glyph()
-                    };
                     let chevron_opts = DrawOpts {
                         font_size: FILE_FONT_SIZE * s * 0.85,
                         color: theme.u8(theme.muted),
-                        clip_rect: Some(row_clip),
-                        ..DrawOpts::default()
-                    };
-                    let folder_opts = DrawOpts {
-                        font_size: icon_size,
-                        color: theme.u8(theme.folder),
                         clip_rect: Some(row_clip),
                         ..DrawOpts::default()
                     };
@@ -755,13 +718,25 @@ impl GitDiffPanel {
                         .text_mut()
                         .draw(cx, text_y, chevron, &chevron_opts);
                     cx += indent_px;
-                    let _ =
-                        sugarloaf
-                            .text_mut()
-                            .draw(cx, icon_y, folder_glyph, &folder_opts);
-                    cx += icon_size + 6.0 * s;
-                    let dir_name = path.rsplit('/').next().unwrap_or(path.as_str());
-                    let name_budget = (stats_right_edge - cx).max(0.0);
+                    if path.is_some() {
+                        let (glyph, _) =
+                            crate::panels::file_tree::icons::folder_icon(!*collapsed);
+                        let opts = DrawOpts {
+                            color: theme.u8(theme.folder),
+                            ..dir_name_opts.clone()
+                        };
+                        sugarloaf.text_mut().draw(cx, text_y, glyph, &opts);
+                        cx += FILE_FONT_SIZE * s + 6.0 * s;
+                    }
+                    let dir_name =
+                        path.as_deref().map(|p| split_path(p).0).unwrap_or(label);
+                    let count = format!(" {}", file_indices.len());
+                    let count_opts = DrawOpts {
+                        color: theme.u8(theme.muted),
+                        ..dir_name_opts.clone()
+                    };
+                    let count_w = sugarloaf.text_mut().measure(&count, &count_opts);
+                    let name_budget = (stats_right_edge - cx - count_w).max(0.0);
                     let dir_fit =
                         truncate_to_fit(dir_name, name_budget, sugarloaf, &dir_name_opts);
                     let _ = sugarloaf.text_mut().draw(
@@ -770,13 +745,18 @@ impl GitDiffPanel {
                         dir_fit.as_str(),
                         &dir_name_opts,
                     );
-                    let prefix = format!("{path}/");
-                    let children: Vec<_> = files
+                    let name_w = sugarloaf.text_mut().measure(&dir_fit, &dir_name_opts);
+                    sugarloaf
+                        .text_mut()
+                        .draw(cx + name_w, text_y, &count, &count_opts);
+                    let children: Vec<_> = file_indices
                         .iter()
-                        .filter(|f| f.path.starts_with(&prefix))
+                        .filter_map(|&index| files.get(index))
                         .collect();
-                    let all_staged =
-                        !children.is_empty() && children.iter().all(|f| f.staged);
+                    let all_staged = !children.is_empty()
+                        && children.iter().all(|f| {
+                            f.staged && f.status != super::types::FileStatus::Mixed
+                        });
                     let some_staged = children.iter().any(|f| f.staged);
                     let cb_y = row_y + (row_h - checkbox_size) / 2.0;
                     if cb_y >= row_clip_top && cb_y + checkbox_size <= row_clip_bot {
@@ -957,11 +937,7 @@ impl GitDiffPanel {
                         ));
                     }
 
-                    let label_color = if is_selected {
-                        theme.u8(theme.fg)
-                    } else {
-                        theme.u8(theme.dim)
-                    };
+                    let label_color = theme.u8(theme.fg);
                     let marker_opts = DrawOpts {
                         font_size: FILE_FONT_SIZE * s,
                         color: f.status.color(theme),
@@ -988,16 +964,26 @@ impl GitDiffPanel {
                         ..DrawOpts::default()
                     };
 
+                    let (filename, _) = split_path(&f.path);
+                    let (glyph, color) =
+                        crate::panels::file_tree::icons::icon_for_file(filename);
+                    let icon_opts = DrawOpts {
+                        color,
+                        ..name_opts.clone()
+                    };
                     let mut tx = base_x;
-                    tx += sugarloaf.text_mut().draw(
-                        tx,
+                    sugarloaf.text_mut().draw(tx, text_y, glyph, &icon_opts);
+                    tx += FILE_FONT_SIZE * s + 6.0 * s;
+                    let marker_w = sugarloaf
+                        .text_mut()
+                        .measure(f.status.marker(), &marker_opts);
+                    let stats_right_edge = stats_right_edge - marker_w - 8.0 * s;
+                    sugarloaf.text_mut().draw(
+                        stats_right_edge + 8.0 * s,
                         text_y,
                         f.status.marker(),
                         &marker_opts,
                     );
-                    tx += 8.0 * s;
-
-                    let (filename, _dir) = split_path(&f.path);
                     let add_str = if f.additions > 0 {
                         format!("+{}", f.additions)
                     } else {
@@ -1070,25 +1056,21 @@ impl GitDiffPanel {
         // Files card scrollbar — record the thumb rect so the screen
         // layer's mouse-down handler can grab and drag it.
         self.files_scrollbar_thumb_rect = Rect::ZERO;
-        if total_rows > visible_rows {
-            let progress = if max_scroll > 0.0 {
-                self.file_scroll / max_scroll
-            } else {
-                0.0
-            };
+        if max_scroll > 0.0 && viewport_h > 0.0 {
+            let progress = rendered_scroll / max_scroll;
             if let Some((thumb_y, thumb_h)) = scrollbar::compute_thumb(
-                visible_rows,
-                total_rows,
-                files_body_y,
-                files_body_h,
+                viewport_h.ceil() as usize,
+                (total_rows as f32 * row_h).ceil() as usize,
+                viewport_y,
+                viewport_h,
                 progress,
             ) {
                 let thumb_x = card_x + card_w - scrollbar::width() - 2.0 * s;
                 scrollbar::draw_track(
                     sugarloaf,
                     thumb_x,
-                    files_body_y,
-                    files_body_h,
+                    viewport_y,
+                    viewport_h,
                     0.95,
                     DEPTH,
                     ORDER_SCROLL,
@@ -1112,136 +1094,6 @@ impl GitDiffPanel {
             }
         }
 
-        // ── Diff card ────────────────────────────────────────────────
-        let selected_file = files.get(self.selected);
-        if let Some(file) = selected_file {
-            let lines = current_diff.unwrap_or_default();
-            let lang = crate::syntax::Lang::from_path(&file.path);
-            let body_capacity_h = (diff_card_h - diff_card::HEADER_HEIGHT * s).max(0.0);
-            // Spring-damped scroll for the diff body. Clamp to the
-            // last-line viewport so over-scroll can't flick the diff
-            // off the bottom of the card.
-            let line_h = diff_card::LINE_HEIGHT * s;
-            let visual_row_offsets = diff_card::warm_render_cache(
-                &lines,
-                diff_card::body_text_width(card_w, s),
-                s,
-                lang,
-            );
-            let visual_line_count =
-                visual_row_offsets.last().copied().unwrap_or(0).max(1);
-            let max_diff_top = visual_line_count
-                .saturating_sub(((body_capacity_h / line_h).floor() as usize).max(1))
-                as f32
-                * line_h;
-            if self.diff_scroll > max_diff_top {
-                self.diff_scroll = max_diff_top;
-            }
-            // Spring lag: `tick_diff_scroll` returns the position the
-            // spring has yet to absorb. Right after a scroll it equals
-            // the just-applied delta and decays back toward 0. To make
-            // the body visually start at the old scroll and slide to
-            // the new one, subtract the lag from the integer target.
-            let diff_scroll_offset =
-                snap_to_device_px(self.tick_diff_scroll(), sugarloaf.scale_factor());
-            let effective_scroll = (self.diff_scroll - diff_scroll_offset).max(0.0);
-
-            // Focus ring for the Diff section (Alt+Down lands here so
-            // ↑/↓ scroll the changes). Drawn just under the card's own
-            // border ring (larger accent backing, painted first so the
-            // card's border + body cover its interior and only the
-            // protruding accent edge shows) — same trick as the branch
-            // button / checkbox focus rings.
-            if self.focused && self.section == FocusSection::Diff {
-                let card_radius = diff_card::CARD_RADIUS * s;
-                let card_stroke = (2.0 * s).max(2.0);
-                let focus = (1.5 * s).max(1.0);
-                let off = card_stroke + focus;
-                git_border_backing(
-                    sugarloaf,
-                    card_x - off,
-                    diff_card_y - off,
-                    card_w + off * 2.0,
-                    diff_card_h + off * 2.0,
-                    theme.f32(theme.accent),
-                    DEPTH,
-                    card_radius + off,
-                    ORDER_ROW_BG,
-                    off,
-                );
-            }
-
-            let spec = CardSpec {
-                path: file.path.as_str(),
-                link_target: None,
-                link_hovered: false,
-                additions: file.additions,
-                deletions: file.deletions,
-                lang,
-                diff_lines: lines.as_slice(),
-                visual_row_offsets: Some(visual_row_offsets.as_slice()),
-                body_scroll: effective_scroll,
-                horizontal_scroll: None,
-            };
-            let _ = diff_card::render(
-                sugarloaf,
-                card_x,
-                diff_card_y,
-                card_w,
-                body_capacity_h,
-                &spec,
-                s,
-                theme,
-                DEPTH,
-                ORDER_ROW_BG,
-                diff_card_y,
-                diff_card_y + diff_card_h,
-            );
-
-            // Diff card scrollbar — same record-rect-for-drag pattern.
-            self.diff_scrollbar_thumb_rect = Rect::ZERO;
-            if max_diff_top > 0.0 {
-                let progress = (self.diff_scroll / max_diff_top).clamp(0.0, 1.0);
-                let visible_count = ((body_capacity_h / line_h).floor() as usize).max(1);
-                if let Some((thumb_y, thumb_h)) = scrollbar::compute_thumb(
-                    visible_count,
-                    visual_line_count,
-                    diff_card_y + diff_card::HEADER_HEIGHT * s,
-                    body_capacity_h,
-                    progress,
-                ) {
-                    let thumb_x = card_x + card_w - scrollbar::width() - 2.0 * s;
-                    scrollbar::draw_track(
-                        sugarloaf,
-                        thumb_x,
-                        diff_card_y + diff_card::HEADER_HEIGHT * s,
-                        body_capacity_h,
-                        0.95,
-                        DEPTH,
-                        ORDER_SCROLL,
-                    );
-                    scrollbar::draw_thumb(
-                        sugarloaf,
-                        thumb_x,
-                        thumb_y,
-                        thumb_h,
-                        0.95,
-                        false,
-                        DEPTH,
-                        ORDER_SCROLL,
-                    );
-                    self.diff_scrollbar_thumb_rect = Rect {
-                        x: thumb_x,
-                        y: thumb_y,
-                        w: scrollbar::width(),
-                        h: thumb_h,
-                    };
-                }
-            }
-        } else {
-            self.diff_scrollbar_thumb_rect = Rect::ZERO;
-        }
-
         // ── Commit region (bottom band) ──────────────────────────────
         let commit_focused = self.commit_focused;
         let msg = self.commit_input.text().to_string();
@@ -1260,51 +1112,14 @@ impl GitDiffPanel {
 
         let mut cy = commit_area_y + ca_pad;
 
-        // Branch line — "on <branch>" summary under the divider (the
-        // switchable selector lives in the header).
-        let branch_clip = [content_x, cy, content_w, branch_line_h];
-        let branch_icon_opts = DrawOpts {
-            font_size: STATS_FONT_SIZE * s,
-            color: theme.u8(theme.dim),
-            clip_rect: Some(branch_clip),
-            ..DrawOpts::default()
-        };
-        let branch_text_opts = DrawOpts {
-            font_size: STATS_FONT_SIZE * s,
-            color: theme.u8(if error.is_some() {
-                theme.red
-            } else {
-                theme.muted
-            }),
-            clip_rect: Some(branch_clip),
-            ..DrawOpts::default()
-        };
-        let branch_text_y = cy + (branch_line_h - STATS_FONT_SIZE * s) / 2.0;
-        let mut bx = inner_x;
-        bx += sugarloaf.text_mut().draw(
-            bx,
-            branch_text_y,
-            branch_glyph(),
-            &branch_icon_opts,
+        self.draw_footer_controls(
+            sugarloaf,
+            inner_x,
+            cy,
+            (content_w - 2.0 * PADDING_X * s).max(0.0),
+            theme,
         );
-        bx += 6.0 * s;
-        let branch_line = if let Some(err) = error.as_ref() {
-            format!("Git: {err}")
-        } else if branch_label.is_empty() {
-            "detached".to_string()
-        } else {
-            format!("on {branch_label}")
-        };
-        let branch_budget = (content_x + content_w - bx - PADDING_X * s).max(0.0);
-        let branch_fit =
-            truncate_to_fit(&branch_line, branch_budget, sugarloaf, &branch_text_opts);
-        let _ = sugarloaf.text_mut().draw(
-            bx,
-            branch_text_y,
-            branch_fit.as_str(),
-            &branch_text_opts,
-        );
-        cy += branch_line_h + 6.0 * s;
+        cy += branch_line_h + 8.0 * s;
 
         // Commit-message input box (grows with line count).
         let box_x = inner_x;
@@ -1348,77 +1163,54 @@ impl GitDiffPanel {
             h: box_h,
         };
 
-        let text_pad = 8.0 * s;
-        let text_x = box_x + text_pad;
-        let box_clip = [box_x, box_y, box_w, box_h];
-        let line_top = box_y + 6.0 * s;
-        let caret_w = (1.5 * s).max(1.0);
-        if msg.is_empty() {
-            let ph_opts = DrawOpts {
-                font_size: COMMIT_FONT_SIZE * s,
-                color: theme.u8(theme.muted),
-                clip_rect: Some(box_clip),
-                ..DrawOpts::default()
+        // Hint, text, and caret share the padded top-left viewport origin.
+        let lines: Vec<&str> = msg.split('\n').collect();
+        let (text_rect, first_line, visible_lines) =
+            commit_text_viewport(self.commit_box_rect, s, lines.len());
+        let msg_opts = DrawOpts {
+            font_size: COMMIT_FONT_SIZE * s,
+            color: theme.u8(theme.fg),
+            clip_rect: Some([text_rect.x, text_rect.y, text_rect.w, text_rect.h]),
+            ..DrawOpts::default()
+        };
+        if let Some(hint) = commit_placeholder(&msg) {
+            let hint_opts = DrawOpts {
+                color: theme.u8(theme.dim),
+                ..msg_opts
             };
-            let ph_y = box_y + (box_h - COMMIT_FONT_SIZE * s) / 2.0;
-            let _ = sugarloaf.text_mut().draw(
-                text_x,
-                ph_y,
-                "Commit message… (Shift+Enter for newline)",
-                &ph_opts,
+            sugarloaf.text_mut().draw(text_rect.x, text_rect.y, hint, &hint_opts);
+        }
+        let caret_w = (1.5 * s).max(1.0).min(text_rect.w);
+        let last = lines.last().copied().unwrap_or("");
+        let last_w = sugarloaf.text_mut().measure(last, &msg_opts);
+        // The input currently appends at the tail. Scroll horizontally as well
+        // as vertically so a long final line cannot hide the insertion point.
+        let tail_scroll_x = (last_w + caret_w - text_rect.w).max(0.0);
+        for (row, line) in lines.iter().skip(first_line).take(visible_lines).enumerate() {
+            let is_tail = first_line + row == lines.len() - 1;
+            let scroll_x = if is_tail { tail_scroll_x } else { 0.0 };
+            sugarloaf.text_mut().draw(
+                text_rect.x - scroll_x,
+                text_rect.y + row as f32 * commit_line_h,
+                line,
+                &msg_opts,
             );
-            if commit_focused {
-                let caret_h = (COMMIT_FONT_SIZE * s + 2.0 * s).min(box_h - 8.0 * s);
-                sugarloaf.rect(
-                    None,
-                    text_x,
-                    box_y + (box_h - caret_h) / 2.0,
-                    caret_w,
-                    caret_h,
-                    theme.f32(theme.accent),
-                    DEPTH,
-                    ORDER_SCROLL,
-                );
-            }
-        } else {
-            // Multi-line: one draw per '\n'-separated line so Shift+Enter
-            // newlines display stacked instead of running off the right.
-            let msg_opts = DrawOpts {
-                font_size: COMMIT_FONT_SIZE * s,
-                color: theme.u8(theme.fg),
-                clip_rect: Some(box_clip),
-                ..DrawOpts::default()
-            };
-            let lines: Vec<&str> = msg.split('\n').collect();
-            for (i, line) in lines.iter().enumerate() {
-                let ly = line_top + i as f32 * commit_line_h;
-                if ly > box_y + box_h {
-                    break;
-                }
-                let _ = sugarloaf.text_mut().draw(text_x, ly, line, &msg_opts);
-            }
-            if commit_focused {
-                // Caret at end of the last line (the commit box types at
-                // the tail; no in-box cursor motion yet).
-                let last = lines.last().copied().unwrap_or("");
-                let last_w = sugarloaf.text_mut().measure(last, &msg_opts);
-                let caret_line = lines.len().saturating_sub(1);
-                let caret_x = (text_x + last_w).min(box_x + box_w - text_pad).max(text_x);
-                let caret_y = line_top + caret_line as f32 * commit_line_h;
-                let caret_h = (COMMIT_FONT_SIZE * s + 2.0 * s).min(box_h);
-                if caret_y + caret_h <= box_y + box_h + 1.0 * s {
-                    sugarloaf.rect(
-                        None,
-                        caret_x,
-                        caret_y,
-                        caret_w,
-                        caret_h,
-                        theme.f32(theme.accent),
-                        DEPTH,
-                        ORDER_SCROLL,
-                    );
-                }
-            }
+        }
+        if commit_focused && text_rect.w > 0.0 && text_rect.h > 0.0 {
+            let caret_y = text_rect.y
+                + (lines.len() - 1 - first_line) as f32 * commit_line_h;
+            let caret_h = (COMMIT_FONT_SIZE * s + 2.0 * s)
+                .min((text_rect.y + text_rect.h - caret_y).max(0.0));
+            sugarloaf.rect(
+                None,
+                text_rect.x + last_w - tail_scroll_x,
+                caret_y,
+                caret_w,
+                caret_h,
+                theme.f32(theme.accent),
+                DEPTH,
+                ORDER_SCROLL,
+            );
         }
         cy += box_h + 8.0 * s;
 
@@ -1426,9 +1218,7 @@ impl GitDiffPanel {
         let btn_h = COMMIT_BUTTON_HEIGHT * s;
         let btn_y = cy;
         let btn_pad_x = 12.0 * s;
-        let btn_gap = 8.0 * s;
         let btn_radius = 6.0 * s;
-        let btn_stroke = (1.0 * s).max(1.0);
         let btn_text_y = btn_y + (btn_h - COMMIT_FONT_SIZE * s) / 2.0;
 
         // Commit — filled accent button.
@@ -1448,7 +1238,20 @@ impl GitDiffPanel {
             .text_mut()
             .measure(commit_label, &commit_label_opts);
         let commit_btn_w = commit_text_w + btn_pad_x * 2.0;
-        let commit_btn_x = inner_x;
+        let commit_btn_x = inner_x + box_w - commit_btn_w;
+        self.latest_commit_rect = Rect::ZERO;
+        if let Some(commit) = self.latest_commit() {
+            let width = (commit_btn_x - inner_x - 12.0 * s).max(0.0);
+            self.latest_commit_rect = Rect { x: inner_x, y: btn_y, w: width, h: btn_h };
+            let subject = commit.message.lines().next().unwrap_or("");
+            let label = truncate_to_fit(subject, width, sugarloaf, &DrawOpts {
+                font_size: COMMIT_FONT_SIZE * s, ..DrawOpts::default()
+            });
+            let _ = sugarloaf.text_mut().draw(inner_x, btn_text_y, &label, &DrawOpts {
+                font_size: COMMIT_FONT_SIZE * s, color: theme.u8(theme.dim),
+                clip_rect: Some(self.latest_commit_rect.as_array()), ..DrawOpts::default()
+            });
+        }
         sugarloaf.rounded_rect(
             None,
             commit_btn_x,
@@ -1480,61 +1283,28 @@ impl GitDiffPanel {
             h: btn_h,
         };
 
-        // Compact actions trigger; the primary Commit action stays one click away.
-        let actions_x = commit_btn_x + commit_btn_w + btn_gap;
-        let actions_w = (box_x + box_w - actions_x).max(0.0).min(156.0 * s);
-        let actions_bg = if self.actions_menu_is_open() {
-            theme.hover
-        } else {
-            theme.surface
-        };
-        git_border_backing(
-            sugarloaf,
-            actions_x - btn_stroke,
-            btn_y - btn_stroke,
-            actions_w + btn_stroke * 2.0,
-            btn_h + btn_stroke * 2.0,
-            theme.f32(theme.border),
-            DEPTH,
-            btn_radius + btn_stroke,
-            ORDER_ROW_BG,
-            btn_stroke,
-        );
-        sugarloaf.rounded_rect(
-            None,
-            actions_x,
-            btn_y,
-            actions_w,
-            btn_h,
-            git_background_opacity(theme.f32(actions_bg)),
-            DEPTH,
-            btn_radius,
-            ORDER_ROW_BG + 1,
-        );
-        let actions_opts = DrawOpts {
-            font_size: COMMIT_FONT_SIZE * s,
-            color: theme.u8(theme.fg),
-            clip_rect: Some([actions_x, btn_y, actions_w, btn_h]),
-            ..DrawOpts::default()
-        };
-        sugarloaf.text_mut().draw(
-            actions_x + btn_pad_x,
-            btn_text_y,
-            "Git actions",
-            &actions_opts,
-        );
-        sugarloaf.text_mut().draw(
-            actions_x + actions_w - btn_pad_x - 10.0 * s,
-            btn_text_y,
-            chevron_down_glyph(),
-            &actions_opts,
-        );
-        self.actions_button_rect = Rect {
-            x: actions_x,
-            y: btn_y,
-            w: actions_w,
-            h: btn_h,
-        };
+        self.latest_commit_popup_rect = Rect::ZERO;
+        self.latest_commit_copy_rect = Rect::ZERO;
+        if self.latest_commit_hover {
+            if let Some(commit) = self.latest_commit() {
+                let width = (330.0 * s).min(content_w - 16.0 * s).max(0.0);
+                let height = 94.0 * s;
+                let px = inner_x;
+                let py = (btn_y - height - 3.0 * s).max(chrome_top);
+                self.latest_commit_popup_rect = Rect { x: px, y: py, w: width, h: height + 6.0 * s };
+                sugarloaf.rounded_rect(None, px, py, width, height, theme.f32(theme.surface), DEPTH, 6.0 * s, ORDER_MENU_BG + 5);
+                let rows = [commit.author.clone(), crate::panels::git_commit_view::format_date(commit.timestamp, 0), commit.message.lines().next().unwrap_or("").to_string(), format!("{}  Copy SHA", commit.sha)];
+                for (i, row) in rows.iter().enumerate() {
+                    let ry = py + (10.0 + i as f32 * 20.0) * s;
+                    let _ = sugarloaf.text_mut().draw(px + 10.0 * s, ry, row, &DrawOpts {
+                        font_size: 11.0 * s, color: theme.u8(if i == 3 { theme.accent } else { theme.fg }),
+                        clip_rect: Some([px + 8.0 * s, py, (width - 16.0 * s).max(0.0), height]), ..DrawOpts::default()
+                    });
+                    if i == 3 { self.latest_commit_copy_rect = Rect { x: px, y: ry, w: width, h: 20.0 * s }; }
+                }
+            }
+        }
+
         self.draw_actions_menu(
             sugarloaf,
             s,
@@ -1552,6 +1322,122 @@ impl GitDiffPanel {
             content_bottom,
             frame_stroke,
             theme,
+        );
+    }
+
+    fn draw_footer_controls(
+        &mut self,
+        sugarloaf: &mut Sugarloaf,
+        x: f32,
+        y: f32,
+        width: f32,
+        theme: &IdeTheme,
+    ) {
+        let s = self.scale;
+        let [branch, push, actions] = footer_control_rects(x, y, width, s);
+        self.branch_button_rect = branch;
+        self.push_button_rect = push;
+        self.actions_button_rect = actions;
+        let enabled = self.push_button_enabled();
+        let branch_focused = self.branch_section_focused();
+        let label = self.branch().unwrap_or_else(|| "detached".into());
+        let split = Rect {
+            w: push.w + actions.w,
+            ..push
+        };
+        for (rect, primary) in [(branch, false), (split, true)] {
+            let bg = if primary && enabled {
+                theme.accent
+            } else if !primary && (branch_focused || self.branch_menu_open) {
+                theme.hover
+            } else {
+                theme.surface
+            };
+            sugarloaf.rounded_rect(
+                None,
+                rect.x,
+                rect.y,
+                rect.w,
+                rect.h,
+                git_background_opacity(theme.f32(bg)),
+                DEPTH,
+                6.0 * s,
+                ORDER_ROW_BG + 1,
+            );
+        }
+        if branch_focused {
+            git_border_backing(
+                sugarloaf,
+                branch.x - s,
+                branch.y - s,
+                branch.w + 2.0 * s,
+                branch.h + 2.0 * s,
+                theme.f32(theme.accent),
+                DEPTH,
+                7.0 * s,
+                ORDER_ROW_BG,
+                s,
+            );
+        }
+        let branch_opts = DrawOpts {
+            font_size: COMMIT_FONT_SIZE * s,
+            color: theme.u8(theme.fg),
+            clip_rect: Some(branch.as_array()),
+            ..DrawOpts::default()
+        };
+        let ty = y + (branch.h - COMMIT_FONT_SIZE * s) / 2.0;
+        let icon_w =
+            sugarloaf
+                .text_mut()
+                .draw(x + 6.0 * s, ty, branch_glyph(), &branch_opts);
+        let name_x = x + 12.0 * s + icon_w;
+        let fit = truncate_to_fit(
+            &label,
+            (branch.x + branch.w - name_x - 20.0 * s).max(0.0),
+            sugarloaf,
+            &branch_opts,
+        );
+        sugarloaf.text_mut().draw(name_x, ty, &fit, &branch_opts);
+        sugarloaf.text_mut().draw(
+            branch.x + branch.w - 16.0 * s,
+            ty,
+            chevron_down_glyph(),
+            &branch_opts,
+        );
+        let push_opts = DrawOpts {
+            font_size: COMMIT_FONT_SIZE * s,
+            color: theme.u8(if enabled { theme.bg } else { theme.muted }),
+            bold: true,
+            clip_rect: Some(push.as_array()),
+            ..DrawOpts::default()
+        };
+        let label = self.push_button_label();
+        let text_w = sugarloaf.text_mut().measure(label, &push_opts);
+        sugarloaf.text_mut().draw(
+            push.x + (push.w - text_w) / 2.0,
+            ty,
+            label,
+            &push_opts,
+        );
+        sugarloaf.rect(
+            None,
+            actions.x,
+            y + 5.0 * s,
+            s.max(1.0),
+            actions.h - 10.0 * s,
+            theme.f32(theme.border),
+            DEPTH,
+            ORDER_ACCENT,
+        );
+        sugarloaf.text_mut().draw(
+            actions.x + 8.0 * s,
+            ty,
+            chevron_down_glyph(),
+            &DrawOpts {
+                color: theme.u8(if enabled { theme.bg } else { theme.fg }),
+                clip_rect: Some(actions.as_array()),
+                ..push_opts
+            },
         );
     }
 
@@ -1684,7 +1570,7 @@ impl GitDiffPanel {
         sugarloaf: &mut Sugarloaf,
         s: f32,
         content_x: f32,
-        content_bottom: f32,
+        _content_bottom: f32,
         frame_stroke: f32,
         theme: &IdeTheme,
     ) {
@@ -1709,22 +1595,20 @@ impl GitDiffPanel {
             .min(branches.len().saturating_sub(1));
 
         let gap = 4.0 * s;
-        // The branch button hugs the panel's right edge, so the dropdown
-        // right-aligns under it and opens leftward — clamped so it never
-        // spills past the panel's left content edge.
+        // The selector is in the footer, so its menu opens upward.
         let min_left = content_x + 4.0 * s;
-        let menu_right = btn.x + btn.w;
-        let desired_w = btn.w.max(240.0 * s);
-        let menu_w = desired_w.min((menu_right - min_left).max(0.0));
-        let menu_x = (menu_right - menu_w).max(min_left);
-        let menu_y = btn.y + btn.h + gap;
+        let max_right = self.panel_rect.x + self.panel_rect.w - 4.0 * s;
+        let menu_w = (240.0 * s).min((max_right - min_left).max(0.0));
+        let menu_x = btn.x.max(min_left).min((max_right - menu_w).max(min_left));
         let pad = 6.0 * s;
         let search_h = 26.0 * s;
         let row_h = 22.0 * s;
         let shown = branches.len().min(BRANCH_MENU_MAX_ROWS);
         let list_h = shown as f32 * row_h;
         let wanted_h = pad + search_h + 6.0 * s + list_h + pad;
-        let menu_h = wanted_h.min((content_bottom - frame_stroke - menu_y).max(0.0));
+        let top = self.panel_rect.y + frame_stroke;
+        let menu_h = wanted_h.min((btn.y - gap - top).max(0.0));
+        let menu_y = (btn.y - gap - menu_h).max(top);
         let menu_bot = menu_y + menu_h;
 
         // Border + fill. Drawn in the OVERLAY pass (after normal UI
@@ -1853,8 +1737,12 @@ impl GitDiffPanel {
         // Branch rows.
         self.branch_menu_row_rects.clear();
         let rows_top = search_y + search_h + 6.0 * s;
-        for (i, b) in branches.iter().take(shown).enumerate() {
-            let ry = rows_top + i as f32 * row_h;
+        let visible =
+            (((menu_bot - rows_top).max(0.0) / row_h).floor() as usize).min(shown);
+        let start = selected.saturating_add(1).saturating_sub(visible.max(1));
+        for (slot, b) in branches.iter().skip(start).take(visible).enumerate() {
+            let i = start + slot;
+            let ry = rows_top + slot as f32 * row_h;
             if ry + row_h > menu_bot {
                 break;
             }

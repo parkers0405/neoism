@@ -113,10 +113,11 @@ impl Screen<'_> {
         // An editor whose document caret is scrolled offscreen still owns
         // cursor focus. Without this ownership the policy falls through to
         // the parked terminal cursor at the top-left corner.
-        let cursorless_surface_active = self.context_manager.current().code.is_some()
+        let cursorless_surface_active = self.context_manager.active_code_pane().is_some()
             || self.context_manager.current().markdown.is_some()
             || self.context_manager.current().notebook.is_some()
             || self.context_manager.current().epub.is_some()
+            || self.context_manager.current().git_diff_view.is_some()
             || self.context_manager.current().neoworld.is_some()
             || self.context_manager.current().neoism_extensions.is_some()
             || self.context_manager.current().neoism_tags.is_some()
@@ -144,9 +145,7 @@ impl Screen<'_> {
             .is_some();
         let code_cursor_available = self
             .context_manager
-            .current()
-            .code
-            .as_ref()
+            .active_code_pane()
             .and_then(|code| code.cursor_rect)
             .is_some();
         let markdown_active = self.context_manager.current().markdown.is_some()
@@ -247,12 +246,8 @@ impl Screen<'_> {
                 }
             }
             Some(TrailCursorOverlayTarget::Code) => {
-                if let Some((rect, shape)) = self
-                    .context_manager
-                    .current()
-                    .code
-                    .as_ref()
-                    .and_then(|code| {
+                if let Some((rect, shape)) =
+                    self.context_manager.active_code_pane().and_then(|code| {
                         code.cursor_rect.map(|rect| (rect, code.cursor_shape()))
                     })
                 {

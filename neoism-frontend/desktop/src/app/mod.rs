@@ -6022,7 +6022,7 @@ impl Application<'_> {
             let workspace_identity = format!("{:?}", manager.current_workspace_tree_id());
             let window_identity = format!("{window_id:?}");
             let route_identity = manager.current().route_id.to_string();
-            let Some(code) = manager.current_mut().code.as_mut() else {
+            let Some(code) = manager.active_code_pane_mut() else {
                 tracing::warn!("Lua document action target is no longer a code document");
                 return;
             };
@@ -6206,6 +6206,10 @@ impl Application<'_> {
                     );
                 }
                 neoism_lua::HostOperation::DocumentClose => {
+                    if route.window.screen.context_manager.current().git_diff_view.is_some() {
+                        tracing::warn!("Close the canonical code tab explicitly; closing a review projection must not discard its owner");
+                        return;
+                    }
                     route.window.screen.execute_palette_action(
                         PaletteAction::TabClose,
                         &mut self.router.clipboard,
@@ -6898,7 +6902,11 @@ impl Application<'_> {
                 return;
             };
             match action.action.as_str() {
-                "stage" => route.window.screen.renderer.git_diff_panel.stage_all(),
+                "stage" => {
+                    if let Some(root) = route.window.screen.renderer.git_diff_panel.repo_root() {
+                        route.window.screen.stage_review_all(root);
+                    }
+                }
                 "unstage" => route.window.screen.renderer.git_diff_panel.unstage_all(),
                 "commit" => {
                     if let Some(message) = argument("message") {
@@ -9313,6 +9321,7 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                 self.apply_update_config();
             }
             RioEventType::Rio(RioEvent::Exit | RioEvent::Quit) => {
+                if self.refuse_unsaved_code_close(window_id, true) { return; }
                 if let Some(route) = self.router.routes.get_mut(&window_id) {
                     match quit_request_action(self.config.ui.confirm_before_quit) {
                         QuitRequestAction::ConfirmQuitAndRedraw => {
@@ -9760,6 +9769,7 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
             }
             #[cfg(target_os = "macos")]
             RioEventType::Rio(RioEvent::CloseWindow) => {
+                if self.refuse_unsaved_code_close(window_id, false) { return; }
                 if let Some(daemon_window_id) =
                     self.router.daemon_window_for_native(window_id)
                 {

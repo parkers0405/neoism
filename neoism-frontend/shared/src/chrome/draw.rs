@@ -695,11 +695,16 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             .into_iter()
             .fold(0.0_f32, f32::max);
             let window_h = layout.status_line.y + layout.status_line.h;
+            // Match desktop: menu material must composite AFTER normal
+            // editor/grid text, with its rounded silhouette intact. Do not
+            // suppress source text using the menu's rectangular bounds.
+            sugarloaf.set_late_overlay_mode(true);
             self.context_menu.render(
                 sugarloaf,
                 (window_w, window_h, 1.0),
                 &self.ide_theme,
             );
+            sugarloaf.set_late_overlay_mode(false);
         }
 
         // Modal overlays must draw before the shared trail cursor so
@@ -801,7 +806,8 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                 .as_ref()
                 .and_then(|pane| pane.markdown.cursor_rect)
                 .is_some();
-        let markdown_cursor_available = (!self.is_terminal_tab_active()
+        let markdown_cursor_available = (self.active_chrome_page().is_none()
+            && !self.is_terminal_tab_active()
             && self.tab_lang == crate::syntax::Lang::Markdown
             && self
                 .markdown_pane
@@ -810,6 +816,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                 .is_some())
             || notebook_cursor_available;
         let markdown_active = content_available
+            && self.active_chrome_page().is_none()
             && !self.is_terminal_tab_active()
             && self.tab_lang == crate::syntax::Lang::Markdown;
         let terminal_block_input_active = content_available
@@ -1286,6 +1293,17 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             if self.host_drawn_panes.contains(&id) {
                 continue;
             }
+            let diff_route = self.pane_tabs.get(&id).and_then(|tabs| {
+                match tabs.target_at(tabs.active()) {
+                    Some(crate::panels::buffer_tabs::BufferTabTarget::ChromePage(page))
+                        if page.kind == crate::panels::buffer_tabs::ChromePageKind::GitDiff => Some(page.route_id),
+                    _ => None,
+                }
+            });
+            if let Some(route) = diff_route {
+                self.draw_git_diff_route(sugarloaf, route, content);
+                continue;
+            }
             let info = self
                 .pane_surfaces
                 .iter()
@@ -1577,6 +1595,50 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             && self.active_editor_pane_kind() == Some(EditorPaneKind::Code)
     }
 
+    /// The same visibility gate is used by paint and host input: stale
+    /// popup geometry must never intercept input through another overlay.
+    pub fn code_hover_interaction(
+        &self,
+    ) -> Option<&crate::panels::hover_popup::HoverPopupState> {
+        if !self.code_hover_surface_visible() || self.code_lsp.owns_menu_popup {
+            return None;
+        }
+        let pane = self.code_pane.as_ref()?;
+        let card = self.code_lsp.hover.as_ref()?;
+        let cursor = pane.buffer.cursor();
+        if card.lines.is_empty()
+            || card.path != pane.path
+            || (!card.from_mouse && (cursor.line != card.line || cursor.col != card.col))
+            || pane.geometry.cell_w <= 0.0
+            || pane.geometry.row_h <= 0.0
+            || pane.buffer.lines.get(card.line).is_none()
+        {
+            return None;
+        }
+        Some(&card.interaction)
+    }
+
+    pub fn code_hover_interaction_mut(
+        &mut self,
+    ) -> Option<&mut crate::panels::hover_popup::HoverPopupState> {
+        if self.code_hover_interaction().is_none() {
+            if let Some(card) = self.code_lsp.hover.as_mut() {
+                card.interaction.hide();
+            }
+            return None;
+        }
+        self.code_lsp.hover.as_mut().map(|card| &mut card.interaction)
+    }
+
+    fn code_hover_surface_visible(&self) -> bool {
+        self.code_lsp_pane_active()
+            && !self.generic_keyboard_overlay_active()
+            && !self.command_palette.is_visible()
+            && !self.finder.is_visible()
+            && !self.file_browser.is_active()
+            && !self.conversation_navigator.is_active()
+    }
+
     /// Per-frame session pump + completion/action menu feed. Runs just
     /// before the completion-menu shim paints so the stored popup is
     /// this frame's snapshot.
@@ -1592,8 +1654,18 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             return;
         }
         let pointer = self.last_pointer_pos;
+        let hover_visible =
+            self.code_hover_surface_visible() && !self.code_lsp.owns_menu_popup;
+        if !hover_visible {
+            if let Some(card) = self.code_lsp.hover.as_mut() {
+                card.interaction.hide();
+            }
+            self.code_lsp.mouse_hover = None;
+        }
         if let Some(pane) = self.code_pane.as_mut() {
-            self.code_lsp.note_mouse_move(pane, Some(pointer));
+            if hover_visible {
+                self.code_lsp.note_mouse_move(pane, Some(pointer));
+            }
             self.code_lsp.pump(pane);
         }
 
@@ -1707,7 +1779,10 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         self.lsp_popup
             .render(sugarloaf, &ide_theme, self.chrome_scale);
 
-        if input_modal_active || !self.code_lsp_pane_active() {
+        if input_modal_active || self.code_hover_interaction_mut().is_none() {
+            if let Some(card) = self.code_lsp.hover.as_mut() {
+                card.interaction.hide();
+            }
             return;
         }
         // The completion / action menu wins the surface (desktop
@@ -1718,7 +1793,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         let Some(pane) = self.code_pane.as_ref() else {
             return;
         };
-        let Some(card) = self.code_lsp.hover.as_ref() else {
+        let Some(card) = self.code_lsp.hover.as_mut() else {
             return;
         };
         if card.lines.is_empty() || card.path != pane.path {
@@ -1758,11 +1833,13 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                 anchor_x,
                 anchor_y,
                 cell_h: geometry.row_h,
+                document_language: crate::syntax::Lang::from_path(&card.path.to_string_lossy()),
                 window_w: window_width,
                 window_h: window_bottom,
                 scale: self.chrome_scale,
             },
             &ide_theme,
+            &mut card.interaction,
         );
     }
 }

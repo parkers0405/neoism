@@ -29,6 +29,36 @@ fn roundtrip_server(msg: &EditorServerMessage) {
 }
 
 #[test]
+fn declaration_and_type_definition_have_distinct_wire_operations_and_outcomes() {
+    use neoism_protocol::editor::EditorLspAction;
+    for (action, operation, outcome, expected) in [
+        (
+            EditorLspAction::Declaration,
+            EditorLspReadOperation::Declaration,
+            EditorLspReadOutcome::Declaration(Vec::new()),
+            "declaration",
+        ),
+        (
+            EditorLspAction::TypeDefinition,
+            EditorLspReadOperation::TypeDefinition,
+            EditorLspReadOutcome::TypeDefinition(Vec::new()),
+            "type_definition",
+        ),
+    ] {
+        let encoded = serde_json::to_string(&action).unwrap();
+        let decoded: EditorLspAction = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, action);
+        assert_eq!(encoded, format!("\"{expected}\""));
+        let encoded = serde_json::to_string(&operation).unwrap();
+        let decoded: EditorLspReadOperation = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, operation);
+        let encoded = serde_json::to_string(&outcome).unwrap();
+        let decoded: EditorLspReadOutcome = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(serde_json::to_string(&decoded).unwrap(), encoded);
+    }
+}
+
+#[test]
 fn editor_surface_id_is_backward_compatible_for_old_client_json() {
     let msg: EditorClientMessage =
         serde_json::from_str(r#"{"OpenBuffer":{"path":"src/lib.rs"}}"#)

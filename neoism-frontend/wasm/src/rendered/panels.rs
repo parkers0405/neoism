@@ -48,6 +48,17 @@ impl DaemonGitDiffIo {
 }
 
 impl GitDiffIo for DaemonGitDiffIo {
+    fn is_host_driven(&self) -> bool {
+        true
+    }
+    fn request_latest_commit(&self) {
+        self.fire(&GitClientMessage::Log { max_count: Some(1) });
+    }
+    fn request_commit(&self, revision: &str) {
+        self.fire(&GitClientMessage::ReadCommit {
+            revision: revision.into(),
+        });
+    }
     fn collect_files(&self, _repo_root: &Path) -> Vec<FileChange> {
         // Fire-and-forget refresh; the daemon reply lands through
         // `git_panel_apply_changed_files`. The empty return is never
@@ -60,6 +71,24 @@ impl GitDiffIo for DaemonGitDiffIo {
         self.fire(&GitClientMessage::Stage {
             path: path.to_string(),
         });
+        Ok(())
+    }
+
+    fn request_base(&self, path: &str) {
+        self.fire(&GitClientMessage::ReadBase {
+            path: path.to_string(),
+        });
+    }
+
+    fn restore(&self, _repo_root: &Path, path: &str) -> Result<(), String> {
+        self.fire(&GitClientMessage::Restore {
+            path: path.to_string(),
+        });
+        Ok(())
+    }
+
+    fn apply_block(&self, _repo_root: &Path, path: &str, block: &neoism_protocol::git::GitChangeBlock, restore: bool) -> Result<(), String> {
+        self.fire(&GitClientMessage::ApplyBlock { path: path.to_owned(), block: block.clone(), restore });
         Ok(())
     }
 
@@ -103,6 +132,11 @@ impl GitDiffIo for DaemonGitDiffIo {
         self.fire(&GitClientMessage::Push);
         Ok(())
     }
+
+    fn publish(&self, _repo_root: &Path) -> Result<(), String> {
+        self.fire(&GitClientMessage::Publish);
+        Ok(())
+    }
 }
 
 /// Map a wire status tag (either the legacy `GitFileStatus` spelling
@@ -123,6 +157,21 @@ fn map_wire_status(tag: &str) -> FileStatus {
 
 #[wasm_bindgen]
 impl ChromeBridge {
+    pub fn git_panel_set_latest_commit(&mut self, json: &str) {
+        if let Ok(commits) =
+            serde_json::from_str::<Vec<neoism_protocol::git::CommitSummary>>(json)
+        {
+            self.chrome
+                .git_diff_panel
+                .host_set_latest_commit(commits.into_iter().next());
+        }
+    }
+    pub fn git_panel_apply_commit_detail(&mut self, json: &str) {
+        if let Ok(detail) = serde_json::from_str(json) {
+            self.chrome.git_diff_panel.host_commit_detail(detail);
+        }
+    }
+
     // -------- rich side panels (git diff / notes) ----------------
     //
     // Desktop's Alt+G right-side git panel and Alt+N notes
@@ -263,6 +312,8 @@ impl ChromeBridge {
             #[serde(default)]
             branch: Option<String>,
             #[serde(default)]
+            upstream: Option<String>,
+            #[serde(default)]
             error: Option<String>,
         }
         let Ok(reply) = serde_json::from_str::<WireChangedFiles>(&reply_json) else {
@@ -281,9 +332,8 @@ impl ChromeBridge {
             .collect();
         let panel = &mut self.chrome.git_diff_panel;
         panel.host_set_files(files);
-        if reply.branch.is_some() {
-            panel.host_set_branch(reply.branch);
-        }
+        panel.host_set_branch(reply.branch);
+        panel.set_upstream(reply.upstream);
         if let Some(error) = reply.error {
             panel.host_set_error(error);
         }
@@ -314,6 +364,66 @@ impl ChromeBridge {
     /// Provider-path push: apply a daemon `FileDiffs` reply —
     /// `[{path, patch}]` with desktop-parity `git diff HEAD` patch
     /// text per changed file.
+    /// Final mutation gate: called after the provider's wasm stack unwinds.
+    pub fn git_panel_prepare_stage(&mut self, path: &str) -> bool {
+        self.chrome
+            .prepare_git_panel_stage(std::path::Path::new(path))
+    }
+
+    pub fn git_panel_restore_identity(&self, path: &str) -> String {
+        let Some(root) = self.chrome.git_diff_panel.repo_root() else { return "null".into(); };
+        let absolute = neoism_protocol::host_path::HostPath::new(root.to_string_lossy()).join(path);
+        let Some((revision, text)) = self.chrome.git_restore_identity(std::path::Path::new(absolute.as_str())) else { return "null".into(); };
+        serde_json::json!({"root": root.to_string_lossy(), "absolute": absolute.as_str(), "revision": revision.to_string(), "text": text}).to_string()
+    }
+
+    /// Reconcile through the EXISTING replica, never reload bytes as a local
+    /// edit. The daemon folds the restore before acknowledging Git success.
+    pub fn git_panel_block_restored(&mut self, identity_json: &str, buffer_id: &str) -> bool {
+        #[derive(serde::Deserialize)]
+        struct Identity { root: String, absolute: String }
+        let Ok(identity) = serde_json::from_str::<Identity>(identity_json) else { return false; };
+        if self.chrome.git_diff_panel.repo_root().as_deref() != Some(std::path::Path::new(&identity.root)) { return false; }
+        let Some((pane, binding)) = self.chrome.code_editor_for_buffer_mut(buffer_id) else { return false; };
+        if pane.path != std::path::Path::new(&identity.absolute) || !pane.workspace_sync_ready() || !binding.is_seeded() { return false; }
+        // Intervening edits/revisions are safe: apply_remote flushes them before
+        // merging this authoritative delta idempotently, preserving undo/caret.
+        let state_vector_v1 = binding.state_vector_v1();
+        self.crdt_outbound.push(neoism_protocol::crdt::CrdtClientMessage::RequestSnapshot { buffer_id: buffer_id.to_owned(), state_vector_v1 });
+        true
+    }
+
+    pub fn prepare_git_stage_block(&mut self, path: &str, block_json: &str) -> bool {
+        let Ok(block) = serde_json::from_str::<neoism_protocol::git::GitChangeBlock>(block_json) else {
+            return false;
+        };
+        self.chrome.prepare_git_panel_block_stage(std::path::Path::new(path), block)
+    }
+
+    pub fn git_panel_prepare_restore(&mut self, path: &str) -> bool {
+        let Some(root) = self.chrome.git_diff_panel.repo_root() else { return false; };
+        let absolute = neoism_protocol::host_path::HostPath::new(root.to_string_lossy()).join(path);
+        if !self.chrome.git_restore_replica_ready(std::path::Path::new(absolute.as_str())) {
+            self.chrome.git_diff_panel.host_set_error("Wait for the canonical source document to finish loading before restoring.".into());
+            return false;
+        }
+        self.chrome.prepare_git_panel_restore(std::path::Path::new(path))
+    }
+
+    /// Provider baseline reply: source text from HEAD, never patch rows.
+    pub fn git_panel_apply_base_file(&mut self, reply_json: String) {
+        #[derive(serde::Deserialize)]
+        struct BaseFile {
+            path: String,
+            text: String,
+        }
+        if let Ok(reply) = serde_json::from_str::<BaseFile>(&reply_json) {
+            self.chrome
+                .git_diff_panel
+                .host_set_base_text(&reply.path, reply.text);
+        }
+    }
+
     pub fn git_panel_apply_file_diffs(&mut self, diffs_json: String) {
         #[derive(serde::Deserialize)]
         struct WireFileDiff {
@@ -328,6 +438,11 @@ impl ChromeBridge {
                 .git_diff_panel
                 .host_set_diff_text(&d.path, &d.patch);
         }
+    }
+
+    /// Clear only the submitted draft after the host confirms this commit.
+    pub fn git_panel_commit_succeeded(&mut self, message: String) {
+        self.chrome.git_diff_panel.host_commit_succeeded(&message);
     }
 
     /// Surface a daemon-side git failure in the panel body.

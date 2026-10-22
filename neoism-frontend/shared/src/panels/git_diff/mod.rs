@@ -41,10 +41,15 @@
 
 #[cfg(test)]
 mod actions_tests;
+mod baseline;
 mod parse;
 mod render;
+mod review;
+pub mod review_actions;
 mod slim;
+mod stage_plan;
 mod state;
+pub use stage_plan::GitStagePlan;
 mod types;
 mod update;
 
@@ -57,7 +62,9 @@ pub use types::{FileChange, FileStatus, PanelHit, ScrollbarKind};
 // `parse_numstat` and `parse_diff_into` are pure-byte/string and run
 // on wasm as well, even though the native shim is the only current
 // caller.
-pub use parse::{parse_diff_into, parse_new_start, parse_numstat};
+pub use parse::{
+    parse_diff_into, parse_diff_into_with_headers, parse_new_start, parse_numstat,
+};
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use parse::load_diff;
@@ -88,12 +95,6 @@ pub(crate) const CARD_VGAP: f32 = 8.0;
 /// tree's row so the +/- badges have breathing room.
 pub(crate) const FILE_ROW_HEIGHT: f32 = 24.0;
 pub(crate) const FILE_FONT_SIZE: f32 = 12.0;
-/// Maximum visible files in the top card before it scrolls — keeps the
-/// diff card from being squeezed into a single line on small windows.
-pub(crate) const FILES_CARD_MAX_VISIBLE_ROWS: usize = 8;
-/// Minimum visible files when there's room. The card never collapses
-/// below this even if the diff card would prefer more space.
-pub(crate) const FILES_CARD_MIN_VISIBLE_ROWS: usize = 3;
 /// Keyboard scroll-off — when the cursor moves into a row this close
 /// to the viewport edge, scroll the list to keep the cursor padded.
 /// Mirrors `file_tree::SCROLL_OFF_ROWS`.
@@ -104,8 +105,8 @@ pub const RESIZE_HIT_HALF: f32 = 5.0;
 /// Hit-test extra width on each side of the right-edge scrollbar
 /// thumb so users don't need surgical mouse precision to grab it.
 pub const SCROLLBAR_HIT_PAD: f32 = 6.0;
-/// Commit-message input box height (pre-scale, single line).
-pub(crate) const COMMIT_INPUT_HEIGHT: f32 = 30.0;
+/// Minimum commit-message editor height (pre-scale).
+pub(crate) const COMMIT_INPUT_HEIGHT: f32 = 76.0;
 /// Max lines the multiline commit box grows to before it stops taller
 /// (further lines still type; the box just caps its drawn height).
 pub(crate) const COMMIT_INPUT_MAX_LINES: usize = 6;
@@ -163,13 +164,6 @@ pub(crate) fn chevron_down_glyph() -> &'static str {
 }
 pub(crate) fn chevron_right_glyph() -> &'static str {
     crate::primitives::look::themed_glyph("git.chevron-right", "\u{f054}")
-}
-/// fa-folder / fa-folder-open — folder group nodes in the tree list.
-pub(crate) fn folder_glyph() -> &'static str {
-    crate::primitives::look::themed_glyph("folder", "\u{f07b}")
-}
-pub(crate) fn folder_open_glyph() -> &'static str {
-    crate::primitives::look::themed_glyph("folder", "\u{f07c}")
 }
 /// Per-depth indent for the tree file list (pre-scale).
 pub(crate) const TREE_INDENT: f32 = 12.0;

@@ -1,5 +1,47 @@
 use super::*;
 
+fn normalized_binding_key(key: Key) -> Key {
+    match key {
+        Key::Character(ch) => Key::Character(ch.to_lowercase().into()),
+        other => other,
+    }
+}
+
+#[cfg(test)]
+mod copy_binding_tests {
+    use super::*;
+
+    #[test]
+    fn uppercase_and_configured_non_c_copy_bindings_resolve() {
+        for (character, mods) in [
+            ("C", ModifiersState::CONTROL | ModifiersState::SHIFT),
+            ("Y", ModifiersState::CONTROL | ModifiersState::ALT),
+        ] {
+            let trigger = BindingKey::Keycode {
+                key: Key::Character(character.to_lowercase().into()),
+                location: neoism_window::keyboard::KeyLocation::Standard,
+            };
+            let binding = crate::bindings::Binding {
+                trigger,
+                mods,
+                action: crate::bindings::Action::Copy,
+                mode: crate::bindings::BindingMode::empty(),
+                notmode: crate::bindings::BindingMode::empty(),
+            };
+            let event = BindingKey::Keycode {
+                key: normalized_binding_key(Key::Character(character.into())),
+                location: neoism_window::keyboard::KeyLocation::Standard,
+            };
+            assert!(binding.is_triggered_by(
+                crate::bindings::BindingMode::empty(),
+                mods,
+                &event
+            ));
+            assert_eq!(binding.action, crate::bindings::Action::Copy);
+        }
+    }
+}
+
 impl Screen<'_> {
     pub fn process_mouse_bindings(
         &mut self,
@@ -134,8 +176,10 @@ impl Screen<'_> {
                         }
                     }
                     let content = clipboard.get(ClipboardType::Clipboard);
-                    if let Some(code) = self.context_manager.current_mut().code.as_mut() {
-                        code.buffer.insert_text(&content);
+                    if let Some(code) = self.context_manager.active_code_pane_mut() {
+                        if !code.remote_content_pending && code.error.is_none() {
+                            code.buffer.insert_text(&content);
+                        }
                         self.sync_active_code_modified();
                         self.mark_dirty();
                     } else if let Some(markdown) =
@@ -264,6 +308,7 @@ impl Screen<'_> {
                 key.logical_key.clone()
             };
 
+            let logical_key = normalized_binding_key(logical_key);
             let key_match = match (&trigger, logical_key) {
                 (BindingKey::Scancode(_), _) => BindingKey::Scancode(key.physical_key),
                 (_, code) => BindingKey::Keycode {
@@ -289,7 +334,7 @@ impl Screen<'_> {
                     && (self.context_manager.current().markdown.is_some()
                         || self.context_manager.current().notebook.is_some()
                         || self.context_manager.current().epub.is_some()
-                        || self.context_manager.current().code.is_some())
+                        || self.context_manager.active_code_pane().is_some())
                 {
                     tracing::trace!(
                         target: "neoism::input",
@@ -338,10 +383,10 @@ impl Screen<'_> {
                             return true;
                         }
                         let content = clipboard.get(ClipboardType::Clipboard);
-                        if let Some(code) =
-                            self.context_manager.current_mut().code.as_mut()
-                        {
-                            code.buffer.insert_text(&content);
+                        if let Some(code) = self.context_manager.active_code_pane_mut() {
+                            if !code.remote_content_pending && code.error.is_none() {
+                                code.buffer.insert_text(&content);
+                            }
                             self.sync_active_code_modified();
                             self.mark_dirty();
                         } else if let Some(markdown) =
@@ -364,10 +409,10 @@ impl Screen<'_> {
                     }
                     Act::PasteSelection => {
                         let content = clipboard.get(ClipboardType::Selection);
-                        if let Some(code) =
-                            self.context_manager.current_mut().code.as_mut()
-                        {
-                            code.buffer.insert_text(&content);
+                        if let Some(code) = self.context_manager.active_code_pane_mut() {
+                            if !code.remote_content_pending && code.error.is_none() {
+                                code.buffer.insert_text(&content);
+                            }
                             self.sync_active_code_modified();
                             self.mark_dirty();
                         } else if let Some(markdown) =
@@ -386,14 +431,7 @@ impl Screen<'_> {
                         }
                     }
                     Act::Copy => {
-                        if let Some(code) =
-                            self.context_manager.current_mut().code.as_mut()
-                        {
-                            let (payload, _linewise) = code.buffer.copy_payload();
-                            clipboard.set(ClipboardType::Clipboard, payload);
-                        } else {
-                            self.copy_selection(ClipboardType::Clipboard, clipboard);
-                        }
+                        self.copy_selection(ClipboardType::Clipboard, clipboard);
                     }
                     Act::Hint(hint_config) => {
                         self.start_hint_mode(hint_config.clone());
@@ -614,7 +652,7 @@ impl Screen<'_> {
                     Act::Quit => {
                         tracing::info!(
                             target: "neoism::editor_tabs",
-                            current_is_editor = self.context_manager.current().code.is_some(),
+                            current_is_editor = self.context_manager.active_code_pane().is_some(),
                             active_tab_is_terminal = self.renderer.buffer_tabs.active_is_terminal(),
                             workspace_id = ?self.current_workspace_id(),
                             "Quit binding invoked"

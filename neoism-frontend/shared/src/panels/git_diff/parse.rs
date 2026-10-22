@@ -71,33 +71,62 @@ pub fn load_diff(repo_root: &std::path::Path, file: &FileChange) -> Vec<DiffLine
     use super::types::FileStatus;
 
     let mut lines = Vec::new();
-    if matches!(file.status, FileStatus::Untracked) {
+    if matches!(file.status, FileStatus::Untracked | FileStatus::Added) {
         let abs = repo_root.join(&file.path);
         if let Ok(output) = crate::utils::background_command("git")
             .env("GIT_OPTIONAL_LOCKS", "0")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_LITERAL_PATHSPECS", "1")
             .arg("-C")
             .arg(repo_root)
-            .args(["diff", "--no-index", "--no-color", "--", "/dev/null"])
+            .args([
+                "diff",
+                "--no-index",
+                "--no-color",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--",
+                "/dev/null",
+            ])
             .arg(&abs)
             .output()
         {
-            parse_diff_into(&output.stdout, &mut lines);
+            parse_diff_into_with_headers(&output.stdout, &mut lines);
         }
         return lines;
     }
     if let Ok(output) = crate::utils::background_command("git")
         .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_LITERAL_PATHSPECS", "1")
         .arg("-C")
         .arg(repo_root)
-        .args(["diff", "HEAD", "--no-color", "--", &file.path])
+        .args([
+            "diff",
+            "HEAD",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--",
+            &file.path,
+        ])
         .output()
     {
-        parse_diff_into(&output.stdout, &mut lines);
+        parse_diff_into_with_headers(&output.stdout, &mut lines);
     }
     lines
 }
 
 pub fn parse_diff_into(bytes: &[u8], out: &mut Vec<DiffLine>) {
+    parse_diff(bytes, out, false);
+}
+
+/// Review cache preserves raw hunk anchors and source ordering for block actions.
+pub fn parse_diff_into_with_headers(bytes: &[u8], out: &mut Vec<DiffLine>) {
+    parse_diff(bytes, out, true);
+}
+
+fn parse_diff(bytes: &[u8], out: &mut Vec<DiffLine>, headers: bool) {
     let slice = if bytes.len() > MAX_DIFF_BYTES {
         &bytes[..MAX_DIFF_BYTES]
     } else {
@@ -119,12 +148,21 @@ pub fn parse_diff_into(bytes: &[u8], out: &mut Vec<DiffLine>) {
             || raw.starts_with("similarity index")
             || raw.starts_with("rename from")
             || raw.starts_with("rename to")
+            || raw.starts_with("\\ No newline at end of file")
         {
-            // File-header preamble — skip; the card header above
-            // already names the file.
+            // Patch metadata is not an editable source row.
             continue;
         } else if raw.starts_with("@@") {
-            flush_hunk_rows(out, &mut hunk_rows);
+            emit_hunk_rows(out, &mut hunk_rows, headers);
+            if headers {
+                out.push(DiffLine {
+                    text: raw.to_owned(),
+                    kind: DiffLineKind::Hunk,
+                    line_number: None,
+                    old_line_number: None,
+                    new_line_number: None,
+                });
+            }
             // Re-anchor the new-file line counter from the hunk header
             // but DON'T emit a row for it — the user explicitly didn't
             // want the `@@ -A,B +C,D @@` line cluttering the preview.
@@ -154,8 +192,8 @@ pub fn parse_diff_into(bytes: &[u8], out: &mut Vec<DiffLine>) {
                 old_line_number: Some(n),
                 new_line_number: None,
             });
-        } else {
-            let body = raw.strip_prefix(' ').unwrap_or(raw).to_string();
+        } else if let Some(body) = raw.strip_prefix(' ') {
+            let body = body.to_string();
             let old = old_line;
             let new = new_line;
             old_line = old_line.saturating_add(1);
@@ -169,7 +207,7 @@ pub fn parse_diff_into(bytes: &[u8], out: &mut Vec<DiffLine>) {
             });
         }
     }
-    flush_hunk_rows(out, &mut hunk_rows);
+    emit_hunk_rows(out, &mut hunk_rows, headers);
 }
 
 /// Pull the new-file starting line out of a `@@ -A,B +C,D @@` header.
@@ -187,6 +225,14 @@ fn parse_old_start(hunk: &str) -> Option<u32> {
     let body = minus.trim_start_matches('-');
     let start = body.split(',').next()?;
     start.parse().ok()
+}
+
+fn emit_hunk_rows(out: &mut Vec<DiffLine>, rows: &mut Vec<DiffLine>, headers: bool) {
+    if headers {
+        out.append(rows);
+    } else {
+        flush_hunk_rows(out, rows);
+    }
 }
 
 fn flush_hunk_rows(out: &mut Vec<DiffLine>, rows: &mut Vec<DiffLine>) {
@@ -234,6 +280,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn eof_metadata_never_creates_an_editable_row_or_advances_source_numbers() {
+        let mut rows = Vec::new();
+        parse_diff_into(b"@@ -1 +1 @@\n-old\n\\ No newline at end of file\n+new\n\\ No newline at end of file\n", &mut rows);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].old_line_number, Some(1));
+        assert_eq!(rows[1].new_line_number, Some(1));
+        assert!(rows.iter().all(|row| !row.text.starts_with('\\')));
+    }
+
+    #[test]
+    fn binary_and_patch_metadata_never_become_editable_source_rows() {
+        let mut rows = Vec::new();
+        parse_diff_into(b"diff --git a/image.png b/image.png\nindex 123..456 100644\nBinary files a/image.png and b/image.png differ\n", &mut rows);
+        assert!(rows.is_empty());
+    }
+
+    #[test]
     fn parse_diff_pairs_replacement_rows_by_line_number() {
         let diff = b"diff --git a/src/lib.rs b/src/lib.rs\n\
 --- a/src/lib.rs\n\
@@ -243,7 +306,7 @@ mod tests {
 -old two\n\
 +new one\n\
 +new two\n\
- context\n";
+\x20context\n";
         let mut rows = Vec::new();
         parse_diff_into(diff, &mut rows);
 

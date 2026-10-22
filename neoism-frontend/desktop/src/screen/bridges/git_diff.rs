@@ -152,7 +152,7 @@ impl Screen<'_> {
                     self.renderer.git_diff_panel.actions_menu_move(-5);
                 }
                 Key::Named(NamedKey::Enter | NamedKey::Space) => {
-                    self.renderer.git_diff_panel.actions_menu_activate();
+                    self.activate_native_git_action(None);
                 }
                 Key::Named(NamedKey::Escape) => {
                     self.renderer.git_diff_panel.close_actions_menu();
@@ -275,7 +275,7 @@ impl Screen<'_> {
             // `c` jumps to the commit box.
             Key::Named(NamedKey::Space) if plain => {
                 self.renderer.git_diff_panel.clear_pending();
-                self.renderer.git_diff_panel.toggle_stage_selected();
+                self.stage_git_panel_selected();
                 true
             }
             Key::Character(s) if plain && s.as_str() == "c" => {
@@ -358,16 +358,15 @@ impl Screen<'_> {
                 // Enter toggles staging on the selected file. Otherwise
                 // Enter activates the file in the editor.
                 if checkbox_focused {
-                    self.renderer.git_diff_panel.toggle_stage_selected();
-                } else if let Some((path, _root)) =
+                    self.stage_git_panel_selected();
+                } else if let Some((path, root)) =
                     self.renderer.git_diff_panel.selected_file_target()
                 {
-                    self.renderer.git_diff_panel.set_focused(false);
-                    if crate::editor::markdown::state::is_markdown_path(&path) {
-                        self.open_path_in_markdown(path);
-                    } else {
-                        self.open_path_in_editor(path);
+                    if let Some(idx) = self.renderer.git_diff_panel.selected_file_index()
+                    {
+                        self.renderer.git_diff_panel.select_file(idx);
                     }
+                    self.open_git_diff_file(root, path);
                 }
                 true
             }
@@ -386,9 +385,9 @@ impl Screen<'_> {
 
     /// Move the git-panel file selection one motion (`j`/`k`/arrows),
     /// honouring a pending vim count (`5j` steps five files, clamped).
-    /// A plain step keeps the existing edge behaviour (rolling onto the
-    /// diff card past the last/first file).
+    /// Uses the panel's visible-leaf navigation, including pending Vim counts.
     fn git_diff_panel_move(&mut self, down: bool) {
+        let before = self.renderer.git_diff_panel.selected_file_index();
         match self.renderer.git_diff_panel.pending_count() {
             Some(_) => {
                 let n = self.renderer.git_diff_panel.take_count();
@@ -405,6 +404,11 @@ impl Screen<'_> {
                 } else {
                     self.renderer.git_diff_panel.select_prev();
                 }
+            }
+        }
+        if before != self.renderer.git_diff_panel.selected_file_index() {
+            if let Some((path, root)) = self.renderer.git_diff_panel.selected_file_target() {
+                self.reveal_existing_git_diff_file(&root, &path);
             }
         }
     }
@@ -476,7 +480,7 @@ impl Screen<'_> {
                 // Disabled rows and padding are Inside, not underlying cards.
                 if let crate::editor::git_diff_panel::PanelHit::ActionMenuRow(slot) = hit
                 {
-                    self.renderer.git_diff_panel.activate_action_row(slot);
+                    self.activate_native_git_action(Some(slot));
                 }
                 self.mark_dirty();
                 return true;
@@ -525,12 +529,12 @@ impl Screen<'_> {
                 true
             }
             crate::editor::git_diff_panel::PanelHit::FolderCheckbox(visual_ix) => {
-                self.renderer.git_diff_panel.toggle_folder_stage(visual_ix);
+                self.stage_git_panel_folder(visual_ix);
                 self.mark_dirty();
                 true
             }
             crate::editor::git_diff_panel::PanelHit::ActionMenuRow(slot) => {
-                self.renderer.git_diff_panel.activate_action_row(slot);
+                self.activate_native_git_action(Some(slot));
                 self.mark_dirty();
                 true
             }
@@ -553,6 +557,11 @@ impl Screen<'_> {
                 self.renderer.git_diff_panel.focus_files_section();
                 self.renderer.file_tree.set_focused(false);
                 self.renderer.git_diff_panel.select_file(idx);
+                if let Some((path, root)) =
+                    self.renderer.git_diff_panel.selected_file_target()
+                {
+                    self.open_git_diff_file(root, path);
+                }
                 self.mark_dirty();
                 true
             }
@@ -560,7 +569,7 @@ impl Screen<'_> {
                 self.renderer.git_diff_panel.set_focused(true);
                 self.renderer.git_diff_panel.focus_files_section();
                 self.renderer.file_tree.set_focused(false);
-                self.renderer.git_diff_panel.toggle_stage(idx);
+                self.stage_git_panel_file(idx);
                 self.mark_dirty();
                 true
             }
@@ -570,10 +579,19 @@ impl Screen<'_> {
                 self.mark_dirty();
                 true
             }
+            crate::editor::git_diff_panel::PanelHit::LatestCommitCopy => { self.renderer.git_diff_panel.copy_latest_commit(); true }
+            crate::editor::git_diff_panel::PanelHit::LatestCommit => { self.renderer.git_diff_panel.open_latest_commit(); true }
             crate::editor::git_diff_panel::PanelHit::CommitButton => {
                 self.renderer.git_diff_panel.set_focused(true);
                 self.renderer.file_tree.set_focused(false);
                 self.renderer.git_diff_panel.commit();
+                self.mark_dirty();
+                true
+            }
+            crate::editor::git_diff_panel::PanelHit::PushButton => {
+                self.renderer.git_diff_panel.set_focused(true);
+                self.renderer.file_tree.set_focused(false);
+                self.renderer.git_diff_panel.activate_push_button();
                 self.mark_dirty();
                 true
             }

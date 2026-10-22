@@ -1,11 +1,74 @@
 use super::*;
 
+/// Resolve lazily so a hover copy never asks the editor to yank or reads the PTY.
+fn explicit_copy_payload(
+    hover: Option<String>,
+    code: impl FnOnce() -> Option<String>,
+    terminal: impl FnOnce() -> Option<String>,
+) -> Option<String> {
+    hover.or_else(code).or_else(terminal)
+}
+
+#[cfg(test)]
+mod explicit_copy_tests {
+    use super::explicit_copy_payload;
+
+    #[test]
+    fn hover_has_first_refusal_without_touching_editor_or_terminal() {
+        // All explicit entry points use this resolver, independent of the key
+        // which resolved Copy (including configured non-C bindings).
+        assert_eq!(
+            explicit_copy_payload(
+                Some("hover documentation".into()),
+                || panic!("hover copy must not yank/mutate editor"),
+                || panic!("hover copy must not access PTY"),
+            )
+            .as_deref(),
+            Some("hover documentation"),
+        );
+    }
+
+    #[test]
+    fn unavailable_hover_preserves_active_surface_fallback() {
+        assert_eq!(
+            explicit_copy_payload(
+                None,
+                || Some("code selection or line".into()),
+                || panic!("inactive PTY")
+            )
+            .as_deref(),
+            Some("code selection or line"),
+        );
+        assert_eq!(
+            explicit_copy_payload(None, || None, || Some("terminal selection".into()))
+                .as_deref(),
+            Some("terminal selection"),
+        );
+        assert_eq!(explicit_copy_payload(None, || None, || None), None);
+    }
+}
+
 impl Screen<'_> {
     pub fn copy_selection(&mut self, ty: ClipboardType, clipboard: &mut Clipboard) {
-        let text = {
+        let terminal_text = || {
             let current = self.context_manager.current();
             let terminal = current.terminal.lock();
             selected_text(&terminal, current.renderable_content.selection_range)
+        };
+        // Explicit copy is surface-aware, regardless of which binding (or the
+        // palette) resolved it. Primary-selection updates remain terminal-only.
+        let text = if ty == ClipboardType::Clipboard {
+            explicit_copy_payload(
+                self.code_hover_selected_text(),
+                || {
+                    self.context_manager
+                        .active_code_pane()
+                        .map(|code| code.buffer.copy_payload().0)
+                },
+                terminal_text,
+            )
+        } else {
+            terminal_text()
         };
 
         if let Some(text) = text {

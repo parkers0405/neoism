@@ -24,7 +24,7 @@ impl Screen<'_> {
             .unwrap_or_default()
             .to_owned();
         let workspace = self.context_manager.current_adopted_workspace_id();
-        let Some(code) = self.context_manager.current_mut().code.as_mut() else {
+        let Some(code) = self.context_manager.active_code_pane_mut() else {
             return;
         };
         code.blame.apply_default(self.renderer.code_git_blame);

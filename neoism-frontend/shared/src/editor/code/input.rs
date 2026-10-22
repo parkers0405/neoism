@@ -138,6 +138,10 @@ impl CodeBuffer {
     /// pixels to line/col). Shift-click extends from the old caret.
     pub fn set_cursor_position(&mut self, line: usize, col: usize, extend: bool) {
         self.cursor_placement_revision = self.cursor_placement_revision.wrapping_add(1);
+        // Absolute placement is pointer-style by default. Keyboard callers that
+        // require reveal explicitly rearm follow after placing the caret.
+        self.follow_cursor = false;
+        self.pending_cursor_row_delta = None;
         self.break_undo_group();
         self.clamp_cursor();
         if extend {

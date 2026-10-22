@@ -2,7 +2,8 @@ use super::*;
 
 impl Screen<'_> {
     pub fn close_active_workspace(&mut self, discard: bool, clipboard: &mut Clipboard) {
-        let active_dirty = self.renderer.buffer_tabs.has_modified_server_tabs()
+        let active_dirty = self.current_grid_has_dirty_code_owners()
+            || self.renderer.buffer_tabs.has_modified_server_tabs()
             || self
                 .renderer
                 .pane_tabs
@@ -16,7 +17,7 @@ impl Screen<'_> {
             self.mark_dirty();
             return;
         }
-        self.close_tab(clipboard);
+        self.close_tab_inner(clipboard, discard);
     }
 
     pub fn close_split_or_tab(&mut self, clipboard: &mut Clipboard) {
@@ -73,6 +74,28 @@ impl Screen<'_> {
                 }
             }
         }
+        if self.context_manager.current().git_diff_view.is_some() {
+            let route = self.context_manager.current().route_id;
+            if let Some(index) = self.renderer.buffer_tabs.tabs().iter().position(|tab| {
+                tab.chrome_page.is_some_and(|page| page.route_id == route)
+            }) {
+                self.close_workspace_buffer_tab_at(index);
+                return;
+            }
+        }
+        if self
+            .context_manager
+            .current()
+            .code
+            .as_ref()
+            .is_some_and(|code| code.is_dirty())
+        {
+            self.file_tree_notify(
+                "Save the canonical source document before closing its pane",
+                neoism_ui::panels::notifications::NotificationLevel::Warn,
+            );
+            return;
+        }
         if self.context_manager.current_grid_len() > 1 {
             // A daemon connection belonging to some *other* workspace must
             // not swallow this local close. Only a grid explicitly adopted
@@ -106,6 +129,14 @@ impl Screen<'_> {
     }
 
     pub fn close_tab(&mut self, clipboard: &mut Clipboard) {
+        self.close_tab_inner(clipboard, false);
+    }
+
+    fn close_tab_inner(&mut self, clipboard: &mut Clipboard, discard: bool) {
+        if !discard && self.current_grid_has_dirty_code_owners() {
+            self.file_tree_notify("Save the canonical source documents before closing this workspace (or explicitly discard with :qall!)", neoism_ui::panels::notifications::NotificationLevel::Warn);
+            return;
+        }
         self.clear_selection();
         let old_len = self.ctx().len();
         let closing_index = self.context_manager.current_index();
@@ -768,7 +799,9 @@ impl Screen<'_> {
                 return true;
             }
             self.renderer.git_diff_panel.set_focused(false);
-            self.focus_main_workspace();
+            if !self.focus_git_diff_column(1) {
+                self.focus_main_workspace();
+            }
             self.mark_dirty();
             return true;
         }
@@ -790,7 +823,9 @@ impl Screen<'_> {
             };
             self.renderer.set_left_sidebar_focus(next);
             if next.is_none() && right {
-                self.focus_main_workspace();
+                if !self.focus_git_diff_column(0) {
+                    self.focus_main_workspace();
+                }
             }
             self.mark_dirty();
             return right || next.is_some();
@@ -830,6 +865,10 @@ impl Screen<'_> {
             }
         }
 
+        if self.move_git_diff_column_focus(right) {
+            return true;
+        }
+
         // Only the editor jumps right into the git panel — when the file
         // tree or notes sidebar holds the caret, Alt+Right must walk the
         // spatial chain (tree → notes → editor → panel) handled below, not
@@ -839,10 +878,18 @@ impl Screen<'_> {
             && !self.renderer.file_tree.is_focused()
             && !self.renderer.notes_sidebar.is_focused()
         {
+            self.blur_git_diff_columns();
             self.renderer.git_diff_panel.set_focused(true);
             self.renderer.file_tree.set_focused(false);
             self.mark_dirty();
             return true;
+        }
+
+        if !right
+            && (!left_views.is_empty()
+                || self.context_manager.current_grid().panel_count() > 1)
+        {
+            self.blur_git_diff_columns();
         }
 
         // Any pane in a multi-pane grid owns a nearest ancestor divider,
@@ -867,6 +914,8 @@ impl Screen<'_> {
                 if let Some(view) = left_views.last().copied() {
                     self.renderer.set_left_sidebar_focus(Some(view));
                     self.mark_dirty();
+                } else if self.context_manager.current().git_diff_view.is_some() {
+                    self.focus_git_diff_column(0);
                 }
                 return true;
             }

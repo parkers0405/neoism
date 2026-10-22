@@ -71,7 +71,7 @@ Fonts
 -----
 
 Cascadia Code — SIL Open Font License 1.1, Copyright (c) Microsoft Corporation.
-Geist — SIL Open Font License 1.1, Copyright 2024 The Geist Project Authors. Browser pages embed a WOFF2 conversion of the website font; full license: neoism-agent/crates/neoism-agent-service-api/src/browser_pages/geist-LICENSE.txt.
+Geist — SIL Open Font License 1.1, Copyright 2024 The Geist Project Authors. Native and web documentation popups embed the unmodified upright variable face; full license: sugarloaf/src/font/resources/Geist/OFL.txt. Browser pages embed a WOFF2 conversion of the website font; full license: neoism-agent/crates/neoism-agent-service-api/src/browser_pages/geist-LICENSE.txt.
 Symbols Nerd Font — MIT License, Copyright (c) Ryan L McIntyre (Nerd Fonts).
 DejaVu fonts (test resources) — Bitstream Vera / DejaVu license (permissive).
 Exo 2 (test resources) — SIL Open Font License 1.1.

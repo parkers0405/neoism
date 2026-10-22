@@ -2112,6 +2112,35 @@ mod bundled_icon_tests {
         }
     }
 
+    #[test]
+    fn bundled_ui_prose_is_regular_proportional_and_deduplicates() {
+        let mut library = FontLibraryData::default();
+        let pixel_id = library
+            .ensure_static_font(constants::FONT_PRESS_START_2P)
+            .unwrap();
+        let id = library
+            .ensure_static_font(constants::FONT_UI_PROSE)
+            .unwrap();
+        assert_ne!(id, pixel_id);
+        assert_eq!(library.font_id_for_family("Geist"), Some(id));
+        assert_eq!(library.get(&id).weight, Weight::NORMAL);
+        assert_eq!(library.get(&id).style, Style::Normal);
+        let count = library.inner.len();
+        assert_eq!(
+            library.ensure_static_font(constants::FONT_UI_PROSE),
+            Some(id)
+        );
+        assert_eq!(library.inner.len(), count);
+
+        let font = swash::FontRef::from_index(constants::FONT_UI_PROSE, 0).unwrap();
+        let cmap = font.charmap();
+        let metrics = font.glyph_metrics(&[]);
+        assert!(
+            metrics.advance_width(cmap.map('W'))
+                > 2.0 * metrics.advance_width(cmap.map('i'))
+        );
+    }
+
     /// Shared chrome uses these glyphs for the folder button, rounded toolbar
     /// buttons, menu rows, and file types. The browser has no system cascade,
     /// so replacing the bundled face must fail before producing web tofu.

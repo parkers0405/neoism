@@ -646,6 +646,7 @@ pub enum ModalActionTag {
     FileTreePaste,
     FileTreePromptDelete,
     FileTreeDelete,
+    GitRestore,
     FileTreePromptNewFile,
     NotesPromptNewFile,
     FileTreePromptNewFolder,
@@ -708,6 +709,7 @@ pub fn modal_action_dispatch(tag: ModalActionTag) -> ModalActionDispatch {
         | T::FileTreeCopy
         | T::FileTreePaste
         | T::FileTreeDelete
+        | T::GitRestore
         | T::AgentDeleteSession
         | T::FileTreeNewFile
         | T::NotesNewFile
@@ -1347,7 +1349,10 @@ mod tests {
 
     #[test]
     fn modal_action_dispatch_run_paths_close_before_action() {
-        assert_eq!(modal_action_dispatch(ModalActionTag::CopyInvite), ModalActionDispatch::KeepOpen);
+        assert_eq!(
+            modal_action_dispatch(ModalActionTag::CopyInvite),
+            ModalActionDispatch::KeepOpen
+        );
         for tag in [
             ModalActionTag::RunEditorCommand,
             ModalActionTag::RunAgent,
@@ -1356,6 +1361,7 @@ mod tests {
             ModalActionTag::FileTreeCopy,
             ModalActionTag::FileTreePaste,
             ModalActionTag::FileTreeDelete,
+            ModalActionTag::GitRestore,
             ModalActionTag::FileTreeNewFile,
             ModalActionTag::FileTreeNewFolder,
             ModalActionTag::FileTreeRename,

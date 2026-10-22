@@ -18,6 +18,391 @@ use super::super::{
 };
 
 #[test]
+fn explicit_navigation_keeps_targets_when_another_adapter_fails() {
+    use super::super::{query_navigation, LspNavigationQuery as Q};
+    let workspace = TestWorkspace::new("navigation-partial-success");
+    let file = workspace.path.join("src/main.ptest");
+    fs::create_dir_all(file.parent().unwrap()).unwrap();
+    fs::write(&file, "broken_v1").unwrap();
+    let failure_log = workspace.path.join("failure.log");
+    let target_log = workspace.path.join("target.log");
+    let server = compile_fake_server(&workspace);
+    write_lsp_config_with_extension(
+        &workspace.path,
+        &server,
+        &failure_log,
+        "navigation-error",
+        "ptest",
+    );
+    let config_path = workspace.path.join(".agent/agent.json");
+    let mut config: serde_json::Value =
+        serde_json::from_slice(&fs::read(&config_path).unwrap()).unwrap();
+    let adapters = config["lsp"].as_object_mut().unwrap();
+    let failing = adapters.remove("protocol-test").unwrap();
+    let mut target = failing.clone();
+    target["command"][1] = json!("navigation");
+    target["command"][3] = json!(target_log.to_string_lossy());
+    adapters.insert("a-failing".into(), failing);
+    adapters.insert("z-target".into(), target);
+    fs::write(config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+
+    for query in [
+        Q::Definition,
+        Q::Declaration,
+        Q::TypeDefinition,
+        Q::References,
+    ] {
+        let hits = query_navigation(
+            &workspace.runtime,
+            &workspace.path,
+            &file,
+            0,
+            4,
+            Some("broken_v1"),
+            query,
+        )
+        .expect("another adapter's failure must not discard valid targets")
+        .expect("the target adapter supports this action");
+        assert_eq!(hits.len(), 1, "{query:?}");
+        let range = hits[0].range.as_ref().unwrap();
+        assert_eq!((range.start.line, range.start.character), (3, 5));
+
+        let legacy = match query {
+            Q::Definition => super::super::definitions(
+                &workspace.runtime,
+                &workspace.path,
+                &file,
+                0,
+                4,
+            ),
+            Q::Declaration => super::super::declarations(
+                &workspace.runtime,
+                &workspace.path,
+                &file,
+                0,
+                4,
+            ),
+            Q::TypeDefinition => super::super::type_definitions(
+                &workspace.runtime,
+                &workspace.path,
+                &file,
+                0,
+                4,
+            ),
+            Q::References => {
+                super::super::references(&workspace.runtime, &workspace.path, &file, 0, 4)
+            }
+        };
+        assert_eq!(legacy.len(), 1, "legacy {query:?}");
+        assert_eq!(legacy[0].path, hits[0].path);
+        assert_eq!(legacy[0].range, hits[0].range);
+    }
+    for log in [&failure_log, &target_log] {
+        let protocol = fs::read_to_string(log).unwrap();
+        assert_eq!(
+            protocol
+                .lines()
+                .filter(|line| line.starts_with("navigation:"))
+                .count(),
+            8,
+            "both adapters must receive every explicit and legacy query: {protocol}"
+        );
+    }
+    workspace.runtime.service.shutdown_all();
+}
+
+#[test]
+fn cold_navigation_cache_never_waits_for_root_or_launch_discovery() {
+    use super::super::{lsp_adapters::WorkspaceRootStrategy, LspNavigationQuery as Q};
+    let workspace = TestWorkspace::new("navigation-cache-discovery");
+    let file = workspace.path.join("main.ts");
+    fs::write(&file, "const x = 1").unwrap();
+    fs::write(workspace.path.join("Cargo.toml"), "[workspace]\n").unwrap();
+    let base = workspace.runtime.adapters_for_root(&workspace.path)
+        .into_iter().next().expect("built-in adapter");
+    for strategy in [
+        WorkspaceRootStrategy::CargoMetadata { manifest: "Cargo.toml".into() },
+        WorkspaceRootStrategy::NearestMarker,
+    ] {
+        let service = &workspace.runtime.service;
+        let cargo_guard = service.cargo_roots.lock().unwrap();
+        let launch_guard = service.typescript_projects.lock().unwrap();
+        let mut spec = base.clone();
+        spec.id = "typescript".into();
+        spec.transport = ResolvedLspTransport::Invalid;
+        spec.markers = vec!["Cargo.toml".into()];
+        spec.root_strategy = strategy;
+        let runtime = workspace.runtime.clone();
+        let root = workspace.path.clone();
+        let file = file.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = thread::spawn(move || {
+            tx.send(runtime.service.cached_navigation_support(&root, &file, &spec, Q::Definition)).unwrap();
+        });
+        let result = rx.recv_timeout(Duration::from_secs(1));
+        // Always release discovery locks before joining, including on regression.
+        drop(launch_guard);
+        drop(cargo_guard);
+        worker.join().unwrap();
+        assert_eq!(result.unwrap(), None, "cold identity is unknown");
+    }
+}
+
+fn assert_navigation_cache_ownership(
+    service: &LspService,
+    root: &Path,
+    file: &Path,
+    spec: &LanguageAdapter,
+) {
+    use super::super::LspNavigationQuery as Q;
+    let peek = |root: &Path, file: &Path, spec: &LanguageAdapter| {
+        service.cached_navigation_support(root, file, spec, Q::Definition)
+    };
+    assert_eq!(peek(root, file, spec), Some(true));
+    let other_runtime = super::super::LspRuntime::new(crate::standard_services());
+    assert_eq!(other_runtime.service.cached_navigation_support(root, file, spec, Q::Definition), None,
+        "another runtime cannot donate capabilities");
+    assert_eq!(peek(root, &file.with_file_name("unresolved.ptest"), spec), None);
+    assert_eq!(peek(file.parent().unwrap(), file, spec), None, "nested owner is distinct");
+    let mut changed = spec.clone();
+    changed.settings = Some(json!({"changed": true}));
+    assert_eq!(peek(root, file, &changed), None, "config is part of selection identity");
+    {
+        let _busy = service.file_clients.lock().unwrap();
+        assert_eq!(peek(root, file, spec), None);
+    }
+    let selection_key = (root.to_path_buf(), file.to_path_buf(), spec.id.clone());
+    let (key, client) = {
+        let selections = service.file_clients.lock().unwrap();
+        let selection = selections.get(&selection_key).unwrap();
+        (selection.key.clone(), selection.client.upgrade().unwrap())
+    };
+    {
+        let _busy = service.clients.lock().unwrap();
+        assert_eq!(peek(root, file, spec), None);
+    }
+    {
+        let _busy = client.lock().unwrap();
+        assert_eq!(peek(root, file, spec), None);
+    }
+    let removed = service.clients.lock().unwrap().remove(&key).unwrap();
+    assert_eq!(peek(root, file, spec), None, "retained Arc cannot donate evicted capabilities");
+    let mut replacement_key = key.clone();
+    replacement_key.runtime_identity = Some("replacement-sdk".into());
+    service.clients.lock().unwrap().insert(replacement_key.clone(), removed);
+    assert_eq!(peek(root, file, spec), None, "same scope with a different runtime is not the cached owner");
+    let removed = service.clients.lock().unwrap().remove(&replacement_key).unwrap();
+    service.clients.lock().unwrap().insert(key, removed);
+    service.file_clients.lock().unwrap().get_mut(&selection_key).unwrap().resolved_at =
+        Instant::now() - Duration::from_millis(250);
+    assert_eq!(peek(root, file, spec), None, "expired root/runtime selection is unknown");
+}
+
+#[test]
+fn explicit_navigation_preserves_snapshot_position_and_outcomes() {
+    use super::super::{query_navigation, LspNavigationQuery as Q};
+    let queries = [
+        Q::Definition,
+        Q::Declaration,
+        Q::TypeDefinition,
+        Q::References,
+    ];
+    for mode in [
+        "navigation",
+        "navigation-empty",
+        "navigation-error",
+        "serve",
+    ] {
+        let workspace = TestWorkspace::new(mode);
+        let file = workspace.path.join("src/main.ptest");
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, "disk must never win").unwrap();
+        let log = workspace.path.join("fake-lsp.log");
+        let server = compile_fake_server(&workspace);
+        write_lsp_config_with_extension(&workspace.path, &server, &log, mode, "ptest");
+        let spec = configured_test_spec(&workspace.runtime, &workspace.path);
+        let service = workspace.runtime.service.as_ref();
+        assert_eq!(
+            super::super::cached_navigation_support(
+                &workspace.runtime,
+                &workspace.path,
+                &file,
+                Q::Definition
+            ),
+            None
+        );
+        assert!(!log.exists(), "capability lookup must not start a server");
+        for query in queries {
+            // Reproduce both a skipped preceding Sync(A) and a newer Sync(B):
+            // the explicit job must install A itself, not rely on that lane.
+            service
+                .sync(&workspace.path, &file, Some("broken_v2"), &spec)
+                .unwrap();
+            let result = query_navigation(
+                &workspace.runtime,
+                &workspace.path,
+                &file,
+                0,
+                4,
+                Some("broken_v1"),
+                query,
+            );
+            match mode {
+                "navigation" => {
+                    let hits = result.unwrap().unwrap();
+                    assert_eq!(hits.len(), 1);
+                    assert_eq!(hits[0].range.as_ref().unwrap().start.line, 3);
+                    assert_eq!(hits[0].range.as_ref().unwrap().start.character, 5);
+                }
+                "navigation-empty" => assert_eq!(result.unwrap().unwrap().len(), 0),
+                "navigation-error" => {
+                    let error = result.unwrap_err();
+                    assert!(error.contains("fixture navigation failure"), "{error}");
+                    assert!(error.contains("protocol-test"), "{error}");
+                    assert!(error.contains("0:4"), "{error}");
+                }
+                _ => assert!(result.unwrap().is_none()),
+            }
+            assert_eq!(
+                super::super::cached_navigation_support(
+                    &workspace.runtime,
+                    &workspace.path,
+                    &file,
+                    query
+                ),
+                Some(mode != "serve")
+            );
+            if mode == "navigation" && query == Q::Definition {
+                assert_navigation_cache_ownership(service, &workspace.path, &file, &spec);
+            }
+        }
+        // A final response is a barrier for all preceding notifications.
+        service.hover(&workspace.path, &file, 0, 0, &spec).unwrap();
+        let protocol = fs::read_to_string(&log).unwrap();
+        let actual: Vec<_> = protocol
+            .lines()
+            .filter(|line| {
+                line.starts_with("didOpen:")
+                    || line.starts_with("didChange:")
+                    || line.starts_with("query:")
+            })
+            .collect();
+        let mut expected =
+            vec!["didOpen:language=protocol-test:version=0:text=broken_v2".to_string()];
+        if mode != "serve" {
+            for (ix, method) in
+                ["definition", "declaration", "typeDefinition", "references"]
+                    .iter()
+                    .enumerate()
+            {
+                if ix > 0 {
+                    expected.push(format!("didChange:version={}:text=broken_v2", ix * 2));
+                }
+                expected.push(format!("didChange:version={}:text=broken_v1", ix * 2 + 1));
+                expected.push(format!("query:textDocument/{method}:0:4:text=broken_v1"));
+            }
+        }
+        assert_eq!(actual, expected, "{mode}");
+        let mut live = String::new();
+        let mut version = 0;
+        for wire in protocol
+            .lines()
+            .filter_map(|line| line.strip_prefix("wire:"))
+        {
+            let message: serde_json::Value = serde_json::from_str(wire).unwrap();
+            let params = &message["params"];
+            assert_eq!(params["textDocument"]["uri"], path_to_file_uri(&file));
+            match message["method"].as_str().unwrap() {
+                "textDocument/didOpen" => {
+                    assert_eq!(params["textDocument"]["version"], 0);
+                    assert_eq!(params["textDocument"]["text"], "broken_v2");
+                    live = "broken_v2".into();
+                }
+                "textDocument/didChange" => {
+                    version += 1;
+                    assert_eq!(params["textDocument"]["version"], version);
+                    assert_eq!(params["contentChanges"].as_array().unwrap().len(), 1);
+                    assert!(params["contentChanges"][0].get("range").is_none());
+                    let text = params["contentChanges"][0]["text"].as_str().unwrap();
+                    assert_eq!(
+                        text,
+                        if version % 2 == 1 {
+                            "broken_v1"
+                        } else {
+                            "broken_v2"
+                        }
+                    );
+                    live = text.into();
+                }
+                method => {
+                    assert_eq!(live, "broken_v1", "{method} saw the wrong snapshot");
+                    assert_eq!(params["position"], json!({"line": 0, "character": 4}));
+                    if method == "textDocument/references" {
+                        assert_eq!(params["context"]["includeDeclaration"], true);
+                    }
+                }
+            }
+        }
+        service.shutdown_all();
+    }
+}
+
+#[test]
+fn real_nil_explicit_navigation_when_installed() {
+    use super::super::{query_navigation, LspNavigationQuery as Q};
+    if Command::new("nil").arg("--version").output().is_err() {
+        eprintln!("skipping real nil navigation: nil is not installed");
+        return;
+    }
+    let workspace = TestWorkspace::new("real-nil-navigation");
+    let file = workspace.path.join("default.nix");
+    let text = "let target = 1;\nin target\n";
+    fs::write(&file, text).unwrap();
+    fs::create_dir_all(workspace.path.join(".agent")).unwrap();
+    fs::write(
+        workspace.path.join(".agent/agent.json"),
+        serde_json::to_vec(&json!({
+            "lsp": { "nil": { "command": ["nil"], "extensions": ["nix"] } }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let run = |query| {
+        query_navigation(
+            &workspace.runtime,
+            &workspace.path,
+            &file,
+            1,
+            3,
+            Some(text),
+            query,
+        )
+        .unwrap()
+    };
+    let definition = run(Q::Definition).expect("nil supports definitions");
+    assert_eq!(definition.len(), 1);
+    assert_eq!(definition[0].range.as_ref().unwrap().start.line, 1);
+    assert_eq!(definition[0].range.as_ref().unwrap().start.character, 5);
+    let references = run(Q::References).expect("nil supports references");
+    let starts: Vec<_> = references
+        .iter()
+        .map(|hit| {
+            let start = &hit.range.as_ref().unwrap().start;
+            (start.line, start.character)
+        })
+        .collect();
+    eprintln!("real nil navigation reference starts (engine one-based): {starts:?}");
+    assert!(starts.contains(&(2, 4)), "{starts:?}");
+    assert!(
+        starts.iter().all(|start| [(1, 5), (2, 4)].contains(start)),
+        "{starts:?}"
+    );
+    assert!(run(Q::Declaration).is_none());
+    assert!(run(Q::TypeDefinition).is_none());
+    workspace.runtime.service.shutdown_all();
+}
+
+#[test]
 fn diagnostic_touch_syncs_disk_without_saving_but_editor_save_still_notifies() {
     let workspace = TestWorkspace::new("diagnostic-touch");
     let file = workspace.path.join("src/main.rs");
@@ -358,6 +743,66 @@ fn persistent_stdio_lsp_lifecycle_is_event_driven_and_consistent() {
     let shutdown_log = fs::read_to_string(&log).expect("read fake LSP shutdown log");
     assert!(shutdown_log.contains("shutdown\n"));
     assert!(shutdown_log.contains("exit\n"));
+}
+
+#[test]
+fn declaration_and_type_definition_negotiate_independently_and_parse_location_links() {
+    for enabled in [false, true] {
+        let workspace = TestWorkspace::new("navigation");
+        let file = workspace.path.join("src/main.ptest");
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, "fn main() {}\n").unwrap();
+        let log = workspace.path.join("fake-lsp.log");
+        let fake_server = compile_fake_server(&workspace);
+        write_lsp_config_with_extension(
+            &workspace.path,
+            &fake_server,
+            &log,
+            if enabled { "navigation" } else { "push" },
+            "ptest",
+        );
+        let spec = configured_test_spec(&workspace.runtime, &workspace.path);
+        let service = workspace.runtime.service.as_ref();
+        let declarations = service
+            .declarations(&workspace.path, &file, 0, 3, &spec)
+            .unwrap();
+        let types = service
+            .type_definitions(&workspace.path, &file, 0, 3, &spec)
+            .unwrap();
+        assert_eq!(declarations.len(), usize::from(enabled));
+        assert_eq!(types.len(), usize::from(enabled));
+        assert_eq!(
+            super::super::declarations(&workspace.runtime, &workspace.path, &file, 0, 3)
+                .len(),
+            usize::from(enabled),
+        );
+        assert_eq!(
+            super::super::type_definitions(
+                &workspace.runtime,
+                &workspace.path,
+                &file,
+                0,
+                3
+            )
+            .len(),
+            usize::from(enabled),
+        );
+        if enabled {
+            // Engine locations are one-based; editor/daemon adapters convert
+            // them back to protocol zero-based positions when presenting them.
+            assert_eq!(declarations[0].range.as_ref().unwrap().start.line, 3);
+            assert_eq!(types[0].range.as_ref().unwrap().start.character, 5);
+        }
+        let protocol = fs::read_to_string(&log).unwrap();
+        assert_eq!(
+            protocol.contains("navigation:textDocument/declaration"),
+            enabled
+        );
+        assert_eq!(
+            protocol.contains("navigation:textDocument/typeDefinition"),
+            enabled
+        );
+    }
 }
 
 #[test]
@@ -914,6 +1359,9 @@ fn main() {
     let mut current_text = String::new();
 
     while let Some(body) = read_message(&mut input) {
+        if has_method(&body, "textDocument/didOpen") || has_method(&body, "textDocument/didChange") || ["textDocument/definition", "textDocument/declaration", "textDocument/typeDefinition", "textDocument/references"].into_iter().any(|method| has_method(&body, method)) {
+            append(log, &format!("wire:{body}"));
+        }
         if has_method(&body, "initialize") {
             if mode == "fail-initialize" {
                 append(log, "initialize:forced-failure");
@@ -945,6 +1393,9 @@ fn main() {
                 && body.contains(r#""fixtureInit":"init-only""#)
                 && !body.contains("settings-only");
             append(log, &format!("initialize:valid={valid}"));
+            let navigation_provider = if mode.starts_with("navigation") {
+                r#""definitionProvider":true,"referencesProvider":true,"declarationProvider":{},"typeDefinitionProvider":true,"#
+            } else { "" };
             let diagnostic_provider = if mode == "pull" {
                 r#""diagnosticProvider":{},"#
             } else {
@@ -954,9 +1405,25 @@ fn main() {
             send(
                 &mut output,
                 &format!(
-                    r#"{{"jsonrpc":"2.0","id":{id},"result":{{"capabilities":{{{diagnostic_provider}"hoverProvider":true,"codeActionProvider":{{"resolveProvider":true}},"executeCommandProvider":{{"commands":["fixture.afterFix"]}},"textDocumentSync":{{"openClose":true,"change":1,"save":{{"includeText":true}}}}}}}}}}"#,
+                    r#"{{"jsonrpc":"2.0","id":{id},"result":{{"capabilities":{{{diagnostic_provider}{navigation_provider}"hoverProvider":true,"codeActionProvider":{{"resolveProvider":true}},"executeCommandProvider":{{"commands":["fixture.afterFix"]}},"textDocumentSync":{{"openClose":true,"change":1,"save":{{"includeText":true}}}}}}}}}}"#,
                 ),
             );
+        } else if has_method(&body, "textDocument/declaration") || has_method(&body, "textDocument/typeDefinition") || has_method(&body, "textDocument/definition") || has_method(&body, "textDocument/references") {
+            let method = ["textDocument/declaration", "textDocument/typeDefinition", "textDocument/definition", "textDocument/references"].into_iter().find(|method| has_method(&body, method)).unwrap();
+            append(log, &format!("navigation:{method}"));
+            let line = number_after(&body, r#""line":"#);
+            let character = number_after(&body, r#""character":"#);
+            append(log, &format!("query:{method}:{line}:{character}:text={current_text}"));
+            let id = request_id(&body);
+            if mode == "navigation-error" {
+                send(&mut output, &format!(r#"{{"jsonrpc":"2.0","id":{id},"error":{{"code":-32603,"message":"fixture navigation failure"}}}}"#));
+                continue;
+            }
+            if mode == "navigation-empty" {
+                send(&mut output, &format!(r#"{{"jsonrpc":"2.0","id":{id},"result":[]}}"#));
+                continue;
+            }
+            send(&mut output, &format!(r#"{{"jsonrpc":"2.0","id":{id},"result":[{{"targetUri":"{uri}","targetRange":{{"start":{{"line":1,"character":0}},"end":{{"line":3,"character":0}}}},"targetSelectionRange":{{"start":{{"line":2,"character":4}},"end":{{"line":2,"character":8}}}}}}]}}"#));
         } else if has_method(&body, "initialized") {
             append(log, "initialized");
             // Server-initiated requests are only legal after the initialize

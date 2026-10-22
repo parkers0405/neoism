@@ -369,6 +369,12 @@ impl Screen<'_> {
             return true;
         }
 
+        if !self.prepare_review_tab_close(ix) {
+            return false;
+        }
+        if self.refuse_dirty_code_tab_close(ix) {
+            return false;
+        }
         let (removed, new_active) = self.renderer.buffer_tabs.close_at(ix);
         let path_update =
             neoism_ui::panels::buffer_tabs::workspace_active_path_for_target(

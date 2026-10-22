@@ -1,0 +1,32 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { TerminalPanel } from "./TerminalPanel.ts";
+import type { GitCommitDetail } from "../workspace/types.ts";
+
+test("historical commit routes are isolated from worktree and source tabs", () => {
+  const panel: any = Object.create(TerminalPanel.prototype);
+  const installed: unknown[] = [];
+  panel.bufferTabs = [{ kind: "file", title: "draft", path: "/repo/sample.txt", modified: true }];
+  panel.nextGitDiffRouteId = 1;
+  panel.assignActiveTabToFocusedEditorPane = () => {};
+  panel.replayBufferTabs = () => {};
+  panel.activateCurrentTabContents = () => {};
+  panel.scheduleDraw = () => {};
+  panel.wasmAdapter = { setGitCommitView: (...args: unknown[]) => installed.push(args) };
+  const detail: GitCommitDetail = { sha: "abcdef0123456789", author: "Ada", email: "ada@example.test", timestamp: 1700000000, offset_minutes: 0, message: "release: v1\n\nbody", files: [], diffs: [] };
+  panel.openGitCommitTab("/repo", detail);
+  const historical = panel.bufferTabs[1];
+  assert.equal(historical.title, "abcdef0 - release: v1");
+  assert.equal(historical.path, undefined);
+  panel.openGitDiffTab("/repo", "sample.txt");
+  assert.equal(panel.bufferTabs.length, 3);
+  assert.notEqual(panel.tabLifecycleKey(historical), panel.tabLifecycleKey(panel.bufferTabs[2]));
+  assert.notEqual(historical.diffRouteId, panel.bufferTabs[2].diffRouteId);
+  panel.openGitCommitTab("/repo", detail);
+  assert.equal(panel.bufferTabs.length, 3);
+  assert.equal(panel.activeTabIndex, 1);
+  assert.equal(panel.bufferTabs[0].modified, true);
+  assert.equal(installed.length, 2);
+  panel.openGitCommitTab("/repo", { ...detail, sha: "1234567890abcdef" });
+  assert.equal(panel.bufferTabs.length, 4);
+});

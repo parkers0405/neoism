@@ -1,13 +1,14 @@
 use std::path::Path;
 
 pub use crate::lsp::{
-    language_server_adapters, language_server_adapters_for, DiagnosticsEvent,
-    LspAdapterMetadata, LspAdapterOrigin, LspAdapterTransport, LspCapabilities,
-    LspCatalogPackageMetadata, LspCommandSource, LspCompletionItem, LspDetection,
-    LspDiagnostic, LspDocumentHighlight, LspDocumentSymbol, LspHover, LspInlayHint,
-    LspLanguageRouteMetadata, LspLocation, LspParameterInfo, LspPosition, LspRange,
-    LspRuntime, LspRuntimeInfo, LspRuntimeSource, LspServerState, LspSignatureHelp,
-    LspSignatureInfo, LspStatus, LspWorkspace, WorkspaceSymbol,
+    cached_navigation_support, language_server_adapters, language_server_adapters_for,
+    query_navigation, DiagnosticsEvent, LspAdapterMetadata, LspAdapterOrigin,
+    LspAdapterTransport, LspCapabilities, LspCatalogPackageMetadata, LspCommandSource,
+    LspCompletionItem, LspDetection, LspDiagnostic, LspDocumentHighlight,
+    LspDocumentSymbol, LspHover, LspInlayHint, LspLanguageRouteMetadata, LspLocation,
+    LspNavigationQuery, LspParameterInfo, LspPosition, LspRange, LspRuntime,
+    LspRuntimeInfo, LspRuntimeSource, LspServerState, LspSignatureHelp, LspSignatureInfo,
+    LspStatus, LspWorkspace, WorkspaceSymbol,
 };
 
 /// Subscribe to real-time `publishDiagnostics` pushes (event-driven — the
@@ -249,6 +250,26 @@ pub fn definition(
     character: u32,
 ) -> Vec<LspLocation> {
     crate::lsp::definitions(runtime, directory, file, line, character)
+}
+
+pub fn declaration(
+    runtime: &LspRuntime,
+    directory: impl AsRef<Path>,
+    file: impl AsRef<Path>,
+    line: u32,
+    character: u32,
+) -> Vec<LspLocation> {
+    crate::lsp::declarations(runtime, directory, file, line, character)
+}
+
+pub fn type_definition(
+    runtime: &LspRuntime,
+    directory: impl AsRef<Path>,
+    file: impl AsRef<Path>,
+    line: u32,
+    character: u32,
+) -> Vec<LspLocation> {
+    crate::lsp::type_definitions(runtime, directory, file, line, character)
 }
 
 pub fn references(

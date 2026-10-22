@@ -1,7 +1,109 @@
 use super::*;
 use std::path::Path;
 
+#[cfg(test)]
+mod location_tests {
+    use super::apply_loaded_code_location;
+    use neoism_ui::editor::code::CodePane;
+    use neoism_ui::services::FileOpenSource;
+    use std::path::PathBuf;
+
+    #[test]
+    fn source_location_waits_for_matching_loaded_canonical_buffer() {
+        let path = PathBuf::from("/nonexistent/neoism-source-location.rs");
+        let mut code = CodePane::load_with_source(path.clone(), FileOpenSource::Host);
+        let mut pending = Some((path.clone(), 2, 3));
+        code.mark_remote_loading();
+        apply_loaded_code_location(&mut pending, &mut code);
+        assert_eq!(pending, Some((path.clone(), 2, 3)));
+
+        code.apply_remote_source("zero\none\nthree");
+        let mut other = CodePane::load_with_source(
+            PathBuf::from("/nonexistent/neoism-other-location.rs"),
+            FileOpenSource::Host,
+        );
+        other.apply_remote_source("other");
+        apply_loaded_code_location(&mut pending, &mut other);
+        assert!(pending.is_some());
+        apply_loaded_code_location(&mut pending, &mut code);
+        assert!(pending.is_none());
+        assert_eq!((code.buffer.cursor_line, code.buffer.cursor_col), (2, 3));
+        assert!(code.buffer.follow_cursor);
+        assert!(!code.is_dirty());
+    }
+
+    #[test]
+    fn source_location_preserves_canonical_edits_and_undo() {
+        let mut code = CodePane::load_with_source(
+            PathBuf::from("/nonexistent/neoism-source-undo.rs"),
+            FileOpenSource::Host,
+        );
+        code.apply_remote_source("source\nsecond");
+        code.buffer.insert_text("dirty ");
+        let text = code.buffer.text();
+        let mut pending = Some((code.path.clone(), 1, 2));
+        apply_loaded_code_location(&mut pending, &mut code);
+        assert_eq!(code.buffer.text(), text);
+        assert!(code.is_dirty());
+        assert_eq!((code.buffer.cursor_line, code.buffer.cursor_col), (1, 2));
+        code.buffer.undo();
+        assert_eq!(code.buffer.text(), "source\nsecond");
+    }
+}
+
+fn apply_loaded_code_location(
+    pending: &mut Option<(std::path::PathBuf, usize, usize)>,
+    code: &mut neoism_ui::editor::code::CodePane,
+) {
+    let Some((path, line, column)) = pending.as_ref() else {
+        return;
+    };
+    if path != &code.path || code.remote_content_pending || code.error.is_some() {
+        return;
+    }
+    code.buffer.set_cursor_position(*line, *column, false);
+    code.buffer.follow_cursor = true;
+    *pending = None;
+}
+
 impl Screen<'_> {
+    /// Gutter navigation explicitly leaves review, unlike same-file LSP jumps.
+    pub(crate) fn open_code_source_location(
+        &mut self,
+        target: std::path::PathBuf,
+        line: usize,
+        column: usize,
+    ) {
+        self.open_path_in_code(target.clone());
+        if !self
+            .context_manager
+            .current()
+            .code
+            .as_ref()
+            .is_some_and(|code| code.path == target)
+        {
+            return;
+        }
+        self.pending_review_code_cursor = None;
+        self.pending_markdown_source_location = None;
+        self.pending_code_location = Some((target, line, column));
+        self.apply_pending_code_location();
+        self.focus_selected_workspace_content();
+        self.mark_dirty();
+    }
+
+    /// Apply only against loaded canonical text, never the remote placeholder.
+    /// Called before ordinary code painting so CRDT/file replies can finish
+    /// loading even after the review surface has lost focus.
+    pub(crate) fn apply_pending_code_location(&mut self) {
+        let Some((path, _, _)) = self.pending_code_location.as_ref() else {
+            return;
+        };
+        if let Some(code) = self.context_manager.code_pane_mut_by_path(path) {
+            apply_loaded_code_location(&mut self.pending_code_location, code);
+        }
+    }
+
     pub fn open_path_in_code(&mut self, path: std::path::PathBuf) {
         let source = neoism_ui::services::FileOpenSource::workspace(
             self.context_manager.current_workspace_is_remote_joined(),
@@ -14,6 +116,14 @@ impl Screen<'_> {
         path: std::path::PathBuf,
         source: neoism_ui::services::FileOpenSource,
     ) {
+        if self
+            .context_manager
+            .markdown_pane_mut_by_path(&path)
+            .is_some()
+        {
+            self.file_tree_notify("This document already has a Markdown owner; close it before opening a code owner", neoism_ui::panels::notifications::NotificationLevel::Warn);
+            return;
+        }
         if self.context_manager.code_node_by_path(&path).is_some()
             && self
                 .context_manager
@@ -60,7 +170,7 @@ impl Screen<'_> {
     /// because the bytes live on the host/ssh remote. Mirrors
     /// `request_remote_markdown_content`; the reply is applied in
     /// `apply_daemon_files_message`'s `FileContent` arm.
-    fn request_remote_code_content(&mut self, path: &Path) {
+    pub(crate) fn request_remote_code_content(&mut self, path: &Path) {
         let Some(remote) = self.remote_editor_files(path) else {
             return;
         };
@@ -125,7 +235,7 @@ impl Screen<'_> {
         // when the setting is off.
         if !self.renderer.vim_mode {
             use neoism_ui::editor::code::{CodeInputMode, CodeMode};
-            if let Some(code) = self.context_manager.current_mut().code.as_mut() {
+            if let Some(code) = self.context_manager.active_code_pane_mut() {
                 code.input_mode = CodeInputMode::Standard;
                 code.buffer.mode = CodeMode::Insert;
             }
@@ -139,7 +249,7 @@ impl Screen<'_> {
         // applies the edits and finishes the save — through the daemon
         // when the pane is doc-bound, locally otherwise.
         if self.renderer.code_format_on_save
-            && self.context_manager.current().code.is_some()
+            && self.context_manager.active_code_pane().is_some()
             && self.queue_code_format_then_save()
         {
             return true;
@@ -155,15 +265,11 @@ impl Screen<'_> {
 
     pub(crate) fn finish_code_save(&mut self) -> bool {
         let Some((path, result)) =
-            self.context_manager
-                .current_mut()
-                .code
-                .as_mut()
-                .map(|code| {
-                    let path = code.path.clone();
-                    let result = code.save().map_err(|err| err.to_string());
-                    (path, result)
-                })
+            self.context_manager.active_code_pane_mut().map(|code| {
+                let path = code.path.clone();
+                let result = code.save().map_err(|err| err.to_string());
+                (path, result)
+            })
         else {
             return false;
         };
@@ -193,9 +299,7 @@ impl Screen<'_> {
     pub(crate) fn sync_active_code_modified(&mut self) {
         let Some((path, dirty)) = self
             .context_manager
-            .current()
-            .code
-            .as_ref()
+            .active_code_pane()
             .map(|code| (code.path.clone(), code.is_dirty()))
         else {
             return;

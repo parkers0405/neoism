@@ -118,6 +118,16 @@ impl ChromeBridge {
         use neoism_ui::panels::buffer_tabs::BufferTab;
         #[derive(serde::Deserialize)]
         struct JsTab {
+            #[serde(default, rename = "chromePage")]
+            chrome_page: Option<String>,
+            #[serde(default, rename = "diffRoot")]
+            diff_root: Option<String>,
+            #[serde(default, rename = "diffPath")]
+            diff_path: Option<String>,
+            #[serde(default, rename = "diffRouteId")]
+            diff_route_id: Option<usize>,
+            #[serde(default, rename = "sourceCode")]
+            source_code: bool,
             title: String,
             #[serde(default)]
             modified: bool,
@@ -143,14 +153,36 @@ impl ChromeBridge {
                             path: None,
                             kind: None,
                             neoism_agent_route_id: None,
+                            chrome_page: None,
+                            diff_root: None,
+                            diff_path: None,
+                            diff_route_id: None,
+                            source_code: false,
                         })
                         .collect()
                 })
                 .map_err(|e| JsValue::from_str(&format!("tabs parse: {e}")))?,
         };
+        let mut diff_routes = Vec::new();
+        for tab in &raw {
+            if tab.chrome_page.as_deref() == Some("git_diff") {
+                if let (Some(route), Some(root), Some(path)) =
+                    (tab.diff_route_id, &tab.diff_root, &tab.diff_path)
+                {
+                    self.chrome
+                        .ensure_git_diff_view(route, root.into(), path.into());
+                    diff_routes.push(route);
+                }
+            }
+        }
+        self.chrome.retain_git_diff_views(&diff_routes);
         self.tab_kinds.clear();
         for (ix, t) in raw.iter().enumerate() {
-            if let Some(kind) = t.kind.as_deref() {
+            if t.chrome_page.as_deref() == Some("git_diff") {
+                self.tab_kinds.insert(ix, "chrome-git-diff".to_string());
+            } else if t.source_code {
+                self.tab_kinds.insert(ix, "source-code".to_string());
+            } else if let Some(kind) = t.kind.as_deref() {
                 self.tab_kinds.insert(ix, kind.to_string());
             } else if t.path.is_some() {
                 self.tab_kinds.insert(ix, "file".to_string());
@@ -177,7 +209,12 @@ impl ChromeBridge {
                 // kind string maps onto the shared ChromePageRef so
                 // `Chrome::active_chrome_page` resolves and the page
                 // body paints (desktop's open_chrome_page twin).
-                let chrome_page = match t.kind.as_deref() {
+                let chrome_page = if t.chrome_page.as_deref() == Some("git_diff") {
+                    t.diff_route_id.map(|route_id| neoism_ui::panels::buffer_tabs::ChromePageRef {
+                        kind: neoism_ui::panels::buffer_tabs::ChromePageKind::GitDiff,
+                        route_id,
+                    })
+                } else { match t.kind.as_deref() {
                     Some("chrome-extensions") => {
                         Some(neoism_ui::panels::buffer_tabs::ChromePageRef {
                             kind: neoism_ui::panels::buffer_tabs::ChromePageKind::Extensions,
@@ -191,7 +228,7 @@ impl ChromeBridge {
                         })
                     }
                     _ => None,
-                };
+                }};
                 BufferTab {
                     title: t.title,
                     modified: t.modified,
@@ -202,11 +239,10 @@ impl ChromeBridge {
                     // panel paints the X. Neoism Agent tabs carry their
                     // route id instead; the desktop frontend's
                     // `NeoismAgentPane` paints the contents.
-                    path: agent_route
-                        .is_none()
+                    path: (agent_route.is_none() && chrome_page.is_none())
                         .then(|| t.path.as_deref().map(std::path::PathBuf::from))
                         .flatten(),
-                    markdown: t
+                    markdown: !t.source_code && chrome_page.is_none() && t
                         .path
                         .as_deref()
                         .map(|p| {
@@ -269,7 +305,9 @@ impl ChromeBridge {
                 // root terminal — they close like any file tab.
                 let is_chrome_page = matches!(
                     tab.kind.as_deref(),
-                    Some("chrome-extensions") | Some("chrome-neoworld")
+                    Some("chrome-extensions")
+                        | Some("chrome-neoworld")
+                        | Some("chrome-git-diff")
                 );
                 let is_terminal = tab.kind.as_deref() == Some("terminal")
                     || (tab.path.is_none() && !is_agent && !is_chrome_page);
@@ -825,6 +863,12 @@ impl ChromeBridge {
         use neoism_ui::panels::buffer_tabs::BufferTab;
         #[derive(serde::Deserialize)]
         struct JsPaneTab {
+            #[serde(default, rename = "chromePage")]
+            chrome_page: Option<String>,
+            #[serde(default, rename = "diffRouteId")]
+            diff_route_id: Option<usize>,
+            #[serde(default, rename = "sourceCode")]
+            source_code: bool,
             title: String,
             #[serde(default)]
             path: Option<String>,
@@ -837,7 +881,17 @@ impl ChromeBridge {
             .into_iter()
             .map(|t| {
                 let is_terminal = t.kind.as_deref() == Some("terminal");
-                BufferTab {
+                let diff_page = if t.chrome_page.as_deref() == Some("git_diff") {
+                    t.diff_route_id.map(|route_id| {
+                        neoism_ui::panels::buffer_tabs::ChromePageRef {
+                            kind: neoism_ui::panels::buffer_tabs::ChromePageKind::GitDiff,
+                            route_id,
+                        }
+                    })
+                } else {
+                    None
+                };
+                let mut tab = BufferTab {
                     title: t.title,
                     modified: false,
                     custom_icon: None,
@@ -846,19 +900,21 @@ impl ChromeBridge {
                     path: (!is_terminal)
                         .then(|| t.path.as_deref().map(std::path::PathBuf::from))
                         .flatten(),
-                    markdown: t
-                        .path
-                        .as_deref()
-                        .map(|p| {
-                            neoism_ui::syntax::Lang::from_path(p)
-                                == neoism_ui::syntax::Lang::Markdown
-                        })
-                        .unwrap_or(false),
+                    markdown: !t.source_code
+                        && t.path
+                            .as_deref()
+                            .map(|p| {
+                                neoism_ui::syntax::Lang::from_path(p)
+                                    == neoism_ui::syntax::Lang::Markdown
+                            })
+                            .unwrap_or(false),
                     terminal_route_id: None,
                     neoism_agent_route_id: None,
                     chrome_page: None,
                     agent_kind: None,
-                }
+                };
+                tab.chrome_page = diff_page;
+                tab
             })
             .collect();
         self.chrome
@@ -1150,8 +1206,12 @@ impl ChromeBridge {
         // it with the right token colors.
         if self.active_tab_index == key {
             self.sync_active_tab_state(key);
-        } else if neoism_ui::syntax::Lang::from_path(path)
-            == neoism_ui::syntax::Lang::Markdown
+        } else if !self
+            .tab_kinds
+            .get(&key)
+            .is_some_and(|kind| kind == "source-code")
+            && neoism_ui::syntax::Lang::from_path(path)
+                == neoism_ui::syntax::Lang::Markdown
         {
             // Host tab indices can drift from ours (sticky terminal
             // slot). A markdown pane left contentless renders BLACK,

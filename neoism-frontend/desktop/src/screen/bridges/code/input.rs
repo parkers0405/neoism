@@ -17,9 +17,27 @@ impl Screen<'_> {
         if key.state == ElementState::Released {
             return;
         }
+        if self
+            .context_manager
+            .active_code_pane()
+            .is_some_and(|code| code.remote_content_pending || code.error.is_some())
+        {
+            // Never edit a placeholder while its canonical source is loading
+            // (or failed); a later ReadFile must not overwrite local typing.
+            return;
+        }
         let plain = !mods.control_key() && !mods.alt_key() && !mods.super_key();
         let primary = (mods.control_key() || mods.super_key()) && !mods.alt_key();
         let shift = mods.shift_key();
+
+        if primary
+            && matches!(key.logical_key.as_ref(), Key::Character(ch) if ch.eq_ignore_ascii_case("c"))
+        {
+            if let Some(text) = self.code_hover_selected_text() {
+                clipboard.set(ClipboardType::Clipboard, text);
+                return;
+            }
+        }
 
         // Code-action menu first refusal (any input mode): Up/Down
         // navigate, Enter applies, Esc dismisses; other keys dismiss
@@ -46,7 +64,7 @@ impl Screen<'_> {
                 _ => None,
             };
             if let Some(down) = vertical {
-                if let Some(code) = self.context_manager.current_mut().code.as_mut() {
+                if let Some(code) = self.context_manager.active_code_pane_mut() {
                     code.buffer.add_caret_vertical(down);
                 }
                 self.mark_dirty();
@@ -59,9 +77,7 @@ impl Screen<'_> {
         // is typing) except Esc, which returns to Normal.
         let vim_state = self
             .context_manager
-            .current()
-            .code
-            .as_ref()
+            .active_code_pane()
             .map(|code| (code.input_mode, code.buffer.mode));
         match vim_state {
             Some((CodeInputMode::Vim, CodeMode::Normal | CodeMode::Visual)) => {
@@ -71,7 +87,7 @@ impl Screen<'_> {
             Some((CodeInputMode::Vim, CodeMode::Insert))
                 if matches!(key.logical_key.as_ref(), Key::Named(NamedKey::Escape)) =>
             {
-                if let Some(code) = self.context_manager.current_mut().code.as_mut() {
+                if let Some(code) = self.context_manager.active_code_pane_mut() {
                     code.buffer.mode = CodeMode::Normal;
                     code.buffer.clear_selection();
                     code.buffer.clear_extra_carets();
@@ -92,21 +108,21 @@ impl Screen<'_> {
                     return;
                 }
                 Key::Character("a") => {
-                    if let Some(code) = self.context_manager.current_mut().code.as_mut() {
+                    if let Some(code) = self.context_manager.active_code_pane_mut() {
                         code.buffer.select_all();
                     }
                     self.mark_dirty();
                     return;
                 }
                 Key::Character("c") => {
-                    if let Some(code) = self.context_manager.current_mut().code.as_mut() {
+                    if let Some(code) = self.context_manager.active_code_pane_mut() {
                         let (payload, _linewise) = code.buffer.copy_payload();
                         clipboard.set(ClipboardType::Clipboard, payload);
                     }
                     return;
                 }
                 Key::Character("x") => {
-                    if let Some(code) = self.context_manager.current_mut().code.as_mut() {
+                    if let Some(code) = self.context_manager.active_code_pane_mut() {
                         let (payload, _linewise) = code.buffer.cut_payload();
                         clipboard.set(ClipboardType::Clipboard, payload);
                     }
@@ -117,7 +133,7 @@ impl Screen<'_> {
                 }
                 Key::Character("v") => {
                     let content = clipboard.get(ClipboardType::Clipboard);
-                    if let Some(code) = self.context_manager.current_mut().code.as_mut() {
+                    if let Some(code) = self.context_manager.active_code_pane_mut() {
                         code.buffer.insert_text(&content);
                     }
                     self.dismiss_code_lsp_popups();
@@ -127,7 +143,7 @@ impl Screen<'_> {
                 }
                 // Shift yields an uppercase logical key (Ctrl+Shift+Z).
                 Key::Character("z") | Key::Character("Z") => {
-                    if let Some(code) = self.context_manager.current_mut().code.as_mut() {
+                    if let Some(code) = self.context_manager.active_code_pane_mut() {
                         if shift {
                             code.buffer.redo();
                         } else {
@@ -140,7 +156,7 @@ impl Screen<'_> {
                     return;
                 }
                 Key::Character("y") => {
-                    if let Some(code) = self.context_manager.current_mut().code.as_mut() {
+                    if let Some(code) = self.context_manager.active_code_pane_mut() {
                         code.buffer.redo();
                     }
                     self.dismiss_code_lsp_popups();
@@ -158,7 +174,7 @@ impl Screen<'_> {
                 // standard mode + vim Insert only; vim Normal keeps
                 // Ctrl+D as half-page scroll (routed above).
                 Key::Character("d") => {
-                    if let Some(code) = self.context_manager.current_mut().code.as_mut() {
+                    if let Some(code) = self.context_manager.active_code_pane_mut() {
                         code.buffer.add_caret_next_occurrence();
                     }
                     self.mark_dirty();
@@ -204,12 +220,10 @@ impl Screen<'_> {
 
         let viewport_rows = self
             .context_manager
-            .current()
-            .code
-            .as_ref()
+            .active_code_pane()
             .map(|code| code.geometry.viewport_rows())
             .unwrap_or(1);
-        let Some(code) = self.context_manager.current_mut().code.as_mut() else {
+        let Some(code) = self.context_manager.active_code_pane_mut() else {
             return;
         };
         let multi = code.buffer.has_extra_carets();
@@ -381,9 +395,7 @@ impl Screen<'_> {
         // is stale state — let the key flow and the pump clean up.
         let insert_mode = self
             .context_manager
-            .current()
-            .code
-            .as_ref()
+            .active_code_pane()
             .is_some_and(|code| code.buffer.mode == CodeMode::Insert);
         if !insert_mode {
             return false;
@@ -428,7 +440,7 @@ impl Screen<'_> {
     }
 
     fn code_motion(&mut self, motion: CodeMotion, extend: bool) {
-        if let Some(code) = self.context_manager.current_mut().code.as_mut() {
+        if let Some(code) = self.context_manager.active_code_pane_mut() {
             // Wrapped continuations are lines: Up/Down walk VISUAL
             // rows when wrap is on (falls back to buffer lines).
             let handled = match motion {
@@ -448,7 +460,7 @@ impl Screen<'_> {
     /// Counted or operator-pending motions keep buffer-line semantics
     /// (`3j`, `dj`). Returns false when the resolver should handle it.
     fn code_vim_vertical(&mut self, down: bool) -> bool {
-        let Some(code) = self.context_manager.current_mut().code.as_mut() else {
+        let Some(code) = self.context_manager.active_code_pane_mut() else {
             return false;
         };
         if !code.buffer.vim.pending.is_empty() {
@@ -484,7 +496,7 @@ impl Screen<'_> {
                 // Ctrl+C: copy the visual selection (or current line in
                 // Normal) to the clipboard, then drop back to Normal.
                 Key::Character("c") => {
-                    if let Some(code) = self.context_manager.current_mut().code.as_mut() {
+                    if let Some(code) = self.context_manager.active_code_pane_mut() {
                         let (payload, _linewise) = code.buffer.copy_payload();
                         clipboard.set(ClipboardType::Clipboard, payload);
                         code.buffer.mode = CodeMode::Normal;
@@ -512,7 +524,7 @@ impl Screen<'_> {
                 // Ctrl-D / Ctrl-U: half-page cursor sweep (vim).
                 Key::Character("d") | Key::Character("u") => {
                     let down = matches!(key.logical_key.as_ref(), Key::Character("d"));
-                    if let Some(code) = self.context_manager.current_mut().code.as_mut() {
+                    if let Some(code) = self.context_manager.active_code_pane_mut() {
                         let extend = code.buffer.mode == CodeMode::Visual;
                         code.half_page_scroll(down, extend);
                         if code.buffer.mode == CodeMode::Normal {
@@ -528,7 +540,7 @@ impl Screen<'_> {
 
         match key.logical_key.as_ref() {
             Key::Named(NamedKey::Escape) => {
-                if let Some(code) = self.context_manager.current_mut().code.as_mut() {
+                if let Some(code) = self.context_manager.active_code_pane_mut() {
                     code.buffer.vim.clear_pending();
                     code.leader_pending = false;
                     code.buffer.mode = CodeMode::Normal;
@@ -564,12 +576,10 @@ impl Screen<'_> {
                     matches!(key.logical_key.as_ref(), Key::Named(NamedKey::PageDown));
                 let rows = self
                     .context_manager
-                    .current()
-                    .code
-                    .as_ref()
+                    .active_code_pane()
                     .map(|code| code.geometry.viewport_rows())
                     .unwrap_or(1);
-                if let Some(code) = self.context_manager.current_mut().code.as_mut() {
+                if let Some(code) = self.context_manager.active_code_pane_mut() {
                     let extend = code.buffer.mode == CodeMode::Visual;
                     if !code.move_cursor_vertical_visual_n(down, rows, extend) {
                         let motion = if down {
@@ -586,7 +596,7 @@ impl Screen<'_> {
             Key::Named(NamedKey::Space) | Key::Character(" ") if plain => {
                 // Space is the leader in Normal mode (`<Space>x` closes
                 // the buffer); Visual keeps it as a motion char.
-                if let Some(code) = self.context_manager.current_mut().code.as_mut() {
+                if let Some(code) = self.context_manager.active_code_pane_mut() {
                     if code.buffer.mode == CodeMode::Normal
                         && code.buffer.vim.pending.is_empty()
                     {
@@ -606,12 +616,10 @@ impl Screen<'_> {
         // backends even for an ordinary character key.
         let leader_armed = self
             .context_manager
-            .current()
-            .code
-            .as_ref()
+            .active_code_pane()
             .is_some_and(|code| code.leader_pending);
         if leader_armed {
-            if let Some(code) = self.context_manager.current_mut().code.as_mut() {
+            if let Some(code) = self.context_manager.active_code_pane_mut() {
                 code.leader_pending = false;
             }
             if plain {
@@ -659,9 +667,7 @@ impl Screen<'_> {
         // `?` is the same surface scanning backward.
         let pending_empty_for_search = self
             .context_manager
-            .current()
-            .code
-            .as_ref()
+            .active_code_pane()
             .is_some_and(|code| code.buffer.vim.pending.is_empty());
         if (ch == '/' || ch == '?') && pending_empty_for_search {
             self.open_finder_buffer_search(ch == '?');
@@ -671,9 +677,7 @@ impl Screen<'_> {
         // `:` opens the command palette (the vim ex-command surface).
         let pending_empty = self
             .context_manager
-            .current()
-            .code
-            .as_ref()
+            .active_code_pane()
             .is_some_and(|code| code.buffer.vim.pending.is_empty());
         if ch == ':' && pending_empty {
             self.open_command_palette();
@@ -684,7 +688,7 @@ impl Screen<'_> {
         // go-to-definition, and `g r` find-references. `gd`/`gr`
         // piggyback on the resolver's pending `g` (Gee) stage without
         // touching the shared vim model.
-        if let Some(code) = self.context_manager.current().code.as_ref() {
+        if let Some(code) = self.context_manager.active_code_pane() {
             let normal = code.buffer.mode == CodeMode::Normal;
             let pending = &code.buffer.vim.pending;
             if normal && ch == 'K' && pending.is_empty() {
@@ -698,7 +702,7 @@ impl Screen<'_> {
                 && pending.stage == VimStage::Gee
             {
                 let cursor = code.buffer.cursor();
-                if let Some(code) = self.context_manager.current_mut().code.as_mut() {
+                if let Some(code) = self.context_manager.active_code_pane_mut() {
                     code.buffer.vim.clear_pending();
                 }
                 self.request_code_definition_at(cursor.line, cursor.col);
@@ -710,7 +714,7 @@ impl Screen<'_> {
                 && pending.operator.is_none()
                 && pending.stage == VimStage::Gee
             {
-                if let Some(code) = self.context_manager.current_mut().code.as_mut() {
+                if let Some(code) = self.context_manager.active_code_pane_mut() {
                     code.buffer.vim.clear_pending();
                 }
                 self.request_code_references();
@@ -725,7 +729,7 @@ impl Screen<'_> {
                 && pending.stage == VimStage::Gee
                 && matches!(code.buffer.mode, CodeMode::Normal | CodeMode::Visual)
             {
-                if let Some(code) = self.context_manager.current_mut().code.as_mut() {
+                if let Some(code) = self.context_manager.active_code_pane_mut() {
                     code.buffer.vim.clear_pending();
                     if code.buffer.add_caret_next_occurrence() {
                         code.buffer.mode = CodeMode::Visual;
@@ -743,7 +747,7 @@ impl Screen<'_> {
                 && matches!(code.buffer.mode, CodeMode::Normal | CodeMode::Visual)
             {
                 let down = ch == 'j';
-                if let Some(code) = self.context_manager.current_mut().code.as_mut() {
+                if let Some(code) = self.context_manager.active_code_pane_mut() {
                     code.buffer.vim.clear_pending();
                     let extend = code.buffer.mode == CodeMode::Visual;
                     if !code.move_cursor_vertical_visual(down, extend) {
@@ -775,7 +779,7 @@ impl Screen<'_> {
         // Multi-cursor Visual `c`/`d` (the gb flow): delete EVERY
         // caret's selection in one undo step; `c` drops into Insert so
         // the follow-up typing lands at every caret.
-        if let Some(code) = self.context_manager.current_mut().code.as_mut() {
+        if let Some(code) = self.context_manager.active_code_pane_mut() {
             if code.buffer.has_extra_carets()
                 && code.buffer.mode == CodeMode::Visual
                 && matches!(ch, 'c' | 'd')
@@ -796,7 +800,7 @@ impl Screen<'_> {
         // Normal/Visual keys always settle the LSP popups (cursor is
         // about to move or the buffer to change).
         self.renderer.code_lsp.dismiss_popups();
-        let Some(code) = self.context_manager.current_mut().code.as_mut() else {
+        let Some(code) = self.context_manager.active_code_pane_mut() else {
             return;
         };
         let visual = code.buffer.mode == CodeMode::Visual;
@@ -806,7 +810,7 @@ impl Screen<'_> {
 
     fn code_vim_ctrl(&mut self, key: char, clipboard: &mut Clipboard) {
         self.renderer.code_lsp.dismiss_popups();
-        let Some(code) = self.context_manager.current_mut().code.as_mut() else {
+        let Some(code) = self.context_manager.active_code_pane_mut() else {
             return;
         };
         let visual = code.buffer.mode == CodeMode::Visual;
@@ -823,7 +827,7 @@ impl Screen<'_> {
                 let paste =
                     matches!(action, VimAction::Paste { .. } | VimAction::Repeat { .. })
                         .then(|| clipboard.get(ClipboardType::Clipboard));
-                let Some(code) = self.context_manager.current_mut().code.as_mut() else {
+                let Some(code) = self.context_manager.active_code_pane_mut() else {
                     return;
                 };
                 let applied = code.buffer.apply_vim_action(&action, paste.as_deref());
@@ -855,11 +859,11 @@ impl Screen<'_> {
 
     /// Replay a recorded macro body through the same char feed path.
     fn code_vim_replay_keys(&mut self, keys: &str, clipboard: &mut Clipboard) {
-        if let Some(code) = self.context_manager.current_mut().code.as_mut() {
+        if let Some(code) = self.context_manager.active_code_pane_mut() {
             code.buffer.vim.replaying_macro = true;
         }
         for ch in keys.chars() {
-            let Some(code) = self.context_manager.current_mut().code.as_mut() else {
+            let Some(code) = self.context_manager.active_code_pane_mut() else {
                 break;
             };
             // Macros only replay Normal/Visual keystreams.
@@ -878,8 +882,7 @@ impl Screen<'_> {
                         VimAction::Paste { .. } | VimAction::Repeat { .. }
                     )
                     .then(|| clipboard.get(ClipboardType::Clipboard));
-                    let Some(code) = self.context_manager.current_mut().code.as_mut()
-                    else {
+                    let Some(code) = self.context_manager.active_code_pane_mut() else {
                         break;
                     };
                     let applied = code.buffer.apply_vim_action(&action, paste.as_deref());
@@ -892,7 +895,7 @@ impl Screen<'_> {
                 }
             }
         }
-        if let Some(code) = self.context_manager.current_mut().code.as_mut() {
+        if let Some(code) = self.context_manager.active_code_pane_mut() {
             code.buffer.vim.replaying_macro = false;
         }
     }
@@ -903,15 +906,10 @@ impl Screen<'_> {
         count: usize,
         clipboard: &mut Clipboard,
     ) -> bool {
-        let applied = self
-            .context_manager
-            .current_mut()
-            .code
-            .as_mut()
-            .map(|code| {
-                code.buffer
-                    .apply_vim_action(&VimAction::MacroPlay { name, count }, None)
-            });
+        let applied = self.context_manager.active_code_pane_mut().map(|code| {
+            code.buffer
+                .apply_vim_action(&VimAction::MacroPlay { name, count }, None)
+        });
         let Some(keys) = applied.and_then(|applied| applied.replay_keys) else {
             return false;
         };
@@ -923,9 +921,7 @@ impl Screen<'_> {
 
     pub(crate) fn code_scrollbar_drag_active(&self) -> bool {
         self.context_manager
-            .current()
-            .code
-            .as_ref()
+            .active_code_pane()
             .is_some_and(|code| code.scrollbar_drag.is_some())
     }
 
@@ -933,7 +929,7 @@ impl Screen<'_> {
     /// spring — every editor's scrollbar tracks the hand exactly).
     pub(crate) fn handle_code_scrollbar_drag_move(&mut self) -> bool {
         let [_, my] = self.markdown_mouse_logical();
-        let Some(code) = self.context_manager.current_mut().code.as_mut() else {
+        let Some(code) = self.context_manager.active_code_pane_mut() else {
             return false;
         };
         let (Some(track), Some(thumb), Some(grab)) = (
@@ -952,7 +948,7 @@ impl Screen<'_> {
 
     #[allow(dead_code)]
     pub(crate) fn end_code_scrollbar_drag(&mut self) {
-        if let Some(code) = self.context_manager.current_mut().code.as_mut() {
+        if let Some(code) = self.context_manager.active_code_pane_mut() {
             code.scrollbar_drag = None;
         }
     }
@@ -962,7 +958,7 @@ impl Screen<'_> {
     /// insert-style editing.
     pub(crate) fn toggle_code_vim_mode(&mut self) -> bool {
         self.renderer.code_lsp.dismiss_popups();
-        let Some(code) = self.context_manager.current_mut().code.as_mut() else {
+        let Some(code) = self.context_manager.active_code_pane_mut() else {
             return false;
         };
         let entering = code.input_mode == CodeInputMode::Standard;
@@ -994,7 +990,7 @@ impl Screen<'_> {
     /// default) and NoWrap + horizontal caret-follow. No-op without a
     /// code pane.
     pub(crate) fn toggle_code_word_wrap(&mut self) -> bool {
-        let Some(code) = self.context_manager.current_mut().code.as_mut() else {
+        let Some(code) = self.context_manager.active_code_pane_mut() else {
             return false;
         };
         code.wrap = !code.wrap;
@@ -1016,17 +1012,116 @@ impl Screen<'_> {
         true
     }
 
+    /// Resolve the right-click once, before opening the modal menu. Menu actions
+    /// use this parked cursor rather than re-hit-testing the pointer over a row.
+    pub(crate) fn handle_code_context_click(&mut self) -> bool {
+        use neoism_ui::panels::context_menu::{
+            ContextMenuAction, ContextMenuItem, LspContextAction,
+        };
+        let [x, y] = self.markdown_mouse_logical();
+        if self
+            .renderer
+            .code_lsp
+            .hover
+            .as_ref()
+            .is_some_and(|hover| hover.interaction.contains(x, y))
+        {
+            return true;
+        }
+        self.select_current_based_on_mouse();
+        let Some(code) = self.context_manager.active_code_pane_mut() else {
+            return false;
+        };
+        let [rx, ry, rw, rh] = code.geometry.rect;
+        if x < rx || y < ry || x >= rx + rw || y >= ry + rh {
+            return false;
+        }
+        let (line, col) = if code.geometry.projected_rows.is_some() {
+            let Some(position) =
+                code.geometry
+                    .projected_hit_position(&code.buffer.lines, x, y)
+            else {
+                return true;
+            };
+            position
+        } else {
+            code.geometry.hit_position(&code.buffer.lines, x, y)
+        };
+        let vim = code.input_mode == CodeInputMode::Vim;
+        code.set_pointer_position(line, col, false);
+        code.mouse_selecting = false;
+        code.scrollbar_drag = None;
+        let path = code.path.clone();
+        let revision = code.buffer.revision;
+        self.dismiss_code_lsp_popups();
+        let items = [
+            (
+                "Go to Definition",
+                if vim { "gd" } else { "" },
+                LspContextAction::Definition,
+            ),
+            ("Go to Declaration", "", LspContextAction::Declaration),
+            (
+                "Go to Type Definition",
+                "",
+                LspContextAction::TypeDefinition,
+            ),
+            (
+                "Show All References",
+                if vim { "gr" } else { "" },
+                LspContextAction::References,
+            ),
+        ]
+        .into_iter()
+        .map(|(label, hint, action)| {
+            use neoism_protocol::editor::EditorLspAction as A;
+            let query = match action {
+                LspContextAction::Definition => A::Definition,
+                LspContextAction::Declaration => A::Declaration,
+                LspContextAction::TypeDefinition => A::TypeDefinition,
+                LspContextAction::References => A::References,
+                _ => unreachable!("navigation menu contains only positional queries"),
+            };
+            let supported = self.code_lsp_cached_navigation_support(query) != Some(false);
+            let mut item = ContextMenuItem::new(
+                label,
+                if supported { hint } else { "Not supported" },
+                ContextMenuAction::CodeLsp {
+                    action,
+                    path: path.clone(),
+                    revision,
+                    line,
+                    column: col,
+                },
+            );
+            item.enabled = supported;
+            item
+        })
+        .collect();
+        let size = self.sugarloaf.window_size();
+        let scale = self.sugarloaf.scale_factor();
+        let height = self.context_menu_logical_height();
+        self.renderer.context_menu.open(
+            "",
+            items,
+            x,
+            y,
+            size.width as f32 / scale,
+            height,
+        );
+        self.mark_dirty();
+        true
+    }
+
     pub(crate) fn handle_code_mouse_press(&mut self, button: MouseButton) -> bool {
-        if self.context_manager.current().code.is_none() {
+        if self.context_manager.active_code_pane().is_none() {
             return false;
         }
         if button != MouseButton::Left {
             return false;
         }
         let [x, y] = self.markdown_mouse_logical();
-        let shift = self.modifiers.state().shift_key();
-        let ctrl = self.modifiers.state().control_key();
-        let Some(code) = self.context_manager.current_mut().code.as_mut() else {
+        let Some(code) = self.context_manager.active_code_pane_mut() else {
             return false;
         };
         if let Some(hit) = code
@@ -1075,7 +1170,68 @@ impl Screen<'_> {
                 return true;
             }
         }
-        let (line, col) = code.geometry.hit_position(&code.buffer.lines, x, y);
+        let (line, col) = if code.geometry.projected_rows.is_some() {
+            let Some(position) =
+                code.geometry
+                    .projected_hit_position(&code.buffer.lines, x, y)
+            else {
+                return true; // Old-only rows, hunk gaps and spacers are not source.
+            };
+            position
+        } else {
+            code.geometry.hit_position(&code.buffer.lines, x, y)
+        };
+        self.apply_code_mouse_press_at_resolved(button, line, col)
+    }
+
+    /// Review hosts resolve source coordinates exactly once, before acquiring
+    /// the canonical editor. Do not place its cursor during acquisition: Shift
+    /// selection must still anchor at the caret from before this press.
+    pub(crate) fn handle_code_mouse_press_at_resolved(
+        &mut self,
+        button: MouseButton,
+        line: usize,
+        byte_column: usize,
+    ) -> bool {
+        if button != MouseButton::Left {
+            return false;
+        }
+        let Some(code) = self.context_manager.active_code_pane_mut() else {
+            return false;
+        };
+        code.invalidate_review_pointer_geometry();
+        self.apply_code_mouse_press_at_resolved(button, line, byte_column)
+    }
+
+    fn apply_code_mouse_press_at_resolved(
+        &mut self,
+        button: MouseButton,
+        line: usize,
+        col: usize,
+    ) -> bool {
+        if button != MouseButton::Left {
+            return false;
+        }
+        let shift = self.modifiers.state().shift_key();
+        let ctrl = self.modifiers.state().control_key();
+        let Some(code) = self.context_manager.active_code_pane_mut() else {
+            return false;
+        };
+        if code.remote_content_pending
+            || code.error.is_some()
+            || code.buffer.lines.is_empty()
+        {
+            code.mouse_selecting = false;
+            return true;
+        }
+        // Clamp stale requests without changing the old caret/Shift anchor.
+        let line = line.min(code.buffer.lines.len() - 1);
+        let text = &code.buffer.lines[line];
+        let mut col = col.min(text.len());
+        while !text.is_char_boundary(col) {
+            col -= 1;
+        }
+        code.mouse_selecting = false;
         // Multi-click selection (chrome standard): double-click selects
         // the word under the pointer, triple-click the whole line. Uses
         // the same ClickState the terminal press pipeline maintains.
@@ -1114,8 +1270,8 @@ impl Screen<'_> {
         match self.mouse.click_state {
             crate::event::ClickState::DoubleClick if !ctrl => {
                 let (start, end) = word_range_at(&code.buffer.lines[line], col);
-                code.buffer.set_cursor_position(line, start, false);
-                code.buffer.set_cursor_position(line, end, true);
+                code.set_pointer_position(line, start, false);
+                code.set_pointer_position(line, end, true);
                 code.mouse_selecting = true;
                 self.dismiss_code_lsp_popups();
                 self.mark_dirty();
@@ -1123,8 +1279,8 @@ impl Screen<'_> {
             }
             crate::event::ClickState::TripleClick if !ctrl => {
                 let line_len = code.buffer.lines[line].len();
-                code.buffer.set_cursor_position(line, 0, false);
-                code.buffer.set_cursor_position(line, line_len, true);
+                code.set_pointer_position(line, 0, false);
+                code.set_pointer_position(line, line_len, true);
                 code.mouse_selecting = true;
                 self.dismiss_code_lsp_popups();
                 self.mark_dirty();
@@ -1134,13 +1290,13 @@ impl Screen<'_> {
         }
         // Ctrl+Click: go to definition of the clicked identifier.
         if ctrl && !shift {
-            code.buffer.set_cursor_position(line, col, false);
+            code.set_pointer_position(line, col, false);
             self.dismiss_code_lsp_popups();
             self.request_code_definition_at(line, col);
             self.mark_dirty();
             return true;
         }
-        code.buffer.set_cursor_position(line, col, shift);
+        code.set_pointer_position(line, col, shift);
         code.mouse_selecting = true;
         self.show_code_diagnostic_card_at(line, col);
         self.dismiss_code_lsp_popups();
@@ -1150,28 +1306,24 @@ impl Screen<'_> {
 
     pub(crate) fn code_drag_active(&self) -> bool {
         self.context_manager
-            .current()
-            .code
-            .as_ref()
+            .active_code_pane()
             .is_some_and(|code| code.mouse_selecting)
     }
 
     pub(crate) fn handle_code_drag_move(&mut self) -> bool {
         let [x, y] = self.markdown_mouse_logical();
-        let Some(code) = self.context_manager.current_mut().code.as_mut() else {
+        let Some(code) = self.context_manager.active_code_pane_mut() else {
             return false;
         };
-        if !code.mouse_selecting {
+        if !code.extend_pointer_selection_at(x, y) {
             return false;
         }
-        let (line, col) = code.geometry.hit_position(&code.buffer.lines, x, y);
-        code.buffer.set_cursor_position(line, col, true);
         self.mark_dirty();
         true
     }
 
     pub(crate) fn handle_code_mouse_release(&mut self) -> bool {
-        let Some(code) = self.context_manager.current_mut().code.as_mut() else {
+        let Some(code) = self.context_manager.active_code_pane_mut() else {
             return false;
         };
         if code.scrollbar_drag.take().is_some() {

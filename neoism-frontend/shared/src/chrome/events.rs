@@ -715,6 +715,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             UiEvent::PointerMove { x, y, .. }
             | UiEvent::PointerDown { x, y, .. }
             | UiEvent::PointerUp { x, y, .. } => {
+                self.git_diff_panel.update_latest_commit_hover(*x, *y);
                 self.last_pointer_pos = (*x, *y);
                 self.pointer_inside = true;
             }
@@ -1046,7 +1047,9 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                             pane.side_panel_mut().navigate_project(true);
                         }
                         LogicalKey::Named(NamedKey::Enter) => {
-                            if let Some(action) = pane.side_panel().selected_header_action() {
+                            if let Some(action) =
+                                pane.side_panel().selected_header_action()
+                            {
                                 self.pending_catalog_header = Some(action);
                             } else if pane.side_panel().new_chat_selected() {
                                 self.activate_new_conversation();
@@ -1077,6 +1080,24 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                     }
                     return true;
                 }
+            }
+        }
+        if alt && !ctrl && !shift && !meta {
+            let next = match &key.logical {
+                LogicalKey::Named(NamedKey::ArrowUp) => Some(false),
+                LogicalKey::Named(NamedKey::ArrowDown) => Some(true),
+                _ => None,
+            };
+            if next.is_some_and(|next| self.handle_git_diff_file_navigation(next)) {
+                return true;
+            }
+            let right = match &key.logical {
+                LogicalKey::Named(NamedKey::ArrowLeft) => Some(false),
+                LogicalKey::Named(NamedKey::ArrowRight) => Some(true),
+                _ => None,
+            };
+            if right.is_some_and(|right| self.handle_git_diff_horizontal_focus(right)) {
+                return true;
             }
         }
         if self.handle_side_panel_key(key) {
@@ -1277,6 +1298,8 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                             if let Some(pane) = self.agent_pane.as_mut() {
                                 pane.side_panel_mut().set_focused(true);
                             }
+                        } else {
+                            self.focus_git_diff_column(0);
                         }
                         // Leaving the tree lands on the agent body, so
                         // the composer takes the caret. Without this the
@@ -1294,6 +1317,8 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                             if let Some(pane) = self.agent_pane.as_mut() {
                                 pane.side_panel_mut().set_focused(true);
                             }
+                        } else {
+                            self.focus_git_diff_column(0);
                         }
                         return true;
                     }
@@ -1566,6 +1591,9 @@ impl<A: Send + Copy + 'static> Chrome<A> {
     /// finger movement in logical pixels, not wheel deltas. Every branch
     /// updates a bounded visual position immediately and creates no velocity.
     pub fn touch_scroll_at(&mut self, x: f32, y: f32, dx: f32, dy: f32) -> bool {
+        if self.scroll_git_diff_at(x, y, -dx, -dy) {
+            return true;
+        }
         if self.conversation_navigator.is_active() {
             self.conversation_navigator.scroll_immediate(-dy);
             return true;
@@ -1954,6 +1982,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                     }
                     self.blur(PanelKey::FileTree);
                     self.git_diff_panel.select_file(idx);
+                    self.queue_selected_git_diff();
                     return true;
                 }
                 GitPanelHit::FileCheckbox(idx) => {
@@ -1974,6 +2003,12 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                     self.blur(PanelKey::FileTree);
                     return true;
                 }
+                GitPanelHit::LatestCommitCopy => {
+                    self.git_diff_panel.copy_latest_commit();
+                }
+                GitPanelHit::LatestCommit => {
+                    self.git_diff_panel.open_latest_commit();
+                }
                 GitPanelHit::CommitButton => {
                     self.git_diff_panel.set_focused(true);
                     if let Some(tree) = self.file_tree.as_mut() {
@@ -1981,6 +2016,15 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                     }
                     self.blur(PanelKey::FileTree);
                     self.git_diff_panel.commit();
+                    return true;
+                }
+                GitPanelHit::PushButton => {
+                    self.git_diff_panel.set_focused(true);
+                    if let Some(tree) = self.file_tree.as_mut() {
+                        tree.set_focused(false);
+                    }
+                    self.blur(PanelKey::FileTree);
+                    self.git_diff_panel.activate_push_button();
                     return true;
                 }
                 GitPanelHit::ActionsButton => {
@@ -2210,36 +2254,43 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                     self.git_diff_panel.focus_commit_box(true);
                     return true;
                 }
-                LogicalKey::Named(NamedKey::ArrowUp)
-                    if self.git_diff_panel.diff_section_focused() =>
+                logical
+                    if matches!(logical, LogicalKey::Named(NamedKey::ArrowUp))
+                        || matches!(logical, LogicalKey::Character(s) if s.as_str() == "k") =>
                 {
-                    self.git_diff_panel.scroll_diff_keys(false);
-                    return true;
-                }
-                LogicalKey::Named(NamedKey::ArrowDown)
-                    if self.git_diff_panel.diff_section_focused() =>
-                {
-                    self.git_diff_panel.scroll_diff_keys(true);
-                    return true;
-                }
-                LogicalKey::Named(NamedKey::ArrowUp) => {
+                    if self.git_diff_panel.diff_section_focused() {
+                        self.git_diff_panel.scroll_diff_keys(false);
+                        return true;
+                    }
+                    let before = self.git_diff_panel.selected_file_index();
                     self.git_diff_panel.select_prev();
+                    if before != self.git_diff_panel.selected_file_index() {
+                        self.reveal_selected_git_diff();
+                    }
                     return true;
                 }
-                LogicalKey::Named(NamedKey::ArrowDown) => {
+                logical
+                    if matches!(logical, LogicalKey::Named(NamedKey::ArrowDown))
+                        || matches!(logical, LogicalKey::Character(s) if s.as_str() == "j") =>
+                {
+                    if self.git_diff_panel.diff_section_focused() {
+                        self.git_diff_panel.scroll_diff_keys(true);
+                        return true;
+                    }
+                    let before = self.git_diff_panel.selected_file_index();
                     self.git_diff_panel.select_next();
+                    if before != self.git_diff_panel.selected_file_index() {
+                        self.reveal_selected_git_diff();
+                    }
                     return true;
                 }
                 LogicalKey::Named(NamedKey::Enter) => {
                     self.git_diff_panel.clear_pending();
                     if self.git_diff_panel.checkbox_column_focused() {
                         self.git_diff_panel.toggle_stage_selected();
-                    } else if let Some((path, _root)) =
-                        self.git_diff_panel.selected_file_target()
-                    {
+                    } else {
+                        self.queue_selected_git_diff();
                         self.git_diff_panel.set_focused(false);
-                        self.pending_panel_open_paths
-                            .push(path.to_string_lossy().into_owned());
                     }
                     return true;
                 }
@@ -2501,6 +2552,7 @@ mod tests {
         tree.set_visible(true);
         tree.set_width(width);
         let mut chrome = Chrome::<()>::new();
+        chrome.set_file_tree_width(width);
         chrome.install_file_tree(tree);
         chrome
     }
@@ -2820,20 +2872,23 @@ mod tests {
                 .with_depth(1)
                 .with_runtime_status(Some("running".into())),
         ]);
-        panel.apply_catalog_family_snapshot("root", neoism_agent_core::CatalogFamilySnapshot {
-            directory: "/work/a".into(),
-            execution_id: Some("execution".into()),
-            family_revision: 1,
-            branches: vec![neoism_agent_core::CatalogBranchSnapshot {
-                session_id: "child".into(),
-                parent_session_id: "root".into(),
-                status: "outstanding".into(),
-                title: "Research".into(),
-                agent: Some("explore".into()),
-                depth: 1,
-                ..Default::default()
-            }],
-        });
+        panel.apply_catalog_family_snapshot(
+            "root",
+            neoism_agent_core::CatalogFamilySnapshot {
+                directory: "/work/a".into(),
+                execution_id: Some("execution".into()),
+                family_revision: 1,
+                branches: vec![neoism_agent_core::CatalogBranchSnapshot {
+                    session_id: "child".into(),
+                    parent_session_id: "root".into(),
+                    status: "outstanding".into(),
+                    title: "Research".into(),
+                    agent: Some("explore".into()),
+                    depth: 1,
+                    ..Default::default()
+                }],
+            },
+        );
         let child = panel
             .sessions()
             .iter()

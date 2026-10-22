@@ -80,26 +80,63 @@ fn snapshot(focused_pane_external_id: u64) -> PaneLayoutSnapshot {
 }
 
 #[test]
+fn active_code_access_mutates_the_context_owner_instead_of_a_copy() {
+    let mut manager =
+        ContextManager::start_with_capacity(5, VoidListener {}, WindowId::from(0))
+            .unwrap();
+    let path = std::path::PathBuf::from("/nonexistent/neoism-review-owner-test.rs");
+    manager.current_mut().code =
+        Some(neoism_ui::editor::code::CodePane::load_with_source(
+            path.clone(),
+            neoism_ui::services::FileOpenSource::LocalOnly,
+        ));
+    let before = manager.active_code_pane().unwrap().buffer.text();
+    manager
+        .active_code_pane_mut()
+        .unwrap()
+        .buffer
+        .insert_text("canonical");
+    assert!(manager
+        .current()
+        .code
+        .as_ref()
+        .unwrap()
+        .buffer
+        .text()
+        .contains("canonical"));
+    manager.code_pane_mut_by_path(&path).unwrap().buffer.undo();
+    assert_eq!(manager.active_code_pane().unwrap().buffer.text(), before);
+    assert_eq!(manager.active_code_pane().unwrap().path, path);
+}
+
+#[test]
 fn joined_workspace_selection_subscribes_without_publishing_host_selection() {
     let mut manager =
         ContextManager::start_with_capacity(5, VoidListener {}, WindowId::from(0))
             .unwrap();
     manager.daemon.link_is_peer = true;
     let stable = manager.current_grid().workspace_route_id().unwrap();
-    manager.adopted_workspaces.insert(stable, AdoptedWorkspaceBinding {
-        workspace_id: "joined".into(),
-        endpoint: "ws://peer/session".into(),
-        credential: Some("ordinary-hello-secret".into()),
-        is_peer: true,
-    });
+    manager.adopted_workspaces.insert(
+        stable,
+        AdoptedWorkspaceBinding {
+            workspace_id: "joined".into(),
+            endpoint: "ws://peer/session".into(),
+            credential: Some("ordinary-hello-secret".into()),
+            is_peer: true,
+        },
+    );
     // Exercise the production message builder on a real manager/binding,
     // including the empty-cache reconnect case. No local host declaration or
     // SwitchHostWorkspace may escape the guest ownership guard.
     let messages = manager.daemon_workspace_selection_messages("joined".into());
-    assert!(matches!(messages.as_slice(), [WorkspaceClientMessage::SubscribeWorkspace { workspace_id }] if workspace_id == "joined"));
+    assert!(
+        matches!(messages.as_slice(), [WorkspaceClientMessage::SubscribeWorkspace { workspace_id }] if workspace_id == "joined")
+    );
     manager.daemon.cache.daemon_host_workspaces.clear();
     let messages = manager.daemon_workspace_selection_messages("joined".into());
-    assert!(matches!(messages.as_slice(), [WorkspaceClientMessage::SubscribeWorkspace { workspace_id }] if workspace_id == "joined"));
+    assert!(
+        matches!(messages.as_slice(), [WorkspaceClientMessage::SubscribeWorkspace { workspace_id }] if workspace_id == "joined")
+    );
 }
 
 #[test]
@@ -121,22 +158,40 @@ fn ordinary_and_fast_workspace_ids_do_not_steal_each_others_endpoint_binding() {
         ContextManager::start_with_capacity(5, VoidListener {}, WindowId::from(0))
             .unwrap();
     let runtime = attach_unconnected_daemon(&mut manager);
-    assert_ne!(manager.daemon_endpoint(), Some("ws://ordinary:9877/session"));
+    assert_ne!(
+        manager.daemon_endpoint(),
+        Some("ws://ordinary:9877/session")
+    );
     manager.daemon.link_is_peer = true;
     let stable = manager.current_grid().workspace_route_id().unwrap();
-    manager.adopted_workspaces.insert(stable, AdoptedWorkspaceBinding {
-        workspace_id: "same-workspace".into(),
-        endpoint: "ws://ordinary:9877/session".into(),
-        credential: Some("ordinary-secret".into()),
-        is_peer: true,
-    });
-    assert_eq!(manager.grid_index_for_workspace_id("same-workspace"), Some(0));
+    manager.adopted_workspaces.insert(
+        stable,
+        AdoptedWorkspaceBinding {
+            workspace_id: "same-workspace".into(),
+            endpoint: "ws://ordinary:9877/session".into(),
+            credential: Some("ordinary-secret".into()),
+            is_peer: true,
+        },
+    );
+    assert_eq!(
+        manager.grid_index_for_workspace_id("same-workspace"),
+        Some(0)
+    );
     // A Fast inventory carrying the same id cannot reuse/rebind ordinary's
     // retained grid. Its document and terminal routes still belong to ordinary.
-    assert_eq!(manager.grid_index_for_attached_daemon_workspace("same-workspace"), None);
+    assert_eq!(
+        manager.grid_index_for_attached_daemon_workspace("same-workspace"),
+        None
+    );
     assert!(!manager.current_workspace_uses_attached_daemon());
-    assert_eq!(manager.current_adopted_workspace_endpoint(), Some("ws://ordinary:9877/session"));
-    assert_eq!(manager.adopted_workspace_identity_for_route(manager.current().route_id), Some(("ws://ordinary:9877/session", "same-workspace")));
+    assert_eq!(
+        manager.current_adopted_workspace_endpoint(),
+        Some("ws://ordinary:9877/session")
+    );
+    assert_eq!(
+        manager.adopted_workspace_identity_for_route(manager.current().route_id),
+        Some(("ws://ordinary:9877/session", "same-workspace"))
+    );
     // Once the owning endpoint is attached again, the original grid is reusable.
     let handle = manager.daemon.link.as_ref().unwrap().handle.clone();
     manager.attach_daemon_client_with_runtime(
@@ -146,16 +201,42 @@ fn ordinary_and_fast_workspace_ids_do_not_steal_each_others_endpoint_binding() {
         Some("ordinary-secret".into()),
         false,
     );
-    assert_eq!(manager.grid_index_for_attached_daemon_workspace("same-workspace"), Some(0));
+    assert_eq!(
+        manager.grid_index_for_attached_daemon_workspace("same-workspace"),
+        Some(0)
+    );
     assert!(manager.current_workspace_uses_attached_daemon());
     assert_eq!(manager.current_index(), 0);
-    assert_eq!(manager.len(), 1, "handoff reuses the selected ordinary grid");
-    assert_eq!(manager.current_adopted_workspace_id().as_deref(), Some("same-workspace"));
-    assert_eq!(manager.current_adopted_workspace_endpoint(), Some("ws://ordinary:9877/session"));
-    assert_eq!(manager.daemon_endpoint(), Some("ws://ordinary:9877/session"));
-    assert_eq!(manager.adopted_workspaces.get(&stable).unwrap().credential.as_deref(), Some("ordinary-secret"));
+    assert_eq!(
+        manager.len(),
+        1,
+        "handoff reuses the selected ordinary grid"
+    );
+    assert_eq!(
+        manager.current_adopted_workspace_id().as_deref(),
+        Some("same-workspace")
+    );
+    assert_eq!(
+        manager.current_adopted_workspace_endpoint(),
+        Some("ws://ordinary:9877/session")
+    );
+    assert_eq!(
+        manager.daemon_endpoint(),
+        Some("ws://ordinary:9877/session")
+    );
+    assert_eq!(
+        manager
+            .adopted_workspaces
+            .get(&stable)
+            .unwrap()
+            .credential
+            .as_deref(),
+        Some("ordinary-secret")
+    );
     let messages = manager.daemon_workspace_selection_messages("same-workspace".into());
-    assert!(matches!(messages.as_slice(), [WorkspaceClientMessage::SubscribeWorkspace { workspace_id }] if workspace_id == "same-workspace"));
+    assert!(
+        matches!(messages.as_slice(), [WorkspaceClientMessage::SubscribeWorkspace { workspace_id }] if workspace_id == "same-workspace")
+    );
     drop(runtime);
 }
 
@@ -169,32 +250,57 @@ fn root_only_ordinary_inventory_adopts_without_any_existing_host_pty_or_layout()
     let endpoint = "ws://ordinary:9877/session";
     let id = "4b7d417f-0aab-4a8c-bfad-42da74b1e1b1";
     let outgoing_stable = manager.current_grid().workspace_route_id().unwrap();
-    manager.adopted_workspaces.insert(outgoing_stable, AdoptedWorkspaceBinding {
-        workspace_id: id.into(), endpoint: "ws://fast-private:34995/session".into(),
-        credential: Some("fast-bearer".into()), is_peer: true,
-    });
+    manager.adopted_workspaces.insert(
+        outgoing_stable,
+        AdoptedWorkspaceBinding {
+            workspace_id: id.into(),
+            endpoint: "ws://fast-private:34995/session".into(),
+            credential: Some("fast-bearer".into()),
+            is_peer: true,
+        },
+    );
     manager.attach_daemon_client_with_runtime(
-        handle, runtime.handle().clone(), endpoint.into(),
-        Some("saved-ordinary-hello-secret".into()), false,
+        handle,
+        runtime.handle().clone(),
+        endpoint.into(),
+        Some("saved-ordinary-hello-secret".into()),
+        false,
     );
     manager.apply_full_snapshot(
-        Uuid::new_v4(), vec![], None, HashMap::new(), HashMap::new(),
+        Uuid::new_v4(),
+        vec![],
+        None,
+        HashMap::new(),
+        HashMap::new(),
     );
     assert_eq!(manager.grid_index_for_attached_daemon_workspace(id), None);
     let root = PathBuf::from("/home/parkersettle/projects/neoism");
     let workspace = serde_json::from_value(serde_json::json!({
         "id": id, "host_id": "ordinary-remote-host", "title": "Neoism",
         "root_dir": root, "main_session_id": null
-    })).unwrap();
+    }))
+    .unwrap();
     manager.apply_workspace_server_message(WorkspaceServerMessage::HostWorkspaceTree {
-        hosts: vec![], workspaces: vec![workspace], tabs: vec![],
+        hosts: vec![],
+        workspaces: vec![workspace],
+        tabs: vec![],
     });
     assert!(manager.daemon.cache.sessions.is_empty());
     assert!(manager.daemon.cache.daemon_workspace_tabs.is_empty());
-    assert!(manager.prepared_remote_pty_for_adopt().is_some(), "transport needs a client/runtime, not a host PTY");
+    assert!(
+        manager.prepared_remote_pty_for_adopt().is_some(),
+        "transport needs a client/runtime, not a host PTY"
+    );
     assert!(manager.adopt_daemon_workspace_with_renderer(id, 0, None, None));
     assert_eq!(manager.current_index(), 1);
-    assert_eq!(manager.adopted_workspaces.get(&outgoing_stable).unwrap().endpoint, "ws://fast-private:34995/session");
+    assert_eq!(
+        manager
+            .adopted_workspaces
+            .get(&outgoing_stable)
+            .unwrap()
+            .endpoint,
+        "ws://fast-private:34995/session"
+    );
     assert_eq!(manager.current_adopted_workspace_id().as_deref(), Some(id));
     assert_eq!(manager.current_adopted_workspace_endpoint(), Some(endpoint));
     assert_eq!(manager.daemon_endpoint(), Some(endpoint));
@@ -202,11 +308,24 @@ fn root_only_ordinary_inventory_adopts_without_any_existing_host_pty_or_layout()
     assert!(manager.current_workspace_uses_attached_daemon());
     assert!(manager.current_workspace_is_collaborative());
     assert!(manager.current_workspace_is_remote_joined());
-    assert!(manager.current().remote_pty.is_some(), "guest must never fall back to a local shell");
-    assert!(manager.daemon.cache.sessions.is_empty(), "adoption does not wait for a PTY reply");
-    assert!(manager.daemon.cache.pending_pty_routes.values().any(|route| *route == manager.current().route_id));
+    assert!(
+        manager.current().remote_pty.is_some(),
+        "guest must never fall back to a local shell"
+    );
+    assert!(
+        manager.daemon.cache.sessions.is_empty(),
+        "adoption does not wait for a PTY reply"
+    );
+    assert!(manager
+        .daemon
+        .cache
+        .pending_pty_routes
+        .values()
+        .any(|route| *route == manager.current().route_id));
     let messages = manager.daemon_workspace_selection_messages(id.into());
-    assert!(matches!(messages.as_slice(), [WorkspaceClientMessage::SubscribeWorkspace { workspace_id }] if workspace_id == id));
+    assert!(
+        matches!(messages.as_slice(), [WorkspaceClientMessage::SubscribeWorkspace { workspace_id }] if workspace_id == id)
+    );
     drop(runtime);
 }
 
@@ -216,9 +335,15 @@ fn peer_inventory_cannot_reuse_an_unadopted_local_grid() {
         ContextManager::start_with_capacity(5, VoidListener {}, WindowId::from(0))
             .unwrap();
     let local_id = manager.workspace_tree_id_for_index(0).unwrap();
-    assert_eq!(manager.grid_index_for_attached_daemon_workspace(&local_id), Some(0));
+    assert_eq!(
+        manager.grid_index_for_attached_daemon_workspace(&local_id),
+        Some(0)
+    );
     manager.daemon.link_is_peer = true;
-    assert_eq!(manager.grid_index_for_attached_daemon_workspace(&local_id), None);
+    assert_eq!(
+        manager.grid_index_for_attached_daemon_workspace(&local_id),
+        None
+    );
 }
 
 #[test]

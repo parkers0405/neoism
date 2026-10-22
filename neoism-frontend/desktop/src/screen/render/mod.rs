@@ -466,6 +466,10 @@ impl Screen<'_> {
         if self.render_neoism_extensions_panels() {
             self.mark_dirty();
         }
+        let git_diff_loading = self.render_git_diff_views();
+        if git_diff_loading {
+            self.mark_dirty();
+        }
         let neoworld_animating = self.render_neoworld_panels();
         if neoworld_animating {
             self.mark_dirty();
@@ -486,8 +490,10 @@ impl Screen<'_> {
         }
 
         self.draw_overlays(&mut frame_ctx, animation_dt);
-        frame_ctx.has_animation |=
-            markdown_panels_animating || code_panels_animating || neoworld_animating;
+        frame_ctx.has_animation |= markdown_panels_animating
+            || code_panels_animating
+            || neoworld_animating
+            || git_diff_loading;
 
         self.snapshot_panels(&mut frame_ctx);
         self.ensure_panel_grids(&frame_ctx);

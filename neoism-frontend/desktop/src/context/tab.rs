@@ -102,6 +102,13 @@ pub struct Context<T: EventListener> {
     /// Native NeoWorld room. The pet service outlives this view; closing the
     /// tab only removes the rendered room.
     pub neoworld: Option<NeoWorldPane>,
+    /// Read-only repository review surface, keyed only by repository root.
+    pub git_diff_view: Option<neoism_ui::panels::git_diff_view::GitDiffView>,
+    /// Last panel cache revision copied into this view; patches are not cloned
+    /// on every repaint. The panel remains the sole Git status/cache owner.
+    pub git_diff_cache_generation: Option<u64>,
+    // Bounded repaint lease while a background diff loads (even with sidebar closed).
+    pub git_diff_load_deadline: Option<web_time::Instant>,
 }
 
 impl<T: neoism_backend::event::EventListener> Drop for Context<T> {
@@ -127,6 +134,7 @@ impl<T: neoism_backend::event::EventListener> Drop for Context<T> {
             && self.neoism_tags.is_none()
             && self.neoism_extensions.is_none()
             && self.neoworld.is_none()
+            && self.git_diff_view.is_none()
         {
             neoism_terminal_pty::kill_pid(self.shell_pid as i32);
         }

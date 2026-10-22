@@ -30,7 +30,26 @@ pub use neoism_ui::panels::git_diff::{
 /// can refresh without depending on `std::process::Command`.
 struct NativeGitDiffIo;
 
+type RestoreResult = (std::path::PathBuf, Result<String, String>);
+pub(crate) type RestoreResults = std::sync::Arc<std::sync::Mutex<Vec<RestoreResult>>>;
+static RESTORE_OBSERVERS: std::sync::Mutex<Vec<std::sync::Weak<std::sync::Mutex<Vec<RestoreResult>>>>> = std::sync::Mutex::new(Vec::new());
+
+pub(crate) fn observe_block_restores() -> RestoreResults {
+    let results = Arc::new(std::sync::Mutex::new(Vec::new()));
+    if let Ok(mut observers) = RESTORE_OBSERVERS.lock() {
+        observers.retain(|observer| observer.strong_count() > 0);
+        observers.push(Arc::downgrade(&results));
+    }
+    results
+}
+
 impl GitDiffIo for NativeGitDiffIo {
+    fn latest_commit(&self, root: &Path) -> Option<neoism_protocol::git::CommitSummary> {
+        neoism_workspace_daemon::git::latest_commit_at(root)
+    }
+    fn read_commit(&self, root: &Path, revision: &str) -> Result<neoism_protocol::git::GitCommitDetail, String> {
+        neoism_workspace_daemon::git::read_commit_at(root, revision)
+    }
     fn collect_files(&self, repo_root: &Path) -> Vec<FileChange> {
         io::collect_files(repo_root)
     }
@@ -41,6 +60,38 @@ impl GitDiffIo for NativeGitDiffIo {
 
     fn unstage(&self, repo_root: &Path, path: &str) -> Result<(), String> {
         io::unstage(repo_root, path)
+    }
+
+    fn load_base(&self, repo_root: &Path, path: &str) -> Result<String, String> {
+        io::load_base(repo_root, path)
+    }
+
+    fn apply_block(
+        &self,
+        root: &Path,
+        path: &str,
+        block: &neoism_protocol::git::GitChangeBlock,
+        restore: bool,
+    ) -> Result<(), String> {
+        let result = io::apply_block(root, path, block, restore);
+        if restore {
+            let path = root.join(path);
+            let text = result.clone().and_then(|()| std::fs::read_to_string(&path).map_err(|e| e.to_string()));
+            if let Ok(mut observers) = RESTORE_OBSERVERS.lock() {
+                observers.retain(|observer| {
+                    let Some(queue) = observer.upgrade() else { return false; };
+                    if let Ok(mut queue) = queue.lock() {
+                        queue.push((path.clone(), text.clone()));
+                    }
+                    true
+                });
+            }
+        }
+        result
+    }
+
+    fn restore(&self, repo_root: &Path, path: &str) -> Result<(), String> {
+        io::restore(repo_root, path)
     }
 
     fn commit(&self, repo_root: &Path, message: &str) -> Result<(), String> {
@@ -65,6 +116,14 @@ impl GitDiffIo for NativeGitDiffIo {
 
     fn push(&self, repo_root: &Path) -> Result<(), String> {
         io::push(repo_root)
+    }
+
+    fn publish(&self, repo_root: &Path) -> Result<(), String> {
+        io::publish(repo_root)
+    }
+
+    fn upstream(&self, repo_root: &Path) -> Option<String> {
+        io::upstream(repo_root)
     }
 }
 

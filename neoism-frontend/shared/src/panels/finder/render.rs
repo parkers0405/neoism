@@ -236,7 +236,7 @@ impl Finder {
         let input_font = INPUT_FONT_SIZE * scale;
         let input_pad_x = INPUT_PADDING_X * scale;
         let mode_glyph = match self.mode {
-            FinderMode::Files => "› ",
+            FinderMode::Files => "",
             FinderMode::Grep | FinderMode::BufferLines => "/ ",
             FinderMode::BufferReplace => "s/ ",
             FinderMode::GitChanges => "git ",
@@ -765,7 +765,7 @@ impl Finder {
                 }
             } else if self.query.is_empty() {
                 match self.mode {
-                    FinderMode::Files => "Start typing to search files…",
+                    FinderMode::Files => "No files found",
                     FinderMode::Grep => "Start typing to grep…",
                     FinderMode::GitChanges => "No git changes",
                     FinderMode::BufferLines => "Start typing to search buffer…",

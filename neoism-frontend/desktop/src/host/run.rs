@@ -1411,7 +1411,7 @@ impl Renderer {
         // was requested at (`self.code_lsp.hover`); the anchor is
         // recomputed from live pane geometry so the card tracks
         // scrolling, and the pump dismisses it once the cursor moves.
-        let code_hover = self.code_lsp.hover.as_ref().and_then(|card| {
+        let code_hover = self.code_lsp.hover.as_mut().and_then(|card| {
             if card.lines.is_empty() {
                 return None;
             }
@@ -1447,13 +1447,22 @@ impl Renderer {
                 geometry.text_x + local_col as f32 * geometry.cell_w - geometry.scroll_x,
                 geometry.rect[1] + vrow as f32 * geometry.row_h - code.scroll_y,
                 geometry.row_h,
+                neoism_ui::syntax::Lang::from_path(&card.path.to_string_lossy()),
                 &card.lines,
+                &mut card.interaction,
             ))
         });
-        if let Some((anchor_x, anchor_y, cell_h, lines)) = code_hover {
+        let mut code_hover_rendered = false;
+        if let Some((anchor_x, anchor_y, cell_h, document_language, lines, interaction)) =
+            code_hover
+        {
             if completion_anchor.editor_focused
                 && !input_overlay_active
                 && !self.modal.is_active()
+                && !self.settings.is_active()
+                && !self.file_browser.is_active()
+                && !self.context_menu.is_visible()
+                && !self.conversation_navigator.is_active()
                 && !diagnostic_detail_active
                 && completion_popup.is_none()
             {
@@ -1465,12 +1474,20 @@ impl Renderer {
                         anchor_x,
                         anchor_y,
                         cell_h,
+                        document_language,
                         window_w: window_size.width as f32 * inv,
                         window_h: window_size.height as f32 * inv,
                         scale: self.chrome_scale,
                     },
                     &editor_theme,
+                    interaction,
                 );
+                code_hover_rendered = true;
+            }
+        }
+        if !code_hover_rendered {
+            if let Some(card) = self.code_lsp.hover.as_mut() {
+                card.interaction.hide();
             }
         }
 

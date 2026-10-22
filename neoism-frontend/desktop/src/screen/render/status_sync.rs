@@ -328,18 +328,18 @@ impl Screen<'_> {
             // Ruler pill: cursor line / total lines. Code and markdown
             // panes read the shared pane's cursor directly. Terminals
             // get no pill — a shell has no line position.
-            let cursor_lines =
-                if let Some(code) = self.context_manager.current().code.as_ref() {
-                    let total = code.buffer.line_count();
-                    (total > 0).then(|| ((code.buffer.cursor_line + 1).min(total), total))
-                } else if let Some(markdown) =
-                    self.context_manager.current().markdown.as_ref()
-                {
-                    let total = markdown.lines.len();
-                    (total > 0).then(|| ((markdown.cursor_line + 1).min(total), total))
-                } else {
-                    None
-                };
+            let cursor_lines = if let Some(code) = self.context_manager.active_code_pane()
+            {
+                let total = code.buffer.line_count();
+                (total > 0).then(|| ((code.buffer.cursor_line + 1).min(total), total))
+            } else if let Some(markdown) =
+                self.context_manager.current().markdown.as_ref()
+            {
+                let total = markdown.lines.len();
+                (total > 0).then(|| ((markdown.cursor_line + 1).min(total), total))
+            } else {
+                None
+            };
             let workspace = cursor_lines.map(|(cur, total)| format!("WS {cur}/{total}"));
             let git_changes = if remote_joined {
                 self.host_git.counts
@@ -366,9 +366,7 @@ impl Screen<'_> {
             // from the code bridge's worker-maintained cache.
             let (lsp_status, lsp_label) = self
                 .context_manager
-                .current()
-                .code
-                .as_ref()
+                .active_code_pane()
                 .and_then(|code| self.code_lsp_pill(&code.path))
                 .map(|(status, label)| (Some(status), label))
                 .unwrap_or((None, None));
@@ -376,9 +374,7 @@ impl Screen<'_> {
             // diagnostics store (markdown/terminal panes show none).
             let diagnostics_counts = self
                 .context_manager
-                .current()
-                .code
-                .as_ref()
+                .active_code_pane()
                 .map(|code| self.code_diagnostic_counts(&code.path))
                 .unwrap_or_default();
             self.renderer
@@ -388,9 +384,7 @@ impl Screen<'_> {
             // ("NORMAL · 2d"), code panes in vim mode only.
             let pending_keys = self
                 .context_manager
-                .current()
-                .code
-                .as_ref()
+                .active_code_pane()
                 .filter(|code| {
                     code.input_mode == neoism_ui::editor::code::CodeInputMode::Vim
                 })

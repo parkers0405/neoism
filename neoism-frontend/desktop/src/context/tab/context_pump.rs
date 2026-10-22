@@ -39,5 +39,6 @@ impl<T: EventListener> Context<T> {
             || self.neoism_tags.is_some()
             || self.neoism_extensions.is_some()
             || self.neoworld.is_some()
+            || self.git_diff_view.is_some()
     }
 }

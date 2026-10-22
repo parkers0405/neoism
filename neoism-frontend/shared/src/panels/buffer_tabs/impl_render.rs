@@ -164,6 +164,7 @@ impl<A: Copy> BufferTabs<A> {
                     match page.kind {
                         ChromePageKind::Extensions => "\u{f12e}",
                         ChromePageKind::NeoWorld => "\u{f1b0}",
+                        ChromePageKind::GitDiff => "\u{f126}",
                     }
                 } else if tab.is_terminal() {
                     crate::primitives::look::icon_override("tab.terminal")
@@ -553,6 +554,7 @@ impl<A: Copy> BufferTabs<A> {
                 let glyph = match page.kind {
                     ChromePageKind::Extensions => "\u{f12e}",
                     ChromePageKind::NeoWorld => "\u{f1b0}",
+                    ChromePageKind::GitDiff => "\u{f126}",
                 };
                 (glyph, theme.u8(theme.accent))
             } else if is_terminal {

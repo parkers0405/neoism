@@ -607,6 +607,20 @@ impl Screen<'_> {
             ModalAction::FileTreePromptDelete { path, notes } => {
                 self.confirm_delete_file_tree_path(PathBuf::from(path), notes);
             }
+            ModalAction::GitRestoreBlock { root, path, block } => {
+                self.renderer.modal.close();
+                if self.refuse_dirty_review_restore(&root, std::path::Path::new(&path)) {
+                    return;
+                }
+                self.restore_review_block(root, path, block);
+            }
+            ModalAction::GitRestore { root, path } => {
+                self.renderer.modal.close();
+                if self.refuse_dirty_review_restore(&root, std::path::Path::new(&path)) {
+                    return;
+                }
+                self.renderer.git_diff_panel.restore_file(&root, &path);
+            }
             ModalAction::FileTreeDelete { path, notes } => {
                 self.delete_file_tree_path(PathBuf::from(path), notes);
             }

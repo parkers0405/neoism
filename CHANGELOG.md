@@ -2,6 +2,19 @@
 
 All notable user-facing changes to Neoism are documented here.
 
+## [0.7.134] - 2026-10-22
+
+### Git review, editor lifecycle, and LSP navigation
+
+- Adds native/shared/browser Git review tabs, canonical inline editing, projected source/carets, precise block stage/discard, full-file baselines, commit review, source navigation, and toolbar/gutter/layout improvements.
+- Preserves canonical document ownership through review/close/save transitions and reconciles CRDT restores against remembered baselines. Exact block actions reject stale or unsupported selections instead of falling back to whole-file mutation.
+- Serializes daemon Git operations asynchronously with bounded admission and scope-aware protocol handling. Browser Git refresh follow-ups retain their captured workspace and reject retired-context replies.
+- Improves rich LSP hover presentation with bundled Geist prose, selection/copy and safe links, declaration/type-definition navigation, negotiated capabilities, asynchronous discovery/caching, and exact-position queries.
+- Improves Agent catalog/conversation caching, credential/scope invalidation, initial-history previews, preload reconciliation, loading presentation, and activity handling.
+- Refines finder behavior, tab/focus/scroll interactions, overlay occlusion, Git review geometry, and first-terminal measured startup layout. Includes the Geist font and its license attribution.
+
+This is a stable production release, available through plain `neoism update` after platform builds and packaging checks pass. Existing first-terminal directory following, trusted-user hosting limits, and Servo/CEF worker exclusions are preserved.
+
 ## [0.7.133] - 2026-10-20
 
 ### Windows startup, provider connection, and search scheduling

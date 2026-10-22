@@ -38,6 +38,8 @@ pub(crate) struct InitializeResult {
     pub(crate) signature_help_provider: bool,
     pub(crate) hover_provider: bool,
     pub(crate) definition_provider: bool,
+    pub(crate) declaration_provider: bool,
+    pub(crate) type_definition_provider: bool,
     pub(crate) references_provider: bool,
     pub(crate) implementation_provider: bool,
     pub(crate) call_hierarchy_provider: bool,
@@ -712,6 +714,8 @@ impl LspClient {
                         "codeDescriptionSupport": true,
                         "dataSupport": true
                     },
+                    "declaration": { "dynamicRegistration": false, "linkSupport": true },
+                    "typeDefinition": { "dynamicRegistration": false, "linkSupport": true },
                     "definition": {
                         "dynamicRegistration": false,
                         "linkSupport": true
@@ -858,6 +862,14 @@ impl LspClient {
             .pointer("/capabilities/hoverProvider")
             .map(capability_enabled)
             .unwrap_or(false);
+        let declaration_provider = result
+            .pointer("/capabilities/declarationProvider")
+            .map(capability_enabled)
+            .unwrap_or(false);
+        let type_definition_provider = result
+            .pointer("/capabilities/typeDefinitionProvider")
+            .map(capability_enabled)
+            .unwrap_or(false);
         let definition_provider = result
             .pointer("/capabilities/definitionProvider")
             .map(capability_enabled)
@@ -918,6 +930,8 @@ impl LspClient {
             signature_help_provider,
             hover_provider,
             definition_provider,
+            declaration_provider,
+            type_definition_provider,
             references_provider,
             implementation_provider,
             document_highlight_provider,
@@ -941,6 +955,8 @@ impl LspClient {
             signature_help_provider,
             hover_provider,
             definition_provider,
+            declaration_provider,
+            type_definition_provider,
             references_provider,
             implementation_provider,
             call_hierarchy_provider,

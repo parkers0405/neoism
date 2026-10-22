@@ -20,6 +20,19 @@ fn roundtrip_server(msg: &GitServerMessage) {
 }
 
 #[test]
+fn apply_block_wire_and_mutation_contract() {
+    use neoism_protocol::git::GitChangeBlock;
+    let block = GitChangeBlock { old_start: 0, new_start: 0, old_lines: vec![], new_lines: vec!["insert".into(), "".into()] };
+    for restore in [false, true] {
+        let message = GitClientMessage::ApplyBlock { path: "literal[*].rs".into(), block: block.clone(), restore };
+        assert!(message.is_mutation());
+        roundtrip_client(&message);
+        let decoded: GitClientMessage = serde_json::from_str(&serde_json::to_string(&message).unwrap()).unwrap();
+        assert!(matches!(decoded, GitClientMessage::ApplyBlock { block: b, restore: r, .. } if b == block && r == restore));
+    }
+}
+
+#[test]
 fn client_status_roundtrip() {
     roundtrip_client(&GitClientMessage::Status);
 }

@@ -93,14 +93,22 @@ pub(crate) fn register_agent_server_credential(server: &str, credential: Option<
     let Ok(mut credentials) = agent_server_credentials().write() else {
         return;
     };
-    match credential.map(str::trim).filter(|value| !value.is_empty()) {
+    let credential = credential.map(str::trim).filter(|value| !value.is_empty());
+    if credentials.get(&key).map(String::as_str) == credential {
+        return;
+    }
+    match credential {
         Some(credential) => {
-            credentials.insert(key, credential.to_string());
+            credentials.insert(key.clone(), credential.to_string());
         }
         None => {
             credentials.remove(&key);
         }
     }
+    // Keep the write guard until the revision changes, so a scope can never
+    // observe the new credential paired with the old revision.
+    invalidate_catalog_endpoint(&key);
+    conversation_cache::credentials_changed();
 }
 
 pub(super) fn fetch_external_options_preview(
@@ -452,22 +460,197 @@ fn agent_server_credential(server: &str) -> Option<String> {
         .cloned()
 }
 
-pub(super) fn fetch_model_options(
+mod catalog_cache;
+#[cfg(test)]
+mod catalog_cache_tests;
+
+// The credential is part of identity (never logged); directory is kept exact,
+// since None and an explicit workspace can resolve different server defaults.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub(crate) struct CatalogScope {
+    endpoint: String,
+    credential: Option<String>,
+    directory: Option<String>,
+    revision: u64,
+}
+
+fn catalog_revisions() -> &'static std::sync::Mutex<HashMap<String, u64>> {
+    static REVISIONS: OnceLock<std::sync::Mutex<HashMap<String, u64>>> = OnceLock::new();
+    REVISIONS.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+fn next_catalog_revision() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+fn endpoint_revision(revisions: &mut HashMap<String, u64>, endpoint: &str) -> u64 {
+    if let Some(revision) = revisions.get(endpoint) { return *revision; }
+    // Eviction also expires old scopes; globally unique revisions prevent ABA.
+    if revisions.len() >= 128 {
+        if let Some(oldest) = revisions.iter().min_by_key(|(_, revision)| **revision).map(|(key, _)| key.clone()) {
+            revisions.remove(&oldest);
+        }
+    }
+    let revision = next_catalog_revision();
+    revisions.insert(endpoint.to_owned(), revision);
+    revision
+}
+pub(super) fn catalog_scope(server: &str, directory: Option<&str>) -> CatalogScope {
+    let endpoint = server.trim().trim_end_matches('/').to_owned();
+    // Lock order is credential -> revisions, including credential registration.
+    let credentials = agent_server_credentials().read().unwrap();
+    let credential = credentials.get(&endpoint).cloned();
+    let revision = endpoint_revision(&mut catalog_revisions().lock().unwrap(), &endpoint);
+    CatalogScope { endpoint, credential, directory: directory.map(str::to_owned), revision }
+}
+impl std::fmt::Debug for CatalogScope {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("CatalogScope")
+            .field("endpoint", &self.endpoint)
+            .field("directory", &self.directory)
+            .field("revision", &self.revision)
+            .finish_non_exhaustive()
+    }
+}
+impl CatalogScope {
+    pub(super) fn is_current(&self, server: &str, directory: Option<&str>) -> bool {
+        self == &catalog_scope(server, directory)
+    }
+    fn still_current(&self) -> bool {
+        self.is_current(&self.endpoint, self.directory.as_deref())
+    }
+}
+pub(super) fn invalidate_catalog_endpoint(server: &str) {
+    let endpoint = server.trim().trim_end_matches('/');
+    let mut revisions = catalog_revisions().lock().unwrap();
+    endpoint_revision(&mut revisions, endpoint);
+    revisions.insert(endpoint.to_owned(), next_catalog_revision());
+    // Keep revision and cache removal atomic with respect to scope capture.
+    catalog_cache().invalidate(|key| key.0.endpoint == endpoint);
+}
+type CatalogKey = (CatalogScope, &'static str);
+fn catalog_cache() -> &'static catalog_cache::Cache<CatalogKey, Value> {
+    static CACHE: OnceLock<catalog_cache::Cache<CatalogKey, Value>> = OnceLock::new();
+    CACHE.get_or_init(catalog_cache::Cache::new)
+}
+fn catalog_key(server: &str, directory: Option<&str>, resource: &'static str) -> CatalogKey {
+    (catalog_scope(server, directory), resource)
+}
+fn catalog_path(resource: &str, directory: Option<&str>) -> String {
+    match directory {
+        Some(dir) => format!("{resource}?directory={}", percent_encode(dir)),
+        None => resource.to_owned(),
+    }
+}
+fn cached_catalog(
     server: &str,
     directory: Option<&str>,
-) -> Result<(Vec<NeoismAgentPickerOption>, Option<ProviderReadiness>), String> {
-    let path = directory
-        .map(|dir| format!("/v2/providers/configured?directory={}", percent_encode(dir)))
-        .unwrap_or_else(|| "/v2/providers/configured".to_string());
-    let value = api_request_json(server, "GET", &path, None)?
-        .ok_or_else(|| "Neoism Agent returned an empty provider response".to_string())?;
-    let catalog_path = path.replace("/providers/configured", "/providers");
-    let readiness = api_request_json(server, "GET", &catalog_path, None)
-        .ok()
-        .flatten()
+    resource: &'static str,
+) -> Option<Value> {
+    let scope = catalog_scope(server, directory);
+    let value = catalog_cache().snapshot(&(scope.clone(), resource))?;
+    scope.still_current().then_some(value)
+}
+fn fetch_catalog(
+    server: &str,
+    directory: Option<&str>,
+    resource: &'static str,
+) -> Result<Value, String> {
+    fetch_catalog_scoped(&catalog_scope(server, directory), resource)
+}
+pub(super) fn fetch_catalog_scoped(scope: &CatalogScope, resource: &'static str) -> Result<Value, String> {
+    if !scope.still_current() { return Err("Catalog scope changed".into()); }
+    let value = catalog_cache().get((scope.clone(), resource), || {
+        if !scope.still_current() { return Err("Catalog scope changed".into()); }
+        let server = scope.endpoint.as_str();
+        let directory = scope.directory.as_deref();
+        // Cold discovery can include a disk-catalog miss and account lookup.
+        // It runs off the UI thread; shortening this budget only creates false
+        // disconnected states, rather than making a cold provider load faster.
+        let timeout = if resource == "/v2/config/defaults" {
+            Duration::from_secs(12)
+        } else {
+            Duration::from_secs(15)
+        };
+        let value = api_request_json_with_read_timeout(
+            server,
+            "GET",
+            &catalog_path(resource, directory),
+            None,
+            timeout,
+        )?
+        .ok_or_else(|| "Neoism Agent returned an empty catalog response".to_string())?;
+        // Bound retained payloads as well as the number of scopes.
+        if value.to_string().len() > 8 * 1024 * 1024 {
+            return Err("Agent catalog exceeds cache size limit".into());
+        }
+        if resource == "/v2/agents" && !value.is_array() {
+            return Err("Neoism Agent returned malformed agents".into());
+        }
+        if resource.starts_with("/v2/providers")
+            && !value
+                .get("providers")
+                .or_else(|| value.get("all"))
+                .is_some_and(Value::is_array)
+        {
+            return Err("Neoism Agent returned malformed providers".into());
+        }
+        if resource == "/v2/providers" && ProviderReadiness::from_json(&value).is_none() {
+            return Err("Neoism Agent returned malformed provider readiness".into());
+        }
+        if !scope.still_current() { return Err("Catalog scope changed".into()); }
+        Ok(value)
+    })?;
+    if !scope.still_current() { return Err("Catalog scope changed".into()); }
+    Ok(value)
+}
+#[cfg(test)]
+pub(super) fn seed_picker_catalog_for_test(server: &str, directory: Option<&str>) {
+    let providers = serde_json::json!({"providers": [{"id": "test", "models": {"model": {"id": "model", "name": "Test model", "limit": {"context": 12345}}}}], "connected": ["test"]});
+    for (resource, value) in [
+        ("/v2/providers/configured", providers.clone()),
+        ("/v2/providers", providers),
+        ("/v2/agents", serde_json::json!([{"name": "build"}])),
+    ] {
+        catalog_cache()
+            .get(catalog_key(server, directory, resource), || Ok(value))
+            .unwrap();
+    }
+}
+
+pub(super) fn cached_model_options(
+    server: &str,
+    directory: Option<&str>,
+) -> Option<(Vec<NeoismAgentPickerOption>, Option<ProviderReadiness>)> {
+    let value = cached_catalog(server, directory, "/v2/providers/configured")?;
+    Some((
+        model_options_from_providers_json(&value),
+        cached_provider_readiness(server, directory),
+    ))
+}
+fn cached_provider_readiness(
+    server: &str,
+    directory: Option<&str>,
+) -> Option<ProviderReadiness> {
+    cached_catalog(server, directory, "/v2/providers")
         .as_ref()
-        .and_then(ProviderReadiness::from_json);
-    Ok((model_options_from_providers_json(&value), readiness))
+        .and_then(ProviderReadiness::from_json)
+}
+pub(super) fn cached_agent_options(
+    server: &str,
+    directory: Option<&str>,
+) -> Option<Vec<NeoismAgentPickerOption>> {
+    agent_options_from_json(&cached_catalog(server, directory, "/v2/agents")?).ok()
+}
+
+pub(super) fn fetch_model_options_scoped(scope: &CatalogScope) -> Result<Vec<NeoismAgentPickerOption>, String> {
+    Ok(model_options_from_providers_json(&fetch_catalog_scoped(scope, "/v2/providers/configured")?))
+}
+pub(super) fn fetch_agent_options_scoped(scope: &CatalogScope) -> Result<Vec<NeoismAgentPickerOption>, String> {
+    agent_options_from_json(&fetch_catalog_scoped(scope, "/v2/agents")?)
+}
+pub(super) fn fetch_provider_readiness_scoped(scope: &CatalogScope) -> Result<ProviderReadiness, String> {
+    let value = fetch_catalog_scoped(scope, "/v2/providers")?;
+    ProviderReadiness::from_json(&value).ok_or_else(|| "Neoism Agent returned malformed provider readiness".into())
 }
 
 pub(super) fn fetch_model_context_limit(
@@ -478,29 +661,13 @@ pub(super) fn fetch_model_context_limit(
     // The provider catalog is assembled lazily and can exceed the normal
     // 900 ms UI-request timeout on a cold agent-server start. A timeout here
     // silently left the usage panel without its `/ context limit` denominator.
-    let path = directory
-        .map(|dir| format!("/v2/providers/configured?directory={}", percent_encode(dir)))
-        .unwrap_or_else(|| "/v2/providers/configured".to_string());
-    let value = api_request_json_with_read_timeout(
-        server,
-        "GET",
-        &path,
-        None,
-        Duration::from_secs(5),
-    )?
-    .ok_or_else(|| "Neoism Agent returned an empty provider response".to_string())?;
+    let value = fetch_catalog(server, directory, "/v2/providers/configured")?;
     Ok(model_context_limit_from_providers_json(&value, model_ref))
 }
 
-pub(super) fn fetch_agent_options(
-    server: &str,
-    directory: Option<&str>,
+fn agent_options_from_json(
+    value: &Value,
 ) -> Result<Vec<NeoismAgentPickerOption>, String> {
-    let path = directory
-        .map(|dir| format!("/v2/agents?directory={}", percent_encode(dir)))
-        .unwrap_or_else(|| "/v2/agents".to_string());
-    let value = api_request_json(server, "GET", &path, None)?
-        .ok_or_else(|| "Neoism Agent returned an empty agent response".to_string())?;
     let agents = value
         .as_array()
         .ok_or_else(|| "Neoism Agent returned malformed agents".to_string())?;
@@ -1194,9 +1361,13 @@ mod subagent_runtime_snapshot_tests {
             serde_json::json!({"id":"older", "parentId":"parent"}),
             serde_json::json!("malformed"),
         ] {
-            assert!(semantic_hit_session_entry(&serde_json::json!({"session":session}), "older", None, || {
-                panic!("present embedded metadata must not trigger HTTP")
-            }).is_none());
+            assert!(semantic_hit_session_entry(
+                &serde_json::json!({"session":session}),
+                "older",
+                None,
+                || { panic!("present embedded metadata must not trigger HTTP") }
+            )
+            .is_none());
         }
     }
 
@@ -1211,7 +1382,13 @@ mod subagent_runtime_snapshot_tests {
             assert_eq!(calls, 1);
             assert_eq!(entry.title, "Legacy");
         }
-        assert!(semantic_hit_session_entry(&serde_json::json!({}), "older", None, || None).is_none());
+        assert!(semantic_hit_session_entry(
+            &serde_json::json!({}),
+            "older",
+            None,
+            || None
+        )
+        .is_none());
     }
 
     #[test]
@@ -1496,7 +1673,9 @@ mod subagent_runtime_snapshot_tests {
         let address = listener.local_addr().unwrap();
         let worker = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
             let mut request = Vec::new();
             while find_header_end(&request).is_none() {
                 let mut bytes = [0; 1024];
@@ -1509,18 +1688,27 @@ mod subagent_runtime_snapshot_tests {
         });
         let response = http_request_with_status(
             &format!("http://{address}/agent/workspaces/debug"),
-            "GET", "/v2/plugins/dev.neoism.mcp/catalog", None, Duration::from_secs(2),
-        ).unwrap();
+            "GET",
+            "/v2/plugins/dev.neoism.mcp/catalog",
+            None,
+            Duration::from_secs(2),
+        )
+        .unwrap();
         assert_eq!(response.status, 200);
         let request = worker.join().unwrap();
-        assert!(request.starts_with("GET /agent/workspaces/debug/v2/plugins/dev.neoism.mcp/catalog HTTP/1.1\r\n"));
+        assert!(request.starts_with(
+            "GET /agent/workspaces/debug/v2/plugins/dev.neoism.mcp/catalog HTTP/1.1\r\n"
+        ));
         assert!(request.contains(&format!("\r\nHost: {address}\r\n")));
     }
 
     #[test]
     fn http_host_authority_retains_nondefault_ports() {
         assert_eq!(http_authority(false, "127.0.0.1", 58732), "127.0.0.1:58732");
-        assert_eq!(http_authority(true, "host.example", 8443), "host.example:8443");
+        assert_eq!(
+            http_authority(true, "host.example", 8443),
+            "host.example:8443"
+        );
         assert_eq!(http_authority(false, "host.example", 80), "host.example");
         assert_eq!(http_authority(true, "host.example", 443), "host.example");
         assert_eq!(http_authority(false, "::1", 4096), "[::1]:4096");
@@ -1907,56 +2095,52 @@ fn parse_pending_permissions(
         .collect())
 }
 
+pub(super) fn cached_config_defaults(
+    server: &str,
+    directory: Option<&str>,
+) -> Option<ConfigDefaults> {
+    // Defaults drive submissions, not just picker presentation. Seed only a
+    // fresh snapshot so a stale label cannot pin an old default after refresh.
+    let value = catalog_cache().fresh_snapshot(&catalog_key(
+        server,
+        directory,
+        "/v2/config/defaults",
+    ))?;
+    let mut defaults = config_defaults_from_json(&value);
+    defaults.provider_readiness = cached_provider_readiness(server, directory);
+    if defaults.model.is_none() {
+        defaults.model = catalog_cache()
+            .fresh_snapshot(&catalog_key(server, directory, "/v2/providers/configured"))
+            .as_ref()
+            .and_then(default_model_from_providers_json);
+    }
+    Some(defaults)
+}
+
 pub(super) fn fetch_config_defaults(
     server: &str,
     directory: Option<&str>,
 ) -> Result<ConfigDefaults, String> {
-    let path = directory
-        .map(|dir| format!("/v2/config/defaults?directory={}", percent_encode(dir)))
-        .unwrap_or_else(|| "/v2/config/defaults".to_string());
-    // First workspace access may construct the plugin generation. This runs
-    // off the UI thread, so give that one-time operation a truthful budget
-    // instead of silently dropping defaults at the generic 900 ms deadline.
-    let value = api_request_json_with_read_timeout(
-        server,
-        "GET",
-        &path,
-        None,
-        std::time::Duration::from_secs(12),
-    )?
-    .ok_or_else(|| "Neoism Agent returned an empty config response".to_string())?;
-    let mut defaults = config_defaults_from_json(&value);
-    let catalog_path = directory
-        .map(|dir| format!("/v2/providers?directory={}", percent_encode(dir)))
-        .unwrap_or_else(|| "/v2/providers".to_string());
-    if let Ok(Some(catalog)) = api_request_json_with_read_timeout(
-        server,
-        "GET",
-        &catalog_path,
-        None,
-        std::time::Duration::from_secs(12),
-    ) {
-        defaults.provider_readiness = ProviderReadiness::from_json(&catalog);
-    }
-    if defaults.model.is_none() {
-        let provider_path = directory
-            .map(|dir| {
-                format!("/v2/providers/configured?directory={}", percent_encode(dir))
-            })
-            .unwrap_or_else(|| "/v2/providers/configured".to_string());
-        // `server` is also the joined host's reverse-proxy URL. Resolve from
-        // that host's provider catalog, never from the guest's local catalog.
-        if let Ok(Some(providers)) = api_request_json_with_read_timeout(
-            server,
-            "GET",
-            &provider_path,
-            None,
-            std::time::Duration::from_secs(12),
-        ) {
+    let value = fetch_catalog(server, directory, "/v2/config/defaults")?;
+    Ok(config_defaults_from_json(&value))
+}
+
+// Catalog discovery may initialize providers or contact account-specific model
+// endpoints. Keep it off the critical path for known composer defaults.
+pub(super) fn fetch_config_catalog_defaults(
+    server: &str,
+    directory: Option<&str>,
+    resolve_model: bool,
+) -> ConfigDefaults {
+    let mut defaults = ConfigDefaults::default();
+    if resolve_model {
+        if let Ok(providers) =
+            fetch_catalog(server, directory, "/v2/providers/configured")
+        {
             defaults.model = default_model_from_providers_json(&providers);
         }
     }
-    Ok(defaults)
+    defaults
 }
 
 pub(super) fn fetch_session_state(
@@ -1978,6 +2162,8 @@ pub(super) fn fetch_session_messages(
     fetch_session_messages_page(server, session_id, None, 80).map(|page| page.blocks)
 }
 
+pub(super) mod conversation_cache;
+
 /// One page of session history. `blocks` is the expanded client-side
 /// render blocks (one stored message fans out into several). `raw_count`
 /// is the number of *stored messages* the server returned — the only
@@ -1996,6 +2182,8 @@ pub(super) fn fetch_session_messages_page(
     limit: usize,
 ) -> Result<SessionMessagePage, String> {
     let started = super::perf::now();
+    let cache_identity = conversation_cache::identity(server, session_id);
+    let initial_page = cursor.is_none_or(str::is_empty);
     let mut path = format!(
         "/v2/sessions/{session_id}/messages?order=desc&limit={}&slim=true",
         limit.max(1)
@@ -2004,18 +2192,28 @@ pub(super) fn fetch_session_messages_page(
         path.push_str("&cursor=");
         path.push_str(&percent_encode(cursor));
     }
-    let value = api_request_json_with_read_timeout(
+    let value = match api_request_json_with_read_timeout(
         server,
         "GET",
         &path,
         None,
         Duration::from_secs(10),
-    )?
-    .ok_or_else(|| "Neoism Agent returned an empty message response".to_string())?;
-    let messages = value
-        .get("items")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "Neoism Agent returned malformed messages".to_string())?;
+    ) {
+        Ok(Some(value)) if value.get("items").is_some_and(Value::is_array) => value,
+        result => {
+            // A failed authorization/revalidation must not leave a preview
+            // available for the next pane, even within its short display TTL.
+            if let Some(identity) = cache_identity.as_ref() {
+                conversation_cache::forget(identity);
+            }
+            return Err(match result {
+                Err(error) => error,
+                Ok(None) => "Neoism Agent returned an empty message response".to_string(),
+                Ok(Some(_)) => "Neoism Agent returned malformed messages".to_string(),
+            });
+        }
+    };
+    let messages = value.get("items").and_then(Value::as_array).expect("validated items");
     let raw_messages = messages.len();
     let oldest_cursor = messages.last().and_then(|message| {
         message
@@ -2050,6 +2248,15 @@ pub(super) fn fetch_session_messages_page(
             elapsed_us = super::perf::elapsed_us(started),
             "agent fetch session messages"
         );
+    }
+    if initial_page {
+        if let Some(identity) = cache_identity {
+            if raw_bytes <= conversation_cache::MAX_ENTRY_BYTES {
+                conversation_cache::remember(identity, value.to_string(), limit.max(1));
+            } else {
+                conversation_cache::forget(&identity);
+            }
+        }
     }
     Ok(SessionMessagePage {
         blocks,
@@ -2104,7 +2311,8 @@ pub(super) fn api_request_json(
     body: Option<&Value>,
 ) -> Result<Option<Value>, String> {
     ensure_request_server_ready(server)?;
-    let response = http_request(server, method, path, body, request_deadline(method, path))?;
+    let response =
+        http_request(server, method, path, body, request_deadline(method, path))?;
     response_json(response)
 }
 
@@ -2121,7 +2329,12 @@ pub(super) fn api_request_json_while_active(
     active: &std::sync::atomic::AtomicBool,
 ) -> Result<Option<Value>, String> {
     api_request_json_with_readiness(
-        server, method, path, body, read_timeout, active,
+        server,
+        method,
+        path,
+        body,
+        read_timeout,
+        active,
         || ensure_request_server_ready(server),
     )
 }
@@ -2400,7 +2613,9 @@ pub(crate) fn fetch_session_search_hits(
     // Only use the legacy title catalog when transcript search is unavailable;
     // an empty ranked result is not a reason to append unrelated title matches.
     if transcript_enabled {
-        if let Some((hits, indexing)) = fetch_semantic_session_hits(server, query, current_session, directory)? {
+        if let Some((hits, indexing)) =
+            fetch_semantic_session_hits(server, query, current_session, directory)?
+        {
             return Ok((hits, false, indexing));
         }
     }
@@ -2494,7 +2709,10 @@ pub(crate) fn fetch_semantic_session_hits(
     {
         return Ok(None);
     }
-    let indexing = value.get("indexing").and_then(Value::as_bool).unwrap_or(false);
+    let indexing = value
+        .get("indexing")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let hits = value
         .get("hits")
         .and_then(Value::as_array)
@@ -2517,16 +2735,18 @@ pub(crate) fn fetch_semantic_session_hits(
         if !seen.insert(session_id.to_owned()) {
             continue;
         }
-        if let Some(entry) = semantic_hit_session_entry(hit, session_id, directory, || {
-            api_request_json(
-                server,
-                "GET",
-                &format!("/v2/sessions/{}", percent_encode(session_id)),
-                None,
-            )
-            .ok()
-            .flatten()
-        }) {
+        if let Some(entry) =
+            semantic_hit_session_entry(hit, session_id, directory, || {
+                api_request_json(
+                    server,
+                    "GET",
+                    &format!("/v2/sessions/{}", percent_encode(session_id)),
+                    None,
+                )
+                .ok()
+                .flatten()
+            })
+        {
             entries.push(entry);
         }
     }
@@ -2536,7 +2756,11 @@ pub(crate) fn fetch_semantic_session_hits(
         .collect();
     let mut best: Vec<NeoismAgentSemanticSessionHit> = Vec::new();
     for hit in &hits {
-        let Some(session_id) = hit.get("sessionId").or_else(|| hit.get("session_id")).and_then(Value::as_str) else {
+        let Some(session_id) = hit
+            .get("sessionId")
+            .or_else(|| hit.get("session_id"))
+            .and_then(Value::as_str)
+        else {
             continue;
         };
         let Some(title) = titles.get(session_id) else {
@@ -2551,7 +2775,10 @@ pub(crate) fn fetch_semantic_session_hits(
             .to_string();
         // Keep the first hit for a session. The server's rank is authoritative;
         // distance/score are optional and must never reorder grouped results.
-        if !best.iter().any(|existing| existing.session_id == session_id) {
+        if !best
+            .iter()
+            .any(|existing| existing.session_id == session_id)
+        {
             best.push(NeoismAgentSemanticSessionHit {
                 session_id: session_id.to_string(),
                 title: title.title.clone(),
@@ -2659,16 +2886,23 @@ fn open_sse_stream(
     let mut connected = None;
     for addr in addresses {
         let remaining = Duration::from_secs(10).saturating_sub(started.elapsed());
-        if remaining.is_zero() { break; }
+        if remaining.is_zero() {
+            break;
+        }
         if let Ok(stream) = super::transport::AgentTransport::connect(
-            &addr, &host, tls, remaining.min(Duration::from_secs(2)),
-            Duration::from_millis(40), Duration::from_secs(5),
+            &addr,
+            &host,
+            tls,
+            remaining.min(Duration::from_secs(2)),
+            Duration::from_millis(40),
+            Duration::from_secs(5),
         ) {
             connected = Some(stream);
             break;
         }
     }
-    let mut stream = connected.ok_or_else(|| "Neoism Agent event connection failed".to_string())?;
+    let mut stream =
+        connected.ok_or_else(|| "Neoism Agent event connection failed".to_string())?;
 
     let path = request_path(&base_path, endpoint);
     let authority = http_authority(tls, &host, port);
@@ -2797,13 +3031,25 @@ fn http_request(
     body: Option<&Value>,
     read_timeout: Duration,
 ) -> Result<HttpResponse, String> {
-    require_http_success(http_request_with_status(
+    let response = require_http_success(http_request_with_status(
         server,
         method,
         path,
         body,
         read_timeout,
-    )?)
+    )?)?;
+    // Provider account/default edits and config writes affect every directory
+    // on this endpoint. Invalidate only after HTTP success, including OAuth
+    // callback and connection removal (failed/cancelled writes retain good data).
+    if method != "GET"
+        && method != "HEAD"
+        && (path.starts_with("/v2/providers/")
+            || path.starts_with("/v2/config")
+            || path.starts_with("/v2/auth"))
+    {
+        invalidate_catalog_endpoint(server);
+    }
+    Ok(response)
 }
 
 fn http_request_with_status(
@@ -2828,15 +3074,21 @@ fn http_request_with_status(
         if tls { "https" } else { "http" },
         http_authority(tls, &host, port),
         request_path(&base_path, path),
-    )).map_err(|_| "Invalid Neoism Agent request URL".to_string())?;
+    ))
+    .map_err(|_| "Invalid Neoism Agent request URL".to_string())?;
     let method = reqwest::Method::from_bytes(method.as_bytes())
         .map_err(|_| "Invalid Neoism Agent request method".to_string())?;
     let body = body.map(serde_json::to_string).transpose()
         .map_err(|_| "Failed to encode Neoism Agent request".to_string())?;
-    let credential = agent_server_credential(server)
-        .filter(|token| !token.contains(['\r', '\n']));
-    let (status, reason, body) = super::transport::request(url, method, credential, body, read_timeout)?;
-    Ok(HttpResponse { body, status, reason })
+    let credential =
+        agent_server_credential(server).filter(|token| !token.contains(['\r', '\n']));
+    let (status, reason, body) =
+        super::transport::request(url, method, credential, body, read_timeout)?;
+    Ok(HttpResponse {
+        body,
+        status,
+        reason,
+    })
 }
 
 pub(super) fn http_error(status: u16, reason: &str, body: &str) -> String {
@@ -2847,10 +3099,13 @@ pub(super) fn http_error(status: u16, reason: &str, body: &str) -> String {
         .and_then(Value::as_str)
         .filter(|message| !message.trim().is_empty());
     if matches!(status, 422 | 429)
-        && envelope.as_ref()
+        && envelope
+            .as_ref()
             .and_then(|value| value.get("code"))
             .and_then(Value::as_str)
-            .is_some_and(|code| matches!(code, "search.busy" | "search.deadline" | "search.too_broad"))
+            .is_some_and(|code| {
+                matches!(code, "search.busy" | "search.deadline" | "search.too_broad")
+            })
     {
         if let Some(message) = message {
             return message.to_owned();
@@ -2889,9 +3144,15 @@ fn parse_http_server(server: &str) -> Result<(bool, String, u16, String), String
     let endpoint = url::Url::parse(server)
         .map_err(|_| "Invalid Neoism Agent endpoint".to_string())?;
     if !matches!(endpoint.scheme(), "http" | "https")
-        || !endpoint.username().is_empty() || endpoint.password().is_some()
-        || endpoint.query().is_some() || endpoint.fragment().is_some() {
-        return Err("Neoism Agent requires HTTP(S) without URL credentials, query, or fragment".into());
+        || !endpoint.username().is_empty()
+        || endpoint.password().is_some()
+        || endpoint.query().is_some()
+        || endpoint.fragment().is_some()
+    {
+        return Err(
+            "Neoism Agent requires HTTP(S) without URL credentials, query, or fragment"
+                .into(),
+        );
     }
     let host = match endpoint.host() {
         Some(url::Host::Domain(host)) => host.to_string(),
@@ -2899,8 +3160,12 @@ fn parse_http_server(server: &str) -> Result<(bool, String, u16, String), String
         Some(url::Host::Ipv6(host)) => host.to_string(),
         None => return Err("Neoism Agent endpoint requires a host".into()),
     };
-    Ok((endpoint.scheme() == "https", host, endpoint.port_or_known_default().unwrap(),
-        endpoint.path().trim_matches('/').to_string()))
+    Ok((
+        endpoint.scheme() == "https",
+        host,
+        endpoint.port_or_known_default().unwrap(),
+        endpoint.path().trim_matches('/').to_string(),
+    ))
 }
 
 #[cfg(test)]
@@ -2909,18 +3174,29 @@ mod transport_policy_tests {
 
     #[test]
     fn ipv6_and_proxy_base_paths_are_preserved() {
-        assert_eq!(parse_http_server("http://[::1]:4096/agent/workspaces/abc").unwrap(),
-            (false, "::1".into(), 4096, "agent/workspaces/abc".into()));
-        assert_eq!(parse_http_server("https://[2001:db8::1]/agent/").unwrap(),
-            (true, "2001:db8::1".into(), 443, "agent".into()));
+        assert_eq!(
+            parse_http_server("http://[::1]:4096/agent/workspaces/abc").unwrap(),
+            (false, "::1".into(), 4096, "agent/workspaces/abc".into())
+        );
+        assert_eq!(
+            parse_http_server("https://[2001:db8::1]/agent/").unwrap(),
+            (true, "2001:db8::1".into(), 443, "agent".into())
+        );
         assert_eq!(http_authority(false, "::1", 4096), "[::1]:4096");
-        assert_eq!(request_path("agent/workspaces/abc", "/v2/sessions?q=a%2Fb"),
-            "/agent/workspaces/abc/v2/sessions?q=a%2Fb");
+        assert_eq!(
+            request_path("agent/workspaces/abc", "/v2/sessions?q=a%2Fb"),
+            "/agent/workspaces/abc/v2/sessions?q=a%2Fb"
+        );
     }
 
     #[test]
     fn endpoint_errors_do_not_disclose_credentials() {
-        for endpoint in ["ftp://secret:password@host", "http://host?token=secret", "http://secret:password@host", "secret"] {
+        for endpoint in [
+            "ftp://secret:password@host",
+            "http://host?token=secret",
+            "http://secret:password@host",
+            "secret",
+        ] {
             let error = parse_http_server(endpoint).unwrap_err();
             assert!(!error.contains("secret"));
             assert!(!error.contains("password"));
@@ -2929,11 +3205,19 @@ mod transport_policy_tests {
 
     #[test]
     fn admission_has_long_bounded_deadline_but_reads_are_interactive() {
-        for path in ["/v2/sessions", "/v2/sessions?directory=x", "/v2/sessions/id/prompt", "/v2/sessions/id/prompt_async"] {
+        for path in [
+            "/v2/sessions",
+            "/v2/sessions?directory=x",
+            "/v2/sessions/id/prompt",
+            "/v2/sessions/id/prompt_async",
+        ] {
             assert!(request_deadline("POST", path) >= Duration::from_secs(120));
             assert_eq!(request_deadline("GET", path), Duration::from_secs(15));
         }
-        assert_eq!(request_deadline("POST", "/v2/interactions/questions/id/reply"), Duration::from_secs(15));
+        assert_eq!(
+            request_deadline("POST", "/v2/interactions/questions/id/reply"),
+            Duration::from_secs(15)
+        );
     }
 }
 

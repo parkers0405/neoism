@@ -1317,6 +1317,132 @@ pub fn completion_trigger_characters(
     Vec::new()
 }
 
+/// Explicit native navigation actions. Inputs are zero-based UTF-8 bytes;
+/// returned locations retain the engine's one-based display contract.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LspNavigationQuery {
+    Definition,
+    Declaration,
+    TypeDefinition,
+    References,
+}
+
+/// Cache-only negotiated navigation support for local menus. `None` means
+/// routing, exact file/client identity, or support is unavailable or busy.
+/// No path normalization, config loading, endpoint probing, or initialization
+/// is allowed here. Callers with non-canonical paths simply get unknown.
+pub fn cached_navigation_support(
+    runtime: &LspRuntime,
+    directory: impl AsRef<Path>,
+    file: impl AsRef<Path>,
+    query: LspNavigationQuery,
+) -> Option<bool> {
+    let root = directory.as_ref();
+    if !root.is_absolute() {
+        return None;
+    }
+    let file = file.as_ref();
+    let file = if file.is_absolute() { file.to_path_buf() } else { root.join(file) };
+    let operation = match query {
+        LspNavigationQuery::Definition => LspOperation::Definition,
+        LspNavigationQuery::Declaration => LspOperation::Declaration,
+        LspNavigationQuery::TypeDefinition => LspOperation::TypeDefinition,
+        LspNavigationQuery::References => LspOperation::References,
+    };
+    let adapters = runtime.service.adapter_cache.cached_for_root(root)?;
+    let strongest_match = adapters
+        .iter()
+        .filter(|spec| operation_supported(spec, operation))
+        .filter_map(|spec| spec.match_priority(&file))
+        .max();
+    let mut unknown = false;
+    // Do not probe endpoint availability here. A routed adapter without an exact
+    // cached identity is unknown, not evidence that navigation is unsupported.
+    for spec in adapters.iter().filter(|spec| {
+        operation_supported(spec, operation)
+            && strongest_match.is_some_and(|score| spec.match_priority(&file) == Some(score))
+    }).take(MAX_LSP_SERVERS_PER_QUERY) {
+        match runtime
+            .service
+            .cached_navigation_support(root, &file, spec, query)
+        {
+            Some(true) => return Some(true),
+            Some(false) => {}
+            None => unknown = true,
+        }
+    }
+    if unknown {
+        None
+    } else {
+        Some(false)
+    }
+}
+
+/// `None`: no route or no advertised provider; `Some([])`: a successful empty
+/// response. Nonempty targets take precedence over other adapters' failures
+/// (which are still logged). With no targets, failures take precedence over
+/// valid empty responses and unsupported providers.
+pub fn query_navigation(
+    runtime: &LspRuntime,
+    directory: impl AsRef<Path>,
+    file: impl AsRef<Path>,
+    line: u32,
+    character: u32,
+    text: Option<&str>,
+    query: LspNavigationQuery,
+) -> Result<Option<Vec<LspLocation>>, String> {
+    let root = normalized_root(directory.as_ref());
+    let file = normalized_file(&root, file.as_ref());
+    let operation = match query {
+        LspNavigationQuery::Definition => LspOperation::Definition,
+        LspNavigationQuery::Declaration => LspOperation::Declaration,
+        LspNavigationQuery::TypeDefinition => LspOperation::TypeDefinition,
+        LspNavigationQuery::References => LspOperation::References,
+    };
+    let mut results = Vec::new();
+    let mut seen = BTreeSet::new();
+    let mut supported = false;
+    let mut errors = Vec::new();
+    for spec in file_query_specs(runtime, &root, &file, operation) {
+        match runtime
+            .service
+            .query_navigation(&root, &file, line, character, text, &spec, query)
+        {
+            Ok(Some(found)) => {
+                supported = true;
+                for location in found {
+                    if seen.insert((location.path.clone(), location.range.clone()))
+                        && results.len() < MAX_SYMBOLS
+                    {
+                        results.push(location);
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                let error = format!("{error:#}");
+                tracing::warn!(action = ?query, file = %file.display(), line, character, adapter = %spec.id, %error, "navigation query failed");
+                errors.push(format!(
+                    "{:?} failed for {} at {}:{} (adapter {}): {}",
+                    query,
+                    file.display(),
+                    line,
+                    character,
+                    spec.id,
+                    error
+                ));
+            }
+        }
+    }
+    if !results.is_empty() {
+        Ok(Some(results))
+    } else if !errors.is_empty() {
+        Err(errors.join("; "))
+    } else {
+        Ok(supported.then_some(results))
+    }
+}
+
 /// Definitions at an exact zero-based line and zero-based UTF-8 byte column.
 pub fn definitions(
     runtime: &LspRuntime,
@@ -1325,39 +1451,67 @@ pub fn definitions(
     line: u32,
     character: u32,
 ) -> Vec<LspLocation> {
-    let root = normalized_root(directory.as_ref());
-    let file = normalized_file(&root, file.as_ref());
-    let mut results = Vec::new();
-    let mut seen = BTreeSet::new();
+    navigation_locations(
+        runtime,
+        directory.as_ref(),
+        file.as_ref(),
+        line,
+        character,
+        LspOperation::Definition,
+    )
+}
 
-    for spec in file_query_specs(runtime, &root, &file, LspOperation::Definition) {
-        match runtime
-            .service
-            .definitions(&root, &file, line, character, &spec)
-        {
-            Ok(found) => {
-                for location in found {
-                    let key = (location.path.clone(), location.range.clone());
-                    if seen.insert(key) {
-                        results.push(location);
-                    }
-                    if results.len() >= MAX_SYMBOLS {
-                        return results;
-                    }
-                }
-            }
-            Err(error) => {
-                tracing::debug!(
-                    language = spec.id,
-                    command = ?spec.command(),
-                    %error,
-                    "definition query failed"
-                );
-            }
-        }
-    }
+pub fn declarations(
+    runtime: &LspRuntime,
+    directory: impl AsRef<Path>,
+    file: impl AsRef<Path>,
+    line: u32,
+    character: u32,
+) -> Vec<LspLocation> {
+    navigation_locations(
+        runtime,
+        directory.as_ref(),
+        file.as_ref(),
+        line,
+        character,
+        LspOperation::Declaration,
+    )
+}
 
-    results
+pub fn type_definitions(
+    runtime: &LspRuntime,
+    directory: impl AsRef<Path>,
+    file: impl AsRef<Path>,
+    line: u32,
+    character: u32,
+) -> Vec<LspLocation> {
+    navigation_locations(
+        runtime,
+        directory.as_ref(),
+        file.as_ref(),
+        line,
+        character,
+        LspOperation::TypeDefinition,
+    )
+}
+
+fn navigation_locations(
+    runtime: &LspRuntime,
+    directory: &Path,
+    file: &Path,
+    line: u32,
+    character: u32,
+    operation: LspOperation,
+) -> Vec<LspLocation> {
+    let query = match operation {
+        LspOperation::Declaration => LspNavigationQuery::Declaration,
+        LspOperation::TypeDefinition => LspNavigationQuery::TypeDefinition,
+        _ => LspNavigationQuery::Definition,
+    };
+    query_navigation(runtime, directory, file, line, character, None, query)
+        .ok()
+        .flatten()
+        .unwrap_or_default()
 }
 
 pub fn references(
@@ -1367,39 +1521,18 @@ pub fn references(
     line: u32,
     character: u32,
 ) -> Vec<LspLocation> {
-    let root = normalized_root(directory.as_ref());
-    let file = normalized_file(&root, file.as_ref());
-    let mut results = Vec::new();
-    let mut seen = BTreeSet::new();
-
-    for spec in file_query_specs(runtime, &root, &file, LspOperation::References) {
-        match runtime
-            .service
-            .references(&root, &file, line, character, &spec)
-        {
-            Ok(found) => {
-                for location in found {
-                    let key = (location.path.clone(), location.range.clone());
-                    if seen.insert(key) {
-                        results.push(location);
-                    }
-                    if results.len() >= MAX_SYMBOLS {
-                        return results;
-                    }
-                }
-            }
-            Err(error) => {
-                tracing::debug!(
-                    language = spec.id,
-                    command = ?spec.command(),
-                    error = %error,
-                    "references query failed"
-                );
-            }
-        }
-    }
-
-    results
+    query_navigation(
+        runtime,
+        directory,
+        file,
+        line,
+        character,
+        None,
+        LspNavigationQuery::References,
+    )
+    .ok()
+    .flatten()
+    .unwrap_or_default()
 }
 
 pub fn implementations(

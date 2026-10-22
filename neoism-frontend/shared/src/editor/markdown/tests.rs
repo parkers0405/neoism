@@ -841,6 +841,20 @@ mod tests {
     }
 
     #[test]
+    fn restoring_viewport_cancels_a_queued_source_reveal_without_moving_caret() {
+        let mut pane = pane_for_test();
+        pane.lines = vec!["text".into(); 100];
+        pane.reveal_source_line(50);
+        pane.cursor_col = 2;
+        assert_eq!(pane.pending_reveal_line, Some(50));
+        pane.restore_scroll_position(700.0);
+        assert_eq!(pane.pending_reveal_line, None);
+        assert!(!pane.follow_cursor);
+        assert_eq!((pane.cursor_line, pane.cursor_col), (50, 2));
+        assert_eq!((pane.scroll_y, pane.target_scroll_y), (700.0, 700.0));
+    }
+
+    #[test]
     fn caret_center_follow_uses_minimal_scroll_at_document_edges() {
         let mut pane = pane_for_test();
         pane.set_content_height(2000.0, 400.0);

@@ -33,6 +33,7 @@ const SNAPSHOT_ORIGIN: u64 = 0;
 pub struct CodeCrdtState {
     client_id: u64,
     bindings: HashMap<String, CodeDocBinding>,
+    restore_reloads: HashSet<String>,
     outbound: Vec<CrdtClientMessage>,
 }
 
@@ -41,6 +42,7 @@ impl Default for CodeCrdtState {
         Self {
             client_id: generate_client_id(),
             bindings: HashMap::new(),
+            restore_reloads: HashSet::new(),
             outbound: Vec::new(),
         }
     }
@@ -56,6 +58,47 @@ impl CodeCrdtState {
 }
 
 impl Screen<'_> {
+    /// Offline-only external write. Online success retains the live replica
+    /// and requests an idempotent snapshot instead of resetting source text.
+    pub(crate) fn reconcile_restored_code(
+        &mut self,
+        path: &std::path::Path,
+        revision: Option<u64>,
+        text: &str,
+        block: &neoism_protocol::git::GitChangeBlock,
+    ) {
+        if self.context_manager.daemon_client_attached() { return; }
+        let Some(code) = self.context_manager.code_pane_mut_by_path(path) else { return; };
+        if !restored_code_can_reload(code, revision) { return; }
+        reload_restored_code_preserving_view(code, text, block);
+        let buffer_id = buffer_id_for_markdown_path(path);
+        self.code_crdt.bindings.remove(&buffer_id);
+        self.code_crdt.restore_reloads.insert(buffer_id);
+        code.buffer.set_doc_history_bound(false);
+        code.buffer.mark_saved();
+        code.error = None;
+    }
+
+    /// The Hub has committed and broadcast the restore before its Git ack.
+    /// Keep the existing replica/undo and request an idempotent catch-up.
+    pub(crate) fn request_code_restore_snapshot(&mut self, path: &std::path::Path) {
+        self.pending_review_code_cursor = None;
+        let Some(code) = self.context_manager.code_pane_mut_by_path(path) else { return; };
+        code.buffer.follow_cursor = false;
+        code.mouse_selecting = false;
+        code.end_touch_word_selection();
+        let buffer_id = buffer_id_for_markdown_path(path);
+        if let Some(binding) = self.code_crdt.bindings.get(&buffer_id).filter(|binding| binding.is_seeded()) {
+            self.code_crdt.outbound.push(CrdtClientMessage::RequestSnapshot {
+                buffer_id, state_vector_v1: binding.state_vector_v1(),
+            });
+        } else {
+            self.code_crdt.outbound.push(CrdtClientMessage::OpenBuffer {
+                buffer_id, initial_text: code.buffer.lines.join("\n"),
+            });
+        }
+    }
+
     /// Per-pump local-edit choke point for code panes (mirror of
     /// `drain_markdown_crdt_messages`).
     pub fn drain_code_crdt_messages(&mut self) -> (Vec<CrdtClientMessage>, bool) {
@@ -163,27 +206,60 @@ impl Screen<'_> {
         {
             return false;
         }
-        let Some(code) = self.context_manager.current_mut().code.as_mut() else {
+        let Some(code) = self.context_manager.active_code_pane() else {
             return false;
         };
         if !code.workspace_sync_ready() {
             return false;
         }
-        let buffer_id = buffer_id_for_markdown_path(&code.path);
-        let state = &mut self.code_crdt;
-        let Some(binding) = state.bindings.get_mut(&buffer_id) else {
-            return false;
-        };
-        if !binding.is_seeded() {
-            return false;
+        let path = code.path.clone();
+        matches!(self.save_code_owner(&path), Ok(true))
+    }
+
+    /// Save a canonical owner without moving focus away from its projection.
+    /// `true` means staging must wait for the daemon's Saved acknowledgment.
+    pub(crate) fn save_code_owner(
+        &mut self,
+        path: &std::path::Path,
+    ) -> Result<bool, String> {
+        let daemon = self.context_manager.daemon_client_attached();
+        let correct_daemon = self
+            .context_manager
+            .current_workspace_uses_attached_daemon();
+        let code = self
+            .context_manager
+            .code_pane_mut_by_path(path)
+            .ok_or("Canonical code owner closed")?;
+        if daemon && code.workspace_sync_ready() {
+            if !correct_daemon {
+                return Err("The canonical document's daemon is not attached".into());
+            }
+            let buffer_id = buffer_id_for_markdown_path(path);
+            let binding = self
+                .code_crdt
+                .bindings
+                .get_mut(&buffer_id)
+                .ok_or("Canonical document is not bound yet")?;
+            if !binding.is_seeded() {
+                return Err("Wait for the canonical document to finish syncing".into());
+            }
+            if let Some(update) = binding.flush_local(&code.buffer) {
+                self.code_crdt
+                    .outbound
+                    .push(make_apply_sync(&buffer_id, update));
+            }
+            self.code_crdt
+                .outbound
+                .push(CrdtClientMessage::SaveBuffer { buffer_id });
+            return Ok(true);
         }
-        if let Some(update) = binding.flush_local(&code.buffer) {
-            state.outbound.push(make_apply_sync(&buffer_id, update));
+        if code.remote_source && !code.local_only {
+            return Err("The host document is not ready for saving".into());
         }
-        state
-            .outbound
-            .push(CrdtClientMessage::SaveBuffer { buffer_id });
-        true
+        code.save().map_err(|error| error.to_string())?;
+        self.sync_markdown_tab_modified(path, false);
+        self.notify_code_lsp_saved(path);
+        Ok(false)
     }
 
     /// Route an inbound CRDT server message into code panes. Returns
@@ -226,6 +302,8 @@ impl Screen<'_> {
         };
         code.buffer.mark_saved();
         let path = code.path.clone();
+        let revision = code.buffer.revision;
+        self.review_stage_saved(&path, revision);
         self.sync_markdown_tab_modified(&path, false);
         self.notify_code_lsp_saved(&path);
         self.renderer.notifications.push(
@@ -257,6 +335,23 @@ impl Screen<'_> {
                         buffer_id,
                         "code CRDT snapshot apply failed"
                     );
+                    false
+                }
+            }
+        } else if state.restore_reloads.remove(buffer_id) && code.is_dirty() {
+            // Edits made after the clean restore reload, but before its new
+            // snapshot arrived, remain in the actual buffer (including undo).
+            // Seed only the replica, then publish that buffer's minimal delta.
+            let mut seed = neoism_ui::editor::code::CodeBuffer::from_text("");
+            match binding.seed_from_snapshot(update_v1, &mut seed) {
+                Ok(_) => {
+                    if let Some(update) = binding.flush_local(&code.buffer) {
+                        state.outbound.push(make_apply_sync(buffer_id, update));
+                    }
+                    true
+                }
+                Err(error) => {
+                    tracing::warn!(%error, buffer_id, "code restore reseed failed");
                     false
                 }
             }
@@ -326,6 +421,75 @@ impl Screen<'_> {
             }
         }
     }
+}
+
+#[cfg(test)]
+mod restore_tests {
+    use super::*;
+
+    #[test]
+    fn offline_restore_keeps_line_50_mode_viewport_and_cancels_reveal() {
+        let source = (0..100).map(|_| "text").collect::<Vec<_>>().join("\n");
+        let mut code = CodePane::new("/repo/a.rs".into(), &source);
+        code.buffer.set_cursor_position(50, 3, false);
+        code.buffer.mode = neoism_ui::editor::code::CodeMode::Insert;
+        code.buffer.follow_cursor = true;
+        code.scroll_y = 730.0;
+        code.mouse_selecting = true;
+        let block = neoism_protocol::git::GitChangeBlock {
+            old_start: 5, new_start: 5, old_lines: vec!["old".into()], new_lines: vec!["new".into()],
+        };
+        reload_restored_code_preserving_view(&mut code, &source, &block);
+        assert_eq!((code.buffer.cursor_line, code.buffer.cursor_col), (50, 3));
+        assert_eq!(code.buffer.mode, neoism_ui::editor::code::CodeMode::Insert);
+        assert_eq!(code.scroll_y, 730.0);
+        assert!(!code.buffer.follow_cursor);
+        assert!(!code.mouse_selecting);
+        assert!(!code.is_dirty());
+        let deleted = neoism_protocol::git::GitChangeBlock { new_lines: vec!["a".into(), "b".into(), "c".into()], ..block };
+        reload_restored_code_preserving_view(&mut code, &source, &deleted);
+        assert_eq!(code.buffer.cursor_line, 48);
+        assert!(!code.buffer.follow_cursor);
+    }
+
+    #[test]
+    fn restore_reload_rejects_edits_or_new_saved_revision_during_wait() {
+        let mut code = CodePane::new("/repo/a.rs".into(), "original");
+        let revision = code.buffer.revision;
+        assert!(restored_code_can_reload(&code, Some(revision)));
+        code.buffer.insert_text("new edit");
+        assert!(!restored_code_can_reload(&code, Some(revision)));
+        code.buffer.mark_saved();
+        assert!(!restored_code_can_reload(&code, Some(revision)));
+        assert!(!restored_code_can_reload(&code, None));
+    }
+}
+
+fn reload_restored_code_preserving_view(
+    code: &mut CodePane,
+    text: &str,
+    block: &neoism_protocol::git::GitChangeBlock,
+) {
+    use super::bridges::git_diff_edit::restored_source_line;
+    let cursor = code.buffer.cursor();
+    let selection = code.buffer.selection_range();
+    let mode = code.buffer.mode;
+    code.buffer.reset_from_text(text);
+    if let Some((start, end)) = selection {
+        let anchor = if start == cursor { end } else { start };
+        code.buffer.set_cursor_position(restored_source_line(anchor.line, block), anchor.col, false);
+        code.buffer.set_cursor_position(restored_source_line(cursor.line, block), cursor.col, true);
+    } else {
+        code.buffer.set_cursor_position(restored_source_line(cursor.line, block), cursor.col, false);
+    }
+    code.buffer.mode = mode;
+    code.buffer.follow_cursor = false;
+    code.mouse_selecting = false;
+    code.end_touch_word_selection();
+}
+
+fn restored_code_can_reload(code: &CodePane, revision: Option<u64>) -> bool {
+    Some(code.buffer.revision) == revision && !code.is_dirty() && !code.remote_content_pending
 }
 
 fn drain_code_pane_crdt(

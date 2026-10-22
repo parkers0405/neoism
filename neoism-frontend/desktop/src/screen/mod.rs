@@ -846,6 +846,14 @@ pub struct Screen<'screen> {
     /// splices with caret transform). See `screen/markdown_crdt.rs`.
     pub markdown_crdt: markdown_crdt::MarkdownCrdtState,
     pub code_crdt: code_crdt::CodeCrdtState,
+    /// Deferred source coordinates while a canonical remote CodePane loads.
+    pending_review_code_cursor: Option<(PathBuf, usize, usize)>,
+    /// Ordinary source navigation must outlive review focus and remote loading.
+    pending_code_location: Option<(PathBuf, usize, usize)>,
+    /// Diff source coordinates for an existing Markdown owner (zero-based).
+    pending_markdown_source_location: Option<(PathBuf, usize, usize)>,
+    pending_review_stage: Option<bridges::git_diff_edit::PendingReviewStage>,
+    pending_review_restore: Option<bridges::git_diff_edit::PendingReviewRestore>,
     last_ime_cursor_pos: Option<(f32, f32)>,
     last_editor_trail_cursor_cell: Option<(usize, usize, usize)>,
     hints_config: Vec<std::rc::Rc<neoism_backend::config::hints::Hint>>,
@@ -1916,6 +1924,11 @@ impl Screen<'_> {
             presence_display_name_override: config.presence.display_name.clone(),
             markdown_crdt: markdown_crdt::MarkdownCrdtState::default(),
             code_crdt: code_crdt::CodeCrdtState::default(),
+            pending_review_code_cursor: None,
+            pending_code_location: None,
+            pending_markdown_source_location: None,
+            pending_review_stage: None,
+            pending_review_restore: None,
             sugarloaf,
             mouse: Mouse::new(
                 config.terminal.scroll.multiplier,

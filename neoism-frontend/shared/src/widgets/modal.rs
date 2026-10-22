@@ -171,6 +171,12 @@ pub enum ModalAction {
         path: String,
         notes: bool,
     },
+    GitRestore { root: std::path::PathBuf, path: String },
+    GitRestoreBlock {
+        root: std::path::PathBuf,
+        path: String,
+        block: neoism_protocol::git::GitChangeBlock,
+    },
     FileTreeDelete {
         path: String,
         notes: bool,
@@ -396,6 +402,8 @@ impl ModalAction {
             self,
             ModalAction::FileTreePromptDelete { .. }
                 | ModalAction::FileTreeDelete { .. }
+                | ModalAction::GitRestore { .. }
+                | ModalAction::GitRestoreBlock { .. }
                 | ModalAction::EpubDeleteAnnotation { .. }
                 | ModalAction::ServerReconnectDiscard { .. }
         )

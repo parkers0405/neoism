@@ -96,6 +96,24 @@ impl Screen<'_> {
             return;
         }
 
+        if alt_only {
+            let next = if Self::is_arrow_down_key(key) {
+                Some(true)
+            } else if Self::is_arrow_up_key(key) {
+                Some(false)
+            } else {
+                None
+            };
+            if next.is_some_and(|next| {
+                self.handle_git_diff_file_navigation(
+                    next,
+                    key.state == ElementState::Pressed,
+                )
+            }) {
+                return;
+            }
+        }
+
         if self.handle_buffer_tab_focus_key(key, mods) {
             return;
         }
@@ -212,6 +230,9 @@ impl Screen<'_> {
             return;
         }
 
+        if self.handle_git_diff_view_key(key) {
+            return;
+        }
         if self.handle_extensions_key(key) {
             return;
         }
@@ -329,8 +350,10 @@ impl Screen<'_> {
             }
             neoism_ui::selection_input::EarlyKeyDispatchAction::ShiftInsert => {
                 let content = clipboard.get(ClipboardType::Clipboard);
-                if let Some(code) = self.context_manager.current_mut().code.as_mut() {
-                    code.buffer.insert_text(&content);
+                if let Some(code) = self.context_manager.active_code_pane_mut() {
+                    if !code.remote_content_pending && code.error.is_none() {
+                        code.buffer.insert_text(&content);
+                    }
                     self.sync_active_code_modified();
                     self.renderer.trail_cursor.reset();
                     self.mark_dirty();
@@ -631,7 +654,7 @@ impl Screen<'_> {
         // below just runs the side effect the original branch ran.
         let mid_dispatch_input = neoism_ui::selection_input::MidKeyDispatchInput {
             search_active: self.search_active(),
-            code_active: self.context_manager.current().code.is_some(),
+            code_active: self.context_manager.active_code_pane().is_some(),
             markdown_active: self.context_manager.current().markdown.is_some()
                 || self.context_manager.current().notebook.is_some()
                 || self.context_manager.current().epub.is_some(),

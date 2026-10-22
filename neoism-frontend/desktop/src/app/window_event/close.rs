@@ -4,6 +4,25 @@ use neoism_window::window::WindowId;
 use crate::app::Application;
 
 impl Application<'_> {
+    /// Native quit-confirmation preferences are not document-loss permission.
+    /// Check actual owners, including background review CodePanes with no tab.
+    pub(in crate::app) fn refuse_unsaved_code_close(
+        &mut self,
+        window_id: WindowId,
+        whole_app: bool,
+    ) -> bool {
+        let dirty = self.router.routes.iter().any(|(id, route)| {
+            (whole_app || *id == window_id) && route.window.screen.has_dirty_code_owners()
+        });
+        if dirty {
+            if let Some(route) = self.router.routes.get_mut(&window_id) {
+                route.window.screen.file_tree_notify("Unsaved source documents: save them before closing. The window was kept open.", neoism_ui::panels::notifications::NotificationLevel::Warn);
+                route.request_redraw();
+            }
+        }
+        dirty
+    }
+
     pub(in crate::app) fn handle_destroyed(
         &mut self,
         event_loop: &ActiveEventLoop,
@@ -26,6 +45,10 @@ impl Application<'_> {
         window_id: WindowId,
     ) {
         if !self.router.routes.contains_key(&window_id) {
+            return;
+        }
+
+        if self.refuse_unsaved_code_close(window_id, false) {
             return;
         }
 

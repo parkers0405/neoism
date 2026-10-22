@@ -22,11 +22,39 @@ pub trait GitDiffIo: Send + Sync {
     fn is_host_driven(&self) -> bool {
         false
     }
+    fn request_latest_commit(&self) {}
+    fn latest_commit(&self, _root: &Path) -> Option<neoism_protocol::git::CommitSummary> {
+        None
+    }
+    fn request_commit(&self, _revision: &str) {}
+    fn read_commit(
+        &self,
+        _root: &Path,
+        _revision: &str,
+    ) -> Result<neoism_protocol::git::GitCommitDetail, String> {
+        Err("Commit reading is not supported by this Git provider".into())
+    }
     fn request_diff(&self, _path: &str) {}
+    fn request_diffs(&self, paths: &[String]) {
+        for path in paths {
+            self.request_diff(path);
+        }
+    }
+
+    fn request_base(&self, _path: &str) {}
+    fn load_base(&self, _repo_root: &Path, _path: &str) -> Result<String, String> {
+        Err("This Git provider cannot read a diff baseline".into())
+    }
 
     /// Run `git status` + `git diff --numstat` for `repo_root` and
     /// return the changed-file list. Called from a background thread.
     fn collect_files(&self, repo_root: &Path) -> Vec<FileChange>;
+    /// Current branch's configured tracking ref (for example `origin/main`).
+    /// Native workers call this off-thread after collecting status; host-driven
+    /// providers supply metadata through `GitDiffPanel::set_upstream` instead.
+    fn upstream(&self, _repo_root: &Path) -> Option<String> {
+        None
+    }
 
     /// Stage `path` (`git add -- <path>`). Called from a background
     /// thread after a checkbox / Stage All click. `Err` carries the
@@ -36,6 +64,22 @@ pub trait GitDiffIo: Send + Sync {
     /// Unstage `path` (`git restore --staged -- <path>`). Called from a
     /// background thread when a staged file's checkbox is cleared.
     fn unstage(&self, repo_root: &Path, path: &str) -> Result<(), String>;
+
+    /// Restore the working tree from the index only; never remove untracked files.
+    fn restore(&self, _repo_root: &Path, _path: &str) -> Result<(), String> {
+        Err("Restore is not supported by this Git provider".into())
+    }
+
+    /// Apply one exact change block; never fall back to a whole-file mutation.
+    fn apply_block(
+        &self,
+        _repo_root: &Path,
+        _path: &str,
+        _block: &neoism_protocol::git::GitChangeBlock,
+        _restore: bool,
+    ) -> Result<(), String> {
+        Err("Partial changes are not supported by this Git provider".into())
+    }
 
     /// Commit the staged changes with `message` (`git commit -m …`).
     /// `Err` carries git's stderr — e.g. "nothing to commit".
@@ -53,6 +97,11 @@ pub trait GitDiffIo: Send + Sync {
     fn fetch(&self, repo_root: &Path) -> Result<(), String>;
     fn pull(&self, repo_root: &Path) -> Result<(), String>;
     fn push(&self, repo_root: &Path) -> Result<(), String>;
+    /// Publish the current branch and establish upstream tracking. Hosts must
+    /// override this; ordinary push is not an equivalent fallback.
+    fn publish(&self, _repo_root: &Path) -> Result<(), String> {
+        Err("Publishing branches is not supported by this Git provider".into())
+    }
 }
 
 pub struct GitDiffPanel {
@@ -96,7 +145,6 @@ pub struct GitDiffPanel {
     /// state instead of moving the selection.
     pub(super) file_checkbox_rects: Vec<(usize, Rect)>,
     pub(super) folder_checkbox_rects: Vec<(usize, Rect)>,
-    pub(super) files_height_override: Option<f32>,
     pub(super) divider_dragging: bool,
     pub(super) divider_rect: Rect,
     /// Files-card scrollbar thumb rect (window-logical). `Rect::ZERO`
@@ -124,6 +172,12 @@ pub struct GitDiffPanel {
     /// Bottom commit-region hit rects, populated by `render`.
     pub(super) commit_box_rect: Rect,
     pub(super) commit_button_rect: Rect,
+    pub(super) latest_commit_rect: Rect,
+    pub(super) latest_commit_hover: bool,
+    pub(super) latest_commit_popup_rect: Rect,
+    pub(super) latest_commit_copy_rect: Rect,
+    pub(super) latest_commit_copy: Option<String>,
+    pub(super) push_button_rect: Rect,
     pub(super) actions_button_rect: Rect,
     pub(super) actions_menu: crate::widgets::popover::Popover<
         crate::widgets::menu::Menu<super::types::GitAction>,
@@ -133,8 +187,9 @@ pub struct GitDiffPanel {
     pub(super) actions_menu_row_rects: Vec<(usize, Rect)>,
 
     // ── Tree file list ───────────────────────────────────────────────
-    /// Collapsed directory nodes (repo-relative dir paths, no trailing
-    /// slash). Every dir not in the set renders expanded.
+    /// Collapsed section labels or section-qualified directory paths
+    /// (`Tracked/src`, `Untracked/src`). Identical paths in different
+    /// sections collapse independently. Other nodes render expanded.
     pub(super) collapsed_dirs: HashSet<String>,
     /// Flattened tree rows (folders + file leaves), rebuilt from the
     /// file list + `collapsed_dirs`. Cached so `render`, hit-testing and
@@ -206,7 +261,6 @@ impl GitDiffPanel {
             file_row_rects: Vec::new(),
             file_checkbox_rects: Vec::new(),
             folder_checkbox_rects: Vec::new(),
-            files_height_override: None,
             divider_dragging: false,
             divider_rect: Rect::ZERO,
             files_scrollbar_thumb_rect: Rect::ZERO,
@@ -217,6 +271,12 @@ impl GitDiffPanel {
             commit_focused: false,
             commit_box_rect: Rect::ZERO,
             commit_button_rect: Rect::ZERO,
+            latest_commit_rect: Rect::ZERO,
+            latest_commit_hover: false,
+            latest_commit_popup_rect: Rect::ZERO,
+            latest_commit_copy_rect: Rect::ZERO,
+            latest_commit_copy: None,
+            push_button_rect: Rect::ZERO,
             actions_button_rect: Rect::ZERO,
             actions_menu: crate::widgets::popover::Popover::new(
                 crate::widgets::menu::Menu::new(),

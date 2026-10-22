@@ -14,10 +14,13 @@
 // bridge's `git_panel_*` entry points — the web twin of the desktop's
 // `NativeGitDiffIo` shell-outs.
 
+import { presenceBufferIdForPath } from "../presence/presence";
 import type { ProtocolClient } from "../workspace/ProtocolClient";
 import type {
+  GitCommitDetail,
   CommitSummary,
   DiffHunk,
+  GitChangeBlock,
   GitClientMessage,
   GitFileChange,
   GitFileDiff,
@@ -31,6 +34,7 @@ export interface GitService {
   status(): Promise<GitStatusEntry[]>;
   diff(path?: string | null): Promise<DiffHunk[]>;
   log(maxCount?: number | null): Promise<CommitSummary[]>;
+  readCommit(revision: string): Promise<GitCommitDetail>;
 }
 
 function expectVariant<K extends string>(
@@ -67,10 +71,20 @@ export class DaemonGitService implements GitService {
     return expectVariant(reply, "Log").Log.commits;
   }
 
+  async readCommit(revision: string): Promise<GitCommitDetail> {
+    const reply = await this.client.requestGit({ ReadCommit: { revision } });
+    return expectVariant(reply, "CommitDetail").CommitDetail.detail;
+  }
+
   // ── Write-parity verbs (Pass 2) ────────────────────────────────────
   // Each mutation replies with a refreshed `ChangedFiles` (desktop
   // parity: mutate, then re-collect), so callers get the post-op list
   // — with real staged bits — in one round trip.
+
+  async readBase(path: string) {
+    const reply = await this.client.requestGit({ ReadBase: { path } });
+    return expectVariant(reply, "BaseFile").BaseFile;
+  }
 
   async changedFiles(): Promise<
     Extract<GitServerMessage, { ChangedFiles: unknown }>["ChangedFiles"]
@@ -84,13 +98,29 @@ export class DaemonGitService implements GitService {
     return expectVariant(reply, "ChangedFiles").ChangedFiles;
   }
 
+  async applyBlock(path: string, block: GitChangeBlock, restore = false) {
+    const reply = await this.client.requestGit({ ApplyBlock: { path, block, restore } });
+    return expectVariant(reply, "ChangedFiles").ChangedFiles;
+  }
+
   async unstage(path: string) {
     const reply = await this.client.requestGit({ Unstage: { path } });
     return expectVariant(reply, "ChangedFiles").ChangedFiles;
   }
 
+  /** Caller must confirm discarding unstaged changes before invoking. */
+  async restore(path: string) {
+    const reply = await this.client.requestGit({ Restore: { path } });
+    return expectVariant(reply, "ChangedFiles").ChangedFiles;
+  }
+
   async commit(message: string) {
     const reply = await this.client.requestGit({ Commit: { message } });
+    return expectVariant(reply, "ChangedFiles").ChangedFiles;
+  }
+
+  async publish() {
+    const reply = await this.client.requestGit("Publish");
     return expectVariant(reply, "ChangedFiles").ChangedFiles;
   }
 
@@ -121,6 +151,24 @@ export class DaemonGitService implements GitService {
  * panel read-only.
  */
 export interface GitPanelBridge {
+  /** Host identity guard: null means this adapter has been retired. */
+  gitPanelContext?(): string | null;
+  prepare_git_stage_block?(path: string, blockJson: string): boolean;
+  prepareGitStageBlock?(path: string, blockJson: string): boolean;
+  git_panel_restore_identity?(path: string): string;
+  gitPanelRestoreIdentity?(path: string): string;
+  git_panel_block_restored?(identityJson: string, bufferId: string): boolean;
+  gitPanelBlockRestored?(identityJson: string, bufferId: string): boolean;
+  git_panel_prepare_stage?(path: string): boolean;
+  gitPanelPrepareStage?(path: string): boolean;
+  git_panel_prepare_restore?(path: string): boolean;
+  gitPanelPrepareRestore?(path: string): boolean;
+  git_panel_set_latest_commit?(json: string): void;
+  gitPanelSetLatestCommit?(json: string): void;
+  git_panel_apply_commit_detail?(json: string): void;
+  gitPanelApplyCommitDetail?(json: string): void;
+  git_panel_apply_base_file?(replyJson: string): void;
+  gitPanelApplyBaseFile?(replyJson: string): void;
   set_git_panel_ops?(cb: (reqId: number, envelopeJson: string) => void): void;
   setGitPanelOps?(cb: (reqId: number, envelopeJson: string) => void): void;
   git_panel_apply_changed_files?(replyJson: string): void;
@@ -131,6 +179,8 @@ export interface GitPanelBridge {
   gitPanelApplyFileDiffs?(diffsJson: string): void;
   git_panel_set_error?(message: string): void;
   gitPanelSetError?(message: string): void;
+  git_panel_commit_succeeded?(message: string): void;
+  gitPanelCommitSucceeded?(message: string): void;
 }
 
 /**
@@ -164,6 +214,7 @@ export class GitPanelService {
   private surfaces: GitPanelBridge[] = [];
   /** Drops stale diff-fetch results when refreshes overlap. */
   private diffFetchSeq = 0;
+  private latestCommitSeq = 0;
 
   constructor(
     private readonly client: ProtocolClient,
@@ -198,6 +249,27 @@ export class GitPanelService {
     }
   }
 
+  private prepareMutation(names: Array<keyof GitPanelBridge>, path: string): boolean {
+    for (const surface of this.surfaces) {
+      for (const name of names) {
+        const method = surface[name] as ((path: string) => boolean) | undefined;
+        if (method) return method.call(surface, path) === true;
+      }
+    }
+    this.call(["gitPanelSetError", "git_panel_set_error"], "Mutation unavailable: reload to connect the canonical editor safety gate.");
+    return false;
+  }
+
+  private prepareBlock(path: string, block: GitChangeBlock, restore: boolean): boolean {
+    if (restore) return this.prepareMutation(["gitPanelPrepareRestore", "git_panel_prepare_restore"], path);
+    for (const surface of this.surfaces) {
+      const prepare = surface.prepareGitStageBlock ?? surface.prepare_git_stage_block;
+      if (prepare) return prepare.call(surface, path, JSON.stringify(block)) === true;
+    }
+    this.call(["gitPanelSetError", "git_panel_set_error"], "Block mutation unavailable: reload to connect the canonical editor safety gate.");
+    return false;
+  }
+
   private async handleEnvelope(envelopeJson: string): Promise<void> {
     let message: GitClientMessage;
     try {
@@ -205,10 +277,48 @@ export class GitPanelService {
     } catch {
       return;
     }
+    const contextSurface = this.surfaces.find(s => s.gitPanelContext);
+    const context = contextSurface ? () => contextSurface.gitPanelContext?.() : undefined;
+    const scope = context?.();
+    // Keep this owner/root/connection guard for the entire refresh chain;
+    // follow-up sequence numbers alone cannot detect a workspace switch.
+    const generation = this.client.getGeneration?.();
+    const current = () => scope !== null && (!context || context() === scope)
+      && this.client.getGeneration?.() === generation;
     try {
-      const reply = await this.client.requestGit(message);
-      this.applyReply(reply);
+      // Providers invoke this callback while ChromeBridge is mutably borrowed.
+      // Unwind that stack before calling any wasm preflight (no re-entrant borrow).
+      await Promise.resolve();
+      if (!current()) return;
+      if (typeof message === "object") {
+        if ("ApplyBlock" in message && !this.prepareBlock(message.ApplyBlock.path, message.ApplyBlock.block, message.ApplyBlock.restore)) return;
+        if ("Stage" in message && !this.prepareMutation(["gitPanelPrepareStage", "git_panel_prepare_stage"], message.Stage.path)) return;
+        if ("Restore" in message && !this.prepareMutation(["gitPanelPrepareRestore", "git_panel_prepare_restore"], message.Restore.path)) return;
+      }
+      const restore = typeof message === "object" && "ApplyBlock" in message && message.ApplyBlock.restore ? message.ApplyBlock : null;
+      const reloadSurface = restore ? this.surfaces.find(s => (s.gitPanelRestoreIdentity ?? s.git_panel_restore_identity) && (s.gitPanelBlockRestored ?? s.git_panel_block_restored)) : undefined;
+      if (restore && !reloadSurface) throw new Error("Restore unavailable: reload to connect canonical source reconciliation.");
+      const identityJson = restore && reloadSurface
+        ? (reloadSurface.gitPanelRestoreIdentity ?? reloadSurface.git_panel_restore_identity)!.call(reloadSurface, restore.path) : "null";
+      const identity = JSON.parse(identityJson) as {root: string; absolute: string; revision: string; text: string} | null;
+      const reply = scope === undefined ? await this.client.requestGit(message) : await this.client.requestGit(message, scope);
+      if (!current()) return;
+      if (restore && identity && reloadSurface && "ChangedFiles" in reply && reply.ChangedFiles.error === null) {
+        // The daemon has already folded actual disk bytes into its canonical
+        // document. Ask the retained replica for an authoritative delta; never
+        // reconstruct CRLF/EOF from display rows or publish a disk replacement.
+        (reloadSurface.gitPanelBlockRestored ?? reloadSurface.git_panel_block_restored)!.call(reloadSurface, identityJson, presenceBufferIdForPath(identity.absolute, identity.root));
+      }
+      this.applyReply(reply, scope, current);
+      if (typeof message === "object" && "Commit" in message
+          && "ChangedFiles" in reply && reply.ChangedFiles.error === null) {
+        this.call(
+          ["gitPanelCommitSucceeded", "git_panel_commit_succeeded"],
+          message.Commit.message,
+        );
+      }
     } catch (err) {
+      if (!current()) return;
       this.call(
         ["gitPanelSetError", "git_panel_set_error"],
         err instanceof Error ? err.message : String(err),
@@ -216,13 +326,31 @@ export class GitPanelService {
     }
   }
 
-  private applyReply(reply: GitServerMessage): void {
+  private applyReply(reply: GitServerMessage, scope: string | null | undefined, current: () => boolean): void {
+    if (!current()) return;
+    if ("Log" in reply) {
+      this.call(["gitPanelSetLatestCommit", "git_panel_set_latest_commit"], JSON.stringify(reply.Log.commits));
+      return;
+    }
+    if ("CommitDetail" in reply) {
+      this.call(["gitPanelApplyCommitDetail", "git_panel_apply_commit_detail"], JSON.stringify(reply.CommitDetail.detail));
+      return;
+    }
+    if ("BaseFile" in reply) {
+      this.call(["gitPanelApplyBaseFile", "git_panel_apply_base_file"], JSON.stringify(reply.BaseFile));
+      return;
+    }
     if ("ChangedFiles" in reply) {
       this.call(
         ["gitPanelApplyChangedFiles", "git_panel_apply_changed_files"],
         JSON.stringify(reply.ChangedFiles),
       );
-      void this.refreshDiffs(reply.ChangedFiles.files.map((f) => f.path));
+      if (!current()) return;
+      void this.refreshDiffs(reply.ChangedFiles.files.map((f) => f.path), scope, current);
+      const latestSeq = ++this.latestCommitSeq;
+      void this.client.requestGit({ Log: { max_count: 1 } }, scope).then(log => {
+        if (current() && latestSeq === this.latestCommitSeq && "Log" in log) this.applyReply(log, scope, current);
+      }).catch(() => {});
       return;
     }
     if ("Branches" in reply) {
@@ -243,16 +371,17 @@ export class GitPanelService {
   /** Fetch per-file `git diff HEAD` patches for the refreshed list and
    *  push them into the panel's diff cache. A newer refresh supersedes
    *  an in-flight fetch. */
-  private async refreshDiffs(paths: string[]): Promise<void> {
-    if (paths.length === 0) return;
+  private async refreshDiffs(paths: string[], scope: string | null | undefined, current: () => boolean): Promise<void> {
+    if (!current()) return;
     const seq = ++this.diffFetchSeq;
+    if (paths.length === 0) return;
     let reply: GitServerMessage;
     try {
-      reply = await this.client.requestGit({ DiffFiles: { paths } });
+      reply = await this.client.requestGit({ DiffFiles: { paths } }, scope);
     } catch {
       return;
     }
-    if (seq !== this.diffFetchSeq) return;
+    if (!current() || seq !== this.diffFetchSeq) return;
     if ("FileDiffs" in reply) {
       this.call(
         ["gitPanelApplyFileDiffs", "git_panel_apply_file_diffs"],

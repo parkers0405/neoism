@@ -1132,9 +1132,7 @@ impl Screen<'_> {
         }
         let code = self
             .context_manager
-            .current()
-            .code
-            .as_ref()
+            .active_code_pane()
             .ok_or_else(|| "there is no focused code buffer".to_string())?;
         let line = argument_u32(arguments, &["line"], code.buffer.cursor_line)?;
         let character =

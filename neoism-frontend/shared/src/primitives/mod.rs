@@ -13,6 +13,7 @@ pub mod surface_background;
 pub mod look;
 mod nvchad_themes;
 pub mod pixel_font;
+pub mod prose_font;
 pub mod text;
 pub mod wordmark_animation;
 

@@ -42,7 +42,20 @@ use crate::widgets::modal::{
 
 use sugarloaf::Sugarloaf;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GitDiffSourceOpenRequest {
+    pub root: std::path::PathBuf,
+    pub path: String,
+    /// Zero-based source coordinates, not patch/display coordinates.
+    pub line: usize,
+    pub column: usize,
+}
+
 impl<A: Send + Copy + 'static> Chrome<A> {
+    pub fn drain_git_diff_source_opens(&mut self) -> Vec<GitDiffSourceOpenRequest> {
+        std::mem::take(&mut self.pending_git_diff_source_opens)
+    }
+
     pub fn open_file_browser(
         &mut self,
         mode: crate::panels::file_browser::FileBrowserMode,
@@ -61,6 +74,117 @@ impl<A: Send + Copy + 'static> Chrome<A> {
 
     /// Which chrome helper page the ACTIVE buffer tab points at, if
     /// any (`None` for terminal / file / agent tabs).
+    /// Register a route without changing selection (JS replays the whole strip).
+    pub fn ensure_git_diff_view(
+        &mut self,
+        route: usize,
+        root: std::path::PathBuf,
+        path: std::path::PathBuf,
+    ) {
+        let path = neoism_protocol::host_path::HostPath::new(root.to_string_lossy())
+            .relative(&path.to_string_lossy())
+            .map(std::path::PathBuf::from)
+            .unwrap_or(path);
+        let replace = self
+            .git_diff_views
+            .get(&route)
+            .is_none_or(|view| view.root != root);
+        if replace {
+            self.git_diff_view_generations.remove(&route);
+            self.git_diff_views.insert(
+                route,
+                crate::panels::git_diff_view::GitDiffView::new(root, path),
+            );
+        }
+    }
+
+    pub fn set_git_commit_view(
+        &mut self,
+        route: usize,
+        root: std::path::PathBuf,
+        detail: neoism_protocol::git::GitCommitDetail,
+    ) {
+        self.git_diff_views.insert(
+            route,
+            crate::panels::git_diff_view::GitDiffView::from_commit(root, detail),
+        );
+        self.git_diff_view_generations.remove(&route);
+    }
+    pub fn take_git_commit_copy(&mut self) -> Option<String> {
+        self.git_diff_panel.take_latest_commit_copy().or_else(|| {
+            self.git_diff_views
+                .values_mut()
+                .find_map(|view| view.take_commit_copy())
+        })
+    }
+
+    /// Explicit navigation only: tab-list replay must never reveal a section.
+    pub fn reveal_git_diff_file(&mut self, route: usize, path: &std::path::Path) {
+        if let Some(view) = self.git_diff_views.get_mut(&route) {
+            view.reveal_file(path);
+        }
+    }
+
+    /// Pointer affordances for the active repository review surface.
+    pub fn active_diff_cursor(&self, x: f32, y: f32) -> bool {
+        !self.chrome_overlay_active()
+            && self.focused_content_rect().contains(x, y)
+            && self
+                .active_git_diff_route()
+                .and_then(|route| self.git_diff_views.get(&route))
+                .is_some_and(|view| view.pointer_cursor(x, y))
+    }
+
+    pub fn retain_git_diff_views(&mut self, routes: &[usize]) {
+        self.git_diff_views
+            .retain(|route, _| routes.contains(route));
+        self.git_diff_view_generations
+            .retain(|route, _| routes.contains(route));
+    }
+
+    pub fn drain_git_diff_opens(
+        &mut self,
+    ) -> Vec<(std::path::PathBuf, std::path::PathBuf)> {
+        std::mem::take(&mut self.pending_git_diff_opens)
+    }
+
+    /// Sidebar navigation is reveal-only: never create/activate a tab, replay
+    /// repository data, or replace the canonical editing buffer.
+    pub(crate) fn reveal_selected_git_diff(&mut self) -> bool {
+        let Some((path, root)) = self.git_diff_panel.selected_file_target() else {
+            return false;
+        };
+        let Some(route) = self.active_git_diff_route() else {
+            return false;
+        };
+        let Some(view) = self.git_diff_views.get_mut(&route) else {
+            return false;
+        };
+        if view.root != root || view.commit_id.is_some() {
+            return false;
+        }
+        view.set_edit_focus(false);
+        view.reveal_file(&path);
+        true
+    }
+
+    pub(crate) fn queue_selected_git_diff(&mut self) {
+        if let Some((path, root)) = self.git_diff_panel.selected_file_target() {
+            self.pending_git_diff_opens.push((path, root));
+        }
+    }
+
+    pub(super) fn active_git_diff_route(&self) -> Option<usize> {
+        match self.buffer_tabs.target_at(self.active_tab_index) {
+            Some(BufferTabTarget::ChromePage(page))
+                if page.kind == ChromePageKind::GitDiff =>
+            {
+                Some(page.route_id)
+            }
+            _ => None,
+        }
+    }
+
     pub fn active_chrome_page(&self) -> Option<ChromePageKind> {
         match self.buffer_tabs.target_at(self.active_tab_index) {
             Some(BufferTabTarget::ChromePage(page)) => Some(page.kind),
@@ -83,7 +207,9 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         self.chrome_overlay_active()
             || self.conversation_navigator.is_active()
             || self.file_browser.is_active()
-            || self.active_chrome_page().is_some()
+            || (self.active_chrome_page().is_some()
+                && self.active_editor_pane_kind()
+                    != Some(super::content::EditorPaneKind::Code))
     }
 
     /// A generic overlay/modal owns keyboard input independently of the
@@ -423,7 +549,10 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                 });
             }
             ModalAction::CopyInvite { url } => {
-                self.modal.queue_host_action(ModalHostAction::Generic { id: "copy-invite".into(), value: url });
+                self.modal.queue_host_action(ModalHostAction::Generic {
+                    id: "copy-invite".into(),
+                    value: url,
+                });
                 self.modal.mark_invite_copied();
             }
             ModalAction::Close => {
@@ -455,6 +584,18 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             }
             ModalAction::FileTreeRename { path, name, .. } => {
                 self.confirm_file_tree_rename(path, name);
+            }
+            ModalAction::GitRestoreBlock { root, path, block } => {
+                self.modal.close();
+                if self.prepare_git_panel_restore(std::path::Path::new(&path)) {
+                    self.git_diff_panel.apply_block(&root, &path, block, true);
+                }
+                self.relayout();
+            }
+            ModalAction::GitRestore { root, path } => {
+                self.modal.close();
+                self.git_diff_panel.restore_file(&root, &path);
+                self.relayout();
             }
             ModalAction::FileTreeDelete { path, .. } => {
                 self.modal
@@ -699,6 +840,11 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         let theme = self.ide_theme;
         let scale = self.chrome_scale;
         match kind {
+            ChromePageKind::GitDiff => {
+                if let Some(route) = self.active_git_diff_route() {
+                    self.draw_git_diff_route(sugarloaf, route, rect);
+                }
+            }
             ChromePageKind::Extensions => {
                 let ticking = self.extensions_page.tick_scroll();
                 self.extensions_page.set_viewport_height(rect.h);
@@ -738,6 +884,88 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         }
     }
 
+    /// Collect every cached file once per repository generation, not just the
+    /// selected path. Missing patches remain loading until a later generation.
+    pub(crate) fn sync_git_diff_route(&mut self, route: usize) {
+        let Some(view) = self.git_diff_views.get_mut(&route) else {
+            return;
+        };
+        let generation = self.git_diff_panel.diff_cache_generation();
+        // Closing the sidebar must not evict the last successful patch.
+        if view.commit_id.is_some()
+            || self.git_diff_panel.repo_root().as_ref() != Some(&view.root)
+            || self.git_diff_view_generations.get(&route) == Some(&generation)
+        {
+            return;
+        }
+        let files = self.git_diff_panel.files();
+        view.set_files(files.clone());
+        for file in files {
+            let path = std::path::Path::new(&file.path);
+            if let Some(lines) = self.git_diff_panel.diff_lines_for_path(path) {
+                view.set_file_lines(path, lines);
+            }
+        }
+        if let Some(error) = self.git_diff_panel.error() {
+            view.set_error(error);
+        }
+        self.git_diff_view_generations.insert(route, generation);
+    }
+
+    pub(crate) fn draw_git_diff_route(
+        &mut self,
+        sugarloaf: &mut Sugarloaf,
+        route: usize,
+        rect: Rect,
+    ) {
+        let view_focused = self.active_git_diff_route() == Some(route)
+            && !self.git_diff_panel.is_focused()
+            && !self.buffer_tabs.is_focused()
+            && !self
+                .file_tree
+                .as_ref()
+                .is_some_and(|tree| tree.is_focused())
+            && !self.notes_sidebar.is_focused()
+            && !self.agent_pane.as_ref().is_some_and(|pane| {
+                pane.side_panel().is_focused() || pane.detail_panel().is_focused()
+            })
+            && !self.chrome_overlay_active();
+        self.sync_git_diff_route(route);
+        if let Some(view) = self.git_diff_views.get_mut(&route) {
+            view.set_host_focused(view_focused);
+            if let Some(path) = view.document_path() {
+                if let Some(base) = self.git_diff_panel.diff_base_for_path(&path) {
+                    view.set_base_text(&path, base);
+                } else {
+                    if let Some(error) = self.git_diff_panel.diff_base_error(&path) {
+                        view.set_error(format!("Cannot load review baseline: {error}"));
+                    } else {
+                        self.git_diff_panel.request_diff_base(&path);
+                    }
+                }
+            }
+            let document_path = view.document_path();
+            let editor = self
+                .code_pane
+                .as_mut()
+                .filter(|pane| document_path.as_ref() == Some(&pane.path))
+                .or_else(|| {
+                    document_path
+                        .as_ref()
+                        .and_then(|path| self.parked_code_panes.get_mut(path))
+                });
+            view.render_with_editor(
+                sugarloaf,
+                rect,
+                0,
+                13.0 * self.chrome_scale,
+                &self.ide_theme,
+                editor,
+            );
+            self.editor_pane_animating |= view.needs_redraw();
+        }
+    }
+
     /// Paint the full-screen overlays (settings, modal) LAST, through
     /// sugarloaf's late-overlay pass so text from panels drawn earlier
     /// this frame can never bleed through the opaque surfaces (the
@@ -774,6 +1002,37 @@ impl<A: Send + Copy + 'static> Chrome<A> {
     /// input inside its page rect while the surrounding chrome strips
     /// keep theirs. Returns true when the event was consumed.
     pub(crate) fn handle_chrome_page_event(&mut self, event: &UiEvent) -> bool {
+        if matches!(
+            event,
+            UiEvent::PointerUp {
+                button: PointerButton::Left,
+                ..
+            } | UiEvent::Focus(false)
+        ) {
+            let released = self
+                .git_diff_views
+                .values_mut()
+                .fold(false, |released, view| view.pointer_up() || released);
+            if released && !self.chrome_overlay_active() {
+                return true;
+            }
+        }
+        if !self.chrome_overlay_active() {
+            if let UiEvent::PointerMove { x, y, .. } = event {
+                if self
+                    .git_diff_views
+                    .values_mut()
+                    .filter(|view| view.is_dragging())
+                    .any(|view| view.pointer_move(*x, *y))
+                {
+                    return true;
+                }
+            }
+        } else {
+            for view in self.git_diff_views.values_mut() {
+                view.pointer_up();
+            }
+        }
         let input_like = matches!(
             event,
             UiEvent::Key(_)
@@ -794,9 +1053,331 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             return self.handle_settings_overlay_event(event);
         }
         match self.active_chrome_page() {
+            Some(ChromePageKind::GitDiff) => self.handle_git_diff_page_event(event),
             Some(ChromePageKind::Extensions) => self.handle_extensions_page_event(event),
             Some(ChromePageKind::NeoWorld) => self.handle_neoworld_page_event(event),
             None => false,
+        }
+    }
+
+    pub fn scroll_git_diff_at(&mut self, x: f32, y: f32, dx: f32, dy: f32) -> bool {
+        if self.chrome_overlay_active()
+            || self.conversation_navigator.is_active()
+            || self.file_browser.is_active()
+            || self.command_palette.is_enabled()
+            || self.finder.is_enabled()
+            || !self.focused_content_rect().contains(x, y)
+        {
+            return false;
+        }
+        let Some(route) = self.active_git_diff_route() else {
+            return false;
+        };
+        if let Some(view) = self.git_diff_views.get_mut(&route) {
+            view.scroll(dy);
+            view.scroll_horizontal_at(x, y, dx);
+        }
+        true
+    }
+
+    /// Keep the exact block and source revision across the shared save barrier.
+    /// The whole-file gate owns readiness/provenance checks, not the payload.
+    pub fn prepare_git_panel_block_stage(
+        &mut self,
+        path: &std::path::Path,
+        block: neoism_protocol::git::GitChangeBlock,
+    ) -> bool {
+        let Some(root) = self.git_diff_panel.repo_root() else {
+            return false;
+        };
+        if self.pending_git_diff_save_stages.iter().any(
+            |(queued_root, queued_path, _)| queued_root == &root && queued_path == path,
+        ) || self.pending_git_diff_block_save_stages.iter().any(
+            |(queued_root, queued_path, _, _)| {
+                queued_root == &root && queued_path == path
+            },
+        ) {
+            return false;
+        }
+        if self.prepare_git_panel_stage(path) {
+            return true;
+        }
+        let Some(index) = self.pending_git_diff_save_stages.iter().position(
+            |(queued_root, queued_path, unstage)| {
+                queued_root == &root && queued_path == path && !unstage
+            },
+        ) else {
+            return false;
+        };
+        self.pending_git_diff_save_stages.remove(index);
+        let Some(revision) = self.code_pane.as_ref().map(|pane| pane.buffer.revision)
+        else {
+            return false;
+        };
+        let pending = (root, path.to_path_buf(), block, revision);
+        if !self.pending_git_diff_block_save_stages.contains(&pending) {
+            self.pending_git_diff_block_save_stages.push(pending);
+        }
+        false
+    }
+
+    pub fn take_git_diff_block_save_stages(
+        &mut self,
+    ) -> Vec<(
+        std::path::PathBuf,
+        std::path::PathBuf,
+        neoism_protocol::git::GitChangeBlock,
+        u64,
+    )> {
+        let root = self.git_diff_panel.repo_root();
+        self.pending_git_diff_block_save_stages
+            .retain(|(queued_root, _, _, _)| Some(queued_root) == root.as_ref());
+        if !self.pending_git_diff_block_save_stages.is_empty() {
+            if let Some(route) = self.active_git_diff_route() {
+                if let Some(view) = self.git_diff_views.get_mut(&route) {
+                    view.set_edit_focus(true);
+                }
+            }
+        }
+        std::mem::take(&mut self.pending_git_diff_block_save_stages)
+    }
+
+    fn drain_review_header_actions(&mut self, route: usize) {
+        let actions = self
+            .git_diff_views
+            .get_mut(&route)
+            .map(|v| v.take_actions())
+            .unwrap_or_default();
+        for action in actions {
+            use crate::panels::git_diff_view::GitDiffViewAction;
+            match action {
+                GitDiffViewAction::ChangeBlock {
+                    root,
+                    path,
+                    block,
+                    restore,
+                } => {
+                    if self.git_diff_panel.repo_root().as_ref() != Some(&root)
+                        || self.git_diff_panel.loading()
+                    {
+                        continue;
+                    }
+                    if restore {
+                        if self.prepare_git_panel_restore(std::path::Path::new(&path)) {
+                            self.open_chrome_modal(
+                                crate::panels::git_diff::review_actions::restore_block_confirmation(
+                                    root, path, block,
+                                ),
+                            );
+                        }
+                    } else {
+                        self.git_diff_panel.apply_block(&root, &path, block, false);
+                    }
+                }
+                GitDiffViewAction::OpenSource {
+                    root,
+                    path,
+                    line,
+                    column,
+                } => {
+                    self.pending_git_diff_source_opens
+                        .push(GitDiffSourceOpenRequest {
+                            root,
+                            path,
+                            line,
+                            column,
+                        });
+                }
+                GitDiffViewAction::Stage {
+                    root,
+                    path,
+                    unstage,
+                } => {
+                    if !unstage
+                        && self.canonical_diff_source_dirty(
+                            &root,
+                            std::path::Path::new(&path),
+                        )
+                    {
+                        self.pending_git_diff_save_stages.push((
+                            root,
+                            path.into(),
+                            unstage,
+                        ));
+                    } else {
+                        self.git_diff_panel.stage_path(&root, &path, unstage);
+                    }
+                }
+                GitDiffViewAction::StageAll { root } => {
+                    if self.code_pane.as_ref().is_some_and(|pane| pane.is_dirty())
+                        || self.parked_code_panes.values().any(|pane| pane.is_dirty())
+                    {
+                        self.notifications.push(
+                            "Save source edits before staging all files.",
+                            NotificationLevel::Warn,
+                        );
+                        continue;
+                    }
+                    if self.git_diff_panel.repo_root().as_ref() == Some(&root)
+                        && !self.git_diff_panel.loading()
+                    {
+                        self.git_diff_panel.stage_all();
+                    }
+                }
+                GitDiffViewAction::Commit { root } => {
+                    if self.git_diff_panel.repo_root().as_ref() == Some(&root)
+                        && !self.git_diff_panel.loading()
+                    {
+                        if !self.git_diff_panel.is_visible() {
+                            let branch = self.git_diff_panel.branch();
+                            self.git_diff_panel.open(Some(root), branch);
+                        }
+                        self.git_diff_panel.focus_commit_box(true);
+                    }
+                }
+                GitDiffViewAction::Restore { root, path } => {
+                    if self
+                        .canonical_diff_source_dirty(&root, std::path::Path::new(&path))
+                    {
+                        self.notifications.push(
+                            "Save or discard source edits before restoring this file.",
+                            NotificationLevel::Warn,
+                        );
+                        continue;
+                    }
+                    if self.git_diff_panel.repo_root().as_ref() == Some(&root)
+                        && !self.git_diff_panel.loading()
+                    {
+                        self.open_chrome_modal(
+                            crate::panels::git_diff::review_actions::restore_confirmation(
+                                root, path,
+                            ),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    fn handle_git_diff_page_event(&mut self, event: &UiEvent) -> bool {
+        if self.command_palette.is_enabled()
+            || self.finder.is_enabled()
+            || self.context_menu.is_visible()
+        {
+            return false;
+        }
+        let Some(route) = self.active_git_diff_route() else {
+            return false;
+        };
+        let rect = self.focused_content_rect();
+        match event {
+            UiEvent::PointerDown {
+                x,
+                y,
+                button: PointerButton::Left,
+                ..
+            } if rect.contains(*x, *y) => {
+                self.git_diff_panel.set_focused(false);
+                self.notes_sidebar.set_focused(false);
+                if let Some(tree) = self.file_tree.as_mut() {
+                    tree.set_focused(false);
+                }
+                self.buffer_tabs.set_focused(false);
+                if let Some(view) = self.git_diff_views.get_mut(&route) {
+                    view.pointer_down(*x, *y);
+                }
+                self.drain_review_header_actions(route);
+                true
+            }
+            UiEvent::PointerLeave => self
+                .git_diff_views
+                .get_mut(&route)
+                .is_some_and(|view| view.pointer_leave()),
+            UiEvent::PointerMove { x, y, .. } => self
+                .git_diff_views
+                .get_mut(&route)
+                .is_some_and(|view| view.pointer_move(*x, *y)),
+            UiEvent::PointerUp {
+                button: PointerButton::Left,
+                ..
+            } => self
+                .git_diff_views
+                .get_mut(&route)
+                .is_some_and(|view| view.pointer_up()),
+            UiEvent::Wheel {
+                dx,
+                dy,
+                mode,
+                modifiers,
+            } if rect.contains(self.last_pointer_pos.0, self.last_pointer_pos.1) => {
+                let (dx, dy) =
+                    if modifiers.contains(Modifiers::SHIFT) && dx.abs() <= f32::EPSILON {
+                        (*dy, 0.0)
+                    } else {
+                        (*dx, *dy)
+                    };
+                // Keep device identity until conversion. Reuse the native agent
+                // notch cap/three-row step, but never amplify pixel events:
+                // browser trackpad acceleration and momentum are already in dy.
+                let vertical = crate::editor::scroll_model::agent_timeline_browser_wheel(
+                    dy,
+                    match mode {
+                        WheelMode::Pixel => 0,
+                        WheelMode::Line => 1,
+                        WheelMode::Page => 2,
+                    },
+                    None,
+                    self.cell_h.max(14.0),
+                )
+                .pixels;
+                let dx = match mode {
+                    WheelMode::Pixel => dx,
+                    WheelMode::Line => dx * self.cell_w.max(8.0),
+                    WheelMode::Page => dx * rect.w,
+                };
+                if let Some(view) = self.git_diff_views.get_mut(&route) {
+                    view.scroll(vertical);
+                    view.scroll_horizontal_at(
+                        self.last_pointer_pos.0,
+                        self.last_pointer_pos.1,
+                        dx,
+                    );
+                }
+                true
+            }
+            UiEvent::Key(key)
+                if self.active_editor_pane_kind()
+                    != Some(super::content::EditorPaneKind::Code)
+                    && !self.git_diff_panel.is_focused()
+                    && !self.notes_sidebar.is_focused()
+                    && !self
+                        .file_tree
+                        .as_ref()
+                        .is_some_and(|tree| tree.is_focused())
+                    && self.buffer_tabs.focused_cursor_rect().is_none()
+                    && key.state == KeyState::Pressed
+                    && key.modifiers.is_empty() =>
+            {
+                let name = match &key.logical {
+                    LogicalKey::Named(NamedKey::ArrowDown) => "ArrowDown",
+                    LogicalKey::Named(NamedKey::ArrowUp) => "ArrowUp",
+                    LogicalKey::Named(NamedKey::ArrowLeft) => "ArrowLeft",
+                    LogicalKey::Named(NamedKey::ArrowRight) => "ArrowRight",
+                    LogicalKey::Named(NamedKey::Enter) => "Enter",
+                    LogicalKey::Named(NamedKey::Tab) => "Tab",
+                    LogicalKey::Named(NamedKey::Space) => " ",
+                    LogicalKey::Named(NamedKey::PageDown) => "PageDown",
+                    LogicalKey::Named(NamedKey::PageUp) => "PageUp",
+                    LogicalKey::Named(NamedKey::Home) => "Home",
+                    LogicalKey::Named(NamedKey::End) => "End",
+                    LogicalKey::Character(s) => s.as_str(),
+                    _ => return false,
+                };
+                self.git_diff_views
+                    .get_mut(&route)
+                    .is_some_and(|view| view.key(name))
+            }
+            _ => false,
         }
     }
 

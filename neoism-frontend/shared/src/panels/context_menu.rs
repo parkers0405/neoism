@@ -78,6 +78,13 @@ pub enum ContextMenuAction {
     ToggleFileTreeHidden,
     Agent(AgentContextAction),
     Lsp(LspContextAction),
+    CodeLsp {
+        action: LspContextAction,
+        path: std::path::PathBuf,
+        revision: u64,
+        line: usize,
+        column: usize,
+    },
     Workspace(WorkspaceContextAction),
     Notebook(NotebookContextAction),
     Epub(EpubContextAction),
@@ -193,6 +200,8 @@ pub enum WorkspaceContextAction {
 pub enum LspContextAction {
     Hover,
     Definition,
+    Declaration,
+    TypeDefinition,
     References,
     CodeAction,
     Rename,
@@ -208,6 +217,8 @@ impl LspContextAction {
         Some(match self {
             Self::Hover => "hover",
             Self::Definition => "definition",
+            Self::Declaration => "declaration",
+            Self::TypeDefinition => "type_definition",
             Self::References => "references",
             Self::CodeAction => "code_action",
             Self::Format => "format",
@@ -681,6 +692,12 @@ impl ContextMenu {
 
     pub fn selected_action(&self) -> Option<ContextMenuAction> {
         self.popover.content().selected_action().cloned()
+    }
+
+    pub fn action_at(&self, x: f32, y: f32) -> Option<ContextMenuAction> {
+        let index = self.hit_test(x, y).ok().flatten()?;
+        let item = self.popover.content().items().get(index)?;
+        item.enabled.then(|| item.action.clone())
     }
 
     fn push_scroll_lag(&mut self, old: usize) {
@@ -1266,6 +1283,95 @@ mod completion_tests {
                 .with_preview(entry.preview)
             })
             .collect()
+    }
+
+    #[test]
+    fn navigation_rows_preserve_the_right_click_target() {
+        let actions = [
+            LspContextAction::Definition,
+            LspContextAction::Declaration,
+            LspContextAction::TypeDefinition,
+            LspContextAction::References,
+        ];
+        let items = actions
+            .into_iter()
+            .map(|action| {
+                ContextMenuItem::new(
+                    "Navigate",
+                    "",
+                    ContextMenuAction::CodeLsp {
+                        action,
+                        path: "/workspace/source.nix".into(),
+                        revision: 7,
+                        line: 45,
+                        column: 23,
+                    },
+                )
+            })
+            .collect();
+        let mut menu = ContextMenu::new();
+        menu.open("", items, 100.0, 150.0, 800.0, 800.0);
+        let [x, y, _, _] = menu.rect().unwrap();
+        for (index, action) in actions.into_iter().enumerate() {
+            menu.hover(
+                x + 20.0,
+                y + MENU_PADDING + ITEM_HEIGHT * (index as f32 + 0.5),
+            );
+            assert_eq!(
+                menu.selected_action(),
+                Some(ContextMenuAction::CodeLsp {
+                    action,
+                    path: "/workspace/source.nix".into(),
+                    revision: 7,
+                    line: 45,
+                    column: 23,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn disabled_navigation_row_cannot_execute_the_previous_selection() {
+        let mut unsupported = ContextMenuItem::new(
+            "Declaration",
+            "Not supported",
+            ContextMenuAction::Lsp(LspContextAction::Declaration),
+        );
+        unsupported.enabled = false;
+        let mut menu = ContextMenu::new();
+        menu.open(
+            "",
+            vec![
+                ContextMenuItem::new(
+                    "Definition",
+                    "",
+                    ContextMenuAction::Lsp(LspContextAction::Definition),
+                ),
+                unsupported,
+                ContextMenuItem::new(
+                    "References",
+                    "",
+                    ContextMenuAction::Lsp(LspContextAction::References),
+                ),
+            ],
+            100.0,
+            150.0,
+            800.0,
+            800.0,
+        );
+        let [x, y, _, _] = menu.rect().unwrap();
+        let disabled_y = y + MENU_PADDING + ITEM_HEIGHT * 1.5;
+        assert_eq!(menu.hit_test(x + 20.0, disabled_y), Ok(Some(1)));
+        menu.hover(x + 20.0, disabled_y);
+        assert_eq!(
+            menu.selected_action(),
+            Some(ContextMenuAction::Lsp(LspContextAction::Definition))
+        );
+        assert_eq!(menu.action_at(x + 20.0, disabled_y), None);
+        assert_eq!(
+            menu.action_at(x + 20.0, disabled_y + ITEM_HEIGHT),
+            Some(ContextMenuAction::Lsp(LspContextAction::References))
+        );
     }
 
     #[test]

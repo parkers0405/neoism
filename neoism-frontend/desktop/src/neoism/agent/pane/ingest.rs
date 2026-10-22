@@ -2256,38 +2256,17 @@ impl NeoismAgentPane {
                     );
                     changed = true;
                 }
-                Ok(NeoismAgentBackgroundUpdate::ConfigDefaultsLoaded(defaults)) => {
-                    self.config_chip_hydration.complete();
-                    if let Some(readiness) = defaults.provider_readiness {
-                        self.provider_readiness = Some(readiness);
-                    }
-                    if let Some(agent) = defaults.agent {
-                        match agent.as_str() {
-                            "build" => self.mode = NeoismAgentMode::Build,
-                            "plan" => self.mode = NeoismAgentMode::Plan,
-                            _ => {}
-                        }
-                        self.agent = Some(agent);
-                    }
-                    if self.model.trim().is_empty() {
-                        if let Some(model) = defaults.model {
-                            self.model = model;
-                        }
-                    }
-                    if self.thinking.is_none() {
-                        self.thinking = defaults.thinking;
-                    }
-                    if let Some(visible) = defaults.input_help_visible {
-                        self.set_input_help_visible(visible);
-                    }
-                    if let Some(visible) = defaults.sidebar_visible {
-                        self.side_panel.set_user_hidden(!visible);
-                    }
-                    self.execute_refresh_model_context_limit_command();
-                    changed = true;
+                Ok(NeoismAgentBackgroundUpdate::ConfigDefaultsLoaded { target, defaults }) => {
+                    changed |= self.apply_loaded_config_defaults(target, defaults);
                 }
-                Ok(NeoismAgentBackgroundUpdate::ConfigDefaultsFailed) => {
-                    self.config_chip_hydration.complete();
+                Ok(NeoismAgentBackgroundUpdate::ConfigDefaultsFailed(target)) => {
+                    if target.generation != self.config_defaults_generation
+                        || target.directory != self.directory
+                        || !target.scope.is_current(&self.server, self.directory.as_deref())
+                    {
+                        continue;
+                    }
+                    self.config_chip_hydration.cancel();
                     changed = true;
                 }
                 Ok(NeoismAgentBackgroundUpdate::ModelContextLimitRefreshed {
@@ -2299,14 +2278,18 @@ impl NeoismAgentPane {
                         changed = true;
                     }
                 }
-                Ok(NeoismAgentBackgroundUpdate::ModelOptionsRefreshed(result)) => {
-                    let result = result.map(|(options, readiness)| {
-                        if let Some(readiness) = readiness {
-                            self.provider_readiness = Some(readiness);
-                            changed = true;
-                        }
-                        options
-                    });
+                Ok(NeoismAgentBackgroundUpdate::ProviderReadinessRefreshed { scope, result }) => {
+                    if !scope.is_current(&self.server, self.directory.as_deref()) { continue; }
+                    if let Ok(readiness) = result {
+                        self.provider_readiness = Some(readiness);
+                        changed = true;
+                    }
+                }
+                Ok(NeoismAgentBackgroundUpdate::ModelOptionsRefreshed { scope, result }) => {
+                    if !scope.is_current(&self.server, self.directory.as_deref()) { continue; }
+                    if result.is_err() && self.picker.as_ref().is_some_and(|picker| picker.kind == NeoismAgentPickerKind::Model && !picker.loading) {
+                        continue; // Background failure must not replace a last-good snapshot.
+                    }
                     if let Some(picker) = self
                         .picker
                         .as_ref()
@@ -2329,7 +2312,11 @@ impl NeoismAgentPane {
                         changed = true;
                     }
                 }
-                Ok(NeoismAgentBackgroundUpdate::AgentOptionsRefreshed(result)) => {
+                Ok(NeoismAgentBackgroundUpdate::AgentOptionsRefreshed { scope, result }) => {
+                    if !scope.is_current(&self.server, self.directory.as_deref()) { continue; }
+                    if result.is_err() && self.picker.as_ref().is_some_and(|picker| picker.kind == NeoismAgentPickerKind::Agent && !picker.loading) {
+                        continue;
+                    }
                     if let Some(picker) = self
                         .picker
                         .as_mut()
@@ -2679,6 +2666,19 @@ impl NeoismAgentPane {
                         .remove(&session_id)
                         .unwrap_or_else(CachedAgentSession::live_only);
                     let mut cached_live = std::mem::take(&mut cached.messages);
+                    // A process-cache preview is not live authority. Strip only
+                    // its untouched blocks before the existing live merge, so
+                    // deleted/shortened server history cannot be resurrected.
+                    super::super::api::conversation_cache::discard_unchanged_preview(
+                        &mut cached_live,
+                        cached.initial_history_preview.take(),
+                    );
+                    if active {
+                        super::super::api::conversation_cache::discard_unchanged_preview(
+                            &mut self.messages,
+                            self.initial_history_preview.take(),
+                        );
+                    }
                     reconcile_cached_pending_user_prompts(
                         &mut messages,
                         &mut cached_live,
@@ -2796,6 +2796,24 @@ impl NeoismAgentPane {
                 }) => {
                     self.session_preloads_in_flight.remove(&session_id);
                     self.session_preloads_force_pending.remove(&session_id);
+                    if self.session_id.as_deref() == Some(session_id.as_str())
+                        && self.initial_history_preview.is_some()
+                    {
+                        super::super::api::conversation_cache::discard_unchanged_preview(
+                            &mut self.messages,
+                            self.initial_history_preview.take(),
+                        );
+                        self.invalidate_timeline_layout();
+                    }
+                    if let Some(cached) = self.session_cache.get_mut(&session_id) {
+                        if cached.initial_history_preview.is_some() {
+                            super::super::api::conversation_cache::discard_unchanged_preview(
+                                &mut cached.messages,
+                                cached.initial_history_preview.take(),
+                            );
+                            cached.invalidate_timeline_layout();
+                        }
+                    }
                     if self.pending_session_switch.as_deref() == Some(session_id.as_str())
                         || self.session_id.as_deref() == Some(session_id.as_str())
                     {

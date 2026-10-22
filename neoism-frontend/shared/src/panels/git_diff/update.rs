@@ -17,82 +17,193 @@ use super::{
     SCROLL_ANIMATION_LENGTH,
 };
 
-/// Build the flattened tree rows from the (path-sorted) file list and
-/// the collapsed-directory set. Directory group nodes are emitted just
-/// before their first child; a collapsed directory swallows every file
-/// under it (the sorted order guarantees those files are contiguous).
+/// Build section-local directory trees. Indices always address the host list;
+/// folder membership includes hidden descendants and never crosses a section.
 pub(super) fn build_visual_rows(
     files: &[FileChange],
     collapsed: &HashSet<String>,
 ) -> Vec<VisualRow> {
-    let mut rows: Vec<VisualRow> = Vec::with_capacity(files.len() + 8);
-    // Directory paths currently "open" along the walk (deepest last).
-    let mut open_stack: Vec<String> = Vec::new();
-    // While set, files whose path starts with this prefix are hidden
-    // (they live under a collapsed directory).
-    let mut skip_prefix: Option<String> = None;
-
-    for (fi, f) in files.iter().enumerate() {
-        if let Some(pref) = &skip_prefix {
-            if f.path.starts_with(pref.as_str()) {
-                continue;
+    fn append(
+        rows: &mut Vec<VisualRow>,
+        files: &[FileChange],
+        indices: &[usize],
+        section: &str,
+        prefix: &str,
+        depth: usize,
+        collapsed: &HashSet<String>,
+    ) {
+        let mut dirs = std::collections::BTreeMap::<String, Vec<usize>>::new();
+        let mut leaves = Vec::new();
+        for &index in indices {
+            let relative = &files[index].path[prefix.len()..];
+            if let Some((dir, _)) = relative.split_once('/') {
+                dirs.entry(format!("{prefix}{dir}"))
+                    .or_default()
+                    .push(index);
+            } else {
+                leaves.push(index);
             }
-            skip_prefix = None;
         }
-
-        // Cumulative directory paths for this file's parent chain.
-        let mut want: Vec<String> = Vec::new();
-        let mut cum = String::new();
-        let comps: Vec<&str> = f.path.split('/').collect();
-        let dir_count = comps.len().saturating_sub(1);
-        for c in &comps[..dir_count] {
-            if !cum.is_empty() {
-                cum.push('/');
-            }
-            cum.push_str(c);
-            want.push(cum.clone());
-        }
-
-        // Truncate the open stack to the shared prefix, then push (and
-        // emit rows for) the newly-entered directories.
-        let mut common = 0;
-        while common < open_stack.len()
-            && common < want.len()
-            && open_stack[common] == want[common]
-        {
-            common += 1;
-        }
-        open_stack.truncate(common);
-        let mut hidden_by_collapse = false;
-        for (depth, path) in want.iter().enumerate().skip(common) {
-            let is_collapsed = collapsed.contains(path);
+        for (path, children) in dirs {
+            let key = format!("{section}/{path}");
+            let is_collapsed = collapsed.contains(&key);
             rows.push(VisualRow {
                 depth,
-                kind: VisualRowKind::Dir {
-                    path: path.clone(),
+                kind: VisualRowKind::Group {
+                    label: key,
+                    path: Some(path.clone()),
+                    file_indices: children.clone(),
                     collapsed: is_collapsed,
                 },
             });
-            open_stack.push(path.clone());
-            if is_collapsed {
-                skip_prefix = Some(format!("{path}/"));
-                hidden_by_collapse = true;
-                break;
+            if !is_collapsed {
+                append(
+                    rows,
+                    files,
+                    &children,
+                    section,
+                    &format!("{path}/"),
+                    depth + 1,
+                    collapsed,
+                );
             }
         }
-        if hidden_by_collapse {
+        leaves.sort_by(|&a, &b| files[a].path.cmp(&files[b].path));
+        rows.extend(leaves.into_iter().map(|file_index| VisualRow {
+            depth,
+            kind: VisualRowKind::File { file_index },
+        }));
+    }
+
+    let mut rows = Vec::with_capacity(files.len() + 2);
+    for (label, untracked) in [("Tracked", false), ("Untracked", true)] {
+        let indices: Vec<_> = files
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| {
+                (f.status == super::types::FileStatus::Untracked) == untracked
+            })
+            .map(|(index, _)| index)
+            .collect();
+        if indices.is_empty() {
             continue;
         }
-
+        let is_collapsed = collapsed.contains(label);
         rows.push(VisualRow {
-            depth: dir_count,
-            kind: VisualRowKind::File { file_index: fi },
+            depth: 0,
+            kind: VisualRowKind::Group {
+                label: label.into(),
+                path: None,
+                file_indices: indices.clone(),
+                collapsed: is_collapsed,
+            },
         });
+        if !is_collapsed {
+            append(&mut rows, files, &indices, label, "", 1, collapsed);
+        }
     }
     rows
 }
 
 impl GitDiffPanel {
+    pub fn update_latest_commit_hover(&mut self, x: f32, y: f32) -> bool {
+        let hovered = self.visible
+            && (self.latest_commit_rect.contains(x, y)
+                || (self.latest_commit_hover
+                    && self.latest_commit_popup_rect.contains(x, y)));
+        let changed = self.latest_commit_hover != hovered;
+        self.latest_commit_hover = hovered;
+        changed
+    }
+    pub fn copy_latest_commit(&mut self) {
+        self.latest_commit_copy = self.latest_commit().map(|commit| commit.sha);
+    }
+    pub fn take_latest_commit_copy(&mut self) -> Option<String> {
+        self.latest_commit_copy.take()
+    }
+    pub fn request_latest_commit(&self) {
+        if let Some(io) = self.io.as_ref().filter(|io| io.is_host_driven()) {
+            io.request_latest_commit();
+        }
+    }
+    pub fn latest_commit(&self) -> Option<neoism_protocol::git::CommitSummary> {
+        self.data
+            .lock()
+            .ok()
+            .and_then(|data| data.latest_commit.clone())
+    }
+    pub fn host_set_latest_commit(
+        &mut self,
+        commit: Option<neoism_protocol::git::CommitSummary>,
+    ) {
+        if let Ok(mut data) = self.data.lock() {
+            data.latest_commit = commit;
+        }
+    }
+    pub fn host_commit_detail(&mut self, detail: neoism_protocol::git::GitCommitDetail) {
+        if let Ok(mut data) = self.data.lock() {
+            data.commit_loading = false;
+            if let Some(root) = data.repo_root.clone() {
+                data.completed_commit_details.push((root, detail));
+            }
+        }
+    }
+    pub fn take_commit_details(
+        &mut self,
+    ) -> Vec<(PathBuf, neoism_protocol::git::GitCommitDetail)> {
+        self.data
+            .lock()
+            .ok()
+            .map(|mut data| std::mem::take(&mut data.completed_commit_details))
+            .unwrap_or_default()
+    }
+    pub fn open_latest_commit(&mut self) {
+        let Some(commit) = self.latest_commit() else {
+            return;
+        };
+        let Some(root) = self.repo_root() else {
+            return;
+        };
+        let Some(io) = self.io.clone() else {
+            return;
+        };
+        if let Ok(mut data) = self.data.lock() {
+            if data.commit_loading {
+                return;
+            }
+            data.commit_loading = true;
+        }
+        if io.is_host_driven() {
+            io.request_commit(&commit.sha);
+            return;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let data = self.data.clone();
+            std::thread::spawn(move || {
+                let result = io.read_commit(&root, &commit.sha);
+                if let Ok(mut data) = data.lock() {
+                    if data.repo_root.as_ref() != Some(&root) {
+                        return;
+                    }
+                    data.commit_loading = false;
+                    match result {
+                        Ok(detail) => data.completed_commit_details.push((root, detail)),
+                        Err(error) => data.error = Some(error),
+                    }
+                }
+            });
+        }
+        #[cfg(target_arch = "wasm32")]
+        if let Ok(mut data) = self.data.lock() {
+            data.commit_loading = false;
+            data.error = Some(format!(
+                "Commit details require a Git host provider for {}",
+                root.display()
+            ));
+        }
+    }
+
     pub fn is_visible(&self) -> bool {
         self.visible
     }
@@ -168,11 +279,7 @@ impl GitDiffPanel {
                 let next = leaves[p + 1];
                 let _ = self.select_file_with_reveal(next, true);
             }
-            Some(_) => {
-                // On the last visible file — let the diff card take the
-                // keystroke so ↓ keeps reading the last file's diff.
-                self.scroll_diff_rows(2);
-            }
+            Some(_) => {}
             None => {
                 // Selection is hidden under a collapsed folder — land on
                 // the first visible leaf.
@@ -191,7 +298,7 @@ impl GitDiffPanel {
         let pos = leaves.iter().position(|&fi| fi == self.selected);
         self.scroll_selected_into_view();
         match pos {
-            Some(0) | None => self.scroll_diff_rows(-2),
+            Some(0) | None => {}
             Some(p) => {
                 let prev = leaves[p - 1];
                 let _ = self.select_file_with_reveal(prev, true);
@@ -341,7 +448,7 @@ impl GitDiffPanel {
             .iter()
             .filter_map(|r| match r.kind {
                 VisualRowKind::File { file_index } => Some(file_index),
-                VisualRowKind::Dir { .. } => None,
+                VisualRowKind::Group { .. } => None,
             })
             .collect()
     }
@@ -359,9 +466,9 @@ impl GitDiffPanel {
     pub fn toggle_folder(&mut self, visual_ix: usize) {
         let path = match self.visual_rows.get(visual_ix) {
             Some(VisualRow {
-                kind: VisualRowKind::Dir { path, .. },
+                kind: VisualRowKind::Group { label, .. },
                 ..
-            }) => path.clone(),
+            }) => label.clone(),
             _ => return,
         };
         if !self.collapsed_dirs.remove(&path) {
@@ -374,28 +481,32 @@ impl GitDiffPanel {
 
     pub fn toggle_folder_stage(&mut self, visual_ix: usize) {
         let Some(VisualRow {
-            kind: VisualRowKind::Dir { path, .. },
+            kind: VisualRowKind::Group { file_indices, .. },
             ..
         }) = self.visual_rows.get(visual_ix)
         else {
             return;
         };
-        let prefix = format!("{path}/");
-        let path = path.clone();
-        let all_staged = self.data.lock().ok().is_some_and(|d| {
-            let mut children = d
-                .files
-                .iter()
-                .filter(|f| f.path.starts_with(&prefix))
-                .peekable();
-            children.peek().is_some() && children.all(|f| f.staged)
-        });
+        let files = self.files();
+        let children: Vec<_> = file_indices
+            .iter()
+            .filter_map(|&index| files.get(index).cloned())
+            .collect();
+        if children.is_empty() {
+            return;
+        }
+        let all_staged = children
+            .iter()
+            .all(|f| f.staged && f.status != super::types::FileStatus::Mixed);
         self.run_mutation(move |io, root| {
-            if all_staged {
-                io.unstage(root, &path)
-            } else {
-                io.stage(root, &path)
+            for file in children {
+                if all_staged {
+                    io.unstage(root, &file.path)?;
+                } else if !file.staged || file.status == super::types::FileStatus::Mixed {
+                    io.stage(root, &file.path)?;
+                }
             }
+            Ok(())
         });
     }
 
@@ -404,27 +515,17 @@ impl GitDiffPanel {
         self.divider_dragging
     }
 
-    pub fn drag_divider(&mut self, y: f32) -> bool {
-        if !self.divider_dragging {
-            return false;
-        }
-        // Store the Files body height unscaled so resizing the window or UI
-        // scale does not change the user's split preference.
-        self.files_height_override = Some(
-            ((y - self.files_card_rect.y) / self.scale - diff_card::HEADER_HEIGHT)
-                .max(FILE_ROW_HEIGHT * 2.0),
-        );
-        true
+    /// Compatibility shim: the sidebar no longer contains a split divider.
+    pub fn drag_divider(&mut self, _y: f32) -> bool {
+        false
     }
 
     pub fn end_divider_drag(&mut self) -> bool {
         std::mem::take(&mut self.divider_dragging)
     }
 
-    pub fn is_hovering_divider(&self, x: f32, y: f32) -> bool {
-        self.visible
-            && !self.actions_menu_contains(x, y)
-            && self.divider_rect.contains(x, y)
+    pub fn is_hovering_divider(&self, _x: f32, _y: f32) -> bool {
+        false
     }
 
     /// Returns the (path, repo_root) of the currently-selected file so
@@ -447,6 +548,79 @@ impl GitDiffPanel {
 
     pub fn branch(&self) -> Option<String> {
         self.data.lock().ok()?.branch.clone()
+    }
+
+    /// Current branch tracking ref. Feed this after each status/branch refresh.
+    pub fn set_upstream(&mut self, upstream: Option<String>) {
+        if let Ok(mut data) = self.data.lock() {
+            data.upstream = upstream.filter(|s| !s.trim().is_empty());
+        }
+    }
+
+    pub fn upstream(&self) -> Option<String> {
+        self.data.lock().ok()?.upstream.clone()
+    }
+
+    pub fn push_button_label(&self) -> &'static str {
+        if self.upstream().is_some() {
+            "Push"
+        } else {
+            "Publish"
+        }
+    }
+
+    pub fn push_button_enabled(&self) -> bool {
+        self.git_action_enabled(super::types::GitAction::Push)
+            && self.branch().is_some_and(|b| !b.trim().is_empty())
+    }
+
+    /// Dispatch the primary footer action (the arrow remains ActionsButton).
+    pub fn activate_push_button(&mut self) {
+        if !self.push_button_enabled() {
+            return;
+        }
+        self.close_actions_menu();
+        if self.upstream().is_some() {
+            self.push();
+        } else {
+            self.publish();
+        }
+    }
+
+    pub fn publish(&mut self) {
+        self.run_mutation(|io, root| io.publish(root));
+    }
+
+    /// Snapshot for separate diff tabs. Accepts repo-relative or absolute paths.
+    /// None means not loaded; Some(empty) is a loaded, empty patch.
+    pub fn diff_lines_for_path(
+        &self,
+        path: &std::path::Path,
+    ) -> Option<Vec<crate::widgets::diff_card::DiffLine>> {
+        let data = self.data.lock().ok()?;
+        let key = data
+            .repo_root
+            .as_ref()
+            .and_then(|root| {
+                neoism_protocol::host_path::HostPath::new(root.to_string_lossy())
+                    .relative(&path.to_string_lossy())
+            })
+            .unwrap_or_else(|| path.to_string_lossy().into_owned());
+        if !data.loading
+            && data.error.is_none()
+            && !data.files.iter().any(|file| file.path == key)
+        {
+            return Some(Vec::new());
+        }
+        data.diffs.get(&key).cloned()
+    }
+
+    /// Changes whenever cached patches are replaced/invalidated.
+    pub fn diff_cache_generation(&self) -> u64 {
+        self.data
+            .lock()
+            .map(|d| d.diff_cache_generation)
+            .unwrap_or(0)
     }
 
     pub fn repo_root(&self) -> Option<PathBuf> {
@@ -476,9 +650,7 @@ impl GitDiffPanel {
     }
 
     pub fn is_animating(&self) -> bool {
-        self.file_scroll_spring.position != 0.0
-            || self.diff_scroll_spring.position != 0.0
-            || self.open_progress() < 1.0
+        self.file_scroll_spring.position != 0.0 || self.open_progress() < 1.0
     }
 
     /// Cursor caret rect (window-logical) so the screen layer can
@@ -497,7 +669,10 @@ impl GitDiffPanel {
             return true;
         }
         if let Ok(data) = self.data.lock() {
-            if data.loading {
+            if data.loading
+                || data.commit_loading
+                || !data.completed_commit_details.is_empty()
+            {
                 return true;
             }
         }
@@ -584,6 +759,11 @@ impl GitDiffPanel {
                 Err(_) => return,
             };
             let same_repo = data.repo_root.as_deref() == repo_root.as_deref();
+            if !same_repo || data.branch != branch {
+                data.upstream = None;
+                data.latest_commit = None;
+                data.completed_commit_message = None;
+            }
             if let Some(last) = data.last_refresh {
                 if same_repo
                     && now.saturating_duration_since(last).as_millis()
@@ -607,7 +787,11 @@ impl GitDiffPanel {
             if let Ok(mut data) = self.data.lock() {
                 data.loading = false;
                 data.files.clear();
+                data.diff_cache_generation = data.diff_cache_generation.wrapping_add(1);
                 data.diffs.clear();
+                data.base_texts.clear();
+                data.base_pending.clear();
+                data.base_errors.clear();
                 data.error = Some("Not a git repository".to_string());
             }
             return;
@@ -615,6 +799,7 @@ impl GitDiffPanel {
 
         if let Some(io) = self.io.as_ref().filter(|io| io.is_host_driven()) {
             let _ = io.collect_files(&root);
+            io.request_latest_commit();
             return;
         }
 
@@ -633,6 +818,8 @@ impl GitDiffPanel {
             let arc = Arc::clone(&self.data);
             std::thread::spawn(move || {
                 let files = io.collect_files(&root);
+                let upstream = io.upstream(&root);
+                let latest_commit = io.latest_commit(&root);
                 let first_diff = files
                     .first()
                     .map(|f| (f.path.clone(), super::parse::load_diff(&root, f)));
@@ -642,7 +829,13 @@ impl GitDiffPanel {
                 }
                 data.loading = false;
                 data.files = files;
+                data.upstream = upstream;
+                data.latest_commit = latest_commit;
+                data.diff_cache_generation = data.diff_cache_generation.wrapping_add(1);
                 data.diffs.clear();
+                data.base_texts.clear();
+                data.base_pending.clear();
+                data.base_errors.clear();
                 if let Some((path, diff)) = first_diff {
                     data.diffs.insert(path, diff);
                 }
@@ -658,6 +851,7 @@ impl GitDiffPanel {
             // `loading` set for the host to clear.
             if let Some(io) = self.io.clone() {
                 let _ = io.collect_files(&root);
+                io.request_latest_commit();
             }
         }
     }
@@ -668,6 +862,17 @@ impl GitDiffPanel {
     /// refresh thread's store-back.
     pub fn host_set_repo(&mut self, root: Option<PathBuf>, branch: Option<String>) {
         if let Ok(mut data) = self.data.lock() {
+            if data.repo_root != root {
+                data.commit_loading = false;
+                data.completed_commit_details.clear();
+            }
+            if data.repo_root != root || data.branch != branch {
+                data.base_texts.clear();
+                data.base_pending.clear();
+                data.base_errors.clear();
+                data.upstream = None;
+                data.completed_commit_message = None;
+            }
             data.repo_root = root;
             data.branch = branch;
         }
@@ -679,7 +884,12 @@ impl GitDiffPanel {
             data.loading = false;
             data.error = None;
             data.files = files;
+            data.review_load_id = None;
+            data.diff_cache_generation = data.diff_cache_generation.wrapping_add(1);
             data.diffs.clear();
+            data.base_texts.clear();
+            data.base_pending.clear();
+            data.base_errors.clear();
         }
         if self.selected >= file_count {
             self.selected = 0;
@@ -691,8 +901,9 @@ impl GitDiffPanel {
     /// `git diff` patch text (hunk `@@` headers included).
     pub fn host_set_diff_text(&mut self, path: &str, patch: &str) {
         let mut lines = Vec::new();
-        super::parse::parse_diff_into(patch.as_bytes(), &mut lines);
+        super::parse::parse_diff_into_with_headers(patch.as_bytes(), &mut lines);
         if let Ok(mut data) = self.data.lock() {
+            data.diff_cache_generation = data.diff_cache_generation.wrapping_add(1);
             data.diffs.insert(path.to_string(), lines);
         }
     }
@@ -702,6 +913,7 @@ impl GitDiffPanel {
     pub fn host_set_error(&mut self, message: String) {
         if let Ok(mut data) = self.data.lock() {
             data.loading = false;
+            data.commit_loading = false;
             data.error = Some(message);
         }
     }
@@ -722,6 +934,9 @@ impl GitDiffPanel {
     /// thread's `data.branch = Some(target)`.
     pub fn host_set_branch(&mut self, branch: Option<String>) {
         if let Ok(mut data) = self.data.lock() {
+            if data.branch != branch {
+                data.upstream = None;
+            }
             data.branch = branch;
         }
     }
@@ -797,6 +1012,71 @@ impl GitDiffPanel {
         });
     }
 
+    /// Explicit review intent, validated against the current repository snapshot.
+    pub fn stage_path(&mut self, root: &std::path::Path, path: &str, unstage: bool) {
+        if self.loading() || self.repo_root().as_deref() != Some(root) {
+            return;
+        }
+        let valid = self.files().iter().any(|f| {
+            f.path == path
+                && (f.staged && f.status != super::types::FileStatus::Mixed) == unstage
+        });
+        if !valid {
+            return;
+        }
+        let path = path.to_owned();
+        self.run_mutation(move |io, root| {
+            if unstage {
+                io.unstage(root, &path)
+            } else {
+                io.stage(root, &path)
+            }
+        });
+    }
+
+    /// Call only after confirmation. Index and untracked files are never discarded.
+    pub fn restore_file(&mut self, root: &std::path::Path, path: &str) {
+        if self.loading() || self.repo_root().as_deref() != Some(root) {
+            return;
+        }
+        let valid = self.files().iter().any(|f| {
+            f.path == path
+                && f.status != super::types::FileStatus::Untracked
+                && (!f.staged || f.status == super::types::FileStatus::Mixed)
+        });
+        if !valid {
+            return;
+        }
+        let path = path.to_owned();
+        self.run_mutation(move |io, root| io.restore(root, &path));
+    }
+
+    /// Hosts must complete canonical save/restore preparation before dispatch.
+    pub fn apply_block(
+        &mut self,
+        root: &std::path::Path,
+        path: &str,
+        block: neoism_protocol::git::GitChangeBlock,
+        restore: bool,
+    ) -> bool {
+        if self.loading()
+            || self.io.is_none()
+            || self.repo_root().as_deref() != Some(root)
+            || (block.old_lines.is_empty() && block.new_lines.is_empty())
+            || path.is_empty()
+            // A retained canonical source can have new unsaved changes before
+            // Git status sees them. The backend validates the exact block.
+            || (restore && self.files().iter().any(|file| {
+                file.path == path && file.status == super::types::FileStatus::Untracked
+            }))
+        {
+            return false;
+        }
+        let path = path.to_owned();
+        self.run_mutation(move |io, root| io.apply_block(root, &path, &block, restore));
+        true
+    }
+
     /// Toggle stage/unstage for the currently-selected file.
     pub fn toggle_stage_selected(&mut self) {
         self.toggle_stage(self.selected);
@@ -811,7 +1091,7 @@ impl GitDiffPanel {
             .map(|d| {
                 d.files
                     .iter()
-                    .filter(|f| !f.staged)
+                    .filter(|f| !f.staged || f.status == super::types::FileStatus::Mixed)
                     .map(|f| f.path.clone())
                     .collect()
             })
@@ -834,7 +1114,12 @@ impl GitDiffPanel {
         self.data
             .lock()
             .ok()
-            .map(|d| !d.files.is_empty() && d.files.iter().all(|f| f.staged))
+            .map(|d| {
+                !d.files.is_empty()
+                    && d.files
+                        .iter()
+                        .all(|f| f.staged && f.status != super::types::FileStatus::Mixed)
+            })
             .unwrap_or(false)
     }
 
@@ -877,33 +1162,28 @@ impl GitDiffPanel {
 
     // ── Focus sections (Alt+Up/Down) ─────────────────────────────────
 
-    /// Move focus to the previous section (Alt+Up): Commit → Diff →
-    /// Files → Branch. Stops at Branch (the topmost section).
+    /// Alt+Up: Commit → footer Branch → Files; clamp at Files.
     pub fn section_focus_prev(&mut self) {
         self.section = match self.section {
-            FocusSection::Commit => FocusSection::Diff,
-            FocusSection::Diff => FocusSection::Files,
-            FocusSection::Files | FocusSection::Branch => FocusSection::Branch,
+            FocusSection::Commit => FocusSection::Branch,
+            FocusSection::Branch => FocusSection::Files,
+            FocusSection::Files => FocusSection::Files,
         };
         self.sync_section_focus();
     }
 
-    /// Move focus to the next section (Alt+Down): Branch → Files → Diff
-    /// → Commit. Stops at Commit (the bottommost section). The Diff
-    /// section parks focus on the changes card so ↑/↓ scroll the diff.
+    /// Alt+Down: Files → footer Branch → Commit; clamp at Commit.
     pub fn section_focus_next(&mut self) {
         self.section = match self.section {
-            FocusSection::Branch => FocusSection::Files,
-            FocusSection::Files => FocusSection::Diff,
-            FocusSection::Diff | FocusSection::Commit => FocusSection::Commit,
+            FocusSection::Files => FocusSection::Branch,
+            FocusSection::Branch | FocusSection::Commit => FocusSection::Commit,
         };
         self.sync_section_focus();
     }
 
-    /// True when the diff/changes card holds keyboard focus (drives its
-    /// focus ring and routes plain ↑/↓ into `scroll_diff_keys`).
+    /// Legacy host query: the sidebar never owns a diff focus section.
     pub fn diff_section_focused(&self) -> bool {
-        self.visible && self.focused && self.section == FocusSection::Diff
+        false // Diff previews live in route tabs, never an invisible sidebar stop.
     }
 
     /// Keep the derived focus flags (commit-box ownership, checkbox
@@ -967,7 +1247,10 @@ impl GitDiffPanel {
                 !self.commit_input.text().trim().is_empty()
                     && data.files.iter().any(|f| f.staged)
             }
-            GitAction::StageAll => data.files.iter().any(|f| !f.staged),
+            GitAction::StageAll => data
+                .files
+                .iter()
+                .any(|f| !f.staged || f.status == super::types::FileStatus::Mixed),
             GitAction::UnstageAll => data.files.iter().any(|f| f.staged),
             GitAction::ToggleStageSelected => data.files.get(self.selected).is_some(),
             _ => true,
@@ -1294,6 +1577,8 @@ impl GitDiffPanel {
             std::thread::spawn(move || {
                 let result = io.checkout(&root, &target);
                 let files = io.collect_files(&root);
+                let upstream = io.upstream(&root);
+                let latest_commit = io.latest_commit(&root);
                 let first_diff = files
                     .first()
                     .map(|f| (f.path.clone(), super::parse::load_diff(&root, f)));
@@ -1307,7 +1592,13 @@ impl GitDiffPanel {
                     Err(e) => data.error = Some(e),
                 }
                 data.files = files;
+                data.upstream = upstream;
+                data.latest_commit = latest_commit;
+                data.diff_cache_generation = data.diff_cache_generation.wrapping_add(1);
                 data.diffs.clear();
+                data.base_texts.clear();
+                data.base_pending.clear();
+                data.base_errors.clear();
                 if let Some((path, diff)) = first_diff {
                     data.diffs.insert(path, diff);
                 }
@@ -1348,9 +1639,41 @@ impl GitDiffPanel {
         // reset the selection to avoid pointing past the new list.
         self.selected = 0;
         self.file_scroll = 0.0;
-        self.run_mutation(move |io, root| io.commit(root, &message));
-        self.commit_input.clear();
-        self.commit_focused = false;
+        let confirmation = Arc::clone(&self.data);
+        let expected_id = self.data.lock().ok().map(|d| d.refresh_id.wrapping_add(1));
+        self.run_mutation(move |io, root| {
+            let result = io.commit(root, &message);
+            // A host-driven Ok merely queues a request. Only local IO can
+            // acknowledge here; hosts deliver explicit success separately.
+            if result.is_ok() && !io.is_host_driven() {
+                if let Ok(mut data) = confirmation.lock() {
+                    if Some(data.refresh_id) == expected_id {
+                        data.completed_commit_message = Some(message);
+                    }
+                }
+            }
+            result
+        });
+        // Keep the draft until explicit local/host confirmation.
+    }
+
+    pub(super) fn apply_commit_confirmation(&mut self) {
+        let completed = self
+            .data
+            .lock()
+            .ok()
+            .and_then(|mut data| data.completed_commit_message.take());
+        if let Some(message) = completed {
+            self.host_commit_succeeded(&message);
+        }
+    }
+
+    /// Call only after the commit backend confirms success. Do not erase a
+    /// newer draft typed while the original request was in flight.
+    pub fn host_commit_succeeded(&mut self, submitted_message: &str) {
+        if self.commit_input.text().trim() == submitted_message.trim() {
+            self.commit_input.clear();
+        }
     }
 
     pub fn fetch(&mut self) {
@@ -1375,7 +1698,7 @@ impl GitDiffPanel {
     /// refreshed list (staged bits, branch, error) lands back through
     /// the `host_set_*` push path; `loading` stays raised meanwhile as
     /// the redraw keep-alive.
-    fn run_mutation<F>(&mut self, op: F)
+    pub(super) fn run_mutation<F>(&mut self, op: F)
     where
         F: FnOnce(
                 &Arc<dyn super::state::GitDiffIo>,
@@ -1413,6 +1736,8 @@ impl GitDiffPanel {
             std::thread::spawn(move || {
                 let result = op(&io, &root);
                 let files = io.collect_files(&root);
+                let upstream = io.upstream(&root);
+                let latest_commit = io.latest_commit(&root);
                 let first_diff = files
                     .first()
                     .map(|f| (f.path.clone(), super::parse::load_diff(&root, f)));
@@ -1425,7 +1750,13 @@ impl GitDiffPanel {
                     data.error = Some(e);
                 }
                 data.files = files;
+                data.upstream = upstream;
+                data.latest_commit = latest_commit;
+                data.diff_cache_generation = data.diff_cache_generation.wrapping_add(1);
                 data.diffs.clear();
+                data.base_texts.clear();
+                data.base_pending.clear();
+                data.base_errors.clear();
                 if let Some((path, diff)) = first_diff {
                     data.diffs.insert(path, diff);
                 }
@@ -1450,7 +1781,49 @@ impl GitDiffPanel {
         Some(self.panel_rect.as_array())
     }
 
+    /// Pixel extent, not rounded row counts: fractional viewports must reveal
+    /// the entire last row without adding a blank row beneath it.
+    pub(super) fn max_file_scroll(&self) -> f32 {
+        if self.files_body_rect.h <= 0.0 {
+            return 0.0;
+        }
+        (self.visual_rows.len() as f32 * FILE_ROW_HEIGHT * self.scale
+            - self.files_body_rect.h)
+            .max(0.0)
+    }
+
+    pub(super) fn clamp_file_scroll(&mut self) {
+        let clamped = self.file_scroll.clamp(0.0, self.max_file_scroll());
+        if clamped != self.file_scroll {
+            self.file_scroll = clamped;
+            self.file_scroll_spring.reset();
+        }
+    }
+
+    pub fn pointer_kind_at(
+        &self,
+        mx: f32,
+        my: f32,
+    ) -> Option<crate::widgets::modal::ModalPointerKind> {
+        use crate::widgets::modal::ModalPointerKind::{Default, Pointer, Text};
+        match self.hit_test(mx, my) {
+            PanelHit::Outside => None,
+            PanelHit::CommitBox | PanelHit::BranchFilterBox => Some(Text),
+            PanelHit::Inside => Some(Default),
+            _ => Some(Pointer),
+        }
+    }
+
     pub fn hit_test(&self, mx: f32, my: f32) -> PanelHit {
+        if self.visible
+            && self.latest_commit_hover
+            && self.latest_commit_copy_rect.contains(mx, my)
+        {
+            return PanelHit::LatestCommitCopy;
+        }
+        if self.visible && self.latest_commit_rect.contains(mx, my) {
+            return PanelHit::LatestCommit;
+        }
         if !self.visible || !self.panel_rect.contains(mx, my) {
             return PanelHit::Outside;
         }
@@ -1473,6 +1846,9 @@ impl GitDiffPanel {
             if self.branch_filter_rect.contains(mx, my) {
                 return PanelHit::BranchFilterBox;
             }
+            if self.branch_menu_rect.contains(mx, my) {
+                return PanelHit::Inside;
+            }
         }
         if self.branch_button_rect.contains(mx, my) {
             return PanelHit::BranchButton;
@@ -1484,6 +1860,9 @@ impl GitDiffPanel {
         // overlap (they sit in the reserved bottom band).
         if self.commit_button_rect.contains(mx, my) {
             return PanelHit::CommitButton;
+        }
+        if self.push_button_rect.contains(mx, my) {
+            return PanelHit::PushButton;
         }
         if self.actions_button_rect.contains(mx, my) {
             return PanelHit::ActionsButton;
@@ -1571,6 +1950,7 @@ impl GitDiffPanel {
                         if Some(d.refresh_id) != refresh_id {
                             return;
                         }
+                        d.diff_cache_generation = d.diff_cache_generation.wrapping_add(1);
                         d.diffs.insert(path_for_thread, diff);
                     }
                 });
@@ -1584,7 +1964,7 @@ impl GitDiffPanel {
     }
 
     pub fn scroll_diff_rows(&mut self, rows: i32) {
-        if rows == 0 {
+        if rows == 0 || self.diff_card_rect.h <= 0.0 {
             return;
         }
         let line_h = diff_card::LINE_HEIGHT * self.scale;
@@ -1622,6 +2002,12 @@ impl GitDiffPanel {
             );
             return true;
         }
+        if self.branch_menu_is_open() && self.branch_menu_rect.contains(mx, my) {
+            if delta != 0.0 {
+                self.branch_menu_move(if delta < 0.0 { 1 } else { -1 });
+            }
+            return true;
+        }
         // Diff card sits below the files card — route wheel events to
         // whichever card the mouse is over so the user can scroll the
         // file list and the diff independently.
@@ -1639,7 +2025,9 @@ impl GitDiffPanel {
         if !self.visible || !self.panel_rect.contains(mx, my) {
             return false;
         }
-        if self.actions_menu_contains(mx, my) {
+        if self.actions_menu_contains(mx, my)
+            || (self.branch_menu_is_open() && self.branch_menu_rect.contains(mx, my))
+        {
             return self.scroll_at(mx, my, finger_delta);
         }
         if self.diff_card_rect.contains(mx, my) {
@@ -1666,9 +2054,7 @@ impl GitDiffPanel {
         if row_h <= 0.0 {
             return;
         }
-        let total = self.visual_rows.len();
-        let visible = ((self.files_body_rect.h / row_h).floor() as usize).max(1);
-        let max_scroll = total.saturating_sub(visible) as f32 * row_h;
+        let max_scroll = self.max_file_scroll();
         let target = (self.file_scroll - delta).clamp(0.0, max_scroll);
         let d = target - self.file_scroll;
         if d == 0.0 {
@@ -1686,7 +2072,7 @@ impl GitDiffPanel {
     /// spring-lagged, dead-zone-free path as the file list so trackpad,
     /// wheel and held ↑/↓ (via `scroll_diff_keys`) all share one feel.
     fn scroll_diff_pixels(&mut self, delta: f32) {
-        if delta == 0.0 {
+        if delta == 0.0 || self.diff_card_rect.h <= 0.0 {
             return;
         }
         let line_h = diff_card::LINE_HEIGHT * self.scale;
@@ -1762,8 +2148,7 @@ impl GitDiffPanel {
         } else {
             self.file_scroll
         };
-        let max_top = total.saturating_sub(visible);
-        let max_scroll = max_top as f32 * row_h;
+        let max_scroll = self.max_file_scroll();
         let target = target.clamp(0.0, max_scroll);
         let drow = target - self.file_scroll;
         if drow.abs() < 0.5 {
@@ -1781,7 +2166,10 @@ impl GitDiffPanel {
     /// the kind so the screen layer can route a drag to the right
     /// scroll axis.
     pub fn scrollbar_hit(&self, mx: f32, my: f32) -> Option<ScrollbarKind> {
-        if !self.visible || self.actions_menu_contains(mx, my) {
+        if !self.visible
+            || self.actions_menu_contains(mx, my)
+            || (self.branch_menu_is_open() && self.branch_menu_rect.contains(mx, my))
+        {
             return None;
         }
         if super::render::hit_scrollbar_thumb(&self.files_scrollbar_thumb_rect, mx, my) {
@@ -1800,14 +2188,10 @@ impl GitDiffPanel {
     pub fn drag_scrollbar(&mut self, kind: ScrollbarKind, mouse_y: f32) {
         match kind {
             ScrollbarKind::Files => {
-                let row_h = FILE_ROW_HEIGHT * self.scale;
-                let total = self.visual_rows.len();
-                let visible = ((self.files_body_rect.h / row_h).floor() as usize).max(1);
-                if total <= visible || self.files_body_rect.h <= 0.0 {
+                let max_scroll = self.max_file_scroll();
+                if max_scroll <= 0.0 {
                     return;
                 }
-                let max_top = total.saturating_sub(visible);
-                let max_scroll = max_top as f32 * row_h;
                 // Map `mouse_y` linearly across the track height.
                 let progress = ((mouse_y - self.files_body_rect.y)
                     / self.files_body_rect.h.max(1.0))
@@ -1871,21 +2255,6 @@ impl GitDiffPanel {
         self.file_scroll_spring.update(dt, SCROLL_ANIMATION_LENGTH);
         self.file_scroll_spring.position
     }
-
-    pub(super) fn tick_diff_scroll(&mut self) -> f32 {
-        if self.diff_scroll_spring.position == 0.0 {
-            self.last_diff_scroll_frame = Instant::now();
-            return 0.0;
-        }
-        let now = Instant::now();
-        let dt = now
-            .saturating_duration_since(self.last_diff_scroll_frame)
-            .as_secs_f32()
-            .min(0.05);
-        self.last_diff_scroll_frame = now;
-        self.diff_scroll_spring.update(dt, SCROLL_ANIMATION_LENGTH);
-        self.diff_scroll_spring.position
-    }
 }
 
 #[cfg(test)]
@@ -1894,7 +2263,77 @@ mod tests {
     use super::*;
 
     #[test]
-    fn folder_checkbox_stages_and_unstages_only_its_path() {
+    fn file_viewport_uses_pixel_bounds_and_reveals_complete_last_row() {
+        let mut panel = GitDiffPanel::new();
+        for scale in [1.0, 1.25, 2.0] {
+            panel.scale = scale;
+            let row_h = FILE_ROW_HEIGHT * scale;
+            panel.visual_rows = (0..10)
+                .map(|file_index| VisualRow {
+                    depth: 0,
+                    kind: VisualRowKind::File { file_index },
+                })
+                .collect();
+            panel.files_body_rect.h = row_h * 3.5;
+            let max = row_h * 6.5;
+            assert!((panel.max_file_scroll() - max).abs() < 0.001);
+            panel.file_scroll = 0.0;
+            panel.selected = 9;
+            panel.scroll_selected_into_view();
+            assert!((panel.file_scroll - max).abs() < 0.001);
+            assert!(
+                (10.0 * row_h - panel.file_scroll - panel.files_body_rect.h).abs()
+                    < 0.001
+            );
+            panel.scroll_files_pixels(-10000.0);
+            assert_eq!(panel.file_scroll, max);
+            panel.drag_scrollbar(ScrollbarKind::Files, 10000.0);
+            assert_eq!(panel.file_scroll, max);
+            // Collapsing to a fitting list resets both target and spring.
+            panel.visual_rows.truncate(2);
+            panel.file_scroll_spring.position = 40.0;
+            panel.clamp_file_scroll();
+            assert_eq!(panel.file_scroll, 0.0);
+            assert_eq!(panel.file_scroll_spring.position, 0.0);
+            panel.files_body_rect.h = 0.0;
+            assert_eq!(panel.max_file_scroll(), 0.0);
+        }
+    }
+
+    #[test]
+    fn git_pointer_classification_reserves_ibeam_for_inputs() {
+        use crate::widgets::modal::ModalPointerKind::{Default, Pointer, Text};
+        let mut panel = GitDiffPanel::new();
+        panel.visible = true;
+        panel.panel_rect = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 300.0,
+            h: 500.0,
+        };
+        let rect = Rect {
+            x: 10.0,
+            y: 10.0,
+            w: 100.0,
+            h: 20.0,
+        };
+        assert_eq!(panel.pointer_kind_at(250.0, 250.0), Some(Default));
+        assert_eq!(panel.pointer_kind_at(400.0, 250.0), None);
+        panel.file_row_rects.push((0, rect));
+        assert_eq!(panel.pointer_kind_at(20.0, 20.0), Some(Pointer));
+        panel.commit_box_rect = rect;
+        assert_eq!(panel.pointer_kind_at(20.0, 20.0), Some(Text));
+        panel.branch_menu_open = true;
+        panel.branch_filter_rect = rect;
+        assert_eq!(panel.pointer_kind_at(20.0, 20.0), Some(Text));
+        panel.branch_menu_row_rects.push(("main".into(), rect));
+        assert_eq!(panel.pointer_kind_at(20.0, 20.0), Some(Pointer));
+        panel.visible = false;
+        assert_eq!(panel.pointer_kind_at(20.0, 20.0), None);
+    }
+
+    #[test]
+    fn group_checkbox_stages_and_unstages_only_its_members() {
         use std::path::Path;
         use std::sync::Mutex;
         struct Io(Mutex<Vec<String>>);
@@ -1950,25 +2389,51 @@ mod tests {
                 .collect();
         }
         panel.rebuild_visual_rows();
-        let src_row = panel
-            .visual_rows
-            .iter()
-            .position(|row| {
-                matches!(&row.kind,
-            VisualRowKind::Dir { path, .. } if path == "src")
-            })
-            .unwrap();
-        panel.toggle_folder_stage(src_row);
+        panel.toggle_folder_stage(0);
         {
             let mut data = panel.data.lock().unwrap();
             for file in &mut data.files {
-                if file.path.starts_with("src/") {
-                    file.staged = true;
-                }
+                file.staged = true;
             }
         }
-        panel.toggle_folder_stage(src_row);
-        assert_eq!(*io.0.lock().unwrap(), ["stage src", "unstage src"]);
+        panel.toggle_folder_stage(0);
+        assert_eq!(
+            *io.0.lock().unwrap(),
+            [
+                "stage src/a.rs",
+                "stage src/nested/b.rs",
+                "stage src-other/c.rs",
+                "unstage src/a.rs",
+                "unstage src/nested/b.rs",
+                "unstage src-other/c.rs",
+            ]
+        );
+        io.0.lock().unwrap().clear();
+        {
+            let mut data = panel.data.lock().unwrap();
+            data.files[1].status = FileStatus::Mixed;
+            data.files.push(FileChange {
+                path: "src/new.rs".into(),
+                status: FileStatus::Untracked,
+                additions: 0,
+                deletions: 0,
+                staged: false,
+            });
+        }
+        panel.rebuild_visual_rows();
+        let src = panel.visual_rows.iter().position(|row| matches!(
+            &row.kind, VisualRowKind::Group { label, .. } if label == "Tracked/src"
+        )).unwrap();
+        panel.toggle_folder(src);
+        panel.toggle_folder_stage(src);
+        assert_eq!(*io.0.lock().unwrap(), ["stage src/nested/b.rs"]);
+        io.0.lock().unwrap().clear();
+        panel.data.lock().unwrap().files[1].status = FileStatus::Staged;
+        panel.toggle_folder_stage(src);
+        assert_eq!(
+            *io.0.lock().unwrap(),
+            ["unstage src/a.rs", "unstage src/nested/b.rs"]
+        );
     }
 
     #[test]
@@ -1999,6 +2464,8 @@ mod tests {
         assert_eq!(panel.file_scroll, 300.0);
         panel.select_next();
         assert_eq!(panel.selected, 1);
-        assert_eq!(panel.file_scroll, 0.0);
+        // Section + directory now precede the leaves; keyboard scroll-off
+        // includes both headers instead of pretending this is a flat list.
+        assert_eq!(panel.file_scroll, FILE_ROW_HEIGHT);
     }
 }

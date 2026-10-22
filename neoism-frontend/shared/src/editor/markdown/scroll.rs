@@ -29,6 +29,7 @@ impl MarkdownPane {
         self.scroll_velocity_moves_cursor = false;
         self.scroll_last_tick_at = None;
         self.scroll_animation_last_tick_at = None;
+        self.pending_reveal_line = None;
         self.follow_cursor = false;
     }
 

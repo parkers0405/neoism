@@ -167,12 +167,20 @@ pub struct CardSpec<'a> {
     pub horizontal_scroll: Option<f32>,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LineNumberHit {
+    /// Zero-based working-tree source line, never an old-side display number.
+    pub line: usize,
+    pub rect: [f32; 4],
+}
+
+#[derive(Clone, Debug, Default)]
 pub struct CardLayout {
     pub header_height: f32,
     pub body_height: f32,
     pub total_height: f32,
     pub header_link_rect: Option<[f32; 4]>,
+    pub line_number_hits: Vec<LineNumberHit>,
 }
 
 /// Compute the card's full height when nothing is clipped.
@@ -184,12 +192,42 @@ pub fn measure(_spec: &CardSpec, scale: f32, available_body_height: f32) -> Card
         body_height: body_h,
         total_height: header_h + body_h,
         header_link_rect: None,
+        line_number_hits: Vec::new(),
     }
 }
 
 pub fn body_text_width(card_width: f32, scale: f32) -> f32 {
-    let gutter_w = GUTTER_WIDTH * scale;
-    (card_width - gutter_w - BODY_PAD_X * 2.0 * scale).max(0.0)
+    body_text_width_with_gutter(card_width, scale, GUTTER_WIDTH * scale)
+}
+
+pub fn body_text_width_with_gutter(card_width: f32, scale: f32, gutter: f32) -> f32 {
+    (card_width - gutter - BODY_PAD_X * 2.0 * scale).max(0.0)
+}
+
+/// Reserve the actual bold digit advance, including both gutter insets.
+pub fn measured_gutter_width(
+    sugarloaf: &mut Sugarloaf,
+    max_line: u32,
+    scale: f32,
+) -> f32 {
+    let digits = max_line.max(1).to_string().len();
+    let opts = DrawOpts {
+        font_size: GUTTER_FONT_SIZE * scale,
+        bold: true,
+        ..DrawOpts::default()
+    };
+    let width = (b'0'..=b'9')
+        .map(|digit| {
+            sugarloaf
+                .text_mut()
+                .measure(&char::from(digit).to_string().repeat(digits), &opts)
+        })
+        .fold(0.0_f32, f32::max);
+    gutter_width_for_text(width, scale)
+}
+
+fn gutter_width_for_text(width: f32, scale: f32) -> f32 {
+    (width + 12.0 * scale).max(GUTTER_WIDTH * scale)
 }
 
 /// Full code-column width in logical pixels, using the same expanded text,
@@ -315,6 +353,13 @@ pub struct PaintParams<'a> {
     pub opacity: f32,
     pub clip: Option<[f32; 4]>,
     pub occlusion_rects: &'a [[f32; 4]],
+    pub gutter_width: Option<f32>,
+    /// Review-only omitted-context rule; keeps the original row geometry.
+    pub review_separators: bool,
+    pub hatch_empty_rows: bool,
+    pub hide_code_text: bool,
+    pub link_line_numbers: bool,
+    pub line_number_pointer: Option<(f32, f32)>,
 }
 impl Default for PaintParams<'_> {
     fn default() -> Self {
@@ -322,6 +367,12 @@ impl Default for PaintParams<'_> {
             opacity: 1.0,
             clip: None,
             occlusion_rects: &[],
+            gutter_width: None,
+            review_separators: false,
+            hatch_empty_rows: false,
+            hide_code_text: false,
+            link_line_numbers: false,
+            line_number_pointer: None,
         }
     }
 }
@@ -419,7 +470,7 @@ pub fn render_with_paint(
     };
     let mut layout = measure(spec, scale, body_height);
     for clip in regions {
-        layout = render_painted_region(
+        let mut painted = render_painted_region(
             sugarloaf,
             x,
             y,
@@ -430,10 +481,31 @@ pub fn render_with_paint(
             &painted_theme,
             depth,
             base_order,
+            paint.gutter_width.unwrap_or(GUTTER_WIDTH * scale),
+            paint.review_separators,
+            paint.hatch_empty_rows,
+            paint.hide_code_text,
+            paint.link_line_numbers,
+            paint.line_number_pointer,
             clip,
         );
+        layout.header_link_rect = painted.header_link_rect.or(layout.header_link_rect);
+        layout
+            .line_number_hits
+            .append(&mut painted.line_number_hits);
     }
     layout
+}
+
+fn review_separator_rect(
+    row_y: f32,
+    line_h: f32,
+    scale: f32,
+    x: f32,
+    width: f32,
+    region: [f32; 4],
+) -> Option<[f32; 4]> {
+    intersection([x, row_y + line_h / 2.0, width, scale], region)
 }
 
 fn intersection(a: [f32; 4], b: [f32; 4]) -> Option<[f32; 4]> {
@@ -469,6 +541,12 @@ fn render_painted_region(
     theme: &PaintTheme<'_>,
     depth: f32,
     base_order: u8,
+    gutter_width: f32,
+    review_separators: bool,
+    hatch_empty_rows: bool,
+    hide_code_text: bool,
+    link_line_numbers: bool,
+    line_number_pointer: Option<(f32, f32)>,
     region: [f32; 4],
 ) -> CardLayout {
     let clip_top = region[1];
@@ -715,11 +793,11 @@ fn render_painted_region(
         clip_top,
         clip_bottom,
     ));
-    let gutter_w = GUTTER_WIDTH * scale;
+    let gutter_w = gutter_width;
     let body_inner_x = x + gutter_w + BODY_PAD_X * scale;
     let body_inner_right = x + width - BODY_PAD_X * scale;
 
-    let body_text_w = body_text_width(width, scale);
+    let body_text_w = body_text_width_with_gutter(width, scale, gutter_w);
     let nowrap = spec.horizontal_scroll.is_some();
     let horizontal_scroll = spec.horizontal_scroll.unwrap_or(0.0).max(0.0);
     let code_clip = if nowrap {
@@ -768,6 +846,7 @@ fn render_painted_region(
     } else {
         visual_row_start_for_line(spec.visual_row_offsets, logical_start)
     };
+    let mut hatch_runs: Vec<[f32; 4]> = Vec::new();
     for line in &spec.diff_lines[logical_start..] {
         let fragments = wrapped_fragments(&line.text, max_chars);
         if visual_row_ix + fragments.len() <= first_visible_visual {
@@ -793,6 +872,35 @@ fn render_painted_region(
                 continue;
             }
 
+            if hatch_empty_rows && is_split_padding(line) {
+                let left = (x + gutter_w).max(region[0]);
+                let right = (x + width).min(region[0] + region[2]);
+                if right > left {
+                    append_hatch_run(
+                        &mut hatch_runs,
+                        [left, visible_y, right - left, visible_h],
+                    );
+                }
+                continue;
+            }
+
+            if review_separators && line.kind == DiffLineKind::Hunk {
+                if let Some(rule) =
+                    review_separator_rect(row_y, line_h, scale, x, width, region)
+                {
+                    sugarloaf.rect(
+                        None,
+                        rule[0],
+                        rule[1],
+                        rule[2],
+                        rule[3],
+                        theme.f32(theme.border),
+                        depth,
+                        base_order + 2,
+                    );
+                }
+                continue;
+            }
             // Row background tint.
             let bg_color = match line.kind {
                 DiffLineKind::Add => Some(theme.f32_alpha(theme.green, 0.18)),
@@ -821,7 +929,7 @@ fn render_painted_region(
                 DiffLineKind::Hunk => theme.u8(theme.muted),
                 DiffLineKind::Context => theme.u8(theme.muted),
             };
-            let gutter_opts = DrawOpts {
+            let mut gutter_opts = DrawOpts {
                 font_size: GUTTER_FONT_SIZE * scale,
                 color: gutter_color,
                 bold: true,
@@ -838,17 +946,49 @@ fn render_painted_region(
                 if let Some(n) = line_number {
                     let s_str = n.to_string();
                     let w = sugarloaf.text_mut().measure(s_str.as_str(), &gutter_opts);
+                    let number_x = x + gutter_w - w - 6.0 * scale;
+                    if link_line_numbers {
+                        if let Some(hit) = line_number_hit(
+                            line,
+                            fragment_ix,
+                            [number_x - 3.0 * scale, row_y, w + 6.0 * scale, line_h],
+                            body_clip,
+                        ) {
+                            if line_number_pointer.is_some_and(|(px, py)| {
+                                px >= hit.rect[0]
+                                    && px < hit.rect[0] + hit.rect[2]
+                                    && py >= hit.rect[1]
+                                    && py < hit.rect[1] + hit.rect[3]
+                            }) {
+                                gutter_opts.color = theme.u8(theme.blue);
+                                sugarloaf.quad(
+                                    None,
+                                    hit.rect[0],
+                                    hit.rect[1],
+                                    hit.rect[2],
+                                    hit.rect[3],
+                                    theme.f32_alpha(theme.blue, 0.16),
+                                    [3.0 * scale; 4],
+                                    depth,
+                                    base_order + 3,
+                                );
+                            }
+                            layout.line_number_hits.push(hit);
+                        }
+                    }
                     let gutter_text_y =
                         snap_text_y(row_y + (line_h - GUTTER_FONT_SIZE * scale) / 2.0);
                     sugarloaf.text_mut().draw(
-                        x + gutter_w - w - 6.0 * scale,
+                        number_x,
                         gutter_text_y,
                         s_str.as_str(),
                         &gutter_opts,
                     );
                 }
             }
-
+            if hide_code_text && line.kind != DiffLineKind::Hunk {
+                continue;
+            }
             // Body text. Hunk + remove rows render flat (single colour);
             // add + context rows get syntax highlighting so the code reads
             // like a buffer rather than a wall of monochrome diff text.
@@ -940,8 +1080,120 @@ fn render_painted_region(
         }
         visual_row_ix += fragments.len();
     }
+    for run in hatch_runs {
+        sugarloaf.rect(
+            None,
+            run[0],
+            run[1],
+            run[2],
+            run[3],
+            theme.f32_alpha(theme.surface, 0.3),
+            depth,
+            base_order + 2,
+        );
+        let inset = scale;
+        let inner = [
+            run[0] + inset,
+            run[1] + inset,
+            (run[2] - 2.0 * inset).max(0.0),
+            (run[3] - 2.0 * inset).max(0.0),
+        ];
+        for segment in
+            hatch_segments(inner, [x + gutter_w, body_top - scroll], 9.0 * scale)
+        {
+            // Plain line() uses compositor order 0, below the opaque card fill.
+            let half = 0.375 * scale * std::f32::consts::FRAC_1_SQRT_2;
+            let a = [segment[0] - half, segment[1] - half];
+            let b = [segment[2] - half, segment[3] - half];
+            let c = [segment[2] + half, segment[3] + half];
+            let d = [segment[0] + half, segment[1] + half];
+            let color = theme.f32_alpha(theme.muted, 0.18);
+            sugarloaf.triangle_ordered(
+                a[0],
+                a[1],
+                b[0],
+                b[1],
+                c[0],
+                c[1],
+                depth,
+                color,
+                base_order + 3,
+            );
+            sugarloaf.triangle_ordered(
+                a[0],
+                a[1],
+                c[0],
+                c[1],
+                d[0],
+                d[1],
+                depth,
+                color,
+                base_order + 3,
+            );
+        }
+    }
 
     layout
+}
+
+fn line_number_hit(
+    line: &DiffLine,
+    fragment: usize,
+    rect: [f32; 4],
+    clip: [f32; 4],
+) -> Option<LineNumberHit> {
+    if fragment != 0 || !matches!(line.kind, DiffLineKind::Add | DiffLineKind::Context) {
+        return None;
+    }
+    Some(LineNumberHit {
+        line: line.new_line_number.filter(|number| *number > 0)? as usize - 1,
+        rect: intersection(rect, clip)?,
+    })
+}
+
+fn is_split_padding(line: &DiffLine) -> bool {
+    line.kind == DiffLineKind::Context
+        && line.text.is_empty()
+        && line.line_number.is_none()
+        && line.old_line_number.is_none()
+        && line.new_line_number.is_none()
+}
+
+fn append_hatch_run(runs: &mut Vec<[f32; 4]>, rect: [f32; 4]) {
+    if let Some(last) = runs.last_mut() {
+        if last[0] == rect[0]
+            && last[2] == rect[2]
+            && (last[1] + last[3] - rect[1]).abs() < 0.5
+        {
+            last[3] = rect[1] + rect[3] - last[1];
+            return;
+        }
+    }
+    runs.push(rect);
+}
+
+fn hatch_segments(rect: [f32; 4], origin: [f32; 2], spacing: f32) -> Vec<[f32; 4]> {
+    if rect[2] <= 0.0
+        || rect[3] <= 0.0
+        || !spacing.is_finite()
+        || spacing <= 0.0
+        || !rect.iter().chain(origin.iter()).all(|v| v.is_finite())
+    {
+        return Vec::new();
+    }
+    let right = rect[0] + rect[2];
+    let bottom = rect[1] + rect[3];
+    let phase = origin[0] + origin[1];
+    let first = ((rect[0] + rect[1] - phase) / spacing).floor() as i32;
+    let last = ((right + bottom - phase) / spacing).ceil() as i32;
+    (first..=last)
+        .filter_map(|index| {
+            let sum = phase + index as f32 * spacing;
+            let start = rect[0].max(sum - bottom);
+            let end = right.min(sum - rect[1]);
+            (end > start).then_some([start, sum - start, end, sum - end])
+        })
+        .collect()
 }
 
 /// Render a single source line with the shared syntax highlighter.
@@ -1035,53 +1287,164 @@ fn wrapped_fragments(text: &str, max_chars: usize) -> Rc<Vec<WrappedFragment>> {
     fragments
 }
 
-fn wrap_fragments_uncached(text: &str, max_chars: usize) -> Vec<WrappedFragment> {
-    let max_chars = max_chars.max(1);
-    // Sentinel shares the wrap cache without running the lossy wrap splitter.
-    if max_chars == usize::MAX {
-        return vec![WrappedFragment {
-            text: expand_tabs(text),
-            indent_cols: 0,
-        }];
-    }
-    if text.is_empty() {
-        return vec![WrappedFragment {
-            text: String::new(),
-            indent_cols: 0,
-        }];
-    }
-    if display_columns(text) <= max_chars {
-        return vec![WrappedFragment {
-            text: text.to_string(),
-            indent_cols: 0,
-        }];
-    }
+/// Exact source bytes displayed in one wrapped row. Trimmed wrap whitespace is
+/// intentionally excluded; indentation is synthetic and does not name bytes.
+/// Tabs use four-cell stops relative to the fragment, as in the card wrapper.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DiffSourceFragment {
+    pub byte_start: usize,
+    pub byte_end: usize,
+    pub indent_cols: usize,
+}
 
+/// `body_width` is the text-only width (same as visual_row_offsets). Returns
+/// one 0..0 row for empty text. No-wrap preserves all bytes/whitespace.
+pub fn source_fragments(
+    text: &str,
+    body_width: f32,
+    scale: f32,
+    nowrap: bool,
+) -> Vec<DiffSourceFragment> {
+    source_fragments_for_columns(
+        text,
+        if nowrap {
+            usize::MAX
+        } else {
+            wrap_chars_for_width(body_width, scale)
+        },
+    )
+}
+
+fn source_fragments_for_columns(text: &str, max_chars: usize) -> Vec<DiffSourceFragment> {
+    let max_chars = max_chars.max(1);
+    if max_chars == usize::MAX || text.is_empty() || display_columns(text) <= max_chars {
+        return vec![DiffSourceFragment {
+            byte_start: 0,
+            byte_end: text.len(),
+            indent_cols: 0,
+        }];
+    }
     let continuation_indent = continuation_indent_cols(text, max_chars);
     let mut out = Vec::new();
-    let mut remaining = text;
+    let mut start = 0;
     let mut first = true;
-    while !remaining.is_empty() {
+    while start < text.len() {
+        let remaining = &text[start..];
         let indent_cols = if first { 0 } else { continuation_indent };
         let budget = max_chars.saturating_sub(indent_cols).max(4);
         if display_columns(remaining) <= budget {
-            out.push(WrappedFragment {
-                text: remaining.to_string(),
+            out.push(DiffSourceFragment {
+                byte_start: start,
+                byte_end: text.len(),
                 indent_cols,
             });
             break;
         }
-
         let split = preferred_code_break(remaining, budget);
         let (head, tail) = remaining.split_at(split);
-        out.push(WrappedFragment {
-            text: head.trim_end_matches([' ', '\t']).to_string(),
+        out.push(DiffSourceFragment {
+            byte_start: start,
+            byte_end: start + head.trim_end_matches([' ', '\t']).len(),
             indent_cols,
         });
-        remaining = tail.trim_start_matches([' ', '\t']);
+        start += split + tail.len() - tail.trim_start_matches([' ', '\t']).len();
         first = false;
     }
     out
+}
+
+fn wrap_fragments_uncached(text: &str, max_chars: usize) -> Vec<WrappedFragment> {
+    source_fragments_for_columns(text, max_chars)
+        .into_iter()
+        .map(|fragment| {
+            let slice = &text[fragment.byte_start..fragment.byte_end];
+            WrappedFragment {
+                text: if max_chars == usize::MAX {
+                    expand_tabs(slice)
+                } else {
+                    slice.to_owned()
+                },
+                indent_cols: fragment.indent_cols,
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod source_fragment_tests {
+    use super::*;
+
+    #[test]
+    fn source_ranges_match_display_wrapper_unicode_tabs_and_trimming() {
+        for text in [
+            "",
+            "   ",
+            "\t  αβ = call(界, foo);\t  tail  ",
+            "\t\tmore whitespace    and_words",
+            "é界",
+        ] {
+            for cols in [1, 4, 8, 12, 20, usize::MAX] {
+                let source = source_fragments_for_columns(text, cols);
+                let display = wrap_fragments_uncached(text, cols);
+                assert_eq!(source.len(), display.len());
+                let mut previous_end = 0;
+                for (row, painted) in source.iter().zip(display.iter()) {
+                    assert!(row.byte_start >= previous_end);
+                    let slice = &text[row.byte_start..row.byte_end];
+                    assert_eq!(row.indent_cols, painted.indent_cols);
+                    assert_eq!(
+                        if cols == usize::MAX {
+                            expand_tabs(slice)
+                        } else {
+                            slice.into()
+                        },
+                        painted.text
+                    );
+                    assert!(text[previous_end..row.byte_start]
+                        .chars()
+                        .all(|c| c == ' ' || c == '\t'));
+                    previous_end = row.byte_end;
+                }
+            }
+        }
+        assert_eq!(
+            source_fragments("", 200.0, 1.0, false),
+            vec![DiffSourceFragment {
+                byte_start: 0,
+                byte_end: 0,
+                indent_cols: 0
+            }]
+        );
+        assert_eq!(
+            source_fragments_for_columns("abc   defgh", 6),
+            vec![
+                DiffSourceFragment {
+                    byte_start: 0,
+                    byte_end: 3,
+                    indent_cols: 0
+                },
+                DiffSourceFragment {
+                    byte_start: 6,
+                    byte_end: 10,
+                    indent_cols: 2
+                },
+                DiffSourceFragment {
+                    byte_start: 10,
+                    byte_end: 11,
+                    indent_cols: 2
+                },
+            ]
+        );
+        let text = "\tα  ";
+        assert_eq!(
+            source_fragments(text, 1.0, 1.0, true),
+            vec![DiffSourceFragment {
+                byte_start: 0,
+                byte_end: text.len(),
+                indent_cols: 0
+            }]
+        );
+    }
 }
 
 fn expand_tabs(text: &str) -> String {
@@ -1254,6 +1617,107 @@ mod tests {
     use super::*;
 
     #[test]
+    fn review_hunk_rule_is_opt_in_thin_and_clipped_without_changing_row_spacing() {
+        assert!(!PaintParams::default().review_separators);
+        for scale in [1.0, 1.5, 2.0] {
+            let row_y = 40.0 * scale;
+            let h = LINE_HEIGHT * scale;
+            let region = [20.0 * scale, 0.0, 100.0 * scale, 200.0 * scale];
+            let rule = review_separator_rect(row_y, h, scale, 0.0, 300.0 * scale, region)
+                .unwrap();
+            assert_eq!(rule, [20.0 * scale, row_y + h / 2.0, 100.0 * scale, scale]);
+            assert!(review_separator_rect(
+                row_y,
+                h,
+                scale,
+                0.0,
+                300.0 * scale,
+                [0.0, row_y + h, 300.0, 10.0]
+            )
+            .is_none());
+            let pieces =
+                subtract(region, [40.0 * scale, 0.0, 20.0 * scale, 200.0 * scale]);
+            for clip in pieces {
+                if let Some(r) =
+                    review_separator_rect(row_y, h, scale, 0.0, 300.0 * scale, clip)
+                {
+                    assert!(r[0] + r[2] <= 40.0 * scale || r[0] >= 60.0 * scale);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn number_links_use_new_source_coordinates_not_display_or_old_numbers() {
+        let mut line = DiffLine {
+            text: "context".into(),
+            kind: DiffLineKind::Context,
+            line_number: Some(12),
+            old_line_number: Some(12),
+            new_line_number: Some(42),
+        };
+        let rect = [20.0, 40.0, 24.0, 18.0];
+        assert_eq!(line_number_hit(&line, 0, rect, rect).unwrap().line, 41);
+        line.kind = DiffLineKind::Add;
+        assert_eq!(line_number_hit(&line, 0, rect, rect).unwrap().line, 41);
+        for kind in [DiffLineKind::Remove, DiffLineKind::Hunk] {
+            line.kind = kind;
+            assert!(line_number_hit(&line, 0, rect, rect).is_none());
+        }
+        line.kind = DiffLineKind::Context;
+        for number in [None, Some(0)] {
+            line.new_line_number = number;
+            assert!(line_number_hit(&line, 0, rect, rect).is_none());
+        }
+        assert!(!PaintParams::default().link_line_numbers);
+    }
+
+    #[test]
+    fn number_link_geometry_stays_inside_visible_first_fragment_at_any_scale() {
+        let line = DiffLine {
+            text: "wrapped source".into(),
+            kind: DiffLineKind::Add,
+            line_number: Some(3),
+            old_line_number: None,
+            new_line_number: Some(3),
+        };
+        for scale in [0.75, 1.0, 1.5, 2.0] {
+            let rect = [20.0 * scale, 40.0 * scale, 24.0 * scale, 18.0 * scale];
+            let clip = [25.0 * scale, 45.0 * scale, 10.0 * scale, 10.0 * scale];
+            let hit = line_number_hit(&line, 0, rect, clip).unwrap();
+            assert_eq!(hit.rect, clip);
+            assert_eq!(hit.line, 2);
+            assert!(line_number_hit(&line, 1, rect, clip).is_none());
+            assert!(line_number_hit(&line, 0, rect, [0.0, 0.0, 1.0, 1.0]).is_none());
+        }
+    }
+
+    #[test]
+    fn occluded_number_fragments_do_not_expose_hidden_hit_regions() {
+        let line = DiffLine {
+            text: "source".into(),
+            kind: DiffLineKind::Add,
+            line_number: Some(9),
+            old_line_number: None,
+            new_line_number: Some(9),
+        };
+        let rect = [10.0, 20.0, 30.0, 18.0];
+        let cut = [20.0, 20.0, 10.0, 18.0];
+        let hits: Vec<_> = subtract(rect, cut)
+            .into_iter()
+            .filter_map(|clip| line_number_hit(&line, 0, rect, clip))
+            .collect();
+        assert_eq!(hits.len(), 2);
+        assert!(hits.iter().all(|hit| intersection(hit.rect, cut).is_none()));
+        assert_eq!(
+            hits.iter()
+                .map(|hit| hit.rect[2] * hit.rect[3])
+                .sum::<f32>(),
+            360.0
+        );
+    }
+
+    #[test]
     fn nowrap_is_one_lossless_tab_expanded_row() {
         let text = format!("\tα\t{}  \t", "long_identifier".repeat(1000));
         let rows = wrapped_fragments(&text, usize::MAX);
@@ -1271,6 +1735,82 @@ mod tests {
             spans.iter().map(|(_, s)| s.as_str()).collect::<String>(),
             rows[0].text
         );
+    }
+
+    #[test]
+    fn hatching_identifies_only_absent_split_rows_not_real_empty_lines() {
+        let padding = DiffLine {
+            text: String::new(),
+            kind: DiffLineKind::Context,
+            line_number: None,
+            old_line_number: None,
+            new_line_number: None,
+        };
+        assert!(is_split_padding(&padding));
+        let mut source_blank = padding.clone();
+        source_blank.old_line_number = Some(42);
+        source_blank.new_line_number = Some(43);
+        assert!(!is_split_padding(&source_blank));
+        source_blank = padding.clone();
+        source_blank.kind = DiffLineKind::Add;
+        assert!(!is_split_padding(&source_blank));
+        assert!(!PaintParams::default().hatch_empty_rows);
+    }
+
+    #[test]
+    fn adjacent_absent_rows_form_one_continuous_hatch_block() {
+        let mut runs = Vec::new();
+        append_hatch_run(&mut runs, [20.0, 30.0, 400.0, 18.0]);
+        append_hatch_run(&mut runs, [20.0, 48.0, 400.0, 18.0]);
+        append_hatch_run(&mut runs, [20.0, 84.0, 400.0, 18.0]);
+        assert_eq!(
+            runs,
+            vec![[20.0, 30.0, 400.0, 36.0], [20.0, 84.0, 400.0, 18.0]]
+        );
+    }
+
+    #[test]
+    fn diagonal_hatching_stays_clipped_and_uses_one_phase_across_rows() {
+        for scale in [0.7, 1.0, 1.5, 2.0] {
+            let rect = [10.0 * scale, 35.0 * scale, 100.0 * scale, 50.0 * scale];
+            let origin = [10.0 * scale, -80.0 * scale];
+            let spacing = 9.0 * scale;
+            let segments = hatch_segments(rect, origin, spacing);
+            assert!(!segments.is_empty());
+            for segment in segments {
+                for point in [[segment[0], segment[1]], [segment[2], segment[3]]] {
+                    assert!(
+                        point[0] >= rect[0] - 0.01
+                            && point[0] <= rect[0] + rect[2] + 0.01
+                    );
+                    assert!(
+                        point[1] >= rect[1] - 0.01
+                            && point[1] <= rect[1] + rect[3] + 0.01
+                    );
+                    let phase = (point[0] + point[1] - origin[0] - origin[1]) / spacing;
+                    assert!((phase - phase.round()).abs() < 0.001);
+                }
+                assert!(
+                    ((segment[2] - segment[0]) + (segment[3] - segment[1])).abs() < 0.01
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn measured_gutter_keeps_digit_insets_and_code_width_consistent() {
+        for scale in [0.7, 1.0, 1.5, 2.0] {
+            let digit_width = 66.0 * scale;
+            let gutter = gutter_width_for_text(digit_width, scale);
+            let left = gutter - digit_width - 6.0 * scale;
+            assert!(left >= 6.0 * scale - 0.01);
+            assert!(
+                (body_text_width_with_gutter(400.0 * scale, scale, gutter)
+                    - (400.0 - 78.0 - BODY_PAD_X * 2.0) * scale)
+                    .abs()
+                    < 0.01
+            );
+        }
     }
 
     #[test]

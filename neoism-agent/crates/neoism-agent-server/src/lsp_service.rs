@@ -36,6 +36,9 @@ pub(super) struct LspService {
         Mutex<HashMap<TypeScriptProjectCacheKey, TypeScriptProjectCacheEntry>>,
     self_weak: std::sync::Weak<LspService>,
     clients: Mutex<HashMap<LspClientKey, Arc<Mutex<PersistentLspClient>>>>,
+    /// Exact file selections published only by the blocking worker path. Never
+    /// infer a nested project's owner by looking for an ancestor/live language.
+    file_clients: Mutex<HashMap<(PathBuf, PathBuf, String), CachedFileClient>>,
     /// Per-client initialization gates. Spawning and initializing happens
     /// outside `clients`, so unrelated servers never block each other, while
     /// concurrent cold opens for the same server still share exactly one
@@ -77,6 +80,7 @@ impl LspService {
             typescript_projects: Default::default(),
             self_weak,
             clients: Mutex::new(HashMap::new()),
+            file_clients: Mutex::new(HashMap::new()),
             initialization_gates: Mutex::new(HashMap::new()),
             diagnostics: Mutex::new(HashMap::new()),
             document_versions: Mutex::new(HashMap::new()),
@@ -145,6 +149,13 @@ enum LspEndpointKey {
         host: String,
         port: u16,
     },
+}
+
+struct CachedFileClient {
+    resolved_at: Instant,
+    adapter: LanguageAdapter,
+    key: LspClientKey,
+    client: std::sync::Weak<Mutex<PersistentLspClient>>,
 }
 
 struct PersistentLspClient {
@@ -641,6 +652,156 @@ impl LspService {
             "definition",
             "textDocument/definition",
         )
+    }
+
+    pub(super) fn declarations(
+        &self,
+        root: &Path,
+        file: &Path,
+        line: u32,
+        character: u32,
+        spec: &LanguageAdapter,
+    ) -> anyhow::Result<Vec<super::LspLocation>> {
+        self.position_locations(
+            root,
+            file,
+            line,
+            character,
+            spec,
+            "declaration",
+            "textDocument/declaration",
+        )
+    }
+
+    pub(super) fn type_definitions(
+        &self,
+        root: &Path,
+        file: &Path,
+        line: u32,
+        character: u32,
+        spec: &LanguageAdapter,
+    ) -> anyhow::Result<Vec<super::LspLocation>> {
+        self.position_locations(
+            root,
+            file,
+            line,
+            character,
+            spec,
+            "typeDefinition",
+            "textDocument/typeDefinition",
+        )
+    }
+
+    /// Never start a server or wait on an in-flight query for menu state.
+    pub(super) fn cached_navigation_support(
+        &self,
+        root: &Path,
+        file: &Path,
+        spec: &LanguageAdapter,
+        query: super::LspNavigationQuery,
+    ) -> Option<bool> {
+        let selections = self.file_clients.try_lock().ok()?;
+        let selection = selections.get(&(root.to_path_buf(), file.to_path_buf(), spec.id.clone()))?;
+        // Filesystem/config freshness cannot be revalidated on the UI thread.
+        // Expired selections are unknown until worker discovery.
+        if selection.resolved_at.elapsed() >= Duration::from_millis(250)
+            || selection.adapter != *spec
+        {
+            return None;
+        }
+        let clients = self.clients.try_lock().ok()?;
+        let client = clients.get(&selection.key)?;
+        // Borrow under the map guard instead of upgrading/cloning an Arc: if a
+        // worker evicts concurrently, dropping the last Arc here could run the
+        // transport's blocking shutdown on the UI thread.
+        if Arc::as_ptr(client) != selection.client.as_ptr() {
+            return None;
+        }
+        let client = client.try_lock().ok()?;
+        // Read the negotiated snapshot only. exit_reason() itself inspects the
+        // transport and can take blocking locks; workers handle liveness/eviction.
+        Some(match query {
+            super::LspNavigationQuery::Definition => {
+                client.initialized.definition_provider
+            }
+            super::LspNavigationQuery::Declaration => {
+                client.initialized.declaration_provider
+            }
+            super::LspNavigationQuery::TypeDefinition => {
+                client.initialized.type_definition_provider
+            }
+            super::LspNavigationQuery::References => {
+                client.initialized.references_provider
+            }
+        })
+    }
+
+    /// Synchronization and the explicit query share the client lock: no later
+    /// coalesced sync can replace the snapshot between didChange and request.
+    pub(super) fn query_navigation(
+        &self,
+        root: &Path,
+        file: &Path,
+        line: u32,
+        character: u32,
+        text: Option<&str>,
+        spec: &LanguageAdapter,
+        query: super::LspNavigationQuery,
+    ) -> anyhow::Result<Option<Vec<super::LspLocation>>> {
+        let language = spec
+            .logical_language_for_path(file)
+            .unwrap_or(&spec.id)
+            .to_string();
+        self.with_file_client(root, file, spec, |client| {
+            let (supported, method) = match query {
+                super::LspNavigationQuery::Definition => (
+                    client.initialized.definition_provider,
+                    "textDocument/definition",
+                ),
+                super::LspNavigationQuery::Declaration => (
+                    client.initialized.declaration_provider,
+                    "textDocument/declaration",
+                ),
+                super::LspNavigationQuery::TypeDefinition => (
+                    client.initialized.type_definition_provider,
+                    "textDocument/typeDefinition",
+                ),
+                super::LspNavigationQuery::References => (
+                    client.initialized.references_provider,
+                    "textDocument/references",
+                ),
+            };
+            if !supported {
+                return Ok(None);
+            }
+            client.ensure_open(file, text)?;
+            let mut params = text_document_position_params(file, line, character);
+            if query == super::LspNavigationQuery::References {
+                params["context"] = json!({ "includeDeclaration": true });
+            }
+            let result = client.client.request(method, params, DOCUMENT_TIMEOUT)?;
+            Ok(Some(parse_locations(root, &language, result)))
+        })
+    }
+
+    pub(super) fn navigation_locations(
+        &self,
+        root: &Path,
+        file: &Path,
+        line: u32,
+        character: u32,
+        spec: &LanguageAdapter,
+        operation: super::lsp_languages::LspOperation,
+    ) -> anyhow::Result<Vec<super::LspLocation>> {
+        match operation {
+            super::lsp_languages::LspOperation::Declaration => {
+                self.declarations(root, file, line, character, spec)
+            }
+            super::lsp_languages::LspOperation::TypeDefinition => {
+                self.type_definitions(root, file, line, character, spec)
+            }
+            _ => self.definitions(root, file, line, character, spec),
+        }
     }
 
     pub(super) fn references(
@@ -1281,6 +1442,8 @@ impl LspService {
         self.with_file_client(root, file, spec, |client| {
             let supported = match capability {
                 "definition" => client.initialized.definition_provider,
+                "declaration" => client.initialized.declaration_provider,
+                "typeDefinition" => client.initialized.type_definition_provider,
                 "implementation" => client.initialized.implementation_provider,
                 _ => true,
             };
@@ -1304,9 +1467,12 @@ impl LspService {
         spec: &LanguageAdapter,
         operation: impl FnOnce(&mut PersistentLspClient) -> anyhow::Result<T>,
     ) -> anyhow::Result<T> {
+        // Discovery can block; do not expose the previous selection while it runs.
+        self.file_clients.lock().expect("lsp file-client cache poisoned")
+            .remove(&(workspace_root.to_path_buf(), file.to_path_buf(), spec.id.clone()));
         let project_root =
             server_root_for_file(&self.runtime(), workspace_root, file, spec);
-        self.with_client(workspace_root, &project_root, spec, operation)
+        self.with_selected_client(workspace_root, &project_root, spec, Some(file), operation)
     }
 
     fn with_client<T>(
@@ -1314,6 +1480,17 @@ impl LspService {
         workspace_root: &Path,
         project_root: &Path,
         spec: &LanguageAdapter,
+        operation: impl FnOnce(&mut PersistentLspClient) -> anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
+        self.with_selected_client(workspace_root, project_root, spec, None, operation)
+    }
+
+    fn with_selected_client<T>(
+        &self,
+        workspace_root: &Path,
+        project_root: &Path,
+        spec: &LanguageAdapter,
+        file: Option<&Path>,
         operation: impl FnOnce(&mut PersistentLspClient) -> anyhow::Result<T>,
     ) -> anyhow::Result<T> {
         let launch = launch_config(&self.runtime(), workspace_root, project_root, spec);
@@ -1336,11 +1513,45 @@ impl LspService {
         // an exit; otherwise subsequent edits and requests must reuse it.
         let exit_reason = guard.client.exit_reason();
         drop(guard);
+        if exit_reason.is_none() {
+            if let Some(file) = file {
+                self.cache_file_client(workspace_root, file, spec, &client);
+            }
+        }
         if let Some(reason) = exit_reason {
             self.record_broken(&key, reason);
             self.evict_client(&key);
         }
         result
+    }
+
+    fn cache_file_client(
+        &self,
+        root: &Path,
+        file: &Path,
+        spec: &LanguageAdapter,
+        client: &Arc<Mutex<PersistentLspClient>>,
+    ) {
+        // client() may reuse a live SDK during regeneration. Record the actual
+        // key/Arc, not the requested degraded fallback launch key.
+        let actual_key = self.clients.lock().expect("lsp client map lock poisoned")
+            .iter().find(|(_, live)| Arc::ptr_eq(live, client))
+            .map(|(key, _)| key.clone());
+        if let Some(key) = actual_key {
+            let mut selections = self.file_clients.lock().expect("lsp file-client cache poisoned");
+            if selections.len() >= 1024 {
+                selections.clear(); // Bounded hints; misses are always safe.
+            }
+            selections.insert(
+                (root.to_path_buf(), file.to_path_buf(), spec.id.clone()),
+                CachedFileClient {
+                    resolved_at: Instant::now(),
+                    adapter: spec.clone(),
+                    key,
+                    client: Arc::downgrade(client),
+                },
+            );
+        }
     }
 
     fn client(

@@ -53,7 +53,7 @@ impl Screen<'_> {
 
         // Code panes reuse the ex line-jump/save heads (`:42`, `:$`,
         // `:w`, `:wq`); the notebook-only plans stay markdown-gated.
-        if self.context_manager.current().code.is_some() {
+        if self.context_manager.active_code_pane().is_some() {
             // `:s` substitute family FIRST, parsed from the full line —
             // the pattern may contain spaces, so the head/tail split
             // below does not apply (`:%s/foo bar/baz/g`).
@@ -65,7 +65,7 @@ impl Screen<'_> {
             }
             match MarkdownExCommandPlan::classify(&head) {
                 MarkdownExCommandPlan::JumpToLastLine => {
-                    if let Some(code) = self.context_manager.current_mut().code.as_mut() {
+                    if let Some(code) = self.context_manager.active_code_pane_mut() {
                         let last = code.buffer.line_count().saturating_sub(1);
                         code.buffer.set_cursor_position(last, 0, false);
                         code.buffer.follow_cursor = true;
@@ -74,7 +74,7 @@ impl Screen<'_> {
                     return true;
                 }
                 MarkdownExCommandPlan::JumpToLine(line) => {
-                    if let Some(code) = self.context_manager.current_mut().code.as_mut() {
+                    if let Some(code) = self.context_manager.active_code_pane_mut() {
                         let line = line
                             .saturating_sub(1)
                             .min(code.buffer.line_count().saturating_sub(1));
@@ -373,7 +373,7 @@ impl Screen<'_> {
         spec: &neoism_ui::editor::code::substitute::SubstituteSpec,
     ) {
         let outcome = {
-            let Some(code) = self.context_manager.current_mut().code.as_mut() else {
+            let Some(code) = self.context_manager.active_code_pane_mut() else {
                 return;
             };
             let outcome = neoism_ui::editor::code::substitute::apply_substitute(
@@ -432,15 +432,19 @@ impl Screen<'_> {
     }
 
     pub fn scroll(&mut self, new_scroll_x_px: f64, new_scroll_y_px: f64) {
-        // Extensions panel (chrome helper page) — wheel only; horizontal
-        // is ignored. It still uses the older overlay convention where
-        // positive wheel deltas must be negated before forwarding.
+        if self
+            .handle_git_diff_view_scroll(new_scroll_x_px as f32, new_scroll_y_px as f32)
+            || self.context_manager.current().git_diff_view.is_some()
+        {
+            return;
+        }
+        // Extensions panel uses the older overlay sign convention.
         if self.context_manager.current().neoism_extensions.is_some() {
             let _ = new_scroll_x_px;
             self.handle_extensions_wheel(-(new_scroll_y_px as f32));
             return;
         }
-        if self.context_manager.current().code.is_some() {
+        if self.context_manager.active_code_pane().is_some() {
             let scale = self.sugarloaf.scale_factor();
             let viewport_height = self
                 .context_manager
@@ -448,7 +452,7 @@ impl Screen<'_> {
                 .current_item()
                 .map(|item| item.layout_rect[3] / scale)
                 .unwrap_or_else(|| self.sugarloaf.window_size().height as f32 / scale);
-            if let Some(code) = self.context_manager.current_mut().code.as_mut() {
+            if let Some(code) = self.context_manager.active_code_pane_mut() {
                 code.scroll_pixels(new_scroll_y_px as f32, viewport_height);
             }
             self.mark_dirty();

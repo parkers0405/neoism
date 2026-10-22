@@ -206,6 +206,17 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
                 contexts_empty
             }
             neoism_ui::context_policy::RouteExitPlan::RemoveGrid { grid_index } => {
+                // A root PTY exit is not consent to discard background document
+                // owners (review CodePanes need not have a BufferTab yet).
+                if self.contexts[grid_index].contexts().values().any(|item| {
+                    item.context()
+                        .code
+                        .as_ref()
+                        .is_some_and(|code| code.is_dirty())
+                }) {
+                    tracing::warn!(route_id, "kept workspace after terminal exit: canonical code owners have unsaved edits");
+                    return false;
+                }
                 // The root terminal owns the top-level workspace. If it
                 // exits, close that whole workspace even when a stacked
                 // editor peer is currently visible over it.

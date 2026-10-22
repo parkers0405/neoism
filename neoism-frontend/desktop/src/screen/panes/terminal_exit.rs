@@ -93,6 +93,12 @@ impl Screen<'_> {
                 return;
             }
         };
+        if !self.prepare_review_tab_close(active_ix) {
+            return;
+        }
+        if self.refuse_dirty_code_tab_close(active_ix) {
+            return;
+        }
         let (removed, new_active) = self.renderer.buffer_tabs.close_at(active_ix);
         let next_target = if return_to_terminal {
             None
@@ -196,6 +202,9 @@ impl Screen<'_> {
                         ChromePageKind::Extensions => {
                             self.activate_neoism_extensions_page();
                         }
+                        ChromePageKind::GitDiff => {
+                            self.activate_git_diff_route(page.route_id);
+                        }
                         ChromePageKind::NeoWorld => {
                             self.activate_neoworld_page();
                         }
@@ -247,6 +256,21 @@ impl Screen<'_> {
             return false;
         }
 
+        if closing_is_workspace_root
+            && closing_workspace_index
+                .and_then(|index| self.context_manager.all_grids().get(index))
+                .is_some_and(|grid| {
+                    grid.contexts().values().any(|item| {
+                        item.context()
+                            .code
+                            .as_ref()
+                            .is_some_and(|code| code.is_dirty())
+                    })
+                })
+        {
+            self.file_tree_notify("The terminal exited, but its workspace was kept open: save the canonical source documents before closing it", neoism_ui::panels::notifications::NotificationLevel::Warn);
+            return false;
+        }
         let should_close_window = self
             .context_manager
             .should_close_context_manager(route_id, &mut self.sugarloaf);

@@ -15,6 +15,9 @@ const CRDT_BROADCAST_CAPACITY: usize = 512;
 #[derive(Clone)]
 pub struct CrdtSyncHub {
     buffers: CrdtBufferRegistry,
+    /// Serializes document mutations and their disk baselines. Never reacquire
+    /// from a `_while_guarded` helper or a guarded filesystem callback.
+    operation: Arc<Mutex<()>>,
     /// Last text observed on disk for every file-backed CRDT buffer.
     ///
     /// Agent tools and other external processes write files directly,
@@ -49,6 +52,7 @@ impl CrdtSyncHub {
         let (tx, _) = tokio::sync::broadcast::channel(CRDT_BROADCAST_CAPACITY);
         Self {
             buffers,
+            operation: Arc::new(Mutex::new(())),
             disk_texts: Arc::new(Mutex::new(HashMap::new())),
             presence: Arc::new(Mutex::new(HashMap::new())),
             peer_state_vectors: Arc::new(Mutex::new(HashMap::new())),
@@ -58,6 +62,8 @@ impl CrdtSyncHub {
         }
     }
 
+    /// Registry access for snapshots/inspection. Production mutations must use
+    /// hub methods so they participate in the document/disk operation gate.
     pub fn buffers(&self) -> &CrdtBufferRegistry {
         &self.buffers
     }
@@ -79,6 +85,7 @@ impl CrdtSyncHub {
         buffer_id: impl Into<CrdtBufferId>,
         initial_text: impl AsRef<str>,
     ) -> CrdtServerMessage {
+        let _guard = self.operation.lock();
         let buffer_id = buffer_id.into();
         // The file itself is fresher than a pane/cache used to compose
         // OpenBuffer. This also establishes the disk baseline on first open.
@@ -89,26 +96,7 @@ impl CrdtSyncHub {
         self.buffers.open_buffer(buffer_id.clone(), seed);
 
         if let Some(disk_text) = disk_text {
-            let changed_since_last_observation = {
-                let mut disk_texts = self.disk_texts.lock();
-                match disk_texts.entry(buffer_id.clone()) {
-                    std::collections::hash_map::Entry::Vacant(entry) => {
-                        entry.insert(disk_text.clone());
-                        false
-                    }
-                    std::collections::hash_map::Entry::Occupied(mut entry) => {
-                        if entry.get() == &disk_text {
-                            false
-                        } else {
-                            entry.insert(disk_text.clone());
-                            true
-                        }
-                    }
-                }
-            };
-            if changed_since_last_observation {
-                self.apply_external_text(&buffer_id, &disk_text);
-            }
+            self.reconcile_buffer_while_guarded(&buffer_id, &disk_text);
         }
 
         let snapshot = self
@@ -246,6 +234,7 @@ impl CrdtSyncHub {
         &self,
         transaction: CrdtEditTransaction,
     ) -> Option<CrdtServerMessage> {
+        let _guard = self.operation.lock();
         let dedupe = format!(
             "{}:{}:{}",
             transaction.plugin_id, transaction.invocation_id, transaction.idempotency_key
@@ -278,10 +267,11 @@ impl CrdtSyncHub {
     /// subscriber (doc-level dirty bit — the document saved, not one
     /// client's buffer). Because every client routes its "write"
     /// through here, the daemon is the single writer: concurrent saves
-    /// serialize on the registry lock and write identical converged
+    /// serialize on the operation gate and write identical converged
     /// bytes. When the requester is alone in the doc this is byte-
     /// identical to the old "save my buffer" (the doc IS their buffer).
     pub fn save_buffer(&self, buffer_id: &str) -> CrdtServerMessage {
+        let _guard = self.operation.lock();
         let Some(path) = crate::crdt::crdt_path_for_buffer_id(buffer_id) else {
             return CrdtServerMessage::Error {
                 buffer_id: Some(buffer_id.to_string()),
@@ -335,35 +325,128 @@ impl CrdtSyncHub {
     ///
     /// The remembered disk baseline is essential: CRDT state may legitimately
     /// be newer than disk while a human has unsaved edits. We only treat disk
-    /// as authoritative after its bytes differ from the last bytes we observed
-    /// or wrote ourselves.
+    /// as authoritative after its bytes differ from the clean baseline AND
+    /// the document still equals that baseline. Otherwise broadcast a conflict
+    /// and preserve both the unsaved document and its remembered baseline.
     pub fn reconcile_disk_path(&self, path: &std::path::Path) -> bool {
+        let _guard = self.operation.lock();
+        self.reconcile_disk_path_while_guarded(path)
+    }
+
+    fn buffer_ids_for_path_while_guarded(&self, path: &std::path::Path) -> Vec<String> {
         let path = crate::path::canonicalize_lossy(path);
-        let buffer_id = crate::crdt::crdt_buffer_id_for_path(&path);
-        if !self.buffers.has_buffer(&buffer_id) {
+        // Include lexical/symlink aliases, not only the canonical file:// id.
+        self.buffers
+            .inner
+            .lock()
+            .keys()
+            .filter(|id| {
+                crate::crdt::crdt_path_for_buffer_id(id).is_some_and(|p| {
+                    crate::path::canonicalize_lossy(std::path::Path::new(p)) == path
+                })
+            })
+            .cloned()
+            .collect()
+    }
+
+    fn reconcile_disk_path_while_guarded(&self, path: &std::path::Path) -> bool {
+        let Ok(disk_text) = std::fs::read_to_string(path) else {
+            return false;
+        };
+        let mut changed = false;
+        for id in self.buffer_ids_for_path_while_guarded(path) {
+            changed |= self.reconcile_buffer_while_guarded(&id, &disk_text);
+        }
+        changed
+    }
+
+    fn reconcile_buffer_while_guarded(&self, buffer_id: &str, disk_text: &str) -> bool {
+        let baseline = self.disk_texts.lock().get(buffer_id).cloned();
+        if baseline.as_deref() == Some(disk_text) {
             return false;
         }
-        let Ok(disk_text) = std::fs::read_to_string(&path) else {
+        let Ok(text) = self.buffers.text(buffer_id) else {
             return false;
         };
-        let changed_since_last_observation = {
-            let mut disk_texts = self.disk_texts.lock();
-            match disk_texts.entry(buffer_id.clone()) {
-                std::collections::hash_map::Entry::Vacant(entry) => {
-                    entry.insert(disk_text.clone());
-                    false
-                }
-                std::collections::hash_map::Entry::Occupied(mut entry) => {
-                    if entry.get() == &disk_text {
-                        false
-                    } else {
-                        entry.insert(disk_text.clone());
-                        true
-                    }
+        if baseline.as_ref().is_some_and(|old| old != &text) {
+            // Do not advance the clean baseline: doing so could authorize a
+            // later destructive restore of unsaved collaborative content.
+            let _ = self.tx.send(CrdtServerMessage::Error {
+                buffer_id: Some(buffer_id.to_owned()),
+                message: "disk conflict: preserving unsaved collaborative document"
+                    .into(),
+            });
+            return false;
+        }
+        if baseline.is_none() && text != disk_text {
+            return false;
+        }
+        let changed = self.apply_external_text(buffer_id, disk_text);
+        if self
+            .buffers
+            .text(buffer_id)
+            .is_ok_and(|text| text == disk_text)
+        {
+            self.disk_texts
+                .lock()
+                .insert(buffer_id.to_owned(), disk_text.to_owned());
+        }
+        changed
+    }
+
+    /// Run a filesystem restore only when EVERY open alias is clean, then
+    /// publish its authoritative CRDT update and Saved before returning success.
+    /// Call on a blocking worker. The callback must not reenter this hub.
+    pub fn guarded_restore<T>(
+        &self,
+        path: &std::path::Path,
+        restore: impl FnOnce() -> Result<T, String>,
+    ) -> Result<T, String> {
+        let _guard = self.operation.lock();
+        let ids = self.buffer_ids_for_path_while_guarded(path);
+        if !ids.is_empty() {
+            let disk = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+            for id in &ids {
+                let baseline = self.disk_texts.lock().get(id).cloned();
+                let text = self.buffers.text(id).map_err(|e| e.to_string())?;
+                if baseline.as_deref() != Some(text.as_str())
+                    || baseline.as_deref() != Some(disk.as_str())
+                {
+                    return Err(format!("restore refused: {id} has unsaved collaborative edits or a disk conflict"));
                 }
             }
-        };
-        changed_since_last_observation && self.apply_external_text(&buffer_id, &disk_text)
+        }
+        let result = restore()?;
+        if !ids.is_empty() {
+            let disk = match std::fs::read_to_string(path) {
+                Ok(text) => text,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+                Err(e) => {
+                    return Err(format!(
+                        "restore written but CRDT reconciliation failed: {e}"
+                    ))
+                }
+            };
+            for id in ids {
+                let changed = self.apply_external_text(&id, &disk);
+                if self.buffers.text(&id).map_err(|e| e.to_string())? != disk {
+                    return Err(
+                        "restore written but authoritative document did not converge"
+                            .into(),
+                    );
+                }
+                self.disk_texts.lock().insert(id.clone(), disk.clone());
+                // Also acknowledge a no-op restore (apply_external_text only
+                // emits Saved when there was a text change).
+                if !changed {
+                    let _ = self.tx.send(CrdtServerMessage::Saved {
+                        buffer_id: id,
+                        bytes_written: disk.len() as u64,
+                    });
+                }
+            }
+        }
+        Ok(result)
     }
 
     fn apply_external_text(&self, buffer_id: &str, disk_text: &str) -> bool {
@@ -547,6 +630,7 @@ impl CrdtSyncHub {
     }
 
     fn apply_update(&self, update: CrdtBufferUpdate) -> Option<CrdtServerMessage> {
+        let _guard = self.operation.lock();
         let origin_peer_id = update.origin_client_id.to_string();
         let origin_state_vector = update.state_vector_v1.clone();
         let buffer_id = update.buffer_id.clone();
@@ -614,6 +698,7 @@ impl CrdtSyncHub {
         new_text: &str,
         origin_client_id: CrdtClientId,
     ) -> Option<CrdtServerMessage> {
+        let _guard = self.operation.lock();
         let old = self.buffers.text(buffer_id).ok()?;
         let old_lines: Vec<&str> = old.split('\n').collect();
         // Clamp defensively: if the replica drifted (Wave 7 territory),

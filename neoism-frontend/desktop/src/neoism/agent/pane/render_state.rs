@@ -475,27 +475,140 @@ impl NeoismAgentPane {
     pub(crate) fn apply_config_defaults(&mut self) {
         self.provider_readiness = None;
         self.config_chip_hydration.begin();
+        let target = self.config_defaults_target();
+        if let Some(defaults) = super::super::api::cached_config_defaults(
+            &self.server,
+            self.directory.as_deref(),
+        ) {
+            self.apply_loaded_config_defaults(target, defaults);
+        }
         self.push_outbound(OutboundAgentCommand::ApplyConfigDefaults);
     }
 
+    pub(crate) fn config_defaults_target(&self) -> ConfigDefaultsTarget {
+        ConfigDefaultsTarget {
+            scope: super::super::api::catalog_scope(
+                &self.server,
+                self.directory.as_deref(),
+            ),
+            generation: self.config_defaults_generation,
+            directory: self.directory.clone(),
+            agent: self.agent.clone(),
+            model: self.model.clone(),
+            thinking: self.thinking.clone(),
+        }
+    }
+
+    pub(crate) fn apply_loaded_config_defaults(
+        &mut self,
+        target: ConfigDefaultsTarget,
+        defaults: neoism_ui::panels::agent_pane::api_mapping::ConfigDefaults,
+    ) -> bool {
+        if target.generation != self.config_defaults_generation
+            || target.directory != self.directory
+            || !target
+                .scope
+                .is_current(&self.server, self.directory.as_deref())
+        {
+            return false;
+        }
+        self.config_chip_hydration.complete();
+        if let Some(readiness) = defaults.provider_readiness {
+            self.provider_readiness = Some(readiness);
+        }
+        // Session metadata and choices made during hydration take precedence.
+        if self.session_id.is_none() {
+            if self.agent == target.agent {
+                if let Some(agent) = defaults.agent {
+                    match agent.as_str() {
+                        "build" => self.mode = NeoismAgentMode::Build,
+                        "plan" => self.mode = NeoismAgentMode::Plan,
+                        _ => {}
+                    }
+                    self.agent = Some(agent);
+                }
+            }
+            if self.model == target.model && self.model.trim().is_empty() {
+                if let Some(model) = defaults.model {
+                    self.model = model;
+                    self.execute_refresh_model_context_limit_command();
+                }
+            }
+            if self.thinking == target.thinking && self.thinking.is_none() {
+                self.thinking = defaults.thinking;
+            }
+        }
+        if let Some(visible) = defaults.input_help_visible {
+            self.set_input_help_visible(visible);
+        }
+        if let Some(visible) = defaults.sidebar_visible {
+            self.side_panel.set_user_hidden(!visible);
+        }
+        true
+    }
+
+    /// A freshly constructed pane opened for an existing conversation will
+    /// hydrate its saved settings instead. Cancel only defaults still queued;
+    /// this does not attempt to cancel or re-scope an in-flight request.
+    pub(crate) fn discard_queued_draft_defaults(&mut self) {
+        let before = self.pending_outbound.len();
+        self.pending_outbound.retain(|command| {
+            !matches!(command, OutboundAgentCommand::ApplyConfigDefaults)
+        });
+        if self.pending_outbound.len() != before {
+            self.config_chip_hydration.cancel();
+        }
+    }
+
     pub(crate) fn execute_apply_config_defaults_command(&mut self) {
+        self.config_defaults_generation = self.config_defaults_generation.wrapping_add(1);
+        let target = self.config_defaults_target();
+        self.refresh_provider_readiness();
         let server = self.server.clone();
-        let directory = self.directory.clone();
         let tx = self.background_tx.clone();
-        std::thread::Builder::new()
+        let failed_target = target.clone();
+        if std::thread::Builder::new()
             .name("neoism-agent-config".into())
             .spawn(move || {
+                let started = crate::neoism::agent::perf::now();
                 let mut last_error = None;
                 for delay in [0, 250, 750] {
                     if delay > 0 {
                         std::thread::sleep(std::time::Duration::from_millis(delay));
                     }
-                    match fetch_config_defaults(&server, directory.as_deref()) {
+                    match fetch_config_defaults(&server, target.directory.as_deref()) {
                         Ok(defaults) => {
+                            if started.is_some() {
+                                tracing::info!(
+                                    elapsed_us =
+                                        crate::neoism::agent::perf::elapsed_us(started),
+                                    "agent composer defaults ready"
+                                );
+                            }
+                            let resolve_model = defaults.model.is_none();
                             let _ = tx.send(
-                                NeoismAgentBackgroundUpdate::ConfigDefaultsLoaded(
+                                NeoismAgentBackgroundUpdate::ConfigDefaultsLoaded {
+                                    target: target.clone(),
                                     defaults,
-                                ),
+                                },
+                            );
+                            let defaults = fetch_config_catalog_defaults(
+                                &server,
+                                target.directory.as_deref(),
+                                resolve_model,
+                            );
+                            if started.is_some() {
+                                tracing::info!(
+                                    elapsed_us =
+                                        crate::neoism::agent::perf::elapsed_us(started),
+                                    "agent composer model defaults ready"
+                                );
+                            }
+                            let _ = tx.send(
+                                NeoismAgentBackgroundUpdate::ConfigDefaultsLoaded {
+                                    target,
+                                    defaults,
+                                },
                             );
                             return;
                         }
@@ -504,10 +617,16 @@ impl NeoismAgentPane {
                 }
                 if let Some(error) = last_error {
                     tracing::warn!(%error, "failed to load agent config defaults");
-                    let _ = tx.send(NeoismAgentBackgroundUpdate::ConfigDefaultsFailed);
+                    let _ = tx
+                        .send(NeoismAgentBackgroundUpdate::ConfigDefaultsFailed(target));
                 }
             })
-            .ok();
+            .is_err()
+        {
+            let _ = self.background_tx.send(
+                NeoismAgentBackgroundUpdate::ConfigDefaultsFailed(failed_target),
+            );
+        }
     }
 
     pub fn cursor_rect(&self) -> Option<[f32; 4]> {
@@ -1239,6 +1358,13 @@ impl NeoismAgentPane {
 
     pub(crate) fn any_tool_expand_animating(&self) -> bool {
         self.tool_expand_anims.values().any(|anim| anim.is_active())
+    }
+
+    /// Whether resetting transient interactions changes measured row geometry.
+    pub(crate) fn timeline_has_transient_geometry(&self) -> bool {
+        !self.expanded_tool_ids.is_empty()
+            || !self.tool_expand_anims.is_empty()
+            || self.selected_tool_group_child.is_some()
     }
 
     /// Drop transient timeline interaction state — expanded tool cards,

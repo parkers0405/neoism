@@ -935,6 +935,40 @@ impl<A> BufferTabs<A> {
         self.active
     }
 
+    /// Review tabs are keyed by host route (one per repository), and may
+    /// coexist with editable file tabs without acquiring file-buffer behavior.
+    pub fn open_git_diff(&mut self, route_id: usize, _path: &Path) -> usize {
+        let page = ChromePageRef {
+            kind: ChromePageKind::GitDiff,
+            route_id,
+        };
+        let index = if let Some(index) = self
+            .tabs
+            .iter()
+            .position(|tab| tab.chrome_page == Some(page))
+        {
+            index
+        } else {
+            self.tabs.push(BufferTab {
+                title: "Uncommitted Changes".into(),
+                modified: false,
+                custom_icon: None,
+                path: None,
+                markdown: false,
+                terminal_route_id: None,
+                neoism_agent_route_id: None,
+                chrome_page: Some(page),
+                agent_kind: None,
+            });
+            self.tabs.len() - 1
+        };
+        self.active = index;
+        self.visible = true;
+        self.layout.clear();
+        self.pending_ensure_active = true;
+        index
+    }
+
     pub fn remove_terminal_route(&mut self, route_id: usize) -> bool {
         let Some(ix) = self
             .tabs

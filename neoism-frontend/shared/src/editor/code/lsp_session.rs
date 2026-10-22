@@ -162,12 +162,13 @@ pub fn snippet_with_first_stop(text: &str) -> (String, Option<(usize, usize)>) {
 
 /// Flatten per-server hover contents into the markdown-ish line list
 /// the shared hover popup parses (fences kept; multiple servers
-/// separated by a blank line). Desktop: `hover_card_lines`.
+/// separated by a blank line). The popup bounds its scrolling viewport;
+/// never truncate source lines and leave a Markdown fence unterminated.
+/// Desktop: `hover_card_lines`.
 pub fn hover_card_lines<'a, I>(contents: I) -> Vec<String>
 where
     I: IntoIterator<Item = &'a str>,
 {
-    const MAX_LINES: usize = 40;
     let mut out: Vec<String> = Vec::new();
     for hover in contents {
         if hover.trim().is_empty() {
@@ -176,12 +177,7 @@ where
         if !out.is_empty() {
             out.push(String::new());
         }
-        for line in hover.lines() {
-            out.push(line.to_string());
-            if out.len() >= MAX_LINES {
-                return out;
-            }
-        }
+        out.extend(hover.lines().map(str::to_owned));
     }
     out
 }
@@ -672,8 +668,9 @@ pub struct LspHoverCard {
     pub col: usize,
     pub seq: u64,
     pub lines: Vec<String>,
-    /// Mouse-idle hover (vs `K`): pinned to the hovered cell,
-    /// dismissed when the pointer leaves it instead of on cursor move.
+    pub interaction: crate::panels::hover_popup::HoverPopupState,
+    /// Mouse-idle hover (vs `K`): anchored to the hovered cell,
+    /// retained while the pointer crosses into or selects the card.
     pub from_mouse: bool,
 }
 
@@ -1066,6 +1063,15 @@ impl CodeLspUi {
     /// mouse-idle hover candidate. Pass `None` when the pointer is
     /// outside the pane. Desktop: `note_code_mouse_hover`.
     pub fn note_mouse_move(&mut self, pane: &CodePane, pos: Option<(f32, f32)>) -> bool {
+        // The rendered popup and its source-to-popup corridor win over
+        // cell-based dismissal, including a captured drag outside the pane.
+        if pos.is_some_and(|(x, y)| {
+            self.hover.as_ref().is_some_and(|card| {
+                card.path == pane.path && card.interaction.retains_pointer(x, y)
+            })
+        }) {
+            return false;
+        }
         let Some((mx, my)) = pos else {
             let mut dirty = self.mouse_hover.take().is_some();
             if self.hover.as_ref().is_some_and(|card| card.from_mouse) {
@@ -1157,6 +1163,7 @@ impl CodeLspUi {
         let anchor_col = hits.iter().map(|d| d.start).min().unwrap_or(col);
         let seq = self.next_seq();
         self.hover = Some(LspHoverCard {
+            interaction: Default::default(),
             path: pane.path.clone(),
             line,
             col: anchor_col,
@@ -1263,6 +1270,7 @@ impl CodeLspUi {
         let seq = self.next_seq();
         self.completion = None;
         self.hover = Some(LspHoverCard {
+            interaction: Default::default(),
             path: pane.path.clone(),
             line,
             col,
@@ -1322,6 +1330,7 @@ impl CodeLspUi {
         };
         self.signature_seq = Some(seq);
         self.hover = Some(LspHoverCard {
+            interaction: Default::default(),
             path: pane.path.clone(),
             line,
             col,
@@ -2031,6 +2040,51 @@ enum EditResultKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hover_card_keeps_complete_fences_and_server_separators() {
+        let mut lines = vec!["```nix".to_owned()];
+        lines.extend((0..60).map(|i| format!("  # comment {i}")));
+        lines.push("```".to_owned());
+        let source = lines.join("\n");
+        let actual = hover_card_lines(["", source.as_str(), "\n", "`tail`"]);
+        let mut expected = lines;
+        expected.push(String::new());
+        expected.push("`tail`".to_owned());
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn new_hover_cards_do_not_capture_input_before_render() {
+        let pane = CodePane::new(PathBuf::from("/hover.rs"), "let value = 1;");
+        let mut session = CodeLspUi::default();
+        session.request_hover_at(&pane, 0, 4, true);
+        let state = &mut session.hover.as_mut().unwrap().interaction;
+        assert!(!state.retains_pointer(0.0, 0.0));
+        assert!(!state.begin_selection(0.0, 0.0));
+        assert!(!state.pointer_move(0.0, 0.0));
+        assert!(!state.end_selection());
+        assert_eq!(state.selected_text(), None);
+        assert!(session.note_mouse_move(&pane, None));
+        assert!(session.hover.is_none());
+    }
+
+    #[test]
+    fn leaving_pane_preserves_keyboard_hover_but_clears_mouse_candidate() {
+        let pane = CodePane::new(PathBuf::from("/hover.rs"), "value");
+        let mut session = CodeLspUi::default();
+        session.request_hover(&pane);
+        session.mouse_hover = Some(LspMouseHover {
+            line: 0,
+            col: 0,
+            since: Instant::now(),
+            requested: true,
+        });
+        assert!(session.note_mouse_move(&pane, None));
+        assert!(session.mouse_hover.is_none());
+        assert!(session.hover.is_some());
+        assert!(!session.note_mouse_move(&pane, None));
+    }
 
     #[test]
     fn snippet_first_stop_strips_placeholders() {

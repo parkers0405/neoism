@@ -26,6 +26,15 @@ pub(in crate::lsp) struct AdapterCache {
     entries: Mutex<HashMap<PathBuf, CachedAdapters>>,
 }
 
+impl AdapterCache {
+    /// UI-only peek: never load config, inspect the registry, or wait for a writer.
+    pub(in crate::lsp) fn cached_for_root(&self, root: &Path) -> Option<Vec<LanguageAdapter>> {
+        let entries = self.entries.try_lock().ok()?;
+        let cached = entries.get(root)?;
+        (cached.loaded_at.elapsed() < ADAPTER_CACHE_TTL).then(|| cached.adapters.clone())
+    }
+}
+
 pub(in crate::lsp) fn adapters_for_root_with(
     cache: &AdapterCache,
     services: &neoism_agent_service_api::AgentServices,
@@ -152,6 +161,32 @@ fn resolve_adapters_uncached(
         adapters.push(adapter);
     }
     adapters
+}
+
+#[cfg(test)]
+mod cached_peek_tests {
+    use super::*;
+
+    #[test]
+    fn peek_is_unknown_when_cold_expired_or_contended() {
+        let cache = AdapterCache::default();
+        let root = Path::new("/cached-menu-root");
+        assert!(cache.cached_for_root(root).is_none());
+        {
+            let mut entries = cache.entries.lock().unwrap();
+            entries.insert(root.to_path_buf(), CachedAdapters {
+                loaded_at: Instant::now(),
+                snapshot_identity: String::new(),
+                capability_generation: 0,
+                adapters: Vec::new(),
+            });
+            assert!(cache.cached_for_root(root).is_none(), "never wait for a writer");
+        }
+        assert_eq!(cache.cached_for_root(root), Some(Vec::new()));
+        cache.entries.lock().unwrap().get_mut(root).unwrap().loaded_at =
+            Instant::now() - ADAPTER_CACHE_TTL;
+        assert!(cache.cached_for_root(root).is_none());
+    }
 }
 
 fn invalid_adapter(id: &str, error: String) -> LanguageAdapter {

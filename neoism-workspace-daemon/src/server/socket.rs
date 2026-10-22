@@ -276,6 +276,14 @@ pub(crate) async fn handle_socket(
     // push lane so the socket pump never blocks behind them.
     let editor_query_tx = push_tx.clone();
     let git_blame_tx = push_tx.clone();
+    // One FIFO for ordinary Git reads AND mutations. Never await queue capacity
+    // in the socket pump: a slow Git operation must not stall PTY forwarding.
+    let (git_tx, git_requests) = tokio::sync::mpsc::channel(GIT_QUEUE_CAPACITY);
+    let (git_replies, mut git_rx) = tokio::sync::mpsc::channel(GIT_QUEUE_CAPACITY);
+    let git_crdt = crdt.clone();
+    tokio::spawn(serial_git_worker(git_requests, git_replies, move |root, message| {
+        git_handler::handle_with_root_and_crdt(root, message, git_crdt.clone())
+    }));
     let (git_watch_tx, git_watch_rx) = tokio::sync::watch::channel(None);
     // Git request IDs are monotonic for one client. A cancelled old scope's
     // task may finish enqueuing while a newer task starts on another thread.
@@ -408,6 +416,14 @@ pub(crate) async fn handle_socket(
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                         return;
                     }
+                }
+                continue;
+            }
+            Some((request_id, message)) = git_rx.recv() => {
+                let resp = ServiceServerMessage::GitReply { request_id, message };
+                if let Err(err) = send_json(&mut sink, &resp).await {
+                    tracing::warn!(error = %err, "websocket send error draining git reply");
+                    return;
                 }
                 continue;
             }
@@ -589,9 +605,13 @@ pub(crate) async fn handle_socket(
                 // burst so remote file trees update too.
                 match fs_event {
                     Ok(payload) => {
-                        for path in &payload.paths {
-                            crdt.reconcile_disk_path(std::path::Path::new(path));
-                        }
+                        let hub = crdt.clone();
+                        let paths = payload.paths.clone();
+                        let _ = tokio::task::spawn_blocking(move || {
+                            for path in paths {
+                                hub.reconcile_disk_path(std::path::Path::new(&path));
+                            }
+                        }).await;
                         let resp = ServiceServerMessage::FilesReply {
                             request_id: 0,
                             message: FilesServerMessage::Changed {
@@ -714,7 +734,9 @@ pub(crate) async fn handle_socket(
         // Try each known client message shape. Variant names across pty /
         // files / git are disjoint, so the first successful parse wins.
         if let Ok(msg) = serde_json::from_str::<ClientMessage>(&text) {
-            if let Some(denial) = directory_permission_denial(&msg, &device, &workspace_manager) {
+            if let Some(denial) =
+                directory_permission_denial(&msg, &device, &workspace_manager)
+            {
                 let _ = send_json(&mut sink, &denial).await;
                 continue;
             }
@@ -755,8 +777,17 @@ pub(crate) async fn handle_socket(
                     request_id,
                     message,
                 } => {
-                    if let Some(denial) = directory_permission_denial(&message, &device, &workspace_manager) {
-                        let _ = send_json(&mut sink, &ServiceServerMessage::PtyReply { request_id, message: denial }).await;
+                    if let Some(denial) =
+                        directory_permission_denial(&message, &device, &workspace_manager)
+                    {
+                        let _ = send_json(
+                            &mut sink,
+                            &ServiceServerMessage::PtyReply {
+                                request_id,
+                                message: denial,
+                            },
+                        )
+                        .await;
                         continue;
                     }
                     if matches!(&message, ClientMessage::CreatePty { .. }) {
@@ -975,10 +1006,19 @@ pub(crate) async fn handle_socket(
                         });
                         continue;
                     }
-                    for message in git_handler::handle_with_root(root, message).await {
+                    // Root resolution and permission checks happen at admission,
+                    // not execution: changing the selected workspace cannot retarget
+                    // an already queued mutation.
+                    if let Err(error) = git_tx.try_send((request_id, root, message)) {
+                        let message = match error {
+                            tokio::sync::mpsc::error::TrySendError::Full(_) =>
+                                "Git request queue is full; request was not executed",
+                            tokio::sync::mpsc::error::TrySendError::Closed(_) =>
+                                "Git request worker is unavailable; request was not executed",
+                        };
                         let resp = ServiceServerMessage::GitReply {
                             request_id,
-                            message,
+                            message: GitServerMessage::Error { message: message.into() },
                         };
                         if let Err(err) = send_json(&mut sink, &resp).await {
                             tracing::warn!(error = %err, "websocket send error");
@@ -1856,7 +1896,21 @@ pub(crate) async fn handle_socket(
                         }
                         other => other,
                     };
-                    for message in crdt.handle_client_message(message) {
+                    let hub = crdt.clone();
+                    let replies = match tokio::task::spawn_blocking(move || {
+                        hub.handle_client_message(message)
+                    })
+                    .await
+                    {
+                        Ok(replies) => replies,
+                        Err(error) => {
+                            vec![neoism_protocol::crdt::CrdtServerMessage::Error {
+                                buffer_id: None,
+                                message: format!("CRDT worker failed: {error}"),
+                            }]
+                        }
+                    };
+                    for message in replies {
                         let resp = ServiceServerMessage::CrdtReply {
                             request_id,
                             message,
@@ -1954,7 +2008,12 @@ pub(crate) async fn handle_socket(
                 let _ = send_json(&mut sink, &denial).await;
                 continue;
             }
-            let responses = git_handler::handle(msg).await;
+            let responses = git_handler::handle_with_root_and_crdt(
+                crate::files::workspace_root(),
+                msg,
+                crdt.clone(),
+            )
+            .await;
             for resp in responses {
                 if let Err(err) = send_json(&mut sink, &resp).await {
                     tracing::warn!(error = %err, "websocket send error");
@@ -1977,20 +2036,41 @@ pub(crate) async fn handle_socket(
     tracing::debug!("websocket connection closed");
 }
 
-fn directory_permission_denial(message: &ClientMessage, device: &Option<crate::auth::DeviceRecord>, manager: &WorkspaceManager) -> Option<ServerMessage> {
-    let ClientMessage::ChangeTerminalDirectory { session_id, request_id, .. } = message else { return None; };
+fn directory_permission_denial(
+    message: &ClientMessage,
+    device: &Option<crate::auth::DeviceRecord>,
+    manager: &WorkspaceManager,
+) -> Option<ServerMessage> {
+    let ClientMessage::ChangeTerminalDirectory {
+        session_id,
+        request_id,
+        ..
+    } = message
+    else {
+        return None;
+    };
     // Same trusted local/token transport as Input, plus an explicit execution
     // capability check for paired devices. An output subscription is not a grant.
-    if let Err(ServerMessage::Error { message }) = check_permission(device, Permission::PtyCreate) {
+    if let Err(ServerMessage::Error { message }) =
+        check_permission(device, Permission::PtyCreate)
+    {
         return Some(ServerMessage::TerminalDirectoryChangeFailed {
-            session_id: session_id.clone(), request_id: request_id.clone(), message,
+            session_id: session_id.clone(),
+            request_id: request_id.clone(),
+            message,
         });
     }
     if let Some(scope) = device.as_ref().and_then(|d| d.workspace_id.as_deref()) {
-        if !manager.workspace_sessions(scope).iter().any(|tab| manager.pty_session_for(&tab.id).as_ref() == Some(session_id)) {
+        if !manager
+            .workspace_sessions(scope)
+            .iter()
+            .any(|tab| manager.pty_session_for(&tab.id).as_ref() == Some(session_id))
+        {
             return Some(ServerMessage::TerminalDirectoryChangeFailed {
-                session_id: session_id.clone(), request_id: request_id.clone(),
-                message: "Terminal is outside this device's authorized workspace scope".into(),
+                session_id: session_id.clone(),
+                request_id: request_id.clone(),
+                message: "Terminal is outside this device's authorized workspace scope"
+                    .into(),
             });
         }
     }
@@ -2004,21 +2084,34 @@ mod directory_authorization_tests {
     fn directory_write_capability_and_workspace_scope_are_correlated() {
         let manager = WorkspaceManager::bootstrap();
         let msg = ClientMessage::ChangeTerminalDirectory {
-            session_id: "unlinked-host-session".into(), request_id: "generation-b".into(), directory: "/tmp".into(),
+            session_id: "unlinked-host-session".into(),
+            request_id: "generation-b".into(),
+            directory: "/tmp".into(),
         };
         assert!(directory_permission_denial(&msg, &None, &manager).is_none());
         let mut device = crate::auth::DeviceRecord {
-            device_id: "reader".into(), device_label: "reader".into(), token_hash: String::new(),
-            created_at: 0, last_seen: 0, granted_permissions: [Permission::ReadFiles].into(), workspace_id: None,
+            device_id: "reader".into(),
+            device_label: "reader".into(),
+            token_hash: String::new(),
+            created_at: 0,
+            last_seen: 0,
+            granted_permissions: [Permission::ReadFiles].into(),
+            workspace_id: None,
         };
-        assert!(matches!(directory_permission_denial(&msg, &Some(device.clone()), &manager),
+        assert!(
+            matches!(directory_permission_denial(&msg, &Some(device.clone()), &manager),
             Some(ServerMessage::TerminalDirectoryChangeFailed { session_id, request_id, .. })
-                if session_id == "unlinked-host-session" && request_id == "generation-b"));
+                if session_id == "unlinked-host-session" && request_id == "generation-b")
+        );
         device.granted_permissions.insert(Permission::PtyCreate);
-        assert!(directory_permission_denial(&msg, &Some(device.clone()), &manager).is_none());
+        assert!(
+            directory_permission_denial(&msg, &Some(device.clone()), &manager).is_none()
+        );
         device.workspace_id = Some("another-workspace".into());
-        assert!(matches!(directory_permission_denial(&msg, &Some(device), &manager),
-            Some(ServerMessage::TerminalDirectoryChangeFailed { message, .. }) if message.contains("scope")));
+        assert!(
+            matches!(directory_permission_denial(&msg, &Some(device), &manager),
+            Some(ServerMessage::TerminalDirectoryChangeFailed { message, .. }) if message.contains("scope"))
+        );
     }
 }
 
@@ -2091,6 +2184,41 @@ mod pty_subscription_tests {
 
         remember_pty_subscription(&mut subscriptions, Some("other"), &ServerMessage::Ack);
         assert!(subscriptions.contains("other"));
+    }
+}
+
+// Bound both queued requests and replies independently of the shared push lane.
+const GIT_QUEUE_CAPACITY: usize = 32;
+type QueuedGitRequest = (u64, std::path::PathBuf, GitClientMessage);
+
+/// Per-socket ordering matches the former inline dispatcher. In particular,
+/// reads cannot overtake accepted mutations and index writers never fan out.
+/// Dropping the socket's reply receiver wakes an idle/backpressured worker on
+/// every exit path. An active operation finishes (spawn_blocking Git cannot be
+/// safely cancelled midway through restore), but queued work is then discarded.
+async fn serial_git_worker<F, Fut>(
+    mut requests: tokio::sync::mpsc::Receiver<QueuedGitRequest>,
+    replies: tokio::sync::mpsc::Sender<(u64, GitServerMessage)>,
+    mut handle: F,
+) where
+    F: FnMut(std::path::PathBuf, GitClientMessage) -> Fut,
+    Fut: std::future::Future<Output = Vec<GitServerMessage>>,
+{
+    loop {
+        let request = tokio::select! {
+            biased;
+            _ = replies.closed() => return,
+            request = requests.recv() => request,
+        };
+        let Some((request_id, root, message)) = request else { return };
+        if replies.is_closed() {
+            return;
+        }
+        for message in handle(root, message).await {
+            if replies.send((request_id, message)).await.is_err() {
+                return;
+            }
+        }
     }
 }
 
@@ -2278,6 +2406,107 @@ mod highlight_tests {
             highlight_spans_for(std::path::Path::new("notes.unknownext"), "hello",)
                 .is_none()
         );
+    }
+}
+
+#[cfg(test)]
+mod git_worker_tests {
+    use super::*;
+    use std::{sync::Arc, time::Duration};
+
+    fn request(id: u64, root: &str) -> QueuedGitRequest {
+        (id, root.into(), GitClientMessage::Stage { path: id.to_string() })
+    }
+
+    #[tokio::test]
+    async fn fifo_is_bounded_and_preserves_captured_roots_and_reply_ids() {
+        let (tx, requests) = tokio::sync::mpsc::channel(1);
+        let (replies, mut rx) = tokio::sync::mpsc::channel(1);
+        let (entered, mut starts) = tokio::sync::mpsc::unbounded_channel();
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let worker_gate = gate.clone();
+        let worker = tokio::spawn(serial_git_worker(requests, replies, move |root, message| {
+            let entered = entered.clone();
+            let gate = worker_gate.clone();
+            async move {
+                entered.send((root, message)).unwrap();
+                gate.acquire().await.unwrap().forget();
+                vec![GitServerMessage::Error { message: "test reply".into() }]
+            }
+        }));
+        tx.try_send(request(1, "/first")).unwrap();
+        let (root, message) = starts.recv().await.unwrap();
+        assert_eq!(root, std::path::PathBuf::from("/first"));
+        assert!(matches!(message, GitClientMessage::Stage { path } if path == "1"));
+        // The worker is still blocked, but admission never waits for Git.
+        tx.try_send(request(2, "/second")).unwrap();
+        assert!(matches!(tx.try_send(request(3, "/third")),
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_))));
+        assert!(starts.try_recv().is_err());
+        gate.add_permits(1);
+        assert_eq!(rx.recv().await.unwrap().0, 1);
+        let (root, message) = starts.recv().await.unwrap();
+        assert_eq!(root, std::path::PathBuf::from("/second"));
+        assert!(matches!(message, GitClientMessage::Stage { path } if path == "2"));
+        gate.add_permits(1);
+        assert_eq!(rx.recv().await.unwrap().0, 2);
+        drop(tx);
+        tokio::time::timeout(Duration::from_secs(1), worker).await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn disconnect_finishes_active_operation_but_discards_queued_mutations() {
+        let (tx, requests) = tokio::sync::mpsc::channel(2);
+        let (replies, rx) = tokio::sync::mpsc::channel(1);
+        let (entered, mut starts) = tokio::sync::mpsc::unbounded_channel();
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let worker_gate = gate.clone();
+        let worker = tokio::spawn(serial_git_worker(requests, replies, move |_, _| {
+            let entered = entered.clone();
+            let gate = worker_gate.clone();
+            async move {
+                entered.send(()).unwrap();
+                gate.acquire().await.unwrap().forget();
+                // Even no-reply handlers must check disconnect before next work.
+                Vec::new()
+            }
+        }));
+        tx.try_send(request(1, "/first")).unwrap();
+        starts.recv().await.unwrap();
+        tx.try_send(request(2, "/first")).unwrap();
+        drop(rx);
+        assert!(!worker.is_finished());
+        gate.add_permits(1);
+        tokio::time::timeout(Duration::from_secs(1), worker).await.unwrap().unwrap();
+        assert!(starts.recv().await.is_none());
+        assert!(tx.is_closed());
+    }
+
+    #[tokio::test]
+    async fn disconnect_wakes_idle_and_reply_backpressured_workers() {
+        for backpressured in [false, true] {
+            let (tx, requests) = tokio::sync::mpsc::channel(1);
+            let (replies, rx) = tokio::sync::mpsc::channel(1);
+            let worker = tokio::spawn(serial_git_worker(requests, replies, |_, _| async {
+                vec![
+                    GitServerMessage::Error { message: "first".into() },
+                    GitServerMessage::Error { message: "second".into() },
+                ]
+            }));
+            if backpressured {
+                tx.try_send(request(1, "/first")).unwrap();
+                // Wait until the first reply fills the bounded lane; the second
+                // send must wait for the receiver, not grow an unbounded queue.
+                tokio::time::timeout(Duration::from_secs(1), async {
+                    while rx.len() == 0 {
+                        tokio::task::yield_now().await;
+                    }
+                }).await.unwrap();
+            }
+            drop(rx);
+            tokio::time::timeout(Duration::from_secs(1), worker).await.unwrap().unwrap();
+            assert!(tx.is_closed());
+        }
     }
 }
 

@@ -7,6 +7,10 @@
 //! All operations reject when the workspace root is not a git repository,
 //! producing a `GitServerMessage::Error` reply.
 
+#[path = "git_blocks.rs"]
+mod git_blocks;
+pub use git_blocks::apply_change_block;
+
 use std::path::Path;
 
 use git2::{DiffFormat, DiffOptions, Repository, Status, StatusOptions};
@@ -66,6 +70,7 @@ pub async fn handle_with_root(
         return vec![GitServerMessage::ChangedFiles {
             files: snapshot.files,
             branch: snapshot.branch,
+            upstream: snapshot.upstream,
             error: snapshot.error,
         }];
     }
@@ -77,6 +82,66 @@ pub async fn handle_with_root(
     }
     match result {
         Ok(out) => out,
+        Err(e) => err(format!("git task join error: {e}")),
+    }
+}
+
+/// Socket entry point: restores finish on the existing authoritative hub
+/// before Git success. Clients must consume Sync/Saved or reopen a snapshot,
+/// not publish a second disk-derived edit into their local Yrs replica.
+/// The pure `handle_with_root`/`apply_change_block` API remains for NativeIo.
+pub async fn handle_with_root_and_crdt(
+    root: std::path::PathBuf,
+    msg: GitClientMessage,
+    crdt: crate::crdt::sync::CrdtSyncHub,
+) -> Vec<GitServerMessage> {
+    if !matches!(
+        &msg,
+        GitClientMessage::ApplyBlock { restore: true, .. }
+            | GitClientMessage::Restore { .. }
+    ) {
+        return handle_with_root(root, msg).await;
+    }
+    let cache_root = root.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let repo = match Repository::discover(&root) {
+            Ok(repo) => repo,
+            Err(e) => return err(e.to_string()),
+        };
+        let Some(wd) = repo.workdir() else {
+            return err("repository has no workdir");
+        };
+        let path = match &msg {
+            GitClientMessage::ApplyBlock { path, .. }
+            | GitClientMessage::Restore { path } => path,
+            _ => unreachable!(),
+        };
+        // Git paths are repo-relative, but the caller's declared workspace
+        // remains the permission boundary (including canonical/symlink checks).
+        let target = match resolve_path(wd, path) {
+            Ok(path) => path,
+            Err(e) => return err(e),
+        };
+        if !crate::path::canonicalize_lossy(&target)
+            .starts_with(crate::path::canonicalize_lossy(&root))
+        {
+            return err("restore path is outside the declared workspace");
+        }
+        let result = crdt.guarded_restore(&target, || match &msg {
+            GitClientMessage::ApplyBlock {
+                path,
+                block,
+                restore,
+            } => apply_change_block(&root, path, block, *restore),
+            GitClientMessage::Restore { path } => restore_file(wd, path),
+            _ => unreachable!(),
+        });
+        vec![changed_files_reply(wd, result.err())]
+    })
+    .await;
+    crate::git_snapshot::invalidate(&cache_root).await;
+    match result {
+        Ok(replies) => replies,
         Err(e) => err(format!("git task join error: {e}")),
     }
 }
@@ -211,6 +276,12 @@ fn handle_blocking(root: &Path, msg: GitClientMessage) -> Vec<GitServerMessage> 
         GitClientMessage::Status => status(&repo),
         GitClientMessage::Diff { path } => diff(&repo, path.as_deref(), root),
         GitClientMessage::Log { max_count } => log(&repo, max_count),
+        GitClientMessage::ReadCommit { revision } => {
+            match read_commit(&repo, &revision) {
+                Ok(detail) => vec![GitServerMessage::CommitDetail { detail }],
+                Err(e) => err(e),
+            }
+        }
         // ── Web git-panel write parity (Pass 2) ──────────────────────
         // These shell out to `git` with the exact flags the desktop
         // panel's `NativeGitDiffIo` uses (see
@@ -237,6 +308,25 @@ fn handle_blocking(root: &Path, msg: GitClientMessage) -> Vec<GitServerMessage> 
             let result = run_git(wd, &["restore", "--staged", "--", &path])
                 .or_else(|_| run_git(wd, &["reset", "-q", "HEAD", "--", &path]));
             vec![changed_files_reply(wd, result.err())]
+        }),
+        GitClientMessage::ReadBase { path } => {
+            with_workdir(&repo, |wd| match load_base(wd, &path) {
+                Ok(text) => vec![GitServerMessage::BaseFile { path, text }],
+                Err(e) => err(e),
+            })
+        }
+        GitClientMessage::Restore { path } => with_workdir(&repo, |wd| {
+            vec![changed_files_reply(wd, restore_file(wd, &path).err())]
+        }),
+        GitClientMessage::ApplyBlock {
+            path,
+            block,
+            restore,
+        } => with_workdir(&repo, |wd| {
+            vec![changed_files_reply(
+                wd,
+                apply_change_block(root, &path, &block, restore).err(),
+            )]
         }),
         GitClientMessage::Commit { message } => with_workdir(&repo, |wd| {
             let result = if message.trim().is_empty() {
@@ -267,6 +357,9 @@ fn handle_blocking(root: &Path, msg: GitClientMessage) -> Vec<GitServerMessage> 
                 run_git(wd, &["pull", "--ff-only"]).err(),
             )]
         }),
+        GitClientMessage::Publish => {
+            with_workdir(&repo, |wd| vec![changed_files_reply(wd, publish(wd).err())])
+        }
         GitClientMessage::Push => with_workdir(&repo, |wd| {
             vec![changed_files_reply(wd, run_git(wd, &["push"]).err())]
         }),
@@ -333,14 +426,172 @@ fn validate_git_path(workdir: &Path, path: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// `ChangedFiles` reply: refreshed file list + current branch, with an
-/// optional mutation error carried alongside (mirrors the desktop
-/// panel's mutate-then-`collect_files` background thread, which stores
-/// the fresh list even when the op failed).
+/// Full HEAD baseline; never use index/worktree contents or lossy UTF-8 conversion.
+fn load_base(workdir: &Path, path: &str) -> Result<String, String> {
+    validate_git_path(workdir, path)?;
+    if path.contains('\0')
+        || Path::new(path)
+            .components()
+            .any(|c| !matches!(c, std::path::Component::Normal(_)))
+        || path
+            .split(['/', '\\'])
+            .any(|c| c.eq_ignore_ascii_case(".git"))
+    {
+        return Err("ReadBase requires a literal repo-relative file path".into());
+    }
+    let repo = Repository::open(workdir).map_err(|e| e.to_string())?;
+    let head = match repo.head() {
+        Ok(head) => head,
+        Err(e)
+            if matches!(
+                e.code(),
+                git2::ErrorCode::UnbornBranch | git2::ErrorCode::NotFound
+            ) =>
+        {
+            return Ok(String::new())
+        }
+        Err(e) => return Err(e.to_string()),
+    };
+    let tree = head.peel_to_tree().map_err(|e| e.to_string())?;
+    let entry = match tree.get_path(Path::new(path)) {
+        Ok(entry) => entry,
+        Err(e) if e.code() == git2::ErrorCode::NotFound => return Ok(String::new()),
+        Err(e) => return Err(e.to_string()),
+    };
+    let odb = repo.odb().map_err(|e| e.to_string())?;
+    let (size, kind) = odb.read_header(entry.id()).map_err(|e| e.to_string())?;
+    if kind != git2::ObjectType::Blob {
+        return Err("HEAD baseline is not a file".into());
+    }
+    if size > 2 * 1024 * 1024 {
+        return Err("HEAD baseline exceeds 2 MiB".into());
+    }
+    let blob = repo.find_blob(entry.id()).map_err(|e| e.to_string())?;
+    if blob.is_binary() || blob.content().contains(&0) {
+        return Err("HEAD baseline is binary".into());
+    }
+    String::from_utf8(blob.content().to_vec())
+        .map_err(|_| "HEAD baseline is not UTF-8".into())
+}
+
+/// Restore only an exact index entry, never a directory/pathspec or untracked file.
+fn restore_file(workdir: &Path, path: &str) -> Result<(), String> {
+    validate_git_path(workdir, path)?;
+    if Path::new(path)
+        .components()
+        .any(|c| !matches!(c, std::path::Component::Normal(_)))
+        || path
+            .split(['/', '\\'])
+            .any(|part| part.eq_ignore_ascii_case(".git"))
+        || path.contains('\0')
+    {
+        return Err("Restore requires a literal repo-relative file path".into());
+    }
+    let output = git_command(workdir)
+        .args(["ls-files", "--cached", "-z", "--", path])
+        .output()
+        .map_err(|e| format!("git: {e}"))?;
+    if !output.status.success()
+        || !output
+            .stdout
+            .split(|b| *b == 0)
+            .any(|entry| entry == path.as_bytes())
+    {
+        return Err(
+            "Cannot restore an untracked file; remove it explicitly instead".into(),
+        );
+    }
+    run_git(workdir, &["restore", "--worktree", "--", path])
+}
+
+/// Resolve configured tracking metadata without requiring the remote ref to exist.
+fn resolve_upstream(workdir: &Path) -> Option<String> {
+    let repo = Repository::discover(workdir).ok()?;
+    let head = repo.find_reference("HEAD").ok()?;
+    let branch = head.symbolic_target()?;
+    let output = crate::git_snapshot::output(git_command(workdir).args([
+        "for-each-ref",
+        "--format=%(upstream:short)",
+        branch,
+    ]))
+    .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let upstream = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    (!upstream.is_empty()).then_some(upstream)
+}
+
+fn git_text(workdir: &Path, args: &[&str]) -> Result<String, String> {
+    let output = git_command(workdir)
+        .args(args)
+        .output()
+        .map_err(|e| format!("git: {e}"))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+/// Never infer a destination from remote ordering or overwrite a remote branch.
+fn publish(workdir: &Path) -> Result<(), String> {
+    let branch =
+        git_text(workdir, &["symbolic-ref", "--quiet", "HEAD"]).map_err(|_| {
+            "Cannot publish a detached HEAD; switch to a branch first".to_owned()
+        })?;
+    let branch = branch.strip_prefix("refs/heads/").ok_or_else(|| {
+        "Cannot publish: HEAD does not refer to a local branch".to_owned()
+    })?;
+    git_text(workdir, &["rev-parse", "--verify", "HEAD^{commit}"]).map_err(|_| {
+        "Cannot publish a branch with no commits; create a commit first".to_owned()
+    })?;
+    let remotes = git_text(workdir, &["remote"])?;
+    let remotes: Vec<_> = remotes.lines().filter(|s| !s.is_empty()).collect();
+    let configured = git_text(
+        workdir,
+        &["config", "--get", &format!("branch.{branch}.pushRemote")],
+    )
+    .ok()
+    .filter(|s| !s.is_empty())
+    .or_else(|| {
+        git_text(workdir, &["config", "--get", "remote.pushDefault"])
+            .ok()
+            .filter(|s| !s.is_empty())
+    });
+    let remote = if let Some(remote) = configured {
+        if !remotes.contains(&remote.as_str()) {
+            return Err(format!(
+                "Publish remote '{remote}' is not a configured remote"
+            ));
+        }
+        remote
+    } else if remotes.contains(&"origin") {
+        "origin".to_owned()
+    } else {
+        match remotes.as_slice() {
+            [] => return Err("Cannot publish: no Git remote is configured".to_owned()),
+            [remote] => (*remote).to_owned(),
+            _ => return Err("Cannot publish: multiple remotes; configure branch.pushRemote or remote.pushDefault".to_owned()),
+        }
+    };
+    // Explicit same-name refspec ignores push.default and remote.<name>.push.
+    run_git(
+        workdir,
+        &[
+            "push",
+            "--set-upstream",
+            "--",
+            &remote,
+            &format!("refs/heads/{branch}:refs/heads/{branch}"),
+        ],
+    )
+}
+
 fn changed_files_reply(workdir: &Path, error: Option<String>) -> GitServerMessage {
     GitServerMessage::ChangedFiles {
         files: collect_changed_files(workdir),
         branch: resolve_branch(workdir),
+        upstream: resolve_upstream(workdir),
         error,
     }
 }
@@ -721,6 +972,114 @@ fn diff(
     vec![GitServerMessage::Diff { hunks }]
 }
 
+/// Native provider shares the daemon's immutable, bounded commit reader.
+pub fn read_commit_at(
+    root: &Path,
+    revision: &str,
+) -> Result<neoism_protocol::git::GitCommitDetail, String> {
+    let repo = Repository::discover(root).map_err(|e| e.to_string())?;
+    read_commit(&repo, revision)
+}
+
+pub fn latest_commit_at(root: &Path) -> Option<CommitSummary> {
+    let repo = Repository::discover(root).ok()?;
+    match log(&repo, Some(1)).pop()? {
+        GitServerMessage::Log { mut commits } => commits.pop(),
+        _ => None,
+    }
+}
+
+/// Resolve to an actual commit before reading trees. No revision ever reaches a
+/// subprocess or an option parser. Reject option-shaped input even in libgit2.
+fn read_commit(
+    repo: &Repository,
+    revision: &str,
+) -> Result<neoism_protocol::git::GitCommitDetail, String> {
+    if revision.is_empty()
+        || revision.starts_with('-')
+        || revision.contains('\0')
+        || revision.len() > 4096
+    {
+        return Err("Invalid commit revision".into());
+    }
+    let commit = repo
+        .revparse_single(revision)
+        .and_then(|object| object.peel_to_commit())
+        .map_err(|e| format!("Resolve commit: {e}"))?;
+    let tree = commit.tree().map_err(|e| e.to_string())?;
+    let parent = if commit.parent_count() > 0 {
+        Some(
+            commit
+                .parent(0)
+                .and_then(|p| p.tree())
+                .map_err(|e| e.to_string())?,
+        )
+    } else {
+        None
+    };
+    let mut options = git2::DiffOptions::new();
+    options.context_lines(3);
+    let diff = repo
+        .diff_tree_to_tree(parent.as_ref(), Some(&tree), Some(&mut options))
+        .map_err(|e| e.to_string())?;
+    let mut files = Vec::new();
+    let mut diffs = Vec::new();
+    let mut total = 0usize;
+    for (index, delta) in diff.deltas().enumerate() {
+        if index >= 2000 {
+            return Err("Commit exceeds 2000 changed files".into());
+        }
+        let path = delta
+            .new_file()
+            .path()
+            .or_else(|| delta.old_file().path())
+            .ok_or("Commit file has no path")?
+            .to_string_lossy()
+            .into_owned();
+        let mut patch =
+            git2::Patch::from_diff(&diff, index).map_err(|e| e.to_string())?;
+        let (additions, deletions, text) = if let Some(ref mut patch) = patch {
+            let (_, adds, dels) = patch.line_stats().map_err(|e| e.to_string())?;
+            let bytes = patch.to_buf().map_err(|e| e.to_string())?;
+            (
+                adds as u32,
+                dels as u32,
+                String::from_utf8_lossy(&bytes).into_owned(),
+            )
+        } else {
+            (0, 0, "Binary file changed".into())
+        };
+        total += text.len();
+        if total > 16 * 1024 * 1024 {
+            return Err("Commit patches exceed 16 MiB".into());
+        }
+        files.push(GitFileChange {
+            path: path.clone(),
+            additions,
+            deletions,
+            staged: false,
+            status: match delta.status() {
+                git2::Delta::Added => GitChangeStatus::Added,
+                git2::Delta::Deleted => GitChangeStatus::Deleted,
+                git2::Delta::Renamed => GitChangeStatus::Renamed,
+                _ => GitChangeStatus::Modified,
+            },
+        });
+        diffs.push(neoism_protocol::git::GitFileDiff { path, patch: text });
+    }
+    let author = commit.author();
+    Ok(neoism_protocol::git::GitCommitDetail {
+        sha: commit.id().to_string(),
+        author: author.name().unwrap_or("").into(),
+        email: author.email().unwrap_or("").into(),
+        timestamp: author.when().seconds(),
+        offset_minutes: author.when().offset_minutes(),
+        message: commit.message().unwrap_or("").into(),
+        files,
+        diffs,
+    })
+}
+
 fn log(repo: &Repository, max_count: Option<u32>) -> Vec<GitServerMessage> {
     let mut revwalk = match repo.revwalk() {
         Ok(r) => r,
@@ -774,6 +1133,295 @@ fn log(repo: &Repository, max_count: Option<u32>) -> Vec<GitServerMessage> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_base_is_exact_bounded_read_only_head_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let repo = Repository::init(root).unwrap();
+        assert_eq!(load_base(root, "file").unwrap(), "");
+        for (path, bytes) in [
+            ("file", b"HEAD\r\n\n".to_vec()),
+            ("binary", vec![0, 1, 2]),
+            ("invalid", vec![255, 254]),
+            ("huge", vec![b'x'; 2 * 1024 * 1024 + 1]),
+        ] {
+            std::fs::write(root.join(path), bytes).unwrap();
+            run_git(root, &["add", "--", path]).unwrap();
+        }
+        let tree_id = repo.index().unwrap().write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let sig = git2::Signature::now("Test", "test@example.invalid").unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "base", &tree, &[])
+            .unwrap();
+        std::fs::write(root.join("file"), "index").unwrap();
+        run_git(root, &["add", "--", "file"]).unwrap();
+        std::fs::write(root.join("file"), "working").unwrap();
+        assert_eq!(load_base(root, "file").unwrap(), "HEAD\r\n\n");
+        assert_eq!(load_base(root, "untracked").unwrap(), "");
+        for path in ["binary", "invalid", "huge", "../file", ".", ".git/config"] {
+            assert!(load_base(root, path).is_err(), "accepted {path:?}");
+        }
+        let message = GitClientMessage::ReadBase {
+            path: "file".into(),
+        };
+        assert!(!message.is_mutation());
+        assert!(matches!(
+            required_permission(&message),
+            Permission::ReadFiles
+        ));
+        assert!(
+            matches!(&handle_blocking(root, message)[0], GitServerMessage::BaseFile { path, text } if path == "file" && text == "HEAD\r\n\n")
+        );
+    }
+
+    #[test]
+    fn restore_preserves_index_and_refuses_unsafe_or_untracked_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        let repo = Repository::init(&root).unwrap();
+        std::fs::write(root.join("file"), "base\n").unwrap();
+        run_git(&root, &["add", "--", "file"]).unwrap();
+        let tree_id = repo.index().unwrap().write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let sig = git2::Signature::now("Test", "test@example.invalid").unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "base", &tree, &[])
+            .unwrap();
+        std::fs::write(root.join("file"), "staged\n").unwrap();
+        run_git(&root, &["add", "--", "file"]).unwrap();
+        let index_before = git_text(&root, &["ls-files", "--stage"]).unwrap();
+        std::fs::write(root.join("file"), "unstaged\n").unwrap();
+        let replies = handle_blocking(
+            &root,
+            GitClientMessage::Restore {
+                path: "file".into(),
+            },
+        );
+        assert!(matches!(
+            &replies[0],
+            GitServerMessage::ChangedFiles { error: None, .. }
+        ));
+        assert_eq!(
+            std::fs::read_to_string(root.join("file")).unwrap(),
+            "staged\n"
+        );
+        assert_eq!(
+            git_text(&root, &["ls-files", "--stage"]).unwrap(),
+            index_before
+        );
+        assert_eq!(git_text(&root, &["show", ":file"]).unwrap(), "staged");
+        assert_eq!(git_text(&root, &["show", "HEAD:file"]).unwrap(), "base");
+        std::fs::remove_file(root.join("file")).unwrap();
+        restore_file(&root, "file").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("file")).unwrap(),
+            "staged\n"
+        );
+        std::fs::write(root.join("untracked"), "keep").unwrap();
+        assert!(restore_file(&root, "untracked")
+            .unwrap_err()
+            .contains("untracked"));
+        assert_eq!(
+            std::fs::read_to_string(root.join("untracked")).unwrap(),
+            "keep"
+        );
+        for path in [
+            "",
+            ".",
+            "..",
+            "../file",
+            "nested/../file",
+            ".git/index",
+            "*",
+            ":(top)file",
+        ] {
+            assert!(restore_file(&root, path).is_err(), "accepted {path:?}");
+        }
+        assert!(restore_file(&root, root.join("file").to_str().unwrap()).is_err());
+        assert!(matches!(
+            required_permission(&GitClientMessage::Restore {
+                path: "file".into()
+            }),
+            Permission::WriteFiles
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restore_rejects_symlink_escape_and_directory_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        Repository::init(&root).unwrap();
+        let outside = dir.path().join("outside");
+        std::fs::write(&outside, "keep").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("link")).unwrap();
+        run_git(&root, &["add", "--", "link"]).unwrap();
+        assert!(restore_file(&root, "link").is_err());
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "keep");
+        std::fs::create_dir(root.join("folder")).unwrap();
+        std::fs::write(root.join("folder/file"), "index").unwrap();
+        run_git(&root, &["add", "--", "folder/file"]).unwrap();
+        std::fs::write(root.join("folder/file"), "working").unwrap();
+        assert!(restore_file(&root, "folder").is_err());
+        assert_eq!(
+            std::fs::read_to_string(root.join("folder/file")).unwrap(),
+            "working"
+        );
+    }
+
+    #[test]
+    fn restore_uses_index_on_unborn_branch_and_literal_filename() {
+        let dir = tempfile::tempdir().unwrap();
+        Repository::init(dir.path()).unwrap();
+        // A wildcard in the actual filename must never match the other file.
+        for path in ["file*", "file-other"] {
+            std::fs::write(dir.path().join(path), "index\n").unwrap();
+            run_git(dir.path(), &["add", "--", path]).unwrap();
+            std::fs::write(dir.path().join(path), "working\n").unwrap();
+        }
+        restore_file(dir.path(), "file*").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("file*")).unwrap(),
+            "index\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("file-other")).unwrap(),
+            "working\n"
+        );
+    }
+
+    #[test]
+    fn publish_sets_tracking_and_rejects_unsafe_destinations() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("work");
+        let repo = Repository::init(&root).unwrap();
+        repo.set_head("refs/heads/topic").unwrap();
+        assert!(publish(&root).unwrap_err().contains("no commits"));
+        let tree_id = repo.index().unwrap().write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let sig =
+            git2::Signature::now("Publish test", "publish@example.invalid").unwrap();
+        let head = repo
+            .commit(Some("HEAD"), &sig, &sig, "initial", &tree, &[])
+            .unwrap();
+        assert!(publish(&root).unwrap_err().contains("no Git remote"));
+        let a = dir.path().join("a.git");
+        let b = dir.path().join("b.git");
+        Repository::init_bare(&a).unwrap();
+        Repository::init_bare(&b).unwrap();
+        repo.remote("alpha", a.to_str().unwrap()).unwrap();
+        repo.remote("beta", b.to_str().unwrap()).unwrap();
+        assert!(publish(&root).unwrap_err().contains("multiple remotes"));
+        repo.config()
+            .unwrap()
+            .set_str("remote.pushDefault", "beta")
+            .unwrap();
+        repo.config()
+            .unwrap()
+            .set_str("branch.topic.pushRemote", "alpha")
+            .unwrap();
+        let reply = handle_blocking(&root, GitClientMessage::Publish);
+        assert!(
+            matches!(&reply[0], GitServerMessage::ChangedFiles { upstream: Some(upstream), error: None, .. } if upstream == "alpha/topic")
+        );
+        assert_eq!(
+            collect_repo_snapshot(&root).upstream.as_deref(),
+            Some("alpha/topic")
+        );
+        assert_eq!(
+            Repository::open_bare(&a)
+                .unwrap()
+                .refname_to_id("refs/heads/topic")
+                .unwrap(),
+            head
+        );
+        assert!(Repository::open_bare(&b)
+            .unwrap()
+            .find_reference("refs/heads/topic")
+            .is_err());
+        // Configured tracking remains meaningful even after a remote ref disappears.
+        repo.find_reference("refs/remotes/alpha/topic")
+            .unwrap()
+            .delete()
+            .unwrap();
+        assert_eq!(resolve_upstream(&root).as_deref(), Some("alpha/topic"));
+        repo.config()
+            .unwrap()
+            .set_str("branch.topic.pushRemote", "missing")
+            .unwrap();
+        assert!(publish(&root)
+            .unwrap_err()
+            .contains("not a configured remote"));
+        repo.config()
+            .unwrap()
+            .remove("branch.topic.pushRemote")
+            .unwrap();
+        publish(&root).unwrap();
+        assert_eq!(resolve_upstream(&root).as_deref(), Some("beta/topic"));
+        repo.config().unwrap().remove("remote.pushDefault").unwrap();
+        repo.remote_delete("beta").unwrap();
+        publish(&root).unwrap();
+        assert_eq!(resolve_upstream(&root).as_deref(), Some("alpha/topic"));
+        repo.remote_rename("alpha", "origin").unwrap();
+        repo.remote("beta", b.to_str().unwrap()).unwrap();
+        publish(&root).unwrap();
+        assert_eq!(resolve_upstream(&root).as_deref(), Some("origin/topic"));
+        repo.set_head_detached(head).unwrap();
+        assert!(publish(&root).unwrap_err().contains("detached HEAD"));
+        assert!(GitClientMessage::Publish.is_mutation());
+    }
+
+    #[test]
+    fn apply_block_dispatch_refreshes_changed_files_on_success_and_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let repo = Repository::init(root).unwrap();
+        run_git(root, &["config", "core.autocrlf", "false"]).unwrap();
+        std::fs::write(root.join("file"), "old\n").unwrap();
+        run_git(root, &["add", "file"]).unwrap();
+        let tree = repo
+            .find_tree(repo.index().unwrap().write_tree().unwrap())
+            .unwrap();
+        let sig = git2::Signature::now("Test", "test@example.invalid").unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "base", &tree, &[])
+            .unwrap();
+        std::fs::write(root.join("file"), "new\n").unwrap();
+        let block = neoism_protocol::git::GitChangeBlock {
+            old_start: 0,
+            new_start: 0,
+            old_lines: vec!["old".into()],
+            new_lines: vec!["new".into()],
+        };
+        for restore in [false, true] {
+            let message = GitClientMessage::ApplyBlock {
+                path: "file".into(),
+                block: block.clone(),
+                restore,
+            };
+            assert!(matches!(
+                required_permission(&message),
+                Permission::WriteFiles
+            ));
+            let result = handle_blocking(root, message);
+            assert!(
+                matches!(&result[0], GitServerMessage::ChangedFiles { error, .. } if error.is_some() == restore)
+            );
+        }
+        assert_eq!(std::fs::read(root.join("file")).unwrap(), b"new\n");
+        let scope = root.join("sub");
+        std::fs::create_dir(&scope).unwrap();
+        let reply = handle_blocking(
+            &scope,
+            GitClientMessage::ApplyBlock {
+                path: "file".into(),
+                block,
+                restore: false,
+            },
+        );
+        assert!(
+            matches!(&reply[0], GitServerMessage::ChangedFiles { error: Some(error), .. } if error.contains("outside the declared workspace"))
+        );
+    }
 
     #[test]
     fn workspace_without_repo_returns_error() {
@@ -902,6 +1550,7 @@ mod tests {
                 files,
                 branch,
                 error,
+                ..
             }) => {
                 assert!(error.is_none(), "commit error: {error:?}");
                 assert!(files.is_empty(), "clean tree after commit: {files:?}");
@@ -1018,6 +1667,7 @@ mod tests {
             GitClientMessage::Fetch,
             GitClientMessage::Pull,
             GitClientMessage::Push,
+            GitClientMessage::Publish,
         ] {
             let must_fail = !matches!(request, GitClientMessage::Fetch);
             let result = handle_blocking(&tmp, request);
@@ -1065,6 +1715,7 @@ mod tests {
             GitClientMessage::Fetch,
             GitClientMessage::Pull,
             GitClientMessage::Push,
+            GitClientMessage::Publish,
         ] {
             assert!(matches!(
                 required_permission(&request),
@@ -1116,6 +1767,7 @@ pub(crate) fn collect_repo_snapshot(root: &Path) -> neoism_protocol::git::GitRep
         workspace_root: root.to_string_lossy().into_owned(),
         repo_root: None,
         branch: None,
+        upstream: None,
         files: Vec::new(),
         error: None,
     };
@@ -1132,9 +1784,14 @@ pub(crate) fn collect_repo_snapshot(root: &Path) -> neoism_protocol::git::GitRep
         std::fs::canonicalize(workdir).unwrap_or_else(|_| workdir.to_path_buf());
     snapshot.repo_root = Some(workdir.to_string_lossy().into_owned());
     snapshot.branch = resolve_branch(&workdir);
+    snapshot.upstream = resolve_upstream(&workdir);
     match collect_changed_files_checked(&workdir) {
         Ok(files) => snapshot.files = files,
         Err(error) => snapshot.error = Some(error),
     }
     snapshot
 }
+
+#[cfg(test)]
+#[path = "git_commit_read_tests.rs"]
+mod commit_read_tests;

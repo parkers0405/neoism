@@ -73,10 +73,23 @@ pub struct FileChange {
 
 #[derive(Default)]
 pub(super) struct PanelData {
+    pub(super) commit_loading: bool,
+    pub(super) latest_commit: Option<neoism_protocol::git::CommitSummary>,
+    pub(super) completed_commit_details:
+        Vec<(PathBuf, neoism_protocol::git::GitCommitDetail)>,
     pub(super) branch: Option<String>,
+    pub(super) upstream: Option<String>,
     pub(super) repo_root: Option<PathBuf>,
     pub(super) files: Vec<FileChange>,
     pub(super) diffs: HashMap<String, Vec<DiffLine>>,
+    pub(super) diff_cache_generation: u64,
+    /// At most one repository review worker/batch for a given status revision.
+    pub(super) review_load_id: Option<u64>,
+    pub(super) base_texts: HashMap<String, std::sync::Arc<str>>,
+    pub(super) base_pending: HashMap<String, u64>,
+    pub(super) base_errors: HashMap<String, String>,
+    /// Confirmed local IO result, drained without holding the data lock.
+    pub(super) completed_commit_message: Option<String>,
     /// Every local branch name, fetched lazily when the branch dropdown
     /// opens (native shells out to `git for-each-ref`; on wasm this
     /// stays empty). Drives the branch-selector menu's row list.
@@ -87,16 +100,18 @@ pub(super) struct PanelData {
     pub(super) last_refresh: Option<Instant>,
 }
 
-/// One row in the tree-structured file list. Folders are collapsible
-/// group nodes; files are leaves that carry the index of their
-/// [`FileChange`] in `PanelData.files`. Rebuilt from the (sorted) file
-/// list + the collapsed-set each frame.
+/// One section header or file leaf in the Tracked/Untracked list. Leaf
+/// indices address `PanelData.files`; collapsing never renumbers files.
 #[derive(Clone)]
 pub(super) enum VisualRowKind {
-    /// A directory group node. `path` is the repo-relative directory
-    /// path (no trailing slash); `collapsed` mirrors the panel's
-    /// collapsed-set so the chevron + child-skip stay in sync.
-    Dir { path: String, collapsed: bool },
+    Group {
+        label: String,
+        collapsed: bool,
+        /// None for a section; repository-relative path for a directory.
+        path: Option<String>,
+        /// All descendants, including files hidden by collapsed subfolders.
+        file_indices: Vec<usize>,
+    },
     /// A file leaf — `file_index` points into `PanelData.files`.
     File { file_index: usize },
 }
@@ -180,6 +195,8 @@ pub enum PanelHit {
     /// `visual_rows` so the caller can resolve the directory path.
     FolderToggle(usize),
     FolderCheckbox(usize),
+    /// Primary footer action. Call `GitDiffPanel::activate_push_button`.
+    PushButton,
     ActionsButton,
     ActionMenuRow(usize),
     /// Click landed on the top branch selector button — caller opens
@@ -195,19 +212,17 @@ pub enum PanelHit {
     CommitBox,
     /// Click landed on the Commit button.
     CommitButton,
+    LatestCommit,
+    LatestCommitCopy,
 }
 
-/// Keyboard-focus section inside the panel. Alt+Up/Down step between
-/// these in order (Branch → Files → Diff → Commit); Alt+Left/Right
-/// within [`FocusSection::Files`] hop onto/off the row checkbox column.
-/// While [`FocusSection::Diff`] holds focus, plain ↑/↓ (and the wheel)
-/// scroll the selected file's diff card instead of moving the file
-/// selection.
+/// Keyboard-focus section inside the panel. Alt+Up/Down follow the visible
+/// order Files → Branch (footer controls) → Commit. Alt+Left/Right inside
+/// Files hop onto/off the row checkbox column.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum FocusSection {
     Branch,
     Files,
-    Diff,
     Commit,
 }
 

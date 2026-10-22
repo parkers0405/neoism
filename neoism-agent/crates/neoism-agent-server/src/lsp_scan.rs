@@ -339,6 +339,9 @@ pub(super) fn operation_supported(
         LspOperation::SignatureHelp => adapter.completion,
         LspOperation::Hover => adapter.hover,
         LspOperation::Definition => adapter.definition,
+        // These optional methods are negotiated with the initialized server,
+        // independently of the adapter's definition support.
+        LspOperation::Declaration | LspOperation::TypeDefinition => true,
         LspOperation::References => adapter.references,
         LspOperation::Implementation => adapter.implementation,
         LspOperation::CallHierarchy => adapter.call_hierarchy,

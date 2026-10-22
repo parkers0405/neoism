@@ -98,6 +98,33 @@ fn file(path: &str) -> BufferTab<()> {
 }
 
 #[test]
+fn git_diff_tabs_are_route_keyed_and_separate_from_editable_markdown() {
+    let mut tabs = BufferTabs::<()>::new();
+    let path = Path::new("/repo/README.md");
+    let editable = tabs.open_markdown(path.to_path_buf());
+    let first = tabs.open_git_diff(71, path);
+    let second = tabs.open_git_diff(72, Path::new("/repo/deleted.rs"));
+    assert_ne!(editable, first);
+    assert_ne!(first, second);
+    assert_eq!(tabs.open_git_diff(71, path), first);
+    assert_eq!(tabs.tabs().len(), 3);
+    assert_eq!(tabs.tabs()[first].title, "Uncommitted Changes");
+    assert!(tabs.tabs()[first].path.is_none());
+    assert!(!tabs.tabs()[first].markdown);
+    assert_eq!(
+        tabs.target_at(first),
+        Some(BufferTabTarget::ChromePage(ChromePageRef {
+            kind: ChromePageKind::GitDiff,
+            route_id: 71
+        }))
+    );
+    assert_eq!(
+        tabs.target_at(editable),
+        Some(BufferTabTarget::Markdown(path.to_path_buf()))
+    );
+}
+
+#[test]
 fn agent_tab_source_mark_tracks_route_without_replacing_session_title() {
     let mut tabs = BufferTabs::<u8>::new();
     let first = tabs.open_neoism_agent(41);

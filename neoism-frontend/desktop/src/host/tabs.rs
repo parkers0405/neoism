@@ -154,9 +154,9 @@ impl Renderer {
         {
             rects.push(rect);
         }
-        if let Some(rect) = self.context_menu.rect() {
-            rects.push(rect);
-        }
+        // Context menus also use the late overlay pass (host/run.rs).
+        // Keep source glyphs intact: the rounded menu material covers only
+        // its own pixels, including antialiased edges, after editor text.
         if let Some(rect) = self.command_composer.completion_popup_rect() {
             rects.push(rect);
         }
@@ -174,7 +174,12 @@ impl Renderer {
         }
         if self.conversation_navigator.is_active() {
             rects.push(self.conversation_navigator.bounds_for_viewport(
-                [0.0, 0.0, window_width / scale_factor, window_height / scale_factor],
+                [
+                    0.0,
+                    0.0,
+                    window_width / scale_factor,
+                    window_height / scale_factor,
+                ],
                 self.chrome_scale(),
             ));
         }

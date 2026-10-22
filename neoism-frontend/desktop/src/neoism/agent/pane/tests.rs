@@ -2305,12 +2305,16 @@ fn catalog_picker_skeletons_keep_drafts_and_finish_on_success_or_error() {
             };
             let update = match kind {
                 NeoismAgentPickerKind::Model => {
-                    NeoismAgentBackgroundUpdate::ModelOptionsRefreshed(
-                        result.map(|options| (options, None)),
-                    )
+                    NeoismAgentBackgroundUpdate::ModelOptionsRefreshed {
+                        scope: super::super::api::catalog_scope(&pane.server, pane.directory.as_deref()),
+                        result,
+                    }
                 }
                 NeoismAgentPickerKind::Agent => {
-                    NeoismAgentBackgroundUpdate::AgentOptionsRefreshed(result)
+                    NeoismAgentBackgroundUpdate::AgentOptionsRefreshed {
+                        scope: super::super::api::catalog_scope(&pane.server, pane.directory.as_deref()),
+                        result,
+                    }
                 }
                 NeoismAgentPickerKind::Session => {
                     NeoismAgentBackgroundUpdate::SessionOptionsRefreshed {
@@ -2395,9 +2399,10 @@ fn background_results_wake_the_window_and_replace_restored_placeholder_titles() 
     // Draining releases the coalesced wake, so another independent result
     // schedules another frame rather than getting stranded.
     pane.background_sender()
-        .send(NeoismAgentBackgroundUpdate::AgentOptionsRefreshed(Ok(
-            Vec::new(),
-        )))
+        .send(NeoismAgentBackgroundUpdate::AgentOptionsRefreshed {
+            scope: super::super::api::catalog_scope(&pane.server, pane.directory.as_deref()),
+            result: Ok(Vec::new()),
+        })
         .unwrap();
     assert_eq!(wake_count.load(std::sync::atomic::Ordering::Relaxed), 2);
 }
@@ -3552,6 +3557,146 @@ fn cross_project_cached_chat_restores_execution_directory_without_workspace_swit
         .any(|event| matches!(event, NeoismAgentUiEvent::SwitchWorkspace { .. })));
 }
 
+fn parked_layout_for_test(epoch: u64, source_len: usize) -> TimelineLayoutCache {
+    TimelineLayoutCache {
+        epoch,
+        source_len,
+        width_bucket: 640,
+        scale_bucket: 100,
+        gap_bucket: 12,
+        content_height: 900.0,
+        pages: Vec::new(),
+        rows: Vec::new(),
+        estimated_prefix_rows: 0,
+        estimated_suffix_start: 0,
+    }
+}
+
+#[test]
+fn conversation_latency_warm_switch_restores_parked_layout_and_dirty_marks_within_family() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("root".into());
+    pane.messages = vec![NeoismAgentMessage::user("question").with_id("user")];
+    pane.timeline_layout_epoch = 42;
+    pane.timeline_live_trace_start = Some(1);
+    pane.timeline_live_trace_anchor = Some("user".into());
+    pane.timeline_layout_cache.replace(Some(parked_layout_for_test(42, 1)));
+    pane.timeline_dirty_message_ids.insert("user".into());
+    pane.timeline_dirty_message_indices.insert(0);
+    let mut child = CachedAgentSession::live_only();
+    child.hydrated = true;
+    child.state.parent_id = Some("root".into());
+    pane.session_cache.insert("child".into(), child);
+    pane.runtime_hydrated_sessions.extend(["root".into(), "child".into()]);
+
+    pane.activate_cached_session("child");
+    assert!(pane.timeline_dirty_message_ids.is_empty());
+    pane.activate_cached_session("root");
+
+    let cache = pane.timeline_layout_cache.borrow();
+    let cache = cache.as_ref().expect("unchanged family layout was parked");
+    assert_eq!(cache.epoch, 42);
+    assert_eq!(pane.timeline_layout_epoch, 42);
+    assert_eq!(
+        (cache.width_bucket, cache.scale_bucket, cache.gap_bucket),
+        (640, 100, 12)
+    );
+    assert_eq!(cache.source_len, 1);
+    assert_eq!(pane.timeline_live_trace_start, Some(1));
+    assert!(pane.timeline_dirty_message_ids.contains("user"));
+    assert!(pane.timeline_dirty_message_indices.contains(&0));
+}
+
+#[test]
+fn conversation_latency_parking_discards_layout_when_reset_or_merge_changes_geometry() {
+    for reason in ["expanded", "animation", "selection", "prepend", "merge", "trace"] {
+        let mut pane = NeoismAgentPane::default();
+        pane.session_id = Some("root".into());
+        pane.messages = vec![NeoismAgentMessage::user("question").with_id("user")];
+        pane.timeline_layout_cache.replace(Some(parked_layout_for_test(0, 1)));
+        match reason {
+            "expanded" => {
+                pane.expanded_tool_ids.insert("tool".into());
+            }
+            "animation" => {
+                pane.tool_expand_anims.insert(
+                    "tool".into(),
+                    ToolExpandAnimation {
+                        started_at: Instant::now(),
+                        expanding: false,
+                        start_progress: 1.0,
+                    },
+                );
+            }
+            "selection" => {
+                pane.selected_tool_group_child = Some(("group".into(), "child".into()));
+            }
+            "prepend" => pane.pending_timeline_prepend_count = Some(1),
+            "merge" => {
+                let mut live = CachedAgentSession::live_only();
+                live.messages.push(NeoismAgentMessage::assistant("new").with_id("new"));
+                pane.session_cache.insert("root".into(), live);
+            }
+            "trace" => pane.timeline_live_trace_start = Some(0),
+            _ => unreachable!(),
+        }
+        pane.cache_current_session(reason != "trace");
+        assert!(pane.session_cache["root"].timeline_layout_cache.is_none(), "{reason}");
+    }
+}
+
+#[test]
+fn conversation_latency_cached_layout_is_invalidated_across_family_boundary() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("other".into());
+    let mut cached = CachedAgentSession::live_only();
+    cached.hydrated = true;
+    cached.timeline_layout_epoch = 42;
+    cached.timeline_layout_cache = Some(parked_layout_for_test(42, 0));
+    cached.timeline_live_trace_start = Some(0);
+    pane.session_cache.insert("root".into(), cached);
+
+    pane.activate_cached_session("root");
+
+    assert!(pane.timeline_layout_cache.borrow().is_none());
+    assert_eq!(pane.timeline_layout_epoch, 43);
+    assert_eq!(pane.timeline_live_trace_start, None);
+}
+
+#[test]
+fn conversation_latency_ongoing_child_trace_reveal_invalidates_restored_layout() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("root".into());
+    let mut child = CachedAgentSession::live_only();
+    child.hydrated = true;
+    child.state.parent_id = Some("root".into());
+    child.timeline_layout_epoch = 42;
+    child.timeline_layout_cache = Some(parked_layout_for_test(42, 0));
+    child.runtime.note_streaming(NeoismAgentStreamingState::Generating, None);
+    pane.session_cache.insert("child".into(), child);
+    pane.runtime_hydrated_sessions.insert("child".into());
+
+    pane.activate_cached_session("child");
+
+    assert_eq!(pane.timeline_live_trace_start, Some(0));
+    assert_eq!(pane.timeline_layout_epoch, 43);
+    assert!(pane.timeline_layout_cache.borrow().is_none());
+}
+
+#[test]
+fn conversation_latency_existing_conversation_discards_only_queued_draft_defaults() {
+    let mut pane = NeoismAgentPane::with_directory(Some("/tmp/project".into()));
+    pane.push_outbound(OutboundAgentCommand::AbortSession);
+    pane.discard_queued_draft_defaults();
+    assert_eq!(pane.drain_pending_outbound(), vec![OutboundAgentCommand::AbortSession]);
+    assert!(!matches!(pane.config_chip_transition(), Some(
+        neoism_ui::panels::agent_pane::state::ConfigChipTransition::Loading { .. }
+    )));
+    // New Chat still uses the normal defaults path.
+    pane.apply_config_defaults();
+    assert_eq!(pane.drain_pending_outbound(), vec![OutboundAgentCommand::ApplyConfigDefaults]);
+}
+
 #[test]
 fn warm_switch_activates_cached_session_without_outbound_or_network_repair() {
     let mut pane = NeoismAgentPane::default();
@@ -3562,6 +3707,7 @@ fn warm_switch_activates_cached_session_without_outbound_or_network_repair() {
     cached.messages = vec![NeoismAgentMessage::assistant("child")];
     cached.state.parent_id = Some("sess-1".to_string());
     cached.timeline_layout_epoch = 42;
+    cached.timeline_live_trace_start = Some(0);
     cached.runtime.queued_prompt_count = 2;
     cached
         .runtime
@@ -5361,13 +5507,10 @@ fn with_directory_queues_config_defaults_for_runtime() {
     );
 
     pane.background_tx
-        .send(NeoismAgentBackgroundUpdate::ConfigDefaultsFailed)
+        .send(NeoismAgentBackgroundUpdate::ConfigDefaultsFailed(pane.config_defaults_target()))
         .unwrap();
     pane.drain_background_updates();
-    assert!(matches!(
-        pane.config_chip_transition(),
-        Some(neoism_ui::panels::agent_pane::state::ConfigChipTransition::Settling { .. })
-    ));
+    assert_eq!(pane.config_chip_transition(), None);
 }
 
 #[test]

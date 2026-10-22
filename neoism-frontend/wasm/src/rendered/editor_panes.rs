@@ -19,6 +19,14 @@ use neoism_ui::editor::notebook::NotebookCellAction;
 use neoism_ui::editor::text_selection::unicode_word_or_grapheme_span;
 use neoism_ui::panels::notifications::NotificationLevel;
 
+thread_local! {
+    static EDITOR_VIM_ENABLED: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
+pub(crate) fn set_editor_vim_enabled(enabled: bool) {
+    EDITOR_VIM_ENABLED.with(|value| value.set(enabled));
+}
+
 // Editor-pane clipboard register. Wasm is single-threaded and the
 // host drains `editor_drain_clipboard_out` synchronously right after
 // the key call, so process-wide cells are safe (they also mirror the
@@ -58,6 +66,18 @@ thread_local! {
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
+impl ChromeBridge {
+    pub(crate) fn flush_code_binding_before_presentation_change(&mut self) {
+        let (pane, slot) = self.chrome.code_editor_parts_mut();
+        if let (Some(pane), Some(binding)) = (pane, slot.as_mut()) {
+            if let Some(update) = binding.flush_local(&pane.buffer) {
+                self.crdt_outbound
+                    .push(make_crdt_apply_sync(binding.buffer_id(), update));
+            }
+        }
+    }
+}
+
 /// Arm the deferred cross-file cursor target consumed by
 /// `editor_open_file` (0-based `line`/`col`). Additive share point:
 /// the LSP cross-file goto and the finder's line-carrying open
@@ -66,6 +86,18 @@ thread_local! {
 /// back in.
 pub(crate) fn arm_editor_pending_goto(path: std::path::PathBuf, line: usize, col: usize) {
     EDITOR_LSP_PENDING_GOTO.with(|cell| *cell.borrow_mut() = Some((path, line, col)));
+}
+
+pub(crate) fn clear_editor_pending_goto(path: &std::path::Path) {
+    EDITOR_LSP_PENDING_GOTO.with(|cell| {
+        let matches = cell
+            .borrow()
+            .as_ref()
+            .is_some_and(|(target, _, _)| target == path);
+        if matches {
+            cell.borrow_mut().take();
+        }
+    });
 }
 
 /// Ship an `EditorClientMessage::DidSave` envelope for `path` over the
@@ -378,7 +410,26 @@ impl ChromeBridge {
     /// for the SAME path keeps live pane state (cursor, undo, unsaved
     /// edits) across tab round-trips.
     pub fn editor_open_file(&mut self, tab_index: u32, path: &str, text: &str) -> String {
-        let kind = self.chrome.open_editor_file(tab_index as usize, path, text);
+        self.flush_code_binding_before_presentation_change();
+        let kind = if self
+            .tab_kinds
+            .get(&(tab_index as usize))
+            .is_some_and(|kind| kind == "source-code")
+        {
+            if !self.chrome.open_source_file(tab_index as usize, path, text) {
+                clear_editor_pending_goto(std::path::Path::new(path));
+                return "unsupported".to_string();
+            }
+            EditorPaneKind::Code
+        } else {
+            self.chrome.open_editor_file(tab_index as usize, path, text)
+        };
+        if !EDITOR_VIM_ENABLED.with(|value| value.get()) {
+            if let Some(pane) = self.chrome.code_pane_mut() {
+                pane.input_mode = CodeInputMode::Standard;
+                pane.buffer.mode = CodeMode::Insert;
+            }
+        }
         if self.mobile_direct_insert {
             if let Some(pane) = self.chrome.code_pane_mut() {
                 pane.buffer.mode = CodeMode::Insert;
@@ -637,6 +688,13 @@ impl ChromeBridge {
         ctrl: bool,
         click_count: u32,
     ) -> bool {
+        if self
+            .chrome
+            .code_hover_interaction_mut()
+            .is_some_and(|state| state.begin_selection(x, y))
+        {
+            return true;
+        }
         let Some(kind) = self.chrome.active_editor_pane_kind() else {
             return false;
         };
@@ -727,6 +785,13 @@ impl ChromeBridge {
     /// Pointer move: code drag-select / scrollbar drag, draw gesture
     /// drag + graph hover. True when the move mutated pane state.
     pub fn editor_pointer_move(&mut self, x: f32, y: f32) -> bool {
+        if self
+            .chrome
+            .code_hover_interaction_mut()
+            .is_some_and(|state| state.pointer_move(x, y))
+        {
+            return true;
+        }
         if !self.chrome.content_surface_contains(x, y) {
             return false;
         }
@@ -771,6 +836,28 @@ impl ChromeBridge {
     /// Pointer release: ends code selections / scrollbar drags and
     /// finalizes draw gestures. True when something was released.
     pub fn editor_pointer_up(&mut self) -> bool {
+        if let Some(state) = self.chrome.code_hover_interaction_mut() {
+            if state.end_selection() {
+                if let Some(url) = state.take_activated_link() {
+                    if url.split_once("://").is_some_and(|(scheme, _)| {
+                        scheme.eq_ignore_ascii_case("https")
+                            || scheme.eq_ignore_ascii_case("http")
+                    }) {
+                        if let Some(window) = web_sys::window() {
+                            let _ = window.open_with_url_and_target_and_features(
+                                &url,
+                                "_blank",
+                                "noopener,noreferrer",
+                            );
+                        }
+                    }
+                } else if let Some(text) = state.selected_text() {
+                    set_clipboard_cache(&text);
+                    queue_clipboard_out(&text);
+                }
+                return true;
+            }
+        }
         match self.chrome.active_editor_pane_kind() {
             Some(EditorPaneKind::Code) => {
                 let Some(pane) = self.chrome.code_pane_mut() else {
@@ -807,6 +894,16 @@ impl ChromeBridge {
         delta_y: f32,
         ctrl: bool,
     ) -> bool {
+        if self
+            .chrome
+            .code_hover_interaction_mut()
+            .is_some_and(|state| state.scroll(x, y, delta_y))
+        {
+            return true;
+        }
+        if self.chrome.git_diff_editing_path().is_some() {
+            return self.chrome.scroll_git_diff_at(x, y, delta_x, delta_y);
+        }
         let Some(kind) = self.chrome.active_editor_pane_kind() else {
             return false;
         };
@@ -857,6 +954,16 @@ impl ChromeBridge {
         delta_x: f32,
         delta_y: f32,
     ) -> bool {
+        if self
+            .chrome
+            .code_hover_interaction_mut()
+            .is_some_and(|state| state.scroll(x, y, delta_y))
+        {
+            return true;
+        }
+        if self.chrome.git_diff_editing_path().is_some() {
+            return self.chrome.scroll_git_diff_at(x, y, delta_x, delta_y);
+        }
         let Some(kind) = self.chrome.active_editor_pane_kind() else {
             return false;
         };
@@ -1105,52 +1212,13 @@ impl ChromeBridge {
     /// through the binding's origin-scoped history, folds pane
     /// mutations into the replica as one minimal op, and returns
     /// queued client messages as a JSON array for the host to ship.
-    /// Pass null when no code tab is active to drop the binding.
+    /// Pass null when no code tab is focused: flush the current pair but retain
+    /// its replica until the pane is explicitly disposed.
     pub fn code_crdt_pump(&mut self, buffer_id: Option<String>) -> Option<String> {
-        use neoism_protocol::crdt::CrdtClientMessage;
-        use neoism_ui::editor::code::doc_sync::CodeDocBinding;
-        use neoism_ui::editor::code::CodeDocHistoryRequest;
-
-        let client_id = self.markdown_crdt_client_id;
-        let (pane, binding_slot) = self.chrome.code_editor_parts_mut();
-        match (pane, buffer_id) {
-            (Some(pane), Some(buffer_id)) => {
-                let stale = binding_slot
-                    .as_ref()
-                    .map(|binding| binding.buffer_id() != buffer_id)
-                    .unwrap_or(true);
-                if stale {
-                    pane.buffer.set_doc_history_bound(false);
-                    self.crdt_outbound.push(CrdtClientMessage::OpenBuffer {
-                        buffer_id: buffer_id.clone(),
-                        initial_text: pane.buffer.lines.join("\n"),
-                    });
-                    *binding_slot = Some(CodeDocBinding::new(client_id, buffer_id));
-                } else if let Some(binding) = binding_slot.as_mut() {
-                    pane.buffer.set_doc_history_bound(binding.is_seeded());
-                    for request in pane.buffer.take_doc_history_requests() {
-                        let result = match request {
-                            CodeDocHistoryRequest::Undo => binding.undo(&mut pane.buffer),
-                            CodeDocHistoryRequest::Redo => binding.redo(&mut pane.buffer),
-                        };
-                        for update in [result.flushed_local, result.history_update]
-                            .into_iter()
-                            .flatten()
-                        {
-                            self.crdt_outbound
-                                .push(make_crdt_apply_sync(binding.buffer_id(), update));
-                        }
-                    }
-                    if let Some(update) = binding.flush_local(&pane.buffer) {
-                        self.crdt_outbound
-                            .push(make_crdt_apply_sync(binding.buffer_id(), update));
-                    }
-                }
-            }
-            _ => {
-                *binding_slot = None;
-            }
-        }
+        self.crdt_outbound.extend(
+            self.chrome
+                .pump_code_document(self.markdown_crdt_client_id, buffer_id.as_deref()),
+        );
         if self.crdt_outbound.is_empty() {
             return None;
         }
@@ -1168,12 +1236,23 @@ impl ChromeBridge {
         let Ok(message) = serde_json::from_str::<CrdtServerMessage>(json) else {
             return false;
         };
+        let buffer_id = match &message {
+            CrdtServerMessage::Snapshot { buffer_id, .. }
+            | CrdtServerMessage::SnapshotFallback { buffer_id, .. }
+            | CrdtServerMessage::Saved { buffer_id, .. }
+            | CrdtServerMessage::Error {
+                buffer_id: Some(buffer_id),
+                ..
+            } => buffer_id,
+            CrdtServerMessage::Sync { envelope } => &envelope.buffer_id,
+            _ => return false,
+        };
         // Deferred notification: pushed after the pane/binding borrow
         // ends (notifications and panes live on the same Chrome).
         let mut notice: Option<(String, NotificationLevel)> = None;
         let changed = {
-            let (pane, binding_slot) = self.chrome.code_editor_parts_mut();
-            let (Some(pane), Some(binding)) = (pane, binding_slot.as_mut()) else {
+            let Some((pane, binding)) = self.chrome.code_editor_for_buffer_mut(buffer_id)
+            else {
                 return false;
             };
             match message {
@@ -1201,9 +1280,7 @@ impl ChromeBridge {
                             Err(_) => false,
                         }
                     } else {
-                        binding
-                            .seed_from_snapshot(&update_v1, &mut pane.buffer)
-                            .unwrap_or(false)
+                        binding.seed_from_snapshot(&update_v1, &mut pane.buffer).unwrap_or(false)
                     }
                 }
                 CrdtServerMessage::Sync { envelope } => {
@@ -1770,6 +1847,19 @@ impl ChromeBridge {
     // ------------------------------------------------------------
 
     fn code_pane_key(&mut self, key: &str, ctrl: bool, shift: bool, alt: bool) -> bool {
+        // Hover text wins over document/Vim selection in every input mode.
+        // The web host folds Cmd+C into `ctrl` for this entry point.
+        if ctrl && !alt && key.eq_ignore_ascii_case("c") {
+            if let Some(text) = self
+                .chrome
+                .code_hover_interaction_mut()
+                .and_then(|state| state.selected_text())
+            {
+                set_clipboard_cache(&text);
+                queue_clipboard_out(&text);
+                return true;
+            }
+        }
         if self.mobile_direct_insert {
             if let Some(pane) = self.chrome.code_pane_mut() {
                 pane.buffer.mode = CodeMode::Insert;
@@ -2401,6 +2491,16 @@ impl ChromeBridge {
         let Some(pane) = self.chrome.code_pane_mut() else {
             return false;
         };
+        if pane.geometry.projected_rows.is_some()
+            && pane
+                .geometry
+                .projected_hit_position(&pane.buffer.lines, x, y)
+                .is_none()
+        {
+            // Headers, deletions and fold rows belong to review navigation,
+            // never to a clamped source position in the editable buffer.
+            return false;
+        }
         // Scrollbar first refusal: thumb press starts a 1:1 drag,
         // track press jumps a viewport toward the click.
         if let (Some(track), Some(thumb)) = (pane.scrollbar_track, pane.scrollbar_thumb) {
@@ -2733,6 +2833,11 @@ impl ChromeBridge {
         let buffer = pane.buffer.clone();
         pane.highlight
             .set_spans_from_host(&buffer, lang, revision, spans)
+    }
+
+    /// Exact canonical revision for save-correlated Git mutations (no JS u64 rounding).
+    pub fn editor_revision(&mut self) -> Option<String> {
+        self.chrome.code_pane_mut().map(|pane| pane.buffer.revision.to_string())
     }
 
     /// Buffer revision the host should quote when requesting highlights.

@@ -38,6 +38,7 @@ pub async fn snapshot(root: PathBuf) -> GitRepoStatus {
                 workspace_root,
                 repo_root: None,
                 branch: None,
+                upstream: None,
                 files: vec![],
                 error: Some(e.to_string()),
             });

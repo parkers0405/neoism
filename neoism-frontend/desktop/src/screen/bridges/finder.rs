@@ -383,7 +383,7 @@ impl Screen<'_> {
             } => {
                 self.open_finder_target_tab(target_route, &path);
                 self.open_path_in_editor(path.clone());
-                if let Some(code) = self.context_manager.current_mut().code.as_mut() {
+                if let Some(code) = self.context_manager.active_code_pane_mut() {
                     code.buffer.set_cursor_position(
                         (line as usize).saturating_sub(1),
                         0,
@@ -436,7 +436,7 @@ impl Screen<'_> {
     /// arms `n`/`N` (reversed for `?`); Esc restores the origin. No-op
     /// when no code pane is active.
     pub(crate) fn open_finder_buffer_search(&mut self, backward: bool) {
-        let Some(code) = self.context_manager.current_mut().code.as_mut() else {
+        let Some(code) = self.context_manager.active_code_pane_mut() else {
             return;
         };
         code.search_origin = Some((code.buffer.cursor_line, code.buffer.cursor_col));
@@ -453,7 +453,7 @@ impl Screen<'_> {
     /// typed as `pattern/replacement` (`:s` escaping), Enter replaces
     /// every occurrence in the file. No-op without a code pane.
     pub(crate) fn open_finder_buffer_replace(&mut self) {
-        let Some(code) = self.context_manager.current_mut().code.as_mut() else {
+        let Some(code) = self.context_manager.active_code_pane_mut() else {
             return;
         };
         code.search_origin = Some((code.buffer.cursor_line, code.buffer.cursor_col));
@@ -479,7 +479,7 @@ impl Screen<'_> {
         }
         self.renderer.finder.close();
         self.renderer.file_tree.set_focused(false);
-        if let Some(code) = self.context_manager.current_mut().code.as_mut() {
+        if let Some(code) = self.context_manager.active_code_pane_mut() {
             code.search_origin = None;
         }
         let spec = neoism_ui::editor::code::substitute::SubstituteSpec {
@@ -510,7 +510,7 @@ impl Screen<'_> {
         } else {
             query
         };
-        let Some(code) = self.context_manager.current_mut().code.as_mut() else {
+        let Some(code) = self.context_manager.active_code_pane_mut() else {
             return;
         };
         let Some((origin_line, origin_col)) = code.search_origin else {
@@ -580,7 +580,7 @@ impl Screen<'_> {
         let Some(row_line) = self.renderer.finder.selected_line() else {
             return;
         };
-        let Some(code) = self.context_manager.current_mut().code.as_mut() else {
+        let Some(code) = self.context_manager.active_code_pane_mut() else {
             return;
         };
         let line_ix = (row_line as usize).saturating_sub(1);
@@ -604,7 +604,7 @@ impl Screen<'_> {
         let selected_line = self.renderer.finder.selected_line();
         self.renderer.finder.close();
         self.renderer.file_tree.set_focused(false);
-        let Some(code) = self.context_manager.current_mut().code.as_mut() else {
+        let Some(code) = self.context_manager.active_code_pane_mut() else {
             self.mark_dirty();
             return;
         };
@@ -646,7 +646,7 @@ impl Screen<'_> {
     /// the hlsearch bands, close the finder.
     pub(crate) fn cancel_finder_buffer_search(&mut self) {
         self.renderer.finder.close();
-        if let Some(code) = self.context_manager.current_mut().code.as_mut() {
+        if let Some(code) = self.context_manager.active_code_pane_mut() {
             if let Some((line, col)) = code.search_origin.take() {
                 code.buffer.set_cursor_position(line, col, false);
                 code.buffer.follow_cursor = true;
@@ -663,7 +663,7 @@ impl Screen<'_> {
     /// land. Remembers the pre-open cursor so Esc restores it (the
     /// search_origin pattern).
     pub(crate) fn open_finder_symbols(&mut self) {
-        if let Some(code) = self.context_manager.current_mut().code.as_mut() {
+        if let Some(code) = self.context_manager.active_code_pane_mut() {
             code.search_origin = Some((code.buffer.cursor_line, code.buffer.cursor_col));
         }
         self.finder_target_route = None;
@@ -694,7 +694,7 @@ impl Screen<'_> {
         else {
             return;
         };
-        if let Some(code) = self.context_manager.current_mut().code.as_mut() {
+        if let Some(code) = self.context_manager.active_code_pane_mut() {
             code.search_origin = Some((code.buffer.cursor_line, code.buffer.cursor_col));
         }
         self.renderer.finder.switch_to_symbols(rest);
@@ -715,7 +715,7 @@ impl Screen<'_> {
         {
             return false;
         }
-        if let Some(code) = self.context_manager.current_mut().code.as_mut() {
+        if let Some(code) = self.context_manager.active_code_pane_mut() {
             if let Some((line, col)) = code.search_origin.take() {
                 code.buffer.set_cursor_position(line, col, false);
                 code.buffer.follow_cursor = true;
@@ -738,7 +738,7 @@ impl Screen<'_> {
         let Some((line, col)) = self.renderer.finder.selected_symbol_target() else {
             return;
         };
-        let Some(code) = self.context_manager.current_mut().code.as_mut() else {
+        let Some(code) = self.context_manager.active_code_pane_mut() else {
             return;
         };
         let line_ix = (line as usize).saturating_sub(1);
@@ -755,7 +755,7 @@ impl Screen<'_> {
         let target = self.renderer.finder.selected_symbol_target();
         self.renderer.finder.close();
         self.renderer.file_tree.set_focused(false);
-        let Some(code) = self.context_manager.current_mut().code.as_mut() else {
+        let Some(code) = self.context_manager.active_code_pane_mut() else {
             self.mark_dirty();
             return;
         };
@@ -781,7 +781,7 @@ impl Screen<'_> {
     /// finder. hlsearch state is untouched — Symbols never sets it.
     pub(crate) fn cancel_finder_symbols(&mut self) {
         self.renderer.finder.close();
-        if let Some(code) = self.context_manager.current_mut().code.as_mut() {
+        if let Some(code) = self.context_manager.active_code_pane_mut() {
             if let Some((line, col)) = code.search_origin.take() {
                 code.buffer.set_cursor_position(line, col, false);
                 code.buffer.follow_cursor = true;

@@ -1,6 +1,9 @@
 use super::*;
 
 #[cfg(test)]
+mod picker_cache_tests;
+
+#[cfg(test)]
 mod composer_cursor_tests {
     use super::*;
     use neoism_ui::panels::agent_pane::state::side_panel::{
@@ -542,22 +545,37 @@ impl NeoismAgentPane {
             NeoismAgentPickerKind::Agent,
             "Agents",
         ));
-        let server = self.server.clone();
-        let directory = self.directory.clone();
+        if let Some(options) = super::super::api::cached_agent_options(
+            &self.server,
+            self.directory.as_deref(),
+        ) {
+            let active_agent = self.agent.as_deref().unwrap_or("build");
+            let selected = options
+                .iter()
+                .position(|option| option.value == active_agent);
+            let picker = self.picker.as_mut().unwrap();
+            picker.replace_options(options);
+            picker.set_loading(false);
+            if let Some(selected) = selected {
+                picker.selected = selected;
+            }
+        }
+        let scope = super::super::api::catalog_scope(&self.server, self.directory.as_deref());
+        let worker_scope = scope.clone();
         let tx = self.background_tx.clone();
         if std::thread::Builder::new()
             .name("neoism-agent-options".into())
             .spawn(move || {
-                let _ = tx.send(NeoismAgentBackgroundUpdate::AgentOptionsRefreshed(
-                    fetch_agent_options(&server, directory.as_deref()),
-                ));
+                let result = super::super::api::fetch_agent_options_scoped(&worker_scope);
+                let _ = tx.send(NeoismAgentBackgroundUpdate::AgentOptionsRefreshed { scope: worker_scope, result });
             })
             .is_err()
         {
             let _ = self.background_tx.send(
-                NeoismAgentBackgroundUpdate::AgentOptionsRefreshed(Err(
-                    "Could not start agent refresh".into(),
-                )),
+                NeoismAgentBackgroundUpdate::AgentOptionsRefreshed {
+                    scope,
+                    result: Err("Could not start agent refresh".into()),
+                },
             );
         }
     }
@@ -572,27 +590,70 @@ impl NeoismAgentPane {
             NeoismAgentPickerKind::Model,
             "Select model",
         ));
+        if let Some((options, readiness)) = super::super::api::cached_model_options(
+            &self.server,
+            self.directory.as_deref(),
+        ) {
+            if let Some(readiness) = readiness {
+                self.provider_readiness = Some(readiness);
+            }
+            let options = self.model_picker_options(options);
+            let picker = self.picker.as_mut().unwrap();
+            picker.replace_options(options);
+            picker.set_loading(false);
+        }
         self.refresh_model_catalog();
     }
 
+    pub(crate) fn refresh_provider_readiness(&self) {
+        let scope = super::super::api::catalog_scope(&self.server, self.directory.as_deref());
+        let worker_scope = scope.clone();
+        let tx = self.background_tx.clone();
+        if std::thread::Builder::new()
+            .name("neoism-provider-readiness".into())
+            .spawn(move || {
+                let started = super::super::perf::now();
+                let result = super::super::api::fetch_provider_readiness_scoped(&worker_scope);
+                if started.is_some() {
+                    tracing::info!(
+                        elapsed_us = super::super::perf::elapsed_us(started),
+                        ready = result.is_ok(),
+                        "agent provider readiness refreshed"
+                    );
+                }
+                let _ = tx.send(NeoismAgentBackgroundUpdate::ProviderReadinessRefreshed {
+                    scope: worker_scope,
+                    result,
+                });
+            })
+            .is_err()
+        {
+            let _ = self.background_tx.send(NeoismAgentBackgroundUpdate::ProviderReadinessRefreshed {
+                scope,
+                result: Err("Could not start provider readiness refresh".into()),
+            });
+        }
+    }
+
     pub(crate) fn refresh_model_catalog(&mut self) {
-        self.provider_readiness = None;
-        let server = self.server.clone();
-        let directory = self.directory.clone();
+        // Configured models are not proof that a provider can submit.
+        self.refresh_provider_readiness();
+        let scope = super::super::api::catalog_scope(&self.server, self.directory.as_deref());
+        let worker_scope = scope.clone();
         let tx = self.background_tx.clone();
         if std::thread::Builder::new()
             .name("neoism-model-options".into())
             .spawn(move || {
-                let _ = tx.send(NeoismAgentBackgroundUpdate::ModelOptionsRefreshed(
-                    fetch_model_options(&server, directory.as_deref()),
-                ));
+                let result = super::super::api::fetch_model_options_scoped(&worker_scope);
+                let _ = tx.send(NeoismAgentBackgroundUpdate::ModelOptionsRefreshed { scope: worker_scope, result });
             })
             .is_err()
         {
             let _ = self.background_tx.send(
-                NeoismAgentBackgroundUpdate::ModelOptionsRefreshed(Err(
-                    "Could not start model refresh".into(),
-                )),
+                NeoismAgentBackgroundUpdate::ModelOptionsRefreshed {
+                    scope,
+                    result: Err("Could not start model refresh".into()),
+                },
             );
         }
     }
@@ -1107,7 +1168,11 @@ impl NeoismAgentPane {
     /// commit it (the conventional "single-click picks" UX). Returns true
     /// when the click was handled by the picker overlay.
     pub fn pick_at(&mut self, x: f32, y: f32) -> bool {
-        if let Some(url) = self.picker.as_ref().and_then(|picker| picker.authorization_url_at(x, y)) {
+        if let Some(url) = self
+            .picker
+            .as_ref()
+            .and_then(|picker| picker.authorization_url_at(x, y))
+        {
             self.ui_events.push(NeoismAgentUiEvent::OpenUrl { url });
             return true;
         }

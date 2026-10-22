@@ -108,6 +108,11 @@ impl CodeDocBinding {
             apply_remote_delta_to_buffer(buffer, &delta);
             changed = true;
         }
+        // The daemon document is the complete file text (including any CRLF
+        // bytes and EOF newline), unlike CodeBuffer::from_text's stripped disk
+        // projection. Do not serialize those terminators a second time.
+        buffer.line_ending = super::CodeLineEnding::Lf;
+        buffer.trailing_newline = false;
         self.shadow = buffer.lines.clone();
         self.seeded = true;
         // The seed reflects the daemon's on-disk text, so a freshly-seeded

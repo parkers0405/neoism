@@ -485,6 +485,9 @@ impl ChromeBridge {
                 ui.hint.stop();
             });
         }
+        if self.active_tab_index != key {
+            self.flush_code_binding_before_presentation_change();
+        }
         self.active_tab_index = key;
         self.chrome.set_active_tab_index(key);
         if key != 0 {
@@ -495,11 +498,22 @@ impl ChromeBridge {
         }
         let content = self.tab_contents.get(&key).cloned();
         self.chrome.set_tab_content(content.clone());
-        let path = self.tab_paths.get(&key).cloned();
-        let lang = path
-            .as_deref()
-            .map(neoism_ui::syntax::Lang::from_path)
-            .unwrap_or(neoism_ui::syntax::Lang::Other);
+        let path = if self.chrome.active_chrome_page().is_some() {
+            None
+        } else {
+            self.tab_paths.get(&key).cloned()
+        };
+        let lang = if self
+            .tab_kinds
+            .get(&key)
+            .is_some_and(|kind| kind == "source-code")
+        {
+            neoism_ui::syntax::Lang::Other
+        } else {
+            path.as_deref()
+                .map(neoism_ui::syntax::Lang::from_path)
+                .unwrap_or(neoism_ui::syntax::Lang::Other)
+        };
         self.chrome.set_tab_lang(lang);
         if lang == neoism_ui::syntax::Lang::Markdown {
             self.chrome.set_markdown_content(content, path.as_deref());
@@ -538,7 +552,7 @@ impl ChromeBridge {
             .unwrap_or("terminal");
         let (mode, primary_kind) = if kind == "neoism-agent" {
             (Mode::Agent, PrimaryKind::Agent)
-        } else if lang == neoism_ui::syntax::Lang::Markdown {
+        } else if kind != "source-code" && lang == neoism_ui::syntax::Lang::Markdown {
             (Mode::Markdown, PrimaryKind::File)
         } else if kind == "terminal" {
             (Mode::Terminal, PrimaryKind::Terminal)

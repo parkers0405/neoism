@@ -78,6 +78,34 @@ fn agent_timeline_scroll_caps_mouse_wheel_bursts() {
 }
 
 #[test]
+fn canonical_wheel_pixels_preserve_os_acceleration_and_momentum_per_event() {
+    // Diff hosts reuse this conversion, not a velocity integrator. Tiny finger
+    // movement, an accelerated swipe and OS momentum retain their exact sizes;
+    // a repeated event cannot acquire a second, application-generated gain.
+    for pixels in [0.125, 17.5, -480.0, 7.0, 0.0] {
+        let input = ScrollDelta::Pixels { x: 0.0, y: pixels };
+        for _ in 0..3 {
+            let wheel = agent_timeline_wheel(&input, 24.0);
+            assert_eq!(wheel.pixels, pixels);
+            assert!(!wheel.smooth);
+            assert_eq!(
+                agent_timeline_browser_wheel(pixels, 0, None, 24.0),
+                wheel,
+            );
+        }
+    }
+    // The cap applies to source notches, never to an equal-sized pixel event.
+    assert_eq!(
+        agent_timeline_wheel(&ScrollDelta::Lines { x: 0.0, y: 8.0 }, 24.0).pixels,
+        216.0,
+    );
+    assert_eq!(
+        agent_timeline_wheel(&ScrollDelta::Pixels { x: 0.0, y: 8.0 }, 24.0).pixels,
+        8.0,
+    );
+}
+
+#[test]
 fn browser_agent_wheel_keeps_large_continuous_trackpad_deltas_as_pixels() {
     assert_eq!(
         agent_timeline_browser_wheel(48.0, 0, None, 24.0),

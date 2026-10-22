@@ -39,6 +39,7 @@ pub struct MarkdownCrdtState {
     /// distinct from the daemon's 9e9 default.
     client_id: u64,
     bindings: HashMap<String, MarkdownDocBinding>,
+    restore_source_reads: HashMap<PathBuf, neoism_protocol::git::GitChangeBlock>,
     outbound: Vec<CrdtClientMessage>,
 }
 
@@ -47,6 +48,7 @@ impl Default for MarkdownCrdtState {
         Self {
             client_id: generate_client_id(),
             bindings: HashMap::new(),
+            restore_source_reads: HashMap::new(),
             outbound: Vec::new(),
         }
     }
@@ -99,6 +101,39 @@ fn canonical_buffer_path(path: &std::path::Path) -> PathBuf {
 }
 
 impl Screen<'_> {
+    pub(crate) fn prepare_markdown_restore_reload(&mut self, path: &std::path::Path, block: &neoism_protocol::git::GitChangeBlock) {
+        if self.context_manager.markdown_pane_mut_by_path(path).is_some() {
+            self.markdown_crdt.restore_source_reads.insert(path.to_owned(), block.clone());
+        }
+    }
+
+    pub(crate) fn finish_offline_markdown_restore(&mut self, path: &std::path::Path, source: Option<&str>) {
+        let Some(block) = self.markdown_crdt.restore_source_reads.remove(path) else { return; };
+        let Some(source) = source else { return; };
+        if let Some(pane) = self.context_manager.markdown_pane_mut_by_path(path) {
+            if !pane.is_dirty() && !pane.remote_source && !pane.remote_content_pending
+                && pane.lines != markdown_text_to_lines(source)
+            {
+                reload_restored_markdown_preserving_view(pane, source, &block);
+            }
+        }
+    }
+
+    pub(crate) fn request_markdown_restore_snapshot(&mut self, path: &std::path::Path) {
+        let Some(pane) = self.context_manager.markdown_pane_mut_by_path(path) else { return; };
+        pane.restore_scroll_position(pane.scroll_y);
+        let buffer_id = buffer_id_for_markdown_path(path);
+        if let Some(binding) = self.markdown_crdt.bindings.get(&buffer_id).filter(|binding| binding.is_seeded()) {
+            self.markdown_crdt.outbound.push(CrdtClientMessage::RequestSnapshot {
+                buffer_id, state_vector_v1: binding.state_vector_v1(),
+            });
+        } else {
+            self.markdown_crdt.outbound.push(CrdtClientMessage::OpenBuffer {
+                buffer_id, initial_text: lines_to_text(&pane.lines),
+            });
+        }
+    }
+
     pub(crate) fn reload_open_markdown_files_from_disk(
         &mut self,
     ) -> (Vec<CrdtClientMessage>, bool) {
@@ -115,17 +150,20 @@ impl Screen<'_> {
                         continue;
                     };
                     let path = normalize_markdown_reload_path(pane.path.clone());
+                    let restore_block = state.restore_source_reads.get(&pane.path).cloned();
                     match reload_markdown_pane_from_disk(
                         pane,
                         &path,
                         &mut state.bindings,
                         &mut self.markdown_fs_reload_fingerprints,
+                        restore_block.as_ref(),
                     ) {
                         Ok((message, pane_changed)) => {
                             if let Some(message) = message {
                                 outbound.push(message);
                             }
                             if pane_changed {
+                                state.restore_source_reads.remove(&pane.path);
                                 modified_paths.push((pane.path.clone(), pane.is_dirty()));
                             }
                             changed |= pane_changed;
@@ -647,7 +685,14 @@ fn reload_markdown_pane_from_disk(
     path: &PathBuf,
     bindings: &mut HashMap<String, MarkdownDocBinding>,
     fingerprints: &mut HashMap<PathBuf, (u64, std::time::SystemTime)>,
+    restore_block: Option<&neoism_protocol::git::GitChangeBlock>,
 ) -> std::io::Result<(Option<CrdtClientMessage>, bool)> {
+    // External Git restores must not replace edits made since confirmation.
+    // Leave the fingerprint untouched so the disk version can be reconciled
+    // after the owner becomes clean. Host-owned paths never read guest disk.
+    if pane.is_dirty() || pane.remote_source || pane.remote_content_pending {
+        return Ok((None, false));
+    }
     let metadata = match fs::metadata(path) {
         Ok(metadata) if metadata.is_file() => metadata,
         _ => {
@@ -675,7 +720,11 @@ fn reload_markdown_pane_from_disk(
         let first = doc_byte_to_position(&pane.lines, delta.byte_start).0;
         first..first.saturating_add(delta.inserted.matches('\n').count() + 1)
     });
-    pane.set_source_preserving_view(&text);
+    if let Some(block) = restore_block {
+        reload_restored_markdown_preserving_view(pane, &text, block);
+    } else {
+        pane.set_source_preserving_view(&text);
+    }
     if let Some(lines) = changed_lines {
         pane.flash_inbound_edit(lines);
     }
@@ -688,6 +737,18 @@ fn reload_markdown_pane_from_disk(
 
     fingerprints.insert(path.clone(), fingerprint);
     Ok((message, true))
+}
+
+fn reload_restored_markdown_preserving_view(pane: &mut MarkdownPane, source: &str, block: &neoism_protocol::git::GitChangeBlock) {
+    let line = super::bridges::git_diff_edit::restored_source_line(pane.cursor_line, block);
+    let col = pane.cursor_col;
+    pane.set_source_preserving_view(source);
+    pane.cursor_line = line.min(pane.lines.len().saturating_sub(1));
+    let text = &pane.lines[pane.cursor_line];
+    let mut col = col.min(text.len());
+    while !text.is_char_boundary(col) { col -= 1; }
+    pane.cursor_col = col;
+    pane.restore_scroll_position(pane.scroll_y);
 }
 
 fn markdown_text_to_lines(text: &str) -> Vec<String> {
@@ -732,6 +793,41 @@ mod tests {
     }
 
     #[test]
+    fn restore_preserves_markdown_raw_line_50_mode_and_scroll_without_navigation() {
+        let source = (0..100).map(|_| "raw **text**").collect::<Vec<_>>().join("\n");
+        let mut pane = MarkdownPane::from_source("/repo/a.md".into(), &source);
+        pane.cursor_line = 50;
+        pane.cursor_col = 6;
+        let mode = pane.mode;
+        pane.restore_scroll_position(700.0);
+        let block = neoism_protocol::git::GitChangeBlock {
+            old_start: 5, new_start: 5, old_lines: vec!["old".into()], new_lines: vec!["new".into()],
+        };
+        reload_restored_markdown_preserving_view(&mut pane, &source, &block);
+        assert_eq!((pane.cursor_line, pane.cursor_col), (50, 6));
+        assert_eq!(pane.mode, mode);
+        assert_eq!(pane.scroll_y, 700.0);
+        assert!(!pane.is_dirty());
+    }
+
+    #[test]
+    fn disk_restore_does_not_overwrite_new_dirty_markdown_edits() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("note.md");
+        std::fs::write(&path, "restored on disk").unwrap();
+        let mut pane = MarkdownPane::from_source(path.clone(), "original");
+        pane.lines[0] = "new user edit".into();
+        assert!(pane.is_dirty());
+        let mut fingerprints = HashMap::new();
+        let (_, changed) = reload_markdown_pane_from_disk(
+            &mut pane, &path, &mut HashMap::new(), &mut fingerprints, None,
+        ).unwrap();
+        assert!(!changed);
+        assert_eq!(pane.lines, vec!["new user edit"]);
+        assert!(fingerprints.is_empty());
+    }
+
+    #[test]
     fn disk_reload_rebuilds_markdown_render_state() {
         let root = std::env::temp_dir().join(format!(
             "neoism-markdown-disk-reload-{}",
@@ -752,6 +848,7 @@ mod tests {
             &path,
             &mut bindings,
             &mut fingerprints,
+            None,
         )
         .unwrap();
 

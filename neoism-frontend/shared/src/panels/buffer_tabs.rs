@@ -261,12 +261,8 @@ pub struct BufferTab<A> {
     /// Rust-rendered Neoism agent route. This is a native surface, not
     /// a PTY-backed agent CLI.
     pub neoism_agent_route_id: Option<usize>,
-    /// Rust-rendered "chrome helper page" tab — Extensions today,
-    /// Updates / About / etc. tomorrow. Singleton kinds whose body is
-    /// painted entirely by a dedicated Rust panel with no file
-    /// backing. Generic over [`ChromePageKind`] so new helper pages
-    /// just add a variant + a render branch, not a new per-kind
-    /// field on every `BufferTab` literal.
+    /// Rust-rendered native page tab with no editable-file backing. Helper
+    /// pages are singleton kinds; Git diffs are keyed by their host route.
     pub chrome_page: Option<ChromePageRef>,
     /// Agent CLI associated with this terminal tab. Stored on the tab
     /// instead of inferred from the active PTY so inactive agent tabs
@@ -286,6 +282,7 @@ pub struct BufferTab<A> {
 pub enum ChromePageKind {
     Extensions,
     NeoWorld,
+    GitDiff,
 }
 
 impl ChromePageKind {
@@ -293,6 +290,7 @@ impl ChromePageKind {
         match self {
             ChromePageKind::Extensions => "Extensions",
             ChromePageKind::NeoWorld => "NeoWorld",
+            ChromePageKind::GitDiff => "Changes",
         }
     }
 }

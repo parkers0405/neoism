@@ -329,12 +329,27 @@ export interface TerminalAdapter {
     /** Flag the notes vault as changed on disk so the next
      *  `takeNotesRefresh` re-fetches the listing (live add/delete). */
     markNotesDirty?(): void;
+    gitPanelApplyChangedFiles?(replyJson: string): void;
     gitPanelSetFiles?(filesJson: string): void;
+    gitPanelRestoreIdentity?(path: string): string;
+    gitPanelBlockRestored?(identityJson: string, bufferId: string): boolean;
+    gitPanelContext?(): string | null;
+    prepareGitStageBlock?(path: string, blockJson: string): boolean;
+    takeGitDiffBlockSaveStages?(): Array<{root: string; path: string; absolute: string; block: import("../workspace/types").GitChangeBlock; revision: string}>;
+    editorRevision?(): string | undefined;
+    gitPanelPrepareStage?(path: string): boolean;
+    gitPanelPrepareRestore?(path: string): boolean;
+    gitPanelApplyBaseFile?(replyJson: string): void;
     gitPanelSetDiff?(path: string, patch: string): void;
     gitPanelSetError?(message: string): void;
     notesSetEntries?(entriesJson: string): void;
     /** Paths activated in the git panel / notes sidebar. */
     drainPanelOpenPaths?(): unknown;
+    revealGitDiffFile?(route: number, path: string): void;
+    drainGitDiffOpens?(): unknown;
+    drainGitCommitOpens?(): unknown;
+    setGitCommitView?(route: number, root: string, json: string): void;
+    takeGitCommitCopy?(): string | undefined;
     toggleAgentPane?(): void;
     showFinder?(): void;
     showFinderFiles?(): void;
@@ -525,6 +540,13 @@ export interface TerminalAdapter {
     /** Open a fetched non-markdown file into the right chrome-hosted
      *  editor pane (`.ipynb` → notebook, `.neodraw` → draw, else the
      *  native code pane). Returns the pane kind. */
+    takeGitDiffSaveStages?(): Array<{root: string; path: string; absolute: string; unstage: boolean}>;
+    drainGitDiffSourceOpens?(): Array<{ path: string; line: number; column: number }>;
+    sourceEditorPolicy?(path: string): "code" | "load" | "unsupported";
+    activateSourceEditor?(tabIndex: number, path: string, line: number, column: number): boolean;
+    takeGitDiffEditRequest?(): { path: string; line: number; column: number } | null;
+    gitDiffEditingPath?(): string | null;
+    activateGitDiffEditor?(path: string, line: number, column: number): boolean;
     editorOpenFile?(tabIndex: number, path: string, text: string): string;
     /** Seed built-in config completion with the daemon host's schema. */
     editorSetConfigDescriptors?(json: string): boolean;
@@ -1554,6 +1576,27 @@ interface ChromeBridgeInstance {
     git_panel_set_error?(message: string): void;
     notes_set_entries?(entriesJson: string): void;
     drain_panel_open_paths?(): unknown;
+    reveal_git_diff_file?(route: number, path: string): void;
+    take_git_diff_save_stages?(): Array<{root: string; path: string; absolute: string; unstage: boolean}>;
+    drain_git_diff_source_opens?(): Array<{ path: string; line: number; column: number }> | null;
+    source_editor_policy?(path: string): string;
+    activate_source_editor?(tabIndex: number, path: string, line: number, column: number): boolean;
+    take_git_diff_edit_request?(): { path: string; line: number; column: number } | null;
+    git_diff_editing_path?(): string | undefined;
+    activate_git_diff_editor?(path: string, line: number, column: number): boolean;
+    git_panel_apply_changed_files?(replyJson: string): void;
+    git_panel_restore_identity?(path: string): string;
+    git_panel_block_restored?(identityJson: string, bufferId: string): boolean;
+    prepare_git_stage_block?(path: string, blockJson: string): boolean;
+    take_git_diff_block_save_stages?(): Array<{root: string; path: string; absolute: string; block: import("../workspace/types").GitChangeBlock; revision: string}>;
+    editor_revision?(): string | undefined;
+    git_panel_prepare_stage?(path: string): boolean;
+    git_panel_prepare_restore?(path: string): boolean;
+    git_panel_apply_base_file?(replyJson: string): void;
+    drain_git_diff_opens?(): unknown;
+    drain_git_commit_opens?(): unknown;
+    set_git_commit_view?(route: number, root: string, json: string): void;
+    take_git_commit_copy?(): string | undefined;
     toggle_agent_pane(): void;
     show_finder(): void;
     show_finder_files?(): void;
@@ -2382,7 +2425,10 @@ class ChromeAdapter implements TerminalAdapter {
     editorPointerMove(x: number, y: number): boolean {
         return this.inner.editor_pointer_move?.(x, y) ?? false;
     }
-    editorPointerUp(): boolean {
+    editorPointerUp(x?: number, y?: number): boolean {
+        if (x !== undefined && y !== undefined) {
+            this.inner.editor_pointer_move?.(x, y);
+        }
         return this.inner.editor_pointer_up?.() ?? false;
     }
     editorSelectWordAt(x: number, y: number): boolean {
@@ -2996,8 +3042,36 @@ class ChromeAdapter implements TerminalAdapter {
     markNotesDirty(): void {
         this.inner.mark_notes_dirty?.();
     }
+    gitPanelApplyChangedFiles(replyJson: string): void {
+        this.inner.git_panel_apply_changed_files?.(replyJson);
+    }
     gitPanelSetFiles(filesJson: string): void {
         this.inner.git_panel_set_files?.(filesJson);
+    }
+    gitPanelRestoreIdentity(path: string): string {
+        if (!this.inner.git_panel_restore_identity || !this.inner.git_panel_block_restored) throw new Error("Canonical restore reconciliation unavailable; reload the web client.");
+        return this.inner.git_panel_restore_identity(path);
+    }
+    gitPanelBlockRestored(identityJson: string, bufferId: string): boolean {
+        return this.inner.git_panel_block_restored?.(identityJson, bufferId) === true;
+    }
+    prepareGitStageBlock(path: string, blockJson: string): boolean {
+        return this.inner.prepare_git_stage_block?.(path, blockJson) === true;
+    }
+    takeGitDiffBlockSaveStages(): Array<{root: string; path: string; absolute: string; block: import("../workspace/types").GitChangeBlock; revision: string}> {
+        return this.inner.take_git_diff_block_save_stages?.() ?? [];
+    }
+    editorRevision(): string | undefined {
+        return this.inner.editor_revision?.();
+    }
+    gitPanelPrepareStage(path: string): boolean {
+        return this.inner.git_panel_prepare_stage?.(path) === true;
+    }
+    gitPanelPrepareRestore(path: string): boolean {
+        return this.inner.git_panel_prepare_restore?.(path) === true;
+    }
+    gitPanelApplyBaseFile(replyJson: string): void {
+        this.inner.git_panel_apply_base_file?.(replyJson);
     }
     gitPanelSetDiff(path: string, patch: string): void {
         this.inner.git_panel_set_diff?.(path, patch);
@@ -3007,6 +3081,37 @@ class ChromeAdapter implements TerminalAdapter {
     }
     notesSetEntries(entriesJson: string): void {
         this.inner.notes_set_entries?.(entriesJson);
+    }
+    revealGitDiffFile(route: number, path: string): void {
+        this.inner.reveal_git_diff_file?.(route, path);
+    }
+    takeGitDiffSaveStages(): Array<{root: string; path: string; absolute: string; unstage: boolean}> {
+        return this.inner.take_git_diff_save_stages?.() ?? [];
+    }
+    takeGitDiffEditRequest(): { path: string; line: number; column: number } | null {
+        return this.inner.take_git_diff_edit_request?.() ?? null;
+    }
+    drainGitDiffSourceOpens(): Array<{ path: string; line: number; column: number }> {
+        return this.inner.drain_git_diff_source_opens?.() ?? [];
+    }
+    sourceEditorPolicy(path: string): "code" | "load" | "unsupported" {
+        const policy = this.inner.source_editor_policy?.(path);
+        return policy === "code" || policy === "load" ? policy : "unsupported";
+    }
+    activateSourceEditor(tabIndex: number, path: string, line: number, column: number): boolean {
+        return this.inner.activate_source_editor?.(tabIndex, path, line, column) === true;
+    }
+    gitDiffEditingPath(): string | null {
+        return this.inner.git_diff_editing_path?.() ?? null;
+    }
+    activateGitDiffEditor(path: string, line: number, column: number): boolean {
+        return this.inner.activate_git_diff_editor?.(path, line, column) === true;
+    }
+    drainGitCommitOpens(): unknown { return this.inner.drain_git_commit_opens?.(); }
+    setGitCommitView(route: number, root: string, json: string): void { this.inner.set_git_commit_view?.(route, root, json); }
+    takeGitCommitCopy(): string | undefined { return this.inner.take_git_commit_copy?.(); }
+    drainGitDiffOpens(): unknown {
+        return this.inner.drain_git_diff_opens?.();
     }
     drainPanelOpenPaths(): unknown {
         return this.inner.drain_panel_open_paths?.();

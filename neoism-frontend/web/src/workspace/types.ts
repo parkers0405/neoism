@@ -232,6 +232,13 @@ export interface GitFileDiff {
   patch: string;
 }
 
+export interface GitChangeBlock {
+  old_start: number;
+  new_start: number;
+  old_lines: string[];
+  new_lines: string[];
+}
+
 export type GitClientMessage =
   | { Blame: { path: string } }
   | "Status"
@@ -242,8 +249,16 @@ export type GitClientMessage =
   | "ChangedFiles"
   | { Stage: { path: string } }
   | { Unstage: { path: string } }
+  | { Restore: { path: string } }
+  | { ApplyBlock: { path: string; block: GitChangeBlock; restore: boolean } }
+  | { ReadBase: { path: string } }
+  | { ReadCommit: { revision: string } }
   | { Commit: { message: string } }
   | "Branches"
+  | "Fetch"
+  | "Pull"
+  | "Push"
+  | "Publish"
   | { Checkout: { branch: string } }
   | { DiffFiles: { paths: string[] } };
 
@@ -267,7 +282,20 @@ export interface GitBlameSnapshot {
   commits: GitBlameCommit[];
 }
 
+export interface GitCommitDetail {
+  sha: string;
+  author: string;
+  email: string;
+  timestamp: number;
+  offset_minutes: number;
+  message: string;
+  files: GitFileChange[];
+  diffs: GitFileDiff[];
+}
+
 export type GitServerMessage =
+  | { CommitDetail: { detail: GitCommitDetail } }
+  | { BaseFile: { path: string; text: string } }
   | { Blame: { snapshot: GitBlameSnapshot } }
   | { Status: { entries: GitStatusEntry[] } }
   | { Diff: { hunks: DiffHunk[] } }
@@ -279,6 +307,7 @@ export type GitServerMessage =
       ChangedFiles: {
         files: GitFileChange[];
         branch: string | null;
+        upstream?: string | null;
         error: string | null;
       };
     }

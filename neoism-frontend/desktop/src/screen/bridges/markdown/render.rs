@@ -11,6 +11,7 @@ impl Screen<'_> {
     }
 
     pub(crate) fn render_markdown_panels(&mut self) -> bool {
+        self.apply_pending_markdown_source_location();
         // Opt-in CPU timing; excludes GPU submit/present. Compare this with
         // full-frame timing before blaming the Windows presentation backend.
         let perf_started =

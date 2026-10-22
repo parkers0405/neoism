@@ -555,8 +555,43 @@ impl NeoismAgentPane {
         if cached.state.title.is_none() {
             cached.state.title = title;
         }
+        self.apply_local_session_selection(&session_id);
         self.ensure_session_preloaded(session_id.clone(), false);
         self.activate_cached_session(&session_id);
+    }
+
+    /// Seed only an empty, unhydrated target. This is display state, never a
+    /// reason to skip the normal authorized preload (or to replace live parts).
+    pub(crate) fn apply_local_session_selection(&mut self, session_id: &str) {
+        let Some(cached) = self.session_cache.get(session_id) else { return; };
+        if cached.hydrated || !cached.messages.is_empty()
+            || !cached.pending_user_prompts.is_empty() || cached.initial_history_preview.is_some()
+        {
+            return;
+        }
+        let Some((page, limit)) = super::api::conversation_cache::peek(&self.server, session_id) else {
+            return;
+        };
+        self.apply_initial_history_preview(session_id, page, limit);
+    }
+
+    pub(super) fn apply_initial_history_preview(
+        &mut self,
+        session_id: &str,
+        page: super::api::SessionMessagePage,
+        limit: usize,
+    ) {
+        let Some(cached) = self.session_cache.get_mut(session_id) else { return; };
+        if cached.hydrated || !cached.messages.is_empty() || !cached.pending_user_prompts.is_empty()
+            || cached.initial_history_preview.is_some()
+        {
+            return;
+        }
+        cached.timeline_history.oldest_loaded_cursor = page.oldest_cursor.clone();
+        cached.timeline_history.has_older = page.raw_count >= limit && page.oldest_cursor.is_some();
+        cached.messages = page.blocks.clone();
+        cached.initial_history_preview = Some(std::sync::Arc::new(page));
+        cached.invalidate_timeline_layout();
     }
 
     pub(crate) fn ensure_session_preloaded(&mut self, session_id: String, force: bool) {
@@ -727,6 +762,13 @@ impl NeoismAgentPane {
             .remove(&session_id)
             .map(|cached| cached.messages)
             .unwrap_or_default();
+        // A parked layout can only survive the switch if resetting transient
+        // interactions does not change its geometry. Merges and unconsumed
+        // prepends also change source indices without preserving their marks.
+        let can_park_layout = cached_live.is_empty()
+            && !self.timeline_has_transient_geometry()
+            && self.pending_timeline_prepend_count.is_none()
+            && (preserve_live_trace || self.timeline_live_trace_start().is_none());
         let messages = std::mem::take(&mut self.messages);
         let messages = if cached_live.is_empty() {
             messages
@@ -734,10 +776,15 @@ impl NeoismAgentPane {
             merge_session_snapshot(messages, cached_live, false)
         };
         let timeline_history = std::mem::take(&mut self.timeline_history);
-        let timeline_layout_cache = self.timeline_layout_cache.replace(None);
+        let timeline_layout_cache = self
+            .timeline_layout_cache
+            .replace(None)
+            .filter(|_| can_park_layout);
         let runtime = self.take_session_runtime_ui();
         let (timeline_live_trace_start, timeline_live_trace_anchor) =
             self.live_trace_for_cache(preserve_live_trace);
+        let hydrated = self.initial_history_preview.is_none();
+        let initial_history_preview = self.initial_history_preview.take();
         self.session_cache.insert(
             session_id,
             CachedAgentSession {
@@ -760,7 +807,8 @@ impl NeoismAgentPane {
                 ),
                 runtime,
                 model_context_limit: self.model_context_limit,
-                hydrated: true,
+                initial_history_preview,
+                hydrated,
                 last_access: Instant::now(),
             },
         );
@@ -844,12 +892,12 @@ impl NeoismAgentPane {
                 cached.timeline_live_trace_anchor,
             );
         }
-        // The restored timeline must render fresh — no raised/expanded
-        // card artifacts from the click that navigated away. Leave-and-return
-        // also collapses the live-trace window, so a parked layout that still
-        // contains tool rows would paint leftover titles until the next click.
+        // Clear click/hover/expansion state, not reusable geometry. Parking
+        // already excludes layouts affected by these transient interactions;
+        // leaving the family below separately invalidates trace-dependent rows.
         self.reset_transient_timeline_interactions();
         self.timeline_history = cached.timeline_history;
+        self.initial_history_preview = cached.initial_history_preview;
         self.timeline_history_position_hydrated = true;
         self.clear_timeline_motion();
         self.timeline_scroll_px = 0.0;
@@ -903,22 +951,24 @@ impl NeoismAgentPane {
         if !stays_in_family {
             self.clear_family_activity();
         }
+        // Restore before revealing ongoing activity: revealing a different
+        // trace window must be allowed to invalidate the parked geometry.
+        // The renderer still validates epoch/content and width/scale/gap keys.
+        self.timeline_layout_epoch = cached.timeline_layout_epoch;
+        self.timeline_layout_cache.replace(cached.timeline_layout_cache);
+        self.timeline_dirty_message_ids = cached.timeline_dirty_message_ids;
+        self.timeline_dirty_message_indices = cached.timeline_dirty_message_indices;
+        if !stays_in_family {
+            // Family boundaries still collapse the trace and re-mask settled
+            // tools/reasoning, even when the transcript itself is unchanged.
+            self.invalidate_timeline_layout();
+        }
         // A cold or previously settled ongoing child must immediately reveal
         // the activity it already emitted
         // (reasoning, tools, edits, and subtasks), not wait for one more SSE
         // part before its existing history becomes visible.
         if self.is_streaming() {
             self.reveal_ongoing_session_trace();
-        }
-        // Warm switches adopt the cached layout epoch wholesale: the cached
-        // session's live updates already bump its own epoch, so an unchanged
-        // transcript renders from the parked layout with no relayout flash.
-        self.timeline_layout_epoch = cached.timeline_layout_epoch;
-        if !stays_in_family {
-            // Leaving the family collapses the live-trace window; drop the
-            // parked layout so settled tool/reasoning rows are re-masked
-            // instead of flashing as leftover titles from the previous visit.
-            self.invalidate_timeline_layout();
         }
         if !stays_in_family || !self.runtime_hydrated_sessions.contains(session_id) {
             self.hydrate_runtime_status_for_session(session_id);
@@ -1911,6 +1961,7 @@ impl NeoismAgentPane {
         self.side_panel.clear_status_display_hold();
         self.clear_pending_user_prompts();
         self.messages.clear();
+        self.initial_history_preview = None;
         self.reset_transient_timeline_interactions();
         self.invalidate_timeline_layout();
         self.reset_session_runtime_ui();

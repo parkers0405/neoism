@@ -150,6 +150,13 @@ impl Screen<'_> {
                 true
             }
             DragRelease::MoveOut { tab } => {
+                // Read-only review/helper contexts stay in their owning stack.
+                // Never let a pathless ChromePage disappear during a pane drop.
+                if tab.chrome_page.is_some() {
+                    self.restore_dragged_tab(source, &tab);
+                    self.mark_dirty();
+                    return true;
+                }
                 if let Some(target) = pane_target {
                     self.drop_tab_on_pane_target(source, tab, target);
                     self.mark_dirty();
@@ -225,7 +232,32 @@ impl Screen<'_> {
         source: crate::host::StripRef,
         tab: &neoism_ui::panels::buffer_tabs::BufferTab<crate::neoism::icon::AgentKind>,
     ) {
-        if let Some(path) = tab.path.clone() {
+        if let Some(page) = tab.chrome_page {
+            let tabs = match source {
+                crate::host::StripRef::Workspace => Some(&mut self.renderer.buffer_tabs),
+                crate::host::StripRef::Pane(route) => {
+                    self.renderer.pane_tabs.get_mut(&route)
+                }
+            };
+            if let Some(tabs) = tabs {
+                if page.kind == neoism_ui::panels::buffer_tabs::ChromePageKind::GitDiff {
+                    if let Some(path) = self
+                        .context_manager
+                        .current_grid()
+                        .contexts()
+                        .values()
+                        .find(|item| item.val.route_id == page.route_id)
+                        .and_then(|item| item.val.git_diff_view.as_ref())
+                        .map(|view| view.path.clone())
+                    {
+                        let index = tabs.open_git_diff(page.route_id, &path);
+                        tabs.set_title(index, "Uncommitted Changes");
+                    }
+                } else {
+                    tabs.open_chrome_page(page.kind, page.route_id);
+                }
+            }
+        } else if let Some(path) = tab.path.clone() {
             self.reinsert_tab_into_strip(source, tab, path);
         } else if let Some(route_id) = tab.neoism_agent_route_id {
             self.reinsert_neoism_agent_tab(source, route_id);
@@ -913,6 +945,13 @@ impl Screen<'_> {
             }
         };
 
+        // Chrome review pages are not serializable editor files. Restore
+        // the tab rather than losing it after end_drag removed it.
+        if tab.chrome_page.is_some() {
+            self.restore_dragged_tab(source, &tab);
+            self.mark_dirty();
+            return None;
+        }
         let path_opt = tab.path.clone();
         let markdown = tab.markdown
             || path_opt

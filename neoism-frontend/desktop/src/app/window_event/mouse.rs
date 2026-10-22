@@ -106,6 +106,14 @@ impl Application<'_> {
             _ => (),
         }
 
+        if button == MouseButton::Left
+            && state == ElementState::Released
+            && route.window.screen.handle_git_diff_view_pointer_up()
+        {
+            route.request_redraw();
+            return;
+        }
+
         if route
             .window
             .screen
@@ -218,6 +226,10 @@ impl Application<'_> {
                         route.request_redraw();
                         return;
                     }
+                    if route.window.screen.handle_code_context_click() {
+                        route.request_redraw();
+                        return;
+                    }
                 }
 
                 if let MouseButton::Left = button {
@@ -230,6 +242,12 @@ impl Application<'_> {
                         .screen
                         .handle_context_menu_click(&mut self.router.clipboard)
                     {
+                        route.request_redraw();
+                        return;
+                    }
+
+                    if route.window.screen.begin_code_hover_selection() {
+                        route.window.set_cursor(CursorIcon::Text);
                         route.request_redraw();
                         return;
                     }
@@ -311,6 +329,7 @@ impl Application<'_> {
                     }
 
                     if route.window.screen.handle_git_diff_panel_click() {
+                        if let Some(text) = route.window.screen.take_git_commit_copy() { self.router.clipboard.set(ClipboardType::Clipboard, text); }
                         route.request_redraw();
                         return;
                     }
@@ -427,7 +446,15 @@ impl Application<'_> {
                     route.request_redraw();
                 }
 
-                if route.window.screen.handle_neoism_tags_mouse_press(button) {
+                if route
+                    .window
+                    .screen
+                    .handle_git_diff_view_pointer_down(button)
+                {
+                    if let Some(text) = route.window.screen.take_git_commit_copy() { self.router.clipboard.set(ClipboardType::Clipboard, text); }
+                    route.request_redraw();
+                    return;
+                } else if route.window.screen.handle_neoism_tags_mouse_press(button) {
                     route.request_redraw();
                     return;
                 } else if route.window.screen.handle_neoworld_pointer_down(button) {
@@ -680,6 +707,23 @@ impl Application<'_> {
                 }
 
                 if button == MouseButton::Left
+                    && route.window.screen.end_code_hover_selection()
+                {
+                    if let Some(text) = route.window.screen.code_hover_selected_text() {
+                        self.router.clipboard.set(ClipboardType::Selection, text);
+                    }
+                    route.window.set_cursor(
+                        if route.window.screen.code_hover_link_at_pointer() {
+                            CursorIcon::Pointer
+                        } else {
+                            CursorIcon::Text
+                        },
+                    );
+                    route.request_redraw();
+                    return;
+                }
+
+                if button == MouseButton::Left
                     && route.window.screen.handle_draw_mouse_release()
                 {
                     route.request_redraw();
@@ -821,6 +865,20 @@ impl Application<'_> {
         route.window.screen.mouse.y = y;
         route.window.screen.mouse.raw_y = position.y;
         route.window.screen.mouse.raw_x = position.x;
+
+        let scale = route.window.screen.sugarloaf.scale_factor();
+        if route.window.screen.renderer.git_diff_panel.update_latest_commit_hover(x as f32 / scale, y as f32 / scale) {
+            route.request_redraw();
+        }
+
+        // A review scrollbar keeps capture outside its pane and over chrome.
+        if route.window.screen.handle_git_diff_view_pointer_move() {
+            let (mx, my) = route.window.screen.mouse_logical_for_hit_test();
+            let cursor = route.window.screen.git_diff_view_pointer_at(mx, my).unwrap_or(CursorIcon::Default);
+            route.window.set_cursor(cursor);
+            route.request_redraw();
+            return;
+        }
 
         if route
             .window
@@ -1063,6 +1121,29 @@ impl Application<'_> {
             return;
         }
 
+        // A modal menu owns pointer motion before editor selection/drag paths.
+        if route.window.screen.renderer.context_menu.is_visible() {
+            let scale = route.window.screen.sugarloaf.scale_factor();
+            let mx = x as f32 / scale;
+            let my = y as f32 / scale;
+            let over_row = route
+                .window
+                .screen
+                .renderer
+                .context_menu
+                .action_at(mx, my)
+                .is_some();
+            if route.window.screen.renderer.context_menu.hover(mx, my) {
+                route.request_redraw();
+            }
+            route.window.set_cursor(if over_row {
+                CursorIcon::Pointer
+            } else {
+                CursorIcon::Default
+            });
+            return;
+        }
+
         // Workspace-strip drag-to-reorder (top-level Island tabs).
         // Runs before buffer-tabs so a workspace drag doesn't bleed
         // into the workspace's interior strip.
@@ -1093,6 +1174,18 @@ impl Application<'_> {
                 );
                 route.request_redraw();
             }
+            return;
+        }
+
+        if route.window.screen.move_code_hover_pointer() {
+            route.window.set_cursor(
+                if route.window.screen.code_hover_link_at_pointer() {
+                    CursorIcon::Pointer
+                } else {
+                    CursorIcon::Text
+                },
+            );
+            route.request_redraw();
             return;
         }
 
@@ -1197,31 +1290,6 @@ impl Application<'_> {
             || route.window.screen.neoism_agent_tool_hovered()
         {
             route.window.set_cursor(CursorIcon::Pointer);
-            return;
-        }
-
-        // Handle context menu hover before Markdown hover. The /
-        // block picker is a context menu opened above Markdown;
-        // Markdown should not steal hover/cursor while it is up.
-        if route.window.screen.renderer.context_menu.is_visible() {
-            let scale = route.window.screen.sugarloaf.scale_factor();
-            let mx = x as f32 / scale;
-            let my = y as f32 / scale;
-            let over_row = route
-                .window
-                .screen
-                .renderer
-                .context_menu
-                .hit_test(mx, my)
-                .is_ok_and(|hit| hit.is_some());
-            if route.window.screen.renderer.context_menu.hover(mx, my) {
-                route.request_redraw();
-            }
-            route.window.set_cursor(if over_row {
-                CursorIcon::Pointer
-            } else {
-                CursorIcon::Default
-            });
             return;
         }
 
@@ -1510,6 +1578,30 @@ impl Application<'_> {
             return;
         }
 
+        // Git owns its entire sidebar: do not inherit the editor's I-beam
+        // over files, buttons or empty panel space.
+        {
+            let (mx, my) = route.window.screen.mouse_logical_for_hit_test();
+            let panel = &route.window.screen.renderer.git_diff_panel;
+            let cursor = if panel.scrollbar_hit(mx, my).is_some() {
+                Some(CursorIcon::Grab)
+            } else {
+                panel.pointer_kind_at(mx, my).map(|kind| {
+                    use neoism_ui::widgets::modal::ModalPointerKind;
+                    match kind {
+                        ModalPointerKind::Default => CursorIcon::Default,
+                        ModalPointerKind::Pointer => CursorIcon::Pointer,
+                        ModalPointerKind::Text => CursorIcon::Text,
+                    }
+                })
+            };
+            if let Some(cursor) = cursor {
+                route.window.screen.mouse.on_border = false;
+                route.window.set_cursor(cursor);
+                return;
+            }
+        }
+
         // Check if hovering over a panel border
         {
             let grid = route.window.screen.context_manager.current_grid();
@@ -1520,6 +1612,15 @@ impl Application<'_> {
                 };
                 route.window.set_cursor(cursor);
                 route.window.screen.mouse.on_border = true;
+                return;
+            }
+        }
+
+        {
+            let (mx, my) = route.window.screen.mouse_logical_for_hit_test();
+            if let Some(pointer) = route.window.screen.git_diff_view_pointer_at(mx, my) {
+                route.window.screen.mouse.on_border = false;
+                route.window.set_cursor(pointer);
                 return;
             }
         }
@@ -1714,6 +1815,9 @@ impl Application<'_> {
         route.window.screen.renderer.notes_sidebar_mouse = None;
         route.request_redraw();
 
+        if route.window.screen.clear_git_diff_view_hover() {
+            route.request_redraw();
+        }
         if route.window.screen.clear_status_line_hover() {
             route.request_redraw();
         }

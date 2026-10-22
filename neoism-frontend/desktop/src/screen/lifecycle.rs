@@ -67,6 +67,7 @@ fn modal_action_policy_tag(
         A::FileTreePaste { .. } => Tag::FileTreePaste,
         A::FileTreePromptDelete { .. } => Tag::FileTreePromptDelete,
         A::FileTreeDelete { .. } => Tag::FileTreeDelete,
+        A::GitRestore { .. } | A::GitRestoreBlock { .. } => Tag::GitRestore,
         A::FileTreePromptNewFile { .. } => Tag::FileTreePromptNewFile,
         A::NotesNewNotebook { .. } => Tag::NotesPromptNewFile,
         A::NotesPromptNewFile { .. } => Tag::NotesPromptNewFile,

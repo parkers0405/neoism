@@ -7,6 +7,29 @@ impl Screen<'_> {
     ) {
         use neoism_ui::panels::context_menu::LspContextAction;
 
+        if let Some(code) = self.context_manager.active_code_pane() {
+            let cursor = code.buffer.cursor();
+            use neoism_protocol::editor::EditorLspAction as Action;
+            match action {
+                LspContextAction::Definition => self.request_code_navigation_at(
+                    cursor.line,
+                    cursor.col,
+                    Action::Definition,
+                ),
+                LspContextAction::Declaration => self.request_code_navigation_at(
+                    cursor.line,
+                    cursor.col,
+                    Action::Declaration,
+                ),
+                LspContextAction::TypeDefinition => self.request_code_navigation_at(
+                    cursor.line,
+                    cursor.col,
+                    Action::TypeDefinition,
+                ),
+                LspContextAction::References => self.request_code_references(),
+                _ => {}
+            }
+        }
         if matches!(action, LspContextAction::Rename) {
             self.open_lsp_rename_prompt();
             return;
@@ -15,8 +38,8 @@ impl Screen<'_> {
             self.open_lsp_workspace_symbols_prompt();
             return;
         }
-        // nvim removed — the remaining per-buffer LSP actions come back
-        // with the native code editor's LSP integration.
+        // Other per-buffer actions are dispatched by their native editor
+        // input paths; navigation above shares those same request workers.
     }
 
     pub(crate) fn execute_block_hover_action(

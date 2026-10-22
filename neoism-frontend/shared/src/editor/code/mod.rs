@@ -29,6 +29,9 @@ pub mod layout;
 pub mod lsp_session;
 pub mod multicursor;
 pub mod outline;
+pub mod projected;
+pub use gitdiff::build_review_diff;
+pub use projected::render_projected_code;
 pub mod render;
 pub mod substitute;
 #[cfg(test)]

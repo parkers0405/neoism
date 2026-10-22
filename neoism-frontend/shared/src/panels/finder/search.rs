@@ -36,10 +36,10 @@ impl Finder {
                     self.files =
                         Some(super::file_search::collect_files(search, &self.cwd));
                 }
-                if search_key != self.last_executed_query {
-                    self.last_executed_query = search_key;
-                    self.refresh_file_results(search);
-                }
+                // Opening the picker is a dirty tick too: an empty query
+                // must run even when the previous search key was empty.
+                self.last_executed_query = search_key;
+                self.refresh_file_results(search);
             }
             FinderMode::GitChanges => {
                 if search_key != self.last_executed_query {
@@ -336,6 +336,120 @@ impl Finder {
                     "SearchService::search_grep failed"
                 );
                 None
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::{
+        IoError, SearchDirectoryHit, SearchFileHit, SearchGitHit, SearchGrepHit,
+    };
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+
+    struct FileSearch {
+        fallback: bool,
+        queries: Mutex<Vec<String>>,
+    }
+
+    impl SearchService for FileSearch {
+        fn collect_files(&self, _: &Path) -> Result<Vec<String>, IoError> {
+            Ok(vec!["src/main.rs".into(), "README.md".into()])
+        }
+
+        fn search_files(
+            &self,
+            cwd: &Path,
+            query: &str,
+            _: SearchFileMode,
+        ) -> Result<Vec<SearchFileHit>, IoError> {
+            self.queries.lock().unwrap().push(query.into());
+            if self.fallback {
+                return Err(IoError::Other("index unavailable".into()));
+            }
+            Ok(self
+                .collect_files(cwd)?
+                .into_iter()
+                .filter(|path| path.contains(query))
+                .map(|path| SearchFileHit { score: 0, path })
+                .collect())
+        }
+
+        fn search_directories(
+            &self,
+            _: &Path,
+            _: &str,
+        ) -> Result<Vec<SearchDirectoryHit>, IoError> {
+            unreachable!()
+        }
+
+        fn search_grep(
+            &self,
+            _: &Path,
+            _: &str,
+            _: SearchGrepMode,
+        ) -> Result<Vec<SearchGrepHit>, IoError> {
+            panic!("empty grep must not launch a search")
+        }
+
+        fn collect_git_changes(&self, _: &Path) -> Result<Vec<SearchGitHit>, IoError> {
+            unreachable!()
+        }
+
+        fn git_repo_root(&self, _: &Path) -> Option<PathBuf> {
+            unreachable!()
+        }
+    }
+
+    #[test]
+    fn files_appear_without_typing_on_open_reopen_clear_and_mode_switch() {
+        for fallback in [false, true] {
+            for mode in [FileSearchMode::Fuzzy, FileSearchMode::Exact] {
+                let search = FileSearch {
+                    fallback,
+                    queries: Mutex::new(Vec::new()),
+                };
+                let root = PathBuf::from("project");
+                let mut finder = Finder::new();
+                finder.file_search_mode = mode;
+                finder.open_files(root.clone());
+                finder.tick(&search);
+                assert_eq!(finder.results.len(), 2);
+                assert_eq!(
+                    finder.selected_open_target().unwrap().0,
+                    root.join("src/main.rs")
+                );
+                finder.tick(&search);
+                assert_eq!(search.queries.lock().unwrap().len(), 1);
+
+                finder.close();
+                finder.open_files(root.clone());
+                finder.tick(&search);
+                assert_eq!(finder.results.len(), 2);
+
+                finder.set_query("main".into());
+                finder.query_dirty_at =
+                    Some(Instant::now() - std::time::Duration::from_millis(100));
+                finder.tick(&search);
+                assert_eq!(finder.results.len(), 1);
+                finder.set_query(String::new());
+                finder.tick(&search);
+                assert_eq!(finder.results.len(), 2);
+
+                finder.open_symbols();
+                finder.switch_to_files(root.clone());
+                finder.tick(&search);
+                assert_eq!(finder.results.len(), 2);
+                assert_eq!(*search.queries.lock().unwrap(), ["", "", "main", "", ""]);
+
+                finder.open_grep(root);
+                finder.query_dirty_at =
+                    Some(Instant::now() - std::time::Duration::from_millis(300));
+                finder.tick(&search);
+                assert!(finder.results.is_empty());
             }
         }
     }

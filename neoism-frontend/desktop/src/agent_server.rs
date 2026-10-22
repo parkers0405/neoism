@@ -1,5 +1,6 @@
-use std::sync::OnceLock;
-use std::time::Duration;
+use std::collections::HashMap;
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 const DEFAULT_SERVER: &str = "http://127.0.0.1:4096";
 // Match the service owner's cold-start budget. This runs only on request
@@ -16,41 +17,151 @@ pub(crate) fn ensure_started() {
     std::env::set_var("NEOISM_AGENT_SERVER", &server);
 }
 
+// Only the configured, owned local endpoint may skip a health probe. Remote
+// endpoints can have changing authorization requirements and remain uncached.
+const HEALTHY_LEASE: Duration = Duration::from_secs(1);
+
+type ReadinessResult = Result<(), String>;
+
+#[derive(Default)]
+struct ReadinessState {
+    healthy_until: Option<Instant>,
+    flight: Option<Arc<ReadinessFlight>>,
+}
+
+#[derive(Default)]
+struct ReadinessFlight {
+    result: Mutex<Option<ReadinessResult>>,
+    done: Condvar,
+}
+
+#[derive(Default)]
+struct EndpointReadiness {
+    state: Mutex<ReadinessState>,
+    worker: Mutex<Option<ProbeWorker>>,
+}
+
+impl EndpointReadiness {
+    fn ensure(
+        &self,
+        local: bool,
+        probe: impl FnOnce() -> ReadinessResult,
+    ) -> ReadinessResult {
+        let mut state = self.state.lock().unwrap();
+        if local
+            && state
+                .healthy_until
+                .is_some_and(|until| Instant::now() < until)
+        {
+            return Ok(());
+        }
+        if let Some(flight) = state.flight.clone() {
+            drop(state);
+            let mut result = flight.result.lock().unwrap();
+            while result.is_none() {
+                result = flight.done.wait(result).unwrap();
+            }
+            return result.as_ref().unwrap().clone();
+        }
+        let flight = Arc::new(ReadinessFlight::default());
+        state.flight = Some(flight.clone());
+        drop(state);
+
+        // No registry/state lock spans network I/O, owner startup, or a join.
+        // Always wake followers, including if a readiness worker panics.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(probe))
+            .unwrap_or_else(|_| Err("Agent readiness worker failed".to_string()));
+        let mut state = self.state.lock().unwrap();
+        state.healthy_until = if local && result.is_ok() {
+            Some(Instant::now() + HEALTHY_LEASE)
+        } else {
+            None
+        };
+        *flight.result.lock().unwrap() = Some(result.clone());
+        state.flight = None;
+        flight.done.notify_all();
+        result
+    }
+}
+
+struct ProbeWorker {
+    runtime: Option<tokio::runtime::Runtime>,
+    client: reqwest::Client,
+}
+
+impl Drop for ProbeWorker {
+    fn drop(&mut self) {
+        // DNS tasks can outlive HTTP deadlines; never join them on shutdown.
+        if let Some(runtime) = self.runtime.take() {
+            runtime.shutdown_background();
+        }
+    }
+}
+
 /// Worker-thread-only readiness for the ACTUAL request endpoint (including a
 /// hosted daemon's /agent prefix). Never substitutes the environment's URL and
 /// never launches a local process to repair a remote server. Errors deliberately
 /// omit URLs, response bodies and transport errors, which can contain credentials.
-pub(crate) fn ensure_started_for_request(server: &str) -> Result<(), String> {
-    // This synchronous API is also used by callers with an entered Tokio
-    // context (including spawn_blocking). Never nest block_on or drop a
-    // runtime there; block_in_place would itself panic on current-thread
-    // runtimes. The existing worker-only blocking budget stays unchanged.
-    if tokio::runtime::Handle::try_current().is_ok() {
-        let server = server.to_owned();
-        return std::thread::Builder::new()
-            .name("neoism-agent-readiness".into())
-            .spawn(move || ensure_started_for_request_inner(&server))
-            .map_err(|_| "Could not start agent readiness worker".to_string())?
-            .join()
-            .map_err(|_| "Agent readiness worker failed".to_string())?;
-    }
-    ensure_started_for_request_inner(server)
-}
-
-fn ensure_started_for_request_inner(server: &str) -> Result<(), String> {
+pub(crate) fn ensure_started_for_request(server: &str) -> ReadinessResult {
+    // Validate before consulting the lease; unsafe URL variants cannot inherit it.
     let url = health_url(server)?;
     let local = is_owned_local_endpoint(server);
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|_| "Could not create agent readiness worker".to_string())?;
-    let result = runtime.block_on(async {
+    static ENDPOINTS: OnceLock<Mutex<HashMap<(String, bool), Arc<EndpointReadiness>>>> =
+        OnceLock::new();
+    let endpoint = ENDPOINTS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .entry((url.to_string(), local))
+        .or_default()
+        .clone();
+    endpoint.ensure(local, || {
+        // Never nest block_on (including on current-thread Tokio runtimes).
+        // Lease hits and followers need neither a thread nor a new executor.
+        if tokio::runtime::Handle::try_current().is_ok() {
+            std::thread::scope(|scope| {
+                std::thread::Builder::new()
+                    .name("neoism-agent-readiness".into())
+                    .spawn_scoped(scope, || {
+                        ensure_started_for_request_inner(&endpoint, &url, local)
+                    })
+                    .map_err(|_| "Could not start agent readiness worker".to_string())?
+                    .join()
+                    .map_err(|_| "Agent readiness worker failed".to_string())?
+            })
+        } else {
+            ensure_started_for_request_inner(&endpoint, &url, local)
+        }
+    })
+}
+
+fn ensure_started_for_request_inner(
+    endpoint: &EndpointReadiness,
+    url: &url::Url,
+    local: bool,
+) -> ReadinessResult {
+    // Single-flight guarantees exclusive use. Take the worker out so no lock
+    // spans block_on or service startup (and a panic cannot poison its mutex).
+    let mut worker = endpoint.worker.lock().unwrap().take();
+    if worker.is_none() {
         let client = reqwest::Client::builder()
             .timeout(PROBE_TIMEOUT)
             .redirect(reqwest::redirect::Policy::none())
             .no_proxy()
             .build()
             .map_err(|_| "Could not create agent readiness probe".to_string())?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|_| "Could not create agent readiness worker".to_string())?;
+        worker = Some(ProbeWorker {
+            runtime: Some(runtime),
+            client,
+        });
+    }
+    let worker = worker.unwrap();
+    let result = worker.runtime.as_ref().unwrap().block_on(async {
+        let client = &worker.client;
         let wait = async {
             loop {
                 let health = probe_health(&client, &url).await;
@@ -76,10 +187,7 @@ fn ensure_started_for_request_inner(server: &str) -> Result<(), String> {
             Err("Agent is still starting or recovering; the request waited 120 seconds. The local service keeps retrying (see log/workspace-service.log).".to_string())
         })
     });
-    // Tokio's ordinary Drop waits for outstanding blocking tasks. DNS lookup
-    // can outlive the HTTP deadline, so shutdown must not silently turn this
-    // bounded readiness check into an unbounded join on the caller's thread.
-    runtime.shutdown_background();
+    *endpoint.worker.lock().unwrap() = Some(worker);
     result
 }
 
@@ -188,6 +296,140 @@ fn valid_health(body: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_lease_expires_and_failures_are_not_cached() {
+        let endpoint = EndpointReadiness::default();
+        assert!(endpoint.ensure(true, || Ok(())).is_ok());
+        assert!(endpoint
+            .ensure(true, || panic!("lease must skip probe"))
+            .is_ok());
+        endpoint.state.lock().unwrap().healthy_until = Some(Instant::now());
+        assert!(endpoint.ensure(true, || Err("offline".into())).is_err());
+        assert!(endpoint.state.lock().unwrap().healthy_until.is_none());
+        assert!(endpoint.ensure(true, || Ok(())).is_ok());
+    }
+
+    #[test]
+    fn leases_do_not_cross_endpoints_or_skip_remote_checks() {
+        let first = EndpointReadiness::default();
+        let second = EndpointReadiness::default();
+        assert!(first.ensure(true, || Ok(())).is_ok());
+        assert!(second
+            .ensure(true, || Err("other endpoint".into()))
+            .is_err());
+        assert!(first
+            .ensure(false, || Err("authorization changed".into()))
+            .is_err());
+        assert!(first.ensure(false, || Ok(())).is_ok());
+        assert!(first
+            .ensure(false, || Err("must probe again".into()))
+            .is_err());
+    }
+
+    #[test]
+    fn concurrent_readiness_shares_success_and_failure_without_replay() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        for outcome in [Ok(()), Err("not ready".to_string())] {
+            let endpoint = Arc::new(EndpointReadiness::default());
+            let calls = AtomicUsize::new(0);
+            std::thread::scope(|scope| {
+                let (started_tx, started_rx) = std::sync::mpsc::channel();
+                let (finish_tx, finish_rx) = std::sync::mpsc::channel();
+                let leader = scope.spawn({
+                    let endpoint = &endpoint;
+                    let calls = &calls;
+                    let outcome = &outcome;
+                    move || {
+                        endpoint.ensure(false, || {
+                            calls.fetch_add(1, Ordering::SeqCst);
+                            started_tx.send(()).unwrap();
+                            finish_rx.recv().unwrap();
+                            outcome.clone()
+                        })
+                    }
+                });
+                started_rx.recv().unwrap();
+                let flight = endpoint.state.lock().unwrap().flight.clone().unwrap();
+                let followers: Vec<_> = (0..8)
+                    .map(|_| {
+                        scope.spawn(|| {
+                            endpoint.ensure(false, || {
+                                calls.fetch_add(1, Ordering::SeqCst);
+                                Err("unexpected second probe".into())
+                            })
+                        })
+                    })
+                    .collect();
+                // Each follower clones this exact flight before waiting. Do not
+                // rely on sleep/scheduler timing to exercise failure sharing.
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while Arc::strong_count(&flight) < 11 {
+                    assert!(Instant::now() < deadline, "followers did not join flight");
+                    std::thread::yield_now();
+                }
+                finish_tx.send(()).unwrap();
+                assert_eq!(leader.join().unwrap(), outcome);
+                for follower in followers {
+                    assert_eq!(follower.join().unwrap(), outcome);
+                }
+            });
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            // A subsequent request can recover; failed readiness is not a
+            // negative lease, and readiness never executes/replays a JSON write.
+            assert!(endpoint.ensure(false, || Ok(())).is_ok());
+        }
+    }
+
+    #[test]
+    fn local_lease_skips_http_then_reprobes_with_the_retained_worker() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url =
+            health_url(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+        let worker = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                let mut request = [0; 4096];
+                let n = stream.read(&mut request).unwrap();
+                assert!(
+                    String::from_utf8_lossy(&request[..n]).starts_with("GET /v2/health ")
+                );
+                let body =
+                    r#"{"healthy":true,"version":"1","providerCredentialStore":"test"}"#;
+                write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            }
+        });
+        // Inject ownership rather than changing process-global environment in
+        // parallel tests. Both real probes are healthy, so no owner is started.
+        let endpoint = EndpointReadiness::default();
+        assert!(endpoint
+            .ensure(true, || ensure_started_for_request_inner(
+                &endpoint, &url, true
+            ))
+            .is_ok());
+        assert!(endpoint.worker.lock().unwrap().is_some());
+        assert!(endpoint
+            .ensure(true, || panic!("must not issue HTTP during lease"))
+            .is_ok());
+        endpoint.state.lock().unwrap().healthy_until = Some(Instant::now());
+        assert!(endpoint
+            .ensure(true, || ensure_started_for_request_inner(
+                &endpoint, &url, true
+            ))
+            .is_ok());
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn worker_panic_releases_the_flight_for_recovery() {
+        let endpoint = EndpointReadiness::default();
+        assert!(endpoint.ensure(true, || panic!("probe failed")).is_err());
+        assert!(endpoint.ensure(true, || Ok(())).is_ok());
+    }
 
     #[test]
     fn health_requires_agent_contract_not_just_http_200() {

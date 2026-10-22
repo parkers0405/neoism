@@ -10,6 +10,290 @@
 
 use std::collections::HashMap;
 
+#[path = "gitdiff_review.rs"]
+mod review_builder;
+pub use review_builder::ReviewDiffBuilder;
+
+/// Build immutable review rows synchronously from current CodeBuffer text.
+/// Positions are 1-based; `ensure_source_line` is 0-based. Unchanged files
+/// produce no excerpt unless a caret row was requested. UI callers should poll
+/// `ReviewDiffBuilder` instead of doing synchronous work in the paint path.
+pub fn build_review_diff(
+    base: &str,
+    current: &str,
+    context: usize,
+    ensure_source_line: Option<usize>,
+) -> Vec<crate::widgets::diff_card::DiffLine> {
+    let mut builder = ReviewDiffBuilder::new(
+        base.to_owned(),
+        current.to_owned(),
+        context,
+        ensure_source_line,
+    );
+    loop {
+        if let Some(rows) = builder.poll(16_384) {
+            return rows;
+        }
+    }
+}
+
+// Retain the previous implementation as an independent semantic oracle.
+#[cfg(test)]
+fn reference_review_diff(
+    base: &str,
+    current: &str,
+    context: usize,
+    ensure_source_line: Option<usize>,
+) -> Vec<crate::widgets::diff_card::DiffLine> {
+    use crate::widgets::diff_card::{DiffLine, DiffLineKind as K};
+    // Keep terminators in the comparison: changing only EOF newline is a real
+    // replacement, while an empty file has zero diff lines (not one blank line).
+    let old: Vec<String> = base.split_inclusive('\n').map(str::to_owned).collect();
+    let new: Vec<String> = current.split_inclusive('\n').map(str::to_owned).collect();
+    let mut prefix = 0;
+    while prefix < old.len().min(new.len()) && old[prefix] == new[prefix] {
+        prefix += 1;
+    }
+    let mut suffix = 0;
+    while suffix < old.len().min(new.len()) - prefix
+        && old[old.len() - 1 - suffix] == new[new.len() - 1 - suffix]
+    {
+        suffix += 1;
+    }
+    let mut ops = vec![LineOp::Keep; prefix];
+    ops.extend(
+        myers_line_ops_bounded(
+            &old[prefix..old.len() - suffix],
+            &new[prefix..new.len() - suffix],
+            256,
+        )
+        .unwrap_or_else(|| {
+            let mut ops = vec![LineOp::Delete; old.len() - prefix - suffix];
+            ops.extend(vec![LineOp::Insert; new.len() - prefix - suffix]);
+            ops
+        }),
+    );
+    ops.extend(vec![LineOp::Keep; suffix]);
+    let (mut oi, mut ni) = (0, 0);
+    let mut rows = Vec::new();
+    let mut unterminated = Vec::new();
+    for op in ops {
+        let (kind, text, old_num, new_num) = match op {
+            LineOp::Keep => {
+                oi += 1;
+                ni += 1;
+                (K::Context, &new[ni - 1], Some(oi as u32), Some(ni as u32))
+            }
+            LineOp::Delete => {
+                oi += 1;
+                (K::Remove, &old[oi - 1], Some(oi as u32), None)
+            }
+            LineOp::Insert => {
+                ni += 1;
+                (K::Add, &new[ni - 1], None, Some(ni as u32))
+            }
+        };
+        unterminated.push(!text.ends_with('\n'));
+        let display = text
+            .strip_suffix('\n')
+            .map(|s| s.strip_suffix('\r').unwrap_or(s))
+            .unwrap_or(text);
+        rows.push(DiffLine {
+            text: display.to_owned(),
+            kind,
+            line_number: new_num.or(old_num),
+            old_line_number: old_num,
+            new_line_number: new_num,
+        });
+    }
+    // CodeBuffer represents an empty document (and a trailing-newline caret)
+    // with a real empty source row. Include it ONLY when explicitly requested;
+    // it is not an added line and must not affect diff counts.
+    if let Some(line) = ensure_source_line {
+        if (current.is_empty() && line == 0)
+            || (current.ends_with('\n') && line == new.len())
+        {
+            rows.push(DiffLine {
+                text: String::new(),
+                kind: K::Context,
+                line_number: Some(line as u32 + 1),
+                old_line_number: None,
+                new_line_number: Some(line as u32 + 1),
+            });
+            unterminated.push(false);
+        }
+    }
+    let mut ranges: Vec<std::ops::Range<usize>> = Vec::new();
+    for (i, row) in rows.iter().enumerate() {
+        if row.kind != K::Context
+            || ensure_source_line
+                .is_some_and(|line| row.new_line_number == Some(line as u32 + 1))
+        {
+            let start = i.saturating_sub(context);
+            let end = i.saturating_add(context).saturating_add(1).min(rows.len());
+            if let Some(last) = ranges.last_mut().filter(|last| start <= last.end) {
+                last.end = last.end.max(end);
+            } else {
+                ranges.push(start..end);
+            }
+        }
+    }
+    let mut result = Vec::new();
+    for range in ranges {
+        let excerpt = &rows[range.clone()];
+        let old_start = rows[..range.start]
+            .iter()
+            .filter(|r| r.old_line_number.is_some())
+            .count();
+        let new_start = rows[..range.start]
+            .iter()
+            .filter(|r| r.new_line_number.is_some())
+            .count();
+        let old_count = excerpt
+            .iter()
+            .filter(|r| r.old_line_number.is_some())
+            .count();
+        let new_count = excerpt
+            .iter()
+            .filter(|r| r.new_line_number.is_some())
+            .count();
+        result.push(DiffLine {
+            text: format!(
+                "@@ -{},{} +{},{} @@",
+                old_start + usize::from(old_count > 0),
+                old_count,
+                new_start + usize::from(new_count > 0),
+                new_count
+            ),
+            kind: K::Hunk,
+            line_number: None,
+            old_line_number: None,
+            new_line_number: None,
+        });
+        for i in range {
+            result.push(rows[i].clone());
+            if unterminated[i] {
+                result.push(DiffLine {
+                    text: "\\ No newline at end of file".into(),
+                    kind: K::Hunk,
+                    line_number: None,
+                    old_line_number: None,
+                    new_line_number: None,
+                });
+            }
+        }
+    }
+    result
+}
+
+#[cfg(test)]
+mod review_tests {
+    use super::*;
+    use crate::widgets::diff_card::DiffLineKind as K;
+
+    #[test]
+    fn positions_unicode_insert_delete_and_eof() {
+        let rows = build_review_diff("α\nold\nlast", "α\n新\nlast\n", 3, None);
+        let actual: Vec<_> = rows
+            .iter()
+            .filter(|r| r.kind != K::Hunk)
+            .map(|r| {
+                (
+                    r.kind,
+                    r.old_line_number,
+                    r.new_line_number,
+                    r.text.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            actual,
+            vec![
+                (K::Context, Some(1), Some(1), "α"),
+                (K::Remove, Some(2), None, "old"),
+                (K::Remove, Some(3), None, "last"),
+                (K::Add, None, Some(2), "新"),
+                (K::Add, None, Some(3), "last")
+            ]
+        );
+        assert_eq!(
+            rows.iter()
+                .filter(|r| r.text == "\\ No newline at end of file")
+                .count(),
+            1
+        );
+        assert_eq!(rows[0].text, "@@ -1,3 +1,3 @@");
+        assert!(build_review_diff("same", "same", 3, None).is_empty());
+        assert!(build_review_diff("", "", 3, None).is_empty());
+        assert_eq!(
+            build_review_diff("", "x\n", 0, None)[0].text,
+            "@@ -0,0 +1,1 @@"
+        );
+        assert_eq!(
+            build_review_diff("x\n", "", 0, None)[0].text,
+            "@@ -1,1 +0,0 @@"
+        );
+    }
+
+    #[test]
+    fn ensure_caret_context_merges_and_empty_documents() {
+        let old = (0..30).map(|i| format!("line {i}\n")).collect::<String>();
+        let current = old.replace("line 2\n", "changed\n");
+        let rows = build_review_diff(&old, &current, 1, Some(25));
+        assert_eq!(rows.iter().filter(|r| r.text.starts_with("@@")).count(), 2);
+        assert!(rows
+            .iter()
+            .any(|r| r.new_line_number == Some(26) && r.text == "line 25"));
+        assert!(!rows.iter().any(|r| r.new_line_number == Some(15)));
+        let empty = build_review_diff("x", "", 0, Some(0));
+        assert!(empty
+            .iter()
+            .any(|r| r.new_line_number == Some(1) && r.text.is_empty()));
+        let same = build_review_diff("α\nβ", "α\nβ", 0, Some(1));
+        assert!(same
+            .iter()
+            .any(|r| r.kind == K::Context && r.new_line_number == Some(2)));
+    }
+
+    #[test]
+    fn live_buffer_insertion_deletion_keeps_cursor_in_projection() {
+        use super::super::types::CodeBuffer;
+        let baseline = "α\nβ\nγ";
+        let mut buffer = CodeBuffer::from_text(baseline);
+        buffer.set_cursor_position(1, 2, false);
+        buffer.insert_text("\n新");
+        let rows =
+            build_review_diff(baseline, &buffer.text(), 0, Some(buffer.cursor_line));
+        assert!(rows
+            .iter()
+            .any(|r| r.new_line_number == Some(buffer.cursor_line as u32 + 1)
+                && r.text == "新"));
+        buffer.set_cursor_position(1, 0, false);
+        buffer.set_cursor_position(2, 3, true);
+        buffer.delete_selection();
+        let rows =
+            build_review_diff(baseline, &buffer.text(), 0, Some(buffer.cursor_line));
+        assert!(rows
+            .iter()
+            .any(|r| r.new_line_number == Some(buffer.cursor_line as u32 + 1)));
+        assert!(rows.iter().any(|r| r.kind == K::Remove));
+    }
+
+    #[test]
+    fn bounded_rewrite_and_repeated_lines_still_have_exact_positions() {
+        let old = "old\n".repeat(300);
+        let new = "new\n".repeat(300);
+        let rows = build_review_diff(&old, &new, 0, None);
+        assert_eq!(rows.iter().filter(|r| r.kind == K::Remove).count(), 300);
+        assert_eq!(rows.iter().filter(|r| r.kind == K::Add).count(), 300);
+        assert_eq!(rows.last().unwrap().new_line_number, Some(300));
+        let rows = build_review_diff("a\nx\na\n", "a\na\n", 3, None);
+        assert!(rows
+            .iter()
+            .any(|r| r.kind == K::Remove && r.old_line_number == Some(2)));
+    }
+}
+
 /// Gutter mark for one buffer line.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CodeGitMark {

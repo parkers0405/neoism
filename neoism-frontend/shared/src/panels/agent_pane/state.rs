@@ -47,7 +47,7 @@ use crate::panels::agent_pane::timeline_scroll_policy::{
     ctrl_u_d_scroll_delta, step_timeline_spring, TimelineScrollOwner,
 };
 
-const CONFIG_CHIP_SETTLE_MS: f32 = 320.0;
+const CONFIG_CHIP_REVEAL_MS: f32 = 320.0;
 const CONFIG_CHIP_LOADING_TIMEOUT_MS: f32 = 15_000.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -59,30 +59,45 @@ pub enum ConfigChipTransition {
 #[derive(Clone, Debug, Default)]
 pub struct ConfigChipHydration {
     requested_at: Option<Instant>,
-    settled_at: Option<Instant>,
+    completed: bool,
 }
 
 impl ConfigChipHydration {
     pub fn begin(&mut self) {
-        if self.requested_at.is_none() || self.settled_at.is_some() {
-            self.requested_at = Some(Instant::now());
-            self.settled_at = None;
+        self.begin_at(Instant::now());
+    }
+
+    fn begin_at(&mut self, now: Instant) {
+        if self.transition_at(now).is_none() {
+            self.requested_at = Some(now);
+            self.completed = false;
         }
     }
 
     pub fn complete(&mut self) {
-        if self.requested_at.is_some() && self.settled_at.is_none() {
-            self.settled_at = Some(Instant::now());
-        }
+        // Loading and reveal share one clock. Cached defaults get the reveal;
+        // a slow request has already played it and must not start another.
+        self.completed = true;
+    }
+
+    pub fn cancel(&mut self) {
+        self.requested_at = None;
+        self.completed = false;
     }
 
     pub fn transition(&self) -> Option<ConfigChipTransition> {
-        if let Some(settled_at) = self.settled_at {
-            let elapsed_ms = settled_at.elapsed().as_secs_f32() * 1000.0;
-            return (elapsed_ms < CONFIG_CHIP_SETTLE_MS)
+        self.transition_at(Instant::now())
+    }
+
+    fn transition_at(&self, now: Instant) -> Option<ConfigChipTransition> {
+        let elapsed_ms = now
+            .saturating_duration_since(self.requested_at?)
+            .as_secs_f32()
+            * 1000.0;
+        if self.completed {
+            return (elapsed_ms < CONFIG_CHIP_REVEAL_MS)
                 .then_some(ConfigChipTransition::Settling { elapsed_ms });
         }
-        let elapsed_ms = self.requested_at?.elapsed().as_secs_f32() * 1000.0;
         (elapsed_ms < CONFIG_CHIP_LOADING_TIMEOUT_MS)
             .then_some(ConfigChipTransition::Loading { elapsed_ms })
     }

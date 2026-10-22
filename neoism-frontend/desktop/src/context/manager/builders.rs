@@ -697,6 +697,88 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         })
     }
 
+    /// Resolve the canonical editor even when a review surface owns focus.
+    pub fn active_code_pane(&self) -> Option<&neoism_ui::editor::code::CodePane> {
+        let current = self.current();
+        if let Some(code) = current.code.as_ref() {
+            return Some(code);
+        }
+        let path = current.git_diff_view.as_ref()?.editing_path()?;
+        self.contexts.iter().find_map(|grid| {
+            grid.contexts().values().find_map(|item| {
+                item.context()
+                    .code
+                    .as_ref()
+                    .filter(|pane| pane.path == path)
+            })
+        })
+    }
+
+    pub fn active_code_pane_mut(
+        &mut self,
+    ) -> Option<&mut neoism_ui::editor::code::CodePane> {
+        if self.current().code.is_some() {
+            return self.current_mut().code.as_mut();
+        }
+        let path = self.current().git_diff_view.as_ref()?.editing_path()?;
+        self.code_pane_mut_by_path(&path)
+    }
+
+    /// Acquire an ordinary context-owned buffer without selecting it. Hidden
+    /// stacked contexts remain in document IO/CRDT enumeration, and are reused
+    /// by a subsequent normal file open. Never manufacture a second binding.
+    pub fn ensure_review_code(
+        &mut self,
+        file: PathBuf,
+        rich_text_id: usize,
+        sugarloaf: &mut Sugarloaf,
+    ) -> Result<(), &'static str> {
+        let source = neoism_ui::services::FileOpenSource::workspace(
+            self.current_workspace_is_remote_joined(),
+        );
+        if self.markdown_pane_mut_by_path(&file).is_some() {
+            return Err(
+                "This file already has a Markdown owner; edit it in its existing tab",
+            );
+        }
+        if let Some(owner_route) = self.contexts.iter().find_map(|grid| {
+            grid.contexts().values().find_map(|item| {
+                item.context()
+                    .code
+                    .as_ref()
+                    .filter(|pane| pane.path == file)
+                    .map(|_| item.context().route_id)
+            })
+        }) {
+            if self.adopted_workspace_identity_for_route(owner_route)
+                != self.adopted_workspace_identity_for_route(self.current().route_id)
+            {
+                return Err("This path has an owner in another workspace/host; refusing to cross its document binding");
+            }
+        }
+        if let Some(pane) = self.code_pane_mut_by_path(&file) {
+            return if source.conflicts_with(pane.remote_source, pane.local_only) {
+                Err("This file is open from another source; close that owner before editing here")
+            } else {
+                Ok(())
+            };
+        }
+        let route = self.current().route_id;
+        let added =
+            self.add_stacked_code_with_source(file, rich_text_id, sugarloaf, source);
+        // Stacking rebuilds Taffy: resolve the old focus by durable route, not
+        // by its now-stale NodeId (otherwise the new ordinary tab is selected).
+        if let Some(node) = self.current_grid().node_by_route_id(route) {
+            let _ = self.current_grid_mut().set_current_node(node, sugarloaf);
+        }
+        self.current_route = route;
+        if added {
+            Ok(())
+        } else {
+            Err("Could not create the canonical code context")
+        }
+    }
+
     pub fn add_stacked_code(
         &mut self,
         file: PathBuf,
@@ -935,6 +1017,28 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         } else {
             false
         }
+    }
+
+    pub fn add_stacked_git_diff(
+        &mut self,
+        root: PathBuf,
+        path: PathBuf,
+        rich_text_id: usize,
+        sugarloaf: &mut Sugarloaf,
+    ) -> Option<usize> {
+        let dimension = self.current_grid().grid_dimension();
+        let context = crate::context::factories::create_git_diff_context(
+            self.event_proxy.clone(),
+            self.window_id,
+            rich_text_id,
+            dimension,
+            root,
+            path,
+        );
+        let route_id = context.route_id;
+        self.contexts[self.current_index].add_stacked_context(context, sugarloaf)?;
+        self.current_route = route_id;
+        Some(route_id)
     }
 
     pub fn add_stacked_neoworld(

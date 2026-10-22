@@ -346,7 +346,9 @@ impl Screen<'_> {
             }
         }
 
-        false
+        // Review surfaces consume both axes before terminal wheel policy can
+        // quantize or discard a horizontal-only trackpad gesture.
+        self.handle_git_diff_view_wheel(delta)
     }
 
     pub fn handle_diagnostics_click(&mut self, clipboard: &mut Clipboard) -> bool {
@@ -510,9 +512,7 @@ impl Screen<'_> {
         // (populated after each document sync).
         let rows = self
             .context_manager
-            .current()
-            .code
-            .as_ref()
+            .active_code_pane()
             .map(|code| self.code_lsp_server_rows(&code.path))
             .unwrap_or_default();
         self.renderer.lsp_popup.set_servers(rows);
@@ -524,9 +524,7 @@ impl Screen<'_> {
             .set_diagnostics(self.renderer.status_line.info().diagnostics);
         let label = self
             .context_manager
-            .current()
-            .code
-            .as_ref()
+            .active_code_pane()
             .and_then(|pane| {
                 pane.path
                     .file_name()

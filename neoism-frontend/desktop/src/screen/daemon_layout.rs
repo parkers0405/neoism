@@ -206,7 +206,8 @@ impl Screen<'_> {
     }
 
     pub fn has_unsaved_server_buffers(&self) -> bool {
-        self.renderer.buffer_tabs.has_modified_server_tabs()
+        self.has_dirty_code_owners()
+            || self.renderer.buffer_tabs.has_modified_server_tabs()
             || self
                 .workspace_buffer_tabs
                 .values()

@@ -14,6 +14,8 @@ pub(in crate::lsp) enum LspOperation {
     SignatureHelp,
     Hover,
     Definition,
+    Declaration,
+    TypeDefinition,
     References,
     Implementation,
     CallHierarchy,

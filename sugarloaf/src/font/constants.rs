@@ -66,3 +66,7 @@ pub const FONT_SYMBOLS_NERD_FONT_MONO: &[u8] =
 /// headings). Registered with the other bundled fonts at library load.
 pub const FONT_PRESS_START_2P: &[u8] =
     font!("./resources/PressStart2P/PressStart2P-Regular.ttf");
+
+/// Proportional UI prose face, default upright weight 400. Unmodified Geist
+/// variable font (SIL OFL 1.1); see resources/Geist/OFL.txt.
+pub const FONT_UI_PROSE: &[u8] = font!("./resources/Geist/Geist-Variable.ttf");

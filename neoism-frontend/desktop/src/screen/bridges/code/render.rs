@@ -4,6 +4,7 @@ impl Screen<'_> {
     pub(crate) fn render_code_panels(&mut self) -> bool {
         neoism_ui::editor::code::render::clear_blame_overlays(&mut self.sugarloaf);
         self.pump_code_lsp();
+        self.apply_pending_code_location();
         let scale = self.sugarloaf.scale_factor();
         let theme = self.renderer.styled_theme(neoism_lua::selector::EDITOR);
         let font_scale = self.renderer.chrome_scale();

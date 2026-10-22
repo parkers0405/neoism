@@ -29,12 +29,23 @@ impl Application<'_> {
             }
         }
 
-        if route.window.screen.renderer.conversation_navigator.is_active() {
+        if route
+            .window
+            .screen
+            .renderer
+            .conversation_navigator
+            .is_active()
+        {
             let dy = match delta {
                 MouseScrollDelta::LineDelta(_, lines) => lines * 34.0,
                 MouseScrollDelta::PixelDelta(pos) => pos.y as f32,
             };
-            route.window.screen.renderer.conversation_navigator.scroll(-dy);
+            route
+                .window
+                .screen
+                .renderer
+                .conversation_navigator
+                .scroll(-dy);
             route.request_redraw();
             return;
         }
@@ -64,6 +75,17 @@ impl Application<'_> {
         // hovered, wheel/trackpad input scrolls their internal
         // list/body instead of leaking into the pane behind it.
         if route.window.screen.handle_rust_overlay_wheel(&delta) {
+            route.request_redraw();
+            return;
+        }
+
+        let hover_delta_y = match delta {
+            MouseScrollDelta::LineDelta(_, lines) => -lines * 34.0,
+            MouseScrollDelta::PixelDelta(pos) => {
+                -pos.y as f32 / route.window.screen.sugarloaf.scale_factor()
+            }
+        };
+        if route.window.screen.scroll_code_hover(hover_delta_y) {
             route.request_redraw();
             return;
         }

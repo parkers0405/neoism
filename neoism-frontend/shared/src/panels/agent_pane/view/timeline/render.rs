@@ -38,10 +38,14 @@ pub(super) fn activity_geometry(
             0.0
         };
     let attached_y = y + real_content_h + tail_gap + top_ink - scroll_top;
-    // On a short viewport preserve the primary activity at the top and clip
-    // overflowing child lines. Never move the whole block under the composer.
+    // Short conversations keep activity at the transcript tail, not across an
+    // empty viewport. Long responses retain the existing following placement.
+    // On a short viewport preserve the primary activity and clip child lines.
     let status_y = if following {
-        (y + h - bottom_ink - status_h).max(y + top_ink).min(y + h)
+        (y + h - bottom_ink - status_h)
+            .max(y + top_ink)
+            .min(y + h)
+            .min(attached_y)
     } else {
         attached_y
     };
@@ -421,8 +425,8 @@ pub fn render_timeline_with<P, D>(
         pane.virtual_timeline_visible_source_range(),
     );
 
-    // Following owns a pinned footer even while its spring has positive lag.
-    // Browsing retains the original content-attached/offscreen semantics.
+    // Following caps activity at the viewport bottom once the transcript fills it,
+    // even while its spring has positive lag. Browsing stays content-attached.
     if status_h > 0.0 {
         let row_y = geometry.status_rect[1];
         if row_y + status_h + STATUS_BOTTOM_INK * s >= y

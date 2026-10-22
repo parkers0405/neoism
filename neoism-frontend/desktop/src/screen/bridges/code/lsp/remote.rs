@@ -411,9 +411,7 @@ impl Screen<'_> {
         }
         let (cursor_line, cursor_col, revision, focused_text) = self
             .context_manager
-            .current()
-            .code
-            .as_ref()
+            .active_code_pane()
             .map(|code| {
                 (
                     code.buffer.cursor_line,
@@ -728,7 +726,7 @@ impl Screen<'_> {
         let Some(document) = self.remote_lsp_document() else {
             return Err(());
         };
-        let code = self.context_manager.current().code.as_ref().ok_or(())?;
+        let code = self.context_manager.active_code_pane().ok_or(())?;
         let revision = code.buffer.revision;
         let buffer_text = code.buffer.text();
         let seq_fallback = QUERY_SEQ.fetch_add(1, Ordering::SeqCst);
@@ -823,15 +821,12 @@ impl Screen<'_> {
                 Kind::Query,
             ),
             CodeLspJob::Definition {
+                action,
                 seq,
                 line,
                 character,
                 ..
-            } => (
-                query(seq, Action::Definition, line, character, None),
-                seq,
-                Kind::Query,
-            ),
+            } => (query(seq, action, line, character, None), seq, Kind::Query),
             CodeLspJob::References {
                 seq,
                 line,
@@ -1228,9 +1223,7 @@ impl Screen<'_> {
         };
         let revision = self
             .context_manager
-            .current()
-            .code
-            .as_ref()
+            .active_code_pane()
             .unwrap()
             .buffer
             .revision;
@@ -1277,9 +1270,7 @@ impl Screen<'_> {
         if due {
             let text = self
                 .context_manager
-                .current()
-                .code
-                .as_ref()
+                .active_code_pane()
                 .unwrap()
                 .buffer
                 .text();
@@ -2072,9 +2063,7 @@ impl Screen<'_> {
             &pending,
             self.remote_lsp_document().as_ref(),
             self.context_manager
-                .current()
-                .code
-                .as_ref()
+                .active_code_pane()
                 .map(|c| c.buffer.revision),
         ) {
             return false;
@@ -2156,10 +2145,10 @@ impl Screen<'_> {
             }
         }
         let Some(results) = parse_reply(&pending, message) else {
-            if matches!(message, Reply::LspQueryResult { action: Action::Definition, seq, .. } if *seq == pending.seq)
+            if matches!(message, Reply::LspQueryResult { action: Action::Definition | Action::Declaration | Action::TypeDefinition, seq, .. } if *seq == pending.seq)
             {
                 self.remote_lsp_error(
-                    "Cannot decode the definition target using the host's path syntax",
+                    "Cannot decode the navigation target using the host's path syntax",
                 );
             }
             return false;
@@ -2465,50 +2454,54 @@ fn parse_reply(pending: &Pending, reply: &Reply) -> Option<CodeLspResults> {
             edits,
             ..
         } if *seq == pending.seq => match action {
-            Action::Definition => {
+            Action::Definition | Action::Declaration | Action::TypeDefinition => {
                 out.definition = Some((
                     *seq,
-                    locations
-                        .iter()
-                        .map(|l| {
-                            Some(engine::LspLocation {
-                                path: l
-                                    .resolve_host_path(
-                                        &neoism_protocol::host_path::HostPath::new(
-                                            pending.document.root.to_string_lossy(),
-                                        ),
-                                    )?
-                                    .as_str()
-                                    .to_owned(),
-                                range: Some(engine::LspRange {
-                                    start: engine::LspPosition {
-                                        line: l.line,
-                                        character: l.character,
-                                    },
-                                    end: engine::LspPosition {
-                                        line: l.line,
-                                        character: l.character,
-                                    },
-                                }),
-                                language: None,
+                    Ok(Some(
+                        locations
+                            .iter()
+                            .map(|l| {
+                                Some(engine::LspLocation {
+                                    path: l
+                                        .resolve_host_path(
+                                            &neoism_protocol::host_path::HostPath::new(
+                                                pending.document.root.to_string_lossy(),
+                                            ),
+                                        )?
+                                        .as_str()
+                                        .to_owned(),
+                                    range: Some(engine::LspRange {
+                                        start: engine::LspPosition {
+                                            line: l.line,
+                                            character: l.character,
+                                        },
+                                        end: engine::LspPosition {
+                                            line: l.line,
+                                            character: l.character,
+                                        },
+                                    }),
+                                    language: None,
+                                })
                             })
-                        })
-                        .collect::<Option<Vec<_>>>()?,
+                            .collect::<Option<Vec<_>>>()?,
+                    )),
                 ))
             }
             Action::References => {
                 out.references = Some((
                     *seq,
                     pending.document.root.clone(),
-                    references
-                        .iter()
-                        .map(|r| neoism_ui::panels::finder::ReferenceRow {
-                            path: r.path.clone(),
-                            line: r.line,
-                            column: r.column,
-                            text: r.text.clone(),
-                        })
-                        .collect(),
+                    Ok(Some(
+                        references
+                            .iter()
+                            .map(|r| neoism_ui::panels::finder::ReferenceRow {
+                                path: r.path.clone(),
+                                line: r.line,
+                                column: r.column,
+                                text: r.text.clone(),
+                            })
+                            .collect(),
+                    )),
                 ))
             }
             Action::DocumentSymbols => {
@@ -2704,8 +2697,29 @@ mod tests {
                 }}))
                 .unwrap();
             let (_, locations) = parse_reply(&p, &reply).unwrap().definition.unwrap();
+            let locations = locations.unwrap().unwrap();
             assert_eq!(locations[0].path, "/home/host/work/space 项目/%20.rs");
             assert_eq!(locations[0].range.as_ref().unwrap().start.character, 2);
+        }
+    }
+
+    #[test]
+    fn declaration_and_type_definition_replies_preserve_navigation_and_reject_wrong_kind()
+    {
+        for action in [Action::Declaration, Action::TypeDefinition] {
+            let mut p = pending();
+            p.action = Some(action);
+            p.document.root = "/host/work".into();
+            let reply: Reply = serde_json::from_value(serde_json::json!({"LspQueryResult": {
+                "seq": 9, "action": action,
+                "locations": [{"uri":"file:///host/work/type.rs", "line":7, "character":3}]
+            }})).unwrap();
+            let (_, hits) = parse_reply(&p, &reply).unwrap().definition.unwrap();
+            let hits = hits.unwrap().unwrap();
+            assert_eq!(hits[0].path, "/host/work/type.rs");
+            assert_eq!(hits[0].range.as_ref().unwrap().start.line, 7);
+            p.action = Some(Action::Definition);
+            assert!(parse_reply(&p, &reply).is_none());
         }
     }
 

@@ -1,7 +1,114 @@
 use super::*;
 use std::path::Path;
 
+#[cfg(test)]
+mod source_location_tests {
+    use super::apply_loaded_markdown_source_location;
+    use neoism_ui::editor::markdown::MarkdownPane;
+    use neoism_ui::services::FileOpenSource;
+    use std::path::PathBuf;
+
+    #[test]
+    fn markdown_source_location_waits_for_loaded_matching_owner() {
+        let path = PathBuf::from("/nonexistent/neoism-source-location.md");
+        let mut pane = MarkdownPane::load_with_source(path.clone(), FileOpenSource::Host);
+        let mut pending = Some((path.clone(), 2, 3));
+        pane.mark_remote_loading();
+        apply_loaded_markdown_source_location(&mut pending, &mut pane);
+        assert_eq!(pending, Some((path, 2, 3)));
+        pane.apply_remote_source("# title\n\nsource");
+        let mut other = MarkdownPane::load_with_source(
+            PathBuf::from("/nonexistent/neoism-other-source.md"),
+            FileOpenSource::Host,
+        );
+        other.apply_remote_source("other");
+        apply_loaded_markdown_source_location(&mut pending, &mut other);
+        assert!(pending.is_some());
+        apply_loaded_markdown_source_location(&mut pending, &mut pane);
+        assert!(pending.is_none());
+        assert_eq!((pane.cursor_line, pane.cursor_col), (2, 3));
+        assert!(!pane.is_dirty());
+    }
+
+    #[test]
+    fn markdown_source_navigation_preserves_dirty_text_and_undo() {
+        let path = PathBuf::from("/nonexistent/neoism-source-undo.md");
+        let mut pane = MarkdownPane::load_with_source(path.clone(), FileOpenSource::Host);
+        pane.apply_remote_source("# title\nsource");
+        pane.insert_text("dirty ");
+        let lines = pane.lines.clone();
+        let mut pending = Some((path, 1, 2));
+        apply_loaded_markdown_source_location(&mut pending, &mut pane);
+        assert_eq!(pane.lines, lines);
+        assert!(pane.is_dirty());
+        assert_eq!((pane.cursor_line, pane.cursor_col), (1, 2));
+        assert!(pane.undo());
+        assert_eq!(pane.lines.join("\n"), "# title\nsource");
+    }
+}
+
+fn apply_loaded_markdown_source_location(
+    pending: &mut Option<(std::path::PathBuf, usize, usize)>,
+    pane: &mut neoism_ui::editor::markdown::MarkdownPane,
+) {
+    let Some((path, line, column)) = pending.as_ref() else {
+        return;
+    };
+    if path != &pane.path || pane.remote_content_pending || pane.error.is_some() {
+        return;
+    }
+    pane.jump_to_line(line.saturating_add(1));
+    let text = &pane.lines[pane.cursor_line];
+    let mut column = (*column).min(text.len());
+    while !text.is_char_boundary(column) {
+        column -= 1;
+    }
+    pane.cursor_col = column;
+    *pending = None;
+}
+
 impl Screen<'_> {
+    /// Diff coordinates are raw source coordinates, not rendered block rows.
+    /// Select the existing Markdown owner without reseeding or creating code.
+    pub(crate) fn open_markdown_source_location(
+        &mut self,
+        path: std::path::PathBuf,
+        line: usize,
+        column: usize,
+    ) {
+        let source = neoism_ui::services::FileOpenSource::workspace(
+            self.context_manager.current_workspace_is_remote_joined(),
+        );
+        self.open_path_in_markdown_with_source(path.clone(), source);
+        if !self
+            .context_manager
+            .current()
+            .markdown
+            .as_ref()
+            .is_some_and(|pane| pane.path == path)
+        {
+            return;
+        }
+        self.pending_review_code_cursor = None;
+        self.pending_code_location = None;
+        self.pending_markdown_source_location = Some((path, line, column));
+        self.apply_pending_markdown_source_location();
+        self.focus_selected_workspace_content();
+        self.mark_dirty();
+    }
+
+    pub(crate) fn apply_pending_markdown_source_location(&mut self) {
+        let Some((path, _, _)) = self.pending_markdown_source_location.as_ref() else {
+            return;
+        };
+        if let Some(pane) = self.context_manager.markdown_pane_mut_by_path(path) {
+            apply_loaded_markdown_source_location(
+                &mut self.pending_markdown_source_location,
+                pane,
+            );
+        }
+    }
+
     pub fn open_path_in_markdown(&mut self, path: std::path::PathBuf) {
         if neoism_ui::editor::documentation_notebook::is_manifest(&path) {
             self.open_documentation_notebook(path);
@@ -21,6 +128,12 @@ impl Screen<'_> {
         path: std::path::PathBuf,
         source: neoism_ui::services::FileOpenSource,
     ) {
+        if self.context_manager.code_pane_mut_by_path(&path).is_some() {
+            // A review may have acquired the raw canonical owner before this
+            // Markdown open. Do not bind a second editor/origin to the same doc.
+            self.file_tree_notify("This document has a code owner (possibly in review); close that owner before opening Markdown", neoism_ui::panels::notifications::NotificationLevel::Warn);
+            return;
+        }
         if self.context_manager.markdown_node_by_path(&path).is_some()
             && self
                 .context_manager
@@ -290,6 +403,7 @@ impl Screen<'_> {
         for tabs in self.renderer.pane_tabs.values_mut() {
             tabs.set_modified(path, modified);
         }
+        self.sync_review_document_modified();
     }
 
     pub(crate) fn sync_note_tab_icon(&mut self, path: &Path, icon: Option<String>) {
@@ -335,7 +449,7 @@ impl Screen<'_> {
         if self.context_manager.current().markdown.is_some() {
             return self.save_current_markdown();
         }
-        if self.context_manager.current().code.is_some() {
+        if self.context_manager.active_code_pane().is_some() {
             return self.save_current_code();
         }
         if self.context_manager.current().draw.is_some() {

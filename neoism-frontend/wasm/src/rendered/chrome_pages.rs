@@ -22,6 +22,158 @@
 
 use super::*;
 
+#[wasm_bindgen]
+impl ChromeBridge {
+    pub fn drain_git_commit_opens(&mut self) -> JsValue {
+        let rows: Vec<_> = self.chrome.git_diff_panel.take_commit_details().into_iter()
+            .map(|(root, detail)| serde_json::json!({ "root": root.to_string_lossy(), "detail": detail })).collect();
+        serde_wasm_bindgen::to_value(&rows).unwrap_or(JsValue::NULL)
+    }
+    pub fn set_git_commit_view(&mut self, route: usize, root: &str, json: &str) {
+        if let Ok(detail) = serde_json::from_str(json) {
+            self.chrome.set_git_commit_view(route, root.into(), detail);
+        }
+    }
+    pub fn take_git_commit_copy(&mut self) -> Option<String> {
+        self.chrome.take_git_commit_copy()
+    }
+
+    pub fn take_git_diff_save_stages(&mut self) -> JsValue {
+        let rows: Vec<_> = self.chrome.take_git_diff_save_stages().into_iter().map(|(root, path, unstage)| {
+            let absolute = neoism_protocol::host_path::HostPath::new(root.to_string_lossy()).join(&path.to_string_lossy());
+            serde_json::json!({"root":root.to_string_lossy(), "path":path.to_string_lossy(), "absolute":absolute.as_str(), "unstage":unstage})
+        }).collect();
+        serde_wasm_bindgen::to_value(&rows).unwrap_or(JsValue::NULL)
+    }
+
+    pub fn take_git_diff_block_save_stages(&mut self) -> JsValue {
+        let rows: Vec<_> = self.chrome.take_git_diff_block_save_stages().into_iter().map(|(root, path, block, revision)| {
+            let absolute = neoism_protocol::host_path::HostPath::new(root.to_string_lossy()).join(&path.to_string_lossy());
+            serde_json::json!({"root":root.to_string_lossy(), "path":path.to_string_lossy(), "absolute":absolute.as_str(), "block":block, "revision":revision.to_string()})
+        }).collect();
+        serde_wasm_bindgen::to_value(&rows).unwrap_or(JsValue::NULL)
+    }
+
+    /// Typed source-edit intent. The host flushes the old binding before
+    /// activating this path, and reads disk only if no canonical pane exists.
+    pub fn take_git_diff_edit_request(&mut self) -> JsValue {
+        let Some(request) = self.chrome.take_git_diff_edit_request() else {
+            return JsValue::NULL;
+        };
+        let path =
+            neoism_protocol::host_path::HostPath::new(request.root.to_string_lossy())
+                .join(&request.path.to_string_lossy());
+        serde_wasm_bindgen::to_value(&serde_json::json!({
+            "path": path.as_str(), "line": request.line, "column": request.column,
+        }))
+        .unwrap_or(JsValue::NULL)
+    }
+
+    /// Ordinary source-tab navigation, separate from inline review editing.
+    pub fn drain_git_diff_source_opens(&mut self) -> JsValue {
+        let rows: Vec<_> = self.chrome.drain_git_diff_source_opens().into_iter().map(|request| {
+            let path = neoism_protocol::host_path::HostPath::new(request.root.to_string_lossy())
+                .join(&request.path);
+            serde_json::json!({"path": path.as_str(), "line": request.line, "column": request.column})
+        }).collect();
+        serde_wasm_bindgen::to_value(&rows).unwrap_or(JsValue::NULL)
+    }
+
+    pub fn source_editor_policy(&self, path: &str) -> String {
+        self.chrome
+            .source_editor_policy(std::path::Path::new(path))
+            .to_string()
+    }
+
+    /// Called only after the host has replayed source-tab metadata. Missing
+    /// panes land via editor_open_file; retained panes navigate immediately.
+    pub fn activate_source_editor(
+        &mut self,
+        tab_index: u32,
+        path: &str,
+        line: usize,
+        column: usize,
+    ) -> bool {
+        self.flush_code_binding_before_presentation_change();
+        let path_ref = std::path::Path::new(path);
+        if self.active_tab_index != tab_index as usize
+            || !self
+                .tab_kinds
+                .get(&(tab_index as usize))
+                .is_some_and(|kind| kind == "source-code")
+            || !self
+                .chrome
+                .buffer_tabs
+                .tabs()
+                .get(tab_index as usize)
+                .is_some_and(|tab| {
+                    tab.chrome_page.is_none() && tab.path.as_deref() == Some(path_ref)
+                })
+            || self.chrome.source_editor_policy(path_ref) == "unsupported"
+        {
+            super::editor_panes::clear_editor_pending_goto(path_ref);
+            return false;
+        }
+        self.tab_paths.insert(tab_index as usize, path.to_string());
+        let retained = self.chrome.focus_source_editor(
+            tab_index as usize,
+            std::path::Path::new(path),
+            line,
+            column,
+        );
+        if retained {
+            // A delayed read from an earlier open must not reapply its old
+            // location over this newer, immediately navigated retained pane.
+            super::editor_panes::clear_editor_pending_goto(std::path::Path::new(path));
+        } else {
+            super::editor_panes::arm_editor_pending_goto(path.into(), line, column);
+        }
+        retained
+    }
+
+    pub fn git_diff_editing_path(&self) -> Option<String> {
+        self.chrome
+            .git_diff_editing_path()
+            .map(|path| path.to_string_lossy().into_owned())
+    }
+
+    pub fn activate_git_diff_editor(
+        &mut self,
+        path: &str,
+        line: usize,
+        column: usize,
+    ) -> bool {
+        self.flush_code_binding_before_presentation_change();
+        self.chrome
+            .focus_git_diff_editor(std::path::Path::new(path), line, column)
+    }
+
+    /// Navigate only on a real sidebar open, never during setBufferTabs replay.
+    pub fn reveal_git_diff_file(&mut self, route: usize, path: &str) {
+        self.chrome
+            .reveal_git_diff_file(route, std::path::Path::new(path));
+    }
+
+    /// Typed opens: never send diff paths through the editable-file queue.
+    pub fn drain_git_diff_opens(&mut self) -> JsValue {
+        #[derive(serde::Serialize)]
+        struct DiffOpen {
+            path: String,
+            root: String,
+        }
+        let rows: Vec<_> = self
+            .chrome
+            .drain_git_diff_opens()
+            .into_iter()
+            .map(|(path, root)| DiffOpen {
+                path: path.to_string_lossy().into_owned(),
+                root: root.to_string_lossy().into_owned(),
+            })
+            .collect();
+        serde_wasm_bindgen::to_value(&rows).unwrap_or(JsValue::NULL)
+    }
+}
+
 use neoism_neoworld_core::{Emotions, PetId, PetMode, PetState, Vec2};
 use neoism_protocol::config::{
     ConfigDescriptor, ExtensionStatusSummary, ExtensionSummary,
@@ -105,6 +257,23 @@ impl ChromeBridge {
     pub fn set_settings_values(&mut self, config_json: &str) -> Result<(), JsValue> {
         let values: serde_json::Value = serde_json::from_str(config_json)
             .map_err(|e| JsValue::from_str(&format!("config parse: {e}")))?;
+        let vim_enabled = values
+            .get("editor")
+            .and_then(|editor| editor.get("vim-mode"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true);
+        super::editor_panes::set_editor_vim_enabled(vim_enabled);
+        if let Some(pane) = self.chrome.code_pane_mut() {
+            use neoism_ui::editor::code::{CodeInputMode, CodeMode};
+            pane.input_mode = if vim_enabled {
+                CodeInputMode::Vim
+            } else {
+                CodeInputMode::Standard
+            };
+            if !vim_enabled {
+                pane.buffer.mode = CodeMode::Insert;
+            }
+        }
         let splash_auto_animate = values
             .get("appearance")
             .and_then(|appearance| appearance.get("splash-auto-animate"))
@@ -229,6 +398,23 @@ impl ChromeBridge {
     /// side effects for the same keys.
     fn hot_apply_setting(&mut self, key: &str, value: &serde_json::Value) {
         match key {
+            "editor.vim-mode" => {
+                let enabled = value.as_bool().unwrap_or(true);
+                super::editor_panes::set_editor_vim_enabled(enabled);
+                if let Some(pane) = self.chrome.code_pane_mut() {
+                    use neoism_ui::editor::code::{CodeInputMode, CodeMode};
+                    pane.input_mode = if enabled {
+                        CodeInputMode::Vim
+                    } else {
+                        CodeInputMode::Standard
+                    };
+                    pane.buffer.mode = if enabled {
+                        CodeMode::Normal
+                    } else {
+                        CodeMode::Insert
+                    };
+                }
+            }
             "appearance.theme" => {
                 if let Some(name) = value.as_str() {
                     let name = name.to_string();

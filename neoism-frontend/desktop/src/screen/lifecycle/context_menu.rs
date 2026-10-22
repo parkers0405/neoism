@@ -71,11 +71,12 @@ impl Screen<'_> {
         match self.renderer.context_menu.hit_test(mouse_x, mouse_y) {
             Ok(Some(_index)) => {
                 self.renderer.context_menu.hover(mouse_x, mouse_y);
-                let action = self.renderer.context_menu.selected_action();
+                let Some(action) = self.renderer.context_menu.action_at(mouse_x, mouse_y)
+                else {
+                    return true;
+                };
                 self.renderer.context_menu.close();
-                if let Some(action) = action {
-                    self.execute_context_menu_action(action, clipboard);
-                }
+                self.execute_context_menu_action(action, clipboard);
                 self.mark_dirty();
                 true
             }
@@ -269,6 +270,21 @@ impl Screen<'_> {
                         });
                     }
                 }
+            }
+            neoism_ui::panels::context_menu::ContextMenuAction::CodeLsp { action, path, revision, line, column } => {
+                let Some(code) = self.context_manager.active_code_pane_mut() else {
+                    return;
+                };
+                if code.path != path || code.buffer.revision != revision {
+                    self.renderer.notifications.push(
+                        "Document changed; reopen the navigation menu",
+                        neoism_ui::panels::notifications::NotificationLevel::Info,
+                    );
+                    self.mark_dirty();
+                    return;
+                }
+                code.buffer.set_cursor_position(line, column, false);
+                self.execute_lsp_context_action(action);
             }
             neoism_ui::panels::context_menu::ContextMenuAction::Lsp(action) => {
                 self.execute_lsp_context_action(action);

@@ -854,7 +854,10 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         replace_index: Option<usize>,
     ) -> bool {
         self.adopt_daemon_workspace_with_renderer(
-            workspace_id, rich_text_id, Some(sugarloaf), replace_index,
+            workspace_id,
+            rich_text_id,
+            Some(sugarloaf),
+            replace_index,
         )
     }
 
@@ -1006,7 +1009,9 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
                 self.adopted_workspaces.remove(&stable);
             }
             self.contexts[index].remove_all_rich_text(
-                sugarloaf.as_deref_mut().expect("replacement requires renderer"),
+                sugarloaf
+                    .as_deref_mut()
+                    .expect("replacement requires renderer"),
             );
             self.contexts[index] = adopted_grid;
             // A custom title or terminal-derived title belongs to the local
@@ -1047,7 +1052,9 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             let Some(session_id) = tab.session_id.clone() else {
                 continue;
             };
-            let sugarloaf = sugarloaf.as_deref_mut().expect("stacked tabs require renderer");
+            let sugarloaf = sugarloaf
+                .as_deref_mut()
+                .expect("stacked tabs require renderer");
             let stacked_rich_text_id = crate::context::next_rich_text_id();
             let _ = sugarloaf.text(Some(stacked_rich_text_id));
             let stacked_dimension = self.current_grid().grid_dimension();
@@ -1255,6 +1262,9 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             neoism_tags: None,
             neoism_extensions: None,
             neoworld: None,
+            git_diff_view: None,
+            git_diff_cache_generation: None,
+            git_diff_load_deadline: None,
         })
     }
 }

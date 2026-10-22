@@ -706,16 +706,41 @@ pub(crate) fn read_query(
             |help| map_read_signature_help(root, help),
         )
         .map(EditorLspReadOutcome::SignatureHelp),
-        EditorLspReadOperation::Definition => collect_results(
-            engine::definition(runtime, root, &file, line, character),
-            |location| map_read_location(root, location),
-        )
-        .map(EditorLspReadOutcome::Definition),
-        EditorLspReadOperation::References => collect_results(
-            engine::references(runtime, root, &file, line, character),
-            |location| map_read_location(root, location),
-        )
-        .map(EditorLspReadOutcome::References),
+        EditorLspReadOperation::Definition
+        | EditorLspReadOperation::Declaration
+        | EditorLspReadOperation::TypeDefinition
+        | EditorLspReadOperation::References => {
+            let query = match operation {
+                EditorLspReadOperation::Declaration => {
+                    engine::LspNavigationQuery::Declaration
+                }
+                EditorLspReadOperation::TypeDefinition => {
+                    engine::LspNavigationQuery::TypeDefinition
+                }
+                EditorLspReadOperation::References => {
+                    engine::LspNavigationQuery::References
+                }
+                _ => engine::LspNavigationQuery::Definition,
+            };
+            navigation_query(runtime, root, &file, line, character, query)
+                .and_then(|locations| {
+                    collect_results(locations, |location| {
+                        map_read_location(root, location)
+                    })
+                })
+                .map(|locations| match operation {
+                    EditorLspReadOperation::Declaration => {
+                        EditorLspReadOutcome::Declaration(locations)
+                    }
+                    EditorLspReadOperation::TypeDefinition => {
+                        EditorLspReadOutcome::TypeDefinition(locations)
+                    }
+                    EditorLspReadOperation::References => {
+                        EditorLspReadOutcome::References(locations)
+                    }
+                    _ => EditorLspReadOutcome::Definition(locations),
+                })
+        }
         EditorLspReadOperation::DocumentSymbols => {
             collect_results(engine::document_symbols(runtime, root, &file), |symbol| {
                 map_read_document_symbol(root, symbol)
@@ -757,6 +782,32 @@ pub(crate) fn read_query(
             message,
         },
     }
+}
+
+fn navigation_query(
+    runtime: &engine::LspRuntime,
+    root: &Path,
+    file: &Path,
+    line: u32,
+    character: u32,
+    query: engine::LspNavigationQuery,
+) -> Result<Vec<engine::LspLocation>, String> {
+    let text = super::active_buffer::live_buffer_text(runtime, root, file);
+    engine::query_navigation(
+        runtime,
+        root,
+        file,
+        line,
+        character,
+        text.as_deref(),
+        query,
+    )?
+    .ok_or_else(|| {
+        format!(
+            "{query:?} is not supported by an available language server for {}",
+            file.display()
+        )
+    })
 }
 
 fn collect_results<T, U>(
@@ -979,6 +1030,9 @@ pub(crate) fn query_at(
     let supported = status.iter().any(|s| match action {
         EditorLspAction::Hover => s.capabilities.hover,
         EditorLspAction::Definition => s.capabilities.definition,
+        // Optional navigation methods are gated by the initialized provider
+        // capabilities in the engine, not the adapter's definition flag.
+        EditorLspAction::Declaration | EditorLspAction::TypeDefinition => true,
         EditorLspAction::References => s.capabilities.references,
         EditorLspAction::DocumentSymbols => s.capabilities.document_symbols,
         EditorLspAction::Format => s.capabilities.formatting,
@@ -1098,9 +1152,28 @@ pub(crate) fn query_at(
                 items,
             }
         }
-        EditorLspAction::Definition => {
+        EditorLspAction::Definition
+        | EditorLspAction::Declaration
+        | EditorLspAction::TypeDefinition => {
             let mut locations = Vec::new();
-            for location in engine::definition(runtime, root, &file, line, character) {
+            let query = match action {
+                EditorLspAction::Declaration => engine::LspNavigationQuery::Declaration,
+                EditorLspAction::TypeDefinition => {
+                    engine::LspNavigationQuery::TypeDefinition
+                }
+                _ => engine::LspNavigationQuery::Definition,
+            };
+            let found =
+                match navigation_query(runtime, root, &file, line, character, query) {
+                    Ok(found) => found,
+                    Err(message) => {
+                        return EditorServerMessage::Error {
+                            surface_id,
+                            message,
+                        }
+                    }
+                };
+            for location in found {
                 let Some(range) = location.range else {
                     continue;
                 };
@@ -1135,7 +1208,22 @@ pub(crate) fn query_at(
             )
         }
         EditorLspAction::References => {
-            let locations = engine::references(runtime, root, &file, line, character);
+            let locations = match navigation_query(
+                runtime,
+                root,
+                &file,
+                line,
+                character,
+                engine::LspNavigationQuery::References,
+            ) {
+                Ok(found) => found,
+                Err(message) => {
+                    return EditorServerMessage::Error {
+                        surface_id,
+                        message,
+                    }
+                }
+            };
             // Ready-made reference rows: read each hit's line text
             // (live buffer first, then disk), path relative to the
             // workspace root — desktop worker parity.

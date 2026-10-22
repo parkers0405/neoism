@@ -34,7 +34,12 @@ pub const TOOL_HEADER_HEIGHT: f32 = 30.0;
 const TOOL_GROUP_BODY_Y: f32 = 36.0;
 
 fn service_symbol_rect(x: f32, y: f32, scale: f32) -> [f32; 4] {
-    [x + 20.0 * scale, y + 2.0 * scale, 18.0 * scale, 18.0 * scale]
+    [
+        x + 20.0 * scale,
+        y + 2.0 * scale,
+        18.0 * scale,
+        18.0 * scale,
+    ]
 }
 
 fn tool_status_label(status: &str) -> &str {
@@ -82,42 +87,134 @@ fn fixed_diff_viewport_height(preview_rows: usize, s: f32) -> f32 {
 }
 
 pub fn measure_tool_message_height(
-    sugarloaf: &mut Sugarloaf, pane: &impl AgentToolPane, message: &impl AgentToolMessage,
-    width: f32, s: f32, tool_expanded: bool, selected_group_child: Option<&str>,
+    sugarloaf: &mut Sugarloaf,
+    pane: &impl AgentToolPane,
+    message: &impl AgentToolMessage,
+    width: f32,
+    s: f32,
+    tool_expanded: bool,
+    selected_group_child: Option<&str>,
 ) -> Option<f32> {
-    let mut height = measure_single_tool_message_height(sugarloaf, pane, message, width, s, tool_expanded, selected_group_child)?;
+    let mut height = measure_single_tool_message_height(
+        sugarloaf,
+        pane,
+        message,
+        width,
+        s,
+        tool_expanded,
+        selected_group_child,
+    )?;
     for child in message.composition_children() {
-        height += measure_composition_child_height(sugarloaf, pane, child, (width - 20.0 * s).max(1.0), s);
+        height += measure_composition_child_height(
+            sugarloaf,
+            pane,
+            child,
+            (width - 20.0 * s).max(1.0),
+            s,
+        );
     }
     Some(height)
 }
 
-fn measure_composition_child_height(sugarloaf: &mut Sugarloaf, pane: &impl AgentToolPane, child: &NeoismAgentMessage, width: f32, s: f32) -> f32 {
-    let collapsed = measure_single_tool_message_height(sugarloaf, pane, child, width, s, false, None).unwrap_or(TOOL_HEADER_HEIGHT * s);
+fn measure_composition_child_height(
+    sugarloaf: &mut Sugarloaf,
+    pane: &impl AgentToolPane,
+    child: &NeoismAgentMessage,
+    width: f32,
+    s: f32,
+) -> f32 {
+    let collapsed =
+        measure_single_tool_message_height(sugarloaf, pane, child, width, s, false, None)
+            .unwrap_or(TOOL_HEADER_HEIGHT * s);
     let progress = pane.tool_expand_progress(&child.id).clamp(0.0, 1.0);
-    if progress <= 0.001 { return collapsed; }
-    let expanded = measure_single_tool_message_height(sugarloaf, pane, child, width, s, true, None).unwrap_or(collapsed);
+    if progress <= 0.001 {
+        return collapsed;
+    }
+    let expanded =
+        measure_single_tool_message_height(sugarloaf, pane, child, width, s, true, None)
+            .unwrap_or(collapsed);
     collapsed + (expanded - collapsed) * progress
 }
 
 #[allow(clippy::too_many_arguments)]
 pub fn render_tool_message(
-    sugarloaf: &mut Sugarloaf, pane: &mut impl AgentToolPane, x: f32, y: f32, w: f32, h: f32,
-    message: &impl AgentToolMessage, theme: &IdeTheme, s: f32, now_seconds: f32,
-    viewport_clip: [f32; 4], occlusion_rects: &[[f32; 4]], prepared_diff_sections: Option<&[ToolDiffSection]>, mouse: Option<(f32, f32)>,
+    sugarloaf: &mut Sugarloaf,
+    pane: &mut impl AgentToolPane,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    message: &impl AgentToolMessage,
+    theme: &IdeTheme,
+    s: f32,
+    now_seconds: f32,
+    viewport_clip: [f32; 4],
+    occlusion_rects: &[[f32; 4]],
+    prepared_diff_sections: Option<&[ToolDiffSection]>,
+    mouse: Option<(f32, f32)>,
 ) -> f32 {
     if message.composition_children().is_empty() {
-        return render_single_tool_message(sugarloaf, pane, x, y, w, h, message, theme, s, now_seconds, viewport_clip, occlusion_rects, prepared_diff_sections, mouse);
+        return render_single_tool_message(
+            sugarloaf,
+            pane,
+            x,
+            y,
+            w,
+            h,
+            message,
+            theme,
+            s,
+            now_seconds,
+            viewport_clip,
+            occlusion_rects,
+            prepared_diff_sections,
+            mouse,
+        );
     }
     let child_w = (w - 20.0 * s).max(1.0);
-    let heights: Vec<f32> = message.composition_children().iter().map(|child|
-        measure_composition_child_height(sugarloaf, pane, child, child_w, s)).collect();
+    let heights: Vec<f32> = message
+        .composition_children()
+        .iter()
+        .map(|child| measure_composition_child_height(sugarloaf, pane, child, child_w, s))
+        .collect();
     let root_h = (h - heights.iter().sum::<f32>()).max(TOOL_HEADER_HEIGHT * s);
-    let Some(viewport_clip) = intersect_rect([x, y, w, h], viewport_clip) else { return h; };
-    render_single_tool_message(sugarloaf, pane, x, y, w, root_h, message, theme, s, now_seconds, viewport_clip, occlusion_rects, prepared_diff_sections, mouse);
+    let Some(viewport_clip) = intersect_rect([x, y, w, h], viewport_clip) else {
+        return h;
+    };
+    render_single_tool_message(
+        sugarloaf,
+        pane,
+        x,
+        y,
+        w,
+        root_h,
+        message,
+        theme,
+        s,
+        now_seconds,
+        viewport_clip,
+        occlusion_rects,
+        prepared_diff_sections,
+        mouse,
+    );
     let mut child_y = y + root_h;
     for (child, child_h) in message.composition_children().iter().zip(heights) {
-        render_tool_message(sugarloaf, pane, x + 20.0 * s, child_y, child_w, child_h, child, theme, s, now_seconds, viewport_clip, occlusion_rects, None, mouse);
+        render_tool_message(
+            sugarloaf,
+            pane,
+            x + 20.0 * s,
+            child_y,
+            child_w,
+            child_h,
+            child,
+            theme,
+            s,
+            now_seconds,
+            viewport_clip,
+            occlusion_rects,
+            None,
+            mouse,
+        );
         child_y += child_h;
     }
     h
@@ -165,7 +262,8 @@ fn measure_single_tool_message_height(
             let mut height = TOOL_HEADER_HEIGHT * s;
             for (section_index, section) in sections.iter().enumerate() {
                 let card_key = format!("{}:{section_index}", message.id());
-                let card_expanded = message.tool() == "compose" || pane.tool_expanded(&card_key);
+                let card_expanded =
+                    message.tool() == "compose" || pane.tool_expanded(&card_key);
                 let view = cached_diff_card_view(section, card_w, s, card_expanded);
                 height += diff_card::HEADER_HEIGHT * s
                     + fixed_diff_viewport_height(view.preview_visual_rows, s)
@@ -397,43 +495,79 @@ fn render_single_tool_message(
     symbol_opts.bold = false;
     symbol_opts.color = theme.u8(theme.muted);
     let first_symbol = sugarloaf.text_mut().instances().len();
-    let fallback_mcp = message.mcp().is_none().then(||
-        crate::panels::agent_pane::api_mapping::mcp_tool_presentation(message.tool(), &Value::Null, None)).flatten();
+    let fallback_mcp = message
+        .mcp()
+        .is_none()
+        .then(|| {
+            crate::panels::agent_pane::api_mapping::mcp_tool_presentation(
+                message.tool(),
+                &Value::Null,
+                None,
+            )
+        })
+        .flatten();
     let mcp = message.mcp().or(fallback_mcp.as_ref());
     let symbol_rect = service_symbol_rect(x, y, s);
     let mut image_symbol_visible = false;
     if let Some(mcp) = mcp {
-        use crate::widgets::inline_picker::{InlinePickerIcon, clip_icon_image};
+        use crate::widgets::inline_picker::{clip_icon_image, InlinePickerIcon};
         match mcp.icon.presentation(sugarloaf, symbol_opts.color) {
             InlinePickerIcon::Glyph(glyph) => {
-                crate::primitives::draw_icon_centered_with_occlusion(sugarloaf,
-                    symbol_rect[0], [symbol_rect[0], y, 18.0 * s, 22.0 * s],
-                    glyph, &symbol_opts, occlusion_rects, true);
+                crate::primitives::draw_icon_centered_with_occlusion(
+                    sugarloaf,
+                    symbol_rect[0],
+                    [symbol_rect[0], y, 18.0 * s, 22.0 * s],
+                    glyph,
+                    &symbol_opts,
+                    occlusion_rects,
+                    true,
+                );
             }
-            InlinePickerIcon::Image { panel_id, image_id, source_rect } => {
-                image_symbol_visible = active_visible(motion, symbol_rect, message_clip, occlusion_rects);
+            InlinePickerIcon::Image {
+                panel_id,
+                image_id,
+                source_rect,
+            } => {
+                image_symbol_visible =
+                    active_visible(motion, symbol_rect, message_clip, occlusion_rects);
                 if symbol_opts.color[3] > 0 {
-                    if let Some((rect, source_rect)) = clip_icon_image(symbol_rect, source_rect, message_clip) {
+                    if let Some((rect, source_rect)) =
+                        clip_icon_image(symbol_rect, source_rect, message_clip)
+                    {
                         let scale = sugarloaf.scale_factor();
                         // Timeline images belong to ordinary content, below modal
                         // material; the same UV crop and occlusions bound the icon.
-                        super::super::draw::push_image_overlay_clipped(sugarloaf,
-                            panel_id, image_id, rect, source_rect, 1, scale, occlusion_rects);
+                        super::super::draw::push_image_overlay_clipped(
+                            sugarloaf,
+                            panel_id,
+                            image_id,
+                            rect,
+                            source_rect,
+                            1,
+                            scale,
+                            occlusion_rects,
+                        );
                     }
                 }
             }
         }
     } else {
-        draw_tool_symbol(sugarloaf, [x + 20.0 * s, y, 18.0 * s, 22.0 * s],
-            message.tool(), &symbol_opts, occlusion_rects);
+        draw_tool_symbol(
+            sugarloaf,
+            [x + 20.0 * s, y, 18.0 * s, 22.0 * s],
+            message.tool(),
+            &symbol_opts,
+            occlusion_rects,
+        );
     }
-    let symbol_visible = image_symbol_visible || active_glyphs(
-        motion,
-        sugarloaf,
-        first_symbol,
-        message_clip,
-        occlusion_rects,
-    );
+    let symbol_visible = image_symbol_visible
+        || active_glyphs(
+            motion,
+            sugarloaf,
+            first_symbol,
+            message_clip,
+            occlusion_rects,
+        );
     // Reserve the lifecycle label before truncating so pending/running cannot
     // disappear behind a long path or command.
     let status = tool_status_label(message.status());
@@ -1142,6 +1276,7 @@ fn render_tool_diff_cards(
                 opacity: theme.opacity,
                 clip: Some(viewport_clip),
                 occlusion_rects,
+                ..diff_card::PaintParams::default()
             },
         );
         if motion.deadline.is_some()
@@ -1313,7 +1448,11 @@ mod tests {
             let rect = super::service_symbol_rect(10.0, -7.0 * scale, scale);
             assert!(rect[0] + rect[2] < 10.0 + 42.0 * scale);
             let (clipped, uv) = crate::widgets::inline_picker::clip_icon_image(
-                rect, [0.5, 0.0, 0.75, 1.0], [0.0, 0.0, 1000.0, 1000.0]).unwrap();
+                rect,
+                [0.5, 0.0, 0.75, 1.0],
+                [0.0, 0.0, 1000.0, 1000.0],
+            )
+            .unwrap();
             assert_eq!(clipped[1], 0.0);
             assert!(clipped[3] <= 18.0 * scale);
             assert!(uv[1] > 0.0 && uv[1] < 1.0);

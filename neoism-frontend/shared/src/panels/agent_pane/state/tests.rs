@@ -2343,6 +2343,92 @@ fn with_directory_queues_apply_config_defaults() {
 }
 
 #[test]
+fn config_chip_cached_defaults_play_one_reveal() {
+    let start = Instant::now();
+    let mut hydration = ConfigChipHydration::default();
+    hydration.begin_at(start);
+    hydration.complete();
+    assert_eq!(
+        hydration.transition_at(start),
+        Some(ConfigChipTransition::Settling { elapsed_ms: 0.0 })
+    );
+    assert!(matches!(
+        hydration.transition_at(start + Duration::from_millis(319)),
+        Some(ConfigChipTransition::Settling { .. })
+    ));
+    assert_eq!(hydration.transition_at(start + Duration::from_millis(320)), None);
+}
+
+#[test]
+fn config_chip_fast_fetch_continues_the_existing_animation_clock() {
+    let start = Instant::now();
+    let mut hydration = ConfigChipHydration::default();
+    hydration.begin_at(start);
+    let loaded = start + Duration::from_millis(80);
+    assert_eq!(
+        hydration.transition_at(loaded),
+        Some(ConfigChipTransition::Loading { elapsed_ms: 80.0 })
+    );
+    hydration.complete();
+    assert_eq!(
+        hydration.transition_at(loaded),
+        Some(ConfigChipTransition::Settling { elapsed_ms: 80.0 })
+    );
+    assert_eq!(hydration.transition_at(start + Duration::from_millis(320)), None);
+}
+
+#[test]
+fn config_chip_slow_fetch_does_not_play_a_second_animation() {
+    let start = Instant::now();
+    let mut hydration = ConfigChipHydration::default();
+    hydration.begin_at(start);
+    let loaded = start + Duration::from_millis(500);
+    assert_eq!(
+        hydration.transition_at(loaded),
+        Some(ConfigChipTransition::Loading { elapsed_ms: 500.0 })
+    );
+    hydration.complete();
+    assert_eq!(hydration.transition_at(loaded), None);
+    hydration.complete();
+    assert_eq!(hydration.transition_at(loaded), None);
+}
+
+#[test]
+fn config_chip_duplicate_begin_and_completion_do_not_restart_reveal() {
+    let start = Instant::now();
+    let mut hydration = ConfigChipHydration::default();
+    hydration.begin_at(start);
+    hydration.begin_at(start + Duration::from_millis(50));
+    hydration.complete();
+    hydration.begin_at(start + Duration::from_millis(100));
+    hydration.complete();
+    assert_eq!(
+        hydration.transition_at(start + Duration::from_millis(200)),
+        Some(ConfigChipTransition::Settling { elapsed_ms: 200.0 })
+    );
+    assert_eq!(hydration.transition_at(start + Duration::from_millis(320)), None);
+    hydration.complete();
+    assert_eq!(hydration.transition_at(start + Duration::from_millis(500)), None);
+}
+
+#[test]
+fn config_chip_cancellation_and_loading_timeout_do_not_replay() {
+    let start = Instant::now();
+    let mut hydration = ConfigChipHydration::default();
+    hydration.complete();
+    assert_eq!(hydration.transition_at(start), None);
+    hydration.begin_at(start);
+    hydration.cancel();
+    hydration.complete();
+    assert_eq!(hydration.transition_at(start), None);
+    hydration.begin_at(start);
+    let timed_out = start + Duration::from_secs(15);
+    assert_eq!(hydration.transition_at(timed_out), None);
+    hydration.complete();
+    assert_eq!(hydration.transition_at(timed_out), None);
+}
+
+#[test]
 fn first_model_and_thinking_choices_request_insert_only_config_persistence() {
     let mut pane = NeoismAgentPane::default();
     pane.apply_model("opencode/free".to_string());

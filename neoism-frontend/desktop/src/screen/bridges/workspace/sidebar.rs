@@ -525,6 +525,10 @@ impl Screen<'_> {
         if self.open_neoism_agent_tab().is_some() {
             if let Some(agent) = self.context_manager.current_mut().neoism_agent.as_mut()
             {
+                // The factory (and joined-host sync) queued draft defaults,
+                // but no frame has drained them yet. Saved session metadata
+                // owns the settings for this existing-conversation pane.
+                agent.discard_queued_draft_defaults();
                 agent.switch_session(id);
                 agent.set_conversation_source(source);
             }

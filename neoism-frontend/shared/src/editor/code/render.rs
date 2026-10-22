@@ -77,19 +77,41 @@ pub fn render(
     font_scale: f32,
     mouse: Option<[f32; 2]>,
 ) -> bool {
+    pane.geometry.projected_rows = None;
     pane.plugin_hit_regions.clear();
     let [x, y, w, h] = rect;
     if w <= 0.0 || h <= 0.0 {
         return false;
     }
     let font_scale = font_scale.clamp(0.5, 3.0);
-    if crate::primitives::surface_background::style("editor.code").background.is_some() {
-        sugarloaf.rect(None, x, y, w, h,
-            crate::primitives::surface_background::base_color("editor.code", theme, theme.f32(theme.bg)),
-            DEPTH, ORDER_BG);
+    if crate::primitives::surface_background::style("editor.code")
+        .background
+        .is_some()
+    {
+        sugarloaf.rect(
+            None,
+            x,
+            y,
+            w,
+            h,
+            crate::primitives::surface_background::base_color(
+                "editor.code",
+                theme,
+                theme.f32(theme.bg),
+            ),
+            DEPTH,
+            ORDER_BG,
+        );
     }
     crate::primitives::surface_background::render(
-        sugarloaf, "editor.code", rect, 0.0, font_scale, DEPTH, ORDER_BG, text_occlusions,
+        sugarloaf,
+        "editor.code",
+        rect,
+        0.0,
+        font_scale,
+        DEPTH,
+        ORDER_BG,
+        text_occlusions,
     );
 
     let font_size = CODE_FONT_SIZE * font_scale;
@@ -420,6 +442,7 @@ pub fn render(
         scroll_y,
         scroll_x,
         wrap: wrap.clone(),
+        projected_rows: None,
     };
 
     // True virtual lines own visual rows in WrapIndex. Their geometry and
@@ -1646,10 +1669,6 @@ mod cursor_clip_tests {
     }
 }
 
-fn rects_intersect(a: [f32; 4], b: [f32; 4]) -> bool {
-    a[0] < b[0] + b[2] && b[0] < a[0] + a[2] && a[1] < b[1] + b[3] && b[1] < a[1] + a[3]
-}
-
 /// Byte column in `line` for a UTF-16 column (the presence wire
 /// format). Clamps to the line end; lands on a char boundary by
 /// construction.
@@ -1674,6 +1693,17 @@ fn draw_text(
     opts: &DrawOpts,
     occlusions: &[[f32; 4]],
 ) {
+    draw_text_into(sugarloaf.text_mut(), x, y, text, opts, occlusions);
+}
+
+fn draw_text_into(
+    target: &mut sugarloaf::text::Text,
+    x: f32,
+    y: f32,
+    text: &str,
+    opts: &DrawOpts,
+    occlusions: &[[f32; 4]],
+) {
     let (clip_top, clip_bottom) = opts
         .clip_rect
         .map(|r| (r[1], r[1] + r[3]))
@@ -1682,14 +1712,175 @@ fn draw_text(
     if y + h < clip_top || y > clip_bottom {
         return;
     }
-    if !occlusions.is_empty() {
-        let w = sugarloaf.text_mut().measure(text, opts);
-        if occlusions
-            .iter()
-            .any(|rect| rects_intersect([x, y, w, h], *rect))
-        {
-            return;
+    if occlusions.is_empty() {
+        target.draw(x, y, text, opts);
+        return;
+    }
+    // Never discard a syntax run because only part of it is covered. Keep
+    // shaping/origin unchanged and clip the SAME glyphs into disjoint visible
+    // fragments; Sugarloaf converts each logical clip to device pixels once.
+    let base_clip = opts.clip_rect.unwrap_or_else(|| {
+        let w = target.measure(text, opts);
+        let pad = opts.font_size;
+        [x - pad, y - pad, w + 2.0 * pad, h + 2.0 * pad]
+    });
+    for clip in text_clip_fragments(base_clip, occlusions) {
+        let mut clipped = *opts;
+        clipped.clip_rect = Some(clip);
+        target.draw(x, y, text, &clipped);
+    }
+}
+
+/// Subtract in logical pixels. Positive, disjoint clips preserve partial
+/// glyphs on every edge, without double-blending or zero-size "no clip" sentinels.
+fn text_clip_fragments(base: [f32; 4], occlusions: &[[f32; 4]]) -> Vec<[f32; 4]> {
+    if base[2] <= 0.0 || base[3] <= 0.0 {
+        return Vec::new();
+    }
+    let mut visible = vec![base];
+    for &cut in occlusions {
+        let mut next = Vec::new();
+        for rect in visible {
+            let Some([cx, cy, cw, ch]) = intersect_cursor_rect(rect, cut) else {
+                next.push(rect);
+                continue;
+            };
+            let [x, y, w, h] = rect;
+            for piece in [
+                [x, y, w, cy - y],
+                [x, cy + ch, w, y + h - cy - ch],
+                [x, cy, cx - x, ch],
+                [cx + cw, cy, x + w - cx - cw, ch],
+            ] {
+                if piece[2] > 0.0 && piece[3] > 0.0 {
+                    next.push(piece);
+                }
+            }
+        }
+        visible = next;
+    }
+    visible
+}
+
+#[cfg(test)]
+mod text_occlusion_tests {
+    use super::text_clip_fragments;
+
+    fn contains(r: [f32; 4], x: f32, y: f32) -> bool {
+        x >= r[0] && x < r[0] + r[2] && y >= r[1] && y < r[1] + r[3]
+    }
+
+    #[test]
+    fn partial_syntax_run_survives_on_all_sides_at_device_scales() {
+        // A single long `pub trait ...` run crosses a menu horizontally;
+        // its top/bottom also slice glyphs, rather than whole editor rows.
+        let run_clip = [10.0, 20.0, 240.0, 24.0];
+        for cuts in [
+            vec![[80.0, 20.0, 60.0, 24.0]],
+            vec![[80.0, 26.0, 60.0, 10.0]],
+            vec![[80.0, 26.0, 60.0, 10.0], [120.0, 30.0, 60.0, 12.0]],
+        ] {
+            let fragments = text_clip_fragments(run_clip, &cuts);
+            for scale in [1.0, 1.25, 1.5, 2.0] {
+                // Sugarloaf snaps clip endpoints, not widths independently.
+                let snap = |r: [f32; 4]| {
+                    let x = (r[0] * scale).round();
+                    let y = (r[1] * scale).round();
+                    [
+                        x,
+                        y,
+                        ((r[0] + r[2]) * scale).round() - x,
+                        ((r[1] + r[3]) * scale).round() - y,
+                    ]
+                };
+                for y in 0..100 {
+                    for x in 0..520 {
+                        let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+                        let expected = contains(snap(run_clip), px, py)
+                            && !cuts.iter().any(|r| contains(snap(*r), px, py));
+                        let hits = fragments
+                            .iter()
+                            .filter(|r| contains(snap(**r), px, py))
+                            .count();
+                        assert_eq!(
+                            hits,
+                            usize::from(expected),
+                            "scale={scale}, pixel=({x},{y}), cuts={cuts:?}"
+                        );
+                    }
+                }
+            }
         }
     }
-    sugarloaf.text_mut().draw(x, y, text, opts);
+
+    #[test]
+    fn partial_glyph_clips_match_original_raster_outside_occlusion() {
+        use sugarloaf::font::{fonts::SugarloafFonts, FontLibrary};
+        use sugarloaf::text::{DrawOpts, Text};
+
+        let (library, _errors) = FontLibrary::new(SugarloafFonts::default());
+        let (width, height) = (640, 160);
+        let base = [0.0, 0.0, 300.0, 64.0];
+        let cut = [85.3, 18.4, 53.4, 7.2];
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let mut text = Text::new(&library);
+            text.init_cpu();
+            text.set_scale_factor(scale);
+            let opts = DrawOpts {
+                font_size: 16.0,
+                color: [255; 4],
+                clip_rect: Some(base),
+                ..DrawOpts::default()
+            };
+            let source = "pub trait Renderer: Sized { fn render(&self); }";
+            text.draw(8.0, 12.0, source, &opts);
+            let mut original = vec![0; (width * height) as usize];
+            text.render_cpu(&mut original, width, height);
+            text.clear();
+            super::draw_text_into(&mut text, 8.0, 12.0, source, &opts, &[cut]);
+            let mut clipped = vec![0; original.len()];
+            text.render_cpu(&mut clipped, width, height);
+            let bounds = [
+                (cut[0] * scale).round(),
+                (cut[1] * scale).round(),
+                ((cut[0] + cut[2]) * scale).round(),
+                ((cut[1] + cut[3]) * scale).round(),
+            ];
+            let mut hidden_ink = 0;
+            let mut surviving_ink = 0;
+            for y in 0..height {
+                for x in 0..width {
+                    let i = (y * width + x) as usize;
+                    let inside = x as f32 >= bounds[0]
+                        && (x as f32) < bounds[2]
+                        && y as f32 >= bounds[1]
+                        && (y as f32) < bounds[3];
+                    assert_eq!(
+                        clipped[i],
+                        if inside { 0 } else { original[i] },
+                        "partial glyph mismatch at scale={scale}, pixel=({x},{y})"
+                    );
+                    if original[i] != 0 {
+                        if inside {
+                            hidden_ink += 1;
+                        } else {
+                            surviving_ink += 1;
+                        }
+                    }
+                }
+            }
+            assert!(hidden_ink > 0 && surviving_ink > 0);
+        }
+    }
+
+    #[test]
+    fn covered_empty_and_nonoverlapping_clips_are_safe() {
+        let base = [10.0, 20.0, 240.0, 24.0];
+        assert!(text_clip_fragments(base, &[base]).is_empty());
+        assert!(text_clip_fragments([0.0; 4], &[]).is_empty());
+        assert_eq!(
+            text_clip_fragments(base, &[[250.0, 20.0, 20.0, 24.0]]),
+            vec![base]
+        );
+    }
 }

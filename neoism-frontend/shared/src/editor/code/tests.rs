@@ -468,6 +468,7 @@ fn geometry_hit_position_maps_rows_and_tabs() {
     // Default (never-built) wrap index degrades to the identity
     // mapping — the NoWrap behavior.
     let geometry = CodePaneGeometry {
+        projected_rows: None,
         rect: [0.0, 100.0, 800.0, 400.0],
         text_x: 60.0,
         gutter_w: 52.0,
@@ -735,6 +736,7 @@ fn hanging_indent_is_part_of_caret_and_hit_test_geometry() {
     );
 
     let geometry = CodePaneGeometry {
+        projected_rows: None,
         rect: [0.0, 0.0, 800.0, 200.0],
         text_x: 60.0,
         gutter_w: 52.0,
@@ -761,6 +763,7 @@ fn hanging_indent_is_part_of_caret_and_hit_test_geometry() {
 fn hit_position_resolves_wrapped_visual_rows() {
     let lines = wrap_lines(&["abcdefghij", "next"]);
     let geometry = CodePaneGeometry {
+        projected_rows: None,
         rect: [0.0, 100.0, 800.0, 400.0],
         text_x: 60.0,
         gutter_w: 52.0,
@@ -795,6 +798,7 @@ fn hit_position_resolves_wrapped_visual_rows() {
 fn hit_position_nowrap_honors_horizontal_scroll() {
     let lines = wrap_lines(&["0123456789abcdef"]);
     let geometry = CodePaneGeometry {
+        projected_rows: None,
         rect: [0.0, 0.0, 400.0, 200.0],
         text_x: 60.0,
         gutter_w: 52.0,

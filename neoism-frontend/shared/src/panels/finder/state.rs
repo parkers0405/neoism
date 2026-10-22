@@ -212,6 +212,7 @@ impl Finder {
 
     pub(super) fn search_debounce_ms(&self) -> u128 {
         match self.mode {
+            FinderMode::Files if self.query.is_empty() => 0,
             FinderMode::Files | FinderMode::GitChanges => FILE_DEBOUNCE_MS,
             FinderMode::Grep => GREP_DEBOUNCE_MS,
             // In-memory substring scan — cheap enough to run every

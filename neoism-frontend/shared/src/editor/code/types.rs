@@ -221,6 +221,30 @@ pub struct CodeExtraCaret {
     pub anchor: Option<CodePosition>,
 }
 
+/// A real buffer segment placed by an aggregated diff. Coordinates are absolute
+/// screen pixels; byte ranges are line-local, UTF-8 boundaries, end-exclusive.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProjectedCodeRow {
+    pub source_line: usize,
+    pub y: f32,
+    pub byte_start: usize,
+    pub byte_end: usize,
+    /// Synthetic continuation padding, in display cells (not source bytes).
+    pub indent_cols: usize,
+}
+
+/// Host-owned diff layout. No deleted-only row or hunk spacer belongs in `rows`.
+#[derive(Clone, Debug)]
+pub struct ProjectedCodeSpec {
+    pub viewport: [f32; 4],
+    pub text_x: f32,
+    pub scroll_x: f32,
+    pub row_height: f32,
+    pub font_size: f32,
+    pub rows: Vec<ProjectedCodeRow>,
+    pub focused: bool,
+}
+
 /// Per-frame pane geometry, stored by the painter and read by the host
 /// for pointer hit-testing and page-motion sizing. Pure data — a tty
 /// host fills the same struct with cell units (cell_w/row_h = 1).
@@ -245,15 +269,86 @@ pub struct CodePaneGeometry {
     /// Wrap layout of the painted frame (visual row ↔ buffer line).
     /// The default (empty) index degrades to the identity mapping.
     pub wrap: std::sync::Arc<super::layout::WrapIndex>,
+    /// `Some` selects exact projected layout, including an empty projection.
+    pub projected_rows: Option<Vec<ProjectedCodeRow>>,
 }
 
 impl CodePaneGeometry {
+    /// Exact hit test for projected editors. Gaps, old-only rows, points outside
+    /// the viewport, and stale/out-of-range segments are not editable targets.
+    pub fn projected_hit_position(
+        &self,
+        lines: &[String],
+        mx: f32,
+        my: f32,
+    ) -> Option<(usize, usize)> {
+        let [x, y, w, h] = self.rect;
+        if mx < x || mx >= x + w || my < y || my >= y + h {
+            return None;
+        }
+        self.projected_rows
+            .as_ref()?
+            .iter()
+            .find(|row| my >= row.y && my < row.y + self.row_h)
+            .and_then(|row| self.projected_row_position(lines, row, mx))
+    }
+
+    fn projected_row_position(
+        &self,
+        lines: &[String],
+        row: &ProjectedCodeRow,
+        mx: f32,
+    ) -> Option<(usize, usize)> {
+        use super::layout::{byte_for_display_col, TAB_DISPLAY_WIDTH};
+        let line = lines.get(row.source_line)?;
+        if row.byte_start > row.byte_end
+            || row.byte_end > line.len()
+            || !line.is_char_boundary(row.byte_start)
+            || !line.is_char_boundary(row.byte_end)
+        {
+            return None;
+        }
+        let cells =
+            ((mx - self.text_x + self.scroll_x) / self.cell_w.max(1.0)).max(0.0) as usize;
+        let cells = cells.saturating_sub(row.indent_cols);
+        let byte = row.byte_start
+            + byte_for_display_col(
+                &line[row.byte_start..row.byte_end],
+                cells,
+                TAB_DISPLAY_WIDTH,
+            );
+        Some((row.source_line, byte))
+    }
+
     /// Map a pointer position to a buffer position (line, byte col).
     /// Under wrap the pointer resolves to a visual row first; clicking
     /// past the end of a wrapped row parks on that row's last char
     /// (nvim), not on the next visual row.
     pub fn hit_position(&self, lines: &[String], mx: f32, my: f32) -> (usize, usize) {
         use super::layout::{byte_for_display_col, TAB_DISPLAY_WIDTH};
+        if let Some(rows) = &self.projected_rows {
+            // Legacy drag callers need a total mapping: choose the nearest REAL
+            // row, never infer a source line from spacer height. New click hosts
+            // should use projected_hit_position to reject gaps outright.
+            return rows
+                .iter()
+                .filter_map(|row| {
+                    self.projected_row_position(lines, row, mx).map(|pos| {
+                        let distance = if my < row.y {
+                            row.y - my
+                        } else {
+                            (my - row.y - self.row_h).max(0.0)
+                        };
+                        (distance, pos)
+                    })
+                })
+                .min_by(|a, b| a.0.total_cmp(&b.0))
+                .map(|(_, pos)| pos)
+                .unwrap_or((0, 0));
+        }
+        if lines.is_empty() {
+            return (0, 0);
+        }
         let y = self.rect[1];
         let vrow = (((my - y + self.scroll_y) / self.row_h.max(1.0)).max(0.0)) as usize;
         let (line_ix, seg) = self.wrap.line_of_row(vrow, lines.len());
@@ -294,7 +389,135 @@ impl CodePaneGeometry {
     }
 }
 
+#[cfg(test)]
+mod pointer_placement_tests {
+    use super::*;
+
+    #[test]
+    fn resolved_review_click_discards_same_file_distant_excerpt_until_repaint() {
+        let text = (0..300).map(|_| "\tαβ word").collect::<Vec<_>>().join("\n");
+        for mode in [CodeMode::Normal, CodeMode::Insert, CodeMode::Visual] {
+            let mut pane = CodePane::new("/repo/a.rs".into(), &text);
+            pane.buffer.mode = mode;
+            pane.geometry = CodePaneGeometry {
+                rect: [0.0, 0.0, 500.0, 200.0],
+                row_h: 20.0,
+                cell_w: 10.0,
+                projected_rows: Some(vec![ProjectedCodeRow {
+                    source_line: 5,
+                    y: 20.0,
+                    byte_start: 0,
+                    byte_end: "\tαβ word".len(),
+                    indent_cols: 0,
+                }]),
+                ..CodePaneGeometry::default()
+            };
+            pane.buffer.follow_cursor = true;
+            pane.buffer.pending_cursor_row_delta = Some(-150);
+            pane.last_keyboard_reveal = Some(Instant::now());
+            pane.scroll_y = 400.0;
+            pane.target_scroll_y = 100.0;
+            pane.scroll_velocity_px_s = -90.0;
+            pane.invalidate_review_pointer_geometry();
+            pane.set_pointer_position(250, 5, false);
+            pane.mouse_selecting = true;
+            assert_eq!(pane.buffer.cursor(), CodePosition { line: 250, col: 5 });
+            assert!(!pane.buffer.follow_cursor);
+            assert_eq!(pane.buffer.pending_cursor_row_delta, None);
+            assert_eq!(pane.last_keyboard_reveal, None);
+            assert_eq!(pane.target_scroll_y, 400.0);
+            assert_eq!(pane.scroll_velocity_px_s, 0.0);
+            // Tiny movement before repaint cannot hit line 5 (or fallback 0).
+            assert!(pane.extend_pointer_selection_at(50.5, 25.5));
+            assert_eq!(pane.buffer.cursor(), CodePosition { line: 250, col: 5 });
+            assert!(!pane.buffer.has_selection());
+            // Fresh wrapped continuation: bytes, not character/display columns.
+            pane.geometry.projected_rows = Some(vec![ProjectedCodeRow {
+                source_line: 250,
+                y: 20.0,
+                byte_start: 1,
+                byte_end: 10,
+                indent_cols: 2,
+            }]);
+            assert!(pane.extend_pointer_selection_at(30.0, 25.5));
+            assert_eq!(pane.buffer.cursor(), CodePosition { line: 250, col: 3 });
+            assert_eq!(
+                pane.buffer.visual_anchor,
+                Some(CodePosition { line: 250, col: 5 })
+            );
+            assert_eq!(pane.buffer.mode, mode);
+            pane.buffer.apply_motion(CodeMotion::Down, false);
+            assert!(
+                pane.buffer.follow_cursor,
+                "keyboard motion must rearm follow"
+            );
+        }
+    }
+
+    #[test]
+    fn pointer_shift_preserves_anchor_and_clamps_unicode_byte_columns() {
+        let mut pane = CodePane::new("/repo/a.rs".into(), "\tαβ word\nnext");
+        pane.set_pointer_position(1, 2, false);
+        pane.buffer.follow_cursor = true;
+        pane.set_pointer_position(0, 4, true); // Inside β -> its starting byte.
+        assert_eq!(pane.buffer.cursor(), CodePosition { line: 0, col: 3 });
+        assert_eq!(
+            pane.buffer.visual_anchor,
+            Some(CodePosition { line: 1, col: 2 })
+        );
+        assert!(!pane.buffer.follow_cursor);
+        pane.set_pointer_position(0, 1, true);
+        assert_eq!(
+            pane.buffer.visual_anchor,
+            Some(CodePosition { line: 1, col: 2 })
+        );
+    }
+}
+
 impl CodePane {
+    /// A resolved source click must never consult geometry retained from a
+    /// different review excerpt (even when it owns the same canonical file).
+    /// Keep the projection explicitly empty until the next projected paint;
+    /// `None` would incorrectly enable ordinary full-file hit testing.
+    pub fn invalidate_review_pointer_geometry(&mut self) {
+        self.geometry.projected_rows = Some(Vec::new());
+        self.plugin_hit_regions.clear();
+        self.scrollbar_track = None;
+        self.scrollbar_thumb = None;
+        self.scrollbar_drag = None;
+        self.cursor_rect = None;
+    }
+
+    /// Pointer placement keeps the view where the user clicked, rather than
+    /// finishing a queued keyboard reveal or structural-edit scroll anchor.
+    pub fn set_pointer_position(&mut self, line: usize, col: usize, extend: bool) {
+        self.buffer.set_cursor_position(line, col, extend);
+        self.last_keyboard_reveal = None;
+        self.visual_goal = None;
+        self.target_scroll_y = self.scroll_y;
+        self.target_scroll_raw = self.scroll_y;
+        self.scroll_velocity_px_s = 0.0;
+        self.scroll_last_tick_at = None;
+    }
+
+    /// Missing/stale projected rows are not source line zero. Consume a drag
+    /// without moving its anchor until the current owner has painted geometry.
+    pub fn extend_pointer_selection_at(&mut self, x: f32, y: f32) -> bool {
+        if !self.mouse_selecting {
+            return false;
+        }
+        let position = if self.geometry.projected_rows.is_some() {
+            self.geometry
+                .projected_hit_position(&self.buffer.lines, x, y)
+        } else {
+            Some(self.geometry.hit_position(&self.buffer.lines, x, y))
+        };
+        if let Some((line, col)) = position {
+            self.set_pointer_position(line, col, true);
+        }
+        true
+    }
+
     pub fn select_touch_word_at(&mut self, x: f32, y: f32) -> bool {
         let (line, col) = self.geometry.hit_position(&self.buffer.lines, x, y);
         let Some((start, end)) =

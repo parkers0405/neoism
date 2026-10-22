@@ -9,6 +9,10 @@ use neoism_window::keyboard::{Key, NamedKey};
 use neoism_window::platform::modifier_supplement::KeyEventExtModifierSupplement;
 use std::time::{Duration, Instant};
 
+fn git_sidebar_claims_escape(focused: bool, pressed: bool, key: &Key) -> bool {
+    focused && pressed && matches!(key, Key::Named(NamedKey::Escape))
+}
+
 const REDRAW_RETRY_INITIAL_AFTER: Duration = Duration::from_millis(250);
 const REDRAW_RETRY_MAX_AFTER: Duration = Duration::from_secs(2);
 
@@ -88,6 +92,23 @@ impl RedrawRequestState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn insert_escape_is_not_consumed_by_a_pinned_git_sidebar() {
+        use neoism_ui::editor::code::{CodeInputMode, CodeMode, CodePane};
+        let mut pane = CodePane::new("/repo/a.rs".into(), "hello\n");
+        pane.input_mode = CodeInputMode::Vim;
+        pane.buffer.mode = CodeMode::Insert;
+        let escape = Key::Named(NamedKey::Escape);
+        // Visibility deliberately is not an input: a pinned panel may not
+        // intercept either edge before dispatch_code_key exits Insert.
+        assert!(!git_sidebar_claims_escape(false, true, &escape));
+        assert!(!git_sidebar_claims_escape(false, false, &escape));
+        assert_eq!(pane.buffer.mode, CodeMode::Insert);
+        assert!(git_sidebar_claims_escape(true, true, &escape));
+        assert!(!git_sidebar_claims_escape(true, false, &escape));
+        assert!(!git_sidebar_claims_escape(true, true, &Key::Named(NamedKey::ArrowDown)));
+    }
 
     #[test]
     fn redraw_request_state_suppresses_duplicate_until_retry_deadline() {
@@ -652,11 +673,13 @@ impl Route<'_> {
             }
         }
 
-        // Right-side git diff panel — claims Esc only. Arrow keys and
-        // PgUp/PgDn fall through to the editor underneath so the panel
-        // doesn't hijack normal navigation while it's pinned open.
-        if self.window.screen.renderer.git_diff_panel.is_visible()
-            && key_event.state == ElementState::Pressed
+        // A pinned sidebar is not a keyboard overlay. Only sidebar focus may
+        // dismiss it; editor Escape must reach the canonical Vim controller.
+        if git_sidebar_claims_escape(
+            self.window.screen.renderer.git_diff_panel.is_focused(),
+            key_event.state == ElementState::Pressed,
+            &key_event.logical_key,
+        )
         {
             if let Key::Named(NamedKey::Escape) = &key_event.logical_key {
                 // Esc while the branch dropdown is open closes JUST the

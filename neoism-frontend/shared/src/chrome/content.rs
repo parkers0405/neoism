@@ -46,7 +46,10 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         let (mode, primary_kind, primary): (Mode, PrimaryKind, String) =
             if self.is_neoism_agent_tab_active() {
                 (Mode::Agent, PrimaryKind::Agent, "Neoism".to_string())
-            } else if let Some(page) = self.active_chrome_page() {
+            } else if let Some(page) = self
+                .active_chrome_page()
+                .filter(|_| self.active_editor_pane_kind().is_none())
+            {
                 // Chrome helper page (Extensions / NeoWorld) — a
                 // Rust-painted surface with no vi mode; show its title
                 // as the primary label.
@@ -443,7 +446,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         path: &str,
         text: &str,
     ) -> EditorPaneKind {
-        use std::path::{Path, PathBuf};
+        use std::path::Path;
         let path_ref = Path::new(path);
         self.editor_pane_tab = Some(tab_index);
         let kind = if crate::editor::notebook::is_notebook_path(path_ref) {
@@ -454,16 +457,80 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             EditorPaneKind::Code
         };
 
+        self.open_editor_file_kind(tab_index, path, text, kind)
+    }
+
+    /// A source gutter opens text, not the structured notebook/drawing editor.
+    /// The caller must first reject an existing special owner.
+    pub fn open_source_file(&mut self, tab_index: usize, path: &str, text: &str) -> bool {
+        let path_ref = std::path::Path::new(path);
+        if self.source_editor_policy(path_ref) == "unsupported" {
+            return false;
+        }
+        if self.activate_canonical_code_pane(path_ref) {
+            self.editor_pane_tab = Some(tab_index);
+            return true;
+        }
+        self.open_editor_file_kind(tab_index, path, text, EditorPaneKind::Code);
+        true
+    }
+
+    /// Never create a second source replica beside a special editor owner.
+    /// Markdown's hosted pane is not parked with its binding; replaying tab
+    /// content calls set_source. Until that ownership path supports a safe
+    /// source reveal, report unsupported rather than resetting a dirty owner.
+    pub fn source_editor_policy(&self, path: &std::path::Path) -> &'static str {
+        if self
+            .markdown_pane
+            .as_ref()
+            .is_some_and(|pane| pane.path == path)
+            || self
+                .notebook_pane
+                .as_ref()
+                .is_some_and(|pane| pane.path == path)
+            || self
+                .draw_pane
+                .as_ref()
+                .is_some_and(|pane| pane.path == path)
+            || self.parked_notebook_panes.contains_key(path)
+            || self.parked_draw_panes.contains_key(path)
+        {
+            "unsupported"
+        } else if self
+            .code_pane
+            .as_ref()
+            .is_some_and(|pane| pane.path == path)
+            || self.parked_code_panes.contains_key(path)
+        {
+            "code"
+        } else {
+            "load"
+        }
+    }
+
+    fn open_editor_file_kind(
+        &mut self,
+        tab_index: usize,
+        path: &str,
+        text: &str,
+        kind: EditorPaneKind,
+    ) -> EditorPaneKind {
+        use std::path::{Path, PathBuf};
+        let path_ref = Path::new(path);
+        self.editor_pane_tab = Some(tab_index);
         // Park panes leaving the hosted slots (different kind or
         // different path) so their cursor/undo/unsaved edits survive
         // the tab round-trip — the web twin of desktop's per-tab
-        // panes. The code pane's doc binding is dropped with the
-        // slot; a restore re-binds through the crdt pump.
+        // panes. Each code pane retains its document replica and origin-scoped
+        // undo history while parked; focus changes are not document disposal.
         if let Some(pane) = self.code_pane.take() {
             if kind == EditorPaneKind::Code && pane.path == path_ref {
                 self.code_pane = Some(pane);
             } else {
-                self.code_doc_binding = None;
+                if let Some(binding) = self.code_doc_binding.take() {
+                    self.parked_code_doc_bindings
+                        .insert(pane.path.clone(), binding);
+                }
                 self.parked_code_panes.insert(pane.path.clone(), pane);
             }
         }
@@ -527,20 +594,22 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             EditorPaneKind::Code => {
                 if self.code_pane.is_none() {
                     if let Some(pane) = self.parked_code_panes.remove(path_ref) {
-                        // A restored pane needs a fresh doc binding
-                        // (the old one died with its slot residency).
-                        self.code_doc_binding = None;
+                        self.code_doc_binding =
+                            self.parked_code_doc_bindings.remove(path_ref);
                         self.code_pane = Some(pane);
                     }
                 }
                 match self.code_pane.as_mut() {
                     Some(pane) => {
-                        // Only fold fresh content into a CLEAN buffer
-                        // whose file actually changed — clobbering a
-                        // dirty buffer would eat the user's edits.
-                        if !pane.is_dirty() && pane.buffer.text_for_disk() != text {
+                        // A retained replica owns both text and the saved
+                        // baseline; even a clean bound pane must not be reseeded
+                        // from a stale host disk fetch. Unbound, clean panes can
+                        // still pick up external disk changes.
+                        if self.code_doc_binding.is_none()
+                            && !pane.is_dirty()
+                            && pane.buffer.text_for_disk() != text
+                        {
                             pane.apply_remote_source(text);
-                            self.code_doc_binding = None;
                         }
                     }
                     None => {
@@ -564,9 +633,248 @@ impl<A: Send + Copy + 'static> Chrome<A> {
     /// modal) is up: the overlay owns the surface, so editor key +
     /// pointer routes (which consult this) stand down instead of
     /// mutating the hidden pane underneath.
+    pub fn canonical_diff_source_dirty(
+        &self,
+        root: &std::path::Path,
+        path: &std::path::Path,
+    ) -> bool {
+        let absolute: std::path::PathBuf =
+            neoism_protocol::host_path::HostPath::new(root.to_string_lossy())
+                .join(&path.to_string_lossy())
+                .as_str()
+                .into();
+        self.code_pane
+            .as_ref()
+            .filter(|pane| pane.path == absolute)
+            .or_else(|| self.parked_code_panes.get(&absolute))
+            .is_some_and(|pane| pane.is_dirty())
+            || self
+                .markdown_pane
+                .as_ref()
+                .is_some_and(|pane| pane.path == absolute && pane.is_dirty())
+            // A displaced Markdown/structured editor may no longer occupy the
+            // single hosted pane slot; its retained tab still owns dirty text.
+            || self.buffer_tabs.tabs().iter().any(|tab| tab.modified && tab.path.as_ref() == Some(&absolute))
+    }
+
+    /// Final provider-envelope gate, shared by review and sidebar mutations.
+    /// False means queued for save acknowledgement, or visibly refused.
+    pub fn prepare_git_panel_stage(&mut self, path: &std::path::Path) -> bool {
+        let Some(root) = self.git_diff_panel.repo_root() else {
+            return false;
+        };
+        if !self.canonical_diff_source_dirty(&root, path) {
+            return true;
+        }
+        let absolute: std::path::PathBuf =
+            neoism_protocol::host_path::HostPath::new(root.to_string_lossy())
+                .join(&path.to_string_lossy())
+                .as_str()
+                .into();
+        let current_code_document = self.active_editor_pane_kind()
+            == Some(EditorPaneKind::Code)
+            || self
+                .active_git_diff_route()
+                .and_then(|route| self.git_diff_views.get(&route))
+                .and_then(|view| view.document_path())
+                .is_some_and(|document| document == absolute);
+        let active_code = current_code_document
+            && self
+                .code_pane
+                .as_ref()
+                .is_some_and(|pane| pane.path == absolute);
+        if active_code {
+            let request = (root, path.to_path_buf(), false);
+            if !self.pending_git_diff_save_stages.contains(&request) {
+                self.pending_git_diff_save_stages.push(request);
+            }
+        } else {
+            self.notifications.push(
+                "Save this file's source edits before staging.",
+                crate::panels::notifications::NotificationLevel::Warn,
+            );
+        }
+        self.git_diff_panel.host_set_error(if active_code {
+            "Waiting for source save before staging.".into()
+        } else {
+            "Save this file's source edits before staging.".into()
+        });
+        false
+    }
+
+    /// Capture the actual retained owner, never the review projection.
+    pub fn git_restore_identity(&self, path: &std::path::Path) -> Option<(u64, String)> {
+        let pane = self.code_pane.as_ref().filter(|p| p.path == path)
+            .or_else(|| self.parked_code_panes.get(path))?;
+        (pane.workspace_sync_ready() && !pane.is_dirty()).then(|| (pane.buffer.revision, pane.buffer.text_for_disk()))
+    }
+
+    /// Web mutations require the canonical owner's authoritative replica to be
+    /// ready. A clean-looking loading/error pane is not permission to restore.
+    pub fn git_restore_replica_ready(&self, path: &std::path::Path) -> bool {
+        if self.code_pane.as_ref().is_some_and(|p| p.path == path) {
+            return self.code_doc_binding.as_ref().is_some_and(|b| b.is_seeded());
+        }
+        if self.parked_code_panes.contains_key(path) {
+            return self.parked_code_doc_bindings.get(path).is_some_and(|b| b.is_seeded());
+        }
+        true
+    }
+
+    pub fn prepare_git_panel_restore(&mut self, path: &std::path::Path) -> bool {
+        let Some(root) = self.git_diff_panel.repo_root() else {
+            return false;
+        };
+        let absolute: std::path::PathBuf = neoism_protocol::host_path::HostPath::new(root.to_string_lossy()).join(&path.to_string_lossy()).as_str().into();
+        let unavailable = self.code_pane.as_ref().filter(|p| p.path == absolute)
+            .or_else(|| self.parked_code_panes.get(&absolute)).is_some_and(|p| !p.workspace_sync_ready())
+            || self.markdown_pane.as_ref().is_some_and(|p| p.path == absolute && !p.workspace_sync_ready());
+        if !unavailable && !self.canonical_diff_source_dirty(&root, path) {
+            return true;
+        }
+        self.notifications.push(
+            "Save or discard source edits before restoring this file.",
+            crate::panels::notifications::NotificationLevel::Warn,
+        );
+        self.git_diff_panel.host_set_error(
+            "Save or discard source edits before restoring this file.".into(),
+        );
+        false
+    }
+
+    pub fn take_git_diff_save_stages(
+        &mut self,
+    ) -> Vec<(std::path::PathBuf, std::path::PathBuf, bool)> {
+        let root = self.git_diff_panel.repo_root();
+        self.pending_git_diff_save_stages
+            .retain(|(queued_root, _, _)| Some(queued_root) == root.as_ref());
+        if !self.pending_git_diff_save_stages.is_empty() {
+            if let Some(route) = self.active_git_diff_route() {
+                if let Some(view) = self.git_diff_views.get_mut(&route) {
+                    view.set_edit_focus(true);
+                }
+            }
+        }
+        std::mem::take(&mut self.pending_git_diff_save_stages)
+    }
+
+    pub fn active_diff_text_cursor(&self, x: f32, y: f32) -> bool {
+        !self.chrome_overlay_active()
+            && self.focused_content_rect().contains(x, y)
+            && self
+                .active_git_diff_route()
+                .and_then(|route| self.git_diff_views.get(&route))
+                .is_some_and(|view| view.text_cursor(x, y))
+    }
+
+    /// Canonical source path currently edited inside the review presentation.
+    pub fn git_diff_editing_path(&self) -> Option<std::path::PathBuf> {
+        self.active_git_diff_route()
+            .and_then(|route| self.git_diff_views.get(&route))
+            .and_then(|view| view.editing_path())
+    }
+
+    pub fn take_git_diff_edit_request(
+        &mut self,
+    ) -> Option<crate::panels::git_diff_view::GitDiffEditRequest> {
+        let route = self.active_git_diff_route()?;
+        self.git_diff_views.get_mut(&route)?.take_edit_request()
+    }
+
+    pub fn focus_git_diff_editor(
+        &mut self,
+        path: &std::path::Path,
+        line: usize,
+        column: usize,
+    ) -> bool {
+        let Some(route) = self.active_git_diff_route() else {
+            return false;
+        };
+        if !self.activate_git_diff_editor(path) {
+            return false;
+        }
+        let pane = self.code_pane.as_mut().expect("activated");
+        pane.buffer.set_cursor_position(line, column, false);
+        pane.buffer.follow_cursor = true;
+        if let Some(view) = self.git_diff_views.get_mut(&route) {
+            view.set_edit_focus(true);
+        }
+        true
+    }
+
+    /// Activate an already-loaded source without reseeding even a clean buffer.
+    /// No buffer tab is created: the review remains the presentation owner.
+    pub fn activate_git_diff_editor(&mut self, path: &std::path::Path) -> bool {
+        self.activate_canonical_code_pane(path)
+    }
+
+    /// The host must install/select the ordinary source tab before calling this.
+    /// Retained panes and their document bindings move together, without reseeding.
+    pub fn focus_source_editor(
+        &mut self,
+        tab_index: usize,
+        path: &std::path::Path,
+        line: usize,
+        column: usize,
+    ) -> bool {
+        if self.source_editor_policy(path) == "unsupported"
+            || self.active_tab_index != tab_index
+            || self.active_chrome_page().is_some()
+            || !self
+                .buffer_tabs
+                .tabs()
+                .get(tab_index)
+                .is_some_and(|tab| tab.path.as_deref() == Some(path))
+        {
+            return false;
+        }
+        if !self.activate_canonical_code_pane(path) {
+            return false;
+        }
+        let pane = self.code_pane.as_mut().expect("activated");
+        pane.buffer.set_cursor_position(line, column, false);
+        pane.buffer.follow_cursor = true;
+        true
+    }
+
+    fn activate_canonical_code_pane(&mut self, path: &std::path::Path) -> bool {
+        if self
+            .code_pane
+            .as_ref()
+            .is_some_and(|pane| pane.path == path)
+        {
+            self.editor_pane_tab = Some(self.active_tab_index);
+            return true;
+        }
+        let Some(pane) = self.parked_code_panes.remove(path) else {
+            return false;
+        };
+        if let Some(previous) = self.code_pane.replace(pane) {
+            if let Some(binding) = self.code_doc_binding.take() {
+                self.parked_code_doc_bindings
+                    .insert(previous.path.clone(), binding);
+            }
+            self.parked_code_panes
+                .insert(previous.path.clone(), previous);
+        }
+        self.code_doc_binding = self.parked_code_doc_bindings.remove(path);
+        self.editor_pane_tab = Some(self.active_tab_index);
+        true
+    }
+
     pub fn active_editor_pane_kind(&self) -> Option<EditorPaneKind> {
         if self.chrome_overlay_active() {
             return None;
+        }
+        if self.active_chrome_page().is_some() {
+            return self
+                .git_diff_editing_path()
+                .filter(|path| {
+                    self.code_pane
+                        .as_ref()
+                        .is_some_and(|pane| pane.path == *path)
+                })
+                .map(|_| EditorPaneKind::Code);
         }
         if self.editor_pane_tab != Some(self.active_tab_index) {
             return None;
@@ -593,6 +901,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         self.editor_pane_tab = None;
         self.editor_pane_animating = false;
         self.parked_code_panes.clear();
+        self.parked_code_doc_bindings.clear();
         self.parked_notebook_panes.clear();
         self.parked_draw_panes.clear();
     }
@@ -634,6 +943,100 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         &mut Option<crate::editor::code::doc_sync::CodeDocBinding>,
     ) {
         (self.code_pane.as_mut(), &mut self.code_doc_binding)
+    }
+
+    /// Find the canonical pane/replica pair by wire identity, including parked
+    /// documents. Inbound updates must not depend on keyboard or tab focus.
+    pub fn code_editor_for_buffer_mut(
+        &mut self,
+        buffer_id: &str,
+    ) -> Option<(
+        &mut crate::editor::code::CodePane,
+        &mut crate::editor::code::doc_sync::CodeDocBinding,
+    )> {
+        if self
+            .code_doc_binding
+            .as_ref()
+            .is_some_and(|binding| binding.buffer_id() == buffer_id)
+        {
+            return self.code_pane.as_mut().zip(self.code_doc_binding.as_mut());
+        }
+        let (path, binding) = self
+            .parked_code_doc_bindings
+            .iter_mut()
+            .find(|(_, binding)| binding.buffer_id() == buffer_id)?;
+        self.parked_code_panes
+            .get_mut(path)
+            .map(|pane| (pane, binding))
+    }
+
+    /// Bind a focused document, then flush the current pair even during a
+    /// null-focus transition. Focus loss is not document disposal.
+    pub fn pump_code_document(
+        &mut self,
+        client_id: u64,
+        buffer_id: Option<&str>,
+    ) -> Vec<neoism_protocol::crdt::CrdtClientMessage> {
+        use crate::editor::code::doc_sync::CodeDocBinding;
+        use neoism_protocol::crdt::{CrdtClientMessage, CrdtSyncEnvelope};
+        let mut messages = Vec::new();
+        if let (Some(pane), Some(buffer_id)) = (self.code_pane.as_mut(), buffer_id) {
+            if !self
+                .code_doc_binding
+                .as_ref()
+                .is_some_and(|binding| binding.buffer_id() == buffer_id)
+            {
+                pane.buffer.set_doc_history_bound(false);
+                messages.push(CrdtClientMessage::OpenBuffer {
+                    buffer_id: buffer_id.to_string(),
+                    initial_text: pane.buffer.lines.join("\n"),
+                });
+                self.code_doc_binding = Some(CodeDocBinding::new(client_id, buffer_id));
+            }
+        }
+        for (buffer_id, update) in self.flush_code_document() {
+            messages.push(CrdtClientMessage::ApplySync {
+                envelope: CrdtSyncEnvelope {
+                    buffer_id,
+                    origin_client_id: update.origin_client_id,
+                    update_v1: update.update_v1,
+                    state_vector_v1: update.state_vector_v1,
+                },
+            });
+        }
+        messages
+    }
+
+    /// Drain local mutations and origin-scoped history even when the host has
+    /// temporarily lost code focus (for example between clicking B and parking A).
+    /// Only explicit pane disposal may drop the replica.
+    pub fn flush_code_document(
+        &mut self,
+    ) -> Vec<(String, crate::editor::crdt::CrdtTextUpdate)> {
+        use crate::editor::code::CodeDocHistoryRequest;
+        let mut updates = Vec::new();
+        let (Some(pane), Some(binding)) =
+            (self.code_pane.as_mut(), self.code_doc_binding.as_mut())
+        else {
+            return updates;
+        };
+        pane.buffer.set_doc_history_bound(binding.is_seeded());
+        for request in pane.buffer.take_doc_history_requests() {
+            let result = match request {
+                CodeDocHistoryRequest::Undo => binding.undo(&mut pane.buffer),
+                CodeDocHistoryRequest::Redo => binding.redo(&mut pane.buffer),
+            };
+            for update in [result.flushed_local, result.history_update]
+                .into_iter()
+                .flatten()
+            {
+                updates.push((binding.buffer_id().to_string(), update));
+            }
+        }
+        if let Some(update) = binding.flush_local(&pane.buffer) {
+            updates.push((binding.buffer_id().to_string(), update));
+        }
+        updates
     }
 
     pub fn animations_active(&self) -> bool {

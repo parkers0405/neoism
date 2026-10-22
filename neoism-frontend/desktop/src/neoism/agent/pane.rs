@@ -30,8 +30,8 @@ use neoism_ui::panels::agent_pane::view::timeline::TimelineViewAnchorKey;
 use serde_json::{json, Value};
 
 use super::api::{
-    api_request_json, delete_session, fetch_agent_options, fetch_config_defaults,
-    fetch_family_runtime, fetch_model_context_limit, fetch_model_options,
+    api_request_json, delete_session, fetch_config_catalog_defaults, fetch_config_defaults,
+    fetch_family_runtime, fetch_model_context_limit,
     fetch_pending_permissions, fetch_pending_questions, fetch_session_goal,
     fetch_session_options, fetch_session_statuses, fetch_skill_options,
     fetch_subagent_entries, fetch_subagent_options, neoism_agent_server, rename_session,
@@ -277,6 +277,7 @@ pub(super) struct CachedAgentSession {
     pub pending_user_prompts: Vec<String>,
     pub prompt_echo_aliases: Vec<(String, String)>,
     pub timeline_history: AgentTimelineHistoryState,
+    pub initial_history_preview: Option<Arc<super::api::SessionMessagePage>>,
     pub timeline_content_height_px: f32,
     pub timeline_live_trace_start: Option<usize>,
     pub timeline_live_trace_anchor: Option<String>,
@@ -299,6 +300,7 @@ impl CachedAgentSession {
             pending_user_prompts: Vec::new(),
             prompt_echo_aliases: Vec::new(),
             timeline_history: AgentTimelineHistoryState::default(),
+            initial_history_preview: None,
             timeline_content_height_px: 0.0,
             timeline_live_trace_start: None,
             timeline_live_trace_anchor: None,
@@ -714,6 +716,16 @@ pub(crate) enum AgentSessionMutation {
     Delete,
 }
 
+#[derive(Clone)]
+pub(crate) struct ConfigDefaultsTarget {
+    scope: super::api::CatalogScope,
+    generation: u64,
+    directory: Option<String>,
+    agent: Option<String>,
+    model: String,
+    thinking: Option<String>,
+}
+
 pub(crate) enum NeoismAgentBackgroundUpdate {
     InteractionReplyCompleted {
         server: String,
@@ -779,22 +791,27 @@ pub(crate) enum NeoismAgentBackgroundUpdate {
         request_id: Option<String>,
         error: String,
     },
-    ConfigDefaultsLoaded(neoism_ui::panels::agent_pane::api_mapping::ConfigDefaults),
-    ConfigDefaultsFailed,
+    ConfigDefaultsLoaded {
+        target: ConfigDefaultsTarget,
+        defaults: neoism_ui::panels::agent_pane::api_mapping::ConfigDefaults,
+    },
+    ConfigDefaultsFailed(ConfigDefaultsTarget),
     ModelContextLimitRefreshed {
         model: String,
         limit: Option<u64>,
     },
-    ModelOptionsRefreshed(
-        Result<
-            (
-                Vec<NeoismAgentPickerOption>,
-                Option<neoism_ui::panels::agent_pane::api_mapping::ProviderReadiness>,
-            ),
-            String,
-        >,
-    ),
-    AgentOptionsRefreshed(Result<Vec<NeoismAgentPickerOption>, String>),
+    ModelOptionsRefreshed {
+        scope: super::api::CatalogScope,
+        result: Result<Vec<NeoismAgentPickerOption>, String>,
+    },
+    AgentOptionsRefreshed {
+        scope: super::api::CatalogScope,
+        result: Result<Vec<NeoismAgentPickerOption>, String>,
+    },
+    ProviderReadinessRefreshed {
+        scope: super::api::CatalogScope,
+        result: Result<neoism_ui::panels::agent_pane::api_mapping::ProviderReadiness, String>,
+    },
     SessionOptionsRefreshed {
         catalog_generation: u64,
         result: Result<Vec<NeoismAgentPickerOption>, String>,
@@ -1066,6 +1083,7 @@ pub struct NeoismAgentPane {
     /// switches agents (including Build/Plan via Tab).
     pub(super) agent_label_changed_at: Option<Instant>,
     config_chip_hydration: neoism_ui::panels::agent_pane::state::ConfigChipHydration,
+    config_defaults_generation: u64,
     pub(super) model: String,
     pub(super) connection_id: Option<String>,
     pub(super) pending_account_model: Option<String>,
@@ -1336,6 +1354,7 @@ pub struct NeoismAgentPane {
     /// turn boundary instead of drifting to the latest turn.
     timeline_live_trace_anchor: Option<String>,
     pub(super) timeline_history: AgentTimelineHistoryState,
+    pub(super) initial_history_preview: Option<Arc<super::api::SessionMessagePage>>,
     scrollbar_thumb_rect: Option<[f32; 4]>,
     scrollbar_track_rect: Option<[f32; 4]>,
     scrollbar_drag: Option<ScrollbarDrag>,
@@ -1462,6 +1481,7 @@ impl Default for NeoismAgentPane {
             agent: Some(DEFAULT_AGENT.to_string()),
             agent_label_changed_at: None,
             config_chip_hydration: Default::default(),
+            config_defaults_generation: 0,
             model: DEFAULT_MODEL.to_string(),
             connection_id: None,
             pending_account_model: None,
@@ -1634,6 +1654,7 @@ impl Default for NeoismAgentPane {
             timeline_live_trace_start: None,
             timeline_live_trace_anchor: None,
             timeline_history: AgentTimelineHistoryState::default(),
+            initial_history_preview: None,
             scrollbar_thumb_rect: None,
             scrollbar_track_rect: None,
             scrollbar_drag: None,
@@ -2575,6 +2596,8 @@ fn ease_out_cubic(t: f32) -> f32 {
 
 #[cfg(test)]
 mod admission_tests;
+#[cfg(test)]
+mod defaults_tests;
 #[cfg(test)]
 mod footer_tests;
 #[cfg(test)]

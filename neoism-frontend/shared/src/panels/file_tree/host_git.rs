@@ -199,6 +199,7 @@ mod tests {
                 workspace_root: root.as_str().into(),
                 repo_root: Some(repo.as_str().into()),
                 branch: Some("main".into()),
+                upstream: None,
                 files: vec![
                     file("sub/tracked.rs", GitChangeStatus::Staged),
                     file("sub/dir/new.rs", GitChangeStatus::Untracked),
@@ -245,6 +246,7 @@ mod tests {
             workspace_root: "/host/repo".into(),
             repo_root: Some("/host/repo".into()),
             branch: None,
+            upstream: None,
             error: None,
             files: vec![
                 file(r"src\literal", GitChangeStatus::Untracked),

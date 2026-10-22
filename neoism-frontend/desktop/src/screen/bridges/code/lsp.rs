@@ -146,8 +146,10 @@ enum CodeLspJob {
         seq: u64,
     },
     Definition {
+        action: neoism_protocol::editor::EditorLspAction,
         root: PathBuf,
         file: PathBuf,
+        text: String,
         line: u32,
         character: u32,
         seq: u64,
@@ -190,6 +192,7 @@ enum CodeLspJob {
     References {
         root: PathBuf,
         file: PathBuf,
+        text: String,
         line: u32,
         character: u32,
         seq: u64,
@@ -379,7 +382,7 @@ fn map_engine_diagnostic(
 struct CodeLspResults {
     completion: Option<(u64, PathBuf, Vec<engine::LspCompletionItem>)>,
     hover: Option<(u64, PathBuf, Vec<engine::LspHover>)>,
-    definition: Option<(u64, Vec<engine::LspLocation>)>,
+    definition: Option<(u64, Result<Option<Vec<engine::LspLocation>>, String>)>,
     /// (file, buffer revision the format ran against, raw LSP edits).
     format_save: Option<(PathBuf, u64, Vec<serde_json::Value>)>,
     /// Flattened code actions for the popup menu.
@@ -387,7 +390,11 @@ struct CodeLspResults {
     /// `(title, workspace edit, ran a command)` for an accepted action.
     action_applied: Option<(String, Option<serde_json::Value>, bool)>,
     /// `(seq, workspace root, ready-made finder rows)`.
-    references: Option<(u64, PathBuf, Vec<neoism_ui::panels::finder::ReferenceRow>)>,
+    references: Option<(
+        u64,
+        PathBuf,
+        Result<Option<Vec<neoism_ui::panels::finder::ReferenceRow>>, String>,
+    )>,
     /// Per-server `{language, path, edit}` groups from `engine::rename`.
     rename: Option<(u64, Vec<serde_json::Value>)>,
     /// `(seq, flattened symbol rows)` for the finder Symbols mode.
@@ -882,6 +889,8 @@ pub struct CodeLspUiState {
     pub actions: Option<CodeActionSession>,
     /// Seq of the in-flight go-to-definition request (newest wins).
     pub definition_seq: Option<u64>,
+    /// Captured explicit action and source position, for empty/unsupported UI outcomes.
+    pub definition_context: Option<String>,
     /// Seq of the in-flight find-references request (newest wins).
     pub references_seq: Option<u64>,
     /// Seq of the in-flight rename request (newest wins).
@@ -1008,9 +1017,10 @@ pub struct CodeHoverCard {
     pub col: usize,
     pub seq: u64,
     pub lines: Vec<String>,
-    /// Mouse-idle hover (vs `K`/Ctrl+K): pinned to the hovered cell,
-    /// dismissed when the pointer leaves it instead of on cursor move.
+    /// Mouse-idle hover (vs `K`/Ctrl+K): anchored to the hovered cell,
+    /// retained while the pointer crosses into or selects the card.
     pub from_mouse: bool,
+    pub interaction: neoism_ui::panels::hover_popup::HoverPopupState,
 }
 
 /// Pointer-idle hover candidate: armed on mouse move over a cell,
@@ -1089,6 +1099,31 @@ fn hover_card_lines(hovers: &[engine::LspHover]) -> Vec<String> {
     neoism_ui::editor::code::lsp_session::hover_card_lines(
         hovers.iter().map(|hover| hover.contents.as_str()),
     )
+}
+
+/// Engine display ranges -> zero-based snippet row and finder byte column.
+/// Resolve relative paths before snippet reads or root stripping.
+fn local_reference_target(
+    root: &Path,
+    location: &engine::LspLocation,
+) -> (PathBuf, usize, u32) {
+    let path = PathBuf::from(&location.path);
+    let path = if path.is_absolute() {
+        path
+    } else {
+        root.join(path)
+    };
+    let (line, column) = location
+        .range
+        .as_ref()
+        .map(|range| {
+            (
+                range.start.line.saturating_sub(1) as usize,
+                range.start.character.saturating_sub(1),
+            )
+        })
+        .unwrap_or((0, 0));
+    (path, line, column)
 }
 
 fn ensure_workers(proxy: EventProxy, window_id: WindowId) -> &'static CodeLspShared {
@@ -1408,8 +1443,10 @@ fn ensure_workers(proxy: EventProxy, window_id: WindowId) -> &'static CodeLspSha
                                 woke = true;
                             }
                             CodeLspJob::Definition {
+                                action,
                                 root,
                                 file,
+                                text,
                                 line,
                                 character,
                                 seq,
@@ -1417,23 +1454,35 @@ fn ensure_workers(proxy: EventProxy, window_id: WindowId) -> &'static CodeLspSha
                                 if newest_definition != Some(ix) {
                                     continue;
                                 }
-                                let mut locations =
-                                    engine::definition(&query_runtime, root, file, *line, *character);
+                                let query = match action {
+                                    neoism_protocol::editor::EditorLspAction::Declaration => engine::LspNavigationQuery::Declaration,
+                                    neoism_protocol::editor::EditorLspAction::TypeDefinition => engine::LspNavigationQuery::TypeDefinition,
+                                    _ => engine::LspNavigationQuery::Definition,
+                                };
+                                let outcome = engine::query_navigation(&query_runtime, root, file, *line, *character, Some(text), query);
+                                let locations = outcome.map(|locations| locations.map(|mut locations| {
                                 // This worker is LOCAL-only. The engine may return
                                 // relative native paths; bind them to the captured
                                 // local query root (not a joined workspace's root).
                                 for location in &mut locations {
+                                    // The engine exposes one-based LSP ranges; the
+                                    // native jump path and remote wire use zero-based.
+                                    if let Some(range) = location.range.as_mut() {
+                                        range.start.line = range.start.line.saturating_sub(1);
+                                        range.start.character = range.start.character.saturating_sub(1);
+                                        range.end.line = range.end.line.saturating_sub(1);
+                                        range.end.character = range.end.character.saturating_sub(1);
+                                    }
                                     let path = Path::new(&location.path);
                                     if !path.is_absolute() {
                                         location.path = root.join(path).to_string_lossy().into_owned();
                                     }
                                 }
                                 if lsp_log() {
-                                    eprintln!(
-                                        "neoism::lsp code definition result: seq={seq} locations={} at {line}:{character}",
-                                        locations.len()
-                                    );
+                                    eprintln!("neoism::lsp code navigation result: action={action:?} file={} seq={seq} locations={} at {line}:{character}", file.display(), locations.len());
                                 }
+                                locations
+                                }));
                                 let mut results = match results_store().lock() {
                                     Ok(results) => results,
                                     Err(poisoned) => poisoned.into_inner(),
@@ -1610,6 +1659,7 @@ fn ensure_workers(proxy: EventProxy, window_id: WindowId) -> &'static CodeLspSha
                             CodeLspJob::References {
                                 root,
                                 file,
+                                text,
                                 line,
                                 character,
                                 seq,
@@ -1617,39 +1667,23 @@ fn ensure_workers(proxy: EventProxy, window_id: WindowId) -> &'static CodeLspSha
                                 if newest_references != Some(ix) {
                                     continue;
                                 }
-                                let locations =
-                                    engine::references(&query_runtime, root, file, *line, *character);
-                                if lsp_log() {
-                                    eprintln!(
-                                        "neoism::lsp code references result: seq={seq} locations={} at {line}:{character}",
-                                        locations.len()
-                                    );
-                                }
-                                // Build ready-made finder rows: read each
-                                // hit's line text (per-file cache), path
-                                // relative to the workspace root. Disk
-                                // text can trail an unsaved buffer —
-                                // cosmetic only, the jump target is exact.
+                                let outcome = engine::query_navigation(&query_runtime, root, file, *line, *character, Some(text), engine::LspNavigationQuery::References);
+                                let rows = outcome.map(|locations| locations.map(|locations| {
+                                // Build finder rows from the captured source text for
+                                // this document, disk for other files, cached per path.
                                 let mut file_lines: HashMap<PathBuf, Vec<String>> =
                                     HashMap::new();
                                 let mut rows: Vec<
                                     neoism_ui::panels::finder::ReferenceRow,
                                 > = Vec::new();
                                 for location in &locations {
-                                    let path = PathBuf::from(&location.path);
-                                    let (line0, col) = location
-                                        .range
-                                        .as_ref()
-                                        .map(|range| {
-                                            (
-                                                range.start.line as usize,
-                                                range.start.character,
-                                            )
-                                        })
-                                        .unwrap_or((0, 0));
+                                    let (path, line0, col) = local_reference_target(root, location);
                                     let text = file_lines
                                         .entry(path.clone())
                                         .or_insert_with(|| {
+                                            if path == *file || canonical_key(&path) == canonical_key(file) {
+                                                return text.lines().map(str::to_string).collect();
+                                            }
                                             std::fs::read_to_string(&path)
                                                 .map(|text| {
                                                     text.lines()
@@ -1686,6 +1720,11 @@ fn ensure_workers(proxy: EventProxy, window_id: WindowId) -> &'static CodeLspSha
                                         && a.line == b.line
                                         && a.column == b.column
                                 });
+                                if lsp_log() {
+                                    eprintln!("neoism::lsp code references result: file={} seq={seq} rows={} at {line}:{character}", file.display(), rows.len());
+                                }
+                                rows
+                                }));
                                 let mut results = match results_store().lock() {
                                     Ok(results) => results,
                                     Err(poisoned) => poisoned.into_inner(),
@@ -1990,16 +2029,14 @@ impl Screen<'_> {
     /// workspaces is served by the daemon that owns the files.
     fn code_lsp_is_remote(&self) -> bool {
         self.context_manager
-            .current()
-            .code
-            .as_ref()
+            .active_code_pane()
             .is_some_and(code_uses_host_lsp)
     }
 
     /// Opaque owner paths for the focused buffer. Dispatch decides transport;
     /// remote paths must never be passed to the in-process engine.
     fn code_lsp_target(&self) -> Option<(PathBuf, PathBuf)> {
-        let code = self.context_manager.current().code.as_ref()?;
+        let code = self.context_manager.active_code_pane()?;
         if code.remote_content_pending || (code.remote_source && code.error.is_some()) {
             return None;
         }
@@ -2023,7 +2060,7 @@ impl Screen<'_> {
     pub(crate) fn pump_code_lsp(&mut self) {
         self.pump_code_blame();
         self.pump_remote_code_lsp();
-        if self.context_manager.current().code.is_none() {
+        if self.context_manager.active_code_pane().is_none() {
             // Focus left the code pane — no stale popups may linger.
             let ui = &mut self.renderer.code_lsp;
             if ui.has_session_state() {
@@ -2036,7 +2073,7 @@ impl Screen<'_> {
         };
         let remote = self.code_lsp_is_remote();
         if !remote {
-            let code = self.context_manager.current().code.as_ref().unwrap();
+            let code = self.context_manager.active_code_pane().unwrap();
             if code.lsp_synced_revision != Some(code.buffer.revision) {
                 let revision = code.buffer.revision;
                 let job = CodeLspJob::Sync {
@@ -2046,9 +2083,7 @@ impl Screen<'_> {
                 };
                 if self.dispatch_code_lsp(job).is_ok() {
                     self.context_manager
-                        .current_mut()
-                        .code
-                        .as_mut()
+                        .active_code_pane_mut()
                         .unwrap()
                         .lsp_synced_revision = Some(revision);
                 }
@@ -2061,7 +2096,7 @@ impl Screen<'_> {
         // and drops the previous bands.
         const OCCURRENCE_IDLE_SECS: f32 = 0.35;
         {
-            let snapshot = self.context_manager.current().code.as_ref().map(|code| {
+            let snapshot = self.context_manager.active_code_pane().map(|code| {
                 (
                     code.buffer.cursor_line,
                     code.buffer.cursor_col,
@@ -2084,9 +2119,7 @@ impl Screen<'_> {
                         seq: 0,
                     });
                     if !spans_empty {
-                        if let Some(code) =
-                            self.context_manager.current_mut().code.as_mut()
-                        {
+                        if let Some(code) = self.context_manager.active_code_pane_mut() {
                             code.occurrence_spans.clear();
                         }
                         self.mark_dirty();
@@ -2133,9 +2166,7 @@ impl Screen<'_> {
             };
             let over_diagnostic = self
                 .context_manager
-                .current()
-                .code
-                .as_ref()
+                .active_code_pane()
                 .and_then(|code| code.diagnostics.get(&line))
                 .is_some_and(|spans| {
                     spans
@@ -2172,7 +2203,7 @@ impl Screen<'_> {
 
     fn apply_code_lsp_results(&mut self, mut results: CodeLspResults) {
         let Some((path, cursor, line_text)) =
-            self.context_manager.current().code.as_ref().map(|code| {
+            self.context_manager.active_code_pane().map(|code| {
                 (
                     code.path.clone(),
                     code.buffer.cursor(),
@@ -2257,7 +2288,7 @@ impl Screen<'_> {
                 .as_ref()
                 .is_some_and(|probe| probe.seq == seq);
             if probe_current && file == path {
-                if let Some(code) = self.context_manager.current_mut().code.as_mut() {
+                if let Some(code) = self.context_manager.active_code_pane_mut() {
                     let mut per_line: HashMap<usize, Vec<(usize, usize)>> =
                         HashMap::new();
                     for (line, start, end) in spans {
@@ -2285,7 +2316,7 @@ impl Screen<'_> {
         // hasn't moved since the format ran, then finish the save.
         if let Some((edit_file, revision, edits)) = format_save {
             if edit_file == path {
-                if let Some(code) = self.context_manager.current_mut().code.as_mut() {
+                if let Some(code) = self.context_manager.active_code_pane_mut() {
                     if code.buffer.revision == revision && !edits.is_empty() {
                         let parsed = parse_lsp_text_edits(&edits);
                         code.buffer.apply_text_edits(&parsed);
@@ -2351,12 +2382,28 @@ impl Screen<'_> {
         if let Some((seq, locations)) = definition {
             if self.renderer.code_lsp.definition_seq == Some(seq) {
                 self.renderer.code_lsp.definition_seq = None;
-                match locations.into_iter().next() {
-                    Some(location) => self.jump_to_code_location(location),
-                    None => self.renderer.notifications.push(
-                        "No definition found",
+                let context = self
+                    .renderer
+                    .code_lsp
+                    .definition_context
+                    .take()
+                    .unwrap_or_else(|| "Navigation".into());
+                match locations {
+                    Err(message) => self.renderer.notifications.push(
+                        message,
+                        neoism_ui::panels::notifications::NotificationLevel::Error,
+                    ),
+                    Ok(None) => self.renderer.notifications.push(
+                        format!("{context}: not supported by an available language server"),
                         neoism_ui::panels::notifications::NotificationLevel::Info,
                     ),
+                    Ok(Some(locations)) => match locations.into_iter().next() {
+                        Some(location) => self.jump_to_code_location(location),
+                        None => self.renderer.notifications.push(
+                            format!("{context}: no target found. Right-click a symbol reference to navigate."),
+                            neoism_ui::panels::notifications::NotificationLevel::Info,
+                        ),
+                    },
                 }
             }
         }
@@ -2417,18 +2464,30 @@ impl Screen<'_> {
         if let Some((seq, root, rows)) = references {
             if self.renderer.code_lsp.references_seq == Some(seq) {
                 self.renderer.code_lsp.references_seq = None;
-                if rows.is_empty() {
-                    self.renderer.notifications.push(
-                        "No references found",
+                match rows {
+                    Err(message) => self.renderer.notifications.push(
+                        message,
+                        neoism_ui::panels::notifications::NotificationLevel::Error,
+                    ),
+                    Ok(None) => self.renderer.notifications.push(
+                        "References are not supported by an available language server",
                         neoism_ui::panels::notifications::NotificationLevel::Info,
-                    );
-                } else {
-                    self.finder_target_route = None;
-                    self.renderer.file_tree.set_focused(false);
-                    if self.code_lsp_is_remote() {
-                        self.renderer.finder.open_host_references(root, rows);
-                    } else {
-                        self.renderer.finder.open_references(root, rows);
+                    ),
+                    Ok(Some(rows)) => {
+                        if rows.is_empty() {
+                            self.renderer.notifications.push(
+                                "No references found",
+                                neoism_ui::panels::notifications::NotificationLevel::Info,
+                            );
+                        } else {
+                            self.finder_target_route = None;
+                            self.renderer.file_tree.set_focused(false);
+                            if self.code_lsp_is_remote() {
+                                self.renderer.finder.open_host_references(root, rows);
+                            } else {
+                                self.renderer.finder.open_references(root, rows);
+                            }
+                        }
                     }
                 }
                 self.mark_dirty();
@@ -2485,15 +2544,11 @@ impl Screen<'_> {
             }
             let canonical = canonical_key(&path);
             let is_current =
-                self.context_manager
-                    .current()
-                    .code
-                    .as_ref()
-                    .is_some_and(|code| {
-                        code.path == path || canonical_key(&code.path) == canonical
-                    });
+                self.context_manager.active_code_pane().is_some_and(|code| {
+                    code.path == path || canonical_key(&code.path) == canonical
+                });
             if is_current {
-                if let Some(code) = self.context_manager.current_mut().code.as_mut() {
+                if let Some(code) = self.context_manager.active_code_pane_mut() {
                     code.buffer.apply_text_edits(&parsed);
                     code.buffer.follow_cursor = true;
                 }
@@ -2578,14 +2633,12 @@ impl Screen<'_> {
     ) {
         let same_file = self
             .context_manager
-            .current()
-            .code
-            .as_ref()
+            .active_code_pane()
             .is_some_and(|code| code_lsp_file_matches(code, &target));
         if !same_file {
             self.open_path_in_code(target.clone());
         }
-        if let Some(code) = self.context_manager.current_mut().code.as_mut() {
+        if let Some(code) = self.context_manager.active_code_pane_mut() {
             if code_lsp_file_matches(code, &target) {
                 let line = line.min(code.buffer.lines.len().saturating_sub(1));
                 code.buffer.set_cursor_position(line, col, false);
@@ -2634,14 +2687,12 @@ impl Screen<'_> {
     /// card pinned to the span start. Non-consuming — the click also
     /// moved the cursor as usual.
     pub(crate) fn show_code_diagnostic_card_at(&mut self, line: usize, col: usize) {
-        let Some((path, spans)) =
-            self.context_manager.current().code.as_ref().map(|code| {
-                (
-                    code.path.clone(),
-                    code.diagnostics.get(&line).cloned().unwrap_or_default(),
-                )
-            })
-        else {
+        let Some((path, spans)) = self.context_manager.active_code_pane().map(|code| {
+            (
+                code.path.clone(),
+                code.diagnostics.get(&line).cloned().unwrap_or_default(),
+            )
+        }) else {
             return;
         };
         let mut hits: Vec<&CodeLineDiagnostic> = spans
@@ -2654,9 +2705,7 @@ impl Screen<'_> {
             // line's strongest messaged diagnostic instead of nothing.
             let line_len = self
                 .context_manager
-                .current()
-                .code
-                .as_ref()
+                .active_code_pane()
                 .and_then(|code| code.buffer.lines.get(line).map(|l| l.len()))
                 .unwrap_or(0);
             if col + 1 >= line_len {
@@ -2693,6 +2742,7 @@ impl Screen<'_> {
             seq,
             lines,
             from_mouse: true,
+            interaction: Default::default(),
         });
         self.mark_dirty();
     }
@@ -2705,7 +2755,7 @@ impl Screen<'_> {
         file: &Path,
     ) -> neoism_ui::panels::status_line::DiagnosticCounts {
         let mut counts = neoism_ui::panels::status_line::DiagnosticCounts::default();
-        if let Some(code) = self.context_manager.current().code.as_ref() {
+        if let Some(code) = self.context_manager.active_code_pane() {
             if code_lsp_file_matches(code, file) {
                 for diagnostic in &code.diagnostic_summaries {
                     match diagnostic.severity {
@@ -2729,7 +2779,7 @@ impl Screen<'_> {
     ) -> Vec<neoism_ui::panels::diagnostics_popup::PopupItem> {
         use neoism_ui::panels::diagnostics_popup::{PopupItem, Severity};
         let mut items = Vec::new();
-        if let Some(code) = self.context_manager.current().code.as_ref() {
+        if let Some(code) = self.context_manager.active_code_pane() {
             if code_lsp_file_matches(code, file) {
                 for diagnostic in &code.diagnostic_summaries {
                     let severity = diagnostic.severity;
@@ -2790,9 +2840,7 @@ impl Screen<'_> {
         };
         let Some(revision) = self
             .context_manager
-            .current()
-            .code
-            .as_ref()
+            .active_code_pane()
             .map(|code| code.buffer.revision)
         else {
             return false;
@@ -2813,9 +2861,7 @@ impl Screen<'_> {
         };
         if !self
             .context_manager
-            .current()
-            .code
-            .as_ref()
+            .active_code_pane()
             .is_some_and(|code| code_lsp_file_matches(code, file))
         {
             return;
@@ -2835,7 +2881,7 @@ impl Screen<'_> {
         let Some((root, file)) = self.code_lsp_target() else {
             return;
         };
-        let Some(code) = self.context_manager.current().code.as_ref() else {
+        let Some(code) = self.context_manager.active_code_pane() else {
             return;
         };
         let cursor = code.buffer.cursor();
@@ -2906,7 +2952,7 @@ impl Screen<'_> {
         if candidates.len() > 256 {
             return Err("completion source returned more than 256 candidates".into());
         }
-        let Some(code) = self.context_manager.current().code.as_ref() else {
+        let Some(code) = self.context_manager.active_code_pane() else {
             return Err("completion target is not a code document".into());
         };
         if code.buffer.revision != expected_revision
@@ -2985,9 +3031,7 @@ impl Screen<'_> {
     pub(crate) fn request_code_hover(&mut self) {
         let Some(cursor) = self
             .context_manager
-            .current()
-            .code
-            .as_ref()
+            .active_code_pane()
             .map(|code| code.buffer.cursor())
         else {
             return;
@@ -3006,9 +3050,7 @@ impl Screen<'_> {
         };
         let text = self
             .context_manager
-            .current()
-            .code
-            .as_ref()
+            .active_code_pane()
             .map(|code| code.buffer.text())
             .unwrap_or_default();
         let seq = QUERY_SEQ.fetch_add(1, Ordering::SeqCst);
@@ -3023,6 +3065,7 @@ impl Screen<'_> {
             seq,
             lines: Vec::new(),
             from_mouse,
+            interaction: Default::default(),
         });
         let _ = self.dispatch_code_lsp(CodeLspJob::Hover {
             root,
@@ -3044,9 +3087,7 @@ impl Screen<'_> {
         };
         let Some((line, col)) = self
             .context_manager
-            .current()
-            .code
-            .as_ref()
+            .active_code_pane()
             .map(|code| (code.buffer.cursor_line, code.buffer.cursor_col))
         else {
             return;
@@ -3068,6 +3109,7 @@ impl Screen<'_> {
             seq,
             lines: carried_lines,
             from_mouse: false,
+            interaction: Default::default(),
         });
         let _ = self.dispatch_code_lsp(CodeLspJob::SignatureHelp {
             root,
@@ -3102,9 +3144,7 @@ impl Screen<'_> {
         };
         let remote = self
             .context_manager
-            .current()
-            .code
-            .as_ref()
+            .active_code_pane()
             .map(code_uses_host_lsp)
             .unwrap_or_else(|| self.context_manager.current_workspace_is_remote_joined());
         let owner = remote
@@ -3193,11 +3233,139 @@ impl Screen<'_> {
         self.mark_dirty();
     }
 
+    pub(crate) fn begin_code_hover_selection(&mut self) -> bool {
+        let [x, y] = self.markdown_mouse_logical();
+        let consumed = self
+            .renderer
+            .code_lsp
+            .hover
+            .as_mut()
+            .is_some_and(|card| card.interaction.begin_selection(x, y));
+        if consumed {
+            self.mark_dirty();
+        }
+        consumed
+    }
+
+    pub(crate) fn move_code_hover_pointer(&mut self) -> bool {
+        let [x, y] = self.markdown_mouse_logical();
+        let consumed = self
+            .renderer
+            .code_lsp
+            .hover
+            .as_mut()
+            .is_some_and(|card| card.interaction.pointer_move(x, y));
+        if consumed {
+            self.mark_dirty();
+        }
+        consumed
+    }
+
+    pub(crate) fn code_hover_link_at_pointer(&self) -> bool {
+        let [x, y] = self.markdown_mouse_logical();
+        self.renderer
+            .code_lsp
+            .hover
+            .as_ref()
+            .is_some_and(|card| card.interaction.link_at(x, y).is_some())
+    }
+
+    pub(crate) fn scroll_code_hover(&mut self, delta_y: f32) -> bool {
+        let [x, y] = self.markdown_mouse_logical();
+        let consumed = self
+            .renderer
+            .code_lsp
+            .hover
+            .as_mut()
+            .is_some_and(|card| card.interaction.scroll(x, y, delta_y));
+        if consumed {
+            self.mark_dirty();
+        }
+        consumed
+    }
+
+    pub(crate) fn end_code_hover_selection(&mut self) -> bool {
+        let [x, y] = self.markdown_mouse_logical();
+        let Some(card) = self.renderer.code_lsp.hover.as_mut() else {
+            return false;
+        };
+        card.interaction.pointer_move(x, y);
+        let consumed = card.interaction.end_selection();
+        if let Some(url) = card.interaction.take_activated_link() {
+            if url.split_once("://").is_some_and(|(scheme, _)| {
+                scheme.eq_ignore_ascii_case("https")
+                    || scheme.eq_ignore_ascii_case("http")
+            }) {
+                if let Err(error) = crate::background_process::open_url(&url) {
+                    self.renderer.notifications.push(
+                        format!("Cannot open documentation link: {error}"),
+                        neoism_ui::panels::notifications::NotificationLevel::Error,
+                    );
+                }
+            }
+        }
+        if consumed {
+            self.mark_dirty();
+        }
+        consumed
+    }
+
+    pub(crate) fn code_hover_selected_text(&self) -> Option<String> {
+        // Check current overlay ownership as well as the last rendered bounds:
+        // a modal may have opened since that frame was drawn.
+        if self.renderer.finder.is_enabled()
+            || self.renderer.command_palette.is_enabled()
+            || self.renderer.inline_diagnostics.has_active_detail()
+            || self.renderer.modal.is_active()
+            || self.renderer.settings.is_active()
+            || self.renderer.file_browser.is_active()
+            || self.renderer.context_menu.is_visible()
+            || self.renderer.conversation_navigator.is_active()
+        {
+            return None;
+        }
+        let card = self.renderer.code_lsp.hover.as_ref()?;
+        let code = self.context_manager.active_code_pane()?;
+        if self
+            .renderer
+            .code_lsp
+            .completion
+            .as_ref()
+            .is_some_and(|session| {
+                session.path == code.path && !session.display.items.is_empty()
+            })
+            || self
+                .renderer
+                .code_lsp
+                .actions
+                .as_ref()
+                .is_some_and(|session| {
+                    session.path == code.path && !session.display.items.is_empty()
+                })
+        {
+            return None;
+        }
+        let cursor = code.buffer.cursor();
+        (card.path == code.path
+            && (card.from_mouse || (cursor.line == card.line && cursor.col == card.col)))
+            .then(|| card.interaction.selected_text())
+            .flatten()
+    }
+
     /// Pointer moved: arm/refresh the mouse-idle hover candidate (the
     /// pump requests once the pointer rests ~400ms on one cell).
     pub(crate) fn note_code_mouse_hover(&mut self) {
         let [mx, my] = self.markdown_mouse_logical();
-        let Some(code) = self.context_manager.current().code.as_ref() else {
+        if self
+            .renderer
+            .code_lsp
+            .hover
+            .as_ref()
+            .is_some_and(|card| card.interaction.retains_pointer(mx, my))
+        {
+            return;
+        }
+        let Some(code) = self.context_manager.active_code_pane() else {
             if self.renderer.code_lsp.mouse_hover.take().is_some() {
                 self.mark_dirty();
             }
@@ -3257,15 +3425,62 @@ impl Screen<'_> {
     /// Request go-to-definition at an explicit buffer position
     /// (Ctrl+Click hit or the cursor for vim `gd`).
     pub(crate) fn request_code_definition_at(&mut self, line: usize, col: usize) {
+        self.request_code_navigation_at(
+            line,
+            col,
+            neoism_protocol::editor::EditorLspAction::Definition,
+        );
+    }
+
+    /// Optional local menu gate. Unknown/busy/remote providers stay enabled;
+    /// only `Some(false)` is evidence of negotiated lack of support.
+    pub(crate) fn code_lsp_cached_navigation_support(
+        &self,
+        action: neoism_protocol::editor::EditorLspAction,
+    ) -> Option<bool> {
+        use neoism_protocol::editor::EditorLspAction as A;
+        if self.code_lsp_is_remote() {
+            return None;
+        }
+        let query = match action {
+            A::Definition => engine::LspNavigationQuery::Definition,
+            A::Declaration => engine::LspNavigationQuery::Declaration,
+            A::TypeDefinition => engine::LspNavigationQuery::TypeDefinition,
+            A::References => engine::LspNavigationQuery::References,
+            _ => return None,
+        };
+        let (root, file) = self.code_lsp_target()?;
+        engine::cached_navigation_support(&CODE_LSP.get()?.runtime, root, file, query)
+    }
+
+    pub(crate) fn request_code_navigation_at(
+        &mut self,
+        line: usize,
+        col: usize,
+        action: neoism_protocol::editor::EditorLspAction,
+    ) {
         let Some((root, file)) = self.code_lsp_target() else {
             return;
         };
         let seq = QUERY_SEQ.fetch_add(1, Ordering::SeqCst);
         if lsp_log() {
-            eprintln!("neoism::lsp code definition request: seq={seq} at {line}:{col}");
+            eprintln!("neoism::lsp code navigation request: action={action:?} seq={seq} at {line}:{col}");
         }
+        let text = self
+            .context_manager
+            .active_code_pane()
+            .map(|code| code.buffer.text())
+            .unwrap_or_default();
+        self.renderer.code_lsp.definition_context = Some(format!(
+            "{action:?} at {}:{}:{}",
+            file.display(),
+            line + 1,
+            col + 1
+        ));
         self.renderer.code_lsp.definition_seq = Some(seq);
         let _ = self.dispatch_code_lsp(CodeLspJob::Definition {
+            text,
+            action,
             root,
             file,
             line: line as u32,
@@ -3295,9 +3510,7 @@ impl Screen<'_> {
         };
         let Some(cursor) = self
             .context_manager
-            .current()
-            .code
-            .as_ref()
+            .active_code_pane()
             .map(|code| code.buffer.cursor())
         else {
             return;
@@ -3394,9 +3607,7 @@ impl Screen<'_> {
         };
         let Some(cursor) = self
             .context_manager
-            .current()
-            .code
-            .as_ref()
+            .active_code_pane()
             .map(|code| code.buffer.cursor())
         else {
             return;
@@ -3409,8 +3620,14 @@ impl Screen<'_> {
             );
         }
         self.renderer.code_lsp.dismiss_popups();
+        let text = self
+            .context_manager
+            .active_code_pane()
+            .map(|code| code.buffer.text())
+            .unwrap_or_default();
         self.renderer.code_lsp.references_seq = Some(seq);
         let _ = self.dispatch_code_lsp(CodeLspJob::References {
+            text,
             root,
             file,
             line: cursor.line as u32,
@@ -3430,7 +3647,7 @@ impl Screen<'_> {
         use neoism_ui::editor::markdown::vim::vim_word_under_cursor;
         use neoism_ui::widgets::modal::{ModalFormField, ModalFormSpec};
         let Some((path, cursor, line_text)) =
-            self.context_manager.current().code.as_ref().map(|code| {
+            self.context_manager.active_code_pane().map(|code| {
                 (
                     code.path.clone(),
                     code.buffer.cursor(),
@@ -3591,7 +3808,7 @@ impl Screen<'_> {
             .unwrap_or_default();
 
         {
-            let Some(code) = self.context_manager.current_mut().code.as_mut() else {
+            let Some(code) = self.context_manager.active_code_pane_mut() else {
                 return false;
             };
             if code.path != session.path || code.buffer.cursor_line != session.line {
@@ -3674,9 +3891,7 @@ impl Screen<'_> {
                 if !self.code_lsp_is_remote() {
                     if let Some(text) = self
                         .context_manager
-                        .current()
-                        .code
-                        .as_ref()
+                        .active_code_pane()
                         .map(|code| code.buffer.text())
                     {
                         let _ = self.dispatch_code_lsp(CodeLspJob::Sync {
@@ -3704,7 +3919,7 @@ impl Screen<'_> {
     /// when the prefix stops being an identifier or nothing matches.
     pub(crate) fn refilter_code_completion(&mut self) {
         let Some((path, cursor, line_text)) =
-            self.context_manager.current().code.as_ref().map(|code| {
+            self.context_manager.active_code_pane().map(|code| {
                 (
                     code.path.clone(),
                     code.buffer.cursor(),
@@ -3755,7 +3970,7 @@ impl Screen<'_> {
     /// Whether `c` is a completion trigger character for the focused
     /// file (server-advertised set, `DEFAULT_TRIGGERS` until fetched).
     pub(crate) fn code_completion_trigger(&self, c: char) -> Option<String> {
-        let code = self.context_manager.current().code.as_ref()?;
+        let code = self.context_manager.active_code_pane()?;
         let store = match trigger_store().lock() {
             Ok(store) => store,
             Err(poisoned) => poisoned.into_inner(),
@@ -3798,9 +4013,7 @@ impl Screen<'_> {
                 }
                 let config_document = self
                     .context_manager
-                    .current()
-                    .code
-                    .as_ref()
+                    .active_code_pane()
                     .is_some_and(|code| is_neoism_config_path(&code.path));
                 if config_document && matches!(c, '"' | '{' | ',' | ':') {
                     self.request_code_completion(Some(c.to_string()));
@@ -3839,6 +4052,40 @@ impl Screen<'_> {
 #[cfg(test)]
 mod diagnostics_tests {
     use super::*;
+
+    #[test]
+    fn local_references_normalize_engine_positions_and_paths_for_finder() {
+        let root = Path::new("/workspace/project");
+        for path in [
+            "src/space file.nix",
+            "/workspace/project/src/space file.nix",
+        ] {
+            let location = engine::LspLocation {
+                path: path.into(),
+                range: Some(engine::LspRange {
+                    start: engine::LspPosition {
+                        line: 3,
+                        character: 5,
+                    },
+                    end: engine::LspPosition {
+                        line: 3,
+                        character: 9,
+                    },
+                }),
+                language: None,
+            };
+            let (path, line0, column) = local_reference_target(root, &location);
+            assert_eq!(path, root.join("src/space file.nix"));
+            assert_eq!(
+                path.strip_prefix(root).unwrap(),
+                Path::new("src/space file.nix")
+            );
+            assert_eq!(line0 + 1, 3); // finder lines are one-based
+            assert_eq!(column, 4); // finder columns are zero-based byte offsets
+            let lines = ["first", "second", "correct snippet", "wrong snippet"];
+            assert_eq!(lines[line0], "correct snippet");
+        }
+    }
 
     fn diagnostic(
         start_line: usize,

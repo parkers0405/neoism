@@ -515,6 +515,26 @@ impl ChromeBridge {
             self.chrome.settings_page.pointer_kind_at(x, y)
         } else if self.chrome.generic_keyboard_overlay_active() {
             ModalPointerKind::Default
+        } else if let Some(hover) = self
+            .chrome
+            .code_hover_interaction()
+            .filter(|hover| hover.contains(x, y))
+        {
+            if hover.link_at(x, y).is_some() {
+                ModalPointerKind::Pointer
+            } else {
+                ModalPointerKind::Text
+            }
+        } else if self.chrome.git_diff_panel.is_hovering_resize_edge(x, y) {
+            return "col-resize".to_owned();
+        } else if self.chrome.git_diff_panel.scrollbar_hit(x, y).is_some() {
+            return "grab".to_owned();
+        } else if let Some(kind) = self.chrome.git_diff_panel.pointer_kind_at(x, y) {
+            kind
+        } else if self.chrome.active_diff_text_cursor(x, y) {
+            ModalPointerKind::Text
+        } else if self.chrome.active_diff_cursor(x, y) {
+            ModalPointerKind::Pointer
         } else if self.chrome.status_line.cwd_at(x, y)
             || self.chrome.layout().file_tree.is_some_and(|bounds| {
                 x < bounds.x + bounds.w - 5.0

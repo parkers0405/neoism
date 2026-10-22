@@ -130,6 +130,53 @@ fn same_chat_repro_open_trace_group_creation_keeps_extent_continuous() {
 }
 
 #[test]
+fn starting_activity_follows_short_transcript_without_a_bottom_to_tail_jump() {
+    for s in [0.75, 1.0, 1.5, 2.0] {
+        for primary in [1, 2] {
+            for (queued, background) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                let rect = [21.0, 73.0, 440.0 * s, 500.0 * s];
+                let gap = 18.0 * s;
+                let status_h = STREAMING_STATUS_LINE_H
+                    * s
+                    * streaming_status_line_count(primary, queued, background) as f32;
+                let user_h = 60.0 * s;
+                let initial = super::render::activity_geometry(
+                    rect, user_h, status_h, gap, s, true, 0.0,
+                );
+                assert_eq!(initial.status_rect[1], rect[1] + user_h + gap + 4.0 * s);
+                assert!(initial.status_rect[1] + status_h < rect[1] + rect[3]);
+                let mut previous_y = initial.status_rect[1];
+                // First assistant delta, then growth through a full viewport.
+                for response_h in [20.0, 100.0, 400.0, 700.0] {
+                    let real_h = user_h + gap + response_h * s;
+                    let content_h = real_h + gap + 4.0 * s + status_h + 14.0 * s;
+                    let scroll_top = (content_h - rect[3]).max(0.0);
+                    let g = super::render::activity_geometry(
+                        rect, real_h, status_h, gap, s, true, scroll_top,
+                    );
+                    assert_eq!(g.content_h, content_h);
+                    assert!(g.status_rect[1] >= previous_y);
+                    assert!((g.status_rect[1]
+                        - (rect[1] + real_h + gap + 4.0 * s - scroll_top))
+                        .abs() < 0.001);
+                    assert!(g.status_rect[1] + status_h + 14.0 * s
+                        <= rect[1] + rect[3] + 0.001);
+                    previous_y = g.status_rect[1];
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn starting_activity_without_visible_messages_has_no_tail_gap() {
+    let rect = [21.0, 73.0, 440.0, 500.0];
+    let g = super::render::activity_geometry(rect, 0.0, 24.0, 18.0, 1.0, true, 0.0);
+    assert_eq!(g.status_rect, [21.0, 77.0, 440.0, 24.0]);
+    assert_eq!(g.content_h, 4.0 + 24.0 + 14.0);
+}
+
+#[test]
 fn following_activity_pins_despite_positive_lag_and_reserves_body_once() {
     for s in [0.75, 1.0, 1.5, 2.0] {
         for primary in [1, 2, 5] {

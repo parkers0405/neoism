@@ -4,7 +4,6 @@ use std::net::ToSocketAddrs;
 use std::sync::{OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
-use base64::Engine as _;
 use serde_json::Value;
 
 use crate::neoism::agent::side_panel::{NeoismAgentSessionEntry, SessionGoal};
@@ -27,6 +26,7 @@ use neoism_ui::panels::agent_pane::session_group::{
 
 const SUBAGENT_TREE_MAX_DEPTH: usize = 5;
 const SUBAGENT_TREE_MAX_ROWS: usize = 80;
+pub(super) const API_INITIAL_HISTORY_LIMIT: usize = 32;
 
 pub(crate) fn neoism_agent_server() -> String {
     std::env::var("NEOISM_SERVER")
@@ -109,6 +109,7 @@ pub(crate) fn register_agent_server_credential(server: &str, credential: Option<
     // observe the new credential paired with the old revision.
     invalidate_catalog_endpoint(&key);
     conversation_cache::credentials_changed();
+    generated_images::credentials_changed();
 }
 
 pub(super) fn fetch_external_options_preview(
@@ -452,7 +453,7 @@ mod external_catalog_tests {
     }
 }
 
-fn agent_server_credential(server: &str) -> Option<String> {
+pub(super) fn agent_server_credential(server: &str) -> Option<String> {
     agent_server_credentials()
         .read()
         .ok()?
@@ -604,7 +605,23 @@ pub(super) fn fetch_catalog_scoped(scope: &CatalogScope, resource: &'static str)
     // readiness refresh stays unknown instead of replaying an old disconnect.
     let key = (scope.clone(), resource);
     let value = if resource == "/v2/providers" {
-        catalog_cache().get_fresh(key, load)
+        let pending = catalog_cache().snapshot_age(&key).is_some_and(|(value, _)| {
+            value.get("readinessPending").and_then(Value::as_bool) == Some(true)
+        });
+        // A pending optional refresh is not a new authoritative catalog. Keep
+        // a same-scope complete snapshot, with its original bounded age.
+        catalog_cache().get_fresh_retaining(
+            key,
+            Duration::from_secs(if pending { 1 } else { 30 }),
+            load,
+            |previous, incoming, age| {
+                age < Duration::from_secs(300)
+                    && ProviderReadiness::from_json(previous).zip(ProviderReadiness::from_json(incoming))
+                        .is_some_and(|(previous, incoming)| {
+                            previous.can_retain_over(&incoming)
+                        })
+            },
+        )
     } else {
         catalog_cache().get(key, load)
     }?;
@@ -659,8 +676,9 @@ pub(super) fn cached_provider_readiness_with_age(
     let readiness = ProviderReadiness::from_json(&value)?;
     // Preserve the original age across panes: reopening a chat must not give
     // a stale disconnect (or model list) a new admission lifetime.
-    if age >= Duration::from_secs(30)
-        && (readiness.connected.is_empty() || readiness.models.is_empty())
+    if (readiness.pending && age >= Duration::from_secs(1))
+        || (age >= Duration::from_secs(30)
+        && (readiness.connected.is_empty() || readiness.models.is_empty()))
     {
         return None;
     }
@@ -741,6 +759,12 @@ fn agent_options_from_json(
         })
         .collect();
     Ok(out)
+}
+
+pub(crate) fn fetch_system_directories(server: &str, path: &str) -> Result<Value, String> {
+    let query: String = url::form_urlencoded::Serializer::new(String::new()).append_pair("path", path).finish();
+    api_request_json(server, "GET", &format!("/v2/directories?{query}"), None)?
+        .ok_or_else(|| "Machine directory browser returned an empty response; update remote Neoism".into())
 }
 
 pub(super) fn fetch_directory_options(
@@ -1798,6 +1822,31 @@ mod subagent_runtime_snapshot_tests {
     }
 
     #[test]
+    fn credential_bearing_owned_local_endpoint_skips_local_startup() {
+        const CHILD: &str = "NEOISM_TEST_CREDENTIALED_LOCAL_READINESS";
+        let server = "http://127.0.0.1:39861";
+        if std::env::var_os(CHILD).is_none() {
+            // Ownership depends on the configured endpoint. Isolate it from
+            // parallel tests instead of mutating process-wide environment.
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "neoism::agent::api::subagent_runtime_snapshot_tests::credential_bearing_owned_local_endpoint_skips_local_startup"])
+                .env(CHILD, "1")
+                .env("NEOISM_SERVER", server)
+                .env("NEOISM_AGENT_SERVER", server)
+                .output().unwrap();
+            assert!(output.status.success(), "{}\n{}",
+                String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            return;
+        }
+        assert!(crate::agent_server::is_owned_local_endpoint(server));
+        register_agent_server_credential(server, Some("test-selected-endpoint-secret"));
+        assert!(!uses_local_startup_readiness(server));
+        assert!(ensure_request_server_ready(server).is_ok());
+        register_agent_server_credential(server, None);
+        assert!(uses_local_startup_readiness(server));
+    }
+
+    #[test]
     fn password_free_joined_endpoint_skips_uncredentialed_readiness_probe() {
         let server = "http://127.0.0.1:1/agent/workspaces/readiness-test-no-token";
         register_agent_server_credential(server, None);
@@ -2162,6 +2211,14 @@ pub(super) fn fetch_config_defaults(
 
 // Catalog discovery may initialize providers or contact account-specific model
 // endpoints. Keep it off the critical path for known composer defaults.
+pub(super) fn fetch_system_defaults(server: &str, directory: Option<&str>) -> Result<ConfigDefaults, String> {
+    // System credentials intentionally cannot read config or provider accounts.
+    let providers = fetch_catalog(server, directory, "/v2/providers/configured")?;
+    let mut defaults = ConfigDefaults::default();
+    defaults.model = default_model_from_providers_json(&providers);
+    Ok(defaults)
+}
+
 pub(super) fn fetch_config_catalog_defaults(
     server: &str,
     directory: Option<&str>,
@@ -2194,7 +2251,7 @@ pub(super) fn fetch_session_messages(
     server: &str,
     session_id: &str,
 ) -> Result<Vec<NeoismAgentMessage>, String> {
-    fetch_session_messages_page(server, session_id, None, 80).map(|page| page.blocks)
+    fetch_session_messages_page(server, session_id, None, API_INITIAL_HISTORY_LIMIT).map(|page| page.blocks)
 }
 
 pub(super) fn invalidate_session_messages_cache(server: &str, session_id: &str) {
@@ -2204,6 +2261,7 @@ pub(super) fn invalidate_session_messages_cache(server: &str, session_id: &str) 
 }
 
 pub(super) mod conversation_cache;
+pub(super) mod generated_images;
 
 /// One page of session history. `blocks` is the expanded client-side
 /// render blocks (one stored message fans out into several). `raw_count`
@@ -2254,6 +2312,7 @@ pub(super) fn fetch_session_messages_page(
             });
         }
     };
+    let request_us = super::perf::elapsed_us(started);
     let messages = value.get("items").and_then(Value::as_array).expect("validated items");
     let raw_messages = messages.len();
     let oldest_cursor = messages.last().and_then(|message| {
@@ -2264,9 +2323,7 @@ pub(super) fn fetch_session_messages_page(
             .and_then(Value::as_str)
             .map(str::to_string)
     });
-    let raw_bytes = value.to_string().len();
-    let mut blocks = message_blocks_from_response(messages, true);
-    hydrate_generated_images(server, &mut blocks);
+    let blocks = message_blocks_from_response(messages, true);
     if super::perf::enabled() {
         let tool_blocks = blocks
             .iter()
@@ -2278,6 +2335,7 @@ pub(super) fn fetch_session_messages_page(
             })
             .count();
         let text_bytes: usize = blocks.iter().map(|message| message.text.len()).sum();
+        let raw_bytes = value.to_string().len();
         tracing::info!(
             target: "neoism::agent_ui_perf",
             session_id,
@@ -2286,24 +2344,22 @@ pub(super) fn fetch_session_messages_page(
             tool_blocks,
             raw_bytes,
             text_bytes,
+            request_us,
             elapsed_us = super::perf::elapsed_us(started),
             "agent fetch session messages"
         );
     }
-    if initial_page {
-        if let Some(identity) = cache_identity {
-            if raw_bytes <= conversation_cache::MAX_ENTRY_BYTES {
-                conversation_cache::remember(identity, value.to_string(), limit.max(1));
-            } else {
-                conversation_cache::forget(&identity);
-            }
-        }
-    }
-    Ok(SessionMessagePage {
+    let page = SessionMessagePage {
         blocks,
         raw_count: raw_messages,
         oldest_cursor,
-    })
+    };
+    if initial_page {
+        if let Some(identity) = cache_identity {
+            conversation_cache::remember(identity, &page, limit.max(1));
+        }
+    }
+    Ok(page)
 }
 
 fn message_blocks_from_response(
@@ -2319,12 +2375,15 @@ fn message_blocks_from_response(
     .collect()
 }
 
+pub(super) fn uses_local_startup_readiness(server: &str) -> bool {
+    agent_server_credential(server).is_none()
+        && crate::agent_server::is_owned_local_endpoint(server)
+}
+
 /// Only the owned local endpoint needs a startup probe. A selected remote or
 /// joined endpoint is checked by the actual request, with normal server auth.
 fn ensure_request_server_ready(server: &str) -> Result<(), String> {
-    if agent_server_credential(server).is_some()
-        || !crate::agent_server::is_owned_local_endpoint(server)
-    {
+    if !uses_local_startup_readiness(server) {
         return Ok(());
     }
     crate::agent_server::ensure_started_for_request(server)?;
@@ -2734,6 +2793,8 @@ pub(crate) fn fetch_semantic_session_hits(
     current_session: Option<&str>,
     directory: Option<&str>,
 ) -> Result<Option<(Vec<NeoismAgentSemanticSessionHit>, bool)>, String> {
+    // Capability v1 permits authorized session/title search, not global plugins.
+    if super::system::is_system_agent_server(server) { return Ok(None); }
     let path = format!(
         "/v2/plugins/dev.neoism.semantic/search?q={}&limit=20&conversation=true{}",
         percent_encode(query),
@@ -3036,6 +3097,14 @@ pub(crate) fn conversation_workspace_registry_request(
     server: &str,
     root: Option<&std::path::Path>,
 ) -> Result<Option<Value>, String> {
+    // Hosted workspace and verified machine transports deliberately expose only
+    // the authorized session-project union, never daemon management APIs.
+    if root.is_none() && url::Url::parse(server).ok().is_some_and(|url| {
+        let path = url.path().trim_end_matches('/');
+        path == "/agent/system" || path.starts_with("/agent/workspaces/")
+    }) {
+        return Ok(None);
+    }
     let body =
         root.map(|root| serde_json::json!({"root": root, "createDirectory": false}));
     let response = http_request_with_status(
@@ -3072,6 +3141,9 @@ fn http_request(
     body: Option<&Value>,
     read_timeout: Duration,
 ) -> Result<HttpResponse, String> {
+    if super::system::is_system_agent_server(server) && path.starts_with("/v2/plugins/") {
+        return Err("This system connection does not support global plugin management (including MCP and goals). Manage these on the selected machine itself.".into());
+    }
     let response = require_http_success(http_request_with_status(
         server,
         method,
@@ -3100,6 +3172,17 @@ fn http_request_with_status(
     body: Option<&Value>,
     read_timeout: Duration,
 ) -> Result<HttpResponse, String> {
+    http_request_with_credential(server, method, path, body, read_timeout, agent_server_credential(server))
+}
+
+fn http_request_with_credential(
+    server: &str,
+    method: &str,
+    path: &str,
+    body: Option<&Value>,
+    read_timeout: Duration,
+    credential: Option<String>,
+) -> Result<HttpResponse, String> {
     let server = server.trim().trim_end_matches('/');
     // Legacy callers specify a "read timeout"; it now bounds the entire wire
     // operation. Never let a short caller override truncate session admission.
@@ -3121,8 +3204,7 @@ fn http_request_with_status(
         .map_err(|_| "Invalid Neoism Agent request method".to_string())?;
     let body = body.map(serde_json::to_string).transpose()
         .map_err(|_| "Failed to encode Neoism Agent request".to_string())?;
-    let credential =
-        agent_server_credential(server).filter(|token| !token.contains(['\r', '\n']));
+    let credential = credential.filter(|token| !token.contains(['\r', '\n']));
     let (status, reason, body) =
         super::transport::request(url, method, credential, body, read_timeout)?;
     Ok(HttpResponse {
@@ -3474,32 +3556,6 @@ fn model_label(model: Option<&Value>) -> String {
 pub(super) fn part_block(part: &Value) -> Option<NeoismAgentMessage> {
     neoism_ui::panels::agent_pane::api_mapping::part_block(part)
         .map(NeoismAgentMessage::from)
-}
-
-pub(super) fn hydrate_generated_images(
-    server: &str,
-    messages: &mut [NeoismAgentMessage],
-) {
-    for message in messages {
-        for image in &mut message.images {
-            if !image.mime.starts_with("image/")
-                || !image.url.starts_with("/v2/artifacts/")
-                || !image.url.ends_with("/content")
-            {
-                continue;
-            }
-            let Ok(response) =
-                http_request(server, "GET", &image.url, None, Duration::from_secs(30))
-            else {
-                continue;
-            };
-            if response.body.len() > 25 * 1024 * 1024 {
-                continue;
-            }
-            let encoded = base64::engine::general_purpose::STANDARD.encode(response.body);
-            image.url = format!("data:{};base64,{encoded}", image.mime);
-        }
-    }
 }
 
 impl From<neoism_ui::panels::agent_pane::state::NeoismAgentTodo> for NeoismAgentTodo {

@@ -326,6 +326,11 @@ fn host_path_eq(left: &Path, right: &Path) -> bool {
     left.as_os_str() == right.as_os_str()
 }
 fn code_lsp_file_matches(code: &neoism_ui::editor::code::CodePane, file: &Path) -> bool {
+    // Status paint passes the active pane's own path. Do not canonicalize it
+    // twice per frame just to prove an identity we already have.
+    if host_path_eq(&code.path, file) {
+        return true;
+    }
     if code_uses_host_lsp(code) {
         host_path_eq(&code.path, file)
     } else {
@@ -1891,7 +1896,7 @@ impl Screen<'_> {
                 }
                 let binding = if code.local_only { None } else { binding };
 
-                code.diagnostic_summaries = summaries.clone();
+                code.set_diagnostic_summaries(summaries.clone());
                 code.diag_anchors.clear();
                 if let Some(binding) = binding {
                     code.diag_anchors = snapshot
@@ -2754,20 +2759,10 @@ impl Screen<'_> {
         &self,
         file: &Path,
     ) -> neoism_ui::panels::status_line::DiagnosticCounts {
-        let mut counts = neoism_ui::panels::status_line::DiagnosticCounts::default();
-        if let Some(code) = self.context_manager.active_code_pane() {
-            if code_lsp_file_matches(code, file) {
-                for diagnostic in &code.diagnostic_summaries {
-                    match diagnostic.severity {
-                        CodeDiagnosticSeverity::Error => counts.error += 1,
-                        CodeDiagnosticSeverity::Warn => counts.warn += 1,
-                        CodeDiagnosticSeverity::Info => counts.info += 1,
-                        CodeDiagnosticSeverity::Hint => counts.hint += 1,
-                    }
-                }
-            }
-        }
-        counts
+        self.context_manager.active_code_pane()
+            .filter(|code| code_lsp_file_matches(code, file))
+            .map(|code| code.diagnostic_counts())
+            .unwrap_or_default()
     }
 
     /// Rows for the status-bar diagnostics popup (error or warn pill):
@@ -2781,7 +2776,7 @@ impl Screen<'_> {
         let mut items = Vec::new();
         if let Some(code) = self.context_manager.active_code_pane() {
             if code_lsp_file_matches(code, file) {
-                for diagnostic in &code.diagnostic_summaries {
+                for diagnostic in code.diagnostic_summaries() {
                     let severity = diagnostic.severity;
                     let wanted = match pill {
                         neoism_ui::panels::status_line::DiagnosticPill::Error => {
@@ -3189,7 +3184,7 @@ impl Screen<'_> {
                             .into_owned();
                         (path.to_string_lossy().into_owned(), display)
                     };
-                    for diagnostic in &code.diagnostic_summaries {
+                    for diagnostic in code.diagnostic_summaries() {
                         if !seen.insert((
                             path.clone(),
                             diagnostic.line,

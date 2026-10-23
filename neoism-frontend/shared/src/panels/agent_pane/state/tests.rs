@@ -1,6 +1,113 @@
 use super::*;
 
 #[test]
+fn question_rail_rejects_non_user_targets_without_moving() {
+    use crate::panels::agent_pane::question_rail::TimelineQuestionTarget;
+
+    for source_index in [0, 99] {
+        for message_id in ["answer", ""] {
+            let mut pane = NeoismAgentPane::default();
+            pane.messages = vec![
+                NeoismAgentMessage::assistant("answer").with_id(message_id),
+                NeoismAgentMessage::user("question").with_id(message_id),
+            ];
+            pane.set_timeline_metrics([0.0, 0.0, 400.0, 200.0], 5000.0, 200.0);
+            pane.set_scrollbar_geometry(Some([380.0, 0.0, 10.0, 100.0]), None);
+            pane.set_timeline_question_rail_targets(std::rc::Rc::new(vec![
+                TimelineQuestionTarget {
+                    source_index,
+                    message_id: message_id.into(),
+                    top: 1000.0,
+                    assistant_source_index: None,
+                },
+            ]));
+            let before = pane.timeline_scroll_offset();
+            assert!(!pane.begin_scrollbar_drag(385.0, 50.0));
+            assert_eq!(pane.timeline_scroll_offset(), before);
+            assert!(pane.timeline_view_anchor().is_none());
+            assert!(!pane.scrollbar_dragging());
+        }
+    }
+}
+
+#[test]
+fn question_rail_selects_turns_and_anchors_before_lazy_remeasurement() {
+    use crate::panels::agent_pane::question_rail::TimelineQuestionTarget;
+    let mut pane = NeoismAgentPane::default();
+    pane.messages = vec![
+        NeoismAgentMessage::user("first").with_id("q1"),
+        NeoismAgentMessage::assistant("very long answer").with_id("a1"),
+        NeoismAgentMessage::user("second").with_id("q2"),
+        NeoismAgentMessage::assistant("short answer").with_id("a2"),
+        NeoismAgentMessage::user("third").with_id("q3"),
+    ];
+    pane.set_timeline_metrics([0.0, 0.0, 400.0, 200.0], 5000.0, 200.0);
+    pane.set_scrollbar_geometry(Some([380.0, 10.0, 10.0, 100.0]), Some([380.0, 10.0, 10.0, 2.0]));
+    pane.set_timeline_question_rail_targets(std::rc::Rc::new(vec![
+        TimelineQuestionTarget { source_index: 0, message_id: "q1".into(), top: 0.0, assistant_source_index: Some(1) },
+        TimelineQuestionTarget { source_index: 2, message_id: "q2".into(), top: 4000.0, assistant_source_index: Some(3) },
+        TimelineQuestionTarget { source_index: 4, message_id: "q3".into(), top: 4400.0, assistant_source_index: None },
+    ]));
+    pane.timeline_velocity_px_s = 800.0;
+    pane.timeline_wheel_target_px = Some(300.0);
+    assert!(pane.begin_scrollbar_drag(385.0, 60.0));
+    // Halfway along the rail means question two, not halfway through answer one.
+    assert_eq!(pane.timeline_scroll_offset(), 800.0);
+    assert!(!pane.timeline_follow_bottom());
+    assert_eq!(pane.timeline_velocity_px_s, 0.0);
+    assert_eq!(pane.timeline_wheel_target_px, None);
+    assert!(pane.timeline_view_anchor_matches(2, 5));
+    assert_eq!(pane.timeline_view_anchor().unwrap().1, 0.0);
+    pane.set_timeline_metrics([0.0, 0.0, 400.0, 200.0], 6000.0, 200.0);
+    pane.restore_timeline_view_anchor(4500.0, 0.0);
+    assert_eq!(pane.timeline_scroll_offset(), 1300.0);
+    assert!(pane.timeline_view_anchor_matches(2, 5));
+    // History prepend invalidates indices, but not the stable message identity.
+    pane.messages.insert(0, NeoismAgentMessage::user("older").with_id("old"));
+    assert!(pane.drag_scrollbar_to(385.0, 60.0));
+    assert!(pane.timeline_view_anchor_matches(3, 6));
+    assert!(pane.drag_scrollbar_to(385.0, 110.0));
+    assert!(pane.timeline_view_anchor_matches(5, 6));
+    pane.session_id = Some("another-session".into());
+    assert!(pane.scrollbar_hit(385.0, 60.0).is_none());
+    assert!(!pane.drag_scrollbar_to(385.0, 60.0));
+    pane.set_scrollbar_geometry(None, None);
+    assert!(pane.timeline_question_targets.is_none());
+    assert!(!pane.scrollbar_dragging());
+}
+
+#[test]
+fn question_rail_hover_uses_all_questions_and_handles_empty_or_single_turn() {
+    use crate::panels::agent_pane::question_rail::TimelineQuestionTarget;
+    let mut pane = NeoismAgentPane::default();
+    let targets = (0..25).map(|index| TimelineQuestionTarget {
+        source_index: index, message_id: index.to_string(), top: index as f32 * 100.0, assistant_source_index: None,
+    }).collect::<Vec<_>>();
+    pane.set_scrollbar_geometry(Some([380.0, 0.0, 10.0, 240.0]), Some([380.0, 0.0, 10.0, 2.0]));
+    pane.messages = (0..25).map(|index| NeoismAgentMessage::user("question").with_id(index.to_string())).collect();
+    pane.set_timeline_metrics([0.0, 0.0, 400.0, 200.0], 5000.0, 200.0);
+    pane.set_timeline_question_rail_targets(std::rc::Rc::new(targets.clone()));
+    assert!(pane.begin_scrollbar_drag(385.0, 130.0));
+    assert!(pane.timeline_view_anchor_matches(13, 25));
+    assert!(pane.end_scrollbar_drag());
+    assert!(pane.update_scrollbar_hover(Some((385.0, 120.0))));
+    assert!(!pane.update_scrollbar_hover(Some((385.0, 121.0))));
+    assert!(pane.update_scrollbar_hover(Some((385.0, 130.0))));
+    pane.set_scrollbar_geometry(Some([380.0, 1.0, 10.0, 240.0]), Some([380.0, 0.0, 10.0, 2.0]));
+    assert!(pane.update_scrollbar_hover(Some((385.0, 130.0))));
+    pane.set_timeline_question_rail_targets(std::rc::Rc::new(vec![targets[0].clone()]));
+    assert!(pane.begin_scrollbar_drag(385.0, 200.0));
+    assert!(pane.timeline_view_anchor_matches(0, 25));
+    assert!(pane.end_scrollbar_drag());
+    assert!(pane.update_scrollbar_hover(Some((385.0, 100.0))));
+    assert!(!pane.update_scrollbar_hover(Some((385.0, 200.0))));
+    pane.set_timeline_question_rail_targets(std::rc::Rc::new(vec![]));
+    assert!(pane.update_scrollbar_hover(Some((385.0, 100.0))));
+    assert!(pane.scrollbar_hit(385.0, 100.0).is_none());
+    assert!(!pane.begin_scrollbar_drag(385.0, 100.0));
+}
+
+#[test]
 fn provider_readiness_rejects_without_consuming_or_navigating() {
     use crate::panels::agent_pane::api_mapping::ProviderReadiness;
     for (catalog, model, action) in [
@@ -35,6 +142,65 @@ fn provider_readiness_rejects_without_consuming_or_navigating() {
                 NeoismAgentUiEvent::Notice { message, .. } if message.contains(action))));
             assert!(pane.send_prompt_with_echo("direct", "direct", true).is_err());
             assert!(pane.messages.is_empty());
+        }
+    }
+}
+
+#[test]
+fn provider_readiness_loaded_survives_new_chat_defaults_and_pending_refresh_only() {
+    let mut pane = NeoismAgentPane::default();
+    pane.set_directory(Some("/project".into()));
+    pane.apply_provider_catalog(&serde_json::json!({
+        "all":[{"id":"openai","models":{"account-only-model":{}}}],
+        "connected":["openai"], "readinessPending":false, "readinessIdentity":"account-a-token-a"
+    }));
+    let original = pane.provider_readiness.clone();
+    let original_at = pane.provider_readiness_checked_at;
+    pane.model = "openai/account-only-model".into();
+    pane.session_id = Some("old-chat".into());
+    pane.start_new_conversation();
+    pane.apply_config_defaults();
+    assert_eq!(pane.provider_readiness, original);
+    pane.apply_provider_catalog(&serde_json::json!({
+        "all":[{"id":"openai","models":{"fallback-only":{}}}],
+        "connected":["openai"], "readinessPending":true, "readinessIdentity":"account-a-token-a"
+    }));
+    assert_eq!(pane.provider_readiness, original);
+    assert_eq!(pane.provider_readiness_checked_at, original_at);
+    pane.insert_text("warm prompt");
+    assert!(pane.submit());
+    assert!(pane.input.is_empty());
+    assert!(pane.drain_pending_outbound().iter().any(|command| matches!(command,
+        OutboundAgentCommand::SendPrompt { text, .. } if text == "warm prompt")));
+    pane.apply_provider_catalog(&serde_json::json!({"all":[],"connected":["openai"],"readinessPending":false}));
+    assert!(pane.provider_readiness.as_ref().unwrap().models.is_empty());
+    pane.set_directory(Some("/other".into()));
+    assert!(pane.provider_readiness.is_none());
+    pane.apply_provider_catalog(&serde_json::json!({"all":[],"connected":[],"readinessPending":true}));
+    assert!(pane.provider_readiness.as_ref().unwrap().pending);
+    pane.set_catalog_endpoint("http://other-server".into());
+    assert!(pane.provider_readiness.is_none());
+}
+
+#[test]
+fn provider_readiness_pending_new_chat_submits_or_retains_invalid_draft() {
+    for model in ["openai/example", "openai/invalid", "other/example"] {
+        let mut pane = NeoismAgentPane::default();
+        pane.provider_readiness = crate::panels::agent_pane::api_mapping::ProviderReadiness::from_json(
+            &serde_json::json!({"all":[{"id":"openai","models":{"example":{}}}],
+                "connected":["openai"], "readinessPending":true}));
+        pane.model = model.into();
+        pane.insert_text("immediate prompt");
+        assert!(pane.submit());
+        let commands = pane.drain_pending_outbound();
+        if model == "openai/example" {
+            assert!(pane.input.is_empty());
+            assert!(commands.iter().any(|command| matches!(command,
+                OutboundAgentCommand::SendPrompt { text, .. } if text == "immediate prompt")));
+        } else {
+            assert_eq!(pane.input, "immediate prompt");
+            assert!(commands.iter().all(|command| !matches!(command,
+                OutboundAgentCommand::EnsureSession | OutboundAgentCommand::SendPrompt { .. })));
         }
     }
 }
@@ -97,6 +263,8 @@ fn seed_prompt_catalog(pane: &mut NeoismAgentPane) {
     pane.provider_readiness = Some(crate::panels::agent_pane::api_mapping::ProviderReadiness {
         connected: vec!["test".into()],
         models: vec!["test/model".into()],
+        pending: false,
+        identity: None,
     });
 }
 
@@ -4235,7 +4403,7 @@ fn streamed_user_image_and_text_merge_in_either_order() {
         let mut pane = NeoismAgentPane::default();
         let image = NeoismAgentImage {
             filename: "clipboard.png".to_string(),
-            url: "data:image/png;base64,AA==".to_string(),
+            url: "data:image/png;base64,AA==".into(),
             mime: "image/png".to_string(),
         };
         let mut optimistic = NeoismAgentMessage::user("[image1] inspect this");
@@ -4891,7 +5059,11 @@ fn settled_tool_titles_hide_after_subagent_round_trip() {
     pane.timeline_live_trace_start = Some(1);
     pane.timeline_live_trace_anchor = Some(pane.messages[0].id.clone());
     *pane.timeline_layout_cache.borrow_mut() = Some(TimelineLayoutCache {
+        question_targets: Default::default(),
         epoch: pane.timeline_layout_epoch,
+        artifact_revision: None,
+        estimated_prefix_rows: 0,
+        estimated_suffix_start: 1,
         source_len: pane.messages.len(),
         width_bucket: 0,
         scale_bucket: 0,
@@ -7359,7 +7531,11 @@ fn tool_expansion_view_test_pane(id: &str, row_top: f32) -> NeoismAgentPane {
     }
     pane.set_timeline_metrics([0.0, 100.0, 400.0, 300.0], 900.0, 300.0);
     *pane.timeline_layout_cache.borrow_mut() = Some(TimelineLayoutCache {
+        question_targets: Default::default(),
         epoch: pane.timeline_layout_epoch,
+        artifact_revision: None,
+        estimated_prefix_rows: 0,
+        estimated_suffix_start: 1,
         source_len: pane.messages.len(),
         width_bucket: 0,
         scale_bucket: 0,

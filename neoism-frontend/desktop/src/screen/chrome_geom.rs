@@ -129,6 +129,7 @@ impl Screen<'_> {
         self.conversations_panel_enabled = config.agent.conversations_panel_enabled;
         self.details_panel_enabled = config.agent.details_panel_enabled;
         self.streaming_text_animation = config.agent.streaming_text_animation;
+        self.default_chat_source = config.agent.default_chat_source;
         self.renderer.splash_auto_animate = config.appearance.splash_auto_animate;
         self.renderer.code_git_blame = config.editor.git_blame;
         self.renderer.code_git_blame_delay_ms = config.editor.git_blame_delay_ms;
@@ -663,7 +664,9 @@ impl Screen<'_> {
         self.resize(new_size)
     }
 
-    pub(crate) fn apply_context_resize(ctx: &mut context::Context<EventProxy>) -> bool {
+    pub(crate) fn apply_context_resize<T: neoism_backend::event::EventListener>(
+        ctx: &mut context::Context<T>,
+    ) -> bool {
         let Some(mut terminal) = ctx.terminal.try_lock_unfair() else {
             ctx.pending_terminal_resize = true;
             ctx.renderable_content.pending_update.set_dirty();

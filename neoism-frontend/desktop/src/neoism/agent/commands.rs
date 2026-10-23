@@ -509,6 +509,7 @@ impl NeoismAgentPane {
             self.pending_session_switch = None;
             return;
         }
+        self.conversation_open_started = super::perf::now().map(|at| (session_id.clone(), at));
         self.reset_external_options();
         self.new_chat_source = self
             .side_panel
@@ -525,10 +526,7 @@ impl NeoismAgentPane {
             .get(&session_id)
             .is_some_and(|cached| cached.hydrated)
         {
-            self.activate_cached_session(&session_id);
-            // Tail-only SSE cannot replay parts completed while this pane was
-            // parked. Show the cache immediately, then reconcile newest history.
-            self.ensure_session_preloaded(session_id, true);
+            self.activate_session_and_preload(session_id, true);
             return;
         }
         // Navigation must never wait behind remote preloads. Joined clients
@@ -550,8 +548,22 @@ impl NeoismAgentPane {
             cached.state.title = title;
         }
         self.apply_local_session_selection(&session_id);
-        self.ensure_session_preloaded(session_id.clone(), false);
+        self.activate_session_and_preload(session_id, false);
+    }
+
+    fn activate_session_and_preload(&mut self, session_id: String, force: bool) {
+        let reused_stream = self.event_stream.as_ref().is_some_and(|stream| {
+            stream.session_id() == session_id && !stream.is_disconnected()
+        });
         self.activate_cached_session(&session_id);
+        // A new root subscription already fetches an authoritative baseline
+        // AFTER subscribing. Reuse that load, not a competing pre-subscribe page.
+        // Reused streams and child navigation still need their own catch-up.
+        let stream_loads_history = !reused_stream
+            && self.event_stream.as_ref().is_some_and(|stream| {
+                stream.session_id() == session_id && !stream.is_disconnected()
+            });
+        self.ensure_session_preload(session_id, force, !stream_loads_history);
     }
 
     /// Seed only an empty, unhydrated target. This is display state, never a
@@ -572,9 +584,10 @@ impl NeoismAgentPane {
     pub(super) fn apply_initial_history_preview(
         &mut self,
         session_id: &str,
-        page: super::api::SessionMessagePage,
+        page: impl Into<std::sync::Arc<super::api::SessionMessagePage>>,
         limit: usize,
     ) {
+        let page = page.into();
         let Some(cached) = self.session_cache.get_mut(session_id) else { return; };
         if cached.hydrated || !cached.messages.is_empty() || !cached.pending_user_prompts.is_empty()
             || cached.initial_history_preview.is_some()
@@ -584,11 +597,15 @@ impl NeoismAgentPane {
         cached.timeline_history.oldest_loaded_cursor = page.oldest_cursor.clone();
         cached.timeline_history.has_older = page.raw_count >= limit && page.oldest_cursor.is_some();
         cached.messages = page.blocks.clone();
-        cached.initial_history_preview = Some(std::sync::Arc::new(page));
+        cached.initial_history_preview = Some(page);
         cached.invalidate_timeline_layout();
     }
 
     pub(crate) fn ensure_session_preloaded(&mut self, session_id: String, force: bool) {
+        self.ensure_session_preload(session_id, force, true);
+    }
+
+    fn ensure_session_preload(&mut self, session_id: String, force: bool, load_history: bool) {
         const MAX_CONCURRENT_PRELOADS: usize = 2;
         const MAX_QUEUED_PRELOADS: usize = 10;
         if session_id.is_empty() {
@@ -611,13 +628,13 @@ impl NeoismAgentPane {
         if let Some(index) = self
             .session_preload_queue
             .iter()
-            .position(|(queued, _)| queued == &session_id)
+            .position(|(queued, _, _)| queued == &session_id)
         {
-            let (_, was_force) = self
+            let (_, was_force, was_load_history) = self
                 .session_preload_queue
                 .remove(index)
                 .expect("queued preload index");
-            let request = (session_id.clone(), force || was_force);
+            let request = (session_id.clone(), force || was_force, load_history || was_load_history);
             if self.pending_session_switch.as_deref() == Some(session_id.as_str())
                 || force
             {
@@ -630,7 +647,7 @@ impl NeoismAgentPane {
         let selected_navigation =
             self.pending_session_switch.as_deref() == Some(session_id.as_str());
         if self.session_preloads_in_flight.len() >= MAX_CONCURRENT_PRELOADS {
-            let request = (session_id.clone(), force);
+            let request = (session_id.clone(), force, load_history);
             if selected_navigation {
                 // Keep only the newest navigation while the fixed workers are
                 // busy. Selection still paints its placeholder immediately.
@@ -646,10 +663,10 @@ impl NeoismAgentPane {
             }
             return;
         }
-        self.start_session_preload(session_id);
+        self.start_session_preload(session_id, load_history);
     }
 
-    fn start_session_preload(&mut self, session_id: String) {
+    fn start_session_preload(&mut self, session_id: String, load_history: bool) {
         if !self.session_preloads_in_flight.insert(session_id.clone()) {
             return;
         }
@@ -662,40 +679,40 @@ impl NeoismAgentPane {
         let spawn = thread::Builder::new()
             .name(format!("neoism-agent-preload-{thread_session_id}"))
             .spawn(move || {
-                // Metadata and history are independent. Fetch them concurrently
-                // so a joined client pays one host-proxy round trip rather than
-                // waiting for two sequential remote responses.
-                let preload = thread::scope(|scope| {
-                    let messages = scope.spawn(|| {
-                        fetch_session_messages_page(
+                thread::scope(|scope| {
+                    scope.spawn(|| {
+                        let result = fetch_session_state(&server, &thread_session_id);
+                        let _ = tx.send(NeoismAgentBackgroundUpdate::SessionMetadataLoaded {
+                            session_id: thread_session_id.clone(),
+                            result,
+                        });
+                    });
+                    if load_history {
+                        let update = fetch_session_messages_page(
                             &server,
                             &thread_session_id,
                             None,
-                            100,
+                            super::api::API_INITIAL_HISTORY_LIMIT,
                         )
-                    });
-                    let state = fetch_session_state(&server, &thread_session_id);
-                    let messages = messages
-                        .join()
-                        .map_err(|_| "Session history worker failed".to_string())?;
-                    state.and_then(|state| messages.map(|page| (state, page)))
-                });
-                let update = preload
-                    .map(
-                        |(state, page)| NeoismAgentBackgroundUpdate::SessionPreloaded {
+                        .map(|page| NeoismAgentBackgroundUpdate::SessionPreloaded {
                             session_id: thread_session_id.clone(),
-                            state,
                             messages: page.blocks,
+                            raw_count: page.raw_count,
+                            requested_limit: super::api::API_INITIAL_HISTORY_LIMIT,
                             oldest_cursor: page.oldest_cursor,
-                        },
-                    )
-                    .unwrap_or_else(|error| {
-                        NeoismAgentBackgroundUpdate::SessionPreloadFailed {
-                            session_id: thread_session_id,
+                        })
+                        .unwrap_or_else(|error| NeoismAgentBackgroundUpdate::SessionPreloadFailed {
+                            session_id: thread_session_id.clone(),
                             error,
-                        }
-                    });
-                let _ = tx.send(update);
+                        });
+                        let _ = tx.send(update);
+                    }
+                });
+                // Keep the bounded worker slot until BOTH independent requests
+                // finish, but publish each result as soon as it is available.
+                let _ = tx.send(NeoismAgentBackgroundUpdate::SessionPreloadFinished {
+                    session_id: thread_session_id,
+                });
             });
         if let Err(error) = spawn {
             self.session_preloads_in_flight.remove(&session_id);
@@ -713,7 +730,7 @@ impl NeoismAgentPane {
     pub(crate) fn start_queued_session_preloads(&mut self) {
         const MAX_CONCURRENT_PRELOADS: usize = 2;
         while self.session_preloads_in_flight.len() < MAX_CONCURRENT_PRELOADS {
-            let Some((session_id, force)) = self.session_preload_queue.pop_front() else {
+            let Some((session_id, force, load_history)) = self.session_preload_queue.pop_front() else {
                 break;
             };
             if !force
@@ -724,7 +741,7 @@ impl NeoismAgentPane {
             {
                 continue;
             }
-            self.start_session_preload(session_id);
+            self.start_session_preload(session_id, load_history);
         }
     }
 
@@ -965,14 +982,14 @@ impl NeoismAgentPane {
         if self.is_streaming() {
             self.reveal_ongoing_session_trace();
         }
-        if !stays_in_family || !self.runtime_hydrated_sessions.contains(session_id) {
-            self.hydrate_runtime_status_for_session(session_id);
-        }
         let stream_session_id = self
             .session_tree_root_id
             .clone()
             .unwrap_or_else(|| session_id.to_string());
-        self.start_session_updates(&stream_session_id);
+        let new_subscription = self.start_session_updates(&stream_session_id);
+        if !new_subscription && (!stays_in_family || !self.runtime_hydrated_sessions.contains(session_id)) {
+            self.hydrate_runtime_status_for_session(session_id);
+        }
         self.pending_session_switch = None;
     }
 
@@ -1314,6 +1331,10 @@ impl NeoismAgentPane {
     }
 
     pub(super) fn show_mcp(&mut self) {
+        if super::system::is_system_agent_server(&self.server) {
+            self.system_message("MCP", "Manage MCP on the selected machine itself. System connections do not expose global plugin management.");
+            return;
+        }
         if !self.picker.as_ref().is_some_and(|picker| {
             matches!(
                 picker.kind,

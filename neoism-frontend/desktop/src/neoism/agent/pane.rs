@@ -727,6 +727,7 @@ pub(crate) struct ConfigDefaultsTarget {
 }
 
 pub(crate) enum NeoismAgentBackgroundUpdate {
+    PromptHistoryLoaded(Vec<String>),
     InteractionReplyCompleted {
         server: String,
         id: String,
@@ -734,6 +735,7 @@ pub(crate) enum NeoismAgentBackgroundUpdate {
         result: Result<(), String>,
     },
     SessionMutationCompleted {
+        source: Option<super::system::AgentSystemSource>,
         server: String,
         session_id: String,
         mutation: AgentSessionMutation,
@@ -881,14 +883,29 @@ pub(crate) enum NeoismAgentBackgroundUpdate {
         session_id: String,
         goal: Option<SessionGoal>,
     },
-    /// Background hydration for parent/child navigation. Live
-    /// events continue landing in the per-session cache while this request is
-    /// in flight; the applier merges instead of replacing them.
+    /// Metadata and transcript are delivered independently: neither a slow
+    /// activity projection nor artifact downloads may hold back the first text.
+    SessionMetadataLoaded {
+        session_id: String,
+        result: Result<SessionState, String>,
+    },
     SessionPreloaded {
         session_id: String,
-        state: SessionState,
         messages: Vec<NeoismAgentMessage>,
+        raw_count: usize,
+        requested_limit: usize,
         oldest_cursor: Option<String>,
+    },
+    ImageHydrationProgress {
+        server: String,
+    },
+    SessionImagesHydrated {
+        server: String,
+        session_id: String,
+        patch: super::api::generated_images::ImagePatch,
+    },
+    SessionPreloadFinished {
+        session_id: String,
     },
     SessionPreloadFailed {
         session_id: String,
@@ -973,10 +990,9 @@ impl AgentBackgroundSender {
         update: NeoismAgentBackgroundUpdate,
     ) -> Result<(), mpsc::SendError<NeoismAgentBackgroundUpdate>> {
         self.tx.send(update)?;
-        if let Ok(wake) = self.wake.lock() {
-            if let Some(wake) = wake.as_ref() {
-                wake.wake();
-            }
+        let wake = self.wake.lock().ok().and_then(|wake| wake.clone());
+        if let Some(wake) = wake {
+            wake.wake();
         }
         Ok(())
     }
@@ -1037,7 +1053,7 @@ enum NeoismAgentInputAttachment {
     File {
         token: String,
         filename: String,
-        url: String,
+        url: neoism_ui::panels::agent_pane::state::AgentImagePayload,
         mime: String,
     },
 }
@@ -1121,6 +1137,7 @@ pub struct NeoismAgentPane {
     pub(super) parent_session_id: Option<String>,
     pub(super) directory: Option<String>,
     pub(super) server: String,
+    pub(crate) systems: systems::PaneSystems,
     pub(super) picker: Option<NeoismAgentPicker>,
     pending_mcp_oauth: Option<mcp_oauth::PendingMcpOAuth>,
     mcp_catalog_monitor: mcp_catalog::McpCatalogMonitor,
@@ -1148,7 +1165,7 @@ pub struct NeoismAgentPane {
     file_mention_root_pin: Mutex<
         Option<std::sync::Arc<dyn neoism_agent_service_api::WorkspaceSearchRootPin>>,
     >,
-    event_stream: Option<AgentSessionEventStream>,
+    pub(super) event_stream: Option<AgentSessionEventStream>,
     session_catalog_stream: Option<AgentSessionCatalogStream>,
     catalog_generation: u64,
     event_wake: Option<AgentEventWake>,
@@ -1172,9 +1189,11 @@ pub struct NeoismAgentPane {
     /// sessions remain resident while navigation only changes `session_id`,
     /// matching the route-over-global-store model.
     pub(super) session_cache: HashMap<String, CachedAgentSession>,
+    image_hydration_pending: BTreeSet<String>,
     pub(super) session_preloads_in_flight: BTreeSet<String>,
-    pub(super) session_preload_queue: VecDeque<(String, bool)>,
+    pub(super) session_preload_queue: VecDeque<(String, bool, bool)>,
     pub(super) session_preloads_force_pending: BTreeSet<String>,
+    pub(super) conversation_open_started: Option<(String, Instant)>,
     pub(super) pending_session_switch: Option<String>,
     pub(super) session_tree_root_id: Option<String>,
     pub(super) runtime_status_request_generation: u64,
@@ -1188,6 +1207,8 @@ pub struct NeoismAgentPane {
     pub(super) session_goal_cache: HashMap<String, (Option<SessionGoal>, u64)>,
     background_tx: AgentBackgroundSender,
     background_rx: Receiver<NeoismAgentBackgroundUpdate>,
+    // One-event lookahead retained when ingestion yields at its deadline.
+    background_pending: Option<NeoismAgentBackgroundUpdate>,
     session_mutations_in_flight: HashSet<(String, String)>,
     pub(super) session_history_in_flight: HashSet<String>,
     pub(super) uncertain_prompts: VecDeque<PendingPromptDispatch>,
@@ -1236,7 +1257,7 @@ pub struct NeoismAgentPane {
     /// wrap the caret is placed with. Up/Down movement walks these;
     /// `input_wrap_len` guards against a frame of staleness after the
     /// text changes.
-    input_wrap_rows: Vec<neoism_ui::panels::agent_pane::input_controller::InputWrapRow>,
+    input_wrap_rows: std::rc::Rc<Vec<neoism_ui::panels::agent_pane::input_controller::InputWrapRow>>,
     input_viewport: neoism_ui::panels::agent_pane::input_viewport::InputViewport,
     input_wrap_len: usize,
     /// Sticky caret x carried between consecutive Up/Down presses so a
@@ -1360,9 +1381,12 @@ pub struct NeoismAgentPane {
     pub(super) timeline_history: AgentTimelineHistoryState,
     pub(super) initial_history_preview: Option<Arc<super::api::SessionMessagePage>>,
     scrollbar_thumb_rect: Option<[f32; 4]>,
+    timeline_question_targets: Option<neoism_ui::panels::agent_pane::question_rail::TimelineQuestionTargets>,
+    timeline_question_targets_session: Option<String>,
     scrollbar_track_rect: Option<[f32; 4]>,
     scrollbar_drag: Option<ScrollbarDrag>,
-    scrollbar_hovered: bool,
+    timeline_content_revision: u64,
+    scrollbar_hovered: neoism_ui::panels::agent_pane::view::timeline::TimelineScrollbarHover,
     streaming_state: NeoismAgentStreamingState,
     streaming_started_at: Option<Instant>,
     streaming_state_changed_at: Option<Instant>,
@@ -1517,6 +1541,7 @@ impl Default for NeoismAgentPane {
             parent_session_id: None,
             directory: None,
             server: neoism_agent_server(),
+            systems: Default::default(),
             picker: None,
             pending_mcp_oauth: None,
             mcp_catalog_monitor: Default::default(),
@@ -1544,9 +1569,11 @@ impl Default for NeoismAgentPane {
             last_stream_resubscribe_at: None,
             retry_reset_pending: false,
             session_cache: HashMap::new(),
+            image_hydration_pending: BTreeSet::new(),
             session_preloads_in_flight: BTreeSet::new(),
             session_preload_queue: VecDeque::new(),
             session_preloads_force_pending: BTreeSet::new(),
+            conversation_open_started: None,
             pending_session_switch: None,
             session_tree_root_id: None,
             runtime_status_request_generation: 0,
@@ -1557,6 +1584,7 @@ impl Default for NeoismAgentPane {
             session_goal_cache: HashMap::new(),
             background_tx,
             background_rx,
+            background_pending: None,
             session_mutations_in_flight: HashSet::new(),
             session_history_in_flight: HashSet::new(),
             uncertain_prompts: VecDeque::new(),
@@ -1580,7 +1608,7 @@ impl Default for NeoismAgentPane {
             particle_burst_requests: Vec::new(),
             particle_bursts: Vec::new(),
             cursor_byte: 0,
-            input_wrap_rows: Vec::new(),
+            input_wrap_rows: Default::default(),
             input_viewport:
                 neoism_ui::panels::agent_pane::input_viewport::InputViewport::default(),
             input_wrap_len: 0,
@@ -1666,9 +1694,12 @@ impl Default for NeoismAgentPane {
             timeline_history: AgentTimelineHistoryState::default(),
             initial_history_preview: None,
             scrollbar_thumb_rect: None,
+            timeline_question_targets: None,
+            timeline_question_targets_session: None,
             scrollbar_track_rect: None,
             scrollbar_drag: None,
-            scrollbar_hovered: false,
+            timeline_content_revision: 0,
+            scrollbar_hovered: Default::default(),
             streaming_state: NeoismAgentStreamingState::Idle,
             streaming_started_at: None,
             streaming_state_changed_at: None,
@@ -1712,6 +1743,9 @@ impl Default for NeoismAgentPane {
 
 pub(super) mod connect;
 mod external_options;
+mod hydration;
+#[cfg(test)]
+mod hydration_tests;
 mod ingest;
 mod input;
 mod mcp_catalog;
@@ -1723,6 +1757,8 @@ mod requests;
 #[cfg(test)]
 mod responsiveness_tests;
 mod selection;
+mod systems;
+pub(crate) use systems::qualify_entry;
 mod session;
 mod status_timing;
 mod submit;

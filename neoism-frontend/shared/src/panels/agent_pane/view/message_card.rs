@@ -625,7 +625,7 @@ where
                 );
             }
             if image_h > 0.0 {
-                super::image_preview::render_image_strip(
+                let image_hits = super::image_preview::render_image_strip(
                     sugarloaf,
                     message.images(),
                     x + ASSISTANT_TEXT_PAD_LEFT * s,
@@ -637,6 +637,11 @@ where
                     viewport_clip,
                     occlusion_rects,
                 );
+                if !pane.suppress_markdown_interactions() {
+                    for hit in image_hits {
+                        pane.register_image_preview(hit);
+                    }
+                }
             }
             return h;
         }
@@ -1151,7 +1156,7 @@ mod tests {
     fn image() -> NeoismAgentImage {
         NeoismAgentImage {
             filename: "clipboard.png".to_string(),
-            url: "data:image/png;base64,AA==".to_string(),
+            url: "data:image/png;base64,AA==".into(),
             mime: "image/png".to_string(),
         }
     }

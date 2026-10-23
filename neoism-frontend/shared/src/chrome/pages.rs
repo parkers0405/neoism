@@ -603,7 +603,8 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                 self.modal.close();
                 self.relayout();
             }
-            ModalAction::SystemFormSubmit | ModalAction::SystemDisconnectConfirm { .. } => {
+            ModalAction::SystemFormSubmit | ModalAction::SystemDisconnectConfirm { .. }
+            | ModalAction::SystemDeactivateConfirm { .. } => {
                 self.modal.open(crate::panels::command_palette::actions::systems_desktop_modal_spec());
                 self.relayout();
             }
@@ -975,6 +976,8 @@ impl<A: Send + Copy + 'static> Chrome<A> {
     /// this frame can never bleed through the opaque surfaces (the
     /// same trick desktop uses for its modal material).
     pub(crate) fn draw_chrome_overlays(&mut self, sugarloaf: &mut Sugarloaf) {
+        // Image placements are retained even after the last overlay closes.
+        self.modal.clear_image_overlay(sugarloaf);
         if !self.chrome_overlay_active() {
             return;
         }

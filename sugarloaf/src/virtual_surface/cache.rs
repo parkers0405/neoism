@@ -1,4 +1,6 @@
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet};
+
+use lru::LruCache;
 
 use serde::{Deserialize, Serialize};
 
@@ -102,9 +104,7 @@ pub struct CacheStats {
 #[derive(Clone, Debug)]
 pub(crate) struct RetainedChunkCache {
     chunks: HashMap<NodeId, RetainedChunk>,
-    lru: VecDeque<(NodeId, u64)>,
-    lru_stamps: HashMap<NodeId, u64>,
-    next_lru_stamp: u64,
+    lru: LruCache<NodeId, ()>,
     policy: GpuResidencyPolicy,
 }
 
@@ -112,9 +112,7 @@ impl RetainedChunkCache {
     pub fn new(policy: GpuResidencyPolicy) -> Self {
         Self {
             chunks: HashMap::new(),
-            lru: VecDeque::new(),
-            lru_stamps: HashMap::new(),
-            next_lru_stamp: 1,
+            lru: LruCache::unbounded(),
             policy,
         }
     }
@@ -151,7 +149,7 @@ impl RetainedChunkCache {
 
     pub fn remove(&mut self, node: NodeId) -> Option<RetainedChunk> {
         let removed = self.chunks.remove(&node);
-        self.lru_stamps.remove(&node);
+        self.lru.pop(&node);
         removed
     }
 
@@ -167,7 +165,7 @@ impl RetainedChunkCache {
             if let Some(chunk) = self.chunks.remove(&id) {
                 removed.push(chunk);
             }
-            self.lru_stamps.remove(&id);
+            self.lru.pop(&id);
         }
         removed
     }
@@ -228,12 +226,9 @@ impl RetainedChunkCache {
         let max = self.policy.max_warm_chunks.max(self.policy.max_hot_chunks);
         let mut protected = 0usize;
         while self.chunks.len() > max {
-            let Some((victim, stamp)) = self.lru.pop_front() else {
+            let Some((victim, ())) = self.lru.pop_lru() else {
                 break;
             };
-            if self.lru_stamps.get(&victim).copied() != Some(stamp) {
-                continue;
-            }
             if self
                 .chunks
                 .get(&victim)
@@ -247,7 +242,6 @@ impl RetainedChunkCache {
                 continue;
             }
             if let Some(chunk) = self.chunks.remove(&victim) {
-                self.lru_stamps.remove(&victim);
                 evicted.push(chunk);
             }
         }
@@ -255,9 +249,77 @@ impl RetainedChunkCache {
     }
 
     fn touch(&mut self, node: NodeId) {
-        let stamp = self.next_lru_stamp;
-        self.next_lru_stamp = self.next_lru_stamp.wrapping_add(1).max(1);
-        self.lru_stamps.insert(node, stamp);
-        self.lru.push_back((node, stamp));
+        // Exactly one entry per resident chunk; repeated animated frames must
+        // not accumulate stale stamps or trigger a later cleanup cliff.
+        self.lru.put(node, ());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cache(max: usize) -> RetainedChunkCache {
+        RetainedChunkCache::new(GpuResidencyPolicy {
+            max_hot_chunks: max,
+            max_warm_chunks: max,
+            ..GpuResidencyPolicy::default()
+        })
+    }
+
+    fn touch(cache: &mut RetainedChunkCache, node: u64) -> &mut RetainedChunk {
+        cache.get_or_insert(NodeId(node), LayoutKey::default(), SurfaceRevision(1))
+    }
+
+    #[test]
+    fn repeated_frames_keep_lru_bookkeeping_proportional_to_residency() {
+        let mut cache = cache(8);
+        for _ in 0..100_000 {
+            for node in 0..8 {
+                touch(&mut cache, node);
+            }
+        }
+        assert_eq!(cache.chunks.len(), 8);
+        assert_eq!(cache.lru.len(), 8);
+    }
+
+    #[test]
+    fn eviction_uses_actual_recency_and_preserves_hot_chunks() {
+        let mut cache = cache(2);
+        touch(&mut cache, 1).tier = CacheTier::Hot;
+        touch(&mut cache, 2);
+        touch(&mut cache, 3);
+        touch(&mut cache, 2);
+        let evicted = cache.evict_to_budget();
+        assert_eq!(evicted.iter().map(|chunk| chunk.node).collect::<Vec<_>>(), [NodeId(3)]);
+        assert!(cache.get(NodeId(1)).is_some());
+        assert!(cache.get(NodeId(2)).is_some());
+        assert_eq!(cache.lru.len(), 2);
+    }
+
+    #[test]
+    fn removal_and_reinsertion_leave_no_old_recency_records() {
+        let mut cache = cache(2);
+        touch(&mut cache, 1);
+        touch(&mut cache, 2);
+        cache.remove(NodeId(1));
+        assert_eq!(cache.lru.len(), 1);
+        touch(&mut cache, 1);
+        touch(&mut cache, 3);
+        assert_eq!(cache.evict_to_budget()[0].node, NodeId(2));
+        cache.retain_nodes(&HashSet::from([NodeId(1)]));
+        assert_eq!(cache.chunks.len(), 1);
+        assert_eq!(cache.lru.len(), 1);
+    }
+
+    #[test]
+    fn all_hot_chunks_stop_eviction_without_growing_bookkeeping() {
+        let mut cache = cache(1);
+        touch(&mut cache, 1).tier = CacheTier::Hot;
+        touch(&mut cache, 2).tier = CacheTier::Hot;
+        for _ in 0..10 {
+            assert!(cache.evict_to_budget().is_empty());
+            assert_eq!(cache.lru.len(), 2);
+        }
     }
 }

@@ -877,7 +877,8 @@ pub struct CodePane {
         std::collections::HashMap<usize, Vec<super::feed::CodeLineDiagnostic>>,
     /// One entry per diagnostic (unlike the per-line projection above, a
     /// multiline range appears only once). Used by status counts/popups.
-    pub diagnostic_summaries: Vec<super::feed::CodeDiagnosticSummary>,
+    diagnostic_summaries: Vec<super::feed::CodeDiagnosticSummary>,
+    diagnostic_counts: crate::panels::status_line::DiagnosticCounts,
     /// Host-published immutable plugin decoration projection. `None` keeps the
     /// no-plugin path allocation-free and render-time Lua-free.
     pub plugin_decorations: Option<std::sync::Arc<super::feed::CodePluginRenderSnapshot>>,
@@ -942,7 +943,58 @@ pub struct CodePane {
     pub remote_cursors: Vec<crate::editor::markdown::MarkdownRemoteCursor>,
 }
 
+#[cfg(test)]
+mod diagnostic_count_tests {
+    use super::*;
+    use super::super::feed::{CodeDiagnosticSeverity, CodeDiagnosticSummary};
+
+    #[test]
+    fn diagnostics_publish_replaces_counts_once_and_empty_publish_resets_them() {
+        let mut pane = CodePane::new(PathBuf::from("counts.rs"), "");
+        let severities = [CodeDiagnosticSeverity::Error, CodeDiagnosticSeverity::Warn,
+            CodeDiagnosticSeverity::Info, CodeDiagnosticSeverity::Hint];
+        let summaries = (0..40_000).map(|line| CodeDiagnosticSummary {
+            line,
+            byte: 0,
+            severity: severities[line % severities.len()],
+            message: String::new(),
+        }).collect();
+        pane.set_diagnostic_summaries(summaries);
+        assert_eq!(pane.diagnostic_summaries().len(), 40_000);
+        for _ in 0..1_000 {
+            assert_eq!(pane.diagnostic_counts(), crate::panels::status_line::DiagnosticCounts {
+                error: 10_000, warn: 10_000, info: 10_000, hint: 10_000,
+            });
+        }
+        pane.set_diagnostic_summaries(Vec::new());
+        assert_eq!(pane.diagnostic_counts(), Default::default());
+    }
+}
+
 impl CodePane {
+    pub fn set_diagnostic_summaries(&mut self, summaries: Vec<super::feed::CodeDiagnosticSummary>) {
+        use super::feed::CodeDiagnosticSeverity;
+        let mut counts = crate::panels::status_line::DiagnosticCounts::default();
+        for diagnostic in &summaries {
+            match diagnostic.severity {
+                CodeDiagnosticSeverity::Error => counts.error += 1,
+                CodeDiagnosticSeverity::Warn => counts.warn += 1,
+                CodeDiagnosticSeverity::Info => counts.info += 1,
+                CodeDiagnosticSeverity::Hint => counts.hint += 1,
+            }
+        }
+        self.diagnostic_summaries = summaries;
+        self.diagnostic_counts = counts;
+    }
+
+    pub fn diagnostic_summaries(&self) -> &[super::feed::CodeDiagnosticSummary] {
+        &self.diagnostic_summaries
+    }
+
+    pub fn diagnostic_counts(&self) -> crate::panels::status_line::DiagnosticCounts {
+        self.diagnostic_counts
+    }
+
     pub fn new(path: PathBuf, text: &str) -> Self {
         let title = path
             .file_name()
@@ -985,6 +1037,7 @@ impl CodePane {
             highlight: super::highlight::CodeHighlightCache::default(),
             diagnostics: std::collections::HashMap::new(),
             diagnostic_summaries: Vec::new(),
+            diagnostic_counts: Default::default(),
             plugin_decorations: None,
             plugin_hit_regions: Vec::new(),
             diag_anchors: Vec::new(),

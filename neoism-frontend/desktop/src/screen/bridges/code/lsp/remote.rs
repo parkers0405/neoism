@@ -1364,7 +1364,7 @@ impl Screen<'_> {
                 })
                 .collect::<Vec<_>>();
             code.diag_anchors.clear();
-            code.diagnostic_summaries = diagnostics
+            code.set_diagnostic_summaries(diagnostics
                 .iter()
                 .map(|d| CodeDiagnosticSummary {
                     line: d.start_line,
@@ -1372,7 +1372,7 @@ impl Screen<'_> {
                     severity: d.severity,
                     message: d.message.clone(),
                 })
-                .collect();
+                .collect());
             code.diagnostics =
                 project_diagnostic_ranges(&code.buffer.lines, &diagnostics);
             code.diagnostics_resolved_revision = Some(code.buffer.revision);

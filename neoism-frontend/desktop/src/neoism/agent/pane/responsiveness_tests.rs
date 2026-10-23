@@ -22,6 +22,8 @@ fn held_prompt_with_image(
         neoism_ui::panels::agent_pane::api_mapping::ProviderReadiness {
             connected: vec!["test".into()],
             models: vec!["test/model".into()],
+        pending: false,
+        identity: None,
         },
     );
     pane.prompt_dispatch_in_flight = true;

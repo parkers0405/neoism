@@ -1,4 +1,4 @@
-//! Host-neutral composer folder/attachment actions and measured picker-chip hits. Hosts own picker routing.
+//! Host-neutral composer system/folder/attachment actions and measured picker-chip hits. Hosts own picker routing.
 
 fn contains(rect: [f32; 4], x: f32, y: f32) -> bool {
     x >= rect[0] && y >= rect[1] && x < rect[0] + rect[2] && y < rect[1] + rect[3]
@@ -10,15 +10,32 @@ mod tests;
 pub enum ComposerAction {
     AttachPicture,
     ChangeDirectory,
+    ChangeSystem,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ComposerSystemControl {
+    pub label: String,
+    pub selectable: bool,
+}
+
+use super::state::NeoismAgentImage;
+
+#[derive(Clone, Debug)]
+pub struct ImagePreviewHit {
+    pub rect: [f32; 4],
+    pub image: NeoismAgentImage,
 }
 
 #[derive(Default)]
 pub struct ComposerInteractions {
+    pub system_rects: Vec<[f32; 4]>,
     pub cwd_rect: Option<[f32; 4]>,
     pub cwd_rects: Vec<[f32; 4]>,
     status_chip_rects: Vec<Option<[f32; 4]>>,
     /// Renderer-provided overlays; covered chips must not receive clicks or pointers.
     pub occlusion_rects: Vec<[f32; 4]>,
+    pub image_previews: Vec<ImagePreviewHit>,
 }
 
 /// Measured cwd ink (folder glyph + inner gap + cwd), never branch or trailing gap.
@@ -63,6 +80,18 @@ pub fn cwd_visible_hit_rects(
 
 impl ComposerInteractions {
     pub fn clear_rects(&mut self) {
+        self.image_previews.clear();
+        self.clear_composer_rects();
+    }
+
+    pub fn image_at(&self, x: f32, y: f32) -> Option<&NeoismAgentImage> {
+        self.image_previews.iter().rev()
+            .find(|hit| contains(hit.rect, x, y))
+            .map(|hit| &hit.image)
+    }
+
+    pub fn clear_composer_rects(&mut self) {
+        self.system_rects.clear();
         self.cwd_rect = None;
         self.cwd_rects.clear();
         self.clear_status_chip_rects();
@@ -92,11 +121,22 @@ impl ComposerInteractions {
     /// Cursor policy only: picker actions stay on their existing host click path.
     /// Text input is deliberately not a pointer target.
     pub fn pointer_at(&self, x: f32, y: f32) -> bool {
-        !self.occlusion_rects.iter().any(|rect| contains(*rect, x, y))
-            && (self.action_at(x, y).is_some() || self.status_chip_at(x, y).is_some())
+        self.image_at(x, y).is_some()
+            || (!self.occlusion_rects.iter().any(|rect| contains(*rect, x, y))
+                && (self.action_at(x, y).is_some() || self.status_chip_at(x, y).is_some()))
     }
 
     pub fn action_at(&self, x: f32, y: f32) -> Option<ComposerAction> {
+        if self
+            .occlusion_rects
+            .iter()
+            .any(|rect| contains(*rect, x, y))
+        {
+            return None;
+        }
+        if self.system_rects.iter().any(|rect| contains(*rect, x, y)) {
+            return Some(ComposerAction::ChangeSystem);
+        }
         self.cwd_rect
             .into_iter()
             .chain(self.cwd_rects.iter().copied())

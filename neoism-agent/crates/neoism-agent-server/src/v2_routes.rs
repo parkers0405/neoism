@@ -291,6 +291,9 @@ pub(crate) async fn v2_events(
             .and_then(|Extension(claims)| claims.resolved.as_ref())
             .and_then(|resolved| resolved.expires_at)
     });
+    let system_workflow = claims
+        .as_ref()
+        .is_some_and(|Extension(c)| c.is_system_workflow());
     let tenant_id = claims.and_then(|Extension(claims)| {
         (claims.hosted || claims.tenant_id != "local").then_some(claims.tenant_id)
     });
@@ -328,6 +331,7 @@ pub(crate) async fn v2_events(
         let mut tenant_sessions = std::collections::HashMap::<String, bool>::new();
         let mut admitted_live_messages = Vec::new();
         for event in live_messages {
+            if system_workflow && !system_workflow_event(&event) { continue; }
             if admit_tenant_event(
                 &state,
                 &event,
@@ -387,6 +391,7 @@ pub(crate) async fn v2_events(
                 }
                 for event in replay {
                     cursor = event.seq.max(0) as u64;
+                    if system_workflow && !system_workflow_event(&event.payload) { continue; }
                     // Only the replay TAIL can overlap the live buffer; keep
                     // the set bounded on huge `since=0` catch-ups by shedding
                     // older pages.
@@ -445,6 +450,7 @@ pub(crate) async fn v2_events(
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
             };
+            if system_workflow && !system_workflow_event(&live) { continue; }
             if !replayed_ids.is_empty() && replayed_ids.remove(live.id.as_str()) {
                 continue;
             }
@@ -654,25 +660,12 @@ pub(crate) async fn admit_live_event(
 }
 
 pub(crate) async fn session_family_ids(state: &AppState, root: &str) -> HashSet<String> {
-    let mut family = HashSet::from([root.to_string()]);
-    let Ok(sessions) = state.inner.store.list_sessions().await else {
-        return family;
-    };
-    loop {
-        let before = family.len();
-        for session in &sessions {
-            if session
-                .parent_id
-                .as_ref()
-                .is_some_and(|parent| family.contains(parent.as_str()))
-            {
-                family.insert(session.id.to_string());
-            }
-        }
-        if family.len() == before {
-            return family;
-        }
-    }
+    state
+        .inner
+        .store
+        .session_descendant_ids(root)
+        .await
+        .unwrap_or_else(|_| HashSet::from([root.to_string()]))
 }
 
 async fn session_descends_from(state: &AppState, session_id: &str, root: &str) -> bool {
@@ -691,6 +684,14 @@ async fn session_descends_from(state: &AppState, session_id: &str, root: &str) -
         current = parent.to_string();
     }
     false
+}
+
+fn system_workflow_event(event: &neoism_agent_core::EventPayload) -> bool {
+    event_session_id(event).is_some()
+        && matches!(
+            event.kind.split('.').next(),
+            Some("session" | "message" | "permission" | "question" | "todo")
+        )
 }
 
 fn event_session_id(event: &neoism_agent_core::EventPayload) -> Option<&str> {

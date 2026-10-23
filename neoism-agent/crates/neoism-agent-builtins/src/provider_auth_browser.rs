@@ -10,19 +10,29 @@ pub(super) async fn start_openai_browser_callback_listener(
     sender: oneshot::Sender<Result<String, String>>,
 ) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
-    tokio::spawn(async move {
-        let mut sender = Some(sender);
+    tokio::spawn(run_openai_browser_callback_listener(
+        listener,
+        callback_path,
+        expected_state,
+        sender,
+        std::time::Duration::from_secs(300),
+    ));
+    Ok(())
+}
+
+async fn run_openai_browser_callback_listener(
+    listener: tokio::net::TcpListener,
+    callback_path: String,
+    expected_state: String,
+    sender: oneshot::Sender<Result<String, String>>,
+    timeout: std::time::Duration,
+) {
+    let mut sender = Some(sender);
+    // One lifetime for the whole listener, including stalled HTTP reads and
+    // writes. Repeated unrelated connections must not reset the deadline.
+    let result = tokio::time::timeout(timeout, async {
         loop {
-            let accept = tokio::time::timeout(
-                std::time::Duration::from_secs(300),
-                listener.accept(),
-            )
-            .await;
-            let Ok(Ok((mut stream, _addr))) = accept else {
-                if let Some(sender) = sender.take() {
-                    let _ =
-                        sender.send(Err("OpenAI OAuth callback timed out".to_string()));
-                }
+            let Ok((mut stream, _addr)) = listener.accept().await else {
                 break;
             };
 
@@ -47,8 +57,43 @@ pub(super) async fn start_openai_browser_callback_listener(
                 break;
             }
         }
-    });
-    Ok(())
+    })
+    .await;
+    if let Some(sender) = sender.take() {
+        let message = if result.is_err() {
+            "OpenAI OAuth callback timed out"
+        } else {
+            "OpenAI OAuth callback listener stopped"
+        };
+        let _ = sender.send(Err(message.to_string()));
+    }
+}
+
+#[cfg(test)]
+mod lifetime_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn browser_listener_deadline_covers_stalled_socket_reads() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (sender, receiver) = oneshot::channel();
+        let task = tokio::spawn(run_openai_browser_callback_listener(
+            listener,
+            "/auth/callback".into(),
+            "state".into(),
+            sender,
+            std::time::Duration::from_millis(100),
+        ));
+        let _socket = tokio::net::TcpStream::connect(address).await.unwrap();
+        let error = tokio::time::timeout(std::time::Duration::from_secs(2), receiver)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert!(error.contains("timed out"));
+        task.await.unwrap();
+    }
 }
 
 pub(super) struct BrowserCallbackOutcome {
@@ -66,7 +111,9 @@ pub(super) fn openai_browser_callback_outcome(
     if route == "/cancel" {
         return BrowserCallbackOutcome {
             status: "200 OK",
-            body: neoism_agent_service_api::browser_pages::provider_authorization_cancelled(),
+            body:
+                neoism_agent_service_api::browser_pages::provider_authorization_cancelled(
+                ),
             result: Some(Err("Login cancelled".to_string())),
         };
     }

@@ -15,13 +15,27 @@ pub const AUDIENCE: &str = "neoism-agent-server";
 pub const PREFIX: &str = "neoism-daemon-v1";
 pub const MAX_LIFETIME_SECS: i64 = 120;
 
+pub const SYSTEM_WORKFLOW_VERSION: u32 = 1;
+pub const SYSTEM_WORKFLOW_SUBJECT: &str = "daemon:system-workflow";
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DaemonCredentialKind {
+    #[default]
+    Workspace,
+    SystemWorkflow,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DaemonCredentialClaims {
     pub issuer: String,
     pub audience: String,
     pub subject: String,
-    pub workspace_id: String,
+    #[serde(default)]
+    pub kind: DaemonCredentialKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
     pub tenant_id: String,
     pub directory_prefixes: Vec<String>,
     pub hosted: bool,
@@ -30,6 +44,22 @@ pub struct DaemonCredentialClaims {
 }
 
 impl DaemonCredentialClaims {
+    /// Machine workflow access is intentionally not a workspace or hosted identity.
+    pub fn system_workflow(now: i64, lifetime_secs: i64) -> Result<Self, &'static str> {
+        let mut claims = Self::new(
+            SYSTEM_WORKFLOW_SUBJECT,
+            "unused",
+            "local",
+            vec![],
+            false,
+            now,
+            lifetime_secs,
+        )?;
+        claims.kind = DaemonCredentialKind::SystemWorkflow;
+        claims.workspace_id = None;
+        Ok(claims)
+    }
+
     pub fn new(
         subject: impl Into<String>,
         workspace_id: impl Into<String>,
@@ -46,7 +76,8 @@ impl DaemonCredentialClaims {
             issuer: ISSUER.into(),
             audience: AUDIENCE.into(),
             subject: subject.into(),
-            workspace_id: workspace_id.into(),
+            kind: DaemonCredentialKind::Workspace,
+            workspace_id: Some(workspace_id.into()),
             tenant_id: tenant_id.into(),
             directory_prefixes,
             hosted,
@@ -122,16 +153,105 @@ fn validate_shape(claims: &DaemonCredentialClaims) -> Result<(), &'static str> {
     if claims.audience != AUDIENCE {
         return Err("invalid daemon credential audience");
     }
-    if claims.subject.trim().is_empty()
-        || claims.workspace_id.trim().is_empty()
-        || claims.tenant_id.trim().is_empty()
-    {
+    if claims.subject.trim().is_empty() || claims.tenant_id.trim().is_empty() {
         return Err("daemon credential identity is empty");
+    }
+    match claims.kind {
+        DaemonCredentialKind::Workspace => {
+            if claims
+                .workspace_id
+                .as_deref()
+                .is_none_or(|id| id.trim().is_empty())
+                || claims.subject == SYSTEM_WORKFLOW_SUBJECT
+            {
+                return Err("invalid workspace credential scope");
+            }
+        }
+        DaemonCredentialKind::SystemWorkflow => {
+            if claims.workspace_id.is_some()
+                || claims.hosted
+                || claims.tenant_id != "local"
+                || !claims.directory_prefixes.is_empty()
+                || claims.subject != SYSTEM_WORKFLOW_SUBJECT
+            {
+                return Err("invalid system workflow credential scope");
+            }
+        }
     }
     if claims.expires_at <= claims.issued_at {
         return Err("daemon credential expiry is invalid");
     }
     Ok(())
+}
+
+/// Fail-closed canonical v2 workflow surface, shared by proxy and verifier.
+/// No prefix grants: new routes must be deliberately added here.
+pub fn system_workflow_allows(method: &str, path: &str) -> bool {
+    if !path.starts_with("/v2/") || path.contains('%') || path.contains('\\') {
+        return false;
+    }
+    let parts: Vec<_> = path.split('/').skip(1).collect();
+    if parts
+        .iter()
+        .any(|part| part.is_empty() || *part == "." || *part == "..")
+    {
+        return false;
+    }
+    match parts.as_slice() {
+        ["v2", "health" | "meta" | "capabilities" | "providers" | "agents"
+        | "commands" | "tools" | "session-projects" | "directories" | "events"] => {
+            method == "GET"
+        }
+        ["v2", "providers", "configured"] => method == "GET",
+        ["v2", "session-catalog", "events"] => method == "GET",
+        ["v2", "sessions"] => matches!(method, "GET" | "POST"),
+        ["v2", "sessions", "status"] => method == "GET",
+        ["v2", "sessions", id] if workflow_id(id) => {
+            matches!(method, "GET" | "PATCH" | "DELETE")
+        }
+        ["v2", "sessions", id, action] if workflow_id(id) => match *action {
+            "messages" | "children" | "runtime" | "participants"
+            | "directory-options" | "todos" | "diff" | "undo-tree" | "context" => {
+                method == "GET"
+            }
+            "control" => matches!(method, "GET" | "POST" | "DELETE"),
+            "queue" => matches!(method, "GET" | "DELETE"),
+            "fork" | "prompt" | "prompt-async" | "abort" | "compact" | "wait"
+            | "commands" | "shell" | "revert" | "unrevert" | "undo" | "redo"
+            | "summarize" | "pin" => method == "POST",
+            _ => false,
+        },
+        ["v2", "sessions", id, "messages", message]
+            if workflow_id(id) && workflow_id(message) =>
+        {
+            matches!(method, "GET" | "DELETE")
+        }
+        ["v2", "sessions", id, "queue", "pop"] if workflow_id(id) => method == "POST",
+        ["v2", "sessions", id, "jobs", job] if workflow_id(id) && workflow_id(job) => {
+            method == "DELETE"
+        }
+        ["v2", "interactions", "permissions" | "questions"] => method == "GET",
+        ["v2", "interactions", "permissions" | "questions", id, "reply"]
+            if workflow_id(id) =>
+        {
+            method == "POST"
+        }
+        ["v2", "interactions", "questions", id, "reject"] if workflow_id(id) => {
+            method == "POST"
+        }
+        ["v2", "artifacts"] => matches!(method, "GET" | "POST"),
+        ["v2", "artifacts", id] if workflow_id(id) => matches!(method, "GET" | "DELETE"),
+        ["v2", "artifacts", id, "content"] if workflow_id(id) => method == "GET",
+        _ => false,
+    }
+}
+
+fn workflow_id(id: &str) -> bool {
+    !id.is_empty()
+        && id
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
+        && !matches!(id, "import" | "export" | "external" | "status")
 }
 
 fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
@@ -163,6 +283,52 @@ mod tests {
     use super::*;
 
     #[test]
+    fn system_workflow_is_explicit_unscoped_short_lived_and_fail_closed() {
+        let claims = DaemonCredentialClaims::system_workflow(100, 60).unwrap();
+        let token = issue(&claims, b"key").unwrap();
+        assert_eq!(verify(&token, b"key", 110).unwrap(), claims);
+        let json = serde_json::to_value(&claims).unwrap();
+        assert_eq!(json["kind"], "system-workflow");
+        assert!(json.get("workspaceId").is_none());
+        let mut invalid = claims.clone();
+        invalid.workspace_id = Some("spoof".into());
+        assert!(issue(&invalid, b"key").is_err());
+        invalid = claims.clone();
+        invalid.hosted = true;
+        assert!(issue(&invalid, b"key").is_err());
+        assert!(verify(&token, b"key", 160).is_err());
+        for path in [
+            "/v2/session-projects",
+            "/v2/directories",
+            "/v2/providers",
+            "/v2/providers/configured",
+            "/v2/agents",
+            "/v2/commands",
+            "/v2/sessions/ses_test/messages",
+        ] {
+            assert!(system_workflow_allows("GET", path), "{path}");
+            assert!(!system_workflow_allows("PUT", path), "{path}");
+        }
+        for path in [
+            "/v2/config",
+            "/v2/config/defaults",
+            "/v2/management/agents",
+            "/v2/hosting/associate",
+            "/v2/providers/openai/auth",
+            "/v2/providers/openai/oauth/authorize",
+            "/v2/providers/openai/connections",
+            "/v2/plugins/dev.neoism.mcp/catalog",
+            "/v2/sessions/../config",
+            "/v2/sessions/%2e%2e",
+            "/v2/sessions/import",
+        ] {
+            for method in ["GET", "POST", "PUT", "DELETE"] {
+                assert!(!system_workflow_allows(method, path), "{method} {path}");
+            }
+        }
+    }
+
+    #[test]
     fn rejects_forged_expired_and_wrong_audience_credentials() {
         let key = b"daemon-key";
         let valid = DaemonCredentialClaims::new(
@@ -176,6 +342,12 @@ mod tests {
         )
         .unwrap();
         let token = issue(&valid, key).unwrap();
+        // Old workspace payloads had no kind tag; they remain workspace-only.
+        let mut legacy = serde_json::to_value(&valid).unwrap();
+        legacy.as_object_mut().unwrap().remove("kind");
+        let legacy: DaemonCredentialClaims = serde_json::from_value(legacy).unwrap();
+        assert_eq!(legacy.kind, DaemonCredentialKind::Workspace);
+        assert_eq!(legacy.workspace_id.as_deref(), Some("workspace-a"));
         assert_eq!(verify(&token, key, 120).unwrap(), valid);
         assert!(verify(&token, b"wrong-key", 120).is_err());
         assert!(verify(&token, key, 161).is_err());

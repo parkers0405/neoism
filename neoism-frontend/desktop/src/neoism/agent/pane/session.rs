@@ -352,7 +352,7 @@ impl NeoismAgentPane {
             DefaultChatSource::Codex => ConversationSource::Codex,
         };
         self.default_chat_source = source;
-        if !self.has_conversation() && !self.draft_source_explicit {
+        if !self.has_conversation() && !self.draft_source_explicit && self.new_chat_source != source {
             self.set_conversation_source(source);
             self.draft_source_explicit = false;
         }
@@ -524,6 +524,8 @@ impl NeoismAgentPane {
             return;
         }
         self.catalog_generation = self.catalog_generation.wrapping_add(1);
+        self.systems.summaries.clear();
+        self.systems.streams.clear();
         self.session_catalog_stream = None;
         self.semantic_in_flight = false;
         self.semantic_pending_query = None;
@@ -625,6 +627,15 @@ impl NeoismAgentPane {
     }
 
     fn ensure_session_catalog_stream(&mut self) {
+        if self.systems.root && self.side_panel.catalog_directory().is_none() {
+            for source in self.systems.available.iter().filter(|s| s.authorized()) {
+                self.systems.streams.entry(source.server.clone()).or_insert_with(|| {
+                    let mut stream = start_session_catalog_stream(source.server.clone(), None);
+                    if let Some(wake) = self.event_wake.clone() { stream.set_wake(wake); }
+                    stream
+                });
+            }
+        }
         if self.session_catalog_stream.as_ref().is_some_and(|stream| {
             stream.matches(&self.server, self.side_panel.catalog_directory())
         }) {
@@ -646,9 +657,10 @@ impl NeoismAgentPane {
         generation: u64,
         directory: Option<&str>,
     ) -> bool {
-        self.server == server
-            && self.catalog_generation == generation
+        self.catalog_generation == generation
             && self.side_panel.catalog_directory() == directory
+            && (self.server == server
+                || (directory.is_none() && self.systems.root && self.system_source(server).is_some()))
     }
 
     pub(crate) fn request_side_panel_session_page(&mut self, cursor: Option<String>) {
@@ -658,6 +670,19 @@ impl NeoismAgentPane {
         let catalog_generation = self.catalog_generation;
         let current = self.session_id.clone();
         let tx = self.background_tx.clone();
+        if directory.is_none() && self.systems.root {
+            for source in self.systems.available.iter().filter(|s| s.authorized()).cloned() {
+                let tx = tx.clone();
+                std::thread::spawn(move || {
+                    let result = crate::neoism::agent::api::fetch_session_projects(&source.server);
+                    if source.authorized() {
+                        let _ = tx.send(NeoismAgentBackgroundUpdate::SessionProjectsRefreshed {
+                            server: source.server, catalog_generation, generation, result,
+                        });
+                    }
+                });
+            }
+        }
         if std::thread::Builder::new()
             .name("neoism-agent-sessions".into())
             .spawn(move || {
@@ -706,16 +731,24 @@ impl NeoismAgentPane {
         let requests = self.side_panel.begin_project_session_requests();
         let changed = !requests.is_empty();
         for (directory, cursor, generation) in requests {
-            let server = self.server.clone();
             let catalog_generation = self.catalog_generation;
             let tx = self.background_tx.clone();
             let requested_directory = directory.clone();
+            let Some((server, wire_directory)) = self.resolve_catalog_key(&directory) else { continue; };
+            let source = self.system_source(&server).cloned();
             if let Err(error) = enqueue_project_session_job(Box::new(move || {
                 let result = crate::neoism::agent::api::fetch_project_session_page(
                     &server,
-                    &requested_directory,
+                    &wire_directory,
                     cursor.as_deref(),
                 );
+                let result = result.map(|(entries, next)| {
+                    let entries = if let Some(source) = &source {
+                        entries.into_iter().map(|entry| systems::qualify_entry(source, entry)).collect()
+                    } else { entries };
+                    (entries, next)
+                });
+                if source.as_ref().is_some_and(|s| !s.authorized()) { return; }
                 let _ = tx.send(NeoismAgentBackgroundUpdate::ProjectSessionPage {
                     server,
                     catalog_generation,
@@ -894,15 +927,17 @@ impl NeoismAgentPane {
         let Some(session_id) = self.session_id.clone() else {
             return;
         };
-        self.hydrate_runtime_status_for_session(&session_id);
-        let stream_session_id = self.session_tree_root_id.clone().unwrap_or(session_id);
-        self.start_session_updates(&stream_session_id);
+        let stream_session_id = self.session_tree_root_id.clone().unwrap_or(session_id.clone());
+        if !self.start_session_updates(&stream_session_id) {
+            self.hydrate_runtime_status_for_session(&session_id);
+        }
     }
 
     /// Debounced background refetch of the session's persistent goal.
     /// Fires on session change / `SESSION_UPDATED` (via
     /// `invalidate_goal_refresh`) and on a slow steady cadence otherwise.
     pub(crate) fn maybe_refresh_session_goal(&mut self) {
+        if super::super::system::is_system_agent_server(&self.server) { return; }
         let Some(session_id) = self.session_id.clone() else {
             return;
         };
@@ -1920,7 +1955,7 @@ impl NeoismAgentPane {
                 || self
                     .session_preload_queue
                     .iter()
-                    .any(|(session_id, _)| session_id == &root_id)
+                    .any(|(session_id, _, _)| session_id == &root_id)
             {
                 return;
             }

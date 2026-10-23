@@ -1,6 +1,78 @@
 use super::*;
 
 #[test]
+fn pending_refresh_preserves_loaded_account_models_and_original_cache_age() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let server = format!("http://{}", listener.local_addr().unwrap());
+    register_agent_server_credential(&server, Some("loaded-readiness"));
+    let scope = catalog_scope(&server, Some("/project"));
+    let key = catalog_key(&server, Some("/project"), "/v2/providers");
+    catalog_cache().get(key.clone(), || Ok(serde_json::json!({
+        "all":[{"id":"openai","models":{"account-only-model":{}}}],
+        "connected":["openai"], "readinessPending":false, "readinessIdentity":"account-a-token-a"
+    }))).unwrap();
+    catalog_cache().age_for_test(&key, Duration::from_secs(45));
+    let http = std::thread::spawn(move || {
+        for body in [
+            r#"{"all":[{"id":"openai","models":{"fallback-only":{}}}],"connected":["openai"],"readinessPending":true,"readinessIdentity":"account-a-token-a"}"#,
+            r#"{"all":[{"id":"openai","models":{}}],"connected":["openai"],"readinessPending":false}"#,
+        ] {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 4096];
+            stream.read(&mut request).unwrap();
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        }
+    });
+    let loaded = fetch_provider_readiness_scoped(&scope).unwrap();
+    assert!(!loaded.pending);
+    assert!(loaded.prompt_error("openai/account-only-model").is_none());
+    assert!(catalog_cache().snapshot_age(&key).unwrap().1 >= Duration::from_secs(45));
+    // A newly opened pane reuses that exact process snapshot, without a worker.
+    let mut pane = crate::neoism::agent::NeoismAgentPane::default();
+    pane.server = server.clone();
+    pane.directory = Some("/project".into());
+    pane.model = "openai/account-only-model".into();
+    pane.apply_config_defaults();
+    assert_eq!(pane.current_provider_readiness(), Some(&loaded));
+    // A complete response must still replace it, including a real empty result.
+    let empty = fetch_provider_readiness_scoped(&scope).unwrap();
+    assert!(!empty.pending);
+    assert!(empty.prompt_error("openai/account-only-model").is_some());
+    assert!(cached_provider_readiness(&server, Some("/other")).is_none());
+    http.join().unwrap();
+    register_agent_server_credential(&server, None);
+}
+
+#[test]
+fn pending_readiness_is_valid_and_refreshes_before_normal_catalog_ttl() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let server = format!("http://{}", listener.local_addr().unwrap());
+    register_agent_server_credential(&server, Some("pending-readiness"));
+    let scope = catalog_scope(&server, None);
+    let key = catalog_key(&server, None, "/v2/providers");
+    let pending = serde_json::json!({"all":[{"id":"openai","models":{"example":{}}}],
+        "connected":["openai"], "readinessPending":true});
+    catalog_cache().get(key.clone(), || Ok(pending)).unwrap();
+    let first = fetch_provider_readiness_scoped(&scope).unwrap();
+    assert!(first.pending);
+    assert!(first.prompt_error("openai/example").is_none());
+    catalog_cache().age_for_test(&key, Duration::from_secs(2));
+    assert!(cached_provider_readiness(&server, None).is_none());
+    let http = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0; 4096];
+        stream.read(&mut request).unwrap();
+        let body = r#"{"all":[{"id":"openai","models":{}}],"connected":["openai"],"readinessPending":false}"#;
+        write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+    });
+    let resolved = fetch_provider_readiness_scoped(&scope).unwrap();
+    assert!(!resolved.pending);
+    assert!(resolved.prompt_error("openai/example").unwrap().contains("/models"));
+    http.join().unwrap();
+    register_agent_server_credential(&server, None);
+}
+
+#[test]
 fn readiness_cache_is_independent_of_defaults_and_configured_models() {
     let server = "invalid://readiness-only-cache";
     let key = catalog_key(server, Some("/chat"), "/v2/providers");

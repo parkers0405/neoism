@@ -18,6 +18,11 @@ use std::sync::{Mutex, OnceLock};
 use web_time::Duration;
 use web_time::Instant;
 
+#[cfg(not(target_arch = "wasm32"))]
+mod status_cache;
+#[cfg(not(target_arch = "wasm32"))]
+pub use status_cache::GitStatusCache;
+
 const BRANCH_TTL: Duration = Duration::from_secs(2);
 const ROOT_TTL: Duration = Duration::from_secs(10);
 const CHANGE_TTL: Duration = Duration::from_secs(10);
@@ -107,12 +112,16 @@ pub fn branch_for(start: &Path) -> Option<String> {
 
 pub fn change_summary_for(start: &Path) -> Option<GitChangeSummary> {
     let repo_root = repo_root_for(start)?;
+    change_summary_for_repo_root(&repo_root)
+}
+
+fn change_summary_for_repo_root(repo_root: &Path) -> Option<GitChangeSummary> {
     let now = Instant::now();
     let (cached, should_refresh) = {
         let Ok(mut cache) = change_cache().lock() else {
             return None;
         };
-        match cache.get_mut(&repo_root) {
+        match cache.get_mut(repo_root) {
             Some(entry) => {
                 let stale = now.saturating_duration_since(entry.fetched_at) >= CHANGE_TTL;
                 let should_refresh = stale && !entry.in_flight;
@@ -123,7 +132,7 @@ pub fn change_summary_for(start: &Path) -> Option<GitChangeSummary> {
             }
             None => {
                 cache.insert(
-                    repo_root.clone(),
+                    repo_root.to_path_buf(),
                     ChangeEntry {
                         value: None,
                         fetched_at: now,
@@ -136,7 +145,7 @@ pub fn change_summary_for(start: &Path) -> Option<GitChangeSummary> {
     };
 
     if should_refresh {
-        refresh_change_summary(repo_root);
+        refresh_change_summary(repo_root.to_path_buf());
     }
 
     cached

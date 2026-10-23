@@ -48,6 +48,8 @@ impl NeoismAgentPane {
         session_id: String,
         mutation: AgentSessionMutation,
     ) {
+        let source = self.system_source(&server).cloned();
+        if super::super::system::is_system_agent_server(&server) && source.is_none() { return; }
         let key = (server.clone(), session_id.clone());
         if !self.session_mutations_in_flight.insert(key.clone()) {
             return;
@@ -56,6 +58,7 @@ impl NeoismAgentPane {
         let result = std::thread::Builder::new()
             .name("neoism-agent-session-mutation".into())
             .spawn(move || {
+                if source.as_ref().is_some_and(|s| !s.authorized()) { return; }
                 let result = match &mutation {
                     AgentSessionMutation::Pin(pinned) => {
                         super::super::api::set_session_pinned(
@@ -72,7 +75,9 @@ impl NeoismAgentPane {
                         super::super::api::delete_session(&server, &session_id)
                     }
                 };
+                if source.as_ref().is_some_and(|s| !s.authorized()) { return; }
                 let _ = tx.send(NeoismAgentBackgroundUpdate::SessionMutationCompleted {
+                    source,
                     server,
                     session_id,
                     mutation,

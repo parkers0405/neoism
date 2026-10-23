@@ -38,10 +38,173 @@ fn record_composition_motion(
 }
 
 use super::*;
+use super::super::updates::ingestion_budget::IngestionBudget;
 
 #[cfg(test)]
 #[path = "late_empty_tests.rs"]
 mod late_empty_tests;
+
+#[cfg(test)]
+mod ingestion_tests {
+    use super::*;
+    use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+
+    fn observe_wakes(pane: &mut NeoismAgentPane) -> Arc<AtomicUsize> {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = calls.clone();
+        pane.set_event_wake(AgentEventWake::for_test(move || {
+            observed.fetch_add(1, Ordering::Relaxed);
+        }));
+        calls
+    }
+
+    fn expired_pass(pane: &mut NeoismAgentPane) -> bool {
+        AgentEventWake::with_ingestion_budget(Duration::ZERO, || {
+            pane.drain_live_session_updates()
+        })
+    }
+
+    #[test]
+    fn ingestion_expired_empty_sources_do_not_wake_or_report_changes() {
+        let mut pane = NeoismAgentPane::default();
+        let calls = observe_wakes(&mut pane);
+        for _ in 0..3 {
+            assert!(!expired_pass(&mut pane)); // no catalog stream
+        }
+        pane.session_catalog_stream = Some(AgentSessionCatalogStream::with_events_for_test([]));
+        // Rebind explicitly because same_receiver intentionally skips rebinding.
+        let wake = pane.event_wake().unwrap();
+        pane.session_catalog_stream.as_mut().unwrap().set_wake(wake);
+        for _ in 0..3 {
+            assert!(!expired_pass(&mut pane)); // present, empty catalog receiver
+            assert!(!pane.drain_background_updates_with_budget(IngestionBudget::ending_at(Instant::now())));
+        }
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn ingestion_expired_catalog_retains_fifo_and_stops_waking_when_empty() {
+        let mut pane = NeoismAgentPane::default();
+        pane.session_catalog_stream = Some(AgentSessionCatalogStream::with_events_for_test(
+            ["first", "second", "third"].map(|id| json!({
+                "id": id, "sequence": 1, "source": "session",
+                "schemaVersion": "1.0.0", "timestamp": 1,
+                "type": "session.deleted", "subject": {"kind": "session", "id": id},
+                "data": {"sessionID": id}
+            })),
+        ));
+        let calls = observe_wakes(&mut pane);
+        for _ in 0..2 {
+            let before = calls.load(Ordering::Relaxed);
+            assert!(expired_pass(&mut pane));
+            assert!(calls.load(Ordering::Relaxed) > before);
+        }
+        let stream = pane.session_catalog_stream.as_mut().unwrap();
+        let first = stream.try_next().unwrap();
+        assert!(matches!(first, AgentSessionCatalogUpdate::Delete(id) if id == "first"));
+        let rest = stream.drain(128).into_iter().map(|update| match update {
+            AgentSessionCatalogUpdate::Delete(id) => id,
+            _ => panic!("expected delete"),
+        }).collect::<Vec<_>>();
+        assert_eq!(rest, ["second", "third"]);
+        let before = calls.load(Ordering::Relaxed);
+        assert!(!expired_pass(&mut pane));
+        assert_eq!(calls.load(Ordering::Relaxed), before);
+    }
+
+    #[test]
+    fn ingestion_expired_background_retains_fifo_and_stops_waking_when_empty() {
+        let mut pane = NeoismAgentPane::default();
+        let calls = observe_wakes(&mut pane);
+        for text in ["first", "second", "third"] {
+            pane.background_tx.send(NeoismAgentBackgroundUpdate::RequestFailed {
+                server: pane.server.clone(), session_id: Some("background-test".into()),
+                title: text.into(), error: text.into(),
+            }).unwrap();
+        }
+        for _ in 0..2 {
+            let before = calls.load(Ordering::Relaxed);
+            assert!(pane.drain_background_updates_with_budget(IngestionBudget::ending_at(Instant::now())));
+            assert!(pane.messages.is_empty());
+            assert!(calls.load(Ordering::Relaxed) > before);
+        }
+        assert!(pane.drain_background_updates_with_budget(
+            IngestionBudget::ending_at(Instant::now() + Duration::from_secs(1)),
+        ));
+        assert_eq!(pane.session_cache["background-test"].messages.iter()
+            .map(|row| row.text.as_str()).collect::<Vec<_>>(),
+            ["first", "second", "third"]);
+        let before = calls.load(Ordering::Relaxed);
+        assert!(!pane.drain_background_updates_with_budget(IngestionBudget::ending_at(Instant::now())));
+        assert_eq!(calls.load(Ordering::Relaxed), before);
+    }
+
+    #[test]
+    fn ingestion_background_exact_count_limit_does_not_rewake_empty_queue() {
+        let mut pane = NeoismAgentPane::default();
+        let calls = observe_wakes(&mut pane);
+        for _ in 0..64 {
+            pane.background_tx.send(NeoismAgentBackgroundUpdate::RequestFailed {
+                server: "not-current-server".into(), session_id: None,
+                title: String::new(), error: String::new(),
+            }).unwrap();
+        }
+        let before = calls.load(Ordering::Relaxed);
+        assert!(!pane.drain_background_updates_with_budget(
+            IngestionBudget::ending_at(Instant::now() + Duration::from_secs(1)),
+        ));
+        assert_eq!(calls.load(Ordering::Relaxed), before);
+    }
+
+    #[test]
+    fn ingestion_background_callback_runs_without_sender_lock() {
+        let mut pane = NeoismAgentPane::default();
+        let slot = pane.background_tx.wake.clone();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = calls.clone();
+        pane.set_event_wake(AgentEventWake::for_test(move || {
+            assert!(slot.try_lock().is_ok());
+            observed.fetch_add(1, Ordering::Relaxed);
+        }));
+        pane.background_tx.send(NeoismAgentBackgroundUpdate::RequestFailed {
+            server: pane.server.clone(), session_id: None,
+            title: String::new(), error: String::new(),
+        }).unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert!(expired_pass(&mut pane));
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn ingestion_expired_window_wakes_and_preserves_stream_for_next_pass() {
+        let mut pane = NeoismAgentPane::default();
+        pane.session_id = Some("root".into());
+        pane.event_stream = Some(AgentSessionEventStream::with_updates_for_test("root", [
+            AgentSessionUpdate::PartDelta {
+                message_id: Some("m".into()), part_id: Some("p".into()),
+                kind: Some("text".into()), delta: "kept".into(),
+            },
+        ]));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = calls.clone();
+        let wake = AgentEventWake::for_test(move || { observed.fetch_add(1, Ordering::Relaxed); });
+        pane.set_event_wake(wake.clone());
+        let before = calls.load(Ordering::Relaxed);
+        AgentEventWake::with_ingestion_budget(Duration::ZERO, || {
+            assert!(pane.drain_live_session_updates());
+        });
+        assert!(pane.messages.is_empty());
+        assert!(calls.load(Ordering::Relaxed) > before);
+        // A subsequent consumer clearing the shared flag cannot retract the
+        // callback already delivered for the deferred suffix.
+        wake.begin_drain();
+        AgentEventWake::with_ingestion_budget(Duration::from_secs(1), || {
+            pane.drain_live_session_updates();
+        });
+        assert_eq!(pane.messages.len(), 1);
+        assert_eq!(pane.messages[0].text, "kept");
+    }
+}
 
 pub(super) fn update_todos_message(
     messages: &mut Vec<NeoismAgentMessage>,
@@ -77,6 +240,26 @@ pub(super) fn apply_authoritative_plan(
     }
 }
 
+fn qualify_catalog_update(
+    source: &crate::neoism::agent::system::AgentSystemSource,
+    update: AgentSessionCatalogUpdate,
+) -> AgentSessionCatalogUpdate {
+    match update {
+        AgentSessionCatalogUpdate::Reconnected => AgentSessionCatalogUpdate::Reconnected,
+        AgentSessionCatalogUpdate::Upsert(entry) => AgentSessionCatalogUpdate::Upsert(super::systems::qualify_entry(source, entry)),
+        AgentSessionCatalogUpdate::Delete(id) => AgentSessionCatalogUpdate::Delete(source.key(&id)),
+        AgentSessionCatalogUpdate::Activity { session_id, activity } => AgentSessionCatalogUpdate::Activity { session_id: source.key(&session_id), activity },
+        AgentSessionCatalogUpdate::Family { session_id, mut snapshot } => {
+            snapshot.directory = source.key(&snapshot.directory);
+            for branch in &mut snapshot.branches {
+                branch.session_id = source.key(&branch.session_id);
+                branch.parent_session_id = source.key(&branch.parent_session_id);
+            }
+            AgentSessionCatalogUpdate::Family { session_id: source.key(&session_id), snapshot }
+        }
+    }
+}
+
 impl NeoismAgentPane {
     pub fn drain_server_updates(&mut self) -> bool {
         self.drain_server_updates_inner(true)
@@ -87,76 +270,91 @@ impl NeoismAgentPane {
     }
 
     fn drain_server_updates_inner(&mut self, include_outbound: bool) -> bool {
+        if !self.execution_authorized() {
+            return false;
+        }
         const MAX_STREAM_UPDATES_PER_FRAME: usize = 512;
+        let budget = IngestionBudget::pane();
         let started = crate::neoism::agent::perf::now();
         let messages_before = self.messages.len();
         let mut drained_updates = 0usize;
         let mut delta_updates = 0usize;
         let mut delta_bytes = 0usize;
         let mut changed = include_outbound && self.drain_outbound_commands();
-        changed |= self.drain_background_updates();
+        changed |= self.drain_background_updates_with_budget(budget.fraction(5, Duration::from_micros(400)));
         changed |= self.pump_project_session_requests();
-        let catalog_updates = self
-            .session_catalog_stream
-            .as_mut()
-            .map(|stream| stream.drain(128))
-            .unwrap_or_default();
+        // Reserve most of the pane's deadline for live text even during a
+        // catalog/result flood. Only dequeue the next catalog event immediately
+        // before applying it; adjacent upserts still share a single rebuild.
+        let catalog_budget = budget.fraction(5, Duration::from_micros(400));
+        let mut sources = vec![None];
+        if self.systems.root && self.side_panel.catalog_directory().is_none() {
+            sources.extend(self.systems.available.iter().filter(|source| source.authorized()).cloned().map(Some));
+        }
         let mut catalog_upserts = Vec::new();
-        for update in catalog_updates {
-            // Preserve reconnect/delete/activity ordering while rebuilding only
-            // once for an adjacent catalog import/upsert burst.
-            if !matches!(&update, AgentSessionCatalogUpdate::Upsert(_))
-                && !catalog_upserts.is_empty()
-            {
-                self.side_panel
-                    .upsert_sessions(std::mem::take(&mut catalog_upserts));
-            }
-            match update {
-                AgentSessionCatalogUpdate::Reconnected => {
-                    self.side_panel.clear_session_activity_overrides();
-                    self.side_panel.clear_catalog_families();
-                    changed = true;
-                    self.request_side_panel_session_page(None);
-                }
-                AgentSessionCatalogUpdate::Family {
-                    session_id,
-                    snapshot,
-                } => {
-                    changed |= self
-                        .side_panel
-                        .apply_catalog_family_snapshot(&session_id, snapshot);
-                }
-                AgentSessionCatalogUpdate::Activity {
-                    session_id,
-                    activity,
-                } => {
-                    changed |=
-                        self.side_panel.set_session_activity(&session_id, activity);
-                }
-                AgentSessionCatalogUpdate::Upsert(session) => {
-                    if self
-                        .side_panel
-                        .catalog_directory()
-                        .is_some_and(|directory| {
-                            session.directory.as_deref() != Some(directory)
-                        })
-                    {
-                        if !catalog_upserts.is_empty() {
-                            self.side_panel
-                                .upsert_sessions(std::mem::take(&mut catalog_upserts));
-                        }
-                        if self.side_panel.catalog_session(&session.id).is_some() {
-                            self.side_panel.remove_session(&session.id);
-                            changed = true;
-                        }
-                        continue;
+        for source in sources {
+            for received in 0..=128 {
+                let stream = match source.as_ref() {
+                    None => self.session_catalog_stream.as_mut(),
+                    Some(source) => self.systems.streams.get_mut(&source.server),
+                };
+                let Some(stream) = stream else { break; };
+                if received == 128 || catalog_budget.exhausted() {
+                    let has_pending = stream.has_pending();
+                    if has_pending {
+                        changed |= self.request_ingestion_continuation();
                     }
-                    catalog_upserts.push(session);
-                    changed = true;
+                    break;
                 }
-                AgentSessionCatalogUpdate::Delete(session_id) => {
-                    self.side_panel.remove_session(&session_id);
-                    changed = true;
+                let Some(update) = stream.try_next() else {
+                    break;
+                };
+                let update = match source.as_ref() {
+                    None => update,
+                    Some(source) => qualify_catalog_update(source, update),
+                };
+                // Preserve reconnect/delete/activity ordering while rebuilding
+                // only once for an adjacent catalog import/upsert burst.
+                if !matches!(&update, AgentSessionCatalogUpdate::Upsert(_))
+                    && !catalog_upserts.is_empty()
+                {
+                    self.side_panel
+                        .upsert_sessions(std::mem::take(&mut catalog_upserts));
+                }
+                match update {
+                    AgentSessionCatalogUpdate::Reconnected => {
+                        self.side_panel.clear_session_activity_overrides();
+                        self.side_panel.clear_catalog_families();
+                        changed = true;
+                        self.request_side_panel_session_page(None);
+                    }
+                    AgentSessionCatalogUpdate::Family { session_id, snapshot } => {
+                        changed |= self.side_panel
+                            .apply_catalog_family_snapshot(&session_id, snapshot);
+                    }
+                    AgentSessionCatalogUpdate::Activity { session_id, activity } => {
+                        changed |= self.side_panel.set_session_activity(&session_id, activity);
+                    }
+                    AgentSessionCatalogUpdate::Upsert(session) => {
+                        if self.side_panel.catalog_directory().is_some_and(|directory| {
+                            session.directory.as_deref() != Some(directory)
+                        }) {
+                            if !catalog_upserts.is_empty() {
+                                self.side_panel.upsert_sessions(std::mem::take(&mut catalog_upserts));
+                            }
+                            if self.side_panel.catalog_session(&session.id).is_some() {
+                                self.side_panel.remove_session(&session.id);
+                                changed = true;
+                            }
+                            continue;
+                        }
+                        catalog_upserts.push(session);
+                        changed = true;
+                    }
+                    AgentSessionCatalogUpdate::Delete(session_id) => {
+                        self.side_panel.remove_session(&session_id);
+                        changed = true;
+                    }
                 }
             }
         }
@@ -168,13 +366,27 @@ impl NeoismAgentPane {
             return changed;
         };
         let stream_session_id = event_stream.session_id().to_string();
-        let (updates, stream_has_more) = event_stream.drain(MAX_STREAM_UPDATES_PER_FRAME);
+        let (updates, mut stream_has_more) = event_stream.drain_with_budget(
+            MAX_STREAM_UPDATES_PER_FRAME,
+            Some(budget.slice(Duration::from_micros(200))),
+        );
         if !updates.is_empty() {
             self.last_stream_update_at = Some(Instant::now());
         }
         let stream_is_active =
             self.session_id.as_deref() == Some(stream_session_id.as_str());
-        for update in updates {
+        let mut updates = updates.into_iter();
+        while !updates.as_slice().is_empty() {
+            if budget.exhausted() {
+                // Put the unapplied coalesced suffix before the stream's
+                // lookahead and receiver. Never replay an already applied edge.
+                if let Some(stream) = self.event_stream.as_mut() {
+                    stream.defer(updates);
+                }
+                stream_has_more = true;
+                break;
+            }
+            let update = updates.next().expect("nonempty update suffix");
             drained_updates += 1;
             match update {
                 AgentSessionUpdate::TodosUpdated(todos) => {
@@ -223,10 +435,44 @@ impl NeoismAgentPane {
                     }
                     changed = true;
                 }
+                AgentSessionUpdate::HistoryRefreshFailed { session_id, error } => {
+                    self.discard_initial_session_preview(&session_id);
+                    if self.session_id.as_deref() == Some(session_id.as_str()) {
+                        self.system_message("History", error);
+                        changed = true;
+                    }
+                }
+                AgentSessionUpdate::HistoryPageLoaded { session_id, raw_count, requested_limit, oldest_cursor } => {
+                    let history = if self.session_id.as_deref() == Some(session_id.as_str()) {
+                        Some(&mut self.timeline_history)
+                    } else {
+                        self.session_cache.get_mut(&session_id).map(|cached| &mut cached.timeline_history)
+                    };
+                    if let Some(history) = history {
+                        // A newest-page refresh must not move an older-page cursor
+                        // forward after the reader has already paged backwards.
+                        if history.oldest_loaded_cursor.is_none() || history.oldest_loaded_cursor == oldest_cursor {
+                            history.has_older = raw_count >= requested_limit && oldest_cursor.is_some();
+                            history.oldest_loaded_cursor = oldest_cursor;
+                        }
+                    }
+                }
+                AgentSessionUpdate::ImageHydrationDeferred => {
+                    self.image_hydration_pending.extend(self.session_cache.keys().cloned());
+                    self.image_hydration_pending.extend(self.session_id.iter().cloned());
+                }
+                AgentSessionUpdate::ImageHydrationProgress => {
+                    self.retry_session_images();
+                }
+                AgentSessionUpdate::ImageHydrated { session_id, patch } => {
+                    let owner = session_id.as_deref().unwrap_or(&stream_session_id);
+                    changed |= self.apply_session_image_patch(owner, &patch);
+                }
                 AgentSessionUpdate::Messages {
                     mut messages,
                     oldest_cursor,
                 } => {
+                    self.discard_initial_session_preview(&stream_session_id);
                     if !stream_is_active {
                         let cached = self
                             .session_cache
@@ -253,7 +499,9 @@ impl NeoismAgentPane {
                             plan.as_ref(),
                             cached.state.source.provider().is_some(),
                         );
-                        cached.timeline_history.oldest_loaded_cursor = oldest_cursor;
+                        if cached.timeline_history.oldest_loaded_cursor.is_none() {
+                            cached.timeline_history.oldest_loaded_cursor = oldest_cursor;
+                        }
                         cached.hydrated = true;
                         cached.invalidate_timeline_layout();
                         changed = true;
@@ -262,9 +510,16 @@ impl NeoismAgentPane {
                     let messages = self.compact_inbound_user_texts(messages);
                     let messages = self.merge_pending_user_prompts(messages);
                     let mut messages = self.preserve_streamed_response_text(messages);
-                    if self.timeline_history.oldest_loaded_cursor.is_some() {
-                        messages =
-                            merge_session_snapshot(messages, self.messages.clone(), true);
+                    if !self.messages.is_empty() {
+                        // The subscribed stream can deliver a new part after SQL
+                        // took its snapshot but before this baseline is applied.
+                        // Untouched display previews were stripped above; retain
+                        // the remaining live parts even on the first cold page.
+                        messages = merge_session_snapshot(
+                            messages,
+                            self.messages.clone(),
+                            self.timeline_history.oldest_loaded_cursor.is_some(),
+                        );
                     }
                     // Landed background-task completion cards survive the
                     // snapshot replacement (runs last so the dedupe check
@@ -461,6 +716,7 @@ impl NeoismAgentPane {
                     mut messages,
                     oldest_cursor,
                 } => {
+                    self.discard_initial_session_preview(&session_id);
                     if self.session_id.as_deref() == Some(session_id.as_str()) {
                         messages = self.compact_inbound_user_texts(messages);
                         messages = self.merge_pending_user_prompts(messages);
@@ -573,7 +829,9 @@ impl NeoismAgentPane {
                             plan.as_ref(),
                             cached.state.source.provider().is_some(),
                         );
-                        cached.timeline_history.oldest_loaded_cursor = oldest_cursor;
+                        if cached.timeline_history.oldest_loaded_cursor.is_none() {
+                            cached.timeline_history.oldest_loaded_cursor = oldest_cursor;
+                        }
                         cached.hydrated = true;
                         cached.invalidate_timeline_layout();
                     }
@@ -620,14 +878,7 @@ impl NeoismAgentPane {
                     switch_workspace,
                 } => {
                     if stream_is_active {
-                        self.directory = Some(directory.clone());
-                        self.refresh_provider_readiness();
-                        self.invalidate_skill_options();
-                        self.side_panel.invalidate_goal_refresh();
-                        if switch_workspace {
-                            self.ui_events
-                                .push(NeoismAgentUiEvent::SwitchWorkspace { directory });
-                        }
+                        self.apply_session_move(directory, switch_workspace);
                         changed = true;
                     }
                 }
@@ -1512,7 +1763,20 @@ impl NeoismAgentPane {
             );
         }
         self.trim_session_cache();
+        if stream_has_more {
+            self.request_ingestion_continuation();
+        }
         changed || stream_has_more
+    }
+
+    /// Request a fresh edge, not just an animation flag: a later queue's
+    /// begin_drain may clear the shared coalescer in this same frame.
+    fn request_ingestion_continuation(&self) -> bool {
+        if let Some(wake) = self.event_wake.as_ref() {
+            wake.begin_drain();
+            wake.wake();
+        }
+        true
     }
 
     pub(crate) fn drain_outbound_commands(&mut self) -> bool {
@@ -1882,6 +2146,16 @@ impl NeoismAgentPane {
     }
 
     pub(crate) fn drain_background_updates(&mut self) -> bool {
+        self.drain_background_updates_with_budget(IngestionBudget::pane())
+    }
+
+    fn drain_background_updates_with_budget(&mut self, budget: IngestionBudget) -> bool {
+        if !self.execution_authorized() {
+            return false;
+        }
+        if !self.image_hydration_pending.is_empty() {
+            self.retry_session_images();
+        }
         self.cancel_out_of_scope_mcp_oauth();
         self.reconcile_mcp_catalog_monitor();
         const MAX_BACKGROUND_UPDATES_PER_FRAME: usize = 64;
@@ -1892,11 +2166,34 @@ impl NeoismAgentPane {
         let mut changed = false;
         let mut remaining = MAX_BACKGROUND_UPDATES_PER_FRAME;
         loop {
-            if remaining == 0 {
-                return true;
+            if remaining == 0 || budget.exhausted() {
+                if self.background_pending.is_none() {
+                    self.background_pending = self.background_rx.try_recv().ok();
+                }
+                return if self.background_pending.is_some() {
+                    self.request_ingestion_continuation()
+                } else {
+                    changed
+                };
             }
             remaining -= 1;
-            match self.background_rx.try_recv() {
+            match self.background_pending.take().map(Ok)
+                .unwrap_or_else(|| self.background_rx.try_recv()) {
+                Ok(NeoismAgentBackgroundUpdate::PromptHistoryLoaded(mut history)) => {
+                    // A prompt can be sent or recalled before disk loading finishes.
+                    // Prepend history without replacing local submissions or input.
+                    let overlap = (1..=history.len().min(self.sent_history.len()))
+                        .rev()
+                        .find(|&count| history[history.len() - count..] == self.sent_history[..count])
+                        .unwrap_or(0);
+                    history.truncate(history.len() - overlap);
+                    let prefix = history.len();
+                    history.append(&mut self.sent_history);
+                    let trimmed = history.len().saturating_sub(super::super::prompt_history::MAX_PROMPT_HISTORY);
+                    history.drain(..trimmed);
+                    self.sent_history = history;
+                    self.history_index = self.history_index.map(|index| (index + prefix).saturating_sub(trimmed));
+                }
                 Ok(NeoismAgentBackgroundUpdate::InteractionReplyCompleted {
                     server,
                     id,
@@ -1923,6 +2220,7 @@ impl NeoismAgentPane {
                     changed = true;
                 }
                 Ok(NeoismAgentBackgroundUpdate::SessionMutationCompleted {
+                    source,
                     server,
                     session_id,
                     mutation,
@@ -1930,6 +2228,8 @@ impl NeoismAgentPane {
                 }) => {
                     self.session_mutations_in_flight
                         .remove(&(server.clone(), session_id.clone()));
+                    if source.as_ref().is_some_and(|source| !source.authorized() || self.system_source(&server) != Some(source)) { continue; }
+                    if super::super::system::is_system_agent_server(&server) && self.system_source(&server).is_none() { continue; }
                     match result {
                         Ok(()) => {
                             if self.server == server {
@@ -2435,9 +2735,7 @@ impl NeoismAgentPane {
                     }
                     match result {
                         Ok(discovery) => {
-                            self.side_panel.set_session_projects(discovery.projects);
-                            self.side_panel
-                                .set_pinned_sessions(discovery.pinned_sessions);
+                            self.apply_system_summary(server, discovery);
                         }
                         Err(error) => self.side_panel.settle_session_page_error(&error),
                     }
@@ -2645,33 +2943,20 @@ impl NeoismAgentPane {
                 }
                 Ok(NeoismAgentBackgroundUpdate::SessionPreloaded {
                     session_id,
-                    state,
                     mut messages,
+                    raw_count,
+                    requested_limit,
                     oldest_cursor,
                 }) => {
-                    self.session_preloads_in_flight.remove(&session_id);
-                    let force_again =
-                        self.session_preloads_force_pending.remove(&session_id);
+                    self.hydrate_session_images(&session_id, &messages);
                     let active = self.session_id.as_deref() == Some(session_id.as_str());
-                    self.session_sources
-                        .insert(session_id.clone(), state.source);
-                    if let Some(history) = state.imported_history.as_ref() {
-                        self.session_histories
-                            .insert(session_id.clone(), history.clone());
-                    } else {
-                        self.session_histories.remove(&session_id);
-                    }
-                    if active {
-                        if self.new_chat_source != state.source {
-                            self.reset_external_options();
-                        }
-                        self.new_chat_source = state.source;
-                    }
                     let mut cached = self
                         .session_cache
                         .remove(&session_id)
                         .unwrap_or_else(CachedAgentSession::live_only);
                     let mut cached_live = std::mem::take(&mut cached.messages);
+                    let was_preview = cached.initial_history_preview.is_some()
+                        || (active && self.initial_history_preview.is_some());
                     // A process-cache preview is not live authority. Strip only
                     // its untouched blocks before the existing live merge, so
                     // deleted/shortened server history cannot be resurrected.
@@ -2695,6 +2980,19 @@ impl NeoismAgentPane {
                         messages = self.compact_inbound_user_texts(messages);
                         messages = self.merge_pending_user_prompts(messages);
                         messages = self.preserve_streamed_response_text(messages);
+                        if cached_live.is_empty() && !was_preview
+                            && !self.live_usage_by_session.contains_key(&session_id)
+                        {
+                            apply_authoritative_plan(&mut messages, self.current_plan_todos.as_ref(), self.new_chat_source.provider().is_some());
+                            if messages == self.messages {
+                                if self.timeline_history.oldest_loaded_cursor.is_none() {
+                                    self.timeline_history.has_older = raw_count >= requested_limit && oldest_cursor.is_some();
+                                    self.timeline_history.oldest_loaded_cursor = oldest_cursor;
+                                }
+                                // Identical revalidation must not discard a warm layout.
+                                continue;
+                            }
+                        }
                     }
                     let live = if active {
                         let active_messages = std::mem::take(&mut self.messages);
@@ -2717,56 +3015,31 @@ impl NeoismAgentPane {
                     ) {
                         self.live_usage_by_session.remove(&session_id);
                     }
-                    // Explicit persisted clear (or no provider plan) must not
-                    // resurrect an older live TodoWrite when a root reloads.
-                    if state.plan_todos.as_ref().is_some_and(Vec::is_empty)
-                        || (state.source.provider().is_some()
-                            && state.plan_todos.is_none())
-                    {
-                        self.plan_todo_events.remove(&session_id);
-                    }
-                    let plan =
-                        self.plan_todo_events.get(&session_id).cloned().or_else(|| {
-                            state.plan_todos.as_deref().map(plan_from_shared)
-                        });
+                    let source = if active { self.new_chat_source } else { cached.state.source };
+                    let plan = self.plan_todo_events.get(&session_id).cloned().or_else(|| {
+                        if active { self.current_plan_todos.clone() } else {
+                            cached.state.plan_todos.as_deref().map(plan_from_shared)
+                        }
+                    });
                     let effective_plan = plan.clone();
                     apply_authoritative_plan(
                         &mut merged,
                         plan.as_ref(),
-                        state.source.provider().is_some(),
+                        source.provider().is_some(),
                     );
                     if active {
                         self.current_plan_todos = effective_plan.clone();
                     }
-                    let mut timeline_history =
-                        std::mem::take(&mut cached.timeline_history);
-                    timeline_history.oldest_loaded_cursor = oldest_cursor;
+                    let mut timeline_history = if active {
+                        std::mem::take(&mut self.timeline_history)
+                    } else {
+                        std::mem::take(&mut cached.timeline_history)
+                    };
+                    if was_preview || timeline_history.oldest_loaded_cursor.is_none() {
+                        timeline_history.has_older = raw_count >= requested_limit && oldest_cursor.is_some();
+                        timeline_history.oldest_loaded_cursor = oldest_cursor;
+                    }
                     if active {
-                        self.session_title = state.title;
-                        self.parent_session_id = state.parent_id;
-                        if let Some(directory) = state.directory {
-                            self.directory = Some(directory);
-                            self.invalidate_skill_options();
-                        }
-                        self.refresh_provider_readiness();
-                        if let Some(agent) = state.agent {
-                            self.agent = Some(agent);
-                        }
-                        let model_changed = state
-                            .model
-                            .as_ref()
-                            .is_some_and(|model| self.model != *model);
-                        if let Some(model) = state.model {
-                            self.model = model;
-                        }
-                        if model_changed {
-                            self.model_context_limit = None;
-                        }
-                        if model_changed || self.model_context_limit.is_none() {
-                            self.execute_refresh_model_context_limit_command();
-                        }
-                        self.connection_id = state.connection_id;
-                        self.thinking = state.thinking;
                         if !self.timeline_history_position_hydrated
                             || merged != self.messages
                         {
@@ -2777,7 +3050,6 @@ impl NeoismAgentPane {
                         self.rebase_current_turn_trace();
                         self.invalidate_timeline_layout();
                     } else {
-                        cached.state = state;
                         cached.state.plan_todos =
                             effective_plan.as_deref().map(plan_to_shared);
                         cached.messages = merged;
@@ -2791,18 +3063,36 @@ impl NeoismAgentPane {
                     {
                         self.activate_cached_session(&session_id);
                     }
-                    if force_again {
+                    changed = true;
+                }
+                Ok(NeoismAgentBackgroundUpdate::SessionMetadataLoaded { session_id, result }) => {
+                    match result {
+                        Ok(state) => self.apply_preloaded_session_metadata(&session_id, state),
+                        Err(error) => tracing::warn!(%session_id, %error, "session metadata hydration failed"),
+                    }
+                    changed = true;
+                }
+                Ok(NeoismAgentBackgroundUpdate::ImageHydrationProgress { server }) => {
+                    if server == self.server {
+                        self.retry_session_images();
+                    }
+                }
+                Ok(NeoismAgentBackgroundUpdate::SessionImagesHydrated { server, session_id, patch }) => {
+                    if server == self.server {
+                        changed |= self.apply_session_image_patch(&session_id, &patch);
+                    }
+                }
+                Ok(NeoismAgentBackgroundUpdate::SessionPreloadFinished { session_id }) => {
+                    self.session_preloads_in_flight.remove(&session_id);
+                    if self.session_preloads_force_pending.remove(&session_id) {
                         self.ensure_session_preloaded(session_id, true);
                     }
                     self.start_queued_session_preloads();
-                    changed = true;
                 }
                 Ok(NeoismAgentBackgroundUpdate::SessionPreloadFailed {
                     session_id,
                     error,
                 }) => {
-                    self.session_preloads_in_flight.remove(&session_id);
-                    self.session_preloads_force_pending.remove(&session_id);
                     if self.session_id.as_deref() == Some(session_id.as_str())
                         && self.initial_history_preview.is_some()
                     {
@@ -2924,6 +3214,7 @@ impl NeoismAgentPane {
                     oldest_cursor,
                     reached_start,
                 }) => {
+                    self.hydrate_session_images(&session_id, &messages);
                     self.apply_older_timeline_page(
                         session_id,
                         messages,
@@ -2951,6 +3242,9 @@ impl NeoismAgentPane {
                     revert_message_id,
                 }) => {
                     self.session_history_in_flight.remove(&session_id);
+                    if let Some(messages) = messages.as_ref() {
+                        self.hydrate_session_images(&session_id, messages);
+                    }
                     if let Some(cached) = self.session_cache.get_mut(&session_id) {
                         if let Some(messages) = messages.as_ref() {
                             cached.messages = messages.clone();
@@ -3096,6 +3390,7 @@ impl NeoismAgentPane {
         self.text_reveal.scope(self.session_id.as_deref());
         self.tool_motion.scope(self.session_id.as_deref());
         self.timeline_layout_epoch = self.timeline_layout_epoch.wrapping_add(1);
+        self.timeline_content_revision = self.timeline_content_revision.wrapping_add(1);
         self.timeline_dirty_message_ids.clear();
         self.timeline_dirty_message_indices.clear();
         // A full invalidation rebuilds every row, so any pending incremental
@@ -3212,10 +3507,12 @@ impl NeoismAgentPane {
 
     pub(crate) fn mark_timeline_message_dirty_at(&mut self, index: usize) {
         self.timeline_dirty_message_indices.insert(index);
+        self.timeline_content_revision = self.timeline_content_revision.wrapping_add(1);
     }
 
     pub(crate) fn mark_timeline_message_and_next_dirty_at(&mut self, index: usize) {
         self.timeline_dirty_message_indices.insert(index);
+        self.timeline_content_revision = self.timeline_content_revision.wrapping_add(1);
         self.timeline_dirty_message_indices
             .insert(index.saturating_add(1));
     }
@@ -3329,7 +3626,9 @@ impl NeoismAgentPane {
         self.event_stream = Some(event_stream);
     }
 
-    pub(crate) fn start_session_updates(&mut self, session_id: &str) {
+    /// Returns true for a new subscription, whose connected edge owns the
+    /// subscription-safe initial runtime/history reconciliation.
+    pub(crate) fn start_session_updates(&mut self, session_id: &str) -> bool {
         let known_child_session_ids = self.tracked_sessions_for_stream(session_id);
         let previous_session_id = self
             .event_stream
@@ -3349,7 +3648,7 @@ impl NeoismAgentPane {
                     "agent event stream start"
                 );
             }
-            return;
+            return false;
         }
         let mut event_stream =
             start_session_event_stream(self.server.clone(), session_id.to_string());
@@ -3367,6 +3666,7 @@ impl NeoismAgentPane {
                 "agent event stream start"
             );
         }
+        true
     }
 
     /// Sessions whose events arrive over a family-root subscription. The
@@ -3398,9 +3698,15 @@ impl NeoismAgentPane {
     }
 
     pub(crate) fn set_event_wake(&mut self, wake: AgentEventWake) {
+        if self.event_wake.as_ref().is_some_and(|current| current.same_receiver(&wake)) {
+            return;
+        }
         self.event_wake = Some(wake.clone());
         self.background_tx.set_wake(wake.clone());
         if let Some(stream) = self.event_stream.as_mut() {
+            stream.set_wake(wake.clone());
+        }
+        for stream in self.systems.streams.values_mut() {
             stream.set_wake(wake.clone());
         }
         if let Some(stream) = self.session_catalog_stream.as_mut() {
@@ -3707,7 +4013,7 @@ impl NeoismAgentPane {
         pinned.extend(
             self.session_preload_queue
                 .iter()
-                .map(|(session_id, _)| session_id.clone()),
+                .map(|(session_id, _, _)| session_id.clone()),
         );
         pinned.extend(self.pending_session_switch.iter().cloned());
         pinned.extend(self.session_tree_root_id.iter().cloned());

@@ -102,6 +102,7 @@ impl NeoismAgentPane {
             return true;
         };
         match picker.kind {
+            NeoismAgentPickerKind::System => { self.select_system(&option.value); }
             NeoismAgentPickerKind::Usage => unreachable!("handled above"),
             NeoismAgentPickerKind::Slash => {
                 if self.new_chat_source.provider().is_some() {
@@ -268,6 +269,11 @@ impl NeoismAgentPane {
     }
 
     pub fn submit(&mut self) -> bool {
+        if self.commit_picker() { return true; }
+        if !self.execution_authorized() {
+            self.push_notice("This machine is disconnected or no longer authorized. Reconnect it in Systems before sending.", NeoismAgentNoticeLevel::Error);
+            return true;
+        }
         if self.commit_picker() {
             return true;
         }
@@ -984,7 +990,7 @@ impl NeoismAgentPane {
             .push(NeoismAgentInputAttachment::File {
                 token: token.to_string(),
                 filename: value.trim_end_matches('/').to_string(),
-                url: attachment_url_for_path(&path, mime),
+                url: attachment_url_for_path(&path, mime).into(),
                 mime: mime.to_string(),
             });
     }

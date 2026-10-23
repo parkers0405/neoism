@@ -289,7 +289,7 @@ impl NeoismAgentPane {
             .push(NeoismAgentInputAttachment::File {
                 token,
                 filename,
-                url,
+                url: url.into(),
                 mime: mime.to_string(),
             });
         self.sync_input_pickers();
@@ -324,7 +324,7 @@ impl NeoismAgentPane {
             .push(NeoismAgentInputAttachment::File {
                 token,
                 filename,
-                url,
+                url: url.into(),
                 mime: image.mime,
             });
         self.sync_input_pickers();
@@ -622,7 +622,7 @@ impl NeoismAgentPane {
             return None;
         }
         let readiness = self.provider_readiness.as_ref()?;
-        let max_age = if readiness.prompt_error(model).is_some() { 30 } else { 300 };
+        let max_age = if readiness.pending { 1 } else if readiness.prompt_error(model).is_some() { 30 } else { 300 };
         (self.provider_readiness_checked_at?.elapsed().as_secs() < max_age)
             .then_some(readiness)
     }
@@ -635,9 +635,22 @@ impl NeoismAgentPane {
         if !scope.is_current(&self.server, self.directory.as_deref()) {
             return false;
         }
+        if readiness.pending && self.current_provider_readiness().is_some_and(|previous| {
+            previous.can_retain_over(&readiness)
+        }) {
+            // An optional refresh cannot revoke already-loaded same-scope
+            // readiness or reset its age. Credential mutations bump the scope.
+            return false;
+        }
+        let checked_at = super::super::api::cached_provider_readiness_with_age(
+            &self.server, self.directory.as_deref(),
+        )
+            .filter(|(cached, _)| cached == &readiness)
+            .and_then(|(_, age)| Instant::now().checked_sub(age))
+            .unwrap_or_else(Instant::now);
         self.provider_readiness = Some(readiness);
         self.provider_readiness_scope = Some(scope);
-        self.provider_readiness_checked_at = Some(Instant::now());
+        self.provider_readiness_checked_at = Some(checked_at);
         true
     }
 

@@ -162,7 +162,7 @@ impl NeoismAgentPane {
             .push(NeoismAgentInputAttachment::File {
                 token,
                 filename,
-                url,
+                url: url.into(),
                 mime: mime.to_string(),
             });
         self.sync_input_pickers();
@@ -244,7 +244,7 @@ impl NeoismAgentPane {
             .push(NeoismAgentInputAttachment::File {
                 token,
                 filename,
-                url,
+                url: url.into(),
                 mime,
             });
         self.sync_input_pickers();

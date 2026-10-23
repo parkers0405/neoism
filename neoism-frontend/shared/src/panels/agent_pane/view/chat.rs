@@ -231,7 +231,7 @@ pub fn render_chat_with<P, D>(
     input_rect: [f32; 4],
     occlusion_rects: &[[f32; 4]],
     plugins: Option<&neoism_lua::PluginSnapshot>,
-    prepared_input_rows: Option<&[InputWrapRow]>,
+    prepared_input_rows: Option<&std::rc::Rc<Vec<InputWrapRow>>>,
     checkout_context: Option<&AgentCheckoutContext>,
 ) where
     P: AgentChatPane,
@@ -346,6 +346,7 @@ pub fn render_chat_with<P, D>(
     let mut timeline_holes = occlusion_rects.to_vec();
     if composer_visible {
         let footer_visible = pane.input_help_visible()
+            || pane.composer_system().is_some()
             || pane.composer_directory().is_some()
             || checkout_context.is_some();
         let geometry = super::composer_geometry::ComposerGeometry::new(
@@ -361,7 +362,14 @@ pub fn render_chat_with<P, D>(
     let previous_holes = sugarloaf.set_content_occlusion_rects(Vec::new());
     timeline_holes.extend_from_slice(&previous_holes);
     sugarloaf.set_content_occlusion_rects(timeline_holes.clone());
-    let rail_profile = timeline::render_timeline_in_paint_viewport_with::<P, D>(
+    let gutter_x = content_x + content_w;
+    let gutter = [
+        gutter_x,
+        metrics_rect[1],
+        (rect[0] + rect[2] - gutter_x).max(0.0),
+        metrics_rect[3],
+    ];
+    let rail_frame = timeline::render_timeline_in_paint_viewport_with::<P, D>(
         sugarloaf,
         pane,
         metrics_rect,
@@ -373,23 +381,10 @@ pub fn render_chat_with<P, D>(
         occlusion_rects,
         &timeline_holes,
         plugins,
-    );
-    let gutter_x = content_x + content_w;
-    timeline::render_timeline_scrollbar_with(
-        sugarloaf,
-        pane,
-        [
-            gutter_x,
-            metrics_rect[1],
-            (rect[0] + rect[2] - gutter_x).max(0.0),
-            metrics_rect[3],
-        ],
-        theme,
-        s,
-        mouse,
-        &rail_profile,
+        Some(gutter),
     );
     sugarloaf.set_content_occlusion_rects(previous_holes);
+    timeline::render_timeline_scrollbar_with(sugarloaf, pane, theme, s, rail_frame.as_ref());
 
     if composer_visible {
         user_input::render_input(

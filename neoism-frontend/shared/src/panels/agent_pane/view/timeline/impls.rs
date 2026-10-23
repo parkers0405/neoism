@@ -212,6 +212,10 @@ impl AgentTimelinePane for NeoismAgentPane {
         NeoismAgentPane::clear_tool_hit_rects(self);
     }
 
+    fn timeline_source_revision(&self) -> Option<u64> {
+        Some(NeoismAgentPane::timeline_source_revision(self))
+    }
+
     fn timeline_layout_epoch(&self) -> u64 {
         NeoismAgentPane::timeline_layout_epoch(self)
     }
@@ -290,6 +294,13 @@ impl AgentTimelinePane for NeoismAgentPane {
         thumb: Option<[f32; 4]>,
     ) {
         NeoismAgentPane::set_scrollbar_geometry(self, track, thumb);
+    }
+
+    fn set_timeline_question_rail_targets(
+        &mut self,
+        targets: crate::panels::agent_pane::question_rail::TimelineQuestionTargets,
+    ) {
+        NeoismAgentPane::set_timeline_question_rail_targets(self, targets);
     }
 
     fn log_timeline_perf(

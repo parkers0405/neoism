@@ -2,6 +2,39 @@ use super::*;
 use std::collections::BTreeSet;
 use std::rc::Rc;
 
+#[test]
+fn cached_table_offsets_preserve_ragged_multiline_row_heights_at_all_scales() {
+    let rows = vec![
+        vec![" header ".into(), "\n\n".into()],
+        vec!["one\n\n two\nthree".into()],
+        vec![],
+        vec!["\n".into(), "last".into()],
+    ];
+    let block = laid_out_table_block(rows.clone(), vec![180.0, 180.0]);
+    let pane = TestPane::default();
+    for scale in [0.75, 1.0, 1.25, 1.5, 2.0] {
+        let cached = markdown_block_height(&block, 400.0, &pane, scale);
+        assert!((cached - measure_laid_out_table_height(&rows, scale)).abs() < 0.001);
+    }
+    assert_eq!(table_cell_lines("  one \n\n two\n"), ["one", "two"]);
+    assert_eq!(table_cell_lines("\n  \n"), [""]);
+}
+
+#[test]
+fn large_table_viewport_seeks_directly_to_visible_rows() {
+    let rows = vec![vec!["cell".into()]; 20_000];
+    let block = laid_out_table_block(rows, vec![320.0]);
+    let AssistantMarkdownBlock::Table { row_offsets, .. } = block else { unreachable!() };
+    assert_eq!(row_offsets.len(), 20_001);
+    assert_eq!(table_first_visible_row(&row_offsets, -30.0), 0);
+    for row in [0, 1, 10_000, 19_999] {
+        let top = row_offsets[row];
+        assert_eq!(table_first_visible_row(&row_offsets, top), row);
+        assert_eq!(table_first_visible_row(&row_offsets, top + 0.25), row);
+    }
+    assert_eq!(table_first_visible_row(&row_offsets, f32::MAX), 20_000);
+}
+
 #[derive(Default)]
 struct TestPane {
     raw_mermaid: BTreeSet<u64>,
@@ -747,10 +780,10 @@ fn reveal_projection_uses_displayed_identity_across_full_body_and_reflow() {
             depth: 0,
             lines: vec!["item".into()],
         }),
-        AssistantMarkdownBlock::Table {
-            rows: vec![vec!["**cell**\nnext".into()]],
-            column_widths: vec![320.0],
-        },
+        laid_out_table_block(
+            vec![vec!["**cell**\nnext".into()]],
+            vec![320.0],
+        ),
         AssistantMarkdownBlock::Code {
             lang: "rust".into(),
             lines: Rc::new(vec!["let x = 1;".into()]),

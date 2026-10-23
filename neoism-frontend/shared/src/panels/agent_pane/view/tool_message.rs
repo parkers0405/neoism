@@ -148,6 +148,7 @@ pub(crate) struct ToolDiffCardView {
     visual_row_offsets: Rc<Vec<usize>>,
     visual_rows: usize,
     preview_visual_rows: usize,
+    max_line_number: u32,
     content_width: Cell<Option<f32>>,
 }
 

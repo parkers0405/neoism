@@ -1,8 +1,84 @@
 use super::*;
 use crate::text::TextInstance;
 
+#[test]
+fn unchanged_output_keeps_storage_without_clone_or_tail_allocation() {
+    struct Instance(usize);
+    let mut items: Vec<_> = (0..20_000).map(Instance).collect();
+    let pointer = items.as_ptr();
+    let capacity = items.capacity();
+    let mut visits = 0;
+    filter_tail(&mut items, 7, |_| {
+        visits += 1;
+        None
+    });
+    assert_eq!(visits, 19_993);
+    assert_eq!(items.as_ptr(), pointer);
+    assert_eq!(items.capacity(), capacity);
+    assert!(items.iter().enumerate().all(|(index, item)| item.0 == index));
+}
+
+#[test]
+fn in_place_compaction_preserves_order_across_removals_and_multiple_splits() {
+    let mut items = vec![0, 1, 2, 3, 4, 5, 6];
+    filter_tail(&mut items, 1, |item| match item {
+        0 => panic!("output before the scope must not be inspected"),
+        1 | 4 => Some(Vec::new()),
+        2 => Some(vec![20, 21, 22]),
+        3 => Some(vec![30]),
+        5 => Some(vec![50, 51]),
+        _ => None,
+    });
+    assert_eq!(items, [0, 20, 21, 22, 30, 50, 51, 6]);
+    filter_tail(&mut items, usize::MAX, |_| panic!("empty tail"));
+    assert_eq!(items, [0, 20, 21, 22, 30, 50, 51, 6]);
+}
+
+#[test]
+fn prepared_composer_holes_leave_all_distant_glyphs_verbatim() {
+    let holes: Vec<_> = (0..128)
+        .map(|row| [100.0, 800.0 + row as f32, 500.0, 1.0])
+        .collect();
+    let prepared = Occlusions::new(&holes);
+    for index in 0..20_000 {
+        let glyph = TextInstance {
+            pos: [(index % 100) as f32 * 8.0, (index / 100) as f32 * 3.0],
+            glyph_size: [8, 12],
+            ..TextInstance::default()
+        };
+        assert!(glyph_parts_with(&glyph, &prepared).is_none());
+    }
+    // Broad-phase rejection must not remove the silhouette's visible corners.
+    assert_eq!(
+        prepared.visible([90.0, 800.0, 20.0, 1.0], [0.0; 4]),
+        Some(vec![[90.0, 800.0, 10.0, 1.0]])
+    );
+}
+
 fn area(r: Rect) -> f32 {
     r[2] * r[3]
+}
+
+#[test]
+#[ignore = "manual CPU microbenchmark, not a frame-rate assertion"]
+fn composer_occlusion_microbenchmark() {
+    use std::hint::black_box;
+    use std::time::Instant;
+    let holes: Vec<_> = (0..128)
+        .map(|row| [100.0, 800.0 + row as f32, 500.0, 1.0])
+        .collect();
+    let bounds = [120.0, 100.0, 8.0, 12.0];
+    let started = Instant::now();
+    for _ in 0..100_000 {
+        black_box(visible_intersecting(black_box(bounds), [0.0; 4], black_box(&holes)));
+    }
+    let prior = started.elapsed();
+    let prepared = Occlusions::new(&holes);
+    let started = Instant::now();
+    for _ in 0..100_000 {
+        black_box(prepared.visible(black_box(bounds), [0.0; 4]));
+    }
+    eprintln!("100k distant glyphs: prior={prior:?}, prepared={:?}", started.elapsed());
 }
 
 #[test]

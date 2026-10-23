@@ -664,6 +664,7 @@ pub enum ModalActionTag {
     NotesVaultPromptAdd,
     SystemFormSubmit,
     SystemDisconnectConfirm,
+    SystemDeactivateConfirm,
     ServerFormSubmit,
     ServerRemoveConfirm,
     ServerReconnectRetry,
@@ -722,6 +723,7 @@ pub fn modal_action_dispatch(tag: ModalActionTag) -> ModalActionDispatch {
         | T::NotesVaultAdd
         | T::SystemFormSubmit
         | T::SystemDisconnectConfirm
+        | T::SystemDeactivateConfirm
         | T::ServerFormSubmit
         | T::ServerRemoveConfirm
         | T::ServerReconnectRetry

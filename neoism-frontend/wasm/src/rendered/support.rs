@@ -83,9 +83,12 @@ pub(crate) fn palette_action_name(
         // Server-manager actions are desktop-only today; the web host
         // has no server picker, so these names are inert labels.
         A::ShowSystems => "ShowSystems",
+        A::ShowSystemSettings { .. } => "ShowSystemSettings",
+        A::SshToSystem { .. } => "SshToSystem",
         A::AddSystem => "AddSystem",
         A::ConnectSystem { .. } => "ConnectSystem",
         A::DisconnectSystem { .. } => "DisconnectSystem",
+        A::SetSystemEnabled { .. } => "SetSystemEnabled",
         A::RemoveSystem { .. } => "RemoveSystem",
         A::ShowServers => "ShowServers",
         A::SelectServer { .. } => "SelectServer",

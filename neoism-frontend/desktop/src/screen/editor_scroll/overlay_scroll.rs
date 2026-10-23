@@ -115,6 +115,9 @@ impl Screen<'_> {
         &mut self,
         delta: &neoism_window::event::MouseScrollDelta,
     ) -> bool {
+        if self.renderer.modal.is_image_open() {
+            return true;
+        }
         let size = self.sugarloaf.window_size();
         let scale_factor = self.sugarloaf.scale_factor();
         let (mouse_x, mouse_y) = self.mouse_logical_for_hit_test();

@@ -1166,6 +1166,13 @@ impl Route<'_> {
                         }
                     }
                     Key::Named(NamedKey::Escape) => {
+                        if let Some(action) = self.window.screen.renderer
+                            .command_palette.system_settings_back_action()
+                        {
+                            self.window.screen.execute_palette_action(action, clipboard);
+                            self.request_overlay_redraw();
+                            return true;
+                        }
                         tracing::trace!(target: "neoism::input", "command palette closing on Escape");
                         let was_search =
                             self.window.screen.renderer.command_palette.is_search_mode();
@@ -1571,6 +1578,17 @@ impl Route<'_> {
                             .get_selected_workspace_target();
                         use neoism_ui::panels::command_palette::PaletteAction;
 
+                        // System search/settings are navigation, never an ex-command prompt.
+                        if self.window.screen.renderer.command_palette.systems_mode()
+                            || self.window.screen.renderer.command_palette.system_settings_id().is_some()
+                        {
+                            if let Some(action) = selected_action {
+                                self.window.screen.execute_palette_action(action, clipboard);
+                            }
+                            self.request_overlay_redraw();
+                            return true;
+                        }
+
                         if let Some(theme) = selected_theme {
                             self.window
                                 .screen
@@ -1787,6 +1805,15 @@ impl Route<'_> {
                         self.request_overlay_redraw();
                     }
                     Key::Named(NamedKey::Backspace) => {
+                        if self.window.screen.renderer.command_palette.query.is_empty() {
+                            if let Some(action) = self.window.screen.renderer
+                                .command_palette.system_settings_back_action()
+                            {
+                                self.window.screen.execute_palette_action(action, clipboard);
+                                self.request_overlay_redraw();
+                                return true;
+                            }
+                        }
                         tracing::trace!(target: "neoism::input", "command palette handling Backspace");
                         if self
                             .window

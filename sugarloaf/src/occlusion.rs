@@ -22,9 +22,57 @@ pub(crate) fn intersection(a: Rect, b: Rect) -> Option<Rect> {
     valid(r).then_some(r)
 }
 
-/// `None` means no hole intersects: retain the instance verbatim, including its
-/// disabled clip sentinel. Otherwise return disjoint visible clips, possibly empty.
+/// Precompute the broad-phase bounds once per scope, not once per glyph.
+pub(crate) struct Occlusions<'a> {
+    holes: &'a [Rect],
+    bounds: Option<Rect>,
+}
+
+impl<'a> Occlusions<'a> {
+    pub(crate) fn new(holes: &'a [Rect]) -> Self {
+        let bounds = holes.iter().copied().filter(|r| valid(*r)).reduce(|a, b| {
+            let x = a[0].min(b[0]);
+            let y = a[1].min(b[1]);
+            [
+                x,
+                y,
+                (a[0] + a[2]).max(b[0] + b[2]) - x,
+                (a[1] + a[3]).max(b[1] + b[3]) - y,
+            ]
+        });
+        Self { holes, bounds }
+    }
+
+    /// `None` retains the instance verbatim, including its disabled clip sentinel.
+    pub(crate) fn visible(&self, bounds: Rect, clip: Rect) -> Option<Vec<Rect>> {
+        if !valid(bounds) {
+            return Some(Vec::new());
+        }
+        let effective = if clip[2] > 0.0 && clip[3] > 0.0 {
+            match intersection(bounds, clip) {
+                Some(rect) => rect,
+                None => return Some(Vec::new()),
+            }
+        } else {
+            bounds
+        };
+        // Almost all transcript glyphs are above the floating composer.
+        if self
+            .bounds
+            .is_none_or(|hole| valid(hole) && intersection(effective, hole).is_none())
+        {
+            return None;
+        }
+        visible_intersecting(bounds, clip, self.holes)
+    }
+}
+
+#[cfg(test)]
 pub(crate) fn visible(bounds: Rect, clip: Rect, holes: &[Rect]) -> Option<Vec<Rect>> {
+    Occlusions::new(holes).visible(bounds, clip)
+}
+
+fn visible_intersecting(bounds: Rect, clip: Rect, holes: &[Rect]) -> Option<Vec<Rect>> {
     if !valid(bounds) {
         return Some(Vec::new());
     }
@@ -71,28 +119,55 @@ pub(crate) fn visible(bounds: Rect, clip: Rect, holes: &[Rect]) -> Option<Vec<Re
     Some(fragments)
 }
 
-/// Split only appended output; earlier content and all original geometry survive.
-pub(crate) fn filter_tail<T: Clone>(
+/// Compact removals in place. Only actual split primitives need extra storage;
+/// unchanged output keeps its allocation and is neither cloned nor copied aside.
+pub(crate) fn filter_tail<T>(
     items: &mut Vec<T>,
     first: usize,
     mut split: impl FnMut(&T) -> Option<Vec<T>>,
 ) {
-    let first = first.min(items.len());
-    let tail = items.split_off(first);
-    for item in tail {
-        match split(&item) {
-            Some(parts) => items.extend(parts),
-            None => items.push(item),
+    let mut source_index = 0;
+    let mut output_index = 0;
+    let mut expansions = Vec::new();
+    items.retain_mut(|item| {
+        let untouched = source_index < first;
+        source_index += 1;
+        if untouched {
+            output_index += 1;
+            return true;
         }
+        if let Some(mut parts) = split(item) {
+            if parts.is_empty() {
+                return false;
+            }
+            *item = parts.remove(0);
+            if !parts.is_empty() {
+                expansions.push((output_index + 1, parts));
+            }
+        }
+        output_index += 1;
+        true
+    });
+    // Indices describe the compacted output, before any extra pieces are inserted.
+    for (index, parts) in expansions.into_iter().rev() {
+        items.splice(index..index, parts);
     }
 }
 
+#[cfg(test)]
 pub(crate) fn image_parts(
     image: &crate::sugarloaf::graphics::GraphicOverlay,
     holes: &[Rect],
 ) -> Option<Vec<crate::sugarloaf::graphics::GraphicOverlay>> {
+    image_parts_with(image, &Occlusions::new(holes))
+}
+
+pub(crate) fn image_parts_with(
+    image: &crate::sugarloaf::graphics::GraphicOverlay,
+    holes: &Occlusions<'_>,
+) -> Option<Vec<crate::sugarloaf::graphics::GraphicOverlay>> {
     let bounds = [image.x, image.y, image.width, image.height];
-    visible(bounds, [0.0; 4], holes).map(|clips| {
+    holes.visible(bounds, [0.0; 4]).map(|clips| {
         clips
             .into_iter()
             .map(|r| {
@@ -114,9 +189,17 @@ pub(crate) fn image_parts(
     })
 }
 
+#[cfg(test)]
 pub(crate) fn glyph_parts(
     instance: &crate::text::TextInstance,
     holes: &[Rect],
+) -> Option<Vec<crate::text::TextInstance>> {
+    glyph_parts_with(instance, &Occlusions::new(holes))
+}
+
+pub(crate) fn glyph_parts_with(
+    instance: &crate::text::TextInstance,
+    holes: &Occlusions<'_>,
 ) -> Option<Vec<crate::text::TextInstance>> {
     let scale = if instance.raster_scale > 0.0 {
         instance.raster_scale
@@ -129,7 +212,7 @@ pub(crate) fn glyph_parts(
         instance.glyph_size[0] as f32 * scale,
         instance.glyph_size[1] as f32 * scale,
     ];
-    visible(bounds, instance.clip_rect, holes).map(|clips| {
+    holes.visible(bounds, instance.clip_rect).map(|clips| {
         clips
             .into_iter()
             .map(|clip| {

@@ -963,10 +963,21 @@ async fn authenticate_request(
     mut request: Request<Body>,
     next: Next,
 ) -> Response {
-    if request.method() == Method::OPTIONS
-        || request.uri().path() == "/v2/health"
-        || is_ticketed_pty_connect(&request)
-        || is_mcp_oauth_callback_get(&request)
+    let signed_daemon = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| {
+            v.starts_with(&format!(
+                "Bearer {}.",
+                neoism_agent_service_api::daemon_credential::PREFIX
+            ))
+        });
+    if !signed_daemon
+        && (request.method() == Method::OPTIONS
+            || request.uri().path() == "/v2/health"
+            || is_ticketed_pty_connect(&request)
+            || is_mcp_oauth_callback_get(&request))
     {
         return next.run(request).await;
     }
@@ -986,10 +997,24 @@ async fn authenticate_request(
             return auth_error(StatusCode::UNAUTHORIZED, "auth.invalid_token", &message)
         }
     };
+    let system_metadata = claims.as_ref().is_some_and(|c| c.is_system_workflow())
+        && system_metadata_path(request.uri().path());
     let mut request_guard = None;
     let mut audit_tenant = None;
     let mut audit_subject = None;
     if let Some(claims) = claims {
+        if claims.is_system_workflow()
+            && !neoism_agent_service_api::daemon_credential::system_workflow_allows(
+                request.method().as_str(),
+                request.uri().path(),
+            )
+        {
+            return auth_error(
+                StatusCode::FORBIDDEN,
+                "auth.system_workflow_forbidden",
+                "Operation outside system workflow capability",
+            );
+        }
         request_guard = match state.inner.caller_policy.begin_request(&claims) {
             Ok(guard) => Some(guard),
             Err(message) => {
@@ -1284,6 +1309,11 @@ async fn authenticate_request(
     let method = request.method().to_string();
     let path = request.uri().path().to_string();
     let response = next.run(request).await;
+    let response = if system_metadata && response.status().is_success() {
+        redact_system_metadata_response(response).await
+    } else {
+        response
+    };
     if let Some(tenant_id) = audit_tenant {
         let entry = neoism_agent_core::AuditEntry {
             id: neoism_agent_core::Id::ascending(neoism_agent_core::IdKind::Audit)
@@ -1301,6 +1331,119 @@ async fn authenticate_request(
     }
     drop(request_guard);
     response
+}
+
+fn system_metadata_path(path: &str) -> bool {
+    matches!(
+        path,
+        "/v2/health"
+            | "/v2/meta"
+            | "/v2/capabilities"
+            | "/v2/providers"
+            | "/v2/providers/configured"
+            | "/v2/agents"
+            | "/v2/models"
+            | "/v2/commands"
+            | "/v2/tools"
+    )
+}
+
+async fn redact_system_metadata_response(response: Response) -> Response {
+    let (mut parts, body) = response.into_parts();
+    let value = match axum::body::to_bytes(body, 32 * 1024 * 1024)
+        .await
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+    {
+        Some(value) => safe_system_metadata(value),
+        None => {
+            return auth_error(
+                StatusCode::BAD_GATEWAY,
+                "system.invalid_metadata",
+                "Invalid catalog response",
+            )
+        }
+    };
+    parts.headers.remove(header::CONTENT_LENGTH);
+    parts.headers.remove(header::SET_COOKIE);
+    Response::from_parts(
+        parts,
+        Body::from(serde_json::to_vec(&value).unwrap_or_default()),
+    )
+}
+
+/// Positive projection: never forward provider keys, URLs, headers, options,
+/// agent prompts, command templates, tool schemas/defaults or arbitrary config.
+fn safe_system_metadata(value: serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+    match value {
+        Value::Array(values) => {
+            Value::Array(values.into_iter().map(safe_system_metadata).collect())
+        }
+        Value::Object(values) => Value::Object(
+            values
+                .into_iter()
+                .filter_map(|(key, value)| {
+                    let value = match key.as_str() {
+                        "models" | "variants" | "default" => match value {
+                            Value::Object(map) => Value::Object(
+                                map.into_iter()
+                                    .map(|(k, v)| (k, safe_system_metadata(v)))
+                                    .collect(),
+                            ),
+                            other => safe_system_metadata(other),
+                        },
+                        "all" | "providers" | "connected" | "agents" | "commands"
+                        | "tools" | "items" | "id" | "name" | "label" | "description"
+                        | "source" | "providerId" | "providerID" | "model"
+                        | "modelID" | "mode" | "hidden" | "native" | "color"
+                        | "status" | "releaseDate" | "limit" | "context" | "input"
+                        | "output" | "cost" | "capabilities" | "attachment"
+                        | "reasoning" | "temperature" | "toolcall" | "modalities"
+                        | "text" | "image" | "audio" | "video" | "pdf" | "healthy"
+                        | "version" | "deployment" | "executionAvailable"
+                        | "defaultAgent" | "variant" => safe_system_metadata(value),
+                        _ => return None,
+                    };
+                    Some((key, value))
+                })
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
+#[cfg(test)]
+mod system_metadata_tests {
+    use super::*;
+
+    #[test]
+    fn workflow_catalog_projection_drops_secrets_and_executable_configuration() {
+        let safe = safe_system_metadata(serde_json::json!({
+            "all": [{"id":"p", "name":"Provider", "key":"secret", "env":["SECRET"],
+                "options":{"apiKey":"secret"}, "models":{"m":{
+                    "id":"m", "name":"Model", "limit":{"context":1234},
+                    "headers":{"Authorization":"secret"}, "api":{"url":"https://secret.invalid"},
+                    "options":{"token":"secret"}, "variants":{"fast":{"name":"Fast","headers":{"key":"secret"}}}
+                }}}],
+            "default":{"p":"m"}, "connected":["p"],
+            "agents":[{"name":"build","prompt":"private prompt","options":{"key":"secret"}}],
+            "commands":[{"name":"review","template":"private shell","description":"Review"}]
+        }));
+        assert_eq!(safe["all"][0]["models"]["m"]["limit"]["context"], 1234);
+        assert_eq!(safe["default"]["p"], "m");
+        assert_eq!(safe["connected"][0], "p");
+        let text = safe.to_string();
+        for private in [
+            "secret",
+            "private prompt",
+            "private shell",
+            "apiKey",
+            "Authorization",
+        ] {
+            assert!(!text.contains(private), "{text}");
+        }
+    }
 }
 
 fn mutation_requires_session_control(request: &Request<Body>) -> bool {

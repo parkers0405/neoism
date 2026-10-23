@@ -134,20 +134,12 @@ impl VulkanGlyphAtlas {
     /// (`Sugarloaf::render_vulkan` keeps `ctx: &mut VulkanContext`
     /// for the swapchain acquire/present cycle).
     ///
-    /// `other_slot_fences` carries the in-flight fences of the OTHER
-    /// frame slots (everything but `slot`). When there are pending
-    /// uploads we CPU-wait on them before recording the upload —
-    /// the atlas image is a single `vk::Image` shared across all
-    /// FRAMES_IN_FLIGHT slots, and per-slot fence semantics only
-    /// synchronize within a slot. Without this wait, slot N's
-    /// `TRANSFER_DST` write to the atlas can be queued while slots
-    /// N-1 / N-2 are still reading the atlas in their fragment
-    /// shaders → torn/half-uploaded glyph data ghosts on screen for
-    /// 1-2 frames whenever scrolling brings new glyphs into view.
-    /// The wait costs nothing on idle frames (no uploads → early
-    /// return). When uploads ARE pending it briefly serializes the
-    /// CPU against the GPU, which is the correct trade for not
-    /// shipping torn glyphs.
+    /// All atlas reads and uploads use the same graphics queue (family's
+    /// queue index 0). The FRAGMENT_SHADER/SHADER_READ -> COPY/TRANSFER_WRITE
+    /// barrier orders earlier submissions' reads before this overwrite; the
+    /// reverse barrier makes the copy visible to subsequent draws. No CPU
+    /// wait on other slots is needed. The acquired slot's fence MUST still
+    /// protect its staging buffer before this function is called.
     pub fn flush_uploads(
         &mut self,
         device: &ash::Device,
@@ -155,44 +147,10 @@ impl VulkanGlyphAtlas {
         physical_device: vk::PhysicalDevice,
         cmd: vk::CommandBuffer,
         slot: usize,
-        other_slot_fences: &[vk::Fence],
     ) {
         if self.pending.is_empty() {
             return;
         }
-        let pending_count = self.pending.len();
-        let wait_start = web_time::Instant::now();
-        // Wait for every OTHER in-flight slot to finish — that drains
-        // any pending fragment-shader reads of the shared atlas image
-        // before we record this slot's TRANSFER_DST write into it.
-        // `wait_for_fences` with `wait_all = true` is a no-op for
-        // already-signaled fences, so the worst-case cost lands only
-        // when we're upload-bound (rapid scroll exposing many new
-        // glyphs at once).
-        let live: Vec<vk::Fence> = other_slot_fences
-            .iter()
-            .copied()
-            .filter(|f| *f != vk::Fence::null())
-            .collect();
-        if !live.is_empty() {
-            unsafe {
-                if let Err(err) = device.wait_for_fences(&live, true, u64::MAX) {
-                    tracing::warn!(
-                        target: "sugarloaf::vulkan",
-                        ?err,
-                        "wait_for_fences on other slots before atlas upload failed"
-                    );
-                }
-            }
-        }
-        let wait_us = wait_start.elapsed().as_micros();
-        tracing::info!(
-            target: "sugarloaf::vulkan::atlas",
-            slot,
-            pending_glyphs = pending_count,
-            wait_us,
-            "atlas upload: queued glyphs + cross-slot fence wait"
-        );
         let total_bytes: usize = self
             .pending
             .iter()
@@ -245,8 +203,8 @@ impl VulkanGlyphAtlas {
 
     /// Forget every packed glyph while keeping the Vulkan image and its
     /// descriptor binding alive.  The next inserts reuse the atlas from the
-    /// origin and `flush_uploads` performs the normal cross-frame fence wait
-    /// before overwriting those texels.
+    /// origin and `flush_uploads` records the same-queue GPU barriers before
+    /// overwriting those texels; the image and descriptors remain alive.
     ///
     /// This is intentionally a metadata reset rather than an image rebuild:
     /// zooming through many font sizes must not permanently exhaust the
@@ -849,7 +807,7 @@ impl VulkanGridRenderer {
     /// No-op when both atlases have no pending entries.
     pub fn prepare(
         &mut self,
-        ctx: &VulkanContext,
+        _ctx: &VulkanContext,
         cmd: vk::CommandBuffer,
         frame_slot: usize,
     ) {
@@ -858,7 +816,7 @@ impl VulkanGridRenderer {
         {
             return;
         }
-        self.flush_pending_uploads(ctx, cmd, frame_slot);
+        self.flush_pending_uploads(cmd, frame_slot);
     }
 
     /// Record the bg + text passes into `cmd`. Caller has already
@@ -988,25 +946,15 @@ impl VulkanGridRenderer {
     }
 
     /// Delegate to each atlas's own `flush_uploads`. Each atlas owns
-    /// its own per-slot staging buffer ring now — see
-    /// `VulkanGlyphAtlas::flush_uploads`. The other-slot fence list
-    /// gates the upload behind any in-flight fragment-shader reads
-    /// of the shared atlas image (see `VulkanGlyphAtlas::flush_uploads`
-    /// for the full rationale).
-    fn flush_pending_uploads(
-        &mut self,
-        ctx: &VulkanContext,
-        cmd: vk::CommandBuffer,
-        slot: usize,
-    ) {
-        let other_slot_fences = ctx.other_slot_fences(slot);
+    /// its own per-slot staging buffer ring. GPU barriers order shared-image
+    /// reads and writes across submissions on the single graphics queue.
+    fn flush_pending_uploads(&mut self, cmd: vk::CommandBuffer, slot: usize) {
         self.atlas_grayscale.flush_uploads(
             &self.device,
             &self.instance,
             self.physical_device,
             cmd,
             slot,
-            &other_slot_fences,
         );
         self.atlas_color.flush_uploads(
             &self.device,
@@ -1014,10 +962,12 @@ impl VulkanGridRenderer {
             self.physical_device,
             cmd,
             slot,
-            &other_slot_fences,
         );
     }
 }
+
+#[cfg(test)]
+mod upload_tests;
 
 /// Record an atlas upload: barrier image → `TRANSFER_DST_OPTIMAL`,
 /// `cmd_copy_buffer_to_image`, barrier image → `SHADER_READ_ONLY_OPTIMAL`.
@@ -1036,6 +986,48 @@ impl VulkanGridRenderer {
 /// VUID-vkCmdCopyBufferToImage-renderpass forbids transfer commands
 /// inside a render pass. `Sugarloaf::render_vulkan` honours this by
 /// calling `prepare_vulkan` before `cmd_begin_rendering`.
+fn atlas_upload_barriers(
+    initialized: bool,
+    image: vk::Image,
+) -> [vk::ImageMemoryBarrier2<'static>; 2] {
+    let old_layout = if initialized {
+        vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL
+    } else {
+        vk::ImageLayout::UNDEFINED
+    };
+    let to_transfer = vk::ImageMemoryBarrier2::default()
+        .src_stage_mask(if initialized {
+            vk::PipelineStageFlags2::FRAGMENT_SHADER
+        } else {
+            vk::PipelineStageFlags2::TOP_OF_PIPE
+        })
+        .src_access_mask(if initialized {
+            vk::AccessFlags2::SHADER_READ
+        } else {
+            vk::AccessFlags2::empty()
+        })
+        .dst_stage_mask(vk::PipelineStageFlags2::COPY)
+        .dst_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+        .old_layout(old_layout)
+        .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+        .image(image)
+        .subresource_range(color_subresource_range());
+    let to_shader_read = vk::ImageMemoryBarrier2::default()
+        .src_stage_mask(vk::PipelineStageFlags2::COPY)
+        .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+        .dst_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER)
+        .dst_access_mask(vk::AccessFlags2::SHADER_READ)
+        .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+        .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+        .image(image)
+        .subresource_range(color_subresource_range());
+    [to_transfer, to_shader_read]
+}
+
 fn upload_to_atlas(
     device: &ash::Device,
     cmd: vk::CommandBuffer,
@@ -1043,32 +1035,9 @@ fn upload_to_atlas(
     atlas: &mut VulkanGlyphAtlas,
     copies: &[vk::BufferImageCopy],
 ) {
-    let old_layout = if atlas.initialized {
-        vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL
-    } else {
-        vk::ImageLayout::UNDEFINED
-    };
+    let [to_transfer, to_shader_read] =
+        atlas_upload_barriers(atlas.initialized, atlas.image.handle());
     unsafe {
-        // → TRANSFER_DST
-        let to_transfer = vk::ImageMemoryBarrier2::default()
-            .src_stage_mask(if atlas.initialized {
-                vk::PipelineStageFlags2::FRAGMENT_SHADER
-            } else {
-                vk::PipelineStageFlags2::TOP_OF_PIPE
-            })
-            .src_access_mask(if atlas.initialized {
-                vk::AccessFlags2::SHADER_READ
-            } else {
-                vk::AccessFlags2::empty()
-            })
-            .dst_stage_mask(vk::PipelineStageFlags2::COPY)
-            .dst_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
-            .old_layout(old_layout)
-            .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-            .image(atlas.image.handle())
-            .subresource_range(color_subresource_range());
         let barriers = [to_transfer];
         let dep = vk::DependencyInfo::default().image_memory_barriers(&barriers);
         device.cmd_pipeline_barrier2(cmd, &dep);
@@ -1083,17 +1052,6 @@ fn upload_to_atlas(
         );
 
         // → SHADER_READ
-        let to_shader_read = vk::ImageMemoryBarrier2::default()
-            .src_stage_mask(vk::PipelineStageFlags2::COPY)
-            .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
-            .dst_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER)
-            .dst_access_mask(vk::AccessFlags2::SHADER_READ)
-            .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-            .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-            .image(atlas.image.handle())
-            .subresource_range(color_subresource_range());
         let barriers = [to_shader_read];
         let dep = vk::DependencyInfo::default().image_memory_barriers(&barriers);
         device.cmd_pipeline_barrier2(cmd, &dep);

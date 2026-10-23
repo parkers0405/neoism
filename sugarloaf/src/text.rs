@@ -593,8 +593,9 @@ impl Text {
 
     #[inline]
     pub(crate) fn occlude_since(&mut self, first: usize, holes: &[[f32; 4]]) {
+        let holes = crate::occlusion::Occlusions::new(holes);
         crate::occlusion::filter_tail(&mut self.instances, first, |instance| {
-            crate::occlusion::glyph_parts(instance, holes)
+            crate::occlusion::glyph_parts_with(instance, &holes)
         });
     }
 
@@ -1810,29 +1811,24 @@ impl Text {
     /// dynamic-rendering pass (matches `GridRenderer::prepare_vulkan`).
     /// No-op when neither atlas has pending uploads.
     ///
-    /// `ctx` is consulted for the OTHER slots' in-flight fences — the
-    /// atlas is one `vk::Image` shared across all FRAMES_IN_FLIGHT
-    /// slots, so a CPU wait on those fences before recording the
-    /// upload is required to avoid torn glyph reads from in-flight
-    /// fragment shaders. See `VulkanGlyphAtlas::flush_uploads`.
+    /// Same-queue GPU barriers protect the shared atlas; acquisition must
+    /// already have completed this slot's fence to protect staging reuse.
     #[cfg(target_os = "linux")]
     pub fn prepare_vulkan(
         &mut self,
-        ctx: &crate::context::vulkan::VulkanContext,
+        _ctx: &crate::context::vulkan::VulkanContext,
         cmd: ash::vk::CommandBuffer,
         slot: usize,
     ) {
         let Some(state) = self.vulkan.as_mut() else {
             return;
         };
-        let other_slot_fences = ctx.other_slot_fences(slot);
         state.atlas_grayscale.flush_uploads(
             &state.device,
             &state.instance,
             state.physical_device,
             cmd,
             slot,
-            &other_slot_fences,
         );
         state.atlas_color.flush_uploads(
             &state.device,
@@ -1840,7 +1836,6 @@ impl Text {
             state.physical_device,
             cmd,
             slot,
-            &other_slot_fences,
         );
     }
 

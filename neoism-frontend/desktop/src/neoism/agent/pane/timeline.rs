@@ -10,7 +10,11 @@ mod floating_composer_tests {
         let mut pane = NeoismAgentPane::default();
         let metrics = [10.0, 30.0, 400.0, 100.0];
         pane.set_timeline_metrics_with_live_growth_scaled(
-            metrics, 1000.0, metrics[3], Some(0.0), 1.0,
+            metrics,
+            1000.0,
+            metrics[3],
+            Some(0.0),
+            1.0,
         );
         let original_max = pane.max_timeline_scroll();
         // Representative disjoint silhouette bands: a rounded card top,
@@ -240,6 +244,20 @@ impl NeoismAgentPane {
         self.timeline_viewport_rect = Some(viewport_rect);
         self.timeline_content_height_px = content_height_px.max(0.0);
         self.timeline_viewport_height_px = viewport_height_px.max(0.0);
+        if self.conversation_open_started.as_ref().is_some_and(|(id, _)| {
+            self.session_id.as_deref() == Some(id.as_str())
+                && self.messages.iter().any(|message| message.kind != NeoismAgentMessageKind::System)
+        }) {
+            let (session_id, started) = self.conversation_open_started.take().unwrap();
+            tracing::info!(
+                target: "neoism::agent_ui_perf",
+                session_id,
+                blocks = self.messages.len(),
+                preview = self.initial_history_preview.is_some(),
+                elapsed_us = started.elapsed().as_micros(),
+                "agent conversation first transcript layout"
+            );
+        }
         if let Some(anchor) = self.pending_timeline_anchor {
             self.cancel_timeline_follow_motion();
             let keep_anchor = self.tool_expansion_is_animating();
@@ -667,6 +685,76 @@ impl NeoismAgentPane {
         );
     }
 
+    pub(crate) fn timeline_source_revision(&self) -> u64 {
+        self.timeline_content_revision
+    }
+
+    pub fn set_timeline_question_rail_targets(
+        &mut self,
+        targets: neoism_ui::panels::agent_pane::question_rail::TimelineQuestionTargets,
+    ) {
+        self.timeline_question_targets = Some(targets);
+        self.timeline_question_targets_session = self.session_id.clone();
+    }
+
+    fn jump_timeline_to_question_y(&mut self, y: f32) -> bool {
+        use neoism_ui::panels::agent_pane::question_rail::question_index_at;
+        use neoism_ui::panels::agent_pane::view::timeline::TimelineViewAnchorKey;
+
+        let Some(track) = self.scrollbar_track_rect else {
+            return false;
+        };
+        if self.timeline_question_targets_session != self.session_id {
+            return false;
+        }
+        let Some(targets) = self.timeline_question_targets.as_ref() else {
+            return false;
+        };
+        let Some(index) = question_index_at(
+            track,
+            targets.len(),
+            Some((track[0], y.clamp(track[1], track[1] + track[3]))),
+        ) else {
+            return false;
+        };
+        let target = &targets[index];
+        let source_index = if self
+            .messages
+            .get(target.source_index)
+            .is_some_and(|message| message.id == target.message_id)
+        {
+            target.source_index
+        } else {
+            let Some(index) = self
+                .messages
+                .iter()
+                .position(|message| message.id == target.message_id)
+            else {
+                return false;
+            };
+            index
+        };
+        if self.messages[source_index].kind != NeoismAgentMessageKind::User {
+            return false;
+        }
+        let key = TimelineViewAnchorKey::for_source(&self.messages, source_index);
+        let top = target.top;
+        self.cancel_timeline_follow_motion();
+        self.clear_timeline_motion();
+        self.pending_timeline_anchor = None;
+        self.pending_timeline_prepend_delta_px = None;
+        self.pending_timeline_prepend_height_px = None;
+        self.timeline_follow_bottom = false;
+        let max_scroll = self.max_timeline_scroll();
+        self.timeline_scroll_px = max_scroll - top.clamp(0.0, max_scroll);
+        // Install before lazy measurement so refinement restores the question,
+        // not whichever estimated answer row previously occupied this pixel.
+        self.set_timeline_view_anchor(key, 0.0);
+        self.timeline_history.last_requested_session_id = None;
+        self.timeline_last_scroll_at = Some(Instant::now());
+        true
+    }
+
     /// Cache the scrollbar rects from the renderer so the input layer can
     /// hit-test them on mouse press without re-deriving the geometry.
     pub fn set_scrollbar_geometry(
@@ -676,14 +764,25 @@ impl NeoismAgentPane {
     ) {
         self.scrollbar_track_rect = track;
         self.scrollbar_thumb_rect = thumb;
+        if track.is_none() {
+            self.timeline_question_targets = None;
+            self.timeline_question_targets_session = None;
+            self.scrollbar_drag = None;
+        }
     }
 
-    /// Repaint every move over the rail (including between ticks), plus its exit.
+    /// Repaint only tick, geometry, entry or exit changes.
     pub fn update_scrollbar_hover(&mut self, pointer: Option<(f32, f32)>) -> bool {
-        let was_hovered = self.scrollbar_hovered;
-        self.scrollbar_hovered =
-            pointer.is_some_and(|(x, y)| self.scrollbar_hit(x, y).is_some());
-        self.scrollbar_hovered || was_hovered
+        let valid_session = self.timeline_question_targets.is_none()
+            || self.timeline_question_targets_session == self.session_id;
+        self.scrollbar_hovered.update_questions(
+            self.scrollbar_track_rect.filter(|_| valid_session),
+            self.scrollbar_thumb_rect,
+            self.timeline_question_targets
+                .as_ref()
+                .map(|targets| targets.len()),
+            pointer,
+        )
     }
 
     pub fn scrollbar_dragging(&self) -> bool {
@@ -692,6 +791,13 @@ impl NeoismAgentPane {
 
     pub fn scrollbar_hit(&self, x: f32, y: f32) -> Option<ScrollbarHit> {
         let track = self.scrollbar_track_rect?;
+        if let Some(targets) = &self.timeline_question_targets {
+            if self.timeline_question_targets_session != self.session_id || targets.is_empty() {
+                return None;
+            }
+            return interaction_policy::rect_contains(track, x, y)
+                .then_some(ScrollbarHit::Track);
+        }
         if !interaction_policy::rect_contains(track, x, y) {
             return None;
         }
@@ -707,6 +813,16 @@ impl NeoismAgentPane {
         let Some(hit) = self.scrollbar_hit(x, y) else {
             return false;
         };
+        if self.timeline_question_targets.is_some() {
+            if !self.jump_timeline_to_question_y(y) {
+                return false;
+            }
+            self.scrollbar_drag = Some(ScrollbarDrag {
+                pointer_start_y: y,
+                scroll_offset_start: self.timeline_scroll_px,
+            });
+            return true;
+        }
         self.cancel_timeline_follow_motion();
         // Clicking a rail mark moves directly to that position in the history.
         if hit == ScrollbarHit::Track {
@@ -730,6 +846,9 @@ impl NeoismAgentPane {
         let Some(drag) = self.scrollbar_drag else {
             return false;
         };
+        if self.timeline_question_targets.is_some() {
+            return self.jump_timeline_to_question_y(y);
+        }
         let Some(track) = self.scrollbar_track_rect else {
             return false;
         };
@@ -772,6 +891,10 @@ impl NeoismAgentPane {
     }
 
     pub(crate) fn jump_timeline_to_track_y(&mut self, y: f32) {
+        if self.timeline_question_targets.is_some() {
+            self.jump_timeline_to_question_y(y);
+            return;
+        }
         let Some(track) = self.scrollbar_track_rect else {
             return;
         };

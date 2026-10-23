@@ -267,14 +267,15 @@ fn local_bind_target(server: &str) -> Option<(String, u16)> {
     {
         return None;
     }
-    let host = url.host_str()?;
+    // URL syntax brackets IPv6; the listener requires a bare IP address.
+    let host = match url.host()? {
+        url::Host::Domain("localhost") => "127.0.0.1".to_string(),
+        url::Host::Ipv4(ip) if ip == std::net::Ipv4Addr::LOCALHOST => ip.to_string(),
+        url::Host::Ipv6(ip) if ip.is_loopback() => ip.to_string(),
+        _ => return None,
+    };
     // Bind the same port the request URL addresses (HTTP's default is 80).
-    let port = url.port_or_known_default()?;
-    match host {
-        "127.0.0.1" | "localhost" => Some(("127.0.0.1".to_string(), port)),
-        "[::1]" => Some(("[::1]".to_string(), port)),
-        _ => None,
-    }
+    Some((host, url.port_or_known_default()?))
 }
 
 /// Handle for a per-connection agent session. Cheap to clone via
@@ -479,8 +480,11 @@ mod readiness_tests {
         );
         assert_eq!(
             local_bind_target("http://[::1]:4096"),
-            Some(("[::1]".into(), 4096))
+            Some(("::1".into(), 4096))
         );
+        let (host, _) = local_bind_target("http://[::1]:4096").unwrap();
+        let ip: std::net::IpAddr = host.parse().expect("listener requires a bare IP");
+        assert_eq!(ip, std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST));
         assert!(local_bind_target("http://127.0.0.1:7878/agent").is_none());
         assert!(local_bind_target("https://host.example/agent").is_none());
         assert!(local_bind_target("http://secret@localhost:4096").is_none());

@@ -151,6 +151,11 @@ impl ProjectSessionPage {
 }
 
 impl NeoismAgentSidePanel {
+    /// Display names are separate from opaque backend-qualified project identity.
+    pub fn set_project_labels(&mut self, labels: HashMap<String, String>) {
+        self.project_labels = labels;
+    }
+
     pub fn set_pinned_sessions(&mut self, sessions: Vec<NeoismAgentSessionEntry>) {
         if self.catalog_directory.is_some() {
             return;

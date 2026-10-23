@@ -19,6 +19,8 @@ struct Project {
 
 #[derive(Default)]
 pub(crate) struct ConversationWorkspaceState {
+    pub(crate) system_browser: Vec<super::file_browser::SystemBrowserJob>,
+    pub(crate) system_sources: Vec<crate::neoism::agent::system::AgentSystemSource>,
     scope: String,
     rows: Vec<Project>,
     registry: Vec<Project>,
@@ -213,6 +215,27 @@ fn retain_explicit_root(
 }
 
 impl Screen<'_> {
+    pub(crate) fn set_agent_system_sources(&mut self, mut sources: Vec<crate::neoism::agent::system::AgentSystemSource>) {
+        sources.sort_by(|a, b| a.id.cmp(&b.id));
+        let root = self.renderer.conversations_pane.side_panel().catalog_directory().is_none()
+            && !self.context_manager.current_workspace_is_remote_joined();
+        let changed = self.conversation_workspaces.system_sources != sources;
+        self.conversation_workspaces.system_sources = sources.clone();
+        if changed { self.refresh_system_conversation_search(); }
+        self.renderer.conversations_pane.set_system_sources(sources.clone(), root);
+        let current_grid = self.context_manager.current_index();
+        for (index, grid) in self.context_manager.all_grids_mut().into_iter().enumerate() {
+            for context in grid.contexts_mut().values_mut() {
+                if let Some(agent) = context.context_mut().neoism_agent.as_mut() {
+                    // Authorization/transport changes reach parked tabs too. Keep
+                    // each inactive pane's existing workspace selection policy.
+                    let pane_root = if index == current_grid { root } else { agent.systems.root };
+                    agent.set_system_sources(sources.clone(), pane_root);
+                }
+            }
+        }
+    }
+
     // Deliberately exclude the root-scoped /agent/workspaces/... endpoint. An
     // anchor belongs to a host connection, not a directory or workspace tab.
     fn conversation_host_scope(&self) -> String {

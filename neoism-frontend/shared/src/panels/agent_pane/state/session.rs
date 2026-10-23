@@ -139,6 +139,9 @@ impl NeoismAgentPane {
                     }
                 }
             }
+            NeoismAgentPickerKind::System => {
+                // Execution-system selection is owned by the desktop transport host.
+            }
             NeoismAgentPickerKind::Agent => self.apply_agent(option.value),
             NeoismAgentPickerKind::Model => {
                 self.remember_model_option(&option);
@@ -1439,7 +1442,7 @@ impl NeoismAgentPane {
             .push(NeoismAgentInputAttachment::File {
                 token: token.to_string(),
                 filename: value.trim_end_matches('/').to_string(),
-                url: attachment_url_for_path(&path, mime),
+                url: attachment_url_for_path(&path, mime).into(),
                 mime: mime.to_string(),
             });
     }

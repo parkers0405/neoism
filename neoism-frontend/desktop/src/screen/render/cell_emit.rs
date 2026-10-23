@@ -91,8 +91,7 @@ impl Screen<'_> {
                         .clamp(i32::MIN as f32, i32::MAX as f32)
                 }
             };
-            let grid_or_damage_full = grid.needs_full_rebuild()
-                || matches!(p.damage, neoism_terminal_core::damage::TerminalDamage::Full);
+            let grid_or_damage_full = p.requires_full_rebuild(grid.needs_full_rebuild());
             let force_full = grid_or_damage_full;
 
             enum RowsToRebuild<'a> {
@@ -673,7 +672,8 @@ impl Screen<'_> {
             );
         }
 
-        self.renderer.background_effects_animating = neoism_ui::primitives::surface_background::animation_demand();
+        self.renderer.background_effects_animating =
+            neoism_ui::primitives::surface_background::animation_demand();
         has_animation |= self.renderer.background_effects_animating;
         let should_present = neoism_ui::render_policy::should_present_frame(
             any_panel_dirty,

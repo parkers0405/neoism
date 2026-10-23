@@ -27,6 +27,72 @@ use crate::primitives::ide_theme::IdeTheme;
 
 const TIMELINE_PAGE_SOURCE_LEN: usize = 128;
 
+/// Hover invalidation follows painted ticks, not raw pointer coordinates.
+#[derive(Default, Debug)]
+pub struct TimelineScrollbarHover {
+    painted: Option<([f32; 4], Option<[f32; 4]>, Option<usize>, usize)>,
+}
+
+/// Shared by the painter and both hosts; the rail pitch is five dash heights.
+pub fn timeline_scrollbar_hovered_tick(
+    track: [f32; 4],
+    thumb: Option<[f32; 4]>,
+    pointer: Option<(f32, f32)>,
+) -> Option<usize> {
+    let (x, y) = pointer?;
+    if !crate::panels::agent_pane::interaction_policy::rect_contains(track, x, y) {
+        return None;
+    }
+    // Legacy track-only hosts still get entry/exit invalidation.
+    let Some(thumb) = thumb else { return Some(0) };
+    let dash_h = thumb[3];
+    if dash_h <= 0.0 || !dash_h.is_finite() {
+        return Some(0);
+    }
+    let intervals = ((track[3] - dash_h) / (5.0 * dash_h))
+        .round()
+        .clamp(1.0, 10.0);
+    let pitch = (track[3] - dash_h) / intervals;
+    if pitch <= 0.0 || !pitch.is_finite() {
+        return Some(0);
+    }
+    Some(
+        ((y - track[1] - dash_h * 0.5) / pitch)
+            .round()
+            .clamp(0.0, intervals) as usize,
+    )
+}
+
+impl TimelineScrollbarHover {
+    pub fn update(
+        &mut self,
+        track: Option<[f32; 4]>,
+        thumb: Option<[f32; 4]>,
+        pointer: Option<(f32, f32)>,
+    ) -> bool {
+        self.update_questions(track, thumb, None, pointer)
+    }
+
+    pub fn update_questions(
+        &mut self,
+        track: Option<[f32; 4]>,
+        thumb: Option<[f32; 4]>,
+        question_count: Option<usize>,
+        pointer: Option<(f32, f32)>,
+    ) -> bool {
+        let next = track.and_then(|track| {
+            let tick = match question_count {
+                Some(count) => crate::panels::agent_pane::question_rail::question_index_at(track, count, pointer),
+                None => timeline_scrollbar_hovered_tick(track, thumb, pointer),
+            };
+            tick.map(|tick| (track, thumb, question_count, tick))
+        });
+        let changed = self.painted != next;
+        self.painted = next;
+        changed
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct TimelineLayoutRow<M> {
     pub source_index: usize,
@@ -54,7 +120,11 @@ pub struct TimelineLayoutPage {
 
 #[derive(Clone, Debug)]
 pub struct TimelineLayoutCache<M> {
+    /// Semantic rail projection, rebuilt with rows and cheaply shared with hosts.
+    pub question_targets: crate::panels::agent_pane::question_rail::TimelineQuestionTargets,
     pub epoch: u64,
+    /// Last source revision reconciled for artifact transitions.
+    pub artifact_revision: Option<u64>,
     pub source_len: usize,
     pub width_bucket: i32,
     pub scale_bucket: i32,
@@ -425,6 +495,10 @@ pub trait AgentTimelinePane: AgentMarkdownPane {
     }
     fn clear_tool_hit_rects(&mut self);
     fn timeline_layout_epoch(&self) -> u64;
+    /// None keeps defensive reconciliation for hosts without revision tracking.
+    fn timeline_source_revision(&self) -> Option<u64> {
+        None
+    }
     fn take_timeline_dirty_marks(&mut self) -> TimelineDirtyMarks;
     fn take_timeline_layout_cache(&self) -> Option<TimelineLayoutCache<Self::Message>>;
     fn store_timeline_layout_cache(&self, cache: TimelineLayoutCache<Self::Message>);
@@ -444,6 +518,10 @@ pub trait AgentTimelinePane: AgentMarkdownPane {
     fn cached_timeline_measure(&self, key: &Self::MeasureKey) -> Option<f32>;
     fn store_timeline_measure(&self, key: Self::MeasureKey, height: f32);
     fn timeline_scrollbar_state(&self) -> Option<(f32, f32, f32)>;
+    fn set_timeline_question_rail_targets(
+        &mut self,
+        targets: crate::panels::agent_pane::question_rail::TimelineQuestionTargets,
+    );
     fn set_scrollbar_geometry(
         &mut self,
         track: Option<[f32; 4]>,
@@ -737,6 +815,10 @@ macro_rules! neoism_ui_impl_agent_timeline_pane {
                 <$pane>::set_visible_user_orb_active(self, active)
             }
 
+            fn timeline_source_revision(&self) -> Option<u64> {
+                Some(<$pane>::timeline_source_revision(self))
+            }
+
             fn timeline_layout_epoch(&self) -> u64 {
                 <$pane>::timeline_layout_epoch(self)
             }
@@ -875,6 +957,13 @@ macro_rules! neoism_ui_impl_agent_timeline_pane {
                 thumb: Option<[f32; 4]>,
             ) {
                 <$pane>::set_scrollbar_geometry(self, track, thumb);
+            }
+
+            fn set_timeline_question_rail_targets(
+                &mut self,
+                targets: $crate::panels::agent_pane::question_rail::TimelineQuestionTargets,
+            ) {
+                <$pane>::set_timeline_question_rail_targets(self, targets);
             }
 
             fn log_timeline_perf(
@@ -1037,20 +1126,20 @@ macro_rules! neoism_ui_impl_agent_timeline_delegate {
 
 pub struct SharedTimelineDelegate;
 
+#[cfg(test)]
+mod footer_edge_tests;
+#[cfg(test)]
+mod footer_tests;
 mod impls;
 mod layout;
 mod read_group;
 mod render;
 #[cfg(test)]
 mod tests;
-#[cfg(test)]
-mod footer_tests;
-#[cfg(test)]
-mod footer_edge_tests;
 
 pub use read_group::read_tool_group_end;
 
 pub use render::{
     render_timeline_in_paint_viewport_with, render_timeline_scrollbar_with,
-    render_timeline_with,
+    render_timeline_with, TimelineQuestionRailFrame,
 };

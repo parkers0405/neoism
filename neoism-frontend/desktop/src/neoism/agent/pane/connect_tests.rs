@@ -2,6 +2,7 @@
 use super::*;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::atomic::AtomicUsize;
 use std::sync::mpsc;
 use std::thread;
 
@@ -146,7 +147,11 @@ fn pane_for(server: &MockServer) -> NeoismAgentPane {
 }
 
 fn settle(pane: &mut NeoismAgentPane) {
-    let deadline = Instant::now() + Duration::from_secs(4);
+    settle_with_timeout(pane, Duration::from_secs(4));
+}
+
+fn settle_with_timeout(pane: &mut NeoismAgentPane, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
     while pane.connect_request_loading() {
         assert!(Instant::now() < deadline, "connect did not settle");
         pane.drain_background_updates();
@@ -277,12 +282,80 @@ fn slash_connect_returns_while_catalog_is_blocked_and_completion_wakes_picker() 
         .providers
         .iter()
         .any(|p| p.id == "openai"));
+    assert_eq!(server.requests.lock().unwrap().iter()
+        .filter(|(_, path)| path.ends_with("/v2/providers")).count(), 1,
+        "opening connect must not start a second readiness discovery");
     assert!(server
         .requests
         .lock()
         .unwrap()
         .iter()
         .all(|(_, path)| path.starts_with("/agent/workspaces/connect-test/v2/")));
+}
+
+#[test]
+fn connect_budgets_include_host_startup_and_interactive_oauth() {
+    assert_eq!(connect_request_timeout(true, false), Duration::from_secs(30));
+    assert_eq!(connect_request_timeout(false, false), Duration::from_secs(150));
+    assert_eq!(connect_request_timeout(true, true), Duration::from_secs(360));
+    assert_eq!(connect_request_timeout(false, true), Duration::from_secs(480));
+}
+
+#[test]
+fn connect_discovery_and_authorization_survive_responses_beyond_five_seconds() {
+    // Exercise each actual HTTP path, not just the timeout calculation. These
+    // run in parallel so the regression adds one six-second wait to the suite.
+    thread::scope(|scope| {
+        for delayed_route in [
+            "/v2/providers",
+            "/v2/providers/auth-methods",
+            "/v2/providers/openai/connections",
+            "/v2/providers/openai/oauth/authorize",
+        ] {
+            scope.spawn(move || {
+                let server = MockServer::new(move |_, path| {
+                    if path.ends_with(delayed_route) {
+                        thread::sleep(Duration::from_secs(6));
+                    }
+                    catalog(path)
+                });
+                let token = AtomicBool::new(true);
+                if delayed_route.ends_with("/connections") {
+                    fetch_provider_connections(&server.endpoint, "openai", &token).unwrap();
+                } else if delayed_route.ends_with("/authorize") {
+                    ConnectRequest::Mutation {
+                        verb: "POST",
+                        path: delayed_route.into(),
+                        body: Some(json!({"method":0})),
+                        effect: ConnectEffect::Authorized {
+                            provider: ConnectProvider { id: "openai".into(), name: "OpenAI".into(), connected: false },
+                            method: ConnectMethod { index: 0, is_api: false, label: "Browser".into() },
+                        },
+                    }.run_with_launcher(&server.endpoint, &token, |_| Ok(())).unwrap();
+                } else {
+                    let flow = fetch_connect_flow(&server.endpoint, &token).unwrap();
+                    assert!(flow.providers.iter().any(|provider| provider.id == "openai"));
+                    assert!(flow.methods_by_provider.contains_key("openai"));
+                }
+                assert_eq!(server.requests.lock().unwrap().iter()
+                    .filter(|(_, path)| path.ends_with(delayed_route)).count(), 1,
+                    "a slow successful response must not replay the request");
+            });
+        }
+    });
+}
+
+#[test]
+fn connect_failure_identifies_the_discovery_stage() {
+    let server = MockServer::new(|_, path| {
+        if path.ends_with("/auth-methods") {
+            (500, json!({"error":"test discovery failure"}))
+        } else {
+            catalog(path)
+        }
+    });
+    let error = fetch_connect_flow(&server.endpoint, &AtomicBool::new(true)).err().unwrap();
+    assert!(error.starts_with("Loading sign-in methods:"), "{error}");
 }
 
 #[test]
@@ -307,6 +380,36 @@ fn connect_down_endpoint_errors_promptly_and_retry_recovers() {
     });
     settle(&mut pane);
     assert_eq!(pane.picker.as_ref().unwrap().title, "Connect a provider");
+}
+
+#[test]
+fn connect_retry_recovers_when_provider_discovery_is_slow() {
+    let failed = Arc::new(AtomicBool::new(true));
+    let failure = failed.clone();
+    let server = MockServer::new(move |_, path| {
+        if failure.load(Ordering::Acquire) {
+            return (503, json!({"error":"starting"}));
+        }
+        if path.ends_with("/v2/providers") {
+            thread::sleep(Duration::from_secs(6));
+        }
+        catalog(path)
+    });
+    let mut pane = pane_for(&server);
+    pane.open_connect_picker();
+    settle(&mut pane);
+    assert_eq!(pane.picker.as_ref().unwrap().title, "Connect unavailable");
+    let (wake_tx, wake_rx) = mpsc::channel();
+    pane.set_event_wake(AgentEventWake::for_test(move || {
+        let _ = wake_tx.send(());
+    }));
+    failed.store(false, Ordering::Release);
+    assert_prompt(|| assert!(pane.commit_picker()));
+    assert!(pane.picker.as_ref().unwrap().loading);
+    wake_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+    settle_with_timeout(&mut pane, Duration::from_secs(10));
+    assert_eq!(pane.picker.as_ref().unwrap().title, "Connect a provider");
+    assert!(!pane.picker.as_ref().unwrap().loading);
 }
 
 #[test]
@@ -648,6 +751,64 @@ fn connect_healthy_remote_works_while_configured_local_is_down() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[test]
+fn connect_auto_oauth_retry_starts_a_fresh_attempt_and_ignores_late_completion() {
+    let authorizations = Arc::new(AtomicUsize::new(0));
+    let attempts = authorizations.clone();
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let server = MockServer::new(move |_, path| {
+        if path.ends_with("/oauth/authorize") {
+            let attempt = attempts.fetch_add(1, Ordering::AcqRel) + 1;
+            (200, json!({"method":"auto","attemptId":format!("attempt-{attempt}")}))
+        } else if path.ends_with("/oauth/callback") {
+            if attempts.load(Ordering::Acquire) == 1 {
+                (504, json!({"error":"delivery outcome unknown"}))
+            } else {
+                entered_tx.send(()).unwrap();
+                release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                (200, json!({"connectionId":"fresh-account"}))
+            }
+        } else {
+            catalog(path)
+        }
+    });
+    let mut pane = pane_for(&server);
+    pane.open_connect_picker();
+    settle(&mut pane);
+    pane.enter_connect_auth("openai");
+    settle(&mut pane);
+    pane.start_connect_method(1);
+    settle(&mut pane);
+    assert_eq!(pane.picker.as_ref().unwrap().activity().unwrap().status, "Connection failed");
+    let old_token = pane.pending_connect.as_ref().unwrap().token.clone();
+    assert_eq!(server.requests.lock().unwrap().iter()
+        .filter(|(_, path)| path.ends_with("/oauth/callback")).count(), 1,
+        "ambiguous callbacks must not be automatically replayed");
+    assert!(pane.commit_picker());
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !pane.pending_connect.as_ref().is_some_and(|pending|
+        matches!(&pending.request, ConnectRequest::Mutation { effect: ConnectEffect::Oauth { .. }, .. })) {
+        assert!(Instant::now() < deadline);
+        pane.drain_background_updates();
+        thread::sleep(Duration::from_millis(5));
+    }
+    entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    let ConnectRequest::Mutation { body: Some(body), .. } = &pane.pending_connect.as_ref().unwrap().request else {
+        panic!("expected fresh callback");
+    };
+    assert_eq!(body["attemptId"], "attempt-2");
+    late_success(&mut pane, old_token);
+    assert!(pane.connection_id.is_none());
+    assert!(pane.pending_connect.as_ref().unwrap().loading);
+    release_tx.send(()).unwrap();
+    settle(&mut pane);
+    assert_eq!(pane.connection_id.as_deref(), Some("fresh-account"));
+    assert_eq!(authorizations.load(Ordering::Acquire), 2);
+    assert_eq!(server.requests.lock().unwrap().iter()
+        .filter(|(_, path)| path.ends_with("/oauth/callback")).count(), 2);
 }
 
 #[test]

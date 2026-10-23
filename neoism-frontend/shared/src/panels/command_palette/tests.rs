@@ -26,6 +26,7 @@ fn system_entry(
         name: id.into(),
         address: format!("user@{id}"),
         local: id == "local",
+        enabled: true,
         status,
     }
 }
@@ -35,74 +36,97 @@ fn systems_rows_refresh_and_controls_use_host_state() {
     use super::SystemConnectionStatus::*;
     let mut palette = CommandPalette::default();
     assert!(!palette.refresh_systems(Vec::new()));
-    palette.enter_systems_mode(vec![
-        system_entry("local", Connected),
-        system_entry("remote", Disconnected),
-    ]);
-    assert!(palette.systems_mode());
-    assert_eq!(
-        palette.category_switch_action(),
-        Some(PaletteAction::ShowServers)
-    );
+    palette.enter_systems_mode(vec![system_entry("local", Connected), system_entry("remote", Disconnected)]);
+    assert_eq!(palette.category_switch_action(), Some(PaletteAction::ShowServers));
     palette.selected_index = 1;
-    assert_eq!(
-        palette.get_selected_action(),
-        Some(PaletteAction::ConnectSystem {
-            id: "remote".into()
-        })
-    );
+    assert_eq!(palette.get_selected_action(), Some(PaletteAction::ShowSystemSettings { id: "remote".into() }));
     palette.set_query("remote".into());
     palette.set_query_cursor(2);
-    assert!(palette.refresh_systems(vec![
-        system_entry("remote", Connecting),
-        system_entry("local", Connected)
-    ]));
+    assert!(palette.refresh_systems(vec![system_entry("remote", Connecting), system_entry("local", Connected)]));
     assert_eq!(palette.query, "remote");
     assert_eq!(palette.query_cursor, 2);
-    assert_eq!(
-        palette.get_selected_action(),
-        Some(PaletteAction::ConnectSystem {
-            id: "remote".into()
-        })
-    );
-    assert_eq!(
-        system_entry("remote", Connecting).controls()[0].2,
-        PaletteAction::DisconnectSystem {
-            id: "remote".into()
-        }
-    );
-    assert_eq!(
-        system_entry("remote", Connected).controls()[0].0,
-        "Disconnect"
-    );
-    assert_eq!(
-        system_entry("remote", Disconnected).controls()[0].0,
-        "Connect"
-    );
-    assert!(system_entry("local", Connected).controls().is_empty());
-    assert_eq!(
-        system_entry("remote", Connected).controls()[1].2,
-        PaletteAction::RemoveSystem {
-            id: "remote".into()
-        }
-    );
+    assert_eq!(palette.get_selected_action(), Some(PaletteAction::ShowSystemSettings { id: "remote".into() }));
+    assert!(palette.system_control_hits.is_empty());
     palette.set_query("missing".into());
     assert_eq!(palette.filtered_rows().len(), 1);
-    assert_eq!(
-        palette.get_selected_action(),
-        Some(PaletteAction::AddSystem)
-    );
+    assert_eq!(palette.get_selected_action(), Some(PaletteAction::AddSystem));
     palette.enter_servers_mode(Vec::new());
-    assert!(!palette.systems_mode());
-    assert_eq!(
-        palette.category_switch_action(),
-        Some(PaletteAction::ShowSystems)
-    );
-    assert_eq!(
-        palette.get_selected_action(),
-        Some(PaletteAction::AddServer)
-    );
+    assert_eq!(palette.category_switch_action(), Some(PaletteAction::ShowSystems));
+    assert_eq!(palette.get_selected_action(), Some(PaletteAction::AddServer));
     assert!(!palette.refresh_systems(Vec::new()));
+}
+
+#[test]
+fn system_switch_intents_are_idempotent_and_independent_of_socket_status() {
+    use super::SystemConnectionStatus::*;
+    for status in [Connected, Connecting, Disconnected] {
+        for enabled in [false, true] {
+            let mut entry = system_entry("remote", status);
+            entry.enabled = enabled;
+            let root = PaletteRow::System { entry: &entry };
+            assert_eq!(root.action(), Some(PaletteAction::ShowSystemSettings { id: "remote".into() }));
+            let mut palette = CommandPalette::default();
+            palette.enter_system_settings_mode(entry);
+            let expected = Some(PaletteAction::SetSystemEnabled { id: "remote".into(), enabled: !enabled });
+            assert_eq!(palette.get_selected_action(), expected);
+            assert_eq!(palette.get_selected_action(), expected);
+            let actions: Vec<_> = palette.filtered_rows().iter().filter_map(|(_, row)| row.action()).collect();
+            assert!(actions.contains(&PaletteAction::SshToSystem { id: "remote".into() }));
+            assert!(actions.contains(&PaletteAction::RemoveSystem { id: "remote".into() }));
+            assert_eq!(actions.contains(&PaletteAction::ConnectSystem { id: "remote".into() }), enabled && status == Disconnected);
+            assert_eq!(actions.contains(&PaletteAction::DisconnectSystem { id: "remote".into() }), status != Disconnected);
+        }
+    }
+    let mut palette = CommandPalette::default();
+    palette.enter_system_settings_mode(system_entry("local", Connected));
+    assert!(palette.filtered_rows().is_empty());
+    assert_eq!(palette.get_selected_action(), None);
+    assert_eq!(palette.system_settings_back_action(), Some(PaletteAction::ShowSystems));
+}
+
+#[test]
+fn systems_refresh_preserves_identity_across_enablement_and_reordering() {
+    use super::SystemConnectionStatus::*;
+    let mut palette = CommandPalette::default();
+    let mut remote = system_entry("remote", Disconnected);
+    remote.enabled = false;
+    palette.enter_systems_mode(vec![system_entry("local", Connected), remote.clone()]);
+    palette.selected_index = 1;
+    let expected = Some(PaletteAction::ShowSystemSettings { id: "remote".into() });
+    assert_eq!(palette.get_selected_action(), expected);
+    remote.enabled = true;
+    assert!(palette.refresh_systems(vec![remote.clone(), system_entry("local", Connected)]));
+    assert_eq!(palette.selected_index, 0);
+    assert_eq!(palette.get_selected_action(), expected);
+    remote.enabled = false;
+    assert!(palette.refresh_systems(vec![system_entry("local", Connected), remote]));
+    assert_eq!(palette.selected_index, 1);
+    assert_eq!(palette.get_selected_action(), expected);
+    palette.selected_index = 0;
+    assert_eq!(palette.get_selected_action(), Some(PaletteAction::ShowSystemSettings { id: "local".into() }));
+}
+
+#[test]
+fn system_switch_clipped_hits_hover_and_pointer_share_visible_bounds() {
+    use super::render::clipped_server_control_rect;
+    let mut palette = CommandPalette::default();
+    palette.enter_system_settings_mode(system_entry("remote", super::SystemConnectionStatus::Disconnected));
+    let clip = [10.0, 100.0, 200.0, 80.0];
+    let action = PaletteAction::SetSystemEnabled { id: "remote".into(), enabled: true };
+    let hit = clipped_server_control_rect([20.0, 90.0, 40.0, 22.0], clip).unwrap();
+    palette.system_control_hits.push((hit, action.clone()));
+    assert_eq!(hit, [20.0, 100.0, 40.0, 12.0]);
+    assert_eq!(palette.server_action_at(25.0, 99.0), None);
+    assert_eq!(palette.server_action_at(25.0, 101.0), Some(action.clone()));
+    assert_eq!(palette.server_action_at(25.0, 112.0), None);
+    assert!(palette.pointer_over_row(25.0, 101.0, 1000.0, 1.0));
+    assert!(palette.hover(25.0, 101.0, 1000.0, 1.0));
+    assert_eq!(palette.hovered_system_control, Some(action));
+    assert!(palette.hover(25.0, 99.0, 1000.0, 1.0));
+    assert_eq!(palette.hovered_system_control, None);
+    assert!(palette.refresh_system_settings(Vec::new()));
+    assert!(palette.system_control_hits.is_empty());
+    assert_eq!(palette.server_action_at(25.0, 101.0), None);
 }
 
 #[test]
@@ -136,7 +160,7 @@ fn connection_category_hover_is_independent_of_row_selection() {
 #[test]
 fn system_header_and_controls_route_without_editing_query() {
     let mut palette = CommandPalette::default();
-    palette.enter_systems_mode(Vec::new());
+    palette.enter_system_settings_mode(system_entry("remote", super::SystemConnectionStatus::Disconnected));
     palette.set_query("hello".into());
     palette.set_query_cursor(2);
     let (x, y, _, _) = palette.palette_rect(1000.0, 1.0);
@@ -145,7 +169,7 @@ fn system_header_and_controls_route_without_editing_query() {
         .category_hits
         .push((header, PaletteAction::ShowServers));
     assert!(!palette.text_entry_at(header[0] + 2.0, header[1] + 2.0, 1000.0, 1.0));
-    assert!(palette.text_entry_at(
+    assert!(!palette.text_entry_at(
         x + 20.0, y + palette.category_header_height() + 14.0, 1000.0, 1.0,
     ));
     assert_eq!(
@@ -154,25 +178,165 @@ fn system_header_and_controls_route_without_editing_query() {
     );
     palette.system_control_hits.push((
         [10.0, 200.0, 60.0, 24.0],
-        PaletteAction::DisconnectSystem {
+        PaletteAction::SetSystemEnabled {
             id: "remote".into(),
+            enabled: false,
         },
     ));
     assert_eq!(
         palette.server_action_at(20.0, 210.0),
-        Some(PaletteAction::DisconnectSystem {
-            id: "remote".into()
+        Some(PaletteAction::SetSystemEnabled {
+            id: "remote".into(),
+            enabled: false,
         })
     );
     assert_eq!(palette.server_action_at(20.0, 225.0), None);
-    assert_eq!(palette.query_cursor, 2);
-    assert_eq!(palette.query, "hello");
+    assert_eq!(palette.query_cursor, 0);
+    assert_eq!(palette.query, "");
     assert!(COMMANDS
         .iter()
         .any(|command| command.action == PaletteAction::ShowSystems));
     assert!(COMMANDS
         .iter()
         .any(|command| command.action == PaletteAction::ShowServers));
+}
+
+#[test]
+fn system_settings_back_restores_root_query_selection_and_mouse_header() {
+    use super::SystemConnectionStatus::*;
+    let mut palette = CommandPalette::default();
+    let remote = system_entry("remote", Disconnected);
+    palette.enter_systems_mode(vec![remote.clone(), system_entry("remote-two", Connected)]);
+    palette.set_query("remote".into());
+    palette.set_query_cursor(3);
+    palette.selected_index = 1;
+    let selected = palette.get_selected_action();
+    palette.enter_system_settings_mode(remote);
+    assert_eq!(palette.query, "");
+    assert_eq!(palette.query_cursor(), 0);
+    assert_eq!(palette.system_settings_id(), Some("remote"));
+    assert_eq!(palette.system_settings_back_action(), Some(PaletteAction::ShowSystems));
+    let header = [10.0, 10.0, 96.0, 30.0];
+    palette.category_hits.push((header, PaletteAction::ShowSystems));
+    assert_eq!(palette.server_action_at(11.0, 11.0), palette.system_settings_back_action());
+    assert_eq!(palette.server_action_at(106.0, 11.0), None);
+    palette.set_query("SSH".into());
+    palette.enter_systems_mode(vec![system_entry("remote-two", Connected), system_entry("remote", Disconnected)]);
+    assert_eq!(palette.query, "remote");
+    assert_eq!(palette.query_cursor(), 3);
+    assert_eq!(palette.get_selected_action(), selected);
+    assert_eq!(palette.system_settings_back_action(), None);
+    assert!(palette.system_control_hits.is_empty());
+}
+
+#[test]
+fn system_settings_refresh_preserves_view_toggle_intent_and_removal_returns_root() {
+    use super::SystemConnectionStatus::*;
+    let mut palette = CommandPalette::default();
+    let mut remote = system_entry("remote", Disconnected);
+    palette.enter_systems_mode(vec![remote.clone()]);
+    palette.set_query("remote".into());
+    palette.enter_system_settings_mode(remote.clone());
+    palette.set_query("Active".into());
+    palette.set_query_cursor(2);
+    remote.enabled = false;
+    assert!(palette.refresh_system_settings(vec![remote.clone()]));
+    assert_eq!(palette.query, "");
+    assert_eq!(palette.query_cursor(), 0);
+    assert_eq!(palette.get_selected_action(), Some(PaletteAction::SetSystemEnabled { id: "remote".into(), enabled: true }));
+    palette.enter_system_settings_mode(remote.clone());
+    assert_eq!(palette.query, ""); // Settings never retain a hidden search query.
+    palette.set_query("".into());
+    palette.selected_index = 1; // SSH when inactive and disconnected.
+    remote.enabled = true;
+    remote.status = Connected;
+    assert!(palette.refresh_system_settings(vec![remote.clone()]));
+    assert_eq!(palette.get_selected_action(), Some(PaletteAction::SshToSystem { id: "remote".into() }));
+    palette.set_enabled(false);
+    assert_eq!(palette.system_settings_id(), Some("remote"));
+    assert_eq!(palette.system_settings_back_action(), None);
+    assert!(palette.refresh_system_settings(vec![remote.clone()]));
+    assert!(!palette.is_enabled());
+    palette.enter_system_settings_mode(remote);
+    assert!(palette.refresh_system_settings(Vec::new()));
+    assert!(palette.systems_mode());
+    assert_eq!(palette.system_settings_id(), None);
+    assert_eq!(palette.query, "remote");
+    assert_eq!(palette.get_selected_action(), Some(PaletteAction::AddSystem));
+    assert!(!palette.refresh_system_settings(Vec::new()));
+}
+
+#[test]
+fn system_settings_have_no_search_band_hits_or_hidden_filter() {
+    use super::SystemConnectionStatus::*;
+    let mut palette = CommandPalette::default();
+    let remote = system_entry("remote", Connected);
+    palette.enter_systems_mode(vec![remote.clone()]);
+    palette.set_query("remote".into());
+    palette.enter_system_settings_mode(remote.clone());
+    assert!(!palette.has_query_input());
+    assert_eq!(palette.input_band_height, palette.category_header_height());
+    let count = palette.filtered_rows().len();
+    palette.insert_query_text("unmatched");
+    palette.set_query("unmatched".into());
+    assert_eq!(palette.query, "");
+    assert_eq!(palette.query_cursor(), 0);
+    assert_eq!(palette.filtered_rows().len(), count);
+    palette.query = "stale query".into();
+    assert_eq!(palette.filtered_rows().len(), count);
+    palette.refresh_system_settings(vec![remote.clone()]);
+    assert_eq!(palette.query, "");
+    for scale in [0.75, 1.0, 1.5, 2.0] {
+        palette.set_scale(scale);
+        assert_eq!(palette.input_band_height, palette.category_header_height());
+        for index in 0..count {
+            let (x, y) = palette.row_center_coords(index, 1000.0, 1.0);
+            assert_eq!(palette.hit_test(x, y, 1000.0, 1.0), Ok(Some(index)));
+            assert!(!palette.text_entry_at(x, y, 1000.0, 1.0));
+        }
+    }
+    palette.enter_systems_mode(vec![remote]);
+    assert!(palette.has_query_input());
+    assert_eq!(palette.query, "remote");
+}
+
+#[test]
+fn systems_root_has_no_inline_controls_or_connection_intents() {
+    use super::SystemConnectionStatus::*;
+    let mut palette = CommandPalette::default();
+    palette.enter_systems_mode(vec![system_entry("local", Connected), system_entry("remote", Connected)]);
+    for (_, row) in palette.filtered_rows() {
+        assert!(matches!(row.action(), Some(PaletteAction::ShowSystemSettings { .. } | PaletteAction::AddSystem)));
+    }
+    // Even stale hit geometry from a prior details frame cannot become a root control.
+    palette.system_control_hits.push(([10.0, 10.0, 40.0, 22.0], PaletteAction::DisconnectSystem { id: "remote".into() }));
+    assert_eq!(palette.server_action_at(11.0, 11.0), None);
+    palette.hover(11.0, 11.0, 1000.0, 1.0);
+    assert_eq!(palette.hovered_system_control, None);
+}
+
+#[test]
+fn system_settings_connection_refresh_and_row_hit_geometry() {
+    use super::SystemConnectionStatus::*;
+    let mut palette = CommandPalette::default();
+    let mut remote = system_entry("remote", Disconnected);
+    palette.enter_systems_mode(vec![remote.clone()]);
+    let (x, y) = palette.row_center_coords(0, 1000.0, 1.0);
+    assert_eq!(palette.hit_test(x, y, 1000.0, 1.0), Ok(Some(0)));
+    assert_eq!(palette.get_selected_action(), Some(PaletteAction::ShowSystemSettings { id: "remote".into() }));
+    palette.enter_system_settings_mode(remote.clone());
+    palette.selected_index = 1;
+    assert_eq!(palette.get_selected_action(), Some(PaletteAction::ConnectSystem { id: "remote".into() }));
+    remote.status = Connected;
+    palette.refresh_system_settings(vec![remote]);
+    assert_eq!(palette.selected_index, 1);
+    assert_eq!(palette.get_selected_action(), Some(PaletteAction::DisconnectSystem { id: "remote".into() }));
+    let rows = palette.filtered_rows();
+    assert_eq!(rows[2].1.shortcut(), "Open a remote workspace for this computer's terminal and files; does not change Active");
+    for index in 0..rows.len() {
+        let (x, y) = palette.row_center_coords(index, 1000.0, 1.0);
+        assert_eq!(palette.hit_test(x, y, 1000.0, 1.0), Ok(Some(index)));
+    }
 }
 
 #[test]

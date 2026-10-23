@@ -51,6 +51,10 @@ impl NeoismAgentPane {
     }
 
     pub(crate) fn reconcile_mcp_catalog_monitor(&mut self) {
+        if super::super::system::is_system_agent_server(&self.server) {
+            if let Some(active) = self.mcp_catalog_monitor.active.take() { active.store(false, Ordering::Release); }
+            return;
+        }
         let visible = self.picker.as_ref().is_some_and(|picker| {
             matches!(
                 picker.kind,

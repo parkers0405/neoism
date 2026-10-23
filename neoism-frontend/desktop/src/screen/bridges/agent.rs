@@ -673,47 +673,90 @@ impl Screen<'_> {
         let mut agent_tab_titles = Vec::new();
         let mut external_root_bound = false;
         let mut active_agent_details_available = false;
-        let agent_event_wake = crate::neoism::agent::AgentEventWake::new(
-            self.context_manager.event_proxy(),
-            self.context_manager.window_id(),
-        );
-        // Background mutations own completion even after the sidebar is closed.
-        self.renderer
-            .conversations_pane
-            .set_event_wake(agent_event_wake.clone());
-        agent_animating |= self
-            .renderer
-            .conversations_pane
-            .drain_live_session_updates();
-        agent_ui_events.extend(
-            self.renderer
-                .conversations_pane
-                .drain_ui_events()
-                .into_iter()
-                .map(|event| (0, event)),
-        );
-        if self.renderer.conversations_visible {
-            agent_animating |= self.renderer.conversations_pane.catalog_is_animating();
-        }
-        // Chat views keep their own timelines current. The independent catalog
-        // stream owns sidebar family tracking, including families with no tab.
+        let agent_event_wake = self.agent_event_wake.get_or_insert_with(|| {
+            crate::neoism::agent::AgentEventWake::new(
+                self.context_manager.event_proxy(),
+                self.context_manager.window_id(),
+            )
+        }).clone();
+        agent_event_wake.begin_drain();
+        self.renderer.conversations_pane.set_event_wake(agent_event_wake.clone());
         let current_grid_index = self.context_manager.current_index();
-        for (grid_index, grid) in
-            self.context_manager.all_grids_mut().iter_mut().enumerate()
-        {
-            if grid_index == current_grid_index {
-                continue;
-            }
-            for item in grid.contexts_mut().values_mut() {
-                if let Some(agent) = item.val.neoism_agent.as_mut() {
-                    agent.set_text_reveal_enabled(self.streaming_text_animation);
-                    agent.set_event_wake(agent_event_wake.clone());
-                    // An inactive workspace still owns a live subscription. Consume
-                    // its bounded batch so reopening it cannot replay a long queue.
-                    agent_animating |= agent.drain_live_session_updates();
-                    agent.maybe_refresh_side_panel_subagents();
+        let mut visible_agents = Vec::new();
+        let mut hidden_agents = Vec::new();
+        for (grid_index, grid) in self.context_manager.all_grids_mut().iter_mut().enumerate() {
+            for (node, item) in grid.contexts_mut().iter_mut() {
+                let Some(agent) = item.val.neoism_agent.as_mut() else { continue };
+                agent.set_text_reveal_enabled(self.streaming_text_animation);
+                agent.set_event_wake(agent_event_wake.clone());
+                let job = (item.val.route_id, Some((grid_index, *node)));
+                if grid_index == current_grid_index && visible_nodes.contains(node) {
+                    visible_agents.push(job);
+                } else {
+                    hidden_agents.push(job);
                 }
             }
+        }
+        let sidebar_visible = self.renderer.conversations_visible;
+        if sidebar_visible {
+            visible_agents.push((0, None));
+        } else {
+            hidden_agents.push((0, None));
+        }
+        visible_agents.sort_by_key(|(route, _)| (*route != active_route, *route));
+        hidden_agents.sort_by_key(|(route, _)| *route);
+        let hidden_start = self.agent_ingestion_cursor % hidden_agents.len().max(1);
+        hidden_agents.rotate_left(hidden_start);
+        self.agent_ingestion_cursor = hidden_start.wrapping_add(1);
+
+        // One cooperative window budget, not a fresh allowance per live tab.
+        // Reserve a hidden-pane turn, rotating its first consumer to avoid starvation.
+        let visible_slice = std::time::Duration::from_micros(
+            (1400 / visible_agents.len().max(1) as u64).max(1),
+        );
+        let mut drain_agent = |job: Option<(usize, taffy::prelude::NodeId)>, is_visible: bool| {
+            let Some((grid_index, node)) = job else {
+                agent_animating |= self.renderer.conversations_pane.drain_live_session_updates();
+                return;
+            };
+            let Some(item) = self.context_manager.all_grids_mut()[grid_index]
+                .contexts_mut().get_mut(&node) else { return };
+            let Some(agent) = item.val.neoism_agent.as_mut() else { return };
+            if is_visible {
+                agent.maybe_refresh_side_panel_sessions();
+            }
+            agent_animating |= if is_visible {
+                agent.drain_server_updates()
+            } else {
+                agent.drain_live_session_updates()
+            };
+            agent.maybe_refresh_side_panel_subagents();
+            if grid_index == current_grid_index {
+                agent.maybe_refresh_external_options();
+            }
+        };
+        crate::neoism::agent::AgentEventWake::with_ingestion_budget(
+            std::time::Duration::from_millis(2), || {
+                crate::neoism::agent::AgentEventWake::with_ingestion_budget(
+                    std::time::Duration::from_micros(1400), || {
+                        for (_, job) in visible_agents {
+                            crate::neoism::agent::AgentEventWake::with_ingestion_budget(
+                                visible_slice, || drain_agent(job, true),
+                            );
+                        }
+                    },
+                );
+                for (_, job) in hidden_agents {
+                    drain_agent(job, false);
+                }
+            },
+        );
+        agent_ui_events.extend(
+            self.renderer.conversations_pane.drain_ui_events()
+                .into_iter().map(|event| (0, event)),
+        );
+        if sidebar_visible {
+            agent_animating |= self.renderer.conversations_pane.catalog_is_animating();
         }
         for (key, item) in self
             .context_manager
@@ -726,28 +769,8 @@ impl Screen<'_> {
                 continue;
             };
             let is_visible = visible_nodes.contains(key);
-            agent.set_text_reveal_enabled(self.streaming_text_animation);
-            agent.set_event_wake(agent_event_wake.clone());
             agent.set_local_presence_name(Some(local_presence_name.clone()));
-            // Warm the tiny first page while the visible Agent pane is coming
-            // up, rather than waiting for the user to open the recent-chat
-            // view. This is a bounded background request; no database or
-            // network work runs on the window startup thread.
-            if is_visible {
-                agent.maybe_refresh_side_panel_sessions();
-            }
-            let agent_changed = if is_visible {
-                agent.drain_server_updates()
-            } else {
-                agent.drain_live_session_updates()
-            };
-            // Keep navigation and detail state current even in hidden views.
-            agent.maybe_refresh_side_panel_subagents();
-            agent.maybe_refresh_external_options();
             external_root_bound |= agent.take_external_root_bound_refresh();
-            if agent_changed {
-                agent_animating = true;
-            }
             agent_ui_events.extend(
                 agent
                     .drain_ui_events()
@@ -818,6 +841,13 @@ impl Screen<'_> {
                     );
             }
             agent.set_splash_auto_animate(self.renderer.splash_auto_animate);
+            let remote_checkout = agent.selected_system_source().map(|source| {
+                neoism_ui::panels::agent_pane::view::AgentCheckoutContext::new(
+                    Some(agent.session_directory().unwrap_or(&source.home_directory).to_owned()), None,
+                )
+            });
+            let selected_checkout = remote_checkout.as_ref().unwrap_or(&checkout_context);
+            let selected_plugins = if remote_checkout.is_some() { None } else { Some(self.renderer.plugins.as_ref()) };
             crate::neoism::view::render(
                 &mut self.sugarloaf,
                 agent,
@@ -828,8 +858,8 @@ impl Screen<'_> {
                 mouse,
                 chrome_scale,
                 &text_occlusions,
-                &checkout_context,
-                Some(&self.renderer.plugins),
+                selected_checkout,
+                selected_plugins,
             );
             let animation_reason = agent.animation_reason();
             agent_animating |= animation_reason.is_some();
@@ -938,7 +968,8 @@ impl Screen<'_> {
                     session_id,
                     deleted,
                 } => {
-                    if self.renderer.conversations_pane.server_address() == server {
+                    if self.renderer.conversations_pane.server_address() == server
+                        || self.renderer.conversations_pane.system_source(&server).is_some() {
                         self.renderer
                             .conversations_pane
                             .refresh_sessions_after_mutation();
@@ -1000,6 +1031,9 @@ impl Screen<'_> {
                     directory,
                 } => {
                     if route_id == active_route {
+                        if self.context_manager.current().neoism_agent.as_ref().is_some_and(|agent| agent.is_system_execution_backend()) {
+                            continue;
+                        }
                         let destination = PathBuf::from(directory);
                         let source_index = self.context_manager.current_index();
                         let source_count = self.context_manager.len();
@@ -1394,6 +1428,11 @@ impl Screen<'_> {
         if let Some(action) = composer_action {
             match action {
                 ComposerAction::AttachPicture => self.open_agent_image_browser(),
+                ComposerAction::ChangeSystem => {
+                    if let Some(agent) = self.context_manager.current_mut().neoism_agent.as_mut() {
+                        agent.open_system_picker();
+                    }
+                }
                 ComposerAction::ChangeDirectory => self.open_agent_directory_browser(),
             }
             self.mark_dirty();
@@ -1612,6 +1651,15 @@ impl Screen<'_> {
             .as_mut()
             .is_some_and(|agent| agent.activate_conversation_navigation(mx, my))
         {
+            self.mark_dirty();
+            return true;
+        }
+        let preview_image = self.context_manager.current().neoism_agent.as_ref()
+            .filter(|agent| !agent.picker_contains_point(mx, my))
+            .and_then(|agent| agent.composer_interactions.image_at(mx, my))
+            .cloned();
+        if let Some(image) = preview_image {
+            self.renderer.modal.open_image(image);
             self.mark_dirty();
             return true;
         }
@@ -2043,7 +2091,15 @@ impl Screen<'_> {
         }
     }
 
-    pub(crate) fn resolve_neoism_agent_link_path(&self, target: &str) -> Option<PathBuf> {
+    pub(crate) fn resolve_neoism_agent_link_path(&mut self, target: &str) -> Option<PathBuf> {
+        if self.context_manager.current().neoism_agent.as_ref().is_some_and(|agent| agent.is_system_execution_backend()) {
+            self.renderer.notifications.push(
+                "Opening files from a system-connected chat is not supported yet. Open the file on that machine; no local file was opened.",
+                neoism_ui::panels::notifications::NotificationLevel::Warn,
+            );
+            self.mark_dirty();
+            return None;
+        }
         let target = target.trim();
         let raw = target
             .strip_prefix("file://")
@@ -2485,6 +2541,21 @@ impl Screen<'_> {
 #[cfg(test)]
 mod agent_surface_geometry_tests {
     use super::{agent_surface_content_rect, joined_agent_link_path};
+
+    #[test]
+    fn system_file_links_are_rejected_before_joined_or_local_resolution() {
+        let source = include_str!("agent.rs");
+        let resolver = source.split("pub(crate) fn resolve_neoism_agent_link_path(").nth(1).unwrap()
+            .split("pub(crate) fn find_neoism_file_by_name(").next().unwrap();
+        let guard = resolver.find("agent.is_system_execution_backend()").unwrap();
+        let refusal = resolver.find("return None;").unwrap();
+        assert!(guard < refusal);
+        for workspace_operation in ["current_workspace_is_remote_joined()", "PathBuf::from", "path.exists()", "active_pane_workspace_root()"] {
+            assert!(refusal < resolver.find(workspace_operation).unwrap(), "{workspace_operation} must not run for system file links");
+        }
+        assert!(resolver[..refusal].contains("no local file was opened"));
+    }
+
 
     #[test]
     fn top_agent_viewport_starts_below_its_workspace_tab_strip() {

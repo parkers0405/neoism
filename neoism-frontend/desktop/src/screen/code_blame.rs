@@ -4,6 +4,20 @@ use neoism_protocol::git::{GitClientMessage, GitServerMessage};
 
 impl Screen<'_> {
     pub(crate) fn pump_code_blame(&mut self) {
+        {
+            let Some(code) = self.context_manager.active_code_pane_mut() else {
+                return;
+            };
+            code.blame.apply_default(self.renderer.code_git_blame);
+            code.blame.set_options(
+                self.renderer.code_git_blame_delay_ms,
+                self.renderer.code_git_blame_hide_on_scroll,
+            );
+            code.observe_blame_viewport();
+            if !code.blame.enabled {
+                return;
+            }
+        }
         let Some((handle, runtime)) =
             self.context_manager.daemon_link_handle_and_runtime()
         else {
@@ -27,12 +41,6 @@ impl Screen<'_> {
         let Some(code) = self.context_manager.active_code_pane_mut() else {
             return;
         };
-        code.blame.apply_default(self.renderer.code_git_blame);
-        code.blame.set_options(
-            self.renderer.code_git_blame_delay_ms,
-            self.renderer.code_git_blame_hide_on_scroll,
-        );
-        code.observe_blame_viewport();
         // Local-only vaults in joined workspaces must never be sent to that host.
         if code.local_only {
             code.blame.error =

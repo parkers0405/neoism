@@ -32,23 +32,28 @@ const CODEX_MODELS_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/model
 const CODEX_MODELS_CLIENT_VERSION: &str = "999.0.0";
 const CODEX_MODELS_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 const CODEX_MODELS_FAILURE_TTL: Duration = Duration::from_secs(15);
+// A failed optional refresh must not erase bounded, same-identity metadata.
+const CODEX_MODELS_STALE_TTL: Duration = Duration::from_secs(30 * 60);
 const CODEX_MODELS_RESPONSE_LIMIT: usize = 2 * 1024 * 1024;
 const OPENAI_OAUTH_ISSUER: &str = "https://auth.openai.com";
 const OPENAI_OAUTH_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const OAUTH_REFRESH_MARGIN_MS: u64 = 60_000;
+static REFRESH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[derive(Clone)]
 pub(super) struct OpenAiClient {
     client: reqwest::Client,
     base_url: String,
-    codex_models: Arc<tokio::sync::Mutex<Option<CodexModelsCache>>>,
+    codex_models: Arc<tokio::sync::RwLock<Option<CodexModelsCache>>>,
+    codex_models_refresh: Arc<tokio::sync::Mutex<()>>,
 }
 
 struct CodexModelsCache {
     identity: String,
     fetched_at: Instant,
     ttl: Duration,
-    models: BTreeMap<String, crate::provider_catalog::CodexModelMetadata>,
+    retry_after: Option<Instant>,
+    models: Option<BTreeMap<String, crate::provider_catalog::CodexModelMetadata>>,
 }
 
 #[derive(Clone)]
@@ -69,7 +74,8 @@ impl OpenAiClient {
         Self {
             client: reqwest::Client::new(),
             base_url: base_url.trim_end_matches('/').to_string(),
-            codex_models: Arc::new(tokio::sync::Mutex::new(None)),
+            codex_models: Arc::new(tokio::sync::RwLock::new(None)),
+            codex_models_refresh: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -91,7 +97,8 @@ impl OpenAiClient {
         Ok(Self {
             client: builder.build()?,
             base_url,
-            codex_models: Arc::new(tokio::sync::Mutex::new(None)),
+            codex_models: Arc::new(tokio::sync::RwLock::new(None)),
+            codex_models_refresh: Arc::new(tokio::sync::Mutex::new(())),
         })
     }
 
@@ -99,77 +106,168 @@ impl OpenAiClient {
         &self,
         auth_store: &AuthStore,
         auth: AuthInfo,
-    ) -> anyhow::Result<BTreeMap<String, crate::provider_catalog::CodexModelMetadata>>
+    ) -> anyhow::Result<Option<BTreeMap<String, crate::provider_catalog::CodexModelMetadata>>>
     {
-        let (access, account_id) =
-            openai_oauth_credentials(&self.client, auth_store, auth).await?;
         let endpoint = std::env::var("NEOISM_AGENT_OPENAI_CODEX_MODELS_URL")
             .unwrap_or_else(|_| CODEX_MODELS_ENDPOINT.to_string());
         let client_version = std::env::var("NEOISM_AGENT_OPENAI_CODEX_CLIENT_VERSION")
             .unwrap_or_else(|_| CODEX_MODELS_CLIENT_VERSION.to_string());
+        let issuer = std::env::var("NEOISM_AGENT_OPENAI_OAUTH_ISSUER")
+            .unwrap_or_else(|_| OPENAI_OAUTH_ISSUER.to_string());
+        self.codex_models_with_credentials(auth_store.clone(), auth, endpoint, client_version, issuer).await
+    }
+
+    #[cfg(test)]
+    async fn codex_models_at(
+        &self,
+        auth: AuthInfo,
+        endpoint: String,
+        client_version: String,
+    ) -> anyhow::Result<Option<BTreeMap<String, crate::provider_catalog::CodexModelMetadata>>> {
+        let path = std::env::temp_dir()
+            .join(format!("neoism-discovery-{}.json", rand::random::<u64>()));
+        let store = AuthStore::from_service(Arc::new(
+            neoism_agent_service_api::LocalProviderCredentialStore::new(path),
+        ));
+        self.codex_models_with_credentials(store, auth, endpoint, client_version,
+            "http://127.0.0.1:1".into()).await
+    }
+
+    async fn codex_models_with_credentials(
+        &self,
+        auth_store: AuthStore,
+        auth: AuthInfo,
+        endpoint: String,
+        client_version: String,
+        issuer: String,
+    ) -> anyhow::Result<Option<BTreeMap<String, crate::provider_catalog::CodexModelMetadata>>> {
+        // Catalog callers never wait for OAuth or optional discovery. The
+        // background owner uses the same rotation gate/re-read/persistence path
+        // as generation, so an expired account can recover without generation.
+        let AuthInfo::OAuth {
+            access,
+            account_id,
+            ..
+        } = &auth
+        else {
+            anyhow::bail!("OpenAI OAuth credentials are required");
+        };
         let identity = codex_cache_identity(
             &access,
             account_id.as_deref(),
             &endpoint,
             &client_version,
         );
-        let mut cache = self.codex_models.lock().await;
-        if let Some(cached) = cache.as_ref().filter(|cached| {
-            cached.identity == identity && cached.fetched_at.elapsed() < cached.ttl
+        // Snapshot reads never contend with OAuth or network I/O. Previously
+        // the refresh held the cache mutex and every warm reader became pending.
+        let cache = self.codex_models.read().await;
+        let cached = cache.as_ref().filter(|cached| cached.identity == identity);
+        let previous = cached
+            .filter(|cached| cached.fetched_at.elapsed() < CODEX_MODELS_STALE_TTL)
+            .and_then(|cached| cached.models.clone());
+        if cached.is_some_and(|cached| {
+            cached.fetched_at.elapsed() < cached.ttl
+                || cached.retry_after.is_some_and(|at| Instant::now() < at)
         }) {
-            return Ok(cached.models.clone());
+            return Ok(previous);
         }
-
-        let fetched = async {
-            let mut request = self
-                .client
-                .get(endpoint)
-                .query(&[("client_version", client_version)])
-                .bearer_auth(access)
-                .header("accept", "application/json")
-                .header("originator", "neoism")
-                .header("user-agent", neoism_user_agent())
-                .timeout(Duration::from_secs(5));
-            if let Some(account_id) = account_id {
-                request = request.header("ChatGPT-Account-Id", account_id);
-            }
-            let mut response = request
-                .send()
-                .await
-                .context("failed to load OpenAI Codex models")?;
-            if !response.status().is_success() {
-                anyhow::bail!("OpenAI Codex models returned {}", response.status());
-            }
-            let mut body = Vec::new();
-            while let Some(chunk) = response.chunk().await? {
-                if body.len().saturating_add(chunk.len()) > CODEX_MODELS_RESPONSE_LIMIT {
-                    anyhow::bail!("OpenAI Codex models response exceeded size limit");
-                }
-                body.extend_from_slice(&chunk);
-            }
-            listed_codex_models(&body)
-        }
-        .await;
-        let (model_ids, ttl) = match fetched {
-            Ok(model_ids) => (model_ids, CODEX_MODELS_CACHE_TTL),
-            Err(error) => {
-                *cache = Some(CodexModelsCache {
-                    identity,
-                    fetched_at: Instant::now(),
-                    ttl: CODEX_MODELS_FAILURE_TTL,
-                    models: BTreeMap::new(),
-                });
-                return Err(error);
-            }
+        drop(cache);
+        let Ok(refresh) = self.codex_models_refresh.clone().try_lock_owned() else {
+            return Ok(previous);
         };
-        *cache = Some(CodexModelsCache {
-            identity,
-            fetched_at: Instant::now(),
-            ttl,
-            models: model_ids.clone(),
+        let cache = self.codex_models.clone();
+        let client = self.client.clone();
+        tokio::spawn(async move {
+            let _refresh = refresh;
+            let mut identity = identity;
+            let fetched = async {
+                let (access, account_id) = openai_oauth_credentials_at(
+                    &client, &auth_store, auth, &REFRESH_LOCK, &issuer, Duration::from_secs(15),
+                ).await?;
+                // Refresh rotates the bearer token. Publish under the persisted
+                // identity so subsequent ordinary catalog reads hit this cache.
+                identity = codex_cache_identity(&access, account_id.as_deref(), &endpoint, &client_version);
+                {
+                    let snapshot = cache.read().await;
+                    if let Some(cached) = snapshot.as_ref().filter(|cached| {
+                        cached.identity == identity && cached.fetched_at.elapsed() < cached.ttl
+                    }) {
+                        return cached.models.clone().context("optional Codex discovery is unavailable");
+                    }
+                }
+                let mut request = client
+                    .get(endpoint)
+                    .query(&[("client_version", client_version)])
+                    .bearer_auth(access)
+                    .header("accept", "application/json")
+                    .header("originator", "neoism")
+                    .header("user-agent", neoism_user_agent())
+                    .timeout(Duration::from_secs(5));
+                if let Some(account_id) = account_id {
+                    request = request.header("ChatGPT-Account-Id", account_id);
+                }
+                let mut response = request
+                    .send()
+                    .await
+                    .context("failed to load OpenAI Codex models")?;
+                if !response.status().is_success() {
+                    anyhow::bail!("OpenAI Codex models returned {}", response.status());
+                }
+                let mut body = Vec::new();
+                while let Some(chunk) = response.chunk().await? {
+                    if body.len().saturating_add(chunk.len())
+                        > CODEX_MODELS_RESPONSE_LIMIT
+                    {
+                        anyhow::bail!("OpenAI Codex models response exceeded size limit");
+                    }
+                    body.extend_from_slice(&chunk);
+                }
+                listed_codex_models(&body)
+            }
+            .await;
+            match fetched {
+                Ok(model_ids) => {
+                    *cache.write().await = Some(CodexModelsCache {
+                        identity,
+                        fetched_at: Instant::now(),
+                        ttl: CODEX_MODELS_CACHE_TTL,
+                        retry_after: None,
+                        models: Some(model_ids),
+                    });
+                }
+                Err(error) => {
+                    let mut snapshot = cache.write().await;
+                    if let Some(good) = snapshot.as_mut().filter(|cached| {
+                        cached.identity == identity && cached.models.is_some()
+                            && cached.fetched_at.elapsed() < CODEX_MODELS_STALE_TTL
+                    }) {
+                        // Do not renew fetched_at: failures cannot extend the
+                        // bounded lifetime of a previously discovered catalog.
+                        good.retry_after = Some(Instant::now() + CODEX_MODELS_FAILURE_TTL);
+                    } else {
+                        *snapshot = Some(CodexModelsCache {
+                            identity,
+                            fetched_at: Instant::now(),
+                            ttl: CODEX_MODELS_FAILURE_TTL,
+                            retry_after: None,
+                            models: None,
+                        });
+                    }
+                    tracing::debug!(%error, "optional Codex model discovery failed");
+                }
+            }
         });
-        Ok(model_ids)
+        Ok(previous)
     }
+}
+
+pub(super) fn codex_discovery_identity(auth: &AuthInfo) -> Option<String> {
+    let AuthInfo::OAuth { access, account_id, .. } = auth else { return None; };
+    let endpoint = std::env::var("NEOISM_AGENT_OPENAI_CODEX_MODELS_URL")
+        .unwrap_or_else(|_| CODEX_MODELS_ENDPOINT.to_string());
+    let version = std::env::var("NEOISM_AGENT_OPENAI_CODEX_CLIENT_VERSION")
+        .unwrap_or_else(|_| CODEX_MODELS_CLIENT_VERSION.to_string());
+    Some(codex_cache_identity(access, account_id.as_deref(), &endpoint, &version))
 }
 
 // Never reuse authenticated discovery across credentials, accounts, or endpoints.
@@ -637,6 +735,289 @@ fn responses_body(request: &ProviderGenerationRequest) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn discovery_auth(expires: u64) -> AuthInfo {
+        AuthInfo::OAuth {
+            access: "synthetic-access".into(),
+            refresh: "do-not-refresh".into(),
+            expires,
+            account_id: Some("account-a".into()),
+            enterprise_url: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn optional_codex_discovery_never_waits_for_hung_http_or_refresh() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/models", listener.local_addr().unwrap());
+        let (accepted, receiver) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.unwrap();
+            let _ = accepted.send(());
+            std::future::pending::<()>().await;
+        });
+        let client = OpenAiClient::with_base_url("http://127.0.0.1:1").unwrap();
+        let first = tokio::time::timeout(
+            Duration::from_millis(500),
+            client.codex_models_at(
+                discovery_auth(u64::MAX),
+                endpoint.clone(),
+                "test".into(),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(first.is_none());
+        tokio::time::timeout(Duration::from_secs(1), receiver)
+            .await
+            .unwrap()
+            .unwrap();
+        // Background discovery owns only the refresh gate. Cold lookups and
+        // expired OAuth never wait for HTTP or initiate credential rotation.
+        assert!(tokio::time::timeout(
+            Duration::from_millis(500),
+            client.codex_models_at(discovery_auth(1), endpoint, "test".into())
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .is_none());
+        server.abort();
+    }
+
+    fn seed_codex_snapshot(identity: String, age: Duration) -> CodexModelsCache {
+        CodexModelsCache {
+            identity,
+            fetched_at: Instant::now() - age,
+            ttl: CODEX_MODELS_CACHE_TTL,
+            retry_after: None,
+            models: Some(BTreeMap::from([("account-only-model".into(), Default::default())])),
+        }
+    }
+
+    #[tokio::test]
+    async fn warm_codex_readers_keep_discovered_metadata_during_refresh() {
+        let client = OpenAiClient::with_base_url("http://127.0.0.1:1").unwrap();
+        let endpoint = "http://127.0.0.1:1/models".to_string();
+        *client.codex_models.write().await = Some(seed_codex_snapshot(
+            codex_cache_identity("synthetic-access", Some("account-a"), &endpoint, "test"),
+            CODEX_MODELS_CACHE_TTL + Duration::from_secs(1),
+        ));
+        let _refresh = client.codex_models_refresh.lock().await;
+        let result = tokio::time::timeout(Duration::from_millis(500),
+            client.codex_models_at(discovery_auth(u64::MAX), endpoint.clone(), "test".into()))
+            .await.unwrap().unwrap().unwrap();
+        assert!(result.contains_key("account-only-model"));
+        // Same account label is not sufficient: a different bearer identity
+        // must not borrow this snapshot while the refresh is busy.
+        let mut other = discovery_auth(u64::MAX);
+        if let AuthInfo::OAuth { access, .. } = &mut other { *access = "different-credential".into(); }
+        assert!(client.codex_models_at(other, endpoint.clone(), "test".into()).await.unwrap().is_none());
+        assert!(client.codex_models_at(discovery_auth(u64::MAX), format!("{endpoint}/other"), "test".into()).await.unwrap().is_none());
+        client.codex_models.write().await.as_mut().unwrap().fetched_at = Instant::now() - CODEX_MODELS_STALE_TTL;
+        assert!(client.codex_models_at(discovery_auth(u64::MAX), endpoint, "test".into()).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn failed_codex_refresh_retains_good_snapshot_without_renewing_age() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/models", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            socket.read(&mut request).await.unwrap();
+            socket.write_all(b"HTTP/1.1 503 Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
+        });
+        let client = OpenAiClient::with_base_url("http://127.0.0.1:1").unwrap();
+        let snapshot = seed_codex_snapshot(
+            codex_cache_identity("synthetic-access", Some("account-a"), &endpoint, "test"),
+            CODEX_MODELS_CACHE_TTL + Duration::from_secs(1));
+        let original = snapshot.fetched_at;
+        *client.codex_models.write().await = Some(snapshot);
+        assert!(client.codex_models_at(discovery_auth(u64::MAX), endpoint.clone(), "test".into()).await.unwrap().unwrap().contains_key("account-only-model"));
+        let _finished = tokio::time::timeout(Duration::from_secs(2), client.codex_models_refresh.lock()).await.unwrap();
+        let cache = client.codex_models.read().await;
+        let good = cache.as_ref().unwrap();
+        assert_eq!(good.fetched_at, original);
+        assert!(good.retry_after.is_some());
+        assert!(good.models.as_ref().unwrap().contains_key("account-only-model"));
+        drop(cache);
+        assert!(client.codex_models_at(discovery_auth(u64::MAX), endpoint, "test".into()).await.unwrap().unwrap().contains_key("account-only-model"));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn successful_empty_codex_refresh_replaces_previous_good_models() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/models", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            socket.read(&mut request).await.unwrap();
+            let body = r#"{"models":[]}"#;
+            socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+        });
+        let client = OpenAiClient::with_base_url("http://127.0.0.1:1").unwrap();
+        *client.codex_models.write().await = Some(seed_codex_snapshot(
+            codex_cache_identity("synthetic-access", Some("account-a"), &endpoint, "test"),
+            CODEX_MODELS_CACHE_TTL + Duration::from_secs(1)));
+        assert!(client.codex_models_at(discovery_auth(u64::MAX), endpoint.clone(), "test".into()).await.unwrap().unwrap().contains_key("account-only-model"));
+        let _finished = tokio::time::timeout(Duration::from_secs(2), client.codex_models_refresh.lock()).await.unwrap();
+        let resolved = client.codex_models_at(discovery_auth(u64::MAX), endpoint, "test".into()).await.unwrap();
+        assert!(resolved.unwrap().is_empty());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn codex_discovery_failure_is_not_a_successfully_empty_catalog() {
+        let client = OpenAiClient::with_base_url("http://127.0.0.1:1").unwrap();
+        let endpoint = "http://127.0.0.1:1/models".to_string();
+        for models in [None, Some(BTreeMap::new())] {
+            *client.codex_models.write().await = Some(CodexModelsCache {
+                identity: codex_cache_identity("synthetic-access", Some("account-a"), &endpoint, "test"),
+                fetched_at: Instant::now(),
+                ttl: CODEX_MODELS_FAILURE_TTL,
+                retry_after: None,
+                models: models.clone(),
+            });
+            let result = client.codex_models_at(discovery_auth(u64::MAX), endpoint.clone(), "test".into()).await.unwrap();
+            assert_eq!(result.is_some(), models.is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn cached_codex_metadata_precedes_expired_oauth_and_is_identity_scoped() {
+        let client = OpenAiClient::with_base_url("http://127.0.0.1:1").unwrap();
+        let endpoint = "http://127.0.0.1:1/models".to_string();
+        *client.codex_models.write().await = Some(CodexModelsCache {
+            identity: codex_cache_identity(
+                "synthetic-access",
+                Some("account-a"),
+                &endpoint,
+                "test",
+            ),
+            fetched_at: Instant::now(),
+            ttl: CODEX_MODELS_CACHE_TTL,
+            retry_after: None,
+            models: Some(BTreeMap::from([("gpt-test".into(), Default::default())])),
+        });
+        assert!(client
+            .codex_models_at(discovery_auth(1), endpoint.clone(), "test".into())
+            .await
+            .unwrap()
+            .unwrap().contains_key("gpt-test"));
+        let mut other = discovery_auth(1);
+        if let AuthInfo::OAuth { account_id, .. } = &mut other {
+            *account_id = Some("account-b".into());
+        }
+        assert!(client
+            .codex_models_at(other, endpoint, "test".into())
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn expired_oauth_discovery_refreshes_and_converges_without_generation() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let issuer = format!("http://{}", listener.local_addr().unwrap());
+        let endpoint = format!("{issuer}/models");
+        let server = tokio::spawn(async move {
+            for (route, body) in [
+                ("/oauth/token", r#"{"access_token":"rotated-access","refresh_token":"rotated-refresh","expires_in":3600}"#),
+                ("/models", r#"{"models":[{"slug":"gpt-5","visibility":"list"}]}"#),
+            ] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0; 8192];
+                let size = socket.read(&mut request).await.unwrap();
+                assert!(String::from_utf8_lossy(&request[..size]).contains(route));
+                let response = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{body}", body.len());
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        let path = std::env::temp_dir().join(format!("neoism-refresh-discovery-{}.json", rand::random::<u64>()));
+        let store = AuthStore::from_service(Arc::new(
+            neoism_agent_service_api::LocalProviderCredentialStore::new(path.clone()),
+        ));
+        let expired = discovery_auth(1);
+        store.set("openai", expired.clone()).await.unwrap();
+        let client = OpenAiClient::with_base_url("http://127.0.0.1:1").unwrap();
+        let first = tokio::time::timeout(Duration::from_millis(500),
+            client.codex_models_with_credentials(store.clone(), expired, endpoint.clone(), "test".into(), issuer.clone()))
+            .await.unwrap().unwrap();
+        assert!(first.is_none());
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let persisted = store.get("openai").await.unwrap().unwrap();
+            let models = client.codex_models_with_credentials(store.clone(), persisted,
+                endpoint.clone(), "test".into(), issuer.clone()).await.unwrap();
+            if models.is_some_and(|models| models.contains_key("gpt-5")) { break; }
+            assert!(Instant::now() < deadline, "discovery never converged after refreshing OAuth");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let AuthInfo::OAuth { access, refresh, .. } = store.get("openai").await.unwrap().unwrap() else { panic!("OAuth disappeared") };
+        assert_eq!(access, "rotated-access");
+        assert_eq!(refresh, "rotated-refresh");
+        tokio::time::timeout(Duration::from_secs(1), server).await.unwrap().unwrap();
+        tokio::fs::remove_file(path).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn oauth_refresh_deadline_includes_stalled_response_body() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let issuer = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            let _ = socket.read(&mut request).await.unwrap();
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\nContent-Type: application/json\r\n\r\n{").await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        let path = std::env::temp_dir()
+            .join(format!("neoism-refresh-{}.json", rand::random::<u64>()));
+        let store = AuthStore::from_service(Arc::new(
+            neoism_agent_service_api::LocalProviderCredentialStore::new(path.clone()),
+        ));
+        store.set("openai", discovery_auth(1)).await.unwrap();
+        let gate = tokio::sync::Mutex::new(());
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            openai_oauth_credentials_at(
+                &reqwest::Client::new(),
+                &store,
+                discovery_auth(1),
+                &gate,
+                &issuer,
+                Duration::from_millis(100),
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(result
+            .unwrap_err()
+            .downcast_ref::<reqwest::Error>()
+            .unwrap()
+            .is_timeout());
+        assert!(
+            gate.try_lock().is_ok(),
+            "failed HTTP must release serialization ownership"
+        );
+        let AuthInfo::OAuth {
+            refresh, access, ..
+        } = store.get("openai").await.unwrap().unwrap()
+        else {
+            panic!("OAuth auth changed")
+        };
+        assert_eq!(refresh, "do-not-refresh");
+        assert_eq!(access, "synthetic-access");
+        tokio::fs::remove_file(path).await.unwrap();
+        server.abort();
+    }
 
     #[test]
     fn codex_prompt_cache_request_affinity() {
@@ -1161,7 +1542,27 @@ pub(super) async fn openai_oauth_credentials(
     // Refresh tokens rotate. Usage polling and generation can race with the
     // same expired snapshot; serialize refreshes and re-read the exact scoped
     // connection before exchanging a token. Never refresh a stale snapshot.
-    static REFRESH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let issuer = std::env::var("NEOISM_AGENT_OPENAI_OAUTH_ISSUER")
+        .unwrap_or_else(|_| OPENAI_OAUTH_ISSUER.to_string());
+    openai_oauth_credentials_at(
+        client,
+        auth_store,
+        auth,
+        &REFRESH_LOCK,
+        &issuer,
+        Duration::from_secs(15),
+    )
+    .await
+}
+
+async fn openai_oauth_credentials_at(
+    client: &reqwest::Client,
+    auth_store: &AuthStore,
+    auth: AuthInfo,
+    refresh_lock: &tokio::sync::Mutex<()>,
+    issuer: &str,
+    timeout: Duration,
+) -> anyhow::Result<(String, Option<String>)> {
     if let AuthInfo::OAuth {
         access,
         account_id,
@@ -1175,7 +1576,9 @@ pub(super) async fn openai_oauth_credentials(
     } else {
         anyhow::bail!("OpenAI OAuth credentials are required")
     }
-    let _refresh_guard = REFRESH_LOCK.lock().await;
+    let _refresh_guard = tokio::time::timeout(timeout, refresh_lock.lock())
+        .await
+        .context("timed out waiting for OpenAI OAuth refresh")?;
     let auth = auth_store
         .get("openai")
         .await?
@@ -1193,8 +1596,18 @@ pub(super) async fn openai_oauth_credentials(
     if !should_refresh_oauth(expires) {
         return Ok((access, account_id));
     }
-    let refreshed =
-        refresh_openai_oauth(client, &refresh, account_id, enterprise_url).await?;
+    let refreshed = refresh_openai_oauth_at(
+        client,
+        issuer,
+        timeout,
+        &refresh,
+        account_id,
+        enterprise_url,
+    )
+    .await?;
+    // Keep serialization through persistence of the rotated token. Do not
+    // wrap exchange + credential mutation in one timeout/retry: cancellation
+    // after a successful exchange must not blindly re-use the old token.
     auth_store.set("openai", refreshed.clone()).await?;
     let AuthInfo::OAuth {
         access, account_id, ..
@@ -1213,20 +1626,22 @@ struct OpenAiOAuthRefreshResponse {
     id_token: Option<String>,
 }
 
-async fn refresh_openai_oauth(
+async fn refresh_openai_oauth_at(
     client: &reqwest::Client,
+    issuer: &str,
+    timeout: Duration,
     refresh_token: &str,
     previous_account_id: Option<String>,
     enterprise_url: Option<String>,
 ) -> anyhow::Result<AuthInfo> {
-    let issuer = std::env::var("NEOISM_AGENT_OPENAI_OAUTH_ISSUER")
-        .unwrap_or_else(|_| OPENAI_OAUTH_ISSUER.to_string());
     // OpenAI's /oauth/token endpoint expects the refresh_token grant as JSON
     // (the authorization_code grant uses form-encoding, but refresh does not).
     // This mirrors codex's `request_chatgpt_token_refresh`; sending this body
     // form-encoded is rejected, which silently breaks auto-refresh.
-    let response = client
+    let mut response = client
         .post(format!("{issuer}/oauth/token"))
+        // reqwest's total request deadline includes response body consumption.
+        .timeout(timeout)
         .header("content-type", "application/json")
         .json(&json!({
             "client_id": OPENAI_OAUTH_CLIENT_ID,
@@ -1235,9 +1650,15 @@ async fn refresh_openai_oauth(
         }))
         .send()
         .await?
-        .error_for_status()?
-        .json::<OpenAiOAuthRefreshResponse>()
-        .await?;
+        .error_for_status()?;
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        if body.len().saturating_add(chunk.len()) > 64 * 1024 {
+            anyhow::bail!("OpenAI OAuth refresh response exceeded size limit");
+        }
+        body.extend_from_slice(&chunk);
+    }
+    let response: OpenAiOAuthRefreshResponse = serde_json::from_slice(&body)?;
     let account_id = response
         .id_token
         .as_deref()

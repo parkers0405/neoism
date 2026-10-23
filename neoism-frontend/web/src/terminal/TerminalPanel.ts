@@ -4560,10 +4560,13 @@ export class TerminalPanel {
         // workspace grep finder.
         (adapter.showFinderGrep ?? adapter.showFinder)?.call(adapter);
         break;
+      case "ShowSystemSettings":
+      case "SshToSystem":
       case "ShowSystems":
       case "AddSystem":
       case "ConnectSystem":
       case "DisconnectSystem":
+      case "SetSystemEnabled":
       case "RemoveSystem":
         this.notifyPaletteUnavailable("Systems are managed in the desktop app. The browser cannot manage SSH connections.", adapter);
         return;

@@ -1,6 +1,92 @@
 use super::composer::splash_composer_reserved_rows;
 use super::*;
 
+#[derive(Clone)]
+pub(super) struct ComposerPaintMetadata {
+    pub(super) alt_screen: bool,
+    pub(super) prompt: neoism_terminal_core::crosswords::ShellPromptState,
+    pub(super) cwd: Option<std::path::PathBuf>,
+}
+
+#[derive(Default)]
+struct PanePaintMetadata {
+    composer: Option<ComposerPaintMetadata>,
+    scrollbar: Option<scrollbar::PanelScrollState>,
+    splash_visible: bool,
+    composer_rows: usize,
+}
+
+impl PanePaintMetadata {
+    fn composer_metadata(
+        &mut self,
+        observed: Option<ComposerPaintMetadata>,
+    ) -> Option<ComposerPaintMetadata> {
+        if let Some(metadata) = observed {
+            self.composer = Some(metadata);
+        }
+        self.composer.clone()
+    }
+
+    fn composer_rows(&mut self, observed: Option<usize>) -> usize {
+        if let Some(rows) = observed {
+            self.composer_rows = rows;
+        }
+        self.composer_rows
+    }
+
+    fn splash_visible(&mut self, observed: Option<bool>) -> bool {
+        if let Some(visible) = observed {
+            self.splash_visible = visible;
+        }
+        self.splash_visible
+    }
+}
+
+/// Small successful metadata only; resident terminal rows live in Screen's Arc
+/// panel cache. Key by both route and surface identity to avoid resurrection.
+#[derive(Default)]
+pub(super) struct TerminalPaintCache {
+    retry: bool,
+    panes: std::collections::HashMap<(usize, usize), PanePaintMetadata>,
+}
+
+impl TerminalPaintCache {
+    pub(super) fn composer_metadata(
+        &mut self,
+        ctx: &crate::context::Context<EventProxy>,
+    ) -> Option<ComposerPaintMetadata> {
+        let pane = self
+            .panes
+            .entry((ctx.route_id, ctx.rich_text_id))
+            .or_default();
+        let observed =
+            ctx.terminal
+                .try_lock_unfair()
+                .map(|terminal| ComposerPaintMetadata {
+                    alt_screen: terminal
+                        .mode()
+                        .contains(neoism_terminal_core::crosswords::Mode::ALT_SCREEN),
+                    prompt: terminal.shell_prompt_state(),
+                    cwd: terminal.current_directory.clone(),
+                });
+        self.retry |= observed.is_none();
+        pane.composer_metadata(observed)
+    }
+}
+
+fn defer_busy_terminal(
+    content: &mut crate::context::renderable::RenderableContent,
+    force_full: bool,
+) {
+    if force_full {
+        content
+            .pending_update
+            .set_terminal_damage(TerminalDamage::Full);
+    } else {
+        content.pending_update.set_dirty();
+    }
+}
+
 /// Only an actually viewed chat can own the passive catalog highlight.
 fn viewed_catalog_root<'a>(
     viewed: Option<&str>,
@@ -67,6 +153,31 @@ fn settings_uses_late_overlay(settings_active: bool) -> bool {
 }
 
 impl Renderer {
+    pub(crate) fn terminal_paint_retry_requested(&self) -> bool {
+        self.terminal_paint_cache.retry
+    }
+
+    /// Paint-only prompt query. Input routing deliberately keeps its own
+    /// authoritative path; drawing may use the last successful metadata.
+    pub(crate) fn terminal_prompt_state_for_paint(
+        &self,
+        ctx: &crate::context::Context<EventProxy>,
+    ) -> Option<(neoism_terminal_core::crosswords::ShellPromptState, bool)> {
+        if let Some(terminal) = ctx.terminal.try_lock_unfair() {
+            return Some((
+                terminal.shell_prompt_state(),
+                terminal
+                    .mode()
+                    .contains(neoism_terminal_core::crosswords::Mode::ALT_SCREEN),
+            ));
+        }
+        self.terminal_paint_cache
+            .panes
+            .get(&(ctx.route_id, ctx.rich_text_id))
+            .and_then(|pane| pane.composer.as_ref())
+            .map(|metadata| (metadata.prompt, metadata.alt_screen))
+    }
+
     #[inline]
     pub fn run(
         &mut self,
@@ -75,6 +186,7 @@ impl Renderer {
         focused_match: &Option<RangeInclusive<Pos>>,
     ) -> (Option<crate::context::renderable::WindowUpdate>, bool) {
         let mut any_panel_dirty = false;
+        self.terminal_paint_cache.retry = false;
         self.terminal_splash_animating = false;
         let terminal_theme = self.styled_theme(neoism_lua::selector::TERMINAL);
         let top_theme = self.styled_theme(neoism_lua::selector::CHROME_TOP);
@@ -93,6 +205,16 @@ impl Renderer {
         let git_theme = self.styled_theme(neoism_lua::selector::GIT);
         let notification_theme = self.styled_theme(neoism_lua::selector::NOTIFICATION);
         let custom_theme = self.styled_theme(neoism_lua::selector::APP);
+        let live_surfaces: std::collections::HashSet<_> = context_manager
+            .all_grids()
+            .iter()
+            .flat_map(|grid| grid.contexts().values())
+            .filter(|item| !item.val.has_non_terminal_surface())
+            .map(|item| (item.val.route_id, item.val.rich_text_id))
+            .collect();
+        self.terminal_paint_cache
+            .panes
+            .retain(|key, _| live_surfaces.contains(key));
         let grid = context_manager.current_grid_mut();
         let active_key = grid.current;
         let visible_nodes: Vec<_> = grid
@@ -124,6 +246,14 @@ impl Renderer {
             if !ctx.pending_splash {
                 continue;
             }
+            if ctx.pending_terminal_resize {
+                // Screen owns resize acknowledgement. Do not inject bytes
+                // sized for a layout the terminal has not accepted yet.
+                self.terminal_paint_cache.retry = true;
+                defer_busy_terminal(&mut ctx.renderable_content, false);
+                any_panel_dirty = true;
+                continue;
+            }
             let cols = ctx.dimension.columns;
             // Subtract whatever the command composer reserves
             // at the bottom of the pane — same math the
@@ -131,8 +261,16 @@ impl Renderer {
             // centers inside the *visible* terminal area, not
             // the area the composer is going to overlap.
             let raw_rows = ctx.dimension.lines;
-            let composer_rows =
-                splash_composer_reserved_rows(ctx, &self.command_composer, scale_factor);
+            let composer_rows = self
+                .terminal_paint_cache
+                .panes
+                .entry((ctx.route_id, ctx.rich_text_id))
+                .or_default()
+                .composer_rows(splash_composer_reserved_rows(
+                    ctx,
+                    &self.command_composer,
+                    scale_factor,
+                ));
             let rows = raw_rows.saturating_sub(composer_rows);
             // Hard floor only — `adapt_layout` does the
             // precise shrink-to-fit. Anything ≥ 5 rows + 24
@@ -168,7 +306,14 @@ impl Renderer {
                     neoism_terminal_core::handler::StdSyncHandler,
                 >::new();
                 let baseline_cursor_row = {
-                    let mut terminal = ctx.terminal.lock();
+                    let Some(mut terminal) = ctx.terminal.try_lock_unfair() else {
+                        // No bytes were injected. Keep pending_splash and its
+                        // prior presence; retry without stopping other panes/UI.
+                        self.terminal_paint_cache.retry = true;
+                        defer_busy_terminal(&mut ctx.renderable_content, false);
+                        any_panel_dirty = true;
+                        continue;
+                    };
                     processor.advance(&mut *terminal, splash.as_bytes());
                     // Cursor row right after we flushed all the
                     // splash newlines — that's the line the
@@ -201,19 +346,52 @@ impl Renderer {
         // Update per-panel scroll state for scrollbar rendering (all panels, not just dirty ones)
         if self.scrollbar.is_enabled() {
             self.scrollbar.clear_panel_states();
-            for (node, grid_context) in grid.contexts_mut().iter() {
+            for (node, grid_context) in grid.contexts_mut().iter_mut() {
                 if !visible_nodes.contains(node) {
                     continue;
                 }
                 let mut panel_rect = grid_context.layout_rect;
-                let ctx = grid_context.context();
-                let terminal = ctx.terminal.lock();
-                let mut screen_lines = terminal.screen_lines();
-                if *node == active_key && !ctx.has_non_terminal_surface() {
-                    let shell_prompt_state = terminal.shell_prompt_state();
-                    let terminal_alt_screen = terminal
-                        .mode()
-                        .contains(neoism_terminal_core::crosswords::Mode::ALT_SCREEN);
+                let ctx = grid_context.context_mut();
+                if ctx.has_non_terminal_surface() {
+                    continue;
+                }
+                let metadata = self
+                    .terminal_paint_cache
+                    .panes
+                    .entry((ctx.route_id, ctx.rich_text_id))
+                    .or_default();
+                let observed = ctx.terminal.try_lock_unfair().map(|terminal| {
+                    (
+                        terminal.screen_lines(),
+                        terminal.display_offset(),
+                        terminal.history_size(),
+                        terminal.shell_prompt_state(),
+                        terminal
+                            .mode()
+                            .contains(neoism_terminal_core::crosswords::Mode::ALT_SCREEN),
+                    )
+                });
+                let Some((
+                    mut screen_lines,
+                    display_offset,
+                    history_size,
+                    shell_prompt_state,
+                    terminal_alt_screen,
+                )) = observed
+                else {
+                    self.terminal_paint_cache.retry = true;
+                    defer_busy_terminal(&mut ctx.renderable_content, false);
+                    any_panel_dirty = true;
+                    if let Some(mut state) = metadata.scrollbar {
+                        state.panel_rect[0] = panel_rect[0];
+                        state.panel_rect[1] = panel_rect[1];
+                        state.panel_rect[2] = panel_rect[2];
+                        state.panel_rect[3] = state.panel_rect[3].min(panel_rect[3]);
+                        self.scrollbar.push_panel_state(state);
+                    }
+                    continue;
+                };
+                if *node == active_key {
                     let block_input_active =
                         ctx.terminal_input.editing_window_open(shell_prompt_state)
                             && !terminal_alt_screen;
@@ -243,16 +421,15 @@ impl Renderer {
                         screen_lines = screen_lines.saturating_sub(composer_rows).max(1);
                     }
                 }
-                if !ctx.has_non_terminal_surface() {
-                    self.scrollbar
-                        .push_panel_state(scrollbar::PanelScrollState {
-                            rich_text_id: ctx.rich_text_id,
-                            panel_rect,
-                            display_offset: terminal.display_offset(),
-                            history_size: terminal.history_size(),
-                            screen_lines,
-                        });
-                }
+                let state = scrollbar::PanelScrollState {
+                    rich_text_id: ctx.rich_text_id,
+                    panel_rect,
+                    display_offset,
+                    history_size,
+                    screen_lines,
+                };
+                metadata.scrollbar = Some(state);
+                self.scrollbar.push_panel_state(state);
             }
         }
 
@@ -282,13 +459,16 @@ impl Renderer {
             let force_full_damage = has_active_changed || self.is_game_mode_enabled;
 
             let is_dirty = context.renderable_content.pending_update.is_dirty();
-            let (terminal_damage_event_in_flight, terminal_pending_damage) = {
-                let terminal = context.terminal.lock();
-                (
-                    terminal.damage_event_in_flight,
-                    terminal.peek_damage_event(),
-                )
+            // One successful guard covers the damage gate and snapshot. On
+            // contention do not drain UI/PTY damage or acknowledge graphics.
+            let Some(mut terminal) = context.terminal.try_lock_unfair() else {
+                self.terminal_paint_cache.retry = true;
+                defer_busy_terminal(&mut context.renderable_content, force_full_damage);
+                any_panel_dirty = true;
+                continue;
             };
+            let terminal_damage_event_in_flight = terminal.damage_event_in_flight;
+            let terminal_pending_damage = terminal.peek_damage_event();
 
             tracing::trace!(
                 target: "neoism::render",
@@ -324,7 +504,7 @@ impl Renderer {
             // terminal, merge with any UI-side damage, and clear the in-flight
             // flag so the PTY thread can send a new notification.
             let terminal_snapshot = {
-                let mut terminal = context.terminal.lock();
+                // The gate's try-lock remains held; never re-enter the mutex.
 
                 // Clear in-flight flag so PTY thread can notify again.
                 let was_damage_event_in_flight = terminal.damage_event_in_flight;
@@ -664,8 +844,9 @@ impl Renderer {
             self.splash_overlay.bind_context(ctx.route_id);
             let is_terminal_pane = !ctx.has_non_terminal_surface();
             let injection = ctx.splash_injection;
-            let mut wants_visible = false;
+            let mut observed_presence = Some(false);
             if is_terminal_pane && injection.is_some() {
+                observed_presence = None;
                 // Command-block count is the cleanest signal:
                 // `submit_with_context` pushes onto the vec
                 // the moment the user hits Enter on a
@@ -698,7 +879,8 @@ impl Renderer {
                         .contains(neoism_terminal_core::crosswords::Mode::ALT_SCREEN);
                     let running_command = terminal.shell_prompt_state().running_command;
                     let cursor_row = terminal.cursor().pos.row.0;
-                    wants_visible = terminal_splash_wants_visible(
+                    drop(terminal);
+                    observed_presence = Some(terminal_splash_wants_visible(
                         no_command_yet,
                         alt,
                         running_command,
@@ -706,9 +888,20 @@ impl Renderer {
                         &mut ctx.splash_last_cursor_row,
                         injection.baseline_cursor_row,
                         is_remote_pty,
-                    );
+                    ));
                 }
             }
+            if observed_presence.is_none() {
+                self.terminal_paint_cache.retry = true;
+                defer_busy_terminal(&mut ctx.renderable_content, false);
+                any_panel_dirty = true;
+            }
+            let wants_visible = self
+                .terminal_paint_cache
+                .panes
+                .entry((ctx.route_id, ctx.rich_text_id))
+                .or_default()
+                .splash_visible(observed_presence);
             // We render whenever (a) the splash should be up,
             // OR (b) the splash was just dismissed and the
             // animation hasn't finished yet. The overlay's own
@@ -733,11 +926,17 @@ impl Renderer {
                 // Same composer-aware shrink we use at inject
                 // time — the splash visual area never extends
                 // into the rows the command composer reserves.
-                let composer_rows_runtime = splash_composer_reserved_rows(
-                    grid_context.context(),
-                    &self.command_composer,
-                    scale_factor,
-                );
+                let ctx = grid_context.context();
+                let composer_rows_runtime = self
+                    .terminal_paint_cache
+                    .panes
+                    .entry((ctx.route_id, ctx.rich_text_id))
+                    .or_default()
+                    .composer_rows(splash_composer_reserved_rows(
+                        ctx,
+                        &self.command_composer,
+                        scale_factor,
+                    ));
                 let visible_rows_f = (rows_f - composer_rows_runtime as f32).max(1.0);
                 let pane_h = visible_rows_f * cell_h;
                 // CRITICAL — recompute the layout against the
@@ -1828,6 +2027,89 @@ impl neoism_ui::panels::buffer_tabs::AgentIconProvider<crate::neoism::icon::Agen
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn busy_splash_metadata_retains_both_presence_and_reserved_geometry() {
+        let mut metadata = super::PanePaintMetadata::default();
+        assert!(metadata.splash_visible(Some(true)));
+        assert_eq!(metadata.composer_rows(Some(4)), 4);
+        for _ in 0..3 {
+            assert!(metadata.splash_visible(None));
+            assert_eq!(metadata.composer_rows(None), 4);
+        }
+        assert!(!metadata.splash_visible(Some(false)));
+        assert!(!metadata.splash_visible(None));
+        assert_eq!(metadata.composer_rows(Some(0)), 0);
+        assert_eq!(metadata.composer_rows(None), 0);
+    }
+
+    #[test]
+    fn busy_composer_keeps_good_prompt_and_cwd_instead_of_hiding_effects() {
+        let mut metadata = super::PanePaintMetadata::default();
+        assert!(metadata.composer_metadata(None).is_none());
+        let cwd = std::path::PathBuf::from("/known-good");
+        metadata.composer_metadata(Some(super::ComposerPaintMetadata {
+            alt_screen: false,
+            prompt: neoism_terminal_core::crosswords::ShellPromptState {
+                awaiting_command: true,
+                ..Default::default()
+            },
+            cwd: Some(cwd.clone()),
+        }));
+        let retained = metadata.composer_metadata(None).unwrap();
+        assert!(!retained.alt_screen);
+        assert!(retained.prompt.awaiting_command);
+        assert_eq!(retained.cwd, Some(cwd));
+    }
+
+    #[test]
+    fn busy_host_keeps_unread_terminal_and_ui_damage_until_success() {
+        use neoism_terminal_core::{
+            ansi::CursorShape, crosswords::Crosswords, damage::TerminalDamage,
+        };
+        let terminal = crate::event::sync::FairMutex::new(Crosswords::new(
+            crate::bridges::utils::ResizeDimensions {
+                columns: 8,
+                lines: 2,
+            },
+            CursorShape::Block,
+            neoism_backend::TerminalId::from(7usize),
+            100,
+        ));
+        let mut content = crate::context::renderable::RenderableContent::default();
+        content.last_frame_damage = TerminalDamage::Noop;
+        content
+            .pending_update
+            .set_terminal_damage(TerminalDamage::Partial(Default::default()));
+        let mut guard = terminal.lock();
+        guard.damage_event_in_flight = true;
+        guard.graphics.kitty_graphics_dirty = true;
+        let unread_damage = guard.peek_damage_event();
+        for _ in 0..3 {
+            assert!(terminal.try_lock_unfair().is_none());
+            super::defer_busy_terminal(&mut content, false);
+            assert!(content.pending_update.is_dirty());
+            assert!(matches!(content.last_frame_damage, TerminalDamage::Noop));
+            assert!(guard.damage_event_in_flight);
+            assert!(guard.graphics.kitty_graphics_dirty);
+            assert_eq!(guard.peek_damage_event(), unread_damage);
+        }
+        assert!(matches!(
+            content.pending_update.take_terminal_damage(),
+            Some(TerminalDamage::Partial(_))
+        ));
+        // Focus/full damage seen during a busy frame survives to the next
+        // successful gate without painting stale Full damage in busy frames.
+        super::defer_busy_terminal(&mut content, true);
+        super::defer_busy_terminal(&mut content, false);
+        assert!(matches!(content.last_frame_damage, TerminalDamage::Noop));
+        assert!(matches!(
+            content.pending_update.take_terminal_damage(),
+            Some(TerminalDamage::Full)
+        ));
+        drop(guard);
+        assert!(terminal.try_lock_unfair().is_some());
+    }
+
     #[test]
     fn catalog_view_maps_child_to_root_and_no_chat_to_none() {
         assert_eq!(

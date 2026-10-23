@@ -16,6 +16,7 @@ use neoism_window::window::WindowId;
 use super::{daemon_pump::DesktopDaemonConnection, Application as App};
 use crate::daemon_client::DaemonClientStatus;
 use crate::event::{RioEvent, RioEventType};
+use crate::neoism::agent::system::{discover_system_source, AgentSystemSource};
 use crate::ssh_hosts::DaemonAttach;
 use crate::system_registry::{same_system_route, SavedSystem, SystemRegistry};
 
@@ -24,7 +25,6 @@ struct Attempt {
     window: WindowId,
     recipe: SavedSystem,
     cancelled: Arc<AtomicBool>,
-    open_on_ready: Option<WindowId>,
 }
 
 impl Drop for Attempt {
@@ -37,6 +37,16 @@ struct BackgroundConnection {
     recipe: SavedSystem,
     endpoint: String,
     connection: DesktopDaemonConnection,
+    source: Option<AgentSystemSource>,
+}
+
+impl Drop for BackgroundConnection {
+    fn drop(&mut self) {
+        if let Some(source) = &self.source {
+            source.revoke();
+            crate::neoism::agent::register_agent_server_credential(&source.server, None);
+        }
+    }
 }
 
 struct ConnectedSystem {
@@ -45,6 +55,8 @@ struct ConnectedSystem {
     // stay in App::ssh_attaches throughout authentication.
     attach: Option<DaemonAttach>,
     connection: DesktopDaemonConnection,
+    source: Result<AgentSystemSource, String>,
+    credential: String,
 }
 
 struct AttemptResult {
@@ -101,6 +113,10 @@ fn same_route(a: &SavedSystem, b: &SavedSystem) -> bool {
     a.id == b.id && a.target == b.target && a.ssh_args == b.ssh_args
 }
 
+fn accepts_connection(current: &SavedSystem, attempted: &SavedSystem) -> bool {
+    current.enabled && same_route(current, attempted)
+}
+
 fn connection_status(
     running: bool,
     status: DaemonClientStatus,
@@ -155,11 +171,70 @@ impl App<'_> {
         }
     }
 
-    pub(super) fn cancel_system_activation(&mut self, window: WindowId) {
-        for attempt in self.systems.attempts.values_mut() {
-            if attempt.open_on_ready == Some(window) {
-                attempt.open_on_ready = None;
+    /// Details are a local registry/UI operation, never a connection request.
+    pub(super) fn open_system_settings(&mut self, window: WindowId, id: &str) {
+        let Some(route) = self.router.routes.get(&window) else {
+            return;
+        };
+        if route.window.screen.renderer.modal.is_active() {
+            return;
+        }
+        if let Err(error) = self.systems.reload() {
+            self.system_error(window, format!("Could not load saved systems: {error}"));
+            return;
+        }
+        self.refresh_system_palettes();
+        let entry = self.systems.entries.iter().find(|entry| entry.id == id).cloned();
+        if let Some(route) = self.router.routes.get_mut(&window) {
+            let palette = &mut route.window.screen.renderer.command_palette;
+            if let Some(entry) = entry {
+                palette.enter_system_settings_mode(entry);
+            } else {
+                palette.enter_systems_mode(self.systems.entries.clone());
             }
+            route.request_redraw();
+        }
+    }
+
+    fn restore_system_view(&mut self, window: WindowId, settings: Option<&str>) {
+        if let Some(id) = settings {
+            self.open_system_settings(window, id);
+        } else {
+            self.open_system_manager(window);
+        }
+    }
+
+    fn cancel_system_workspace_adoption(&mut self, window: WindowId) {
+        self.pending_ssh_workspaces.remove(&window);
+        self.server_switch_inflight.remove(&window);
+        if let Some(session) = self.window_sessions.get_mut(&window) {
+            session.pending_peer_adopt = None;
+        }
+    }
+
+    fn open_system_ssh_workspace(&mut self, window: WindowId, id: &str) {
+        if id == "local" {
+            return;
+        }
+        if let Err(error) = self.systems.reload() {
+            self.system_error(window, format!("Could not load saved systems: {error}"));
+            return;
+        }
+        let Some(recipe) = self.systems.recipe(id) else {
+            self.system_error(window, "Saved system no longer exists.");
+            return;
+        };
+        // Latest explicit intent wins; retain a same-route authentication worker
+        // so duplicate clicks coalesce through the normal attach pipeline.
+        if self.ssh_attach_inflight.get(&window).is_some_and(|request| {
+            !same_system_route(&request.target, &request.ssh_args, &recipe.target, &recipe.ssh_args)
+        }) {
+            self.ssh_attach_inflight.remove(&window);
+        }
+        self.cancel_system_workspace_adoption(window);
+        if let Some(route) = self.router.routes.get_mut(&window) {
+            route.window.screen.request_ssh_workspace_open(recipe.target, recipe.ssh_args);
+            route.request_redraw();
         }
     }
 
@@ -172,8 +247,14 @@ impl App<'_> {
         if !self.router.routes.contains_key(&window_id) {
             return;
         }
+        let settings = self.router.routes.get(&window_id).and_then(|route| {
+            route.window.screen.renderer.command_palette
+                .system_settings_id().map(str::to_owned)
+        });
         match request {
             SystemRequest::Show => self.open_system_manager(window_id),
+            SystemRequest::Settings { id } => self.open_system_settings(window_id, &id),
+            SystemRequest::SshWorkspace { id } => self.open_system_ssh_workspace(window_id, &id),
             SystemRequest::Add { name, target } => {
                 if let Err(error) = self.systems.reload() {
                     self.system_error(
@@ -193,31 +274,18 @@ impl App<'_> {
                             .map_err(|e| e.to_string())
                     });
                 match saved {
-                    // Add must never implicitly replace the current workspace,
-                    // even when upsert found an already-connected recipe.
-                    Ok(recipe) => self.connect_saved_system(window_id, recipe, false),
+                    Ok(_) => {} // Saving a recipe never dials or changes activation intent.
                     Err(error) => self.system_error(
                         window_id,
                         format!("Could not save system: {error}"),
                     ),
                 }
                 self.refresh_system_palettes();
+                self.open_system_manager(window_id);
             }
             SystemRequest::Connect { id } => {
-                self.ssh_attach_inflight.remove(&window_id);
-                self.pending_ssh_workspaces.remove(&window_id);
-                self.server_switch_inflight.remove(&window_id);
-                self.cancel_system_activation(window_id);
-                if let Some(route) = self.router.routes.get_mut(&window_id) {
-                    route
-                        .window
-                        .screen
-                        .cancel_pending_ssh_workspace_activation();
-                }
                 if id == "local" {
-                    if let Some(endpoint) = self.home_daemon_endpoint.clone() {
-                        self.switch_window_server(window_id, &endpoint, None, None);
-                    }
+                    self.restore_system_view(window_id, settings.as_deref());
                     return;
                 }
                 if let Err(error) = self.systems.reload() {
@@ -228,31 +296,74 @@ impl App<'_> {
                     return;
                 }
                 if let Some(recipe) = self.systems.recipe(&id) {
-                    self.connect_saved_system(window_id, recipe, true);
+                    self.connect_saved_system(window_id, recipe);
                 }
                 self.refresh_system_palettes();
-                self.open_system_manager(window_id);
+                self.restore_system_view(window_id, settings.as_deref());
+            }
+            SystemRequest::SetEnabled {
+                id,
+                enabled,
+                discard,
+            } => {
+                if id == "local" {
+                    return;
+                }
+                if !enabled {
+                    self.disconnect_saved_system(window_id, &id, false, discard, true);
+                } else {
+                    if let Err(error) = self.systems.reload() {
+                        self.system_error(
+                            window_id,
+                            format!("Could not load saved systems: {error}"),
+                        );
+                        return;
+                    }
+                    let saved = self
+                        .systems
+                        .registry
+                        .as_mut()
+                        .map_err(|error| error.to_string())
+                        .and_then(|registry| {
+                            registry
+                                .set_enabled(&id, true)
+                                .map_err(|error| error.to_string())
+                        });
+                    match saved {
+                        Ok(recipe) => self.connect_saved_system(window_id, recipe),
+                        Err(error) => self.system_error(
+                            window_id,
+                            format!("Could not activate system: {error}"),
+                        ),
+                    }
+                }
+                self.refresh_system_palettes();
+                self.restore_system_view(window_id, settings.as_deref());
             }
             SystemRequest::Disconnect {
                 id,
                 remove,
                 discard,
             } => {
-                self.disconnect_saved_system(window_id, &id, remove, discard);
+                self.disconnect_saved_system(window_id, &id, remove, discard, false);
+                self.restore_system_view(window_id, if remove { None } else { settings.as_deref() });
             }
         }
     }
 
-    fn connect_saved_system(
-        &mut self,
-        window: WindowId,
-        recipe: SavedSystem,
-        open_if_connected: bool,
-    ) {
-        if let Some(attempt) = self.systems.attempts.get_mut(&recipe.id) {
-            if open_if_connected {
-                attempt.open_on_ready = Some(window);
-            }
+    // Manager connections are background-only, including reconnects and reuse.
+    // Workspace selection belongs exclusively to explicit workspace actions.
+    fn connect_saved_system(&mut self, window: WindowId, recipe: SavedSystem) {
+        // Consult current intent, not the worker/request's potentially stale copy.
+        if !self
+            .systems
+            .recipe(&recipe.id)
+            .is_some_and(|current| accepts_connection(&current, &recipe))
+        {
+            self.system_error(window, "Activate this saved system before connecting.");
+            return;
+        }
+        if self.systems.attempts.contains_key(&recipe.id) {
             return;
         }
         let existing = self
@@ -267,33 +378,18 @@ impl App<'_> {
                 )
             })
             .find_map(|(endpoint, attach)| {
-                attach.is_running().then(|| {
-                    (
-                        endpoint.clone(),
-                        attach.workspace_id.clone(),
-                        attach.credential.clone(),
-                    )
-                })
+                attach
+                    .is_running()
+                    .then(|| (endpoint.clone(), attach.credential.clone()))
             });
-        if let Some((endpoint, workspace, credential)) = &existing {
-            let authenticated =
-                self.system_endpoint_status(endpoint) == DaemonClientStatus::Open;
-            if authenticated && open_if_connected {
-                self.begin_ssh_workspace_switch(
-                    window,
-                    recipe.target.clone(),
-                    endpoint.clone(),
-                    workspace.clone(),
-                    credential.clone(),
-                );
-                return;
-            }
+        if let Some((endpoint, _)) = &existing {
             if self
                 .systems
                 .connections
                 .get(&recipe.id)
                 .is_some_and(|connection| {
                     connection.endpoint == *endpoint
+                        && connection.source.is_some()
                         && connection.connection.status() == DaemonClientStatus::Open
                 })
             {
@@ -315,7 +411,6 @@ impl App<'_> {
                 window,
                 recipe: recipe.clone(),
                 cancelled: cancelled.clone(),
-                open_on_ready: open_if_connected.then_some(window),
             },
         );
         let tx = self.systems.tx.clone();
@@ -330,7 +425,7 @@ impl App<'_> {
                         return Err("Connection cancelled".into());
                     }
                     let (endpoint, credential, attach) = match existing {
-                        Some((endpoint, _, credential)) => (endpoint, credential, None),
+                        Some((endpoint, credential)) => (endpoint, credential, None),
                         None => {
                             let attach = crate::ssh_hosts::attach_workspace_over_ssh(
                                 &recipe.target,
@@ -349,16 +444,28 @@ impl App<'_> {
                     }
                     let connection = DesktopDaemonConnection::connect_with_token(
                         &endpoint,
-                        Some(credential),
+                        Some(credential.clone()),
                         proxy.clone(),
                     )
                     .map_err(|error| error.to_string())?;
                     // Background links do not own workspace subscriptions or PTYs.
                     connection.set_parked(true);
+                    if cancelled.load(Ordering::Acquire) {
+                        return Err("Connection cancelled".into());
+                    }
+                    let source = discover_system_source(
+                        recipe.id.clone(),
+                        recipe.name.clone(),
+                        generation,
+                        &endpoint,
+                        credential.clone(),
+                    );
                     Ok(ConnectedSystem {
                         endpoint,
                         attach,
                         connection,
+                        source,
+                        credential,
                     })
                 })();
                 if cancelled.load(Ordering::Acquire) {
@@ -429,6 +536,7 @@ impl App<'_> {
         id: &str,
         remove: bool,
         discard: bool,
+        deactivate: bool,
     ) {
         if let Err(error) = self.systems.reload() {
             self.system_error(window, format!("Could not load saved systems: {error}"));
@@ -485,17 +593,38 @@ impl App<'_> {
         if dirty {
             if let Some(route) = self.router.routes.get_mut(&window) {
                 route.window.screen.renderer.modal.open(ModalSpec {
-                    title: if remove { "Remove system with unsaved edits?" } else { "Disconnect with unsaved edits?" }.into(),
+                    title: if deactivate { "Deactivate system with unsaved edits?" } else if remove { "Remove system with unsaved edits?" } else { "Disconnect with unsaved edits?" }.into(),
                     body: "This system has unsaved edits in an open window. Keep it connected to save or copy them locally, or disconnect and discard those edits. Saved files on the remote host are not deleted.".into(),
                     meta: recipe.name.clone(), input: None, busy: false, blocking: true,
                     buttons: vec![
                         ModalButton::new("Keep connected", "Esc", ModalAction::Close),
-                        ModalButton::new("Disconnect and discard edits", "", ModalAction::SystemDisconnectConfirm { id: id.into(), remove }),
+                        ModalButton::new(if deactivate { "Deactivate and discard edits" } else { "Disconnect and discard edits" }, "", if deactivate { ModalAction::SystemDeactivateConfirm { id: id.into() } } else { ModalAction::SystemDisconnectConfirm { id: id.into(), remove } }),
                     ],
                 });
                 route.request_redraw();
             }
             return;
+        }
+        // The dirty preflight must precede persistence; persistence must succeed
+        // before touching transports, owner tokens, or pending work.
+        if deactivate {
+            let result = self
+                .systems
+                .registry
+                .as_mut()
+                .map_err(|error| error.to_string())
+                .and_then(|registry| {
+                    registry
+                        .set_enabled(id, false)
+                        .map_err(|error| error.to_string())
+                });
+            if let Err(error) = result {
+                self.system_error(
+                    window,
+                    format!("Could not deactivate system: {error}"),
+                );
+                return;
+            }
         }
         // Snapshot pending endpoint ownership before leave removes tunnel guards.
         let mut cancelled_windows: Vec<_> = self
@@ -605,7 +734,7 @@ impl App<'_> {
             if !self
                 .systems
                 .recipe(&pending.id)
-                .is_some_and(|recipe| same_route(&recipe, &attempt.recipe))
+                .is_some_and(|recipe| accepts_connection(&recipe, &attempt.recipe))
             {
                 continue;
             }
@@ -630,11 +759,7 @@ impl App<'_> {
                         });
                     if reuse {
                         drop(connected);
-                        self.connect_saved_system(
-                            attempt.open_on_ready.unwrap_or(pending.window),
-                            attempt.recipe.clone(),
-                            attempt.open_on_ready.is_some(),
-                        );
+                        self.connect_saved_system(pending.window, attempt.recipe.clone());
                         continue;
                     }
                     if let Some(attach) = connected.attach.take() {
@@ -660,30 +785,68 @@ impl App<'_> {
                     if !running {
                         continue;
                     }
+                    self.systems.connections.remove(&pending.id);
+                    let source = match connected.source {
+                        Ok(source) => {
+                            crate::neoism::agent::register_agent_server_credential(
+                                &source.server,
+                                Some(&connected.credential),
+                            );
+                            Some(source)
+                        }
+                        Err(error) => {
+                            self.system_error(
+                                pending.window,
+                                format!("{}: {error}", attempt.recipe.name),
+                            );
+                            None
+                        }
+                    };
                     self.systems.connections.insert(
                         pending.id,
                         BackgroundConnection {
                             recipe: attempt.recipe.clone(),
                             endpoint: connected.endpoint,
                             connection: connected.connection,
+                            source,
                         },
                     );
-                    if let Some(window) = attempt.open_on_ready {
-                        if self.router.routes.contains_key(&window) {
-                            self.connect_saved_system(
-                                window,
-                                attempt.recipe.clone(),
-                                true,
-                            );
-                        }
-                    }
                 }
             }
         }
+        // A registry reload may have observed deactivation/removal by another
+        // desktop process. Never retain or publish its agent authority.
+        let registry = self.systems.registry.as_ref().ok();
+        self.systems.attempts.retain(|id, attempt| {
+            registry
+                .and_then(|registry| registry.system(id))
+                .is_some_and(|current| accepts_connection(current, &attempt.recipe))
+        });
+        self.systems.connections.retain(|id, connection| {
+            registry
+                .and_then(|registry| registry.system(id))
+                .is_some_and(|current| accepts_connection(current, &connection.recipe))
+        });
         for connection in self.systems.connections.values() {
             // Discard hello/snapshots/presence here. They must never be applied
             // to the window's currently selected (possibly local) workspace.
             drop(connection.connection.drain_messages());
+        }
+        let sources: Vec<_> = self
+            .systems
+            .connections
+            .values()
+            .filter(|connection| {
+                connection.connection.status() == DaemonClientStatus::Open
+            })
+            .filter_map(|connection| connection.source.clone())
+            .filter(AgentSystemSource::authorized)
+            .collect();
+        for route in self.router.routes.values_mut() {
+            route
+                .window
+                .screen
+                .set_agent_system_sources(sources.clone());
         }
         self.refresh_system_palettes();
     }
@@ -701,6 +864,7 @@ impl App<'_> {
             name: "This computer".into(),
             address: "Local".into(),
             local: true,
+            enabled: true,
             status: local_status,
         }];
         let recipes = self
@@ -755,6 +919,7 @@ impl App<'_> {
                 name: recipe.name,
                 address: recipe.target,
                 local: false,
+                enabled: recipe.enabled,
                 status,
             });
         }
@@ -764,9 +929,12 @@ impl App<'_> {
         self.systems.entries = entries;
         for route in self.router.routes.values_mut() {
             let palette = &mut route.window.screen.renderer.command_palette;
-            if palette.systems_mode()
-                && palette.refresh_systems(self.systems.entries.clone())
-            {
+            let changed = if palette.system_settings_id().is_some() {
+                palette.refresh_system_settings(self.systems.entries.clone())
+            } else {
+                palette.refresh_systems(self.systems.entries.clone())
+            };
+            if changed {
                 route.request_redraw();
             }
         }
@@ -776,6 +944,177 @@ impl App<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn manager_connect_and_add_have_no_workspace_activation_intent() {
+        // Guard the request, connect/reuse, and completion paths without starting
+        // SSH or constructing a desktop window. Disconnect intentionally retains
+        // its separate all-window workspace cleanup responsibilities.
+        let source = include_str!("systems.rs");
+        let production = source.split("#[cfg(test)]").next().unwrap();
+        let requests_and_connect = production
+            .split("pub(super) fn process_system_request(")
+            .nth(1)
+            .unwrap()
+            .split("// Only authenticated DesktopDaemonConnections count.")
+            .next()
+            .unwrap();
+        let completion = production
+            .split("pub(super) fn pump_system_connections(")
+            .nth(1)
+            .unwrap()
+            .split("fn refresh_system_palettes(")
+            .next()
+            .unwrap();
+        let add = requests_and_connect.split("SystemRequest::Add { name, target } => {").nth(1).unwrap()
+            .split("SystemRequest::Connect").next().unwrap();
+        let connect = requests_and_connect.split("SystemRequest::Connect { id } => {").nth(1).unwrap()
+            .split("SystemRequest::SetEnabled").next().unwrap();
+        let active = requests_and_connect.split("SystemRequest::SetEnabled {").nth(1).unwrap()
+            .split("SystemRequest::Disconnect").next().unwrap();
+        let background = requests_and_connect.split("fn connect_saved_system(").nth(1).unwrap();
+        for path in [add, connect, active, background, completion] {
+            for forbidden in [
+                "open_if_connected",
+                "open_on_ready",
+                "begin_ssh_workspace_switch",
+                "switch_window_server",
+                "cancel_system_activation",
+                "cancel_pending_ssh_workspace_activation",
+                "ssh_attach_inflight.remove",
+                "pending_ssh_workspaces.remove",
+                "server_switch_inflight.remove",
+            ] {
+                assert!(
+                    !path.contains(forbidden),
+                    "manager must not use {forbidden}"
+                );
+            }
+        }
+        assert!(requests_and_connect.contains("connection.set_parked(true)"));
+        assert!(completion.contains("drop(connection.connection.drain_messages())"));
+    }
+
+    #[test]
+    fn system_settings_navigation_does_not_dial_or_change_activation() {
+        let production = include_str!("systems.rs").split("#[cfg(test)]").next().unwrap();
+        let details = production.split("pub(super) fn open_system_settings(").nth(1).unwrap()
+            .split("fn restore_system_view(").next().unwrap();
+        assert!(details.contains("enter_system_settings_mode"));
+        for forbidden in ["connect_saved_system", "request_ssh_workspace", "set_enabled", "switch_window_server"] {
+            assert!(!details.contains(forbidden), "settings navigation must not use {forbidden}");
+        }
+    }
+
+    #[test]
+    fn explicit_system_ssh_preserves_activation_args_and_local_workspace() {
+        let production = include_str!("systems.rs").split("#[cfg(test)]").next().unwrap();
+        let ssh = production.split("fn open_system_ssh_workspace(").nth(1).unwrap()
+            .split("pub(super) fn process_system_request(").next().unwrap();
+        assert!(ssh.contains("self.systems.recipe(id)"));
+        assert!(ssh.contains("request_ssh_workspace_open(recipe.target, recipe.ssh_args)"));
+        for forbidden in ["set_enabled", "accepts_connection", "connect_saved_system", "begin_ssh_workspace_switch"] {
+            assert!(!ssh.contains(forbidden), "explicit SSH must not use {forbidden}");
+        }
+        let layout = include_str!("../screen/daemon_layout.rs");
+        let open = layout.split("pub fn request_ssh_workspace_open(").nth(1).unwrap()
+            .split("pub fn take_ssh_workspace_attach(").next().unwrap();
+        assert!(open.contains("self.pending_ssh_workspace_replacement = None"));
+        assert!(!open.contains("current_workspace_id()"));
+        let takeover = layout.split("pub fn request_ssh_workspace_attach(").nth(1).unwrap()
+            .split("pub fn request_ssh_workspace_open(").next().unwrap();
+        assert!(takeover.contains("self.pending_ssh_workspace_replacement = self.current_workspace_id()"));
+    }
+
+    #[test]
+    fn disabled_recipe_rejects_late_completion_and_retry() {
+        let attempted = SavedSystem {
+            id: "host".into(),
+            name: "Host".into(),
+            target: "host".into(),
+            ssh_args: vec![],
+            enabled: true,
+        };
+        let mut current = attempted.clone();
+        assert!(accepts_connection(&current, &attempted));
+        current.enabled = false;
+        assert!(!accepts_connection(&current, &attempted));
+        assert!(!accepts_connection(&current, &current));
+        current.enabled = true;
+        current.name = "Renamed".into();
+        assert!(accepts_connection(&current, &attempted));
+    }
+
+    #[test]
+    fn add_only_saves_and_connect_checks_intent_before_dial() {
+        let source = include_str!("systems.rs");
+        let production = source.split("#[cfg(test)]").next().unwrap();
+        let add = production
+            .split("SystemRequest::Add { name, target } => {")
+            .nth(1)
+            .unwrap()
+            .split("SystemRequest::Connect")
+            .next()
+            .unwrap();
+        assert!(add.contains(".upsert("));
+        for forbidden in [
+            "connect_saved_system",
+            "attach_workspace_over_ssh",
+            "discover_system_source",
+            "set_enabled",
+        ] {
+            assert!(!add.contains(forbidden), "Add must not use {forbidden}");
+        }
+        let connect = production.split("fn connect_saved_system(").nth(1).unwrap();
+        assert!(
+            connect.find("accepts_connection").unwrap()
+                < connect.find(".ssh_attaches").unwrap()
+        );
+        let completion = production
+            .split("pub(super) fn pump_system_connections(")
+            .nth(1)
+            .unwrap();
+        assert!(
+            completion.find("accepts_connection").unwrap()
+                < completion.find("match pending.result").unwrap()
+        );
+    }
+
+    #[test]
+    fn deactivation_preflight_and_write_precede_all_teardown() {
+        let source = include_str!("systems.rs");
+        let disconnect = source
+            .split("fn disconnect_saved_system(")
+            .nth(1)
+            .unwrap()
+            .split("pub(super) fn pump_system_connections(")
+            .next()
+            .unwrap();
+        let dirty = disconnect.find("let dirty = !discard").unwrap();
+        let persist = disconnect.find(".set_enabled(id, false)").unwrap();
+        assert!(dirty < persist);
+        assert!(disconnect[dirty..persist].contains("self.router.routes.values().any"));
+        assert!(
+            disconnect[dirty..persist].contains("ModalAction::SystemDeactivateConfirm")
+        );
+        assert!(disconnect[dirty..persist].contains("return;"));
+        let failed_write = disconnect[persist..]
+            .find("if let Err(error) = result")
+            .unwrap()
+            + persist;
+        for teardown in [
+            "leave_server_connection_with_discard",
+            "self.ssh_attach_inflight.retain",
+            "self.pending_ssh_workspaces",
+            "self.systems.attempts.remove",
+            "self.systems.connections.remove",
+            "self.ssh_attaches.remove",
+        ] {
+            let position = disconnect.find(teardown).unwrap();
+            assert!(failed_write < position, "write must precede {teardown}");
+            assert!(disconnect[failed_write..position].contains("return;"));
+        }
+    }
 
     #[test]
     fn dropping_an_attempt_cancels_its_background_worker() {
@@ -788,9 +1127,9 @@ mod tests {
                 name: "Buildbox".into(),
                 target: "buildbox".into(),
                 ssh_args: Vec::new(),
+                enabled: true,
             },
             cancelled: cancelled.clone(),
-            open_on_ready: None,
         };
         assert!(!cancelled.load(Ordering::Acquire));
         drop(attempt);
@@ -835,6 +1174,7 @@ mod tests {
             name: "Host".into(),
             target: "user@host".into(),
             ssh_args: vec![],
+            enabled: true,
         };
         let mut changed = recipe.clone();
         changed.name = "Renamed".into();

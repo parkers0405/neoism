@@ -60,6 +60,8 @@ pub enum OpenAiModelAccess {
     #[default]
     Api,
     Codex(BTreeMap<String, CodexModelMetadata>),
+    /// Optional discovery is pending or failed, not a successful empty catalog.
+    CodexPending,
 }
 
 #[derive(Clone)]
@@ -77,6 +79,14 @@ pub struct ProviderCatalog {
 }
 
 impl ProviderCatalog {
+    #[cfg(test)]
+    pub(crate) fn with_test_source(source: String, cache_path: PathBuf) -> Self {
+        let mut catalog = Self::from_env_with_config(BTreeMap::new());
+        catalog.source = source;
+        catalog.path_override = None;
+        catalog.cache_path = cache_path;
+        catalog
+    }
     pub fn from_env_with_config(configured: BTreeMap<String, ProviderConfig>) -> Self {
         let source = std::env::var("NEOISM_AGENT_MODELS_URL")
             .unwrap_or_else(|_| DEFAULT_SOURCE.to_string());
@@ -138,6 +148,7 @@ impl ProviderCatalog {
         &self,
         mut providers: Vec<ProviderInfo>,
     ) -> anyhow::Result<Vec<ProviderInfo>> {
+        self.schedule_discovery();
         for (provider_id, config) in self.configured.iter() {
             let existing = providers
                 .iter()
@@ -187,7 +198,14 @@ impl ProviderCatalog {
             }
 
             if config.discover_models && !base_url.is_empty() {
-                for model_id in self.discover_model_ids(&base_url, auth).await {
+                let discovered = self
+                    .discovered
+                    .read()
+                    .await
+                    .get(&base_url)
+                    .map(|(_, ids)| ids.clone())
+                    .unwrap_or_default();
+                for model_id in discovered {
                     provider.models.entry(model_id.clone()).or_insert_with(|| {
                         local_model(
                             provider_id,
@@ -247,18 +265,46 @@ impl ProviderCatalog {
         Ok(providers)
     }
 
+    // Catalog reads never wait on optional configured endpoints. One background
+    // pass owns discovery; explicit configured models remain available meanwhile.
+    fn schedule_discovery(&self) {
+        let Ok(gate) = self.discovery_gate.clone().try_lock_owned() else {
+            return;
+        };
+        let catalog = self.clone();
+        tokio::spawn(async move {
+            let _gate = gate;
+            let providers = catalog.cached.read().await.clone().unwrap_or_default();
+            for (id, config) in catalog.configured.iter() {
+                if !config.discover_models {
+                    continue;
+                }
+                let existing = providers.iter().find(|provider| provider.id == *id);
+                let auth = config.auth.unwrap_or(if existing.is_some() {
+                    ProviderAuthMode::Required
+                } else {
+                    ProviderAuthMode::None
+                });
+                let url = config.options.base_url.clone().or_else(|| {
+                    existing
+                        .and_then(|provider| provider.models.values().next())
+                        .map(|model| model.api.url.clone())
+                });
+                if let Some(url) = url.filter(|url| !url.is_empty()) {
+                    catalog
+                        .discover_model_ids(url.trim_end_matches('/'), auth)
+                        .await;
+                }
+            }
+        });
+    }
+
     async fn discover_model_ids(
         &self,
         base_url: &str,
         auth: ProviderAuthMode,
     ) -> Vec<String> {
         const TTL: Duration = Duration::from_secs(60);
-        if let Some((loaded, models)) = self.discovered.read().await.get(base_url) {
-            if loaded.elapsed() < TTL {
-                return models.clone();
-            }
-        }
-        let _gate = self.discovery_gate.lock().await;
         if let Some((loaded, models)) = self.discovered.read().await.get(base_url) {
             if loaded.elapsed() < TTL {
                 return models.clone();
@@ -310,12 +356,16 @@ impl ProviderCatalog {
             }
             Err(error) => {
                 tracing::debug!(%error, %base_url, "local model discovery failed");
-                self.discovered
-                    .read()
-                    .await
+                let mut cache = self.discovered.write().await;
+                let ids = cache
                     .get(base_url)
                     .map(|(_, ids)| ids.clone())
-                    .unwrap_or_default()
+                    .unwrap_or_default();
+                cache.insert(
+                    base_url.to_string(),
+                    (std::time::Instant::now(), ids.clone()),
+                );
+                ids
             }
         }
     }
@@ -335,24 +385,25 @@ impl ProviderCatalog {
     async fn load(&self) -> anyhow::Result<(Vec<ProviderInfo>, bool)> {
         if let Some(path) = &self.path_override {
             if let Some(raw) = read_to_string_async(path.clone()).await {
-                return Ok((parse_models_async(raw).await?, false));
+                if let Ok(providers) = parse_models_async(raw).await {
+                    return Ok((providers, false));
+                }
             }
         }
 
         if let Some(raw) = read_to_string_async(self.cache_path.clone()).await {
-            let providers = parse_models_async(raw).await?;
-            let refresh_stale = !self.cache_fresh().await && !fetch_disabled();
-            return Ok((providers, refresh_stale));
+            if let Ok(providers) = parse_models_async(raw).await {
+                let refresh_stale = !self.cache_fresh().await && !fetch_disabled();
+                return Ok((providers, refresh_stale));
+            }
         }
 
-        if fetch_disabled() {
-            return Ok((Vec::new(), false));
-        }
-
-        let raw = self.fetch_api().await?;
-        let providers = parse_models_async(raw.clone()).await?;
-        let _ = write_cache_async(self.cache_path.clone(), raw).await;
-        Ok((providers, false))
+        // First run/offline/corrupt cache: auth metadata must not depend on
+        // models.dev. Fetch richer metadata in the background, never on /connect.
+        Ok((
+            parse_models(include_str!("provider_catalog_fallback.json"))?,
+            !fetch_disabled(),
+        ))
     }
 
     async fn fetch_api(&self) -> anyhow::Result<String> {
@@ -856,8 +907,14 @@ fn effective_catalog_with_config(
         if provider.id != "openai" {
             continue;
         }
-        if let OpenAiModelAccess::Codex(models) = access {
-            if restrict_to_listed {
+        let unavailable = BTreeMap::new();
+        let models = match access {
+            OpenAiModelAccess::Api => continue,
+            OpenAiModelAccess::Codex(models) => models,
+            OpenAiModelAccess::CodexPending => &unavailable,
+        };
+        {
+            if restrict_to_listed && !matches!(access, OpenAiModelAccess::CodexPending) {
                 // Match the actual wire ID, not a picker alias or variant label.
                 provider
                     .models
@@ -1277,6 +1334,58 @@ mod tests {
     }
 
     use super::*;
+
+    #[tokio::test]
+    async fn basic_catalog_survives_hung_optional_discovery_and_corrupt_cache() {
+        let models_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let local_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let source = format!("http://{}", models_listener.local_addr().unwrap());
+        let local_url = format!("http://{}", local_listener.local_addr().unwrap());
+        let models_task = tokio::spawn(async move {
+            let (_socket, _) = models_listener.accept().await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        let local_task = tokio::spawn(async move {
+            let (_socket, _) = local_listener.accept().await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        let mut configured = BTreeMap::new();
+        configured.insert(
+            "local".into(),
+            ProviderConfig {
+                discover_models: true,
+                options: neoism_agent_core::ProviderConfigOptions {
+                    base_url: Some(local_url),
+                },
+                ..ProviderConfig::default()
+            },
+        );
+        let mut catalog = ProviderCatalog::from_env_with_config(configured);
+        catalog.source = source;
+        catalog.path_override = None;
+        catalog.cache_path = std::env::temp_dir()
+            .join(format!("neoism-catalog-{}.json", rand::random::<u64>()));
+        tokio::fs::write(&catalog.cache_path, "broken cache")
+            .await
+            .unwrap();
+        let providers =
+            tokio::time::timeout(Duration::from_millis(500), catalog.providers())
+                .await
+                .unwrap()
+                .unwrap();
+        let connect = connect_provider_catalog(&providers, &[], &OpenAiModelAccess::Api);
+        assert!(connect.iter().any(|provider| provider.id == "openai"));
+        assert!(crate::provider_auth::methods(&providers).contains_key("openai"));
+        assert!(providers.iter().any(|provider| provider.id == "local"));
+        // Repeat while both optional servers are still unresponsive.
+        tokio::time::timeout(Duration::from_millis(500), catalog.providers())
+            .await
+            .unwrap()
+            .unwrap();
+        tokio::fs::remove_file(&catalog.cache_path).await.unwrap();
+        models_task.abort();
+        local_task.abort();
+    }
 
     #[test]
     fn generation_metadata_forwards_reasoning_capability_without_effort_compatibility() {
@@ -2152,6 +2261,20 @@ mod tests {
             .iter()
             .find(|provider| provider.id == "opencode")
             .is_some_and(|provider| provider.models.contains_key("free")));
+    }
+
+    #[test]
+    fn pending_codex_keeps_basic_models_but_successfully_empty_discovery_restricts() {
+        let raw = parse_codex_limit_fixture();
+        let pending = effective_provider_catalog(&raw, &OpenAiModelAccess::CodexPending);
+        let openai = pending.iter().find(|p| p.id == "openai").unwrap();
+        assert!(!openai.models.is_empty());
+        for model in openai.models.values() {
+            assert!(model.limit.context <= CODEX_OPENAI_CONTEXT_LIMIT);
+            assert_eq!(model.cost.input, 0.0);
+        }
+        let empty = effective_provider_catalog(&raw, &OpenAiModelAccess::Codex(BTreeMap::new()));
+        assert!(empty.iter().find(|p| p.id == "openai").unwrap().models.is_empty());
     }
 
     fn codex_access(providers: &[ProviderInfo]) -> OpenAiModelAccess {

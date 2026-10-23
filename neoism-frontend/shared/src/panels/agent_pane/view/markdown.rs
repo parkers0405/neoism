@@ -244,6 +244,8 @@ pub enum AssistantMarkdownBlock {
     Table {
         rows: Vec<Vec<String>>,
         column_widths: Vec<f32>,
+        /// Scale-independent row boundaries, prepared once with the wrapped cells.
+        row_offsets: Vec<f32>,
     },
     Code {
         lang: String,
@@ -356,6 +358,11 @@ pub trait AgentMarkdownPane {
     }
     fn selectable_line_highlight(&self, index: usize) -> Option<(f32, f32)>;
     fn register_link_hit_rect(&mut self, target: String, rect: [f32; 4]);
+    fn register_image_preview(
+        &mut self,
+        _hit: crate::panels::agent_pane::composer_interactions::ImagePreviewHit,
+    ) {
+    }
     fn link_hovered(&self, target: &str) -> bool;
     fn mermaid_raw_mode(&self, key: u64) -> bool;
     /// Return the persisted horizontal offset for a Markdown code/table
@@ -464,6 +471,13 @@ impl AgentMarkdownPane for NeoismAgentPane {
 
     fn register_link_hit_rect(&mut self, target: String, rect: [f32; 4]) {
         NeoismAgentPane::register_link_hit_rect(self, target, rect);
+    }
+
+    fn register_image_preview(
+        &mut self,
+        hit: crate::panels::agent_pane::composer_interactions::ImagePreviewHit,
+    ) {
+        self.composer_interactions.image_previews.push(hit);
     }
 
     fn link_hovered(&self, target: &str) -> bool {
@@ -614,10 +628,7 @@ fn flush_layout_table(
         .into_iter()
         .map(|row| wrap_table_cells(sugarloaf, row, &column_widths, s, opts))
         .collect();
-    blocks.push(AssistantMarkdownBlock::Table {
-        rows,
-        column_widths,
-    });
+    blocks.push(laid_out_table_block(rows, column_widths));
 }
 
 fn push_layout_prose_block(
@@ -2057,8 +2068,8 @@ pub fn markdown_block_height_namespaced<P: AgentMarkdownPane>(
             4.0 * s + lines.len().max(1) as f32 * 19.0 * s
         }
         AssistantMarkdownBlock::Rule => 9.0 * s,
-        AssistantMarkdownBlock::Table { rows, .. } => {
-            measure_laid_out_table_height(rows, s)
+        AssistantMarkdownBlock::Table { row_offsets, .. } => {
+            (TABLE_BLOCK_PAD_Y + row_offsets.last().copied().unwrap_or_default()) * s
         }
         AssistantMarkdownBlock::Code { lang, lines, .. } => {
             // A streaming artifact is inert code, but reserves the same slot as
@@ -2511,6 +2522,7 @@ pub fn render_markdown_blocks<P: AgentMarkdownPane>(
             AssistantMarkdownBlock::Table {
                 rows,
                 column_widths,
+                row_offsets,
             } => {
                 let scroll_key =
                     format!("markdown:{scroll_namespace}:table:{block_index}");
@@ -2523,6 +2535,7 @@ pub fn render_markdown_blocks<P: AgentMarkdownPane>(
                     block_h,
                     rows,
                     column_widths,
+                    row_offsets,
                     &scroll_key,
                     theme,
                     s,
@@ -3410,6 +3423,7 @@ fn render_markdown_table<P: AgentMarkdownPane>(
     h: f32,
     rows: &[Vec<String>],
     column_widths: &[f32],
+    row_offsets: &[f32],
     scroll_key: &str,
     theme: &IdeTheme,
     s: f32,
@@ -3421,9 +3435,8 @@ fn render_markdown_table<P: AgentMarkdownPane>(
     if h <= 0.0 || rows.is_empty() {
         return;
     }
-    let cols = table_column_count(rows);
-    let row_heights = laid_out_table_row_heights(rows, s);
-    let table_h = row_heights.iter().sum::<f32>().min(h);
+    let cols = column_widths.len().max(1);
+    let table_h = (row_offsets.last().copied().unwrap_or_default() * s).min(h);
     let content_w = column_widths.iter().copied().sum::<f32>();
     // When a table overflows, include a small terminal reveal margin. At the
     // far-right stop this leaves the last cell text and closing rule wholly
@@ -3485,13 +3498,10 @@ fn render_markdown_table<P: AgentMarkdownPane>(
     ) else {
         return;
     };
-    let mut row_y = y;
-    for (row_ix, row) in rows.iter().enumerate() {
-        let row_h = row_heights
-            .get(row_ix)
-            .copied()
-            .unwrap_or_else(|| table_row_height_for_lines(1, s));
-        if row_y >= y + h {
+    let first_row = table_first_visible_row(row_offsets, (table_clip[1] - y) / s);
+    for (row_ix, row) in rows.iter().enumerate().skip(first_row) {
+        let row_y = y + row_offsets[row_ix] * s;
+        if row_y >= (table_clip[1] + table_clip[3]).min(y + h) {
             break;
         }
         draw_rect_clipped(
@@ -3543,7 +3553,6 @@ fn render_markdown_table<P: AgentMarkdownPane>(
                 );
             }
         }
-        row_y += row_h;
     }
     if max_scroll > 1.0 {
         let scrollbar_visible = pane.markdown_horizontal_scrollbar_visible(scroll_key)
@@ -3578,36 +3587,45 @@ fn render_markdown_table<P: AgentMarkdownPane>(
     }
 }
 
+fn laid_out_table_block(rows: Vec<Vec<String>>, column_widths: Vec<f32>) -> AssistantMarkdownBlock {
+    let mut row_offsets = Vec::with_capacity(rows.len() + 1);
+    row_offsets.push(0.0);
+    let mut height = 0.0;
+    for row in &rows {
+        height += laid_out_table_row_height(row, 1.0);
+        row_offsets.push(height);
+    }
+    AssistantMarkdownBlock::Table { rows, column_widths, row_offsets }
+}
+
+fn table_first_visible_row(row_offsets: &[f32], top: f32) -> usize {
+    row_offsets.partition_point(|offset| *offset <= top.max(0.0))
+        .saturating_sub(1)
+        .min(row_offsets.len().saturating_sub(1))
+}
+
+#[cfg(test)]
 fn measure_laid_out_table_height(rows: &[Vec<String>], s: f32) -> f32 {
-    TABLE_BLOCK_PAD_Y * s + laid_out_table_row_heights(rows, s).iter().sum::<f32>()
+    TABLE_BLOCK_PAD_Y * s + rows.iter().map(|row| laid_out_table_row_height(row, s)).sum::<f32>()
 }
 
-fn laid_out_table_row_heights(rows: &[Vec<String>], s: f32) -> Vec<f32> {
-    let cols = table_column_count(rows);
-    rows.iter()
-        .map(|row| {
-            let lines = (0..cols)
-                .map(|col| {
-                    row.get(col)
-                        .map(|cell| table_cell_lines(cell).len())
-                        .unwrap_or(1)
-                })
-                .max()
-                .unwrap_or(1);
-            table_row_height_for_lines(lines, s)
-        })
-        .collect()
+fn laid_out_table_row_height(row: &[String], s: f32) -> f32 {
+    let lines = row.iter()
+        .map(|cell| cell.lines().map(str::trim).filter(|line| !line.is_empty()).count())
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    table_row_height_for_lines(lines, s)
 }
 
-fn table_cell_lines(cell: &str) -> Vec<String> {
-    let lines: Vec<String> = cell
+fn table_cell_lines(cell: &str) -> Vec<&str> {
+    let lines: Vec<&str> = cell
         .lines()
         .map(str::trim)
-        .map(ToOwned::to_owned)
         .filter(|line| !line.is_empty())
         .collect();
     if lines.is_empty() {
-        vec![String::new()]
+        vec![""]
     } else {
         lines
     }

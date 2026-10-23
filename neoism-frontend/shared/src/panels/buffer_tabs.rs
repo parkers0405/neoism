@@ -20,7 +20,7 @@ use web_time::Duration;
 use web_time::Instant;
 
 #[cfg(target_arch = "wasm32")]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Instant(f64);
 
 #[cfg(target_arch = "wasm32")]
@@ -241,7 +241,7 @@ impl<A> AgentIconProvider<A> for NoopAgentIcons<A> {
 /// One row in the strip. Identity is whichever of `path`,
 /// `neoism_agent_route_id`, or `terminal_route_id` is set — see
 /// `target()` for resolution order.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct BufferTab<A> {
     pub title: String,
     pub modified: bool,
@@ -1054,7 +1054,7 @@ const DRAG_ACTIVATION_THRESHOLD_PX: f32 = 4.0;
 
 /// Live state for an in-progress drag — covers both "reorder
 /// horizontally inside the strip" and "tear out onto a pane body".
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct DragState {
     /// Index of the dragged tab — updated as we swap with neighbors.
     pub current_ix: usize,
@@ -1091,7 +1091,7 @@ pub enum DragRelease<A> {
 }
 
 /// Brief post-release "tab lifted off" animation.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct TearOutAnim {
     pub started_at: Instant,
     pub from_x: f32,
@@ -1111,7 +1111,7 @@ const TEAR_OUT_ANIM_MS: u32 = 180;
 /// Mutators that keep invariants (`set_active`, `set_focused`,
 /// `set_hover`, etc.) still live on the impl below — prefer those when
 /// you're not in the per-frame paint loop.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct BufferTabs<A> {
     pub visible: bool,
     pub tabs: Vec<BufferTab<A>>,

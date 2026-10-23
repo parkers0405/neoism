@@ -388,20 +388,6 @@ impl VulkanContext {
         }
     }
 
-    /// Return the in-flight fences for every slot EXCEPT `current_slot`.
-    /// Atlas (single `vk::Image` shared across all slots) writers must
-    /// CPU-wait on these before recording their `TRANSFER_DST` upload
-    /// — without it, in-flight slots can still be reading the atlas in
-    /// fragment shaders while we queue a write, producing torn glyph
-    /// data ghosting on screen for 1-2 frames. See
-    /// `VulkanGlyphAtlas::flush_uploads` for the full rationale.
-    pub fn other_slot_fences(&self, current_slot: usize) -> Vec<vk::Fence> {
-        (0..FRAMES_IN_FLIGHT)
-            .filter(|slot| *slot != current_slot)
-            .map(|slot| self.frames[slot].in_flight)
-            .collect()
-    }
-
     #[inline]
     pub fn surface_format(&self) -> vk::Format {
         self.swapchain_format

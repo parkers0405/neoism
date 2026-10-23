@@ -75,7 +75,21 @@ impl Screen<'_> {
         // populate hit-test rects. Filled inside the loop when
         // the pane in iteration is the active terminal pane.
         let mut active_block_headers: Option<ActiveBlockHeaders> = None;
-        let mut panels: Vec<PanelFrame> = Vec::new();
+        // Keep inactive panes, but never resurrect a closed/replaced surface.
+        let live_routes: std::collections::HashMap<_, _> = self
+            .context_manager
+            .all_grids()
+            .iter()
+            .flat_map(|grid| grid.contexts().values())
+            .filter(|item| !item.val.has_non_terminal_surface())
+            .map(|item| (item.val.route_id, item.val.rich_text_id))
+            .collect();
+        self.terminal_panel_frames
+            .retain(|route, frame| live_routes.get(route) == Some(&frame.rich_text_id));
+        self.terminal_cwd_cache
+            .retain(|route, _| live_routes.contains_key(route));
+        let mut panels: Vec<PanelFrameRef> = Vec::new();
+        let mut terminal_snapshot_busy = false;
         let mut terminal_block_prompt_animating = false;
         // Wall-clock phase the chrome overlay threads into every
         // animated surface. Pure math now lives in
@@ -105,7 +119,86 @@ impl Screen<'_> {
                 continue;
             }
             let ctx = &mut item.val;
+            tick_terminal_cursor_blink(
+                &mut ctx.renderable_content,
+                self.renderer.config_blinking_interval,
+                Instant::now(),
+            );
+            // A busy terminal retains the exact previous-good grid and one-shot
+            // damage is NOT replayed. Live uniforms/effect overlays still tick.
+            macro_rules! retain_pane {
+                () => {{
+                    terminal_snapshot_busy = true;
+                    defer_panel_damage(
+                        &mut ctx.renderable_content.pending_update,
+                        &mut ctx.renderable_content.last_frame_damage,
+                    );
+                    if let Some(frame) = self.terminal_panel_frames.get(&ctx.route_id) {
+                        let mut retained = PanelFrameRef::retained(frame.clone());
+                        retained.is_active = *key == active_key;
+                        retained.cursor_blink_visible = !frame.cursor_blinking
+                            || ctx.renderable_content.is_blinking_cursor_visible;
+                        retained.cursor_color = if self.renderer.cursor_is_animated() {
+                            self.renderer.live_cursor_color()
+                        } else {
+                            frame.cursor_color
+                        };
+                        let mut cursor_policy = frame.cursor_policy;
+                        cursor_policy.is_active = retained.is_active;
+                        cursor_policy.tree_focused = tree_focused;
+                        cursor_policy.trail_cursor_enabled =
+                            self.renderer.trail_cursor_enabled;
+                        cursor_policy.cursor_state_visible &=
+                            !self.renderer.settings.is_active();
+                        retained.cursor_visible = terminal_cursor_visible(cursor_policy);
+                        retained.layout_rect = item.layout_rect;
+                        retained.terminal_scroll_offset_y = self
+                            .renderer
+                            .terminal_scroll
+                            .current_offset(ctx.rich_text_id);
+                        let dx = item.layout_rect[0] - frame.layout_rect[0];
+                        let dy = item.layout_rect[1] - frame.layout_rect[1]
+                            + retained.terminal_scroll_offset_y
+                            - frame.terminal_scroll_offset_y;
+                        let overlays = self
+                            .sugarloaf
+                            .image_overlays
+                            .entry(ctx.rich_text_id)
+                            .or_default();
+                        overlays.clone_from(&frame.image_overlays);
+                        for overlay in overlays {
+                            overlay.x += dx;
+                            overlay.y += dy;
+                        }
+                        if retained.is_active {
+                            active_block_headers =
+                                frame.block_headers.as_ref().map(|headers| {
+                                    let mut headers = (**headers).clone();
+                                    headers.animation_phase = prompt_animation_phase;
+                                for snapshot in &mut headers.snapshots {
+                                    if matches!(snapshot.status, crate::terminal::blocks::BlockStatusKind::Running) {
+                                        snapshot.duration_ms += frame.captured_at.elapsed().as_secs_f32() * 1000.0;
+                                    }
+                                }
+                                    let scale = self.sugarloaf.scale_factor();
+                                    headers.panel_left_logical += dx / scale;
+                                    headers.panel_right_logical += dx / scale;
+                                    headers.panel_top_logical += dy / scale;
+                                    headers.content_clip_logical[0] += dx / scale;
+                                    headers.content_clip_logical[1] += dy / scale;
+                                    headers
+                                });
+                        }
+                        terminal_block_prompt_animating |= frame.prompt_animating;
+                        panels.push(retained);
+                    }
+                    // Retry even without a running effect or another PTY wakeup.
+                    // The common render tail retains the normal frame cadence.
+                    ctx.renderable_content.pending_update.set_dirty();
+                }};
+            }
             if ctx.pending_terminal_resize && !Self::apply_context_resize(ctx) {
+                retain_pane!();
                 continue;
             }
             if ctx.neoism_agent.is_some() || ctx.neoism_tags.is_some() {
@@ -169,9 +262,11 @@ impl Screen<'_> {
                 terminal_alt_screen,
                 terminal_cursor_abs,
                 terminal_prompt_rows,
+                raw_window_snapshot,
+                mut image_snapshot,
             ) = {
                 let Some(terminal) = ctx.terminal.try_lock_unfair() else {
-                    ctx.renderable_content.pending_update.set_dirty();
+                    retain_pane!();
                     continue;
                 };
                 let shell_prompt_state = terminal.shell_prompt_state();
@@ -207,6 +302,64 @@ impl Screen<'_> {
                     .iter()
                     .map(|cell| cell.c())
                     .collect::<String>()];
+                // Snapshot only bounded neighborhoods needed by block compose.
+                // All rows and image metadata share this one lock/epoch; no later
+                // blocking re-lock can mix a new PTY grid into this frame.
+                let radius = (dim.lines.max(1) as usize)
+                    .saturating_mul(3)
+                    .saturating_add(16);
+                let anchor = self
+                    .renderer
+                    .terminal_scroll
+                    .block_cursor(ctx.rich_text_id)
+                    .map(|cursor| cursor.raw_top_abs);
+                let mut raw_window_snapshot = std::collections::BTreeMap::new();
+                let centers = visible_row_sources
+                    .first()
+                    .copied()
+                    .into_iter()
+                    .chain(visible_row_sources.last().copied())
+                    .chain(anchor);
+                for center in centers.filter(|_| {
+                    is_active && !terminal_alt_screen && !ctx.has_non_terminal_surface()
+                }) {
+                    for abs in
+                        center.saturating_sub(radius)..=center.saturating_add(radius)
+                    {
+                        let line = line_for_absolute_row(abs, terminal.history_size());
+                        if line.0 > terminal.bottommost_line().0 {
+                            break;
+                        }
+                        raw_window_snapshot
+                            .entry(abs)
+                            .or_insert_with(|| terminal.grid[line].clone());
+                    }
+                }
+                let image_snapshot = crate::context::renderable::TerminalSnapshot {
+                    colors: terminal.colors,
+                    display_offset: terminal.display_offset(),
+                    blinking_cursor: terminal.blinking_cursor,
+                    visible_rows: Vec::new(),
+                    style_set: terminal.grid.style_set.clone(),
+                    extras_table: terminal.grid.extras_table.clone(),
+                    cursor: terminal.cursor(),
+                    damage: neoism_terminal_core::damage::TerminalDamage::Noop,
+                    columns: terminal.columns(),
+                    screen_lines: terminal.screen_lines(),
+                    history_size: terminal.history_size(),
+                    kitty_virtual_placements: terminal
+                        .graphics
+                        .kitty_virtual_placements
+                        .clone(),
+                    kitty_images: terminal.graphics.kitty_images.clone(),
+                    kitty_placements: terminal
+                        .graphics
+                        .kitty_placements
+                        .values()
+                        .cloned()
+                        .collect(),
+                    kitty_graphics_dirty: terminal.graphics.kitty_graphics_dirty,
+                };
                 (
                     visible_rows,
                     visible_row_sources,
@@ -220,6 +373,8 @@ impl Screen<'_> {
                     terminal_alt_screen,
                     terminal_cursor_abs,
                     terminal_prompt_rows,
+                    raw_window_snapshot,
+                    image_snapshot,
                 )
             };
             if ctx.terminal_input.sync_shell_state(shell_prompt_state) {
@@ -461,17 +616,17 @@ impl Screen<'_> {
                 let before = terminal_content_rows.saturating_mul(3).saturating_add(16);
                 let after = terminal_content_rows.saturating_mul(3).saturating_add(16);
                 let collect_raw_window = |start_abs: usize, end_abs: usize| {
-                    let terminal = ctx.terminal.lock();
-                    let history_size = terminal.history_size();
-                    let bottom_line = terminal.bottommost_line();
+                    // Detached scroll positions can be arbitrarily far from the
+                    // live bottom. Never copy that entire history gap per frame.
+                    let end_abs = end_abs
+                        .min(start_abs.saturating_add(before.saturating_add(after)));
                     let mut rows = Vec::new();
                     let mut sources = Vec::new();
                     for abs in start_abs..=end_abs {
-                        let line = line_for_absolute_row(abs, history_size);
-                        if line.0 > bottom_line.0 {
+                        let Some(row) = raw_window_snapshot.get(&abs) else {
                             break;
-                        }
-                        rows.push(terminal.grid[line].clone());
+                        };
+                        rows.push(row.clone());
                         sources.push(abs);
                     }
                     (rows, sources)
@@ -661,18 +816,22 @@ impl Screen<'_> {
                     );
                 }
                 {
-                    let terminal = ctx.terminal.lock();
+                    // Image placement/GPU work uses only owned metadata after
+                    // the snapshot guard has been released.
+                    if !image_snapshot.kitty_virtual_placements.is_empty() {
+                        image_snapshot.visible_rows = frame.rows.clone();
+                        image_snapshot.screen_lines = frame.rows.len();
+                        image_snapshot.style_set = style_set.clone();
+                    }
                     let terminal_scroll_offset_y = self
                         .renderer
                         .terminal_scroll
                         .current_offset(ctx.rich_text_id);
                     sync_composed_terminal_image_overlays(
                         &mut self.sugarloaf,
-                        &terminal,
+                        &image_snapshot,
                         ctx.rich_text_id,
-                        &frame.rows,
                         &frame.source_row_indices,
-                        &style_set,
                         item.layout_rect[0] + pre_loop_scaled_margin.left,
                         item.layout_rect[1]
                             + pre_loop_scaled_margin.top
@@ -814,7 +973,32 @@ impl Screen<'_> {
                 .current_offset(ctx.rich_text_id);
             let panel_cols = dim.columns.max(1) as usize;
             let panel_rows = dim.lines.max(1) as usize;
-            panels.push(PanelFrame {
+            let panel = PanelFrame {
+                captured_at: Instant::now(),
+                cursor_policy: TerminalCursorVisibilityInput {
+                    block_footer_active,
+                    is_active,
+                    hide_running_command_cursor,
+                    block_input_cursor_present: block_input_cursor.is_some(),
+                    cursor_state_visible: cursor.state.is_visible()
+                        && !ctx.has_non_terminal_surface(),
+                    tree_focused,
+                    trail_cursor_enabled: self.renderer.trail_cursor_enabled,
+                },
+                block_headers: if is_active {
+                    active_block_headers
+                        .as_ref()
+                        .map(|headers| std::sync::Arc::new(headers.clone()))
+                } else {
+                    None
+                },
+                prompt_animating: ctx.terminal_input.is_prompt_animating(),
+                image_overlays: self
+                    .sugarloaf
+                    .image_overlays
+                    .get(&ctx.rich_text_id)
+                    .cloned()
+                    .unwrap_or_default(),
                 route_id: ctx.route_id,
                 rich_text_id: ctx.rich_text_id,
                 terminal_scroll_offset_y,
@@ -873,7 +1057,13 @@ impl Screen<'_> {
                 hint_matches,
                 focused_match,
                 hovered_hyperlink,
-            });
+            };
+            let panel = PanelFrameRef::fresh(panel);
+            if !panel.has_non_terminal_surface {
+                self.terminal_panel_frames
+                    .insert(ctx.route_id, panel.frame.clone());
+            }
+            panels.push(panel);
         }
         crate::app::freeze_watchdog::mark_render_stage(
             window_id,
@@ -893,6 +1083,7 @@ impl Screen<'_> {
         } else {
             self.block_hover_icon_visual = None;
         }
+        ctx.has_animation |= terminal_snapshot_busy;
         ctx.panels = panels;
         ctx.scaled_margin = scaled_margin;
     }

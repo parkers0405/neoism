@@ -16,6 +16,8 @@ const CURSOR_ANIMATION_LENGTH: f32 = 0.10;
 pub enum NeoismAgentPickerKind {
     Slash,
     ConversationSource,
+    /// Execution system for a fresh dashboard draft; hosts resolve stable IDs.
+    System,
     Agent,
     Model,
     /// Provider-advertised ACP root session config option (never Neoism model).

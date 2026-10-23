@@ -46,11 +46,122 @@ fn wayland_frame_callback_throttle_disabled() -> bool {
 use std::path::{Path, PathBuf};
 
 mod cell_emit;
+#[cfg(test)]
+mod contention_tests;
 mod overlays;
 mod status_sync;
 mod terminal_compose;
 
+/// Advance presentation-only blink even when the renderer's Noop gate or a
+/// busy terminal prevented its normal snapshot path from ticking the clock.
+fn tick_terminal_cursor_blink(
+    content: &mut crate::context::renderable::RenderableContent,
+    interval_ms: u64,
+    now: Instant,
+) {
+    if !content.has_blinking_enabled {
+        return;
+    }
+    if content.selection_range.is_some() {
+        content.is_blinking_cursor_visible = true;
+        content.last_blink_toggle = None;
+        return;
+    }
+    let interval = std::time::Duration::from_millis(interval_ms.max(1));
+    if content
+        .last_typing
+        .is_some_and(|typing| now.saturating_duration_since(typing) < interval)
+    {
+        content.is_blinking_cursor_visible = true;
+        content.last_blink_toggle = content.last_typing;
+    } else if let Some(last) = content.last_blink_toggle {
+        if now.saturating_duration_since(last) >= interval {
+            content.is_blinking_cursor_visible = !content.is_blinking_cursor_visible;
+            content.last_blink_toggle = Some(now);
+        }
+    } else {
+        content.is_blinking_cursor_visible = true;
+        content.last_blink_toggle = Some(now);
+    }
+}
+
+/// Renderer::run may already have consumed PTY damage before our second
+/// snapshot encounters contention. Preserve that work for the next fresh frame,
+/// never for the retained frame being presented now.
+fn defer_panel_damage(
+    pending: &mut crate::context::renderable::PendingUpdate,
+    last_damage: &mut neoism_terminal_core::damage::TerminalDamage,
+) {
+    let damage = std::mem::replace(
+        last_damage,
+        neoism_terminal_core::damage::TerminalDamage::Noop,
+    );
+    pending.set_terminal_damage(damage);
+}
+
+/// Immutable previous-good pane data plus transient, never-replayed damage.
+/// Deref keeps row consumers read-only; cloning this handle never clones rows.
+pub(crate) struct PanelFrameRef {
+    frame: std::sync::Arc<PanelFrame>,
+    damage: neoism_terminal_core::damage::TerminalDamage,
+    cursor_blink_visible: bool,
+    cursor_color: neoism_backend::config::colors::ColorArray,
+    cursor_visible: bool,
+    is_active: bool,
+    terminal_scroll_offset_y: f32,
+    layout_rect: [f32; 4],
+}
+
+impl std::ops::Deref for PanelFrameRef {
+    type Target = PanelFrame;
+    fn deref(&self) -> &PanelFrame {
+        &self.frame
+    }
+}
+
+impl PanelFrameRef {
+    fn fresh(mut frame: PanelFrame) -> Self {
+        let damage = std::mem::replace(
+            &mut frame.damage,
+            neoism_terminal_core::damage::TerminalDamage::Noop,
+        );
+        Self::new(std::sync::Arc::new(frame), damage)
+    }
+
+    fn requires_full_rebuild(&self, grid_needs_full_rebuild: bool) -> bool {
+        grid_needs_full_rebuild
+            || matches!(
+                self.damage,
+                neoism_terminal_core::damage::TerminalDamage::Full
+            )
+    }
+
+    fn retained(frame: std::sync::Arc<PanelFrame>) -> Self {
+        Self::new(frame, neoism_terminal_core::damage::TerminalDamage::Noop)
+    }
+
+    fn new(
+        frame: std::sync::Arc<PanelFrame>,
+        damage: neoism_terminal_core::damage::TerminalDamage,
+    ) -> Self {
+        Self {
+            cursor_blink_visible: frame.cursor_blink_visible,
+            cursor_color: frame.cursor_color,
+            cursor_visible: frame.cursor_visible,
+            is_active: frame.is_active,
+            terminal_scroll_offset_y: frame.terminal_scroll_offset_y,
+            layout_rect: frame.layout_rect,
+            frame,
+            damage,
+        }
+    }
+}
+
 pub(crate) struct PanelFrame {
+    captured_at: Instant,
+    block_headers: Option<std::sync::Arc<ActiveBlockHeaders>>,
+    prompt_animating: bool,
+    image_overlays: Vec<neoism_backend::sugarloaf::GraphicOverlay>,
     route_id: usize,
     /// rich_text_id used to look up per-pane scroll offset
     /// (editor_scroll spring or terminal_scroll direct).
@@ -96,6 +207,7 @@ pub(crate) struct PanelFrame {
     source_row_indices: Vec<Option<usize>>,
     style_set: neoism_terminal_core::crosswords::style::StyleSet,
     term_colors: neoism_terminal_core::colors::term::TermColors,
+    cursor_policy: TerminalCursorVisibilityInput,
     cursor_col: u16,
     cursor_row: u16,
     cursor_visible: bool,
@@ -173,7 +285,7 @@ pub(crate) struct FrameCtx {
     scale_factor: f32,
     trail_cursor_target: Option<neoism_ui::chrome_policy::TrailCursorOverlayTarget>,
     scaled_margin: neoism_backend::config::layout::Margin,
-    panels: Vec<PanelFrame>,
+    panels: Vec<PanelFrameRef>,
 }
 
 impl Screen<'_> {
@@ -212,6 +324,43 @@ impl Screen<'_> {
                 cursor_color,
             );
         }
+    }
+
+    fn terminal_block_input_active_for_paint(&self) -> bool {
+        let current = self.context_manager.current();
+        if current.has_non_terminal_surface()
+            || current.terminal_input.passthrough_session_active()
+        {
+            return false;
+        }
+        self.renderer
+            .terminal_prompt_state_for_paint(current)
+            .is_some_and(|(prompt, alt)| {
+                current.terminal_input.should_capture_input(
+                    prompt,
+                    alt,
+                    current.remote_pty.is_some(),
+                )
+            })
+    }
+
+    fn terminal_block_input_cursor_rect_for_paint(
+        &self,
+    ) -> Option<([f32; 4], neoism_terminal_core::ansi::CursorShape)> {
+        if !self.terminal_block_input_active_for_paint() {
+            return None;
+        }
+        let [x, y, w, h] = self.renderer.command_composer.last_frame().caret_rect?;
+        #[cfg(target_os = "macos")]
+        let (y, h) = {
+            let extra = (2.0 * self.renderer.command_composer.scale()).max(2.0);
+            (y - extra * 0.5, h + extra)
+        };
+        let scale = self.sugarloaf.scale_factor();
+        Some((
+            [x * scale, y * scale, w * scale, h * scale],
+            neoism_terminal_core::ansi::CursorShape::Block,
+        ))
     }
 
     fn chrome_trail_cursor_rect(
@@ -302,6 +451,7 @@ impl Screen<'_> {
     ) -> Option<crate::context::renderable::WindowUpdate> {
         #[cfg(feature = "cef-artifacts")]
         self.begin_html_artifact_frame();
+        self.poll_notes_sidebar_refresh();
         self.pump_agent_image_browser();
         self.pump_conversation_navigator();
         self.renderer.background_effects_animating = false;
@@ -342,45 +492,23 @@ impl Screen<'_> {
         // failure later. Nothing is rendered *through* the grid yet
         // — `sugarloaf.render()` is still called with no grids
         // slice below.
-        if self.context_manager.current().pending_terminal_resize {
-            let current = self.context_manager.current_mut();
-            if !Self::apply_context_resize(current) {
-                crate::app::freeze_watchdog::mark_render_stage(
-                    window_id,
-                    "screen.render.skip_pending_resize_busy",
-                );
-                return None;
-            }
-        }
-
+        // Resize is attempted once per pane in snapshot_panels. Until it succeeds,
+        // keep the resident grid at its last acknowledged terminal dimensions.
         let current_route = self.context_manager.current_route();
-        let (grid_cols, grid_rows) = {
-            let Some(terminal) =
-                self.context_manager.current().terminal.try_lock_unfair()
-            else {
-                tracing::debug!(
-                    target: "neoism::render",
-                    route_id = current_route,
-                    "skipping render frame because current terminal state is busy"
-                );
-                self.context_manager
-                    .current_mut()
-                    .renderable_content
-                    .pending_update
-                    .set_dirty();
-                crate::app::freeze_watchdog::mark_render_stage(
-                    window_id,
-                    "screen.render.skip_terminal_busy",
-                );
-                return None;
-            };
-            (terminal.columns() as u32, terminal.screen_lines() as u32)
-        };
+        let current = self.context_manager.current();
+        let (grid_cols, grid_rows) = self
+            .terminal_panel_frames
+            .get(&current_route)
+            .map(|frame| (frame.cols, frame.rows))
+            .unwrap_or((
+                current.dimension.columns.max(1) as u32,
+                current.dimension.lines.max(1) as u32,
+            ));
         crate::app::freeze_watchdog::mark_render_stage(
             window_id,
             "screen.render.terminal_dimensions",
         );
-        if grid_cols > 0 && grid_rows > 0 {
+        if grid_cols > 0 && grid_rows > 0 && !self.grids.contains_key(&current_route) {
             self.ensure_grid(current_route, grid_cols, grid_rows);
         }
 
@@ -490,6 +618,9 @@ impl Screen<'_> {
         }
 
         self.draw_overlays(&mut frame_ctx, animation_dt);
+        // A later successful pane gate must not erase an earlier host metadata
+        // retry. Keep it alive through the common cadence, without cell damage.
+        frame_ctx.has_animation |= self.renderer.terminal_paint_retry_requested();
         frame_ctx.has_animation |= markdown_panels_animating
             || code_panels_animating
             || neoworld_animating

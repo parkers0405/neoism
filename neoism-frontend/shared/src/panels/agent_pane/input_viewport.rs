@@ -1,5 +1,7 @@
 //! Wheel-owned viewport for the agent's wrapped draft text.
 
+use std::rc::Rc;
+
 #[derive(Debug, Default)]
 pub struct InputViewport {
     first_row: usize,
@@ -8,13 +10,17 @@ pub struct InputViewport {
     capacity: usize,
     row_height: f32,
     rect: Option<[f32; 4]>,
-    text: String,
+    text: Rc<str>,
     cursor: Option<usize>,
 }
 
 impl InputViewport {
     pub fn row_height(&self) -> f32 {
         self.row_height.max(1.0)
+    }
+
+    pub fn text_snapshot(&self) -> Rc<str> {
+        self.text.clone()
     }
 
     /// Redraws preserve manual scrolling; only edits, caret movement, or
@@ -29,8 +35,32 @@ impl InputViewport {
         rect: [f32; 4],
         row_height: f32,
     ) -> usize {
+        let text = if self.text.as_ref() == text {
+            self.text.clone()
+        } else {
+            Rc::from(text)
+        };
+        self.update_shared(
+            text, cursor, caret_row, row_count, capacity, rect, row_height,
+        )
+    }
+
+    /// Renderer path: retain the draft snapshot rather than copying it when
+    /// caret/geometry changes. Shared identity skips even the content comparison;
+    /// distinct snapshots still compare exactly, including same-length edits.
+    pub fn update_shared(
+        &mut self,
+        text: Rc<str>,
+        cursor: usize,
+        caret_row: usize,
+        row_count: usize,
+        capacity: usize,
+        rect: [f32; 4],
+        row_height: f32,
+    ) -> usize {
         let capacity = capacity.max(1);
-        let reveal = self.text != text
+        let text_changed = !Rc::ptr_eq(&self.text, &text) && self.text != text;
+        let reveal = text_changed
             || self.cursor != Some(cursor)
             || self.row_count != row_count
             || self.capacity != capacity
@@ -49,8 +79,7 @@ impl InputViewport {
                 self.first_row = caret_row.saturating_sub(capacity - 1);
             }
             self.first_row = self.first_row.min(row_count.saturating_sub(capacity));
-            self.text.clear();
-            self.text.push_str(text);
+            self.text = text;
             self.cursor = Some(cursor);
         }
         self.first_row
@@ -108,6 +137,37 @@ mod tests {
         caret: usize,
     ) -> usize {
         view.update(text, cursor, caret, 12, 5, RECT, 20.0)
+    }
+
+    #[test]
+    fn huge_shared_draft_survives_redraw_cursor_and_resize_without_copying() {
+        let mut view = InputViewport::default();
+        let text: Rc<str> = Rc::from("界".repeat(400_000));
+        view.update_shared(text.clone(), text.len(), 11, 12, 5, RECT, 20.0);
+        view.scroll_at(40.0, 40.0, 60.0);
+        for _ in 0..100 {
+            assert_eq!(
+                view.update_shared(text.clone(), text.len(), 11, 12, 5, RECT, 20.0),
+                4
+            );
+            assert!(Rc::ptr_eq(&text, &view.text_snapshot()));
+        }
+        view.update_shared(text.clone(), 0, 0, 12, 5, RECT, 20.0);
+        assert!(Rc::ptr_eq(&text, &view.text_snapshot()));
+        view.update_shared(text.clone(), 0, 0, 12, 4, RECT, 20.0);
+        assert!(Rc::ptr_eq(&text, &view.text_snapshot()));
+        let replacement: Rc<str> = Rc::from("語".repeat(400_000));
+        view.update_shared(
+            replacement.clone(),
+            replacement.len(),
+            11,
+            12,
+            5,
+            RECT,
+            20.0,
+        );
+        assert!(Rc::ptr_eq(&replacement, &view.text_snapshot()));
+        assert_eq!(view.first_row, 7);
     }
 
     #[test]

@@ -1850,10 +1850,11 @@ impl Sugarloaf<'_> {
         self.text.occlude_since(checkpoint.text, &holes);
         self.overlay_text
             .occlude_since(checkpoint.overlay_text, &holes);
+        let image_holes = crate::occlusion::Occlusions::new(&holes);
         for (panel, images) in &mut self.image_overlays {
             let first = checkpoint.images.get(panel).copied().unwrap_or_default();
             crate::occlusion::filter_tail(images, first, |image| {
-                crate::occlusion::image_parts(image, &holes)
+                crate::occlusion::image_parts_with(image, &image_holes)
             });
         }
         self.capture_content_occlusion_checkpoint();
@@ -2247,6 +2248,8 @@ impl Sugarloaf<'_> {
 
         let device = ctx.device().clone();
         let cmd = frame.cmd_buffer;
+
+        self.renderer.prepare_image_retirement_vulkan(&frame);
 
         // Pre-pass: per-panel grid atlas uploads + UI text overlay
         // atlas uploads. MUST happen before `cmd_begin_rendering` —

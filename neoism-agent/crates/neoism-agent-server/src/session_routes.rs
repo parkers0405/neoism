@@ -604,8 +604,7 @@ pub(crate) async fn session_get(
         .get_session(&session_id)
         .await?
         .ok_or_else(|| ApiError::not_found("Session not found"))?;
-    let mut projected = crate::catalog_activity::project(&state, vec![info]).await?;
-    Ok(Json(projected.remove(0)))
+    Ok(Json(crate::catalog_activity::project_one(&state, info).await?))
 }
 
 pub(crate) async fn session_delete(

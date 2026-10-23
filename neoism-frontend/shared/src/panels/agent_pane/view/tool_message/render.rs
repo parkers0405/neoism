@@ -1228,7 +1228,8 @@ fn render_tool_diff_cards(
         } else {
             0.0
         };
-        let code_width = diff_card::body_text_width(card_w, s);
+        let gutter_width = diff_card::measured_gutter_width(sugarloaf, view.max_line_number, s);
+        let code_width = diff_card::body_text_width_with_gutter(card_w, s, gutter_width);
         let content_width = view.content_width.get().unwrap_or_else(|| {
             let width = diff_card::content_width(
                 sugarloaf,
@@ -1275,6 +1276,7 @@ fn render_tool_diff_cards(
             diff_card::PaintParams {
                 opacity: theme.opacity,
                 clip: Some(viewport_clip),
+                gutter_width: Some(gutter_width),
                 occlusion_rects,
                 ..diff_card::PaintParams::default()
             },
@@ -1369,7 +1371,7 @@ fn render_tool_diff_cards(
                     }
                     let track = sticky_markdown_horizontal_scrollbar_track(
                         visible_body,
-                        card_x + (diff_card::GUTTER_WIDTH + diff_card::BODY_PAD_X) * s,
+                        card_x + gutter_width + diff_card::BODY_PAD_X * s,
                         code_width,
                         s,
                     )

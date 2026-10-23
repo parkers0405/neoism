@@ -68,7 +68,7 @@ impl<K: Eq + Hash + Clone, V: Clone> Cache<K, V> {
         key: K,
         load: impl FnOnce() -> Result<V, String>,
     ) -> Result<V, String> {
-        self.get_with_stale(key, true, load)
+        self.get_with_stale(key, true, FRESH, load, |_, _, _| false)
     }
 
     pub(super) fn get_fresh(
@@ -76,14 +76,26 @@ impl<K: Eq + Hash + Clone, V: Clone> Cache<K, V> {
         key: K,
         load: impl FnOnce() -> Result<V, String>,
     ) -> Result<V, String> {
-        self.get_with_stale(key, false, load)
+        self.get_with_stale(key, false, FRESH, load, |_, _, _| false)
+    }
+
+    pub(super) fn get_fresh_retaining(
+        &self,
+        key: K,
+        fresh: Duration,
+        load: impl FnOnce() -> Result<V, String>,
+        retain: impl Fn(&V, &V, Duration) -> bool,
+    ) -> Result<V, String> {
+        self.get_with_stale(key, false, fresh, load, retain)
     }
 
     fn get_with_stale(
         &self,
         key: K,
         allow_stale: bool,
+        fresh: Duration,
         load: impl FnOnce() -> Result<V, String>,
+        retain: impl Fn(&V, &V, Duration) -> bool,
     ) -> Result<V, String> {
         let slot = {
             let mut slots = self.slots.lock().unwrap();
@@ -122,7 +134,7 @@ impl<K: Eq + Hash + Clone, V: Clone> Cache<K, V> {
         let mut state = slot.state.lock().unwrap();
         loop {
             if let Some((at, value)) = &state.good {
-                if at.elapsed() < FRESH {
+                if at.elapsed() < fresh {
                     return Ok(value.clone());
                 }
             }
@@ -145,13 +157,21 @@ impl<K: Eq + Hash + Clone, V: Clone> Cache<K, V> {
         }
         drop(state);
         // Always release waiters even if a loader panics.
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(load))
+        let mut result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(load))
             .unwrap_or_else(|_| Err("Catalog loader panicked".into()));
         let mut state = slot.state.lock().unwrap();
         state.running = false;
         match &result {
             Ok(value) => {
-                state.good = Some((Instant::now(), value.clone()));
+                if let Some((_, previous)) = state.good.as_ref().filter(|(at, previous)| {
+                    retain(previous, value, at.elapsed())
+                }) {
+                    // Preserve the original age; incomplete refreshes cannot
+                    // extend the admission lifetime of a complete snapshot.
+                    result = Ok(previous.clone());
+                } else {
+                    state.good = Some((Instant::now(), value.clone()));
+                }
                 state.error = None;
             }
             Err(error) => state.error = Some((Instant::now(), error.clone())),

@@ -30,6 +30,7 @@ pub(crate) enum PaletteMode {
     Buffers(Vec<PaletteBufferEntry>),
     Workspaces(Vec<PaletteWorkspaceEntry>),
     Systems(Vec<super::actions::PaletteSystemEntry>),
+    SystemSettings(super::actions::PaletteSystemEntry),
     Servers(Vec<PaletteServerEntry>),
     /// Vim-style ex-command capture. The shared command palette is the
     /// default `:` surface now; this mode remains for explicit raw
@@ -170,7 +171,7 @@ impl<'a> PaletteRow<'a> {
     pub(crate) fn display_title(&self) -> String {
         match *self {
             PaletteRow::Command { service, title, .. } => {
-                format!("{service}: {title}")
+                if service.is_empty() { title.to_owned() } else { format!("{service}: {title}") }
             }
             PaletteRow::Ex { name, .. } => format!("neoism: {name}"),
             _ => self.title().to_owned(),
@@ -198,6 +199,7 @@ impl<'a> PaletteRow<'a> {
             PaletteRow::WorkspaceCreate => "Ctrl+Shift+W",
             PaletteRow::Workspace { entry } => entry.detail.as_str(),
             PaletteRow::Server { entry } => entry.address.as_str(),
+            PaletteRow::System { entry } if !entry.local && !entry.enabled => "Deactivated",
             PaletteRow::System { entry } => match entry.status {
                 super::actions::SystemConnectionStatus::Connected => "Connected",
                 super::actions::SystemConnectionStatus::Connecting => "Connecting",
@@ -224,7 +226,7 @@ impl<'a> PaletteRow<'a> {
             PaletteRow::Server { entry } => Some(PaletteAction::SelectServer {
                 id: entry.id.clone(),
             }),
-            PaletteRow::System { entry } => Some(PaletteAction::ConnectSystem {
+            PaletteRow::System { entry } => Some(PaletteAction::ShowSystemSettings {
                 id: entry.id.clone(),
             }),
             PaletteRow::SystemAdd => Some(PaletteAction::AddSystem),

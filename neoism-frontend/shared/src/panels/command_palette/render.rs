@@ -27,7 +27,7 @@ use super::{
     CURSOR_ANIMATION_LENGTH, DEPTH_BG, DEPTH_ELEMENT, INPUT_FONT_SIZE, INPUT_HEIGHT,
     INPUT_PADDING_X, LIST_SCROLL_ANIMATION_LENGTH, OPEN_POP_MS, ORDER,
     PALETTE_CORNER_RADIUS, PALETTE_PADDING, RESULTS_MARGIN_TOP, RESULTS_PADDING_BOTTOM,
-    RESULT_FONT_SIZE, RESULT_ITEM_HEIGHT, SEPARATOR_HEIGHT, SHORTCUT_FONT_SIZE,
+    RESULT_FONT_SIZE, SEPARATOR_HEIGHT, SHORTCUT_FONT_SIZE,
 };
 
 const MAX_INPUT_ROWS: usize = 5;
@@ -518,7 +518,7 @@ impl CommandPalette {
         self.viewport_height = window_height / scale_factor;
         let input_pad_x = INPUT_PADDING_X * s;
         let input_font = INPUT_FONT_SIZE * s;
-        let row_h = RESULT_ITEM_HEIGHT * s;
+        let row_h = self.row_height();
         let result_font = RESULT_FONT_SIZE * s;
         let shortcut_font = SHORTCUT_FONT_SIZE * s;
         let margin_top = RESULTS_MARGIN_TOP * s;
@@ -560,6 +560,7 @@ impl CommandPalette {
                 PaletteMode::Shaders(_) => "Type a shader name...",
                 PaletteMode::Buffers(_) => "Search buffers...",
                 PaletteMode::Workspaces(_) => "Search workspaces...",
+                PaletteMode::SystemSettings(_) => "",
                 PaletteMode::Systems(_) => "Search systems...",
                 PaletteMode::Servers(_) => "Search servers...",
             }
@@ -574,7 +575,9 @@ impl CommandPalette {
         let error_rows = usize::from(self.cd_error.is_some());
         let line_h = INPUT_HEIGHT * s;
         let header_h = self.category_header_height();
-        self.input_band_height = line_h * (query_rows + error_rows) as f32 + header_h;
+        let has_query_input = self.has_query_input();
+        self.input_band_height = header_h
+            + if has_query_input { line_h * (query_rows + error_rows) as f32 } else { 0.0 };
         let input_h = self.input_band_height - header_h;
         // A resize or wrapped query can change the row budget. Keep the real
         // selection visible in the same viewport used for geometry and drawing.
@@ -610,7 +613,38 @@ impl CommandPalette {
         let input_x = content_x + pad;
         let input_y = content_y + pad + header_h;
         let input_width = (content_w - pad * 2.0).max(0.0);
-        if header_h > 0.0 {
+        if let PaletteMode::SystemSettings(entry) = &self.mode {
+            let back = [input_x, content_y + pad, 96.0 * s, 30.0 * s];
+            if self.hovered_category == Some(0) {
+                sugarloaf.overlay_rounded_rect(back[0], back[1], back[2], back[3],
+                    theme.f32(theme.hover), DEPTH_ELEMENT, 6.0 * s, ORDER);
+            }
+            let opts = DrawOpts { font_size: shortcut_font, color: theme.u8(theme.fg),
+                clip_rect: Some(back), ..DrawOpts::default() };
+            draw_overlay_icon_centered(
+                sugarloaf,
+                back[0] + 8.0 * s,
+                [back[0] + 8.0 * s, back[1], 14.0 * s, back[3]],
+                "\u{f060}",
+                &DrawOpts { font_size: 14.0 * s, ..opts.clone() },
+                true,
+            );
+            sugarloaf.overlay_text_mut().draw(
+                back[0] + 30.0 * s, back[1] + 7.0 * s, "Systems", &opts,
+            );
+            self.category_hits.push((back, PaletteAction::ShowSystems));
+            let status = match entry.status {
+                super::actions::SystemConnectionStatus::Connected => "Connected",
+                super::actions::SystemConnectionStatus::Connecting => "Connecting",
+                super::actions::SystemConnectionStatus::Disconnected => "Disconnected",
+            };
+            let heading = format!("{} · {} · {}{}", entry.name, entry.address, status,
+                if entry.local { " · Read only" } else { "" });
+            let heading_opts = DrawOpts { clip_rect: Some([input_x, back[1] + 34.0 * s,
+                input_width, 24.0 * s]), ..opts };
+            let heading = truncate_to_fit(&heading, input_width, sugarloaf, &heading_opts);
+            sugarloaf.overlay_text_mut().draw(input_x, back[1] + 37.0 * s, &heading, &heading_opts);
+        } else if header_h > 0.0 {
             let gap = 4.0 * s;
             let tab_w = ((input_width - gap) * 0.5).clamp(0.0, 120.0 * s);
             let tab_h = 30.0 * s;
@@ -709,7 +743,8 @@ impl CommandPalette {
             PaletteMode::Shaders(_) => "Type a shader name...",
             PaletteMode::Buffers(_) => "Search buffers...",
             PaletteMode::Workspaces(_) => "Search workspaces...",
-            PaletteMode::Systems(_) => "Search systems...",
+            PaletteMode::SystemSettings(_) => "",
+                PaletteMode::Systems(_) => "Search systems...",
             PaletteMode::Servers(_) => "Search servers...",
             // Ex/Search modes should open with a readable prompt, not
             // a lone ':' or '/' glyph sitting in the input.
@@ -767,7 +802,7 @@ impl CommandPalette {
         let visible_display_rows = display_rows
             .iter()
             .skip(first_visible)
-            .take(visible_count)
+            .take(if has_query_input { visible_count } else { 0 })
             .copied()
             .collect::<Vec<_>>();
         let mut input_rendered_width = 0.0;
@@ -793,7 +828,7 @@ impl CommandPalette {
                 );
             }
         }
-        if let Some(error) = self.cd_error.as_deref() {
+        if let Some(error) = self.cd_error.as_deref().filter(|_| has_query_input) {
             let error_opts = DrawOpts {
                 color: theme.u8(theme.red),
                 ..input_opts
@@ -840,7 +875,7 @@ impl CommandPalette {
         let elapsed_ms = Instant::now()
             .saturating_duration_since(self.caret_blink_start)
             .as_millis();
-        let caret_visible = (elapsed_ms / CARET_BLINK_MS).is_multiple_of(2);
+        let caret_visible = has_query_input && (elapsed_ms / CARET_BLINK_MS).is_multiple_of(2);
 
         if caret_visible {
             let (caret_start, _) = display_rows.get(caret_row).copied().unwrap_or((0, 0));
@@ -1308,7 +1343,9 @@ impl CommandPalette {
                 + row_icon_gap
                 + online_dot_width
                 + online_dot_gap;
-            let row_text_y = item_y + (row_h - result_font) / 2.0;
+            let is_system_setting = matches!(self.mode, PaletteMode::SystemSettings(_));
+            let row_text_y = if is_system_setting { item_y + 6.0 * s }
+                else { item_y + (row_h - result_font) / 2.0 };
 
             // Right-side hint: shortcut for commands, copy icon for
             // font rows (signals "Enter copies this to clipboard").
@@ -1326,7 +1363,7 @@ impl CommandPalette {
             };
             let is_server_row =
                 matches!(row, PaletteRow::Server { .. } | PaletteRow::System { .. });
-            let shortcut_text: &str = if is_server_row {
+            let shortcut_text: &str = if is_server_row || is_system_setting {
                 ""
             } else if is_command {
                 command_chip.as_deref().unwrap_or("")
@@ -1397,7 +1434,9 @@ impl CommandPalette {
                 0.0
             };
             let server_actions = match row {
-                PaletteRow::System { entry } => Some(entry.controls()),
+                PaletteRow::Command { action: action @ PaletteAction::SetSystemEnabled { .. }, .. }
+                    if matches!(self.mode, PaletteMode::SystemSettings(_)) =>
+                    Some(vec![("Active", 40.0, action.clone())]),
                 PaletteRow::Server { entry } if !entry.local => Some(entry.controls()),
                 _ => None,
             };
@@ -1499,6 +1538,27 @@ impl CommandPalette {
                 &title,
                 &title_opts,
             );
+            if is_system_setting {
+                let description_opts = DrawOpts { font_size: shortcut_font,
+                    color: theme.u8(theme.dim), clip_rect: Some(list_clip), ..DrawOpts::default() };
+                let budget = (input_x + input_width - input_pad_x - row_text_x
+                    - server_action_reserve).max(0.0);
+                let mut line = String::new();
+                let mut lines = Vec::new();
+                for word in row.shortcut().split_whitespace() {
+                    let candidate = if line.is_empty() { word.to_owned() } else { format!("{line} {word}") };
+                    if !line.is_empty() && sugarloaf.overlay_text_mut().measure(&candidate, &description_opts) > budget {
+                        lines.push(line);
+                        line = word.to_owned();
+                    } else { line = candidate; }
+                }
+                if !line.is_empty() { lines.push(line); }
+                for (index, line) in lines.iter().take(2).enumerate() {
+                    let line = truncate_to_fit(line, budget, sugarloaf, &description_opts);
+                    sugarloaf.overlay_text_mut().draw(row_text_x,
+                        item_y + (25.0 + index as f32 * 15.0) * s, &line, &description_opts);
+                }
+            }
             let endpoint_detail = match row {
                 PaletteRow::Server { entry } => Some(entry.address.clone()),
                 PaletteRow::System { entry } => Some(if entry.address.is_empty() {
@@ -1552,6 +1612,43 @@ impl CommandPalette {
                 let chip_y = item_y + (row_h - chip_h) * 0.5;
                 for (label, width, action) in controls {
                     let w = width * s;
+                    if let PaletteAction::SetSystemEnabled { enabled, .. } = &action {
+                        // Match the modal/Settings 40×22 track and 16px knob.
+                        // Clip each primitive independently, just like the modal.
+                        let checked = !*enabled;
+                        let ty = item_y + (row_h - 22.0 * s) * 0.5;
+                        let track = [x, ty, w, 22.0 * s];
+                        let Some(hit) = clipped_server_control_rect(track, list_clip) else {
+                            x += w + gap;
+                            continue;
+                        };
+                        let mut draw = |r: [f32; 4], color: [f32; 4], radius: f32, order| {
+                            if let Some(r) = clipped_server_control_rect(r, list_clip) {
+                                sugarloaf.overlay_rounded_rect(
+                                    r[0], r[1], r[2], r[3], color,
+                                    DEPTH_ELEMENT + 0.03,
+                                    radius.min(r[2] * 0.5).min(r[3] * 0.5), order,
+                                );
+                            }
+                        };
+                        if self.hovered_system_control.as_ref() == Some(&action) {
+                            draw(
+                                [x - 2.0 * s, ty - 3.0 * s, w + 4.0 * s, 28.0 * s],
+                                theme.f32_alpha(theme.accent, 0.08), 6.0 * s, ORDER + 1,
+                            );
+                        }
+                        draw(track, theme.f32(if checked { theme.accent } else { theme.border }),
+                            11.0 * s, ORDER + 3);
+                        draw(
+                            [x + if checked { 21.0 * s } else { 3.0 * s },
+                                ty + 3.0 * s, 16.0 * s, 16.0 * s],
+                            theme.f32(if checked { theme.fg } else { theme.dim }),
+                            8.0 * s, ORDER + 4,
+                        );
+                        next_system_control_hits.push((hit, action));
+                        x += w + gap;
+                        continue;
+                    }
                     let Some(rect) =
                         clipped_server_control_rect([x, chip_y, w, chip_h], list_clip)
                     else {
@@ -1584,11 +1681,6 @@ impl CommandPalette {
                         &opts,
                     );
                     match action {
-                        action @ (PaletteAction::ConnectSystem { .. }
-                        | PaletteAction::DisconnectSystem { .. }
-                        | PaletteAction::RemoveSystem { .. }) => {
-                            next_system_control_hits.push((rect, action));
-                        }
                         PaletteAction::EditServer { id } => {
                             next_server_edit_hits.push((rect, id))
                         }

@@ -176,6 +176,7 @@ pub struct Renderer {
     /// input and the next render tick.
     pub splash_overlay: splash_overlay::SplashOverlay,
     pub file_tree: file_tree::FileTree,
+    terminal_paint_cache: run::TerminalPaintCache,
     pub notes_sidebar: notes_sidebar::NotesSidebar,
     pub left_sidebar_host: neoism_ui::panels::left_sidebar_host::LeftSidebarHost,
     pub conversations_visible: bool,
@@ -474,6 +475,7 @@ impl Renderer {
             terminal_scroll: terminal_scroll::TerminalScroll::new(),
             splash_overlay: splash_overlay::SplashOverlay::new(),
             file_tree: file_tree::FileTree::new(),
+            terminal_paint_cache: Default::default(),
             notes_sidebar: notes_sidebar::NotesSidebar::default(),
             left_sidebar_host,
             conversations_visible: false,

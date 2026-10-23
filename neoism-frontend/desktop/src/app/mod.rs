@@ -134,15 +134,25 @@ mod server_switch_tests {
             target: "buildbox".into(),
             result: Err("canceled".into()),
         };
-        let mut requests = HashMap::from([(window_id, SshAttachRequest {
-            generation: 1, target: "buildbox".into(), ssh_args: Vec::new(),
-        })]);
+        let mut requests = HashMap::from([(
+            window_id,
+            SshAttachRequest {
+                generation: 1,
+                target: "buildbox".into(),
+                ssh_args: Vec::new(),
+            },
+        )]);
         assert!(pending.is_current(&requests));
         requests.remove(&window_id);
         assert!(!pending.is_current(&requests));
-        requests.insert(window_id, SshAttachRequest {
-            generation: 2, target: "buildbox".into(), ssh_args: Vec::new(),
-        });
+        requests.insert(
+            window_id,
+            SshAttachRequest {
+                generation: 2,
+                target: "buildbox".into(),
+                ssh_args: Vec::new(),
+            },
+        );
         assert!(!pending.is_current(&requests));
         requests.get_mut(&window_id).unwrap().generation = 1;
         requests.get_mut(&window_id).unwrap().target = "otherbox".into();
@@ -376,13 +386,13 @@ pub mod bell;
 mod connection_recovery;
 pub mod daemon_pump;
 mod fast_server_sessions;
-mod systems;
 pub mod freeze_watchdog;
 pub mod ime;
 mod invite_activation;
 mod invite_join;
 pub mod messenger;
 pub mod scheduler;
+mod systems;
 pub mod user_event_dispatch;
 pub mod window_event;
 pub mod window_server_session;
@@ -397,6 +407,8 @@ pub struct Application<'a> {
     router: Router<'a>,
     bootstrap_daemon: Option<DesktopDaemonConnection>,
     window_sessions: HashMap<WindowId, WindowServerSession>,
+    daemon_pump_turn: daemon_pump::PumpTurn,
+    daemon_pump_cursor: usize,
     /// Monotonic ordinal for window profile ids. Profiles key persisted
     /// workspace subscriptions in `servers.json`, so they must be STABLE
     /// across restarts — the Nth window a process creates is always
@@ -636,6 +648,8 @@ impl Application<'_> {
             router,
             bootstrap_daemon: daemon,
             window_sessions: HashMap::new(),
+            daemon_pump_turn: daemon_pump::PumpTurn::default(),
+            daemon_pump_cursor: 0,
             window_profile_seq: 0,
             home_daemon_endpoint,
             server_registry,
@@ -743,7 +757,10 @@ impl Application<'_> {
                 session.connection.token().map(str::to_string),
                 is_home,
             );
-            route.window.screen.refresh_selected_workspace_after_daemon_attach();
+            route
+                .window
+                .screen
+                .refresh_selected_workspace_after_daemon_attach();
             route.request_redraw();
         }
     }
@@ -913,96 +930,109 @@ impl Application<'_> {
                     .top_bar
                     .set_server_temporary(temporary);
             }
-            // Capture the source endpoint BEFORE processing workspace events:
-            // an earlier event in this batch can switch the active connection.
-            let drain_start = perf_start.map(|_| Instant::now());
-            let (endpoint, connection_key, messages, parked_editors) = self
-                .window_sessions
-                .get(&window_id)
-                .map(|session| {
-                    (
-                        session.connection.endpoint().to_string(),
-                        session.connection.connection_key(),
-                        session.connection.drain_messages(),
-                        session
-                            .parked_connections
-                            .values()
-                            .flat_map(|connection| {
-                                let endpoint = connection.endpoint().to_string();
-                                connection
-                                    .drain_editor_messages()
-                                    .into_iter()
-                                    .map(move |message| (endpoint.clone(), message))
-                            })
-                            .collect::<Vec<_>>(),
-                    )
-                })
-                .unwrap_or_default();
-            let drain_us = drain_start
-                .map(|start| start.elapsed().as_micros())
-                .unwrap_or(0);
-            let message_count = messages.len();
-            let parked_editor_count = parked_editors.len();
-            for (endpoint, message) in parked_editors {
-                let ended = match &message {
-                    DaemonServerMessage::Workspace {
-                        message: WorkspaceServerMessage::HostEnded { reason },
-                        ..
-                    } => Some(reason.as_str()),
-                    DaemonServerMessage::Workspace {
-                        message:
-                            WorkspaceServerMessage::HelloAck {
-                                accepted: false,
-                                reason,
-                                ..
-                            },
-                        ..
-                    } => Some(
-                        reason
-                            .as_deref()
-                            .unwrap_or("Server authentication was rejected"),
-                    ),
-                    _ => None,
-                };
-                if let Some(reason) = ended {
-                    self.leave_server_connection(window_id, &endpoint);
-                    if let Some(route) = self.router.routes.get_mut(&window_id) {
-                        route.window.screen.renderer.notifications.push(
-                            reason,
-                            neoism_ui::panels::notifications::NotificationLevel::Warn,
-                        );
-                        route.request_redraw();
-                    }
-                    continue;
-                }
-                if let DaemonServerMessage::Editor {
-                    request_id,
-                    message,
-                } = message
-                {
-                    if let Some(route) = self.router.routes.get_mut(&window_id) {
-                        if route.window.screen.apply_remote_code_lsp_message(
-                            &endpoint, request_id, &message,
-                        ) {
-                            route.request_redraw();
-                        }
-                    }
+            if let Some(start) = window_start {
+                let elapsed_us = start.elapsed().as_micros();
+                if elapsed_us >= 1_000 {
+                    tracing::debug!(target: "neoism::frame_work", ?window_id, elapsed_us,
+                        "slow window daemon maintenance outside render");
                 }
             }
-            for message in messages {
-                match message {
-                    DaemonServerMessage::Workspace { message, .. } => {
-                        self.apply_daemon_workspace_message(
-                            window_id, event_loop, message,
-                        );
+        }
+        // Keep asynchronous completion/status maintenance above live on every
+        // event: its wake may have arrived after new_events. Only queue work is
+        // single-entry per turn; those queues get their final backlog wake below.
+        if self.daemon_pump_turn.enter() {
+            self.daemon_pump_turn.begin_messages();
+            // Snapshot identities, not messages. A lifecycle message may remove,
+            // replace or park any source. Resolve it again before EVERY extraction.
+            // Each source gets one message per round, including parked editors.
+            let sources = self
+                .window_sessions
+                .iter()
+                .flat_map(|(id, session)| {
+                    std::iter::once((
+                        session.connection.source_id(),
+                        (*id, session.connection.endpoint().to_string()),
+                    ))
+                    .chain(session.parked_connections.values().map(
+                        move |connection| {
+                            (
+                                connection.source_id(),
+                                (*id, connection.endpoint().to_string()),
+                            )
+                        },
+                    ))
+                })
+                .collect::<Vec<_>>();
+            let mut sources = daemon_pump::source_ring(sources, self.daemon_pump_cursor);
+            while self.daemon_pump_turn.available() {
+                let Some((source_id, (window_id, endpoint))) = sources.pop_front() else {
+                    break;
+                };
+                self.daemon_pump_cursor = source_id;
+                let window_start = perf_start.map(|_| Instant::now());
+                let drain_start = perf_start.map(|_| Instant::now());
+                let source = self.window_sessions.get(&window_id).and_then(|session| {
+                    if session.connection.source_id() == source_id {
+                        Some((&session.connection, false))
+                    } else {
+                        session
+                            .parked_connections
+                            .get(&endpoint)
+                            .filter(|connection| connection.source_id() == source_id)
+                            .map(|connection| (connection, true))
                     }
-                    // Native guest code panes reuse the editor envelope for
-                    // host-owned LSP snapshots/diagnostics. Grid/nvim
-                    // messages remain harmless no-ops in the screen bridge.
-                    DaemonServerMessage::Editor {
+                });
+                let Some((connection, parked)) = source else {
+                    continue;
+                };
+                let connection_key = connection.connection_key();
+                let Some(message) = connection.pop_message() else {
+                    continue;
+                };
+                sources.push_back((source_id, (window_id, endpoint.clone())));
+                let drain_us = drain_start
+                    .map(|start| start.elapsed().as_micros())
+                    .unwrap_or(0);
+                let message_count = usize::from(!parked);
+                let parked_editor_count = usize::from(parked);
+                if parked {
+                    let ended = match &message {
+                        DaemonServerMessage::Workspace {
+                            message: WorkspaceServerMessage::HostEnded { reason },
+                            ..
+                        } => Some(reason.as_str()),
+                        DaemonServerMessage::Workspace {
+                            message:
+                                WorkspaceServerMessage::HelloAck {
+                                    accepted: false,
+                                    reason,
+                                    ..
+                                },
+                            ..
+                        } => Some(
+                            reason
+                                .as_deref()
+                                .unwrap_or("Server authentication was rejected"),
+                        ),
+                        _ => None,
+                    };
+                    if let Some(reason) = ended {
+                        self.leave_server_connection(window_id, &endpoint);
+                        if let Some(route) = self.router.routes.get_mut(&window_id) {
+                            route.window.screen.renderer.notifications.push(
+                                reason,
+                                neoism_ui::panels::notifications::NotificationLevel::Warn,
+                            );
+                            route.request_redraw();
+                        }
+                        continue;
+                    }
+                    if let DaemonServerMessage::Editor {
                         request_id,
                         message,
-                    } => {
+                    } = message
+                    {
                         if let Some(route) = self.router.routes.get_mut(&window_id) {
                             if route.window.screen.apply_remote_code_lsp_message(
                                 &endpoint, request_id, &message,
@@ -1011,33 +1041,77 @@ impl Application<'_> {
                             }
                         }
                     }
-                    DaemonServerMessage::PtyFailure {
-                        request_id,
-                        session_id,
-                        message,
-                        class,
-                        operation,
-                    } => {
-                        if let Some(route) = self.router.routes.get_mut(&window_id) {
-                            if route.window.screen.context_manager.daemon_endpoint()
-                                != Some(endpoint.as_str())
-                            {
-                                tracing::warn!(
-                                    target: "neoism::remote_pty",
-                                    source_endpoint = %endpoint,
-                                    active_endpoint = ?route.window.screen.context_manager.daemon_endpoint(),
-                                    request_id,
-                                    ?session_id,
-                                    "ignoring PTY failure from a daemon that was parked during this batch"
-                                );
-                                continue;
+                } else {
+                    match message {
+                        DaemonServerMessage::Workspace { message, .. } => {
+                            self.apply_daemon_workspace_message(
+                                window_id, event_loop, message,
+                            );
+                        }
+                        // Native guest code panes reuse the editor envelope for
+                        // host-owned LSP snapshots/diagnostics. Grid/nvim
+                        // messages remain harmless no-ops in the screen bridge.
+                        DaemonServerMessage::Editor {
+                            request_id,
+                            message,
+                        } => {
+                            if let Some(route) = self.router.routes.get_mut(&window_id) {
+                                if route.window.screen.apply_remote_code_lsp_message(
+                                    &endpoint, request_id, &message,
+                                ) {
+                                    route.request_redraw();
+                                }
                             }
-                            if matches!(
-                                class,
-                                PtyFailureClass::Transport
-                                    | PtyFailureClass::NotDelivered
-                            ) {
-                                let interrupted = route
+                        }
+                        DaemonServerMessage::PtyFailure {
+                            request_id,
+                            session_id,
+                            message,
+                            class,
+                            operation,
+                        } => {
+                            if let Some(route) = self.router.routes.get_mut(&window_id) {
+                                if route.window.screen.context_manager.daemon_endpoint()
+                                    != Some(endpoint.as_str())
+                                {
+                                    tracing::warn!(
+                                        target: "neoism::remote_pty",
+                                        source_endpoint = %endpoint,
+                                        active_endpoint = ?route.window.screen.context_manager.daemon_endpoint(),
+                                        request_id,
+                                        ?session_id,
+                                        "ignoring PTY failure from a daemon that was parked during this batch"
+                                    );
+                                    continue;
+                                }
+                                if matches!(
+                                    class,
+                                    PtyFailureClass::Transport
+                                        | PtyFailureClass::NotDelivered
+                                ) {
+                                    let interrupted = route
+                                        .window
+                                        .screen
+                                        .context_manager
+                                        .apply_remote_pty_failure(
+                                            request_id,
+                                            session_id.as_deref(),
+                                            &message,
+                                            class,
+                                            operation,
+                                        );
+                                    if interrupted {
+                                        route.window.screen.renderer.notifications.push(
+                                        if class == PtyFailureClass::NotDelivered {
+                                            format!("Command not sent: {message}. Wait for the terminal to reconnect, then retry.")
+                                        } else {
+                                            format!("Remote command interrupted: {message}. Delivery/execution is unknown; nothing was replayed.")
+                                        },
+                                        neoism_ui::panels::notifications::NotificationLevel::Error,
+                                    );
+                                    }
+                                    route.request_redraw();
+                                } else if route
                                     .window
                                     .screen
                                     .context_manager
@@ -1047,126 +1121,104 @@ impl Application<'_> {
                                         &message,
                                         class,
                                         operation,
-                                    );
-                                if interrupted {
+                                    )
+                                {
                                     route.window.screen.renderer.notifications.push(
-                                        if class == PtyFailureClass::NotDelivered {
-                                            format!("Command not sent: {message}. Wait for the terminal to reconnect, then retry.")
-                                        } else {
-                                            format!("Remote command interrupted: {message}. Delivery/execution is unknown; nothing was replayed.")
-                                        },
-                                        neoism_ui::panels::notifications::NotificationLevel::Error,
-                                    );
-                                }
-                                route.request_redraw();
-                            } else if route
-                                .window
-                                .screen
-                                .context_manager
-                                .apply_remote_pty_failure(
-                                    request_id,
-                                    session_id.as_deref(),
-                                    &message,
-                                    class,
-                                    operation,
-                                )
-                            {
-                                route.window.screen.renderer.notifications.push(
                                     format!("Remote terminal detached: {message}. Nothing was replayed. Reopen/reattach the terminal and check its state before retrying a command."),
                                     neoism_ui::panels::notifications::NotificationLevel::Error,
                                 );
-                                route.request_redraw();
+                                    route.request_redraw();
+                                }
                             }
                         }
-                    }
-                    DaemonServerMessage::Pty {
-                        request_id,
-                        message,
-                    } => {
-                        self.apply_daemon_pty_message(
-                            window_id,
-                            &endpoint,
-                            connection_key,
+                        DaemonServerMessage::Pty {
                             request_id,
                             message,
+                        } => {
+                            self.apply_daemon_pty_message(
+                                window_id,
+                                &endpoint,
+                                connection_key,
+                                request_id,
+                                message,
+                            );
+                        }
+                        DaemonServerMessage::Crdt { message, .. } => {
+                            self.apply_daemon_crdt_message(window_id, message);
+                        }
+                        DaemonServerMessage::Files {
+                            request_id,
+                            message,
+                        } => {
+                            if let Some(route) = self.router.routes.get_mut(&window_id) {
+                                // Request counters are connection-local. A workspace event earlier
+                                // in this batch may have re-bound the window; never let a parked
+                                // host's reply satisfy a new host's file-browser request.
+                                if route.window.screen.context_manager.daemon_endpoint()
+                                    != Some(endpoint.as_str())
+                                    || route
+                                        .window
+                                        .screen
+                                        .context_manager
+                                        .daemon_connection_key()
+                                        != Some(connection_key)
+                                {
+                                    continue;
+                                }
+                                if route
+                                    .window
+                                    .screen
+                                    .apply_daemon_files_message(request_id, &message)
+                                {
+                                    route.request_redraw();
+                                }
+                            }
+                        }
+                        DaemonServerMessage::Search {
+                            request_id,
+                            message,
+                        } => {
+                            if let Some(route) = self.router.routes.get_mut(&window_id) {
+                                if route
+                                    .window
+                                    .screen
+                                    .apply_daemon_search_message(request_id, &message)
+                                {
+                                    route.request_redraw();
+                                }
+                            }
+                        }
+                        DaemonServerMessage::Git {
+                            request_id,
+                            message,
+                        } => {
+                            if let Some(route) = self.router.routes.get_mut(&window_id) {
+                                if route
+                                    .window
+                                    .screen
+                                    .apply_daemon_git_message(request_id, &message)
+                                {
+                                    route.request_redraw();
+                                }
+                            }
+                        } // Agent HTTP/SSE is rebound separately per window; it is
+                          // not a frame variant on the daemon multiplex today.
+                    }
+                }
+                // PTY frames never pass through a different connection's cache;
+                // lifecycle changes are re-resolved at the next extraction.
+                if let Some(start) = window_start {
+                    let elapsed_us = start.elapsed().as_micros();
+                    if elapsed_us >= 1_000 {
+                        tracing::debug!(
+                            target: "neoism::frame_work",
+                            ?window_id, elapsed_us, drain_us, message_count, parked_editor_count,
+                            "slow window daemon pump outside render"
                         );
                     }
-                    DaemonServerMessage::Crdt { message, .. } => {
-                        self.apply_daemon_crdt_message(window_id, message);
-                    }
-                    DaemonServerMessage::Files {
-                        request_id,
-                        message,
-                    } => {
-                        if let Some(route) = self.router.routes.get_mut(&window_id) {
-                            // Request counters are connection-local. A workspace event earlier
-                            // in this batch may have re-bound the window; never let a parked
-                            // host's reply satisfy a new host's file-browser request.
-                            if route.window.screen.context_manager.daemon_endpoint() != Some(endpoint.as_str())
-                                || route.window.screen.context_manager.daemon_connection_key() != Some(connection_key)
-                            {
-                                continue;
-                            }
-                            if route
-                                .window
-                                .screen
-                                .apply_daemon_files_message(request_id, &message)
-                            {
-                                route.request_redraw();
-                            }
-                        }
-                    }
-                    DaemonServerMessage::Search {
-                        request_id,
-                        message,
-                    } => {
-                        if let Some(route) = self.router.routes.get_mut(&window_id) {
-                            if route
-                                .window
-                                .screen
-                                .apply_daemon_search_message(request_id, &message)
-                            {
-                                route.request_redraw();
-                            }
-                        }
-                    }
-                    DaemonServerMessage::Git {
-                        request_id,
-                        message,
-                    } => {
-                        if let Some(route) = self.router.routes.get_mut(&window_id) {
-                            if route
-                                .window
-                                .screen
-                                .apply_daemon_git_message(request_id, &message)
-                            {
-                                route.request_redraw();
-                            }
-                        }
-                    } // Agent HTTP/SSE is rebound separately per window; it is
-                      // not a frame variant on the daemon multiplex today.
                 }
             }
-            // Parked connections keep receiving into their own queues. Do not
-            // feed those frames through the active server's single transport
-            // cache: session ids are server-local and could collide. When a
-            // workspace activates its server, route/session bindings are
-            // rehydrated first and that connection's queued frames are then
-            // drained normally.
-            self.queue_dead_ssh_reconnect(window_id);
-            self.process_window_server_requests(window_id);
-            self.update_connection_recovery(window_id);
-            self.flush_window_outbound(window_id);
-            if let Some(start) = window_start {
-                let elapsed_us = start.elapsed().as_micros();
-                if elapsed_us >= 1_000 {
-                    tracing::debug!(
-                        target: "neoism::frame_work",
-                        ?window_id, elapsed_us, drain_us, message_count, parked_editor_count,
-                        "slow window daemon pump outside render"
-                    );
-                }
-            }
+            self.daemon_pump_turn.finish();
         }
         self.process_pending_invites(event_loop);
         if let Some(start) = perf_start {
@@ -6255,7 +6307,14 @@ impl Application<'_> {
                     );
                 }
                 neoism_lua::HostOperation::DocumentClose => {
-                    if route.window.screen.context_manager.current().git_diff_view.is_some() {
+                    if route
+                        .window
+                        .screen
+                        .context_manager
+                        .current()
+                        .git_diff_view
+                        .is_some()
+                    {
                         tracing::warn!("Close the canonical code tab explicitly; closing a review projection must not discard its owner");
                         return;
                     }
@@ -6952,7 +7011,9 @@ impl Application<'_> {
             };
             match action.action.as_str() {
                 "stage" => {
-                    if let Some(root) = route.window.screen.renderer.git_diff_panel.repo_root() {
+                    if let Some(root) =
+                        route.window.screen.renderer.git_diff_panel.repo_root()
+                    {
                         route.window.screen.stage_review_all(root);
                     }
                 }
@@ -7280,7 +7341,6 @@ impl Application<'_> {
         };
 
         if let Some((target, ssh_args)) = ssh_attach_request {
-            self.cancel_system_activation(window_id);
             self.start_ssh_workspace_attach(window_id, target, ssh_args);
         }
 
@@ -7306,7 +7366,6 @@ impl Application<'_> {
         }
 
         if let Some(server_id) = server_request {
-            self.cancel_system_activation(window_id);
             if let Err(error) = self.server_registry.reload() {
                 tracing::warn!(%error, "could not refresh saved server before connecting");
                 return;
@@ -7444,7 +7503,6 @@ impl Application<'_> {
         }
 
         if let Some((workspace_id, daemon_url)) = join_request {
-            self.cancel_system_activation(window_id);
             if let Some(session) = self.window_sessions.get_mut(&window_id) {
                 session.pending_peer_adopt = Some(workspace_id);
             }
@@ -7499,7 +7557,6 @@ impl Application<'_> {
         }
 
         if go_home {
-            self.cancel_system_activation(window_id);
             if let Some(home) = self.home_daemon_endpoint.clone() {
                 if let Some(session) = self.window_sessions.get_mut(&window_id) {
                     session.pending_peer_adopt = None;
@@ -7835,7 +7892,10 @@ impl Application<'_> {
         {
             return;
         }
-        route.window.screen.refresh_selected_workspace_after_daemon_attach();
+        route
+            .window
+            .screen
+            .refresh_selected_workspace_after_daemon_attach();
         route.window.screen.request_markdown_crdt_resync();
         route.window.screen.request_code_crdt_resync();
         route.window.screen.sync_host_git();
@@ -8058,10 +8118,9 @@ impl Application<'_> {
                     } else {
                         // HostWorkspaceList is a scoped merge, not a deletion
                         // authority for subscriptions on other hosts.
-                        Ok(self.server_registry.workspace_subscription(
-                            &session.profile_id,
-                            server_id,
-                        ))
+                        Ok(self
+                            .server_registry
+                            .workspace_subscription(&session.profile_id, server_id))
                     }
                 });
             if let Some(subscription) = subscription {
@@ -8089,10 +8148,11 @@ impl Application<'_> {
                 };
                 let mut restored_any = false;
                 if let Some(route) = self.router.routes.get_mut(&source_window_id) {
-                    restored_any = route.window.screen.restore_subscribed_daemon_workspaces(
-                        &subscription.subscribed_workspace_ids,
-                        subscription.last_active_workspace_id.as_deref(),
-                    );
+                    restored_any =
+                        route.window.screen.restore_subscribed_daemon_workspaces(
+                            &subscription.subscribed_workspace_ids,
+                            subscription.last_active_workspace_id.as_deref(),
+                        );
                     route.request_redraw();
                 }
                 // A fresh server switch with no subscription to restore
@@ -8109,7 +8169,12 @@ impl Application<'_> {
                         &mut session.needs_initial_workspace_adopt,
                         restored_any,
                         summaries,
-                        |workspace| route.window.screen.open_or_adopt_daemon_workspace(workspace.id.clone()),
+                        |workspace| {
+                            route
+                                .window
+                                .screen
+                                .open_or_adopt_daemon_workspace(workspace.id.clone())
+                        },
                     );
                     route.request_redraw();
                 }
@@ -8137,8 +8202,14 @@ impl Application<'_> {
                         workspace_id = %workspace_id,
                         "peer workspace tree landed; adopting over the new daemon link"
                     );
-                    if route.window.screen.open_or_adopt_daemon_workspace(workspace_id) {
-                        if let Some(session) = self.window_sessions.get_mut(&source_window_id) {
+                    if route
+                        .window
+                        .screen
+                        .open_or_adopt_daemon_workspace(workspace_id)
+                    {
+                        if let Some(session) =
+                            self.window_sessions.get_mut(&source_window_id)
+                        {
                             session.pending_peer_adopt = None;
                             session.needs_initial_workspace_adopt = false;
                         }
@@ -8184,7 +8255,9 @@ impl Application<'_> {
             })
             .or_else(|| {
                 self.ssh_routes.get(daemon_url).map(|(target, args)| {
-                    ssh_server_id(&crate::ssh_hosts::quick_ssh_workspace_id_with_args(target, args))
+                    ssh_server_id(&crate::ssh_hosts::quick_ssh_workspace_id_with_args(
+                        target, args,
+                    ))
                 })
             })
             .unwrap_or_else(|| format!("peer:{daemon_url}"))
@@ -8202,7 +8275,10 @@ impl Application<'_> {
             .find(|(_, attach)| {
                 (attach.alias == target && attach.ssh_args == ssh_args)
                     || crate::system_registry::same_system_route(
-                        &attach.alias, &attach.ssh_args, &target, &ssh_args,
+                        &attach.alias,
+                        &attach.ssh_args,
+                        &target,
+                        &ssh_args,
                     )
             })
             .map(|(endpoint, attach)| {
@@ -8375,19 +8451,34 @@ impl Application<'_> {
                 }
             };
 
-            let existing = self.ssh_attaches.iter_mut().find_map(|(endpoint, current)| {
-                let same_route = (current.alias == attach.alias && current.ssh_args == attach.ssh_args)
-                    || crate::system_registry::same_system_route(
-                        &current.alias, &current.ssh_args, &attach.alias, &attach.ssh_args,
-                    );
-                (same_route && current.is_running()).then(|| (
-                    endpoint.clone(), current.workspace_id.clone(), current.credential.clone(),
-                ))
-            });
+            let existing =
+                self.ssh_attaches
+                    .iter_mut()
+                    .find_map(|(endpoint, current)| {
+                        let same_route = (current.alias == attach.alias
+                            && current.ssh_args == attach.ssh_args)
+                            || crate::system_registry::same_system_route(
+                                &current.alias,
+                                &current.ssh_args,
+                                &attach.alias,
+                                &attach.ssh_args,
+                            );
+                        (same_route && current.is_running()).then(|| {
+                            (
+                                endpoint.clone(),
+                                current.workspace_id.clone(),
+                                current.credential.clone(),
+                            )
+                        })
+                    });
             if let Some((endpoint, workspace_id, credential)) = existing {
                 drop(attach);
                 self.begin_ssh_workspace_switch(
-                    pending.window_id, pending.target, endpoint, workspace_id, credential,
+                    pending.window_id,
+                    pending.target,
+                    endpoint,
+                    workspace_id,
+                    credential,
                 );
                 continue;
             }
@@ -8395,7 +8486,8 @@ impl Application<'_> {
             let workspace_id = attach.workspace_id.clone();
             let credential = attach.credential.clone();
             self.ssh_routes.insert(
-                daemon_url.clone(), (attach.alias.clone(), attach.ssh_args.clone()),
+                daemon_url.clone(),
+                (attach.alias.clone(), attach.ssh_args.clone()),
             );
             self.ssh_attaches.insert(daemon_url.clone(), attach);
             self.begin_ssh_workspace_switch(
@@ -8889,7 +8981,7 @@ impl Application<'_> {
                 .window
                 .screen
                 .context_manager
-                .apply_pty_server_message(request_id, message.clone())
+                .apply_pty_server_message(request_id, message)
             {
                 route.request_redraw();
             }
@@ -9029,7 +9121,11 @@ impl Application<'_> {
 
     fn request_event_loop_redraws(&mut self) -> Option<Instant> {
         if self.config.renderer.strategy.is_game()
-            && self.router.routes.values().all(|route| !route.window.initial_reveal_pending)
+            && self
+                .router
+                .routes
+                .values()
+                .all(|route| !route.window.initial_reveal_pending)
         {
             return None;
         }
@@ -9052,10 +9148,12 @@ impl Application<'_> {
                 if deadline <= now {
                     route.request_redraw_with_reason("event_loop:initial_reveal");
                     if let Some(retry) = route.redraw_retry_deadline() {
-                        next_deadline = Some(next_deadline.map_or(retry, |old| old.min(retry)));
+                        next_deadline =
+                            Some(next_deadline.map_or(retry, |old| old.min(retry)));
                     }
                 } else {
-                    next_deadline = Some(next_deadline.map_or(deadline, |old| old.min(deadline)));
+                    next_deadline =
+                        Some(next_deadline.map_or(deadline, |old| old.min(deadline)));
                 }
                 continue;
             }
@@ -9265,30 +9363,55 @@ mod workspace_inventory_tests {
     #[test]
     fn initialization_retries_empty_and_failed_adoption_until_a_real_success() {
         let mut needs_initial = true;
-        Application::initialize_workspace_adoption(&mut needs_initial, false, &[], |_| {
-            panic!("empty inventory cannot adopt")
-        });
+        Application::initialize_workspace_adoption(
+            &mut needs_initial,
+            false,
+            &[],
+            |_| panic!("empty inventory cannot adopt"),
+        );
         assert!(needs_initial);
         let summaries = vec![
-            serde_json::from_value(serde_json::json!({"id": "stale", "host_id": "peer", "title": "stale"})).unwrap(),
-            serde_json::from_value(serde_json::json!({"id": "live", "host_id": "peer", "title": "live"})).unwrap(),
+            serde_json::from_value(
+                serde_json::json!({"id": "stale", "host_id": "peer", "title": "stale"}),
+            )
+            .unwrap(),
+            serde_json::from_value(
+                serde_json::json!({"id": "live", "host_id": "peer", "title": "live"}),
+            )
+            .unwrap(),
         ];
-        Application::initialize_workspace_adoption(&mut needs_initial, false, &summaries, |_| false);
+        Application::initialize_workspace_adoption(
+            &mut needs_initial,
+            false,
+            &summaries,
+            |_| false,
+        );
         assert!(needs_initial, "failed adoption is not completion");
         let mut attempts = Vec::new();
-        Application::initialize_workspace_adoption(&mut needs_initial, false, &summaries, |workspace| {
-            attempts.push(workspace.id.clone());
-            workspace.id == "live"
-        });
+        Application::initialize_workspace_adoption(
+            &mut needs_initial,
+            false,
+            &summaries,
+            |workspace| {
+                attempts.push(workspace.id.clone());
+                workspace.id == "live"
+            },
+        );
         assert_eq!(attempts, ["stale", "live"]);
         assert!(!needs_initial);
-        Application::initialize_workspace_adoption(&mut needs_initial, false, &summaries, |_| {
-            panic!("completed initialization must not re-adopt")
-        });
+        Application::initialize_workspace_adoption(
+            &mut needs_initial,
+            false,
+            &summaries,
+            |_| panic!("completed initialization must not re-adopt"),
+        );
         needs_initial = true;
-        Application::initialize_workspace_adoption(&mut needs_initial, true, &summaries, |_| {
-            panic!("actual successful restoration needs no fallback")
-        });
+        Application::initialize_workspace_adoption(
+            &mut needs_initial,
+            true,
+            &summaries,
+            |_| panic!("actual successful restoration needs no fallback"),
+        );
         assert!(!needs_initial);
     }
 
@@ -9296,14 +9419,23 @@ mod workspace_inventory_tests {
     fn only_full_tree_can_prune_saved_subscriptions() {
         let list = WorkspaceServerMessage::HostWorkspaceList { workspaces: vec![] };
         let tree = WorkspaceServerMessage::HostWorkspaceTree {
-            hosts: vec![], workspaces: vec![], tabs: vec![],
+            hosts: vec![],
+            workspaces: vec![],
+            tabs: vec![],
         };
-        assert_eq!(Application::workspace_inventory_from_message(&list), Some((&[][..], false)));
-        assert_eq!(Application::workspace_inventory_from_message(&tree), Some((&[][..], true)));
+        assert_eq!(
+            Application::workspace_inventory_from_message(&list),
+            Some((&[][..], false))
+        );
+        assert_eq!(
+            Application::workspace_inventory_from_message(&tree),
+            Some((&[][..], true))
+        );
         // A singleton control update isn't an inventory at all.
         let workspace = serde_json::from_value(serde_json::json!({
             "id": "one", "host_id": "peer", "title": "one", "last_active": 0
-        })).unwrap();
+        }))
+        .unwrap();
         let change = WorkspaceServerMessage::WorkspaceControlChanged { workspace };
         assert!(Application::workspace_inventory_from_message(&change).is_none());
     }
@@ -9317,6 +9449,7 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
     }
 
     fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: StartCause) {
+        self.daemon_pump_turn.reset();
         self.pump_daemon(event_loop);
         crate::app::freeze_watchdog::mark_global("new_events", format!("{cause:?}"));
         if cause != StartCause::Init
@@ -9429,7 +9562,9 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                 self.apply_update_config();
             }
             RioEventType::Rio(RioEvent::Exit | RioEvent::Quit) => {
-                if self.refuse_unsaved_code_close(window_id, true) { return; }
+                if self.refuse_unsaved_code_close(window_id, true) {
+                    return;
+                }
                 if let Some(route) = self.router.routes.get_mut(&window_id) {
                     match quit_request_action(self.config.ui.confirm_before_quit) {
                         QuitRequestAction::ConfirmQuitAndRedraw => {
@@ -9877,7 +10012,9 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
             }
             #[cfg(target_os = "macos")]
             RioEventType::Rio(RioEvent::CloseWindow) => {
-                if self.refuse_unsaved_code_close(window_id, false) { return; }
+                if self.refuse_unsaved_code_close(window_id, false) {
+                    return;
+                }
                 if let Some(daemon_window_id) =
                     self.router.daemon_window_for_native(window_id)
                 {
@@ -10193,6 +10330,39 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
         let _watchdog_span =
             crate::app::freeze_watchdog::global_span("about_to_wait", "");
         self.pump_daemon(event_loop);
+        // Flush after the turn's input and inbound applies, not before them:
+        // replies/local edits can enqueue outbound CRDT without inbound backlog.
+        for window_id in self.window_sessions.keys().copied().collect::<Vec<_>>() {
+            let perf_start =
+                tracing::enabled!(target: "neoism::frame_work", tracing::Level::DEBUG)
+                    .then(Instant::now);
+            self.queue_dead_ssh_reconnect(window_id);
+            self.process_window_server_requests(window_id);
+            self.update_connection_recovery(window_id);
+            self.flush_window_outbound(window_id);
+            if let Some(start) = perf_start {
+                let elapsed_us = start.elapsed().as_micros();
+                if elapsed_us >= 1_000 {
+                    tracing::debug!(target: "neoism::frame_work", ?window_id, elapsed_us,
+                        "slow window daemon flush outside render");
+                }
+            }
+        }
+        // Do not short-circuit: empty queues must also clear their producer
+        // latch. Producers and this final check serialize on the same mutex.
+        let mut backlog = false;
+        for session in self.window_sessions.values() {
+            backlog |= session.connection.finish_turn();
+            for connection in session.parked_connections.values() {
+                backlog |= connection.finish_turn();
+            }
+        }
+        if backlog {
+            self.event_proxy
+                .send_event(RioEventType::Rio(RioEvent::Render), unsafe {
+                    WindowId::dummy()
+                });
+        }
         self.schedule_next_event(event_loop);
     }
 

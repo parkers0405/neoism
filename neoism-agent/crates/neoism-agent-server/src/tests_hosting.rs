@@ -1,6 +1,211 @@
 use super::*;
 
 #[tokio::test]
+async fn system_workflow_machine_catalog_without_adoption_and_guest_isolation() {
+    let _guard = env_lock();
+    let dir = std::env::temp_dir().join(format!(
+        "system-workflow-{}",
+        neoism_agent_core::new_session_id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let previous = std::env::var_os("NEOISM_DAEMON_TOKEN");
+    std::env::set_var("NEOISM_DAEMON_TOKEN", "system-test-key");
+    let state = AppState::open_database(dir.join("agent.db")).await.unwrap();
+    match previous {
+        Some(value) => std::env::set_var("NEOISM_DAEMON_TOKEN", value),
+        None => std::env::remove_var("NEOISM_DAEMON_TOKEN"),
+    }
+    let mut local =
+        store_test_session(&neoism_agent_core::new_session_id(), now_millis());
+    local.directory = dir.to_string_lossy().into_owned();
+    let mut foreign =
+        store_test_session(&neoism_agent_core::new_session_id(), now_millis());
+    foreign.directory = dir.join("other-project").to_string_lossy().into_owned();
+    std::fs::create_dir_all(&foreign.directory).unwrap();
+    foreign.extra.insert(
+        crate::caller::TENANT_EXTRA_KEY.into(),
+        json!("workspace:other"),
+    );
+    for session in [&local, &foreign] {
+        state.inner.store.insert_session(session).await.unwrap();
+        let message = store_test_message(&session.id, now_millis(), "machine history");
+        state
+            .inner
+            .store
+            .append_message(session.id.as_str(), &message)
+            .await
+            .unwrap();
+    }
+    // Production listen starts the catalog backfill; a bare test router does not.
+    state.start_session_list_backfill();
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        while !state.inner.store.session_list_index_ready().await.unwrap() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("system workflow catalog index ready");
+    let now = (now_millis() / 1000) as i64;
+    let system = neoism_agent_service_api::daemon_credential::issue(
+        &neoism_agent_service_api::daemon_credential::DaemonCredentialClaims::system_workflow(now, 60).unwrap(),
+        b"system-test-key",
+    ).unwrap();
+    let guest = neoism_agent_service_api::daemon_credential::issue(
+        &neoism_agent_service_api::daemon_credential::DaemonCredentialClaims::new(
+            "device:visitor",
+            "visitor",
+            "workspace:visitor",
+            vec![dir.to_string_lossy().into_owned()],
+            true,
+            now,
+            60,
+        )
+        .unwrap(),
+        b"system-test-key",
+    )
+    .unwrap();
+    let signed = |token: &str, method: Method, path: &str, body: Option<Value>| {
+        let mut req = request(method, path, body);
+        req.headers_mut()
+            .insert("authorization", format!("Bearer {token}").parse().unwrap());
+        req
+    };
+    let app = app(state.clone());
+    let listed = app
+        .clone()
+        .oneshot(signed(
+            &system,
+            Method::GET,
+            "/v2/sessions?roots=true",
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(listed.status(), StatusCode::OK);
+    let listed: Value = response_json(listed).await;
+    let listed_text = listed.to_string();
+    assert!(listed_text.contains(local.id.as_str()));
+    assert!(listed_text.contains(foreign.id.as_str()));
+    for path in [
+        "/v2/providers",
+        "/v2/providers/configured",
+        "/v2/agents",
+        "/v2/commands",
+        "/v2/sessions/status",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(signed(&system, Method::GET, path, None))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{path}");
+    }
+    let projects = app
+        .clone()
+        .oneshot(signed(&system, Method::GET, "/v2/session-projects", None))
+        .await
+        .unwrap();
+    assert_eq!(projects.status(), StatusCode::OK);
+    let projects: Value = response_json(projects).await;
+    assert!(projects["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|v| v["directory"] == local.directory));
+    assert!(projects["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|v| v["directory"] == foreign.directory));
+    for session in [&local, &foreign] {
+        for path in [
+            format!("/v2/sessions/{}", session.id),
+            format!("/v2/sessions/{}/messages", session.id),
+        ] {
+            assert_eq!(
+                app.clone()
+                    .oneshot(signed(&system, Method::GET, &path, None))
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::OK
+            );
+            let denied = app
+                .clone()
+                .oneshot(signed(&guest, Method::GET, &path, None))
+                .await
+                .unwrap();
+            assert!(matches!(
+                denied.status(),
+                StatusCode::NOT_FOUND | StatusCode::FORBIDDEN
+            ));
+        }
+    }
+    let created = app
+        .clone()
+        .oneshot(signed(
+            &system,
+            Method::POST,
+            &format!("/v2/sessions?directory={}", dir.to_string_lossy()),
+            Some(json!({"title":"remote UI chat"})),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::OK);
+    let created: Value = response_json(created).await;
+    assert!(created["workspaceID"].is_null());
+    assert_eq!(
+        app.clone()
+            .oneshot(signed(
+                &system,
+                Method::GET,
+                &format!("/v2/directories?path={}", dir.to_string_lossy()),
+                None
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    for (method, path) in [
+        (Method::GET, "/v2/config"),
+        (Method::GET, "/v2/management/agents"),
+        (Method::POST, "/v2/hosting/associate"),
+        (Method::GET, "/v2/providers/openai/auth"),
+        (Method::POST, "/v2/providers/openai/oauth/authorize"),
+        (Method::GET, "/v2/plugins/dev.neoism.mcp/catalog"),
+        (
+            Method::GET,
+            "/v2/plugins/dev.neoism.mcp/test/auth/callback?state=spoof",
+        ),
+    ] {
+        assert_eq!(
+            app.clone()
+                .oneshot(signed(&system, method, path, None))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN,
+            "{path}"
+        );
+    }
+    // Catalog reads must not mutate/adopt pre-existing local history.
+    assert_eq!(
+        crate::caller::session_tenant(
+            &state
+                .inner
+                .store
+                .get_session(local.id.as_str())
+                .await
+                .unwrap()
+                .unwrap()
+        ),
+        "local"
+    );
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[tokio::test]
 async fn hosting_http_requires_operator_and_guests_read_same_history() {
     let _guard = env_lock();
     let dir = std::env::temp_dir().join(format!(

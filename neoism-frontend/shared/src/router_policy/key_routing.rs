@@ -460,6 +460,9 @@ fn handle_command_palette(
     }
 
     if input.escape {
+        if let Some(action) = palette.system_settings_back_action() {
+            return HandlerResult::Consumed(KeyRouteAction::ExecutePaletteAction(action));
+        }
         let was_search = palette.is_search_mode();
         palette.set_enabled(false);
         return HandlerResult::Consumed(if was_search {
@@ -506,6 +509,9 @@ fn handle_command_palette(
     if input.backspace {
         let current_query = palette.query.clone();
         if current_query.is_empty() {
+            if let Some(action) = palette.system_settings_back_action() {
+                return HandlerResult::Consumed(KeyRouteAction::ExecutePaletteAction(action));
+            }
             return HandlerResult::Consumed(KeyRouteAction::Consume);
         }
         let mut chars = current_query.chars().collect::<Vec<_>>();
@@ -629,6 +635,11 @@ fn palette_enter(palette: &mut CommandPalette) -> KeyRouteAction {
     if let Some(font) = selected_font {
         palette.set_enabled(false);
         return KeyRouteAction::CopyFontToClipboard(font);
+    }
+
+    if palette.systems_mode() || palette.system_settings_id().is_some() {
+        return selected_action.map(KeyRouteAction::ExecutePaletteAction)
+            .unwrap_or(KeyRouteAction::ConsumeAndRedraw);
     }
 
     match selected_action {
@@ -907,6 +918,51 @@ mod tests {
             HandlerResult::Consumed(KeyRouteAction::ConsumeAndRedraw)
         ));
         assert_eq!(palette.query, "+ Add Server");
+    }
+
+    #[test]
+    fn systems_enter_opens_details_and_settings_escape_backspace_emit_back() {
+        use crate::panels::command_palette::{PaletteSystemEntry, SystemConnectionStatus};
+        let mut palette = CommandPalette::default();
+        let entry = PaletteSystemEntry { id: "remote".into(), name: "Remote".into(),
+            address: "user@host".into(), local: false, enabled: false,
+            status: SystemConnectionStatus::Disconnected };
+        palette.enter_systems_mode(vec![entry.clone()]);
+        let mut input = key_input_pressed();
+        input.enter = true;
+        assert!(matches!(handle_command_palette(&input, &mut palette),
+            HandlerResult::Consumed(KeyRouteAction::ExecutePaletteAction(PaletteAction::ShowSystemSettings { id })) if id == "remote"));
+        assert!(palette.is_enabled());
+        palette.enter_system_settings_mode(entry);
+        assert!(matches!(handle_command_palette(&input, &mut palette),
+            HandlerResult::Consumed(KeyRouteAction::ExecutePaletteAction(PaletteAction::SetSystemEnabled { enabled: true, .. }))));
+        assert!(palette.is_enabled());
+        input.enter = false;
+        input.escape = true;
+        assert!(matches!(handle_command_palette(&input, &mut palette),
+            HandlerResult::Consumed(KeyRouteAction::ExecutePaletteAction(PaletteAction::ShowSystems))));
+        assert!(palette.is_enabled());
+        input.escape = false;
+        input.backspace = true;
+        assert!(matches!(handle_command_palette(&input, &mut palette),
+            HandlerResult::Consumed(KeyRouteAction::ExecutePaletteAction(PaletteAction::ShowSystems))));
+        palette.set_query("abc".into());
+        assert!(matches!(handle_command_palette(&input, &mut palette),
+            HandlerResult::Consumed(KeyRouteAction::ConsumeAndRedraw)));
+        assert_eq!(palette.query, "ab");
+    }
+
+    #[test]
+    fn system_settings_local_enter_never_dispatches_an_ex_query() {
+        use crate::panels::command_palette::{PaletteSystemEntry, SystemConnectionStatus};
+        let mut palette = CommandPalette::default();
+        palette.enter_system_settings_mode(PaletteSystemEntry { id: "local".into(), name: "Local".into(),
+            address: String::new(), local: true, enabled: true, status: SystemConnectionStatus::Connected });
+        let mut input = key_input_pressed();
+        input.enter = true;
+        assert!(matches!(handle_command_palette(&input, &mut palette),
+            HandlerResult::Consumed(KeyRouteAction::ConsumeAndRedraw)));
+        assert!(palette.is_enabled());
     }
 
     #[test]

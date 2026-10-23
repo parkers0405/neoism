@@ -86,6 +86,7 @@ fn modal_action_policy_tag(
         A::NotesVaultPromptAdd => Tag::NotesVaultPromptAdd,
         A::SystemFormSubmit => Tag::SystemFormSubmit,
         A::SystemDisconnectConfirm { .. } => Tag::SystemDisconnectConfirm,
+        A::SystemDeactivateConfirm { .. } => Tag::SystemDeactivateConfirm,
         A::ServerFormSubmit => Tag::ServerFormSubmit,
         A::ServerRemoveConfirm { .. } => Tag::ServerRemoveConfirm,
         A::ServerReconnectRetry { .. } => Tag::ServerReconnectRetry,

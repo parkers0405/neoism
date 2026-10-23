@@ -934,6 +934,14 @@ pub(crate) fn cached_diff_card_view(
         visual_row_offsets,
         visual_rows,
         preview_visual_rows,
+        // Include hidden rows and both sides so expanding or scrolling cannot resize the gutter.
+        max_line_number: section
+            .lines
+            .iter()
+            .flat_map(|line| [line.line_number, line.old_line_number, line.new_line_number])
+            .flatten()
+            .max()
+            .unwrap_or(1),
         content_width: Cell::new(None),
     });
     TOOL_DIFF_CARD_VIEW_CACHE.with(|cache| cache.borrow_mut().insert(key, view.clone()));

@@ -57,6 +57,32 @@ fn terminal(title: &str, route: Option<usize>) -> BufferTab<()> {
 }
 
 #[test]
+fn snapshot_equality_tracks_live_animation_and_tab_state() {
+    let mut tabs = BufferTabs::<()>::new();
+    tabs.set_tabs(vec![terminal("Terminal", Some(1))], 0);
+    let saved = tabs.clone();
+    assert!(saved == tabs);
+
+    tabs.scroll_x = 0.5;
+    assert!(saved != tabs);
+    tabs = saved.clone();
+    tabs.hover_anim_started = Some(Instant::now());
+    assert!(saved != tabs);
+    tabs = saved.clone();
+    tabs.tear_out_anim = Some(TearOutAnim {
+        started_at: Instant::now(),
+        from_x: 0.0,
+        from_y: 0.0,
+        width: 100.0,
+        title: "Terminal".into(),
+    });
+    assert!(saved != tabs);
+    tabs = saved.clone();
+    tabs.tabs[0].modified = true;
+    assert!(saved != tabs);
+}
+
+#[test]
 fn touch_scroll_is_direct_bounded_and_has_no_glide_target() {
     let mut tabs = BufferTabs::<()>::new();
     tabs.set_tabs(

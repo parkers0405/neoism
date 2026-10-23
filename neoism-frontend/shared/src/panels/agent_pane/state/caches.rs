@@ -493,7 +493,7 @@ impl NeoismAgentPane {
     }
 
     pub(in crate::panels::agent_pane::state) fn apply_config_defaults(&mut self) {
-        self.provider_readiness = None;
+        // Defaults are chip preferences, not a credential or catalog change.
         // In-memory: nothing to mutate without the response. Record the
         // request so the host can fetch config defaults and feed the
         // result back via the snapshot / setters.
@@ -557,7 +557,7 @@ impl NeoismAgentPane {
         self.input_viewport.scroll_at(x, y, pixels)
     }
 
-    pub fn set_input_wrap_rows(&mut self, rows: Vec<InputWrapRow>) {
+    pub fn set_input_wrap_rows(&mut self, rows: std::rc::Rc<Vec<InputWrapRow>>) {
         self.input_wrap_len = self.input.len();
         self.input_wrap_rows = rows;
     }

@@ -2,6 +2,7 @@
 // Phase A/B/C: workspace/watcher sync + status-line & chrome-strip
 // drains + search-hint refresh. Pure code-move.
 use super::*;
+use neoism_backend::event::{RioEvent, RioEventType};
 
 #[inline]
 fn workspace_breadcrumbs_active<A>(
@@ -61,14 +62,21 @@ impl Screen<'_> {
             }
 
             let remote_joined = self.uses_host_git();
-            let branch_for = |path: Option<&Path>| {
+            let git_status_proxy = self.context_manager.event_proxy();
+            let git_status_window = self.context_manager.window_id();
+            let mut branch_for = |path: Option<&Path>| {
                 if remote_joined {
                     self.host_git
                         .snapshot
                         .as_ref()
                         .and_then(|snapshot| snapshot.branch.clone())
                 } else {
-                    path.and_then(neoism_ui::panels::git_branch::branch_for)
+                    path.and_then(|path| {
+                        let proxy = git_status_proxy.clone();
+                        self.git_status_cache.branch_for(path, move || {
+                            proxy.send_event(RioEventType::Rio(RioEvent::Render), git_status_window);
+                        })
+                    })
                 }
             };
             let current = self.context_manager.current();
@@ -243,11 +251,14 @@ impl Screen<'_> {
                 } else {
                     let terminal_agent =
                         self.renderer.buffer_tabs.agent_for_route(current.route_id);
-                    let cwd_buf = current
-                        .terminal
-                        .lock()
-                        .current_directory
-                        .clone()
+                    let terminal_cwd = if let Some(terminal) = current.terminal.try_lock_unfair() {
+                        let cwd = terminal.current_directory.clone();
+                        self.terminal_cwd_cache.insert(current.route_id, cwd.clone());
+                        cwd
+                    } else {
+                        self.terminal_cwd_cache.get(&current.route_id).cloned().flatten()
+                    };
+                    let cwd_buf = terminal_cwd
                         .or_else(|| self.active_workspace_root.clone())
                         .or_else(|| {
                             self.context_manager
@@ -347,7 +358,12 @@ impl Screen<'_> {
                 active_path
                     .as_deref()
                     .or(active_cwd.as_deref())
-                    .and_then(neoism_ui::panels::git_branch::change_summary_for)
+                    .and_then(|path| {
+                        let proxy = git_status_proxy.clone();
+                        self.git_status_cache.change_summary_for(path, move || {
+                            proxy.send_event(RioEventType::Rio(RioEvent::Render), git_status_window);
+                        })
+                    })
             }
             .filter(|summary| !summary.is_empty())
             .map(|summary| {

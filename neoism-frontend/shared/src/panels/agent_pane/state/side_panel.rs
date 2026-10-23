@@ -1332,6 +1332,7 @@ pub struct NeoismAgentSidePanel {
     dashboard_directory: Option<String>,
     collapsed_projects: HashSet<String>,
     project_pages: HashMap<String, ProjectSessionPage>,
+    project_labels: HashMap<String, String>,
     project_pagination: bool,
     project_generation: u64,
     retired_project_requests: HashSet<u64>,
@@ -1482,6 +1483,7 @@ impl Default for NeoismAgentSidePanel {
             dashboard_directory: None,
             collapsed_projects: HashSet::new(),
             project_pages: HashMap::new(),
+            project_labels: HashMap::new(),
             project_pagination: false,
             project_generation: 0,
             retired_project_requests: HashSet::new(),
@@ -3593,6 +3595,7 @@ impl NeoismAgentSidePanel {
             }
         }
         let project_name = |directory: &str| {
+            if let Some(label) = self.project_labels.get(directory) { return label.clone(); }
             if directory.is_empty() {
                 return "Other chats".to_owned();
             }

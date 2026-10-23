@@ -685,12 +685,13 @@ impl BatchManager {
         checkpoint: &[(usize, usize)],
         holes: &[[f32; 4]],
     ) {
-        use crate::occlusion::{filter_tail, visible};
+        use crate::occlusion::{filter_tail, Occlusions};
+        let holes = Occlusions::new(holes);
         for (index, batch) in self.active.iter_mut().enumerate() {
             let (instances, vertices) =
                 checkpoint.get(index).copied().unwrap_or_default();
             filter_tail(&mut batch.instances, instances, |instance| {
-                visible(
+                holes.visible(
                     [
                         instance.pos[0],
                         instance.pos[1],
@@ -698,7 +699,6 @@ impl BatchManager {
                         instance.size[1],
                     ],
                     instance.clip_rect,
-                    holes,
                 )
                 .map(|clips| {
                     clips
@@ -726,10 +726,9 @@ impl BatchManager {
                     right = right.max(v.pos[0]);
                     bottom = bottom.max(v.pos[1]);
                 }
-                match visible(
+                match holes.visible(
                     [left, top, right - left, bottom - top],
                     triangle[0].clip_rect,
-                    holes,
                 ) {
                     None => batch.vertices.extend_from_slice(triangle),
                     Some(clips) => {

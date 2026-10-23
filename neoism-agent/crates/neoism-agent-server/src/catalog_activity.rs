@@ -115,8 +115,7 @@ pub(crate) async fn activity(
     {
         return Ok(CatalogActivity::Running);
     }
-    let runs = state.inner.session_coordinator.active_runs().await;
-    if runs.contains_key(root) {
+    if state.inner.session_coordinator.active_run(root).await.is_some() {
         return Ok(CatalogActivity::Running);
     }
     let busy = state
@@ -418,6 +417,18 @@ async fn authorized_root(
         && crate::external_agent::catalog::is_neoism_owned_root(&root)
         && claims.is_none_or(|claims| crate::caller::allows_session(claims, &root)))
     .then_some(root))
+}
+
+/// Single-session reads retain the requested ID as the activity root, including
+/// child GETs. Do not substitute the child's execution/parent root here.
+/// Runtime-only branches are merged by `activity`, just as in catalog projection.
+pub(crate) async fn project_one(
+    state: &AppState,
+    info: SessionInfo,
+) -> anyhow::Result<CatalogSessionInfo> {
+    let family = state.inner.store.catalog_family_members(info.id.as_str()).await?;
+    let catalog_activity = activity(state, info.id.as_str(), &family).await?;
+    Ok(CatalogSessionInfo { info, catalog_activity })
 }
 
 pub(crate) async fn project(

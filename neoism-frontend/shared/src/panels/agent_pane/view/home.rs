@@ -47,7 +47,7 @@ pub fn render_home_with<P: AgentHomePane>(
     s: f32,
     input_rect: [f32; 4],
     occlusion_rects: &[[f32; 4]],
-    prepared_input_rows: Option<&[InputWrapRow]>,
+    prepared_input_rows: Option<&std::rc::Rc<Vec<InputWrapRow>>>,
     checkout_context: Option<&AgentCheckoutContext>,
 ) {
     let [x, y, w, h] = rect;

@@ -2,6 +2,19 @@
 
 All notable user-facing changes to Neoism are documented here.
 
+## [0.7.136] - 2026-10-23
+
+### Chat hydration, provider readiness, and frame responsiveness
+
+- Improves chat opening with incremental/cached history, bounded ingestion work, background generated-image hydration, and shared attachment payloads.
+- Adds bundled offline provider/model metadata and makes optional discovery nonblocking for connection UI. Keeps warm account-scoped readiness metadata through bounded refresh failures while preserving per-model Codex maxima and effective input budgets.
+- Adds capability-verified machine-wide Agent target selection, generation-scoped remote catalogs, explicit activation settings, and reconnect handling without automatic prompt replay.
+- Adds a question navigation rail and refines image-preview/modal behavior, composer wrapping/layout, and account-selection reconciliation.
+- Presents previous-good terminal frames during lock contention instead of blocking unrelated UI; moves Git/notes work off the critical path and improves cached diagnostic and bounded LRU bookkeeping.
+- Defers Vulkan texture retirement until acquired-slot fence reuse and uses GPU-ordered atlas uploads rather than ordinary-path idle/cross-slot CPU waits, preserving teardown synchronization.
+
+This is a stable production release, available through plain `neoism update` after all platform builds and packaging checks pass. Visible continuous animations remain enabled. Existing first-terminal behavior, scoped authorization, trusted-user hosting limits, and Servo/CEF worker exclusions are preserved.
+
 ## [0.7.135] - 2026-10-23
 
 ### Pull requests, systems management, and Agent presentation

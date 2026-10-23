@@ -129,7 +129,22 @@ impl NeoismAgentPane {
         }
     }
 
+    pub(crate) fn record_conversation_open_started(&mut self, started: Option<Instant>) {
+        if let (Some(started), Some((session_id, started_at))) =
+            (started, self.conversation_open_started.as_mut())
+        {
+            *started_at = started;
+            tracing::info!(
+                target: "neoism::agent_ui_perf",
+                session_id = session_id.as_str(),
+                elapsed_us = started.elapsed().as_micros() as u64,
+                "agent conversation sidebar activation"
+            );
+        }
+    }
+
     pub fn with_directory(directory: Option<String>) -> Self {
+        let started = super::super::perf::now();
         let mut pane = Self {
             directory: directory.clone(),
             ..Self::default()
@@ -137,22 +152,24 @@ impl NeoismAgentPane {
         // Screen plumbing may explicitly widen HOME/root dashboards. Default
         // to exact scope here because this may be a remote host's directory.
         pane.set_catalog_directory(directory);
-        // Seed the composer's Up-arrow recall from the GLOBAL, persisted
-        // prompt history so a brand-new pane sees every past session's
-        // prompts (zsh-style). Persistence is host-only std::fs, so it is
-        // compiled out of test builds — unit tests keep a deterministic
-        // empty history and exercise the store directly.
+        // Recall is independent of the transcript; never read/parse its file
+        // on the click thread. The host supplies its already-loaded config.
         #[cfg(not(test))]
         {
-            pane.sent_history = crate::neoism::agent::prompt_history::load();
+            let tx = pane.background_sender();
+            std::thread::spawn(move || {
+                let history = crate::neoism::agent::prompt_history::load();
+                let _ = tx.send(NeoismAgentBackgroundUpdate::PromptHistoryLoaded(history));
+            });
         }
         pane.apply_config_defaults();
-        #[cfg(not(test))]
-        pane.set_default_chat_source(
-            neoism_backend::config::Config::load()
-                .agent
-                .default_chat_source,
-        );
+        if super::super::perf::enabled() {
+            tracing::info!(
+                target: "neoism::agent_ui_perf",
+                elapsed_us = super::super::perf::elapsed_us(started),
+                "agent conversation pane construction"
+            );
+        }
         pane
     }
 
@@ -574,7 +591,12 @@ impl NeoismAgentPane {
                     if delay > 0 {
                         std::thread::sleep(std::time::Duration::from_millis(delay));
                     }
-                    match fetch_config_defaults(&server, target.directory.as_deref()) {
+                    let response = if super::super::system::is_system_agent_server(&server) {
+                        super::super::api::fetch_system_defaults(&server, target.directory.as_deref())
+                    } else {
+                        fetch_config_defaults(&server, target.directory.as_deref())
+                    };
+                    match response {
                         Ok(defaults) => {
                             if started.is_some() {
                                 tracing::info!(
@@ -809,7 +831,7 @@ impl NeoismAgentPane {
 
     pub fn set_input_wrap_rows(
         &mut self,
-        rows: Vec<neoism_ui::panels::agent_pane::input_controller::InputWrapRow>,
+        rows: std::rc::Rc<Vec<neoism_ui::panels::agent_pane::input_controller::InputWrapRow>>,
     ) {
         self.input_wrap_len = self.input.len();
         self.input_wrap_rows = rows;

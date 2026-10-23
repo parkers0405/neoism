@@ -29,6 +29,10 @@ const CONNECT_HEADER_TIMEOUT: Duration = Duration::from_secs(3);
 const RECONNECT_DELAY: Duration = Duration::from_millis(500);
 const PENDING_UNKNOWN_SESSION_EVENT_LIMIT: usize = 512;
 
+#[path = "ingestion_budget.rs"]
+pub(crate) mod ingestion_budget;
+use ingestion_budget::IngestionBudget;
+
 /// Transcript snapshots are reconciled independently for every session in a
 /// subscribed tree. An event from a child must not invalidate the parent's
 /// completed-message refresh (or vice versa), and lifecycle-only events must
@@ -99,6 +103,22 @@ pub(super) enum AgentSessionUpdate {
     PartUpdated {
         message: NeoismAgentMessage,
         parent_message_id: Option<String>,
+    },
+    HistoryRefreshFailed {
+        session_id: String,
+        error: String,
+    },
+    HistoryPageLoaded {
+        session_id: String,
+        raw_count: usize,
+        requested_limit: usize,
+        oldest_cursor: Option<String>,
+    },
+    ImageHydrationDeferred,
+    ImageHydrationProgress,
+    ImageHydrated {
+        session_id: Option<String>,
+        patch: super::api::generated_images::ImagePatch,
     },
     PartRemoved(String),
     ChildPartDelta {
@@ -231,7 +251,7 @@ pub(super) enum AgentSessionUpdate {
 pub(crate) struct AgentSessionEventStream {
     session_id: String,
     rx: Receiver<AgentSessionUpdate>,
-    pending: Option<AgentSessionUpdate>,
+    pending: VecDeque<AgentSessionUpdate>,
     known_child_session_ids: Arc<Mutex<HashSet<String>>>,
     stop: Arc<AtomicBool>,
     disconnected: bool,
@@ -254,6 +274,16 @@ impl AgentEventWake {
             }),
             pending: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Share one elapsed-time deadline across a window's ordered pane passes.
+    /// The bridge chooses visible-first order and rotates hidden panes.
+    pub(crate) fn with_ingestion_budget<R>(duration: Duration, f: impl FnOnce() -> R) -> R {
+        ingestion_budget::with_window_budget(duration, f)
+    }
+
+    pub(crate) fn same_receiver(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.pending, &other.pending)
     }
 
     pub(crate) fn wake(&self) {
@@ -311,7 +341,7 @@ impl AgentSessionEventStream {
         Self {
             session_id: session_id.to_string(),
             rx,
-            pending: None,
+            pending: VecDeque::new(),
             known_child_session_ids: Arc::new(Mutex::new(HashSet::new())),
             stop: Arc::new(AtomicBool::new(false)),
             disconnected: false,
@@ -332,7 +362,7 @@ impl AgentSessionEventStream {
         Self {
             session_id: session_id.to_string(),
             rx,
-            pending: None,
+            pending: VecDeque::new(),
             known_child_session_ids: Arc::new(Mutex::new(HashSet::new())),
             stop: Arc::new(AtomicBool::new(false)),
             disconnected: false,
@@ -366,6 +396,20 @@ impl AgentSessionEventStream {
     }
 
     pub(super) fn drain(&mut self, limit: usize) -> (Vec<AgentSessionUpdate>, bool) {
+        self.drain_with_budget(limit, None)
+    }
+
+    pub(super) fn defer(&mut self, updates: impl DoubleEndedIterator<Item = AgentSessionUpdate>) {
+        for update in updates.rev() {
+            self.pending.push_front(update);
+        }
+    }
+
+    pub(super) fn drain_with_budget(
+        &mut self,
+        limit: usize,
+        budget: Option<IngestionBudget>,
+    ) -> (Vec<AgentSessionUpdate>, bool) {
         if let Ok(wake) = self.wake.lock() {
             if let Some(wake) = wake.as_ref() {
                 wake.begin_drain();
@@ -374,12 +418,9 @@ impl AgentSessionEventStream {
         let limit = limit.max(1);
         let mut out = Vec::with_capacity(limit.min(64));
         let mut received = 0usize;
-        if let Some(update) = self.pending.take() {
-            push_coalesced_update(&mut out, update);
-            received = 1;
-        }
-        while received < limit {
-            match self.rx.try_recv() {
+        while received < limit && !budget.is_some_and(IngestionBudget::exhausted) {
+            let update = self.pending.pop_front().map(Ok).unwrap_or_else(|| self.rx.try_recv());
+            match update {
                 Ok(update) => {
                     push_coalesced_update(&mut out, update);
                     received += 1;
@@ -391,22 +432,16 @@ impl AgentSessionEventStream {
                 }
             }
         }
-        let has_more = if received >= limit {
+        // One-event lookahead detects backlog even when the deadline was already
+        // exhausted on entry. It never consumes the event out of FIFO order.
+        if self.pending.is_empty() {
             match self.rx.try_recv() {
-                Ok(update) => {
-                    self.pending = Some(update);
-                    true
-                }
-                Err(TryRecvError::Empty) => false,
-                Err(TryRecvError::Disconnected) => {
-                    self.disconnected = true;
-                    false
-                }
+                Ok(update) => self.pending.push_back(update),
+                Err(TryRecvError::Empty) => {},
+                Err(TryRecvError::Disconnected) => self.disconnected = true,
             }
-        } else {
-            false
-        };
-        (out, has_more)
+        }
+        (out, !self.pending.is_empty())
     }
 
     pub(super) fn is_disconnected(&self) -> bool {
@@ -438,6 +473,7 @@ pub(crate) struct AgentSessionCatalogStream {
     server: String,
     directory: Option<String>,
     rx: Receiver<AgentSessionCatalogUpdate>,
+    pending: Option<AgentSessionCatalogUpdate>,
     stop: Arc<AtomicBool>,
     wake: Arc<Mutex<Option<AgentEventWake>>>,
 }
@@ -459,6 +495,7 @@ impl AgentSessionCatalogStream {
             server: "test".into(),
             directory: None,
             rx,
+            pending: None,
             stop: Arc::new(AtomicBool::new(false)),
             wake: Arc::new(Mutex::new(None)),
         }
@@ -466,6 +503,25 @@ impl AgentSessionCatalogStream {
 
     pub(super) fn matches(&self, server: &str, directory: Option<&str>) -> bool {
         self.server == server && self.directory.as_deref() == directory
+    }
+
+    /// Clear the coalescer before probing so an enqueue racing an empty probe
+    /// still wakes the window. Retain lookahead until actual application.
+    pub(super) fn has_pending(&mut self) -> bool {
+        if let Ok(wake) = self.wake.lock() {
+            if let Some(wake) = wake.as_ref() {
+                wake.begin_drain();
+            }
+        }
+        if self.pending.is_none() {
+            self.pending = self.rx.try_recv().ok();
+        }
+        self.pending.is_some()
+    }
+
+    pub(super) fn try_next(&mut self) -> Option<AgentSessionCatalogUpdate> {
+        self.has_pending();
+        self.pending.take()
     }
 
     pub(super) fn drain(&mut self, limit: usize) -> Vec<AgentSessionCatalogUpdate> {
@@ -476,7 +532,7 @@ impl AgentSessionCatalogStream {
         }
         let mut updates = Vec::new();
         while updates.len() < limit.max(1) {
-            match self.rx.try_recv() {
+            match self.pending.take().map(Ok).unwrap_or_else(|| self.rx.try_recv()) {
                 Ok(update) => updates.push(update),
                 Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
             }
@@ -541,6 +597,7 @@ pub(super) fn start_session_catalog_stream(
         server,
         directory,
         rx,
+        pending: None,
         stop,
         wake,
     }
@@ -688,7 +745,7 @@ pub(super) fn start_session_event_stream_with_reconcile(
     AgentSessionEventStream {
         session_id,
         rx,
-        pending: None,
+        pending: VecDeque::new(),
         known_child_session_ids,
         stop,
         disconnected: false,
@@ -790,8 +847,18 @@ fn run_event_stream(
     // transcript reconciliation immediately — the watchdog resubscribe path.
     let mut connected_once = reconcile_first_connect;
     while !stop.load(Ordering::Relaxed) {
+        let connecting = super::perf::now();
         match open_event_stream_with_deadline(&server, &session_id) {
             Ok(connection) => {
+                if super::perf::enabled() {
+                    tracing::info!(
+                        target: "neoism::agent_ui_perf",
+                        session_id,
+                        reconnect = connected_once,
+                        elapsed_us = super::perf::elapsed_us(connecting),
+                        "agent conversation subscribed"
+                    );
+                }
                 let message_refresh_epochs = Arc::new(MessageRefreshEpochs::default());
                 if connected_once {
                     // The stream is subscribed before the snapshot is fetched, so live
@@ -1186,10 +1253,10 @@ fn send_event_updates(
                         message: message.clone(),
                         parent_message_id: parent_message_id.clone(),
                     })?;
-                    hydrate_live_images(server, tx, wake, message, move |message| {
-                        AgentSessionUpdate::PartUpdated {
-                            message,
-                            parent_message_id,
+                    hydrate_live_images(server, tx, wake, message, move |patch| {
+                        AgentSessionUpdate::ImageHydrated {
+                            session_id: None,
+                            patch,
                         }
                     });
                 }
@@ -1224,11 +1291,10 @@ fn send_event_updates(
                         message: message.clone(),
                         parent_message_id: parent_message_id.clone(),
                     })?;
-                    hydrate_live_images(server, tx, wake, message, move |message| {
-                        AgentSessionUpdate::ChildPartUpdated {
-                            session_id: child_session_id,
-                            message,
-                            parent_message_id,
+                    hydrate_live_images(server, tx, wake, message, move |patch| {
+                        AgentSessionUpdate::ImageHydrated {
+                            session_id: Some(child_session_id.clone()),
+                            patch,
                         }
                     });
                 }
@@ -1464,8 +1530,8 @@ fn hydrate_live_images(
     tx: &Sender<AgentSessionUpdate>,
     wake: &Arc<Mutex<Option<AgentEventWake>>>,
     message: super::pane::NeoismAgentMessage,
-    update: impl FnOnce(super::pane::NeoismAgentMessage) -> AgentSessionUpdate
-        + Send
+    update: impl Fn(super::api::generated_images::ImagePatch) -> AgentSessionUpdate
+        + Send + Sync
         + 'static,
 ) {
     if !message.images.iter().any(|image| {
@@ -1473,16 +1539,23 @@ fn hydrate_live_images(
     }) {
         return;
     }
-    let server = server.to_string();
+    let progress_tx = tx.clone();
+    let deferred_tx = tx.clone();
+    let progress_wake = wake.clone();
+    let deferred_wake = wake.clone();
     let tx = tx.clone();
     let wake = wake.clone();
-    std::thread::spawn(move || {
-        let mut message = message;
-        super::api::hydrate_generated_images(&server, std::slice::from_mut(&mut message));
-        if tx.send(update(message)).is_ok() {
+    if !super::api::generated_images::hydrate_page(server, std::slice::from_ref(&message), move |patch| {
+        if tx.send(update(patch)).is_ok() {
             wake_event_loop(&wake);
         }
-    });
+    }, move || {
+        let _ = progress_tx.send(AgentSessionUpdate::ImageHydrationProgress);
+        wake_event_loop(&progress_wake);
+    }) {
+        let _ = deferred_tx.send(AgentSessionUpdate::ImageHydrationDeferred);
+        wake_event_loop(&deferred_wake);
+    }
 }
 
 fn spawn_message_refreshes(
@@ -1508,13 +1581,14 @@ fn spawn_message_refreshes(
                 return;
             }
             let mut page = None;
+            let mut last_error = None;
             for attempt in 0..3 {
                 if stop.load(Ordering::Relaxed)
                     || message_refresh_epochs.current(&owner_session_id) != expected_epoch
                 {
                     break;
                 }
-                match fetch_session_messages_page(&server, &owner_session_id, None, 80) {
+                match fetch_session_messages_page(&server, &owner_session_id, None, super::api::API_INITIAL_HISTORY_LIMIT) {
                     Ok(fetched) => {
                         page = Some(fetched);
                         break;
@@ -1522,6 +1596,7 @@ fn spawn_message_refreshes(
                     Err(error) => {
                         tracing::warn!(session_id = %owner_session_id, attempt = attempt + 1, %error,
                             "agent transcript refresh failed");
+                        last_error = Some(error);
                         if attempt < 2 {
                             thread::sleep(std::time::Duration::from_millis(250 * (attempt + 1)));
                         }
@@ -1529,6 +1604,16 @@ fn spawn_message_refreshes(
                 }
             }
             let Some(page) = page else {
+                if !stop.load(Ordering::Relaxed)
+                    && message_refresh_epochs.current(&owner_session_id) == expected_epoch
+                {
+                    if let Some(error) = last_error {
+                        let _ = tx.send(AgentSessionUpdate::HistoryRefreshFailed {
+                            session_id: owner_session_id, error,
+                        });
+                        wake_event_loop(&wake);
+                    }
+                }
                 continue;
             };
             if stop.load(Ordering::Relaxed)
@@ -1536,11 +1621,25 @@ fn spawn_message_refreshes(
             {
                 continue;
             }
+            let pagination = AgentSessionUpdate::HistoryPageLoaded {
+                session_id: owner_session_id.clone(),
+                raw_count: page.raw_count,
+                requested_limit: super::api::API_INITIAL_HISTORY_LIMIT,
+                oldest_cursor: page.oldest_cursor.clone(),
+            };
             let messages = if let Some(usage) = usage {
                 with_compaction_usage(page.blocks, usage)
             } else {
                 page.blocks
             };
+            // Queue the authoritative text snapshot first, then hydrate only
+            // descriptors. Image completion can never replay a stale snapshot.
+            let image_descriptors = messages.iter().rev().filter(|message| !message.images.is_empty()).map(|message| {
+                let mut descriptor = super::pane::NeoismAgentMessage::assistant("").with_id(message.id.clone());
+                descriptor.images = message.images.clone();
+                descriptor
+            }).collect::<Vec<_>>();
+            let image_session_id = (owner_session_id != stream_session_id).then(|| owner_session_id.clone());
             let update = if owner_session_id == stream_session_id {
                 AgentSessionUpdate::Messages {
                     messages,
@@ -1553,19 +1652,24 @@ fn spawn_message_refreshes(
                     oldest_cursor: page.oldest_cursor,
                 }
             };
-            if tx.send(update).is_err() {
+            if tx.send(update).is_err() || tx.send(pagination).is_err() {
                 return;
             }
             wake_event_loop(&wake);
+            for message in image_descriptors {
+                let session_id = image_session_id.clone();
+                hydrate_live_images(&server, &tx, &wake, message, move |patch| {
+                    AgentSessionUpdate::ImageHydrated { session_id: session_id.clone(), patch }
+                });
+            }
         }
     });
 }
 
 fn wake_event_loop(wake: &Arc<Mutex<Option<AgentEventWake>>>) {
-    if let Ok(wake) = wake.lock() {
-        if let Some(wake) = wake.as_ref() {
-            wake.wake();
-        }
+    let wake = wake.lock().ok().and_then(|wake| wake.clone());
+    if let Some(wake) = wake {
+        wake.wake();
     }
 }
 
@@ -1612,6 +1716,105 @@ fn desktop_permission_from_shared(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ingestion_catalog_probe_retains_fifo_and_enqueue_after_empty_probe_wakes() {
+        let mut stream = AgentSessionCatalogStream::with_events_for_test([]);
+        let (tx, rx) = mpsc::channel();
+        stream.rx = rx; // Keep the producer connected across the empty probe.
+        let slot = stream.wake.clone();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = calls.clone();
+        stream.set_wake(AgentEventWake::for_test(move || {
+            assert!(slot.try_lock().is_ok(), "callback must not hold stream wake lock");
+            observed.fetch_add(1, Ordering::Relaxed);
+        }));
+        assert!(!stream.has_pending());
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+        tx.send(AgentSessionCatalogUpdate::Delete("first".into())).unwrap();
+        wake_event_loop(&stream.wake);
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert!(stream.has_pending());
+        assert!(stream.has_pending()); // A second probe must not consume lookahead.
+        tx.send(AgentSessionCatalogUpdate::Delete("second".into())).unwrap();
+        let ids = stream.drain(128).into_iter().map(|update| match update {
+            AgentSessionCatalogUpdate::Delete(id) => id,
+            _ => panic!("expected delete"),
+        }).collect::<Vec<_>>();
+        assert_eq!(ids, ["first", "second"]);
+        assert!(!stream.has_pending());
+    }
+
+    #[test]
+    fn ingestion_fake_clock_defers_suffix_before_lookahead_without_reordering() {
+        let updates = (0..10).map(|i| AgentSessionUpdate::System {
+            title: i.to_string(), body: String::new(),
+        });
+        let mut stream = AgentSessionEventStream::with_updates_for_test("session", updates);
+        let start = Instant::now();
+        let budget = IngestionBudget::ending_at(start + Duration::from_millis(2));
+        let (batch, more) = stream.drain(6);
+        assert!(more); // event 6 is in lookahead, 7..9 in the receiver
+        let mut batch = batch.into_iter();
+        let mut titles = Vec::new();
+        let mut elapsed = Duration::ZERO;
+        while !budget.exhausted_at(start + elapsed) {
+            if let Some(AgentSessionUpdate::System { title, .. }) = batch.next() {
+                titles.push(title);
+            }
+            elapsed += Duration::from_millis(1);
+        }
+        stream.defer(batch); // events 2..5 go before lookahead 6
+        loop {
+            let (batch, more) = stream.drain(3);
+            for update in batch {
+                if let AgentSessionUpdate::System { title, .. } = update { titles.push(title); }
+            }
+            if !more { break; }
+        }
+        assert_eq!(titles, (0..10).map(|i| i.to_string()).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn ingestion_expired_budget_keeps_first_event_and_coalescing_barriers() {
+        let delta = |text: &str| AgentSessionUpdate::PartDelta {
+            message_id: Some("m".into()), part_id: Some("p".into()),
+            kind: Some("text".into()), delta: text.into(),
+        };
+        let mut stream = AgentSessionEventStream::with_updates_for_test("session", [
+            delta("a"), delta("b"),
+            AgentSessionUpdate::PartRemoved("p".into()), delta("c"),
+        ]);
+        let expired = IngestionBudget::ending_at(Instant::now());
+        let (batch, more) = stream.drain_with_budget(512, Some(expired));
+        assert!(batch.is_empty());
+        assert!(more);
+        let (batch, more) = stream.drain(512);
+        assert!(!more);
+        assert_eq!(batch.len(), 3);
+        assert!(matches!(&batch[0], AgentSessionUpdate::PartDelta { delta, .. } if delta == "ab"));
+        assert!(matches!(&batch[1], AgentSessionUpdate::PartRemoved(id) if id == "p"));
+        assert!(matches!(&batch[2], AgentSessionUpdate::PartDelta { delta, .. } if delta == "c"));
+    }
+
+    #[test]
+    fn persistent_window_wake_shares_identity_and_rearms_after_drain() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let callback_calls = calls.clone();
+        let wake = AgentEventWake::for_test(move || {
+            callback_calls.fetch_add(1, Ordering::Relaxed);
+        });
+        let pane_wake = wake.clone();
+        assert!(wake.same_receiver(&pane_wake));
+        assert!(!wake.same_receiver(&AgentEventWake::for_test(|| {})));
+        for _ in 0..100 {
+            pane_wake.wake();
+        }
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        wake.begin_drain();
+        pane_wake.wake();
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+    }
 
     fn no_wake() -> Arc<Mutex<Option<AgentEventWake>>> {
         Arc::new(Mutex::new(None))
@@ -2133,32 +2336,23 @@ mod tests {
                 .images
                 .push(neoism_ui::panels::agent_pane::state::NeoismAgentImage {
                     filename: "generated-image.jpg".to_string(),
-                    url: "/v2/artifacts/art-image/content".to_string(),
+                    url: "/v2/artifacts/art-image/content".into(),
                     mime: "image/jpeg".to_string(),
                 });
 
-            hydrate_live_images(&server, &tx, &wake, message, move |message| {
-                if child {
-                    AgentSessionUpdate::ChildPartUpdated {
-                        session_id: "child".to_string(),
-                        message,
-                        parent_message_id: Some("message".to_string()),
-                    }
-                } else {
-                    AgentSessionUpdate::PartUpdated {
-                        message,
-                        parent_message_id: Some("message".to_string()),
-                    }
-                }
+            hydrate_live_images(&server, &tx, &wake, message, move |patch| {
+                AgentSessionUpdate::ImageHydrated { session_id: child.then(|| "child".to_owned()), patch }
             });
 
             wake_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-            let message = match rx.try_recv().unwrap() {
-                AgentSessionUpdate::PartUpdated { message, .. } if !child => message,
-                AgentSessionUpdate::ChildPartUpdated { message, .. } if child => message,
+            let patch = match rx.try_recv().unwrap() {
+                AgentSessionUpdate::ImageHydrated { session_id, patch } => {
+                    assert_eq!(session_id.as_deref(), child.then_some("child"));
+                    patch
+                }
                 _ => panic!("unexpected hydrated image update"),
             };
-            assert_eq!(message.images[0].url, "data:image/jpeg;base64,aW1hZ2U=");
+            assert_eq!(patch.url.as_str(), "data:image/jpeg;base64,aW1hZ2U=");
             responder.join().unwrap();
         }
     }

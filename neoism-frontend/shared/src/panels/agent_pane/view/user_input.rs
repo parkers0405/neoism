@@ -1,5 +1,7 @@
 mod wrap_cache;
 
+use std::rc::Rc;
+
 use sugarloaf::text::DrawOpts;
 use sugarloaf::Sugarloaf;
 use unicode_segmentation::UnicodeSegmentation;
@@ -425,7 +427,7 @@ pub trait AgentUserInputPane {
     fn input_images(&self) -> Vec<NeoismAgentImage>;
     fn cursor_byte(&self) -> usize;
     fn set_cursor_rect(&mut self, rect: Option<[f32; 4]>);
-    fn set_input_wrap_rows(&mut self, rows: Vec<InputWrapRow>);
+    fn set_input_wrap_rows(&mut self, rows: Rc<Vec<InputWrapRow>>);
     fn input_viewport_mut(
         &mut self,
     ) -> &mut crate::panels::agent_pane::input_viewport::InputViewport;
@@ -433,6 +435,12 @@ pub trait AgentUserInputPane {
         &mut self,
     ) -> &mut crate::panels::agent_pane::composer_interactions::ComposerInteractions;
     fn composer_directory(&self) -> Option<String>;
+    fn composer_system(
+        &self,
+    ) -> Option<crate::panels::agent_pane::composer_interactions::ComposerSystemControl>
+    {
+        None
+    }
     fn clear_usage_chip_rect(&mut self);
     fn register_usage_chip_rect(&mut self, rect: [f32; 4]);
     fn clear_composer_control_rect(&mut self);
@@ -561,8 +569,8 @@ macro_rules! neoism_ui_impl_agent_user_input {
 
             fn set_input_wrap_rows(
                 &mut self,
-                rows: Vec<
-                    $crate::panels::agent_pane::input_controller::InputWrapRow,
+                rows: std::rc::Rc<
+                    Vec<$crate::panels::agent_pane::input_controller::InputWrapRow>,
                 >,
             ) {
                 <$pane>::set_input_wrap_rows(self, rows);
@@ -570,6 +578,10 @@ macro_rules! neoism_ui_impl_agent_user_input {
 
             fn input_viewport_mut(&mut self) -> &mut $crate::panels::agent_pane::input_viewport::InputViewport {
                 <$pane>::input_viewport_mut(self)
+            }
+
+            fn composer_system(&self) -> Option<$crate::panels::agent_pane::composer_interactions::ComposerSystemControl> {
+                <$pane>::composer_system_control(self)
             }
 
             fn composer_interactions(&mut self) -> &mut $crate::panels::agent_pane::composer_interactions::ComposerInteractions {
@@ -841,7 +853,7 @@ impl AgentUserInputPane for NeoismAgentPane {
         NeoismAgentPane::set_cursor_rect(self, rect);
     }
 
-    fn set_input_wrap_rows(&mut self, rows: Vec<InputWrapRow>) {
+    fn set_input_wrap_rows(&mut self, rows: Rc<Vec<InputWrapRow>>) {
         NeoismAgentPane::set_input_wrap_rows(self, rows);
     }
 
@@ -1346,7 +1358,7 @@ pub fn render_user_message<P: AgentMarkdownPane>(
             shown as f32 * thumb + (shown - 1) as f32 * gap
         };
         let image_x = text_x + (text_w - strip_w).max(0.0);
-        super::image_preview::render_image_strip(
+        let image_hits = super::image_preview::render_image_strip(
             sugarloaf,
             images,
             image_x,
@@ -1358,6 +1370,11 @@ pub fn render_user_message<P: AgentMarkdownPane>(
             viewport_clip,
             occlusion_rects,
         );
+        if !pane.suppress_markdown_interactions() {
+            for hit in image_hits {
+                pane.register_image_preview(hit);
+            }
+        }
         line_y += 164.0 * s;
     }
     let suppress_interactions = pane.suppress_markdown_interactions();
@@ -1486,7 +1503,7 @@ pub fn render_input(
     home_source: bool,
     now_seconds: f32,
     occlusion_rects: &[[f32; 4]],
-    prepared_wrap_rows: Option<&[InputWrapRow]>,
+    prepared_wrap_rows: Option<&Rc<Vec<InputWrapRow>>>,
     checkout_context: Option<&AgentCheckoutContext>,
 ) {
     let [x, y, w, h] = rect;
@@ -1503,7 +1520,7 @@ pub fn render_input(
     });
     let checkout_context = session_checkout.as_ref().or(checkout_context);
     pane.set_cursor_rect(None);
-    pane.composer_interactions().clear_rects();
+    pane.composer_interactions().clear_composer_rects();
     pane.clear_usage_chip_rect();
     pane.clear_composer_control_rect();
     pane.clear_status_chip_rects();
@@ -1513,7 +1530,10 @@ pub fn render_input(
     // One continuous shell surrounds the text and footer, with no divider or
     // separately bordered input box inside it.
     let geometry = ComposerGeometry::new(
-        rect, s, sugarloaf.scale_factor(), pane.input_help_visible() || checkout_context.is_some(),
+        rect,
+        s,
+        sugarloaf.scale_factor(),
+        pane.input_help_visible() || checkout_context.is_some() || pane.composer_system().is_some(),
     );
     let corner_radius = geometry.card_radius;
     let chips_band_h = CHIPS_BAND_H * s;
@@ -1598,7 +1618,7 @@ pub fn render_input(
         );
     }
     if !input_images.is_empty() {
-        super::image_preview::render_image_strip(
+        let image_hits = super::image_preview::render_image_strip(
             sugarloaf,
             &input_images,
             box_x + 18.0 * s,
@@ -1610,6 +1630,7 @@ pub fn render_input(
             [box_x, box_y, box_w, box_h],
             occlusion_rects,
         );
+        pane.composer_interactions().image_previews.extend(image_hits);
     }
 
     let mut composer_policy = composer_visual_policy(
@@ -1643,7 +1664,14 @@ pub fn render_input(
         occlusion_rects,
     );
 
-    let input_text = pane.input().to_string();
+    // Retain one exact draft snapshot per pane. Content comparison deliberately
+    // catches same-length edits from every input path without a revision API.
+    let previous_text = pane.input_viewport_mut().text_snapshot();
+    let input_text: Rc<str> = if previous_text.as_ref() == pane.input() {
+        previous_text
+    } else {
+        Rc::from(pane.input())
+    };
     let text: &str = if input_text.is_empty() {
         "Ask anything"
     } else {
@@ -1667,7 +1695,7 @@ pub fn render_input(
         ..DrawOpts::default()
     };
     let wrapped_rows = prepared_wrap_rows
-        .map(|rows| rows.to_vec())
+        .cloned()
         .unwrap_or_else(|| wrap_agent_prompt_rows(sugarloaf, text, text_w, &opts));
     // Register the visual rows (byte spans + per-boundary x offsets)
     // back on the pane so Up/Down arrow movement walks the exact rows
@@ -1675,7 +1703,7 @@ pub fn render_input(
     // (see `AgentInputBuffer::move_up_with_history_visual`). The
     // placeholder isn't the draft, so an empty input registers no rows.
     pane.set_input_wrap_rows(if input_text.is_empty() {
-        Vec::new()
+        Rc::default()
     } else {
         wrapped_rows.clone()
     });
@@ -1688,8 +1716,8 @@ pub fn render_input(
             .unwrap_or(wrapped_rows.len().saturating_sub(1))
     };
     let cursor_byte = pane.cursor_byte();
-    let visible_line_offset = pane.input_viewport_mut().update(
-        &input_text,
+    let visible_line_offset = pane.input_viewport_mut().update_shared(
+        input_text.clone(),
         cursor_byte,
         caret_row,
         wrapped_rows.len(),
@@ -1902,11 +1930,48 @@ fn render_input_help_strip(
     // is active, the activity scanner and interrupt hint own this same slot.
     let visible_checkout = visible_footer_checkout_context(policy, checkout_context);
     let checkout_hint_left = hint_left;
-    let mut activity_guard = visible_checkout.map_or(x, |context| {
+    let mut checkout_rect = rect;
+    pane.composer_interactions().system_rects.clear();
+    if !policy.show_activity {
+        if let Some(system) = pane.composer_system() {
+            let icon = crate::primitives::look::themed_glyph("status.system", "\u{f108}");
+            let label = if system.selectable {
+                format!("{icon}  {}  \u{f107}", system.label)
+            } else {
+                format!("{icon}  {}", system.label)
+            };
+            let measured = sugarloaf.text_mut().measure(&label, &label_opts);
+            let (system_rect, remaining) = composer_system_layout(
+                rect,
+                hint_left,
+                measured,
+                visible_checkout.is_some(),
+                s,
+            );
+            if let Some(opts) = opts_with_clip(label_opts.clone(), system_rect) {
+                draw_text_clipped(
+                    sugarloaf,
+                    system_rect[0],
+                    baseline_y,
+                    &label,
+                    &opts,
+                    occlusion_rects,
+                );
+            }
+            if system.selectable {
+                pane.composer_interactions().system_rects =
+                    crate::panels::agent_pane::composer_interactions::cwd_visible_hit_rects(
+                        system_rect, measured, system_rect[2], occlusion_rects,
+                    );
+            }
+            checkout_rect = remaining;
+        }
+    }
+    let mut activity_guard = visible_checkout.map_or(checkout_rect[0], |context| {
         render_checkout_context(
             sugarloaf,
             context,
-            rect,
+            checkout_rect,
             baseline_y,
             &key_opts,
             &label_opts,
@@ -1920,10 +1985,10 @@ fn render_input_help_strip(
         let measured_cwd = sugarloaf.text_mut().measure(glyph, &label_opts)
             + 6.0 * s
             + sugarloaf.text_mut().measure(cwd, &key_opts);
-        let clip_width = checkout_context_width(rect, checkout_hint_left, s);
+        let clip_width = checkout_context_width(checkout_rect, checkout_hint_left, s);
         let hits =
             crate::panels::agent_pane::composer_interactions::cwd_visible_hit_rects(
-                rect,
+                checkout_rect,
                 measured_cwd,
                 clip_width,
                 occlusion_rects,
@@ -1997,6 +2062,37 @@ fn visible_footer_checkout_context<'a>(
     checkout_context: Option<&'a AgentCheckoutContext>,
 ) -> Option<&'a AgentCheckoutContext> {
     checkout_context.filter(|_| !policy.show_activity)
+}
+
+fn composer_system_layout(
+    rect: [f32; 4],
+    hint_left: f32,
+    measured_width: f32,
+    has_checkout: bool,
+    scale: f32,
+) -> ([f32; 4], [f32; 4]) {
+    let available = checkout_context_width(rect, hint_left, scale);
+    let budget = if has_checkout {
+        available * 0.5
+    } else {
+        available
+    };
+    let width = measured_width.max(0.0).min(budget).min(180.0 * scale);
+    let advance = if width > 0.0 {
+        width + 12.0 * scale
+    } else {
+        0.0
+    }
+    .min(rect[2].max(0.0));
+    (
+        [rect[0], rect[1], width, rect[3]],
+        [
+            rect[0] + advance,
+            rect[1],
+            (rect[2] - advance).max(0.0),
+            rect[3],
+        ],
+    )
 }
 
 fn checkout_context_width(rect: [f32; 4], hint_left: f32, scale: f32) -> f32 {
@@ -3008,6 +3104,22 @@ mod composer_visual_policy_tests {
     use super::super::{composer_geometry::COMPOSER_CORNER_RADIUS, INPUT_HELP_STRIP_H};
 
     #[test]
+    fn system_footer_reserves_directory_space_and_never_crosses_hints() {
+        for scale in [0.75, 1.0, 1.5, 2.0] {
+            let rect = [10.0 * scale, 20.0 * scale, 400.0 * scale, 24.0 * scale];
+            let hint_left = 300.0 * scale;
+            let (system, directory) = composer_system_layout(rect, hint_left, 1000.0, true, scale);
+            assert!(system[2] <= checkout_context_width(rect, hint_left, scale) * 0.5);
+            assert!(system[0] + system[2] < directory[0]);
+            assert_eq!(directory[0] + directory[2], rect[0] + rect[2]);
+            assert!(system[0] + system[2] < hint_left);
+            let (hidden, unchanged) = composer_system_layout(rect, rect[0], 100.0, true, scale);
+            assert_eq!(hidden[2], 0.0);
+            assert_eq!(unchanged, rect);
+        }
+    }
+
+    #[test]
     fn checkout_tray_is_narrower_and_touches_the_composer_bottom() {
         for scale in [0.75, 1.0, 1.5, 2.0] {
             for width in [0.0, 32.0, 280.0, 900.0] {
@@ -3529,7 +3641,7 @@ fn wrap_agent_prompt_rows(
     text: &str,
     max_w: f32,
     opts: &DrawOpts,
-) -> Vec<InputWrapRow> {
+) -> Rc<Vec<InputWrapRow>> {
     wrap_cache::prompt(sugarloaf, text, max_w, opts, |sugarloaf| {
         // Slot and glyph measurements are both in the scaled DrawOpts units.
         // The cache already keys font_size (and backend scale), so the derived
@@ -3616,7 +3728,7 @@ pub(super) fn measure_prompt_visual_rows(
     input: &str,
     input_w: f32,
     s: f32,
-) -> Vec<InputWrapRow> {
+) -> Rc<Vec<InputWrapRow>> {
     let text = if input.is_empty() {
         "Ask anything"
     } else {

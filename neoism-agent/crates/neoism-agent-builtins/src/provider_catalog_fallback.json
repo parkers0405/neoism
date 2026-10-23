@@ -1,0 +1,22 @@
+{
+  "openai": {
+    "id": "openai", "name": "OpenAI", "env": ["OPENAI_API_KEY"],
+    "api": "https://api.openai.com/v1", "npm": "@ai-sdk/openai",
+    "models": {"gpt-5": {"id": "gpt-5", "name": "GPT-5", "release_date": "2025-08-07", "tool_call": true, "reasoning": true, "limit": {"context": 272000, "output": 32000}}}
+  },
+  "anthropic": {
+    "id": "anthropic", "name": "Anthropic", "env": ["ANTHROPIC_API_KEY"],
+    "api": "https://api.anthropic.com/v1", "npm": "@ai-sdk/anthropic",
+    "models": {"claude-sonnet-4-6": {"id": "claude-sonnet-4-6", "name": "Claude Sonnet 4.6", "release_date": "2026-02-17", "tool_call": true, "limit": {"context": 200000, "output": 32000}}}
+  },
+  "github-copilot": {
+    "id": "github-copilot", "name": "GitHub Copilot", "env": [],
+    "api": "https://api.githubcopilot.com", "npm": "@ai-sdk/openai-compatible",
+    "models": {"gpt-4.1": {"id": "gpt-4.1", "name": "GPT-4.1", "release_date": "2025-04-14", "tool_call": true, "limit": {"context": 128000, "output": 16000}}}
+  },
+  "xai": {
+    "id": "xai", "name": "xAI", "env": ["XAI_API_KEY"],
+    "api": "https://api.x.ai/v1", "npm": "@ai-sdk/openai-compatible",
+    "models": {"grok-3": {"id": "grok-3", "name": "Grok 3", "release_date": "2025-02-17", "tool_call": true, "limit": {"context": 131072, "output": 16000}}}
+  }
+}

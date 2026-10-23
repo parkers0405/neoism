@@ -47,6 +47,7 @@ impl SearchIdentity {
 }
 
 struct SearchRequest {
+    sources: Vec<crate::neoism::agent::system::AgentSystemSource>,
     identity: SearchIdentity,
     current: Option<String>,
     transcript_enabled: bool,
@@ -147,6 +148,7 @@ impl Drop for SearchWorkers {
 }
 
 struct SearchReply {
+    errors: Vec<String>,
     identity: SearchIdentity,
     result: Result<(Vec<(NeoismAgentSessionEntry, String)>, bool, bool), String>,
 }
@@ -176,6 +178,34 @@ impl Default for ConversationSearchState {
 }
 
 fn fetch(request: &SearchRequest) -> SearchReply {
+    let mut reply = fetch_one(request);
+    for source in request.sources.iter().filter(|s| s.authorized()) {
+        let remote = SearchRequest {
+            sources: Vec::new(),
+            identity: SearchIdentity { server: source.server.clone(), directory: None, ..request.identity.clone() },
+            current: None, transcript_enabled: true, wake: request.wake.clone(),
+        };
+        let result = fetch_one(&remote).result;
+        if !source.authorized() { continue; }
+        match result {
+            Ok((hits, unavailable, indexing)) => {
+                if let Err(error) = &reply.result {
+                    reply.errors.push(format!("This computer: {error}"));
+                    reply.result = Ok((Vec::new(), false, false));
+                }
+                let target = reply.result.as_mut().unwrap();
+                target.0.extend(hits.into_iter().map(|(entry, excerpt)| (crate::neoism::agent::qualify_entry(source, entry), excerpt)));
+                // Transcript support belongs to the remote source, not the local endpoint.
+                if unavailable { reply.errors.push(format!("{}: transcript search unavailable", source.name)); }
+                target.2 |= indexing;
+            }
+            Err(error) => reply.errors.push(format!("{}: {error}", source.name)),
+        }
+    }
+    reply
+}
+
+fn fetch_one(request: &SearchRequest) -> SearchReply {
     let identity = request.identity.clone();
     let result = if identity.query.trim().is_empty() {
         // Initial view uses the same sidebar scope as transcript search.
@@ -226,7 +256,7 @@ fn fetch(request: &SearchRequest) -> SearchReply {
             )
         })
     };
-    SearchReply { identity, result }
+    SearchReply { identity, result, errors: Vec::new() }
 }
 
 impl ConversationSearchState {
@@ -268,6 +298,9 @@ impl ConversationSearchState {
 }
 
 fn project_label(directory: Option<&str>) -> String {
+    if let Some((id, _, path)) = directory.and_then(crate::neoism::agent::system::decode_source_key) {
+        return format!("{} · {id}", project_label(Some(&path)));
+    }
     directory
         .filter(|path| !path.is_empty())
         .map(|path| {
@@ -392,6 +425,13 @@ impl Screen<'_> {
         rows
     }
 
+    pub(crate) fn refresh_system_conversation_search(&mut self) {
+        if self.renderer.conversation_navigator.is_active()
+            && self.renderer.conversation_navigator.mode() == Some(Mode::Search) {
+            self.queue_conversation_search();
+        } else { self.invalidate_conversation_search(); }
+    }
+
     fn invalidate_conversation_search(&mut self) {
         if let Some(requests) = &self.conversation_search.requests {
             requests.0.replace(None);
@@ -432,6 +472,10 @@ impl Screen<'_> {
             .and_then(|agent| agent.session_id_str())
             .map(str::to_owned);
         let request = SearchRequest {
+            sources: if self.renderer.conversations_pane.side_panel().catalog_directory().is_none()
+                && !self.context_manager.current_workspace_is_remote_joined() {
+                self.conversation_workspaces.system_sources.clone()
+            } else { Vec::new() },
             identity: self.conversation_search.identity.clone(),
             current,
             transcript_enabled: !self
@@ -524,7 +568,7 @@ impl Screen<'_> {
                     let (rows, cache) = search_rows(entries, current);
                     self.conversation_search.entries = cache;
                     self.renderer.conversation_navigator.set_rows(rows);
-                    self.renderer.conversation_navigator.set_error(None);
+                    self.renderer.conversation_navigator.set_error((!reply.errors.is_empty()).then(|| reply.errors.join("; ")));
                 }
                 Err(error) => self.renderer.conversation_navigator.set_error(Some(error)),
             }

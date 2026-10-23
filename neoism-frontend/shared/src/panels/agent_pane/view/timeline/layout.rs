@@ -5,94 +5,18 @@ use super::render::{
 };
 use super::*;
 
+// Both hosts now own the same cache representation: no row/page walks or
+// replacement vector allocations are needed at the state/view boundary.
 pub(crate) fn from_state_cache(
     cache: crate::panels::agent_pane::state::TimelineLayoutCache,
 ) -> TimelineLayoutCache<NeoismAgentMessage> {
-    TimelineLayoutCache {
-        epoch: cache.epoch,
-        source_len: cache.source_len,
-        width_bucket: cache.width_bucket,
-        scale_bucket: cache.scale_bucket,
-        gap_bucket: cache.gap_bucket,
-        content_height: cache.content_height,
-        pages: cache
-            .pages
-            .into_iter()
-            .map(|page| TimelineLayoutPage {
-                page_index: page.page_index,
-                source_start: page.source_start,
-                source_end: page.source_end,
-                row_start: page.row_start,
-                row_end: page.row_end,
-                top: page.top,
-                height: page.height,
-                measured: page.measured,
-            })
-            .collect(),
-        estimated_suffix_start: cache.rows.len(),
-        rows: cache
-            .rows
-            .into_iter()
-            .map(|row| TimelineLayoutRow {
-                source_index: row.source_index,
-                source_end_index: row.source_end_index,
-                top: row.top,
-                height: row.height,
-                display_text: row.display_text,
-                display_message: row.display_message,
-                markdown_blocks: row.markdown_blocks,
-                tool_diff_sections: row.tool_diff_sections,
-                is_edit_tool: row.is_edit_tool,
-            })
-            .collect(),
-        // The web/state cache never runs lazy measurement (env flag is
-        // desktop-only); a round-tripped cache is always fully exact.
-        estimated_prefix_rows: 0,
-    }
+    cache
 }
 
 pub(crate) fn into_state_cache(
     cache: TimelineLayoutCache<NeoismAgentMessage>,
 ) -> crate::panels::agent_pane::state::TimelineLayoutCache {
-    crate::panels::agent_pane::state::TimelineLayoutCache {
-        epoch: cache.epoch,
-        source_len: cache.source_len,
-        width_bucket: cache.width_bucket,
-        scale_bucket: cache.scale_bucket,
-        gap_bucket: cache.gap_bucket,
-        content_height: cache.content_height,
-        pages: cache
-            .pages
-            .into_iter()
-            .map(
-                |page| crate::panels::agent_pane::state::TimelineLayoutPage {
-                    page_index: page.page_index,
-                    source_start: page.source_start,
-                    source_end: page.source_end,
-                    row_start: page.row_start,
-                    row_end: page.row_end,
-                    top: page.top,
-                    height: page.height,
-                    measured: page.measured,
-                },
-            )
-            .collect(),
-        rows: cache
-            .rows
-            .into_iter()
-            .map(|row| crate::panels::agent_pane::state::TimelineLayoutRow {
-                source_index: row.source_index,
-                source_end_index: row.source_end_index,
-                top: row.top,
-                height: row.height,
-                display_text: row.display_text,
-                display_message: row.display_message,
-                markdown_blocks: row.markdown_blocks,
-                tool_diff_sections: row.tool_diff_sections,
-                is_edit_tool: row.is_edit_tool,
-            })
-            .collect(),
-    }
+    cache
 }
 
 pub(crate) fn visible_timeline_row_range<M>(
@@ -276,7 +200,12 @@ where
     });
     let mut live_baseline = None;
     if let Some(mut cache) = cache {
-        mark_changed_artifact_rows(&cache, pane.messages(), &mut dirty);
+        reconcile_artifact_rows(
+            &mut cache,
+            pane.messages(),
+            pane.timeline_source_revision(),
+            &mut dirty,
+        );
         live_baseline = dirty_start_source(pane, &cache, &dirty)
             .and_then(|source| measured_tail_baseline(&cache, source));
         let covers_viewport =
@@ -400,15 +329,47 @@ pub(super) fn measured_tail_growth<M>(
     }
 }
 
-/// Reconcile artifact source transitions even if an ingest path missed a dirty
-/// mark. Repatching from the owning row also rebuilds every following row top,
-/// page height and virtual measurement; the renderer restores its view anchor.
+/// Work counters make the unchanged-frame contract testable without timing noise.
+#[derive(Default, Debug, PartialEq, Eq)]
+pub(super) struct ArtifactReconcileWork {
+    pub rows_visited: usize,
+    /// Upper bound on bytes offered to candidate detection, not elapsed time.
+    pub candidate_body_bytes: usize,
+    pub candidates: usize,
+}
+
+pub(super) fn reconcile_artifact_rows<M: AgentTimelineMessage>(
+    cache: &mut TimelineLayoutCache<M>,
+    messages: &[M],
+    revision: Option<u64>,
+    dirty: &mut TimelineDirtyMarks,
+) -> ArtifactReconcileWork {
+    // Appends have their own length guard. Dirty marks still drive normal
+    // suffix repair below; they need not force body scans (tool animation and
+    // learned artifact metrics can dirty geometry without changing source).
+    // Unknown revisions retain the defensive fallback.
+    if revision.is_some()
+        && cache.artifact_revision == revision
+        && cache.source_len == messages.len()
+    {
+        return ArtifactReconcileWork::default();
+    }
+    let work = mark_changed_artifact_rows(cache, messages, dirty);
+    cache.artifact_revision = revision;
+    work
+}
+
+/// Reconcile artifact source transitions on source changes, even if an ingest
+/// path advanced the revision without marking the owning row dirty. Repatching
+/// also rebuilds following row tops, pages and virtual measurements.
 pub(super) fn mark_changed_artifact_rows<M: AgentTimelineMessage>(
     cache: &TimelineLayoutCache<M>,
     messages: &[M],
     dirty: &mut TimelineDirtyMarks,
-) {
+) -> ArtifactReconcileWork {
+    let mut work = ArtifactReconcileWork::default();
     for (index, row) in cache.rows.iter().enumerate() {
+        work.rows_visited += 1;
         if row.source_index != row.source_end_index {
             continue;
         }
@@ -418,11 +379,15 @@ pub(super) fn mark_changed_artifact_rows<M: AgentTimelineMessage>(
         let Some(old) = row.display_message.as_ref() else {
             continue;
         };
-        if current.text() == old.text() && current.status() == old.status() {
-            continue;
-        }
+        // Detect candidates before full-body equality. Do not narrow by kind:
+        // defensive repair also covers legacy/non-assistant artifact sources.
+        work.candidate_body_bytes += current.text().len() + old.text().len();
         if !current.text().contains("neoism-html") && !old.text().contains("neoism-html")
         {
+            continue;
+        }
+        work.candidates += 1;
+        if current.text() == old.text() && current.status() == old.status() {
             continue;
         }
         let previous_edit = index > 0 && cache.rows[index - 1].is_edit_tool;
@@ -434,6 +399,7 @@ pub(super) fn mark_changed_artifact_rows<M: AgentTimelineMessage>(
             dirty.indices.insert(row.source_index);
         }
     }
+    work
 }
 
 pub(super) fn prepend_cache_is_exact<M>(cache: &TimelineLayoutCache<M>) -> bool {
@@ -532,7 +498,9 @@ where
     };
     let pages = build_timeline_layout_pages(&rows, pane.messages().len());
     TimelineLayoutCache {
+        question_targets: Default::default(),
         epoch,
+        artifact_revision: pane.timeline_source_revision(),
         source_len: pane.messages().len(),
         width_bucket,
         scale_bucket,
@@ -689,16 +657,11 @@ fn append_estimated_rows<P>(
     let mut previous_visible_was_edit_tool = false;
     let mut appended_any = false;
     let source_len = pane.messages().len();
-    let visibility =
-        timeline_message_visibility(pane.messages(), pane.timeline_live_trace_start());
     let mut source_index = 0;
     while source_index < source_len {
-        let Some(item) = next_timeline_item::<P>(
-            pane,
-            &visibility,
-            source_index,
-            previous_visible_was_edit_tool,
-        ) else {
+        let Some(item) =
+            next_timeline_item::<P>(pane, source_index, previous_visible_was_edit_tool)
+        else {
             source_index += 1;
             continue;
         };
@@ -1068,8 +1031,6 @@ where
     let mut previous_visible_was_edit_tool = false;
     let mut source_index = 0usize;
     let mut converge: Option<(usize, f32)> = None;
-    let visibility =
-        timeline_message_visibility(pane.messages(), pane.timeline_live_trace_start());
 
     while source_index < source_len {
         // Once we reach previously-laid-out territory, try to converge: if the
@@ -1084,12 +1045,9 @@ where
             }
         }
 
-        let Some(item) = next_timeline_item::<P>(
-            pane,
-            &visibility,
-            source_index,
-            previous_visible_was_edit_tool,
-        ) else {
+        let Some(item) =
+            next_timeline_item::<P>(pane, source_index, previous_visible_was_edit_tool)
+        else {
             source_index += 1;
             continue;
         };
@@ -1262,16 +1220,11 @@ where
     let source_len = end_index
         .unwrap_or_else(|| pane.messages().len())
         .min(pane.messages().len());
-    let visibility =
-        timeline_message_visibility(pane.messages(), pane.timeline_live_trace_start());
     let mut source_index = start_index;
     while source_index < source_len {
-        let Some(item) = next_timeline_item::<P>(
-            pane,
-            &visibility,
-            source_index,
-            previous_visible_was_edit_tool,
-        ) else {
+        let Some(item) =
+            next_timeline_item::<P>(pane, source_index, previous_visible_was_edit_tool)
+        else {
             source_index += 1;
             continue;
         };
@@ -1373,7 +1326,6 @@ enum NextTimelineItem<M> {
 
 fn next_timeline_item<P>(
     pane: &P,
-    visibility: &[bool],
     source_index: usize,
     previous_visible_was_edit_tool: bool,
 ) -> Option<NextTimelineItem<P::Message>>
@@ -1383,7 +1335,12 @@ where
     let messages = pane.messages();
     // Filter before grouping. Otherwise an archived read-tool run could enter
     // through the group fast path even though its typed rows are hidden.
-    if !visibility.get(source_index).copied().unwrap_or(false) {
+    let message = messages.get(source_index)?;
+    let live_start = pane
+        .timeline_live_trace_start()
+        .unwrap_or(messages.len())
+        .min(messages.len());
+    if !timeline_message_visible(message, source_index, live_start) {
         return None;
     }
     if let Some((source_end_exclusive, group_message)) =
@@ -1394,7 +1351,6 @@ where
             message: group_message,
         });
     }
-    let message = messages.get(source_index)?;
     display_timeline_message(message, previous_visible_was_edit_tool)
         .map(|message| NextTimelineItem::Message { message })
 }
@@ -1412,6 +1368,7 @@ where
 /// text part — and hid even the final answer when a turn ended on a tool
 /// call — which wiped re-entered transcripts down to fragments. Answers must
 /// survive every reload and session switch.
+#[cfg(test)]
 pub(crate) fn timeline_message_visibility<M: AgentTimelineMessage>(
     messages: &[M],
     live_trace_start: Option<usize>,
@@ -1422,24 +1379,30 @@ pub(crate) fn timeline_message_visibility<M: AgentTimelineMessage>(
     messages
         .iter()
         .enumerate()
-        .map(|(index, message)| {
-            if is_subagent_runtime_notification(message)
-                || is_background_completion_result_card(message)
-            {
-                return false;
-            }
-            match message.kind() {
-                AgentTimelineMessageKind::System => message.tool() == "location_notice",
-                AgentTimelineMessageKind::Reasoning
-                | AgentTimelineMessageKind::Tool
-                | AgentTimelineMessageKind::Subtask
-                | AgentTimelineMessageKind::Compaction => index >= live_start,
-                AgentTimelineMessageKind::User | AgentTimelineMessageKind::Assistant => {
-                    true
-                }
-            }
-        })
+        .map(|(index, message)| timeline_message_visible(message, index, live_start))
         .collect()
+}
+
+/// Visibility is row-local. Tail repairs must not allocate a mask or walk the
+/// archived prefix just to decide whether a handful of new rows are visible.
+fn timeline_message_visible<M: AgentTimelineMessage>(
+    message: &M,
+    index: usize,
+    live_start: usize,
+) -> bool {
+    if is_subagent_runtime_notification(message)
+        || is_background_completion_result_card(message)
+    {
+        return false;
+    }
+    match message.kind() {
+        AgentTimelineMessageKind::System => message.tool() == "location_notice",
+        AgentTimelineMessageKind::Reasoning
+        | AgentTimelineMessageKind::Tool
+        | AgentTimelineMessageKind::Subtask
+        | AgentTimelineMessageKind::Compaction => index >= live_start,
+        AgentTimelineMessageKind::User | AgentTimelineMessageKind::Assistant => true,
+    }
 }
 
 /// The runtime completion sentinel exists only to settle background-task

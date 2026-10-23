@@ -96,16 +96,26 @@ impl ProviderRegistry {
         &self,
         auth_store: &AuthStore,
     ) -> anyhow::Result<OpenAiModelAccess> {
+        self.openai_model_access_with_identity(auth_store).await.map(|(access, _)| access)
+    }
+
+    pub async fn openai_model_access_with_identity(
+        &self, auth_store: &AuthStore,
+    ) -> anyhow::Result<(OpenAiModelAccess, Option<String>)> {
         let Some(auth @ AuthInfo::OAuth { .. }) = auth_store.get("openai").await? else {
-            return Ok(OpenAiModelAccess::Api);
+            return Ok((OpenAiModelAccess::Api, None));
         };
-        match self.openai.codex_models(auth_store, auth).await {
-            Ok(ids) => Ok(OpenAiModelAccess::Codex(ids)),
+        // Use the exact discovery auth snapshot; a second read can race rotation.
+        let identity = provider_openai::codex_discovery_identity(&auth);
+        let access = match self.openai.codex_models(auth_store, auth).await {
+            Ok(Some(ids)) => OpenAiModelAccess::Codex(ids),
+            Ok(None) => OpenAiModelAccess::CodexPending,
             Err(error) => {
                 tracing::warn!(%error, "failed to load account-specific Codex model catalog");
-                Ok(OpenAiModelAccess::Codex(Default::default()))
+                OpenAiModelAccess::CodexPending
             }
-        }
+        };
+        Ok((access, identity))
     }
 
     pub async fn stream(

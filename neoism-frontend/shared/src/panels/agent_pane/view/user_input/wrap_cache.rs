@@ -2,6 +2,7 @@
 //! shaping and rebuilding caret offsets during otherwise animated frames.
 use std::cell::RefCell;
 use std::collections::VecDeque;
+use std::rc::Rc;
 
 use sugarloaf::text::DrawOpts;
 use sugarloaf::Sugarloaf;
@@ -12,8 +13,75 @@ const ENTRY_LIMIT: usize = 32;
 const BYTE_LIMIT: usize = 512 * 1024;
 
 thread_local! {
-    static PROMPTS: RefCell<WrapCache<Vec<InputWrapRow>>> = RefCell::new(WrapCache::default());
+    static PROMPTS: RefCell<WrapCache<Rc<Vec<InputWrapRow>>>> = RefCell::new(WrapCache::default());
     static BUBBLES: RefCell<WrapCache<Vec<String>>> = RefCell::new(WrapCache::default());
+    static FONT_KEYS: RefCell<Option<FontKey>> = const { RefCell::new(None) };
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FontKey {
+    library: usize,
+    faces: Rc<Vec<(usize, u64)>>,
+    hinting: bool,
+    symbol_maps: Rc<Vec<(usize, char, char)>>,
+}
+
+impl FontKey {
+    fn new(sugarloaf: &Sugarloaf) -> Self {
+        let library = sugarloaf.font_library();
+        let address = std::sync::Arc::as_ptr(&library.inner) as usize;
+        let fonts = library.inner.read();
+        Self::from_fonts(address, &fonts)
+    }
+
+    // The public library is mutable without a revision counter. Validate every
+    // face and symbol mapping, not just the Arc address/face count. Unchanged
+    // calls reuse allocations and skip enumeration/sorting; validation remains
+    // O(faces + mappings) under the read lock until Sugarloaf owns a revision.
+    fn from_fonts(address: usize, fonts: &sugarloaf::font::FontLibraryData) -> Self {
+        FONT_KEYS.with(|cached| {
+            let mut cached = cached.borrow_mut();
+            if let Some(key) = cached.as_ref().filter(|key| {
+                key.library == address
+                    && key.hinting == fonts.hinting
+                    && key.faces.len() == fonts.inner.len()
+                    && key.faces.iter().all(|(id, face)| {
+                        fonts
+                            .inner
+                            .get(id)
+                            .is_some_and(|font| font.key.value() == *face)
+                    })
+                    && key.symbol_maps.iter().copied().eq(fonts
+                        .symbol_maps
+                        .iter()
+                        .flatten()
+                        .map(|map| (map.font_index, map.range.start, map.range.end)))
+            }) {
+                return key.clone();
+            }
+            let mut faces: Vec<_> = fonts
+                .inner
+                .iter()
+                .map(|(id, face)| (*id, face.key.value()))
+                .collect();
+            faces.sort_unstable();
+            let key = Self {
+                library: address,
+                faces: Rc::new(faces),
+                hinting: fonts.hinting,
+                symbol_maps: Rc::new(
+                    fonts
+                        .symbol_maps
+                        .iter()
+                        .flatten()
+                        .map(|map| (map.font_index, map.range.start, map.range.end))
+                        .collect(),
+                ),
+            };
+            *cached = Some(key.clone());
+            key
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -29,21 +97,14 @@ struct LayoutKey {
     library: usize,
     // Face keys are globally unique, also detecting replacements within a library
     // and preventing a recycled library address from hitting an obsolete entry.
-    faces: Vec<(usize, u64)>,
+    faces: Rc<Vec<(usize, u64)>>,
     hinting: bool,
-    symbol_maps: Vec<(usize, char, char)>,
+    symbol_maps: Rc<Vec<(usize, char, char)>>,
 }
 
 impl LayoutKey {
     fn new(sugarloaf: &Sugarloaf, width: f32, opts: &DrawOpts) -> Self {
-        let library = sugarloaf.font_library();
-        let fonts = library.inner.read();
-        let mut faces: Vec<_> = fonts
-            .inner
-            .iter()
-            .map(|(id, face)| (*id, face.key.value()))
-            .collect();
-        faces.sort_unstable();
+        let fonts = FontKey::new(sugarloaf);
         Self {
             width: width.to_bits(),
             font_size: opts.font_size.to_bits(),
@@ -51,18 +112,10 @@ impl LayoutKey {
             bold: opts.bold,
             italic: opts.italic,
             font_id: opts.font_id,
-            library: std::sync::Arc::as_ptr(&library.inner) as usize,
-            faces,
+            library: fonts.library,
+            faces: fonts.faces,
             hinting: fonts.hinting,
-            symbol_maps: fonts
-                .symbol_maps
-                .as_ref()
-                .map(|maps| {
-                    maps.iter()
-                        .map(|map| (map.font_index, map.range.start, map.range.end))
-                        .collect()
-                })
-                .unwrap_or_default(),
+            symbol_maps: fonts.symbol_maps,
         }
     }
 
@@ -158,13 +211,13 @@ pub(super) fn prompt(
     width: f32,
     opts: &DrawOpts,
     build: impl FnOnce(&mut Sugarloaf) -> Vec<InputWrapRow>,
-) -> Vec<InputWrapRow> {
+) -> Rc<Vec<InputWrapRow>> {
     let key = LayoutKey::new(sugarloaf, width, opts);
     cached(
         &PROMPTS,
         key,
         text,
-        || build(sugarloaf),
+        || Rc::new(build(sugarloaf)),
         |rows| {
             rows.len() * std::mem::size_of::<InputWrapRow>()
                 + rows
@@ -208,10 +261,82 @@ mod tests {
             italic: false,
             font_id: None,
             library: 1,
-            faces: vec![(0, 42)],
+            faces: Rc::new(vec![(0, 42)]),
             hinting: true,
-            symbol_maps: vec![],
+            symbol_maps: Rc::default(),
         }
+    }
+
+    #[test]
+    fn font_fingerprint_reuses_allocations_but_detects_in_place_mutation() {
+        use sugarloaf::font::{FontData, FontLibraryData, SymbolMap};
+        let mut fonts = FontLibraryData::default();
+        let bytes = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../sugarloaf/resources/test-fonts/DejaVuSans.ttf"
+        ));
+        fonts.inner.insert(0, FontData::from_slice(bytes).unwrap());
+        let first = FontKey::from_fonts(7, &fonts);
+        let hit = FontKey::from_fonts(7, &fonts);
+        assert!(Rc::ptr_eq(&first.faces, &hit.faces));
+        assert!(Rc::ptr_eq(&first.symbol_maps, &hit.symbol_maps));
+        // Same address, same face count: replacement must not hit stale rows.
+        fonts.inner.insert(0, FontData::from_slice(bytes).unwrap());
+        let replacement = FontKey::from_fonts(7, &fonts);
+        assert_ne!(replacement, first);
+        fonts.hinting = !fonts.hinting;
+        let hinting = FontKey::from_fonts(7, &fonts);
+        assert_ne!(hinting, replacement);
+        fonts.symbol_maps = Some(vec![SymbolMap {
+            font_index: 0,
+            range: 'a'..'z',
+        }]);
+        let mapped = FontKey::from_fonts(7, &fonts);
+        assert_ne!(mapped, hinting);
+        fonts.symbol_maps.as_mut().unwrap()[0].range.end = 'y';
+        let remapped = FontKey::from_fonts(7, &fonts);
+        assert_ne!(remapped, mapped);
+        fonts.inner.clear();
+        assert_ne!(FontKey::from_fonts(7, &fonts), remapped);
+        assert_ne!(
+            FontKey::from_fonts(8, &fonts),
+            FontKey::from_fonts(7, &fonts)
+        );
+    }
+
+    #[test]
+    fn prompt_hits_share_rows_and_caret_offsets_without_deep_clones() {
+        thread_local! {
+            static TEST: RefCell<WrapCache<Rc<Vec<InputWrapRow>>>> = RefCell::new(WrapCache::default());
+        }
+        let builds = std::cell::Cell::new(0);
+        let text = "界 e\u{301} [Image1]\n👩‍💻";
+        let wrap = || {
+            cached(
+                &TEST,
+                key(),
+                text,
+                || {
+                    builds.set(builds.get() + 1);
+                    Rc::new(super::super::wrap_agent_prompt_rows_with(text, 4.0, |s| {
+                        s.chars().count() as f32
+                    }))
+                },
+                |_| 256,
+            )
+        };
+        let original = wrap();
+        let offsets = original[0].offsets.as_ptr();
+        for _ in 0..100 {
+            let hit = wrap();
+            assert!(Rc::ptr_eq(&original, &hit));
+            assert_eq!(offsets, hit[0].offsets.as_ptr());
+        }
+        assert_eq!(builds.get(), 1);
+        // Pane/prepared-layout owners survive eviction of the global entry.
+        TEST.with(|cache| *cache.borrow_mut() = WrapCache::default());
+        assert!(!original.is_empty());
+        assert_eq!(original[0].offsets[0], 0.0);
     }
 
     #[test]
@@ -243,13 +368,13 @@ mod tests {
         k.library += 1;
         variants.push(k);
         let mut k = key();
-        k.faces[0].1 += 1;
+        Rc::make_mut(&mut k.faces)[0].1 += 1;
         variants.push(k);
         let mut k = key();
         k.hinting = false;
         variants.push(k);
         let mut k = key();
-        k.symbol_maps.push((1, 'a', 'z'));
+        Rc::make_mut(&mut k.symbol_maps).push((1, 'a', 'z'));
         variants.push(k);
         for variant in variants {
             assert!(cache.get(&variant, "界 e\u{301}\n👩‍💻").is_none());
@@ -349,9 +474,17 @@ mod tests {
             let rows = super::super::wrap_agent_prompt_rows_with(text, width, |s| {
                 s.chars().count() as f32
             });
-            assert_eq!(rows.iter().map(|row| (row.start, row.end)).collect::<Vec<_>>(), spans);
             assert_eq!(
-                crate::panels::agent_pane::input_controller::visual_row_index(&rows, text.len()),
+                rows.iter()
+                    .map(|row| (row.start, row.end))
+                    .collect::<Vec<_>>(),
+                spans
+            );
+            assert_eq!(
+                crate::panels::agent_pane::input_controller::visual_row_index(
+                    &rows,
+                    text.len()
+                ),
                 Some(rows.len() - 1),
             );
             for row in rows.iter().filter(|row| row.start == row.end) {
@@ -365,11 +498,13 @@ mod tests {
             if part == "[Image1]" {
                 140.0
             } else {
-                part.chars().map(|ch| match ch {
-                    'W' => 23.0,
-                    'i' => 2.0,
-                    _ => 19.0,
-                }).sum()
+                part.chars()
+                    .map(|ch| match ch {
+                        'W' => 23.0,
+                        'i' => 2.0,
+                        _ => 19.0,
+                    })
+                    .sum()
             }
         })
     }
@@ -406,7 +541,12 @@ mod tests {
             ("[Image1]\n", vec![(0, 8), (9, 9)]),
         ] {
             let rows = slot_rows(text, 100.0, 9.6);
-            assert_eq!(rows.iter().map(|row| (row.start, row.end)).collect::<Vec<_>>(), spans);
+            assert_eq!(
+                rows.iter()
+                    .map(|row| (row.start, row.end))
+                    .collect::<Vec<_>>(),
+                spans
+            );
         }
     }
 
@@ -421,8 +561,13 @@ mod tests {
         assert_eq!(caret, 5);
         let mut viewport = InputViewport::default();
         let first = viewport.update(
-            &text, text.len(), caret, rows.len(), 5,
-            [18.0, 0.0, 100.0, 120.0], 24.0,
+            &text,
+            text.len(),
+            caret,
+            rows.len(),
+            5,
+            [18.0, 0.0, 100.0, 120.0],
+            24.0,
         );
         assert_eq!(first, 1);
         assert_eq!(caret - first, 4);
@@ -438,13 +583,21 @@ mod tests {
             let above = f32::from_bits(exact.to_bits() + 1);
             for (width, count) in [(below, 2), (exact, 1), (above, 1)] {
                 let rows = super::super::wrap_agent_prompt_rows_with_slot(
-                    "a", width, slot, |_| glyph,
+                    "a",
+                    width,
+                    slot,
+                    |_| glyph,
                 );
                 assert_eq!(rows.len(), count, "scale={scale}, width={width}");
                 assert_eq!(rows[0].offsets, [0.0, glyph]);
             }
             let rect = super::super::prompt_caret_rect(
-                18.0 * scale, 0.0, glyph, exact, slot, 20.0 * scale,
+                18.0 * scale,
+                0.0,
+                glyph,
+                exact,
+                slot,
+                20.0 * scale,
             );
             assert_eq!(rect[0], 18.0 * scale + glyph);
             assert!((rect[2] - slot).abs() < 0.0001);
@@ -456,12 +609,18 @@ mod tests {
         // The old independent box-right-minus-28 clamp shifted this caret left.
         let rect = super::super::prompt_caret_rect(18.0, 0.0, 90.0, 100.0, 9.6, 20.0);
         assert_eq!(rect, [108.0, 0.0, 9.6, 20.0]);
-        assert_eq!(super::super::prompt_caret_rect(18.0, 0.0, 95.0, 100.0, 9.6, 20.0),
-            [113.0, 0.0, 5.0, 20.0]);
+        assert_eq!(
+            super::super::prompt_caret_rect(18.0, 0.0, 95.0, 100.0, 9.6, 20.0),
+            [113.0, 0.0, 5.0, 20.0]
+        );
         let text = "i [Image1]i";
         let rows = slot_rows(text, 100.0, 9.6);
-        assert_eq!(rows.iter().map(|row| &text[row.start..row.end]).collect::<Vec<_>>(),
-            ["i ", "[Image1]", "i"]);
+        assert_eq!(
+            rows.iter()
+                .map(|row| &text[row.start..row.end])
+                .collect::<Vec<_>>(),
+            ["i ", "[Image1]", "i"]
+        );
         assert_eq!(rows[1].offsets.len(), 9);
         assert_eq!(rows[1].offsets.last(), Some(&140.0));
         assert!(rows[1].offsets.windows(2).all(|pair| pair[0] < pair[1]));
@@ -539,7 +698,7 @@ mod tests {
             (
                 {
                     let mut k = key();
-                    k.faces[0].1 += 1;
+                    Rc::make_mut(&mut k.faces)[0].1 += 1;
                     k
                 },
                 text,

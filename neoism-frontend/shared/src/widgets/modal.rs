@@ -5,7 +5,10 @@ use std::sync::{
 use web_time::{Duration, Instant};
 
 use sugarloaf::text::DrawOpts;
-use sugarloaf::Sugarloaf;
+use sugarloaf::{GraphicOverlay, Sugarloaf};
+
+use crate::panels::agent_pane::state::NeoismAgentImage;
+use crate::panels::agent_pane::view::image_preview::register_image;
 
 use crate::editor::markdown::MarkdownPane;
 use crate::editor::neodraw::{render_scene, Camera, Vec2};
@@ -44,6 +47,27 @@ const DEPTH_BACKDROP: f32 = 0.0;
 const DEPTH_BG: f32 = 0.1;
 const DEPTH_ELEMENT: f32 = 0.2;
 const ORDER: u8 = 24;
+// Placements belong to the modal, not the thumbnail strip. Clear this owner on
+// every render, including the first inactive frame after dismissal.
+const IMAGE_OVERLAY_OWNER: usize = 0x4D4F_4449;
+
+/// Center the complete image inside a spacious logical-pixel viewport. Invalid
+/// dimensions yield no placement rather than NaNs in the graphics pipeline.
+fn image_aspect_fit(viewport: [f32; 2], aspect: f32, scale: f32) -> Option<[f32; 4]> {
+    let [w, h] = viewport;
+    if !w.is_finite() || !h.is_finite() || w <= 0.0 || h <= 0.0
+        || !aspect.is_finite() || aspect <= 0.0 || !scale.is_finite() || scale <= 0.0
+    {
+        return None;
+    }
+    let mx = (48.0 * scale).min(w * 0.12);
+    let my = (72.0 * scale).min(h * 0.22);
+    let width = (w - 2.0 * mx).min((h - 2.0 * my) * aspect);
+    let height = width / aspect;
+    (width > 0.0 && height > 0.0).then_some([
+        (w - width) * 0.5, (h - height) * 0.5, width, height,
+    ])
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ModalAction {
@@ -249,6 +273,8 @@ pub enum ModalAction {
     },
     NotesVaultPromptAdd,
     SystemFormSubmit,
+    /// Confirm deactivation without losing the durable enablement intent.
+    SystemDeactivateConfirm { id: String },
     SystemDisconnectConfirm {
         id: String,
         remove: bool,
@@ -610,6 +636,8 @@ impl Eq for ModalActivity {}
 #[derive(Debug)]
 pub struct UniversalModal {
     active: bool,
+    image: Option<NeoismAgentImage>,
+    image_rect: Option<[f32; 4]>,
     title: String,
     body: String,
     body_layout: Option<BodyLayout>,
@@ -727,6 +755,8 @@ impl Default for UniversalModal {
     fn default() -> Self {
         Self {
             active: false,
+            image: None,
+            image_rect: None,
             title: String::new(),
             body: String::new(),
             body_layout: None,
@@ -813,6 +843,8 @@ impl UniversalModal {
             activity.cancel();
         }
         self.active = false;
+        self.image = None;
+        self.image_rect = None;
         self.body_link = None;
         self.body_layout = None;
         self.body_link_hit_rects.clear();
@@ -853,6 +885,8 @@ impl UniversalModal {
             activity.cancel();
         }
         self.active = true;
+        self.image = None;
+        self.image_rect = None;
         self.invite_url = None;
         self.invite_hit_rects.clear();
         self.title = spec.title;
@@ -919,6 +953,29 @@ impl UniversalModal {
         self.hovered_target = None;
         self.previous_hover_target = None;
         self.hover_started = None;
+    }
+
+    /// Full-resolution inspection. Hosts route thumbnail clicks here and keep
+    /// calling `render` after close so retained GPU placements are cleared.
+    pub fn open_image(&mut self, image: NeoismAgentImage) {
+        self.open(ModalSpec {
+            title: image.filename.to_string(),
+            body: String::new(),
+            meta: String::new(),
+            input: None,
+            buttons: vec![ModalButton::new("Close", "Esc", ModalAction::Close)],
+            busy: false,
+            blocking: true,
+        });
+        self.image = Some(image);
+    }
+
+    pub fn clear_image_overlay(&self, sugarloaf: &mut Sugarloaf) {
+        sugarloaf.clear_image_overlays_for(IMAGE_OVERLAY_OWNER);
+    }
+
+    pub fn is_image_open(&self) -> bool {
+        self.active && self.image.is_some()
     }
 
     pub fn open_form(&mut self, spec: ModalFormSpec) {
@@ -2092,6 +2149,10 @@ impl UniversalModal {
         if !self.active {
             return false;
         }
+        // Consume wheel on the backdrop too; never scroll obscured content.
+        if self.is_image_open() {
+            return true;
+        }
         let (x, y, w, h) = self.modal_rect(window_width, scale_factor);
         if self.form.is_none()
             && (mouse_x < x || mouse_x > x + w || mouse_y < y || mouse_y > y + h)
@@ -2432,6 +2493,20 @@ impl UniversalModal {
         window_width: f32,
         scale_factor: f32,
     ) -> Result<Option<usize>, ()> {
+        if self.is_image_open() {
+            if self.close_button_hit(mouse_x, mouse_y) {
+                return Ok(Some(0));
+            }
+            // The image itself is inert. Outside it is the dismissing backdrop,
+            // using the same Err convention as ordinary modal outside clicks.
+            return if self.image_rect.is_some_and(|[x, y, w, h]| {
+                mouse_x >= x && mouse_x <= x + w && mouse_y >= y && mouse_y <= y + h
+            }) {
+                Ok(None)
+            } else {
+                Err(())
+            };
+        }
         let (x, y, w, h) = self.modal_rect(window_width, scale_factor);
         if mouse_x < x || mouse_x > x + w || mouse_y < y || mouse_y > y + h {
             return Err(());
@@ -2489,6 +2564,9 @@ impl UniversalModal {
 
     pub fn active_rect(&self, window_width: f32, scale_factor: f32) -> Option<[f32; 4]> {
         self.active.then(|| {
+            if self.is_image_open() {
+                return [0.0, 0.0, (window_width / scale_factor).max(1.0), self.viewport_height];
+            }
             let (x, y, w, h) = self.modal_rect(window_width, scale_factor);
             [x, y, w, h]
         })
@@ -2675,12 +2753,70 @@ impl UniversalModal {
         }
     }
 
+    fn render_image(&mut self, sugarloaf: &mut Sugarloaf, viewport: [f32; 2]) {
+        let [w, h] = viewport;
+        let s = self.scale;
+        sugarloaf.overlay_rect(0.0, 0.0, w, h, [0.025, 0.028, 0.035, 0.98], DEPTH_BACKDROP, ORDER);
+        self.image_rect = self.image.as_ref()
+            .and_then(|image| register_image(sugarloaf, image))
+            .and_then(|(id, aspect)| {
+                let rect = image_aspect_fit(viewport, aspect, s)?;
+                let scale = sugarloaf.scale_factor();
+                sugarloaf.push_image_overlay(IMAGE_OVERLAY_OWNER, GraphicOverlay {
+                    image_id: id,
+                    x: rect[0] * scale,
+                    y: rect[1] * scale,
+                    width: rect[2] * scale,
+                    height: rect[3] * scale,
+                    z_index: GraphicOverlay::LATE_OVERLAY_Z_INDEX,
+                    source_rect: GraphicOverlay::FULL_SOURCE_RECT,
+                });
+                Some(rect)
+            });
+        if self.image_rect.is_none() {
+            let opts = DrawOpts {
+                font_size: 13.0 * s,
+                color: [180, 183, 190, 255],
+                clip_rect: Some([0.0, 0.0, w, h]),
+                ..DrawOpts::default()
+            };
+            let label = "Image unavailable";
+            let width = sugarloaf.overlay_text_mut().measure(label, &opts);
+            sugarloaf.overlay_text_mut().draw((w - width) * 0.5, h * 0.5, label, &opts);
+        }
+        // Reserve the top band for a quiet floating control, outside the image.
+        // Overlay labels flush AFTER late graphics, so the close glyph never
+        // disappears underneath a full-resolution image placement.
+        let size = (32.0 * s).min(w * 0.18).min(h * 0.18);
+        let inset = (20.0 * s).min(w * 0.05).min(h * 0.04);
+        let close = [w - inset - size, inset, size, size];
+        self.close_rect = self.dismissible.then_some(close);
+        if self.dismissible {
+            let hover = self.hover_intensity(ModalHoverTarget::Close);
+            sugarloaf.rounded_rect(None, close[0], close[1], size, size,
+                [0.16, 0.17, 0.19, 0.7 + hover * 0.2], DEPTH_ELEMENT, size * 0.5, ORDER + 1);
+            let opts = DrawOpts {
+                font_size: size * 0.6,
+                color: [235, 237, 242, 255],
+                clip_rect: Some(close),
+                ..DrawOpts::default()
+            };
+            let width = sugarloaf.overlay_text_mut().measure("×", &opts);
+            sugarloaf.overlay_text_mut().draw(
+                close[0] + (size - width) * 0.5, close[1] + size * 0.18, "×", &opts,
+            );
+        }
+    }
+
     pub fn render(
         &mut self,
         sugarloaf: &mut Sugarloaf,
         dimensions: (f32, f32, f32),
         theme: &IdeTheme,
     ) {
+        // Retained graphics survive ordinary UI redraws. Clear even when closed
+        // or replaced with a normal modal; never clear the shared image cache.
+        sugarloaf.clear_image_overlays_for(IMAGE_OVERLAY_OWNER);
         if !self.active {
             return;
         }
@@ -2692,6 +2828,10 @@ impl UniversalModal {
         self.viewport_height = viewport_height;
         self.form_compact = false;
         let viewport_width = (window_width / scale_factor).max(1.0);
+        if self.is_image_open() {
+            self.render_image(sugarloaf, [viewport_width, viewport_height]);
+            return;
+        }
         let normal_margin = if self.form.is_some() {
             (12.0 * self.scale).min(viewport_height * 0.02).min(viewport_width * 0.05)
         } else {
@@ -3700,6 +3840,89 @@ fn lang_from_fence(label: &str) -> Lang {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn preview_image() -> NeoismAgentImage {
+        NeoismAgentImage {
+            filename: "Artwork.png".into(),
+            url: "data:image/png;base64,preview".into(),
+            mime: "image/png".into(),
+        }
+    }
+
+    #[test]
+    fn image_fit_preserves_aspect_and_spacious_margins() {
+        for aspect in [0.01, 0.5, 1.0, 2.0, 100.0] {
+            for (viewport, scale) in [([1200.0, 800.0], 1.0), ([320.0, 480.0], 2.0), ([24.0, 16.0], 3.0)] {
+                let [x, y, w, h] = image_aspect_fit(viewport, aspect, scale).unwrap();
+                assert!((w / h - aspect).abs() < aspect * 0.0001);
+                assert!((x * 2.0 + w - viewport[0]).abs() < 0.001);
+                assert!((y * 2.0 + h - viewport[1]).abs() < 0.001);
+                assert!(x >= (48.0 * scale).min(viewport[0] * 0.12) - 0.001);
+                assert!(y >= (72.0 * scale).min(viewport[1] * 0.22) - 0.001);
+            }
+        }
+        assert_eq!(image_aspect_fit([1200.0, 800.0], 2.0, 1.0), Some([48.0, 124.0, 1104.0, 552.0]));
+    }
+
+    #[test]
+    fn image_fit_rejects_invalid_geometry() {
+        for aspect in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+            assert!(image_aspect_fit([100.0, 100.0], aspect, 1.0).is_none());
+        }
+        for viewport in [[0.0, 100.0], [100.0, -1.0], [f32::INFINITY, 100.0], [100.0, f32::NAN]] {
+            assert!(image_aspect_fit(viewport, 1.0, 1.0).is_none());
+        }
+        assert!(image_aspect_fit([100.0, 100.0], 1.0, 0.0).is_none());
+    }
+
+    #[test]
+    fn image_mode_owns_focus_escape_and_wheel_without_an_input() {
+        let mut modal = UniversalModal::new();
+        modal.open_image(preview_image());
+        assert!(modal.is_active() && modal.is_image_open() && modal.is_blocking());
+        assert!(modal.owns_editor_focus());
+        assert!(!modal.has_input());
+        assert_eq!(modal.escape_action(), Some(ModalAction::Close));
+        assert!(!modal.close_if_non_blocking());
+        assert!(modal.scroll_at(0.0, 0.0, 1200.0, 2.0, -120.0));
+        assert!(modal.scroll_at(500.0, 300.0, 1200.0, 2.0, 120.0));
+        assert_eq!(modal.body_scroll_offset, 0);
+        assert_eq!(modal.scroll_offset, 0);
+        assert_eq!(modal.active_rect(1200.0, 2.0), Some([0.0, 0.0, 600.0, 720.0]));
+    }
+
+    #[test]
+    fn image_hits_are_inert_and_backdrop_or_close_dismiss() {
+        let mut modal = UniversalModal::new();
+        modal.open_image(preview_image());
+        modal.image_rect = Some([100.0, 100.0, 400.0, 300.0]);
+        modal.close_rect = Some([550.0, 20.0, 32.0, 32.0]);
+        assert_eq!(modal.hit_test(200.0, 200.0, 1200.0, 2.0), Ok(None));
+        assert_eq!(modal.hit_test(10.0, 200.0, 1200.0, 2.0), Err(()));
+        assert_eq!(modal.hit_test(560.0, 30.0, 1200.0, 2.0), Ok(Some(0)));
+        modal.pointer_move(560.0, 30.0, 1200.0, 2.0);
+        assert_eq!(modal.pointer_kind(), ModalPointerKind::Pointer);
+    }
+
+    #[test]
+    fn image_lifecycle_resets_on_close_normal_open_and_replacement() {
+        let mut modal = UniversalModal::new();
+        modal.open_image(preview_image());
+        modal.image_rect = Some([100.0, 100.0, 400.0, 300.0]);
+        modal.open_message("Ordinary", "Body");
+        assert!(!modal.is_image_open());
+        assert!(modal.image.is_none() && modal.image_rect.is_none());
+        modal.open_image(preview_image());
+        modal.image_rect = Some([100.0, 100.0, 400.0, 300.0]);
+        modal.open_image(preview_image());
+        assert!(modal.image_rect.is_none());
+        modal.close();
+        assert!(!modal.is_active() && !modal.is_image_open());
+        assert!(modal.image.is_none() && modal.image_rect.is_none());
+        assert!(modal.close_rect.is_none());
+        assert!(!modal.owns_editor_focus());
+        assert!(!modal.scroll_at(0.0, 0.0, 1200.0, 1.0, 120.0));
+    }
 
     #[test]
     fn epub_note_modal_uses_markdown_pane_and_serializes_newlines() {

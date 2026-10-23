@@ -269,7 +269,7 @@ impl CallerPolicy {
             };
             return Ok(Some(CallerClaims {
                 subject: claims.subject,
-                workspace_id: Some(claims.workspace_id),
+                workspace_id: claims.workspace_id,
                 tenant_id: claims.tenant_id,
                 directory_prefixes: claims.directory_prefixes,
                 hosted: claims.hosted,
@@ -356,6 +356,18 @@ impl CallerPolicy {
 }
 
 impl CallerClaims {
+    /// Reserved subject accepted only for a verified explicit SystemWorkflow kind;
+    /// hosted/resolver callers and workspace credentials cannot assert it.
+    pub(crate) fn is_system_workflow(&self) -> bool {
+        self.subject
+            == neoism_agent_service_api::daemon_credential::SYSTEM_WORKFLOW_SUBJECT
+            && !self.hosted
+            && self.workspace_id.is_none()
+            && self.tenant_id == "local"
+            && self.resolved.is_none()
+            && self.worker.is_none()
+    }
+
     pub(crate) fn execution_policy(&self) -> neoism_agent_service_api::ExecutionPolicy {
         use neoism_agent_service_api::ExecutionPolicy;
         if self.hosted {
@@ -659,6 +671,9 @@ pub(crate) fn allows_session(
     claims: &CallerClaims,
     session: &neoism_agent_core::SessionInfo,
 ) -> bool {
+    if claims.is_system_workflow() {
+        return allows_directory(claims, &session.directory);
+    }
     if let Some(worker) = &claims.worker {
         if !worker_session_admitted(worker, session) {
             return false;
@@ -872,6 +887,46 @@ mod tests {
             Box::pin(async move { Ok(Some(self.0.clone())) })
         }
     }
+    #[tokio::test]
+    async fn system_workflow_reserved_subject_cannot_be_asserted_by_other_auth_paths() {
+        use neoism_agent_service_api::{daemon_credential, ActorType, ExecutionPolicy, ResolvedTenant, TenantQuotas};
+        let reserved = daemon_credential::SYSTEM_WORKFLOW_SUBJECT;
+        let mut policy = CallerPolicy {
+            daemon_key: Some(Arc::<[u8]>::from(b"system-capability-test".as_slice())),
+            hosted_config: Ok(None),
+            local_token: Some(reserved.into()),
+            usage: Arc::new(UsageTracker::default()),
+            tenant_resolver: None,
+            strict_hosted: false,
+            worker: None,
+        };
+        // Even choosing the reserved string as the configured bearer produces
+        // local-operator, never a system-workflow capability.
+        assert!(!policy.authenticate(Some(reserved)).unwrap().unwrap().is_system_workflow());
+        let hosted: HostedAuthConfig = serde_json::from_value(serde_json::json!({
+            "tokens": [{"token": reserved, "tenantId":"local"}]
+        })).unwrap();
+        policy.hosted_config = Ok(Some(Arc::new(hosted)));
+        assert!(!policy.authenticate(Some(reserved)).unwrap().unwrap().is_system_workflow());
+        policy.hosted_config = Ok(None);
+        policy.tenant_resolver = Some(Arc::new(WorkerMismatchResolver(ResolvedTenant {
+            subject: reserved.into(), tenant_id: "local".into(), workspace_id: None,
+            actor_type: ActorType::Human, directory_prefixes: vec![], scopes: vec![],
+            quotas: TenantQuotas::default(), execution: ExecutionPolicy::NativeLocal,
+            runtime_id: None, runtime_generation: None, expires_at: None,
+        })));
+        let resolved = policy.authenticate_request(Some("resolver-token")).await.unwrap().unwrap();
+        assert_eq!(resolved.subject, reserved);
+        assert!(!resolved.is_system_workflow());
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+        // A signed explicit kind is admitted even when a resolver is configured;
+        // workspace-kind payloads cannot carry the reserved subject at all.
+        let signed = daemon_credential::issue(&daemon_credential::DaemonCredentialClaims::system_workflow(now, 60).unwrap(), b"system-capability-test").unwrap();
+        assert!(policy.authenticate_request(Some(&signed)).await.unwrap().unwrap().is_system_workflow());
+        let workspace = daemon_credential::DaemonCredentialClaims::new(reserved, "workspace", "local", vec![], false, now, 60).unwrap();
+        assert!(daemon_credential::issue(&workspace, b"system-capability-test").is_err());
+    }
+
     #[tokio::test]
     async fn custom_resolver_cannot_bypass_worker_signature_or_actor_claims() {
         let (binding, key, signed, _) = worker_fixture();

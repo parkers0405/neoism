@@ -2699,9 +2699,18 @@ async fn catalog_activity_stream_reprojects_root_running_and_idle() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let mut body = response.into_body().into_data_stream();
-    // The authoritative subscription baseline precedes runtime edges.
-    let baseline = body.next().await.unwrap().unwrap();
-    assert!(String::from_utf8_lossy(&baseline).contains("session.catalog.activity"));
+    // Family membership and activity are separate SSE events. Consume the
+    // activity baseline rather than depending on which body frame arrives first.
+    let baseline = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let chunk = body.next().await.unwrap().unwrap();
+            let text = String::from_utf8_lossy(&chunk).into_owned();
+            if text.contains("session.catalog.activity") {
+                break text;
+            }
+        }
+    }).await.expect("catalog activity baseline must arrive");
+    assert!(baseline.contains(root.id.as_str()));
     for status in ["busy", "idle"] {
         if status == "busy" {
             state.inner.statuses.write().await.insert(root.id.to_string(), SessionStatus::Busy { queue: None });
@@ -2712,12 +2721,15 @@ async fn catalog_activity_stream_reprojects_root_running_and_idle() {
             event_type::SESSION_STATUS,
             json!({"sessionID": root.id, "status": {"type": status}}),
         ));
-        let chunk = tokio::time::timeout(Duration::from_secs(2), body.next())
-            .await
-            .expect("root status must reach left catalog")
-            .unwrap()
-            .unwrap();
-        let text = String::from_utf8_lossy(&chunk);
+        let text = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let chunk = body.next().await.unwrap().unwrap();
+                let text = String::from_utf8_lossy(&chunk).into_owned();
+                if text.contains("session.catalog.activity") {
+                    break text;
+                }
+            }
+        }).await.expect("root status must reach left catalog");
         assert!(text.contains("session.catalog.activity"), "{text}");
         assert!(text.contains(root.id.as_str()), "{text}");
         assert!(text.contains(if status == "busy" { "running" } else { "idle" }), "{text}");

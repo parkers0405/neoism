@@ -3,6 +3,32 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use web_time::Instant;
 
+#[cfg(not(target_arch = "wasm32"))]
+mod local_refresh;
+
+/// Disk data only: collecting this snapshot never touches panel/UI state.
+#[derive(Debug, Default)]
+struct LocalNotesSnapshot {
+    entries: Vec<NoteSidebarEntry>,
+    icons: HashMap<String, String>,
+    icon_revisions: HashMap<PathBuf, u64>,
+}
+
+fn list_local_notes(root: &Path) -> LocalNotesSnapshot {
+    let mut entries = Vec::new();
+    collect_note_entries(root, root, 0, &mut entries);
+    // Icons and live UI overrides do not affect ordering. Prepare it on the
+    // listing worker, caching case-folded labels once rather than per comparison.
+    entries.sort_by_cached_key(|entry| (
+        entry.parent.clone(), !entry.is_dir, entry.label.to_lowercase(),
+    ));
+    LocalNotesSnapshot {
+        entries,
+        icons: load_notes_icons(root),
+        icon_revisions: HashMap::new(),
+    }
+}
+
 use sugarloaf::text::DrawOpts;
 use sugarloaf::Sugarloaf;
 
@@ -57,6 +83,8 @@ pub struct NotesSidebar {
     notebook_root: Option<PathBuf>,
     notebook_back_rect: Option<[f32; 4]>,
     remote_workspace: bool,
+    #[cfg(not(target_arch = "wasm32"))]
+    local_refresh: local_refresh::LocalRefresh,
     all_entries: Vec<NoteSidebarEntry>,
     rows: Vec<NoteSidebarRow>,
     open_dirs: HashSet<PathBuf>,
@@ -76,7 +104,11 @@ pub struct NotesSidebar {
     /// they beat the disk walk until the daemon flushes the file, else
     /// any refresh between accept and flush reverts the row's emoji.
     icon_overrides: HashMap<PathBuf, Option<String>>,
+    icon_revisions: HashMap<PathBuf, u64>,
     selected_index: usize,
+    /// Explicit create/reveal intent only; ordinary select_path misses never queue.
+    /// Cleared whenever the vault/source changes or the user navigates again.
+    selection_after_refresh: Option<PathBuf>,
     selector_selected: bool,
     notebook_back_selected: bool,
     scroll_top: usize,
@@ -234,6 +266,8 @@ impl Default for NotesSidebar {
             notebook_root: None,
             notebook_back_rect: None,
             remote_workspace: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            local_refresh: local_refresh::LocalRefresh::default(),
             all_entries: Vec::new(),
             rows: Vec::new(),
             open_dirs: HashSet::new(),
@@ -242,7 +276,9 @@ impl Default for NotesSidebar {
             empty_link_vault_rect: None,
             empty_select_vault_rect: None,
             icon_overrides: HashMap::new(),
+            icon_revisions: HashMap::new(),
             selected_index: 0,
+            selection_after_refresh: None,
             selector_selected: false,
             notebook_back_selected: false,
             scroll_top: 0,
@@ -281,6 +317,7 @@ impl NotesSidebar {
     pub fn set_visible(&mut self, visible: bool) {
         self.visible = visible;
         if !visible {
+            self.cancel_selection_after_refresh();
             // Settle the springs but KEEP `open_dirs` — the user's
             // expanded folders persist across a close/reopen, mirroring
             // the file tree. Resetting the springs only avoids a stale
@@ -315,6 +352,9 @@ impl NotesSidebar {
     }
 
     pub fn set_focused(&mut self, focused: bool) {
+        if self.focused != focused {
+            self.cancel_selection_after_refresh();
+        }
         self.focused = focused;
         if !focused {
             self.clear_pending();
@@ -378,11 +418,15 @@ impl NotesSidebar {
         self.workspace_name = name.into();
         self.workspace_path = path;
         if vault_changed {
+            self.cancel_selection_after_refresh();
+            #[cfg(not(target_arch = "wasm32"))]
+            self.local_refresh.invalidate();
             self.notebook_root = None;
             self.all_entries.clear();
             self.rows.clear();
             self.open_dirs.clear();
             self.icon_overrides.clear();
+            self.icon_revisions.clear();
         }
         if let Some(root) = self.workspace_path.clone() {
             self.open_dirs.insert(root);
@@ -436,42 +480,86 @@ impl NotesSidebar {
             self.pending_refresh = true;
             return;
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.local_refresh.enabled {
+            self.local_refresh.request();
+            return;
+        }
+        let mut snapshot = self
+            .workspace_path
+            .as_deref()
+            .map(list_local_notes)
+            .unwrap_or_default();
+        snapshot.icon_revisions = self.icon_revisions.clone();
+        self.apply_local_notes(snapshot);
+    }
+
+    /// Opt native hosts into nonblocking refreshes, including set_workspace and
+    /// mutation-triggered refreshes. Call before assigning the initial vault.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn enable_async_local_refresh(&mut self) {
+        self.local_refresh.enabled = true;
+    }
+
+    /// Apply a completed snapshot and launch at most one coalesced follow-up.
+    /// Call once per host loop, even while hidden, so completions are drained.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn poll_local_refresh(&mut self, wake: impl FnOnce() + Send + 'static) -> bool {
+        self.enable_async_local_refresh();
+        let completed = self.local_refresh.take_completed();
+        let changed = !self.remote_workspace && completed.is_some();
+        if !self.remote_workspace {
+            if let Some(snapshot) = completed {
+                self.apply_local_notes(snapshot);
+            }
+            if self.take_refresh() {
+                self.local_refresh.request();
+            }
+            if self.local_refresh.needs_start() {
+                if let Some(root) = self.workspace_path.clone() {
+                    let revisions = self.icon_revisions.clone();
+                    self.local_refresh.start(root, revisions, wake);
+                }
+            }
+        }
+        changed
+    }
+
+    /// Pure UI application: no filesystem reads. Resolve current selection,
+    /// expansion and live icons NOW, not from the worker's launch-time state.
+    fn apply_local_notes(&mut self, snapshot: LocalNotesSnapshot) {
         let selected_path = self.selected_note_path();
-        self.all_entries.clear();
+        self.all_entries = snapshot.entries;
         let root = self.workspace_path.clone();
         if let Some(root) = &root {
-            collect_note_entries(root, root, 0, &mut self.all_entries);
             self.open_dirs.insert(root.clone());
         }
-        // Live in-buffer frontmatter edits first...
+        // Preserve saved-map precedence over pre-existing frontmatter values,
+        // but never let an old snapshot overwrite icon events received while
+        // the worker was running (including an explicit reset to None).
         self.apply_icon_overrides();
-        // ...then the explicit `.neoism-icons.json` map LAST, so a picked
-        // icon has the highest priority. It used to be applied BEFORE
-        // `apply_icon_overrides`, so a stale `None` frontmatter override from
-        // an open note (see `set_note_icon`) clobbered a just-picked icon —
-        // the "root/open note icon doesn't stick" bug. A MISSING map entry
-        // still must not wipe an existing icon.
-        if let Some(root) = &root {
-            let icons = load_notes_icons(root);
-            if !icons.is_empty() {
-                for entry in &mut self.all_entries {
-                    if let Some(icon) =
-                        entry.path.strip_prefix(root).ok().and_then(|rel| {
-                            icons.get(&rel.to_string_lossy().into_owned())
-                        })
-                    {
-                        entry.icon = Some(icon.clone());
+        if let Some(root) = root.as_ref().filter(|_| {
+            !snapshot.icons.is_empty() || self.icon_revisions != snapshot.icon_revisions
+        }) {
+            for entry in &mut self.all_entries {
+                if self.icon_revisions.get(&entry.path).copied().unwrap_or(0)
+                    != snapshot.icon_revisions.get(&entry.path).copied().unwrap_or(0)
+                {
+                    // A reset received during this scan must clear its old
+                    // frontmatter icon too, even when the saved map is empty.
+                    if let Some(icon) = self.icon_overrides.get(&entry.path) {
+                        entry.icon = icon.clone();
                     }
+                    continue;
+                }
+                if let Some(icon) = entry.path.strip_prefix(root).ok().and_then(|rel| {
+                    snapshot.icons.get(rel.to_string_lossy().as_ref())
+                }) {
+                    entry.icon = Some(icon.clone());
                 }
             }
         }
         self.log_resolved_note_icons("refresh_notes");
-        self.all_entries.sort_by(|a, b| {
-            a.parent
-                .cmp(&b.parent)
-                .then_with(|| b.is_dir.cmp(&a.is_dir))
-                .then_with(|| a.label.to_lowercase().cmp(&b.label.to_lowercase()))
-        });
         self.rebuild_rows();
         if let Some(path) = selected_path {
             if let Some(row) = self.row_index_for_path(&path) {
@@ -479,6 +567,7 @@ impl NotesSidebar {
             }
         }
         self.clamp_selection_and_scroll();
+        self.apply_selection_after_refresh();
     }
 
     /// Host push (web): replace the entry list with daemon-listed
@@ -532,6 +621,11 @@ impl NotesSidebar {
     }
 
     fn set_host_entries(&mut self, entries: Vec<(PathBuf, bool)>, local: bool) {
+        if self.remote_workspace != !local {
+            self.cancel_selection_after_refresh();
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        self.local_refresh.invalidate();
         self.remote_workspace = !local;
         self.pending_refresh = false;
         let Some(root) = self.workspace_path.clone() else {
@@ -618,6 +712,7 @@ impl NotesSidebar {
             }
         }
         self.clamp_selection_and_scroll();
+        self.apply_selection_after_refresh();
     }
 
     /// In-place icon update for one note — the frontmatter `icon:` was
@@ -631,6 +726,8 @@ impl NotesSidebar {
         // `Some("")` would both render blank and (as a live override) clobber
         // a real icon read from the map or a later frontmatter edit.
         let icon = icon.filter(|glyph| !glyph.trim().is_empty());
+        let revision = self.icon_revisions.entry(path.to_path_buf()).or_default();
+        *revision = revision.wrapping_add(1);
         self.icon_overrides.insert(path.to_path_buf(), icon.clone());
         for entry in &mut self.all_entries {
             if entry.path.as_os_str() == path.as_os_str() {
@@ -679,12 +776,45 @@ impl NotesSidebar {
     }
 
     pub fn select_path(&mut self, path: &Path) {
+        self.cancel_selection_after_refresh();
         if let Some(index) = (0..self.rows.len()).find(|&index| {
             self.row_entry(index)
                 .is_some_and(|entry| entry.path == path)
         }) {
             self.set_selected(index);
         }
+    }
+
+    /// Explicit local create/reveal intent. Unlike select_path, a missing row
+    /// waits across older in-flight snapshots until a following listing has it.
+    /// This does not request I/O; the host must also request its normal refresh.
+    pub fn select_after_refresh(&mut self, path: &Path) {
+        self.cancel_selection_after_refresh();
+        if self.remote_workspace
+            || !self.workspace_path.as_deref().is_some_and(|root| {
+                path != root && path.starts_with(root)
+                    && !path.components().any(|part| part == std::path::Component::ParentDir)
+            })
+        {
+            return;
+        }
+        self.selection_after_refresh = Some(path.to_path_buf());
+        self.apply_selection_after_refresh();
+    }
+
+    /// Cancel an explicit deferred create/reveal without changing current focus.
+    pub fn cancel_selection_after_refresh(&mut self) {
+        self.selection_after_refresh = None;
+    }
+
+    fn apply_selection_after_refresh(&mut self) {
+        let Some(index) = self.selection_after_refresh.as_deref()
+            .and_then(|path| self.row_index_for_path(path)) else {
+                return;
+            };
+        // set_selected consumes the intent and uses the existing cursor/scroll
+        // motion. A missing row above deliberately leaves the intent untouched.
+        self.set_selected(index);
     }
 
     pub fn selected_note_path(&self) -> Option<PathBuf> {
@@ -712,6 +842,7 @@ impl NotesSidebar {
     /// Notebook identity comes from the daemon/local listing, so this works
     /// for joined workspaces without reading host paths on the guest.
     pub fn enter_selected_notebook(&mut self) -> bool {
+        self.cancel_selection_after_refresh();
         let Some(root) = self
             .selected_note_path()
             .filter(|path| self.is_notebook_dir(path))
@@ -730,6 +861,7 @@ impl NotesSidebar {
     }
 
     pub fn leave_notebook(&mut self) -> bool {
+        self.cancel_selection_after_refresh();
         let Some(root) = self.notebook_root.take() else {
             return false;
         };
@@ -765,12 +897,14 @@ impl NotesSidebar {
     }
 
     pub fn select_selector(&mut self) {
+        self.cancel_selection_after_refresh();
         self.notebook_back_selected = false;
         self.selector_selected = true;
     }
 
     /// The vault selector is the footer's only horizontal target.
     pub fn move_horizontal_focus(&mut self, _right: bool) -> bool {
+        self.cancel_selection_after_refresh();
         false
     }
 
@@ -840,6 +974,7 @@ impl NotesSidebar {
     }
 
     pub fn set_selected(&mut self, index: usize) {
+        self.cancel_selection_after_refresh();
         self.selector_selected = false;
         self.notebook_back_selected = false;
         if !self.rows.is_empty() {
@@ -869,6 +1004,7 @@ impl NotesSidebar {
     }
 
     pub fn select_next(&mut self) {
+        self.cancel_selection_after_refresh();
         if self.notebook_back_selected {
             self.notebook_back_selected = false;
             if !self.rows.is_empty() {
@@ -889,6 +1025,7 @@ impl NotesSidebar {
     }
 
     pub fn select_prev(&mut self) {
+        self.cancel_selection_after_refresh();
         if self.selector_selected {
             self.selector_selected = false;
             if !self.rows.is_empty() {
@@ -908,6 +1045,7 @@ impl NotesSidebar {
     /// Mirrors `file_tree::select_next_by`; lands on a real note row so
     /// the cursor spring animates the same way as single-step moves.
     pub fn select_next_by(&mut self, n: usize) {
+        self.cancel_selection_after_refresh();
         if self.rows.is_empty() {
             self.selector_selected = true;
             return;
@@ -921,6 +1059,7 @@ impl NotesSidebar {
 
     /// Half-page jump up (Ctrl+U / PageUp), clamped to the first row.
     pub fn select_prev_by(&mut self, n: usize) {
+        self.cancel_selection_after_refresh();
         if self.rows.is_empty() {
             return;
         }
@@ -948,6 +1087,7 @@ impl NotesSidebar {
 
     /// Jump to the first note row (vim `gg` / `1`).
     pub fn select_first(&mut self) {
+        self.cancel_selection_after_refresh();
         self.clear_pending();
         if !self.rows.is_empty() {
             self.set_selected(0);
@@ -956,6 +1096,7 @@ impl NotesSidebar {
 
     /// Jump to the last note row (vim `$` / `G`).
     pub fn select_last(&mut self) {
+        self.cancel_selection_after_refresh();
         self.clear_pending();
         if !self.rows.is_empty() {
             self.set_selected(self.rows.len().saturating_sub(1));
@@ -965,6 +1106,7 @@ impl NotesSidebar {
     /// Jump to a 1-based row (vim `<count>G`). Out-of-range counts clamp
     /// to the last row; a zero count is treated as the first row.
     pub fn goto_row(&mut self, one_based: usize) {
+        self.cancel_selection_after_refresh();
         self.clear_pending();
         if !self.rows.is_empty() {
             self.set_selected(one_based.saturating_sub(1));
@@ -1019,6 +1161,7 @@ impl NotesSidebar {
     }
 
     pub fn toggle_selected_dir(&mut self) -> bool {
+        self.cancel_selection_after_refresh();
         let Some(path) = self.selected_note_path() else {
             return false;
         };
@@ -2992,6 +3135,221 @@ fn fade_u8(mut color: [u8; 4], alpha: f32) -> [u8; 4] {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn listing_worker_prepares_the_same_case_insensitive_directory_first_order() {
+        let vault = tempfile::tempdir().unwrap();
+        for name in ["zeta.md", "Alpha.md", "beta.md"] {
+            std::fs::write(vault.path().join(name), "").unwrap();
+        }
+        std::fs::create_dir(vault.path().join("Z-folder")).unwrap();
+        let snapshot = list_local_notes(vault.path());
+        let mut expected = snapshot.entries.clone();
+        expected.reverse();
+        expected.sort_by(|a, b| a.parent.cmp(&b.parent)
+            .then_with(|| b.is_dir.cmp(&a.is_dir))
+            .then_with(|| a.label.to_lowercase().cmp(&b.label.to_lowercase())));
+        assert_eq!(snapshot.entries.iter().map(|e| &e.path).collect::<Vec<_>>(),
+            expected.iter().map(|e| &e.path).collect::<Vec<_>>());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn live_icon_reset_clears_worker_frontmatter_with_or_without_saved_icons() {
+        for saved_map in [r#"{}"#, r#"{"page.md":"picked"}"#] {
+            let vault = tempfile::tempdir().unwrap();
+            let page = vault.path().join("page.md");
+            std::fs::write(&page, "---\nicon: old\n---\n# Page").unwrap();
+            std::fs::write(vault.path().join(NOTES_ICONS_FILE), saved_map).unwrap();
+            let mut sidebar = NotesSidebar::default();
+            sidebar.set_workspace("Vault", Some(vault.path().to_path_buf()));
+            let mut snapshot = list_local_notes(vault.path());
+            snapshot.icon_revisions = sidebar.icon_revisions.clone();
+            assert_eq!(snapshot.entries[0].icon.as_deref(), Some("old"));
+            sidebar.set_note_icon(&page, None);
+            sidebar.apply_local_notes(snapshot);
+            assert_eq!(sidebar.all_entries[0].icon, None);
+
+            // An already-existing None is not a new reset of this scan. The
+            // saved icon read by the next worker must retain normal precedence.
+            std::fs::write(vault.path().join(NOTES_ICONS_FILE), r#"{"page.md":"fresh"}"#).unwrap();
+            let mut snapshot = list_local_notes(vault.path());
+            snapshot.icon_revisions = sidebar.icon_revisions.clone();
+            sidebar.apply_local_notes(snapshot);
+            assert_eq!(sidebar.all_entries[0].icon.as_deref(), Some("fresh"));
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn deferred_selection_fixture() -> (tempfile::TempDir, NotesSidebar) {
+        let vault = tempfile::tempdir().unwrap();
+        for name in ["a.md", "b.md"] {
+            std::fs::write(vault.path().join(name), "# Page").unwrap();
+        }
+        let mut sidebar = NotesSidebar::default();
+        sidebar.set_workspace("Vault", Some(vault.path().to_path_buf()));
+        sidebar.enable_async_local_refresh();
+        (vault, sidebar)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn explicit_create_selection_survives_older_scan_and_is_consumed_once() {
+        let (vault, mut sidebar) = deferred_selection_fixture();
+        let target = vault.path().join("new.md");
+        let older_scan = list_local_notes(vault.path());
+        std::fs::write(&target, "# New").unwrap();
+        sidebar.refresh_notes(); // coalesced follow-up to the older scan
+        sidebar.set_focused(false); // create helper opens the new editor
+        sidebar.select_after_refresh(&target);
+        sidebar.apply_local_notes(older_scan);
+        assert_eq!(sidebar.selection_after_refresh.as_deref(), Some(target.as_path()));
+        assert_ne!(sidebar.selected_note_path(), Some(target.clone()));
+        sidebar.apply_local_notes(list_local_notes(vault.path()));
+        assert_eq!(sidebar.selected_note_path(), Some(target.clone()));
+        assert!(sidebar.selection_after_refresh.is_none());
+        sidebar.select_path(&vault.path().join("a.md"));
+        sidebar.apply_local_notes(list_local_notes(vault.path()));
+        assert_eq!(sidebar.selected_note_path(), Some(vault.path().join("a.md")));
+        // If the row is already present, selection is immediate, not queued.
+        sidebar.select_after_refresh(&target);
+        assert_eq!(sidebar.selected_note_path(), Some(target));
+        assert!(sidebar.selection_after_refresh.is_none());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn deferred_selection_is_scoped_to_vault_and_source_generation() {
+        let (vault, mut sidebar) = deferred_selection_fixture();
+        let root = vault.path().to_path_buf();
+        let target = root.join("new.md");
+        sidebar.select_after_refresh(&target);
+        sidebar.set_workspace("Same vault", Some(root.clone()));
+        assert!(sidebar.selection_after_refresh.is_some());
+        let other = tempfile::tempdir().unwrap();
+        sidebar.set_workspace("Other", Some(other.path().to_path_buf()));
+        sidebar.set_workspace("Back", Some(root.clone()));
+        assert!(sidebar.selection_after_refresh.is_none());
+        sidebar.select_after_refresh(&target);
+        sidebar.set_remote_workspace("Remote same spelling", Some(root.clone()));
+        assert!(sidebar.selection_after_refresh.is_none());
+        sidebar.select_after_refresh(&target); // local-create API rejects remote
+        assert!(sidebar.selection_after_refresh.is_none());
+        sidebar.set_workspace("Local again", Some(root));
+        std::fs::write(&target, "# New").unwrap();
+        sidebar.apply_local_notes(list_local_notes(vault.path()));
+        assert_ne!(sidebar.selected_note_path(), Some(target));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn later_keyboard_pointer_and_cancel_intents_prevent_deferred_jump() {
+        let (vault, initial) = deferred_selection_fixture();
+        let target = vault.path().join("new.md");
+        let cancellations: &[fn(&mut NotesSidebar)] = &[
+            |s| s.select_next(),
+            |s| s.select_prev(), // boundary motion still supersedes create
+            |s| s.set_selected(0), // pointer on the already-selected row
+            |s| {
+                let path = s.workspace_path().unwrap().join("a.md");
+                s.select_path(&path);
+            },
+            |s| s.select_selector(),
+            |s| s.select_first(),
+            |s| s.select_last(),
+            |s| s.select_next_by(1),
+            |s| s.select_prev_by(1),
+            |s| s.goto_row(1),
+            |s| s.set_visible(false),
+            |s| s.set_focused(true),
+            |s| s.cancel_selection_after_refresh(),
+        ];
+        std::fs::write(&target, "# New").unwrap();
+        for cancel in cancellations {
+            let mut sidebar = initial.clone();
+            sidebar.select_after_refresh(&target);
+            cancel(&mut sidebar);
+            assert!(sidebar.selection_after_refresh.is_none());
+            sidebar.apply_local_notes(list_local_notes(vault.path()));
+            assert_ne!(sidebar.selected_note_path(), Some(target.clone()));
+        }
+        let mut sidebar = initial;
+        sidebar.set_focused(true);
+        sidebar.select_after_refresh(&target);
+        sidebar.set_focused(false); // keyboard Escape/blur cancels as well
+        assert!(sidebar.selection_after_refresh.is_none());
+        // Neither incidental foreign misses nor ordinary missing select_path
+        // calls become global targets that can select something on a later scan.
+        sidebar.select_after_refresh(&vault.path().join("../foreign.md"));
+        assert!(sidebar.selection_after_refresh.is_none());
+        sidebar.select_path(&target);
+        assert!(sidebar.selection_after_refresh.is_none());
+        sidebar.apply_local_notes(list_local_notes(vault.path()));
+        assert_ne!(sidebar.selected_note_path(), Some(target));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn snapshot_listing_preserves_disk_rules_and_ui_state() {
+        let vault = tempfile::tempdir().unwrap();
+        let root = vault.path();
+        std::fs::create_dir(root.join("folder")).unwrap();
+        std::fs::create_dir(root.join(".hidden")).unwrap();
+        std::fs::create_dir(root.join("target")).unwrap();
+        for path in [".hidden/no.md", "target/no.md", "project.toml", "project.json", ".secret"] {
+            std::fs::write(root.join(path), "hidden").unwrap();
+        }
+        std::fs::write(root.join("folder/project.toml"), "visible").unwrap();
+        std::fs::write(root.join("folder/page.md"), "---\nicon: disk\n---\n# Page").unwrap();
+        std::fs::write(root.join("other.txt"), "visible").unwrap();
+        std::fs::write(root.join(NOTES_ICONS_FILE), r#"{"folder/page.md":"picked"}"#).unwrap();
+        let mut sidebar = NotesSidebar::default();
+        sidebar.set_workspace("Vault", Some(root.to_path_buf()));
+        sidebar.reveal_dir(&root.join("folder"));
+        sidebar.select_path(&root.join("folder/page.md"));
+        let before: Vec<_> = sidebar.all_entries.iter().map(|entry|
+            (entry.path.clone(), entry.label.clone(), entry.icon.clone(), entry.depth, entry.parent.clone())
+        ).collect();
+        let snapshot = list_local_notes(root);
+        sidebar.apply_local_notes(snapshot);
+        let after: Vec<_> = sidebar.all_entries.iter().map(|entry|
+            (entry.path.clone(), entry.label.clone(), entry.icon.clone(), entry.depth, entry.parent.clone())
+        ).collect();
+        assert_eq!(before, after);
+        assert_eq!(after.len(), 4);
+        assert!(sidebar.open_dirs.contains(&root.join("folder")));
+        assert_eq!(sidebar.selected_note_path(), Some(root.join("folder/page.md")));
+        assert_eq!(sidebar.all_entries.iter().find(|e| e.path == root.join("folder/page.md")).unwrap().icon.as_deref(), Some("picked"));
+
+        // A reset arriving after worker launch beats even its saved icon map.
+        let snapshot = list_local_notes(root);
+        sidebar.set_note_icon(&root.join("folder/page.md"), None);
+        sidebar.apply_local_notes(snapshot);
+        assert_eq!(sidebar.all_entries.iter().find(|e| e.path == root.join("folder/page.md")).unwrap().icon, None);
+        sidebar.enable_async_local_refresh();
+        std::fs::remove_file(root.join("other.txt")).unwrap();
+        sidebar.refresh_notes();
+        assert!(sidebar.contains_path(&root.join("other.txt")), "retain old listing until completion");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn remote_listing_never_uses_coincident_local_vault() {
+        let vault = tempfile::tempdir().unwrap();
+        std::fs::write(vault.path().join("private.md"), "---\nicon: secret\n---").unwrap();
+        std::fs::write(vault.path().join(NOTES_ICONS_FILE), r#"{"shared.md":"secret"}"#).unwrap();
+        let mut sidebar = NotesSidebar::default();
+        sidebar.enable_async_local_refresh();
+        sidebar.set_remote_workspace("Remote", Some(vault.path().to_path_buf()));
+        sidebar.set_remote_entries_from_host(vec![(vault.path().join("shared.md"), false)]);
+        sidebar.refresh_notes();
+        assert!(!sidebar.poll_local_refresh(|| panic!("remote must not start a local worker")));
+        assert!(sidebar.take_refresh(), "remote refresh event belongs to remote host");
+        assert_eq!(sidebar.all_entries.len(), 1);
+        assert_eq!(sidebar.all_entries[0].icon, None);
+        assert!(!sidebar.contains_path(&vault.path().join("private.md")));
+    }
+
     #[test]
     fn tree_row_material_inherits_context_opacity_and_specific_background() {
         let theme = crate::primitives::IdeTheme::default();

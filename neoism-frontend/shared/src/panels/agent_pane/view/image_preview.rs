@@ -1,11 +1,14 @@
-use std::hash::{Hash, Hasher};
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use sugarloaf::{ColorType, GraphicData, GraphicDataEntry, GraphicId, Sugarloaf};
 use web_time::Instant;
 
+use crate::panels::agent_pane::composer_interactions::ImagePreviewHit;
 use crate::panels::agent_pane::state::NeoismAgentImage;
+use crate::primitives::visible_rect_fragments;
 
 use super::draw::{draw_rounded_rect_clipped, push_image_overlay_clipped};
 use super::{ORDER_PANEL, OVERLAY_PANEL_ID};
@@ -13,13 +16,34 @@ use crate::primitives::ide_theme::IdeTheme;
 
 const THUMB_SIZE: f32 = 64.0;
 
-fn image_id(image: &NeoismAgentImage) -> u32 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    image.url.hash(&mut hasher);
-    // Keep agent attachments out of the notebook image namespace. Sharing
-    // 0xA100 IDs allowed a cached full-size notebook/terminal texture to be
-    // reused for a small chat preview, producing a giant overlay across text.
-    0xA700_0000 | (hasher.finish() as u32 & 0x00ff_ffff)
+#[derive(Default)]
+struct ImageIds(HashMap<[u8; 32], u32>);
+
+impl ImageIds {
+    fn get_or_allocate(&mut self, identity: [u8; 32]) -> Option<u32> {
+        if let Some(id) = self.0.get(&identity) {
+            return Some(*id);
+        }
+        // Allocate, rather than truncate a content hash. Never reuse an ID for
+        // different bytes, even after a renderer has evicted its texture.
+        let index = u32::try_from(self.0.len()).ok()?;
+        if index > 0x00ff_ffff {
+            return None;
+        }
+        let id = 0xA700_0000 | index;
+        self.0.insert(identity, id);
+        Some(id)
+    }
+}
+
+fn image_id(image: &NeoismAgentImage) -> Option<u32> {
+    static IDS: OnceLock<Mutex<ImageIds>> = OnceLock::new();
+    image.url.renderer_id(|identity| {
+        IDS.get_or_init(Default::default)
+            .lock()
+            .ok()?
+            .get_or_allocate(identity)
+    })
 }
 
 fn image_bytes(url: &str) -> Option<Vec<u8>> {
@@ -28,17 +52,33 @@ fn image_bytes(url: &str) -> Option<Vec<u8>> {
     STANDARD.decode(payload).ok()
 }
 
-fn register_image(
+fn decode_image(image: &NeoismAgentImage) -> Option<image_rs::RgbaImage> {
+    if image.url.decode_failed() {
+        return None;
+    }
+    let decoded = image_bytes(&image.url)
+        .and_then(|bytes| image_rs::load_from_memory(&bytes).ok())
+        .map(|image| image.to_rgba8());
+    if decoded.is_none() {
+        image.url.mark_decode_failed();
+    }
+    decoded
+}
+
+/// Register the original-resolution attachment for both strips and inspection modals.
+/// Cache hits inspect only the precomputed identity; no URL hashing or decoding.
+pub fn register_image(
     sugarloaf: &mut Sugarloaf,
     image: &NeoismAgentImage,
 ) -> Option<(u32, f32)> {
-    let id = image_id(image);
+    if image.url.decode_failed() {
+        return None;
+    }
+    let id = image_id(image)?;
     if let Some(entry) = sugarloaf.image_data.get(&id) {
         return Some((id, entry.width / entry.height.max(1.0)));
     }
-    let decoded = image_rs::load_from_memory(&image_bytes(&image.url)?)
-        .ok()?
-        .to_rgba8();
+    let decoded = decode_image(image)?;
     let (width, height) = decoded.dimensions();
     sugarloaf.image_data.insert(
         id,
@@ -58,6 +98,25 @@ fn register_image(
     Some((id, width as f32 / height.max(1) as f32))
 }
 
+fn image_preview_hits(
+    image: &NeoismAgentImage,
+    rect: [f32; 4],
+    clip: [f32; 4],
+    occlusions: &[[f32; 4]],
+) -> Vec<ImagePreviewHit> {
+    visible_rect_fragments(rect, clip, occlusions)
+        .into_iter()
+        .map(|rect| ImagePreviewHit {
+            rect,
+            image: image.clone(),
+        })
+        .collect()
+}
+
+fn thumbnail_is_visible(rect: [f32; 4], clip: [f32; 4], occlusions: &[[f32; 4]]) -> bool {
+    !visible_rect_fragments(rect, clip, occlusions).is_empty()
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn render_image_strip(
     sugarloaf: &mut Sugarloaf,
@@ -70,13 +129,20 @@ pub fn render_image_strip(
     thumb_size: f32,
     clip: [f32; 4],
     occlusion_rects: &[[f32; 4]],
-) {
+) -> Vec<ImagePreviewHit> {
+    let mut hits = Vec::new();
     let size = thumb_size * s;
     let gap = 10.0 * s;
     let mut thumb_x = x;
     for image in images {
         if thumb_x + size > x + max_w + 0.5 {
             break;
+        }
+        // Cull before registration: unseen attachments must not synchronously
+        // decode base64 or upload the original full-resolution texture.
+        if !thumbnail_is_visible([thumb_x, y, size, size], clip, occlusion_rects) {
+            thumb_x += size + gap;
+            continue;
         }
         draw_rounded_rect_clipped(
             sugarloaf,
@@ -110,6 +176,7 @@ pub fn render_image_strip(
                 [thumb_x + (size - width) * 0.5, y, width, size]
             };
             if let Some((visible, source)) = clip_image(fitted, clip) {
+                hits.extend(image_preview_hits(image, fitted, clip, occlusion_rects));
                 push_image_overlay_clipped(
                     sugarloaf,
                     OVERLAY_PANEL_ID,
@@ -124,10 +191,142 @@ pub fn render_image_strip(
         }
         thumb_x += size + gap;
     }
+    hits
 }
 
 pub const COMPOSER_THUMB_SIZE: f32 = THUMB_SIZE;
 pub const MESSAGE_THUMB_SIZE: f32 = 150.0;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unseen_thumbnails_are_culled_before_registration() {
+        let canvas = [10.0, 20.0, 64.0, 64.0];
+        assert!(!thumbnail_is_visible(
+            canvas,
+            [100.0, 0.0, 200.0, 200.0],
+            &[]
+        ));
+        assert!(!thumbnail_is_visible(
+            canvas,
+            [0.0, 100.0, 200.0, 200.0],
+            &[]
+        ));
+        let clip = [0.0, 0.0, 200.0, 200.0];
+        assert!(!thumbnail_is_visible(canvas, clip, &[canvas]));
+        assert!(!thumbnail_is_visible(
+            canvas,
+            clip,
+            &[[10.0, 20.0, 32.0, 64.0], [42.0, 20.0, 32.0, 64.0],]
+        ));
+        assert!(thumbnail_is_visible(
+            canvas,
+            clip,
+            &[[10.0, 20.0, 64.0, 32.0]]
+        ));
+    }
+
+    #[test]
+    fn partial_vertical_occlusion_preserves_clickable_lower_pixels() {
+        let image = NeoismAgentImage {
+            filename: "hit.png".into(),
+            mime: "image/png".into(),
+            url: "data:image/png;base64,AA==".into(),
+        };
+        let hits = image_preview_hits(
+            &image,
+            [0.0, 0.0, 100.0, 100.0],
+            [10.0, 10.0, 80.0, 80.0],
+            &[[30.0, 10.0, 40.0, 30.0]],
+        );
+        assert!(hits.iter().all(|hit| std::ptr::eq(
+            hit.image.url.as_str().as_ptr(),
+            image.url.as_str().as_ptr()
+        )));
+        let fragments: Vec<_> = hits.iter().map(|hit| hit.rect).collect();
+        let contains = |x: f32, y: f32| {
+            fragments
+                .iter()
+                .any(|r| x >= r[0] && x < r[0] + r[2] && y >= r[1] && y < r[1] + r[3])
+        };
+        assert!(
+            contains(50.0, 60.0),
+            "a partial-height overlay must not cut entire columns"
+        );
+        assert!(contains(20.0, 20.0));
+        assert!(!contains(50.0, 20.0));
+        assert!(!contains(5.0, 60.0));
+        assert!(!contains(50.0, 95.0));
+        let area: f32 = fragments.iter().map(|r| r[2] * r[3]).sum();
+        assert_eq!(area, 80.0 * 80.0 - 40.0 * 30.0);
+    }
+
+    #[test]
+    fn failed_decode_is_remembered_by_payload_clones() {
+        for url in [
+            "data:image/png;base64,???",
+            "data:image/png;base64,bm90IGEgcG5n",
+            "/v2/artifacts/missing/content",
+        ] {
+            let image = NeoismAgentImage {
+                filename: "invalid.png".into(),
+                mime: "image/png".into(),
+                url: url.into(),
+            };
+            let cloned = image.clone();
+            assert!(!cloned.url.decode_failed());
+            assert!(decode_image(&image).is_none());
+            assert!(cloned.url.decode_failed());
+            assert!(decode_image(&cloned).is_none());
+            // Replacing immutable bytes (e.g. artifact hydration) gets a fresh state.
+            let replacement: crate::panels::agent_pane::state::AgentImagePayload =
+                url.into();
+            assert!(!replacement.decode_failed());
+            assert_eq!(image.url.cache_identity(), replacement.cache_identity());
+        }
+    }
+
+    #[test]
+    fn texture_ids_do_not_truncate_content_identity() {
+        let mut ids = ImageIds::default();
+        let first = [0; 32];
+        let mut second = first;
+        second[31] = 1;
+        let a = ids.get_or_allocate(first).unwrap();
+        let b = ids.get_or_allocate(second).unwrap();
+        assert_ne!(a, b);
+        assert_eq!(ids.get_or_allocate(first), Some(a));
+        assert_eq!(a & 0xff00_0000, 0xA700_0000);
+    }
+
+    #[test]
+    fn attachment_decode_preserves_original_resolution_and_pixels() {
+        let source =
+            image_rs::RgbaImage::from_pixel(513, 257, image_rs::Rgba([12, 34, 56, 78]));
+        let mut encoded = std::io::Cursor::new(Vec::new());
+        source
+            .write_to(&mut encoded, image_rs::ImageFormat::Png)
+            .unwrap();
+        let image = NeoismAgentImage {
+            filename: "original.png".into(),
+            mime: "image/png".into(),
+            url: format!(
+                "data:image/png;base64,{}",
+                STANDARD.encode(encoded.into_inner())
+            )
+            .into(),
+        };
+        let decoded = decode_image(&image).unwrap();
+        assert_eq!(decoded.dimensions(), (513, 257));
+        assert_eq!(decoded.as_raw(), source.as_raw());
+        // Even a decodable URL must not reach the decoder after a cached
+        // failure; the flag is shared with clones and is checked first.
+        image.url.mark_decode_failed();
+        assert!(decode_image(&image.clone()).is_none());
+    }
+}
 
 fn clip_image(rect: [f32; 4], clip: [f32; 4]) -> Option<([f32; 4], [f32; 4])> {
     let [x, y, w, h] = rect;

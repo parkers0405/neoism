@@ -85,21 +85,36 @@ impl ProviderPlatform {
             ProviderRouteAction::List => {
                 let raw = self.catalog.providers().await?;
                 let connected = self.registry.connected_ids(&raw).await?;
-                let openai_access = self.registry.openai_model_access(&auth).await?;
+                let (openai_access, readiness_identity) = self.registry.openai_model_access_with_identity(&auth).await?;
                 let effective = self
                     .catalog
                     .providers_for_access(&openai_access, true)
                     .await?;
-                let all = connect_provider_catalog(
-                    &effective,
-                    &connected,
-                    &OpenAiModelAccess::Api,
-                );
-                Ok(serde_json::to_value(ProviderListResult {
+                // Determine connectability from the basic catalog, not optional
+                // account discovery. An empty/unavailable model list must not
+                // hide an account's provider or its auth methods.
+                let mut all =
+                    connect_provider_catalog(&raw, &connected, &OpenAiModelAccess::Api);
+                for provider in all.iter_mut().filter(|provider| provider.id == "openai")
+                {
+                    if let Some(resolved) = effective.iter().find(|p| p.id == provider.id)
+                    {
+                        provider.models = resolved.models.clone();
+                    }
+                }
+                let readiness_pending = connected.iter().any(|id| id == "openai")
+                    && matches!(&openai_access, OpenAiModelAccess::CodexPending);
+                let mut result = serde_json::to_value(ProviderListResult {
                     default: default_model_ids(&all),
                     connected,
                     all,
-                })?)
+                })?;
+                // Connection/auth metadata is usable while optional account
+                // discovery refreshes. Do not publish a false negative that
+                // would prevent generation from ever refreshing this account.
+                result["readinessPending"] = Value::Bool(readiness_pending);
+                result["readinessIdentity"] = serde_json::to_value(readiness_identity)?;
+                Ok(result)
             }
             ProviderRouteAction::Configured => {
                 let raw = self.catalog.providers().await?;
@@ -539,6 +554,96 @@ mod tests {
     use super::{runtime_error, ProviderAuthorizeRequest, ProviderCallbackRequest};
     use crate::provider_error::ProviderError;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn connect_list_and_auth_methods_survive_hung_catalog() {
+        const CHILD: &str = "NEOISM_TEST_HUNG_CONNECT_CATALOG";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "provider_service::tests::connect_list_and_auth_methods_survive_hung_catalog"])
+                .env(CHILD, "1")
+                .env("NEOISM_AGENT_OPENAI_OAUTH_ISSUER", "http://127.0.0.1:1")
+                .env("NEOISM_AGENT_OPENAI_CODEX_MODELS_URL", "http://127.0.0.1:1/models")
+                .output().unwrap();
+            assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            return;
+        }
+        use super::*;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let source = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        let path = std::env::temp_dir()
+            .join(format!("neoism-connect-{}.json", opaque_attempt_id()));
+        let credentials = Arc::new(
+            neoism_agent_service_api::LocalProviderCredentialStore::new(path.clone()),
+        );
+        let mut platform = ProviderPlatform::new(credentials);
+        platform
+            .auth
+            .set(
+                "openai",
+                AuthInfo::OAuth {
+                    access: "expired-access".into(),
+                    refresh: "unchanged-refresh".into(),
+                    expires: 1,
+                    account_id: Some("test-account".into()),
+                    enterprise_url: None,
+                },
+            )
+            .await
+            .unwrap();
+        platform.catalog =
+            ProviderCatalog::with_test_source(source, path.with_extension("models"));
+        for action in [ProviderRouteAction::List, ProviderRouteAction::AuthMethods] {
+            let result = tokio::time::timeout(
+                std::time::Duration::from_millis(500),
+                platform.execute_route(ProviderRouteRequest {
+                    action: action.clone(),
+                    provider_id: None,
+                    connection_id: None,
+                    tenant_id: None,
+                    workspace_id: None,
+                    hosted: false,
+                    body: Value::Null,
+                }),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            if matches!(action, ProviderRouteAction::List) {
+                assert_eq!(result["readinessPending"], true);
+                assert_eq!(result["readinessIdentity"].as_str().unwrap().len(), 64,
+                    "readiness must identify the exact discovery snapshot without exposing tokens");
+                assert!(result["connected"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!("openai")));
+                let openai = result["all"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|p| p["id"] == "openai")
+                    .unwrap();
+                assert!(openai["models"].get("gpt-5").is_some(),
+                    "pending discovery retains basic model IDs for immediate-send validation");
+                assert_eq!(openai["models"]["gpt-5"]["limit"]["context"], 272000,
+                    "pending discovery must still use conservative subscription limits");
+            } else {
+                assert!(!result["openai"].as_array().unwrap().is_empty());
+            }
+        }
+        let AuthInfo::OAuth { refresh, .. } =
+            platform.auth.get("openai").await.unwrap().unwrap()
+        else {
+            panic!("auth changed")
+        };
+        assert_eq!(refresh, "unchanged-refresh");
+        tokio::fs::remove_file(path).await.unwrap();
+        server.abort();
+    }
 
     #[tokio::test]
     async fn codex_limit_auth_follows_selected_connection_not_default_account() {

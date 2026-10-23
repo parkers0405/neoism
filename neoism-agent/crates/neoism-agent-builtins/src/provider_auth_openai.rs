@@ -43,6 +43,18 @@ pub(super) async fn authorize_openai_browser(
     provider_id: &str,
     pending: &RwLock<std::collections::HashMap<String, ProviderOAuthPending>>,
 ) -> anyhow::Result<ProviderAuthAuthorization> {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        authorize_openai_browser_inner(provider_id, pending),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("OpenAI browser authorization preparation timed out"))?
+}
+
+async fn authorize_openai_browser_inner(
+    provider_id: &str,
+    pending: &RwLock<std::collections::HashMap<String, ProviderOAuthPending>>,
+) -> anyhow::Result<ProviderAuthAuthorization> {
     let issuer = std::env::var("NEOISM_AGENT_OPENAI_OAUTH_ISSUER")
         .unwrap_or_else(|_| OPENAI_ISSUER.to_string());
     let redirect_uri = std::env::var("NEOISM_AGENT_OPENAI_OAUTH_REDIRECT_URI")
@@ -135,6 +147,18 @@ pub(super) async fn exchange_openai_browser(
     provider_id: &str,
     pending: &RwLock<std::collections::HashMap<String, ProviderOAuthPending>>,
 ) -> anyhow::Result<AuthInfo> {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(330),
+        exchange_openai_browser_inner(provider_id, pending),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("OpenAI browser authorization timed out"))?
+}
+
+async fn exchange_openai_browser_inner(
+    provider_id: &str,
+    pending: &RwLock<std::collections::HashMap<String, ProviderOAuthPending>>,
+) -> anyhow::Result<AuthInfo> {
     let (issuer, redirect_uri, code_verifier, receiver) = {
         let pending = pending.read().await;
         let Some(ProviderOAuthPending::OpenAiBrowser {
@@ -180,6 +204,7 @@ pub(super) async fn exchange_openai_browser(
             form_escape(OPENAI_CLIENT_ID),
             form_escape(&code_verifier),
         ))
+        .timeout(std::time::Duration::from_secs(15))
         .send()
         .await?
         .error_for_status()?
@@ -192,6 +217,18 @@ pub(super) async fn authorize_openai_headless(
     provider_id: &str,
     pending: &RwLock<std::collections::HashMap<String, ProviderOAuthPending>>,
 ) -> anyhow::Result<ProviderAuthAuthorization> {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        authorize_openai_headless_inner(provider_id, pending),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("OpenAI device authorization preparation timed out"))?
+}
+
+async fn authorize_openai_headless_inner(
+    provider_id: &str,
+    pending: &RwLock<std::collections::HashMap<String, ProviderOAuthPending>>,
+) -> anyhow::Result<ProviderAuthAuthorization> {
     let issuer = std::env::var("NEOISM_AGENT_OPENAI_OAUTH_ISSUER")
         .unwrap_or_else(|_| OPENAI_ISSUER.to_string());
     let client = reqwest::Client::new();
@@ -199,6 +236,7 @@ pub(super) async fn authorize_openai_headless(
         .post(format!("{issuer}/api/accounts/deviceauth/usercode"))
         .header("user-agent", neoism_user_agent())
         .json(&serde_json::json!({ "client_id": OPENAI_CLIENT_ID }))
+        .timeout(std::time::Duration::from_secs(15))
         .send()
         .await?
         .error_for_status()?
@@ -234,6 +272,18 @@ pub(super) async fn poll_openai_headless(
     provider_id: &str,
     pending: &RwLock<std::collections::HashMap<String, ProviderOAuthPending>>,
 ) -> anyhow::Result<AuthInfo> {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(300),
+        poll_openai_headless_inner(provider_id, pending),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("OpenAI device authorization timed out"))?
+}
+
+async fn poll_openai_headless_inner(
+    provider_id: &str,
+    pending: &RwLock<std::collections::HashMap<String, ProviderOAuthPending>>,
+) -> anyhow::Result<AuthInfo> {
     let Some(ProviderOAuthPending::OpenAiHeadless {
         issuer,
         device_auth_id,
@@ -252,6 +302,7 @@ pub(super) async fn poll_openai_headless(
                 "device_auth_id": device_auth_id,
                 "user_code": user_code,
             }))
+            .timeout(std::time::Duration::from_secs(15))
             .send()
             .await?;
         if response.status().is_success() {
@@ -266,7 +317,8 @@ pub(super) async fn poll_openai_headless(
                     form_escape(OPENAI_CLIENT_ID),
                     form_escape(&device.code_verifier),
                 ))
-                .send()
+                .timeout(std::time::Duration::from_secs(15))
+        .send()
                 .await?
                 .error_for_status()?
                 .json::<OpenAiTokenResponse>()

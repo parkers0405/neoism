@@ -969,7 +969,7 @@ fn map_history(
             .into_iter()
             .map(|attachment| NeoismAgentImage {
                 filename: attachment.filename,
-                url: attachment.url,
+                url: attachment.url.into(),
                 mime: attachment.mime,
             })
             .collect(),

@@ -26,6 +26,33 @@ fn timeline_diff_rows_do_not_wrap_when_the_pane_narrows() {
 }
 
 #[test]
+fn timeline_diff_gutter_reserves_hidden_numbers_from_both_sides() {
+    let after = "line\n".repeat(60);
+    for (display, old, new, expected) in [
+        (Some(9_999), None, None, 9_999),
+        (Some(53), Some(100_000), Some(53), 100_000),
+        (None, None, Some(u32::MAX), u32::MAX),
+    ] {
+        let mut section = snapshot_section_from_text(
+            format!("gutter-{expected}.rs"),
+            "",
+            &after,
+        );
+        let last = section.lines.last_mut().unwrap();
+        last.line_number = display;
+        last.old_line_number = old;
+        last.new_line_number = new;
+        for scale in [0.7, 1.0, 1.5, 2.0] {
+            let preview = super::diff::cached_diff_card_view(&section, 120.0 * scale, scale, false);
+            let expanded = super::diff::cached_diff_card_view(&section, 900.0 * scale, scale, true);
+            assert!(preview.rows.len() < section.lines.len());
+            assert_eq!(preview.max_line_number, expected);
+            assert_eq!(expanded.max_line_number, preview.max_line_number);
+        }
+    }
+}
+
+#[test]
 fn timeline_diff_show_more_keeps_the_preview_height() {
     let after = (0..60)
         .map(|i| format!("line_{i}_{}\n", "x".repeat(400)))

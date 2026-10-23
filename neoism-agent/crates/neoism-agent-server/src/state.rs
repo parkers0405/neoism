@@ -154,6 +154,10 @@ pub(crate) enum ExecutionSubtaskRegistration {
 
 mod conversation_search;
 mod hosting;
+#[cfg(test)]
+mod catalog_family_tests;
+#[cfg(test)]
+mod session_descendant_tests;
 
 #[derive(Clone)]
 pub(crate) struct SessionStore {
@@ -2127,6 +2131,16 @@ impl SessionStore {
             "CREATE INDEX IF NOT EXISTS idx_session_list_pinned_roots_updated ON session_list_index(updated DESC, session_id DESC) WHERE parent_id IS NULL AND json_type(summary_json, '$.pinned') = 'true'",
             Vec::new(),
         ).await?;
+        // Canonical JSON expression indexes work immediately on legacy stores;
+        // the list sidecar may still be awaiting its resumable backfill.
+        self.db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sessions_catalog_parent ON sessions(json_extract(info_json, '$.parentId'))",
+            Vec::new(),
+        ).await?;
+        self.db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sessions_catalog_execution_root ON sessions(json_extract(info_json, '$.executionRootSessionID'))",
+            Vec::new(),
+        ).await?;
         if !self.schema_migration_applied(4).await? {
             self.db
                 .execute_transaction(vec![
@@ -3218,6 +3232,121 @@ impl SessionStore {
             )
             .await?
             .is_some())
+    }
+
+    /// Exact `catalog_activity::families` membership for one key, without loading
+    /// conversation blobs or relying on the asynchronously backfilled list index.
+    /// Hints can name a root outside the parent tree; ancestors are needed to
+    /// reject overridden descendants and to preserve orphan/cycle behavior.
+    pub(crate) async fn catalog_family_members(&self, root: &str) -> anyhow::Result<std::collections::HashSet<String>> {
+        // Turso does not support recursive CTEs. Walk indexed frontiers in
+        // bounded batches instead; UNION/visited sets terminate corrupt cycles.
+        const COLUMNS: &str = "id, json_extract(info_json, '$.parentId') AS parent_id, CASE WHEN json_type(info_json, '$.executionRootSessionID') = 'text' THEN json_extract(info_json, '$.executionRootSessionID') END AS execution_root";
+        let mut rows = self.db.fetch_all(
+            &format!("SELECT {COLUMNS} FROM sessions WHERE id = ? UNION SELECT {COLUMNS} FROM sessions WHERE json_extract(info_json, '$.executionRootSessionID') = ?"),
+            vec![text(root), text(root)],
+        ).await?;
+        let mut graph = HashMap::new();
+        let mut candidates = std::collections::HashSet::new();
+        for row in rows.drain(..) {
+            let id = row.get_str("id")?;
+            candidates.insert(id.clone());
+            graph.insert(id, (row.get_opt_str("parent_id")?, row.get_opt_str("execution_root")?));
+        }
+        let mut frontier = vec![root.to_string()];
+        let mut expanded = std::collections::HashSet::new();
+        while !frontier.is_empty() {
+            let batch = std::mem::take(&mut frontier);
+            // Equality seeks use the expression index; Turso scans for IN.
+            // Small compounds bound planner/VM stack usage as well.
+            for chunk in batch.chunks(16) {
+                let query = vec![
+                    format!("SELECT {COLUMNS} FROM sessions WHERE json_extract(info_json, '$.parentId') = ?");
+                    chunk.len()
+                ].join(" UNION ALL ");
+                let children = self.db.fetch_all(
+                    &query,
+                    chunk.iter().map(text).collect(),
+                ).await?;
+                for row in children {
+                    let id = row.get_str("id")?;
+                    candidates.insert(id.clone());
+                    if expanded.insert(id.clone()) { frontier.push(id.clone()); }
+                    graph.insert(id, (row.get_opt_str("parent_id")?, row.get_opt_str("execution_root")?));
+                }
+            }
+        }
+        let mut attempted = std::collections::HashSet::new();
+        loop {
+            let parents: std::collections::HashSet<_> = graph.values()
+                .filter_map(|(parent, _)| parent.as_ref())
+                .filter(|parent| !graph.contains_key(*parent) && !attempted.contains(*parent))
+                .cloned().collect();
+            if parents.is_empty() { break; }
+            let parents: Vec<_> = parents.into_iter().collect();
+            for chunk in parents.chunks(128) {
+                let placeholders = vec!["?"; chunk.len()].join(",");
+                let ancestors = self.db.fetch_all(
+                    &format!("SELECT {COLUMNS} FROM sessions WHERE id IN ({placeholders})"),
+                    chunk.iter().map(text).collect(),
+                ).await?;
+                for row in ancestors {
+                    graph.insert(row.get_str("id")?, (row.get_opt_str("parent_id")?, row.get_opt_str("execution_root")?));
+                }
+            }
+            attempted.extend(parents);
+        }
+        let mut family = std::collections::HashSet::new();
+        for id in candidates {
+            let mut current = id.as_str();
+            let mut visited = std::collections::HashSet::new();
+            while visited.insert(current) {
+                let Some(parent) = graph.get(current).and_then(|(parent, _)| parent.as_deref()) else { break };
+                if !graph.contains_key(parent) { break; }
+                current = parent;
+            }
+            let resolved = graph.get(&id).and_then(|(_, hint)| hint.as_deref()).unwrap_or(current);
+            if resolved == root { family.insert(id); }
+        }
+        Ok(family)
+    }
+
+    /// Parent-descendant closure, including the requested key even if its row
+    /// is absent. Unlike catalogue membership, execution-root hints do not
+    /// affect this graph. Read only IDs via the canonical parent index: the
+    /// list sidecar may still be backfilling, and unrelated session/hosting
+    /// hydration must not gate a session-scoped event subscription.
+    pub(crate) async fn session_descendant_ids(
+        &self,
+        root: &str,
+    ) -> anyhow::Result<std::collections::HashSet<String>> {
+        let mut family = std::collections::HashSet::from([root.to_string()]);
+        let mut frontier = vec![root.to_string()];
+        // Turso does not support recursive CTEs. Bound each indexed frontier
+        // query, and enqueue only newly discovered IDs to terminate cycles.
+        while !frontier.is_empty() {
+            let batch = std::mem::take(&mut frontier);
+            // Small compounds also bound Turso planner/VM stack usage.
+            for chunk in batch.chunks(16) {
+                // Turso does not use this expression index for IN. Keep
+                // each frontier edge an indexed equality seek via UNION ALL.
+                let query = vec![
+                    "SELECT id FROM sessions WHERE json_extract(info_json, '$.parentId') = ?";
+                    chunk.len()
+                ].join(" UNION ALL ");
+                let children = self.db.fetch_all(
+                    &query,
+                    chunk.iter().map(text).collect(),
+                ).await?;
+                for row in children {
+                    let id = row.get_str("id")?;
+                    if family.insert(id.clone()) {
+                        frontier.push(id);
+                    }
+                }
+            }
+        }
+        Ok(family)
     }
 
     pub(crate) async fn list_sessions(&self) -> anyhow::Result<Vec<SessionInfo>> {

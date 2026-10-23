@@ -105,6 +105,43 @@ impl ConnectFlow {
 
 const RETRY_VALUE: &str = "__connect_retry__";
 
+fn connect_request_timeout(owned_local: bool, oauth_wait: bool) -> Duration {
+    // Joined requests can wait for the host's 120-second startup before work
+    // begins. Browser sign-in also needs its own bounded interactive lifetime.
+    let work = if oauth_wait { 360 } else { 30 };
+    Duration::from_secs(work + if owned_local { 0 } else { 120 })
+}
+
+fn connect_api_request(
+    server: &str,
+    method: &str,
+    path: &str,
+    body: Option<&Value>,
+    token: &AtomicBool,
+    stage: &'static str,
+    oauth_wait: bool,
+) -> Result<Option<Value>, String> {
+    let owned_local = super::super::api::uses_local_startup_readiness(server);
+    let timeout = connect_request_timeout(owned_local, oauth_wait);
+    let started = Instant::now();
+    api_request_json_while_active(server, method, path, body, timeout, token)
+        .map_err(|error| {
+            if !token.load(Ordering::Acquire) {
+                return error;
+            }
+            // Never log endpoint URLs, provider/account IDs, request bodies or
+            // response errors: those can contain credentials or OAuth codes.
+            tracing::warn!(
+                stage,
+                endpoint = if owned_local { "owned-local" } else { "selected-endpoint" },
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                wire_budget_secs = timeout.as_secs(),
+                "provider connection request failed"
+            );
+            format!("{stage}: {error}")
+        })
+}
+
 // A request owns only data, never the pane. The existing background sender wakes
 // the owning window; there is no timer/poll loop while network I/O is pending.
 #[derive(Clone)]
@@ -218,18 +255,20 @@ impl ConnectRequest {
                 body,
                 effect,
             } => {
-                let read_timeout = if matches!(effect, ConnectEffect::Oauth { .. }) {
-                    Duration::from_secs(300)
-                } else {
-                    Duration::from_secs(5)
-                };
-                let value = api_request_json_while_active(
+                let value = connect_api_request(
                     server,
                     verb,
                     path,
                     body.as_ref(),
-                    read_timeout,
                     token,
+                    if matches!(effect, ConnectEffect::Authorized { .. }) {
+                        "Preparing provider sign-in"
+                    } else if matches!(effect, ConnectEffect::Oauth { .. }) {
+                        "Completing provider sign-in"
+                    } else {
+                        "Updating provider account"
+                    },
+                    matches!(effect, ConnectEffect::Oauth { .. }),
                 )?;
                 // ShellExecute on Windows (and launching the URL helper on
                 // Unix) belongs off-thread too. Check cancellation after the
@@ -600,7 +639,12 @@ impl NeoismAgentPane {
     /// `/connect` entry point: fetch the provider catalog + auth methods and
     /// open stage 1 (the provider list).
     pub(in crate::neoism::agent) fn open_connect_picker(&mut self) {
-        self.refresh_provider_readiness();
+        if super::super::system::is_system_agent_server(&self.server) {
+            self.push_notice("Manage provider accounts on the selected machine itself. System connections allow execution, not provider authentication.", NeoismAgentNoticeLevel::Warn);
+            return;
+        }
+        // The connect catalog applies scoped readiness on completion. Starting
+        // another discovery here duplicates cold model/auth work and survives Esc.
         self.close_connect();
         self.start_connect_request(ConnectRequest::Catalog);
     }
@@ -1280,22 +1324,24 @@ fn fetch_connect_flow_in_directory(
 ) -> Result<ConnectFlow, String> {
     let providers_path = directory.map(|directory| format!("/v2/providers?directory={}", percent_encode(directory)))
         .unwrap_or_else(|| "/v2/providers".into());
-    let providers_value = api_request_json_while_active(
+    let providers_value = connect_api_request(
         server,
         "GET",
         &providers_path,
         None,
-        Duration::from_secs(5),
         token,
+        "Loading provider list",
+        false,
     )?
     .unwrap_or(Value::Null);
-    let auth_value = api_request_json_while_active(
+    let auth_value = connect_api_request(
         server,
         "GET",
         "/v2/providers/auth-methods",
         None,
-        Duration::from_secs(5),
         token,
+        "Loading sign-in methods",
+        false,
     )?
     .unwrap_or(Value::Null);
     if !providers_value.get("all").is_some_and(Value::is_array) || !auth_value.is_object()
@@ -1388,13 +1434,14 @@ fn fetch_provider_connections(
     provider_id: &str,
     token: &AtomicBool,
 ) -> Result<Vec<ProviderConnection>, String> {
-    let value = api_request_json_while_active(
+    let value = connect_api_request(
         server,
         "GET",
         &format!("/v2/providers/{provider_id}/connections"),
         None,
-        Duration::from_secs(5),
         token,
+        "Loading provider accounts",
+        false,
     )?
     .ok_or_else(|| "The agent returned empty provider accounts".to_string())?;
     if !value.is_array() {

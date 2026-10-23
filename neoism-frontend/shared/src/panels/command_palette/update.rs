@@ -25,7 +25,7 @@ use super::modes::{PaletteMode, PaletteRow};
 use super::state::{CommandPalette, WorkspaceDrag};
 use super::{
     INPUT_HEIGHT, MAX_VISIBLE_RESULTS, PALETTE_PADDING, RESULTS_MARGIN_TOP,
-    RESULTS_PADDING_BOTTOM, RESULT_ITEM_HEIGHT, SEPARATOR_HEIGHT,
+    RESULTS_PADDING_BOTTOM, SEPARATOR_HEIGHT,
     WORKSPACE_DRAG_ACTIVATION_PX,
 };
 
@@ -420,13 +420,13 @@ impl CommandPalette {
         for (rect, action) in self
             .category_hits
             .iter()
-            .chain(self.system_control_hits.iter())
+            .chain(self.system_control_hits.iter().filter(|_| self.system_settings_id().is_some()))
         {
             if self.enabled && contains(*rect) {
                 return Some(action.clone());
             }
         }
-        if self.systems_mode() {
+        if self.systems_mode() || self.system_settings_id().is_some() {
             return None;
         }
         if let Some((_, id)) = self
@@ -894,6 +894,31 @@ impl CommandPalette {
                 rows.push((i32::MIN, PaletteRow::SystemAdd));
                 rows
             }
+            PaletteMode::SystemSettings(entry) => {
+                use super::actions::SystemConnectionStatus;
+                let mut settings = Vec::new();
+                if !entry.local {
+                    settings.push(("Active", "Keep agent chats connected in the background. Deactivating disconnects this system.", PaletteAction::SetSystemEnabled {
+                        id: entry.id.clone(), enabled: !entry.enabled,
+                    }));
+                    match entry.status {
+                        SystemConnectionStatus::Connected | SystemConnectionStatus::Connecting => {
+                            settings.push(("Disconnect", "Disconnect this computer's live connections and remote workspaces", PaletteAction::DisconnectSystem { id: entry.id.clone() }));
+                        }
+                        SystemConnectionStatus::Disconnected if entry.enabled => {
+                            settings.push(("Connect", "Retry the managed background connection", PaletteAction::ConnectSystem { id: entry.id.clone() }));
+                        }
+                        SystemConnectionStatus::Disconnected => {}
+                    }
+                    settings.push(("SSH to system", "Open a remote workspace for this computer's terminal and files; does not change Active", PaletteAction::SshToSystem { id: entry.id.clone() }));
+                    settings.push(("Remove", "Disconnect and forget this system; remote files are not deleted", PaletteAction::RemoveSystem { id: entry.id.clone() }));
+                }
+                settings.into_iter().enumerate().map(|(index, (title, description, action))| {
+                    (i32::MAX - index as i32, PaletteRow::Command {
+                        service: "", title, shortcut: description, action,
+                    })
+                }).collect()
+            }
             PaletteMode::Servers(servers) => {
                 let mut rows = servers
                     .iter()
@@ -1095,7 +1120,7 @@ impl CommandPalette {
         let available =
             (self.viewport_height - self.top_anchor - 8.0 * self.scale - fixed).max(0.0);
         let viewport_rows =
-            (available / (RESULT_ITEM_HEIGHT * self.scale).max(1.0)) as usize;
+            (available / self.row_height().max(1.0)) as usize;
         MAX_VISIBLE_RESULTS.min(viewport_rows)
     }
 
@@ -1141,7 +1166,7 @@ impl CommandPalette {
         let width = (preferred_width * s).min((logical_w - 16.0 * s).max(160.0));
         let pad = PALETTE_PADDING * s;
         let input_h = self.input_band_height.max(INPUT_HEIGHT * s);
-        let row_h = RESULT_ITEM_HEIGHT * s;
+        let row_h = self.row_height();
         let margin_top = RESULTS_MARGIN_TOP * s;
         let frame_stroke = (file_tree::FRAME_STROKE * s).max(2.0);
         let results_padding_bottom = RESULTS_PADDING_BOTTOM * s;
@@ -1177,7 +1202,7 @@ impl CommandPalette {
         window_width: f32,
         scale_factor: f32,
     ) -> bool {
-        if !self.enabled {
+        if !self.enabled || !self.has_query_input() {
             return false;
         }
         let (px, py, pw, _) = self.palette_rect(window_width, scale_factor);
@@ -1257,7 +1282,7 @@ impl CommandPalette {
             - results_y
             - self.list_scroll_spring.position
             - self.touch_scroll_offset;
-        let row = (relative_y / (RESULT_ITEM_HEIGHT * s)) as usize;
+        let row = (relative_y / self.row_height()) as usize;
         let filtered_count = self.filtered_rows().len();
         let actual_index = self.scroll_offset + row;
 
@@ -1295,7 +1320,7 @@ impl CommandPalette {
         let row = index.saturating_sub(self.scroll_offset);
         let y = results_y
             + self.list_scroll_spring.position
-            + (row as f32 + 0.5) * (RESULT_ITEM_HEIGHT * s);
+            + (row as f32 + 0.5) * self.row_height();
         (px + pw / 2.0, y)
     }
 
@@ -1315,11 +1340,19 @@ impl CommandPalette {
             mouse_x >= rect[0] && mouse_x < rect[0] + rect[2]
                 && mouse_y >= rect[1] && mouse_y < rect[1] + rect[3]
         });
-        if next == self.hovered_index && category == self.hovered_category {
+        let control = self.system_control_hits.iter().find(|(rect, _)| {
+            self.enabled && self.system_settings_id().is_some()
+                && mouse_x >= rect[0] && mouse_x < rect[0] + rect[2]
+                && mouse_y >= rect[1] && mouse_y < rect[1] + rect[3]
+        }).map(|(_, action)| action.clone());
+        if next == self.hovered_index && category == self.hovered_category
+            && control == self.hovered_system_control
+        {
             return false;
         }
         self.hovered_index = next;
         self.hovered_category = category;
+        self.hovered_system_control = control;
         true
     }
 

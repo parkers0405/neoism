@@ -170,10 +170,17 @@ pub struct SessionState {
 pub struct ProviderReadiness {
     pub connected: Vec<String>,
     pub models: Vec<String>,
+    /// Models are a basic-catalog fallback while optional discovery is unavailable.
+    pub pending: bool,
+    /// Opaque discovery credential/account/source fingerprint; not a UI label.
+    pub identity: Option<String>,
 }
 
 impl ProviderReadiness {
     pub fn from_json(value: &Value) -> Option<Self> {
+        // Pending discovery still has authoritative connection information and
+        // basic-catalog model IDs. Validate those rather than dropping all guards.
+        let pending = value.get("readinessPending").and_then(Value::as_bool) == Some(true);
         let connected = value
             .get("connected")?
             .as_array()?
@@ -191,7 +198,13 @@ impl ProviderReadiness {
                 })
             })
             .collect::<Vec<_>>();
-        Some(Self { connected, models })
+        Some(Self { connected, models, pending, identity: value.get("readinessIdentity").and_then(Value::as_str).map(str::to_owned) })
+    }
+
+    /// Retain only proven same-credential metadata, never merely matching labels.
+    pub fn can_retain_over(&self, incoming: &Self) -> bool {
+        !self.pending && incoming.pending && self.connected == incoming.connected
+            && self.identity.is_some() && self.identity == incoming.identity
     }
 
     pub fn prompt_error(&self, model: &str) -> Option<&'static str> {
@@ -204,6 +217,58 @@ impl ProviderReadiness {
         } else {
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod pending_readiness_tests {
+    use super::*;
+
+    #[test]
+    fn pending_refresh_retention_requires_exact_credential_identity() {
+        let complete = ProviderReadiness {
+            connected: vec!["openai".into()], models: vec!["openai/account-only".into()],
+            pending: false, identity: Some("token-a-account-a-source-a".into()),
+        };
+        let mut incoming = complete.clone();
+        incoming.pending = true;
+        incoming.models.clear();
+        assert!(complete.can_retain_over(&incoming));
+        for identity in [None, Some("token-b-account-a-source-a".into()), Some("token-a-account-b-source-a".into()), Some("token-a-account-a-source-b".into())] {
+            incoming.identity = identity;
+            assert!(!complete.can_retain_over(&incoming));
+        }
+        incoming.identity = complete.identity.clone();
+        incoming.connected.clear();
+        assert!(!complete.can_retain_over(&incoming));
+        incoming.connected = complete.connected.clone();
+        incoming.pending = false;
+        assert!(!complete.can_retain_over(&incoming));
+    }
+
+    #[test]
+    fn pending_discovery_validates_basic_catalog_and_connections() {
+        let mut catalog = serde_json::json!({
+            "connected": ["openai"],
+            "all": [{"id":"openai", "models":{"example":{}}},
+                    {"id":"other", "models":{"example":{}}}],
+            "readinessPending": true
+        });
+        let readiness = ProviderReadiness::from_json(&catalog).unwrap();
+        assert!(readiness.pending);
+        assert_eq!(readiness.prompt_error("openai/example"), None);
+        assert!(readiness.prompt_error("openai/invalid").is_some());
+        assert!(readiness.prompt_error("other/example").is_some());
+        assert!(readiness.prompt_error("").is_some());
+        catalog["connected"] = serde_json::json!([]);
+        assert!(ProviderReadiness::from_json(&catalog).unwrap()
+            .prompt_error("openai/example").unwrap().contains("/connect"));
+        catalog["connected"] = serde_json::json!(["openai"]);
+        catalog["all"][0]["models"] = serde_json::json!({});
+        catalog["readinessPending"] = Value::Bool(false);
+        let readiness = ProviderReadiness::from_json(&catalog).unwrap();
+        assert!(!readiness.pending);
+        assert!(readiness.prompt_error("openai/example").is_some());
     }
 }
 
@@ -2594,7 +2659,7 @@ mod tests {
         assert_eq!(message.kind, NeoismAgentMessageKind::User);
         assert_eq!(message.id, "msg-user-1");
         assert_eq!(message.images.len(), 1);
-        assert_eq!(message.images[0].url, "data:image/png;base64,AA==");
+        assert_eq!(message.images[0].url.as_str(), "data:image/png;base64,AA==");
     }
 
     #[test]
@@ -2612,7 +2677,7 @@ mod tests {
         assert_eq!(message.kind, NeoismAgentMessageKind::Assistant);
         assert_eq!(message.id, "part-image-2");
         assert_eq!(message.images.len(), 1);
-        assert_eq!(message.images[0].url, "/v2/artifacts/art_1/content");
+        assert_eq!(message.images[0].url.as_str(), "/v2/artifacts/art_1/content");
     }
 
     #[test]
@@ -2814,7 +2879,7 @@ fn image_from_part(part: &Value) -> Option<NeoismAgentImage> {
             .and_then(Value::as_str)
             .unwrap_or("image")
             .to_string(),
-        url,
+        url: url.into(),
         mime,
     })
 }

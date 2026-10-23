@@ -178,7 +178,8 @@ impl Screen<'_> {
         for grid in self.context_manager.contexts_mut() {
             for context in grid.contexts_mut().values_mut() {
                 if let Some(agent) = context.context_mut().neoism_agent.as_mut() {
-                    agent.switch_server(server.clone());
+                    agent.sync_workspace_server(server.clone());
+                    agent.set_default_chat_source(self.default_chat_source);
                 }
             }
         }
@@ -188,7 +189,7 @@ impl Screen<'_> {
     ///
     /// A window can contain local and remote-joined workspaces backed by
     /// different agent servers. Workspace navigation must not broadcast the
-    /// newly active server to every grid: `NeoismAgentPane::switch_server`
+    /// newly active server to every grid: `NeoismAgentPane::sync_workspace_server`
     /// intentionally clears server-owned session state, so doing that reset
     /// every other workspace's active conversation back to the agent home
     /// screen.
@@ -200,7 +201,8 @@ impl Screen<'_> {
             .values_mut()
         {
             if let Some(agent) = context.context_mut().neoism_agent.as_mut() {
-                agent.switch_server(server.clone());
+                agent.sync_workspace_server(server.clone());
+                agent.set_default_chat_source(self.default_chat_source);
             }
         }
     }
@@ -371,6 +373,19 @@ impl Screen<'_> {
         ssh_args: Vec<String>,
     ) {
         self.pending_ssh_workspace_replacement = self.current_workspace_id();
+        self.pending_ssh_workspace_id = None;
+        self.pending_ssh_workspace_attach = Some((target, ssh_args));
+        self.mark_dirty();
+    }
+
+    /// Explicit saved-system SSH opens a remote workspace alongside the local one.
+    /// CLI SSH retains its separate takeover semantics in `request_ssh_workspace_attach`.
+    pub fn request_ssh_workspace_open(
+        &mut self,
+        target: String,
+        ssh_args: Vec<String>,
+    ) {
+        self.pending_ssh_workspace_replacement = None;
         self.pending_ssh_workspace_id = None;
         self.pending_ssh_workspace_attach = Some((target, ssh_args));
         self.mark_dirty();

@@ -4,6 +4,10 @@ use super::layout::{
     union_timeline_row_ranges, visible_timeline_row_range,
 };
 use super::*;
+use crate::panels::agent_pane::question_rail::{
+    question_index_at, TimelineQuestionTarget, TimelineQuestionTargets,
+};
+use sugarloaf::text::DrawOpts;
 
 // These are ink bounds, not another footer: the word moves ±3.2px and
 // its far echo adds 3.5px; the text renderer allows 14px bottom ink slack.
@@ -115,6 +119,7 @@ pub fn render_timeline_with<P, D>(
         occlusion_rects,
         occlusion_rects,
         plugins,
+        None,
     );
 }
 
@@ -134,17 +139,17 @@ pub fn render_timeline_in_paint_viewport_with<P, D>(
     occlusion_rects: &[[f32; 4]],
     hit_occlusion_rects: &[[f32; 4]],
     plugins: Option<&neoism_lua::PluginSnapshot>,
-) -> [f32; 11]
+    question_gutter: Option<[f32; 4]>,
+) -> Option<TimelineQuestionRailFrame>
 where
     P: AgentTimelinePane,
     D: AgentTimelineDelegate<P>,
 {
-    let paint_region = TimelinePaintRegion {
-        viewport: paint_rect,
-        occlusion_rects: hit_occlusion_rects.to_vec(),
-    };
-    let mouse = mouse.filter(|(x, y)| paint_region.contains(*x, *y));
-    pane.set_timeline_paint_region(paint_region);
+    let rail_mouse = mouse.filter(|(x, y)| {
+        !hit_occlusion_rects.iter().any(|r| {
+            crate::panels::agent_pane::interaction_policy::rect_contains(*r, *x, *y)
+        })
+    });
     derivations::reset();
     pane.set_visible_user_orb_active(false);
     pane.set_visible_running_tool_active(false);
@@ -153,8 +158,15 @@ where
     let viewport_h = h.max(0.0);
     let gap = 18.0 * s;
     let layout_started = web_time::Instant::now();
-    let (layout, did_layout_work, live_growth_px) = timeline_layout::<P, D>(
-        sugarloaf, pane, w, theme, s, gap, viewport_h, paint_rect[3],
+    let (mut layout, did_layout_work, live_growth_px) = timeline_layout::<P, D>(
+        sugarloaf,
+        pane,
+        w,
+        theme,
+        s,
+        gap,
+        viewport_h,
+        paint_rect[3],
     );
     let layout_elapsed_us = web_time::Instant::now()
         .saturating_duration_since(layout_started)
@@ -166,6 +178,12 @@ where
     // see fixed per-frame overhead distinctly from drawing.
     let prep_started = web_time::Instant::now();
     let real_content_h = layout.content_height;
+    // Every new/reconciled layout is marked as work, including empty histories.
+    // Populate even a zero-height layout before caching it, so its first visible
+    // frame can reuse the projection without scanning assistant-only histories.
+    if did_layout_work {
+        layout.question_targets = question_targets(&layout.rows, pane.messages());
+    }
     let row_count = layout.rows.len();
     let status_h = if pane.has_status_activity() {
         let primary_lines =
@@ -221,11 +239,64 @@ where
                 .saturating_duration_since(render_started)
                 .as_micros(),
         );
-        return [0.0; 11];
+        pane.set_timeline_question_rail_targets(Rc::default());
+        pane.set_scrollbar_geometry(None, None);
+        pane.set_timeline_paint_region(TimelinePaintRegion {
+            viewport: paint_rect,
+            occlusion_rects: hit_occlusion_rects.to_vec(),
+        });
+        return None;
     }
 
     let max_scroll = (content_h - viewport_h).max(0.0);
     let scroll_top = (max_scroll - pane.timeline_scroll_offset()).clamp(0.0, max_scroll);
+    pane.set_timeline_question_rail_targets(layout.question_targets.clone());
+    let mut rail_frame = question_gutter.and_then(|gutter| {
+        timeline_scroll_rail_geometry(gutter, s, layout.question_targets.len())
+    });
+    if let Some(frame) = &mut rail_frame {
+        frame.hovered = frame.hovered_tick(rail_mouse);
+        let next = layout
+            .question_targets
+            .partition_point(|target| target.top < scroll_top);
+        frame.active = if layout
+            .question_targets
+            .get(next)
+            .is_some_and(|target| target.top < scroll_top + viewport_h)
+        {
+            Some(next)
+        } else {
+            next.checked_sub(1)
+        };
+        if let Some(index) = frame.hovered {
+            frame.preview = build_question_preview(
+                sugarloaf,
+                &layout.question_targets[index],
+                pane.messages(),
+                rect,
+                frame,
+                index,
+                s,
+            );
+        }
+    }
+    let mut local_hit_occlusions = hit_occlusion_rects.to_vec();
+    let mut previous_renderer_holes = None;
+    if let Some(preview) = rail_frame.as_ref().and_then(|frame| frame.preview.as_ref()) {
+        // Keep this a 2D mask; legacy text occlusions cut entire lines.
+        local_hit_occlusions.push(preview.rect);
+        let previous = sugarloaf.set_content_occlusion_rects(Vec::new());
+        let mut holes = previous.clone();
+        holes.push(preview.rect);
+        sugarloaf.set_content_occlusion_rects(holes);
+        previous_renderer_holes = Some(previous);
+    }
+    let paint_region = TimelinePaintRegion {
+        viewport: paint_rect,
+        occlusion_rects: local_hit_occlusions,
+    };
+    let mouse = mouse.filter(|(x, y)| paint_region.contains(*x, *y));
+    pane.set_timeline_paint_region(paint_region);
     let mut draw_scroll_top = scroll_top;
     let geometry = activity_geometry(
         rect,
@@ -519,7 +590,9 @@ where
     }
 
     pane.set_visible_user_orb_active(visible_user_orb);
-    let rail_profile = timeline_scroll_rail_profile(&layout.rows, content_h, s);
+    if let Some(previous) = previous_renderer_holes {
+        sugarloaf.set_content_occlusion_rects(previous);
+    }
     if cacheable_layout {
         pane.store_timeline_layout_cache(layout);
     }
@@ -546,7 +619,7 @@ where
             .saturating_duration_since(render_started)
             .as_micros(),
     );
-    rail_profile
+    rail_frame
 }
 
 fn message_theme(
@@ -647,7 +720,9 @@ where
         pane.timeline_measure_key(message, width, s, tool_expanded, selected_group_child);
     // Artifact metrics are host-fed independently of message text. Layout dirty
     // marks must remeasure them rather than revive a pre-metric cached height.
-    let cacheable = !tool_expand_animating && message.tool() != "compose" && !message.text().contains("neoism-html");
+    let cacheable = !tool_expand_animating
+        && message.tool() != "compose"
+        && !message.text().contains("neoism-html");
     if cacheable {
         if let Some(height) = pane.cached_timeline_measure(&key) {
             return height;
@@ -809,151 +884,318 @@ pub(crate) fn is_edit_tool_message<M: AgentTimelineMessage>(message: &M) -> bool
     )
 }
 
-pub(super) fn timeline_scroll_rail_profile<M>(
+/// Derived exclusively from displayed rows; tool/reasoning rows never end a turn.
+pub(super) fn question_targets<M: AgentTimelineMessage>(
     rows: &[TimelineLayoutRow<M>],
-    content_h: f32,
-    s: f32,
-) -> [f32; 11] {
-    let mut profile = [0.0; 11];
-    if rows.is_empty() || content_h <= 0.0 || s <= 0.0 {
-        return profile;
-    }
-    // Sample the blocks occupying each history band, not just its filled area:
-    // a long answer should leave a different silhouette than many short cards.
-    // Bounded binary searches also work with the virtual layout's estimated rows.
-    for (index, weight) in profile.iter_mut().enumerate() {
-        for sample in 0..3 {
-            let at = (index as f32 + (sample as f32 + 0.5) / 3.0) * content_h / 11.0;
-            let row_index = rows.partition_point(|row| row.top + row.height <= at);
-            if let Some(row) = rows.get(row_index).filter(|row| row.top <= at) {
-                *weight += (row.height / (360.0 * s)).sqrt().clamp(0.0, 1.0) / 3.0;
+    messages: &[M],
+) -> TimelineQuestionTargets {
+    let mut targets: Vec<TimelineQuestionTarget> = Vec::new();
+    for row in rows {
+        let Some(message) = row
+            .display_message
+            .as_ref()
+            .or_else(|| messages.get(row.source_index))
+        else {
+            continue;
+        };
+        match message.kind() {
+            AgentTimelineMessageKind::User => targets.push(TimelineQuestionTarget {
+                source_index: row.source_index,
+                message_id: message.id().to_owned(),
+                top: row.top,
+                assistant_source_index: None,
+            }),
+            AgentTimelineMessageKind::Assistant => {
+                if let Some(target) = targets.last_mut() {
+                    target.assistant_source_index = Some(row.source_index);
+                }
             }
+            _ => {}
         }
     }
-    profile
+    Rc::new(targets)
 }
 
 #[derive(Debug)]
-pub(super) struct TimelineScrollRail {
+pub struct TimelineQuestionRailFrame {
     pub track: [f32; 4],
-    pub thumb: [f32; 4],
     pub tick_count: usize,
-    pub active_tick: usize,
+    pub hovered: Option<usize>,
+    pub active: Option<usize>,
+    pub preview: Option<QuestionPreview>,
+    scale: f32,
 }
 
-impl TimelineScrollRail {
+#[derive(Debug)]
+pub struct QuestionPreview {
+    pub rect: [f32; 4],
+    pub user: String,
+    pub assistant: Vec<String>,
+}
+
+impl TimelineQuestionRailFrame {
     pub fn hovered_tick(&self, mouse: Option<(f32, f32)>) -> Option<usize> {
-        let (x, y) = mouse?;
-        if !crate::panels::agent_pane::interaction_policy::rect_contains(self.track, x, y)
-        {
-            return None;
-        }
-        let top = self.track[1];
-        let h = self.track[3];
-        let pitch = (h - self.thumb[3]) / (self.tick_count - 1) as f32;
-        Some(
-            ((y - top - self.thumb[3] * 0.5) / pitch)
-                .round()
-                .clamp(0.0, (self.tick_count - 1) as f32) as usize,
-        )
+        question_index_at(self.track, self.tick_count, mouse)
     }
 
-    pub fn tick_rect(
-        &self,
-        index: usize,
-        hovered: bool,
-        profile: &[f32; 11],
-    ) -> [f32; 4] {
-        let s = self.thumb[3] * 0.5;
-        let pad = (self.track[2] * 0.15).min(3.0 * s);
-        let max_w = self.track[2] - pad * 2.0;
-        let slot = (index as f32 * 10.0 / (self.tick_count - 1) as f32).round() as usize;
-        let weight = profile[slot].clamp(0.0, 1.0);
-        let base_w = (10.0 * s).min(max_w * 0.75) * (0.4 + 0.6 * weight);
-        let width = if hovered {
-            (base_w + 4.0 * s).min(max_w)
-        } else {
-            base_w
+    pub fn tick_rect(&self, index: usize, hovered: Option<usize>) -> [f32; 4] {
+        let ratio = match hovered.map(|h| h.abs_diff(index)) {
+            Some(0) => 1.0,
+            Some(1) => 2.0 / 3.0,
+            Some(2) => 5.0 / 12.0,
+            _ => 1.0 / 3.0,
         };
-        let pitch = (self.track[3] - self.thumb[3]) / (self.tick_count - 1) as f32;
+        let pad = self.scale.min(self.track[2] * 0.125);
         [
             self.track[0] + pad,
-            self.track[1] + index as f32 * pitch,
-            width,
-            self.thumb[3],
+            self.track[1] + index as f32 * self.track[3] / (self.tick_count - 1) as f32
+                - self.scale,
+            (self.track[2] - 2.0 * pad) * ratio,
+            2.0 * self.scale,
         ]
     }
 }
 
-/// The rect is the existing right gutter, never the transcript's text column.
+/// The rect is the existing right gutter, never the transcript column.
 pub(super) fn timeline_scroll_rail_geometry(
     [x, y, w, h]: [f32; 4],
     s: f32,
-    offset: f32,
-    content_h: f32,
-    viewport_h: f32,
-) -> Option<TimelineScrollRail> {
-    if content_h <= viewport_h || s <= 0.0 || w < 6.0 * s || h < 28.0 * s {
+    count: usize,
+) -> Option<TimelineQuestionRailFrame> {
+    if count < 2
+        || ![x, y, w, h, s].iter().all(|v| v.is_finite())
+        || s <= 0.0
+        || w < 6.0 * s
+        || h < 4.0 * s
+    {
         return None;
     }
-    let tick_h = 2.0 * s;
-    let pitch = 10.0 * s;
-    let tick_count = (((h - 16.0 * s - tick_h) / pitch).floor() as usize + 1).min(11);
-    let rail_h = (tick_count - 1) as f32 * pitch + tick_h;
-    let top = y + (h - rail_h) * 0.5;
-    let progress = 1.0 - (offset / (content_h - viewport_h)).clamp(0.0, 1.0);
-    let track_w = w.min(22.0 * s);
-    // Stay beside the column even when its width cap leaves a large gutter.
-    let left = x + ((w - track_w) * 0.5).min(8.0 * s);
-    let track = [left, top, track_w, rail_h];
-    Some(TimelineScrollRail {
-        track,
-        // A dash-sized handle keeps drag travel aligned with the visible rail,
-        // rather than retaining the old proportional scrollbar's sensitivity.
-        thumb: [
-            track[0],
-            top + progress * (rail_h - tick_h),
-            track[2],
-            tick_h,
+    let rail_h = ((count - 1) as f32 * 8.0 * s).min((h - 4.0 * s).max(0.0));
+    let width = w.min(26.0 * s);
+    Some(TimelineQuestionRailFrame {
+        track: [
+            x + ((w - width) * 0.5).min(8.0 * s),
+            y + (h - rail_h) * 0.5,
+            width,
+            rail_h,
         ],
-        tick_count,
-        active_tick: (progress * (tick_count - 1) as f32).round() as usize,
+        tick_count: count,
+        hovered: None,
+        active: None,
+        preview: None,
+        scale: s,
     })
 }
 
+pub(super) fn compact_question_preview(source: &str) -> String {
+    use pulldown_cmark::{Event, Options, Parser, TagEnd};
+    // Bound before either HTML safety projection or Markdown parsing.
+    let bounded: String = source.chars().take(1500).collect();
+    let safe = super::super::markdown::safe_canvas_markdown(&bounded);
+    let mut plain = String::new();
+    let options =
+        Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
+    for event in Parser::new_ext(&safe, options) {
+        match event {
+            Event::Text(text) | Event::Code(text) => plain.push_str(&text),
+            Event::SoftBreak | Event::HardBreak | Event::Rule => plain.push(' '),
+            Event::End(
+                TagEnd::Paragraph
+                | TagEnd::Heading(_)
+                | TagEnd::Item
+                | TagEnd::CodeBlock
+                | TagEnd::TableCell
+                | TagEnd::TableRow,
+            ) => plain.push(' '),
+            _ => {}
+        }
+    }
+    plain.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+pub(super) fn question_preview_rect(
+    pane: [f32; 4],
+    track: [f32; 4],
+    index: usize,
+    count: usize,
+    height: f32,
+    s: f32,
+) -> Option<[f32; 4]> {
+    let right = (track[0] - 6.0 * s).min(pane[0] + pane[2]);
+    let width = (right - pane[0] - 4.0 * s).min(340.0 * s);
+    let height = height.min(pane[3]);
+    if width < 40.0 * s || height < 30.0 * s {
+        return None;
+    }
+    let tick_y = track[1] + index as f32 * track[3] / (count - 1) as f32;
+    let top = (tick_y - height * 0.5).clamp(pane[1], pane[1] + pane[3] - height);
+    Some([right - width, top, width, height])
+}
+
+/// Width-measured compact lines, shared by the one-line question and answer.
+pub(super) fn question_preview_lines(
+    text: &str,
+    width: f32,
+    max_lines: usize,
+    mut measure: impl FnMut(&str) -> f32,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut remaining = text;
+    for line in 0..max_lines {
+        if remaining.is_empty() {
+            break;
+        }
+        if measure(remaining) <= width {
+            lines.push(remaining.to_owned());
+            break;
+        }
+        let last = line + 1 == max_lines;
+        let mut end = 0;
+        for (i, ch) in remaining.char_indices() {
+            let next = i + ch.len_utf8();
+            let candidate = if last {
+                format!("{}…", &remaining[..next])
+            } else {
+                remaining[..next].to_owned()
+            };
+            if measure(&candidate) > width {
+                break;
+            }
+            end = next;
+        }
+        if last {
+            lines.push(format!("{}…", remaining[..end].trim_end()));
+            break;
+        }
+        if end == 0 {
+            break;
+        }
+        if let Some(space) = remaining[..end].rfind(' ').filter(|space| *space > 0) {
+            end = space;
+        }
+        lines.push(remaining[..end].trim().to_owned());
+        remaining = remaining[end..].trim_start();
+    }
+    lines
+}
+
+pub(super) fn question_user_preview(text: &str, has_images: bool) -> String {
+    let text = compact_question_preview(text);
+    if text.is_empty() {
+        let fallback = if has_images {
+            "Image attachment"
+        } else {
+            "User question"
+        };
+        fallback.to_owned()
+    } else {
+        text
+    }
+}
+
+fn build_question_preview<M: AgentTimelineMessage>(
+    sugarloaf: &mut Sugarloaf,
+    target: &TimelineQuestionTarget,
+    messages: &[M],
+    pane_rect: [f32; 4],
+    frame: &TimelineQuestionRailFrame,
+    index: usize,
+    s: f32,
+) -> Option<QuestionPreview> {
+    let user = messages.get(target.source_index)?;
+    let text = question_user_preview(user.text(), !user.images().is_empty());
+    let answer = target
+        .assistant_source_index
+        .and_then(|i| messages.get(i))
+        .map(|m| compact_question_preview(m.text()))
+        .unwrap_or_default();
+    let opts = DrawOpts {
+        font_size: 12.0 * s,
+        ..DrawOpts::default()
+    };
+    let provisional =
+        question_preview_rect(pane_rect, frame.track, index, frame.tick_count, 84.0 * s, s)?;
+    let width = provisional[2] - 20.0 * s;
+    let mut measure = |text: &str| sugarloaf.overlay_text_mut().measure(text, &opts);
+    let user = question_preview_lines(&text, width, 1, &mut measure)
+        .pop()
+        .unwrap_or_default();
+    let available_lines = ((pane_rect[3] - 36.0 * s) / (16.0 * s)).floor().max(0.0) as usize;
+    let assistant = question_preview_lines(&answer, width, available_lines.min(3), &mut measure);
+    let height = 32.0 * s
+        + if assistant.is_empty() {
+            0.0
+        } else {
+            4.0 * s + 16.0 * s * assistant.len() as f32
+        };
+    let rect = question_preview_rect(pane_rect, frame.track, index, frame.tick_count, height, s)?;
+    Some(QuestionPreview {
+        rect,
+        user,
+        assistant,
+    })
+}
+
+/// Paint the exact snapshot whose preview was masked before transcript glyphs.
 pub fn render_timeline_scrollbar_with<P: AgentTimelinePane>(
     sugarloaf: &mut Sugarloaf,
     pane: &mut P,
-    rect: [f32; 4],
     theme: &IdeTheme,
     s: f32,
-    mouse: Option<(f32, f32)>,
-    profile: &[f32; 11],
+    frame: Option<&TimelineQuestionRailFrame>,
 ) {
-    let Some((offset, content_h, viewport_h)) = pane.timeline_scrollbar_state() else {
+    let Some(frame) = frame else {
         pane.set_scrollbar_geometry(None, None);
         return;
     };
-    let Some(rail) =
-        timeline_scroll_rail_geometry(rect, s, offset, content_h, viewport_h)
-    else {
-        pane.set_scrollbar_geometry(None, None);
-        return;
-    };
-    pane.set_scrollbar_geometry(Some(rail.track), Some(rail.thumb));
-    let hovered_tick = rail.hovered_tick(mouse);
-    // This is a persistent position rail, not a fading thumb or painted track.
-    for index in 0..rail.tick_count {
-        let hovered = hovered_tick == Some(index);
-        let color = theme.f32_alpha(
-            theme.fg,
-            if hovered || index == rail.active_tick {
-                0.9
-            } else {
-                0.18
-            },
-        );
-        let [x, y, w, h] = rail.tick_rect(index, hovered, profile);
+    pane.set_scrollbar_geometry(Some(frame.track), None);
+    for index in 0..frame.tick_count {
+        let [x, y, w, h] = frame.tick_rect(index, frame.hovered);
+        let color = if frame.active == Some(index) {
+            theme.f32_alpha(theme.fg, 0.9)
+        } else {
+            theme.f32_alpha(
+                theme.muted,
+                if frame.hovered == Some(index) {
+                    0.75
+                } else {
+                    0.35
+                },
+            )
+        };
         sugarloaf.rect(None, x, y, w, h, color, DEPTH, ORDER_CARET);
+    }
+    if let Some(preview) = &frame.preview {
+        let [x, y, w, h] = preview.rect;
+        // Both surface and text use the dedicated overlay layer, after transcript
+        // occlusion holes have been restored by the timeline/chat renderers.
+        sugarloaf.overlay_rounded_rect(x, y, w, h, theme.f32(theme.border), DEPTH, 6.0 * s, 185);
+        sugarloaf.overlay_rounded_rect(
+            x + s,
+            y + s,
+            w - 2.0 * s,
+            h - 2.0 * s,
+            theme.f32(theme.surface),
+            DEPTH,
+            5.0 * s,
+            186,
+        );
+        let mut opts = DrawOpts {
+            font_size: 12.0 * s,
+            color: theme.u8(theme.fg),
+            ..DrawOpts::default()
+        };
+        sugarloaf
+            .overlay_text_mut()
+            .draw(x + 10.0 * s, y + 8.0 * s, &preview.user, &opts);
+        opts.color = theme.u8(theme.muted);
+        for (i, line) in preview.assistant.iter().enumerate() {
+            sugarloaf.overlay_text_mut().draw(
+                x + 10.0 * s,
+                y + 28.0 * s + i as f32 * 16.0 * s,
+                line,
+                &opts,
+            );
+        }
     }
 }

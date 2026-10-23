@@ -66,6 +66,8 @@ pub struct CommandPalette {
     pub(super) hovered_category: Option<usize>,
     pub(super) category_hits: Vec<([f32; 4], super::actions::PaletteAction)>,
     pub(super) system_control_hits: Vec<([f32; 4], super::actions::PaletteAction)>,
+    pub(super) hovered_system_control: Option<super::actions::PaletteAction>,
+    systems_return_state: Option<(String, usize, usize, usize, Option<super::actions::PaletteAction>)>,
     pub(super) server_edit_hits: Vec<([f32; 4], String)>,
     pub(super) server_invite_hits: Vec<([f32; 4], String)>,
     pub(super) server_remove_hits: Vec<([f32; 4], String)>,
@@ -180,6 +182,8 @@ impl Default for CommandPalette {
             hovered_category: None,
             category_hits: Vec::new(),
             system_control_hits: Vec::new(),
+            hovered_system_control: None,
+            systems_return_state: None,
             server_edit_hits: Vec::new(),
             server_invite_hits: Vec::new(),
             server_remove_hits: Vec::new(),
@@ -246,7 +250,8 @@ impl CommandPalette {
     /// stray test or future caller can't spike the multiplier.
     pub fn set_scale(&mut self, scale: f32) {
         self.scale = scale.clamp(0.5, 3.0);
-        self.input_band_height = super::INPUT_HEIGHT * self.scale;
+        self.input_band_height = self.category_header_height()
+            + if self.has_query_input() { super::INPUT_HEIGHT * self.scale } else { 0.0 };
         self.reset_motion();
     }
 
@@ -655,6 +660,62 @@ impl CommandPalette {
         self.enter_workspaces_mode_with_hosts(workspaces, Vec::new());
     }
 
+    /// Retains the details identity even while the palette is closed.
+    pub fn system_settings_id(&self) -> Option<&str> {
+        match &self.mode {
+            PaletteMode::SystemSettings(entry) => Some(&entry.id),
+            _ => None,
+        }
+    }
+
+    pub fn has_query_input(&self) -> bool {
+        !matches!(self.mode, PaletteMode::SystemSettings(_))
+    }
+
+    pub fn system_settings_back_action(&self) -> Option<super::actions::PaletteAction> {
+        (self.enabled && self.system_settings_id().is_some())
+            .then_some(super::actions::PaletteAction::ShowSystems)
+    }
+
+    pub fn enter_system_settings_mode(&mut self, entry: super::actions::PaletteSystemEntry) {
+        if self.system_settings_id() == Some(entry.id.as_str()) {
+            self.enabled = true;
+            self.refresh_system_settings(vec![entry]);
+            return;
+        }
+        if matches!(self.mode, PaletteMode::Systems(_)) {
+            self.systems_return_state = Some((self.query.clone(), self.query_cursor,
+                self.selected_index, self.scroll_offset, self.get_selected_action()));
+        }
+        self.enter_servers_mode(Vec::new());
+        self.mode = PaletteMode::SystemSettings(entry);
+        self.input_band_height = self.category_header_height();
+    }
+
+    /// Refresh details in place; a forgotten system returns to the saved list.
+    pub fn refresh_system_settings(&mut self, entries: Vec<super::actions::PaletteSystemEntry>) -> bool {
+        let Some(id) = self.system_settings_id().map(str::to_owned) else { return false; };
+        if let Some(entry) = entries.iter().find(|entry| entry.id == id) {
+            let selected_title = self.filtered_rows().get(self.selected_index).map(|(_, row)| row.title().to_owned());
+            self.mode = PaletteMode::SystemSettings(entry.clone());
+            self.query.clear();
+            self.query_cursor = 0;
+            self.input_band_height = self.category_header_height();
+            let rows = self.filtered_rows();
+            self.selected_index = rows.iter().position(|(_, row)| selected_title.as_deref() == Some(row.title())
+                || (matches!(selected_title.as_deref(), Some("Connect" | "Disconnect"))
+                    && matches!(row.title(), "Connect" | "Disconnect")))
+                .unwrap_or_else(|| self.selected_index.min(rows.len().saturating_sub(1)));
+            self.system_control_hits.clear();
+            self.hovered_system_control = None;
+        } else {
+            let visible = self.enabled;
+            self.enter_systems_mode(entries);
+            self.enabled = visible;
+        }
+        true
+    }
+
     pub fn systems_mode(&self) -> bool {
         self.enabled && matches!(self.mode, PaletteMode::Systems(_))
     }
@@ -671,7 +732,9 @@ impl CommandPalette {
     }
 
     pub(super) fn category_header_height(&self) -> f32 {
-        if matches!(self.mode, PaletteMode::Systems(_) | PaletteMode::Servers(_)) {
+        if matches!(self.mode, PaletteMode::SystemSettings(_)) {
+            70.0 * self.scale
+        } else if matches!(self.mode, PaletteMode::Systems(_) | PaletteMode::Servers(_)) {
             38.0 * self.scale
         } else {
             0.0
@@ -682,9 +745,18 @@ impl CommandPalette {
         &mut self,
         entries: Vec<super::actions::PaletteSystemEntry>,
     ) {
+        let restore = matches!(self.mode, PaletteMode::SystemSettings(_))
+            .then(|| self.systems_return_state.take()).flatten();
         self.enter_servers_mode(Vec::new());
         self.mode = PaletteMode::Systems(entries);
-        self.query_cursor = 0;
+        if let Some((query, cursor, selection, scroll, action)) = restore {
+            self.query = query;
+            self.query_cursor = cursor;
+            let rows = self.filtered_rows();
+            self.selected_index = rows.iter().position(|(_, row)| action.is_some() && row.action() == action)
+                .unwrap_or_else(|| selection.min(rows.len().saturating_sub(1)));
+            self.scroll_offset = scroll;
+        }
     }
 
     pub fn refresh_systems(
@@ -694,14 +766,27 @@ impl CommandPalette {
         if !self.systems_mode() {
             return false;
         }
+        // Activation can change the selected row action; identity must not.
+        let selected_id = self.filtered_rows().get(self.selected_index).and_then(|(_, row)| {
+            match row {
+                super::modes::PaletteRow::System { entry } => Some(entry.id.clone()),
+                _ => None,
+            }
+        });
         let selected = self.get_selected_action();
         self.mode = PaletteMode::Systems(entries);
         let rows = self.filtered_rows();
         self.selected_index = rows
             .iter()
-            .position(|(_, row)| selected.is_some() && row.action() == selected)
+            .position(|(_, row)| match row {
+                super::modes::PaletteRow::System { entry } => {
+                    selected_id.as_ref() == Some(&entry.id)
+                }
+                _ => selected.is_some() && row.action() == selected,
+            })
             .unwrap_or_else(|| self.selected_index.min(rows.len().saturating_sub(1)));
         self.system_control_hits.clear();
+        self.hovered_system_control = None;
         true
     }
 
@@ -713,6 +798,7 @@ impl CommandPalette {
         self.category_hits.clear();
         self.hovered_category = None;
         self.system_control_hits.clear();
+        self.hovered_system_control = None;
         self.query_cursor = 0;
         self.input_band_height =
             super::INPUT_HEIGHT * self.scale + self.category_header_height();
@@ -833,6 +919,9 @@ impl CommandPalette {
     }
 
     pub fn set_query(&mut self, query: String) {
+        if !self.has_query_input() {
+            return;
+        }
         let old_cd_suffix = self.cd_query_suffix().map(str::to_owned);
         self.query = query;
         self.query_cursor = self.query.len();
@@ -900,7 +989,7 @@ impl CommandPalette {
     }
 
     pub fn insert_query_text(&mut self, text: &str) {
-        if text.is_empty() || text.chars().any(char::is_control) {
+        if !self.has_query_input() || text.is_empty() || text.chars().any(char::is_control) {
             return;
         }
         let at = self.query_cursor;
@@ -960,7 +1049,8 @@ impl CommandPalette {
     }
 
     pub(super) fn row_height(&self) -> f32 {
-        RESULT_ITEM_HEIGHT * self.scale
+        if matches!(self.mode, PaletteMode::SystemSettings(_)) { 62.0 * self.scale }
+        else { RESULT_ITEM_HEIGHT * self.scale }
     }
 
     pub(super) fn reset_motion(&mut self) {
@@ -975,6 +1065,7 @@ impl CommandPalette {
         // the dragged row may no longer exist in the new list.
         self.workspace_drag = None;
         self.system_control_hits.clear();
+        self.hovered_system_control = None;
     }
 
     /// Record a dispatched workspace move so the Workspaces modal shows

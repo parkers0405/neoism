@@ -1,6 +1,26 @@
 use super::*;
 
 #[test]
+fn image_hits_survive_composer_paint_but_not_frame_invalidation() {
+    let mut state = ComposerInteractions::default();
+    state.image_previews.push(ImagePreviewHit {
+        rect: [10.0, 20.0, 50.0, 40.0],
+        image: NeoismAgentImage {
+            filename: "photo.png".into(),
+            mime: "image/png".into(),
+            url: "data:image/png;base64,test".into(),
+        },
+    });
+    assert!(state.pointer_at(20.0, 30.0));
+    assert!(state.image_at(60.0, 30.0).is_none());
+    state.clear_composer_rects();
+    assert_eq!(state.image_at(20.0, 30.0).unwrap().filename, "photo.png");
+    state.clear_rects();
+    assert!(state.image_at(20.0, 30.0).is_none());
+    assert!(!state.pointer_at(20.0, 30.0));
+}
+
+#[test]
 fn agent_model_thinking_rects_are_pointer_targets_not_text_input() {
     let mut hits = ComposerInteractions::default();
     for index in 0..3 {
@@ -61,6 +81,22 @@ fn hidden_and_occluded_cwd_has_no_invisible_hit_target() {
     assert_eq!(state.action_at(75.0, 110.0), Some(ComposerAction::ChangeDirectory));
     state.clear_rects();
     assert_eq!(state.action_at(75.0, 110.0), None);
+}
+
+#[test]
+fn system_and_directory_controls_have_separate_occlusion_safe_hits() {
+    let mut state = ComposerInteractions::default();
+    state.system_rects.push([10.0, 100.0, 100.0, 24.0]);
+    state.cwd_rects.push([122.0, 100.0, 180.0, 24.0]);
+    assert_eq!(state.action_at(20.0, 110.0), Some(ComposerAction::ChangeSystem));
+    assert_eq!(state.action_at(130.0, 110.0), Some(ComposerAction::ChangeDirectory));
+    assert_eq!(state.action_at(116.0, 110.0), None);
+    state.occlusion_rects.push([10.0, 100.0, 100.0, 24.0]);
+    assert_eq!(state.action_at(20.0, 110.0), None);
+    assert!(!state.pointer_at(20.0, 110.0));
+    state.clear_rects();
+    assert_eq!(state.action_at(130.0, 110.0), None);
+    assert!(state.system_rects.is_empty());
 }
 
 #[test]

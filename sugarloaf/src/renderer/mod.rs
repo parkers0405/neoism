@@ -1130,6 +1130,40 @@ impl Renderer {
         self.overlay_comp.batches.reset();
     }
 
+    /// Vulkan resources cannot be destroyed until the GPU has finished using
+    /// both their images and descriptor sets. Other backends retain their usual
+    /// reference-counted/immediate destruction behavior.
+    fn retire_image_texture(&mut self, texture: ImageTextureEntry) {
+        #[cfg(target_os = "linux")]
+        if let ImageTexture::Vulkan(texture) = texture.gpu {
+            let RendererType::Vulkan(brush) = &mut self.brush_type else {
+                unreachable!("Vulkan image without its owning renderer");
+            };
+            brush.retire_image(texture);
+        }
+    }
+
+    fn clear_image_textures(&mut self) {
+        // Move entries out before borrowing the renderer for retirement. Each
+        // whole texture is moved exactly once; non-Vulkan backends drop it as
+        // usual, while Vulkan keeps image + descriptor pool alive together.
+        for (_, texture) in std::mem::take(&mut self.image_textures) {
+            self.retire_image_texture(texture);
+        }
+    }
+
+    /// Successful-acquire prepass only: the actual slot's fence has completed.
+    /// Pending retirements survive any number of failed acquire attempts.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn prepare_image_retirement_vulkan(
+        &mut self,
+        frame: &crate::context::vulkan::VulkanFrame,
+    ) {
+        if let RendererType::Vulkan(brush) = &mut self.brush_type {
+            brush.acquired_image_retirement_slot(frame.slot);
+        }
+    }
+
     /// Replace the background image. Pass `None` to clear it. The pixels
     /// are uploaded into a dedicated GPU texture on the next `prepare`
     /// call (so we don't go through the glyph atlas).
@@ -1140,7 +1174,9 @@ impl Renderer {
             self.background_image_dirty = Some(pixels);
         } else {
             self.background_image_dirty = None;
-            self.background_image_texture = None;
+            if let Some(texture) = self.background_image_texture.take() {
+                self.retire_image_texture(texture);
+            }
             self.background_image_layout = BackgroundImageLayout::default();
         }
     }
@@ -1388,31 +1424,15 @@ impl Renderer {
 
         // Keep offscreen images, but release textures whose owning CPU entries
         // were deleted (including closed/evicted browser surfaces).
-        if self
+        let removed: Vec<_> = self
             .image_textures
             .keys()
-            .any(|id| !image_data.contains_key(id))
-        {
-            #[cfg(target_os = "linux")]
-            let can_evict = match &context.inner {
-                crate::context::ContextType::Vulkan(ctx) => {
-                    // Native Vulkan drops destroy resources immediately, and prepare
-                    // runs before frame acquisition. Do not destroy in-flight images.
-                    match unsafe { ctx.device().device_wait_idle() } {
-                        Ok(()) => true,
-                        Err(error) => {
-                            tracing::warn!("Image texture eviction deferred: {error:?}");
-                            false
-                        }
-                    }
-                }
-                _ => true,
-            };
-            #[cfg(not(target_os = "linux"))]
-            let can_evict = true;
-            if can_evict {
-                self.image_textures
-                    .retain(|id, _| image_data.contains_key(id));
+            .filter(|id| !image_data.contains_key(id))
+            .copied()
+            .collect();
+        for id in removed {
+            if let Some(texture) = self.image_textures.remove(&id) {
+                self.retire_image_texture(texture);
             }
         }
 
@@ -1602,13 +1622,16 @@ impl Renderer {
                     brush.image_texture_descriptor_set_layout,
                     brush.image_sampler,
                 );
-                self.image_textures.insert(
+                let previous = self.image_textures.insert(
                     overlay.image_id,
                     ImageTextureEntry {
                         gpu: ImageTexture::Vulkan(texture),
                         transmit_time: entry.transmit_time,
                     },
                 );
+                if let Some(previous) = previous {
+                    self.retire_image_texture(previous);
+                }
                 continue;
             }
             #[allow(unused_variables)]
@@ -1926,14 +1949,14 @@ impl Renderer {
 
     #[inline]
     pub fn reset(&mut self) {
-        self.image_textures.clear();
+        self.clear_image_textures();
         self.image_draws.clear();
     }
 
     #[inline]
     pub fn clear_atlas(&mut self) {
         self.images.clear_atlas();
-        self.image_textures.clear();
+        self.clear_image_textures();
         self.image_draws.clear();
         tracing::info!("Renderer atlas cleared");
     }
@@ -3180,10 +3203,13 @@ impl Renderer {
             brush.image_texture_descriptor_set_layout,
             brush.image_sampler,
         );
-        self.background_image_texture = Some(ImageTextureEntry {
+        let previous = self.background_image_texture.replace(ImageTextureEntry {
             gpu: ImageTexture::Vulkan(texture),
             transmit_time: web_time::Instant::now(),
         });
+        if let Some(previous) = previous {
+            self.retire_image_texture(previous);
+        }
     }
 
     /// Record sugarloaf's own draws inside the active dynamic-rendering

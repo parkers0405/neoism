@@ -300,24 +300,22 @@ fn drop_composer_owned_prompt_row(
 #[allow(clippy::too_many_arguments)]
 fn sync_composed_terminal_image_overlays(
     sugarloaf: &mut Sugarloaf<'_>,
-    terminal: &neoism_terminal_core::crosswords::Crosswords,
+    terminal: &crate::context::renderable::TerminalSnapshot,
     rich_text_id: usize,
-    frame_rows: &[Row<Square>],
     frame_source_rows: &[Option<usize>],
-    style_set: &neoism_terminal_core::crosswords::style::StyleSet,
     origin_x: f32,
     origin_y: f32,
     cell_width: f32,
     cell_height: f32,
 ) {
-    let has_direct = !terminal.graphics.kitty_placements.is_empty();
-    let has_virtual = !terminal.graphics.kitty_virtual_placements.is_empty();
+    let has_direct = !terminal.kitty_placements.is_empty();
+    let has_virtual = !terminal.kitty_virtual_placements.is_empty();
     if !has_direct && !has_virtual {
         sugarloaf.clear_image_overlays_for(rich_text_id);
         return;
     }
 
-    let images = terminal.graphics.kitty_images.clone();
+    let images = &terminal.kitty_images;
     if images.is_empty() {
         sugarloaf.clear_image_overlays_for(rich_text_id);
         return;
@@ -328,9 +326,8 @@ fn sync_composed_terminal_image_overlays(
 
     if has_direct {
         let mut placements = terminal
-            .graphics
             .kitty_placements
-            .values()
+            .iter()
             .filter(|placement| images.contains_key(&placement.image_id))
             .cloned()
             .collect::<Vec<_>>();
@@ -370,26 +367,9 @@ fn sync_composed_terminal_image_overlays(
     }
 
     if has_virtual {
-        let snapshot = crate::context::renderable::TerminalSnapshot {
-            colors: terminal.colors,
-            display_offset: terminal.display_offset(),
-            blinking_cursor: terminal.blinking_cursor,
-            visible_rows: frame_rows.to_vec(),
-            style_set: style_set.clone(),
-            extras_table: terminal.grid.extras_table.clone(),
-            cursor: terminal.cursor(),
-            damage: neoism_terminal_core::damage::TerminalDamage::Noop,
-            columns: terminal.columns(),
-            screen_lines: frame_rows.len(),
-            history_size: terminal.history_size(),
-            kitty_virtual_placements: terminal.graphics.kitty_virtual_placements.clone(),
-            kitty_images: images,
-            kitty_placements: Vec::new(),
-            kitty_graphics_dirty: terminal.graphics.kitty_graphics_dirty,
-        };
         crate::host::Renderer::push_virtual_placeholder_overlays(
             overlays,
-            &snapshot,
+            terminal,
             origin_x,
             origin_y,
             cell_width,
@@ -425,12 +405,23 @@ fn ends_passthrough_session(command: &str) -> bool {
 #[derive(Debug)]
 pub(crate) enum SystemRequest {
     Show,
+    Settings {
+        id: String,
+    },
+    SshWorkspace {
+        id: String,
+    },
     Add {
         name: String,
         target: String,
     },
     Connect {
         id: String,
+    },
+    SetEnabled {
+        id: String,
+        enabled: bool,
+        discard: bool,
     },
     Disconnect {
         id: String,
@@ -776,6 +767,8 @@ pub struct Screen<'screen> {
     pub search_state: SearchState,
     pub hint_state: HintState,
     pub renderer: Renderer,
+    agent_event_wake: Option<crate::neoism::agent::AgentEventWake>,
+    agent_ingestion_cursor: usize,
     /// Last chrome state that completed a full grid reflow. Breadcrumb and
     /// editor activation can finish asynchronously; a mismatch is repaired
     /// in status sync before the grid is painted.
@@ -815,6 +808,8 @@ pub struct Screen<'screen> {
         std::path::PathBuf,
         (std::time::SystemTime, Option<crate::editor::neodraw::Scene>),
     >,
+    terminal_panel_frames: HashMap<usize, std::sync::Arc<render::PanelFrame>>,
+    terminal_cwd_cache: HashMap<usize, Option<PathBuf>>,
     /// Per-panel `GridRenderer`, keyed by `route_id`. Lazily created
     /// on first render of each panel so construction (which compiles
     /// the Metal/WGSL shaders and builds pipeline states) runs once
@@ -882,6 +877,7 @@ pub struct Screen<'screen> {
     conversations_panel_enabled: bool,
     details_panel_enabled: bool,
     streaming_text_animation: bool,
+    default_chat_source: neoism_backend::config::DefaultChatSource,
     git_diff_panel_resize_state: Option<GitDiffPanelResizeState>,
     git_diff_panel_scrollbar_drag: Option<GitDiffPanelScrollbarDragState>,
     // (constant lives just above the field's first use; declared as a
@@ -998,6 +994,7 @@ pub struct Screen<'screen> {
     /// In-flight remote git-status request → the root it was asked
     /// for, so a stale reply for a workspace we've left is dropped.
     host_git: git_state::HostGitState,
+    git_status_cache: neoism_ui::panels::git_branch::GitStatusCache,
     /// In-flight WalkTree listings of a joined workspace's `Notes/`
     /// folder — replies feed the notes sidebar, not the file tree.
     pending_remote_notes_listing: std::collections::HashSet<u64>,
@@ -1106,6 +1103,7 @@ pub struct BlockHoverIcon {
 /// Per-frame snapshot captured during the active terminal pane's
 /// compose pass, used after the per-pane loop to render block-hover
 /// icons + populate `Screen::block_hover_icons` for click hit-test.
+#[derive(Clone)]
 struct ActiveBlockHeaders {
     spans: Vec<crate::terminal::blocks::BlockHeaderSpan>,
     snapshots: Vec<crate::terminal::blocks::CommandBlockSnapshot>,
@@ -1789,6 +1787,7 @@ impl Screen<'_> {
         );
 
         let mut renderer = Renderer::new(config);
+        renderer.notes_sidebar.enable_async_local_refresh();
         renderer.shader_overlay_active = startup_shader_overlay.is_some();
         renderer.relayout_surfaces(
             size.width as f32 / scale as f32,
@@ -1912,6 +1911,8 @@ impl Screen<'_> {
 
         Ok(Screen {
             search_state: SearchState::default(),
+            terminal_panel_frames: HashMap::new(),
+            terminal_cwd_cache: HashMap::new(),
             hint_state: HintState::new(config.terminal.hints.alphabet.clone()),
             hints_config: config
                 .terminal
@@ -1954,6 +1955,8 @@ impl Screen<'_> {
             ),
             touchpurpose: TouchPurpose::default(),
             renderer,
+            agent_event_wake: None,
+            agent_ingestion_cursor: 0,
             last_chrome_layout_signature: None,
             last_active_terminal_route: None,
             welcome_reveal_pending: true,
@@ -1979,6 +1982,7 @@ impl Screen<'_> {
             conversations_panel_enabled: config.agent.conversations_panel_enabled,
             details_panel_enabled: config.agent.details_panel_enabled,
             streaming_text_animation: config.agent.streaming_text_animation,
+            default_chat_source: config.agent.default_chat_source,
             git_diff_panel_resize_state: None,
             git_diff_panel_scrollbar_drag: None,
             grids: rustc_hash::FxHashMap::default(),
@@ -2035,6 +2039,7 @@ impl Screen<'_> {
             markdown_cover_cache: HashMap::new(),
             markdown_image_overlay_ids: std::collections::HashSet::new(),
             host_git: git_state::HostGitState::default(),
+            git_status_cache: Default::default(),
             pending_remote_notes_listing: std::collections::HashSet::new(),
             pending_remote_notes_creates: HashMap::new(),
             pending_remote_notes_mutations: std::collections::HashSet::new(),

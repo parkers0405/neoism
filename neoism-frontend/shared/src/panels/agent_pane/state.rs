@@ -196,10 +196,13 @@ pub struct NeoismAgentMessage {
     pub images: Vec<NeoismAgentImage>,
 }
 
+mod image_payload;
+pub use image_payload::AgentImagePayload;
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct NeoismAgentImage {
     pub filename: String,
-    pub url: String,
+    pub url: AgentImagePayload,
     pub mime: String,
 }
 
@@ -278,47 +281,13 @@ pub struct TimelineMeasureKey {
     selected_tool_group_child: u64,
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct TimelineLayoutRow {
-    pub source_index: usize,
-    pub source_end_index: usize,
-    pub top: f32,
-    pub height: f32,
-    pub display_text: Option<String>,
-    pub display_message: Option<NeoismAgentMessage>,
-    pub markdown_blocks: Option<
-        std::rc::Rc<
-            Vec<crate::panels::agent_pane::view::markdown::AssistantMarkdownBlock>,
-        >,
-    >,
-    pub tool_diff_sections:
-        Option<crate::panels::agent_pane::view::tool_message::CachedToolDiffSections>,
-    pub is_edit_tool: bool,
-}
+#[cfg(test)]
+pub(crate) type TimelineLayoutRow =
+    super::view::timeline::TimelineLayoutRow<NeoismAgentMessage>;
 
-#[derive(Clone, Debug)]
-pub(crate) struct TimelineLayoutCache {
-    pub epoch: u64,
-    pub source_len: usize,
-    pub width_bucket: i32,
-    pub scale_bucket: i32,
-    pub gap_bucket: i32,
-    pub content_height: f32,
-    pub pages: Vec<TimelineLayoutPage>,
-    pub rows: Vec<TimelineLayoutRow>,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct TimelineLayoutPage {
-    pub page_index: usize,
-    pub source_start: usize,
-    pub source_end: usize,
-    pub row_start: usize,
-    pub row_end: usize,
-    pub top: f32,
-    pub height: f32,
-    pub measured: bool,
-}
+// State and rendering transfer the same vectors without rebuilding history.
+pub(crate) type TimelineLayoutCache =
+    super::view::timeline::TimelineLayoutCache<NeoismAgentMessage>;
 
 #[derive(Clone, Debug)]
 struct AgentTimelineHistoryState {
@@ -568,7 +537,7 @@ enum NeoismAgentInputAttachment {
     File {
         token: String,
         filename: String,
-        url: String,
+        url: AgentImagePayload,
         mime: String,
     },
 }
@@ -672,7 +641,7 @@ pub struct NeoismAgentPane {
     /// wrap the caret is placed with. Up/Down movement walks these;
     /// `input_wrap_len` guards against a frame of staleness after the
     /// text changes.
-    input_wrap_rows: Vec<InputWrapRow>,
+    input_wrap_rows: std::rc::Rc<Vec<InputWrapRow>>,
     input_viewport: super::input_viewport::InputViewport,
     input_wrap_len: usize,
     /// Sticky caret x carried between consecutive Up/Down presses so a
@@ -804,7 +773,10 @@ pub struct NeoismAgentPane {
     session_cache: HashMap<String, session_cache::CachedAgentSession>,
     virtual_timeline: NeoismAgentVirtualTimeline,
     scrollbar_thumb_rect: Option<[f32; 4]>,
+    timeline_question_targets: Option<crate::panels::agent_pane::question_rail::TimelineQuestionTargets>,
+    timeline_question_targets_session: Option<String>,
     scrollbar_track_rect: Option<[f32; 4]>,
+    scrollbar_hovered: super::view::timeline::TimelineScrollbarHover,
     scrollbar_drag: Option<ScrollbarDrag>,
     streaming_state: NeoismAgentStreamingState,
     streaming_started_at: Option<Instant>,
@@ -840,6 +812,7 @@ pub struct NeoismAgentPane {
     model_context_limits: HashMap<String, u64>,
     model_options: Vec<NeoismAgentPickerOption>,
     provider_readiness: Option<crate::panels::agent_pane::api_mapping::ProviderReadiness>,
+    provider_readiness_checked_at: Option<Instant>,
     recent_model_options: Vec<NeoismAgentPickerOption>,
     agent_options: Vec<NeoismAgentPickerOption>,
     skill_options: Vec<NeoismAgentPickerOption>,
@@ -1090,7 +1063,7 @@ impl Default for NeoismAgentPane {
             background_rx,
             cursor_rect: None,
             cursor_byte: 0,
-            input_wrap_rows: Vec::new(),
+            input_wrap_rows: Default::default(),
             input_viewport: super::input_viewport::InputViewport::default(),
             input_wrap_len: 0,
             input_goal_x: None,
@@ -1178,7 +1151,10 @@ impl Default for NeoismAgentPane {
             session_cache: HashMap::new(),
             virtual_timeline: NeoismAgentVirtualTimeline::default(),
             scrollbar_thumb_rect: None,
+            timeline_question_targets: None,
+            timeline_question_targets_session: None,
             scrollbar_track_rect: None,
+            scrollbar_hovered: Default::default(),
             scrollbar_drag: None,
             streaming_state: NeoismAgentStreamingState::Idle,
             streaming_started_at: None,
@@ -1205,6 +1181,7 @@ impl Default for NeoismAgentPane {
             model_context_limits: HashMap::new(),
             model_options: Vec::new(),
             provider_readiness: None,
+            provider_readiness_checked_at: None,
             recent_model_options: Vec::new(),
             agent_options: Vec::new(),
             skill_options: Vec::new(),
@@ -1399,7 +1376,7 @@ impl NeoismAgentPane {
             self.model = model;
         }
         if let Some(directory) = snapshot.directory {
-            self.directory = (!directory.trim().is_empty()).then_some(directory);
+            self.set_directory((!directory.trim().is_empty()).then_some(directory));
         }
         if let Some(session_id) = snapshot.session_id {
             let session_id = (!session_id.trim().is_empty()).then_some(session_id);

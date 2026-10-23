@@ -7,6 +7,41 @@ use neoism_ui::layout::Rect;
 use neoism_ui::session_layout::geometry::{self as pane_geometry, SolveOpts};
 use taffy::{geometry, style_helpers::length, NodeId, TaffyError};
 
+/// Commit solved geometry even when the PTY parser owns the terminal lock.
+/// The pending bit refers to `ctx.dimension`, not a captured winsize: another
+/// layout (or pane-chrome inset) may supersede it before the render retry.
+fn apply_layout_dimensions<T: EventListener>(
+    ctx: &mut crate::context::Context<T>,
+    width: f32,
+    height: f32,
+    visible: bool,
+) {
+    ctx.dimension.margin = Margin::all(0.0);
+    ctx.dimension.restore_nominal_cell_height();
+    ctx.dimension.update_width(width);
+    ctx.dimension.update_height(height);
+
+    let Some(mut terminal) = ctx.terminal.try_lock_unfair() else {
+        ctx.pending_terminal_resize = true;
+        ctx.renderable_content.pending_update.set_dirty();
+        return;
+    };
+    let winsize = crate::bridges::utils::terminal_dimensions(&ctx.dimension);
+    terminal.resize(crate::bridges::utils::resize_dimensions(
+        winsize.cols,
+        winsize.rows,
+    ));
+    drop(terminal);
+    ctx.pending_terminal_resize = false;
+
+    // Keep hidden stacked terminals locally sized, but only notify their PTY
+    // when visible. The render retry also runs only for visible contexts and
+    // sends through the same messenger (including daemon-backed PTYs).
+    if visible {
+        let _ = ctx.messenger.send_resize(winsize);
+    }
+}
+
 impl<T: EventListener> ContextGrid<T> {
     pub(crate) fn try_update_size(
         &mut self,
@@ -187,28 +222,10 @@ impl<T: EventListener> ContextGrid<T> {
             let x = (abs_x + self.scaled_margin.left) / scale;
             let y = (abs_y + self.scaled_margin.top) / scale;
 
-            // Clear margin since Taffy layout already accounts for spacing
-            item.val.dimension.margin = Margin::all(0.0);
-            item.val.dimension.restore_nominal_cell_height();
-            item.val.dimension.update_width(width);
-            item.val.dimension.update_height(height);
-            let winsize = crate::bridges::utils::terminal_dimensions(&item.val.dimension);
-            let cols = winsize.cols;
-            let rows = winsize.rows;
-            let terminal_rows = rows;
-            // Editor rows use a pane-local pitch whose complete rows fill
-            // the solved surface exactly. Terminals retain the nominal
-            // fixed font pitch.
-            let mut terminal = item.val.terminal.lock();
-            terminal.resize(crate::bridges::utils::resize_dimensions(
-                cols,
-                terminal_rows,
-            ));
-            drop(terminal);
-
-            if visible {
-                let _ = item.val.messenger.send_resize(winsize);
-            }
+            // Clear margins / restore nominal terminal pitch before deriving
+            // rows. A busy terminal must not prevent geometry/visibility from
+            // reaching Sugarloaf; Screen retries its latest dimension on paint.
+            apply_layout_dimensions(&mut item.val, width, height, visible);
 
             // Update position via sugarloaf (handles scaling)
             sugarloaf.set_position(item.val.rich_text_id, x, y);
@@ -347,5 +364,101 @@ impl<T: EventListener> ContextGrid<T> {
             let y = item.layout_rect[1] + self.scaled_margin.top;
             item.set_position([x, y]);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::messenger::Messenger;
+    use crate::context::factories::create_dead_context;
+    use crate::event::Msg;
+    use neoism_backend::event::{VoidListener, WindowId};
+    use neoism_backend::sugarloaf::layout::TextDimensions;
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn busy_layout_resize_is_nonblocking_and_paint_retry_sends_latest_winsize() {
+        let dimension = ContextDimension::build(
+            800.0,
+            600.0,
+            TextDimensions {
+                width: 10.0,
+                height: 20.0,
+                scale: 1.0,
+            },
+            1.0,
+            Margin::all(0.0),
+        );
+        let mut ctx =
+            create_dead_context(VoidListener {}, WindowId::from(0), 7, 11, dimension);
+        let (sender, receiver) = corcovado::channel::channel();
+        ctx.messenger = Messenger::new(sender);
+        let terminal = ctx.terminal.clone();
+        let (locked_tx, locked_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        // Release even if a blocking lock regresses, rather than hang forever.
+        let holder = std::thread::spawn(move || {
+            let guard = terminal.lock();
+            locked_tx.send(()).unwrap();
+            let _ = release_rx.recv_timeout(Duration::from_secs(5));
+            drop(guard);
+        });
+        locked_rx.recv().unwrap();
+        let started = Instant::now();
+        // Opening a stacked chat lays out the now-hidden terminal, too.
+        apply_layout_dimensions(&mut ctx, 600.0, 400.0, false);
+        assert!(ctx.pending_terminal_resize);
+        assert!(ctx.renderable_content.pending_update.is_dirty());
+        assert_eq!((ctx.dimension.width, ctx.dimension.height), (600.0, 400.0));
+        // A subsequent layout supersedes the old pending geometry.
+        apply_layout_dimensions(&mut ctx, 500.0, 300.0, true);
+        assert!(ctx.pending_terminal_resize);
+        assert!(!crate::screen::Screen::apply_context_resize(&mut ctx));
+        assert!(
+            receiver.try_recv().is_err(),
+            "no PTY resize before local acceptance"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "layout waited for terminal lock"
+        );
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+
+        // Pane chrome can refine geometry after the grid pass. Exercise the
+        // real paint retry, not another full layout, to catch stale sizes.
+        ctx.dimension.update_height(260.0);
+        let expected = crate::bridges::utils::terminal_dimensions(&ctx.dimension);
+        assert!(crate::screen::Screen::apply_context_resize(&mut ctx));
+        assert!(!ctx.pending_terminal_resize);
+        let guard = ctx.terminal.lock();
+        assert_eq!(guard.columns(), expected.cols as usize);
+        assert_eq!(guard.screen_lines(), expected.rows as usize);
+        drop(guard);
+        let Msg::Resize(actual) = receiver.try_recv().expect("required PTY resize")
+        else {
+            panic!("expected resize message");
+        };
+        assert_eq!(
+            (actual.cols, actual.rows, actual.width, actual.height),
+            (
+                expected.cols,
+                expected.rows,
+                expected.width,
+                expected.height
+            ),
+        );
+        assert!(receiver.try_recv().is_err());
+
+        // Hidden success still sizes locally without notifying the PTY.
+        // Showing the terminal later must send the latest geometry.
+        apply_layout_dimensions(&mut ctx, 400.0, 200.0, false);
+        assert!(!ctx.pending_terminal_resize);
+        assert_eq!(ctx.terminal.lock().columns(), ctx.dimension.columns);
+        assert!(receiver.try_recv().is_err());
+        apply_layout_dimensions(&mut ctx, 400.0, 200.0, true);
+        assert!(matches!(receiver.try_recv(), Ok(Msg::Resize(_))));
     }
 }

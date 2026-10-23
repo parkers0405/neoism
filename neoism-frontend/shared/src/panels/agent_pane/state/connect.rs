@@ -255,6 +255,8 @@ impl NeoismAgentPane {
 
     /// Scope changes dismiss provider UI without touching an unrelated picker.
     pub(super) fn dismiss_connect_for_scope_change(&mut self) {
+        self.provider_readiness = None;
+        self.provider_readiness_checked_at = None;
         self.discard_queued_connect_request();
         self.connect = None;
         self.pending_account_model = None;
@@ -294,7 +296,6 @@ impl NeoismAgentPane {
     /// host answers.
     pub fn open_connect_picker(&mut self) {
         if !self.connect_request_available() { return; }
-        self.provider_readiness = None;
         self.pending_account_model = None;
         // Preserve an already-fetched catalog across a re-open (e.g. after a
         // disconnect); otherwise start from an empty flow that shows the
@@ -343,7 +344,19 @@ impl NeoismAgentPane {
     /// host ferries the raw `/provider` + `/provider/auth` JSON so the parsing
     /// stays in one place.
     pub fn apply_provider_catalog(&mut self, providers: &Value) {
-        self.provider_readiness = super::super::api_mapping::ProviderReadiness::from_json(providers);
+        let Some(readiness) = super::super::api_mapping::ProviderReadiness::from_json(providers) else { return; };
+        if readiness.pending
+            && self.provider_readiness_checked_at.is_some_and(|at| at.elapsed().as_secs() < 300)
+            && self.provider_readiness.as_ref().is_some_and(|previous| {
+                previous.can_retain_over(&readiness)
+            })
+        {
+            // Keep actual loaded metadata, not a fallback from a concurrent
+            // optional refresh. Do not renew the original lifetime.
+            return;
+        }
+        self.provider_readiness = Some(readiness);
+        self.provider_readiness_checked_at = Some(Instant::now());
     }
 
     pub fn apply_connect_catalog(&mut self, providers: Value, auth: Value) {
@@ -543,7 +556,17 @@ impl NeoismAgentPane {
             let selected = self
                 .preferred_connection_for_model(&model)
                 .or_else(|| self.connection_id.clone().filter(|_| selected_for_provider));
-            if connections.is_empty() {
+            if let Some(selected) = selected.as_ref().filter(|_| self.model == model) {
+                // Reconcile an unchanged/restored selection without another
+                // chooser. An explicit model switch still confirms accounts.
+                if connections.iter().any(|connection| &connection.id == selected) {
+                    self.apply_model_with_connection(model, Some(selected.clone()));
+                } else {
+                    // An explicit/remembered account is identity, not a hint
+                    // to silently replace with the sole remaining account.
+                    self.system_message("Account", "The selected provider connection no longer exists. Choose another account before sending.");
+                }
+            } else if connections.is_empty() {
                 // Fetch auth methods only once a missing credential is established.
                 // The catalog keeps its usual skeleton; it then opens Add account.
                 self.open_connect_picker();

@@ -1,6 +1,113 @@
 use super::*;
 
 #[test]
+fn question_rail_rejects_non_user_targets_without_moving() {
+    use neoism_ui::panels::agent_pane::question_rail::TimelineQuestionTarget;
+
+    for source_index in [0, 99] {
+        for message_id in ["answer", ""] {
+            let mut pane = NeoismAgentPane::default();
+            pane.messages = vec![
+                NeoismAgentMessage::assistant("answer").with_id(message_id),
+                NeoismAgentMessage::user("question").with_id(message_id),
+            ];
+            pane.set_timeline_metrics([0.0, 0.0, 400.0, 200.0], 5000.0, 200.0);
+            pane.set_scrollbar_geometry(Some([380.0, 0.0, 10.0, 100.0]), None);
+            pane.set_timeline_question_rail_targets(std::rc::Rc::new(vec![
+                TimelineQuestionTarget {
+                    source_index,
+                    message_id: message_id.into(),
+                    top: 1000.0,
+                    assistant_source_index: None,
+                },
+            ]));
+            let before = pane.timeline_scroll_offset();
+            assert!(!pane.begin_scrollbar_drag(385.0, 50.0));
+            assert_eq!(pane.timeline_scroll_offset(), before);
+            assert!(pane.timeline_view_anchor().is_none());
+            assert!(!pane.scrollbar_dragging());
+        }
+    }
+}
+
+#[test]
+fn question_rail_selects_turns_and_anchors_before_lazy_remeasurement() {
+    use neoism_ui::panels::agent_pane::question_rail::TimelineQuestionTarget;
+    let mut pane = NeoismAgentPane::default();
+    pane.messages = vec![
+        NeoismAgentMessage::user("first").with_id("q1"),
+        NeoismAgentMessage::assistant("very long answer").with_id("a1"),
+        NeoismAgentMessage::user("second").with_id("q2"),
+        NeoismAgentMessage::assistant("short answer").with_id("a2"),
+        NeoismAgentMessage::user("third").with_id("q3"),
+    ];
+    pane.set_timeline_metrics([0.0, 0.0, 400.0, 200.0], 5000.0, 200.0);
+    pane.set_scrollbar_geometry(Some([380.0, 10.0, 10.0, 100.0]), Some([380.0, 10.0, 10.0, 2.0]));
+    pane.set_timeline_question_rail_targets(std::rc::Rc::new(vec![
+        TimelineQuestionTarget { source_index: 0, message_id: "q1".into(), top: 0.0, assistant_source_index: Some(1) },
+        TimelineQuestionTarget { source_index: 2, message_id: "q2".into(), top: 4000.0, assistant_source_index: Some(3) },
+        TimelineQuestionTarget { source_index: 4, message_id: "q3".into(), top: 4400.0, assistant_source_index: None },
+    ]));
+    pane.timeline_velocity_px_s = 800.0;
+    pane.timeline_wheel_target_px = Some(300.0);
+    assert!(pane.begin_scrollbar_drag(385.0, 60.0));
+    // Halfway along the rail means question two, not halfway through answer one.
+    assert_eq!(pane.timeline_scroll_offset(), 800.0);
+    assert!(!pane.timeline_follow_bottom());
+    assert_eq!(pane.timeline_velocity_px_s, 0.0);
+    assert_eq!(pane.timeline_wheel_target_px, None);
+    assert!(pane.timeline_view_anchor_matches(2, 5));
+    assert_eq!(pane.timeline_view_anchor().unwrap().1, 0.0);
+    pane.set_timeline_metrics([0.0, 0.0, 400.0, 200.0], 6000.0, 200.0);
+    pane.restore_timeline_view_anchor(4500.0, 0.0);
+    assert_eq!(pane.timeline_scroll_offset(), 1300.0);
+    assert!(pane.timeline_view_anchor_matches(2, 5));
+    // History prepend invalidates indices, but not the stable message identity.
+    pane.messages.insert(0, NeoismAgentMessage::user("older").with_id("old"));
+    assert!(pane.drag_scrollbar_to(385.0, 60.0));
+    assert!(pane.timeline_view_anchor_matches(3, 6));
+    assert!(pane.drag_scrollbar_to(385.0, 110.0));
+    assert!(pane.timeline_view_anchor_matches(5, 6));
+    pane.session_id = Some("another-session".into());
+    assert!(pane.scrollbar_hit(385.0, 60.0).is_none());
+    assert!(!pane.drag_scrollbar_to(385.0, 60.0));
+    pane.set_scrollbar_geometry(None, None);
+    assert!(pane.timeline_question_targets.is_none());
+    assert!(!pane.scrollbar_dragging());
+}
+
+#[test]
+fn question_rail_hover_uses_all_questions_and_handles_empty_or_single_turn() {
+    use neoism_ui::panels::agent_pane::question_rail::TimelineQuestionTarget;
+    let mut pane = NeoismAgentPane::default();
+    let targets = (0..25).map(|index| TimelineQuestionTarget {
+        source_index: index, message_id: index.to_string(), top: index as f32 * 100.0, assistant_source_index: None,
+    }).collect::<Vec<_>>();
+    pane.set_scrollbar_geometry(Some([380.0, 0.0, 10.0, 240.0]), Some([380.0, 0.0, 10.0, 2.0]));
+    pane.messages = (0..25).map(|index| NeoismAgentMessage::user("question").with_id(index.to_string())).collect();
+    pane.set_timeline_metrics([0.0, 0.0, 400.0, 200.0], 5000.0, 200.0);
+    pane.set_timeline_question_rail_targets(std::rc::Rc::new(targets.clone()));
+    assert!(pane.begin_scrollbar_drag(385.0, 130.0));
+    assert!(pane.timeline_view_anchor_matches(13, 25));
+    assert!(pane.end_scrollbar_drag());
+    assert!(pane.update_scrollbar_hover(Some((385.0, 120.0))));
+    assert!(!pane.update_scrollbar_hover(Some((385.0, 121.0))));
+    assert!(pane.update_scrollbar_hover(Some((385.0, 130.0))));
+    pane.set_scrollbar_geometry(Some([380.0, 1.0, 10.0, 240.0]), Some([380.0, 0.0, 10.0, 2.0]));
+    assert!(pane.update_scrollbar_hover(Some((385.0, 130.0))));
+    pane.set_timeline_question_rail_targets(std::rc::Rc::new(vec![targets[0].clone()]));
+    assert!(pane.begin_scrollbar_drag(385.0, 200.0));
+    assert!(pane.timeline_view_anchor_matches(0, 25));
+    assert!(pane.end_scrollbar_drag());
+    assert!(pane.update_scrollbar_hover(Some((385.0, 100.0))));
+    assert!(!pane.update_scrollbar_hover(Some((385.0, 200.0))));
+    pane.set_timeline_question_rail_targets(std::rc::Rc::new(vec![]));
+    assert!(pane.update_scrollbar_hover(Some((385.0, 100.0))));
+    assert!(pane.scrollbar_hit(385.0, 100.0).is_none());
+    assert!(!pane.begin_scrollbar_drag(385.0, 100.0));
+}
+
+#[test]
 fn connected_mcp_done_closes_picker_without_changing_the_draft() {
     use neoism_ui::panels::agent_pane::state::picker::McpAuthorizationDetail;
     let mut pane = NeoismAgentPane::default();
@@ -536,6 +643,8 @@ fn seed_prompt_catalog(pane: &mut NeoismAgentPane) {
         neoism_ui::panels::agent_pane::api_mapping::ProviderReadiness {
             connected: vec!["test".into()],
             models: vec!["test/model".into()],
+        pending: false,
+        identity: None,
         },
     );
 }
@@ -1378,14 +1487,12 @@ fn active_preload_rebinds_context_limit_to_hydrated_model() {
     pane.messages.push(message);
 
     pane.background_tx
-        .send(NeoismAgentBackgroundUpdate::SessionPreloaded {
+        .send(NeoismAgentBackgroundUpdate::SessionMetadataLoaded {
             session_id: "session".into(),
-            state: session_state_from_json(&serde_json::json!({
+            result: Ok(session_state_from_json(&serde_json::json!({
                 "id": "session",
                 "model": { "providerId": "openai", "modelId": "gpt-6-astra" }
-            })),
-            messages: Vec::new(),
-            oldest_cursor: None,
+            }))),
         })
         .unwrap();
     pane.drain_background_updates();
@@ -1798,13 +1905,13 @@ fn generated_image_hydration_updates_the_existing_assistant_card() {
         .images
         .push(neoism_ui::panels::agent_pane::state::NeoismAgentImage {
             filename: "generated-image.jpg".to_string(),
-            url: "/v2/artifacts/art-image/content".to_string(),
+            url: "/v2/artifacts/art-image/content".into(),
             mime: "image/jpeg".to_string(),
         });
     pane.upsert_part_message(message.clone());
     pane.retry_reset_pending = true;
 
-    message.images[0].url = "data:image/jpeg;base64,aW1hZ2U=".to_string();
+    message.images[0].url = "data:image/jpeg;base64,aW1hZ2U=".into();
     pane.upsert_part_message(message.clone());
 
     assert_eq!(pane.messages.len(), 1);
@@ -3608,7 +3715,9 @@ fn cross_project_cached_chat_restores_execution_directory_without_workspace_swit
 
 fn parked_layout_for_test(epoch: u64, source_len: usize) -> TimelineLayoutCache {
     TimelineLayoutCache {
+        question_targets: Default::default(),
         epoch,
+        artifact_revision: None,
         source_len,
         width_bucket: 640,
         scale_bucket: 100,
@@ -5168,7 +5277,7 @@ fn streamed_first_prompt_image_and_text_merge_in_either_order() {
         let mut pane = NeoismAgentPane::default();
         let image = neoism_ui::panels::agent_pane::state::NeoismAgentImage {
             filename: "clipboard.png".to_string(),
-            url: "data:image/png;base64,AA==".to_string(),
+            url: "data:image/png;base64,AA==".into(),
             mime: "image/png".to_string(),
         };
         let mut optimistic = NeoismAgentMessage::user("[image1] inspect this");
@@ -5745,10 +5854,14 @@ fn imported_history_preload_discloses_text_only_without_changing_title_or_source
             "historyIncompleteContent":true
         }}
     }));
+    pane.background_tx.send(NeoismAgentBackgroundUpdate::SessionMetadataLoaded {
+        session_id: "imported".into(), result: Ok(state),
+    }).unwrap();
     pane.background_tx
         .send(NeoismAgentBackgroundUpdate::SessionPreloaded {
             session_id: "imported".into(),
-            state,
+            raw_count: 1,
+            requested_limit: 32,
             messages: vec![NeoismAgentMessage::assistant("actual imported text")],
             oldest_cursor: None,
         })
@@ -5799,7 +5912,8 @@ fn preloaded_disjoint_page_keeps_newest_reply_after_parked_history() {
     pane.background_tx
         .send(NeoismAgentBackgroundUpdate::SessionPreloaded {
             session_id: "returned".to_string(),
-            state: Default::default(),
+            raw_count: 2,
+            requested_limit: 32,
             messages: vec![
                 NeoismAgentMessage::user("new task").with_id("new-user"),
                 NeoismAgentMessage::assistant("latest reply").with_id("new-answer"),
@@ -8289,7 +8403,9 @@ fn tool_expansion_view_test_pane(id: &str, row_top: f32) -> NeoismAgentPane {
     }
     pane.set_timeline_metrics([0.0, 100.0, 400.0, 300.0], 900.0, 300.0);
     *pane.timeline_layout_cache.borrow_mut() = Some(TimelineLayoutCache {
+        question_targets: Default::default(),
         epoch: pane.timeline_layout_epoch,
+        artifact_revision: None,
         source_len: pane.messages.len(),
         width_bucket: 0,
         scale_bucket: 0,
@@ -9115,15 +9231,41 @@ fn follow_scroll_ticks_and_metrics_do_not_impersonate_history_gestures() {
 }
 
 #[test]
-fn timeline_scroll_rail_hover_redraws_each_move_and_one_exit() {
+fn timeline_source_revision_tracks_dirty_updates_without_full_layout_invalidation() {
+    let mut pane = NeoismAgentPane::default();
+    let epoch = pane.timeline_layout_epoch;
+    let revision = pane.timeline_source_revision();
+    pane.mark_timeline_message_dirty_at(0);
+    assert_ne!(pane.timeline_source_revision(), revision);
+    assert_eq!(pane.timeline_layout_epoch, epoch);
+    let revision = pane.timeline_source_revision();
+    pane.mark_timeline_message_and_next_dirty_at(0);
+    assert_ne!(pane.timeline_source_revision(), revision);
+    assert_eq!(pane.timeline_layout_epoch, epoch);
+    let revision = pane.timeline_source_revision();
+    pane.invalidate_timeline_layout();
+    assert_ne!(pane.timeline_source_revision(), revision);
+}
+
+#[test]
+fn timeline_scroll_rail_hover_redraws_only_visual_changes() {
     let mut pane = NeoismAgentPane::default();
     assert!(!pane.update_scrollbar_hover(Some((390.0, 100.0))));
-    pane.set_scrollbar_geometry(Some([382.0, 99.0, 18.0, 102.0]), None);
+    pane.set_scrollbar_geometry(
+        Some([382.0, 99.0, 18.0, 102.0]), Some([382.0, 99.0, 18.0, 2.0]),
+    );
     assert!(!pane.update_scrollbar_hover(Some((370.0, 100.0))));
     assert!(pane.update_scrollbar_hover(Some((390.0, 100.0))));
-    // The host does not duplicate tick geometry: every move inside repaints.
     assert!(pane.update_scrollbar_hover(Some((390.0, 150.0))));
+    for i in 0..10_000 {
+        assert!(!pane.update_scrollbar_hover(Some((385.0 + (i % 10) as f32, 150.0))));
+    }
+    // Real geometry changes under a stationary pointer still invalidate.
+    pane.set_scrollbar_geometry(
+        Some([382.0, 99.0, 18.0, 102.0]), Some([382.0, 109.0, 18.0, 2.0]),
+    );
     assert!(pane.update_scrollbar_hover(Some((390.0, 150.0))));
+    assert!(!pane.update_scrollbar_hover(Some((390.0, 150.0))));
     assert!(pane.update_scrollbar_hover(Some((370.0, 150.0))));
     assert!(!pane.update_scrollbar_hover(Some((370.0, 150.0))));
     assert!(pane.update_scrollbar_hover(Some((390.0, 150.0))));

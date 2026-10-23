@@ -23,6 +23,7 @@ pub mod outbound;
 pub mod permission_policy;
 pub mod protocol_mapping;
 pub mod question_policy;
+pub mod question_rail;
 pub mod resolve_link_path;
 pub mod selection_model;
 pub mod session_group;

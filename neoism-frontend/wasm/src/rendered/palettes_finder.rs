@@ -71,6 +71,13 @@ impl ChromeBridge {
         }) else {
             return 0;
         };
+        if self.chrome.modal.is_image_open() {
+            let hit = self.chrome.modal.hit_test(x, y, pw, sf);
+            if self.chrome.modal.close_button_hit(x, y) || hit.is_err() {
+                self.chrome.modal.close();
+            }
+            return 2;
+        }
         if self.chrome.conversation_navigator.is_active() {
             if let Some(action) = self.chrome.conversation_navigator.pointer_down(x, y) {
                 self.chrome.apply_navigator_action(action);
@@ -1401,7 +1408,9 @@ impl ChromeBridge {
 
     fn execute_palette_action_chrome_side(&mut self, action: &str) -> bool {
         match action {
-            "ShowSystems" | "AddSystem" | "ConnectSystem" | "DisconnectSystem"
+            "ShowSystemSettings" | "SshToSystem"
+            | "ShowSystems" | "AddSystem" | "ConnectSystem" | "DisconnectSystem"
+            | "SetSystemEnabled"
             | "RemoveSystem" => {
                 self.chrome.command_palette.set_enabled(false);
                 self.chrome.modal.open(neoism_ui::panels::command_palette::actions::systems_desktop_modal_spec());

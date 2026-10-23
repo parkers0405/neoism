@@ -127,17 +127,15 @@ pub(super) fn classify_input(
 /// How many cell rows the Warp-style command composer reserves
 /// at the bottom of `ctx`'s pane right now. Used by the splash
 /// inject + render so the wordmark / menu never extends into
-/// rows the composer is going to overlap. Returns 0 when the
-/// composer footer is hidden (alt-screen TUI, passthrough, no
-/// active prompt).
+/// rows the composer is going to overlap. Returns `Some(0)` when the
+/// composer footer is hidden; `None` means the terminal is
+/// busy and paint must retain its last successful reservation instead.
 pub(super) fn splash_composer_reserved_rows<T: neoism_backend::event::EventListener>(
     ctx: &crate::context::Context<T>,
     composer: &command_composer::CommandComposer,
     scale_factor: f32,
-) -> usize {
-    let Some(terminal) = ctx.terminal.try_lock_unfair() else {
-        return 0;
-    };
+) -> Option<usize> {
+    let terminal = ctx.terminal.try_lock_unfair()?;
     let alt = terminal
         .mode()
         .contains(neoism_terminal_core::crosswords::Mode::ALT_SCREEN);
@@ -148,26 +146,26 @@ pub(super) fn splash_composer_reserved_rows<T: neoism_backend::event::EventListe
     // reserved gap at the bottom while a CLI / TUI is taking the
     // pane.
     if alt || prompt.running_command || ctx.terminal_input.passthrough_session_active() {
-        return 0;
+        return Some(0);
     }
     // Match `composer_footer_active`: reserve the composer gap during
     // the fresh-terminal boot window too, so the first command's
     // composer doesn't overlap the splash before the first prompt.
     let block_input_active = ctx.terminal_input.editing_window_open(prompt);
     if !ctx.terminal_input.has_visible_footer(block_input_active) {
-        return 0;
+        return Some(0);
     }
     let cell_h = ctx.dimension.dimension.height.round().max(1.0);
     let cell_w = ctx.dimension.dimension.width.round().max(1.0);
     let cell_h_logical = (cell_h / scale_factor).max(1.0);
     let cell_w_logical = (cell_w / scale_factor).max(1.0);
-    composer.terminal_reserved_rows_for_input(
+    Some(composer.terminal_reserved_rows_for_input(
         cell_h_logical,
         ctx.dimension.columns as f32 * cell_w_logical,
         cell_w_logical,
         ctx.dimension.lines,
         ctx.terminal_input.text(),
-    )
+    ))
 }
 
 /// Desired `passthrough_session_active` for a terminal pane, or `None`
@@ -259,18 +257,13 @@ impl Renderer {
                 continue;
             }
 
-            let (alt_screen, prompt, running, cwd_path) = {
-                let terminal = ctx.terminal.lock();
-                let prompt = terminal.shell_prompt_state();
-                (
-                    terminal
-                        .mode()
-                        .contains(neoism_terminal_core::crosswords::Mode::ALT_SCREEN),
-                    prompt,
-                    prompt.running_command,
-                    terminal.current_directory.clone(),
-                )
+            let Some(metadata) = self.terminal_paint_cache.composer_metadata(ctx) else {
+                continue;
             };
+            let alt_screen = metadata.alt_screen;
+            let prompt = metadata.prompt;
+            let running = prompt.running_command;
+            let cwd_path = metadata.cwd;
             // Boot-window aware: match `composer_footer_active` so the
             // first command's composer paints before the first prompt.
             let awaiting = ctx.terminal_input.editing_window_open(prompt);
@@ -382,17 +375,12 @@ impl Renderer {
                 self.command_composer.set_visible(false);
                 return;
             }
-            let (alt_screen, prompt, running) = {
-                let terminal = ctx.terminal.lock();
-                let prompt = terminal.shell_prompt_state();
-                (
-                    terminal
-                        .mode()
-                        .contains(neoism_terminal_core::crosswords::Mode::ALT_SCREEN),
-                    prompt,
-                    prompt.running_command,
-                )
+            let Some(metadata) = self.terminal_paint_cache.composer_metadata(ctx) else {
+                return;
             };
+            let alt_screen = metadata.alt_screen;
+            let prompt = metadata.prompt;
+            let running = prompt.running_command;
             // Visible whenever the user has block context (recent
             // command blocks or live awaiting prompt) — matches the
             // `has_visible_footer` predicate in the screen pipeline so
@@ -429,15 +417,11 @@ impl Renderer {
             // as tall on a hi-DPI display).
             let cell_w = (ctx.dimension.dimension.width.round() / scale_factor).max(1.0);
             let cell_h = (ctx.dimension.dimension.height.round() / scale_factor).max(1.0);
-            let (cwd, cwd_path) = {
-                let term = ctx.terminal.lock();
-                let path = term.current_directory.clone();
-                let label = path
-                    .as_ref()
-                    .map(|p| display_cwd(p))
-                    .unwrap_or_else(|| "~".to_string());
-                (label, path)
-            };
+            let cwd_path = metadata.cwd;
+            let cwd = cwd_path
+                .as_ref()
+                .map(|path| display_cwd(path))
+                .unwrap_or_else(|| "~".to_string());
             (
                 pane_left, pane_top, pane_w, pane_h, cwd, cwd_path, true, true, cell_w,
                 cell_h,

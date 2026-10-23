@@ -208,6 +208,14 @@ pub fn router(state: AppState) -> Router {
             any(agent_workspace_proxy)
                 .layer(axum::extract::DefaultBodyLimit::max(25 * 1024 * 1024)),
         )
+        .route("/agent/system/info", get(agent_system_info))
+        .route("/agent/system", any(agent_system_proxy_root))
+        .route("/agent/system/", any(agent_system_proxy_root))
+        .route(
+            "/agent/system/*path",
+            any(agent_system_proxy)
+                .layer(axum::extract::DefaultBodyLimit::max(25 * 1024 * 1024)),
+        )
         .route("/agent/*path", any(agent_proxy))
         .fallback(web_fallback)
         .with_state(state)
@@ -241,6 +249,71 @@ async fn agent_workspaces(State(state): State<AppState>, headers: HeaderMap) -> 
     Json(serde_json::json!({ "workspaces": workspaces })).into_response()
 }
 
+async fn agent_system_info(headers: HeaderMap) -> Response {
+    if let Err(response) = require_system_master(&headers) {
+        return response;
+    }
+    let home =
+        match dirs::home_dir().and_then(|home| crate::path::canonicalize(&home).ok()) {
+            Some(home) => home,
+            None => {
+                return (StatusCode::SERVICE_UNAVAILABLE, "daemon home unavailable")
+                    .into_response()
+            }
+        };
+    Json(serde_json::json!({
+        "systemId": crate::workspace::machine_host_id(),
+        "name": crate::workspace::machine_host_label(),
+        "homeDirectory": home.to_string_lossy(),
+        "capabilityVersion": neoism_agent_service_api::daemon_credential::SYSTEM_WORKFLOW_VERSION,
+    })).into_response()
+}
+
+fn require_system_master(headers: &HeaderMap) -> Result<(), Response> {
+    let bearer = cloud_auth::extract_bearer(headers).ok_or_else(|| {
+        (StatusCode::UNAUTHORIZED, "master daemon bearer required").into_response()
+    })?;
+    if !cloud_auth::legacy_daemon_token_matches(&bearer) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "system workflow requires master daemon token",
+        )
+            .into_response());
+    }
+    Ok(())
+}
+
+async fn agent_system_proxy_root(
+    State(state): State<AppState>,
+    method: axum::http::Method,
+    headers: HeaderMap,
+    query: axum::extract::RawQuery,
+    body: axum::body::Bytes,
+) -> Response {
+    agent_proxy_inner(
+        &state,
+        true,
+        None,
+        String::new(),
+        method,
+        headers,
+        query,
+        body,
+    )
+    .await
+}
+
+async fn agent_system_proxy(
+    State(state): State<AppState>,
+    Path(path): Path<String>,
+    method: axum::http::Method,
+    headers: HeaderMap,
+    query: axum::extract::RawQuery,
+    body: axum::body::Bytes,
+) -> Response {
+    agent_proxy_inner(&state, true, None, path, method, headers, query, body).await
+}
+
 async fn agent_proxy_root(
     State(state): State<AppState>,
     method: axum::http::Method,
@@ -248,7 +321,17 @@ async fn agent_proxy_root(
     query: axum::extract::RawQuery,
     body: axum::body::Bytes,
 ) -> Response {
-    agent_proxy_inner(&state, None, String::new(), method, headers, query, body).await
+    agent_proxy_inner(
+        &state,
+        false,
+        None,
+        String::new(),
+        method,
+        headers,
+        query,
+        body,
+    )
+    .await
 }
 
 async fn agent_proxy(
@@ -259,7 +342,7 @@ async fn agent_proxy(
     query: axum::extract::RawQuery,
     body: axum::body::Bytes,
 ) -> Response {
-    agent_proxy_inner(&state, None, path, method, headers, query, body).await
+    agent_proxy_inner(&state, false, None, path, method, headers, query, body).await
 }
 
 async fn agent_workspace_proxy_root(
@@ -272,6 +355,7 @@ async fn agent_workspace_proxy_root(
 ) -> Response {
     agent_proxy_inner(
         &state,
+        false,
         Some(workspace_id),
         String::new(),
         method,
@@ -292,6 +376,7 @@ async fn agent_workspace_proxy(
 ) -> Response {
     agent_proxy_inner(
         &state,
+        false,
         Some(workspace_id),
         path,
         method,
@@ -304,6 +389,7 @@ async fn agent_workspace_proxy(
 
 async fn agent_proxy_inner(
     state: &AppState,
+    system: bool,
     workspace_id: Option<String>,
     path: String,
     method: axum::http::Method,
@@ -311,73 +397,93 @@ async fn agent_proxy_inner(
     axum::extract::RawQuery(query): axum::extract::RawQuery,
     body: axum::body::Bytes,
 ) -> Response {
-    let Some(workspace_id) = workspace_id else {
-        // Authenticate before disclosing route shape, but never fall back to
-        // the process-global workspace root: that root can change underneath
-        // a long-lived joined client.
-        if agent_proxy_principal(&state.auth, &headers, None).is_err() {
-            return (StatusCode::UNAUTHORIZED, "invalid daemon authentication")
+    let (workspace_id, root, subject) = if system {
+        if let Err(response) = require_system_master(&headers) {
+            return response;
+        }
+        if !neoism_agent_service_api::daemon_credential::system_workflow_allows(
+            method.as_str(),
+            &format!("/{path}"),
+        ) {
+            return (
+                StatusCode::FORBIDDEN,
+                "operation outside system workflow capability",
+            )
                 .into_response();
         }
-        return (
-            StatusCode::BAD_REQUEST,
-            "workspace-scoped Agent endpoint required",
-        )
-            .into_response();
-    };
-    // No proxy caller (including guests and trust-local clients) can invoke
-    // the daemon-operator association endpoint or receive its signing subject.
-    if path.trim_start_matches('/').starts_with("v2/hosting/") {
-        return StatusCode::FORBIDDEN.into_response();
-    }
-    let root = match agent_workspace_root(&state.workspaces, &workspace_id) {
-        Some(root) => root,
-        None => return (StatusCode::NOT_FOUND, "unknown workspace").into_response(),
-    };
-    let shared = state
-        .workspaces
-        .get_host_workspace(&workspace_id)
-        .is_some_and(|workspace| {
-            workspace.visibility
-                == neoism_protocol::workspace::WorkspaceVisibility::Shared
-        });
-    // OAuth redirects are unauthenticated browser navigations. Only the exact
-    // GET callback with a code and state may bypass the daemon bearer gate;
-    // the Agent consumes the one-time state before exchanging any credentials.
-    if shared
-        && method == axum::http::Method::GET
-        && body.is_empty()
-        && mcp_oauth_callback_name(&path).is_some()
-    {
-        if let Some(callback) = mcp_oauth_callback_target(&path, query.as_deref()) {
-            crate::agent::ensure_agent_server_started(state.workspaces.clone());
-            let target =
-                format!("{}{}", agent_handler::configured_agent_server(), callback);
-            return match reqwest::Client::new().get(target).send().await {
-                Ok(upstream) => {
-                    let status = StatusCode::from_u16(upstream.status().as_u16())
-                        .unwrap_or(StatusCode::BAD_GATEWAY);
-                    let mut response = Response::new(axum::body::Body::from_stream(
-                        upstream.bytes_stream(),
-                    ));
-                    *response.status_mut() = status;
-                    response.headers_mut().insert(
-                        header::CONTENT_TYPE,
-                        "text/html; charset=utf-8".parse().unwrap(),
-                    );
-                    response
-                }
-                Err(_) => StatusCode::BAD_GATEWAY.into_response(),
-            };
+        (String::new(), std::path::PathBuf::new(), String::new())
+    } else {
+        let Some(workspace_id) = workspace_id else {
+            // Authenticate before disclosing route shape, but never fall back to
+            // the process-global workspace root: that root can change underneath
+            // a long-lived joined client.
+            if agent_proxy_principal(&state.auth, &headers, None).is_err() {
+                return (StatusCode::UNAUTHORIZED, "invalid daemon authentication")
+                    .into_response();
+            }
+            return (
+                StatusCode::BAD_REQUEST,
+                "workspace-scoped Agent endpoint required",
+            )
+                .into_response();
+        };
+        // No proxy caller (including guests and trust-local clients) can invoke
+        // the daemon-operator association endpoint or receive its signing subject.
+        if path.trim_start_matches('/').starts_with("v2/hosting/") {
+            return StatusCode::FORBIDDEN.into_response();
         }
-        return StatusCode::BAD_REQUEST.into_response();
-    }
-    let subject =
-        match agent_proxy_principal(&state.auth, &headers, Some((&workspace_id, shared)))
+        let root = match agent_workspace_root(&state.workspaces, &workspace_id) {
+            Some(root) => root,
+            None => return (StatusCode::NOT_FOUND, "unknown workspace").into_response(),
+        };
+        let shared = state
+            .workspaces
+            .get_host_workspace(&workspace_id)
+            .is_some_and(|workspace| {
+                workspace.visibility
+                    == neoism_protocol::workspace::WorkspaceVisibility::Shared
+            });
+        // OAuth redirects are unauthenticated browser navigations. Only the exact
+        // GET callback with a code and state may bypass the daemon bearer gate;
+        // the Agent consumes the one-time state before exchanging any credentials.
+        if shared
+            && method == axum::http::Method::GET
+            && body.is_empty()
+            && mcp_oauth_callback_name(&path).is_some()
         {
+            if let Some(callback) = mcp_oauth_callback_target(&path, query.as_deref()) {
+                crate::agent::ensure_agent_server_started(state.workspaces.clone());
+                let target =
+                    format!("{}{}", agent_handler::configured_agent_server(), callback);
+                return match reqwest::Client::new().get(target).send().await {
+                    Ok(upstream) => {
+                        let status = StatusCode::from_u16(upstream.status().as_u16())
+                            .unwrap_or(StatusCode::BAD_GATEWAY);
+                        let mut response = Response::new(axum::body::Body::from_stream(
+                            upstream.bytes_stream(),
+                        ));
+                        *response.status_mut() = status;
+                        response.headers_mut().insert(
+                            header::CONTENT_TYPE,
+                            "text/html; charset=utf-8".parse().unwrap(),
+                        );
+                        response
+                    }
+                    Err(_) => StatusCode::BAD_GATEWAY.into_response(),
+                };
+            }
+            return StatusCode::BAD_REQUEST.into_response();
+        }
+        let subject = match agent_proxy_principal(
+            &state.auth,
+            &headers,
+            Some((&workspace_id, shared)),
+        ) {
             Ok(subject) => subject,
             Err(response) => return response,
         };
+        (workspace_id, root, subject)
+    };
     crate::agent::ensure_agent_server_started(state.workspaces.clone());
     let base = agent_handler::configured_agent_server();
     let client = match agent_handler::agent_http_client(&base) {
@@ -457,11 +563,15 @@ async fn agent_proxy_inner(
     // Authenticate before waiting, but issue the 60-second upstream credential
     // only when forwarding: a healthy cold boot can legitimately take longer.
     let namespace = crate::agent_hosting::namespace(&workspace_id, &root);
-    let credential = match mint_agent_credential(
-        subject,
-        namespace.as_deref().unwrap_or(&workspace_id),
-        &root,
-    ) {
+    let credential = match if system {
+        mint_system_agent_credential()
+    } else {
+        mint_agent_credential(
+            subject,
+            namespace.as_deref().unwrap_or(&workspace_id),
+            &root,
+        )
+    } {
         Ok(credential) => credential,
         Err(response) => return response,
     };
@@ -469,7 +579,9 @@ async fn agent_proxy_inner(
     // The inbound bearer and all caller-controlled scope headers terminate at
     // the daemon. Agent receives only the daemon-minted, short-lived identity.
     request = request.bearer_auth(credential);
-    request = request.header("x-neoism-directory", root.to_string_lossy().as_ref());
+    if !system {
+        request = request.header("x-neoism-directory", root.to_string_lossy().as_ref());
+    }
     // Forward canonical representation negotiation and SSE resume state only;
     // hop-by-hop, Authorization, and caller scope headers stay behind.
     for name in [
@@ -486,7 +598,9 @@ async fn agent_proxy_inner(
         request = request.body(body);
     }
     // Bound response headers without placing a total deadline on healthy SSE.
-    match tokio::time::timeout(std::time::Duration::from_secs(120), request.send()).await
+    // Provider callbacks can wait five minutes for interactive browser sign-in,
+    // then complete a bounded token exchange. Ordinary requests remain at 120s.
+    match tokio::time::timeout(agent_proxy_response_timeout(&method, &path), request.send()).await
     {
         Ok(Ok(upstream)) => {
             let status = StatusCode::from_u16(upstream.status().as_u16())
@@ -516,6 +630,13 @@ async fn agent_proxy_inner(
     }
 }
 
+fn agent_proxy_response_timeout(method: &reqwest::Method, path: &str) -> std::time::Duration {
+    let parts: Vec<_> = path.split('/').collect();
+    let provider_callback = method == reqwest::Method::POST
+        && matches!(parts.as_slice(), ["v2", "providers", provider, "oauth", "callback"] if !provider.is_empty());
+    std::time::Duration::from_secs(if provider_callback { 345 } else { 120 })
+}
+
 fn agent_proxy_failure(
     method: &reqwest::Method,
     delivery_unknown: bool,
@@ -541,6 +662,21 @@ fn agent_proxy_failure(
 #[cfg(test)]
 mod agent_proxy_failure_tests {
     use super::*;
+
+    #[test]
+    fn only_provider_oauth_callbacks_get_the_interactive_response_budget() {
+        let callback = "v2/providers/openai/oauth/callback";
+        assert_eq!(agent_proxy_response_timeout(&reqwest::Method::POST, callback).as_secs(), 345);
+        for (method, path) in [
+            (reqwest::Method::GET, callback),
+            (reqwest::Method::POST, "v2/providers/openai/oauth/authorize"),
+            (reqwest::Method::POST, "v2/providers//oauth/callback"),
+            (reqwest::Method::POST, "v2/providers/openai/oauth/callback/extra"),
+            (reqwest::Method::GET, "v2/events"),
+        ] {
+            assert_eq!(agent_proxy_response_timeout(&method, path).as_secs(), 120);
+        }
+    }
 
     #[test]
     fn ambiguous_mutations_never_advertise_safe_replay() {
@@ -727,6 +863,31 @@ pub(crate) fn mint_agent_credential(
     workspace_id: &str,
     root: &std::path::Path,
 ) -> Result<String, Response> {
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+    let claims =
+        neoism_agent_service_api::daemon_credential::DaemonCredentialClaims::new(
+            subject,
+            workspace_id,
+            format!("workspace:{workspace_id}"),
+            vec![root.to_string_lossy().into_owned()],
+            true,
+            now,
+            AGENT_CREDENTIAL_LIFETIME_SECS,
+        )
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())?;
+    sign_agent_credential(&claims)
+}
+
+fn mint_system_agent_credential() -> Result<String, Response> {
+    let claims = neoism_agent_service_api::daemon_credential::DaemonCredentialClaims::system_workflow(
+        time::OffsetDateTime::now_utc().unix_timestamp(), AGENT_CREDENTIAL_LIFETIME_SECS,
+    ).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())?;
+    sign_agent_credential(&claims)
+}
+
+fn sign_agent_credential(
+    claims: &neoism_agent_service_api::daemon_credential::DaemonCredentialClaims,
+) -> Result<String, Response> {
     // The env var is captured once at daemon startup, but the canonical
     // token file is the live trust root shared with the (possibly separate)
     // agent-server process — and it rotates when the runtime dir is
@@ -747,20 +908,8 @@ pub(crate) fn mint_agent_credential(
             );
             StatusCode::SERVICE_UNAVAILABLE.into_response()
         })?;
-    let now = time::OffsetDateTime::now_utc().unix_timestamp();
-    let claims =
-        neoism_agent_service_api::daemon_credential::DaemonCredentialClaims::new(
-            subject,
-            workspace_id,
-            format!("workspace:{workspace_id}"),
-            vec![root.to_string_lossy().into_owned()],
-            true,
-            now,
-            AGENT_CREDENTIAL_LIFETIME_SECS,
-        )
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())?;
     let credential = neoism_agent_service_api::daemon_credential::issue(
-        &claims,
+        claims,
         signing_key.as_bytes(),
     )
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())?;
@@ -854,6 +1003,90 @@ mod agent_proxy_auth_tests {
     use tower::ServiceExt;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[tokio::test]
+    async fn system_proxy_master_only_even_with_spoofed_scope_and_denies_global_routes() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let previous = std::env::var_os("NEOISM_DAEMON_TOKEN");
+        std::env::set_var("NEOISM_DAEMON_TOKEN", "system-proxy-master-test");
+        let dir =
+            std::env::temp_dir().join(format!("system-proxy-{}", uuid::Uuid::new_v4()));
+        let auth = AuthService::bootstrap(&dir).unwrap();
+        let device = auth.registry.issue("paired", BTreeSet::new()).unwrap();
+        let visitor = auth
+            .registry
+            .issue_for_workspace(
+                "visitor",
+                BTreeSet::from([Permission::AgentUse]),
+                Some("workspace-a".into()),
+            )
+            .unwrap();
+        for token in [
+            None,
+            Some(device.raw_token.as_str()),
+            Some(visitor.raw_token.as_str()),
+            Some("neoism-daemon-v1.forged.signature"),
+        ] {
+            let mut headers = HeaderMap::new();
+            if let Some(token) = token {
+                headers.insert(
+                    header::AUTHORIZATION,
+                    format!("Bearer {token}").parse().unwrap(),
+                );
+            }
+            headers.insert("x-neoism-tenant-id", "local".parse().unwrap());
+            headers.insert("x-neoism-subject", "local-operator".parse().unwrap());
+            headers.insert("x-neoism-directory", "/".parse().unwrap());
+            assert!(require_system_master(&headers).is_err());
+            assert!(agent_system_info(headers).await.status().is_client_error());
+        }
+        let mut master = HeaderMap::new();
+        master.insert(
+            header::AUTHORIZATION,
+            "Bearer system-proxy-master-test".parse().unwrap(),
+        );
+        assert!(require_system_master(&master).is_ok());
+        let info = agent_system_info(master.clone()).await;
+        assert_eq!(info.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(info.into_body(), 8192).await.unwrap();
+        let info: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(info["capabilityVersion"], 1);
+        assert_eq!(info["systemId"], crate::workspace::machine_host_id());
+        assert_eq!(
+            info["homeDirectory"],
+            crate::path::canonicalize(&dirs::home_dir().unwrap())
+                .unwrap()
+                .to_string_lossy()
+                .as_ref()
+        );
+        assert_eq!(info.as_object().unwrap().len(), 4);
+        let app = router_from_registry(SessionRegistry::shared());
+        for (method, path) in [
+            ("GET", "/agent/system/v2/config"),
+            ("GET", "/agent/system/v2/management/agents"),
+            ("GET", "/agent/system/v2/providers/openai/auth"),
+            ("POST", "/agent/system/v2/providers/openai/oauth/authorize"),
+            ("POST", "/agent/system/v2/hosting/associate"),
+            ("GET", "/agent/system/v2/plugins/dev.neoism.mcp/catalog"),
+        ] {
+            let req = axum::http::Request::builder()
+                .method(method)
+                .uri(path)
+                .header(header::AUTHORIZATION, "Bearer system-proxy-master-test")
+                .body(axum::body::Body::empty())
+                .unwrap();
+            assert_eq!(
+                app.clone().oneshot(req).await.unwrap().status(),
+                StatusCode::FORBIDDEN,
+                "{path}"
+            );
+        }
+        match previous {
+            Some(value) => std::env::set_var("NEOISM_DAEMON_TOKEN", value),
+            None => std::env::remove_var("NEOISM_DAEMON_TOKEN"),
+        }
+        std::fs::remove_dir_all(dir).ok();
+    }
 
     #[test]
     fn only_state_bearing_mcp_browser_callbacks_can_reach_agent_without_bearer() {
@@ -1338,7 +1571,7 @@ mod agent_proxy_auth_tests {
         )
         .unwrap();
         assert_eq!(local.tenant_id, "workspace:workspace-a");
-        assert_eq!(local.workspace_id, "workspace-a");
+        assert_eq!(local.workspace_id.as_deref(), Some("workspace-a"));
         assert!(local.hosted);
         assert_eq!(local.directory_prefixes, vec![root.to_string_lossy()]);
 

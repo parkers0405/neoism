@@ -582,9 +582,9 @@ impl Screen<'_> {
                 fields: vec![
                     ModalFormField {
                         id: "system_target".into(),
-                        label: "SSH host".into(),
+                        label: "Computer".into(),
                         value: String::new(),
-                        placeholder: "user@hostname or SSH alias".into(),
+                        placeholder: "laptop, hostname, or SSH alias".into(),
                         secret: false,
                     },
                     ModalFormField {
@@ -595,12 +595,12 @@ impl Screen<'_> {
                         secret: false,
                     },
                 ],
-                submit_label: "Add and connect".into(),
+                submit_label: "Add system".into(),
             },
             ModalAction::SystemFormSubmit,
         );
         self.renderer.modal.set_form_description(
-            "Uses your SSH configuration and keys. Neoism starts or reuses its service on the remote system.",
+            "New systems are saved deactivated. Turn on Active in Systems when you want to connect.",
         );
         self.mark_dirty();
     }
@@ -1791,19 +1791,35 @@ impl Screen<'_> {
             PaletteAction::ShowSystems => {
                 self.request_system_action(SystemRequest::Show);
             }
+            PaletteAction::ShowSystemSettings { id } => {
+                self.request_system_action(SystemRequest::Settings { id });
+            }
+            PaletteAction::SshToSystem { id } => {
+                self.renderer.command_palette.set_enabled(false);
+                self.request_system_action(SystemRequest::SshWorkspace { id });
+            }
             PaletteAction::AddSystem => {
                 self.open_add_system_prompt();
             }
+            PaletteAction::SetSystemEnabled { id, enabled } => {
+                self.request_system_action(SystemRequest::SetEnabled {
+                    id: id.clone(),
+                    enabled,
+                    discard: false,
+                });
+                self.request_system_action(SystemRequest::Settings { id });
+            }
             PaletteAction::ConnectSystem { id } => {
-                self.request_system_action(SystemRequest::Connect { id });
+                self.request_system_action(SystemRequest::Connect { id: id.clone() });
+                self.request_system_action(SystemRequest::Settings { id });
             }
             PaletteAction::DisconnectSystem { id } => {
                 self.request_system_action(SystemRequest::Disconnect {
-                    id,
+                    id: id.clone(),
                     remove: false,
                     discard: false,
                 });
-                self.request_system_action(SystemRequest::Show);
+                self.request_system_action(SystemRequest::Settings { id });
             }
             PaletteAction::RemoveSystem { id } => {
                 self.request_system_action(SystemRequest::Disconnect {

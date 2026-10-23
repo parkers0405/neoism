@@ -282,6 +282,13 @@ impl Screen<'_> {
             }
         }
         let current = self.context_manager.current();
+        if current.markdown.is_some() || current.notebook.is_some() || current.code.is_some() {
+            // Document/LSP refresh calls this on animation frames. The declared
+            // root is already normalized; only unresolved fallbacks need a probe.
+            if let Some(root) = self.active_workspace_root.as_ref() {
+                return Some(root.clone());
+            }
+        }
         if let Some(markdown) = current.markdown.as_ref() {
             return self
                 .active_workspace_root
@@ -603,16 +610,19 @@ impl Screen<'_> {
             .workspace_buffer_tabs
             .get(&id)
             .is_some_and(|tabs| !tabs.tabs().is_empty());
-        if !(next_tabs_empty && saved_tabs_non_empty) {
+        if !(next_tabs_empty && saved_tabs_non_empty)
+            && self.workspace_buffer_tabs.get(&id)
+                .is_none_or(|saved| saved != &self.renderer.buffer_tabs)
+        {
             self.workspace_buffer_tabs
                 .insert(id.clone(), self.renderer.buffer_tabs.clone());
         }
-        if let Some(root) = self
-            .active_workspace_root
-            .clone()
-            .and_then(|root| self.normalize_workspace_dir_for_current(root))
-        {
-            self.workspace_roots.insert(id, root);
+        // This root was validated when the workspace was established. Snapshot
+        // persistence runs every animation frame and must not touch the filesystem.
+        if let Some(root) = self.active_workspace_root.as_ref() {
+            if self.workspace_roots.get(&id) != Some(root) {
+                self.workspace_roots.insert(id, root.clone());
+            }
         }
     }
 
@@ -697,6 +707,7 @@ impl Screen<'_> {
                             std::mem::take(&mut self.renderer.notes_sidebar)
                         }
                     });
+            incoming.enable_async_local_refresh();
             if incoming.workspace_path().is_none() {
                 if let Some(path) = self.workspace_notes_vaults.get(&id).cloned() {
                     incoming.set_workspace(
@@ -1335,6 +1346,7 @@ impl Screen<'_> {
             != server.trim_end_matches('/');
         self.renderer.conversations_pane.switch_server(server);
         self.sync_conversation_dashboard_directory();
+        self.renderer.conversations_pane.set_default_chat_source(self.default_chat_source);
         self.renderer
             .conversations_pane
             .side_panel_mut()

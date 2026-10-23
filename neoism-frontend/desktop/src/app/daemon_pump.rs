@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc, Mutex,
 };
 
@@ -11,7 +11,59 @@ use crate::daemon_client::{
 use crate::event::{EventProxy, RioEvent, RioEventType};
 use neoism_protocol::workspace::WorkspaceClientMessage;
 
+use std::time::{Duration, Instant};
+
 const DAEMON_CLIENT_RUNTIME_WORKERS: usize = 2;
+
+/// Reset only by ApplicationHandler::new_events, never by a window/user event.
+#[derive(Default)]
+pub(crate) struct PumpTurn {
+    started: Option<Instant>,
+    spent: Duration,
+    entered: bool,
+}
+
+impl PumpTurn {
+    pub fn reset(&mut self) {
+        self.started = None;
+        self.spent = Duration::ZERO;
+        self.entered = false;
+    }
+
+    pub fn enter(&mut self) -> bool {
+        if self.entered || self.spent >= Duration::from_millis(2) {
+            return false;
+        }
+        self.entered = true;
+        self.started = Some(Instant::now());
+        true
+    }
+
+    /// Maintenance has its own diagnostics; the bounded slice covers queue
+    /// extraction and application. Slow maintenance must not starve all input.
+    pub fn begin_messages(&mut self) {
+        self.started = Some(Instant::now());
+    }
+
+    pub fn available(&self) -> bool {
+        self.spent + self.started.map(|s| s.elapsed()).unwrap_or_default()
+            < Duration::from_millis(2)
+    }
+
+    pub fn finish(&mut self) {
+        if let Some(start) = self.started.take() {
+            self.spent += start.elapsed();
+        }
+    }
+}
+
+/// Check/clear under the producer's queue lock. An arrival after an empty
+/// observation therefore sees false and is responsible for sending a new wake.
+fn finish_queue_turn<T>(queue: &VecDeque<T>, pending: &AtomicBool) -> bool {
+    let backlog = !queue.is_empty();
+    pending.store(backlog, Ordering::Release);
+    backlog
+}
 
 /// Registry provenance, never address shape or authentication failure, selects
 /// the wire contract for both Fast Host and Fast Join.
@@ -26,7 +78,22 @@ pub(crate) fn server_upgrade_auth(
     }
 }
 
+static NEXT_SOURCE_ID: AtomicUsize = AtomicUsize::new(1);
+
+/// Stable round-robin order independent of HashMap iteration order. The cursor
+/// survives turns, so a hot early window cannot starve parked/late sources.
+pub(crate) fn source_ring<T>(
+    mut sources: Vec<(usize, T)>,
+    cursor: usize,
+) -> VecDeque<(usize, T)> {
+    sources.sort_by_key(|(id, _)| *id);
+    let pivot = sources.partition_point(|(id, _)| *id <= cursor);
+    sources.rotate_left(pivot);
+    sources.into()
+}
+
 pub struct DesktopDaemonConnection {
+    source_id: usize,
     _runtime: tokio::runtime::Runtime,
     runtime_handle: tokio::runtime::Handle,
     handle: DaemonClientHandle,
@@ -122,6 +189,7 @@ impl DesktopDaemonConnection {
         });
 
         Ok(Self {
+            source_id: NEXT_SOURCE_ID.fetch_add(1, Ordering::Relaxed),
             _runtime: runtime,
             runtime_handle,
             handle,
@@ -144,6 +212,12 @@ impl DesktopDaemonConnection {
 
     pub fn handle(&self) -> DaemonClientHandle {
         self.handle.clone()
+    }
+
+    /// Monotonic object identity, unlike allocator addresses, cannot alias a
+    /// replacement connection created by a lifecycle message in this turn.
+    pub fn source_id(&self) -> usize {
+        self.source_id
     }
 
     pub fn connection_key(&self) -> usize {
@@ -224,15 +298,23 @@ impl DesktopDaemonConnection {
         });
     }
 
-    /// Parked connections still own background editors. Drain editor replies
-    /// and HostEnded lifecycle pushes; discard other families. PTY routes are explicitly
-    /// reattached with retained backlog when this connection becomes active;
-    /// retaining their live output here makes the parked queue grow forever.
-    pub fn drain_editor_messages(&self) -> Vec<DaemonServerMessage> {
-        let mut queue = self.inbound.lock().unwrap_or_else(|p| p.into_inner());
-        let editors = take_editor_messages(&mut queue);
-        self.inbound_wake_pending.store(false, Ordering::Release);
-        editors
+    /// One bounded extraction. Continuations stay with this connection object;
+    /// switching endpoints cannot misattribute a detached batch to a new socket.
+    /// This deliberately does not infer a wire generation from handle.generation():
+    /// the upstream mpsc can already contain older frames. That boundary must be
+    /// tagged at the client runner to reject stale frames without dropping CRDT.
+    pub fn pop_message(&self) -> Option<DaemonServerMessage> {
+        self.inbound
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .pop_front()
+    }
+
+    /// Called once at about_to_wait for every live source, including sources the
+    /// budget never reached. The application coalesces true results to one wake.
+    pub fn finish_turn(&self) -> bool {
+        let queue = self.inbound.lock().unwrap_or_else(|p| p.into_inner());
+        finish_queue_turn(&queue, &self.inbound_wake_pending)
     }
 
     pub fn drain_messages(&self) -> Vec<DaemonServerMessage> {
@@ -294,6 +376,7 @@ pub(crate) async fn wait_for_startup(
     .map_err(|_| Box::<dyn std::error::Error>::from("daemon connection timed out"))?
 }
 
+#[cfg(test)]
 fn take_editor_messages(
     queue: &mut VecDeque<DaemonServerMessage>,
 ) -> Vec<DaemonServerMessage> {
@@ -329,6 +412,127 @@ mod tests {
     use super::*;
     use neoism_protocol::editor::EditorServerMessage;
     use neoism_protocol::pty::ServerMessage as PtyServerMessage;
+
+    #[test]
+    fn budget_is_shared_across_window_and_user_events_until_new_turn() {
+        let mut turn = PumpTurn::default();
+        assert!(turn.enter());
+        turn.begin_messages();
+        assert!(turn.available());
+        turn.spent = Duration::from_millis(2);
+        assert!(!turn.available());
+        turn.finish();
+        for _ in 0..100 {
+            assert!(!turn.enter(), "an event must not renew the turn budget");
+        }
+        turn.reset();
+        assert!(turn.enter());
+        assert!(turn.available());
+    }
+
+    #[test]
+    fn bounded_fifo_continues_across_turns_with_parked_source_fairness() {
+        use std::collections::HashMap;
+        let mut queues = HashMap::from([
+            (1, VecDeque::from([10, 11, 12, 13])),
+            (2, VecDeque::from([20, 21, 22])),
+            (3, VecDeque::from([30, 31])),
+        ]);
+        let mut seen = Vec::new();
+        let mut cursor = 0;
+        for _ in 0..5 {
+            let mut ring = source_ring(vec![(3, ()), (1, ()), (2, ())], cursor);
+            // Deterministic work-count stand-in for two time-budgeted applies.
+            for _ in 0..2 {
+                let (id, ()) = ring.pop_front().unwrap();
+                cursor = id;
+                if let Some(value) = queues.get_mut(&id).unwrap().pop_front() {
+                    seen.push((id, value));
+                    ring.push_back((id, ()));
+                }
+            }
+        }
+        assert_eq!(&seen[..3], &[(1, 10), (2, 20), (3, 30)]);
+        for id in 1..=3 {
+            let values = seen
+                .iter()
+                .filter(|(source, _)| *source == id)
+                .map(|(_, value)| *value)
+                .collect::<Vec<_>>();
+            let expected = match id {
+                1 => vec![10, 11, 12, 13],
+                2 => vec![20, 21, 22],
+                _ => vec![30, 31],
+            };
+            assert_eq!(values, expected);
+        }
+    }
+
+    #[test]
+    fn replacement_at_same_endpoint_does_not_inherit_old_continuation() {
+        let old_id = NEXT_SOURCE_ID.fetch_add(1, Ordering::Relaxed);
+        let replacement_id = NEXT_SOURCE_ID.fetch_add(1, Ordering::Relaxed);
+        let mut ring = source_ring(vec![(old_id, "same-endpoint")], 0);
+        let (scheduled_id, endpoint) = ring.pop_front().unwrap();
+        let live = std::collections::HashMap::from([(endpoint, replacement_id)]);
+        assert_ne!(live.get(endpoint), Some(&scheduled_id));
+        // New source is discovered on the next turn, never fed old messages.
+        assert_eq!(
+            source_ring(vec![(replacement_id, endpoint)], old_id).front(),
+            Some(&(replacement_id, endpoint))
+        );
+    }
+
+    #[test]
+    fn empty_wake_and_producer_arrival_on_either_side_of_final_check() {
+        let queue = Mutex::new(VecDeque::<u8>::new());
+        let pending = AtomicBool::new(true); // consumed producer wake
+        assert!(!finish_queue_turn(&queue.lock().unwrap(), &pending));
+        assert!(!pending.load(Ordering::Acquire));
+        // Producer wins after an empty final check: it must wake.
+        {
+            let mut queue = queue.lock().unwrap();
+            queue.push_back(1);
+            assert!(!pending.swap(true, Ordering::AcqRel));
+        }
+        // Consumer sees backlog: continuation wake; no duplicate producer wake.
+        assert!(finish_queue_turn(&queue.lock().unwrap(), &pending));
+        {
+            let mut queue = queue.lock().unwrap();
+            queue.push_back(2);
+            assert!(pending.swap(true, Ordering::AcqRel));
+            assert_eq!(queue.pop_front(), Some(1));
+            assert_eq!(queue.pop_front(), Some(2));
+            assert!(!finish_queue_turn(&queue, &pending));
+        }
+        // An old queued wake with no data does not perpetuate itself.
+        assert!(!finish_queue_turn(&queue.lock().unwrap(), &pending));
+    }
+
+    #[test]
+    fn producer_blocked_during_empty_final_check_sends_wake_after_unlock() {
+        let queue = Arc::new(Mutex::new(VecDeque::<u8>::new()));
+        let pending = Arc::new(AtomicBool::new(true));
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let guard = queue.lock().unwrap();
+        let producer_queue = queue.clone();
+        let producer_pending = pending.clone();
+        let producer_barrier = barrier.clone();
+        let producer = std::thread::spawn(move || {
+            producer_barrier.wait();
+            let mut queue = producer_queue.lock().unwrap();
+            queue.push_back(7);
+            !producer_pending.swap(true, Ordering::AcqRel)
+        });
+        barrier.wait();
+        assert!(!finish_queue_turn(&guard, &pending));
+        drop(guard);
+        assert!(
+            producer.join().unwrap(),
+            "arrival after empty check owns the wake"
+        );
+        assert_eq!(queue.lock().unwrap().pop_front(), Some(7));
+    }
 
     #[test]
     fn parked_drain_retains_host_ended_but_discards_pty_output() {

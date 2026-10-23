@@ -137,6 +137,13 @@ impl AgentMarkdownPane for NeoismAgentPane {
         NeoismAgentPane::register_link_hit_rect(self, target, rect);
     }
 
+    fn register_image_preview(
+        &mut self,
+        hit: neoism_ui::panels::agent_pane::composer_interactions::ImagePreviewHit,
+    ) {
+        self.composer_interactions.image_previews.push(hit);
+    }
+
     fn link_hovered(&self, target: &str) -> bool {
         NeoismAgentPane::link_hovered(self, target)
     }

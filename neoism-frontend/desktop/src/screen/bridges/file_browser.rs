@@ -9,6 +9,15 @@ use neoism_ui::panels::file_browser::{
 };
 use std::path::PathBuf;
 
+pub(crate) struct SystemBrowserJob {
+    generation: u64,
+    target: DesktopBrowserTarget,
+    path: String,
+    selection: bool,
+    source: crate::neoism::agent::system::AgentSystemSource,
+    receiver: std::sync::mpsc::Receiver<Result<serde_json::Value, String>>,
+}
+
 const MAX_BROWSER_IMAGE_BYTES: u64 = 20 * 1024 * 1024;
 
 fn request_applies(
@@ -42,6 +51,18 @@ impl Screen<'_> {
         &self,
         purpose: DesktopBrowserPurpose,
     ) -> Option<DesktopBrowserTarget> {
+        if purpose == DesktopBrowserPurpose::AgentDirectory {
+            if let Some(pane) = self.context_manager.current().neoism_agent.as_ref() {
+                if let Some(source) = pane.selected_system_source() {
+                    if !pane.execution_authorized() { return None; }
+                    return Some(DesktopBrowserTarget {
+                        purpose, workspace_id: self.current_workspace_id(),
+                        root: PathBuf::from(&source.home_directory), scope: source.key("browser"), joined: true,
+                        route: Some(self.context_manager.current().route_id), agent: Some(pane.file_browser_identity()),
+                    });
+                }
+            }
+        }
         let joined = self.context_manager.current_workspace_is_remote_joined();
         // A missing host root is an error, never permission to inspect guest files.
         let root = self
@@ -161,6 +182,73 @@ impl Screen<'_> {
         self.desktop_browser_target = Some(target);
         self.pump_agent_image_browser();
         self.mark_dirty();
+    }
+
+    fn request_system_directory(&mut self, target: DesktopBrowserTarget, path: String, selection: bool) {
+        let Some(source) = self.context_manager.current().neoism_agent.as_ref()
+            .and_then(|pane| pane.selected_system_source()).cloned() else { return; };
+        if !source.authorized() { return; }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let server = source.server.clone();
+        let requested = path.clone();
+        let events = self.context_manager.event_proxy();
+        let window = self.context_manager.window_id();
+        let route = self.context_manager.current().route_id;
+        std::thread::spawn(move || {
+            let result = crate::neoism::agent::fetch_system_directories(&server, &requested);
+            let _ = tx.send(result);
+            events.send_event(neoism_backend::event::RioEvent::RenderRoute(route).into(), window);
+        });
+        self.conversation_workspaces.system_browser.push(SystemBrowserJob {
+            generation: self.desktop_browser_generation, target, path, selection, source, receiver: rx,
+        });
+    }
+
+    fn pump_system_directory_browser(&mut self, target: DesktopBrowserTarget) {
+        let mut pending = Vec::new();
+        for job in std::mem::take(&mut self.conversation_workspaces.system_browser) {
+            if job.generation != self.desktop_browser_generation || job.target != target || !job.source.authorized() { continue; }
+            let result = match job.receiver.try_recv() {
+                Ok(result) => result,
+                Err(std::sync::mpsc::TryRecvError::Empty) => { pending.push(job); continue; }
+                Err(_) => Err("Machine directory browser worker stopped".into()),
+            };
+            if !job.selection && (!self.renderer.file_browser.is_active() || self.renderer.file_browser.current_path() != job.path) { continue; }
+            match result {
+                Err(error) => self.browser_failure(error, job.selection),
+                Ok(value) => {
+                    let Some(path) = value.get("path").and_then(|v| v.as_str()) else {
+                        self.browser_failure("Invalid machine directory response; update remote Neoism".into(), job.selection);
+                        continue;
+                    };
+                    if job.selection { self.commit_browser_directory(PathBuf::from(path)); }
+                    else {
+                        let entries = value.get("entries").and_then(|v| v.as_array()).map(|entries| entries.iter().filter_map(|entry| {
+                            Some(FileBrowserEntry { name: entry.get("name")?.as_str()?.to_owned(), is_dir: true, size: None })
+                        }).collect()).unwrap_or_default();
+                        self.renderer.file_browser.set_listing(path, entries);
+                    }
+                }
+            }
+        }
+        self.conversation_workspaces.system_browser = pending;
+        for request in self.renderer.file_browser.drain_requests() {
+            match request {
+                FileBrowserRequest::LoadLocations => {
+                    if let Some(source) = self.context_manager.current().neoism_agent.as_ref().and_then(|p| p.selected_system_source()) {
+                        self.renderer.file_browser.set_locations(vec![FileBrowserLocation {
+                            kind: "home".into(), label: "Home".into(), path: source.home_directory.clone(),
+                        }]);
+                    }
+                }
+                FileBrowserRequest::ListDirectory { path } => self.request_system_directory(target.clone(), path, false),
+            }
+        }
+        if let Some(selection) = self.renderer.file_browser.take_selection() {
+            if selection.mode == FileBrowserMode::ChooseDirectory {
+                self.request_system_directory(target, selection.path, true);
+            }
+        }
     }
 
     fn browser_failure(&mut self, message: String, selection: bool) {
@@ -296,6 +384,11 @@ impl Screen<'_> {
             return;
         }
         let target = self.desktop_browser_target.clone().unwrap();
+        if self.context_manager.current().neoism_agent.as_ref().and_then(|pane| pane.selected_system_source()).is_some()
+            && target.purpose == DesktopBrowserPurpose::AgentDirectory {
+            self.pump_system_directory_browser(target);
+            return;
+        }
         if target.joined {
             for request in self.renderer.file_browser.drain_requests() {
                 match request {

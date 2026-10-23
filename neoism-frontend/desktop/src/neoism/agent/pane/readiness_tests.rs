@@ -22,6 +22,8 @@ fn positive() -> ProviderReadiness {
     ProviderReadiness {
         connected: vec!["test".into()],
         models: vec!["test/model".into()],
+        pending: false,
+        identity: Some("test-identity".into()),
     }
 }
 
@@ -167,6 +169,85 @@ fn rejection_expires_before_usable_positive_state() {
     pane.provider_readiness_checked_at =
         Instant::now().checked_sub(std::time::Duration::from_secs(301));
     assert!(pane.current_provider_readiness().is_none());
+}
+
+#[test]
+fn new_chat_reuses_loaded_readiness_and_pending_reply_cannot_downgrade_it() {
+    let mut pane = pane();
+    pane.apply_provider_readiness(scope(&pane), positive());
+    pane.provider_readiness_checked_at = Instant::now().checked_sub(Duration::from_secs(45));
+    let original_age = pane.provider_readiness_checked_at;
+    pane.session_id = Some("previous-chat".into());
+    pane.create_new_session();
+    pane.refresh_provider_readiness();
+    assert_eq!(pane.current_provider_readiness(), Some(&positive()));
+    assert_eq!(pane.provider_readiness_checked_at, original_age);
+    assert!(pane.provider_readiness_in_flight.is_empty());
+    let mut pending = positive();
+    pending.pending = true;
+    pending.models = vec!["test/fallback-only".into()];
+    pane.background_tx.send(NeoismAgentBackgroundUpdate::ProviderReadinessRefreshed {
+        scope: scope(&pane), result: Ok(pending.clone()),
+    }).unwrap();
+    pane.drain_background_updates();
+    assert_eq!(pane.current_provider_readiness(), Some(&positive()));
+    assert_eq!(pane.provider_readiness_checked_at, original_age);
+    let mut changed_credential = pending.clone();
+    changed_credential.identity = Some("different-credential".into());
+    assert!(pane.apply_provider_readiness(scope(&pane), changed_credential));
+    assert!(pane.provider_readiness.as_ref().unwrap().pending);
+    pane.apply_provider_readiness(scope(&pane), positive());
+    // A complete empty result is authoritative, unlike pending fallback data.
+    pane.apply_provider_readiness(scope(&pane), ProviderReadiness {
+        connected: vec!["test".into()], ..Default::default()
+    });
+    assert!(pane.prompt_readiness_error().unwrap().contains("/models"));
+    // Explicit invalidation forbids reusing even a previously good value.
+    super::super::api::invalidate_catalog_endpoint(&pane.server);
+    assert!(pane.apply_provider_readiness(scope(&pane), pending));
+    assert!(pane.provider_readiness.as_ref().unwrap().pending);
+}
+
+#[test]
+fn pending_discovery_new_chat_submits_first_attempt_and_invalid_selection_retains_draft() {
+    for model in ["test/model", "test/invalid", "disconnected/model"] {
+        let mut pane = pane();
+        let mut readiness = positive();
+        readiness.pending = true;
+        super::super::api::seed_readiness_catalog_for_test(
+            &pane.server, pane.directory.as_deref(),
+            serde_json::json!({"all":[{"id":"test","models":{"model":{}}}],
+                "connected":["test"], "readinessPending":true, "readinessIdentity":"test-identity"}),
+        );
+        pane.model = model.into();
+        // Keep dispatch local: the test asserts admission/queueing, not provider I/O.
+        pane.prompt_dispatch_in_flight = true;
+        pane.input = "immediate prompt".into();
+        pane.cursor_byte = pane.input.len();
+        assert!(pane.submit());
+        if model == "test/model" {
+            assert!(pane.input.is_empty());
+            assert_eq!(pane.pending_prompt_dispatches.len(), 1);
+            assert!(pane.drain_ui_events().is_empty());
+        } else {
+            assert_eq!(pane.input, "immediate prompt");
+            assert_eq!(pane.cursor_byte, pane.input.len());
+            assert!(pane.pending_prompt_dispatches.is_empty());
+        }
+        assert_eq!(pane.current_provider_readiness(), Some(&readiness));
+    }
+}
+
+#[test]
+fn pending_readiness_expires_quickly_without_becoming_a_negative() {
+    let mut pane = pane();
+    let mut readiness = positive();
+    readiness.pending = true;
+    pane.apply_provider_readiness(scope(&pane), readiness);
+    assert!(pane.prompt_readiness_error().is_none());
+    pane.provider_readiness_checked_at = Instant::now().checked_sub(Duration::from_secs(2));
+    assert!(pane.current_provider_readiness().is_none());
+    assert!(pane.prompt_readiness_error().unwrap().contains("still loading"));
 }
 
 #[test]

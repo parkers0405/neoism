@@ -154,11 +154,11 @@ impl Screen<'_> {
         let terminal_block_input_active = {
             #[cfg(target_os = "macos")]
             {
-                self.current_terminal_block_input_cursor_rect().is_some()
+                self.terminal_block_input_cursor_rect_for_paint().is_some()
             }
             #[cfg(not(target_os = "macos"))]
             {
-                self.current_terminal_block_input_active()
+                self.terminal_block_input_active_for_paint()
             }
         };
         let cursor_blink_visible = self
@@ -344,7 +344,7 @@ impl Screen<'_> {
             }
             Some(TrailCursorOverlayTarget::TerminalBlockInput) => {
                 if let Some(([x, y, w, h], shape)) =
-                    self.current_terminal_block_input_cursor_rect()
+                    self.terminal_block_input_cursor_rect_for_paint()
                 {
                     self.renderer.trail_cursor.set_cursor_shape(shape);
                     self.renderer.trail_cursor.set_destination(x, y, w, h);

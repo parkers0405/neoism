@@ -4,6 +4,7 @@ mod pane;
 pub(crate) mod picker;
 pub(crate) mod prompt_history;
 pub(crate) mod side_panel;
+pub(crate) mod system;
 pub(crate) mod transport;
 mod updates;
 
@@ -31,11 +32,11 @@ pub(crate) mod perf {
 
 pub(crate) use api::{
     agent_reverse_proxy_for_daemon_workspace, conversation_workspace_registry_request,
-    delete_session, fetch_session_entries_page, fetch_session_projects,
+    delete_session, fetch_session_entries_page, fetch_session_projects, fetch_system_directories,
     fetch_session_search_hits, neoism_agent_server, register_agent_server_credential,
     rename_session, set_session_pinned,
 };
-pub(crate) use pane::{AgentSessionMutation, TimelineMeasureKey};
+pub(crate) use pane::{qualify_entry, AgentSessionMutation, TimelineMeasureKey};
 pub use pane::{
     NeoismAgentMessage, NeoismAgentMessageKind, NeoismAgentNoticeLevel,
     NeoismAgentOutputKind, NeoismAgentPane, NeoismAgentPendingPermission,

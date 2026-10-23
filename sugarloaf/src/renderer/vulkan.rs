@@ -101,7 +101,54 @@ pub(crate) struct VulkanShaderOverlayBrush {
     frame_count: u32,
 }
 
+#[cfg(test)]
+mod retirement_tests;
+
+/// Retain whole resources until reuse of the actual acquired slot proves that
+/// the submission carrying their retirement has completed. No frame-count or
+/// round-robin assumptions: acquisition may repeatedly choose the same slot.
+struct SlotRetirement<T> {
+    pending: Vec<T>,
+    bins: [Vec<T>; FRAMES_IN_FLIGHT],
+}
+
+impl<T> Default for SlotRetirement<T> {
+    fn default() -> Self {
+        Self {
+            pending: Vec::new(),
+            bins: std::array::from_fn(|_| Vec::new()),
+        }
+    }
+}
+
+impl<T> SlotRetirement<T> {
+    fn retire(&mut self, resource: T) {
+        self.pending.push(resource);
+    }
+
+    /// Call exactly once after successful acquisition, after that slot's fence
+    /// completed and before submitting the new frame on the same graphics queue.
+    /// That new frame's fence also covers all earlier queued uses of pending
+    /// resources. Failed acquisition MUST NOT advance this state. Submission
+    /// failure currently panics in present_frame after the fence was reset;
+    /// it cannot supply a signaled reuse proof. The bin stays owned until the
+    /// normal idle-before-drop teardown (also for an abandoned acquired frame).
+    fn acquired(&mut self, slot: usize) {
+        self.bins[slot].clear();
+        self.bins[slot].append(&mut self.pending);
+    }
+
+    /// Only for teardown, after device idle and before shared sampler teardown.
+    fn clear_after_idle(&mut self) {
+        self.pending.clear();
+        for bin in &mut self.bins {
+            bin.clear();
+        }
+    }
+}
+
 pub struct VulkanRenderer {
+    retired_images: SlotRetirement<VulkanImageTexture>,
     /// Bootstrap pipeline — proves the SPIR-V → `vk::ShaderModule` →
     /// `vk::Pipeline` chain works end-to-end. Bound only when
     /// `bootstrap_visible` is true; otherwise the frame is just a
@@ -331,6 +378,7 @@ impl VulkanRenderer {
         let image_sampler = create_image_sampler(&device);
 
         Self {
+            retired_images: SlotRetirement::default(),
             bootstrap_pipeline,
             bootstrap_layout,
             bootstrap_visible,
@@ -367,6 +415,15 @@ impl VulkanRenderer {
             pipeline_cache,
             shader_overlay: None,
         }
+    }
+
+    pub(super) fn retire_image(&mut self, texture: VulkanImageTexture) {
+        // Includes image/view, descriptor pool/set and any streaming staging.
+        self.retired_images.retire(texture);
+    }
+
+    pub(super) fn acquired_image_retirement_slot(&mut self, slot: usize) {
+        self.retired_images.acquired(slot);
     }
 
     pub(crate) fn has_shader_overlay(&self) -> bool {
@@ -1026,6 +1083,7 @@ impl Drop for VulkanRenderer {
             // submit using this pipeline would crash the driver if we
             // destroyed it under the GPU's nose.
             let _ = self.device.device_wait_idle();
+            self.retired_images.clear_after_idle();
 
             self.device.destroy_pipeline(self.image_pipeline, None);
             self.device

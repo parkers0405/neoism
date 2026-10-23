@@ -391,7 +391,23 @@ impl Screen<'_> {
         originating_server: &str,
         pointer: bool,
     ) {
-        let server = originating_server.to_owned();
+        let opening_started = crate::neoism::agent::perf::now();
+        let mut entry = entry;
+        let remote_source = if let Some((id, generation, raw)) = crate::neoism::agent::system::decode_source_key(&entry.id) {
+            let Some(source) = self.conversation_workspaces.system_sources.iter()
+                .find(|s| s.id == id && s.generation == generation && s.authorized()).cloned() else { return; };
+            entry.id = raw;
+            entry.directory = entry.directory.and_then(|value| {
+                let (owner, epoch, path) = crate::neoism::agent::system::decode_source_key(&value)?;
+                (owner == id && epoch == generation).then_some(path)
+            });
+            entry.branch_root_id = entry.branch_root_id.and_then(|value| {
+                let (owner, epoch, branch) = crate::neoism::agent::system::decode_source_key(&value)?;
+                (owner == id && epoch == generation).then_some(branch)
+            });
+            Some(source)
+        } else { None };
+        let server = remote_source.as_ref().map(|s| s.server.clone()).unwrap_or_else(|| originating_server.to_owned());
         let expected_server = self
             .context_manager
             .agent_server_override_for_current()
@@ -405,7 +421,10 @@ impl Screen<'_> {
                 self.context_manager.current_workspace_is_remote_joined(),
                 dirs::home_dir().as_deref(),
             );
-        if !conversation_catalog_matches(
+        let remote_allowed = remote_source.is_some()
+            && expected_catalog_directory.is_none()
+            && !self.context_manager.current_workspace_is_remote_joined();
+        if !remote_allowed && !conversation_catalog_matches(
             &server,
             self.renderer
                 .conversations_pane
@@ -421,7 +440,9 @@ impl Screen<'_> {
             );
             return;
         }
-        let target_directory = entry.directory.or(expected_directory);
+        let target_directory = if let Some(source) = &remote_source {
+            entry.directory.or_else(|| Some(source.home_directory.clone()))
+        } else { entry.directory.or(expected_directory) };
         let id = entry.id;
         let branch_root = entry.branch_root_id;
         let source = entry.source;
@@ -510,6 +531,7 @@ impl Screen<'_> {
                     // The pane owns parked parent runtime/input and the family
                     // subscription. Never replace it with the catalog pane.
                     agent.switch_session(target.to_owned());
+                    agent.record_conversation_open_started(opening_started);
                     if branch_root.is_none() {
                         agent.set_conversation_source(source);
                     }
@@ -529,7 +551,13 @@ impl Screen<'_> {
                 // but no frame has drained them yet. Saved session metadata
                 // owns the settings for this existing-conversation pane.
                 agent.discard_queued_draft_defaults();
+                if let Some(source) = remote_source {
+                    agent.pin_system_backend(source, target_directory);
+                } else if let Some(directory) = target_directory {
+                    agent.choose_session_directory(directory);
+                }
                 agent.switch_session(id);
+                agent.record_conversation_open_started(opening_started);
                 agent.set_conversation_source(source);
             }
             self.renderer
@@ -727,6 +755,13 @@ impl Screen<'_> {
         server: &str,
         directory: Option<&str>,
     ) -> bool {
+        if let Some((id, generation, marker)) = directory.and_then(crate::neoism::agent::system::decode_source_key) {
+            return marker == "catalog"
+                && self.renderer.conversations_pane.side_panel().catalog_directory().is_none()
+                && !self.context_manager.current_workspace_is_remote_joined()
+                && self.conversation_workspaces.system_sources.iter().any(|source|
+                    source.id == id && source.generation == generation && source.server == server && source.authorized());
+        }
         let expected_server = self
             .context_manager
             .agent_server_override_for_current()
@@ -777,6 +812,7 @@ impl Screen<'_> {
                 (!entry.is_header
                     && !entry.is_excerpt
                     && entry.branch_root_id.is_none()
+                    && entry.external_preview.is_none()
                     && !entry.id.starts_with("external:"))
                 .then_some((row, entry.clone()))
             })
@@ -785,8 +821,15 @@ impl Screen<'_> {
         };
         panel.side_panel_mut().set_focused(true);
         panel.side_panel_mut().set_selected(row);
-        let server = panel.server_address().to_owned();
-        let directory = panel.side_panel().catalog_directory().map(str::to_owned);
+        let (server, raw_id) = match panel.resolve_catalog_key(&entry.id) {
+            Some(origin) => origin,
+            None => return true,
+        };
+        let directory = if server != panel.server_address() {
+            panel.system_source(&server).map(|source| source.key("catalog"))
+        } else { panel.side_panel().catalog_directory().map(str::to_owned) };
+        let mut entry = entry;
+        entry.id = raw_id;
         let items = vec![
             ContextMenuItem::new(
                 if entry.pinned {
@@ -1054,8 +1097,29 @@ impl Screen<'_> {
             self.request_remote_notes_listing();
             return true;
         }
-        self.renderer.notes_sidebar.refresh_notes();
+        self.request_local_notes_sidebar_refresh();
         true
+    }
+
+    fn request_local_notes_sidebar_refresh(&mut self) {
+        self.renderer.notes_sidebar.enable_async_local_refresh();
+        self.renderer.notes_sidebar.refresh_notes();
+        self.poll_notes_sidebar_refresh();
+    }
+
+    /// Parent hook: pump once per app loop/render, including hidden panels.
+    /// Enables async mode for subsequent workspace assignments as well.
+    /// Completion wakes this window through EventProxy, outside the mailbox lock.
+    pub(crate) fn poll_notes_sidebar_refresh(&mut self) -> bool {
+        let events = self.context_manager.event_proxy();
+        let window = self.context_manager.window_id();
+        let changed = self.renderer.notes_sidebar.poll_local_refresh(move || {
+            events.send_event(neoism_backend::event::RioEvent::Render.into(), window);
+        });
+        if changed {
+            self.mark_dirty();
+        }
+        changed
     }
 
     pub(crate) fn handle_notes_sidebar_click(&mut self) -> bool {
@@ -1300,7 +1364,7 @@ impl Screen<'_> {
                 // Reveal the destination folder so the moved item shows,
                 // re-list the panel, and keep the sidebar focused.
                 self.renderer.notes_sidebar.reveal_dir(&dest_dir);
-                self.renderer.notes_sidebar.refresh_notes();
+                self.request_local_notes_sidebar_refresh();
                 self.renderer.notes_sidebar.set_focused(true);
                 self.renderer.notifications.push(
                     format!("Moved {}", target.display()),
@@ -1660,7 +1724,7 @@ impl Screen<'_> {
         let target = vault.join(&name);
         match std::fs::create_dir_all(&target) {
             Ok(()) => {
-                self.renderer.notes_sidebar.refresh_notes();
+                self.request_local_notes_sidebar_refresh();
                 self.renderer.notes_sidebar.set_focused(true);
                 self.renderer.notifications.push(
                     format!("Created folder {}", target.display()),
@@ -1823,9 +1887,9 @@ impl Screen<'_> {
             Ok(()) => {
                 self.renderer.modal.close();
                 self.renderer.notes_sidebar.reveal_dir(&dir);
-                self.renderer.notes_sidebar.refresh_notes();
-                self.renderer.notes_sidebar.select_path(&path);
+                self.request_local_notes_sidebar_refresh();
                 self.renderer.notes_sidebar.set_focused(false);
+                self.renderer.notes_sidebar.select_after_refresh(&path);
                 self.renderer.file_tree.set_focused(false);
                 self.refresh_file_tree_entries();
                 self.open_path_from_notes_sidebar(path);

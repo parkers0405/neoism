@@ -672,7 +672,7 @@ pub(crate) fn history_from_agent_message(
             .into_iter()
             .map(|image| HistoryAttachment {
                 filename: image.filename,
-                url: image.url,
+                url: image.url.to_string(),
                 mime: image.mime,
             })
             .collect(),

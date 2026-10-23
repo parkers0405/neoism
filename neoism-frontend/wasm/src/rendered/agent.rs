@@ -1772,6 +1772,11 @@ impl ChromeBridge {
             selecting: bool,
         }
         let mut result = ClickResult::default();
+        if self.chrome.modal.is_image_open() {
+            self.modal_pointer_down(x, y);
+            result.handled = true;
+            return serde_wasm_bindgen::to_value(&result).unwrap_or(JsValue::NULL);
+        }
         if !self.chrome.agent_interaction_surface_contains(x, y) {
             return serde_wasm_bindgen::to_value(&result).unwrap_or(JsValue::NULL);
         }
@@ -1780,6 +1785,7 @@ impl ChromeBridge {
             self.chrome.agent_side_panel_takeover_active();
         let mut usage_menu_lines = None;
         let mut file_browser_action = None;
+        let mut preview_image = None;
         // Match desktop z-order: the top bar and its open menu own their full
         // painted area before the agent timeline can begin a selection.
         let in_top_bar = self
@@ -1892,6 +1898,11 @@ impl ChromeBridge {
                 result.handled = true;
                 break 'chain;
             }
+            if let Some(image) = pane.composer_interactions.image_at(x, y).cloned() {
+                preview_image = Some(image);
+                result.handled = true;
+                break 'chain;
+            }
             if pane.begin_scrollbar_drag(x, y)
                 || pane.begin_markdown_horizontal_scrollbar_drag(x, y)
             {
@@ -1934,19 +1945,25 @@ impl ChromeBridge {
         if relayout {
             self.relayout_chrome();
         }
+        if let Some(image) = preview_image {
+            self.chrome.modal.open_image(image);
+        }
         if let Some(lines) = usage_menu_lines {
             open_agent_usage_menu(self, lines, x, y);
         }
         if let Some(action) = file_browser_action {
             use neoism_ui::panels::agent_pane::composer_interactions::ComposerAction;
             let mode = match action {
-                ComposerAction::AttachPicture => "attach_image",
-                ComposerAction::ChangeDirectory => "choose_directory",
+                ComposerAction::AttachPicture => Some("attach_image"),
+                ComposerAction::ChangeDirectory => Some("choose_directory"),
+                ComposerAction::ChangeSystem => None,
             };
-            self.pending_agent_file_browser = Some(serde_json::json!({
-                "mode": mode,
-                "session_id": self.agent_session_id(),
-            }));
+            if let Some(mode) = mode {
+                self.pending_agent_file_browser = Some(serde_json::json!({
+                    "mode": mode,
+                    "session_id": self.agent_session_id(),
+                }));
+            }
         }
         if result.handled {
             // Picker commits / permission replies queue outbound
@@ -2019,6 +2036,9 @@ impl ChromeBridge {
     /// cursor → timeline. `delta_pixels` uses the timeline sign
     /// convention (positive scrolls up into history).
     pub fn agent_scroll_at(&mut self, x: f32, y: f32, delta_pixels: f32) -> bool {
+        if self.chrome.modal.is_active() {
+            return self.modal_scroll(x, y, delta_pixels);
+        }
         if !self.chrome.agent_interaction_surface_contains(x, y) {
             return false;
         }
@@ -2080,6 +2100,9 @@ impl ChromeBridge {
         delta_mode: u32,
         legacy_wheel_delta_y: f32,
     ) -> bool {
+        if self.chrome.modal.is_active() {
+            return self.modal_scroll(x, y, delta_y);
+        }
         if !self.chrome.agent_interaction_surface_contains(x, y) {
             return false;
         }
@@ -2135,6 +2158,9 @@ impl ChromeBridge {
         y: f32,
         delta_pixels: f32,
     ) -> bool {
+        if self.chrome.modal.is_active() {
+            return true;
+        }
         if !self.chrome.content_surface_contains(x, y) {
             return false;
         }

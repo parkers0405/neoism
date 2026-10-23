@@ -934,12 +934,25 @@ impl Screen<'_> {
                 });
                 self.request_system_action(SystemRequest::Show);
             }
+            ModalAction::SystemDeactivateConfirm { id } => {
+                self.renderer.modal.close();
+                self.request_system_action(SystemRequest::SetEnabled {
+                    id: id.clone(),
+                    enabled: false,
+                    discard: true,
+                });
+                self.request_system_action(SystemRequest::Settings { id });
+            }
             ModalAction::SystemDisconnectConfirm { id, remove } => {
                 self.renderer.modal.close();
                 self.request_system_action(SystemRequest::Disconnect {
-                    id, remove, discard: true,
+                    id: id.clone(), remove, discard: true,
                 });
-                self.request_system_action(SystemRequest::Show);
+                self.request_system_action(if remove {
+                    SystemRequest::Show
+                } else {
+                    SystemRequest::Settings { id }
+                });
             }
             ModalAction::ServerReconnectRetry { endpoint } => {
                 self.renderer.modal.close();

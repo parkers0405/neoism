@@ -31,46 +31,9 @@ pub struct PaletteSystemEntry {
     pub name: String,
     pub address: String,
     pub local: bool,
+    /// Durable activation preference supplied by the host (always true for local).
+    pub enabled: bool,
     pub status: SystemConnectionStatus,
-}
-
-impl PaletteSystemEntry {
-    pub(crate) fn controls(&self) -> Vec<(&'static str, f32, PaletteAction)> {
-        let mut controls = Vec::new();
-        if !self.local {
-            controls.push(match self.status {
-                SystemConnectionStatus::Connected => (
-                    "Disconnect",
-                    76.0,
-                    PaletteAction::DisconnectSystem {
-                        id: self.id.clone(),
-                    },
-                ),
-                SystemConnectionStatus::Connecting => (
-                    "Cancel",
-                    52.0,
-                    PaletteAction::DisconnectSystem {
-                        id: self.id.clone(),
-                    },
-                ),
-                SystemConnectionStatus::Disconnected => (
-                    "Connect",
-                    60.0,
-                    PaletteAction::ConnectSystem {
-                        id: self.id.clone(),
-                    },
-                ),
-            });
-            controls.push((
-                "Remove",
-                58.0,
-                PaletteAction::RemoveSystem {
-                    id: self.id.clone(),
-                },
-            ));
-        }
-        controls
-    }
 }
 
 /// Actions that can be triggered from the command palette.
@@ -172,12 +135,19 @@ pub enum PaletteAction {
     /// chrome; web owns this action at the host layer.
     ShowWorkplaces,
     ShowSystems,
+    ShowSystemSettings { id: String },
+    SshToSystem { id: String },
     AddSystem,
     ConnectSystem {
         id: String,
     },
     DisconnectSystem {
         id: String,
+    },
+    /// Idempotent activation intent, independent of runtime connection state.
+    SetSystemEnabled {
+        id: String,
+        enabled: bool,
     },
     RemoveSystem {
         id: String,
@@ -933,10 +903,13 @@ pub(crate) fn command_visible_for_surface(
         | PaletteAction::ListFonts
         | PaletteAction::ListBuffers
         | PaletteAction::ShowWorkplaces
+        | PaletteAction::ShowSystemSettings { .. }
+        | PaletteAction::SshToSystem { .. }
         | PaletteAction::ShowSystems
         | PaletteAction::AddSystem
         | PaletteAction::ConnectSystem { .. }
         | PaletteAction::DisconnectSystem { .. }
+        | PaletteAction::SetSystemEnabled { .. }
         | PaletteAction::RemoveSystem { .. }
         | PaletteAction::ShowServers
         | PaletteAction::SelectServer { .. }

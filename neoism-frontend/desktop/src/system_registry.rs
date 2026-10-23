@@ -10,6 +10,12 @@ pub(crate) struct SavedSystem {
     pub name: String,
     pub target: String,
     pub ssh_args: Vec<String>,
+    #[serde(default = "legacy_enabled")]
+    pub enabled: bool,
+}
+
+fn legacy_enabled() -> bool {
+    true
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -122,10 +128,35 @@ impl SystemRegistry {
                 name,
                 target,
                 ssh_args,
+                enabled: false,
             };
             systems.push(system.clone());
             system
         };
+        self.persist(&RegistryData {
+            systems: systems.clone(),
+        })?;
+        self.data.systems = systems;
+        Ok(saved)
+    }
+
+    /// Change activation intent under the same lock as recipe updates. Failed
+    /// persistence leaves the reloaded snapshot unchanged.
+    pub(crate) fn set_enabled(
+        &mut self,
+        id: &str,
+        enabled: bool,
+    ) -> io::Result<SavedSystem> {
+        let _lock = self.lock_and_reload()?;
+        let mut systems = self.data.systems.clone();
+        let system = systems
+            .iter_mut()
+            .find(|system| system.id == id)
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::NotFound, "saved system not found")
+            })?;
+        system.enabled = enabled;
+        let saved = system.clone();
         self.persist(&RegistryData {
             systems: systems.clone(),
         })?;
@@ -373,6 +404,85 @@ mod tests {
     use super::*;
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn legacy_recipes_default_enabled() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("systems.json"), br#"{"systems":[{"id":"legacy","name":"Old","target":"host","ssh_args":[]}]}"#).unwrap();
+        let mut registry = SystemRegistry::load_directory(dir.path().into()).unwrap();
+        assert!(registry.system("legacy").unwrap().enabled);
+        let duplicate = registry.upsert("Renamed", "host", vec![]).unwrap();
+        assert_eq!(duplicate.id, "legacy");
+        assert!(duplicate.enabled);
+    }
+
+    #[test]
+    fn activation_roundtrip_and_duplicate_preserve_intent() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut registry = SystemRegistry::load_directory(dir.path().into()).unwrap();
+        let saved = registry.upsert("Host", "host", vec![]).unwrap();
+        assert!(!saved.enabled);
+        assert!(
+            !registry
+                .upsert("Duplicate", "HOST", vec![])
+                .unwrap()
+                .enabled
+        );
+        registry.reload().unwrap();
+        assert!(!registry.system(&saved.id).unwrap().enabled);
+        assert!(registry.set_enabled(&saved.id, true).unwrap().enabled);
+        assert!(registry.upsert("Renamed", "host", vec![]).unwrap().enabled);
+        registry.reload().unwrap();
+        assert!(registry.system(&saved.id).unwrap().enabled);
+        registry.set_enabled(&saved.id, false).unwrap();
+        registry.reload().unwrap();
+        assert!(!registry.system(&saved.id).unwrap().enabled);
+        assert!(registry.set_enabled("unknown", true).is_err());
+    }
+
+    #[test]
+    fn stale_activation_writers_preserve_other_records_and_intent() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut a = SystemRegistry::load_directory(dir.path().into()).unwrap();
+        let first = a.upsert("First", "first", vec![]).unwrap();
+        let mut b = SystemRegistry::load_directory(dir.path().into()).unwrap();
+        a.set_enabled(&first.id, true).unwrap();
+        b.upsert("Renamed", "first", vec![]).unwrap();
+        let second = a.upsert("Second", "second", vec![]).unwrap();
+        b.set_enabled(&first.id, false).unwrap();
+        a.reload().unwrap();
+        assert_eq!(a.system(&first.id).unwrap().name, "Renamed");
+        assert!(!a.system(&first.id).unwrap().enabled);
+        assert_eq!(a.system(&second.id), Some(&second));
+    }
+
+    #[test]
+    fn activation_write_failure_preserves_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut registry = SystemRegistry::load_directory(dir.path().into()).unwrap();
+        let saved = registry.upsert("Host", "host", vec![]).unwrap();
+        let saved = registry.set_enabled(&saved.id, true).unwrap();
+        // Hold the valid reloaded snapshot while forcing atomic replacement to
+        // fail, independent of platform permissions (including root test runs).
+        let lock = registry.lock_and_reload().unwrap();
+        let mut stale = SystemRegistry {
+            directory: dir.path().into(),
+            data: RegistryData {
+                systems: vec![saved.clone()],
+            },
+        };
+        assert!(stale.set_enabled(&saved.id, false).is_err());
+        assert_eq!(stale.system(&saved.id), Some(&saved));
+        fs::remove_file(dir.path().join("systems.json")).unwrap();
+        fs::create_dir(dir.path().join("systems.json")).unwrap();
+        let mut data = RegistryData {
+            systems: vec![saved.clone()],
+        };
+        data.systems[0].enabled = false;
+        assert!(registry.persist(&data).is_err());
+        assert_eq!(registry.system(&saved.id), Some(&saved));
+        drop(lock);
     }
 
     #[test]

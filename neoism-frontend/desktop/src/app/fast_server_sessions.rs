@@ -585,7 +585,9 @@ impl Application<'_> {
         let temporary = self.server_registry.is_temporary(&server_id);
         // Temporary entries are application-owned. Remove their bindings in
         // every window before disposing the single hosting guard/credential.
-        let windows = if temporary {
+        let ssh = self.ssh_attaches.contains_key(endpoint)
+            || self.ssh_routes.contains_key(endpoint);
+        let windows = if temporary || ssh {
             self.router.routes.keys().copied().collect::<Vec<_>>()
         } else {
             vec![window_id]
@@ -691,6 +693,10 @@ impl Application<'_> {
                     self.switch_window_server(id, &target, token, target_id);
                 }
             }
+        }
+        if ssh && complete {
+            self.ssh_attaches.remove(endpoint);
+            self.ssh_routes.remove(endpoint);
         }
         if temporary && complete {
             self.fast_hosts.remove(&server_id);

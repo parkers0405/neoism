@@ -1,6 +1,67 @@
 use super::*;
 
 #[test]
+fn readiness_cache_is_independent_of_defaults_and_configured_models() {
+    let server = "invalid://readiness-only-cache";
+    let key = catalog_key(server, Some("/chat"), "/v2/providers");
+    let value = serde_json::json!({
+        "providers": [{"id": "test", "models": {"model": {}}}],
+        "connected": ["test"]
+    });
+    catalog_cache().get(key.clone(), || Ok(value)).unwrap();
+    assert!(cached_config_defaults(server, Some("/chat")).is_none());
+    assert!(cached_model_options(server, Some("/chat")).is_none());
+    for _ in 0..10 {
+        let ready = cached_provider_readiness(server, Some("/chat")).unwrap();
+        assert!(ready.prompt_error("test/model").is_none());
+    }
+    catalog_cache().age_for_test(&key, Duration::from_secs(45));
+    let (_, age) = cached_provider_readiness_with_age(server, Some("/chat")).unwrap();
+    assert!(age >= Duration::from_secs(45));
+    assert!(cached_provider_readiness(server, Some("/chat")).is_some());
+    assert!(cached_provider_readiness(server, Some("/other")).is_none());
+}
+
+#[test]
+fn readiness_cache_does_not_replay_stale_disconnects_or_unusable_models() {
+    for (server, value) in [
+        (
+            "invalid://readiness-empty",
+            serde_json::json!({"providers": [], "connected": []}),
+        ),
+        (
+            "invalid://readiness-unusable",
+            serde_json::json!({"providers": [], "connected": ["test"]}),
+        ),
+    ] {
+        let key = catalog_key(server, None, "/v2/providers");
+        catalog_cache().get(key.clone(), || Ok(value)).unwrap();
+        assert!(cached_provider_readiness(server, None).is_some());
+        catalog_cache().age_for_test(&key, Duration::from_secs(45));
+        assert!(cached_provider_readiness(server, None).is_none());
+        let scope = catalog_scope(server, None);
+        assert!(fetch_provider_readiness_scoped(&scope).is_err());
+        assert!(fetch_provider_readiness_scoped(&scope).is_err());
+        assert!(cached_provider_readiness(server, None).is_none());
+    }
+}
+
+#[test]
+fn conversation_context_limits_reuse_last_good_model_metadata() {
+    let server = "invalid://conversation-context-cache";
+    seed_picker_catalog_for_test(server, Some("/chat"));
+    let key = catalog_key(server, Some("/chat"), "/v2/providers/configured");
+    catalog_cache().age_for_test(&key, Duration::from_secs(45));
+    for _ in 0..10 {
+        assert_eq!(
+            fetch_model_context_limit(server, Some("/chat"), "test/model"),
+            Ok(Some(12345))
+        );
+    }
+    assert!(fetch_model_context_limit(server, Some("/other"), "test/model").is_err());
+}
+
+#[test]
 fn catalog_scope_discards_inflight_http_after_invalidation() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let server = format!("http://{}", listener.local_addr().unwrap());

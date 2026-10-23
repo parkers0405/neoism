@@ -922,14 +922,13 @@ pub(crate) enum NeoismAgentBackgroundUpdate {
         session_id: String,
         error: String,
     },
-    /// An `/undo` or `/redo` completed off the UI thread. Runs on a background
-    /// thread (the revert POST plus a full message re-fetch can be slow on a
-    /// large session, and doing it inline froze the UI so ESC couldn't be
-    /// processed). `title` is "Undo"/"Redo" for the confirmation line.
+    /// An authoritative undo/redo completed off the UI thread. Undo normally
+    /// needs only the returned boundary; redo/paged-out targets carry history.
     SessionHistoryApplied {
         session_id: String,
         title: String,
-        messages: Vec<NeoismAgentMessage>,
+        messages: Option<Vec<NeoismAgentMessage>>,
+        revert_message_id: Option<String>,
     },
     /// An `/undo` or `/redo` failed off the UI thread.
     SessionHistoryFailed {
@@ -1137,6 +1136,9 @@ pub struct NeoismAgentPane {
     pub(super) session_rename: Option<(String, String)>,
     provider_readiness:
         Option<neoism_ui::panels::agent_pane::api_mapping::ProviderReadiness>,
+    provider_readiness_scope: Option<super::api::CatalogScope>,
+    provider_readiness_checked_at: Option<Instant>,
+    provider_readiness_in_flight: std::collections::HashSet<super::api::CatalogScope>,
     recent_model_options: Vec<NeoismAgentPickerOption>,
     skill_options: Vec<NeoismAgentPickerOption>,
     skill_options_directory: Option<Option<String>>,
@@ -1187,6 +1189,7 @@ pub struct NeoismAgentPane {
     background_tx: AgentBackgroundSender,
     background_rx: Receiver<NeoismAgentBackgroundUpdate>,
     session_mutations_in_flight: HashSet<(String, String)>,
+    pub(super) session_history_in_flight: HashSet<String>,
     pub(super) uncertain_prompts: VecDeque<PendingPromptDispatch>,
     /// Semantic session-search coalescing: at most one fetch in flight; a
     /// query typed meanwhile waits in `semantic_pending_query` and is kicked
@@ -1302,6 +1305,7 @@ pub struct NeoismAgentPane {
     pub(super) timeline_content_height_px: f32,
     timeline_viewport_height_px: f32,
     timeline_viewport_rect: Option<[f32; 4]>,
+    timeline_paint_region: Option<neoism_ui::panels::agent_pane::view::timeline::TimelinePaintRegion>,
     pending_timeline_anchor: Option<TimelineAnchor>,
     timeline_view_anchor: Option<TimelineViewAnchor>,
     pub(super) pending_timeline_prepend_height_px: Option<f32>,
@@ -1358,6 +1362,7 @@ pub struct NeoismAgentPane {
     scrollbar_thumb_rect: Option<[f32; 4]>,
     scrollbar_track_rect: Option<[f32; 4]>,
     scrollbar_drag: Option<ScrollbarDrag>,
+    scrollbar_hovered: bool,
     streaming_state: NeoismAgentStreamingState,
     streaming_started_at: Option<Instant>,
     streaming_state_changed_at: Option<Instant>,
@@ -1520,6 +1525,9 @@ impl Default for NeoismAgentPane {
             pending_usage: None,
             session_rename: None,
             provider_readiness: None,
+            provider_readiness_scope: None,
+            provider_readiness_checked_at: None,
+            provider_readiness_in_flight: Default::default(),
             recent_model_options: Vec::new(),
             skill_options: Vec::new(),
             skill_options_directory: None,
@@ -1550,6 +1558,7 @@ impl Default for NeoismAgentPane {
             background_tx,
             background_rx,
             session_mutations_in_flight: HashSet::new(),
+            session_history_in_flight: HashSet::new(),
             uncertain_prompts: VecDeque::new(),
             semantic_in_flight: false,
             semantic_pending_query: None,
@@ -1624,6 +1633,7 @@ impl Default for NeoismAgentPane {
             timeline_content_height_px: 0.0,
             timeline_viewport_height_px: 0.0,
             timeline_viewport_rect: None,
+            timeline_paint_region: None,
             pending_timeline_anchor: None,
             timeline_view_anchor: None,
             pending_timeline_prepend_height_px: None,
@@ -1658,6 +1668,7 @@ impl Default for NeoismAgentPane {
             scrollbar_thumb_rect: None,
             scrollbar_track_rect: None,
             scrollbar_drag: None,
+            scrollbar_hovered: false,
             streaming_state: NeoismAgentStreamingState::Idle,
             streaming_started_at: None,
             streaming_state_changed_at: None,
@@ -2597,8 +2608,12 @@ fn ease_out_cubic(t: f32) -> f32 {
 #[cfg(test)]
 mod admission_tests;
 #[cfg(test)]
+mod readiness_tests;
+#[cfg(test)]
 mod defaults_tests;
 #[cfg(test)]
 mod footer_tests;
+#[cfg(test)]
+mod history_tests;
 #[cfg(test)]
 mod tests;

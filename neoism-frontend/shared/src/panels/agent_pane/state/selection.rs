@@ -93,15 +93,20 @@ impl NeoismAgentPane {
     }
 
     pub fn begin_selection_at(&mut self, x: f32, y: f32) -> bool {
+        if self
+            .timeline_paint_region
+            .as_ref()
+            .is_some_and(|region| !region.contains(x, y))
+        {
+            return false;
+        }
         // Grab-anywhere: a press inside the timeline viewport that isn't
         // pixel-perfect on a glyph anchors to the NEAREST text line, so
         // selecting doesn't require starting right on top of the text.
         let index = self.selectable_line_at(x, y).or_else(|| {
-            self.timeline_viewport_rect
-                .filter(|[vx, vy, vw, vh]| {
-                    x >= *vx && x <= vx + vw && y >= *vy && y <= vy + vh
-                })
-                .and_then(|_| self.nearest_selectable_line(x, y))
+            self.timeline_contains_point(x, y)
+                .then(|| self.nearest_selectable_line(x, y))
+                .flatten()
         });
         let Some(index) = index else {
             self.selection_anchor = None;
@@ -216,6 +221,13 @@ impl NeoismAgentPane {
     }
 
     pub fn drag_selection_to(&mut self, x: f32, y: f32) -> bool {
+        if self
+            .timeline_paint_region
+            .as_ref()
+            .is_some_and(|region| region.occludes(x, y))
+        {
+            return false;
+        }
         if self.selection_anchor.is_none() {
             return false;
         }
@@ -278,7 +290,12 @@ impl NeoismAgentPane {
     /// the selection can extend past visible content. Returns true when
     /// scrolling actually advanced.
     pub fn scroll_for_drag_edge(&mut self, pointer_y: f32) -> bool {
-        let Some([_, vy, _, vh]) = self.timeline_viewport_rect else {
+        let viewport = self
+            .timeline_paint_region
+            .as_ref()
+            .map(|region| region.viewport)
+            .or(self.timeline_viewport_rect);
+        let Some([_, vy, _, vh]) = viewport else {
             return false;
         };
         if vh <= 0.0 {
@@ -365,6 +382,13 @@ impl NeoismAgentPane {
         x: f32,
         y: f32,
     ) -> Option<usize> {
+        if self
+            .timeline_paint_region
+            .as_ref()
+            .is_some_and(|region| !region.contains(x, y))
+        {
+            return None;
+        }
         self.selectable_lines[..self.selectable_lines_len]
             .iter()
             .enumerate()

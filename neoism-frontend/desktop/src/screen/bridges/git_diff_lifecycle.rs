@@ -34,6 +34,12 @@ fn set_review_page_flags<A>(
 }
 
 impl Screen<'_> {
+    pub(crate) fn has_pull_request_drafts(&self) -> bool {
+        self.context_manager.all_grids().iter().any(|grid| grid.contexts().values().any(|item| {
+            item.context().git_diff_view.as_ref().is_some_and(|view| view.has_pull_request_drafts())
+        }))
+    }
+
     pub(crate) fn has_dirty_code_owners(&self) -> bool {
         self.context_manager.all_grids().iter().any(|grid| {
             grid.contexts().values().any(|item| {
@@ -70,6 +76,14 @@ impl Screen<'_> {
         if page.kind != ChromePageKind::GitDiff {
             return true;
         }
+        if self.host_git.pull_request_close_approved != Some(page.route_id)
+            && self.context_manager.current_grid().contexts().values().any(|item| {
+            item.context().route_id == page.route_id
+                && item.context().git_diff_view.as_ref().is_some_and(|view| view.has_pull_request_drafts())
+        }) {
+            self.confirm_pull_request_draft_close(page.route_id);
+            return false;
+        }
         let Some(root) = self
             .context_manager
             .current_grid()
@@ -80,7 +94,7 @@ impl Screen<'_> {
                 (context.route_id == page.route_id)
                     .then_some(context.git_diff_view.as_ref())
                     .flatten()
-                    .filter(|view| view.commit_id.is_none())
+                    .filter(|view| !view.is_read_only())
                     .map(|view| view.root.clone())
             })
         else {
@@ -186,8 +200,8 @@ impl Screen<'_> {
                 grid.contexts().values().filter_map(|item| {
                     let context = item.context();
                     let view = context.git_diff_view.as_ref()?;
-                    if view.commit_id.is_some() {
-                        return Some((context.route_id, false));
+                    if view.is_read_only() {
+                        return Some((context.route_id, view.has_pull_request_drafts()));
                     }
                     let root = neoism_protocol::host_path::HostPath::new(
                         view.root.to_string_lossy(),

@@ -54,7 +54,7 @@ impl GitDiffView {
         self.active_column = column;
         self.edit_focused = false;
         self.reveal_edit_on_focus = false;
-        if column == 0 || self.commit_id.is_some() {
+        if column == 0 || self.is_read_only() {
             return true;
         }
         if self.edit_path.as_ref() == Some(&self.path) {

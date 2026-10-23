@@ -319,42 +319,79 @@ pub fn render_chat_with<P, D>(
         }
     }
     let composer_visible = !pane.is_subagent_session();
-    // Clip the timeline EXACTLY at the island's top border — not at a
-    // gap above it. A clip line floating above the card slices glyphs
-    // mid-row in open space ("a black line splitting the sentence");
-    // cutting at the border itself reads as content sliding under the
-    // floating card.
+    // The metrics viewport retains its original bottom for scroll/follow math.
+    // The paint viewport continues behind the floating silhouette, not a blank strip.
     let content_bottom = if composer_visible {
-        // The island's quads cannot mask text (text composites above
-        // quads), so stop at the border's first pixel — nothing may
-        // draw ON the border itself.
         input_rect[1]
     } else {
         rect[1] + rect[3] - 12.0 * s
     };
-
-    timeline::render_timeline_with::<P, D>(
+    let metrics_rect = [
+        content_x,
+        timeline_top,
+        content_w,
+        (content_bottom - timeline_top).max(0.0),
+    ];
+    let paint_bottom = if composer_visible {
+        rect[1] + rect[3]
+    } else {
+        content_bottom
+    };
+    let paint_rect = [
+        content_x,
+        timeline_top,
+        content_w,
+        (paint_bottom - timeline_top).max(0.0),
+    ];
+    let mut timeline_holes = occlusion_rects.to_vec();
+    if composer_visible {
+        let footer_visible = pane.input_help_visible()
+            || pane.composer_directory().is_some()
+            || checkout_context.is_some();
+        let geometry = super::composer_geometry::ComposerGeometry::new(
+            input_rect,
+            s,
+            sugarloaf.scale_factor(),
+            footer_visible,
+        );
+        timeline_holes.extend(geometry.occlusion_rects());
+    }
+    // Inherit existing renderer-scoped holes (e.g. host overlays). Restore them
+    // before the composer: glyphs/images are not masked by later surface quads.
+    let previous_holes = sugarloaf.set_content_occlusion_rects(Vec::new());
+    timeline_holes.extend_from_slice(&previous_holes);
+    sugarloaf.set_content_occlusion_rects(timeline_holes.clone());
+    let rail_profile = timeline::render_timeline_in_paint_viewport_with::<P, D>(
         sugarloaf,
         pane,
-        [
-            content_x,
-            timeline_top,
-            content_w,
-            (content_bottom - timeline_top).max(0.0),
-        ],
+        metrics_rect,
+        paint_rect,
         theme,
         s,
         now_seconds,
         mouse,
         occlusion_rects,
+        &timeline_holes,
         plugins,
     );
+    let gutter_x = content_x + content_w;
+    timeline::render_timeline_scrollbar_with(
+        sugarloaf,
+        pane,
+        [
+            gutter_x,
+            metrics_rect[1],
+            (rect[0] + rect[2] - gutter_x).max(0.0),
+            metrics_rect[3],
+        ],
+        theme,
+        s,
+        mouse,
+        &rail_profile,
+    );
+    sugarloaf.set_content_occlusion_rects(previous_holes);
 
     if composer_visible {
-        // The timeline is clipped exactly at the composer border, so the
-        // composer does not need the late quad pass for masking. Keeping it in
-        // the normal pass also lets provider logos and attachment thumbnails
-        // composite above the island surface.
         user_input::render_input(
             sugarloaf,
             pane,

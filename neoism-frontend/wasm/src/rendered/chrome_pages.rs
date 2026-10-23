@@ -24,6 +24,40 @@ use super::*;
 
 #[wasm_bindgen]
 impl ChromeBridge {
+    pub fn git_panel_apply_pull_request_reply(&mut self, json: &str) {
+        if let Ok(reply) = serde_json::from_str(json) { self.chrome.apply_git_pull_request_reply(reply); }
+    }
+    pub fn drain_git_pull_request_opens(&mut self) -> JsValue {
+        self.chrome.pump_git_pull_request_replies();
+        let rows: Vec<_> = self.chrome.git_diff_panel.take_pull_request_opens().into_iter().map(|open| {
+            match open {
+                neoism_ui::panels::git_diff::PullRequestOpen::Inbox { root } => serde_json::json!({"root":root.to_string_lossy(),"inbox":true}),
+                neoism_ui::panels::git_diff::PullRequestOpen::Create { root, branch, head, default_branch } => serde_json::json!({"root":root.to_string_lossy(),"create":{"branch":branch,"head":head,"default_branch":default_branch}}),
+                neoism_ui::panels::git_diff::PullRequestOpen::Detail { root, detail } => serde_json::json!({"root":root.to_string_lossy(),"detail":detail}),
+            }
+        }).collect();
+        serde_wasm_bindgen::to_value(&rows).unwrap_or(JsValue::NULL)
+    }
+    pub fn open_git_pull_request_inbox(&mut self, route: usize, root: &str) {
+        self.chrome.open_git_pull_request_inbox(route, root.into());
+    }
+    pub fn set_git_pull_request_view(&mut self, route: usize, root: &str, json: &str) {
+        if let Ok(detail) = serde_json::from_str(json) { self.chrome.set_git_pull_request_view(route, root.into(), detail); }
+    }
+    pub fn create_git_pull_request_view(&mut self, route: usize, root: &str, branch: &str, head: &str, default_branch: &str) {
+        self.chrome.create_git_pull_request_view(route, root.into(), branch.into(), head.into(), default_branch.into());
+    }
+    pub fn git_pull_request_tab_info(&self, route: usize) -> JsValue {
+        serde_wasm_bindgen::to_value(&self.chrome.git_pull_request_tab_info(route)).unwrap_or(JsValue::NULL)
+    }
+    pub fn git_pull_request_has_drafts(&self, route: usize) -> bool { self.chrome.git_pull_request_has_drafts(route) }
+    pub fn drain_pull_request_urls(&mut self) -> JsValue {
+        serde_wasm_bindgen::to_value(&self.chrome.drain_pull_request_urls()).unwrap_or(JsValue::NULL)
+    }
+    pub fn drain_pull_request_workspaces(&mut self) -> JsValue {
+        serde_wasm_bindgen::to_value(&self.chrome.drain_pull_request_workspaces()).unwrap_or(JsValue::NULL)
+    }
+
     pub fn drain_git_commit_opens(&mut self) -> JsValue {
         let rows: Vec<_> = self.chrome.git_diff_panel.take_commit_details().into_iter()
             .map(|(root, detail)| serde_json::json!({ "root": root.to_string_lossy(), "detail": detail })).collect();

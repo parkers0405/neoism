@@ -98,6 +98,7 @@ pub enum TopBarAction {
     /// Switch the left Conversations sidebar without creating, replacing, or
     /// activating a main-pane chat tab.
     ToggleConversations,
+    OpenSystems,
     OpenServers,
     OpenSettings,
     OpenWorkspaces,
@@ -812,7 +813,7 @@ impl ChromeTopBar {
             return true;
         }
         if self.server_btn_rect.contains(x, y) {
-            self.pending_action = Some(TopBarAction::OpenServers);
+            self.pending_action = Some(TopBarAction::OpenSystems);
             self.menu_open = false;
             return true;
         }
@@ -1731,7 +1732,7 @@ mod tests {
 
         let server = bar.server_btn_rect;
         bar.handle_pointer_down(server.x + server.w * 0.5, server.y + server.h * 0.5);
-        assert_eq!(bar.take_action(), Some(TopBarAction::OpenServers));
+        assert_eq!(bar.take_action(), Some(TopBarAction::OpenSystems));
 
         let agent = bar.right_btn_rect;
         bar.handle_pointer_down(agent.x + agent.w * 0.5, agent.y + agent.h * 0.5);

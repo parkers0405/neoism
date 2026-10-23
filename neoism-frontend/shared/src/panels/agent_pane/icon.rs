@@ -140,6 +140,21 @@ impl ProviderLogo {
         Self::from_provider_id(provider)
     }
 
+    /// Composer logos keep their brand treatment independently of chip text.
+    pub fn composer_color(self, dark: bool, fallback: [u8; 4]) -> [u8; 4] {
+        match self {
+            Self::Anthropic => [217, 119, 87, 255],
+            Self::OpenAi | Self::OpenRouter => {
+                if dark {
+                    [255; 4]
+                } else {
+                    [0, 0, 0, 255]
+                }
+            }
+            _ => fallback,
+        }
+    }
+
     pub fn source_rect(self) -> [f32; 4] {
         let index = self.index() as f32;
         [index / Self::COUNT, 0.0, (index + 1.0) / Self::COUNT, 1.0]
@@ -359,6 +374,46 @@ mod tests {
             Some(ProviderLogo::OpenRouter)
         );
         assert_eq!(ProviderLogo::from_model("server default"), None);
+    }
+
+    #[test]
+    fn composer_logo_colors_follow_brand_and_theme_instead_of_chip_text() {
+        let fallback = [70, 90, 200, 255];
+        for dark in [false, true] {
+            assert_eq!(
+                ProviderLogo::Anthropic.composer_color(dark, fallback),
+                [217, 119, 87, 255],
+            );
+            for provider in [ProviderLogo::OpenAi, ProviderLogo::OpenRouter] {
+                let expected = if dark { [255; 4] } else { [0, 0, 0, 255] };
+                assert_eq!(provider.composer_color(dark, fallback), expected);
+            }
+            for provider in [
+                ProviderLogo::Google,
+                ProviderLogo::GitHubCopilot,
+                ProviderLogo::Vercel,
+                ProviderLogo::OpenCode,
+            ] {
+                assert_eq!(provider.composer_color(dark, fallback), fallback);
+            }
+        }
+    }
+
+    #[test]
+    fn claude_atlas_cell_is_the_sourced_starburst_not_the_anthropic_lettermark() {
+        let encoded: String = PROVIDER_LOGO_ATLAS_BASE64.split_whitespace().collect();
+        let bytes = base64::engine::general_purpose::STANDARD.decode(encoded).unwrap();
+        let image = image_rs::load_from_memory(&bytes).unwrap().to_rgba8();
+        // FNV-1a of the 64x64 alpha mask rasterized from claude-starburst.svg.
+        let mut fingerprint = 14_695_981_039_346_656_037_u64;
+        let start_x = ProviderLogo::Anthropic.index() * ProviderLogo::SOURCE_SIDE;
+        for y in 0..ProviderLogo::SOURCE_SIDE {
+            for x in start_x..start_x + ProviderLogo::SOURCE_SIDE {
+                fingerprint = (fingerprint ^ image.get_pixel(x as u32, y as u32)[3] as u64)
+                    .wrapping_mul(1_099_511_628_211);
+            }
+        }
+        assert_eq!(fingerprint, 0x0d0d_e8fd_aa96_84bd);
     }
 
     #[test]

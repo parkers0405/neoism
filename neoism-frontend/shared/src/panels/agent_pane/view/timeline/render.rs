@@ -70,6 +70,25 @@ pub(super) fn activity_geometry(
     }
 }
 
+/// Following activity keeps its body reservation; browsing can paint to the pane bottom.
+pub(super) fn body_paint_clip(
+    geometry: &ActivityGeometry,
+    paint_rect: [f32; 4],
+    following: bool,
+    status_h: f32,
+) -> [f32; 4] {
+    if following && status_h > 0.0 {
+        geometry.body_clip
+    } else {
+        [
+            geometry.body_clip[0],
+            geometry.body_clip[1],
+            geometry.body_clip[2],
+            paint_rect[3].max(geometry.body_clip[3]),
+        ]
+    }
+}
+
 pub fn render_timeline_with<P, D>(
     sugarloaf: &mut Sugarloaf,
     pane: &mut P,
@@ -84,6 +103,48 @@ pub fn render_timeline_with<P, D>(
     P: AgentTimelinePane,
     D: AgentTimelineDelegate<P>,
 {
+    render_timeline_in_paint_viewport_with::<P, D>(
+        sugarloaf,
+        pane,
+        rect,
+        rect,
+        theme,
+        s,
+        now_seconds,
+        mouse,
+        occlusion_rects,
+        occlusion_rects,
+        plugins,
+    );
+}
+
+/// The paint viewport shares the metrics origin/width, but may extend below it.
+/// Keep silhouette hit masks separate from legacy text occlusions: revealed
+/// text treats those as full-line cuts. The renderer clips final glyphs in 2D.
+#[allow(clippy::too_many_arguments)]
+pub fn render_timeline_in_paint_viewport_with<P, D>(
+    sugarloaf: &mut Sugarloaf,
+    pane: &mut P,
+    rect: [f32; 4],
+    paint_rect: [f32; 4],
+    theme: &IdeTheme,
+    s: f32,
+    now_seconds: f32,
+    mouse: Option<(f32, f32)>,
+    occlusion_rects: &[[f32; 4]],
+    hit_occlusion_rects: &[[f32; 4]],
+    plugins: Option<&neoism_lua::PluginSnapshot>,
+) -> [f32; 11]
+where
+    P: AgentTimelinePane,
+    D: AgentTimelineDelegate<P>,
+{
+    let paint_region = TimelinePaintRegion {
+        viewport: paint_rect,
+        occlusion_rects: hit_occlusion_rects.to_vec(),
+    };
+    let mouse = mouse.filter(|(x, y)| paint_region.contains(*x, *y));
+    pane.set_timeline_paint_region(paint_region);
     derivations::reset();
     pane.set_visible_user_orb_active(false);
     pane.set_visible_running_tool_active(false);
@@ -92,8 +153,9 @@ pub fn render_timeline_with<P, D>(
     let viewport_h = h.max(0.0);
     let gap = 18.0 * s;
     let layout_started = web_time::Instant::now();
-    let (layout, did_layout_work, live_growth_px) =
-        timeline_layout::<P, D>(sugarloaf, pane, w, theme, s, gap, viewport_h);
+    let (layout, did_layout_work, live_growth_px) = timeline_layout::<P, D>(
+        sugarloaf, pane, w, theme, s, gap, viewport_h, paint_rect[3],
+    );
     let layout_elapsed_us = web_time::Instant::now()
         .saturating_duration_since(layout_started)
         .as_micros();
@@ -159,7 +221,7 @@ pub fn render_timeline_with<P, D>(
                 .saturating_duration_since(render_started)
                 .as_micros(),
         );
-        return;
+        return [0.0; 11];
     }
 
     let max_scroll = (content_h - viewport_h).max(0.0);
@@ -174,7 +236,13 @@ pub fn render_timeline_with<P, D>(
         pane.timeline_follow_bottom(),
         snap_px(scroll_top),
     );
-    let body_viewport_h = geometry.body_clip[3];
+    let body_clip = body_paint_clip(
+        &geometry,
+        paint_rect,
+        pane.timeline_follow_bottom(),
+        status_h,
+    );
+    let body_viewport_h = body_clip[3];
     // Only materialise per-row measurements when a virtual surface consumes
     // them. On panes that draw straight from the windowed `layout.rows`, this
     // would be O(total history) work allocated every frame for nothing.
@@ -194,7 +262,7 @@ pub fn render_timeline_with<P, D>(
     };
     pane.maybe_request_older_timeline_page(scroll_top, viewport_h);
     pane.sync_virtual_timeline(
-        geometry.body_clip,
+        body_clip,
         w,
         real_content_h,
         scroll_top,
@@ -205,7 +273,7 @@ pub fn render_timeline_with<P, D>(
     // physical pixels. Text-heavy rows (especially code blocks) get visibly
     // soft if their glyph baselines ride half-pixels during inertial scroll.
     let render_scroll_top = snap_px(draw_scroll_top);
-    let viewport_clip = geometry.body_clip;
+    let viewport_clip = body_clip;
     // Keep ordinary scroll frames tight, but preserve the wide registration
     // band while selecting text so drag-to-select still works past the edge.
     // The markdown renderer now culls visible lines itself, so normal scroll
@@ -254,7 +322,7 @@ pub fn render_timeline_with<P, D>(
     let anchor_range = visible_timeline_row_range(
         &layout.rows,
         scroll_top,
-        scroll_top + body_viewport_h,
+        scroll_top + geometry.body_clip[3],
     );
     if let Some(row) = layout.rows.get(anchor_range.start) {
         if !pane.timeline_view_anchor_matches(row.source_index, pane.messages().len()) {
@@ -276,7 +344,7 @@ pub fn render_timeline_with<P, D>(
     {
         draw_scroll_top = scroll_top.clamp(0.0, max_scroll);
         pane.sync_virtual_timeline(
-            geometry.body_clip,
+            body_clip,
             w,
             real_content_h,
             draw_scroll_top,
@@ -429,8 +497,13 @@ pub fn render_timeline_with<P, D>(
     // even while its spring has positive lag. Browsing stays content-attached.
     if status_h > 0.0 {
         let row_y = geometry.status_rect[1];
+        let status_clip = if pane.timeline_follow_bottom() {
+            rect
+        } else {
+            paint_rect
+        };
         if row_y + status_h + STATUS_BOTTOM_INK * s >= y
-            && row_y - STATUS_TOP_INK * s < y + viewport_h
+            && row_y - STATUS_TOP_INK * s < status_clip[1] + status_clip[3]
         {
             D::render_streaming_status_row(
                 sugarloaf,
@@ -439,14 +512,14 @@ pub fn render_timeline_with<P, D>(
                 theme,
                 s,
                 now_seconds,
-                [x, y, w, viewport_h],
+                status_clip,
                 occlusion_rects,
             );
         }
     }
 
     pane.set_visible_user_orb_active(visible_user_orb);
-    render_timeline_scrollbar_with(sugarloaf, pane, [x, y, w, viewport_h], s);
+    let rail_profile = timeline_scroll_rail_profile(&layout.rows, content_h, s);
     if cacheable_layout {
         pane.store_timeline_layout_cache(layout);
     }
@@ -473,6 +546,7 @@ pub fn render_timeline_with<P, D>(
             .saturating_duration_since(render_started)
             .as_micros(),
     );
+    rail_profile
 }
 
 fn message_theme(
@@ -735,64 +809,151 @@ pub(crate) fn is_edit_tool_message<M: AgentTimelineMessage>(message: &M) -> bool
     )
 }
 
+pub(super) fn timeline_scroll_rail_profile<M>(
+    rows: &[TimelineLayoutRow<M>],
+    content_h: f32,
+    s: f32,
+) -> [f32; 11] {
+    let mut profile = [0.0; 11];
+    if rows.is_empty() || content_h <= 0.0 || s <= 0.0 {
+        return profile;
+    }
+    // Sample the blocks occupying each history band, not just its filled area:
+    // a long answer should leave a different silhouette than many short cards.
+    // Bounded binary searches also work with the virtual layout's estimated rows.
+    for (index, weight) in profile.iter_mut().enumerate() {
+        for sample in 0..3 {
+            let at = (index as f32 + (sample as f32 + 0.5) / 3.0) * content_h / 11.0;
+            let row_index = rows.partition_point(|row| row.top + row.height <= at);
+            if let Some(row) = rows.get(row_index).filter(|row| row.top <= at) {
+                *weight += (row.height / (360.0 * s)).sqrt().clamp(0.0, 1.0) / 3.0;
+            }
+        }
+    }
+    profile
+}
+
+#[derive(Debug)]
+pub(super) struct TimelineScrollRail {
+    pub track: [f32; 4],
+    pub thumb: [f32; 4],
+    pub tick_count: usize,
+    pub active_tick: usize,
+}
+
+impl TimelineScrollRail {
+    pub fn hovered_tick(&self, mouse: Option<(f32, f32)>) -> Option<usize> {
+        let (x, y) = mouse?;
+        if !crate::panels::agent_pane::interaction_policy::rect_contains(self.track, x, y)
+        {
+            return None;
+        }
+        let top = self.track[1];
+        let h = self.track[3];
+        let pitch = (h - self.thumb[3]) / (self.tick_count - 1) as f32;
+        Some(
+            ((y - top - self.thumb[3] * 0.5) / pitch)
+                .round()
+                .clamp(0.0, (self.tick_count - 1) as f32) as usize,
+        )
+    }
+
+    pub fn tick_rect(
+        &self,
+        index: usize,
+        hovered: bool,
+        profile: &[f32; 11],
+    ) -> [f32; 4] {
+        let s = self.thumb[3] * 0.5;
+        let pad = (self.track[2] * 0.15).min(3.0 * s);
+        let max_w = self.track[2] - pad * 2.0;
+        let slot = (index as f32 * 10.0 / (self.tick_count - 1) as f32).round() as usize;
+        let weight = profile[slot].clamp(0.0, 1.0);
+        let base_w = (10.0 * s).min(max_w * 0.75) * (0.4 + 0.6 * weight);
+        let width = if hovered {
+            (base_w + 4.0 * s).min(max_w)
+        } else {
+            base_w
+        };
+        let pitch = (self.track[3] - self.thumb[3]) / (self.tick_count - 1) as f32;
+        [
+            self.track[0] + pad,
+            self.track[1] + index as f32 * pitch,
+            width,
+            self.thumb[3],
+        ]
+    }
+}
+
+/// The rect is the existing right gutter, never the transcript's text column.
+pub(super) fn timeline_scroll_rail_geometry(
+    [x, y, w, h]: [f32; 4],
+    s: f32,
+    offset: f32,
+    content_h: f32,
+    viewport_h: f32,
+) -> Option<TimelineScrollRail> {
+    if content_h <= viewport_h || s <= 0.0 || w < 6.0 * s || h < 28.0 * s {
+        return None;
+    }
+    let tick_h = 2.0 * s;
+    let pitch = 10.0 * s;
+    let tick_count = (((h - 16.0 * s - tick_h) / pitch).floor() as usize + 1).min(11);
+    let rail_h = (tick_count - 1) as f32 * pitch + tick_h;
+    let top = y + (h - rail_h) * 0.5;
+    let progress = 1.0 - (offset / (content_h - viewport_h)).clamp(0.0, 1.0);
+    let track_w = w.min(22.0 * s);
+    // Stay beside the column even when its width cap leaves a large gutter.
+    let left = x + ((w - track_w) * 0.5).min(8.0 * s);
+    let track = [left, top, track_w, rail_h];
+    Some(TimelineScrollRail {
+        track,
+        // A dash-sized handle keeps drag travel aligned with the visible rail,
+        // rather than retaining the old proportional scrollbar's sensitivity.
+        thumb: [
+            track[0],
+            top + progress * (rail_h - tick_h),
+            track[2],
+            tick_h,
+        ],
+        tick_count,
+        active_tick: (progress * (tick_count - 1) as f32).round() as usize,
+    })
+}
+
 pub fn render_timeline_scrollbar_with<P: AgentTimelinePane>(
     sugarloaf: &mut Sugarloaf,
     pane: &mut P,
     rect: [f32; 4],
+    theme: &IdeTheme,
     s: f32,
+    mouse: Option<(f32, f32)>,
+    profile: &[f32; 11],
 ) {
-    let Some((offset, content_h, viewport_h, opacity)) = pane.timeline_scrollbar_state()
+    let Some((offset, content_h, viewport_h)) = pane.timeline_scrollbar_state() else {
+        pane.set_scrollbar_geometry(None, None);
+        return;
+    };
+    let Some(rail) =
+        timeline_scroll_rail_geometry(rect, s, offset, content_h, viewport_h)
     else {
         pane.set_scrollbar_geometry(None, None);
         return;
     };
-    let [x, y, w, h] = rect;
-    let track_h = h.max(0.0);
-    // Offset counts up from the BOTTOM here; the shared helper wants
-    // distance from the top.
-    let max_scroll = (content_h - viewport_h).max(1.0);
-    let scroll_top = max_scroll - offset.clamp(0.0, max_scroll);
-    let Some((thumb_y, thumb_h)) = scrollbar::compute_thumb_px(
-        viewport_h,
-        content_h,
-        y,
-        track_h,
-        scroll_top,
-        scrollbar::min_thumb_height() * s,
-    ) else {
-        pane.set_scrollbar_geometry(None, None);
-        return;
-    };
-    let thumb_x = x + w - scrollbar::width() * s - scrollbar::SCROLLBAR_MARGIN * s;
-    let thumb_w = scrollbar::width() * s;
-    // Hit-test rect is a bit wider than the visible thumb so clicks don't
-    // demand pixel-perfect aim. Track rect spans the whole viewport height
-    // along the same x band.
-    let hit_pad = 4.0 * s;
-    let track_rect = [thumb_x - hit_pad, y, thumb_w + hit_pad * 2.0, track_h];
-    let thumb_hit_rect = [thumb_x - hit_pad, thumb_y, thumb_w + hit_pad * 2.0, thumb_h];
-    pane.set_scrollbar_geometry(Some(track_rect), Some(thumb_hit_rect));
-    scrollbar::draw_track_scaled(
-        sugarloaf,
-        false,
-        thumb_x,
-        y,
-        track_h,
-        s,
-        opacity,
-        DEPTH,
-        ORDER_CARET,
-    );
-    scrollbar::draw_thumb_scaled(
-        sugarloaf,
-        false,
-        thumb_x,
-        thumb_y,
-        thumb_h,
-        s,
-        opacity,
-        false,
-        DEPTH,
-        ORDER_CARET,
-    );
+    pane.set_scrollbar_geometry(Some(rail.track), Some(rail.thumb));
+    let hovered_tick = rail.hovered_tick(mouse);
+    // This is a persistent position rail, not a fading thumb or painted track.
+    for index in 0..rail.tick_count {
+        let hovered = hovered_tick == Some(index);
+        let color = theme.f32_alpha(
+            theme.fg,
+            if hovered || index == rail.active_tick {
+                0.9
+            } else {
+                0.18
+            },
+        );
+        let [x, y, w, h] = rail.tick_rect(index, hovered, profile);
+        sugarloaf.rect(None, x, y, w, h, color, DEPTH, ORDER_CARET);
+    }
 }

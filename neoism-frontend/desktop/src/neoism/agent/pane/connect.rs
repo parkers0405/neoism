@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use serde_json::{json, Value};
 
 use super::*;
-use crate::neoism::agent::api::api_request_json_while_active;
+use crate::neoism::agent::api::{api_request_json_while_active, percent_encode};
 
 #[cfg(test)]
 #[path = "connect_tests.rs"]
@@ -78,6 +78,7 @@ pub(in crate::neoism::agent) struct ConnectMethod {
 /// In-progress `/connect` state, held on the pane while any connect picker is
 /// open.
 pub(crate) struct ConnectFlow {
+    readiness_scope: crate::neoism::agent::api::CatalogScope,
     readiness: Option<neoism_ui::panels::agent_pane::api_mapping::ProviderReadiness>,
     providers: Vec<ConnectProvider>,
     methods_by_provider: BTreeMap<String, Vec<ConnectMethod>>,
@@ -333,10 +334,17 @@ impl NeoismAgentPane {
         self.picker = picker;
         let tx = self.background_sender();
         let worker_token = token.clone();
+        let directory = self.directory.clone();
+        let scope = super::super::api::catalog_scope(&self.server, self.directory.as_deref());
         if let Err(error) = std::thread::Builder::new()
             .name("neoism-agent-connect".into())
             .spawn(move || {
-                let result = request.run(&server, &worker_token);
+                let result = if matches!(&request, ConnectRequest::Catalog) {
+                    fetch_connect_flow_in_directory(&server, &worker_token, directory.as_deref(), scope)
+                        .map(ConnectOutcome::Catalog)
+                } else {
+                    request.run(&server, &worker_token)
+                };
                 if worker_token.load(Ordering::Acquire) {
                     let _ = tx.send(NeoismAgentBackgroundUpdate::ConnectCompleted {
                         token: worker_token,
@@ -444,8 +452,13 @@ impl NeoismAgentPane {
                 self.pending_connect = None;
                 match outcome {
                     ConnectOutcome::Catalog(flow) => {
+                        if !flow.readiness_scope.is_current(&self.server, self.directory.as_deref()) {
+                            self.refresh_provider_readiness();
+                            self.open_connect_picker();
+                            return;
+                        }
                         if let Some(readiness) = flow.readiness.clone() {
-                            self.provider_readiness = Some(readiness);
+                            self.apply_provider_readiness(flow.readiness_scope.clone(), readiness);
                         }
                         if flow.providers.is_empty() {
                             self.close_connect();
@@ -492,7 +505,9 @@ impl NeoismAgentPane {
                         };
                         match effect {
                             ConnectEffect::Refresh { notice } => {
-                                self.provider_readiness = None;
+                                // Successful auth mutations already invalidate the
+                                // endpoint revision in the API transport.
+                                self.refresh_provider_readiness();
                                 if let Some((title, message)) = notice {
                                     self.system_message(&title, message);
                                 }
@@ -585,7 +600,7 @@ impl NeoismAgentPane {
     /// `/connect` entry point: fetch the provider catalog + auth methods and
     /// open stage 1 (the provider list).
     pub(in crate::neoism::agent) fn open_connect_picker(&mut self) {
-        self.provider_readiness = None;
+        self.refresh_provider_readiness();
         self.close_connect();
         self.start_connect_request(ConnectRequest::Catalog);
     }
@@ -1237,7 +1252,7 @@ impl NeoismAgentPane {
         let mut picker = NeoismAgentPicker::new(NeoismAgentPickerKind::Connect, "Provider connection", vec![NeoismAgentPickerOption::new("Done", "", "", "__connect_done__")], 0);
         picker.set_connect_activity(format!("{provider_name} connected. Open /model to pick a model."), "Connected", false);
         self.picker = Some(picker);
-        self.provider_readiness = None;
+        // The successful auth write invalidated the catalog scope.
         self.refresh_model_catalog();
     }
 
@@ -1253,10 +1268,22 @@ impl NeoismAgentPane {
 /// Fetch the provider catalog (`/provider`) and per-provider auth methods
 /// (`/provider/auth`) and fold them into a [`ConnectFlow`].
 fn fetch_connect_flow(server: &str, token: &AtomicBool) -> Result<ConnectFlow, String> {
+    let scope = super::super::api::catalog_scope(server, None);
+    fetch_connect_flow_in_directory(server, token, None, scope)
+}
+
+fn fetch_connect_flow_in_directory(
+    server: &str,
+    token: &AtomicBool,
+    directory: Option<&str>,
+    scope: super::super::api::CatalogScope,
+) -> Result<ConnectFlow, String> {
+    let providers_path = directory.map(|directory| format!("/v2/providers?directory={}", percent_encode(directory)))
+        .unwrap_or_else(|| "/v2/providers".into());
     let providers_value = api_request_json_while_active(
         server,
         "GET",
-        "/v2/providers",
+        &providers_path,
         None,
         Duration::from_secs(5),
         token,
@@ -1342,6 +1369,7 @@ fn fetch_connect_flow(server: &str, token: &AtomicBool) -> Result<ConnectFlow, S
     }
 
     Ok(ConnectFlow {
+        readiness_scope: scope,
         readiness: neoism_ui::panels::agent_pane::api_mapping::ProviderReadiness::from_json(&providers_value),
         providers,
         methods_by_provider,

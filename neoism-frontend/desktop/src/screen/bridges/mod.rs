@@ -13,6 +13,7 @@ pub(crate) mod conversation_workspaces;
 pub mod finder;
 pub mod git_diff;
 pub mod git_diff_view;
+pub(crate) mod git_pull_request;
 pub(crate) mod git_diff_edit;
 pub(crate) mod git_diff_lifecycle;
 #[cfg(feature = "cef-artifacts")]

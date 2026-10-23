@@ -1851,6 +1851,34 @@ impl Screen<'_> {
         handled
     }
 
+    /// Track rail hover independently of link/markdown hover and early-return paths.
+    pub fn handle_neoism_agent_scrollbar_hover_move(&mut self) -> bool {
+        let pointer = self
+            .mouse
+            .inside_window
+            .then(|| self.mouse_logical_for_hit_test());
+        let Some(agent) = self.context_manager.current_mut().neoism_agent.as_mut() else {
+            return false;
+        };
+        let redraw = agent.update_scrollbar_hover(pointer);
+        if redraw {
+            self.mark_dirty();
+        }
+        redraw
+    }
+
+    pub fn neoism_agent_scrollbar_pointer(&self) -> bool {
+        let (mx, my) = self.mouse_logical_for_hit_test();
+        self.context_manager
+            .current()
+            .neoism_agent
+            .as_ref()
+            .is_some_and(|agent| {
+                agent.scrollbar_dragging()
+                    || (self.mouse.inside_window && agent.scrollbar_hit(mx, my).is_some())
+            })
+    }
+
     pub fn handle_neoism_agent_hover_move(&mut self) -> bool {
         let scale = self.sugarloaf.scale_factor();
         let mx = self.mouse.x as f32 / scale;

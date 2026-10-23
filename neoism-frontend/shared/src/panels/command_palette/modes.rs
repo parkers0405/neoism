@@ -29,6 +29,7 @@ pub(crate) enum PaletteMode {
     Shaders(Vec<PaletteShaderEntry>),
     Buffers(Vec<PaletteBufferEntry>),
     Workspaces(Vec<PaletteWorkspaceEntry>),
+    Systems(Vec<super::actions::PaletteSystemEntry>),
     Servers(Vec<PaletteServerEntry>),
     /// Vim-style ex-command capture. The shared command palette is the
     /// default `:` surface now; this mode remains for explicit raw
@@ -98,6 +99,10 @@ pub(crate) enum PaletteRow<'a> {
     Server {
         entry: &'a PaletteServerEntry,
     },
+    System {
+        entry: &'a super::actions::PaletteSystemEntry,
+    },
+    SystemAdd,
     ServerAdd,
     /// "+ Create server" — host the machine's own daemon for a chosen
     /// folder and auto-join it (the flip side of ServerAdd's join-by-URL).
@@ -128,6 +133,10 @@ pub(crate) enum PaletteRow<'a> {
 }
 
 impl<'a> PaletteRow<'a> {
+    pub(crate) fn centers_title(&self) -> bool {
+        matches!(self, Self::SystemAdd | Self::ServerAdd | Self::ServerCreate)
+    }
+
     pub(crate) fn title(&self) -> &'a str {
         match *self {
             PaletteRow::Command { title, .. } => title,
@@ -144,6 +153,8 @@ impl<'a> PaletteRow<'a> {
             PaletteRow::WorkspaceCreate => "+ New Workspace",
             PaletteRow::Workspace { entry } => entry.title.as_str(),
             PaletteRow::Server { entry } => entry.name.as_str(),
+            PaletteRow::System { entry } => entry.name.as_str(),
+            PaletteRow::SystemAdd => "+ Add System",
             PaletteRow::ServerAdd => "+ Add Server",
             PaletteRow::ServerCreate => "+ Create server",
             PaletteRow::Ex { name, .. } => name,
@@ -187,6 +198,12 @@ impl<'a> PaletteRow<'a> {
             PaletteRow::WorkspaceCreate => "Ctrl+Shift+W",
             PaletteRow::Workspace { entry } => entry.detail.as_str(),
             PaletteRow::Server { entry } => entry.address.as_str(),
+            PaletteRow::System { entry } => match entry.status {
+                super::actions::SystemConnectionStatus::Connected => "Connected",
+                super::actions::SystemConnectionStatus::Connecting => "Connecting",
+                super::actions::SystemConnectionStatus::Disconnected => "Disconnected",
+            },
+            PaletteRow::SystemAdd => "",
             PaletteRow::ServerAdd => "",
             PaletteRow::ServerCreate => "",
             PaletteRow::Ex { hint, .. } => hint,
@@ -207,6 +224,10 @@ impl<'a> PaletteRow<'a> {
             PaletteRow::Server { entry } => Some(PaletteAction::SelectServer {
                 id: entry.id.clone(),
             }),
+            PaletteRow::System { entry } => Some(PaletteAction::ConnectSystem {
+                id: entry.id.clone(),
+            }),
+            PaletteRow::SystemAdd => Some(PaletteAction::AddSystem),
             PaletteRow::ServerAdd => Some(PaletteAction::AddServer),
             PaletteRow::ServerCreate => Some(PaletteAction::CreateServer),
             PaletteRow::Font { .. }

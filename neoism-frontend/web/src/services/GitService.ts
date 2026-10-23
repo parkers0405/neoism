@@ -151,6 +151,9 @@ export class DaemonGitService implements GitService {
  * panel read-only.
  */
 export interface GitPanelBridge {
+  gitPanelPreparePullRequest?(json: string): boolean | Promise<boolean>;
+  gitPanelApplyPullRequestReply?(json: string): void;
+  git_panel_apply_pull_request_reply?(json: string): void;
   /** Host identity guard: null means this adapter has been retired. */
   gitPanelContext?(): string | null;
   prepare_git_stage_block?(path: string, blockJson: string): boolean;
@@ -290,6 +293,15 @@ export class GitPanelService {
       // Unwind that stack before calling any wasm preflight (no re-entrant borrow).
       await Promise.resolve();
       if (!current()) return;
+      if (typeof message === "object" && "PullRequest" in message) {
+        const surface = this.surfaces.find(s => s.gitPanelPreparePullRequest);
+        const allowed = await surface?.gitPanelPreparePullRequest?.(JSON.stringify(message.PullRequest.request));
+        if (!current()) return;
+        if (allowed === false) {
+          this.call(["gitPanelApplyPullRequestReply", "git_panel_apply_pull_request_reply"], JSON.stringify({ Error: { kind: "Conflict", message: "Pull request operation cancelled." } }));
+          return;
+        }
+      }
       if (typeof message === "object") {
         if ("ApplyBlock" in message && !this.prepareBlock(message.ApplyBlock.path, message.ApplyBlock.block, message.ApplyBlock.restore)) return;
         if ("Stage" in message && !this.prepareMutation(["gitPanelPrepareStage", "git_panel_prepare_stage"], message.Stage.path)) return;
@@ -319,15 +331,20 @@ export class GitPanelService {
       }
     } catch (err) {
       if (!current()) return;
-      this.call(
-        ["gitPanelSetError", "git_panel_set_error"],
-        err instanceof Error ? err.message : String(err),
-      );
+      if (typeof message === "object" && "PullRequest" in message) {
+        this.call(["gitPanelApplyPullRequestReply", "git_panel_apply_pull_request_reply"], JSON.stringify({ Error: { kind: "Unavailable", message: err instanceof Error ? err.message : String(err) } }));
+      } else {
+        this.call(["gitPanelSetError", "git_panel_set_error"], err instanceof Error ? err.message : String(err));
+      }
     }
   }
 
   private applyReply(reply: GitServerMessage, scope: string | null | undefined, current: () => boolean): void {
     if (!current()) return;
+    if ("PullRequest" in reply) {
+      this.call(["gitPanelApplyPullRequestReply", "git_panel_apply_pull_request_reply"], JSON.stringify(reply.PullRequest.reply));
+      return;
+    }
     if ("Log" in reply) {
       this.call(["gitPanelSetLatestCommit", "git_panel_set_latest_commit"], JSON.stringify(reply.Log.commits));
       return;

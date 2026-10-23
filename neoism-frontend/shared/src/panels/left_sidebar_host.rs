@@ -1,3 +1,5 @@
+pub const DEFAULT_SIDEBAR_WIDTH: f32 = 300.0;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LeftSidebarView {
     Files,
@@ -62,7 +64,7 @@ impl Default for LeftSidebarHost {
         Self {
             active_unified: None,
             focused: None,
-            unified_width: 300.0,
+            unified_width: DEFAULT_SIDEBAR_WIDTH,
             placements: [SidebarPlacement::Unified; 3],
         }
     }

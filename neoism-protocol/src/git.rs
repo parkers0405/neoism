@@ -17,6 +17,7 @@ pub struct GitChangeBlock {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum GitClientMessage {
+    PullRequest { request: crate::pull_request::PullRequestRequest },
     /// Read-only HEAD attribution. Path is workspace-relative or an absolute host path.
     Blame {
         path: String,
@@ -101,6 +102,7 @@ impl GitClientMessage {
     /// True for verbs that mutate the repository. The daemon gates
     /// these on the write permission; reads stay on the read gate.
     pub fn is_mutation(&self) -> bool {
+        if let Self::PullRequest { request } = self { return request.is_mutation(); }
         matches!(
             self,
             GitClientMessage::Stage { .. }
@@ -144,6 +146,7 @@ mod restore_tests {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum GitServerMessage {
+    PullRequest { reply: crate::pull_request::PullRequestReply },
     CommitDetail { detail: GitCommitDetail },
     BaseFile { path: String, text: String },
     Blame {

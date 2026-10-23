@@ -662,6 +662,8 @@ pub enum ModalActionTag {
     AgentDeleteSession,
     RenameTab,
     NotesVaultPromptAdd,
+    SystemFormSubmit,
+    SystemDisconnectConfirm,
     ServerFormSubmit,
     ServerRemoveConfirm,
     ServerReconnectRetry,
@@ -718,6 +720,8 @@ pub fn modal_action_dispatch(tag: ModalActionTag) -> ModalActionDispatch {
         | T::FileTreeNewFolder
         | T::FileTreeRename
         | T::NotesVaultAdd
+        | T::SystemFormSubmit
+        | T::SystemDisconnectConfirm
         | T::ServerFormSubmit
         | T::ServerRemoveConfirm
         | T::ServerReconnectRetry

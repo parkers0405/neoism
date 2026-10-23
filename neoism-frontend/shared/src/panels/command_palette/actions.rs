@@ -7,6 +7,72 @@
 
 use crate::widgets::modal::{ModalAction, ModalButton, ModalSpec};
 
+pub fn systems_desktop_modal_spec() -> ModalSpec {
+    ModalSpec {
+        title: "Systems".into(),
+        body: "Systems are managed in the desktop app. Use Neoism desktop to add a computer and connect over SSH. The browser cannot manage SSH connections.".into(),
+        meta: String::new(),
+        buttons: vec![ModalButton::new("Close", "Esc", ModalAction::Close)],
+        input: None, busy: false, blocking: true,
+    }
+}
+
+/// Connection state supplied by the host; never inferred from discovery probes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SystemConnectionStatus {
+    Connected,
+    Connecting,
+    Disconnected,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaletteSystemEntry {
+    pub id: String,
+    pub name: String,
+    pub address: String,
+    pub local: bool,
+    pub status: SystemConnectionStatus,
+}
+
+impl PaletteSystemEntry {
+    pub(crate) fn controls(&self) -> Vec<(&'static str, f32, PaletteAction)> {
+        let mut controls = Vec::new();
+        if !self.local {
+            controls.push(match self.status {
+                SystemConnectionStatus::Connected => (
+                    "Disconnect",
+                    76.0,
+                    PaletteAction::DisconnectSystem {
+                        id: self.id.clone(),
+                    },
+                ),
+                SystemConnectionStatus::Connecting => (
+                    "Cancel",
+                    52.0,
+                    PaletteAction::DisconnectSystem {
+                        id: self.id.clone(),
+                    },
+                ),
+                SystemConnectionStatus::Disconnected => (
+                    "Connect",
+                    60.0,
+                    PaletteAction::ConnectSystem {
+                        id: self.id.clone(),
+                    },
+                ),
+            });
+            controls.push((
+                "Remove",
+                58.0,
+                PaletteAction::RemoveSystem {
+                    id: self.id.clone(),
+                },
+            ));
+        }
+        controls
+    }
+}
+
 /// Actions that can be triggered from the command palette.
 ///
 /// Almost every variant is a fieldless one-shot, but `MoveWorkspaceToHost`
@@ -105,6 +171,17 @@ pub enum PaletteAction {
     /// Open the web workplace switcher. Desktop has native window/workspace
     /// chrome; web owns this action at the host layer.
     ShowWorkplaces,
+    ShowSystems,
+    AddSystem,
+    ConnectSystem {
+        id: String,
+    },
+    DisconnectSystem {
+        id: String,
+    },
+    RemoveSystem {
+        id: String,
+    },
     ShowServers,
     SelectServer {
         id: String,
@@ -856,6 +933,11 @@ pub(crate) fn command_visible_for_surface(
         | PaletteAction::ListFonts
         | PaletteAction::ListBuffers
         | PaletteAction::ShowWorkplaces
+        | PaletteAction::ShowSystems
+        | PaletteAction::AddSystem
+        | PaletteAction::ConnectSystem { .. }
+        | PaletteAction::DisconnectSystem { .. }
+        | PaletteAction::RemoveSystem { .. }
         | PaletteAction::ShowServers
         | PaletteAction::SelectServer { .. }
         | PaletteAction::EditServer { .. }

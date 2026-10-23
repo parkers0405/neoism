@@ -239,7 +239,62 @@ export interface GitChangeBlock {
   new_lines: string[];
 }
 
+// Exact externally-tagged serde mirror of neoism-protocol/src/pull_request.rs.
+export interface PullRequestSummary {
+  number: number; title: string; url: string; author: string; state: string; draft: boolean;
+  base_branch: string; head_branch: string; base_sha: string; head_sha: string;
+  review_decision: string; checks_state: string;
+}
+export interface PullRequestComment { id: string; author: string; body: string; created_at: string; url: string }
+export type PullRequestSide = "Left" | "Right";
+export interface PullRequestThread {
+  id: string; path: string; side: PullRequestSide; line: number | null; start_line: number | null;
+  outdated: boolean; resolved: boolean; comments: PullRequestComment[];
+}
+export interface PullRequestCheck { name: string; status: string; conclusion: string; url: string }
+export interface PullRequestInlineComment { path: string; side: PullRequestSide; line: number; start_line: number | null; body: string }
+export type PullRequestReviewEvent = "Comment" | "Approve" | "RequestChanges";
+export type PullRequestMergeMethod = "Merge" | "Squash" | "Rebase";
+export interface PullRequestDetail {
+  summary: PullRequestSummary; body: string; files: GitFileChange[]; diffs: GitFileDiff[];
+  conversation: PullRequestComment[]; threads: PullRequestThread[]; checks: PullRequestCheck[]; truncated: boolean;
+}
+export type PullRequestSort = "Updated" | "Newest" | "Oldest";
+export type PullRequestFilter = "Open" | "Closed" | "Merged" | "All";
+export interface PullRequestInboxItem {
+  summary: PullRequestSummary; repository: string; updated_at: string; additions: number; deletions: number;
+  labels: string[]; reviewers: string[]; authored: boolean; review_requested: boolean; assigned: boolean;
+}
+export interface PullRequestPage {
+  repository: string; viewer: string; generation: number; items: PullRequestInboxItem[];
+  next_cursor: string | null; total_count: number;
+}
+export type PullRequestRequest =
+  | { List: { query: string; sort: PullRequestSort; filter: PullRequestFilter; cursor: string | null; generation: number } }
+  | { ReadInbox: { number: number } }
+  | { Discover: { branch: string | null } }
+  | { Read: { number: number } }
+  | { Create: { title: string; body: string; base: string; draft: boolean; expected_branch: string; expected_head: string } }
+  | { SubmitReview: { number: number; expected_head: string; body: string; event: PullRequestReviewEvent; comments: PullRequestInlineComment[] } }
+  | { ReplyThread: { number: number; thread_id: string; body: string } }
+  | { ResolveThread: { number: number; thread_id: string; resolved: boolean } }
+  | { Checkout: { number: number; expected_head: string; new_worktree: boolean } }
+  | { Merge: { number: number; expected_head: string; method: PullRequestMergeMethod } };
+export type PullRequestErrorKind = "Unsupported" | "Unavailable" | "Authentication" | "Permission" | "Stale" | "Conflict" | "Invalid" | "Failed";
+export type PullRequestReply =
+  | { Listed: { page: PullRequestPage } }
+  | { InboxDetail: { detail: PullRequestDetail; item: PullRequestInboxItem } }
+  | { Discovered: { branch: string; head: string; default_branch: string; pull_request: PullRequestSummary | null } }
+  | { Detail: { detail: PullRequestDetail } }
+  | { Created: { pull_request: PullRequestSummary } }
+  | { ReviewSubmitted: { number: number } }
+  | { ThreadUpdated: { number: number } }
+  | { CheckedOut: { number: number; path: string; worktree: boolean } }
+  | { Merged: { number: number } }
+  | { Error: { kind: PullRequestErrorKind; message: string } };
+
 export type GitClientMessage =
+  | { PullRequest: { request: PullRequestRequest } }
   | { Blame: { path: string } }
   | "Status"
   | { Diff: { path: string | null } }
@@ -294,6 +349,7 @@ export interface GitCommitDetail {
 }
 
 export type GitServerMessage =
+  | { PullRequest: { reply: PullRequestReply } }
   | { CommitDetail: { detail: GitCommitDetail } }
   | { BaseFile: { path: string; text: string } }
   | { Blame: { snapshot: GitBlameSnapshot } }

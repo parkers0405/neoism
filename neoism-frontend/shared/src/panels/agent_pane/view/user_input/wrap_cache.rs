@@ -315,7 +315,13 @@ mod tests {
         });
         assert_eq!((rows[0].start, rows[0].end), (0, 4));
         assert_eq!(rows[0].offsets, [0.0, 1.0, 2.0]);
-        assert_eq!(rows.len(), 1);
+        assert_eq!(rows.len(), 2);
+        assert_eq!((rows[1].start, rows[1].end), (4, 4));
+        assert_eq!(rows[1].offsets, [0.0]);
+        assert_eq!(
+            crate::panels::agent_pane::input_controller::visual_row_index(&rows, 4),
+            Some(1),
+        );
         let text = "a [Image1]\n";
         let rows = super::super::wrap_agent_prompt_rows_with(text, 3.0, |s| {
             s.chars().count() as f32
@@ -325,6 +331,145 @@ mod tests {
         let last = rows.last().unwrap();
         assert_eq!((last.start, last.end), (text.len(), text.len()));
         assert_eq!(last.offsets, [0.0]);
+    }
+
+    #[test]
+    fn prompt_newlines_and_exact_fill_preserve_the_eof_insertion_row() {
+        for (text, width, spans) in [
+            ("", 2.0, vec![(0, 0)]),
+            ("\n", 2.0, vec![(0, 0), (1, 1)]),
+            ("a\n", 2.0, vec![(0, 1), (2, 2)]),
+            ("a\n\n", 2.0, vec![(0, 1), (2, 2), (3, 3)]),
+            ("界\n", 2.0, vec![(0, 3), (4, 4)]),
+            ("a", 2.0, vec![(0, 1)]),
+            ("ab", 2.0, vec![(0, 2), (2, 2)]),
+            ("abc", 2.0, vec![(0, 2), (2, 3)]),
+            ("ab\n", 2.0, vec![(0, 2), (3, 3)]),
+        ] {
+            let rows = super::super::wrap_agent_prompt_rows_with(text, width, |s| {
+                s.chars().count() as f32
+            });
+            assert_eq!(rows.iter().map(|row| (row.start, row.end)).collect::<Vec<_>>(), spans);
+            assert_eq!(
+                crate::panels::agent_pane::input_controller::visual_row_index(&rows, text.len()),
+                Some(rows.len() - 1),
+            );
+            for row in rows.iter().filter(|row| row.start == row.end) {
+                assert_eq!(row.offsets, [0.0]);
+            }
+        }
+    }
+
+    fn slot_rows(text: &str, width: f32, slot: f32) -> Vec<InputWrapRow> {
+        super::super::wrap_agent_prompt_rows_with_slot(text, width, slot, |part| {
+            if part == "[Image1]" {
+                140.0
+            } else {
+                part.chars().map(|ch| match ch {
+                    'W' => 23.0,
+                    'i' => 2.0,
+                    _ => 19.0,
+                }).sum()
+            }
+        })
+    }
+
+    #[test]
+    fn prompt_slot_closes_proportional_remainder_before_narrow_or_wide_append() {
+        use crate::panels::agent_pane::input_controller::visual_row_index;
+        // Five proportional glyphs leave 5px: text fits, the 9.6px caret does not.
+        let rows = slot_rows("aaaaa", 100.0, 9.6);
+        assert_eq!(rows.len(), 2);
+        assert_eq!((rows[0].start, rows[0].end), (0, 5));
+        assert_eq!(rows[0].offsets.last(), Some(&95.0));
+        assert_eq!((rows[1].start, rows[1].end), (5, 5));
+        assert_eq!(visual_row_index(&rows, 5), Some(1));
+        for next in ["i", "W"] {
+            let text = format!("aaaaa{next}");
+            let appended = slot_rows(&text, 100.0, 9.6);
+            assert_eq!(appended.len(), 2);
+            assert_eq!((appended[0].start, appended[0].end), (0, 5));
+            assert_eq!(appended[0].offsets, rows[0].offsets);
+            assert_eq!((appended[1].start, appended[1].end), (5, 6));
+            assert_eq!(visual_row_index(&appended, 6), Some(1));
+            // Editing an interior boundary keeps the existing end affinity.
+            assert_eq!(visual_row_index(&appended, 5), Some(0));
+        }
+    }
+
+    #[test]
+    fn prompt_closed_row_newline_consumes_pending_soft_break() {
+        for (text, spans) in [
+            ("aaaaa\n", vec![(0, 5), (6, 6)]),
+            ("aaaaa\ni", vec![(0, 5), (6, 7)]),
+            ("aaaaa\n\n", vec![(0, 5), (6, 6), (7, 7)]),
+            ("[Image1]\n", vec![(0, 8), (9, 9)]),
+        ] {
+            let rows = slot_rows(text, 100.0, 9.6);
+            assert_eq!(rows.iter().map(|row| (row.start, row.end)).collect::<Vec<_>>(), spans);
+        }
+    }
+
+    #[test]
+    fn prompt_slot_eof_successor_scrolls_at_capacity_five() {
+        use crate::panels::agent_pane::input_controller::visual_row_index;
+        use crate::panels::agent_pane::input_viewport::InputViewport;
+        let text = "aaaaa".repeat(5);
+        let rows = slot_rows(&text, 100.0, 9.6);
+        assert_eq!(rows.len(), 6);
+        let caret = visual_row_index(&rows, text.len()).unwrap();
+        assert_eq!(caret, 5);
+        let mut viewport = InputViewport::default();
+        let first = viewport.update(
+            &text, text.len(), caret, rows.len(), 5,
+            [18.0, 0.0, 100.0, 120.0], 24.0,
+        );
+        assert_eq!(first, 1);
+        assert_eq!(caret - first, 4);
+    }
+
+    #[test]
+    fn prompt_exact_slot_fit_and_fractional_scale_thresholds() {
+        for scale in [0.6, 0.75, 0.95, 1.0, 1.2, 1.5, 2.0] {
+            let slot = super::super::prompt_caret_width(16.0 * scale);
+            let glyph = 71.0 * scale;
+            let exact = glyph + slot;
+            let below = f32::from_bits(exact.to_bits() - 1);
+            let above = f32::from_bits(exact.to_bits() + 1);
+            for (width, count) in [(below, 2), (exact, 1), (above, 1)] {
+                let rows = super::super::wrap_agent_prompt_rows_with_slot(
+                    "a", width, slot, |_| glyph,
+                );
+                assert_eq!(rows.len(), count, "scale={scale}, width={width}");
+                assert_eq!(rows[0].offsets, [0.0, glyph]);
+            }
+            let rect = super::super::prompt_caret_rect(
+                18.0 * scale, 0.0, glyph, exact, slot, 20.0 * scale,
+            );
+            assert_eq!(rect[0], 18.0 * scale + glyph);
+            assert!((rect[2] - slot).abs() < 0.0001);
+        }
+    }
+
+    #[test]
+    fn prompt_caret_uses_true_insertion_x_and_clips_oversized_atomic_attachment() {
+        // The old independent box-right-minus-28 clamp shifted this caret left.
+        let rect = super::super::prompt_caret_rect(18.0, 0.0, 90.0, 100.0, 9.6, 20.0);
+        assert_eq!(rect, [108.0, 0.0, 9.6, 20.0]);
+        assert_eq!(super::super::prompt_caret_rect(18.0, 0.0, 95.0, 100.0, 9.6, 20.0),
+            [113.0, 0.0, 5.0, 20.0]);
+        let text = "i [Image1]i";
+        let rows = slot_rows(text, 100.0, 9.6);
+        assert_eq!(rows.iter().map(|row| &text[row.start..row.end]).collect::<Vec<_>>(),
+            ["i ", "[Image1]", "i"]);
+        assert_eq!(rows[1].offsets.len(), 9);
+        assert_eq!(rows[1].offsets.last(), Some(&140.0));
+        assert!(rows[1].offsets.windows(2).all(|pair| pair[0] < pair[1]));
+        let clipped = super::super::prompt_caret_rect(18.0, 0.0, 140.0, 100.0, 9.6, 20.0);
+        assert_eq!(clipped, [158.0, 0.0, 0.0, 20.0]);
+        let eof = slot_rows("[Image1]", 100.0, 9.6);
+        assert_eq!(eof.len(), 2);
+        assert_eq!((eof[1].start, eof[1].end), (8, 8));
     }
 
     #[test]

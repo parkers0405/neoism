@@ -4847,6 +4847,66 @@ impl SessionStore {
         Ok(results.first().copied().unwrap_or(0) > 0)
     }
 
+    /// Delete a message tail with one writer acquisition/commit, not one per
+    /// message. Resolve IDs inside the transaction so callers only publish
+    /// removals for rows actually deleted, including with missing/foreign IDs.
+    pub(crate) async fn delete_messages(
+        &self,
+        session_id: &str,
+        message_ids: &[String],
+    ) -> anyhow::Result<Vec<String>> {
+        if message_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let _writer = self.db.lock_writer().await;
+        let deleted = turso_busy_retry(|| async {
+            let mut connection = self.db.database.connect()?;
+            let transaction = connection
+                .transaction_with_behavior(
+                    turso::transaction::TransactionBehavior::Immediate,
+                )
+                .await?;
+            let mut deleted = Vec::new();
+            // Stay well below SQLite's bind limit regardless of transcript size.
+            for chunk in message_ids.chunks(128) {
+                let placeholders = vec!["?"; chunk.len()].join(",");
+                let mut params = vec![text(session_id)];
+                params.extend(chunk.iter().map(text));
+                let mut rows = transaction.query(
+                    &format!("SELECT id FROM messages WHERE session_id = ? AND id IN ({placeholders})"),
+                    params,
+                ).await?;
+                let mut ids = Vec::new();
+                while let Some(row) = rows.next().await? {
+                    ids.push(row.get::<String>(0)?);
+                }
+                drop(rows);
+                if ids.is_empty() {
+                    continue;
+                }
+                let placeholders = vec!["?"; ids.len()].join(",");
+                let mut params = vec![text(session_id)];
+                params.extend(ids.iter().map(text));
+                // Native FTS is maintained by deletes from the docs table.
+                // Keep the session/title document (message_id = '') untouched.
+                for table in ["conversation_search_docs", "conversation_search_dirty", "message_embeddings"] {
+                    transaction.execute(
+                        &format!("DELETE FROM {table} WHERE session_id = ? AND message_id IN ({placeholders})"),
+                        params.clone(),
+                    ).await?;
+                }
+                transaction.execute(
+                    &format!("DELETE FROM messages WHERE session_id = ? AND id IN ({placeholders})"),
+                    params,
+                ).await?;
+                deleted.extend(ids);
+            }
+            transaction.commit().await?;
+            Ok(deleted)
+        }).await?;
+        Ok(deleted)
+    }
+
     /// Remove every transcript message for a session. Used by session import to
     /// make re-importing a bundle idempotent (the prior transcript is replaced
     /// rather than appended to).

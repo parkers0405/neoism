@@ -14,10 +14,11 @@ use super::draw::{
     draw_rect_clipped, draw_rounded_rect_clipped, draw_text_clipped, measure_text_cached,
     opts_with_clip, push_image_overlay_clipped,
 };
+use super::composer_geometry::{ComposerGeometry, COMPOSER_TRAY_RADIUS};
 use super::markdown::AgentMarkdownPane;
 use super::wordmark::format_elapsed;
 use super::{
-    AgentCheckoutContext, DEPTH, INPUT_HELP_STRIP_H, INPUT_LINE_H, MAX_INPUT_LINES,
+    AgentCheckoutContext, DEPTH, INPUT_LINE_H, MAX_INPUT_LINES,
     ORDER_CARET, ORDER_PANEL, ORDER_TEXT, OVERLAY_PANEL_ID, STREAMING_STATUS_LINE_H,
     USER_MESSAGE_MAX_LINES,
 };
@@ -26,36 +27,32 @@ use crate::primitives::ide_theme::IdeTheme;
 use crate::primitives::text::draw_icon_centered_with_occlusion;
 use crate::render_policy::opencode_scanner_frame;
 
-/// Logical height of the dropdown-chip row (agent ˅ / model ˅ /
-/// thinking ˅) rendered below the input box, inside the outer shell.
-pub(super) const CHIPS_BAND_H: f32 = 26.0;
-const STATUS_CHIP_DESKTOP_FONT: f32 = 12.5;
-const STATUS_CHIP_COMPACT_FONT: f32 = 10.75;
+/// Logical height of the shared agent/model/thinking and submit row.
+pub(super) const CHIPS_BAND_H: f32 = 44.0;
+const STATUS_CHIP_DESKTOP_FONT: f32 = 14.0;
+const STATUS_CHIP_COMPACT_FONT: f32 = 12.0;
 const STATUS_CHIP_HIT_H: f32 = 23.5;
 const INPUT_COMMAND_HINT: (&str, &str) = ("/", "commands");
-const INPUT_TAB_HINT: (&str, &str) = ("tab", "agents");
 const NARROW_CONTROL_HIT_SIDE: f32 = 44.0;
 const COMPOSER_CONTROL_RADIUS: f32 = 8.0;
 const COMPOSER_STOP_SIDE_RATIO: f32 = 0.28;
 const COMPOSER_SEND_FONT_RATIO: f32 = 0.62;
-const COMPOSER_ATTACH_FONT_RATIO: f32 = 0.72;
 const MODEL_LOGO_SIDE: f32 = 17.0;
-const THINKING_ICON_SIDE: f32 = 12.0;
-const THINKING_ICON_GLYPH: &str = "\u{f0e7}";
 const MODEL_LOGO_GAP: f32 = 5.0;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct ComposerActionDrawPolicy {
-    paint_background: bool,
+pub(super) fn composer_text_padding(show_status: bool) -> (f32, f32) {
+    if show_status {
+        (15.0, 21.0)
+    } else {
+        (11.0, 17.0)
+    }
 }
 
-const ATTACHMENT_ACTION_DRAW_POLICY: ComposerActionDrawPolicy =
-    ComposerActionDrawPolicy {
-        // The attachment affordance is deliberately only a glyph. Its visual
-        // target below exists for centering, clipping, and hit geometry; it is not
-        // a surface that may be filled or outlined.
-        paint_background: false,
-    };
+fn composer_visible_line_count(text_h: f32, line_h: f32) -> usize {
+    // Layout and paint reconstruct the same height through different f32
+    // operations. Do not drop an entire row for subpixel roundoff.
+    ((text_h / line_h + 1.0e-4).floor().max(1.0) as usize).min(MAX_INPUT_LINES)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ComposerControlAction {
@@ -72,7 +69,6 @@ struct ComposerVisualPolicy {
     action: ComposerControlAction,
     show_activity: bool,
     show_interrupt_hint: bool,
-    show_tab_hint: bool,
     show_command_hint: bool,
 }
 
@@ -109,63 +105,47 @@ fn composer_visual_policy(
         action,
         show_activity: display_status_active,
         show_interrupt_hint: display_status_active && !narrow,
-        show_tab_hint: !narrow,
         show_command_hint: true,
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct ComposerControlGeometry {
+struct ComposerFooterGeometry {
     visual_rect: [f32; 4],
     hit_rect: [f32; 4],
+    chips_rect: [f32; 4],
 }
 
-/// Keep the invisible mobile target concentric with the original visual
-/// square. It is interaction-only and therefore cannot reserve composer
-/// height or shift adjacent chips/text.
-fn composer_control_geometry(
-    box_x: f32,
-    box_w: f32,
-    box_bottom: f32,
-    inset: f32,
-    policy: ComposerVisualPolicy,
-) -> ComposerControlGeometry {
-    let visual_side = policy.visual_side.min((box_w - inset * 2.0).max(0.0));
-    let visual_x = box_x + box_w - inset - visual_side;
-    let visual_y = box_bottom - inset - visual_side;
-    let hit_pad = (policy.hit_side - visual_side).max(0.0) * 0.5;
-    let hit_x = (visual_x - hit_pad).max(box_x);
-    let hit_y = visual_y - hit_pad;
-    let hit_right = (visual_x + visual_side + hit_pad).min(box_x + box_w);
-    ComposerControlGeometry {
-        visual_rect: [visual_x, visual_y, visual_side, visual_side],
-        hit_rect: [hit_x, hit_y, (hit_right - hit_x).max(0.0), policy.hit_side],
-    }
-}
-
-fn attachment_control_geometry(
-    box_x: f32,
-    box_w: f32,
-    inset: f32,
-    send_visual_rect: [f32; 4],
+/// Share a row center and reserve the full submit hit target before measuring
+/// chips, so narrow touch targets never steal a chip or help-strip click.
+fn composer_footer_geometry(
+    rect: [f32; 4],
     scale: f32,
-) -> ComposerControlGeometry {
-    let visual_side = send_visual_rect[2];
-    let visual_x = box_x + inset;
-    let visual_y = send_visual_rect[1];
-    // Keep the touch target accessible at every width, not only after the
-    // narrow breakpoint. It remains invisible and does not reserve layout.
-    let hit_side = (NARROW_CONTROL_HIT_SIDE * scale).max(visual_side);
-    let hit_pad = (hit_side - visual_side) * 0.5;
-    let hit_x = (visual_x - hit_pad).max(box_x);
-    let hit_right = (visual_x + visual_side + hit_pad).min(box_x + box_w);
-    ComposerControlGeometry {
+    policy: ComposerVisualPolicy,
+) -> ComposerFooterGeometry {
+    let [x, y, w, h] = rect;
+    let inset = 9.0 * scale;
+    let center_y = y + h * 0.5;
+    let visual_side = policy.visual_side.min((w - inset * 2.0).max(0.0));
+    let visual_x = x + w - inset.min(w) - visual_side;
+    let visual_y = center_y - visual_side * 0.5;
+    let hit_pad = (policy.hit_side - visual_side).max(0.0) * 0.5;
+    let hit_x = (visual_x - hit_pad).max(x);
+    let hit_right = (visual_x + visual_side + hit_pad).min(x + w);
+    let chips_x = x + 14.0 * scale;
+    ComposerFooterGeometry {
         visual_rect: [visual_x, visual_y, visual_side, visual_side],
         hit_rect: [
             hit_x,
-            visual_y - hit_pad,
+            center_y - policy.hit_side * 0.5,
             (hit_right - hit_x).max(0.0),
-            hit_side,
+            policy.hit_side,
+        ],
+        chips_rect: [
+            chips_x,
+            center_y - STATUS_CHIP_HIT_H * scale * 0.5,
+            (hit_x - 8.0 * scale - chips_x).max(0.0),
+            STATUS_CHIP_HIT_H * scale,
         ],
     }
 }
@@ -179,23 +159,45 @@ fn centered_square(rect: [f32; 4], side: f32) -> [f32; 4] {
     [center[0] - side * 0.5, center[1] - side * 0.5, side, side]
 }
 
-fn point_in_rect(rect: [f32; 4], point: (f32, f32)) -> bool {
-    point.0 >= rect[0]
-        && point.0 <= rect[0] + rect[2]
-        && point.1 >= rect[1]
-        && point.1 <= rect[1] + rect[3]
+fn composer_background_color(theme: &IdeTheme) -> [f32; 4] {
+    crate::primitives::surface_background::base_color(
+        "composer.agent", theme, theme.f32(theme.bg),
+    )
 }
 
-/// Narrow chips show only the terminal non-empty model-id segment. The pane's
-/// full model value remains untouched for picker actions and host state.
-fn model_chip_label(model: &str, narrow: bool) -> &str {
-    if !narrow {
-        return model;
+fn composer_help_panel_color(theme: &IdeTheme) -> [f32; 4] {
+    crate::primitives::surface_background::base_color(
+        "composer.agent", theme, theme.f32(theme.surface),
+    )
+}
+
+/// Capitalization is display-only; provider/model IDs and picker values stay
+/// unchanged, including existing acronyms and model version suffixes.
+fn capitalize_chip_label(label: &str) -> String {
+    let mut start = true;
+    let mut display = String::with_capacity(label.len());
+    for ch in label.chars() {
+        if start {
+            display.extend(ch.to_uppercase());
+        } else {
+            display.push(ch);
+        }
+        start = matches!(ch, '/' | '-' | '_') || ch.is_whitespace();
     }
-    model
-        .rsplit('/')
-        .find(|segment| !segment.is_empty())
-        .unwrap_or("")
+    display
+}
+
+/// Narrow chips show only the terminal non-empty model-id segment.
+fn model_chip_label(model: &str, narrow: bool) -> String {
+    let label = if narrow {
+        model
+            .rsplit('/')
+            .find(|segment| !segment.is_empty())
+            .unwrap_or("")
+    } else {
+        model
+    };
+    capitalize_chip_label(label)
 }
 
 /// Scale chip labels down with the shared compositor's available width. This
@@ -1478,7 +1480,7 @@ pub fn render_input(
     responsive_width: f32,
     theme: &IdeTheme,
     active: bool,
-    mouse: Option<(f32, f32)>,
+    _mouse: Option<(f32, f32)>,
     s: f32,
     show_status: bool,
     home_source: bool,
@@ -1508,152 +1510,93 @@ pub fn render_input(
     pane.composer_interactions()
         .occlusion_rects
         .extend_from_slice(occlusion_rects);
-    // Floating-island composer: the input box's own border IS the
-    // island's top and sides — the shell only shows as a "skirt"
-    // below the box, wrapping the dropdown chip row (agent ˅ /
-    // model ˅ / thinking ˅), so nothing sticks out past the box on
-    // top or the sides. No shadow: on near-black themes a halo reads
-    // as a smeared bg band around the border, not as depth.
-    let corner_radius = if show_status { 18.0 } else { 14.0 } * s;
+    // One continuous shell surrounds the text and footer, with no divider or
+    // separately bordered input box inside it.
+    let geometry = ComposerGeometry::new(
+        rect, s, sugarloaf.scale_factor(), pane.input_help_visible() || checkout_context.is_some(),
+    );
+    let corner_radius = geometry.card_radius;
     let chips_band_h = CHIPS_BAND_H * s;
-    let outer_stroke = (FRAME_STROKE * s).max(2.0);
     let box_x = x;
     let box_y = y;
     let box_w = w;
     let box_h = (h - chips_band_h).max(44.0 * s);
     let box_bottom = box_y + box_h;
-    let background = crate::primitives::surface_background::base_color(
-        "composer.agent",
-        theme,
-        theme.f32(theme.surface),
-    );
-    let translucent = background[3] < 1.0;
-    if translucent {
-        // The footer starts below the box: no hidden skirt backing and no
-        // second alpha layer beneath the input's lower half.
-        let skirt = [x, box_bottom, w, (y + h - box_bottom).max(0.0)];
-        let inner = [
-            x + outer_stroke,
-            box_bottom,
-            (w - 2.0 * outer_stroke).max(0.0),
-            (skirt[3] - outer_stroke).max(0.0),
-        ];
-        let r = (corner_radius - outer_stroke).max(0.0);
-        crate::widgets::frame::draw_background_border(
-            sugarloaf,
-            skirt,
-            inner,
-            [0.0, 0.0, corner_radius, corner_radius],
-            [0.0, 0.0, r, r],
-            theme.f32_alpha(theme.border, 0.75),
-            DEPTH,
-            ORDER_PANEL,
-        );
-        sugarloaf.quad(
-            None,
-            inner[0],
-            inner[1],
-            inner[2],
-            inner[3],
-            background,
-            [0.0, 0.0, r, r],
-            DEPTH,
-            ORDER_PANEL,
-        );
-    } else {
-        // Skirt: border + hollow fill from the box's midline down to the
-        // island's bottom edge — its top half hides behind the opaque box,
-        // leaving only the side rails and the bottom line around the chips.
-        let skirt_top = box_y + box_h * 0.5;
-        sugarloaf.rounded_rect(
-            None,
-            x,
-            skirt_top,
-            w,
-            (y + h - skirt_top).max(0.0),
-            theme.f32_alpha(theme.border, 0.75),
-            DEPTH,
-            corner_radius,
-            ORDER_PANEL,
-        );
-        sugarloaf.rounded_rect(
-            None,
-            x + outer_stroke,
-            skirt_top,
-            (w - 2.0 * outer_stroke).max(0.0),
-            (y + h - skirt_top - outer_stroke).max(0.0),
-            theme.f32(theme.bg),
-            DEPTH,
-            (corner_radius - outer_stroke).max(0.0),
-            ORDER_PANEL,
-        );
-    }
-    // Bottom band INSIDE the box hosts the square send button; wrapped
-    // text never enters it.
-    let bottom_reserved = if show_status { 42.0 } else { 38.0 } * s;
+    let background = composer_background_color(theme);
+    let (text_top_padding, text_bottom_padding) = composer_text_padding(show_status);
     let input_images = pane.input_images();
     let image_rail_h = if input_images.is_empty() {
         0.0
     } else {
         super::INPUT_IMAGE_RAIL_H * s
     };
-    let text_top_pad = (if show_status { 15.0 } else { 11.0 }) * s + image_rail_h;
-    let border_w = (FRAME_STROKE * s).max(2.0);
-    if translucent {
-        crate::widgets::frame::draw_background_border(
-            sugarloaf,
-            [box_x, box_y, box_w, box_h],
-            [
-                box_x + border_w,
-                box_y + border_w,
-                (box_w - 2.0 * border_w).max(0.0),
-                (box_h - 2.0 * border_w).max(0.0),
-            ],
-            [corner_radius; 4],
-            [(corner_radius - border_w).max(0.0); 4],
-            theme.f32(theme.border),
-            DEPTH,
-            ORDER_PANEL,
-        );
-    } else {
-        sugarloaf.rounded_rect(
-            None,
-            box_x,
-            box_y,
-            box_w,
-            box_h,
-            theme.f32(theme.border),
-            DEPTH,
-            corner_radius,
-            ORDER_PANEL,
-        );
-    }
+    let text_top_pad = text_top_padding * s + image_rail_h;
+    let border_w = (FRAME_STROKE * 0.5 * s).max(1.0);
+    let [frame_x, frame_y, frame_w, frame_h] = geometry.card;
+    let inner = [
+        frame_x + border_w,
+        frame_y + border_w,
+        (frame_w - 2.0 * border_w).max(0.0),
+        (frame_h - 2.0 * border_w).max(0.0),
+    ];
+    let inner_radius = (corner_radius - border_w).max(0.0);
+    let tray_join = geometry.tray_join_rect(border_w);
+    let prior_card_occlusions = tray_join.map(|join| {
+        let previous = sugarloaf.set_content_occlusion_rects(Vec::new());
+        let mut holes = previous.clone();
+        holes.push(join);
+        sugarloaf.set_content_occlusion_rects(holes);
+        previous
+    });
+    crate::widgets::frame::draw_background_border(
+        sugarloaf,
+        geometry.card,
+        inner,
+        [corner_radius; 4],
+        [inner_radius; 4],
+        theme.f32_alpha(theme.border, 0.75),
+        DEPTH,
+        ORDER_PANEL,
+    );
     sugarloaf.rounded_rect(
         None,
-        box_x + border_w,
-        box_y + border_w,
-        (box_w - 2.0 * border_w).max(0.0),
-        (box_h - 2.0 * border_w).max(0.0),
+        inner[0],
+        inner[1],
+        inner[2],
+        inner[3],
         background,
         DEPTH,
-        (corner_radius - border_w).max(0.0),
+        inner_radius,
         ORDER_PANEL + 1,
     );
     crate::primitives::surface_background::render(
         sugarloaf,
         "composer.agent",
-        [
-            box_x + border_w,
-            box_y + border_w,
-            (box_w - 2.0 * border_w).max(0.0),
-            (box_h - 2.0 * border_w).max(0.0),
-        ],
-        (corner_radius - border_w).max(0.0),
+        inner,
+        inner_radius,
         s,
         DEPTH,
         ORDER_PANEL + 1,
         occlusion_rects,
     );
+    if let Some(previous) = prior_card_occlusions {
+        sugarloaf.set_content_occlusion_rects(previous);
+    }
+    if let Some([join_x, join_y, join_w, join_h]) = tray_join {
+        // This strip replaces (rather than backs) the card's bottom border and
+        // fill. The tray and main card each contribute opacity exactly once.
+        sugarloaf.quad(
+            None,
+            join_x,
+            join_y,
+            join_w,
+            join_h,
+            composer_help_panel_color(theme),
+            [0.0; 4],
+            DEPTH,
+            ORDER_PANEL + 1,
+        );
+    }
     if !input_images.is_empty() {
         super::image_preview::render_image_strip(
             sugarloaf,
@@ -1678,23 +1621,21 @@ pub fn render_input(
         pane.interruptible_run_active(),
     );
     if pane.conversation_source().provider().is_some() {
-        composer_policy.show_tab_hint = false;
         composer_policy.show_command_hint = false;
     }
-    // The painted square retains its original size. Narrow panes register a
-    // separate 44 logical-pixel touch target without affecting layout.
-    let send_inset = 9.0 * s;
-    let control_geometry =
-        composer_control_geometry(box_x, box_w, box_bottom, send_inset, composer_policy);
+    let control_geometry = composer_footer_geometry(
+        [box_x, box_bottom, box_w, chips_band_h],
+        s,
+        composer_policy,
+    );
     let [send_x, send_y, send_side, _] = control_geometry.visual_rect;
-    // Dropdown chip row in the shell band below the box. Each chip
-    // registers a hit rect: clicking one opens its "/" picker.
+    let [chips_x, chips_y, chips_w, _] = control_geometry.chips_rect;
     render_status_chips(
         sugarloaf,
         pane,
-        x + 14.0 * s,
-        box_bottom + ((y + h - box_bottom) - 13.5 * s) * 0.5,
-        (w - 28.0 * s).max(0.0),
+        chips_x,
+        chips_y + 5.0 * s,
+        chips_w,
         composer_policy.narrow,
         home_source,
         theme,
@@ -1717,18 +1658,12 @@ pub fn render_input(
     let text_y = box_y + text_top_pad;
     let text_w = (box_w - 36.0 * s).max(20.0 * s);
     let line_h = INPUT_LINE_H * s;
-    let max_visible_lines = (((box_h - bottom_reserved) / line_h).floor().max(1.0)
-        as usize)
-        .min(MAX_INPUT_LINES);
+    let text_h = (box_h - text_top_pad - text_bottom_padding * s).max(line_h);
+    let max_visible_lines = composer_visible_line_count(text_h, line_h);
     let opts = DrawOpts {
         font_size: 16.0 * s,
         color: text_color,
-        clip_rect: Some([
-            text_x,
-            box_y + 6.0 * s + image_rail_h,
-            text_w,
-            (box_h - bottom_reserved - image_rail_h).max(INPUT_LINE_H * s),
-        ]),
+        clip_rect: Some([text_x, text_y, text_w, text_h]),
         ..DrawOpts::default()
     };
     let wrapped_rows = prepared_wrap_rows
@@ -1797,12 +1732,13 @@ pub fn render_input(
             .unwrap_or(0.0);
         let caret_visible_row = caret_row.saturating_sub(visible_line_offset);
         let caret_y = text_y + caret_visible_row as f32 * line_h;
-        let caret_x = (text_x + caret_x_in_row)
-            .min(box_x + box_w - 28.0 * s)
-            .max(text_x);
-        let cursor_w = (16.0 * s * 0.6).max(2.0);
+        let cursor_w = prompt_caret_width(opts.font_size);
         let cursor_h = 20.0 * s;
-        let caret_rect = [caret_x, caret_y, cursor_w, cursor_h];
+        // Keep the true insertion x, including interior boundaries of an
+        // oversized atomic attachment. Clip the overlay, never shift it left.
+        let caret_rect = prompt_caret_rect(
+            text_x, caret_y, caret_x_in_row, text_w, cursor_w, cursor_h,
+        );
         // The trail-cursor overlay paints this rect ABOVE everything,
         // so when a covering panel (the `/` picker, a modal) occludes
         // the caret position, publishing it would punch the caret
@@ -1811,54 +1747,12 @@ pub fn render_input(
         let occluded = occlusion_rects
             .iter()
             .any(|rect| crate::primitives::geom::rects_intersect(*rect, caret_rect));
-        if !occluded {
+        if !occluded && caret_rect[2] > 0.0 {
             pane.set_cursor_rect(Some(caret_rect));
         }
     }
 
-    // Attachment is a bare `+`, with no painted surface. `usage_chip_rect` is
-    // retained as the authoritative ABI-level file-browser action slot while
-    // old percentage-meter consumers migrate. Its independent invisible hit
-    // target is at least 44 logical pixels without changing composer layout.
-    if pane.conversation_source().provider().is_none() {
-        let attachment_geometry = attachment_control_geometry(
-            box_x,
-            box_w,
-            send_inset,
-            control_geometry.visual_rect,
-            s,
-        );
-        debug_assert!(!ATTACHMENT_ACTION_DRAW_POLICY.paint_background);
-        let attachment_hovered =
-            mouse.is_some_and(|point| point_in_rect(attachment_geometry.hit_rect, point));
-        let mut attach_color = theme.u8(theme.fg);
-        let attach_alpha = if attachment_hovered {
-            1.0
-        } else if active {
-            0.88
-        } else {
-            0.68
-        };
-        attach_color[3] = (attach_color[3] as f32 * attach_alpha).round() as u8;
-        let attach_opts = DrawOpts {
-            font_size: send_side * COMPOSER_ATTACH_FONT_RATIO,
-            color: attach_color,
-            bold: true,
-            clip_rect: Some(attachment_geometry.visual_rect),
-            ..DrawOpts::default()
-        };
-        draw_icon_centered_with_occlusion(
-            sugarloaf,
-            attachment_geometry.visual_rect[0],
-            attachment_geometry.visual_rect,
-            "+",
-            &attach_opts,
-            occlusion_rects,
-            true,
-        );
-        pane.register_usage_chip_rect(attachment_geometry.hit_rect);
-    }
-    // Square send button: filled rounded square, bottom-right. While the
+    // Submit shares the footer row with agent/model/thinking. While the
     // model responds it becomes a quiet static stop-square; avoid layering
     // another activity animation here because the status row already owns
     // the live response treatment. Enter still submits — the button mirrors
@@ -1921,17 +1815,12 @@ pub fn render_input(
         );
     }
 
-    if pane.input_help_visible() || checkout_context.is_some() {
+    if let Some(tray) = geometry.tray {
         render_input_help_strip(
             sugarloaf,
             pane,
             composer_policy,
-            [
-                x + 8.0 * s,
-                y + h + 1.0 * s,
-                (w - 16.0 * s).max(0.0),
-                (INPUT_HELP_STRIP_H - 7.0) * s,
-            ],
+            tray,
             theme,
             s,
             now_seconds,
@@ -1959,8 +1848,23 @@ fn render_input_help_strip(
     if w <= 0.0 || h <= 0.0 {
         return;
     }
-
-    let clip = [x, y, w, h];
+    let radius = (COMPOSER_TRAY_RADIUS * s).min(w * 0.5).min(h);
+    let stroke = s.min(w * 0.5).min(h);
+    let inner = [x + stroke, y, (w - 2.0 * stroke).max(0.0), (h - stroke).max(0.0)];
+    let inner_radius = (radius - stroke).max(0.0);
+    crate::widgets::frame::draw_background_border(
+        sugarloaf, rect, inner, [0.0, 0.0, radius, radius],
+        [0.0, 0.0, inner_radius, inner_radius],
+        theme.f32_alpha(theme.border, 0.4), DEPTH, ORDER_PANEL,
+    );
+    sugarloaf.quad(
+        None, inner[0], inner[1], inner[2], inner[3], composer_help_panel_color(theme),
+        [0.0, 0.0, inner_radius, inner_radius], DEPTH, ORDER_PANEL,
+    );
+    let padding = (14.0 * s).min(w * 0.5);
+    let rect = [x + padding, y, (w - 2.0 * padding).max(0.0), h];
+    let [x, y, w, h] = rect;
+    let clip = rect;
     let key_opts = DrawOpts {
         font_size: 12.5 * s,
         color: theme.u8(theme.fg),
@@ -1978,26 +1882,15 @@ fn render_input_help_strip(
 
     // Reserve the right-hand hints before deciding whether the branch fits.
     let needs_connect = pane.no_providers_connected();
-    let show_tab_hint = policy.show_tab_hint && !needs_connect;
     let (slash, command_label) = if needs_connect {
         ("/connect", "to connect a provider")
     } else {
         INPUT_COMMAND_HINT
     };
-    let (tab, agents) = INPUT_TAB_HINT;
     let command_label_w = sugarloaf.text_mut().measure(command_label, &label_opts);
     let slash_w = sugarloaf.text_mut().measure(slash, &key_opts);
-    let agents_w = sugarloaf.text_mut().measure(agents, &label_opts);
-    let tab_w = sugarloaf.text_mut().measure(tab, &key_opts);
     let inner_gap = 7.0 * s;
-    let group_gap = 26.0 * s;
-    let tab_group_w = tab_w + inner_gap + agents_w;
-    let command_group_w = slash_w + inner_gap + command_label_w;
-    let right_w = if show_tab_hint {
-        tab_group_w + group_gap + command_group_w
-    } else {
-        command_group_w
-    };
+    let right_w = slash_w + inner_gap + command_label_w;
     let right_x = x + (w - right_w).max(0.0);
     let hint_left = if pane.input_help_visible() && policy.show_command_hint {
         right_x
@@ -2074,43 +1967,13 @@ fn render_input_help_strip(
                 &label_opts,
                 occlusion_rects,
             );
-            activity_guard = esc_x
-                + esc_w
-                + 7.0 * s
-                + sugarloaf.text_mut().measure("interrupt", &label_opts)
-                + 12.0 * s;
         }
     }
 
     if !policy.show_command_hint {
         return;
     }
-    let groups_fit = right_x >= activity_guard;
-    if show_tab_hint && groups_fit {
-        draw_text_clipped(
-            sugarloaf,
-            right_x,
-            baseline_y,
-            tab,
-            &key_opts,
-            occlusion_rects,
-        );
-        draw_text_clipped(
-            sugarloaf,
-            right_x + tab_w + inner_gap,
-            baseline_y,
-            agents,
-            &label_opts,
-            occlusion_rects,
-        );
-    }
-    let slash_x = if show_tab_hint && groups_fit {
-        right_x + tab_group_w + group_gap
-    } else if groups_fit {
-        right_x
-    } else {
-        x + (w - slash_w - inner_gap - command_label_w).max(0.0)
-    };
+    let slash_x = right_x;
     draw_text_clipped(
         sugarloaf,
         slash_x,
@@ -2577,7 +2440,11 @@ pub fn render_streaming_status_row(
         AgentStreamingStatus::Retrying => "backoff",
         AgentStreamingStatus::Idle => "idle",
     };
-    let time_label = format!("· {} model · {detail}", format_elapsed(elapsed));
+    let time_label = if matches!(state, AgentStreamingStatus::Generating) {
+        format!("· {} model", format_elapsed(elapsed))
+    } else {
+        format!("· {} model · {detail}", format_elapsed(elapsed))
+    };
     let time_opts = DrawOpts {
         font_size: 13.0 * s,
         color: theme.u8(theme.muted),
@@ -2587,14 +2454,16 @@ pub fn render_streaming_status_row(
     };
     let time_baseline = sugarloaf.text_mut().baseline_offset(&time_opts);
     let time_y = last_line_y + word_baseline - time_baseline;
-    draw_text_clipped(
-        sugarloaf,
-        cursor_x,
-        time_y,
-        &time_label,
-        &time_opts,
-        occlusion_rects,
-    );
+    if elapsed > 0.0 {
+        draw_text_clipped(
+            sugarloaf,
+            cursor_x,
+            time_y,
+            &time_label,
+            &time_opts,
+            occlusion_rects,
+        );
+    }
 
     if queued_count > 0 {
         let queue_label = if pane.queued_prompt_preview() == Some("Compaction queued") {
@@ -2757,6 +2626,9 @@ pub fn render_status_chips(
     s: f32,
     occlusion_rects: &[[f32; 4]],
 ) {
+    if max_w <= 0.0 {
+        return;
+    }
     let mut remaining_w = max_w;
     let offset = usize::from(home_source);
     if home_source
@@ -2807,11 +2679,22 @@ pub fn render_status_chips(
         };
         let caret_w = sugarloaf.text_mut().measure(caret, &caret_opts);
         let gap = 4.0 * s;
+        let mut thought_width = order.iter()
+            .map(|&index| &options[index])
+            .find(|option| option.category == "thought_level")
+            .map_or(0.0, |option| {
+                let opts = DrawOpts { font_size, bold: true, ..DrawOpts::default() };
+                sugarloaf.text_mut().measure(&capitalize_chip_label(option.selected_label()), &opts)
+                    + caret_w + 22.0 * s + gap
+            });
         for option_index in order {
             let option = &options[option_index];
+            if option.category == "thought_level" {
+                thought_width = 0.0;
+            }
             let label = match option.category.as_str() {
                 "model" => model_chip_label(option.selected_label(), narrow),
-                _ => option.selected_label(),
+                _ => capitalize_chip_label(option.selected_label()),
             };
             let color = match option.category.as_str() {
                 "mode" => theme.yellow,
@@ -2838,31 +2721,30 @@ pub fn render_status_chips(
                     .or_else(|| model_kind_for_source(source))
                 })
                 .flatten();
-            let thinking_icon = option.category == "thought_level";
-            let logo_advance = status_chip_icon_advance(model_kind, thinking_icon, s);
+            let logo_advance = model_logo_advance(model_kind, s);
+            let label = if option.category == "model" {
+                crate::primitives::text::truncate_to_fit(
+                    &label,
+                    (remaining_w - thought_width - logo_advance - caret_w - 22.0 * s).max(0.0),
+                    sugarloaf,
+                    &opts,
+                )
+            } else {
+                label
+            };
             let width = logo_advance
-                + sugarloaf.text_mut().measure(label, &opts)
+                + sugarloaf.text_mut().measure(&label, &opts)
                 + caret_w
                 + 22.0 * s;
             if width > remaining_w {
                 break;
             }
-            draw_model_logo(sugarloaf, model_kind, x, y, opts.color, s, occlusion_rects);
-            draw_thinking_icon(
-                sugarloaf,
-                thinking_icon,
-                x,
-                y,
-                opts.color,
-                s,
-                None,
-                occlusion_rects,
-            );
+            draw_model_logo(sugarloaf, model_kind, x, y, font_size, theme, s, occlusion_rects);
             draw_text_clipped(
                 sugarloaf,
                 x + logo_advance,
                 y,
-                label,
+                &label,
                 &opts,
                 occlusion_rects,
             );
@@ -2895,17 +2777,19 @@ pub fn render_status_chips(
         String,
         u32,
         Option<crate::panels::agent_pane::icon::ProviderLogo>,
-        bool,
     ); 3] = [
-        (agent_label, agent_color, None, false),
+        (agent_label, agent_color, None),
         (
-            model_chip_label(pane.model(), narrow).to_string(),
+            model_chip_label(pane.model(), narrow),
             theme.blue,
             crate::panels::agent_pane::icon::ProviderLogo::from_model(pane.model())
                 .or_else(|| model_kind_for_source(pane.conversation_source())),
-            false,
         ),
-        (pane.thinking_label().to_string(), theme.magenta, None, true),
+        (
+            capitalize_chip_label(pane.thinking_label()),
+            theme.magenta,
+            None,
+        ),
     ];
     let font_size = status_chip_font_size(max_w, s);
     let caret = "\u{f078}";
@@ -2915,10 +2799,14 @@ pub fn render_status_chips(
         ..DrawOpts::default()
     };
     let caret_w = sugarloaf.text_mut().measure(caret, &caret_opts);
+    let thought_opts = DrawOpts { font_size, bold: true, ..DrawOpts::default() };
+    let thought_width = if chips[2].0.is_empty() {
+        0.0
+    } else {
+        sugarloaf.text_mut().measure(&chips[2].0, &thought_opts) + caret_w + 24.0 * s
+    };
     let start_x = x;
-    for (index, (label, color, model_kind, thinking_icon)) in
-        chips.into_iter().enumerate()
-    {
+    for (index, (label, color, model_kind)) in chips.into_iter().enumerate() {
         if label.is_empty() {
             continue;
         }
@@ -2928,8 +2816,18 @@ pub fn render_status_chips(
             bold: true,
             ..DrawOpts::default()
         };
+        let logo_advance = model_logo_advance(model_kind, s);
+        let label = if index == 1 {
+            crate::primitives::text::truncate_to_fit(
+                &label,
+                (start_x + remaining_w - x - thought_width - logo_advance - caret_w - 24.0 * s).max(0.0),
+                sugarloaf,
+                &opts,
+            )
+        } else {
+            label
+        };
         let label_w = sugarloaf.text_mut().measure(&label, &opts);
-        let logo_advance = status_chip_icon_advance(model_kind, thinking_icon, s);
         let chip_w = logo_advance + label_w + 6.0 * s + caret_w + 18.0 * s;
         if x + chip_w > start_x + remaining_w {
             break;
@@ -2944,18 +2842,9 @@ pub fn render_status_chips(
             model_kind,
             x,
             y + lift,
-            opts.color,
+            font_size,
+            theme,
             s,
-            occlusion_rects,
-        );
-        draw_thinking_icon(
-            sugarloaf,
-            thinking_icon,
-            x,
-            y + lift,
-            opts.color,
-            s,
-            activation,
             occlusion_rects,
         );
         let label_x = x + logo_advance;
@@ -3073,27 +2962,10 @@ fn model_logo_advance(
     }
 }
 
-fn status_chip_icon_advance(
-    model_kind: Option<crate::panels::agent_pane::icon::ProviderLogo>,
-    thinking_icon: bool,
-    s: f32,
-) -> f32 {
-    if thinking_icon {
-        (THINKING_ICON_SIDE + MODEL_LOGO_GAP) * s
-    } else {
-        model_logo_advance(model_kind, s)
-    }
-}
-
-fn status_chip_icon_rect(x: f32, text_y: f32, side: f32, s: f32) -> [f32; 4] {
+fn status_chip_icon_rect(x: f32, text_y: f32, side: f32, font_size: f32, s: f32) -> [f32; 4] {
     let side = side * s;
-    let hit_top = text_y - 5.0 * s;
-    [
-        x,
-        hit_top + (STATUS_CHIP_HIT_H * s - side) * 0.5,
-        side,
-        side,
-    ]
+    // Text is drawn from its nominal em-box top, independently of the hit target.
+    [x, text_y + (font_size - side) * 0.5, side, side]
 }
 
 fn draw_model_logo(
@@ -3101,13 +2973,17 @@ fn draw_model_logo(
     kind: Option<crate::panels::agent_pane::icon::ProviderLogo>,
     x: f32,
     y: f32,
-    color: [u8; 4],
+    font_size: f32,
+    theme: &IdeTheme,
     s: f32,
     occlusion_rects: &[[f32; 4]],
 ) {
     let Some(kind) = kind else {
         return;
     };
+    let color = kind.composer_color(
+        theme.is_dark(), theme.u8(theme.readable_accent(theme.blue)),
+    );
     let Some(image_id) =
         crate::panels::agent_pane::icon::register_provider_logo_atlas(sugarloaf, color)
     else {
@@ -3118,7 +2994,7 @@ fn draw_model_logo(
         sugarloaf,
         OVERLAY_PANEL_ID,
         image_id,
-        status_chip_icon_rect(x, y, MODEL_LOGO_SIDE, s),
+        status_chip_icon_rect(x, y, MODEL_LOGO_SIDE, font_size, s),
         kind.source_rect(),
         2,
         scale,
@@ -3126,78 +3002,74 @@ fn draw_model_logo(
     );
 }
 
-#[allow(clippy::too_many_arguments)]
-fn draw_thinking_icon(
-    sugarloaf: &mut Sugarloaf,
-    visible: bool,
-    x: f32,
-    y: f32,
-    color: [u8; 4],
-    s: f32,
-    activation_ms: Option<f32>,
-    occlusion_rects: &[[f32; 4]],
-) {
-    if !visible {
-        return;
-    }
-    let side = THINKING_ICON_SIDE * s;
-    let strength = activation_ms.map_or(0.0, |ms| 1.0 - (ms / 280.0).clamp(0.0, 1.0));
-    let phase = activation_ms.unwrap_or(0.0) * 0.12;
-    let jitter_x = phase.sin() * 1.25 * s * strength;
-    let jitter_y = (phase * 1.7).cos() * 0.65 * s * strength;
-    let mut icon_rect = status_chip_icon_rect(x, y, THINKING_ICON_SIDE, s);
-    icon_rect[0] += jitter_x;
-    icon_rect[1] += jitter_y;
-    let icon_opts = DrawOpts {
-        font_size: side,
-        color,
-        bold: true,
-        ..DrawOpts::default()
-    };
-
-    if strength > 0.0 {
-        for (direction, alpha) in [(-1.0_f32, 0.24_f32), (1.0, 0.18)] {
-            let mut echo_color = color;
-            echo_color[3] = ((color[3] as f32) * alpha * strength).round() as u8;
-            let echo_rect = [
-                icon_rect[0] + direction * 3.0 * s * strength,
-                icon_rect[1] - direction * 1.25 * s * strength,
-                icon_rect[2],
-                icon_rect[3],
-            ];
-            draw_icon_centered_with_occlusion(
-                sugarloaf,
-                echo_rect[0],
-                echo_rect,
-                THINKING_ICON_GLYPH,
-                &DrawOpts {
-                    color: echo_color,
-                    ..icon_opts.clone()
-                },
-                occlusion_rects,
-                true,
-            );
-        }
-    }
-    draw_icon_centered_with_occlusion(
-        sugarloaf,
-        icon_rect[0],
-        icon_rect,
-        THINKING_ICON_GLYPH,
-        &icon_opts,
-        occlusion_rects,
-        true,
-    );
-}
-
 #[cfg(test)]
 mod composer_visual_policy_tests {
     use super::*;
+    use super::super::{composer_geometry::COMPOSER_CORNER_RADIUS, INPUT_HELP_STRIP_H};
 
     #[test]
-    fn help_strip_defines_tab_and_slash_commands() {
+    fn checkout_tray_is_narrower_and_touches_the_composer_bottom() {
+        for scale in [0.75, 1.0, 1.5, 2.0] {
+            for width in [0.0, 32.0, 280.0, 900.0] {
+                let card = [30.0, 80.0, width * scale, 98.0 * scale];
+                let geometry = ComposerGeometry::new(card, scale, 1.0, true);
+                let Some(tray) = geometry.tray else {
+                    assert_eq!(width, 0.0);
+                    continue;
+                };
+                assert_eq!(tray[1], geometry.card[1] + geometry.card[3]);
+                assert!((tray[3] + geometry.card[3] - card[3] - INPUT_HELP_STRIP_H * scale).abs() < 0.001);
+                assert!(tray[0] >= card[0]);
+                assert!(tray[0] + tray[2] <= card[0] + card[2]);
+                assert!(tray[2] >= 0.0);
+                if width >= 280.0 {
+                    assert_eq!(tray[0] - card[0], 24.0 * scale);
+                    assert_eq!(card[2] - tray[2], 48.0 * scale);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn composer_background_follows_every_selected_theme_instead_of_forcing_black() {
+        for name in crate::primitives::ide_theme::IdeThemeName::ALL {
+            let theme = IdeTheme::by_name(name.as_str());
+            assert_eq!(
+                composer_background_color(&theme),
+                crate::primitives::surface_background::base_color(
+                    "composer.agent", &theme, theme.f32(theme.bg),
+                ),
+                "{name:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn composer_and_tray_preserve_theme_tokens_and_configured_opacity() {
+        let mut themes: Vec<_> = crate::primitives::ide_theme::IdeThemeName::ALL
+            .into_iter().map(|name| IdeTheme::by_name(name.as_str())).collect();
+        themes.push(IdeTheme {
+            bg: 0xf2_f4_f8,
+            surface: 0xff_ff_ff,
+            ..IdeTheme::pastel_dark()
+        });
+        for theme in themes {
+            let shell = composer_background_color(&theme);
+            let tray = composer_help_panel_color(&theme);
+            assert_eq!(shell, crate::primitives::surface_background::base_color(
+                "composer.agent", &theme, theme.f32(theme.bg),
+            ));
+            assert_eq!(tray, crate::primitives::surface_background::base_color(
+                "composer.agent", &theme, theme.f32(theme.surface),
+            ));
+            assert!(tray[..3].iter().zip(&shell[..3]).all(|(a, b)| a > b));
+            assert_eq!(tray[3], shell[3]);
+        }
+    }
+
+    #[test]
+    fn help_strip_defines_slash_commands() {
         assert_eq!(INPUT_COMMAND_HINT, ("/", "commands"));
-        assert_eq!(INPUT_TAB_HINT, ("tab", "agents"));
     }
 
     #[test]
@@ -3260,7 +3132,6 @@ mod composer_visual_policy_tests {
         assert!(policy.narrow);
         assert!(policy.show_activity);
         assert!(!policy.show_interrupt_hint);
-        assert!(!policy.show_tab_hint);
         assert!(policy.show_command_hint);
         assert_eq!(policy.action, ComposerControlAction::Interrupt);
         assert_eq!(policy.visual_side, 26.0);
@@ -3273,7 +3144,6 @@ mod composer_visual_policy_tests {
         assert!(!policy.narrow);
         assert!(policy.show_activity);
         assert!(policy.show_interrupt_hint);
-        assert!(policy.show_tab_hint);
         assert!(policy.show_command_hint);
         assert_eq!(policy.action, ComposerControlAction::Interrupt);
         assert_eq!(policy.visual_side, 26.0);
@@ -3309,14 +3179,12 @@ mod composer_visual_policy_tests {
 
         for policy in [cramped, scaled_cramped] {
             assert!(policy.narrow);
-            assert!(!policy.show_tab_hint);
             assert!(!policy.show_interrupt_hint);
             assert!(policy.show_activity);
             assert!(policy.show_command_hint);
         }
         for policy in [wide, scaled_wide] {
             assert!(!policy.narrow);
-            assert!(policy.show_tab_hint);
             assert!(policy.show_interrupt_hint);
         }
     }
@@ -3350,14 +3218,22 @@ mod composer_visual_policy_tests {
     }
 
     #[test]
-    fn status_chip_symbols_share_the_hit_row_center() {
-        let text_y = 100.0;
-        for side in [MODEL_LOGO_SIDE, THINKING_ICON_SIDE] {
-            let rect = status_chip_icon_rect(20.0, text_y, side, 1.0);
-            assert_eq!(
-                rect[1] + rect[3] * 0.5,
-                text_y - 5.0 + STATUS_CHIP_HIT_H * 0.5
-            );
+    fn model_logo_stays_centered_on_the_label_at_every_responsive_size() {
+        for scale in [0.75, 1.0, 1.25, 1.5, 2.0] {
+            for width in [360.0, 420.0, 590.0, 760.0, 900.0] {
+                let font_size = status_chip_font_size(width * scale, scale);
+                for lift in [0.0, -1.25 * scale, -2.5 * scale] {
+                    let text_y = 100.25 + lift;
+                    let rect = status_chip_icon_rect(
+                        20.0, text_y, MODEL_LOGO_SIDE, font_size, scale,
+                    );
+                    assert!((rect_center(rect)[1] - (text_y + font_size * 0.5)).abs() < 0.0001);
+                    assert_eq!(rect[2], MODEL_LOGO_SIDE * scale);
+                    assert_eq!(rect[3], rect[2]);
+                    assert_eq!(rect[0], 20.0);
+                }
+            }
+            assert_eq!(model_logo_advance(None, scale), 0.0);
         }
     }
 
@@ -3370,28 +3246,35 @@ mod composer_visual_policy_tests {
     }
 
     #[test]
-    fn narrow_model_chip_uses_last_non_empty_segment_without_changing_wide_label() {
+    fn chip_capitalization_is_display_only_and_preserves_acronyms() {
         let full = "openrouter/openai/gpt-5.6";
-        assert_eq!(model_chip_label(full, true), "gpt-5.6");
-        assert_eq!(model_chip_label(full, false), full);
-        assert_eq!(model_chip_label("provider//family/model/", true), "model");
-        assert_eq!(model_chip_label("/model/", true), "model");
+        assert_eq!(model_chip_label(full, true), "Gpt-5.6");
+        assert_eq!(model_chip_label(full, false), "Openrouter/Openai/Gpt-5.6");
+        assert_eq!(full, "openrouter/openai/gpt-5.6");
+        assert_eq!(model_chip_label("provider//family/model/", true), "Model");
+        assert_eq!(model_chip_label("/model/", true), "Model");
         assert_eq!(model_chip_label("", true), "");
         assert_eq!(model_chip_label("///", true), "");
+        assert_eq!(capitalize_chip_label("high"), "High");
+        assert_eq!(capitalize_chip_label("extra high"), "Extra High");
+        assert_eq!(capitalize_chip_label("OpenAI/GPT-5.6"), "OpenAI/GPT-5.6");
+        assert_eq!(model_chip_label("openai/gpt-6-astra", false), "Openai/Gpt-6-Astra");
+        assert_eq!(model_chip_label("openai/gpt-6-astra", true), "Gpt-6-Astra");
+        assert_eq!(capitalize_chip_label("extra_high"), "Extra_High");
     }
 
     #[test]
     fn narrow_control_separates_original_visual_square_from_touch_hit_rect() {
         let idle = composer_visual_policy(390.0, 1.0, false, true, false, false);
         let streaming = composer_visual_policy(390.0, 1.0, false, true, true, true);
-        let idle_geometry = composer_control_geometry(10.0, 300.0, 120.0, 9.0, idle);
-        let streaming_geometry =
-            composer_control_geometry(10.0, 300.0, 120.0, 9.0, streaming);
+        let footer = [10.0, 120.0, 300.0, CHIPS_BAND_H];
+        let idle_geometry = composer_footer_geometry(footer, 1.0, idle);
+        let streaming_geometry = composer_footer_geometry(footer, 1.0, streaming);
 
         assert_eq!(idle.action, ComposerControlAction::Send);
         assert_eq!(streaming.action, ComposerControlAction::Interrupt);
-        assert_eq!(idle_geometry.visual_rect, [275.0, 85.0, 26.0, 26.0]);
-        assert_eq!(idle_geometry.hit_rect, [266.0, 76.0, 44.0, 44.0]);
+        assert_eq!(idle_geometry.visual_rect, [275.0, 129.0, 26.0, 26.0]);
+        assert_eq!(idle_geometry.hit_rect, [266.0, 120.0, 44.0, 44.0]);
         assert_eq!(streaming_geometry, idle_geometry);
     }
 
@@ -3404,7 +3287,7 @@ mod composer_visual_policy_tests {
         assert_eq!(COMPOSER_CONTROL_RADIUS, 8.0);
         assert_eq!(COMPOSER_STOP_SIDE_RATIO, 0.28);
         assert_eq!(COMPOSER_SEND_FONT_RATIO, 0.62);
-        assert_eq!(COMPOSER_ATTACH_FONT_RATIO, 0.72);
+        assert_eq!(COMPOSER_CORNER_RADIUS, 20.0);
     }
 
     #[test]
@@ -3421,13 +3304,8 @@ mod composer_visual_policy_tests {
         ] {
             let policy =
                 composer_visual_policy(width, scale, show_status, true, false, false);
-            let send = composer_control_geometry(20.0, width, 180.0, 9.0 * scale, policy);
-            let attach = attachment_control_geometry(
-                20.0,
-                width,
-                9.0 * scale,
-                send.visual_rect,
-                scale,
+            let send = composer_footer_geometry(
+                [20.0, 180.0, width, CHIPS_BAND_H * scale], scale, policy,
             );
             let action_center = rect_center(send.visual_rect);
             assert_eq!(rect_center(send.visual_rect), action_center);
@@ -3438,50 +3316,90 @@ mod composer_visual_policy_tests {
                 )),
                 action_center
             );
-            assert_eq!(
-                rect_center(attach.visual_rect),
-                [
-                    attach.visual_rect[0] + attach.visual_rect[2] * 0.5,
-                    action_center[1],
-                ]
-            );
+            assert_eq!(rect_center(send.chips_rect)[1], action_center[1]);
         }
     }
 
     #[test]
-    fn attachment_is_glyph_only_with_independent_44px_hit_target() {
-        assert!(!ATTACHMENT_ACTION_DRAW_POLICY.paint_background);
-        for (width, scale, show_status) in [
-            (900.0, 1.0, false),
-            (900.0, 1.0, true),
-            (390.0, 1.0, false),
-            (780.0, 2.0, false),
-        ] {
-            let policy =
-                composer_visual_policy(width, scale, show_status, true, false, false);
-            let send = composer_control_geometry(10.0, width, 160.0, 9.0 * scale, policy);
-            let attach = attachment_control_geometry(
-                10.0,
-                width,
-                9.0 * scale,
-                send.visual_rect,
-                scale,
-            );
-            assert!(attach.hit_rect[2] / scale >= 44.0);
-            assert!(attach.hit_rect[3] / scale >= 44.0);
-            assert!(attach.hit_rect[2] > attach.visual_rect[2]);
-            assert!(attach.hit_rect[3] > attach.visual_rect[3]);
-            assert_eq!(
-                rect_center(attach.hit_rect),
-                rect_center(attach.visual_rect)
-            );
+    fn footer_chips_and_send_share_a_row_without_overlapping_hit_targets() {
+        for scale in [0.75, 1.0, 1.5, 2.0] {
+            for width in [280.0, 390.0, 900.0] {
+                for home in [false, true] {
+                    let policy = composer_visual_policy(width * scale, scale, home, true, false, false);
+                    let footer = [20.0, 160.0, width * scale, CHIPS_BAND_H * scale];
+                    let geometry = composer_footer_geometry(footer, scale, policy);
+                    assert_eq!(rect_center(geometry.chips_rect)[1], rect_center(geometry.visual_rect)[1]);
+                    assert!(geometry.chips_rect[0] + geometry.chips_rect[2] <= geometry.hit_rect[0] - 7.99 * scale);
+                    assert_eq!(rect_center(geometry.hit_rect), rect_center(geometry.visual_rect));
+                    assert!(geometry.hit_rect[1] >= footer[1]);
+                    assert!(geometry.hit_rect[1] + geometry.hit_rect[3] <= footer[1] + footer[3]);
+                    assert!(geometry.visual_rect[1] >= footer[1]);
+                    assert!(geometry.visual_rect[1] + geometry.visual_rect[3] <= footer[1] + footer[3]);
+                    if policy.narrow {
+                        assert_eq!(geometry.hit_rect[3], 44.0 * scale);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn shift_enter_keeps_caret_on_the_new_row_without_premature_scrolling() {
+        use crate::panels::agent_pane::input_controller::AgentInputBuffer;
+        use crate::panels::agent_pane::input_viewport::InputViewport;
+
+        for scale in [0.6, 0.75, 0.8, 0.95, 1.0, 1.2, 1.5, 2.0] {
+            for home in [false, true] {
+                for image_h in [0.0, super::super::INPUT_IMAGE_RAIL_H * scale] {
+                    let mut input = AgentInputBuffer::new(
+                        "draft".into(), 5, Vec::new(), None, String::new(),
+                    );
+                    let mut viewport = InputViewport::default();
+                    for rows in 1..=MAX_INPUT_LINES + 3 {
+                        let wrapped = wrap_agent_prompt_rows_with(&input.input, 100.0, |s| {
+                            s.chars().count() as f32
+                        });
+                        assert_eq!(wrapped.len(), rows);
+                        let caret_row = visual_row_index(&wrapped, input.cursor_byte).unwrap();
+                        assert_eq!(caret_row, rows - 1);
+                        let h = super::super::layout::input_height_for_visual_rows(
+                            rows, scale, home, false,
+                        ) + image_h;
+                        let (top_pad, bottom_pad) = composer_text_padding(home);
+                        let text_top_pad = top_pad * scale + image_h;
+                        let line_h = INPUT_LINE_H * scale;
+                        let text_h = (h - CHIPS_BAND_H * scale - text_top_pad
+                            - bottom_pad * scale).max(line_h);
+                        let capacity = composer_visible_line_count(text_h, line_h);
+                        assert_eq!(capacity, rows.min(MAX_INPUT_LINES));
+                        let first_row = viewport.update(
+                            &input.input, input.cursor_byte, caret_row, wrapped.len(), capacity,
+                            [0.0, text_top_pad, 100.0, capacity as f32 * line_h], line_h,
+                        );
+                        assert_eq!(first_row, rows.saturating_sub(MAX_INPUT_LINES));
+                        assert_eq!(caret_row - first_row, (rows - 1).min(MAX_INPUT_LINES - 1));
+                        input.insert_text("\n");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn visible_line_count_does_not_round_genuinely_partial_rows_up() {
+        for scale in [0.6, 0.8, 0.95, 1.0, 1.2, 2.0] {
+            let line_h = INPUT_LINE_H * scale;
+            assert_eq!(composer_visible_line_count(1.5 * line_h, line_h), 1);
+            assert_eq!(composer_visible_line_count(1.999 * line_h, line_h), 1);
+            assert_eq!(composer_visible_line_count(4.2 * line_h, line_h), 4);
         }
     }
 
     #[test]
     fn narrow_control_paint_and_hit_width_stay_inside_composer() {
         let policy = composer_visual_policy(32.0, 1.0, false, true, false, false);
-        let geometry = composer_control_geometry(100.0, 32.0, 120.0, 9.0, policy);
+        let geometry = composer_footer_geometry([100.0, 120.0, 32.0, CHIPS_BAND_H], 1.0, policy);
+        assert_eq!(geometry.chips_rect[2], 0.0);
         for rect in [geometry.visual_rect, geometry.hit_rect] {
             assert!(rect[0] >= 100.0);
             assert!(rect[2] >= 0.0);
@@ -3542,6 +3460,21 @@ fn draw_agent_prompt_text(
     }
 }
 
+fn prompt_caret_width(font_size: f32) -> f32 {
+    (font_size * 0.6).max(2.0)
+}
+
+fn prompt_caret_rect(
+    text_x: f32,
+    y: f32,
+    insertion_x: f32,
+    text_w: f32,
+    caret_w: f32,
+    caret_h: f32,
+) -> [f32; 4] {
+    [text_x + insertion_x, y, caret_w.min((text_w - insertion_x).max(0.0)), caret_h]
+}
+
 /// Running wrap state for [`wrap_agent_prompt_rows`]: the visual row
 /// being built covers `text[start..end]` at accumulated width `width`,
 /// with `offsets` holding the x of every character boundary already
@@ -3569,6 +3502,15 @@ impl PromptWrapRanges {
         self.width = 0.0;
     }
 
+    // Strict slot fit: equality leaves the insertion point on this row.
+    // Full/oversized rows close even with a zero reserve (legacy test core).
+    // Re-evaluate this BEFORE placing any next glyph/token so a narrow append
+    // cannot flow backwards into a row whose EOF caret already moved down.
+    fn is_closed(&self, max_w: f32, caret_slot: f32) -> bool {
+        self.end > self.start
+            && (self.width >= max_w || self.width + caret_slot > max_w)
+    }
+
     fn break_soft(&mut self) {
         let resume = self.end;
         self.push_row(resume);
@@ -3589,15 +3531,28 @@ fn wrap_agent_prompt_rows(
     opts: &DrawOpts,
 ) -> Vec<InputWrapRow> {
     wrap_cache::prompt(sugarloaf, text, max_w, opts, |sugarloaf| {
-        wrap_agent_prompt_rows_with(text, max_w, |part| {
+        // Slot and glyph measurements are both in the scaled DrawOpts units.
+        // The cache already keys font_size (and backend scale), so the derived
+        // slot cannot change independently of its layout key.
+        wrap_agent_prompt_rows_with_slot(text, max_w, prompt_caret_width(opts.font_size), |part| {
             sugarloaf.text_mut().measure(part, opts)
         })
     })
 }
 
+#[cfg(test)]
 fn wrap_agent_prompt_rows_with(
     text: &str,
     max_w: f32,
+    measure: impl FnMut(&str) -> f32,
+) -> Vec<InputWrapRow> {
+    wrap_agent_prompt_rows_with_slot(text, max_w, 0.0, measure)
+}
+
+fn wrap_agent_prompt_rows_with_slot(
+    text: &str,
+    max_w: f32,
+    caret_slot: f32,
     mut measure: impl FnMut(&str) -> f32,
 ) -> Vec<InputWrapRow> {
     let token_spans = agent_attachment_token_spans(text);
@@ -3608,10 +3563,12 @@ fn wrap_agent_prompt_rows_with(
     let mut cursor = 0;
 
     for (start, end) in token_spans {
-        push_wrapped_prompt_segment(text, cursor, start, max_w, &mut measure, &mut wrap);
+        push_wrapped_prompt_segment(text, cursor, start, max_w, caret_slot, &mut measure, &mut wrap);
         let token = &text[start..end];
         let token_w = measure(token);
-        if wrap.end > wrap.start && wrap.width + token_w > max_w {
+        if wrap.is_closed(max_w, caret_slot)
+            || (wrap.end > wrap.start && wrap.width + token_w > max_w)
+        {
             wrap.break_soft();
         }
         wrap.end = end;
@@ -3627,11 +3584,11 @@ fn wrap_agent_prompt_rows_with(
         cursor = end;
     }
 
-    push_wrapped_prompt_segment(text, cursor, text.len(), max_w, &mut measure, &mut wrap);
-    // Once the last glyph exactly fills a row, the insertion point belongs at
-    // column zero of the next visual row. Reserve that empty row immediately
-    // instead of waiting for the next typed character to make the caret jump.
-    let trailing_wrap_boundary = wrap.end > wrap.start && wrap.width >= max_w;
+    push_wrapped_prompt_segment(text, cursor, text.len(), max_w, caret_slot, &mut measure, &mut wrap);
+    // Materialize the closed row's EOF successor now, using exactly the same
+    // predicate as append placement. A newline instead terminates the current
+    // row directly, consuming this pending soft break without a phantom row.
+    let trailing_wrap_boundary = wrap.is_closed(max_w, caret_slot);
     if trailing_wrap_boundary {
         let end = wrap.end;
         wrap.push_row(end);
@@ -3640,8 +3597,10 @@ fn wrap_agent_prompt_rows_with(
     // preserving it, Shift+Enter updates `cursor_byte` past the last
     // registered row and the renderer falls back to painting the caret
     // on the first/top row.
-    if !trailing_wrap_boundary
-        && (wrap.end > wrap.start || wrap.lines.is_empty() || text.ends_with('\n'))
+    if trailing_wrap_boundary
+        || wrap.end > wrap.start
+        || wrap.lines.is_empty()
+        || text.ends_with('\n')
     {
         let end = wrap.end;
         wrap.push_row(end);
@@ -3676,6 +3635,7 @@ fn push_wrapped_prompt_segment(
     seg_start: usize,
     seg_end: usize,
     max_w: f32,
+    caret_slot: f32,
     measure: &mut impl FnMut(&str) -> f32,
     wrap: &mut PromptWrapRanges,
 ) {
@@ -3690,7 +3650,9 @@ fn push_wrapped_prompt_segment(
         let mut buf = [0; 4];
         let s = ch.encode_utf8(&mut buf);
         let ch_w = measure(s);
-        if wrap.end > wrap.start && wrap.width + ch_w > max_w {
+        if wrap.is_closed(max_w, caret_slot)
+            || (wrap.end > wrap.start && wrap.width + ch_w > max_w)
+        {
             wrap.push_row(ix);
         }
         wrap.end = ix + ch_len;

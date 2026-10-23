@@ -69,9 +69,80 @@ pub(super) fn footer_control_rects(x: f32, y: f32, width: f32, scale: f32) -> [R
     ]
 }
 
+fn pull_request_row_rects(x: f32, y: f32, width: f32, scale: f32) -> (Rect, Rect) {
+    let row = Rect {
+        x,
+        y,
+        w: width.max(0.0),
+        h: 26.0 * scale,
+    };
+    let inset = (PADDING_X * scale).min(row.w * 0.5);
+    let text = Rect {
+        x: x + inset,
+        y,
+        w: (row.w - inset * 2.0 - 12.0 * scale).max(0.0),
+        h: row.h,
+    };
+    (row, text)
+}
+
+fn pull_request_text_opts(
+    fonts: &sugarloaf::font::FontLibrary,
+    rect: Rect,
+    scale: f32,
+    color: [u8; 4],
+) -> DrawOpts {
+    DrawOpts {
+        font_id: crate::primitives::prose_font::ui_prose_font_id(fonts),
+        font_size: 12.0 * scale,
+        color,
+        clip_rect: Some(rect.as_array()),
+        ..DrawOpts::default()
+    }
+}
+
 #[cfg(test)]
 mod commit_layout_tests {
     use super::*;
+
+    #[test]
+    fn pull_request_row_is_inset_centered_and_bounded_at_all_scales() {
+        for scale in [0.75, 1.0, 1.5, 2.0] {
+            for width in [0.0, 8.0, 28.0, 240.0] {
+                let (row, text) =
+                    pull_request_row_rects(31.0, 80.0, width * scale, scale);
+                assert_eq!(row.h, 26.0 * scale);
+                assert!(text.x >= row.x && text.x + text.w <= row.x + row.w);
+                assert!(text.w >= 0.0);
+                if width == 240.0 {
+                    assert_eq!(text.x, row.x + PADDING_X * scale);
+                }
+                let top = row.y + (row.h - 12.0 * scale) * 0.5;
+                assert!(
+                    (top - row.y - (row.y + row.h - top - 12.0 * scale)).abs() < 0.001
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pull_request_action_uses_regular_proportional_ui_font_not_terminal_primary() {
+        use sugarloaf::font::{constants::FONT_PRESS_START_2P, FontLibrary};
+        let fonts = FontLibrary {
+            inner: Default::default(),
+        };
+        let primary = fonts.ensure_static_font(FONT_PRESS_START_2P).unwrap();
+        let (_, rect) = pull_request_row_rects(0.0, 0.0, 240.0, 1.0);
+        let opts = pull_request_text_opts(&fonts, rect, 1.0, [180, 180, 180, 255]);
+        assert_eq!(opts.font_id, fonts.font_id_for_family("Geist"));
+        assert!(opts.font_id.is_some());
+        assert_ne!(opts.font_id, Some(primary));
+        assert!(!opts.bold);
+        assert_eq!(opts.clip_rect, Some(rect.as_array()));
+        let mut text = sugarloaf::text::Text::new(&fonts);
+        text.init_cpu();
+        assert!(text.measure("WWWW", &opts) > text.measure("iiii", &opts) * 2.0);
+    }
 
     #[test]
     fn commit_text_starts_at_padded_top_left_at_all_scales() {
@@ -163,6 +234,7 @@ impl GitDiffPanel {
             return;
         }
 
+        self.discover_pull_request();
         self.apply_commit_confirmation();
         let s = self.scale;
         // Use the same width the chrome layout already reserved on
@@ -363,17 +435,78 @@ impl GitDiffPanel {
             .draw(sx, stats_text_y, del_text.as_str(), &del_opts);
 
         cursor_y += stats_h;
-
-        sugarloaf.rect(
-            None,
-            content_x,
-            cursor_y,
-            content_w,
-            (1.0 * s).max(1.0),
-            theme.f32(theme.border),
-            DEPTH,
-            ORDER_ACCENT,
-        );
+        if self.pull_request_row_visible() {
+            let (pr_rect, pr_text_rect) =
+                pull_request_row_rects(content_x, cursor_y, content_w, s);
+            let hovered = self.pull_request_hovered();
+            let lookup = self.pull_request_lookup_active();
+            if hovered || (lookup && self.focused) {
+                let inset = (6.0 * s).min(pr_rect.w * 0.5);
+                sugarloaf.rounded_rect(
+                    None,
+                    pr_rect.x + inset,
+                    pr_rect.y + 2.0 * s,
+                    (pr_rect.w - inset * 2.0).max(0.0),
+                    pr_rect.h - 4.0 * s,
+                    git_background_opacity(theme.f32(theme.hover)),
+                    DEPTH,
+                    4.0 * s,
+                    ORDER_ROW_BG,
+                );
+            }
+            let pr_opts = pull_request_text_opts(
+                sugarloaf.font_library(),
+                pr_text_rect,
+                s,
+                theme.u8(if hovered || lookup {
+                    theme.fg
+                } else {
+                    theme.dim
+                }),
+            );
+            let label = truncate_to_fit(
+                &self.pull_request_label(),
+                pr_text_rect.w,
+                sugarloaf,
+                &pr_opts,
+            );
+            let label_y = pr_rect.y + (pr_rect.h - pr_opts.font_size) * 0.5;
+            let label_w =
+                sugarloaf
+                    .text_mut()
+                    .draw(pr_text_rect.x, label_y, &label, &pr_opts);
+            if lookup && self.focused && pr_text_rect.w > 0.0 {
+                let caret_w = s.max(1.0).min(pr_text_rect.w);
+                let caret_x = (pr_text_rect.x + label_w + s)
+                    .min(pr_text_rect.x + pr_text_rect.w - caret_w)
+                    .max(pr_text_rect.x);
+                sugarloaf.rect(
+                    None,
+                    caret_x,
+                    label_y,
+                    caret_w,
+                    pr_opts.font_size,
+                    theme.f32(theme.accent),
+                    DEPTH,
+                    ORDER_ACCENT,
+                );
+            } else if hovered && pr_text_rect.w > 0.0 {
+                let arrow_opts = DrawOpts {
+                    clip_rect: Some(pr_rect.as_array()),
+                    ..pr_opts
+                };
+                sugarloaf.text_mut().draw(
+                    pr_text_rect.x + pr_text_rect.w + 4.0 * s,
+                    label_y,
+                    "›",
+                    &arrow_opts,
+                );
+            }
+            if let Ok(mut data) = self.data.lock() {
+                data.pr.rect = Some(pr_rect);
+            }
+            cursor_y += pr_rect.h;
+        }
 
         // Empty / error / loading branches.
         let body_top = cursor_y + (1.0 * s).max(1.0) + CARD_GAP_TOP * s;

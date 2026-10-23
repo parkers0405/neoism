@@ -45,6 +45,8 @@ mod baseline;
 mod parse;
 mod render;
 mod review;
+mod pull_request;
+pub use pull_request::PullRequestOpen;
 pub mod review_actions;
 mod slim;
 mod stage_plan;
@@ -71,7 +73,7 @@ pub use parse::load_diff;
 
 // --- Panel-wide layout/rendering constants ------------------------------
 
-pub const PANEL_DEFAULT_WIDTH: f32 = 420.0;
+pub const PANEL_DEFAULT_WIDTH: f32 = crate::panels::left_sidebar_host::DEFAULT_SIDEBAR_WIDTH;
 pub const PANEL_MIN_WIDTH: f32 = 240.0;
 pub const PANEL_MAX_WIDTH: f32 = 900.0;
 pub(crate) const FRAME_RADIUS: f32 = 14.0;

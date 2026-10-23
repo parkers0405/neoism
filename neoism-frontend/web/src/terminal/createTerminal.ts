@@ -337,6 +337,7 @@ export interface TerminalAdapter {
     prepareGitStageBlock?(path: string, blockJson: string): boolean;
     takeGitDiffBlockSaveStages?(): Array<{root: string; path: string; absolute: string; block: import("../workspace/types").GitChangeBlock; revision: string}>;
     editorRevision?(): string | undefined;
+    gitPanelPreparePullRequest?(json: string): boolean | Promise<boolean>;
     gitPanelPrepareStage?(path: string): boolean;
     gitPanelPrepareRestore?(path: string): boolean;
     gitPanelApplyBaseFile?(replyJson: string): void;
@@ -347,6 +348,15 @@ export interface TerminalAdapter {
     drainPanelOpenPaths?(): unknown;
     revealGitDiffFile?(route: number, path: string): void;
     drainGitDiffOpens?(): unknown;
+    drainGitPullRequestOpens?(): unknown;
+    openGitPullRequestInbox?(route: number, root: string): void;
+    setGitPullRequestView?(route: number, root: string, json: string): void;
+    createGitPullRequestView?(route: number, root: string, branch: string, head: string, defaultBranch: string): void;
+    gitPullRequestTabInfo?(route: number): unknown;
+    gitPullRequestHasDrafts?(route: number): boolean;
+    gitPanelApplyPullRequestReply?(json: string): void;
+    drainPullRequestUrls?(): unknown;
+    drainPullRequestWorkspaces?(): unknown;
     drainGitCommitOpens?(): unknown;
     setGitCommitView?(route: number, root: string, json: string): void;
     takeGitCommitCopy?(): string | undefined;
@@ -695,9 +705,9 @@ export interface TerminalAdapter {
     agentScrollAt?(x: number, y: number, deltaPixels: number): boolean;
     /** Axis-specific wheel for rendered Markdown code/table overflow. */
     agentScrollHorizontalAt?(x: number, y: number, deltaPixels: number): boolean;
-    /** Direct pointer drag for the sticky code/table horizontal rail. */
-    agentDragMarkdownHorizontalScrollbar?(x: number): boolean;
-    agentEndMarkdownHorizontalScrollbarDrag?(): boolean;
+    /** Direct pointer drag for timeline and Markdown overflow rails. */
+    agentDragScrollbar?(x: number, y: number): boolean;
+    agentEndScrollbarDrag?(): boolean;
     /** Center-modal click router: 0 = unhandled, 1 = row committed,
      *  2 = inside modal chrome/input (raise keyboard for the query). */
     modalPointerDown?(x: number, y: number): number;
@@ -1594,6 +1604,15 @@ interface ChromeBridgeInstance {
     git_panel_prepare_restore?(path: string): boolean;
     git_panel_apply_base_file?(replyJson: string): void;
     drain_git_diff_opens?(): unknown;
+    drain_git_pull_request_opens?(): unknown;
+    open_git_pull_request_inbox?(route: number, root: string): void;
+    set_git_pull_request_view?(route: number, root: string, json: string): void;
+    create_git_pull_request_view?(route: number, root: string, branch: string, head: string, defaultBranch: string): void;
+    git_pull_request_tab_info?(route: number): unknown;
+    git_pull_request_has_drafts?(route: number): boolean;
+    git_panel_apply_pull_request_reply?(json: string): void;
+    drain_pull_request_urls?(): unknown;
+    drain_pull_request_workspaces?(): unknown;
     drain_git_commit_opens?(): unknown;
     set_git_commit_view?(route: number, root: string, json: string): void;
     take_git_commit_copy?(): string | undefined;
@@ -1682,8 +1701,8 @@ interface ChromeBridgeInstance {
     agent_selection_end?(): string | undefined;
     agent_has_active_selection?(): boolean;
     agent_scroll_horizontal_at?(x: number, y: number, deltaPixels: number): boolean;
-    agent_drag_markdown_horizontal_scrollbar?(x: number): boolean;
-    agent_end_markdown_horizontal_scrollbar_drag?(): boolean;
+    agent_drag_scrollbar?(x: number, y: number): boolean;
+    agent_end_scrollbar_drag?(): boolean;
     modal_pointer_down?(x: number, y: number): number;
     modal_scroll?(x: number, y: number, deltaPixels: number): boolean;
     modal_touch_scroll?(x: number, y: number, fingerDelta: number): boolean;
@@ -3107,6 +3126,15 @@ class ChromeAdapter implements TerminalAdapter {
     activateGitDiffEditor(path: string, line: number, column: number): boolean {
         return this.inner.activate_git_diff_editor?.(path, line, column) === true;
     }
+    openGitPullRequestInbox(route: number, root: string): void { this.inner.open_git_pull_request_inbox?.(route, root); }
+    drainGitPullRequestOpens(): unknown { return this.inner.drain_git_pull_request_opens?.(); }
+    setGitPullRequestView(route: number, root: string, json: string): void { this.inner.set_git_pull_request_view?.(route, root, json); }
+    createGitPullRequestView(route: number, root: string, branch: string, head: string, defaultBranch: string): void { this.inner.create_git_pull_request_view?.(route, root, branch, head, defaultBranch); }
+    gitPullRequestTabInfo(route: number): unknown { return this.inner.git_pull_request_tab_info?.(route); }
+    gitPullRequestHasDrafts(route: number): boolean { return this.inner.git_pull_request_has_drafts?.(route) === true; }
+    gitPanelApplyPullRequestReply(json: string): void { this.inner.git_panel_apply_pull_request_reply?.(json); }
+    drainPullRequestUrls(): unknown { return this.inner.drain_pull_request_urls?.(); }
+    drainPullRequestWorkspaces(): unknown { return this.inner.drain_pull_request_workspaces?.(); }
     drainGitCommitOpens(): unknown { return this.inner.drain_git_commit_opens?.(); }
     setGitCommitView(route: number, root: string, json: string): void { this.inner.set_git_commit_view?.(route, root, json); }
     takeGitCommitCopy(): string | undefined { return this.inner.take_git_commit_copy?.(); }
@@ -3445,11 +3473,11 @@ class ChromeAdapter implements TerminalAdapter {
     agentScrollHorizontalAt(x: number, y: number, deltaPixels: number): boolean {
         return this.inner.agent_scroll_horizontal_at?.(x, y, deltaPixels) === true;
     }
-    agentDragMarkdownHorizontalScrollbar(x: number): boolean {
-        return this.inner.agent_drag_markdown_horizontal_scrollbar?.(x) === true;
+    agentDragScrollbar(x: number, y: number): boolean {
+        return this.inner.agent_drag_scrollbar?.(x, y) === true;
     }
-    agentEndMarkdownHorizontalScrollbarDrag(): boolean {
-        return this.inner.agent_end_markdown_horizontal_scrollbar_drag?.() === true;
+    agentEndScrollbarDrag(): boolean {
+        return this.inner.agent_end_scrollbar_drag?.() === true;
     }
     modalPointerDown(x: number, y: number): number {
         return this.inner.modal_pointer_down?.(x, y) ?? 0;

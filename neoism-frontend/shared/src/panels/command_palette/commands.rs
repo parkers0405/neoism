@@ -570,6 +570,12 @@ pub(crate) const COMMANDS: &[Command] = &[
         service: CommandService::Workspace,
     },
     Command {
+        title: "Systems",
+        shortcut: "SSH computers connections",
+        action: PaletteAction::ShowSystems,
+        service: CommandService::Workspace,
+    },
+    Command {
         title: "Servers",
         shortcut: "daemon connections",
         action: PaletteAction::ShowServers,

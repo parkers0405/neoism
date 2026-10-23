@@ -552,6 +552,7 @@ impl NeoismAgentPane {
             // A fresh composer has no backend session to PATCH yet. Keep its
             // prompt/attachments and use this cwd when the first prompt creates it.
             self.directory = Some(path);
+            self.refresh_provider_readiness();
             self.invalidate_skill_options();
             self.close_picker();
             return;
@@ -1389,7 +1390,7 @@ impl NeoismAgentPane {
                 );
             return Some(elapsed as f32 / 1000.0);
         }
-        // The footer labels this clock as model time. A local Windows submit
+        // The footer labels this clock as model time. A local submit
         // has no provider duration until execution activity arrives; showing
         // admission wall time here would jump backwards at that handoff.
         if self.status_timing.pending_model_clock() && self.is_streaming() {

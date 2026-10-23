@@ -12,11 +12,12 @@ impl Application<'_> {
         whole_app: bool,
     ) -> bool {
         let dirty = self.router.routes.iter().any(|(id, route)| {
-            (whole_app || *id == window_id) && route.window.screen.has_dirty_code_owners()
+            (whole_app || *id == window_id) && (route.window.screen.has_dirty_code_owners()
+                || route.window.screen.has_pull_request_drafts())
         });
         if dirty {
             if let Some(route) = self.router.routes.get_mut(&window_id) {
-                route.window.screen.file_tree_notify("Unsaved source documents: save them before closing. The window was kept open.", neoism_ui::panels::notifications::NotificationLevel::Warn);
+                route.window.screen.file_tree_notify("Unsaved source documents or pull request drafts: save documents and submit drafts (or close their PR tabs to confirm discard) before closing. The window was kept open.", neoism_ui::panels::notifications::NotificationLevel::Warn);
                 route.request_redraw();
             }
         }

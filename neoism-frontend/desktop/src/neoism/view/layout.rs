@@ -11,6 +11,10 @@ impl AgentPaneInput for NeoismAgentPane {
         self.input_help_visible()
     }
 
+    fn input_footer_visible(&self) -> bool {
+        self.input_help_visible() || self.session_directory().is_some()
+    }
+
     fn background_task_details_expanded(&self) -> bool {
         self.background_task_details_expanded()
     }

@@ -30,8 +30,17 @@ pub(super) struct HostGitState {
     requests: Option<mpsc::Receiver<Request>>,
     pending: HashSet<u64>,
     pending_commits: HashMap<u64, String>,
+    pending_pull_requests: HashMap<u64, (Option<usize>, web_time::Instant)>,
+    pending_pr_tasks: HashMap<u64, GitWatchTask>,
     pending_block_restores: HashMap<u64, String>,
     native_blocks: HashMap<u64, NativeBlockRequest>,
+    native_pull_requests: HashMap<u64, NativePullRequest>,
+    pull_request_reply_route: Option<usize>,
+    pub(super) pull_request_view_scopes: HashMap<usize, String>,
+    pub(super) pull_request_confirmation: Option<super::bridges::git_pull_request::PullRequestConfirmation>,
+    pub(super) pull_request_close_approved: Option<usize>,
+    native_pull_request_workspace: Option<(String, Option<PathBuf>, Option<String>, Option<usize>)>,
+    native_pull_request_connection: Option<crate::daemon_client::DaemonClientHandle>,
     native_block_failures: Option<mpsc::Receiver<(u64, String)>>,
     watch_task: Option<GitWatchTask>,
 }
@@ -48,6 +57,14 @@ impl NativeBlockScope {
     fn rpc_root(&self) -> PathBuf {
         self.workspace_root.clone()
     }
+}
+
+struct NativePullRequest {
+    scope: NativeBlockScope,
+    route: usize,
+    started: web_time::Instant,
+    _send_task: GitWatchTask,
+    connection_watch: crate::daemon_client::DaemonClientHandle,
 }
 
 struct NativeBlockRequest {
@@ -73,13 +90,16 @@ impl HostGitState {
     fn reset_subscription(&mut self) {
         let native_blocks = std::mem::take(&mut self.native_blocks);
         let native_block_failures = self.native_block_failures.take();
-        *self = Self { native_blocks, native_block_failures, ..Self::default() };
+        let native_pull_requests = std::mem::take(&mut self.native_pull_requests);
+        let pull_request_view_scopes = std::mem::take(&mut self.pull_request_view_scopes);
+        *self = Self { native_blocks, native_block_failures, native_pull_requests, pull_request_view_scopes, ..Self::default() };
     }
 
     fn accepts_panel_reply(&mut self, request_id: u64, message: &Reply) -> bool {
         matches!(
             message,
-            Reply::Log { .. }
+            Reply::PullRequest { .. }
+                | Reply::Log { .. }
                 | Reply::CommitDetail { .. }
                 | Reply::FileDiffs { .. }
                 | Reply::BaseFile { .. }
@@ -97,6 +117,12 @@ impl HostGitState {
                 .as_ref()
                 .is_some_and(|scope| snapshot.workspace_root == scope.root)
     }
+}
+
+/// Both inputs are declared workspace roots, never a Git-discovered parent or
+/// terminal cwd. An attached daemon's list can lag ordinary local grid creation.
+fn native_pull_request_root(binding: Option<PathBuf>, current: Option<PathBuf>) -> Option<PathBuf> {
+    binding.or(current)
 }
 
 fn guarded_block_request(
@@ -128,6 +154,9 @@ impl HostGitIo {
     }
 }
 impl GitDiffIo for HostGitIo {
+    fn request_pull_request(&self, request: neoism_protocol::pull_request::PullRequestRequest) {
+        self.send(Request::PullRequest { request });
+    }
     fn request_latest_commit(&self) {
         self.send(Request::Log { max_count: Some(1) });
     }
@@ -215,6 +244,57 @@ impl GitDiffIo for HostGitIo {
 }
 
 impl Screen<'_> {
+    pub(crate) fn set_pull_request_reply_route(&mut self, route: usize) {
+        self.host_git.pull_request_reply_route = Some(route);
+    }
+    pub(crate) fn take_pull_request_reply_route(&mut self) -> Option<usize> {
+        self.host_git.pull_request_reply_route.take()
+    }
+    /// Return true when the attached host owns this operation, including refusal.
+    pub(crate) fn dispatch_attached_pull_request(&mut self, root: &Path, request: neoism_protocol::pull_request::PullRequestRequest, route: usize) -> bool {
+        if self.uses_host_git() || !self.context_manager.daemon_client_attached() { return false; }
+        self.sync_host_git();
+        if !self.context_manager.current_workspace_uses_attached_daemon()
+            || self.renderer.git_diff_panel.repo_root().as_deref() != Some(root)
+            || !self.host_git.native_pull_requests.is_empty() || !self.host_git.native_blocks.is_empty()
+        {
+            self.fail_pull_request_route(route, root, "The repository host is busy or no longer owns this workspace.");
+            return true;
+        }
+        let Some((handle, runtime)) = self.context_manager.daemon_link_handle_and_runtime() else {
+            self.fail_pull_request_route(route, root, "The repository host is disconnected. Reconnect before retrying.");
+            return true;
+        };
+        let workspace = self.context_manager.current_workspace_tree_id();
+        let Some(workspace_root) = self.context_manager.daemon_host_workspace_root(&workspace) else {
+            self.fail_pull_request_route(route, root, "The declared workspace is unavailable. Reconnect before retrying.");
+            return true;
+        };
+        let scope = NativeBlockScope {
+            endpoint: self.context_manager.daemon_endpoint().unwrap_or_default().to_owned(),
+            connection: handle.connection_key(), workspace, workspace_root: workspace_root.clone(), repo_root: root.to_owned(),
+        };
+        if !self.renderer.git_diff_panel.begin_external_pull_request() {
+            self.fail_pull_request_route(route, root, "Another pull request operation is still running. Retry when it finishes.");
+            return true;
+        }
+        let id = handle.allocate_git_request_id();
+        let mut connection_watch = handle.clone();
+        let _ = connection_watch.take_editor_connection_change();
+        let (tx, rx) = mpsc::channel();
+        self.host_git.native_block_failures = Some(rx);
+        let task = runtime.spawn(async move {
+            if let Err(error) = handle.send_git_with_request_id(id, Request::PullRequest { request }, Some(workspace_root)).await {
+                let _ = tx.send((id, error.to_string()));
+            }
+        });
+        self.host_git.native_pull_requests.insert(id, NativePullRequest {
+            scope, route, started: web_time::Instant::now(),
+            _send_task: GitWatchTask(task.abort_handle()), connection_watch,
+        });
+        true
+    }
+
     /// Keep normal native Git IO/cache/provider ownership. Only block writes
     /// cross the actual attached daemon's guarded Hub transaction.
     pub(crate) fn dispatch_review_block(
@@ -317,6 +397,26 @@ impl Screen<'_> {
         let failures: Vec<_> = self.host_git.native_block_failures.as_ref()
             .map(|receiver| receiver.try_iter().collect()).unwrap_or_default();
         for (id, error) in failures {
+            if let Some((route, _)) = self.host_git.pending_pull_requests.remove(&id) {
+                self.host_git.pending_pr_tasks.remove(&id);
+                self.host_git.pending.remove(&id);
+                self.host_git.pull_request_reply_route = route;
+                self.renderer.git_diff_panel.host_pull_request_reply(neoism_protocol::pull_request::PullRequestReply::Error {
+                    kind: neoism_protocol::pull_request::PullRequestErrorKind::Unavailable, message: error,
+                });
+                continue;
+            }
+            if let Some(NativePullRequest { scope, route, .. }) = self.host_git.native_pull_requests.remove(&id) {
+                if self.native_block_scope_is_current(&scope) {
+                    self.host_git.pull_request_reply_route = Some(route);
+                    self.renderer.git_diff_panel.host_pull_request_reply(neoism_protocol::pull_request::PullRequestReply::Error {
+                        kind: neoism_protocol::pull_request::PullRequestErrorKind::Unavailable, message: error,
+                    });
+                } else {
+                    self.cancel_native_pull_request(route, &scope.repo_root);
+                }
+                continue;
+            }
             if let Some(pending) = self.host_git.native_blocks.remove(&id) {
                 if self.native_block_scope_is_current(&pending.scope) {
                     self.renderer.git_diff_panel.host_set_error(error);
@@ -334,6 +434,32 @@ impl Screen<'_> {
                 self.pending_review_restore = None;
             }
         }
+        let stale_prs: Vec<_> = self.host_git.native_pull_requests.iter_mut().map(|(id, pending)| (*id, pending.scope.clone(), pending.started, pending.connection_watch.take_editor_connection_change().is_some())).collect();
+        for (id, scope, started, reconnect) in stale_prs {
+            if reconnect || !self.native_block_scope_is_current(&scope) || started.elapsed() > std::time::Duration::from_secs(90) {
+                if let Some(NativePullRequest { route, .. }) = self.host_git.native_pull_requests.remove(&id) {
+                    if !reconnect && self.native_block_scope_is_current(&scope) {
+                        self.host_git.pull_request_reply_route = Some(route);
+                        self.renderer.git_diff_panel.host_pull_request_reply(neoism_protocol::pull_request::PullRequestReply::Error { kind: neoism_protocol::pull_request::PullRequestErrorKind::Unavailable, message: "Pull request operation timed out. Verify its state on GitHub before retrying.".into() });
+                    } else {
+                        self.cancel_native_pull_request(route, &scope.repo_root);
+                    }
+                }
+            }
+        }
+        let expired: Vec<_> = self.host_git.pending_pull_requests.iter()
+            .filter(|(_, (_, started))| started.elapsed() > std::time::Duration::from_secs(90))
+            .map(|(id, (route, _))| (*id, *route)).collect();
+        for (id, route) in expired {
+            self.host_git.pending_pull_requests.remove(&id);
+            self.host_git.pending_pr_tasks.remove(&id);
+            self.host_git.pending.remove(&id);
+            self.host_git.pull_request_reply_route = route;
+            self.renderer.git_diff_panel.host_pull_request_reply(neoism_protocol::pull_request::PullRequestReply::Error {
+                kind: neoism_protocol::pull_request::PullRequestErrorKind::Unavailable,
+                message: "Pull request operation timed out. Verify its state on GitHub before retrying.".into(),
+            });
+        }
         let scope = self.host_git_scope();
         let reconnect = self
             .host_git
@@ -342,6 +468,13 @@ impl Screen<'_> {
             .and_then(|handle| handle.take_editor_connection_change())
             .is_some();
         if self.host_git.scope != scope || reconnect {
+            if let Some(root) = self.renderer.git_diff_panel.repo_root() {
+                let routes: Vec<_> = self.host_git.pending_pull_requests.values().filter_map(|(route, _)| *route)
+                    .chain(self.host_git.pull_request_reply_route).collect();
+                for route in routes {
+                    self.fail_pull_request_route(route, &root, "The repository host changed or reconnected. Verify the operation before retrying; it will not be replayed.");
+                }
+            }
             if let (None, Some(handle), Some((_, runtime))) = (
                 &scope,
                 self.host_git.handle.clone(),
@@ -404,9 +537,7 @@ impl Screen<'_> {
                     self.renderer.git_diff_panel.open(None, None);
                 }
             } else {
-                crate::editor::git_diff_panel::install_io(
-                    &mut self.renderer.git_diff_panel,
-                );
+                // Native installation is centralized below, with its declared scope.
             }
             self.mark_dirty();
         }
@@ -425,7 +556,37 @@ impl Screen<'_> {
             // reset_server_owned_state clears our scope before the next frame.
             // Restore local IO even when there is no old subscription to compare.
             self.renderer.git_diff_panel.reset_for_server_switch();
-            crate::editor::git_diff_panel::install_io(&mut self.renderer.git_diff_panel);
+            // Do not overwrite a scoped provider with constructor-only IO.
+            // The native identity check below owns every local installation.
+        }
+        if !self.uses_host_git() {
+            let workspace = self.context_manager.current_workspace_tree_id();
+            let root = native_pull_request_root(
+                self.context_manager.daemon_host_workspace_root(&workspace),
+                self.active_workspace_root.clone(),
+            );
+            let endpoint = self.context_manager.daemon_endpoint().map(str::to_owned);
+            let connection = self.context_manager.daemon_link_handle_and_runtime().map(|(handle, _)| handle.connection_key());
+            let identity = (workspace, root.clone(), endpoint, connection);
+            let reconnected = self.host_git.native_pull_request_connection.as_mut().is_some_and(|handle| handle.take_editor_connection_change().is_some());
+            if self.host_git.native_pull_request_workspace.as_ref() != Some(&identity)
+                || reconnected
+                || self.renderer.git_diff_panel.is_host_driven()
+                || !self.renderer.git_diff_panel.has_io_provider()
+            {
+                if self.host_git.native_pull_request_workspace.is_some() {
+                    if let (Some(route), Some(repo)) = (self.host_git.pull_request_reply_route.take(), self.renderer.git_diff_panel.repo_root()) {
+                        self.fail_pull_request_route(route, &repo, "The declared workspace changed. Verify the operation before retrying; it will not be replayed.");
+                    }
+                    self.renderer.git_diff_panel.reset_for_server_switch();
+                }
+                crate::editor::git_diff_panel::install_io_for_workspace(&mut self.renderer.git_diff_panel, root);
+                self.host_git.native_pull_request_workspace = Some(identity);
+                self.host_git.native_pull_request_connection = self.context_manager.daemon_link_handle_and_runtime().map(|(mut handle, _)| {
+                    let _ = handle.take_editor_connection_change();
+                    handle
+                });
+            }
         }
         let requests: Vec<_> = self
             .host_git
@@ -456,14 +617,25 @@ impl Screen<'_> {
             if let Request::ApplyBlock { path, restore: true, .. } = &request {
                 self.host_git.pending_block_restores.insert(id, path.clone());
             }
+            if matches!(&request, Request::PullRequest { .. }) {
+                let route = self.host_git.pull_request_reply_route.take();
+                self.host_git.pending_pull_requests.insert(id, (route, web_time::Instant::now()));
+            }
             if let Request::Commit { message } = &request {
                 self.host_git.pending_commits.insert(id, message.clone());
             }
-            runtime.spawn(async move {
-                let _ = handle
-                    .send_git_with_request_id(id, request, Some(root))
-                    .await;
+            let failure = if matches!(&request, Request::PullRequest { .. }) {
+                let (tx, rx) = mpsc::channel();
+                self.host_git.native_block_failures = Some(rx);
+                Some(tx)
+            } else { None };
+            let is_pr = failure.is_some();
+            let task = runtime.spawn(async move {
+                if let Err(error) = handle.send_git_with_request_id(id, request, Some(root)).await {
+                    if let Some(tx) = failure { let _ = tx.send((id, error.to_string())); }
+                }
             });
+            if is_pr { self.host_git.pending_pr_tasks.insert(id, GitWatchTask(task.abort_handle())); }
         }
     }
 
@@ -561,6 +733,21 @@ impl Screen<'_> {
             return true;
         }
         self.sync_host_git();
+        if let Some(NativePullRequest { scope, route, .. }) = self.host_git.native_pull_requests.remove(&request_id) {
+            if self.native_block_scope_is_current(&scope) {
+                self.host_git.pull_request_reply_route = Some(route);
+                let reply = match message {
+                    Reply::PullRequest { reply } => reply.clone(),
+                    Reply::Error { message } => neoism_protocol::pull_request::PullRequestReply::Error { kind: neoism_protocol::pull_request::PullRequestErrorKind::Failed, message: message.clone() },
+                    _ => neoism_protocol::pull_request::PullRequestReply::Error { kind: neoism_protocol::pull_request::PullRequestErrorKind::Failed, message: "Unexpected reply to a pull request operation. Verify its state before retrying.".into() },
+                };
+                self.renderer.git_diff_panel.host_pull_request_reply(reply);
+                self.mark_dirty();
+            } else {
+                self.cancel_native_pull_request(route, &scope.repo_root);
+            }
+            return true;
+        }
         if let Some(pending) = self.host_git.native_blocks.remove(&request_id) {
             if !self.native_block_scope_is_current(&pending.scope) { return true; }
             let success = matches!(message, Reply::ChangedFiles { error: None, .. });
@@ -604,6 +791,15 @@ impl Screen<'_> {
                 self.renderer.git_diff_panel.host_set_error(message.clone());
             }
             _ if self.host_git.accepts_panel_reply(request_id, message) => {
+                if let Some((route, _)) = self.host_git.pending_pull_requests.remove(&request_id) {
+                    self.host_git.pending_pr_tasks.remove(&request_id);
+                    self.host_git.pull_request_reply_route = route;
+                    if let Reply::Error { message } = message {
+                        self.renderer.git_diff_panel.host_pull_request_reply(neoism_protocol::pull_request::PullRequestReply::Error { kind: neoism_protocol::pull_request::PullRequestErrorKind::Failed, message: message.clone() });
+                        self.mark_dirty();
+                        return true;
+                    }
+                }
                 if let Some(path) = self.host_git.pending_block_restores.remove(&request_id) {
                     self.review_block_restored_on_host(&path, matches!(message, Reply::ChangedFiles { error: None, .. }));
                 }
@@ -616,6 +812,7 @@ impl Screen<'_> {
                     }
                 }
                 match message {
+                    Reply::PullRequest { reply } => self.renderer.git_diff_panel.host_pull_request_reply(reply.clone()),
                     Reply::ChangedFiles {
                         files,
                         branch,
@@ -676,6 +873,16 @@ impl Screen<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_pr_scope_uses_binding_then_explicit_current_root_only() {
+        let nested = PathBuf::from("/repo/nested");
+        assert_eq!(native_pull_request_root(Some(nested.clone()), Some("/stale".into())), Some(nested.clone()));
+        // An attached daemon with no cached workspace summary must not suppress
+        // the normal local grid's declared root or broaden it to /repo.
+        assert_eq!(native_pull_request_root(None, Some(nested.clone())), Some(nested));
+        assert_eq!(native_pull_request_root(None, None), None);
+    }
     #[test]
     fn attached_native_block_routes_to_mock_daemon_never_pure_backend() {
         let (tx, rx) = mpsc::channel();
@@ -725,6 +932,21 @@ mod tests {
         // Normal local frames (None -> None, no host handle) do not reset.
         assert!(state.handle.is_none());
         assert_eq!(state.scope, None);
+    }
+
+    #[test]
+    fn pull_request_provider_enqueues_on_host_and_consumes_only_correlated_replies() {
+        use neoism_protocol::pull_request::{PullRequestErrorKind, PullRequestReply, PullRequestRequest};
+        let (tx, rx) = mpsc::channel();
+        HostGitIo(tx).request_pull_request(PullRequestRequest::Read { number: 42 });
+        assert!(matches!(rx.recv().unwrap(), Request::PullRequest { request: PullRequestRequest::Read { number: 42 } }));
+        let reply = Reply::PullRequest { reply: PullRequestReply::Error { kind: PullRequestErrorKind::Unavailable, message: "Offline".into() } };
+        let mut state = HostGitState { pending: HashSet::from([9]), pull_request_reply_route: Some(7), ..Default::default() };
+        assert!(!state.accepts_panel_reply(8, &reply));
+        assert!(state.accepts_panel_reply(9, &reply));
+        assert!(!state.accepts_panel_reply(9, &reply));
+        state.reset_subscription();
+        assert!(state.pull_request_reply_route.is_none());
     }
 
     #[test]

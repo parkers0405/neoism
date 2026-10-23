@@ -26,6 +26,7 @@ pub mod finder;
 pub mod git_diff;
 pub mod git_diff_view;
 pub mod git_commit_view;
+pub mod git_pull_request;
 pub mod status_line;
 
 pub mod breadcrumbs;

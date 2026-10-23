@@ -594,8 +594,8 @@ impl NeoismAgentPane {
             &self.server,
             self.directory.as_deref(),
         ) {
-            if let Some(readiness) = readiness {
-                self.provider_readiness = Some(readiness);
+            if readiness.is_some() {
+                self.refresh_provider_readiness();
             }
             let options = self.model_picker_options(options);
             let picker = self.picker.as_mut().unwrap();
@@ -605,8 +605,74 @@ impl NeoismAgentPane {
         self.refresh_model_catalog();
     }
 
-    pub(crate) fn refresh_provider_readiness(&self) {
+    /// Only scope-proven values may authorize native submission.
+    pub(crate) fn current_provider_readiness(
+        &self,
+    ) -> Option<&neoism_ui::panels::agent_pane::api_mapping::ProviderReadiness> {
+        self.current_provider_readiness_for_model(&self.model)
+    }
+
+    /// Queued prompts can target a different model from the visible composer.
+    pub(crate) fn current_provider_readiness_for_model(
+        &self,
+        model: &str,
+    ) -> Option<&neoism_ui::panels::agent_pane::api_mapping::ProviderReadiness> {
+        let scope = self.provider_readiness_scope.as_ref()?;
+        if !scope.is_current(&self.server, self.directory.as_deref()) {
+            return None;
+        }
+        let readiness = self.provider_readiness.as_ref()?;
+        let max_age = if readiness.prompt_error(model).is_some() { 30 } else { 300 };
+        (self.provider_readiness_checked_at?.elapsed().as_secs() < max_age)
+            .then_some(readiness)
+    }
+
+    pub(crate) fn apply_provider_readiness(
+        &mut self,
+        scope: super::super::api::CatalogScope,
+        readiness: neoism_ui::panels::agent_pane::api_mapping::ProviderReadiness,
+    ) -> bool {
+        if !scope.is_current(&self.server, self.directory.as_deref()) {
+            return false;
+        }
+        self.provider_readiness = Some(readiness);
+        self.provider_readiness_scope = Some(scope);
+        self.provider_readiness_checked_at = Some(Instant::now());
+        true
+    }
+
+    /// Reconcile independently of draft defaults and model discovery. Warm
+    /// navigation keeps known state; concurrent callers share a scoped worker.
+    pub(crate) fn refresh_provider_readiness(&mut self) {
+        let model = self.model.clone();
+        self.refresh_provider_readiness_for_model(&model);
+    }
+
+    pub(crate) fn refresh_provider_readiness_for_model(&mut self, model: &str) {
+        if self.conversation_source().provider().is_some() {
+            return;
+        }
         let scope = super::super::api::catalog_scope(&self.server, self.directory.as_deref());
+        if self.current_provider_readiness_for_model(model).is_some() {
+            return;
+        }
+        if self.provider_readiness_scope.as_ref() != Some(&scope) {
+            self.provider_readiness = None;
+            self.provider_readiness_scope = None;
+            self.provider_readiness_checked_at = None;
+        }
+        if let Some((readiness, age)) = super::super::api::cached_provider_readiness_with_age(
+            &self.server, self.directory.as_deref(),
+        ) {
+            self.apply_provider_readiness(scope.clone(), readiness);
+            self.provider_readiness_checked_at = Instant::now().checked_sub(age);
+            if self.current_provider_readiness_for_model(model).is_some() {
+                return;
+            }
+        }
+        if !self.provider_readiness_in_flight.insert(scope.clone()) {
+            return;
+        }
         let worker_scope = scope.clone();
         let tx = self.background_tx.clone();
         if std::thread::Builder::new()

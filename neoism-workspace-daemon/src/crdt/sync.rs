@@ -449,6 +449,142 @@ impl CrdtSyncHub {
         Ok(result)
     }
 
+    /// Whole-worktree transaction. Only an exact canonical repository declaration
+    /// may call this. All file-backed aliases in that repository must agree with
+    /// their remembered disk baselines. The callback performs LOCAL work only,
+    /// must not reenter the hub, and receives canonical open paths for preflight.
+    /// Reconcile even after a failed callback (Git may have partially changed disk).
+    pub fn guarded_repository_checkout<T>(
+        &self,
+        root: &std::path::Path,
+        checkout: impl FnOnce(&[std::path::PathBuf]) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let _guard = self.operation.lock();
+        let root = crate::path::canonicalize(root)
+            .map_err(|_| "Cannot establish checkout scope")?;
+        let repo = git2::Repository::open(&root)
+            .map_err(|_| "Checkout scope is not a repository workdir")?;
+        let workdir = repo
+            .workdir()
+            .and_then(|p| crate::path::canonicalize(p).ok());
+        if workdir.as_ref() != Some(&root) {
+            return Err("Checkout requires the full declared repository workdir".into());
+        }
+        fn disk(path: &std::path::Path) -> Result<String, String> {
+            use std::io::Read;
+            let file = match std::fs::File::open(path) {
+                Ok(file) => file,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    return Ok(String::new())
+                }
+                Err(_) => return Err("Cannot read an open checkout document".into()),
+            };
+            let mut bytes = Vec::new();
+            file.take(16 * 1024 * 1024 + 1)
+                .read_to_end(&mut bytes)
+                .map_err(|_| "Cannot read an open checkout document")?;
+            if bytes.len() > 16 * 1024 * 1024 {
+                return Err("Open checkout document exceeds the safety limit".into());
+            }
+            String::from_utf8(bytes)
+                .map_err(|_| "Open checkout document is not UTF-8".into())
+        }
+        fn backing(path: &std::path::Path) -> Result<std::path::PathBuf, String> {
+            let mut ancestor = path;
+            let mut suffix = Vec::new();
+            loop {
+                match crate::path::canonicalize(ancestor) {
+                    Ok(mut resolved) => {
+                        for name in suffix.into_iter().rev() {
+                            resolved.push(name);
+                        }
+                        return Ok(resolved);
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        let name = ancestor
+                            .file_name()
+                            .ok_or("Unresolvable open document backing")?;
+                        suffix.push(name.to_owned());
+                        ancestor = ancestor
+                            .parent()
+                            .ok_or("Unresolvable open document backing")?;
+                    }
+                    Err(_) => {
+                        return Err("Cannot establish open document backing scope".into())
+                    }
+                }
+            }
+        }
+        let ids: Vec<_> = self.buffers.inner.lock().keys().cloned().collect();
+        let mut affected = Vec::new();
+        for id in ids {
+            // Non-file documents have no worktree backing and cannot be changed
+            // by Git. Malformed/relative file identities cannot establish scope.
+            let Some(raw) = crate::crdt::crdt_path_for_buffer_id(&id) else {
+                continue;
+            };
+            let path = std::path::Path::new(raw);
+            if !path.is_absolute() {
+                return Err(
+                    "Checkout refused: an open file document has ambiguous scope".into(),
+                );
+            }
+            let canonical = backing(path)?;
+            if (path.starts_with(&root) || canonical.starts_with(&root))
+                && canonical != path
+            {
+                return Err("Checkout refused: an open repository document uses a symlink or ambiguous path".into());
+            }
+            if !canonical.starts_with(&root) {
+                continue;
+            }
+            if affected.len() >= 4096 {
+                return Err("Too many open documents for safe checkout".into());
+            }
+            let baseline = self.disk_texts.lock().get(&id).cloned();
+            let text = self.buffers.text(&id).map_err(|e| e.to_string())?;
+            let on_disk = disk(&canonical)?;
+            if baseline.as_deref() != Some(text.as_str())
+                || baseline.as_deref() != Some(on_disk.as_str())
+            {
+                return Err("Checkout refused: an open authoritative document has unsaved collaborative edits or a disk conflict".into());
+            }
+            affected.push((id, canonical));
+        }
+        let paths: Vec<_> = affected.iter().map(|(_, path)| path.clone()).collect();
+        let result = checkout(&paths);
+        // Read every result first, before publishing any acknowledgements.
+        let mut after = Vec::new();
+        for (id, path) in affected {
+            if backing(&path)? != path {
+                return Err("Checkout may have run but an open document backing escaped its canonical path".into());
+            }
+            if let Ok(metadata) = std::fs::symlink_metadata(&path) {
+                if metadata.file_type().is_symlink() || !metadata.is_file() {
+                    return Err("Checkout may have run but an open document became a symlink/non-file; reconciliation refused".into());
+                }
+            }
+            let text = disk(&path).map_err(|e| {
+                format!("Checkout may have run but reconciliation failed: {e}")
+            })?;
+            after.push((id, text));
+        }
+        for (id, text) in after {
+            let changed = self.apply_external_text(&id, &text);
+            if self.buffers.text(&id).map_err(|e| e.to_string())? != text {
+                return Err("Checkout may have run but an authoritative document failed to converge".into());
+            }
+            self.disk_texts.lock().insert(id.clone(), text.clone());
+            if !changed {
+                let _ = self.tx.send(CrdtServerMessage::Saved {
+                    buffer_id: id,
+                    bytes_written: text.len() as u64,
+                });
+            }
+        }
+        result
+    }
+
     fn apply_external_text(&self, buffer_id: &str, disk_text: &str) -> bool {
         let Ok(old) = self.buffers.text(buffer_id) else {
             return false;

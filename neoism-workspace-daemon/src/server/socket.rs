@@ -280,6 +280,12 @@ pub(crate) async fn handle_socket(
     // in the socket pump: a slow Git operation must not stall PTY forwarding.
     let (git_tx, git_requests) = tokio::sync::mpsc::channel(GIT_QUEUE_CAPACITY);
     let (git_replies, mut git_rx) = tokio::sync::mpsc::channel(GIT_QUEUE_CAPACITY);
+    // Hosted reads have a small independent FIFO: slow GitHub never blocks status/index work.
+    let (pr_read_tx, pr_read_requests) = tokio::sync::mpsc::channel(4);
+    tokio::spawn(serial_git_worker(pr_read_requests, git_replies.clone(), |root, message| {
+        git_handler::handle_with_root(root, message)
+    }));
+    let mut pr_mutation_ids = std::collections::HashSet::new();
     let git_crdt = crdt.clone();
     tokio::spawn(serial_git_worker(git_requests, git_replies, move |root, message| {
         git_handler::handle_with_root_and_crdt(root, message, git_crdt.clone())
@@ -1009,17 +1015,34 @@ pub(crate) async fn handle_socket(
                     // Root resolution and permission checks happen at admission,
                     // not execution: changing the selected workspace cannot retarget
                     // an already queued mutation.
-                    if let Err(error) = git_tx.try_send((request_id, root, message)) {
-                        let message = match error {
-                            tokio::sync::mpsc::error::TrySendError::Full(_) =>
-                                "Git request queue is full; request was not executed",
-                            tokio::sync::mpsc::error::TrySendError::Closed(_) =>
-                                "Git request worker is unavailable; request was not executed",
+                    let pr_read = matches!(&message, GitClientMessage::PullRequest { request } if !request.is_mutation());
+                    if matches!(&message, GitClientMessage::PullRequest { request } if request.is_mutation())
+                        && (pr_mutation_ids.len() >= 1024 || !pr_mutation_ids.insert(request_id))
+                    {
+                        let resp = ServiceServerMessage::GitReply { request_id, message: GitServerMessage::PullRequest {
+                            reply: neoism_protocol::pull_request::PullRequestReply::Error {
+                                kind: neoism_protocol::pull_request::PullRequestErrorKind::Invalid,
+                                message: "Duplicate PR mutation or socket mutation limit reached; request was not executed".into(),
+                            },
+                        }};
+                        let _ = send_json(&mut sink, &resp).await;
+                        continue;
+                    }
+                    let lane = if pr_read { &pr_read_tx } else { &git_tx };
+                    if let Err(error) = lane.try_send((request_id, root, message)) {
+                        let (diagnostic, rejected) = match error {
+                            tokio::sync::mpsc::error::TrySendError::Full((_, _, rejected)) =>
+                                ("Git request queue is full; request was not executed", rejected),
+                            tokio::sync::mpsc::error::TrySendError::Closed((_, _, rejected)) =>
+                                ("Git request worker is unavailable; request was not executed", rejected),
                         };
-                        let resp = ServiceServerMessage::GitReply {
-                            request_id,
-                            message: GitServerMessage::Error { message: message.into() },
-                        };
+                        let message = if matches!(rejected, GitClientMessage::PullRequest { .. }) {
+                            GitServerMessage::PullRequest { reply: neoism_protocol::pull_request::PullRequestReply::Error {
+                                kind: neoism_protocol::pull_request::PullRequestErrorKind::Unavailable,
+                                message: diagnostic.into(),
+                            }}
+                        } else { GitServerMessage::Error { message: diagnostic.into() } };
+                        let resp = ServiceServerMessage::GitReply { request_id, message };
                         if let Err(err) = send_json(&mut sink, &resp).await {
                             tracing::warn!(error = %err, "websocket send error");
                             return;
@@ -2008,6 +2031,18 @@ pub(crate) async fn handle_socket(
                 let _ = send_json(&mut sink, &denial).await;
                 continue;
             }
+            // Hosted operations require scoped request IDs for ordered admission,
+            // bounded read routing, and duplicate-mutation rejection.
+            if matches!(&msg, GitClientMessage::PullRequest { .. }) {
+                let reply = GitServerMessage::PullRequest {
+                    reply: neoism_protocol::pull_request::PullRequestReply::Error {
+                        kind: neoism_protocol::pull_request::PullRequestErrorKind::Unsupported,
+                        message: "PR requests require a scoped Git service envelope".into(),
+                    },
+                };
+                let _ = send_json(&mut sink, &reply).await;
+                continue;
+            }
             let responses = git_handler::handle_with_root_and_crdt(
                 crate::files::workspace_root(),
                 msg,
@@ -2416,6 +2451,39 @@ mod git_worker_tests {
 
     fn request(id: u64, root: &str) -> QueuedGitRequest {
         (id, root.into(), GitClientMessage::Stage { path: id.to_string() })
+    }
+
+    #[tokio::test]
+    async fn slow_hosted_read_lane_does_not_block_ordinary_git() {
+        let (pr_tx, pr_requests) = tokio::sync::mpsc::channel(1);
+        let (git_tx, git_requests) = tokio::sync::mpsc::channel(1);
+        let (replies, mut rx) = tokio::sync::mpsc::channel(4);
+        let (started, mut starts) = tokio::sync::mpsc::unbounded_channel();
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let worker_gate = gate.clone();
+        let pr_worker = tokio::spawn(serial_git_worker(pr_requests, replies.clone(), move |_, _| {
+            let gate = worker_gate.clone(); let started = started.clone();
+            async move {
+                started.send(()).unwrap();
+                gate.acquire().await.unwrap().forget();
+                vec![GitServerMessage::Error { message: "PR completed".into() }]
+            }
+        }));
+        let git_worker = tokio::spawn(serial_git_worker(git_requests, replies, |_, _| async {
+            vec![GitServerMessage::Branches { branches: vec!["main".into()] }]
+        }));
+        pr_tx.try_send((1, "/repo".into(), GitClientMessage::PullRequest {
+            request: neoism_protocol::pull_request::PullRequestRequest::Read { number: 7 },
+        })).unwrap();
+        starts.recv().await.unwrap();
+        git_tx.try_send((2, "/repo".into(), GitClientMessage::Branches)).unwrap();
+        let (id, reply) = tokio::time::timeout(Duration::from_secs(1), rx.recv()).await.unwrap().unwrap();
+        assert_eq!(id, 2);
+        assert!(matches!(reply, GitServerMessage::Branches { .. }));
+        gate.add_permits(1);
+        assert_eq!(rx.recv().await.unwrap().0, 1);
+        drop(pr_tx); drop(git_tx);
+        pr_worker.await.unwrap(); git_worker.await.unwrap();
     }
 
     #[tokio::test]

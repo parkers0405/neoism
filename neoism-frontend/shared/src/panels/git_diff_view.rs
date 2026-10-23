@@ -7,10 +7,14 @@ use std::path::{Path, PathBuf};
 mod blocks;
 #[path = "git_diff_view_focus.rs"]
 mod column_focus;
-#[path = "git_diff_view_toolbar.rs"]
-mod toolbar;
+#[path = "git_pull_request_inbox.rs"]
+pub mod inbox;
 #[path = "git_diff_view_live.rs"]
 mod live;
+#[path = "git_diff_view_pr.rs"]
+mod pr;
+#[path = "git_diff_view_toolbar.rs"]
+mod toolbar;
 
 use sugarloaf::{text::DrawOpts, Sugarloaf};
 
@@ -165,6 +169,13 @@ struct EditHit {
 /// Root-scoped intents; Restore must be confirmed by the host before mutation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GitDiffViewAction {
+    PullRequest {
+        root: PathBuf,
+        request: neoism_protocol::pull_request::PullRequestRequest,
+    },
+    OpenUrl {
+        url: String,
+    },
     /// Open a normal source tab at a zero-based working-tree location.
     OpenSource {
         root: PathBuf,
@@ -197,6 +208,8 @@ pub enum GitDiffViewAction {
 }
 
 pub struct GitDiffView {
+    pub pull_request: Option<crate::panels::git_pull_request::PullRequestView>,
+    pub inbox: Option<Box<inbox::PullRequestInbox>>,
     /// Historical tabs never share working-tree identity or mutation controls.
     pub commit_id: Option<String>,
     pub commit_metadata: Option<crate::panels::git_commit_view::CommitMetadata>,
@@ -239,6 +252,10 @@ pub struct GitDiffView {
     edit_request: Option<GitDiffEditRequest>,
     edit_hits: Vec<EditHit>,
     source_hits: Vec<SourceHit>,
+    pr_line_hits: Vec<(
+        Rect,
+        neoism_protocol::pull_request::PullRequestInlineComment,
+    )>,
     block_controls: Vec<blocks::BlockControl>,
     block_hover: Option<usize>,
     base_revision: u64,
@@ -296,6 +313,8 @@ impl GitDiffView {
         let mut view = Self {
             root,
             commit_id: None,
+            pull_request: None,
+            inbox: None,
             commit_metadata: None,
             path: path.clone(),
             sections: Vec::new(),
@@ -334,6 +353,7 @@ impl GitDiffView {
             edit_request: None,
             edit_hits: Vec::new(),
             source_hits: Vec::new(),
+            pr_line_hits: Vec::new(),
             block_controls: Vec::new(),
             block_hover: None,
             base_revision: 0,
@@ -428,6 +448,9 @@ impl GitDiffView {
     }
 
     pub fn set_text_occlusions(&mut self, rects: &[[f32; 4]]) {
+        if let Some(inbox) = &mut self.inbox {
+            inbox.set_occlusions(rects);
+        }
         self.text_occlusions.clear();
         self.text_occlusions.extend_from_slice(rects);
     }
@@ -437,15 +460,23 @@ impl GitDiffView {
     }
 
     pub fn take_actions(&mut self) -> Vec<GitDiffViewAction> {
-        if self.commit_id.is_some() {
-            self.pending_actions.clear();
-            return Vec::new();
+        if let Some(inbox) = &mut self.inbox {
+            return inbox.take_actions();
+        }
+        if self.is_read_only() {
+            self.pending_actions.retain(|a| {
+                matches!(
+                    a,
+                    GitDiffViewAction::PullRequest { .. }
+                        | GitDiffViewAction::OpenUrl { .. }
+                )
+            });
         }
         std::mem::take(&mut self.pending_actions)
     }
 
     pub fn set_edit_focus(&mut self, focused: bool) {
-        self.edit_focused = focused && self.commit_id.is_none();
+        self.edit_focused = focused && !self.is_read_only();
         if self.edit_focused {
             self.column_focus = Some(1);
         } else {
@@ -464,7 +495,7 @@ impl GitDiffView {
     /// The canonical source stays attached for painting after keyboard focus
     /// moves to a header, so unsaved edits never fall back to a disk patch.
     pub fn document_path(&self) -> Option<PathBuf> {
-        if self.commit_id.is_some() {
+        if self.is_read_only() {
             return None;
         }
         let path = self.edit_path.as_ref()?;
@@ -477,7 +508,7 @@ impl GitDiffView {
     }
 
     pub fn take_edit_request(&mut self) -> Option<GitDiffEditRequest> {
-        if self.commit_id.is_some() {
+        if self.is_read_only() {
             self.edit_request = None;
             return None;
         }
@@ -489,9 +520,11 @@ impl GitDiffView {
         self.error = None;
         if let Some(&index) = self.indices.get(&path) {
             let section = &mut self.sections[index];
-            if section.base_text.as_ref().is_some_and(|old| {
-                std::sync::Arc::ptr_eq(old, &text)
-            }) {
+            if section
+                .base_text
+                .as_ref()
+                .is_some_and(|old| std::sync::Arc::ptr_eq(old, &text))
+            {
                 return;
             }
             let changed = section.base_text.as_deref() != Some(text.as_ref());
@@ -505,6 +538,9 @@ impl GitDiffView {
     }
 
     pub fn needs_redraw(&self) -> bool {
+        if let Some(inbox) = &self.inbox {
+            return inbox.needs_redraw();
+        }
         self.live_diff_pending
     }
 
@@ -520,10 +556,16 @@ impl GitDiffView {
         {
             return;
         }
-        section.change.additions = output.lines.iter()
-            .filter(|line| line.kind == DiffLineKind::Add).count() as u32;
-        section.change.deletions = output.lines.iter()
-            .filter(|line| line.kind == DiffLineKind::Remove).count() as u32;
+        section.change.additions = output
+            .lines
+            .iter()
+            .filter(|line| line.kind == DiffLineKind::Add)
+            .count() as u32;
+        section.change.deletions = output
+            .lines
+            .iter()
+            .filter(|line| line.kind == DiffLineKind::Remove)
+            .count() as u32;
         section.set_lines(output.lines);
         section.live_revision = Some(output.key.revision);
     }
@@ -555,7 +597,8 @@ impl GitDiffView {
                 line.new_line_number == Some(pane.buffer.cursor_line as u32 + 1)
             })
         });
-        let current = section.live_revision == Some(pane.buffer.revision) && caret_visible;
+        let current =
+            section.live_revision == Some(pane.buffer.revision) && caret_visible;
         if !current && !self.live_diff.pending() {
             let key = live::Key {
                 path,
@@ -566,7 +609,9 @@ impl GitDiffView {
             // Only snapshot when the worker is available. Edits made while it
             // runs coalesce into the latest revision, not a queue of full files.
             if let Err(error) = self.live_diff.start(
-                key, section.base_text.as_ref().unwrap().clone(), pane.buffer.text(),
+                key,
+                section.base_text.as_ref().unwrap().clone(),
+                pane.buffer.text(),
             ) {
                 self.set_error(error);
                 return;
@@ -582,6 +627,19 @@ impl GitDiffView {
 
     /// Positive deltas move down, in logical pixels.
     pub fn scroll(&mut self, delta: f32) {
+        if let Some(inbox) = &mut self.inbox {
+            inbox.scroll(delta);
+            return;
+        }
+        if let Some(p) = &mut self.pull_request {
+            if p.sheet
+                || p.detail.is_none()
+                || p.tab != crate::panels::git_pull_request::Tab::Changes
+            {
+                p.scroll = (p.scroll + delta).clamp(0.0, p.max_scroll);
+                return;
+            }
+        }
         if self
             .commit_metadata
             .as_mut()
@@ -596,6 +654,10 @@ impl GitDiffView {
     }
 
     pub fn scroll_horizontal(&mut self, delta: f32) {
+        if let Some(inbox) = &mut self.inbox {
+            inbox.horizontal_delta(delta);
+            return;
+        }
         if delta.is_finite() {
             let column = self.active_column;
             self.horizontal[column] =
@@ -604,6 +666,10 @@ impl GitDiffView {
     }
 
     pub fn scroll_horizontal_at(&mut self, x: f32, y: f32, delta: f32) {
+        if let Some(inbox) = &mut self.inbox {
+            inbox.horizontal(x, y, delta);
+            return;
+        }
         self.select_column(x, y);
         self.scroll_horizontal(delta);
     }
@@ -619,6 +685,9 @@ impl GitDiffView {
     }
 
     pub fn pointer_move(&mut self, x: f32, y: f32) -> bool {
+        if let Some(inbox) = &mut self.inbox {
+            return inbox.pointer_move(x, y);
+        }
         self.select_column(x, y);
         if let Some(grab) = self.vertical_drag {
             let travel = (self.scrollbar_rect.h - self.vertical_thumb.h).max(0.0);
@@ -639,6 +708,20 @@ impl GitDiffView {
             }
             return true;
         }
+        let pr_hover_width = if self.effective_split {
+            self.column_rects[0].w
+        } else {
+            self.column_rects[1].w
+        };
+        let old_pr_hover = self.header_pointer.and_then(|(px, py)| {
+            self.pr_line_hits.iter().position(|(r, _)| {
+                Rect::new(r.x, r.y, pr_hover_width, r.h).contains(px, py)
+            })
+        });
+        let pr_hover = self
+            .pr_line_hits
+            .iter()
+            .position(|(r, _)| Rect::new(r.x, r.y, pr_hover_width, r.h).contains(x, y));
         let old_block_button = self
             .header_pointer
             .and_then(|(px, py)| self.block_button_at(px, py));
@@ -665,12 +748,16 @@ impl GitDiffView {
         let changed = self.block_hover != block_hover;
         self.block_hover = block_hover;
         changed
+            || old_pr_hover != pr_hover
             || old_block_button != self.block_button_at(x, y)
             || old_hover != hover
             || old_number_hover != number_hover
     }
 
     pub fn pointer_leave(&mut self) -> bool {
+        if let Some(inbox) = &mut self.inbox {
+            return inbox.pointer_leave();
+        }
         let block = self.block_hover.take().is_some();
         for c in &mut self.block_controls {
             c.shown = false;
@@ -679,15 +766,27 @@ impl GitDiffView {
     }
 
     pub fn is_dragging(&self) -> bool {
+        if let Some(inbox) = &self.inbox {
+            return inbox.is_dragging();
+        }
         self.horizontal_drag.is_some() || self.vertical_drag.is_some()
     }
 
     pub fn pointer_up(&mut self) -> bool {
+        if let Some(inbox) = &mut self.inbox {
+            return inbox.pointer_up();
+        }
         let horizontal = self.horizontal_drag.take().is_some();
         self.vertical_drag.take().is_some() || horizontal
     }
 
     pub fn key(&mut self, key: &str) -> bool {
+        if let Some(inbox) = &mut self.inbox {
+            return inbox.key(key, false, false);
+        }
+        if self.pull_request_key(key, false, false) {
+            return true;
+        }
         match key {
             "ArrowDown" | "Down" | "j" => self.scroll(self.line_height * 3.0),
             "ArrowUp" | "Up" | "k" => self.scroll(-self.line_height * 3.0),
@@ -737,7 +836,7 @@ impl GitDiffView {
     }
 
     fn source_hit_index(&self, x: f32, y: f32) -> Option<usize> {
-        if self.commit_id.is_some() || self.occluded(x, y) {
+        if self.is_read_only() || self.occluded(x, y) {
             return None;
         }
         self.source_hits
@@ -746,6 +845,25 @@ impl GitDiffView {
     }
 
     pub fn pointer_cursor(&self, x: f32, y: f32) -> bool {
+        if let Some(inbox) = &self.inbox {
+            return inbox.pointer_cursor(x, y);
+        }
+        if let Some(pr) = &self.pull_request {
+            if self.occluded(x, y) {
+                return false;
+            }
+            if pr.hits.iter().any(|(r, _)| r.contains(x, y))
+                || self.pr_line_hits.iter().any(|(r, _)| r.contains(x, y))
+            {
+                return true;
+            }
+            if pr.sheet
+                || pr.detail.is_none()
+                || pr.tab != crate::panels::git_pull_request::Tab::Changes
+            {
+                return false;
+            }
+        }
         if self.occluded(x, y) {
             return false;
         }
@@ -777,7 +895,10 @@ impl GitDiffView {
     }
 
     pub fn text_cursor(&self, x: f32, y: f32) -> bool {
-        if self.commit_id.is_some() {
+        if let Some(inbox) = &self.inbox {
+            return inbox.text_cursor(x, y);
+        }
+        if self.is_read_only() {
             return false;
         }
         !self.occluded(x, y)
@@ -787,10 +908,16 @@ impl GitDiffView {
     }
 
     pub fn pointer_down(&mut self, x: f32, y: f32) -> bool {
+        if let Some(inbox) = &mut self.inbox {
+            return inbox.pointer_down(x, y);
+        }
         if self.occluded(x, y) {
             return false;
         }
         // A fresh pointer gesture supersedes an asynchronous file-header reveal.
+        if self.pr_pointer_down(x, y) {
+            return true;
+        }
         self.pending_reveal = None;
         if self.toolbar_pointer_down(x, y) {
             return true;
@@ -883,7 +1010,7 @@ impl GitDiffView {
         if let Some(hit) = self
             .edit_hits
             .iter()
-            .find(|hit| self.commit_id.is_none() && hit.rect.contains(x, y))
+            .find(|hit| !self.is_read_only() && hit.rect.contains(x, y))
         {
             let fragment = hit.text.get(hit.byte_start..hit.byte_end).unwrap_or("");
             let cells = ((x - hit.text_x + hit.scroll_x) / hit.cell_w)
@@ -1043,14 +1170,41 @@ impl GitDiffView {
         &mut self,
         sugarloaf: &mut Sugarloaf,
         rect: Rect,
-        _font_id: usize,
+        font_id: usize,
         font_size: f32,
         theme: &IdeTheme,
         mut editor: Option<&mut CodePane>,
     ) {
-        if self.commit_id.is_some() {
+        if self.is_read_only() {
             editor = None;
         }
+        if let Some(inbox) = &mut self.inbox {
+            inbox.render(sugarloaf, rect, font_id, font_size, theme);
+            return;
+        }
+        self.pr_line_hits.clear();
+        let rect = if let Some(pr) = self.pull_request.as_mut() {
+            match pr.render(
+                sugarloaf,
+                rect,
+                (font_size / diff_card::FONT_SIZE).clamp(0.7, 2.5),
+                theme,
+                &self.text_occlusions,
+            ) {
+                Some(rect) => rect,
+                None => {
+                    self.header_rects.clear();
+                    self.header_actions.clear();
+                    self.source_hits.clear();
+                    self.edit_hits.clear();
+                    self.block_controls.clear();
+                    self.toolbar_hits.clear();
+                    return;
+                }
+            }
+        } else {
+            rect
+        };
         let rect = if let Some(metadata) = self.commit_metadata.as_mut() {
             metadata.render(
                 sugarloaf,
@@ -1097,14 +1251,18 @@ impl GitDiffView {
             0.0,
             20,
         );
-        let toolbar_h = (36.0 * scale).min(rect.h);
+        let toolbar_h = if self.is_pull_request() {
+            0.0
+        } else {
+            (36.0 * scale).min(rect.h)
+        };
         let opts = DrawOpts {
             font_size: 12.0 * scale,
             color: theme.u8(theme.dim),
             clip_rect: Some(clip),
             ..DrawOpts::default()
         };
-        if self.commit_id.is_none() {
+        if !self.is_read_only() {
             self.render_toolbar(sugarloaf, rect, toolbar_h, scale, theme);
         }
         let notice_h = if self.error.is_some() && !self.sections.is_empty() {
@@ -1176,14 +1334,11 @@ impl GitDiffView {
             ..opts
         };
         if self.sections.is_empty() {
-            let message = self
-                .error
-                .as_deref()
-                .unwrap_or(if self.commit_id.is_some() {
-                    "This commit has no changed files."
-                } else {
-                    "No uncommitted changes."
-                });
+            let message = self.error.as_deref().unwrap_or(if self.is_read_only() {
+                "This commit has no changed files."
+            } else {
+                "No uncommitted changes."
+            });
             draw_text_with_occlusion(
                 sugarloaf,
                 viewport.x + 8.0 * scale,
@@ -1479,11 +1634,38 @@ impl GitDiffView {
                 ..opts
             };
             let Some(lines) = &section.lines else {
+                if self
+                    .pull_request
+                    .as_ref()
+                    .is_some_and(|pr| pr.detail.is_none())
+                    && self.error.is_none()
+                {
+                    inbox::skeleton(
+                        sugarloaf,
+                        Rect::new(
+                            viewport.x + 12.0 * scale,
+                            body_y + 10.0 * scale,
+                            (viewport.w - 24.0 * scale).max(0.0),
+                            body_clip.h,
+                        ),
+                        body_opts.clip_rect.unwrap(),
+                        &self.text_occlusions,
+                        theme,
+                        scale,
+                        6,
+                    );
+                    continue;
+                }
+                let unavailable = if self.pull_request.is_some() {
+                    "No text diff available for this file."
+                } else {
+                    "Loading diff..."
+                };
                 draw_text_with_occlusion(
                     sugarloaf,
                     viewport.x + 12.0 * scale,
                     body_y + 10.0 * scale,
-                    self.error.as_deref().unwrap_or("Loading diff..."),
+                    self.error.as_deref().unwrap_or(unavailable),
                     &body_opts,
                     &self.text_occlusions,
                 );
@@ -1506,7 +1688,7 @@ impl GitDiffView {
                 relative_path(&self.root, &pane.path) != Path::new(&section.change.path)
                     || section.live_revision == Some(pane.buffer.revision)
             });
-            if self.commit_id.is_none() && live_current {
+            if !self.is_read_only() && live_current {
                 let label_opts = DrawOpts {
                     font_size: 12.0 * scale,
                     ..DrawOpts::default()
@@ -1586,6 +1768,78 @@ impl GitDiffView {
             let gap = if split { 2.0 * scale } else { 0.0 };
             let column_w = (viewport.w - gap) / columns as f32;
             for column in 0..columns {
+                if self.is_pull_request() {
+                    let rows = if !split {
+                        lines
+                    } else if column == 0 {
+                        &section.left
+                    } else {
+                        &section.right
+                    };
+                    for (i, _) in rows.iter().enumerate() {
+                        let first = if split {
+                            i
+                        } else {
+                            section.wrapped_offsets.get(i).copied().unwrap_or(i)
+                        };
+                        let Some(anchor) =
+                            section.pr_anchor_for_visual_row(first, split, column)
+                        else {
+                            continue;
+                        };
+                        let end = if split {
+                            i + 1
+                        } else {
+                            section
+                                .wrapped_offsets
+                                .get(i + 1)
+                                .copied()
+                                .unwrap_or(first + 1)
+                        };
+                        let source_rect = Rect::new(
+                            viewport.x + column as f32 * (column_w + gap),
+                            body_y
+                                + diff_card::BODY_TOP_PAD * scale
+                                + first as f32 * self.line_height,
+                            column_w,
+                            (end - first) as f32 * self.line_height,
+                        );
+                        if let Some(hit) = intersection(source_rect, body_clip) {
+                            let button =
+                                Rect::new(hit.x, hit.y, (20.0 * scale).min(hit.w), hit.h);
+                            self.pr_line_hits.push((button, anchor));
+                            if self
+                                .header_pointer
+                                .is_some_and(|(x, y)| hit.contains(x, y))
+                            {
+                                draw_text_with_occlusion(
+                                    sugarloaf,
+                                    button.x + 2.0 * scale,
+                                    button.y,
+                                    "+",
+                                    &DrawOpts {
+                                        color: theme.u8(theme.accent),
+                                        clip_rect: Some([
+                                            button.x, button.y, button.w, button.h,
+                                        ]),
+                                        ..opts
+                                    },
+                                    &self.text_occlusions,
+                                );
+                            }
+                        }
+                    }
+                }
+                let mut column_occlusions = code_occlusions.clone();
+                if self.is_pull_request() {
+                    for (r, _) in &self.pr_line_hits {
+                        if self.header_pointer.is_some_and(|(x, y)| {
+                            Rect::new(r.x, r.y, column_w, r.h).contains(x, y)
+                        }) {
+                            column_occlusions.push([r.x, r.y, r.w, r.h]);
+                        }
+                    }
+                }
                 let spec = CardSpec {
                     path: &section.change.path,
                     link_target: None,
@@ -1605,9 +1859,8 @@ impl GitDiffView {
                     body_scroll: 0.0,
                     horizontal_scroll: split.then_some(self.horizontal[column]),
                 };
-                let working_tree = self.commit_id.is_none()
-                    && live_current
-                    && (!split || column == 1);
+                let working_tree =
+                    !self.is_read_only() && live_current && (!split || column == 1);
                 let editor_attached = working_tree
                     && section.base_text.is_some()
                     && editor.as_ref().is_some_and(|pane| {
@@ -1723,7 +1976,7 @@ impl GitDiffView {
                     body_clip.y + body_clip.h,
                     PaintParams {
                         clip: Some([body_clip.x, body_clip.y, body_clip.w, body_clip.h]),
-                        occlusion_rects: &code_occlusions,
+                        occlusion_rects: &column_occlusions,
                         gutter_width: Some(self.gutter_width),
                         hatch_empty_rows: split,
                         review_separators: true,
@@ -2182,7 +2435,10 @@ mod tests {
             if !view.needs_redraw() {
                 break;
             }
-            assert!(std::time::Instant::now() < deadline, "live review did not finish");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "live review did not finish"
+            );
             std::thread::yield_now();
         }
         assert_eq!(view.sections[0].live_revision, Some(pane.buffer.revision));
@@ -2238,7 +2494,8 @@ mod tests {
         assert!(!std::sync::Arc::ptr_eq(&first, &refreshed));
         view.set_base_text(Path::new("a.rs"), refreshed.clone());
         assert!(std::sync::Arc::ptr_eq(
-            view.sections[0].base_text.as_ref().unwrap(), &refreshed,
+            view.sections[0].base_text.as_ref().unwrap(),
+            &refreshed,
         ));
         assert_eq!(view.sections[0].base_revision, revision);
         assert_eq!(view.sections[0].live_revision, Some(42));
@@ -2290,7 +2547,11 @@ mod tests {
         }
         finish_live_review(&mut view, &mut pane);
         assert!(!view.live_diff.pending());
-        assert!(view.sections[0].lines.as_ref().unwrap().iter()
+        assert!(view.sections[0]
+            .lines
+            .as_ref()
+            .unwrap()
+            .iter()
             .any(|line| line.text == format!("{}new", "x".repeat(50))));
         view.sync_live_editor(&mut pane);
         assert!(!view.needs_redraw(), "unchanged reviews must stop polling");

@@ -1168,6 +1168,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn batch_delete_cleans_search_and_embeddings_and_is_session_scoped() {
+        let _search_test = SEARCH_TEST.lock().await;
+        let store = store().await;
+        let db = &store.db;
+        session(db, "ses_batch", "kept title", "/project", None, "local").await;
+        session(db, "ses_other", "other title", "/other", None, "local").await;
+        let mut ids = Vec::new();
+        // Cross the bounded SQL chunk size, including a duplicate in a later chunk.
+        for index in 0..130 {
+            let id = format!("msg_batch_{index:03}");
+            message(db, &id, "ses_batch", "batchneedle", "local").await;
+            ids.push(id);
+        }
+        message(db, "msg_foreign", "ses_other", "foreignneedle", "local").await;
+        flush(db).await.unwrap();
+        assert!(!find(db, "batchneedle", false, 10).await.is_empty());
+        // Keep dirty rows as well as indexed documents for the same messages.
+        let mut statements = Vec::new();
+        for id in ids.iter().chain(std::iter::once(&"msg_foreign".to_string())) {
+            statements.push(dirty_message(id));
+            statements.push((
+                "INSERT INTO message_embeddings(message_id,session_id,created,model) VALUES(?,?,1,'test')".into(),
+                vec![text(id), text(if id == "msg_foreign" { "ses_other" } else { "ses_batch" })],
+            ));
+        }
+        db.execute_transaction(statements).await.unwrap();
+        let mut requested = ids.clone();
+        requested.extend([ids[0].clone(), "msg_missing".into(), "msg_foreign".into()]);
+        let mut deleted = store.delete_messages("ses_batch", &requested).await.unwrap();
+        deleted.sort();
+        assert_eq!(deleted, ids);
+        assert!(store.delete_messages("ses_batch", &requested).await.unwrap().is_empty());
+        assert!(store.delete_messages("ses_batch", &[]).await.unwrap().is_empty());
+        assert!(store.list_messages("ses_batch").await.unwrap().is_empty());
+        assert_eq!(store.list_messages("ses_other").await.unwrap().len(), 1);
+        for table in ["conversation_search_docs", "conversation_search_dirty", "message_embeddings"] {
+            assert_eq!(db.fetch_scalar_i64(
+                &format!("SELECT COUNT(*) FROM {table} WHERE session_id = ? AND message_id != ''"),
+                vec![text("ses_batch")],
+            ).await.unwrap(), 0);
+            assert_eq!(db.fetch_scalar_i64(
+                &format!("SELECT COUNT(*) FROM {table} WHERE message_id = ?"),
+                vec![text("msg_foreign")],
+            ).await.unwrap(), 1);
+        }
+        assert!(find(db, "batchneedle", false, 10).await.is_empty());
+        assert_eq!(find(db, "foreignneedle", false, 10).await.len(), 1);
+        assert_eq!(db.fetch_scalar_i64(
+            "SELECT COUNT(*) FROM conversation_search_docs WHERE session_id = ? AND message_id = ''",
+            vec![text("ses_batch")],
+        ).await.unwrap(), 1);
+    }
+
+    #[tokio::test]
     async fn indexed_plan_parser_and_and_or_semantics() {
         let _search_test = SEARCH_TEST.lock().await;
         let store = store().await;

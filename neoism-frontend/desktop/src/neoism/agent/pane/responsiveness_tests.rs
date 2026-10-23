@@ -16,7 +16,9 @@ fn held_prompt_with_image(
     pane.server = "invalid://responsiveness-test".into();
     pane.session_id = session.map(str::to_string);
     pane.model = "test/model".into();
-    pane.provider_readiness = Some(
+    let scope = super::super::api::catalog_scope(&pane.server, pane.directory.as_deref());
+    pane.apply_provider_readiness(
+        scope,
         neoism_ui::panels::agent_pane::api_mapping::ProviderReadiness {
             connected: vec!["test".into()],
             models: vec!["test/model".into()],

@@ -38,6 +38,10 @@ impl Screen<'_> {
                 self.mark_dirty();
                 true
             }
+            Some(TopBarAction::OpenSystems) => {
+                self.request_system_action(SystemRequest::Show);
+                true
+            }
             Some(TopBarAction::OpenServers) => {
                 self.request_server_manager();
                 true

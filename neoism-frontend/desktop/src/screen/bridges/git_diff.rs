@@ -128,6 +128,23 @@ impl Screen<'_> {
         let alt = mods.alt_key();
         let plain = !mods.alt_key() && !mods.control_key() && !mods.super_key();
 
+        if self.renderer.git_diff_panel.pull_request_lookup_active() {
+            let name = match &key.logical_key {
+                Key::Named(NamedKey::Enter) => "Enter",
+                Key::Named(NamedKey::Escape) => "Escape",
+                Key::Named(NamedKey::Backspace) => "Backspace",
+                Key::Character(text) => text.as_str(),
+                _ => "",
+            };
+            if plain {
+                let text = key.text.as_ref().map(|text| text.as_str()).or_else(|| match &key.logical_key {
+                    Key::Character(text) => Some(text.as_str()), _ => None,
+                });
+                self.renderer.git_diff_panel.pull_request_lookup_key(name, text);
+            }
+            return true; // Lookup input must never edit the commit box or source.
+        }
+
         // The actions dropdown owns every key while open, including shortcuts
         // that would otherwise act on the editor/terminal behind the panel.
         if self.renderer.git_diff_panel.actions_menu_is_open() {
@@ -245,6 +262,10 @@ impl Screen<'_> {
         let diff_section = self.renderer.git_diff_panel.diff_section_focused();
 
         match &key.logical_key {
+            Key::Character(s) if plain && s.as_str() == "p" => {
+                self.renderer.git_diff_panel.activate_pull_request();
+                true
+            }
             // Ctrl/Cmd+Enter commits from anywhere in the panel.
             Key::Named(NamedKey::Enter) if ctrl => {
                 self.renderer.git_diff_panel.commit();
@@ -504,6 +525,11 @@ impl Screen<'_> {
             self.mark_dirty();
         }
         match hit {
+            crate::editor::git_diff_panel::PanelHit::PullRequest => {
+                self.renderer.git_diff_panel.activate_pull_request();
+                self.mark_dirty();
+                true
+            }
             crate::editor::git_diff_panel::PanelHit::Outside => {
                 if self.renderer.git_diff_panel.is_focused() {
                     self.renderer.git_diff_panel.set_focused(false);

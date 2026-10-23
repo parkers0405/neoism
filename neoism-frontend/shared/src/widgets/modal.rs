@@ -248,6 +248,11 @@ pub enum ModalAction {
         name: String,
     },
     NotesVaultPromptAdd,
+    SystemFormSubmit,
+    SystemDisconnectConfirm {
+        id: String,
+        remove: bool,
+    },
     ServerFormSubmit,
     ServerReconnectRetry {
         endpoint: String,
@@ -917,16 +922,16 @@ impl UniversalModal {
     }
 
     pub fn open_form(&mut self, spec: ModalFormSpec) {
+        self.open_form_with_action(spec, ModalAction::ServerFormSubmit);
+    }
+
+    pub fn open_form_with_action(&mut self, spec: ModalFormSpec, action: ModalAction) {
         self.open(ModalSpec {
             title: spec.title.clone(),
             body: String::new(),
             meta: String::new(),
             buttons: vec![
-                ModalButton::new(
-                    spec.submit_label.clone(),
-                    "Enter",
-                    ModalAction::ServerFormSubmit,
-                ),
+                ModalButton::new(spec.submit_label.clone(), "Enter", action),
                 ModalButton::new("Cancel", "Esc", ModalAction::Close),
             ],
             input: None,
@@ -1865,7 +1870,7 @@ impl UniversalModal {
                 .map(|field| (field.id.clone(), field.value.clone()))
                 .collect(),
         );
-        Some(ModalAction::ServerFormSubmit)
+        self.buttons.first().map(|button| button.action.clone())
     }
 
     pub fn action_for_hint(&self, hint: &str) -> Option<ModalAction> {
@@ -3795,6 +3800,19 @@ mod tests {
         let pane = modal.markdown_pane.as_ref().unwrap();
         assert_eq!(pane.cursor_line, 30);
         assert_eq!(pane.lines.len(), 31);
+    }
+
+    #[test]
+    fn system_form_preserves_custom_submit_action_and_values() {
+        let mut modal = UniversalModal::default();
+        modal.open_form_with_action(switch_test_form(), ModalAction::SystemFormSubmit);
+        assert_eq!(modal.submit_form(), Some(ModalAction::SystemFormSubmit));
+        assert!(modal.take_submitted_form().is_some());
+        assert!(
+            modal.has_action(|action| matches!(action, ModalAction::SystemFormSubmit))
+        );
+        modal.open_form(switch_test_form());
+        assert_eq!(modal.submit_form(), Some(ModalAction::ServerFormSubmit));
     }
 
     fn switch_test_form() -> ModalFormSpec {

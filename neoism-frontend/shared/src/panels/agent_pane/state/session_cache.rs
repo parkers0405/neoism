@@ -749,6 +749,7 @@ impl NeoismAgentPane {
         self.timeline_wheel_target_px = None;
         self.timeline_scroll_owner = TimelineScrollOwner::Wheel;
         self.timeline_viewport_rect = None;
+        self.timeline_paint_region = None;
         self.timeline_history_position_hydrated = false;
         self.timeline_live_growth = false;
         self.footer_growth.clear();

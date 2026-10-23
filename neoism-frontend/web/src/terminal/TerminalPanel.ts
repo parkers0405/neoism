@@ -168,6 +168,7 @@ interface WebBufferTab {
   chromePage?: "git_diff";
   diffRoot?: string;
   diffCommit?: string;
+  diffPullRequest?: number | "create" | "inbox";
   diffPath?: string;
   diffRouteId?: number;
   title: string;
@@ -757,6 +758,16 @@ export class TerminalPanel {
         const gitAdapter = this.wasmAdapter;
         gitAdapter.gitPanelContext = () => this.wasmAdapter === gitAdapter
           ? this.options.workspaceRoot ?? "" : null;
+        gitAdapter.gitPanelPreparePullRequest = (json: string) => {
+          if (this.wasmAdapter !== gitAdapter) return false;
+          try {
+            const request = JSON.parse(json);
+            if (request.Checkout && request.Checkout.new_worktree === false) {
+              return window.confirm("Check out this pull request in the current workspace? Unsaved documents and local changes must be saved or committed first. Neoism will not stash or overwrite them.");
+            }
+            return true;
+          } catch { return false; }
+        };
         try {
           this.options.onBridgeReady?.(
             this.wasmAdapter as unknown as ServiceRegistryBridge,
@@ -879,6 +890,7 @@ export class TerminalPanel {
     this.canvas.addEventListener("pointerdown", this.pointerDownHandler);
     this.canvas.addEventListener("pointerup", this.pointerUpHandler);
     this.canvas.addEventListener("pointercancel", this.pointerCancelHandler);
+    this.canvas.addEventListener("lostpointercapture", this.agentScrollbarLostCaptureHandler);
     this.canvas.addEventListener("pointerleave", this.pointerLeaveHandler);
     this.canvas.addEventListener("wheel", this.wheelHandler, { passive: false });
     this.canvas.addEventListener("paste", this.pasteHandler);
@@ -1490,6 +1502,7 @@ export class TerminalPanel {
   }
 
   dispose(): void {
+    this.endAgentScrollbarDrag();
     if (this.wasmAdapter) this.wasmAdapter.gitPanelContext = () => null;
     this.pendingDiffSaveStages.clear();
     this.clearConversationNavigation();
@@ -1520,6 +1533,7 @@ export class TerminalPanel {
     this.canvas.removeEventListener("pointerdown", this.pointerDownHandler);
     this.canvas.removeEventListener("pointerup", this.pointerUpHandler);
     this.canvas.removeEventListener("pointercancel", this.pointerCancelHandler);
+    this.canvas.removeEventListener("lostpointercapture", this.agentScrollbarLostCaptureHandler);
     this.canvas.removeEventListener("pointerleave", this.pointerLeaveHandler);
     this.canvas.removeEventListener("wheel", this.wheelHandler);
     this.canvas.removeEventListener("paste", this.pasteHandler);
@@ -3378,6 +3392,9 @@ export class TerminalPanel {
         case "open_agent":
           this.openNeoismAgentTab();
           break;
+        case "open_systems":
+          if (this.wasmAdapter) this.notifyPaletteUnavailable("Systems are managed in the desktop app. The browser cannot manage SSH connections.", this.wasmAdapter);
+          break;
         case "open_servers": {
           // Desktop parity: open the SHARED servers palette
           // (`command_palette.enter_servers_mode`) instead of the
@@ -3554,6 +3571,26 @@ export class TerminalPanel {
   private pendingDiffSaveStages = new Map<string, { root: string; path: string; adapter: TerminalAdapter | null; scope: string; revision?: string; block?: import("../workspace/types").GitChangeBlock }[]>();
   private nextGitDiffRouteId = 1;
 
+  private openGitPullRequestTab(row: {root: string; inbox?: boolean; detail?: import("../workspace/types").PullRequestDetail; create?: {branch: string; head: string; default_branch: string}}): void {
+    const identity = row.inbox ? "inbox" : row.detail?.summary.number ?? "create";
+    let index = this.bufferTabs.findIndex(tab => tab.chromePage === "git_diff" && tab.diffRoot === row.root && tab.diffPullRequest === identity);
+    const created = index < 0;
+    if (created) {
+      index = this.bufferTabs.length;
+      this.bufferTabs.push({ title: row.inbox ? "Pull Requests" : row.detail ? `#${row.detail.summary.number} ${row.detail.summary.title}` : "New pull request", kind: "chrome-git-diff", chromePage: "git_diff", diffRoot: row.root, diffPullRequest: identity, diffPath: "", diffRouteId: this.nextGitDiffRouteId++ });
+    }
+    this.activeTabIndex = index;
+    this.assignActiveTabToFocusedEditorPane();
+    this.replayBufferTabs();
+    const route = this.bufferTabs[index].diffRouteId!;
+    // Existing pages own drafts and scroll state; ordinary tab replay never reseeds them.
+    if (row.inbox) this.wasmAdapter?.openGitPullRequestInbox?.(route, row.root);
+    if (row.detail) this.wasmAdapter?.setGitPullRequestView?.(route, row.root, JSON.stringify(row.detail));
+    if (row.create) this.wasmAdapter?.createGitPullRequestView?.(route, row.root, row.create.branch, row.create.head, row.create.default_branch);
+    this.activateCurrentTabContents(false);
+    this.scheduleDraw();
+  }
+
   private openGitCommitTab(root: string, detail: import("../workspace/types").GitCommitDetail): void {
     let index = this.bufferTabs.findIndex(tab => tab.chromePage === "git_diff" && tab.diffRoot === root && tab.diffCommit === detail.sha);
     if (index < 0) {
@@ -3570,7 +3607,7 @@ export class TerminalPanel {
 
   private openGitDiffTab(root: string, path: string): void {
     const existing = this.bufferTabs.findIndex(tab =>
-      tab.chromePage === "git_diff" && tab.diffRoot === root && !tab.diffCommit);
+      tab.chromePage === "git_diff" && tab.diffRoot === root && !tab.diffCommit && tab.diffPullRequest === undefined);
     if (existing >= 0) {
       this.bufferTabs[existing].diffPath = path;
       this.activeTabIndex = existing;
@@ -3784,6 +3821,28 @@ export class TerminalPanel {
     }
     const edit = this.wasmAdapter?.takeGitDiffEditRequest?.();
     if (edit) this.beginGitDiffEdit(edit);
+    const prRows = this.wasmAdapter?.drainGitPullRequestOpens?.();
+    if (Array.isArray(prRows)) {
+      for (const row of prRows) if (typeof row?.root === "string" && (row.inbox === true || row.detail?.summary?.number || row.create?.branch)) this.openGitPullRequestTab(row);
+    }
+    let prTitlesChanged = false;
+    for (const tab of this.bufferTabs) {
+      if (tab.diffPullRequest === undefined || tab.diffRouteId === undefined) continue;
+      const info = this.wasmAdapter?.gitPullRequestTabInfo?.(tab.diffRouteId);
+      if (Array.isArray(info) && typeof info[0] === "number" && typeof info[1] === "string") {
+        const title = `#${info[0]} ${info[1]}`;
+        if (tab.diffPullRequest !== info[0] || tab.title !== title) { tab.diffPullRequest = info[0]; tab.title = title; prTitlesChanged = true; }
+      }
+    }
+    if (prTitlesChanged) this.replayBufferTabs();
+    const prUrls = this.wasmAdapter?.drainPullRequestUrls?.();
+    if (Array.isArray(prUrls)) for (const value of prUrls) {
+      try { const url = new URL(value); if (url.protocol === "https:") window.open(url.href, "_blank", "noopener,noreferrer"); } catch { /* Invalid host link. */ }
+    }
+    const prWorkspaces = this.wasmAdapter?.drainPullRequestWorkspaces?.();
+    if (Array.isArray(prWorkspaces)) for (const path of prWorkspaces) {
+      if (typeof path === "string" && window.confirm(`The PR worktree is ready at ${path}. Open it as the current workspace?`)) this.options.onWorkspaceRootRequested?.(path, this.options.activeWorkspaceId ?? null);
+    }
     const commitRows = this.wasmAdapter?.drainGitCommitOpens?.();
     if (Array.isArray(commitRows)) {
       for (const row of commitRows) if (typeof row?.root === "string" && row.detail?.sha) this.openGitCommitTab(row.root, row.detail);
@@ -4501,6 +4560,13 @@ export class TerminalPanel {
         // workspace grep finder.
         (adapter.showFinderGrep ?? adapter.showFinder)?.call(adapter);
         break;
+      case "ShowSystems":
+      case "AddSystem":
+      case "ConnectSystem":
+      case "DisconnectSystem":
+      case "RemoveSystem":
+        this.notifyPaletteUnavailable("Systems are managed in the desktop app. The browser cannot manage SSH connections.", adapter);
+        return;
       case "ShowServers":
         // Web connection ownership lives above TerminalPanel — route
         // to the host's workplace/server switcher, same as the
@@ -4880,7 +4946,7 @@ export class TerminalPanel {
 
   private tabLifecycleKey(tab: WebBufferTab | undefined): string | null {
     if (!tab) return null;
-    if (tab.chromePage === "git_diff") return `git_diff:${tab.diffRoot}:${tab.diffCommit ?? "worktree"}`;
+    if (tab.chromePage === "git_diff") return `git_diff:${tab.diffRoot}:${tab.diffPullRequest !== undefined ? `pr:${tab.diffPullRequest}` : tab.diffCommit ?? "worktree"}`;
     if (tab.kind === "terminal") return tab.sessionId ? `terminal:${tab.sessionId}` : null;
     if (tab.kind === "file" && tab.path) return `file:${this.tabIdentityPath(tab.path)}`;
     if (tab.kind === "neoism-agent" && tab.neoismAgentRouteId !== undefined) {
@@ -5023,6 +5089,10 @@ export class TerminalPanel {
   private syncActiveTabModified(): boolean {
     const tab = this.bufferTabs[this.activeTabIndex];
     if (!tab || (tab.kind !== "file" && tab.chromePage !== "git_diff")) return false;
+    if (tab.diffPullRequest !== undefined && tab.diffRouteId !== undefined) {
+      tab.modified = this.wasmAdapter?.gitPullRequestHasDrafts?.(tab.diffRouteId) === true;
+      return tab.modified;
+    }
     let modified = tab.modified === true;
     if (this.activeTabIsMarkdown() && this.useWasmMarkdown()) {
       modified = this.wasmAdapter?.markdownDirty?.() === true;
@@ -5116,6 +5186,9 @@ export class TerminalPanel {
 
   private closeUnfocusedBufferTabs(): void {
     const oldTabs = this.bufferTabs;
+    const prDrafts = oldTabs.filter((tab, index) => index !== this.activeTabIndex && tab.diffPullRequest !== undefined
+      && tab.diffRouteId !== undefined && this.wasmAdapter?.gitPullRequestHasDrafts?.(tab.diffRouteId) === true);
+    if (prDrafts.length && !window.confirm(`Discard pull request drafts in ${prDrafts.length} other tab(s)?`)) return;
     const fallbackTerminal = oldTabs.find((tab) => tab.kind === "terminal") ?? {
       title: "Terminal 1",
       kind: "terminal" as const,
@@ -8469,8 +8542,10 @@ export class TerminalPanel {
     if (requestedCloseIndex >= 0) {
       if (requestedCloseIndex === this.activeTabIndex) this.syncActiveTabModified();
       const candidate = this.bufferTabs[requestedCloseIndex];
-      if (candidate?.modified === true && !confirmDirtyClose(true, () =>
-        window.confirm(`Discard unsaved changes to ${candidate.title}?`)
+      const prDrafts = candidate?.diffPullRequest !== undefined && candidate.diffRouteId !== undefined
+        && this.wasmAdapter?.gitPullRequestHasDrafts?.(candidate.diffRouteId) === true;
+      if ((candidate?.modified === true || prDrafts) && !confirmDirtyClose(true, () =>
+        window.confirm(prDrafts ? `Discard the pull request draft in ${candidate.title}?` : `Discard unsaved changes to ${candidate.title}?`)
       )) {
         this.replayBufferTabs();
         return;
@@ -9316,6 +9391,15 @@ export class TerminalPanel {
   }
 
   private handlePointerMove(event: PointerEvent): void {
+    if (event.pointerType !== "touch" && this.agentScrollbarPointerId != null) {
+      if (this.agentScrollbarPointerId === event.pointerId) {
+        const { x, y } = this.canvasLogicalPoint(event);
+        this.wasmAdapter?.agentDragScrollbar?.(x, y);
+        this.scheduleDraw();
+      }
+      event.preventDefault();
+      return;
+    }
     // Touch pointers are owned entirely by the touchstart/move/end
     // handlers; letting the parallel PointerEvent stream through
     // double-fires every action (a folder tap toggled open on
@@ -9386,14 +9470,6 @@ export class TerminalPanel {
         return;
       }
     }
-    if (this.activeSurface() === "agent") {
-      const { x } = this.canvasLogicalPoint(event);
-      if (this.wasmAdapter?.agentDragMarkdownHorizontalScrollbar?.(x)) {
-        event.preventDefault();
-        this.scheduleDraw();
-        return;
-      }
-    }
     if (this.wasmAdapter?.splashMouseMove) {
       const { x, y } = this.canvasLogicalPoint(event);
       this.wasmAdapter.splashMouseMove(x, y);
@@ -9436,6 +9512,10 @@ export class TerminalPanel {
   }
 
   private handlePointerDown(event: PointerEvent): void {
+    if (event.pointerType !== "touch" && this.agentScrollbarPointerId != null) {
+      event.preventDefault();
+      return;
+    }
     if (this.wasmAdapter?.shareSheetVisible?.()) {
       this.wasmAdapter.shareSheetDismiss?.();
       event.preventDefault();
@@ -9561,7 +9641,7 @@ export class TerminalPanel {
     }
     if (this.activeSurface() === "agent") {
       const { x, y } = this.canvasLogicalPoint(event);
-      if (this.agentPointerDownAt(x, y)) {
+      if (event.button === 0 && this.agentPointerDownAt(x, y, event)) {
         this.scheduleDraw();
         return;
       }
@@ -9826,6 +9906,11 @@ export class TerminalPanel {
   }
 
   private handlePointerUp(event: PointerEvent): void {
+    if (event.pointerType !== "touch" && this.agentScrollbarPointerId != null) {
+      if (event.button === 0) this.endAgentScrollbarDrag(event.pointerId);
+      event.preventDefault();
+      return;
+    }
     if (event.pointerType === "touch") return;
     if (this.tabGestureOwnership.owns(event.pointerId)) {
       const source = this.tabGestureOwnership.release(event.pointerId);
@@ -9895,11 +9980,6 @@ export class TerminalPanel {
         return;
       }
     }
-    if (this.wasmAdapter?.agentEndMarkdownHorizontalScrollbarDrag?.()) {
-      event.preventDefault();
-      this.scheduleDraw();
-      return;
-    }
     if (this.handleTerminalGridPointerUp(event)) {
       return;
     }
@@ -9907,6 +9987,11 @@ export class TerminalPanel {
   }
 
   private handlePointerCancel(event: PointerEvent): void {
+    if (event.pointerType !== "touch" && this.agentScrollbarPointerId != null) {
+      this.endAgentScrollbarDrag(event.pointerId);
+      event.preventDefault();
+      return;
+    }
     if (event.pointerType === "touch") return;
     if (!this.tabGestureOwnership.owns(event.pointerId)) return;
     this.tabGestureOwnership.release(event.pointerId);
@@ -10149,7 +10234,25 @@ export class TerminalPanel {
    *  wasm click chain reports `selecting`. */
   private agentSelectionActive = false;
 
-  private agentPointerDownAt(x: number, y: number): boolean {
+  private agentScrollbarPointerId: number | null = null;
+  private readonly agentScrollbarLostCaptureHandler = (event: PointerEvent): void => {
+    this.endAgentScrollbarDrag(event.pointerId);
+  };
+
+  private endAgentScrollbarDrag(pointerId = this.agentScrollbarPointerId): boolean {
+    if (pointerId == null || pointerId !== this.agentScrollbarPointerId) return false;
+    this.agentScrollbarPointerId = null;
+    this.wasmAdapter?.agentEndScrollbarDrag?.();
+    try {
+      this.canvas.releasePointerCapture(pointerId);
+    } catch {
+      // Capture may already have been lost or the canvas detached.
+    }
+    this.scheduleDraw();
+    return true;
+  }
+
+  private agentPointerDownAt(x: number, y: number, event?: PointerEvent): boolean {
     const sidePanelWasOpen =
       this.wasmAdapter?.agentSidePanelTakeoverActive?.() === true;
     const sidePanelSearchWasFocused =
@@ -10163,6 +10266,23 @@ export class TerminalPanel {
         this.wasmAdapter?.agentSidePanelSearchFocused?.() !== true)
     ) {
       this.dismissSoftKeyboard();
+    }
+    // The shared bridge reports ownership even when clamped at a rail bound.
+    if (this.wasmAdapter?.agentDragScrollbar?.(x, y)) {
+      if (event) {
+        this.agentScrollbarPointerId = event.pointerId;
+        try {
+          this.canvas.setPointerCapture(event.pointerId);
+        } catch {
+          // Best-effort capture; logical ownership prevents fall-through.
+        }
+        event.preventDefault();
+      } else {
+        // Touch taps share this chain but have no PointerEvent drag.
+        this.wasmAdapter?.agentEndScrollbarDrag?.();
+      }
+      this.scheduleDraw();
+      return true;
     }
     this.agentSelectionActive = result.selecting === true;
     if (result.copy) {

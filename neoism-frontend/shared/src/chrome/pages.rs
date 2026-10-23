@@ -160,7 +160,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         let Some(view) = self.git_diff_views.get_mut(&route) else {
             return false;
         };
-        if view.root != root || view.commit_id.is_some() {
+        if view.root != root || view.is_read_only() {
             return false;
         }
         view.set_edit_focus(false);
@@ -603,6 +603,10 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                 self.modal.close();
                 self.relayout();
             }
+            ModalAction::SystemFormSubmit | ModalAction::SystemDisconnectConfirm { .. } => {
+                self.modal.open(crate::panels::command_palette::actions::systems_desktop_modal_spec());
+                self.relayout();
+            }
             ModalAction::ServerFormSubmit => {
                 let values = self.modal.take_submitted_form().unwrap_or_default();
                 // Code-rename form: `code_rename_to` is the
@@ -892,7 +896,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         };
         let generation = self.git_diff_panel.diff_cache_generation();
         // Closing the sidebar must not evict the last successful patch.
-        if view.commit_id.is_some()
+        if view.is_read_only()
             || self.git_diff_panel.repo_root().as_ref() != Some(&view.root)
             || self.git_diff_view_generations.get(&route) == Some(&generation)
         {
@@ -1142,7 +1146,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         std::mem::take(&mut self.pending_git_diff_block_save_stages)
     }
 
-    fn drain_review_header_actions(&mut self, route: usize) {
+    pub(super) fn drain_review_header_actions(&mut self, route: usize) {
         let actions = self
             .git_diff_views
             .get_mut(&route)
@@ -1151,6 +1155,10 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         for action in actions {
             use crate::panels::git_diff_view::GitDiffViewAction;
             match action {
+                GitDiffViewAction::PullRequest { root, request } => self.dispatch_git_pull_request(route, root, request),
+                GitDiffViewAction::OpenUrl { url } => {
+                    if url.starts_with("https://") { self.pending_pull_request_urls.push(url); }
+                }
                 GitDiffViewAction::ChangeBlock {
                     root,
                     path,
@@ -1259,7 +1267,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         }
     }
 
-    fn handle_git_diff_page_event(&mut self, event: &UiEvent) -> bool {
+    pub(super) fn handle_git_diff_page_event(&mut self, event: &UiEvent) -> bool {
         if self.command_palette.is_enabled()
             || self.finder.is_enabled()
             || self.context_menu.is_visible()
@@ -1270,6 +1278,34 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             return false;
         };
         let rect = self.focused_content_rect();
+        let pr_focused = self.git_diff_views.get(&route).is_some_and(|view| view.is_pull_request())
+            && !self.git_diff_panel.is_focused() && !self.notes_sidebar.is_focused()
+            && !self.file_tree.as_ref().is_some_and(|tree| tree.is_focused())
+            && !self.buffer_tabs.is_focused();
+        if pr_focused {
+            let handled = match event {
+                UiEvent::Text(text) => self.git_diff_views.get_mut(&route).is_some_and(|view| view.pull_request_text_input(text)),
+                UiEvent::Key(key) if key.state == KeyState::Pressed && !key.modifiers.contains(Modifiers::ALT) => {
+                    let name = match &key.logical {
+                        LogicalKey::Named(NamedKey::Enter) => "Enter", LogicalKey::Named(NamedKey::Tab) => "Tab",
+                        LogicalKey::Named(NamedKey::Escape) => "Escape", LogicalKey::Named(NamedKey::Backspace) => "Backspace",
+                        LogicalKey::Named(NamedKey::Delete) => "Delete", LogicalKey::Named(NamedKey::ArrowLeft) => "ArrowLeft",
+                        LogicalKey::Named(NamedKey::ArrowRight) => "ArrowRight", LogicalKey::Named(NamedKey::ArrowUp) => "ArrowUp",
+                        LogicalKey::Named(NamedKey::ArrowDown) => "ArrowDown", LogicalKey::Named(NamedKey::Home) => "Home",
+                        LogicalKey::Named(NamedKey::End) => "End", LogicalKey::Character(s) => s.as_str(), _ => "",
+                    };
+                    let primary = key.modifiers.intersects(Modifiers::CTRL | Modifiers::META);
+                    let inserted = !primary && match &key.logical {
+                        LogicalKey::Character(text) => self.git_diff_views.get_mut(&route).is_some_and(|view| view.pull_request_text_input(text)),
+                        LogicalKey::Named(NamedKey::Space) => self.git_diff_views.get_mut(&route).is_some_and(|view| view.pull_request_text_input(" ")),
+                        _ => false,
+                    };
+                    inserted || self.git_diff_views.get_mut(&route).is_some_and(|view| view.pull_request_key(name, key.modifiers.contains(Modifiers::SHIFT), primary))
+                }
+                _ => false,
+            };
+            if handled { self.drain_review_header_actions(route); return true; }
+        }
         match event {
             UiEvent::PointerDown {
                 x,
@@ -1559,7 +1595,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                     return;
                 }
                 let selected = self.modal.selected_action();
-                let action = if matches!(selected, Some(ModalAction::ServerFormSubmit)) {
+                let action = if matches!(selected, Some(ModalAction::ServerFormSubmit | ModalAction::SystemFormSubmit)) {
                     self.modal.submit_form()
                 } else {
                     selected
@@ -1649,7 +1685,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                 }
                 self.modal.set_selected_index(index);
                 let selected = self.modal.selected_action();
-                let action = if matches!(selected, Some(ModalAction::ServerFormSubmit)) {
+                let action = if matches!(selected, Some(ModalAction::ServerFormSubmit | ModalAction::SystemFormSubmit)) {
                     self.modal.submit_form()
                 } else {
                     selected

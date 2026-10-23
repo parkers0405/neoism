@@ -126,6 +126,30 @@ mod server_switch_tests {
     }
 
     #[test]
+    fn canceled_or_superseded_ssh_bootstrap_cannot_reconnect_a_system() {
+        let window_id = unsafe { WindowId::dummy() };
+        let pending = PendingSshAttach {
+            window_id,
+            generation: 1,
+            target: "buildbox".into(),
+            result: Err("canceled".into()),
+        };
+        let mut requests = HashMap::from([(window_id, SshAttachRequest {
+            generation: 1, target: "buildbox".into(), ssh_args: Vec::new(),
+        })]);
+        assert!(pending.is_current(&requests));
+        requests.remove(&window_id);
+        assert!(!pending.is_current(&requests));
+        requests.insert(window_id, SshAttachRequest {
+            generation: 2, target: "buildbox".into(), ssh_args: Vec::new(),
+        });
+        assert!(!pending.is_current(&requests));
+        requests.get_mut(&window_id).unwrap().generation = 1;
+        requests.get_mut(&window_id).unwrap().target = "otherbox".into();
+        assert!(!pending.is_current(&requests));
+    }
+
+    #[test]
     fn explicit_invite_identity_and_credential_cannot_coalesce_with_a_saved_dial() {
         let request = ServerSwitchRequest {
             generation: 1,
@@ -156,8 +180,23 @@ mod server_switch_tests {
 /// neither SSH authentication nor daemon startup can block the UI thread.
 struct PendingSshAttach {
     window_id: WindowId,
+    generation: u64,
     target: String,
     result: Result<crate::ssh_hosts::DaemonAttach, String>,
+}
+
+struct SshAttachRequest {
+    generation: u64,
+    target: String,
+    ssh_args: Vec<String>,
+}
+
+impl PendingSshAttach {
+    fn is_current(&self, requests: &HashMap<WindowId, SshAttachRequest>) -> bool {
+        requests.get(&self.window_id).is_some_and(|request| {
+            request.generation == self.generation && request.target == self.target
+        })
+    }
 }
 
 #[derive(Clone)]
@@ -337,6 +376,7 @@ pub mod bell;
 mod connection_recovery;
 pub mod daemon_pump;
 mod fast_server_sessions;
+mod systems;
 pub mod freeze_watchdog;
 pub mod ime;
 mod invite_activation;
@@ -369,6 +409,7 @@ pub struct Application<'a> {
     /// returns home.
     home_daemon_endpoint: Option<String>,
     server_registry: ServerRegistry,
+    systems: systems::SystemConnections,
     fast_hosts: HashMap<String, crate::fast_servers::FastHost>,
     ended_fast_hosts: HashSet<String>,
     fast_host_tx: mpsc::Sender<fast_server_sessions::PendingFastHost>,
@@ -393,11 +434,15 @@ pub struct Application<'a> {
     server_switch_generation: u64,
     ssh_attach_tx: mpsc::Sender<PendingSshAttach>,
     ssh_attach_rx: mpsc::Receiver<PendingSshAttach>,
-    ssh_attach_inflight: HashSet<WindowId>,
+    ssh_attach_inflight: HashMap<WindowId, SshAttachRequest>,
+    ssh_attach_generation: u64,
     /// Live tunnel guards keyed by their normalized daemon endpoint. They
     /// outlive workspace switches so returning to an SSH workspace can reuse
     /// its parked daemon connection and remote PTYs immediately.
     ssh_attaches: HashMap<String, crate::ssh_hosts::DaemonAttach>,
+    /// Keep endpoint ownership after a tunnel dies so disconnect can still
+    /// remove every window's adopted workspaces during a reconnect.
+    ssh_routes: HashMap<String, (String, Vec<String>)>,
     /// Workspace to create/adopt once the tunnel's websocket server switch
     /// completes.
     pending_ssh_workspaces: HashMap<WindowId, PendingSshWorkspace>,
@@ -594,6 +639,7 @@ impl Application<'_> {
             window_profile_seq: 0,
             home_daemon_endpoint,
             server_registry,
+            systems: systems::SystemConnections::new(),
             fast_hosts: HashMap::new(),
             ended_fast_hosts: HashSet::new(),
             fast_host_tx,
@@ -613,8 +659,10 @@ impl Application<'_> {
             server_switch_generation: 0,
             ssh_attach_tx,
             ssh_attach_rx,
-            ssh_attach_inflight: HashSet::new(),
+            ssh_attach_inflight: HashMap::new(),
+            ssh_attach_generation: 0,
             ssh_attaches: HashMap::new(),
+            ssh_routes: HashMap::new(),
             pending_ssh_workspaces: HashMap::new(),
             scheduler,
             app_id,
@@ -769,6 +817,7 @@ impl Application<'_> {
         self.reap_stopped_fast_hosts();
         self.drain_ssh_attach_results();
         self.drain_server_switch_results();
+        self.pump_system_connections();
         self.refresh_temporary_server_statuses();
         let window_ids = self.window_sessions.keys().copied().collect::<Vec<_>>();
         for window_id in window_ids {
@@ -7109,7 +7158,7 @@ impl Application<'_> {
     /// permanently disconnected; reopening the workspace was the only code
     /// path that noticed the dead child.
     fn queue_dead_ssh_reconnect(&mut self, window_id: WindowId) {
-        if self.ssh_attach_inflight.contains(&window_id) {
+        if self.ssh_attach_inflight.contains_key(&window_id) {
             return;
         }
         let Some(endpoint) = self.window_sessions.get(&window_id).and_then(|session| {
@@ -7182,6 +7231,16 @@ impl Application<'_> {
     }
 
     fn process_window_server_requests(&mut self, window_id: WindowId) {
+        let system_requests = self
+            .router
+            .routes
+            .get_mut(&window_id)
+            .map(|route| route.window.screen.take_system_requests())
+            .unwrap_or_default();
+        for request in system_requests {
+            self.process_system_request(window_id, request);
+        }
+
         let (
             server_request,
             ssh_attach_request,
@@ -7221,6 +7280,7 @@ impl Application<'_> {
         };
 
         if let Some((target, ssh_args)) = ssh_attach_request {
+            self.cancel_system_activation(window_id);
             self.start_ssh_workspace_attach(window_id, target, ssh_args);
         }
 
@@ -7246,6 +7306,7 @@ impl Application<'_> {
         }
 
         if let Some(server_id) = server_request {
+            self.cancel_system_activation(window_id);
             if let Err(error) = self.server_registry.reload() {
                 tracing::warn!(%error, "could not refresh saved server before connecting");
                 return;
@@ -7383,6 +7444,7 @@ impl Application<'_> {
         }
 
         if let Some((workspace_id, daemon_url)) = join_request {
+            self.cancel_system_activation(window_id);
             if let Some(session) = self.window_sessions.get_mut(&window_id) {
                 session.pending_peer_adopt = Some(workspace_id);
             }
@@ -7437,6 +7499,7 @@ impl Application<'_> {
         }
 
         if go_home {
+            self.cancel_system_activation(window_id);
             if let Some(home) = self.home_daemon_endpoint.clone() {
                 if let Some(session) = self.window_sessions.get_mut(&window_id) {
                     session.pending_peer_adopt = None;
@@ -8119,6 +8182,11 @@ impl Application<'_> {
                     .get(daemon_url)
                     .map(|attach| ssh_server_id(&attach.workspace_id))
             })
+            .or_else(|| {
+                self.ssh_routes.get(daemon_url).map(|(target, args)| {
+                    ssh_server_id(&crate::ssh_hosts::quick_ssh_workspace_id_with_args(target, args))
+                })
+            })
             .unwrap_or_else(|| format!("peer:{daemon_url}"))
     }
 
@@ -8131,7 +8199,12 @@ impl Application<'_> {
         let existing = self
             .ssh_attaches
             .iter_mut()
-            .find(|(_, attach)| attach.alias == target && attach.ssh_args == ssh_args)
+            .find(|(_, attach)| {
+                (attach.alias == target && attach.ssh_args == ssh_args)
+                    || crate::system_registry::same_system_route(
+                        &attach.alias, &attach.ssh_args, &target, &ssh_args,
+                    )
+            })
             .map(|(endpoint, attach)| {
                 (
                     endpoint.clone(),
@@ -8156,9 +8229,19 @@ impl Application<'_> {
                 session.parked_connections.remove(&endpoint);
             }
         }
-        if !self.ssh_attach_inflight.insert(window_id) {
+        if self.ssh_attach_inflight.contains_key(&window_id) {
             return;
         }
+        self.ssh_attach_generation = self.ssh_attach_generation.wrapping_add(1);
+        let generation = self.ssh_attach_generation;
+        self.ssh_attach_inflight.insert(
+            window_id,
+            SshAttachRequest {
+                generation,
+                target: target.clone(),
+                ssh_args: ssh_args.clone(),
+            },
+        );
         let tx = self.ssh_attach_tx.clone();
         let event_proxy = self.event_proxy.clone();
         let thread_target = target.clone();
@@ -8170,6 +8253,7 @@ impl Application<'_> {
                         .map_err(|error| error.to_string());
                 let _ = tx.send(PendingSshAttach {
                     window_id,
+                    generation,
                     target: thread_target,
                     result,
                 });
@@ -8260,6 +8344,11 @@ impl Application<'_> {
 
     fn drain_ssh_attach_results(&mut self) {
         while let Ok(pending) = self.ssh_attach_rx.try_recv() {
+            if !pending.is_current(&self.ssh_attach_inflight)
+                || !self.router.routes.contains_key(&pending.window_id)
+            {
+                continue;
+            }
             self.ssh_attach_inflight.remove(&pending.window_id);
             let attach = match pending.result {
                 Ok(attach) => attach,
@@ -8286,9 +8375,28 @@ impl Application<'_> {
                 }
             };
 
+            let existing = self.ssh_attaches.iter_mut().find_map(|(endpoint, current)| {
+                let same_route = (current.alias == attach.alias && current.ssh_args == attach.ssh_args)
+                    || crate::system_registry::same_system_route(
+                        &current.alias, &current.ssh_args, &attach.alias, &attach.ssh_args,
+                    );
+                (same_route && current.is_running()).then(|| (
+                    endpoint.clone(), current.workspace_id.clone(), current.credential.clone(),
+                ))
+            });
+            if let Some((endpoint, workspace_id, credential)) = existing {
+                drop(attach);
+                self.begin_ssh_workspace_switch(
+                    pending.window_id, pending.target, endpoint, workspace_id, credential,
+                );
+                continue;
+            }
             let daemon_url = attach.daemon_url.clone();
             let workspace_id = attach.workspace_id.clone();
             let credential = attach.credential.clone();
+            self.ssh_routes.insert(
+                daemon_url.clone(), (attach.alias.clone(), attach.ssh_args.clone()),
+            );
             self.ssh_attaches.insert(daemon_url.clone(), attach);
             self.begin_ssh_workspace_switch(
                 pending.window_id,

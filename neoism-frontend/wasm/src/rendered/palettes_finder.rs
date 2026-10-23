@@ -82,6 +82,23 @@ impl ChromeBridge {
             return 2;
         }
         if self.chrome.command_palette.is_visible() {
+            if let Some(action) = self.chrome.command_palette.server_action_at(x, y) {
+                let id = match &action {
+                    neoism_ui::panels::command_palette::PaletteAction::EditServer { id }
+                    | neoism_ui::panels::command_palette::PaletteAction::RemoveServer { id }
+                    | neoism_ui::panels::command_palette::PaletteAction::CopyFastServerInvite { id } => Some(id.clone()),
+                    _ => None,
+                };
+                let name = palette_action_name(action);
+                if !self.execute_palette_action_chrome_side(name) {
+                    self.pending_palette_intents.push(match id {
+                        Some(id) => PaletteIntent::Server { action: name, id },
+                        None => PaletteIntent::Action { action: name },
+                    });
+                }
+                self.relayout_chrome();
+                return 2;
+            }
             return match self.chrome.command_palette.hit_test(x, y, pw, sf) {
                 Ok(Some(index)) => {
                     // Hover is intentionally visual-only so mouse motion does
@@ -204,7 +221,9 @@ impl ChromeBridge {
             return false;
         };
         if self.chrome.conversation_navigator.is_active() {
-            self.chrome.conversation_navigator.scroll_immediate(-finger_delta);
+            self.chrome
+                .conversation_navigator
+                .scroll_immediate(-finger_delta);
             return true;
         }
         if self.chrome.file_browser.is_active() {
@@ -1382,6 +1401,13 @@ impl ChromeBridge {
 
     fn execute_palette_action_chrome_side(&mut self, action: &str) -> bool {
         match action {
+            "ShowSystems" | "AddSystem" | "ConnectSystem" | "DisconnectSystem"
+            | "RemoveSystem" => {
+                self.chrome.command_palette.set_enabled(false);
+                self.chrome.modal.open(neoism_ui::panels::command_palette::actions::systems_desktop_modal_spec());
+                self.relayout_chrome();
+                true
+            }
             // Desktop: `command_palette.enter_ex_mode()` — the typed
             // `:N` payload then jumps there (see the ex interception
             // below).

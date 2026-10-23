@@ -672,6 +672,80 @@ impl BatchManager {
         }
     }
 
+    /// Capture append positions without disturbing batching or draw order.
+    pub(crate) fn occlusion_checkpoint(&self) -> Vec<(usize, usize)> {
+        self.active
+            .iter()
+            .map(|b| (b.instances.len(), b.vertices.len()))
+            .collect()
+    }
+
+    pub(crate) fn occlude_since(
+        &mut self,
+        checkpoint: &[(usize, usize)],
+        holes: &[[f32; 4]],
+    ) {
+        use crate::occlusion::{filter_tail, visible};
+        for (index, batch) in self.active.iter_mut().enumerate() {
+            let (instances, vertices) =
+                checkpoint.get(index).copied().unwrap_or_default();
+            filter_tail(&mut batch.instances, instances, |instance| {
+                visible(
+                    [
+                        instance.pos[0],
+                        instance.pos[1],
+                        instance.size[0],
+                        instance.size[1],
+                    ],
+                    instance.clip_rect,
+                    holes,
+                )
+                .map(|clips| {
+                    clips
+                        .into_iter()
+                        .map(|clip| {
+                            let mut part = *instance;
+                            part.clip_rect = clip;
+                            part
+                        })
+                        .collect()
+                })
+            });
+            // Non-quad output is a triangle list. Duplicate whole triangles with
+            // independent clips: interpolation, AA and geometry remain unchanged.
+            let first = vertices.min(batch.vertices.len());
+            let tail = batch.vertices.split_off(first);
+            for triangle in tail.chunks(3) {
+                let mut left = f32::INFINITY;
+                let mut top = f32::INFINITY;
+                let mut right = f32::NEG_INFINITY;
+                let mut bottom = f32::NEG_INFINITY;
+                for v in triangle {
+                    left = left.min(v.pos[0]);
+                    top = top.min(v.pos[1]);
+                    right = right.max(v.pos[0]);
+                    bottom = bottom.max(v.pos[1]);
+                }
+                match visible(
+                    [left, top, right - left, bottom - top],
+                    triangle[0].clip_rect,
+                    holes,
+                ) {
+                    None => batch.vertices.extend_from_slice(triangle),
+                    Some(clips) => {
+                        for clip in clips {
+                            batch.vertices.extend(triangle.iter().map(|v| {
+                                let mut part = *v;
+                                part.clip_rect = clip;
+                                part
+                            }));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     #[inline]
     pub fn reset(&mut self) {
         self.pool.append(&mut self.active);

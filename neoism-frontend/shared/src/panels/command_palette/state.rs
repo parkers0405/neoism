@@ -63,6 +63,9 @@ pub struct CommandPalette {
     pub query: String,
     pub selected_index: usize,
     pub(super) hovered_index: Option<usize>,
+    pub(super) hovered_category: Option<usize>,
+    pub(super) category_hits: Vec<([f32; 4], super::actions::PaletteAction)>,
+    pub(super) system_control_hits: Vec<([f32; 4], super::actions::PaletteAction)>,
     pub(super) server_edit_hits: Vec<([f32; 4], String)>,
     pub(super) server_invite_hits: Vec<([f32; 4], String)>,
     pub(super) server_remove_hits: Vec<([f32; 4], String)>,
@@ -174,6 +177,9 @@ impl Default for CommandPalette {
             query: String::new(),
             selected_index: 0,
             hovered_index: None,
+            hovered_category: None,
+            category_hits: Vec::new(),
+            system_control_hits: Vec::new(),
             server_edit_hits: Vec::new(),
             server_invite_hits: Vec::new(),
             server_remove_hits: Vec::new(),
@@ -649,11 +655,67 @@ impl CommandPalette {
         self.enter_workspaces_mode_with_hosts(workspaces, Vec::new());
     }
 
+    pub fn systems_mode(&self) -> bool {
+        self.enabled && matches!(self.mode, PaletteMode::Systems(_))
+    }
+
+    pub fn category_switch_action(&self) -> Option<super::actions::PaletteAction> {
+        if !self.enabled {
+            return None;
+        }
+        match self.mode {
+            PaletteMode::Systems(_) => Some(super::actions::PaletteAction::ShowServers),
+            PaletteMode::Servers(_) => Some(super::actions::PaletteAction::ShowSystems),
+            _ => None,
+        }
+    }
+
+    pub(super) fn category_header_height(&self) -> f32 {
+        if matches!(self.mode, PaletteMode::Systems(_) | PaletteMode::Servers(_)) {
+            38.0 * self.scale
+        } else {
+            0.0
+        }
+    }
+
+    pub fn enter_systems_mode(
+        &mut self,
+        entries: Vec<super::actions::PaletteSystemEntry>,
+    ) {
+        self.enter_servers_mode(Vec::new());
+        self.mode = PaletteMode::Systems(entries);
+        self.query_cursor = 0;
+    }
+
+    pub fn refresh_systems(
+        &mut self,
+        entries: Vec<super::actions::PaletteSystemEntry>,
+    ) -> bool {
+        if !self.systems_mode() {
+            return false;
+        }
+        let selected = self.get_selected_action();
+        self.mode = PaletteMode::Systems(entries);
+        let rows = self.filtered_rows();
+        self.selected_index = rows
+            .iter()
+            .position(|(_, row)| selected.is_some() && row.action() == selected)
+            .unwrap_or_else(|| self.selected_index.min(rows.len().saturating_sub(1)));
+        self.system_control_hits.clear();
+        true
+    }
+
     /// Open the minimal server picker. The final Add row remains visible
     /// while filtering so a missing server can always be added directly.
     pub fn enter_servers_mode(&mut self, servers: Vec<PaletteServerEntry>) {
         self.enabled = true;
         self.mode = PaletteMode::Servers(servers);
+        self.category_hits.clear();
+        self.hovered_category = None;
+        self.system_control_hits.clear();
+        self.query_cursor = 0;
+        self.input_band_height =
+            super::INPUT_HEIGHT * self.scale + self.category_header_height();
         self.query.clear();
         self.selected_index = 0;
         self.scroll_offset = 0;
@@ -912,6 +974,7 @@ impl CommandPalette {
         // A mode switch / requery / reopen invalidates any armed drag —
         // the dragged row may no longer exist in the new list.
         self.workspace_drag = None;
+        self.system_control_hits.clear();
     }
 
     /// Record a dispatched workspace move so the Workspaces modal shows

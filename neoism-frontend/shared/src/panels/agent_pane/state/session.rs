@@ -256,8 +256,10 @@ impl NeoismAgentPane {
         }
         match self.provider_readiness.as_ref() {
             Some(catalog) => catalog.prompt_error(&self.model),
+            // Unknown client discovery must not disable a saved conversation.
+            None if self.session_id.is_some() => None,
             None => Some(
-                "Provider catalog is not ready. Use /connect to connect a provider or retry after it loads.",
+                "Provider availability is still loading. Your draft is unchanged; retry shortly.",
             ),
         }
     }

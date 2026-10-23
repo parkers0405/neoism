@@ -473,7 +473,7 @@ impl NeoismAgentPane {
     }
 
     pub(crate) fn apply_config_defaults(&mut self) {
-        self.provider_readiness = None;
+        self.refresh_provider_readiness();
         self.config_chip_hydration.begin();
         let target = self.config_defaults_target();
         if let Some(defaults) = super::super::api::cached_config_defaults(
@@ -513,9 +513,6 @@ impl NeoismAgentPane {
             return false;
         }
         self.config_chip_hydration.complete();
-        if let Some(readiness) = defaults.provider_readiness {
-            self.provider_readiness = Some(readiness);
-        }
         // Session metadata and choices made during hydration take precedence.
         if self.session_id.is_none() {
             if self.agent == target.agent {
@@ -551,6 +548,7 @@ impl NeoismAgentPane {
     /// hydrate its saved settings instead. Cancel only defaults still queued;
     /// this does not attempt to cancel or re-scope an in-flight request.
     pub(crate) fn discard_queued_draft_defaults(&mut self) {
+        self.refresh_provider_readiness();
         let before = self.pending_outbound.len();
         self.pending_outbound.retain(|command| {
             !matches!(command, OutboundAgentCommand::ApplyConfigDefaults)
@@ -844,6 +842,13 @@ impl NeoismAgentPane {
     }
 
     pub fn activity_status_contains(&self, x: f32, y: f32) -> bool {
+        if self
+            .timeline_paint_region
+            .as_ref()
+            .is_some_and(|region| !region.contains(x, y))
+        {
+            return false;
+        }
         // Moving/padded primary glyphs may overlap the child-summary row.
         // Reserve that entire row for its existing Background task menu.
         !self.background_status_contains(x, y)
@@ -977,6 +982,13 @@ impl NeoismAgentPane {
     }
 
     pub fn begin_markdown_horizontal_scrollbar_drag(&mut self, x: f32, y: f32) -> bool {
+        if self
+            .timeline_paint_region
+            .as_ref()
+            .is_some_and(|region| !region.contains(x, y))
+        {
+            return false;
+        }
         let Some(drag) = interaction_policy::begin_markdown_horizontal_scrollbar_drag(
             &self.markdown_horizontal_scrollbars,
             &mut self.markdown_horizontal_scroll_offsets,
@@ -994,6 +1006,13 @@ impl NeoismAgentPane {
     }
 
     pub fn markdown_horizontal_scrollbar_contains(&self, x: f32, y: f32) -> bool {
+        if self
+            .timeline_paint_region
+            .as_ref()
+            .is_some_and(|region| !region.contains(x, y))
+        {
+            return false;
+        }
         self.markdown_horizontal_scrollbars
             .iter()
             .rev()
@@ -1390,10 +1409,24 @@ impl NeoismAgentPane {
     }
 
     pub fn tool_hit(&self, x: f32, y: f32) -> bool {
+        if self
+            .timeline_paint_region
+            .as_ref()
+            .is_some_and(|region| !region.contains(x, y))
+        {
+            return false;
+        }
         interaction_policy::hit_rect_target(&self.tool_hit_rects, x, y).is_some()
     }
 
     pub fn toggle_tool_at(&mut self, x: f32, y: f32) -> bool {
+        if self
+            .timeline_paint_region
+            .as_ref()
+            .is_some_and(|region| !region.contains(x, y))
+        {
+            return false;
+        }
         let Some((id, rect)) =
             interaction_policy::hit_rect_target(&self.tool_hit_rects, x, y)
         else {
@@ -1569,6 +1602,13 @@ impl NeoismAgentPane {
     }
 
     pub fn link_at(&self, x: f32, y: f32) -> Option<String> {
+        if self
+            .timeline_paint_region
+            .as_ref()
+            .is_some_and(|region| !region.contains(x, y))
+        {
+            return None;
+        }
         interaction_policy::hit_rect_target(&self.link_hit_rects, x, y)
             .map(|(target, _)| target)
     }

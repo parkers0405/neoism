@@ -230,7 +230,7 @@ impl Screen<'_> {
             return;
         }
 
-        if self.handle_git_diff_view_key(key) {
+        if self.handle_git_diff_view_key(key, clipboard) {
             return;
         }
         if self.handle_extensions_key(key) {

@@ -22,6 +22,23 @@ impl ChromeBridge {
             return Ok(());
         }
 
+        if let neoism_ui::event::UiEvent::Key(key) = &event {
+            use neoism_ui::event::{KeyState, LogicalKey, Modifiers, NamedKey};
+            if key.state == KeyState::Pressed
+                && matches!(key.logical, LogicalKey::Named(NamedKey::Tab))
+                && key.modifiers.contains(Modifiers::CTRL)
+                && !key.modifiers.intersects(Modifiers::ALT | Modifiers::META)
+            {
+                if let Some(action) = self.chrome.command_palette.category_switch_action()
+                {
+                    self.pending_palette_intents.push(PaletteIntent::Action {
+                        action: palette_action_name(action),
+                    });
+                    return Ok(());
+                }
+            }
+        }
+
         let palette_enter_action = palette_enter_action(&self.chrome, &event);
 
         // Capture finder + palette picks BEFORE dispatch — the
@@ -407,6 +424,7 @@ impl ChromeBridge {
         let action = self.chrome.drain_top_bar_action()?;
         let name = match action {
             neoism_ui::panels::TopBarAction::OpenSettings => "open_settings",
+            neoism_ui::panels::TopBarAction::OpenSystems => "open_systems",
             neoism_ui::panels::TopBarAction::OpenServers => "open_servers",
             neoism_ui::panels::TopBarAction::OpenWorkspaces => "open_workspaces",
             neoism_ui::panels::TopBarAction::StartWebServer => "start_web_server",
@@ -515,6 +533,13 @@ impl ChromeBridge {
             self.chrome.settings_page.pointer_kind_at(x, y)
         } else if self.chrome.generic_keyboard_overlay_active() {
             ModalPointerKind::Default
+        } else if self.chrome.is_neoism_agent_tab_active()
+            && self
+                .chrome
+                .agent_pane()
+                .is_some_and(|pane| pane.scrollbar_dragging())
+        {
+            ModalPointerKind::Pointer
         } else if let Some(hover) = self
             .chrome
             .code_hover_interaction()
@@ -559,7 +584,8 @@ impl ChromeBridge {
                     || self.chrome.splash_overlay.wordmark_hit(x, y)))
             || (self.chrome.is_neoism_agent_tab_active()
                 && self.chrome.agent_pane().is_some_and(|pane| {
-                    pane.conversation_navigation_at(x, y).is_some()
+                    pane.scrollbar_hit(x, y).is_some()
+                        || pane.conversation_navigation_at(x, y).is_some()
                         || pane.activity_status_contains(x, y)
                         || pane.composer_pointer_at(x, y)
                         || pane.detail_sidebar_pointer_at(x, y)

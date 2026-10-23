@@ -711,6 +711,12 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         services: Services<'_>,
         time: Duration,
     ) {
+        if let UiEvent::Text(text) = event {
+            if self.git_diff_panel.is_focused() && self.git_diff_panel.pull_request_lookup_active() {
+                self.git_diff_panel.pull_request_lookup_key("", Some(text));
+                return;
+            }
+        }
         match event {
             UiEvent::PointerMove { x, y, .. }
             | UiEvent::PointerDown { x, y, .. }
@@ -2003,6 +2009,9 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                     self.blur(PanelKey::FileTree);
                     return true;
                 }
+                GitPanelHit::PullRequest => {
+                    self.git_diff_panel.activate_pull_request();
+                }
                 GitPanelHit::LatestCommitCopy => {
                     self.git_diff_panel.copy_latest_commit();
                 }
@@ -2137,6 +2146,17 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         let shift = key.modifiers.contains(Modifiers::SHIFT);
         let plain = !ctrl && !alt;
         if self.git_diff_panel.is_focused() {
+            if self.git_diff_panel.pull_request_lookup_active() {
+                if !plain { return false; }
+                let (name, text) = match &key.logical {
+                    LogicalKey::Named(NamedKey::Enter) => ("Enter", None),
+                    LogicalKey::Named(NamedKey::Escape) => ("Escape", None),
+                    LogicalKey::Named(NamedKey::Backspace) => ("Backspace", None),
+                    LogicalKey::Character(text) => ("", Some(text.as_str())),
+                    _ => ("", None),
+                };
+                return self.git_diff_panel.pull_request_lookup_key(name, text);
+            }
             // Dropdown input takes precedence even over modified shortcuts.
             if self.git_diff_panel.actions_menu_is_open() {
                 match &key.logical {
@@ -2247,6 +2267,10 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                 LogicalKey::Named(NamedKey::Space) => {
                     self.git_diff_panel.clear_pending();
                     self.git_diff_panel.toggle_stage_selected();
+                    return true;
+                }
+                LogicalKey::Character(s) if s.as_str() == "p" => {
+                    self.git_diff_panel.activate_pull_request();
                     return true;
                 }
                 LogicalKey::Character(s) if s.as_str() == "c" => {
@@ -2546,6 +2570,20 @@ impl<A: Send + Copy + 'static> Chrome<A> {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn pull_request_number_entry_owns_typing_and_escape_without_editing_commit_text() {
+        let mut chrome = Chrome::<()>::new();
+        chrome.git_diff_panel.open(Some("/repo".into()), Some("main".into()));
+        chrome.git_diff_panel.start_pull_request_lookup();
+        assert!(chrome.handle_side_panel_key(&git_panel_key(LogicalKey::Character("42".into()), Modifiers::empty())));
+        assert!(chrome.git_diff_panel.pull_request_lookup_active());
+        assert!(chrome.git_diff_panel.commit_input_text().is_empty());
+        assert!(chrome.handle_side_panel_key(&git_panel_key(LogicalKey::Named(NamedKey::Escape), Modifiers::empty())));
+        assert!(!chrome.git_diff_panel.pull_request_lookup_active());
+        assert!(chrome.git_diff_panel.is_visible());
+        assert!(chrome.code_pane.is_none());
+    }
 
     fn chrome_with_tree(width: f32) -> Chrome<()> {
         let mut tree = crate::panels::FileTree::new(PathBuf::from("/workspace"));

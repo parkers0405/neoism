@@ -621,6 +621,7 @@ impl NeoismAgentPane {
                 } => {
                     if stream_is_active {
                         self.directory = Some(directory.clone());
+                        self.refresh_provider_readiness();
                         self.invalidate_skill_options();
                         self.side_panel.invalidate_goal_refresh();
                         if switch_workspace {
@@ -2279,11 +2280,16 @@ impl NeoismAgentPane {
                     }
                 }
                 Ok(NeoismAgentBackgroundUpdate::ProviderReadinessRefreshed { scope, result }) => {
-                    if !scope.is_current(&self.server, self.directory.as_deref()) { continue; }
-                    if let Ok(readiness) = result {
-                        self.provider_readiness = Some(readiness);
-                        changed = true;
+                    self.provider_readiness_in_flight.remove(&scope);
+                    if !scope.is_current(&self.server, self.directory.as_deref()) {
+                        self.refresh_provider_readiness();
+                        continue;
                     }
+                    if let Ok(readiness) = result {
+                        changed |= self.apply_provider_readiness(scope, readiness);
+                    }
+                    // Failure releases only this worker. Preserve same-scope
+                    // last-good state; unknown must not become known-empty.
                 }
                 Ok(NeoismAgentBackgroundUpdate::ModelOptionsRefreshed { scope, result }) => {
                     if !scope.is_current(&self.server, self.directory.as_deref()) { continue; }
@@ -2742,6 +2748,7 @@ impl NeoismAgentPane {
                             self.directory = Some(directory);
                             self.invalidate_skill_options();
                         }
+                        self.refresh_provider_readiness();
                         if let Some(agent) = state.agent {
                             self.agent = Some(agent);
                         }
@@ -2941,11 +2948,30 @@ impl NeoismAgentPane {
                     session_id,
                     title,
                     messages,
+                    revert_message_id,
                 }) => {
-                    // Ignore a revert that finished after the user switched away.
+                    self.session_history_in_flight.remove(&session_id);
+                    if let Some(cached) = self.session_cache.get_mut(&session_id) {
+                        if let Some(messages) = messages.as_ref() {
+                            cached.messages = messages.clone();
+                        } else if let Some(index) = cached.messages.iter().position(|message| {
+                            message.kind == NeoismAgentMessageKind::User
+                                && Some(&message.id) == revert_message_id.as_ref()
+                        }) {
+                            cached.messages.truncate(index);
+                        }
+                        cached.invalidate_timeline_layout();
+                    }
                     if self.session_id.as_deref() == Some(session_id.as_str()) {
                         self.prepare_timeline_history_position();
-                        self.messages = messages;
+                        if let Some(messages) = messages {
+                            self.messages = messages;
+                        } else if let Some(index) = self.messages.iter().position(|message| {
+                            message.kind == NeoismAgentMessageKind::User
+                                && Some(&message.id) == revert_message_id.as_ref()
+                        }) {
+                            self.messages.truncate(index);
+                        }
                         self.text_reveal.scope(self.session_id.as_deref());
                         self.tool_motion.scope(self.session_id.as_deref());
                         self.text_reveal.reconcile_history_with_footers(
@@ -2960,6 +2986,8 @@ impl NeoismAgentPane {
                         );
                         self.invalidate_timeline_layout();
                         self.hydrate_runtime_status_for_session(&session_id);
+                        // Discard history refreshes queued before the revert.
+                        self.event_stream = None;
                         self.start_session_updates(&session_id);
                         self.system_message(&title, "session history updated");
                     }
@@ -2970,6 +2998,7 @@ impl NeoismAgentPane {
                     title,
                     error,
                 }) => {
+                    self.session_history_in_flight.remove(&session_id);
                     if self.session_id.as_deref() == Some(session_id.as_str()) {
                         self.system_message(&title, error);
                     }
@@ -3626,6 +3655,7 @@ impl NeoismAgentPane {
         self.timeline_wheel_target_px = None;
         self.timeline_scroll_owner = TimelineScrollOwner::Wheel;
         self.timeline_viewport_rect = None;
+        self.timeline_paint_region = None;
         self.timeline_history_position_hydrated = false;
         self.timeline_live_growth = false;
         self.footer_growth.clear();

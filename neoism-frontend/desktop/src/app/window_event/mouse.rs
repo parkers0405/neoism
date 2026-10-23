@@ -349,6 +349,9 @@ impl Application<'_> {
                         .screen
                         .handle_neoism_agent_click(&mut self.router.clipboard)
                     {
+                        if route.window.screen.neoism_agent_scrollbar_pointer() {
+                            route.window.set_cursor(CursorIcon::Pointer);
+                        }
                         route.request_redraw();
                         return;
                     }
@@ -753,7 +756,8 @@ impl Application<'_> {
                         .handle_neoism_agent_mouse_release(&mut self.router.clipboard)
                 {
                     route.window.set_cursor(
-                        if route.window.screen.neoism_agent_wordmark_hovered()
+                        if route.window.screen.neoism_agent_scrollbar_pointer()
+                            || route.window.screen.neoism_agent_wordmark_hovered()
                             || route.window.screen.neoism_agent_tool_hovered()
                             || route.window.screen.neoism_agent_link_hovered()
                         {
@@ -865,6 +869,11 @@ impl Application<'_> {
         route.window.screen.mouse.y = y;
         route.window.screen.mouse.raw_y = position.y;
         route.window.screen.mouse.raw_x = position.x;
+
+        // Rail hover needs every move, even when another hover/drag path returns early.
+        if route.window.screen.handle_neoism_agent_scrollbar_hover_move() {
+            route.request_redraw();
+        }
 
         let scale = route.window.screen.sugarloaf.scale_factor();
         if route.window.screen.renderer.git_diff_panel.update_latest_commit_hover(x as f32 / scale, y as f32 / scale) {
@@ -1222,7 +1231,9 @@ impl Application<'_> {
 
         if route.window.screen.handle_neoism_agent_drag_move() {
             route.window.set_cursor(
-                if route
+                if route.window.screen.neoism_agent_scrollbar_pointer() {
+                    CursorIcon::Pointer
+                } else if route
                     .window
                     .screen
                     .neoism_agent_markdown_scrollbar_dragging()
@@ -1233,6 +1244,16 @@ impl Application<'_> {
                 },
             );
             route.request_redraw();
+            return;
+        }
+
+        // Update link and markdown hover before rail/scrollbar cursor early returns.
+        let agent_hover_changed = route.window.screen.handle_neoism_agent_hover_move();
+        if agent_hover_changed {
+            route.request_redraw();
+        }
+        if route.window.screen.neoism_agent_scrollbar_pointer() {
+            route.window.set_cursor(CursorIcon::Pointer);
             return;
         }
 
@@ -1263,14 +1284,11 @@ impl Application<'_> {
                     })
         };
         if clickable_chrome_hovered {
-            if route.window.screen.handle_neoism_agent_hover_move() {
-                route.request_redraw();
-            }
             route.window.set_cursor(CursorIcon::Pointer);
             return;
         }
 
-        if route.window.screen.handle_neoism_agent_hover_move() {
+        if agent_hover_changed {
             route.window.set_cursor(
                 if route.window.screen.neoism_agent_link_hovered()
                     || route.window.screen.neoism_agent_wordmark_hovered()
@@ -1812,6 +1830,7 @@ impl Application<'_> {
         route.window.screen.leave_html_artifact();
 
         route.window.screen.mouse.inside_window = false;
+        route.window.screen.handle_neoism_agent_scrollbar_hover_move();
         route.window.screen.renderer.notes_sidebar_mouse = None;
         route.request_redraw();
 

@@ -353,6 +353,7 @@ impl Screen<'_> {
             }
             return;
         }
+        if self.handle_pull_request_paste(text) { return; }
         if self.current_terminal_block_input_active() {
             self.context_manager
                 .current_mut()

@@ -26,6 +26,9 @@ use crate::files::{resolve_path, workspace_root};
 /// Mutating verbs (stage / unstage / commit / checkout) ride the same
 /// write gate as file writes; everything else stays read-only.
 pub fn required_permission(msg: &GitClientMessage) -> Permission {
+    if matches!(msg, GitClientMessage::PullRequest { request } if request.is_mutation()) {
+        return Permission::GitWrite;
+    }
     if msg.is_mutation() {
         Permission::WriteFiles
     } else {
@@ -62,6 +65,12 @@ pub async fn handle_with_root(
     root: std::path::PathBuf,
     msg: GitClientMessage,
 ) -> Vec<GitServerMessage> {
+    if let GitClientMessage::PullRequest { request } = msg {
+        let mutated = request.is_mutation();
+        let reply = crate::pull_request::handle(root.clone(), request).await;
+        if mutated { crate::git_snapshot::invalidate(&root).await; }
+        return vec![GitServerMessage::PullRequest { reply }];
+    }
     if let GitClientMessage::Blame { path } = msg {
         return crate::git_blame::handle(root, path).await;
     }
@@ -95,6 +104,12 @@ pub async fn handle_with_root_and_crdt(
     msg: GitClientMessage,
     crdt: crate::crdt::sync::CrdtSyncHub,
 ) -> Vec<GitServerMessage> {
+    if let GitClientMessage::PullRequest { request } = msg {
+        let mutated = request.is_mutation();
+        let reply = crate::pull_request::handle_with_hub(root.clone(), request, crdt).await;
+        if mutated { crate::git_snapshot::invalidate(&root).await; }
+        return vec![GitServerMessage::PullRequest { reply }];
+    }
     if !matches!(
         &msg,
         GitClientMessage::ApplyBlock { restore: true, .. }
@@ -272,6 +287,7 @@ fn handle_blocking(root: &Path, msg: GitClientMessage) -> Vec<GitServerMessage> 
         GitClientMessage::WatchStatus { .. } | GitClientMessage::UnwatchStatus { .. } => {
             vec![]
         }
+        GitClientMessage::PullRequest { request } => vec![GitServerMessage::PullRequest { reply: crate::pull_request::handle_at(root, request) }],
         GitClientMessage::Blame { .. } => err("Blame requires async dispatch"),
         GitClientMessage::Status => status(&repo),
         GitClientMessage::Diff { path } => diff(&repo, path.as_deref(), root),
@@ -361,7 +377,8 @@ fn handle_blocking(root: &Path, msg: GitClientMessage) -> Vec<GitServerMessage> 
             with_workdir(&repo, |wd| vec![changed_files_reply(wd, publish(wd).err())])
         }
         GitClientMessage::Push => with_workdir(&repo, |wd| {
-            vec![changed_files_reply(wd, run_git(wd, &["push"]).err())]
+            let result = crate::pull_request::push_if_associated(root).unwrap_or_else(|| run_git(wd, &["push"]));
+            vec![changed_files_reply(wd, result.err())]
         }),
         GitClientMessage::DiffFiles { paths } => with_workdir(&repo, |wd| {
             let mut diffs = Vec::with_capacity(paths.len());
@@ -542,6 +559,9 @@ fn publish(workdir: &Path) -> Result<(), String> {
     let branch = branch.strip_prefix("refs/heads/").ok_or_else(|| {
         "Cannot publish: HEAD does not refer to a local branch".to_owned()
     })?;
+    if crate::pull_request::is_associated_branch(workdir, branch)? {
+        return Err("This checkout already tracks its original PR source branch; use Push, not Publish".into());
+    }
     git_text(workdir, &["rev-parse", "--verify", "HEAD^{commit}"]).map_err(|_| {
         "Cannot publish a branch with no commits; create a commit first".to_owned()
     })?;

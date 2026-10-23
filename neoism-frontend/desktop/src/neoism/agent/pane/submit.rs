@@ -21,9 +21,6 @@ impl NeoismAgentPane {
                 .or_default();
             *revision = revision.wrapping_add(1);
         }
-        if !self.status_timing.enabled() {
-            return;
-        }
         // Until the new execution event arrives, do not label the new turn
         // with the previous execution's final provider duration. Never discard
         // an ongoing family execution (children may still be working).
@@ -244,8 +241,7 @@ impl NeoismAgentPane {
     pub fn no_providers_connected(&self) -> bool {
         self.conversation_source().provider().is_none()
             && self
-                .provider_readiness
-                .as_ref()
+                .current_provider_readiness()
                 .is_some_and(|catalog| catalog.connected.is_empty())
     }
 
@@ -260,10 +256,13 @@ impl NeoismAgentPane {
         if self.conversation_source().provider().is_some() {
             return None;
         }
-        match self.provider_readiness.as_ref() {
+        match self.current_provider_readiness_for_model(model) {
             Some(catalog) => catalog.prompt_error(model),
+            // A local discovery cache is not admission authority for a saved
+            // conversation. Let its server resolve the persisted provider.
+            None if self.session_id.is_some() => None,
             None => Some(
-                "Provider catalog is not ready. Use /connect to connect a provider or retry after it loads.",
+                "Provider availability is still loading. Your draft is unchanged; retry shortly.",
             ),
         }
     }
@@ -291,15 +290,22 @@ impl NeoismAgentPane {
         }
         let local_command =
             text.starts_with('/') && self.new_chat_source.provider().is_none();
+        if !local_command && self.session_id.as_ref()
+            .is_some_and(|session| self.session_history_in_flight.contains(session))
+        {
+            self.push_notice(
+                "Wait for the history update before sending; your draft is unchanged",
+                NeoismAgentNoticeLevel::Warn,
+            );
+            return true;
+        }
         let close_home = text.eq_ignore_ascii_case("exit")
             && self.session_id.is_none()
             && !self.has_conversation();
         if !local_command && !close_home {
+            self.refresh_provider_readiness();
             if let Some(error) = self.prompt_readiness_error() {
                 self.push_notice(error, NeoismAgentNoticeLevel::Warn);
-                if self.provider_readiness.is_none() {
-                    self.refresh_model_catalog();
-                }
                 return true;
             }
         }

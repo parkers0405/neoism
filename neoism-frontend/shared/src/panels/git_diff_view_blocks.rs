@@ -446,7 +446,7 @@ impl GitDiffView {
         }
     }
     fn valid_block(&self, control: &BlockControl) -> bool {
-        self.commit_id.is_none()
+        !self.is_read_only()
             && self.sections.iter().any(|s| {
                 s.change.path == control.path
                     && !s.collapsed

@@ -39,17 +39,13 @@ impl DesktopStatusTiming {
     }
 
     pub(super) fn retire_execution(&mut self, id: &str) {
-        if self.enabled {
-            self.retired_execution = Some(id.to_owned());
-        }
+        self.retired_execution = Some(id.to_owned());
     }
 
     pub(super) fn accepts_execution(&self, id: &str) -> bool {
-        !self.enabled
-            || self
-                .retired_execution
-                .as_deref()
-                .is_none_or(|retired| id > retired)
+        self.retired_execution
+            .as_deref()
+            .is_none_or(|retired| id > retired)
     }
 
     pub(super) fn enabled(&self) -> bool {
@@ -71,7 +67,7 @@ impl DesktopStatusTiming {
     }
 
     pub(super) fn pending_model_clock(&self) -> bool {
-        self.enabled && self.local_run
+        self.local_run
     }
 
     #[cfg(test)]
@@ -164,6 +160,23 @@ mod tests {
             DesktopStatusTiming::default().enabled,
             cfg!(target_os = "windows")
         );
+    }
+
+    #[test]
+    fn model_clock_waits_for_execution_on_every_platform() {
+        for enabled in [false, true] {
+            let mut status = policy(enabled);
+            assert!(!status.pending_model_clock());
+            status.admit("first");
+            assert!(status.pending_model_clock());
+            status.confirm_admission();
+            assert!(status.pending_model_clock());
+            status.retire_execution("execution-a");
+            assert!(!status.accepts_execution("execution-a"));
+            assert!(status.accepts_execution("execution-b"));
+            status.settle();
+            assert!(!status.pending_model_clock());
+        }
     }
 
     #[test]

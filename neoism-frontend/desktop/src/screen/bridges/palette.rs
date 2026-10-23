@@ -573,6 +573,38 @@ impl Screen<'_> {
         self.mark_dirty();
     }
 
+    pub(crate) fn open_add_system_prompt(&mut self) {
+        use neoism_ui::widgets::modal::{ModalAction, ModalFormField, ModalFormSpec};
+        self.renderer.command_palette.set_enabled(false);
+        self.renderer.modal.open_form_with_action(
+            ModalFormSpec {
+                title: "Add system".into(),
+                fields: vec![
+                    ModalFormField {
+                        id: "system_target".into(),
+                        label: "SSH host".into(),
+                        value: String::new(),
+                        placeholder: "user@hostname or SSH alias".into(),
+                        secret: false,
+                    },
+                    ModalFormField {
+                        id: "system_name".into(),
+                        label: "Name (optional)".into(),
+                        value: String::new(),
+                        placeholder: "Mac Studio".into(),
+                        secret: false,
+                    },
+                ],
+                submit_label: "Add and connect".into(),
+            },
+            ModalAction::SystemFormSubmit,
+        );
+        self.renderer.modal.set_form_description(
+            "Uses your SSH configuration and keys. Neoism starts or reuses its service on the remote system.",
+        );
+        self.mark_dirty();
+    }
+
     pub(crate) fn open_add_server_prompt(&mut self) {
         self.begin_server_form(true, false);
     }
@@ -1755,6 +1787,31 @@ impl Screen<'_> {
             }
             PaletteAction::ShowWorkplaces => {
                 self.open_daemon_workspaces_picker();
+            }
+            PaletteAction::ShowSystems => {
+                self.request_system_action(SystemRequest::Show);
+            }
+            PaletteAction::AddSystem => {
+                self.open_add_system_prompt();
+            }
+            PaletteAction::ConnectSystem { id } => {
+                self.request_system_action(SystemRequest::Connect { id });
+            }
+            PaletteAction::DisconnectSystem { id } => {
+                self.request_system_action(SystemRequest::Disconnect {
+                    id,
+                    remove: false,
+                    discard: false,
+                });
+                self.request_system_action(SystemRequest::Show);
+            }
+            PaletteAction::RemoveSystem { id } => {
+                self.request_system_action(SystemRequest::Disconnect {
+                    id,
+                    remove: true,
+                    discard: false,
+                });
+                self.request_system_action(SystemRequest::Show);
             }
             PaletteAction::ShowServers => {
                 self.request_server_manager();

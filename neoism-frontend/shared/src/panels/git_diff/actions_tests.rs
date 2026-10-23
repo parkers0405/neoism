@@ -331,6 +331,13 @@ fn unavailable_and_stale_actions_cannot_mutate_or_clear_commit_draft() {
 }
 
 #[test]
+fn git_panel_default_width_matches_the_unified_left_sidebar() {
+    let panel = GitDiffPanel::new();
+    let left = crate::panels::left_sidebar_host::LeftSidebarHost::default();
+    assert_eq!(panel.width(), left.unified_width());
+}
+
+#[test]
 fn menu_keyboard_skips_disabled_rows_and_follows_selected_file_state() {
     let (mut panel, _) = panel();
     panel.host_set_files(vec![]);
@@ -352,7 +359,7 @@ fn menu_keyboard_skips_disabled_rows_and_follows_selected_file_state() {
     panel.actions_menu_move(-1);
     assert_eq!(
         panel.actions_menu.content().selected_action(),
-        Some(&GitAction::Refresh)
+        Some(&GitAction::BrowsePullRequests)
     );
     panel.host_set_files(vec![FileChange {
         path: "a.rs".into(),

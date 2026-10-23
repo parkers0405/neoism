@@ -18,6 +18,7 @@ pub mod host_path;
 pub mod ide_tools;
 pub mod pairing;
 pub mod plugin_resource;
+pub mod pull_request;
 pub mod pty;
 pub mod search;
 pub mod workspace;

@@ -43,6 +43,22 @@ impl<K: Eq + Hash + Clone, V: Clone> Cache<K, V> {
             .filter(|(at, _)| at.elapsed() < max_age)
             .map(|(_, v)| v.clone())
     }
+    pub(super) fn snapshot_age(&self, key: &K) -> Option<(V, Duration)> {
+        let slot = self.slots.lock().unwrap().get(key).cloned()?;
+        let state = slot.state.lock().unwrap();
+        let (at, value) = state.good.as_ref()?;
+        let age = at.elapsed();
+        (age < STALE).then(|| (value.clone(), age))
+    }
+
+    #[cfg(test)]
+    pub(super) fn age_for_test(&self, key: &K, age: Duration) {
+        let slot = self.slots.lock().unwrap().get(key).cloned().unwrap();
+        let mut state = slot.state.lock().unwrap();
+        state.good.as_mut().unwrap().0 = Instant::now() - age;
+        state.error = None;
+    }
+
     pub(super) fn invalidate(&self, matches: impl Fn(&K) -> bool) {
         // Detached in-flight slots cannot repopulate the invalidated map.
         self.slots.lock().unwrap().retain(|key, _| !matches(key));
@@ -50,6 +66,23 @@ impl<K: Eq + Hash + Clone, V: Clone> Cache<K, V> {
     pub(super) fn get(
         &self,
         key: K,
+        load: impl FnOnce() -> Result<V, String>,
+    ) -> Result<V, String> {
+        self.get_with_stale(key, true, load)
+    }
+
+    pub(super) fn get_fresh(
+        &self,
+        key: K,
+        load: impl FnOnce() -> Result<V, String>,
+    ) -> Result<V, String> {
+        self.get_with_stale(key, false, load)
+    }
+
+    fn get_with_stale(
+        &self,
+        key: K,
+        allow_stale: bool,
         load: impl FnOnce() -> Result<V, String>,
     ) -> Result<V, String> {
         let slot = {
@@ -102,7 +135,7 @@ impl<K: Eq + Hash + Clone, V: Clone> Cache<K, V> {
                     return state
                         .good
                         .as_ref()
-                        .filter(|(at, _)| at.elapsed() < STALE)
+                        .filter(|(at, _)| allow_stale && at.elapsed() < STALE)
                         .map(|(_, value)| value.clone())
                         .ok_or_else(|| error.clone());
                 }
@@ -128,7 +161,7 @@ impl<K: Eq + Hash + Clone, V: Clone> Cache<K, V> {
             state
                 .good
                 .as_ref()
-                .filter(|(at, _)| at.elapsed() < STALE)
+                .filter(|(at, _)| allow_stale && at.elapsed() < STALE)
                 .map(|(_, value)| value.clone())
                 .ok_or(error)
         })
@@ -138,6 +171,27 @@ impl<K: Eq + Hash + Clone, V: Clone> Cache<K, V> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn readiness_refresh_errors_never_return_expired_catalogs() {
+        let cache = Cache::new();
+        assert_eq!(cache.get_fresh(1, || Ok(7)), Ok(7));
+        cache.age_for_test(&1, FRESH + Duration::from_secs(1));
+        let (value, age) = cache.snapshot_age(&1).unwrap();
+        assert_eq!(value, 7);
+        assert!(age > FRESH);
+        assert_eq!(
+            cache.get_fresh(1, || Err("offline".into())),
+            Err("offline".into())
+        );
+        assert_eq!(
+            cache.get_fresh(1, || panic!("failure backoff should share the error")),
+            Err("offline".into())
+        );
+        // Picker presentation can still reuse last-good data independently.
+        assert_eq!(cache.snapshot(&1), Some(7));
+        assert_eq!(cache.get(1, || panic!("last-good should survive")), Ok(7));
+    }
+
     #[test]
     fn scopes_and_repeated_opens_share_only_matching_snapshots() {
         let cache = Cache::new();

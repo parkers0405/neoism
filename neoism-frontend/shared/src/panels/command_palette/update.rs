@@ -417,6 +417,18 @@ impl CommandPalette {
         let contains = |rect: [f32; 4]| {
             x >= rect[0] && x < rect[0] + rect[2] && y >= rect[1] && y < rect[1] + rect[3]
         };
+        for (rect, action) in self
+            .category_hits
+            .iter()
+            .chain(self.system_control_hits.iter())
+        {
+            if self.enabled && contains(*rect) {
+                return Some(action.clone());
+            }
+        }
+        if self.systems_mode() {
+            return None;
+        }
         if let Some((_, id)) = self
             .server_invite_hits
             .iter()
@@ -480,6 +492,8 @@ impl CommandPalette {
                 | PaletteRow::WorkspaceCreate
                 | PaletteRow::Workspace { .. }
                 | PaletteRow::Server { .. }
+                | PaletteRow::System { .. }
+                | PaletteRow::SystemAdd
                 | PaletteRow::ServerAdd
                 | PaletteRow::ServerCreate
                 | PaletteRow::Ex { .. } => None,
@@ -508,6 +522,8 @@ impl CommandPalette {
                 | PaletteRow::WorkspaceCreate
                 | PaletteRow::Workspace { .. }
                 | PaletteRow::Server { .. }
+                | PaletteRow::System { .. }
+                | PaletteRow::SystemAdd
                 | PaletteRow::ServerAdd
                 | PaletteRow::ServerCreate
                 | PaletteRow::Search { .. } => None,
@@ -531,6 +547,8 @@ impl CommandPalette {
                 | PaletteRow::WorkspaceCreate
                 | PaletteRow::Workspace { .. }
                 | PaletteRow::Server { .. }
+                | PaletteRow::System { .. }
+                | PaletteRow::SystemAdd
                 | PaletteRow::ServerAdd
                 | PaletteRow::ServerCreate
                 | PaletteRow::Ex { .. }
@@ -555,6 +573,8 @@ impl CommandPalette {
                 | PaletteRow::WorkspaceCreate
                 | PaletteRow::Workspace { .. }
                 | PaletteRow::Server { .. }
+                | PaletteRow::System { .. }
+                | PaletteRow::SystemAdd
                 | PaletteRow::ServerAdd
                 | PaletteRow::ServerCreate
                 | PaletteRow::Ex { .. }
@@ -579,6 +599,8 @@ impl CommandPalette {
                 | PaletteRow::WorkspaceCreate
                 | PaletteRow::Workspace { .. }
                 | PaletteRow::Server { .. }
+                | PaletteRow::System { .. }
+                | PaletteRow::SystemAdd
                 | PaletteRow::ServerAdd
                 | PaletteRow::ServerCreate
                 | PaletteRow::Ex { .. }
@@ -634,6 +656,8 @@ impl CommandPalette {
                 | PaletteRow::WorkspaceCreate
                 | PaletteRow::Workspace { .. }
                 | PaletteRow::Server { .. }
+                | PaletteRow::System { .. }
+                | PaletteRow::SystemAdd
                 | PaletteRow::ServerAdd
                 | PaletteRow::ServerCreate
                 | PaletteRow::Search { .. } => None,
@@ -650,6 +674,8 @@ impl CommandPalette {
                 PaletteRow::WorkspaceHost { .. }
                 | PaletteRow::WorkspaceCreate
                 | PaletteRow::Server { .. }
+                | PaletteRow::System { .. }
+                | PaletteRow::SystemAdd
                 | PaletteRow::ServerAdd
                 | PaletteRow::ServerCreate
                 | PaletteRow::Command { .. }
@@ -854,6 +880,20 @@ impl CommandPalette {
             PaletteMode::Workspaces(_) => unreachable!(
                 "Workspaces mode is handled by the early return in filtered_rows"
             ),
+            PaletteMode::Systems(entries) => {
+                let mut rows = entries
+                    .iter()
+                    .filter_map(|entry| {
+                        let score = fuzzy_score(&self.query, &entry.name)
+                            .into_iter()
+                            .chain(fuzzy_score(&self.query, &entry.address))
+                            .max()?;
+                        Some((score, PaletteRow::System { entry }))
+                    })
+                    .collect::<Vec<_>>();
+                rows.push((i32::MIN, PaletteRow::SystemAdd));
+                rows
+            }
             PaletteMode::Servers(servers) => {
                 let mut rows = servers
                     .iter()
@@ -1146,9 +1186,11 @@ impl CommandPalette {
         let pad = PALETTE_PADDING * s;
         let rect = [
             px + stroke + pad,
-            py + stroke + pad,
+            py + stroke + pad + self.category_header_height(),
             (pw - stroke * 2.0 - pad * 2.0).max(0.0),
-            self.input_band_height.max(INPUT_HEIGHT * s),
+            (self.input_band_height.max(INPUT_HEIGHT * s)
+                - self.category_header_height())
+            .max(INPUT_HEIGHT * s),
         ];
         x >= rect[0] && x <= rect[0] + rect[2] && y >= rect[1] && y <= rect[1] + rect[3]
     }
@@ -1269,10 +1311,15 @@ impl CommandPalette {
             .hit_test(mouse_x, mouse_y, window_width, scale_factor)
             .ok()
             .flatten();
-        if next == self.hovered_index {
+        let category = self.category_hits.iter().position(|(rect, _)| {
+            mouse_x >= rect[0] && mouse_x < rect[0] + rect[2]
+                && mouse_y >= rect[1] && mouse_y < rect[1] + rect[3]
+        });
+        if next == self.hovered_index && category == self.hovered_category {
             return false;
         }
         self.hovered_index = next;
+        self.hovered_category = category;
         true
     }
 
@@ -1283,10 +1330,12 @@ impl CommandPalette {
         window_width: f32,
         scale_factor: f32,
     ) -> bool {
-        self.hit_test(mouse_x, mouse_y, window_width, scale_factor)
-            .ok()
-            .flatten()
-            .is_some()
+        self.enabled
+            && (self.server_action_at(mouse_x, mouse_y).is_some()
+                || self.hit_test(mouse_x, mouse_y, window_width, scale_factor)
+                    .ok()
+                    .flatten()
+                    .is_some())
     }
 
     // ------------------------------------------------------------------

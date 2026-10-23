@@ -6,6 +6,7 @@ use crate::primitives::ide_theme::IdeTheme;
 pub mod assistant;
 pub mod chat;
 pub mod code_block;
+pub(super) mod composer_geometry;
 pub mod derivations;
 pub mod draw;
 pub mod fx;
@@ -87,21 +88,18 @@ pub(super) const DEPTH: f32 = 0.0;
 pub(super) const ORDER_PANEL: u8 = 19;
 pub(super) const ORDER_TEXT: u8 = 20;
 pub(super) const ORDER_CARET: u8 = 21;
-// Input rect = the bordered input box (text + send band) plus the
-// skirt band below it holding the dropdown-chip row — see
-// `user_input::CHIPS_BAND_H`.
-pub(super) const HOME_INPUT_MIN_H: f32 = 106.0;
-pub(super) const CHAT_INPUT_MIN_H: f32 = 98.0;
+// Input rect = one rounded shell containing the text area and the shared
+// agent/model/thinking and submit footer; see `user_input::CHIPS_BAND_H`.
+pub(super) const HOME_INPUT_MIN_H: f32 = 102.0;
+pub(super) const CHAT_INPUT_MIN_H: f32 = 94.0;
 pub(super) const INPUT_LINE_H: f32 = 22.0;
 pub(super) const MAX_INPUT_LINES: usize = 5;
 /// User bubbles intentionally show a compact prompt preview. Measurement,
 /// rendering, and the lazy timeline estimator must all share this cap or a
 /// large pasted prompt reserves a tall blank row beneath its visible lines.
 pub(super) const USER_MESSAGE_MAX_LINES: usize = 6;
-/// Help/status strip painted immediately below the composer island.
-/// Chat layout reserves this much bottom space so the strip never gets
-/// clipped by the pane edge.
-pub(super) const INPUT_HELP_STRIP_H: f32 = 28.0;
+/// Height reserved beneath the composer for the inset checkout/hints tray.
+pub(super) const INPUT_HELP_STRIP_H: f32 = 32.0;
 /// Height (in logical px, pre-scale) reserved at the very bottom of the pane
 /// for the streaming status line. Stays fixed regardless of the input rect.
 pub(super) const STREAMING_STATUS_LINE_H: f32 = 26.0;

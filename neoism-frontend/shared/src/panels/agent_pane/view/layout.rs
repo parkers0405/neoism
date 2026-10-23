@@ -25,6 +25,9 @@ pub fn chat_horizontal_pad(width: f32, s: f32) -> f32 {
 pub trait AgentPaneInput {
     fn input(&self) -> &str;
     fn input_help_visible(&self) -> bool;
+    fn input_footer_visible(&self) -> bool {
+        self.input_help_visible()
+    }
     fn background_task_details_expanded(&self) -> bool;
     fn input_image_count(&self) -> usize;
     /// Exact rows registered by the most recent render, when they still
@@ -41,6 +44,10 @@ impl AgentPaneInput for NeoismAgentPane {
 
     fn input_help_visible(&self) -> bool {
         self.input_help_visible()
+    }
+
+    fn input_footer_visible(&self) -> bool {
+        self.input_help_visible() || self.session_directory().is_some()
     }
 
     fn background_task_details_expanded(&self) -> bool {
@@ -84,8 +91,10 @@ pub fn home_input_rect(pane: &impl AgentPaneInput, rect: [f32; 4], s: f32) -> [f
     let input_x = x + (w - input_w) * 0.5;
     // The wordmark anchors a fixed gap above this card, so the pair
     // reads as one group centered slightly above the pane's midline.
-    input_h = input_h.min(h.max(0.0));
-    let input_y = (y + h * 0.46).min(y + h - input_h).max(y);
+    let footer_h = if pane.input_footer_visible() { INPUT_HELP_STRIP_H * s } else { 0.0 };
+    let available_h = (h - footer_h).max(0.0);
+    input_h = input_h.min(available_h);
+    let input_y = (y + h * 0.46).min(y + available_h - input_h).max(y);
     [input_x, input_y, input_w, input_h]
 }
 
@@ -117,8 +126,10 @@ pub fn home_input_rect_for_visual_rows(
         input_h += INPUT_IMAGE_RAIL_H * s;
     }
     let input_x = x + (w - input_w) * 0.5;
-    input_h = input_h.min(h.max(0.0));
-    let input_y = (y + h * 0.46).min(y + h - input_h).max(y);
+    let footer_h = if pane.input_footer_visible() { INPUT_HELP_STRIP_H * s } else { 0.0 };
+    let available_h = (h - footer_h).max(0.0);
+    input_h = input_h.min(available_h);
+    let input_y = (y + h * 0.46).min(y + available_h - input_h).max(y);
     [input_x, input_y, input_w, input_h]
 }
 
@@ -141,11 +152,10 @@ pub fn chat_input_rect(pane: &impl AgentPaneInput, rect: [f32; 4], s: f32) -> [f
     // Floating island: same column as the timeline, lifted off the
     // pane bottom.
     let (input_x, input_w) = chat_column(rect, s);
-    // Leave a dedicated band only while the help strip is
-    // visible. `/hints` removes both the paint and this reservation so the
-    // timeline/composer reclaim the full row.
-    let help_h = if pane.input_help_visible() {
-        INPUT_HELP_STRIP_H - 6.0
+    // Checkout stays visible even when keyboard hints are disabled.
+    // Reserve the full inset tray so its rounded bottom cannot be clipped.
+    let help_h = if pane.input_footer_visible() {
+        INPUT_HELP_STRIP_H
     } else {
         0.0
     };
@@ -189,8 +199,8 @@ pub fn chat_input_rect_for_visual_rows(
 ) -> [f32; 4] {
     let [_x, y, _w, h] = rect;
     let (input_x, input_w) = chat_column(rect, s);
-    let help_h = if pane.input_help_visible() {
-        INPUT_HELP_STRIP_H - 6.0
+    let help_h = if pane.input_footer_visible() {
+        INPUT_HELP_STRIP_H
     } else {
         0.0
     };
@@ -249,9 +259,10 @@ pub fn input_height_for_visual_rows(
     } else {
         CHAT_INPUT_MIN_H
     };
-    // Base = box paddings + the send band + the skirt chip row below
-    // the box. Chat stays slightly tighter than the home splash card.
-    let base_h = if show_status { 84.0 } else { 76.0 };
+    // Text padding plus the shared chip/submit footer. Keep home slightly
+    // roomier without reserving a separate action row inside the text box.
+    let (top_pad, bottom_pad) = super::user_input::composer_text_padding(show_status);
+    let base_h = top_pad + bottom_pad + super::user_input::CHIPS_BAND_H;
     let status_extra_h = if show_status && background_details_expanded {
         96.0
     } else {
@@ -290,12 +301,43 @@ mod tests {
         }
     }
 
+    struct FooterPane;
+
+    impl AgentPaneInput for FooterPane {
+        fn input(&self) -> &str { "draft" }
+        fn input_help_visible(&self) -> bool { false }
+        fn input_footer_visible(&self) -> bool { true }
+        fn background_task_details_expanded(&self) -> bool { false }
+        fn input_image_count(&self) -> usize { 0 }
+        fn input_visual_row_count(&self) -> Option<usize> { Some(1) }
+    }
+
+    #[test]
+    fn checkout_tray_is_reserved_even_when_keyboard_hints_are_hidden() {
+        let pane = FooterPane;
+        assert!(!pane.input_help_visible());
+        for scale in [0.75, 1.0, 1.5, 2.0] {
+            for height in [140.0, 300.0, 600.0] {
+                let bounds = [23.0, 41.0, 700.0 * scale, height * scale];
+                let chat = chat_input_rect(&pane, bounds, scale);
+                let home = home_input_rect(&pane, bounds, scale);
+                assert_eq!(chat, chat_input_rect_for_visual_rows(&pane, bounds, scale, 1));
+                assert_eq!(home, home_input_rect_for_visual_rows(&pane, bounds, scale, 1));
+                for card in [chat, home] {
+                    assert!(card[1] >= bounds[1]);
+                    assert!(card[1] + card[3] + INPUT_HELP_STRIP_H * scale
+                        <= bounds[1] + bounds[3] + 0.001);
+                }
+            }
+        }
+    }
+
     #[test]
     fn measured_rows_expand_both_composer_variants_at_the_second_row() {
-        assert_eq!(input_height_for_visual_rows(1, 1.0, false, false), 98.0);
-        assert_eq!(input_height_for_visual_rows(2, 1.0, false, false), 120.0);
-        assert_eq!(input_height_for_visual_rows(1, 1.0, true, false), 106.0);
-        assert_eq!(input_height_for_visual_rows(2, 1.0, true, false), 128.0);
+        assert_eq!(input_height_for_visual_rows(1, 1.0, false, false), 94.0);
+        assert_eq!(input_height_for_visual_rows(2, 1.0, false, false), 116.0);
+        assert_eq!(input_height_for_visual_rows(1, 1.0, true, false), 102.0);
+        assert_eq!(input_height_for_visual_rows(2, 1.0, true, false), 124.0);
     }
 
     #[test]
@@ -311,8 +353,8 @@ mod tests {
         let rect = [0.0, 0.0, 800.0, 600.0];
         let estimated = chat_input_rect(&TestPane { rows: None }, rect, 1.0);
         let measured = chat_input_rect(&TestPane { rows: Some(2) }, rect, 1.0);
-        assert_eq!(estimated[3], 98.0, "short text estimates one row");
-        assert_eq!(measured[3], 120.0, "registered two-row geometry wins");
+        assert_eq!(estimated[3], 94.0, "short text estimates one row");
+        assert_eq!(measured[3], 116.0, "registered two-row geometry wins");
         assert_eq!(estimated[1] - measured[1], 22.0);
     }
 
@@ -322,7 +364,7 @@ mod tests {
             chat_input_rect(&TestPane { rows: Some(1) }, [0.0, 0.0, 390.0, 600.0], 1.0);
         let wide =
             chat_input_rect(&TestPane { rows: Some(1) }, [0.0, 0.0, 900.0, 600.0], 1.0);
-        assert_eq!(narrow[3], 98.0);
+        assert_eq!(narrow[3], 94.0);
         assert_eq!(narrow[3], wide[3]);
     }
 

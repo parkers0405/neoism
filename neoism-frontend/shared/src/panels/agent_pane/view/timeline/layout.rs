@@ -181,6 +181,7 @@ pub(crate) fn timeline_layout<P, D>(
     s: f32,
     gap: f32,
     viewport_h: f32,
+    paint_h: f32,
 ) -> (TimelineLayoutCache<P::Message>, bool, f32)
 where
     P: AgentTimelinePane,
@@ -279,7 +280,7 @@ where
         live_baseline = dirty_start_source(pane, &cache, &dirty)
             .and_then(|source| measured_tail_baseline(&cache, source));
         let covers_viewport =
-            !lazy || lazy_cache_covers_viewport(&cache, offset, viewport_h);
+            !lazy || lazy_cache_covers_viewport(&cache, offset, viewport_h, paint_h);
         let needs_patch = cache.source_len != source_len
             || !dirty.ids.is_empty()
             || !dirty.indices.is_empty();
@@ -307,6 +308,7 @@ where
         gap_bucket,
         lazy,
         viewport_h,
+        paint_h,
         offset,
     );
     let growth = measured_tail_growth(&layout, live_baseline);
@@ -442,10 +444,11 @@ pub(super) fn prepend_cache_is_exact<M>(cache: &TimelineLayoutCache<M>) -> bool 
 /// the viewport (kept at least one viewport inside both estimated edges). When
 /// it stops covering, the caller rebuilds with a window centered on the new
 /// scroll position. A fully-exact cache always covers.
-fn lazy_cache_covers_viewport<M>(
+pub(super) fn lazy_cache_covers_viewport<M>(
     cache: &TimelineLayoutCache<M>,
     offset: f32,
     viewport_h: f32,
+    paint_h: f32,
 ) -> bool {
     let exact_start = cache.estimated_prefix_rows;
     let exact_end = cache.estimated_suffix_start.min(cache.rows.len());
@@ -454,7 +457,7 @@ fn lazy_cache_covers_viewport<M>(
     }
     let max_scroll = (cache.content_height - viewport_h).max(0.0);
     let scroll_top = (max_scroll - offset).clamp(0.0, max_scroll);
-    let viewport_bottom = scroll_top + viewport_h;
+    let viewport_bottom = scroll_top + paint_h.max(viewport_h);
     if exact_start > 0 {
         let Some(first_exact) = cache.rows.get(exact_start) else {
             return true;
@@ -480,7 +483,7 @@ pub(super) fn lazy_cache_covers_viewport_for_test<M>(
     offset: f32,
     viewport_h: f32,
 ) -> bool {
-    lazy_cache_covers_viewport(cache, offset, viewport_h)
+    lazy_cache_covers_viewport(cache, offset, viewport_h, viewport_h)
 }
 
 pub(super) fn mark_animating_tool_rows_dirty<P: AgentTimelinePane>(
@@ -508,6 +511,7 @@ fn build_timeline_layout<P, D>(
     gap_bucket: i32,
     lazy: bool,
     viewport_h: f32,
+    paint_h: f32,
     offset: f32,
 ) -> TimelineLayoutCache<P::Message>
 where
@@ -517,7 +521,7 @@ where
     let mut rows: Vec<TimelineLayoutRow<P::Message>> = Vec::new();
     let (content_height, estimated_prefix_rows, estimated_suffix_start) = if lazy {
         build_lazy_rows::<P, D>(
-            sugarloaf, pane, width, theme, s, gap, viewport_h, offset, &mut rows,
+            sugarloaf, pane, width, theme, s, gap, viewport_h, paint_h, offset, &mut rows,
         )
     } else {
         let height = append_timeline_rows::<P, D>(
@@ -554,6 +558,7 @@ fn build_lazy_rows<P, D>(
     s: f32,
     gap: f32,
     viewport_h: f32,
+    paint_h: f32,
     offset: f32,
     rows: &mut Vec<TimelineLayoutRow<P::Message>>,
 ) -> (f32, usize, usize)
@@ -580,7 +585,7 @@ where
         });
     let (scroll_top, anchor_row) = lazy_window_position(rows, max_scroll, offset, anchor);
     let window_top = (scroll_top - overscan).max(0.0);
-    let window_bottom = scroll_top + viewport_h + overscan;
+    let window_bottom = scroll_top + paint_h.max(viewport_h) + overscan;
     let mut exact_start_row =
         rows.partition_point(|row| row.top + row.height < window_top);
     let mut exact_end_row = exact_start_row

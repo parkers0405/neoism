@@ -46,9 +46,10 @@ pub use actions::{
     theme_picker_modal_spec, ChangeWorkspaceDirectoryIntent, HostKind, PaletteAction,
     PaletteBackgroundEntry, PaletteBufferEntry, PaletteBufferTarget,
     PaletteDirectoryEntry, PaletteHostCapabilities, PaletteHostEntry, PaletteMashupEntry,
-    PaletteServerEntry, PaletteShaderEntry, PaletteSurface, PaletteWorkspaceEntry,
-    PaletteWorkspaceTarget, WorkspaceDirectoryTarget, WorkspaceHostKind,
-    WorkspaceVisibility, WORKSPACE_ROOT_DETAIL_PREFIX,
+    PaletteServerEntry, PaletteShaderEntry, PaletteSurface, PaletteSystemEntry,
+    PaletteWorkspaceEntry, PaletteWorkspaceTarget, SystemConnectionStatus,
+    WorkspaceDirectoryTarget, WorkspaceHostKind, WorkspaceVisibility,
+    WORKSPACE_ROOT_DETAIL_PREFIX,
 };
 pub use state::{CommandPalette, WorkspaceMovePhase, WorkspaceMoveStatus};
 

@@ -110,6 +110,9 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             pending_git_diff_block_save_stages: Vec::new(),
             pending_git_diff_source_opens: Vec::new(),
             pending_git_diff_opens: Vec::new(),
+            pending_pull_request_route: None,
+            pending_pull_request_urls: Vec::new(),
+            pending_pull_request_workspaces: Vec::new(),
             git_diff_view_generations: Default::default(),
             notes_sidebar: NotesSidebar::default(),
             left_sidebar_host: crate::panels::left_sidebar_host::LeftSidebarHost::default(
@@ -244,6 +247,10 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                 // web" gap for Themes without depending on JS wiring.
                 let themes = crate::primitives::ide_theme::all_ide_theme_names();
                 self.command_palette.enter_themes_mode(themes);
+                self.relayout();
+            }
+            TopBarAction::OpenSystems => {
+                self.modal.open(crate::panels::command_palette::actions::systems_desktop_modal_spec());
                 self.relayout();
             }
             TopBarAction::OpenServers => {

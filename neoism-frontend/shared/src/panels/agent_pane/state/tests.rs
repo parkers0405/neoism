@@ -4,13 +4,16 @@ use super::*;
 fn provider_readiness_rejects_without_consuming_or_navigating() {
     use crate::panels::agent_pane::api_mapping::ProviderReadiness;
     for (catalog, model, action) in [
-        (None, "", "/connect"),
+        (None, "", "still loading"),
         (Some(serde_json::json!({"all": [], "connected": []})), "stale/model", "/connect"),
         (Some(serde_json::json!({"all": [], "connected": ["env-provider"]})), "", "/models"),
         (Some(serde_json::json!({"all": [{"id": "env-provider", "models": {"good": {}}}], "connected": ["env-provider"], "default": {"env-provider": "good"}})), "", "/models"),
         (Some(serde_json::json!({"all": [{"id": "env-provider", "models": {"good": {}}}], "connected": ["env-provider"]})), "other/model", "/models"),
     ] {
         for session_id in [None, Some("existing".to_string())] {
+            if catalog.is_none() && session_id.is_some() {
+                continue;
+            }
             let mut pane = NeoismAgentPane::default();
             pane.session_id = session_id.clone();
             pane.provider_readiness = catalog.as_ref().and_then(ProviderReadiness::from_json);
@@ -34,6 +37,22 @@ fn provider_readiness_rejects_without_consuming_or_navigating() {
             assert!(pane.messages.is_empty());
         }
     }
+}
+
+#[test]
+fn provider_readiness_unknown_catalog_does_not_block_existing_conversation() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("existing".into());
+    pane.model = "saved/model".into();
+    pane.insert_text("send without waiting for discovery");
+    assert!(pane.submit());
+    assert!(pane.input.is_empty());
+    let commands = pane.drain_pending_outbound();
+    assert!(commands.iter().any(|command| matches!(command,
+        OutboundAgentCommand::SendPrompt { text, .. } if text == "send without waiting for discovery")));
+    assert!(!commands.iter().any(|command| matches!(command, OutboundAgentCommand::EnsureSession)));
+    assert!(pane.ui_events.is_empty());
+    assert!(pane.send_prompt_with_echo("direct", "direct", true).is_ok());
 }
 
 #[test]

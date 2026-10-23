@@ -324,7 +324,7 @@ async fn session_undo_tree_reports_applied_and_reverted_nodes() {
 }
 
 #[tokio::test]
-async fn session_revert_can_move_marker_backward_and_forward() {
+async fn session_undo_redo_can_move_marker_backward_and_forward() {
     let root = std::env::temp_dir().join(format!(
         "neoism-agent-redo-marker-{}",
         Id::ascending(IdKind::Event)
@@ -372,8 +372,8 @@ async fn session_revert_can_move_marker_backward_and_forward() {
         app.clone()
             .oneshot(request(
                 Method::POST,
-                &format!("/v2/sessions/{}/revert", session.id),
-                Some(json!({ "messageId": second_user_id })),
+                &format!("/v2/sessions/{}/undo", session.id),
+                None,
             ))
             .await
             .unwrap(),
@@ -383,8 +383,8 @@ async fn session_revert_can_move_marker_backward_and_forward() {
         app.clone()
             .oneshot(request(
                 Method::POST,
-                &format!("/v2/sessions/{}/revert", session.id),
-                Some(json!({ "messageId": first_user_id })),
+                &format!("/v2/sessions/{}/undo", session.id),
+                None,
             ))
             .await
             .unwrap(),
@@ -411,8 +411,8 @@ async fn session_revert_can_move_marker_backward_and_forward() {
         app.clone()
             .oneshot(request(
                 Method::POST,
-                &format!("/v2/sessions/{}/revert", session.id),
-                Some(json!({ "messageId": second_user_id })),
+                &format!("/v2/sessions/{}/redo", session.id),
+                None,
             ))
             .await
             .unwrap(),
@@ -451,6 +451,20 @@ async fn session_revert_can_move_marker_backward_and_forward() {
     .await;
     assert_eq!(messages.items.len(), 2);
     assert_eq!(message_id_of(&messages.items[0]), first_user_id.to_string());
+
+    let restored: SessionInfo = response_json(
+        app.clone().oneshot(request(
+            Method::POST,
+            &format!("/v2/sessions/{}/redo", session.id),
+            None,
+        )).await.unwrap(),
+    ).await;
+    assert!(!restored.extra.contains_key("revert"));
+    let restored_messages = state.inner.store.list_messages(session.id.as_str()).await.unwrap();
+    assert_eq!(restored_messages.iter().map(message_id_of).collect::<Vec<_>>(), vec![
+        first_user_id.to_string(), first_assistant_id.to_string(),
+        second_user_id.to_string(), second_assistant_id.to_string(),
+    ]);
 
     cleanup_sqlite_files(&db_path);
     let _ = std::fs::remove_dir_all(root);

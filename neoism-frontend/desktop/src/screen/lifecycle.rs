@@ -84,6 +84,8 @@ fn modal_action_policy_tag(
         A::AgentDeleteSession { .. } => Tag::AgentDeleteSession,
         A::RenameTab { .. } => Tag::RenameTab,
         A::NotesVaultPromptAdd => Tag::NotesVaultPromptAdd,
+        A::SystemFormSubmit => Tag::SystemFormSubmit,
+        A::SystemDisconnectConfirm { .. } => Tag::SystemDisconnectConfirm,
         A::ServerFormSubmit => Tag::ServerFormSubmit,
         A::ServerRemoveConfirm { .. } => Tag::ServerRemoveConfirm,
         A::ServerReconnectRetry { .. } => Tag::ServerReconnectRetry,

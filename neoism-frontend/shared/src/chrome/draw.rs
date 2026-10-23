@@ -279,7 +279,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                         &self.ide_theme,
                         true,
                         time.as_secs_f32(),
-                        Some(self.last_pointer_pos),
+                        self.pointer_inside.then_some(self.last_pointer_pos),
                         self.chrome_scale,
                         &active_text_occlusions,
                         narrow_takeover,

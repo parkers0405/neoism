@@ -86,6 +86,7 @@ mod git_diff_focus;
 mod git_diff_tests;
 mod navigator;
 mod pages;
+mod pull_requests;
 pub use pages::GitDiffSourceOpenRequest;
 mod paint;
 pub use content::EditorPaneKind;
@@ -416,6 +417,9 @@ pub struct Chrome<A: Send + Copy + 'static = ()> {
     )>,
     pending_git_diff_source_opens: Vec<pages::GitDiffSourceOpenRequest>,
     pending_git_diff_opens: Vec<(std::path::PathBuf, std::path::PathBuf)>,
+    pending_pull_request_route: Option<(usize, std::path::PathBuf)>,
+    pending_pull_request_urls: Vec<String>,
+    pending_pull_request_workspaces: Vec<String>,
     git_diff_view_generations: std::collections::HashMap<usize, u64>,
     /// Left notes sidebar — desktop's Alt+N column. Docks right of
     /// the file tree; entry data comes from local fs on desktop and

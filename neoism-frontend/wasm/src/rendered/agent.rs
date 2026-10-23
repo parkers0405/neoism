@@ -1892,7 +1892,9 @@ impl ChromeBridge {
                 result.handled = true;
                 break 'chain;
             }
-            if pane.begin_markdown_horizontal_scrollbar_drag(x, y) {
+            if pane.begin_scrollbar_drag(x, y)
+                || pane.begin_markdown_horizontal_scrollbar_drag(x, y)
+            {
                 result.handled = true;
                 break 'chain;
             }
@@ -2146,24 +2148,29 @@ impl ChromeBridge {
             .is_some()
     }
 
-    /// Continue a direct mouse drag of a rendered Markdown code/table
-    /// horizontal scrollbar. A true result means the active drag owns the
-    /// pointer even when it is already clamped at an edge.
-    pub fn agent_drag_markdown_horizontal_scrollbar(&mut self, x: f32) -> bool {
+    /// Continue either timeline or Markdown overflow rail drag. Ownership
+    /// remains true at the bounds and outside the pane until explicitly ended.
+    pub fn agent_drag_scrollbar(&mut self, x: f32, y: f32) -> bool {
         let Some(pane) = self.chrome.agent_pane_mut() else {
             return false;
         };
-        if !pane.markdown_horizontal_scrollbar_dragging() {
-            return false;
+        if pane.scrollbar_dragging() {
+            pane.drag_scrollbar_to(x, y);
+            return true;
         }
-        pane.drag_markdown_horizontal_scrollbar_to(x);
-        true
+        if pane.markdown_horizontal_scrollbar_dragging() {
+            pane.drag_markdown_horizontal_scrollbar_to(x);
+            return true;
+        }
+        false
     }
 
-    pub fn agent_end_markdown_horizontal_scrollbar_drag(&mut self) -> bool {
-        self.chrome
-            .agent_pane_mut()
-            .is_some_and(|pane| pane.end_markdown_horizontal_scrollbar_drag())
+    pub fn agent_end_scrollbar_drag(&mut self) -> bool {
+        self.chrome.agent_pane_mut().is_some_and(|pane| {
+            let vertical = pane.end_scrollbar_drag();
+            let horizontal = pane.end_markdown_horizontal_scrollbar_drag();
+            vertical || horizontal
+        })
     }
 
     /// Touch-drag routing over the agent pane. Vertical direct manipulation

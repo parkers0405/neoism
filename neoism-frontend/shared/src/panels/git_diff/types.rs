@@ -73,6 +73,7 @@ pub struct FileChange {
 
 #[derive(Default)]
 pub(super) struct PanelData {
+    pub(super) pr: super::pull_request::SidebarPullRequest,
     pub(super) commit_loading: bool,
     pub(super) latest_commit: Option<neoism_protocol::git::CommitSummary>,
     pub(super) completed_commit_details:
@@ -163,10 +164,13 @@ pub(super) enum GitAction {
     Push,
     SwitchBranch,
     Refresh,
+    OpenPullRequest,
+    CreatePullRequest,
+    BrowsePullRequests,
 }
 
 impl GitAction {
-    pub(super) const ALL: [Self; 9] = [
+    pub(super) const ALL: [Self; 12] = [
         Self::Commit,
         Self::StageAll,
         Self::UnstageAll,
@@ -176,11 +180,15 @@ impl GitAction {
         Self::Push,
         Self::SwitchBranch,
         Self::Refresh,
+        Self::OpenPullRequest,
+        Self::CreatePullRequest,
+        Self::BrowsePullRequests,
     ];
 }
 
 #[derive(Clone, Copy, Debug)]
 pub enum PanelHit {
+    PullRequest,
     Outside,
     Inside,
     Close,

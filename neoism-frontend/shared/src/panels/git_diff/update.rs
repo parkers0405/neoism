@@ -107,11 +107,12 @@ pub(super) fn build_visual_rows(
 
 impl GitDiffPanel {
     pub fn update_latest_commit_hover(&mut self, x: f32, y: f32) -> bool {
+        let pr_changed = self.update_pull_request_hover(x, y);
         let hovered = self.visible
             && (self.latest_commit_rect.contains(x, y)
                 || (self.latest_commit_hover
                     && self.latest_commit_popup_rect.contains(x, y)));
-        let changed = self.latest_commit_hover != hovered;
+        let changed = self.latest_commit_hover != hovered || pr_changed;
         self.latest_commit_hover = hovered;
         changed
     }
@@ -665,7 +666,7 @@ impl GitDiffPanel {
         if !self.visible {
             return false;
         }
-        if self.is_animating() {
+        if self.is_animating() || self.pull_request_needs_redraw() {
             return true;
         }
         if let Ok(data) = self.data.lock() {
@@ -1253,6 +1254,8 @@ impl GitDiffPanel {
                 .any(|f| !f.staged || f.status == super::types::FileStatus::Mixed),
             GitAction::UnstageAll => data.files.iter().any(|f| f.staged),
             GitAction::ToggleStageSelected => data.files.get(self.selected).is_some(),
+            GitAction::OpenPullRequest => !data.pr.pending,
+            GitAction::CreatePullRequest => !data.pr.pending && !matches!(&data.pr.discovered, Some(neoism_protocol::pull_request::PullRequestReply::Discovered { pull_request: Some(_), .. })),
             _ => true,
         }
     }
@@ -1283,6 +1286,9 @@ impl GitDiffPanel {
             GitAction::Push => "Push",
             GitAction::SwitchBranch => "Switch branch...",
             GitAction::Refresh => "Refresh",
+            GitAction::OpenPullRequest => "Open pull request...",
+            GitAction::CreatePullRequest => "Create pull request...",
+            GitAction::BrowsePullRequests => "Pull Requests...",
         }
     }
 
@@ -1381,6 +1387,9 @@ impl GitDiffPanel {
             GitAction::Pull => self.pull(),
             GitAction::Push => self.push(),
             GitAction::SwitchBranch => self.open_branch_menu(),
+            GitAction::OpenPullRequest => self.start_pull_request_lookup(),
+            GitAction::BrowsePullRequests => { self.open_pull_request_inbox(); }
+            GitAction::CreatePullRequest => { self.start_pull_request_creation(); }
             GitAction::Refresh => {
                 let target = self.data.lock().ok().map(|mut d| {
                     d.last_refresh = None;
@@ -1815,6 +1824,7 @@ impl GitDiffPanel {
     }
 
     pub fn hit_test(&self, mx: f32, my: f32) -> PanelHit {
+        if !self.branch_menu_open && !self.actions_menu_is_open() && self.pull_request_hit(mx, my) { return PanelHit::PullRequest; }
         if self.visible
             && self.latest_commit_hover
             && self.latest_commit_copy_rect.contains(mx, my)

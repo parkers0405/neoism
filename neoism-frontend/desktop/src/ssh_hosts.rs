@@ -56,7 +56,7 @@ pub(crate) fn is_quick_ssh_workspace_id(workspace_id: &str) -> bool {
 /// SSH aliases, and one desktop may keep several SSH hosts in the same window;
 /// including the target prevents their otherwise-identical "home" ids from
 /// colliding in the local workspace strip.
-fn quick_ssh_workspace_id_with_args(target: &str, ssh_args: &[String]) -> String {
+pub(crate) fn quick_ssh_workspace_id_with_args(target: &str, ssh_args: &[String]) -> String {
     // Deterministic FNV-1a avoids a new hashing dependency and keeps the id
     // stable across processes/platforms.
     let mut hash = 0xcbf29ce484222325_u64;
@@ -525,7 +525,7 @@ fn looks_like_direct_host(alias: &str) -> bool {
 /// Keep only SSH options that describe how to reach/authenticate to the host.
 /// The parser already emits flag/value pairs; this second boundary makes the
 /// tunnel safe even if another caller supplies `AttachOptions` directly.
-fn safe_connection_args(args: &[String]) -> Vec<&str> {
+pub(crate) fn safe_connection_args(args: &[String]) -> Vec<&str> {
     const SAFE_VALUE_FLAGS: &[&str] =
         &["-p", "-i", "-o", "-l", "-F", "-J", "-b", "-c", "-I"];
     let mut safe = Vec::new();

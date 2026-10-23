@@ -28,7 +28,7 @@ pub use neoism_ui::panels::git_diff::{
 
 /// Native IO provider — wraps `io::collect_files` so the shared panel
 /// can refresh without depending on `std::process::Command`.
-struct NativeGitDiffIo;
+struct NativeGitDiffIo { pull_request_root: Option<std::path::PathBuf> }
 
 type RestoreResult = (std::path::PathBuf, Result<String, String>);
 pub(crate) type RestoreResults = std::sync::Arc<std::sync::Mutex<Vec<RestoreResult>>>;
@@ -44,6 +44,16 @@ pub(crate) fn observe_block_restores() -> RestoreResults {
 }
 
 impl GitDiffIo for NativeGitDiffIo {
+    fn pull_requests_ready(&self) -> bool {
+        self.pull_request_root.is_some()
+    }
+    fn pull_request(&self, root: &Path, request: neoism_protocol::pull_request::PullRequestRequest) -> neoism_protocol::pull_request::PullRequestReply {
+        let _ = root;
+        let Some(root) = self.pull_request_root.as_deref() else {
+            return neoism_protocol::pull_request::PullRequestReply::Error { kind: neoism_protocol::pull_request::PullRequestErrorKind::Unavailable, message: "The declared workspace is not ready for pull requests.".into() };
+        };
+        neoism_workspace_daemon::pull_request::handle_at(root, request)
+    }
     fn latest_commit(&self, root: &Path) -> Option<neoism_protocol::git::CommitSummary> {
         neoism_workspace_daemon::git::latest_commit_at(root)
     }
@@ -130,5 +140,31 @@ impl GitDiffIo for NativeGitDiffIo {
 /// Install the native IO provider on a freshly-constructed panel.
 /// The host calls this once during chrome assembly.
 pub fn install_io(panel: &mut GitDiffPanel) {
-    panel.set_io_provider(Arc::new(NativeGitDiffIo));
+    install_io_for_workspace(panel, None);
+}
+
+pub fn install_io_for_workspace(panel: &mut GitDiffPanel, root: Option<std::path::PathBuf>) {
+    panel.set_io_provider(Arc::new(NativeGitDiffIo { pull_request_root: root }));
+}
+
+#[cfg(test)]
+mod pull_request_tests {
+    use super::*;
+    use neoism_protocol::pull_request::{PullRequestErrorKind, PullRequestReply, PullRequestRequest};
+
+    #[test]
+    fn native_readiness_requires_declared_scope_not_repository_discovery() {
+        let unbound = NativeGitDiffIo { pull_request_root: None };
+        assert!(!unbound.pull_requests_ready());
+        let nested = NativeGitDiffIo { pull_request_root: Some("/repo/nested".into()) };
+        assert!(nested.pull_requests_ready());
+        assert_eq!(nested.pull_request_root.as_deref(), Some(Path::new("/repo/nested")));
+    }
+
+    #[test]
+    fn unbound_native_provider_never_falls_back_to_discovered_repo() {
+        let io = NativeGitDiffIo { pull_request_root: None };
+        let reply = io.pull_request(Path::new("/arbitrary/discovered/repo"), PullRequestRequest::Read { number: 42 });
+        assert!(matches!(reply, PullRequestReply::Error { kind: PullRequestErrorKind::Unavailable, .. }));
+    }
 }

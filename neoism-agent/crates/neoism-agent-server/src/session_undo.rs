@@ -59,6 +59,16 @@ async fn revert_session(
     message_id: String,
     part_id: Option<String>,
 ) -> Result<SessionInfo, ApiError> {
+    revert_session_with_history(state, session_id, message_id, part_id, None).await
+}
+
+async fn revert_session_with_history(
+    state: &AppState,
+    session_id: String,
+    message_id: String,
+    part_id: Option<String>,
+    history: Option<Vec<MessageWithParts>>,
+) -> Result<SessionInfo, ApiError> {
     if state
         .inner
         .session_coordinator
@@ -70,7 +80,10 @@ async fn revert_session(
     }
     let mut info = ensure_session(state, &session_id).await?;
     let previous_revert = decode_persisted_revert(info.extra.get("revert"))?;
-    let mut messages = state.inner.store.list_messages(&session_id).await?;
+    let mut messages = match history {
+        Some(messages) => messages,
+        None => state.inner.store.list_messages(&session_id).await?,
+    };
     let existing_message_ids =
         messages.iter().map(message_id_of).collect::<BTreeSet<_>>();
     if let Some(revert) = &previous_revert {
@@ -214,19 +227,13 @@ async fn revert_session(
         ));
     }
 
-    for message in &removed_messages {
-        let removed_id = message_id_of(message);
-        let deleted = state
-            .inner
-            .store
-            .delete_message(&session_id, &removed_id)
-            .await?;
-        if deleted {
-            state.publish(EventPayload::new(
-                event_type::MESSAGE_REMOVED,
-                json!({ "sessionID": session_id, "messageID": removed_id }),
-            ));
-        }
+    let delete_ids = removed_message_ids.into_iter().collect::<Vec<_>>();
+    let deleted_ids = state.inner.store.delete_messages(&session_id, &delete_ids).await?;
+    for removed_id in deleted_ids {
+        state.publish(EventPayload::new(
+            event_type::MESSAGE_REMOVED,
+            json!({ "sessionID": session_id, "messageID": removed_id }),
+        ));
     }
 
     info.time.updated = now_millis();
@@ -371,12 +378,12 @@ pub(crate) async fn session_undo(
 
     let revert = decode_persisted_revert(info.extra.get("revert"))?;
     let messages = state.inner.store.list_messages(&session_id).await?;
-    let reconstructed = reconstruct_messages(revert.as_ref(), messages);
+    let reconstructed = reconstruct_messages(revert.as_ref(), &messages);
     let marker = revert.as_ref().map(|revert| revert.message_id.as_str());
 
-    match last_user_message_before(&reconstructed, marker) {
+    match last_user_message_before(reconstructed, marker) {
         Some(message_id) => Ok(Json(
-            revert_session(&state, session_id, message_id, None).await?,
+            revert_session_with_history(&state, session_id, message_id, None, Some(messages)).await?,
         )),
         // Nothing earlier to undo — return the current session unchanged.
         None => Ok(Json(info)),
@@ -408,12 +415,12 @@ pub(crate) async fn session_redo(
     }
 
     let messages = state.inner.store.list_messages(&session_id).await?;
-    let reconstructed = reconstruct_messages(Some(&revert), messages);
+    let reconstructed = reconstruct_messages(Some(&revert), &messages);
 
-    match first_user_message_after(&reconstructed, &revert.message_id) {
+    match first_user_message_after(reconstructed, &revert.message_id) {
         // Step the marker forward to the next user turn.
         Some(message_id) => Ok(Json(
-            revert_session(&state, session_id, message_id, None).await?,
+            revert_session_with_history(&state, session_id, message_id, None, Some(messages)).await?,
         )),
         // No later user turn remains — fully restore.
         None => Ok(Json(unrevert_session(&state, session_id).await?)),
@@ -431,36 +438,23 @@ fn parse_optional_revert_body(body: &Bytes) -> Result<RevertRequest, ApiError> {
         .map_err(|error| ApiError::bad_request(format!("invalid revert body: {error}")))
 }
 
-/// Merge the messages/parts stashed in the session's `revert` marker back into
-/// the live message list, recreating the full pre-revert history so undo/redo
-/// can locate steps that were already reverted out of the store.
-fn reconstruct_messages(
-    revert: Option<&PersistedRevert>,
-    mut messages: Vec<MessageWithParts>,
-) -> Vec<MessageWithParts> {
-    if let Some(revert) = revert {
-        if !revert.parts.is_empty() {
-            if let Some(message) = messages
-                .iter_mut()
-                .find(|message| message_id_of(message) == revert.message_id)
-            {
-                message.parts.extend(revert.parts.clone());
-            }
-        }
-        messages.extend(revert.messages.clone());
-    }
-    messages
+/// Step selection only needs message metadata, not reconstructed parts. Borrow
+/// the live and stashed histories so selecting a target does not clone payloads.
+fn reconstruct_messages<'a>(
+    revert: Option<&'a PersistedRevert>,
+    messages: &'a [MessageWithParts],
+) -> impl Iterator<Item = &'a MessageWithParts> {
+    messages.iter().chain(revert.into_iter().flat_map(|revert| revert.messages.iter()))
 }
 
 /// Most recent user message strictly before `before` (or the most recent user
 /// message overall when `before` is `None`). IDs are monotonic, so the
 /// lexicographic maximum is the latest message.
-fn last_user_message_before(
-    messages: &[MessageWithParts],
+fn last_user_message_before<'a>(
+    messages: impl Iterator<Item = &'a MessageWithParts>,
     before: Option<&str>,
 ) -> Option<String> {
     messages
-        .iter()
         .filter(|message| matches!(message.info, MessageInfo::User(_)))
         .map(message_id_of)
         .filter(|id| before.is_none_or(|before| id.as_str() < before))
@@ -468,12 +462,11 @@ fn last_user_message_before(
 }
 
 /// Earliest user message strictly after `after`.
-fn first_user_message_after(
-    messages: &[MessageWithParts],
+fn first_user_message_after<'a>(
+    messages: impl Iterator<Item = &'a MessageWithParts>,
     after: &str,
 ) -> Option<String> {
     messages
-        .iter()
         .filter(|message| matches!(message.info, MessageInfo::User(_)))
         .map(message_id_of)
         .filter(|id| id.as_str() > after)

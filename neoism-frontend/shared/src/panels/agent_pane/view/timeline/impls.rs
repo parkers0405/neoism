@@ -156,6 +156,10 @@ impl AgentTimelinePane for NeoismAgentPane {
         );
     }
 
+    fn set_timeline_paint_region(&mut self, region: TimelinePaintRegion) {
+        NeoismAgentPane::set_timeline_paint_region(self, region);
+    }
+
     fn sync_virtual_timeline(
         &mut self,
         viewport_rect: [f32; 4],
@@ -274,15 +278,10 @@ impl AgentTimelinePane for NeoismAgentPane {
         NeoismAgentPane::store_timeline_measure(self, key, height);
     }
 
-    fn timeline_scrollbar_state(&self) -> Option<(f32, f32, f32, f32)> {
-        let (offset, content_h, viewport_h, last_scroll) =
+    fn timeline_scrollbar_state(&self) -> Option<(f32, f32, f32)> {
+        let (offset, content_h, viewport_h, _) =
             NeoismAgentPane::timeline_scrollbar_state(self)?;
-        let opacity = if NeoismAgentPane::scrollbar_dragging(self) || offset > 0.0 {
-            0.9
-        } else {
-            scrollbar::opacity_from_last_scroll(last_scroll, false)
-        };
-        Some((offset, content_h, viewport_h, opacity))
+        Some((offset, content_h, viewport_h))
     }
 
     fn set_scrollbar_geometry(

@@ -422,6 +422,23 @@ fn ends_passthrough_session(command: &str) -> bool {
     matches!(command.trim(), "exit" | "logout")
 }
 
+#[derive(Debug)]
+pub(crate) enum SystemRequest {
+    Show,
+    Add {
+        name: String,
+        target: String,
+    },
+    Connect {
+        id: String,
+    },
+    Disconnect {
+        id: String,
+        remove: bool,
+        discard: bool,
+    },
+}
+
 /// Parse the `[user@]host` target — plus any connection flags worth
 /// carrying onto the daemon tunnel — out of an `ssh` command line for
 /// Quick SSH workspace takeover.
@@ -923,6 +940,7 @@ pub struct Screen<'screen> {
     pending_ssh_workspace_id: Option<String>,
     server_form_draft: Option<bridges::palette::ServerFormDraft>,
     pending_server_manager_open: bool,
+    pending_system_requests: Vec<SystemRequest>,
     pending_server_add: Option<(String, Option<String>, Option<String>)>,
     hosted_server_completions: bridges::palette::HostedCompletions,
     pending_fast_invite_join: Option<(String, Option<String>, Option<String>)>,
@@ -1985,6 +2003,7 @@ impl Screen<'_> {
             pending_ssh_workspace_replacement: None,
             pending_ssh_workspace_id: None,
             pending_server_manager_open: false,
+            pending_system_requests: Vec::new(),
             pending_server_add: None,
             hosted_server_completions: Default::default(),
             server_form_draft: None,

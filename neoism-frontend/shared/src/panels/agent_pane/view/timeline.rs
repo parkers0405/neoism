@@ -24,7 +24,6 @@ use super::user_input::{
 };
 use super::{DEPTH, ORDER_CARET, STREAMING_STATUS_LINE_H, USER_MESSAGE_MAX_LINES};
 use crate::primitives::ide_theme::IdeTheme;
-use crate::widgets::scrollbar;
 
 const TIMELINE_PAGE_SOURCE_LEN: usize = 128;
 
@@ -308,6 +307,27 @@ pub fn lazy_timeline_enabled() -> bool {
     }
 }
 
+/// Paint/hit geometry is independent of the rectangular scroll metrics.
+#[derive(Clone, Debug)]
+pub struct TimelinePaintRegion {
+    pub viewport: [f32; 4],
+    pub occlusion_rects: Vec<[f32; 4]>,
+}
+
+impl TimelinePaintRegion {
+    pub fn occludes(&self, x: f32, y: f32) -> bool {
+        self.occlusion_rects
+            .iter()
+            .any(|r| x >= r[0] && x < r[0] + r[2] && y >= r[1] && y < r[1] + r[3])
+    }
+
+    pub fn contains(&self, x: f32, y: f32) -> bool {
+        let inside =
+            |r: &[f32; 4]| x >= r[0] && x < r[0] + r[2] && y >= r[1] && y < r[1] + r[3];
+        inside(&self.viewport) && !self.occludes(x, y)
+    }
+}
+
 pub trait AgentTimelinePane: AgentMarkdownPane {
     type Message: AgentTimelineMessage;
     type MeasureKey;
@@ -331,6 +351,7 @@ pub trait AgentTimelinePane: AgentMarkdownPane {
         live_growth_px: f32,
         scale: f32,
     );
+    fn set_timeline_paint_region(&mut self, _region: TimelinePaintRegion) {}
     fn sync_virtual_timeline(
         &mut self,
         _viewport_rect: [f32; 4],
@@ -422,7 +443,7 @@ pub trait AgentTimelinePane: AgentMarkdownPane {
     ) -> Self::MeasureKey;
     fn cached_timeline_measure(&self, key: &Self::MeasureKey) -> Option<f32>;
     fn store_timeline_measure(&self, key: Self::MeasureKey, height: f32);
-    fn timeline_scrollbar_state(&self) -> Option<(f32, f32, f32, f32)>;
+    fn timeline_scrollbar_state(&self) -> Option<(f32, f32, f32)>;
     fn set_scrollbar_geometry(
         &mut self,
         track: Option<[f32; 4]>,
@@ -689,6 +710,13 @@ macro_rules! neoism_ui_impl_agent_timeline_pane {
                 );
             }
 
+            fn set_timeline_paint_region(
+                &mut self,
+                region: $crate::panels::agent_pane::view::timeline::TimelinePaintRegion,
+            ) {
+                <$pane>::set_timeline_paint_region(self, region);
+            }
+
             fn clear_tool_hit_rects(&mut self) {
                 <$pane>::clear_tool_hit_rects(self);
             }
@@ -835,15 +863,10 @@ macro_rules! neoism_ui_impl_agent_timeline_pane {
                 <$pane>::store_timeline_measure(self, key, height);
             }
 
-            fn timeline_scrollbar_state(&self) -> Option<(f32, f32, f32, f32)> {
-                let (offset, content_h, viewport_h, last_scroll) =
+            fn timeline_scrollbar_state(&self) -> Option<(f32, f32, f32)> {
+                let (offset, content_h, viewport_h, _) =
                     <$pane>::timeline_scrollbar_state(self)?;
-                let opacity = if <$pane>::scrollbar_dragging(self) || offset > 0.0 {
-                    0.9
-                } else {
-                    $crate::widgets::scrollbar::opacity_from_last_scroll(last_scroll, false)
-                };
-                Some((offset, content_h, viewport_h, opacity))
+                Some((offset, content_h, viewport_h))
             }
 
             fn set_scrollbar_geometry(
@@ -1027,14 +1050,7 @@ mod footer_edge_tests;
 
 pub use read_group::read_tool_group_end;
 
-pub use render::{render_timeline_scrollbar_with, render_timeline_with};
-
-#[allow(dead_code)]
-pub(super) fn render_timeline_scrollbar(
-    sugarloaf: &mut Sugarloaf,
-    pane: &mut NeoismAgentPane,
-    rect: [f32; 4],
-    s: f32,
-) {
-    render_timeline_scrollbar_with(sugarloaf, pane, rect, s);
-}
+pub use render::{
+    render_timeline_in_paint_viewport_with, render_timeline_scrollbar_with,
+    render_timeline_with,
+};

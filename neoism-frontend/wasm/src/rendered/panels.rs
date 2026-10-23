@@ -48,6 +48,9 @@ impl DaemonGitDiffIo {
 }
 
 impl GitDiffIo for DaemonGitDiffIo {
+    fn request_pull_request(&self, request: neoism_protocol::pull_request::PullRequestRequest) {
+        self.fire(&GitClientMessage::PullRequest { request });
+    }
     fn is_host_driven(&self) -> bool {
         true
     }

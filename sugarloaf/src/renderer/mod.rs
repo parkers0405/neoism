@@ -1056,6 +1056,24 @@ fn upload_background_image_texture(
 }
 
 impl Renderer {
+    pub(crate) fn occlusion_checkpoint(&self) -> [Vec<(usize, usize)>; 2] {
+        [
+            self.comp.batches.occlusion_checkpoint(),
+            self.overlay_comp.batches.occlusion_checkpoint(),
+        ]
+    }
+
+    pub(crate) fn occlude_since(
+        &mut self,
+        checkpoint: &[Vec<(usize, usize)>; 2],
+        holes: &[[f32; 4]],
+    ) {
+        self.comp.batches.occlude_since(&checkpoint[0], holes);
+        self.overlay_comp
+            .batches
+            .occlude_since(&checkpoint[1], holes);
+    }
+
     pub fn new(context: &Context, colorspace: crate::sugarloaf::Colorspace) -> Self {
         // `colorspace` only matters to the Metal path (macOS); on other
         // platforms the shader doesn't know the sRGB→P3 matrix yet so we

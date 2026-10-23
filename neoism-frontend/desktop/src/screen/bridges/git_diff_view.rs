@@ -1,5 +1,7 @@
 //! Desktop hosting for working-tree review and historical Git diff tabs.
 use super::super::*;
+use neoism_backend::clipboard::Clipboard;
+use neoism_backend::ClipboardType;
 
 /// Grid layout already excludes the status bar through its bottom margin.
 /// Use this same logical viewport for painting and every pointer input path.
@@ -170,7 +172,7 @@ impl Screen<'_> {
                     .filter(|(node, item)| {
                         grid.is_context_visible(**node)
                             && item.val.git_diff_view.as_ref().is_some_and(|view| {
-                                view.commit_id.is_none()
+                                !view.is_read_only()
                                     && root.as_ref() == Some(&view.root)
                             })
                     })
@@ -356,7 +358,7 @@ impl Screen<'_> {
         let Some(view) = self.context_manager.current_mut().git_diff_view.as_mut() else {
             return false;
         };
-        if view.root != root || view.commit_id.is_some() {
+        if view.root != root || view.is_read_only() {
             return false;
         }
         view.set_edit_focus(false);
@@ -380,7 +382,7 @@ impl Screen<'_> {
                 item.val
                     .git_diff_view
                     .as_ref()
-                    .filter(|view| view.root == root && view.commit_id.is_none())
+                    .filter(|view| view.root == root && !view.is_read_only())
                     .map(|_| item.val.route_id)
             });
         self.renderer.buffer_tabs.ensure_terminal_tab();
@@ -458,6 +460,7 @@ impl Screen<'_> {
     }
 
     pub(crate) fn render_git_diff_views(&mut self) -> bool {
+        self.pump_pull_request_views();
         for (root, detail) in self.renderer.git_diff_panel.take_commit_details() {
             self.open_git_commit_detail(root, detail);
         }
@@ -517,7 +520,7 @@ impl Screen<'_> {
             .values()
             .any(|item| {
                 item.val.git_diff_view.as_ref().is_some_and(|view| {
-                    view.commit_id.is_none() && panel_root.as_ref() == Some(&view.root)
+                    !view.is_read_only() && panel_root.as_ref() == Some(&view.root)
                 })
             })
         {
@@ -535,7 +538,7 @@ impl Screen<'_> {
             // Keep the repository snapshot after the sidebar closes or changes roots.
             // The panel is the sole status/cache owner; its request API only queues
             // work (bounded native worker or host RPC), never runs Git here.
-            if view.commit_id.is_none() && panel_root.as_ref() == Some(&view.root) {
+            if !view.is_read_only() && panel_root.as_ref() == Some(&view.root) {
                 let generation = self.renderer.git_diff_panel.diff_cache_generation();
                 if item.val.git_diff_cache_generation != Some(generation) {
                     let files = self.renderer.git_diff_panel.files();
@@ -620,7 +623,7 @@ impl Screen<'_> {
             }
             view.set_text_occlusions(&occlusions);
             let path = view.document_path();
-            if view.commit_id.is_none() && panel_root.as_ref() == Some(&view.root) {
+            if !view.is_read_only() && panel_root.as_ref() == Some(&view.root) {
                 if let Some(path) = path.as_ref() {
                     let relative = neoism_protocol::host_path::HostPath::new(
                         view.root.to_string_lossy(),
@@ -734,6 +737,9 @@ impl Screen<'_> {
             .set_current_node(node, &mut self.sugarloaf);
         self.context_manager.select_route_from_current_grid();
         self.renderer.git_diff_panel.set_focused(false);
+        self.renderer.file_tree.set_focused(false);
+        self.renderer.notes_sidebar.set_focused(false);
+        self.renderer.buffer_tabs.set_focused(false);
         let Some(view) = self.context_manager.current_mut().git_diff_view.as_mut() else {
             return false;
         };
@@ -741,9 +747,14 @@ impl Screen<'_> {
             view.pointer_down(x, y);
             let edit_request = view.take_edit_request();
             let actions = view.take_actions();
+            let action_route = self.context_manager.current().route_id;
             for action in actions {
                 use neoism_ui::panels::git_diff_view::GitDiffViewAction;
                 match action {
+                    GitDiffViewAction::PullRequest { root, request } => self.dispatch_pull_request_for_route(root, request, action_route),
+                    GitDiffViewAction::OpenUrl { url } => {
+                        if url.starts_with("https://") { let _ = crate::background_process::open_url(&url); }
+                    }
                     GitDiffViewAction::OpenSource {
                         root,
                         path,
@@ -1004,12 +1015,78 @@ impl Screen<'_> {
         handled
     }
 
+    pub(crate) fn handle_pull_request_paste(&mut self, text: &str) -> bool {
+        if self.renderer.git_diff_panel.is_focused() && self.renderer.git_diff_panel.pull_request_lookup_active() {
+            self.renderer.git_diff_panel.pull_request_lookup_key("", Some(text));
+            self.mark_dirty();
+            return true;
+        }
+        if self.is_island_strip_focused() || self.focused_buffer_tabs_strip().is_some()
+            || self.renderer.git_diff_panel.is_focused() || self.renderer.file_tree.is_focused()
+            || self.renderer.notes_sidebar.is_focused()
+            || (self.renderer.conversations_visible && self.renderer.conversations_pane.side_panel().is_focused())
+            || self.renderer.command_palette.is_enabled() || self.renderer.finder.is_enabled()
+            || self.renderer.modal.owns_editor_focus()
+        { return false; }
+        let Some(view) = self.context_manager.current_mut().git_diff_view.as_mut().filter(|view| view.is_pull_request()) else {
+            return false;
+        };
+        // Even when no form field is focused, a PR surface must not paste into
+        // its backing terminal or acquire canonical source ownership.
+        view.pull_request_text_input(text);
+        self.mark_dirty();
+        true
+    }
+
     pub(crate) fn handle_git_diff_view_key(
         &mut self,
         key: &neoism_window::event::KeyEvent,
+        clipboard: &mut Clipboard,
     ) -> bool {
         use neoism_window::keyboard::{Key, NamedKey};
+        if self.is_island_strip_focused() || self.focused_buffer_tabs_strip().is_some()
+            || self.renderer.git_diff_panel.is_focused() || self.renderer.file_tree.is_focused()
+            || self.renderer.notes_sidebar.is_focused()
+            || (self.renderer.conversations_visible && self.renderer.conversations_pane.side_panel().is_focused())
+            || self.renderer.command_palette.is_enabled() || self.renderer.finder.is_enabled()
+            || self.renderer.modal.owns_editor_focus()
+        { return false; }
         let mods = self.modifiers.state();
+        if self.context_manager.current().git_diff_view.as_ref().is_some_and(|view| view.is_pull_request())
+            && !mods.alt_key()
+        {
+            if key.state == neoism_window::event::ElementState::Pressed {
+                let name = match &key.logical_key {
+                    Key::Named(NamedKey::Enter) => "Enter", Key::Named(NamedKey::Tab) => "Tab",
+                    Key::Named(NamedKey::Escape) => "Escape", Key::Named(NamedKey::Backspace) => "Backspace",
+                    Key::Named(NamedKey::Delete) => "Delete", Key::Named(NamedKey::ArrowLeft) => "ArrowLeft",
+                    Key::Named(NamedKey::ArrowRight) => "ArrowRight", Key::Named(NamedKey::ArrowUp) => "ArrowUp",
+                    Key::Named(NamedKey::ArrowDown) => "ArrowDown", Key::Named(NamedKey::Home) => "Home",
+                    Key::Named(NamedKey::End) => "End", Key::Named(NamedKey::PageUp) => "PageUp",
+                    Key::Named(NamedKey::PageDown) => "PageDown", Key::Named(NamedKey::Space) => " ",
+                    Key::Character(s) => s.as_str(), _ => "",
+                };
+                let primary = mods.control_key() || mods.super_key();
+                if primary && !pull_request_primary_key(name) { return false; }
+                let view = self.context_manager.current_mut().git_diff_view.as_mut().unwrap();
+                let pasted = primary && matches!(&key.logical_key, Key::Character(s) if s.eq_ignore_ascii_case("v"))
+                    && view.pull_request_text_input(&clipboard.get(ClipboardType::Clipboard));
+                let inserted = pasted || !primary
+                    && matches!(&key.logical_key, Key::Character(_) | Key::Named(NamedKey::Space))
+                    && view.pull_request_text_input(key.text.as_ref().map(|text| text.as_str()).unwrap_or(name));
+                if !inserted && !view.pull_request_key(name, mods.shift_key(), primary) && !primary { view.key(name); }
+                let actions = view.take_actions();
+                for action in actions {
+                    match action {
+                        neoism_ui::panels::git_diff_view::GitDiffViewAction::PullRequest { root, request } => self.dispatch_pull_request(root, request),
+                        neoism_ui::panels::git_diff_view::GitDiffViewAction::OpenUrl { url } if url.starts_with("https://") => { let _ = crate::background_process::open_url(&url); }
+                        _ => {}
+                    }
+                }
+                self.mark_dirty();
+            }
+            return true;
+        }
         if mods.control_key() || mods.super_key() || mods.alt_key() {
             return false;
         }
@@ -1044,9 +1121,21 @@ impl Screen<'_> {
     }
 }
 
+fn pull_request_primary_key(name: &str) -> bool {
+    name == "Enter" || name.eq_ignore_ascii_case("v")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pr_composer_only_claims_submit_and_paste_primary_shortcuts() {
+        for name in ["Enter", "v", "V"] { assert!(pull_request_primary_key(name)); }
+        for name in ["t", "w", "Tab", "ArrowLeft", "ArrowRight", "d", "u", "p", "s"] {
+            assert!(!pull_request_primary_key(name), "global/source shortcut {name} must remain available");
+        }
+    }
 
     #[test]
     fn review_backdrop_fills_outer_padding_below_tabs_at_every_scale() {

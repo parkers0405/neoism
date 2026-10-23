@@ -113,7 +113,10 @@ impl Screen<'_> {
                 let selected = self.renderer.modal.selected_action();
                 let action = if matches!(
                     selected,
-                    Some(neoism_ui::widgets::modal::ModalAction::ServerFormSubmit)
+                    Some(
+                        neoism_ui::widgets::modal::ModalAction::ServerFormSubmit
+                            | neoism_ui::widgets::modal::ModalAction::SystemFormSubmit
+                    )
                 ) {
                     self.renderer.modal.submit_form()
                 } else {
@@ -187,6 +190,7 @@ impl Screen<'_> {
                 }
             }
             ModalAction::Close => {
+                self.host_git.pull_request_confirmation = None;
                 self.renderer.modal.close();
             }
             ModalAction::UpdateNeoism { version } => {
@@ -258,7 +262,8 @@ impl Screen<'_> {
             ModalAction::ApplyMashupPack { id } => {
                 self.request_mashup_pack(id);
             }
-            ModalAction::RunEditorCommand { command: _ } => {
+            ModalAction::RunEditorCommand { command } => {
+                if self.confirm_pull_request_action(&command) { return; }
                 // nvim removed; native editor equivalent TBD.
                 self.renderer.modal.close();
             }
@@ -901,6 +906,40 @@ impl Screen<'_> {
                 // Back to the Servers list rather than closing the
                 // whole flow — join status shows right there.
                 self.request_server_manager();
+            }
+            ModalAction::SystemFormSubmit => {
+                let values = self
+                    .renderer
+                    .modal
+                    .take_submitted_form()
+                    .unwrap_or_default();
+                let value = |id: &str| {
+                    values
+                        .iter()
+                        .find(|(field, _)| field == id)
+                        .map(|(_, value)| value.trim().to_string())
+                        .unwrap_or_default()
+                };
+                let target = value("system_target");
+                if let Err(error) = crate::system_registry::validate_system_target(&target) {
+                    self.renderer.notifications.push(
+                        error.to_string(),
+                        neoism_ui::panels::notifications::NotificationLevel::Warn,
+                    );
+                    return;
+                }
+                self.renderer.modal.close();
+                self.request_system_action(SystemRequest::Add {
+                    name: value("system_name"), target,
+                });
+                self.request_system_action(SystemRequest::Show);
+            }
+            ModalAction::SystemDisconnectConfirm { id, remove } => {
+                self.renderer.modal.close();
+                self.request_system_action(SystemRequest::Disconnect {
+                    id, remove, discard: true,
+                });
+                self.request_system_action(SystemRequest::Show);
             }
             ModalAction::ServerReconnectRetry { endpoint } => {
                 self.renderer.modal.close();

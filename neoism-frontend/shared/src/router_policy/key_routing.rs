@@ -476,6 +476,15 @@ fn handle_command_palette(
         palette.move_selection_down();
         return HandlerResult::Consumed(maybe_preview_palette_search(palette));
     }
+    if input.tab
+        && input.modifiers.control
+        && !input.modifiers.alt
+        && !input.modifiers.super_key
+    {
+        if let Some(action) = palette.category_switch_action() {
+            return HandlerResult::Consumed(KeyRouteAction::ExecutePaletteAction(action));
+        }
+    }
     if input.tab {
         let was_search = palette.is_search_mode();
         let completed = palette.tab_complete();
@@ -866,6 +875,38 @@ mod tests {
         let action = fx.dispatch(&input, route_ctx_terminal(), false, None);
         assert_eq!(action, KeyRouteAction::ConsumeAndRedraw);
         assert_eq!(fx.finder.query, "bar");
+    }
+
+    #[test]
+    fn system_category_ctrl_tab_emits_intent_without_completing_query() {
+        let mut palette = CommandPalette::default();
+        palette.enter_systems_mode(Vec::new());
+        palette.set_query("my computer".into());
+        palette.set_query_cursor(2);
+        let mut input = key_input_pressed();
+        input.tab = true;
+        input.modifiers.control = true;
+        assert!(matches!(
+            handle_command_palette(&input, &mut palette),
+            HandlerResult::Consumed(KeyRouteAction::ExecutePaletteAction(
+                PaletteAction::ShowServers
+            ))
+        ));
+        assert_eq!(palette.query, "my computer");
+        assert_eq!(palette.query_cursor(), 2);
+        palette.enter_servers_mode(Vec::new());
+        assert!(matches!(
+            handle_command_palette(&input, &mut palette),
+            HandlerResult::Consumed(KeyRouteAction::ExecutePaletteAction(
+                PaletteAction::ShowSystems
+            ))
+        ));
+        input.modifiers.control = false;
+        assert!(matches!(
+            handle_command_palette(&input, &mut palette),
+            HandlerResult::Consumed(KeyRouteAction::ConsumeAndRedraw)
+        ));
+        assert_eq!(palette.query, "+ Add Server");
     }
 
     #[test]

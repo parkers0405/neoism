@@ -313,7 +313,7 @@ fn provider_readiness_blocks_native_generation_bypasses_before_side_effects() {
         let mut pane = NeoismAgentPane::default();
         pane.server = "invalid://agent-server".into();
         pane.session_id = session_id.clone();
-        pane.provider_readiness = Some(Default::default());
+        seed_prompt_readiness(&mut pane, Default::default());
         pane.input = "keep draft".into();
         pane.cursor_byte = pane.input.len();
         assert!(pane
@@ -377,7 +377,7 @@ fn provider_readiness_checks_the_queued_model_and_exempts_current_external_sourc
     pane.session_id = Some("external".into());
     pane.new_chat_source =
         neoism_ui::panels::agent_pane::state::side_panel::ConversationSource::Codex;
-    pane.provider_readiness = Some(Default::default());
+    seed_prompt_readiness(&mut pane, Default::default());
     assert!(!pane.no_providers_connected());
     assert!(pane
         .send_prepared_prompt("external".into(), true, "external-message".into())
@@ -400,7 +400,7 @@ fn provider_readiness_checks_the_queued_model_and_exempts_current_external_sourc
 fn provider_readiness_rejects_without_consuming_or_navigating() {
     use neoism_ui::panels::agent_pane::api_mapping::ProviderReadiness;
     for (catalog, model, action) in [
-        (None, "", "/connect"),
+        (None, "", "still loading"),
         (
             Some(json!({"all": [], "connected": []})),
             "stale/model",
@@ -427,11 +427,15 @@ fn provider_readiness_rejects_without_consuming_or_navigating() {
         ),
     ] {
         for session_id in [None, Some("existing".to_string())] {
+            if catalog.is_none() && session_id.is_some() {
+                continue;
+            }
             let mut pane = NeoismAgentPane::default();
             pane.server = "invalid://agent-server".into();
             pane.session_id = session_id.clone();
-            pane.provider_readiness =
-                catalog.as_ref().and_then(ProviderReadiness::from_json);
+            if let Some(readiness) = catalog.as_ref().and_then(ProviderReadiness::from_json) {
+                seed_prompt_readiness(&mut pane, readiness);
+            }
             pane.model = model.into();
             pane.insert_paste("large pasted prompt\nsecond line");
             let input = pane.input.clone();
@@ -459,10 +463,46 @@ fn provider_readiness_rejects_without_consuming_or_navigating() {
 }
 
 #[test]
+fn provider_readiness_unknown_existing_chat_submits_on_first_attempt() {
+    let mut pane = NeoismAgentPane::default();
+    pane.server = "invalid://existing-chat-readiness".into();
+    pane.session_id = Some("existing".into());
+    pane.model = "saved/model".into();
+    pane.prompt_dispatch_in_flight = true;
+    pane.insert_text("send without waiting for discovery");
+    assert!(pane.submit());
+    assert!(pane.input.is_empty());
+    assert_eq!(pane.pending_prompt_dispatches.len(), 1);
+    assert_eq!(pane.pending_prompt_dispatches[0].origin_session_id.as_deref(), Some("existing"));
+    assert!(pane.drain_ui_events().is_empty());
+    assert!(pane.send_prepared_prompt("direct".into(), true, "direct-message".into()).is_ok());
+    assert_eq!(pane.pending_prompt_dispatches.len(), 2);
+}
+
+#[test]
+fn provider_readiness_stale_queued_model_rejection_defers_to_existing_server() {
+    let mut pane = NeoismAgentPane::default();
+    pane.server = "invalid://queued-model-readiness".into();
+    seed_prompt_catalog(&mut pane);
+    pane.session_id = Some("existing".into());
+    pane.provider_readiness_checked_at = Instant::now().checked_sub(Duration::from_secs(31));
+    assert!(pane.current_provider_readiness().is_some());
+    assert!(pane.prompt_readiness_error_for_model("test/new-model").is_none());
+    pane.prompt_dispatch_in_flight = true;
+    pane.queue_send_prompt_command(
+        "queued".into(), "hello".into(), vec![], None, None,
+        "test/new-model".into(), None,
+        neoism_protocol::agent::PromptDelivery::Steer, true,
+    );
+    assert_eq!(pane.pending_prompt_dispatches.len(), 1);
+    assert!(pane.drain_ui_events().is_empty());
+}
+
+#[test]
 fn provider_readiness_keeps_local_connect_and_external_cli_available() {
     let mut pane = NeoismAgentPane::default();
     pane.server = "invalid://agent-server".into();
-    pane.provider_readiness = Some(Default::default());
+    seed_prompt_readiness(&mut pane, Default::default());
     assert!(pane.no_providers_connected());
     pane.input = "/connect ".into();
     assert!(pane.submit());
@@ -481,9 +521,18 @@ fn provider_readiness_keeps_local_connect_and_external_cli_available() {
     assert!(pane.drain_pending_outbound().is_empty());
 }
 
+fn seed_prompt_readiness(
+    pane: &mut NeoismAgentPane,
+    readiness: neoism_ui::panels::agent_pane::api_mapping::ProviderReadiness,
+) {
+    let scope = super::super::api::catalog_scope(&pane.server, pane.directory.as_deref());
+    assert!(pane.apply_provider_readiness(scope, readiness));
+}
+
 fn seed_prompt_catalog(pane: &mut NeoismAgentPane) {
     pane.model = "test/model".into();
-    pane.provider_readiness = Some(
+    seed_prompt_readiness(
+        pane,
         neoism_ui::panels::agent_pane::api_mapping::ProviderReadiness {
             connected: vec!["test".into()],
             models: vec!["test/model".into()],
@@ -1512,35 +1561,38 @@ fn confirmed_admission_allows_idle_recovery_without_dequeue() {
 }
 
 #[test]
-fn windows_first_model_clock_does_not_count_admission_wall_time() {
-    let mut pane = NeoismAgentPane::default();
-    pane.status_timing = status_timing::DesktopStatusTiming::for_test(true);
-    pane.note_prompt_admission("first");
-    pane.note_streaming(NeoismAgentStreamingState::Generating, None);
-    pane.streaming_started_at = Some(Instant::now() - Duration::from_secs(5));
-    assert_eq!(pane.streaming_label(), "Crafting");
-    assert_eq!(pane.streaming_elapsed_seconds(), Some(0.0));
-    pane.status_timing.confirm_admission();
-    assert_eq!(pane.streaming_elapsed_seconds(), Some(0.0));
-    pane.session_id = Some("root".into());
-    let activity = neoism_ui::panels::agent_pane::state::ExecutionActivityState {
-        execution_id: "execution".into(),
-        root_session_id: "root".into(),
-        revision: 1,
-        ..Default::default()
-    };
-    assert!(pane.apply_execution_activity(activity.clone()));
-    assert_eq!(pane.streaming_elapsed_seconds(), Some(0.0));
-    assert!(pane.apply_execution_activity(
-        neoism_ui::panels::agent_pane::state::ExecutionActivityState {
-            completed_ms: 2_000,
-            revision: 2,
-            ..activity.clone()
-        }
-    ));
-    assert_eq!(pane.streaming_elapsed_seconds(), Some(2.0));
-    assert!(!pane.apply_execution_activity(activity));
-    assert_eq!(pane.streaming_elapsed_seconds(), Some(2.0));
+fn first_model_clock_does_not_count_admission_wall_time() {
+    for windows_policy in [false, true] {
+        let mut pane = NeoismAgentPane::default();
+        pane.status_timing = status_timing::DesktopStatusTiming::for_test(windows_policy);
+        pane.note_prompt_admission("first");
+        pane.note_streaming(NeoismAgentStreamingState::Generating, None);
+        pane.streaming_started_at = Some(Instant::now() - Duration::from_secs(5));
+        assert_eq!(pane.streaming_label(), "Crafting");
+        assert_eq!(pane.streaming_elapsed_seconds(), Some(0.0));
+        pane.status_timing.confirm_admission();
+        assert_eq!(pane.streaming_elapsed_seconds(), Some(0.0));
+        pane.session_id = Some("root".into());
+        assert_eq!(pane.streaming_elapsed_seconds(), Some(0.0));
+        let activity = neoism_ui::panels::agent_pane::state::ExecutionActivityState {
+            execution_id: "execution".into(),
+            root_session_id: "root".into(),
+            revision: 1,
+            ..Default::default()
+        };
+        assert!(pane.apply_execution_activity(activity.clone()));
+        assert_eq!(pane.streaming_elapsed_seconds(), Some(0.0));
+        assert!(pane.apply_execution_activity(
+            neoism_ui::panels::agent_pane::state::ExecutionActivityState {
+                completed_ms: 2_000,
+                revision: 2,
+                ..activity.clone()
+            }
+        ));
+        assert_eq!(pane.streaming_elapsed_seconds(), Some(2.0));
+        assert!(!pane.apply_execution_activity(activity));
+        assert_eq!(pane.streaming_elapsed_seconds(), Some(2.0));
+    }
 }
 
 #[test]
@@ -1630,7 +1682,7 @@ fn windows_admission_cache_and_hydration_preserve_real_followup() {
 }
 
 #[test]
-fn windows_new_prompt_does_not_borrow_finished_execution_timer() {
+fn new_prompt_does_not_borrow_finished_execution_timer() {
     use neoism_ui::panels::agent_pane::state::ExecutionActivityState;
     for windows_policy in [false, true] {
         let mut pane = NeoismAgentPane::default();
@@ -1651,13 +1703,8 @@ fn windows_new_prompt_does_not_borrow_finished_execution_timer() {
         pane.note_streaming(NeoismAgentStreamingState::Generating, None);
         assert_eq!(pane.streaming_label(), "Crafting");
         assert_eq!(pane.session_runtime_revision("root"), revision + 1);
-        if windows_policy {
-            assert!(pane.streaming_elapsed_seconds().unwrap() < 1.0);
-            assert!(!pane.apply_execution_activity(previous));
-        } else {
-            assert_eq!(pane.streaming_elapsed_seconds(), Some(90.0));
-            assert!(pane.apply_execution_activity(previous));
-        }
+        assert_eq!(pane.streaming_elapsed_seconds(), Some(0.0));
+        assert!(!pane.apply_execution_activity(previous));
         assert!(pane.apply_execution_activity(ExecutionActivityState {
             execution_id: "execution-b".into(),
             root_session_id: "root".into(),
@@ -1670,24 +1717,26 @@ fn windows_new_prompt_does_not_borrow_finished_execution_timer() {
 }
 
 #[test]
-fn windows_new_prompt_keeps_live_family_execution_and_real_queue() {
-    let mut pane = NeoismAgentPane::default();
-    pane.session_id = Some("root".into());
-    pane.status_timing = status_timing::DesktopStatusTiming::for_test(true);
-    pane.apply_execution_activity(
-        neoism_ui::panels::agent_pane::state::ExecutionActivityState {
-            execution_id: "execution-a".into(),
-            root_session_id: "root".into(),
-            completed_ms: 9_000,
-            revision: 1,
-            ..Default::default()
-        },
-    );
-    pane.note_prompt_admission("next");
-    assert_eq!(pane.streaming_elapsed_seconds(), Some(9.0));
-    // An authoritative active run means the submitted request really waits,
-    // even if the local pane thought it was idle when Enter arrived.
-    assert_eq!(pane.status_timing.queue_count(1, Some(100)), 1);
+fn new_prompt_keeps_live_family_execution_and_real_queue() {
+    for windows_policy in [false, true] {
+        let mut pane = NeoismAgentPane::default();
+        pane.session_id = Some("root".into());
+        pane.status_timing = status_timing::DesktopStatusTiming::for_test(windows_policy);
+        pane.apply_execution_activity(
+            neoism_ui::panels::agent_pane::state::ExecutionActivityState {
+                execution_id: "execution-a".into(),
+                root_session_id: "root".into(),
+                completed_ms: 9_000,
+                revision: 1,
+                ..Default::default()
+            },
+        );
+        pane.note_prompt_admission("next");
+        assert_eq!(pane.streaming_elapsed_seconds(), Some(9.0));
+        // An authoritative active run means the submitted request really waits,
+        // even if the local pane thought it was idle when Enter arrived.
+        assert_eq!(pane.status_timing.queue_count(1, Some(100)), 1);
+    }
 }
 
 #[test]
@@ -9063,6 +9112,51 @@ fn follow_scroll_ticks_and_metrics_do_not_impersonate_history_gestures() {
     assert_eq!(pane.timeline_history.last_requested_session_id, None);
     pane.maybe_request_older_timeline_page(0.0, 300.0);
     assert!(pane.timeline_history.loading_older);
+}
+
+#[test]
+fn timeline_scroll_rail_hover_redraws_each_move_and_one_exit() {
+    let mut pane = NeoismAgentPane::default();
+    assert!(!pane.update_scrollbar_hover(Some((390.0, 100.0))));
+    pane.set_scrollbar_geometry(Some([382.0, 99.0, 18.0, 102.0]), None);
+    assert!(!pane.update_scrollbar_hover(Some((370.0, 100.0))));
+    assert!(pane.update_scrollbar_hover(Some((390.0, 100.0))));
+    // The host does not duplicate tick geometry: every move inside repaints.
+    assert!(pane.update_scrollbar_hover(Some((390.0, 150.0))));
+    assert!(pane.update_scrollbar_hover(Some((390.0, 150.0))));
+    assert!(pane.update_scrollbar_hover(Some((370.0, 150.0))));
+    assert!(!pane.update_scrollbar_hover(Some((370.0, 150.0))));
+    assert!(pane.update_scrollbar_hover(Some((390.0, 150.0))));
+    assert!(pane.update_scrollbar_hover(None)); // Native window leave.
+    assert!(!pane.update_scrollbar_hover(None));
+    assert!(pane.update_scrollbar_hover(Some((390.0, 150.0))));
+    pane.set_scrollbar_geometry(None, None);
+    assert!(pane.update_scrollbar_hover(Some((390.0, 150.0))));
+    assert!(!pane.update_scrollbar_hover(Some((390.0, 150.0))));
+}
+
+#[test]
+fn timeline_scroll_rail_click_and_drag_reach_both_history_endpoints() {
+    let mut pane = NeoismAgentPane::default();
+    pane.set_timeline_metrics([0.0, 0.0, 400.0, 300.0], 1200.0, 300.0);
+    pane.set_scrollbar_geometry(
+        Some([382.0, 99.0, 18.0, 102.0]),
+        Some([382.0, 199.0, 18.0, 2.0]),
+    );
+    assert!(!pane.begin_scrollbar_drag(390.0, 90.0));
+    assert!(pane.begin_scrollbar_drag(390.0, 100.0));
+    assert_eq!(pane.timeline_scroll_offset(), 900.0);
+    assert!(!pane.timeline_follow_bottom);
+    assert!(pane.scrollbar_dragging());
+    assert!(pane.drag_scrollbar_to(390.0, 200.0));
+    assert_eq!(pane.timeline_scroll_offset(), 0.0);
+    assert!(pane.timeline_follow_bottom);
+    assert!(pane.end_scrollbar_drag());
+    assert!(!pane.scrollbar_dragging());
+    assert!(!pane.drag_scrollbar_to(390.0, 100.0));
+    assert!(pane.begin_scrollbar_drag(390.0, 150.0));
+    assert_eq!(pane.timeline_scroll_offset(), 450.0);
+    assert!(pane.end_scrollbar_drag());
 }
 
 #[test]

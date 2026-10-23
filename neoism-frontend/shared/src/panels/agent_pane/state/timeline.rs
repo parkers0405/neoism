@@ -305,6 +305,7 @@ impl NeoismAgentPane {
             self.timeline_history_position_hydrated = true;
             self.clear_timeline_motion();
             self.timeline_viewport_rect = None;
+            self.timeline_paint_region = None;
         }
     }
 
@@ -522,7 +523,17 @@ impl NeoismAgentPane {
         }
     }
 
+    pub fn set_timeline_paint_region(
+        &mut self,
+        region: crate::panels::agent_pane::view::timeline::TimelinePaintRegion,
+    ) {
+        self.timeline_paint_region = Some(region);
+    }
+
     pub fn timeline_contains_point(&self, x: f32, y: f32) -> bool {
+        if let Some(region) = &self.timeline_paint_region {
+            return region.contains(x, y);
+        }
         let Some([rx, ry, rw, rh]) = self.timeline_viewport_rect else {
             return false;
         };
@@ -883,8 +894,7 @@ impl NeoismAgentPane {
             return false;
         };
         self.cancel_timeline_follow_motion();
-        // Page-jump when the user clicks the track outside the thumb so it
-        // matches the conventional scrollbar behaviour.
+        // Clicking a rail mark moves directly to that position in the history.
         if hit == ScrollbarHit::Track {
             self.jump_timeline_to_track_y(y);
         }
@@ -958,7 +968,9 @@ impl NeoismAgentPane {
         if max_scroll <= 0.0 {
             return;
         }
-        let progress = ((y - track[1]) / track[3].max(1.0)).clamp(0.0, 1.0);
+        let handle_h = self.scrollbar_thumb_rect.map_or(0.0, |thumb| thumb[3]);
+        let travel = (track[3] - handle_h).max(1.0);
+        let progress = ((y - track[1] - handle_h * 0.5) / travel).clamp(0.0, 1.0);
         // Higher y → further down the visible content → less `timeline_scroll_px`.
         let scroll_top = progress * max_scroll;
         let before = self.timeline_scroll_px;

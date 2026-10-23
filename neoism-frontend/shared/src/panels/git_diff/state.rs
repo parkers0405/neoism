@@ -17,6 +17,11 @@ use super::PANEL_DEFAULT_WIDTH;
 /// build leaves it `None` and the daemon pushes data directly into
 /// the panel's `Arc<Mutex<PanelData>>` instead.
 pub trait GitDiffIo: Send + Sync {
+    fn pull_requests_ready(&self) -> bool { true }
+    fn request_pull_request(&self, _request: neoism_protocol::pull_request::PullRequestRequest) {}
+    fn pull_request(&self, _root: &Path, _request: neoism_protocol::pull_request::PullRequestRequest) -> neoism_protocol::pull_request::PullRequestReply {
+        neoism_protocol::pull_request::PullRequestReply::Error { kind: neoism_protocol::pull_request::PullRequestErrorKind::Unsupported, message: "Pull requests are not supported by this Git provider".into() }
+    }
     /// Host-driven providers queue RPCs and return immediately. Never run the
     /// native load_diff/collect worker against these opaque host paths.
     fn is_host_driven(&self) -> bool {

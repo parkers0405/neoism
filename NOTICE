@@ -54,6 +54,8 @@ OpenCode provider artwork (`neoism-agent/sdk/typescript/packages/gui/src/compone
 
 MCP service artwork — Firecrawl mark from Lobe Icons, MIT, Copyright (c) 2023 LobeHub; Webflow mark from Simple Icons, CC0-1.0. SVG sources, rasterizations, source URLs, and the LobeHub MIT license are in `neoism-frontend/shared/assets/icons/MCP-ARTWORK.md`. Service marks remain trademarks of their respective owners.
 
+Claude provider artwork — Claude starburst from Lobe Icons, MIT, Copyright (c) 2023 LobeHub. Source, atlas-generation notes, and a link to the bundled MIT license are in `neoism-frontend/shared/assets/icons/PROVIDER-ARTWORK.md`. The mark remains a trademark of Anthropic.
+
 
 Tool Composition parser
 -----------------------

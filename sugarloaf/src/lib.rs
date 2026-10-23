@@ -15,6 +15,7 @@ pub mod font;
 mod font_cache;
 pub mod grid;
 pub mod layout;
+mod occlusion;
 pub mod renderer;
 mod sugarloaf;
 pub mod text;

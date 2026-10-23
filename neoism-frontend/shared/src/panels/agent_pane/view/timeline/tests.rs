@@ -8,6 +8,376 @@ use super::read_group::read_tool_group_at;
 
 use super::*;
 
+#[test]
+fn timeline_scroll_rail_is_compact_and_centered_in_right_gutter_at_every_scale() {
+    use super::render::timeline_scroll_rail_geometry;
+    for s in [0.75, 1.0, 1.5, 2.0] {
+        let rect = [400.0 * s, 40.0 * s, 20.0 * s, 300.0 * s];
+        let rail = timeline_scroll_rail_geometry(rect, s, 0.0, 1200.0, 300.0).unwrap();
+        assert_eq!(rail.tick_count, 11);
+        assert_eq!(rail.active_tick, 10);
+        assert!((rail.track[3] - 102.0 * s).abs() < 0.001);
+        assert!(
+            (rail.track[1] + rail.track[3] * 0.5 - (rect[1] + rect[3] * 0.5)).abs()
+                < 0.001
+        );
+        assert_eq!(rail.track[0] + rail.track[2], rect[0] + rect[2]);
+        assert_eq!(rail.thumb[1] + rail.thumb[3], rail.track[1] + rail.track[3]);
+        assert_eq!(rail.thumb[3], 2.0 * s);
+    }
+}
+
+#[test]
+fn timeline_scroll_rail_never_covers_chat_even_when_hovered() {
+    use super::render::timeline_scroll_rail_geometry;
+    for s in [0.75, 1.0, 1.5, 2.0] {
+        for width in [320.0, 519.0, 520.0, 960.0, 1200.0, 2000.0] {
+            let rect = [20.0 * s, 40.0 * s, width * s, 300.0 * s];
+            let (content_x, content_w) = super::super::layout::chat_column(rect, s);
+            let right = content_x + content_w;
+            let gutter = [right, rect[1], rect[0] + rect[2] - right, rect[3]];
+            let rail =
+                timeline_scroll_rail_geometry(gutter, s, 0.0, 1200.0, 300.0).unwrap();
+            assert!(rail.track[0] >= right);
+            assert!(rail.track[0] <= right + 8.0 * s);
+            assert!(rail.track[0] + rail.track[2] <= rect[0] + rect[2] + 0.001);
+            for index in 0..rail.tick_count {
+                let normal = rail.tick_rect(index, false, &[1.0; 11]);
+                let hovered = rail.tick_rect(index, true, &[1.0; 11]);
+                assert!(normal[0] > right);
+                assert_eq!(normal[0], hovered[0], "hover extends only rightward");
+                assert!(hovered[2] > normal[2]);
+                assert!(hovered[0] + hovered[2] <= rail.track[0] + rail.track[2]);
+                assert!(hovered[1] >= rect[1]);
+                assert!(hovered[1] + hovered[3] <= rect[1] + rect[3]);
+            }
+            let padding = if width < 520.0 { 16.0 } else { 40.0 };
+            let expected_width = (width - padding).min(960.0) * s;
+            assert!(
+                (content_w - expected_width).abs() < 0.001,
+                "chat wrapping is unchanged"
+            );
+        }
+    }
+}
+
+#[test]
+fn timeline_scroll_rail_hover_tracks_each_tick_and_clears_outside_gutter() {
+    use super::render::timeline_scroll_rail_geometry;
+    let rail =
+        timeline_scroll_rail_geometry([400.0, 0.0, 20.0, 300.0], 1.0, 0.0, 1200.0, 300.0)
+            .unwrap();
+    for index in 0..rail.tick_count {
+        let [x, y, w, h] = rail.tick_rect(index, true, &[1.0; 11]);
+        assert_eq!(
+            rail.hovered_tick(Some((x + w * 0.5, y + h * 0.5))),
+            Some(index)
+        );
+        assert_eq!(rail.hovered_tick(Some((x + w, y + h * 0.5))), Some(index));
+    }
+    assert_eq!(rail.hovered_tick(None), None);
+    assert_eq!(rail.hovered_tick(Some((399.0, 150.0))), None);
+    assert_eq!(rail.hovered_tick(Some((421.0, 150.0))), None);
+    assert_eq!(rail.hovered_tick(Some((410.0, rail.track[1] - 1.0))), None);
+    assert_eq!(
+        rail.hovered_tick(Some((410.0, rail.track[1] + rail.track[3] + 1.0))),
+        None
+    );
+    assert_eq!(rail.hovered_tick(Some((f32::NAN, 150.0))), None);
+}
+
+#[test]
+fn timeline_scroll_rail_profile_follows_real_blocks_gaps_and_content_growth() {
+    use super::render::timeline_scroll_rail_profile;
+    let mut rows = vec![
+        layout_row(0, 0.0, 60.0),
+        layout_row(1, 60.0, 540.0),
+        layout_row(2, 600.0, 60.0),
+    ];
+    let profile = timeline_scroll_rail_profile(&rows, 660.0, 1.0);
+    assert!((profile[0] - profile[10]).abs() < 0.001);
+    assert!(profile[0] > 0.0 && profile[0] < profile[1]);
+    assert!(profile[1..10]
+        .iter()
+        .all(|weight| (*weight - 1.0).abs() < 0.001));
+    rows[1].height = 120.0;
+    let changed = timeline_scroll_rail_profile(&rows, 660.0, 1.0);
+    assert_eq!(
+        changed[5], 0.0,
+        "a gap is not a substantial conversation block"
+    );
+    assert!(changed[5] < profile[5]);
+    assert_eq!(changed[0], profile[0]);
+    assert_eq!(changed[10], profile[10]);
+    let empty: Vec<TimelineLayoutRow<NeoismAgentMessage>> = Vec::new();
+    assert_eq!(timeline_scroll_rail_profile(&empty, 660.0, 1.0), [0.0; 11]);
+    assert_eq!(timeline_scroll_rail_profile(&rows, 0.0, 1.0), [0.0; 11]);
+}
+
+#[test]
+fn timeline_scroll_rail_profile_is_scale_independent_not_a_decorative_pattern() {
+    use super::render::timeline_scroll_rail_profile;
+    let rows: Vec<_> = (0..11)
+        .map(|i| layout_row(i, i as f32 * 60.0, 60.0))
+        .collect();
+    let profile = timeline_scroll_rail_profile(&rows, 660.0, 1.0);
+    assert!(profile
+        .iter()
+        .all(|weight| (*weight - profile[0]).abs() < 0.001));
+    for s in [0.75, 1.5, 2.0] {
+        let scaled: Vec<_> = (0..11)
+            .map(|i| layout_row(i, i as f32 * 60.0 * s, 60.0 * s))
+            .collect();
+        let actual = timeline_scroll_rail_profile(&scaled, 660.0 * s, s);
+        for (expected, weight) in profile.iter().zip(actual) {
+            assert!((expected - weight).abs() < 0.001);
+            assert!(weight.is_finite() && (0.0..=1.0).contains(&weight));
+        }
+    }
+}
+
+#[test]
+fn timeline_scroll_rail_variable_lengths_preserve_hover_and_full_history_in_short_rails()
+{
+    use super::render::timeline_scroll_rail_geometry;
+    let mut profile = [0.5; 11];
+    profile[0] = 0.0;
+    profile[10] = 1.0;
+    for s in [1.0, 2.0] {
+        for width in [8.0, 20.0, 200.0] {
+            for height in [28.0, 48.0, 300.0] {
+                let rail = timeline_scroll_rail_geometry(
+                    [400.0, 0.0, width * s, height * s],
+                    s,
+                    0.0,
+                    1200.0,
+                    300.0,
+                )
+                .unwrap();
+                let short = rail.tick_rect(0, false, &profile);
+                let long = rail.tick_rect(rail.tick_count - 1, false, &profile);
+                assert!(
+                    short[2] < long[2],
+                    "short rails still include the full history profile"
+                );
+                for index in 0..rail.tick_count {
+                    let normal = rail.tick_rect(index, false, &profile);
+                    let hover = rail.tick_rect(index, true, &profile);
+                    assert_eq!(normal[0], hover[0]);
+                    assert!(
+                        hover[2] > normal[2],
+                        "even the longest tick extends on hover"
+                    );
+                    assert!(hover[0] >= 400.0);
+                    assert!(hover[0] + hover[2] <= rail.track[0] + rail.track[2]);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn timeline_scroll_rail_clamps_position_and_shrinks_for_short_viewports() {
+    use super::render::timeline_scroll_rail_geometry;
+    let rect = [0.0, 10.0, 400.0, 300.0];
+    for (offset, active) in [(1000.0, 0), (900.0, 0), (450.0, 5), (0.0, 10), (-10.0, 10)]
+    {
+        let rail =
+            timeline_scroll_rail_geometry(rect, 1.0, offset, 1200.0, 300.0).unwrap();
+        assert_eq!(rail.active_tick, active);
+        assert!(rail.thumb[1] >= rail.track[1]);
+        assert!(rail.thumb[1] + rail.thumb[3] <= rail.track[1] + rail.track[3]);
+    }
+    for height in [28.0, 48.0, 80.0, 120.0] {
+        let rail = timeline_scroll_rail_geometry(
+            [0.0, 10.0, 400.0, height],
+            1.0,
+            0.0,
+            1200.0,
+            height,
+        )
+        .unwrap();
+        assert!((2..=11).contains(&rail.tick_count));
+        assert!(rail.track[1] >= 18.0);
+        assert!(rail.track[1] + rail.track[3] <= 10.0 + height - 8.0);
+    }
+    assert!(timeline_scroll_rail_geometry(rect, 1.0, 0.0, 300.0, 300.0).is_none());
+    assert!(timeline_scroll_rail_geometry(
+        [0.0, 0.0, 400.0, 20.0],
+        1.0,
+        0.0,
+        1200.0,
+        20.0
+    )
+    .is_none());
+    assert!(timeline_scroll_rail_geometry(
+        [0.0, 0.0, 5.0, 300.0],
+        1.0,
+        0.0,
+        1200.0,
+        300.0
+    )
+    .is_none());
+}
+
+#[test]
+fn timeline_scroll_rail_click_and_drag_reach_both_history_endpoints() {
+    use super::render::timeline_scroll_rail_geometry;
+    let rect = [0.0, 0.0, 400.0, 300.0];
+    let mut pane = NeoismAgentPane::default();
+    pane.set_timeline_metrics(rect, 1200.0, 300.0);
+    let rail =
+        timeline_scroll_rail_geometry([400.0, 0.0, 20.0, 300.0], 1.0, 0.0, 1200.0, 300.0)
+            .unwrap();
+    pane.set_scrollbar_geometry(Some(rail.track), Some(rail.thumb));
+    let x = rail.track[0] + rail.track[2] * 0.5;
+    let top = rail.track[1] + rail.thumb[3] * 0.5;
+    let bottom = rail.track[1] + rail.track[3] - rail.thumb[3] * 0.5;
+    assert!(!pane.begin_scrollbar_drag(x, top - 10.0));
+    assert!(pane.begin_scrollbar_drag(x, top));
+    assert_eq!(pane.timeline_scroll_offset(), 900.0);
+    assert!(!AgentTimelinePane::timeline_follow_bottom(&pane));
+    assert!(pane.scrollbar_dragging());
+    assert!(pane.drag_scrollbar_to(x, bottom));
+    assert_eq!(pane.timeline_scroll_offset(), 0.0);
+    assert!(AgentTimelinePane::timeline_follow_bottom(&pane));
+    assert!(pane.end_scrollbar_drag());
+    assert!(!pane.scrollbar_dragging());
+    assert!(!pane.drag_scrollbar_to(x, top));
+    assert!(pane.begin_scrollbar_drag(x, (top + bottom) * 0.5));
+    assert_eq!(pane.timeline_scroll_offset(), 450.0);
+    assert!(pane.end_scrollbar_drag());
+}
+
+#[test]
+fn floating_paint_preserves_scroll_metrics_and_following_activity_reservation() {
+    use super::render::{activity_geometry, body_paint_clip};
+    let metrics = [10.0, 30.0, 400.0, 300.0];
+    let paint = [10.0, 30.0, 400.0, 440.0];
+    for following in [false, true] {
+        for status_h in [0.0, 72.0] {
+            let geometry =
+                activity_geometry(metrics, 1800.0, status_h, 18.0, 1.0, following, 800.0);
+            let original_status = geometry.status_rect;
+            let original_max = (geometry.content_h - metrics[3]).max(0.0);
+            let body = body_paint_clip(&geometry, paint, following, status_h);
+            assert_eq!(geometry.status_rect, original_status);
+            assert_eq!(body[..3], metrics[..3]);
+            if following && status_h > 0.0 {
+                assert_eq!(body, geometry.body_clip);
+                assert!(body[1] + body[3] < geometry.status_rect[1]);
+            } else {
+                assert_eq!(body[3], paint[3]);
+            }
+            let mut pane = NeoismAgentPane::default();
+            AgentTimelinePane::set_timeline_metrics(
+                &mut pane,
+                metrics,
+                geometry.content_h,
+                metrics[3],
+                0.0,
+                1.0,
+            );
+            let before = pane.timeline_scrollbar_state().unwrap();
+            pane.set_timeline_paint_region(TimelinePaintRegion {
+                viewport: paint,
+                occlusion_rects: Vec::new(),
+            });
+            let after = pane.timeline_scrollbar_state().unwrap();
+            assert_eq!(before.1, after.1);
+            assert_eq!(after.2, metrics[3]);
+            assert_eq!((after.1 - after.2).max(0.0), original_max);
+        }
+    }
+}
+
+#[test]
+fn floating_paint_materializes_rows_below_metrics_without_moving_origin() {
+    use super::render::{activity_geometry, body_paint_clip};
+    let rows = vec![
+        layout_row(0, 0.0, 60.0),
+        layout_row(1, 110.0, 60.0),
+        layout_row(2, 230.0, 60.0),
+    ];
+    let metrics = [20.0, 40.0, 400.0, 100.0];
+    let paint = [20.0, 40.0, 400.0, 220.0];
+    let geometry = activity_geometry(metrics, 290.0, 0.0, 18.0, 1.0, false, 0.0);
+    let body = body_paint_clip(&geometry, paint, false, 0.0);
+    assert_eq!(visible_timeline_row_range(&rows, 0.0, metrics[3]), 0..1);
+    assert_eq!(visible_timeline_row_range(&rows, 0.0, body[3]), 0..2);
+    assert_eq!(body[1], metrics[1]);
+    let virtual_rows = super::layout::timeline_virtual_row_measurements(&rows, 18.0);
+    let mut pane = NeoismAgentPane::default();
+    pane.messages = vec![
+        NeoismAgentMessage::assistant("first").with_id("a"),
+        NeoismAgentMessage::assistant("below old clip").with_id("b"),
+        NeoismAgentMessage::assistant("later").with_id("c"),
+    ];
+    pane.sync_virtual_timeline(body, body[2], 290.0, 0.0, 1.0, &virtual_rows);
+    let (start, end) = pane.virtual_timeline_visible_source_range().unwrap();
+    assert_eq!(start, 0);
+    assert!(
+        end >= 1,
+        "paint extension must materialize the second source row"
+    );
+}
+
+#[test]
+fn lazy_exact_window_must_cover_paint_extension_at_the_original_scroll_top() {
+    let rows = (0..20)
+        .map(|index| layout_row(index, index as f32 * 100.0, 80.0))
+        .collect();
+    let cache = lazy_cache(rows, 0, 10);
+    let metric_h = 100.0;
+    let scroll_top = 200.0;
+    let offset = cache.content_height - metric_h - scroll_top;
+    assert!(super::layout::lazy_cache_covers_viewport(&cache, offset, metric_h, metric_h));
+    assert!(!super::layout::lazy_cache_covers_viewport(&cache, offset, metric_h, 800.0));
+}
+
+#[test]
+fn floating_composer_masks_block_hits_but_expose_corners_and_tray_sides() {
+    use super::super::composer_geometry::ComposerGeometry;
+    for scale in [1.0, 1.5, 2.0] {
+        for footer in [false, true] {
+            let composer = ComposerGeometry::new([10.0, 110.0, 400.0, 80.0], 1.0, scale, footer);
+            let host_hole = [150.0, 40.0, 30.0, 20.0];
+            let mut holes = vec![host_hole];
+            holes.extend(composer.occlusion_rects());
+            let region = TimelinePaintRegion {
+                viewport: [10.0, 30.0, 400.0, 240.0],
+                occlusion_rects: holes,
+            };
+            assert!(!region.contains(160.0, 50.0), "inherited host hole");
+            assert!(!region.contains(210.0, 150.0), "card body");
+            assert!(region.contains(11.0, 111.0), "uncovered top corner");
+            assert!(region.contains(11.0, 189.0), "uncovered bottom corner");
+            assert!(region.contains(12.0, 195.0), "beside inset tray");
+            if let Some(tray) = composer.tray {
+                assert!(!region.contains(tray[0] + tray[2] * 0.5, tray[1] + 2.0));
+            } else {
+                assert!(region.contains(210.0, 195.0));
+            }
+            let mut pane = NeoismAgentPane::default();
+            pane.register_link_hit_rect("test-link".into(), region.viewport);
+            pane.register_tool_hit_rect("test-tool".into(), region.viewport);
+            pane.set_timeline_paint_region(region);
+            pane.register_selectable_line("exposed tray side", [10.0, 194.0, 400.0, 16.0]);
+            pane.register_selectable_line("behind card", [10.0, 145.0, 400.0, 16.0]);
+            assert!(pane.begin_selection_on_text_at(12.0, 195.0));
+            assert!(!pane.begin_selection_on_text_at(210.0, 150.0));
+            assert!(!pane.drag_selection_to(210.0, 150.0));
+            assert!(pane.timeline_contains_point(11.0, 111.0));
+            assert_eq!(pane.link_at(11.0, 111.0).as_deref(), Some("test-link"));
+            assert!(pane.tool_hit(12.0, 195.0));
+            assert!(!pane.timeline_contains_point(210.0, 150.0));
+            assert!(pane.link_at(210.0, 150.0).is_none());
+            assert!(!pane.tool_hit(210.0, 150.0));
+            assert!(!pane.begin_selection_at(210.0, 150.0));
+        }
+    }
+}
+
 fn trace_reveal_tool(id: &str, batch: &str) -> NeoismAgentMessage {
     let mut message = NeoismAgentMessage::tool(
         "Read file",

@@ -168,6 +168,7 @@ impl NeoismAgentPane {
                     .unwrap_or(requested.as_str())
                     .to_string();
                 self.directory = Some(directory.clone());
+                self.refresh_provider_readiness();
                 self.invalidate_skill_options();
                 self.close_picker();
                 self.side_panel.invalidate_goal_refresh();
@@ -226,19 +227,11 @@ impl NeoismAgentPane {
     }
 
     fn undo_session(&mut self) {
-        if self.session_id.is_none() {
-            self.system_message("Undo", "no session has started yet");
-            return;
-        }
-        self.push_outbound(OutboundAgentCommand::UndoSession);
+        self.execute_undo_session_command();
     }
 
     fn redo_session(&mut self) {
-        if self.session_id.is_none() {
-            self.system_message("Redo", "no session has started yet");
-            return;
-        }
-        self.push_outbound(OutboundAgentCommand::RedoSession);
+        self.execute_redo_session_command();
     }
 
     fn set_goal(&mut self, text: String) {
@@ -512,6 +505,7 @@ impl NeoismAgentPane {
             return;
         }
         if self.session_id.as_deref() == Some(session_id.as_str()) {
+            self.refresh_provider_readiness();
             self.pending_session_switch = None;
             return;
         }
@@ -924,6 +918,7 @@ impl NeoismAgentPane {
             self.directory = Some(directory);
             self.invalidate_skill_options();
         }
+        self.refresh_provider_readiness();
         if let Some(agent) = state.agent {
             self.agent = Some(agent);
         }
@@ -998,6 +993,14 @@ impl NeoismAgentPane {
                 "Wait for the provider to confirm your option before sending".to_string(),
             );
         }
+        if self.session_id.as_ref()
+            .is_some_and(|session| self.session_history_in_flight.contains(session))
+        {
+            return Err("Wait for the session history update before sending".into());
+        }
+        if self.conversation_source().provider().is_none() {
+            self.refresh_provider_readiness();
+        }
         if let Some(error) = self.prompt_readiness_error() {
             return Err(error.to_string());
         }
@@ -1034,6 +1037,9 @@ impl NeoismAgentPane {
         if self.is_subagent_session() {
             self.system_message("Prompt failed", "subagent sessions are view-only");
             return;
+        }
+        if self.conversation_source().provider().is_none() {
+            self.refresh_provider_readiness_for_model(&model);
         }
         if let Some(error) = self.prompt_readiness_error_for_model(&model) {
             self.push_notice(error, NeoismAgentNoticeLevel::Warn);
@@ -1721,10 +1727,21 @@ impl NeoismAgentPane {
             self.system_message(title, "no session has started yet");
             return;
         };
-        // Run the revert POST and the (potentially large) message re-fetch off
-        // the UI thread. Doing them inline blocked the drain loop, freezing the
-        // whole pane — so ESC and any other keystroke were ignored until the
-        // revert finished. The result is applied back via a background update.
+        if self.is_streaming() || self.prompt_dispatch_in_flight {
+            self.system_message(title, "stop the current response before changing history");
+            return;
+        }
+        if !self.session_history_in_flight.insert(session_id.clone()) {
+            self.system_message(title, "session history is already being updated");
+            return;
+        }
+        // The successful undo response already identifies the removed turn.
+        // Reuse loaded rows instead of waiting for another history request and
+        // synchronous image downloads before updating the transcript.
+        let loaded_user_ids: HashSet<String> = self.messages.iter()
+            .filter(|message| message.kind == super::pane::NeoismAgentMessageKind::User)
+            .map(|message| message.id.clone())
+            .collect();
         let server = self.server.clone();
         let title = title.to_string();
         let action = action.to_string();
@@ -1740,23 +1757,45 @@ impl NeoismAgentPane {
                     "POST",
                     &format!("/v2/sessions/{thread_session}/{thread_action}"),
                     None,
-                )
-                .and_then(|_| fetch_session_messages(&server, &thread_session))
-                {
-                    Ok(messages) => NeoismAgentBackgroundUpdate::SessionHistoryApplied {
+                ) {
+                    Ok(Some(info)) => {
+                        super::api::invalidate_session_messages_cache(&server, &thread_session);
+                        let revert_message_id = info.get("revert")
+                            .and_then(|revert| revert.get("messageID"))
+                            .and_then(Value::as_str)
+                            .map(str::to_owned);
+                        let local_undo = thread_action == "undo"
+                            && revert_message_id.as_ref()
+                                .is_none_or(|id| loaded_user_ids.contains(id));
+                        let messages = if local_undo {
+                            Ok(None)
+                        } else {
+                            fetch_session_messages(&server, &thread_session).map(Some)
+                        };
+                        match messages {
+                            Ok(messages) => NeoismAgentBackgroundUpdate::SessionHistoryApplied {
+                                session_id: thread_session,
+                                title: thread_title,
+                                messages,
+                                revert_message_id,
+                            },
+                            Err(error) => NeoismAgentBackgroundUpdate::SessionHistoryFailed {
+                                session_id: thread_session,
+                                title: thread_title,
+                                error: format!("{thread_action} succeeded, but refreshing history failed: {error}"),
+                            },
+                        }
+                    }
+                    result => NeoismAgentBackgroundUpdate::SessionHistoryFailed {
                         session_id: thread_session,
                         title: thread_title,
-                        messages,
-                    },
-                    Err(error) => NeoismAgentBackgroundUpdate::SessionHistoryFailed {
-                        session_id: thread_session,
-                        title: thread_title,
-                        error,
+                        error: result.err().unwrap_or_else(|| "empty session history response".into()),
                     },
                 };
                 let _ = background_tx.send(update);
             })
         {
+            self.session_history_in_flight.remove(&session_id);
             self.system_message(
                 &title,
                 format!("failed to start {action} thread: {error}"),

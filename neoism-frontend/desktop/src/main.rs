@@ -53,6 +53,8 @@ mod screen;
 #[cfg(not(target_arch = "wasm32"))]
 mod server_registry;
 #[cfg(not(target_arch = "wasm32"))]
+mod system_registry;
+#[cfg(not(target_arch = "wasm32"))]
 mod service_process;
 #[cfg(not(target_arch = "wasm32"))]
 mod ssh_hosts;

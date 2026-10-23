@@ -18,6 +18,13 @@ impl NeoismAgentPane {
     }
 
     pub fn activity_status_contains(&self, x: f32, y: f32) -> bool {
+        if self
+            .timeline_paint_region
+            .as_ref()
+            .is_some_and(|region| !region.contains(x, y))
+        {
+            return false;
+        }
         // Moving/padded primary glyphs may overlap the child-summary row.
         // Reserve that entire row for its existing Background task menu.
         !self.background_status_contains(x, y)
@@ -152,6 +159,13 @@ impl NeoismAgentPane {
     }
 
     pub fn begin_markdown_horizontal_scrollbar_drag(&mut self, x: f32, y: f32) -> bool {
+        if self
+            .timeline_paint_region
+            .as_ref()
+            .is_some_and(|region| !region.contains(x, y))
+        {
+            return false;
+        }
         let Some(drag) = interaction_policy::begin_markdown_horizontal_scrollbar_drag(
             &self.markdown_horizontal_scrollbars,
             &mut self.markdown_horizontal_scroll_offsets,
@@ -169,6 +183,13 @@ impl NeoismAgentPane {
     }
 
     pub fn markdown_horizontal_scrollbar_contains(&self, x: f32, y: f32) -> bool {
+        if self
+            .timeline_paint_region
+            .as_ref()
+            .is_some_and(|region| !region.contains(x, y))
+        {
+            return false;
+        }
         self.markdown_horizontal_scrollbars
             .iter()
             .rev()
@@ -518,10 +539,24 @@ impl NeoismAgentPane {
     }
 
     pub fn tool_hit(&self, x: f32, y: f32) -> bool {
+        if self
+            .timeline_paint_region
+            .as_ref()
+            .is_some_and(|region| !region.contains(x, y))
+        {
+            return false;
+        }
         interaction_policy::hit_rect_target(&self.tool_hit_rects, x, y).is_some()
     }
 
     pub fn toggle_tool_at(&mut self, x: f32, y: f32) -> bool {
+        if self
+            .timeline_paint_region
+            .as_ref()
+            .is_some_and(|region| !region.contains(x, y))
+        {
+            return false;
+        }
         let Some((id, rect)) =
             interaction_policy::hit_rect_target(&self.tool_hit_rects, x, y)
         else {
@@ -695,6 +730,13 @@ impl NeoismAgentPane {
     }
 
     pub fn link_at(&self, x: f32, y: f32) -> Option<String> {
+        if self
+            .timeline_paint_region
+            .as_ref()
+            .is_some_and(|region| !region.contains(x, y))
+        {
+            return None;
+        }
         interaction_policy::hit_rect_target(&self.link_hit_rects, x, y)
             .map(|(target, _)| target)
     }

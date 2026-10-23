@@ -955,7 +955,7 @@ impl Route<'_> {
                         let selected =
                             self.window.screen.renderer.modal.selected_action();
                         let action =
-                            if matches!(selected, Some(ModalAction::ServerFormSubmit)) {
+                            if matches!(selected, Some(ModalAction::ServerFormSubmit | ModalAction::SystemFormSubmit)) {
                                 self.window.screen.renderer.modal.submit_form()
                             } else {
                                 selected
@@ -1249,6 +1249,16 @@ impl Route<'_> {
                         self.request_overlay_redraw();
                     }
                     Key::Named(NamedKey::Tab) => {
+                        if mods.control_key() && !mods.alt_key() && !mods.super_key() {
+                            if let Some(action) = self.window.screen.renderer
+                                .command_palette.category_switch_action()
+                            {
+                                self.window.screen.renderer.command_palette.set_enabled(false);
+                                self.window.screen.execute_palette_action(action, clipboard);
+                                self.request_overlay_redraw();
+                                return true;
+                            }
+                        }
                         if self.window.screen.renderer.command_palette.is_cd_query() {
                             let reverse =
                                 self.window.screen.modifiers.state().shift_key();

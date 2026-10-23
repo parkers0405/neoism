@@ -592,6 +592,13 @@ impl Text {
     }
 
     #[inline]
+    pub(crate) fn occlude_since(&mut self, first: usize, holes: &[[f32; 4]]) {
+        crate::occlusion::filter_tail(&mut self.instances, first, |instance| {
+            crate::occlusion::glyph_parts(instance, holes)
+        });
+    }
+
+    #[inline]
     pub fn instances(&self) -> &[TextInstance] {
         &self.instances
     }
@@ -2942,6 +2949,59 @@ mod tests {
             instances_ink_bounds_px(&instances),
             Some([8.0, 23.0, 17.0, 29.0])
         );
+    }
+
+    #[test]
+    fn deferred_inverse_clip_observes_centering_and_post_draw_reveal_mutations() {
+        let (font_library, _errors) = FontLibrary::new(SugarloafFonts::default());
+        // Both Sugarloaf recorders use the same deferred tail filter.
+        {
+            let mut text = Text::new(&font_library);
+            text.scale_factor = 2.0;
+            let glyph = TextInstance {
+                pos: [0.0; 2],
+                glyph_size: [8, 6],
+                glyph_pos: [10, 20],
+                ..TextInstance::default()
+            };
+            text.instances.push(glyph); // Content before the scope must survive.
+            let checkpoint = text.instances.len();
+            text.instances.push(glyph);
+            assert!(text.center_instances_in_rect(
+                checkpoint,
+                [10.0, 20.0, 20.0, 10.0],
+                true,
+                true
+            ));
+            let centered = text.instances[checkpoint];
+            // Model a reveal pass which adjusts the instance after drawing.
+            text.instances[checkpoint].pos[0] += 1.0;
+            text.instances[checkpoint].blur_radius = 2.0;
+            let final_pos = text.instances[checkpoint].pos;
+            let hole = [final_pos[0] + 2.0, final_pos[1], 2.0, 6.0];
+            text.occlude_since(checkpoint, &[hole]);
+            assert_eq!(text.instances.len(), 3);
+            assert_eq!(text.instances[0].clip_rect, [0.0; 4]);
+            for part in &text.instances[checkpoint..] {
+                assert_eq!(part.pos, final_pos);
+                assert_eq!(part.glyph_pos, centered.glyph_pos);
+                assert_eq!(part.blur_radius, 2.0);
+                assert!(crate::occlusion::intersection(part.clip_rect, hole).is_none());
+            }
+            // Restoring to an empty scope must not mask later glyphs.
+            text.instances.push(glyph);
+            assert_eq!(text.instances.last().unwrap().clip_rect, [0.0; 4]);
+
+            // Conversely, never discard a glyph at draw time just because it
+            // overlaps a hole before its icon-centering transform.
+            let mut moved = Text::new(&font_library);
+            moved.scale_factor = 2.0;
+            moved.instances.push(glyph);
+            moved.center_instances_in_rect(0, [10.0, 20.0, 20.0, 10.0], true, true);
+            moved.occlude_since(0, &[[0.0, 0.0, 8.0, 6.0]]);
+            assert_eq!(moved.instances.len(), 1);
+            assert_eq!(moved.instances[0].clip_rect, [0.0; 4]);
+        }
     }
 
     #[test]

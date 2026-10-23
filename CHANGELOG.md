@@ -2,6 +2,21 @@
 
 All notable user-facing changes to Neoism are documented here.
 
+## [0.7.135] - 2026-10-23
+
+### Pull requests, systems management, and Agent presentation
+
+- Adds GitHub pull-request discovery, creation/opening, immutable comparison tabs, Changes/Conversation/Checks views, review drafts, comments/approvals/change requests, thread replies/resolution, and viewer-side browser links.
+- Adds a repository-scoped paginated PR inbox with search, labels, state/sort filters, relationship grouping, responsive detail layout, and retained drafts.
+- Adds explicit current-workspace or managed-worktree checkout with repository/snapshot verification and authoritative document checks; dirty or collaborative documents refuse unsafe transitions. Checkout is not an untrusted-repository sandbox.
+- Adds muted, noninteractive PR loading skeletons while retaining meaningful errors/empty states. PR detail headers and tabs scroll away so Code/Timeline can use the full detail viewport, with clipped input routing and review-sheet scroll ownership.
+- Adds native Systems management for saved SSH recipes and connection lifecycle, cancellation/generation guards, shared tunnels, and palette navigation. Browser clients report desktop-only management.
+- Refines the floating composer, inset tray, wrapping, snapped seams, silhouette-aware painting/hit regions, timeline scrollbar, and browser drag ownership. Adds deferred inverse clipping while preserving preceding render output and atlas/UV metadata.
+- Improves provider readiness caching, history-operation serialization, and undo deletion/search cleanup. Uses proportional Geist for PR presentation and updates provider artwork with attribution notices.
+- Includes PR documentation and the intentional removal of the source-only typesafe-AI skill files.
+
+This is a stable production release, available through plain `neoism update` after the full platform matrix passes. Servo and CEF workers remain separate experimental components and are not packaged.
+
 ## [0.7.134] - 2026-10-22
 
 ### Git review, editor lifecycle, and LSP navigation

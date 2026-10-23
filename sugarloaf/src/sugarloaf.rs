@@ -255,6 +255,14 @@ mod background_identity_tests {
     }
 }
 
+#[derive(Default)]
+struct ContentOcclusionCheckpoint {
+    batches: [Vec<(usize, usize)>; 2],
+    text: usize,
+    overlay_text: usize,
+    images: rustc_hash::FxHashMap<usize, usize>,
+}
+
 pub struct Sugarloaf<'a> {
     // NOTE: field order is load-bearing for the Vulkan backend. Rust
     // drops struct fields in declaration order, and any field that
@@ -306,6 +314,8 @@ pub struct Sugarloaf<'a> {
     /// late overlay quads, such as popover/menu items.
     overlay_text: crate::text::Text,
     late_overlay_mode: bool,
+    content_occlusion_rects: Vec<[f32; 4]>,
+    content_occlusion_checkpoint: ContentOcclusionCheckpoint,
     last_frame_presented: bool,
     /// Owned context (device + swapchain + queue). Last so the device
     /// outlives every Vulkan-handle-owning field above. See note at
@@ -596,6 +606,8 @@ impl Sugarloaf<'_> {
             image_overlays: rustc_hash::FxHashMap::default(),
             overlay_text,
             late_overlay_mode: false,
+            content_occlusion_rects: Vec::new(),
+            content_occlusion_checkpoint: ContentOcclusionCheckpoint::default(),
             last_frame_presented: true,
         };
 
@@ -663,6 +675,8 @@ impl Sugarloaf<'_> {
             image_overlays: rustc_hash::FxHashMap::default(),
             overlay_text,
             late_overlay_mode: false,
+            content_occlusion_rects: Vec::new(),
+            content_occlusion_checkpoint: ContentOcclusionCheckpoint::default(),
             last_frame_presented: true,
         })
     }
@@ -1779,6 +1793,72 @@ impl Sugarloaf<'_> {
         self.state.content.update_dimensions(id);
     }
 
+    /// Replace inverse clips for subsequently emitted immediate-mode content.
+    /// Rectangles are `[x, y, width, height]` in UI logical pixels, just like
+    /// `quad` and text inputs. Invalid/empty rectangles have no effect. Holes
+    /// may be scanline strips describing a rounded silhouette (not its box).
+    ///
+    /// Returns the previous list verbatim. Bracket one timeline emission with
+    /// this setter and restore that list BEFORE emitting the composer. Nested
+    /// replacement/restoration is supported; lists replace, rather than union.
+    /// Existing explicit clips are intersected, never replaced. Cached content,
+    /// terminal grids and content emitted before the call are not affected.
+    /// Filtering occurs at scope transitions, not by repainting the producer.
+    /// Text uses final recorded instances, including post-draw icon centering
+    /// and reveal transforms. Complete those mutations before restoring scope.
+    pub fn set_content_occlusion_rects(&mut self, rects: Vec<[f32; 4]>) -> Vec<[f32; 4]> {
+        self.flush_content_occlusion();
+        let prior = std::mem::replace(&mut self.content_occlusion_rects, rects);
+        self.capture_content_occlusion_checkpoint();
+        prior
+    }
+
+    fn capture_content_occlusion_checkpoint(&mut self) {
+        self.content_occlusion_checkpoint = ContentOcclusionCheckpoint {
+            batches: self.renderer.occlusion_checkpoint(),
+            text: self.text.instances().len(),
+            overlay_text: self.overlay_text.instances().len(),
+            images: self
+                .image_overlays
+                .iter()
+                .map(|(id, images)| (*id, images.len()))
+                .collect(),
+        };
+    }
+
+    fn physical_content_occlusions(&self) -> Vec<[f32; 4]> {
+        let scale = self.state.style.scale_factor;
+        self.content_occlusion_rects
+            .iter()
+            .copied()
+            .filter(|r| crate::occlusion::valid(*r))
+            .map(|r| r.map(|v| v * scale))
+            .filter(|r| crate::occlusion::valid(*r))
+            .collect()
+    }
+
+    fn flush_content_occlusion(&mut self) {
+        if self.content_occlusion_rects.is_empty() {
+            return;
+        }
+        let holes = self.physical_content_occlusions();
+        if holes.is_empty() {
+            return;
+        }
+        let checkpoint = &self.content_occlusion_checkpoint;
+        self.renderer.occlude_since(&checkpoint.batches, &holes);
+        self.text.occlude_since(checkpoint.text, &holes);
+        self.overlay_text
+            .occlude_since(checkpoint.overlay_text, &holes);
+        for (panel, images) in &mut self.image_overlays {
+            let first = checkpoint.images.get(panel).copied().unwrap_or_default();
+            crate::occlusion::filter_tail(images, first, |image| {
+                crate::occlusion::image_parts(image, &holes)
+            });
+        }
+        self.capture_content_occlusion_checkpoint();
+    }
+
     /// Immediate-mode text recorder for UI overlays. The per-sugarloaf
     /// `Text` instance. Overlays call `draw` / `measure` via this
     /// handle; sugarloaf flushes the recorded instances at render
@@ -1914,6 +1994,7 @@ impl Sugarloaf<'_> {
         if let Some(v) = self.image_overlays.get_mut(&panel_id) {
             v.clear();
         }
+        self.content_occlusion_checkpoint.images.remove(&panel_id);
     }
 
     /// Get text dimensions. Returns None if id is not text
@@ -1979,6 +2060,7 @@ impl Sugarloaf<'_> {
 
     #[inline]
     pub fn rescale(&mut self, scale: f32) {
+        self.flush_content_occlusion();
         self.ctx.set_scale(scale);
         self.state.compute_layout_rescale(scale);
         self.text.set_scale_factor(scale);
@@ -1990,11 +2072,13 @@ impl Sugarloaf<'_> {
 
     #[inline]
     pub fn reset(&mut self) {
+        self.flush_content_occlusion();
         self.state.reset();
         // Drop this frame's UI text instances — overlays re-record
         // next frame (immediate mode).
         self.text.clear();
         self.overlay_text.clear();
+        self.capture_content_occlusion_checkpoint();
     }
 
     /// Drop everything this frame's immediate-mode producers pushed
@@ -2011,6 +2095,7 @@ impl Sugarloaf<'_> {
         self.state.reset();
         self.text.clear();
         self.overlay_text.clear();
+        self.capture_content_occlusion_checkpoint();
     }
 
     #[inline]
@@ -2030,6 +2115,7 @@ impl Sugarloaf<'_> {
         &mut self,
         grids: &mut [(&mut crate::grid::GridRenderer, crate::grid::GridUniforms)],
     ) {
+        self.flush_content_occlusion();
         self.last_frame_presented = false;
         self.state.compute_dimensions();
         self.state.compute_updates(

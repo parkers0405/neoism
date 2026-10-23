@@ -17,6 +17,164 @@ use super::modes::{PaletteMode, PaletteRow};
 use super::state::{CommandPalette, WorkspaceMovePhase};
 use crate::TerminalShellKind;
 
+fn system_entry(
+    id: &str,
+    status: super::SystemConnectionStatus,
+) -> super::PaletteSystemEntry {
+    super::PaletteSystemEntry {
+        id: id.into(),
+        name: id.into(),
+        address: format!("user@{id}"),
+        local: id == "local",
+        status,
+    }
+}
+
+#[test]
+fn systems_rows_refresh_and_controls_use_host_state() {
+    use super::SystemConnectionStatus::*;
+    let mut palette = CommandPalette::default();
+    assert!(!palette.refresh_systems(Vec::new()));
+    palette.enter_systems_mode(vec![
+        system_entry("local", Connected),
+        system_entry("remote", Disconnected),
+    ]);
+    assert!(palette.systems_mode());
+    assert_eq!(
+        palette.category_switch_action(),
+        Some(PaletteAction::ShowServers)
+    );
+    palette.selected_index = 1;
+    assert_eq!(
+        palette.get_selected_action(),
+        Some(PaletteAction::ConnectSystem {
+            id: "remote".into()
+        })
+    );
+    palette.set_query("remote".into());
+    palette.set_query_cursor(2);
+    assert!(palette.refresh_systems(vec![
+        system_entry("remote", Connecting),
+        system_entry("local", Connected)
+    ]));
+    assert_eq!(palette.query, "remote");
+    assert_eq!(palette.query_cursor, 2);
+    assert_eq!(
+        palette.get_selected_action(),
+        Some(PaletteAction::ConnectSystem {
+            id: "remote".into()
+        })
+    );
+    assert_eq!(
+        system_entry("remote", Connecting).controls()[0].2,
+        PaletteAction::DisconnectSystem {
+            id: "remote".into()
+        }
+    );
+    assert_eq!(
+        system_entry("remote", Connected).controls()[0].0,
+        "Disconnect"
+    );
+    assert_eq!(
+        system_entry("remote", Disconnected).controls()[0].0,
+        "Connect"
+    );
+    assert!(system_entry("local", Connected).controls().is_empty());
+    assert_eq!(
+        system_entry("remote", Connected).controls()[1].2,
+        PaletteAction::RemoveSystem {
+            id: "remote".into()
+        }
+    );
+    palette.set_query("missing".into());
+    assert_eq!(palette.filtered_rows().len(), 1);
+    assert_eq!(
+        palette.get_selected_action(),
+        Some(PaletteAction::AddSystem)
+    );
+    palette.enter_servers_mode(Vec::new());
+    assert!(!palette.systems_mode());
+    assert_eq!(
+        palette.category_switch_action(),
+        Some(PaletteAction::ShowSystems)
+    );
+    assert_eq!(
+        palette.get_selected_action(),
+        Some(PaletteAction::AddServer)
+    );
+    assert!(!palette.refresh_systems(Vec::new()));
+}
+
+#[test]
+fn connection_add_rows_share_centered_presentation() {
+    use super::modes::PaletteRow;
+    assert!(PaletteRow::SystemAdd.centers_title());
+    assert!(PaletteRow::ServerAdd.centers_title());
+    assert!(PaletteRow::ServerCreate.centers_title());
+    assert_eq!(PaletteRow::SystemAdd.title(), "+ Add System");
+    assert_eq!(PaletteRow::ServerAdd.title(), "+ Add Server");
+    assert!(!PaletteRow::WorkspaceCreate.centers_title());
+}
+
+#[test]
+fn connection_category_hover_is_independent_of_row_selection() {
+    let mut palette = CommandPalette::default();
+    palette.enter_systems_mode(Vec::new());
+    let (x, y, _, _) = palette.palette_rect(1000.0, 1.0);
+    let header = [x + 4.0, y + 4.0, 120.0, 30.0];
+    palette.category_hits.push((header, PaletteAction::ShowSystems));
+    assert!(palette.hover(header[0] + 2.0, header[1] + 2.0, 1000.0, 1.0));
+    assert_eq!(palette.hovered_category, Some(0));
+    assert!(palette.pointer_over_row(header[0] + 2.0, header[1] + 2.0, 1000.0, 1.0));
+    assert_eq!(palette.hovered_index, None);
+    assert_eq!(palette.selected_index, 0);
+    assert!(!palette.hover(header[0] + 2.0, header[1] + 2.0, 1000.0, 1.0));
+    assert!(palette.hover(0.0, 0.0, 1000.0, 1.0));
+    assert_eq!(palette.hovered_category, None);
+}
+
+#[test]
+fn system_header_and_controls_route_without_editing_query() {
+    let mut palette = CommandPalette::default();
+    palette.enter_systems_mode(Vec::new());
+    palette.set_query("hello".into());
+    palette.set_query_cursor(2);
+    let (x, y, _, _) = palette.palette_rect(1000.0, 1.0);
+    let header = [x + 4.0, y + 4.0, 80.0, 20.0];
+    palette
+        .category_hits
+        .push((header, PaletteAction::ShowServers));
+    assert!(!palette.text_entry_at(header[0] + 2.0, header[1] + 2.0, 1000.0, 1.0));
+    assert!(palette.text_entry_at(
+        x + 20.0, y + palette.category_header_height() + 14.0, 1000.0, 1.0,
+    ));
+    assert_eq!(
+        palette.server_action_at(header[0] + 2.0, header[1] + 2.0),
+        Some(PaletteAction::ShowServers)
+    );
+    palette.system_control_hits.push((
+        [10.0, 200.0, 60.0, 24.0],
+        PaletteAction::DisconnectSystem {
+            id: "remote".into(),
+        },
+    ));
+    assert_eq!(
+        palette.server_action_at(20.0, 210.0),
+        Some(PaletteAction::DisconnectSystem {
+            id: "remote".into()
+        })
+    );
+    assert_eq!(palette.server_action_at(20.0, 225.0), None);
+    assert_eq!(palette.query_cursor, 2);
+    assert_eq!(palette.query, "hello");
+    assert!(COMMANDS
+        .iter()
+        .any(|command| command.action == PaletteAction::ShowSystems));
+    assert!(COMMANDS
+        .iter()
+        .any(|command| command.action == PaletteAction::ShowServers));
+}
+
 #[test]
 fn cd_operand_parser_handles_bare_quotes_and_rejects_multiple_words() {
     use super::actions::parse_cd_operand;

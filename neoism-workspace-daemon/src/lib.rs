@@ -17,6 +17,7 @@ pub mod daemon_token;
 pub mod files;
 pub mod fs_watch;
 pub mod git;
+pub mod pull_request;
 mod git_blame;
 mod git_snapshot;
 pub mod handshake;

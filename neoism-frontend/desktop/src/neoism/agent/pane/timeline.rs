@@ -1,5 +1,42 @@
 use super::*;
 
+#[cfg(test)]
+mod floating_composer_tests {
+    use super::*;
+    use neoism_ui::panels::agent_pane::view::timeline::TimelinePaintRegion;
+
+    #[test]
+    fn native_paint_hits_do_not_enlarge_scroll_metrics() {
+        let mut pane = NeoismAgentPane::default();
+        let metrics = [10.0, 30.0, 400.0, 100.0];
+        pane.set_timeline_metrics_with_live_growth_scaled(
+            metrics, 1000.0, metrics[3], Some(0.0), 1.0,
+        );
+        let original_max = pane.max_timeline_scroll();
+        // Representative disjoint silhouette bands: a rounded card top,
+        // full card body, then an inset tray. Corners and tray sides stay live.
+        pane.set_timeline_paint_region(TimelinePaintRegion {
+            viewport: [10.0, 30.0, 400.0, 230.0],
+            occlusion_rects: vec![
+                [30.0, 130.0, 360.0, 5.0],
+                [10.0, 135.0, 400.0, 75.0],
+                [34.0, 210.0, 352.0, 20.0],
+            ],
+        });
+        assert_eq!(pane.timeline_viewport_rect, Some(metrics));
+        assert_eq!(pane.max_timeline_scroll(), original_max);
+        assert_eq!(pane.timeline_viewport_height_px, 100.0);
+        pane.register_link_hit_rect("link".into(), [10.0, 30.0, 400.0, 230.0]);
+        pane.register_selectable_line("tray side", [10.0, 215.0, 400.0, 16.0]);
+        assert!(pane.timeline_contains_point(12.0, 132.0));
+        assert!(pane.link_at(12.0, 132.0).is_some());
+        assert!(pane.begin_selection_on_text_at(12.0, 220.0));
+        assert!(!pane.timeline_contains_point(210.0, 150.0));
+        assert!(pane.link_at(210.0, 150.0).is_none());
+        assert!(!pane.begin_selection_at(210.0, 220.0));
+    }
+}
+
 impl NeoismAgentPane {
     pub fn timeline_follow_bottom(&self) -> bool {
         self.timeline_follow_bottom
@@ -85,6 +122,7 @@ impl NeoismAgentPane {
             self.timeline_history_position_hydrated = true;
             self.clear_timeline_motion();
             self.timeline_viewport_rect = None;
+            self.timeline_paint_region = None;
         }
     }
 
@@ -303,7 +341,17 @@ impl NeoismAgentPane {
         }
     }
 
+    pub fn set_timeline_paint_region(
+        &mut self,
+        region: neoism_ui::panels::agent_pane::view::timeline::TimelinePaintRegion,
+    ) {
+        self.timeline_paint_region = Some(region);
+    }
+
     pub fn timeline_contains_point(&self, x: f32, y: f32) -> bool {
+        if let Some(region) = &self.timeline_paint_region {
+            return region.contains(x, y);
+        }
         let Some([rx, ry, rw, rh]) = self.timeline_viewport_rect else {
             return false;
         };
@@ -630,6 +678,14 @@ impl NeoismAgentPane {
         self.scrollbar_thumb_rect = thumb;
     }
 
+    /// Repaint every move over the rail (including between ticks), plus its exit.
+    pub fn update_scrollbar_hover(&mut self, pointer: Option<(f32, f32)>) -> bool {
+        let was_hovered = self.scrollbar_hovered;
+        self.scrollbar_hovered =
+            pointer.is_some_and(|(x, y)| self.scrollbar_hit(x, y).is_some());
+        self.scrollbar_hovered || was_hovered
+    }
+
     pub fn scrollbar_dragging(&self) -> bool {
         self.scrollbar_drag.is_some()
     }
@@ -652,8 +708,7 @@ impl NeoismAgentPane {
             return false;
         };
         self.cancel_timeline_follow_motion();
-        // Page-jump when the user clicks the track outside the thumb so it
-        // matches the conventional scrollbar behaviour.
+        // Clicking a rail mark moves directly to that position in the history.
         if hit == ScrollbarHit::Track {
             self.jump_timeline_to_track_y(y);
         }
@@ -724,7 +779,9 @@ impl NeoismAgentPane {
         if max_scroll <= 0.0 {
             return;
         }
-        let progress = ((y - track[1]) / track[3].max(1.0)).clamp(0.0, 1.0);
+        let handle_h = self.scrollbar_thumb_rect.map_or(0.0, |thumb| thumb[3]);
+        let travel = (track[3] - handle_h).max(1.0);
+        let progress = ((y - track[1] - handle_h * 0.5) / travel).clamp(0.0, 1.0);
         // Higher y → further down the visible content → less `timeline_scroll_px`.
         let scroll_top = progress * max_scroll;
         let before = self.timeline_scroll_px;

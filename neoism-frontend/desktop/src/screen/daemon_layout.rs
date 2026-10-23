@@ -14,7 +14,7 @@ use neoism_protocol::workspace::{
     PaneSplitAxis, PaneSplitPlacement, WorkspaceClientMessage, WorkspaceServerMessage,
 };
 
-use super::Screen;
+use super::{Screen, SystemRequest};
 
 const DAEMON_RESIZE_RATIO_STEP: f32 = 0.025;
 
@@ -380,6 +380,29 @@ impl Screen<'_> {
         self.pending_ssh_workspace_attach.take()
     }
 
+    pub(crate) fn cancel_pending_ssh_workspace_activation(&mut self) {
+        self.pending_ssh_workspace_attach = None;
+        self.cancel_ssh_workspace_replacement();
+        self.mark_dirty();
+    }
+
+    pub(crate) fn cancel_queued_ssh_workspace_attach(
+        &mut self,
+        target: &str,
+        ssh_args: &[String],
+    ) -> bool {
+        if self.pending_ssh_workspace_attach.as_ref().is_some_and(
+            |(queued_target, queued_args)| crate::system_registry::same_system_route(
+                queued_target, queued_args, target, ssh_args,
+            ),
+        ) {
+            self.pending_ssh_workspace_attach = None;
+            self.cancel_ssh_workspace_replacement();
+            self.mark_dirty();
+        }
+        self.pending_ssh_workspace_attach.is_none()
+    }
+
     pub fn cancel_ssh_workspace_replacement(&mut self) {
         self.pending_ssh_workspace_replacement = None;
         self.pending_ssh_workspace_id = None;
@@ -387,6 +410,15 @@ impl Screen<'_> {
 
     pub fn prepare_ssh_workspace_replacement(&mut self, workspace_id: String) {
         self.pending_ssh_workspace_id = Some(workspace_id);
+    }
+
+    pub(crate) fn request_system_action(&mut self, request: SystemRequest) {
+        self.pending_system_requests.push(request);
+        self.mark_dirty();
+    }
+
+    pub(crate) fn take_system_requests(&mut self) -> Vec<SystemRequest> {
+        std::mem::take(&mut self.pending_system_requests)
     }
 
     pub fn request_server_manager(&mut self) {

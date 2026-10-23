@@ -559,7 +559,7 @@ fn fetch_catalog(
 }
 pub(super) fn fetch_catalog_scoped(scope: &CatalogScope, resource: &'static str) -> Result<Value, String> {
     if !scope.still_current() { return Err("Catalog scope changed".into()); }
-    let value = catalog_cache().get((scope.clone(), resource), || {
+    let load = || {
         if !scope.still_current() { return Err("Catalog scope changed".into()); }
         let server = scope.endpoint.as_str();
         let directory = scope.directory.as_deref();
@@ -599,10 +599,25 @@ pub(super) fn fetch_catalog_scoped(scope: &CatalogScope, resource: &'static str)
         }
         if !scope.still_current() { return Err("Catalog scope changed".into()); }
         Ok(value)
-    })?;
+    };
+    // An expired negative catalog is not an onboarding verdict. A failed
+    // readiness refresh stays unknown instead of replaying an old disconnect.
+    let key = (scope.clone(), resource);
+    let value = if resource == "/v2/providers" {
+        catalog_cache().get_fresh(key, load)
+    } else {
+        catalog_cache().get(key, load)
+    }?;
     if !scope.still_current() { return Err("Catalog scope changed".into()); }
     Ok(value)
 }
+#[cfg(test)]
+pub(super) fn seed_readiness_catalog_for_test(server: &str, directory: Option<&str>, value: Value) {
+    catalog_cache()
+        .get(catalog_key(server, directory, "/v2/providers"), || Ok(value))
+        .unwrap();
+}
+
 #[cfg(test)]
 pub(super) fn seed_picker_catalog_for_test(server: &str, directory: Option<&str>) {
     let providers = serde_json::json!({"providers": [{"id": "test", "models": {"model": {"id": "model", "name": "Test model", "limit": {"context": 12345}}}}], "connected": ["test"]});
@@ -627,13 +642,29 @@ pub(super) fn cached_model_options(
         cached_provider_readiness(server, directory),
     ))
 }
-fn cached_provider_readiness(
+pub(super) fn cached_provider_readiness(
     server: &str,
     directory: Option<&str>,
 ) -> Option<ProviderReadiness> {
-    cached_catalog(server, directory, "/v2/providers")
-        .as_ref()
-        .and_then(ProviderReadiness::from_json)
+    cached_provider_readiness_with_age(server, directory).map(|(readiness, _)| readiness)
+}
+
+pub(super) fn cached_provider_readiness_with_age(
+    server: &str,
+    directory: Option<&str>,
+) -> Option<(ProviderReadiness, Duration)> {
+    let scope = catalog_scope(server, directory);
+    let key = (scope.clone(), "/v2/providers");
+    let (value, age) = catalog_cache().snapshot_age(&key)?;
+    let readiness = ProviderReadiness::from_json(&value)?;
+    // Preserve the original age across panes: reopening a chat must not give
+    // a stale disconnect (or model list) a new admission lifetime.
+    if age >= Duration::from_secs(30)
+        && (readiness.connected.is_empty() || readiness.models.is_empty())
+    {
+        return None;
+    }
+    scope.still_current().then_some((readiness, age))
 }
 pub(super) fn cached_agent_options(
     server: &str,
@@ -658,9 +689,14 @@ pub(super) fn fetch_model_context_limit(
     directory: Option<&str>,
     model_ref: &str,
 ) -> Result<Option<u64>, String> {
-    // The provider catalog is assembled lazily and can exceed the normal
-    // 900 ms UI-request timeout on a cold agent-server start. A timeout here
-    // silently left the usage panel without its `/ context limit` denominator.
+    // Context limits are presentation metadata, not prompt admission. Reuse
+    // known metadata across conversation panes without rediscovering providers.
+    if let Some(value) = cached_catalog(server, directory, "/v2/providers/configured") {
+        if let Some(limit) = model_context_limit_from_providers_json(&value, model_ref) {
+            return Ok(Some(limit));
+        }
+    }
+    // A cold catalog/account lookup may exceed the normal UI-request timeout.
     let value = fetch_catalog(server, directory, "/v2/providers/configured")?;
     Ok(model_context_limit_from_providers_json(&value, model_ref))
 }
@@ -2107,7 +2143,6 @@ pub(super) fn cached_config_defaults(
         "/v2/config/defaults",
     ))?;
     let mut defaults = config_defaults_from_json(&value);
-    defaults.provider_readiness = cached_provider_readiness(server, directory);
     if defaults.model.is_none() {
         defaults.model = catalog_cache()
             .fresh_snapshot(&catalog_key(server, directory, "/v2/providers/configured"))
@@ -2160,6 +2195,12 @@ pub(super) fn fetch_session_messages(
     session_id: &str,
 ) -> Result<Vec<NeoismAgentMessage>, String> {
     fetch_session_messages_page(server, session_id, None, 80).map(|page| page.blocks)
+}
+
+pub(super) fn invalidate_session_messages_cache(server: &str, session_id: &str) {
+    if let Some(identity) = conversation_cache::identity(server, session_id) {
+        conversation_cache::forget(&identity);
+    }
 }
 
 pub(super) mod conversation_cache;

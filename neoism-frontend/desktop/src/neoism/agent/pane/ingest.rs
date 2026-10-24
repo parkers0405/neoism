@@ -1954,6 +1954,7 @@ impl NeoismAgentPane {
                     self.execute_load_older_timeline_command(session_id, before, limit);
                     changed = true;
                 }
+                OutboundAgentCommand::RefreshModelCatalog { .. } => { self.refresh_model_catalog(); }
                 OutboundAgentCommand::RefreshModels => {
                     self.open_model_picker();
                     changed = true;
@@ -2150,6 +2151,10 @@ impl NeoismAgentPane {
     }
 
     fn drain_background_updates_with_budget(&mut self, budget: IngestionBudget) -> bool {
+        if let Some(picker) = self.picker.as_mut() { picker.expire_model_catalog_request(); }
+        if self.picker.as_ref().is_some_and(|p| p.model_catalog_poll_due()) {
+            self.refresh_model_catalog();
+        }
         if !self.execution_authorized() {
             return false;
         }
@@ -2590,6 +2595,21 @@ impl NeoismAgentPane {
                     }
                     // Failure releases only this worker. Preserve same-scope
                     // last-good state; unknown must not become known-empty.
+                }
+                Ok(NeoismAgentBackgroundUpdate::ModelCatalogRefreshed { scope, identity, result }) => {
+                    if !scope.is_current(&self.server, self.directory.as_deref()) { continue; }
+                    if !self.picker.as_ref().is_some_and(|p| p.kind == NeoismAgentPickerKind::Model && std::sync::Arc::ptr_eq(&p.activity_identity, &identity)) { continue; }
+                    match result {
+                        Ok((options, status)) => {
+                            let failed = status.as_ref().and_then(|s| s.get("state")).and_then(Value::as_str) == Some("retryable-error");
+                            let options = self.model_picker_options(options);
+                            let picker = self.picker.as_mut().unwrap();
+                            if !failed || picker.options().is_empty() { picker.replace_options(options); }
+                            picker.apply_model_catalog_status(status.as_ref());
+                        }
+                        Err(_) => self.picker.as_mut().unwrap().model_catalog_failed(),
+                    }
+                    changed = true;
                 }
                 Ok(NeoismAgentBackgroundUpdate::ModelOptionsRefreshed { scope, result }) => {
                     if !scope.is_current(&self.server, self.directory.as_deref()) { continue; }

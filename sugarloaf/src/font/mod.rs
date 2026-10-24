@@ -540,8 +540,6 @@ pub struct FontLibraryData {
     pub inner: FxHashMap<usize, FontData>,
     pub symbol_maps: Option<Vec<SymbolMap>>,
     pub hinting: bool,
-    // Cache primary font metrics for consistent cell dimensions (consistent metrics approach)
-    primary_metrics_cache: FxHashMap<u32, Metrics>,
     /// PostScript-name → `font_id` lookup, populated on `insert`. Used
     /// by the cascade resolver on every platform: macOS maps CoreText's
     /// per-CTRun font back to a Rio `font_id` when the cascade-list
@@ -564,7 +562,6 @@ impl Default for FontLibraryData {
             inner: FxHashMap::default(),
             hinting: true,
             symbol_maps: None,
-            primary_metrics_cache: FxHashMap::default(),
             postscript_to_id: FxHashMap::default(),
             family_to_id: FxHashMap::default(),
         }
@@ -815,18 +812,15 @@ impl FontLibraryData {
         font_id: &usize,
         font_size: f32,
     ) -> Option<(f32, f32, f32)> {
-        let size_key = (font_size * 100.0) as u32;
-
-        // First, ensure we have primary font metrics
-        let primary_metrics =
-            if let Some(cached) = self.primary_metrics_cache.get(&size_key) {
-                *cached
-            } else {
-                let primary_font = self.inner.get_mut(&FONT_ID_REGULAR)?;
-                let primary_metrics = primary_font.get_metrics(font_size, None)?;
-                self.primary_metrics_cache.insert(size_key, primary_metrics);
-                primary_metrics
-            };
+        // The primary face already owns its natural-metrics cache. A second
+        // size-only cache on FontLibraryData outlives face-0 replacement and
+        // serves stale baselines to every renderer sharing this library. Read
+        // the current face's cache instead; even a reused public swash key is
+        // safe because replacement FontData owns its own cached metrics.
+        let primary_metrics = self
+            .inner
+            .get_mut(&FONT_ID_REGULAR)?
+            .get_metrics(font_size, None)?;
 
         match font_id {
             &FONT_ID_REGULAR => {

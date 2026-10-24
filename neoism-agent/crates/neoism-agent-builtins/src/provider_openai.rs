@@ -102,6 +102,26 @@ impl OpenAiClient {
         })
     }
 
+    pub(super) async fn catalog_hydration(&self, identity: Option<&str>) -> (&'static str, u64) {
+        let Some(identity) = identity else { return ("ready", 0); };
+        let cache = self.codex_models.read().await;
+        let Some(cached) = cache.as_ref().filter(|c| c.identity == identity) else {
+            return ("loading", 500);
+        };
+        let now = Instant::now();
+        if let Some(at) = cached.retry_after.filter(|at| *at > now) {
+            return ("retryable-error", at.duration_since(now).as_millis() as u64);
+        }
+        if cached.models.is_none() && cached.fetched_at.elapsed() < cached.ttl {
+            return ("retryable-error", cached.ttl.saturating_sub(cached.fetched_at.elapsed()).as_millis() as u64);
+        }
+        if cached.models.is_some() && cached.fetched_at.elapsed() < CODEX_MODELS_STALE_TTL {
+            ("ready", 0)
+        } else {
+            ("loading", 500)
+        }
+    }
+
     pub(super) async fn codex_models(
         &self,
         auth_store: &AuthStore,
@@ -885,6 +905,11 @@ mod tests {
             });
             let result = client.codex_models_at(discovery_auth(u64::MAX), endpoint.clone(), "test".into()).await.unwrap();
             assert_eq!(result.is_some(), models.is_some());
+            let identity = codex_cache_identity("synthetic-access", Some("account-a"), &endpoint, "test");
+            let hydration = client.catalog_hydration(Some(&identity)).await;
+            assert_eq!(hydration.0, if models.is_some() { "ready" } else { "retryable-error" });
+            assert_eq!(client.catalog_hydration(Some("different-account")).await.0, "loading");
+            assert_eq!(client.catalog_hydration(None).await, ("ready", 0));
         }
     }
 

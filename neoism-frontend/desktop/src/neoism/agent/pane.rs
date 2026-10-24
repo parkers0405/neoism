@@ -802,6 +802,11 @@ pub(crate) enum NeoismAgentBackgroundUpdate {
         model: String,
         limit: Option<u64>,
     },
+    ModelCatalogRefreshed {
+        scope: super::api::CatalogScope,
+        identity: std::sync::Arc<()>,
+        result: Result<(Vec<NeoismAgentPickerOption>, Option<Value>), String>,
+    },
     ModelOptionsRefreshed {
         scope: super::api::CatalogScope,
         result: Result<Vec<NeoismAgentPickerOption>, String>,

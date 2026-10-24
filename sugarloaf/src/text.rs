@@ -14,6 +14,35 @@
 //! GPU backend is Metal on macOS and wgpu on other platforms.
 
 use rustc_hash::FxHashMap;
+use std::sync::Arc;
+
+mod cache;
+#[cfg(test)]
+mod cache_tests;
+mod font_stamp;
+#[cfg(test)]
+mod invalidation_tests;
+use cache::TextCache;
+use font_stamp::FontStamp;
+
+// Independent LRUs: shared allocations are conservatively charged to both.
+const SHAPE_CACHE_ENTRIES: usize = 2048;
+const SHAPE_CACHE_BYTES: usize = 8 * 1024 * 1024;
+const FONT_LOOKUP_ENTRIES: usize = 16384;
+type RunKey = (u32, u16, u16, u8);
+type FullTextKey = (u32, u32, Option<usize>, bool, bool);
+
+// Globally unique across renderer instances too, so a recreated renderer cannot
+// accidentally validate measurement entries from its predecessor.
+fn next_font_cache_generation() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_update(
+        std::sync::atomic::Ordering::Relaxed,
+        std::sync::atomic::Ordering::Relaxed,
+        |value| value.checked_add(1),
+    )
+    .expect("text cache generation space exhausted")
+}
 
 use crate::font::FontLibrary;
 
@@ -136,7 +165,7 @@ fn prepare_reveal_effects(
     use std::collections::BinaryHeap;
     let mut clusters: Vec<_> = runs
         .iter()
-        .flat_map(|run| &run.glyphs)
+        .flat_map(|run| run.source_glyphs())
         .map(|g| (g.cluster, g.cluster_end))
         .collect();
     clusters.sort_unstable();
@@ -217,14 +246,9 @@ fn set_cluster_ends(glyphs: &mut [ShapedGlyph], source_end: u32) {
     }
 }
 
-// Apply offsets only to the returned clone, never the substring-keyed cache.
+// Rebase the view, never the shared substring-local glyph allocation.
 fn offset_run_clusters(mut run: ShapedRun, byte_start: usize) -> ShapedRun {
-    if byte_start != 0 {
-        for glyph in &mut run.glyphs {
-            glyph.cluster += byte_start as u32;
-            glyph.cluster_end += byte_start as u32;
-        }
-    }
+    run.source_offset = byte_start as u32;
     run
 }
 
@@ -233,7 +257,7 @@ fn offset_run_clusters(mut run: ShapedRun, byte_start: usize) -> ShapedRun {
 /// One shaped glyph in a run. Same shape on macOS (CoreText) and
 /// non-macOS (swash) so the emit loop doesn't care which backend
 /// produced it. Cached `cluster` offsets are local to the shaped substring;
-/// `shape_for` rebases returned clones into the complete input string.
+/// `source_glyphs` applies a lightweight view's offset into the complete input.
 #[derive(Clone, Copy, Debug)]
 #[allow(dead_code)]
 struct ShapedGlyph {
@@ -242,7 +266,7 @@ struct ShapedGlyph {
     y: f32,
     advance: f32,
     cluster: u32,
-    /// Exclusive source end; local in cache, global in returned runs.
+    /// Exclusive source end, always substring-local in immutable storage.
     cluster_end: u32,
 }
 
@@ -259,19 +283,21 @@ struct ShapedRun {
     /// baseline, in physical pixels.  This is derived from the primary
     /// font's line metrics for every resolved fallback run.
     baseline_px: i16,
-    glyphs: Vec<ShapedGlyph>,
+    glyphs: Arc<[ShapedGlyph]>,
+    source_offset: u32,
+    advance: f32,
 }
 
-#[inline]
-fn shape_hash(font_id: u32, size_bucket: u16, style_flags: u8, text: &str) -> u64 {
-    use core::hash::Hasher;
-    use rustc_hash::FxHasher;
-    let mut h = FxHasher::default();
-    h.write_u32(font_id);
-    h.write_u16(size_bucket);
-    h.write_u8(style_flags);
-    h.write(text.as_bytes());
-    h.finish()
+impl ShapedRun {
+    /// Lightweight source-global view, including UTF-8 cluster ends. Copying one
+    /// glyph here is stack-only; no glyph vector is cloned or mutated on hits.
+    fn source_glyphs(&self) -> impl Iterator<Item = ShapedGlyph> + '_ {
+        self.glyphs.iter().map(|glyph| ShapedGlyph {
+            cluster: glyph.cluster + self.source_offset,
+            cluster_end: glyph.cluster_end + self.source_offset,
+            ..*glyph
+        })
+    }
 }
 
 /// Place a font's natural line box in the middle of the nominal `font_size`
@@ -454,11 +480,19 @@ pub struct Text {
     /// `(font_id, size_bucket) → baseline_px`. Secondary/fallback fonts use
     /// the primary face's cell metrics, keeping mixed icon/text runs on one
     /// baseline while each nominal font-size box remains vertically centred.
-    baseline_cache: FxHashMap<(u32, u16), i16>,
+    baseline_cache: lru::LruCache<(u32, u16), i16>,
 
     /// Position-independent shape cache. Hash of
     /// `(font_id, size_bucket, style_flags, text)` → shaped run.
-    shape_cache: FxHashMap<u64, ShapedRun>,
+    shape_cache: TextCache<RunKey, ShapedRun>,
+    /// Whole input cache bypasses character resolution and segmentation on hits.
+    full_text_cache: TextCache<FullTextKey, Arc<[ShapedRun]>>,
+    font_cache_generation: u64,
+    font_stamp: FontStamp,
+    #[cfg(test)]
+    segmentation_chars: usize,
+    #[cfg(test)]
+    shape_misses: usize,
 
     /// Markdown caret/hit-test geometry. Unlike the shape cache this avoids
     /// walking, hashing and cloning every successive prefix on each redraw.
@@ -496,8 +530,17 @@ impl Text {
             font_resolve: FxHashMap::default(),
             font_coverage: FxHashMap::default(),
             synthesis_cache: FxHashMap::default(),
-            baseline_cache: FxHashMap::default(),
-            shape_cache: FxHashMap::default(),
+            baseline_cache: lru::LruCache::new(
+                std::num::NonZeroUsize::new(SHAPE_CACHE_ENTRIES).unwrap(),
+            ),
+            shape_cache: TextCache::new(SHAPE_CACHE_ENTRIES, SHAPE_CACHE_BYTES),
+            full_text_cache: TextCache::new(SHAPE_CACHE_ENTRIES, SHAPE_CACHE_BYTES),
+            font_cache_generation: next_font_cache_generation(),
+            font_stamp: FontStamp::new(font_library),
+            #[cfg(test)]
+            segmentation_chars: 0,
+            #[cfg(test)]
+            shape_misses: 0,
             prefix_measure_cache: lru::LruCache::new(
                 std::num::NonZeroUsize::new(PREFIX_MEASURE_CACHE_ENTRIES).unwrap(),
             ),
@@ -537,7 +580,11 @@ impl Text {
     /// logical coords / font sizes to device pixels.
     #[inline]
     pub fn set_scale_factor(&mut self, scale: f32) {
-        self.scale_factor = scale.max(1.0);
+        let scale = scale.max(1.0);
+        if self.scale_factor.to_bits() != scale.to_bits() {
+            self.scale_factor = scale;
+            self.font_cache_generation = next_font_cache_generation();
+        }
     }
 
     #[inline]
@@ -550,16 +597,62 @@ impl Text {
         self.instances.clear();
     }
 
-    /// Drop raster-size-specific state and recycle the UI glyph atlases.
+    /// Opaque, process-unique identity for external text measurement caches.
+    /// Changes on renderer creation, DPI changes, explicit invalidation/library
+    /// replacement (even the same Arc), and observed font metadata mutations.
     ///
-    /// Font zoom can visit dozens of size buckets in one session. Keeping all
-    /// of them in a finite atlas eventually makes `insert` return `None`, at
-    /// which point individual labels lose seemingly random letters. UI text
-    /// is immediate-mode, so clearing the current instances and repopulating
-    /// the atlas on the next frame is both complete and cheap.
+    /// O(faces + symbol ranges), allocation-free on unchanged libraries. Takes
+    /// one read lock, but never scans text/font bytes. Public library maps have
+    /// no mutation epoch; comparing their immutable metadata is required here,
+    /// BEFORE a caller may reuse a width without calling measure/draw.
+    pub fn font_cache_generation(&mut self) -> u64 {
+        self.observe_font_changes();
+        self.font_cache_generation
+    }
+
+    fn observe_font_changes(&mut self) {
+        match self.font_stamp.change(&self.font_library) {
+            font_stamp::FontChange::Unchanged => {}
+            font_stamp::FontChange::Replaced => self.clear_glyph_cache(),
+            font_stamp::FontChange::Appended => {
+                // Lazy fallback discovery can append faces mid-frame. Existing
+                // atlas slots and emitted instances remain valid; do not erase
+                // earlier labels while invalidating fallback/measurement data.
+                self.font_cache_generation = next_font_cache_generation();
+                self.shape_cache.clear();
+                self.full_text_cache.clear();
+                self.prefix_measure_cache.clear();
+                self.font_resolve.clear();
+                self.font_coverage.clear();
+                self.baseline_cache.clear();
+                self.font_stamp = FontStamp::new(&self.font_library);
+            }
+        }
+    }
+
+    /// Drop font-derived layout/raster state and recycle the UI glyph atlases.
+    /// Font zoom can visit many size buckets and exhaust finite atlas space;
+    /// immediate-mode UI text repopulates the atlas on the next frame.
     pub fn clear_glyph_cache(&mut self) {
+        self.font_cache_generation = next_font_cache_generation();
         self.instances.clear();
         self.shape_cache.clear();
+        self.full_text_cache.clear();
+        self.font_coverage.clear();
+        self.font_resolve.clear();
+        self.synthesis_cache.clear();
+        #[cfg(target_os = "macos")]
+        self.handle_cache.clear();
+        #[cfg(not(target_os = "macos"))]
+        self.font_data_cache.clear();
+        #[cfg(not(target_os = "macos"))]
+        {
+            // Swash caches metadata by the public FontRef key. Replacement
+            // bytes can reuse that key; outer-cache eviction is not enough.
+            self.shape_ctx = swash::shape::ShapeContext::new();
+            self.scale_ctx = swash::scale::ScaleContext::new();
+        }
+        self.font_stamp = FontStamp::new(&self.font_library);
         self.prefix_measure_cache.clear();
         self.baseline_cache.clear();
 
@@ -611,14 +704,8 @@ impl Text {
     /// handle cache from the previous library can mix old glyphs with new
     /// layout metrics, so a library swap invalidates all font-derived state.
     pub fn set_font_library(&mut self, font_library: &FontLibrary) {
-        self.clear_glyph_cache();
         self.font_library = font_library.clone();
-        self.font_resolve.clear();
-        self.synthesis_cache.clear();
-        #[cfg(target_os = "macos")]
-        self.handle_cache.clear();
-        #[cfg(not(target_os = "macos"))]
-        self.font_data_cache.clear();
+        self.clear_glyph_cache();
     }
 
     /// Top-to-baseline distance for the nominal font-size box described by
@@ -626,6 +713,7 @@ impl Text {
     /// different font sizes on one baseline (drop caps, badges) can use this
     /// instead of a font-family-specific ratio.
     pub fn baseline_offset(&mut self, opts: &DrawOpts) -> f32 {
+        self.observe_font_changes();
         let scaled = opts.font_size * self.scale_factor;
         let size_bucket = (scaled * 4.0).round().clamp(0.0, u16::MAX as f32) as u16;
         let size_u16 = scaled.round().clamp(1.0, u16::MAX as f32) as u16;
@@ -692,13 +780,20 @@ impl Text {
         opts: &DrawOpts,
         scale: f32,
     ) -> f32 {
-        if !scale.is_finite() || scale <= 0.0 {
+        if !scale.is_finite() || scale <= 0.0 || text.is_empty() {
             return 0.0;
         }
+        // Complete shaping (including pending destructive invalidation) before
+        // taking the emission boundary. Do not call draw() here: its second
+        // observer could see another shared-library mutation and clear this
+        // boundary's instances. Emission itself does not observe or clear.
+        let Some(shaped) = self.shape_for(text, opts) else {
+            return 0.0;
+        };
         let first = self.instances.len();
         let mut raster_opts = *opts;
         raster_opts.clip_rect = None;
-        let advance = self.draw(x, y, text, &raster_opts);
+        let advance = self.draw_shaped(x, y, &shaped, &raster_opts);
         let origin = [x * self.scale_factor, y * self.scale_factor];
         let clip = opts
             .clip_rect
@@ -720,9 +815,20 @@ impl Text {
         let Some(shaped) = self.shape_for(text, opts) else {
             return 0.0;
         };
-        let width_px = shaped_text_width(&shaped);
+        self.draw_shaped(x, y, &shaped, opts)
+    }
+
+    // No font-change observation below the caller's instance boundary.
+    fn draw_shaped(
+        &mut self,
+        x: f32,
+        y: f32,
+        shaped: &[ShapedRun],
+        opts: &DrawOpts,
+    ) -> f32 {
+        let width_px = shaped_text_width(shaped);
         let mut run_x = x;
-        for run in &shaped {
+        for run in shaped.iter() {
             self.emit_instances::<false>(run_x, y, run, opts, None);
             run_x += shaped_width(run) / self.scale_factor;
         }
@@ -752,7 +858,7 @@ impl Text {
         let width_px = shaped_text_width(&shaped);
         let effects = prepare_reveal_effects(&shaped, reveals, self.scale_factor);
         let mut run_x = x;
-        for run in &shaped {
+        for run in shaped.iter() {
             self.emit_instances::<true>(run_x, y, run, opts, Some(&effects));
             run_x += shaped_width(run) / self.scale_factor;
         }
@@ -775,6 +881,7 @@ impl Text {
     /// Keep the existing prefix-shaping semantics: summing isolated character
     /// widths would change kerning, ligatures and fallback-font geometry.
     pub fn measure_char_prefixes(&mut self, text: &str, opts: &DrawOpts) -> Vec<f32> {
+        self.observe_font_changes();
         let key = (text.len() <= PREFIX_MEASURE_MAX_BYTES).then(|| PrefixMeasureKey {
             text: text.to_owned(),
             font_size: opts.font_size.to_bits(),
@@ -802,7 +909,34 @@ impl Text {
 
     //  Shape pipeline — shared cache + cfg-gated backend call
 
-    fn shape_for(&mut self, text: &str, opts: &DrawOpts) -> Option<Vec<ShapedRun>> {
+    fn shape_for(&mut self, text: &str, opts: &DrawOpts) -> Option<Arc<[ShapedRun]>> {
+        self.observe_font_changes();
+        let key = (
+            opts.font_size.to_bits(),
+            self.scale_factor.to_bits(),
+            opts.font_id,
+            opts.bold,
+            opts.italic,
+        );
+        if let Some(runs) = self.full_text_cache.get(&key, text) {
+            return Some(Arc::clone(runs));
+        }
+        let runs: Arc<[ShapedRun]> = self.segment_and_shape(text, opts)?.into();
+        let bytes = runs.len() * std::mem::size_of::<ShapedRun>()
+            + runs
+                .iter()
+                .map(|run| std::mem::size_of_val(run.glyphs.as_ref()))
+                .sum::<usize>();
+        self.full_text_cache
+            .insert(key, text, Arc::clone(&runs), bytes);
+        Some(runs)
+    }
+
+    fn segment_and_shape(
+        &mut self,
+        text: &str,
+        opts: &DrawOpts,
+    ) -> Option<Vec<ShapedRun>> {
         use crate::{Attributes, SpanStyle, Stretch, Style as FontStyle, Weight};
 
         let scaled = opts.font_size * self.scale_factor;
@@ -840,6 +974,10 @@ impl Text {
         let mut current_font_id: Option<u32> = None;
 
         for (byte_ix, ch) in text.char_indices() {
+            #[cfg(test)]
+            {
+                self.segmentation_chars += 1;
+            }
             let font_id = self.resolve_font_id_for_char(ch, style_flags, &ss);
             match current_font_id {
                 None => current_font_id = Some(font_id),
@@ -882,6 +1020,15 @@ impl Text {
         style_flags: u8,
         style: &crate::SpanStyle,
     ) -> u32 {
+        if self.font_resolve.len() >= FONT_LOOKUP_ENTRIES {
+            return self
+                .font_resolve
+                .get(&(ch, style_flags))
+                .map(|v| v.0)
+                .unwrap_or_else(|| {
+                    self.font_library.resolve_font_for_char(ch, style).0 as u32
+                });
+        }
         let (font_id, _is_emoji) = match self.font_resolve.entry((ch, style_flags)) {
             std::collections::hash_map::Entry::Occupied(e) => *e.get(),
             std::collections::hash_map::Entry::Vacant(e) => {
@@ -903,7 +1050,9 @@ impl Text {
             .inner
             .read()
             .font_covers_char(font_id as usize, ch);
-        self.font_coverage.insert((font_id, ch), covers);
+        if self.font_coverage.len() < FONT_LOOKUP_ENTRIES {
+            self.font_coverage.insert((font_id, ch), covers);
+        }
         covers
     }
 
@@ -934,6 +1083,10 @@ impl Text {
         let mut current_font_id: Option<u32> = None;
 
         for (byte_ix, ch) in text.char_indices() {
+            #[cfg(test)]
+            {
+                self.segmentation_chars += 1;
+            }
             let font_id = self.resolve_font_id_for_char_with_preferred(
                 ch,
                 style_flags,
@@ -983,9 +1136,13 @@ impl Text {
         size_u16: u16,
         style_flags: u8,
     ) -> Option<ShapedRun> {
-        let hash = shape_hash(font_id, size_bucket, style_flags, text);
-        if let Some(entry) = self.shape_cache.get(&hash) {
+        let key = (font_id, size_bucket, size_u16, style_flags);
+        if let Some(entry) = self.shape_cache.get(&key, text) {
             return Some(entry.clone());
+        }
+        #[cfg(test)]
+        {
+            self.shape_misses += 1;
         }
 
         let (synthetic_bold, synthetic_italic) = match self.synthesis_cache.entry(font_id)
@@ -1078,41 +1235,50 @@ impl Text {
             synthetic_bold,
             synthetic_italic,
             baseline_px,
-            glyphs,
+            advance: glyphs.iter().map(|g| g.advance).sum(),
+            source_offset: 0,
+            glyphs: glyphs.into(),
         };
-        self.shape_cache.insert(hash, run.clone());
+        self.shape_cache.insert(
+            key,
+            text,
+            run.clone(),
+            std::mem::size_of_val(run.glyphs.as_ref()),
+        );
         Some(run)
     }
 
     fn baseline_px_for(&mut self, font_id: u32, size_bucket: u16, size_u16: u16) -> i16 {
-        *self
-            .baseline_cache
-            .entry((font_id, size_bucket))
-            .or_insert_with(|| {
-                let metrics = self
-                    .font_library
-                    .inner
-                    .write()
-                    .get_ui_font_metrics(&(font_id as usize), size_u16 as f32);
-                metrics.map_or_else(
-                    || {
-                        centered_line_box_baseline_px(
-                            size_u16 as f32,
-                            size_u16 as f32 * 0.8,
-                            size_u16 as f32 * 0.2,
-                            0.0,
-                        )
-                    },
-                    |(ascent, descent, leading)| {
-                        centered_line_box_baseline_px(
-                            size_u16 as f32,
-                            ascent,
-                            descent.abs(),
-                            leading,
-                        )
-                    },
-                )
-            })
+        if let Some(value) = self.baseline_cache.get(&(font_id, size_bucket)) {
+            return *value;
+        }
+        let value = {
+            let metrics = self
+                .font_library
+                .inner
+                .write()
+                .get_ui_font_metrics(&(font_id as usize), size_u16 as f32);
+            metrics.map_or_else(
+                || {
+                    centered_line_box_baseline_px(
+                        size_u16 as f32,
+                        size_u16 as f32 * 0.8,
+                        size_u16 as f32 * 0.2,
+                        0.0,
+                    )
+                },
+                |(ascent, descent, leading)| {
+                    centered_line_box_baseline_px(
+                        size_u16 as f32,
+                        ascent,
+                        descent.abs(),
+                        leading,
+                    )
+                },
+            )
+        };
+        self.baseline_cache.put((font_id, size_bucket), value);
+        value
     }
 
     //  Emit pipeline — rasterize + push TextInstance
@@ -1144,7 +1310,7 @@ impl Text {
             return;
         }
 
-        for glyph in &run.glyphs {
+        for glyph in run.source_glyphs() {
             let Some((slot_x, slot_y, slot_w, slot_h, bearing_x, bearing_y, is_color)) =
                 self.rasterize_slot(run, glyph.id)
             else {
@@ -1917,7 +2083,7 @@ impl Text {
 
 #[inline]
 fn shaped_width(run: &ShapedRun) -> f32 {
-    run.glyphs.iter().map(|g| g.advance).sum()
+    run.advance
 }
 
 #[inline]
@@ -3083,7 +3249,9 @@ mod tests {
             synthetic_bold: false,
             synthetic_italic: false,
             baseline_px: 12,
-            glyphs,
+            advance: glyphs.iter().map(|g| g.advance).sum(),
+            source_offset: 0,
+            glyphs: glyphs.into(),
         }
     }
 
@@ -3117,7 +3285,7 @@ mod tests {
                 .collect();
             let effects = prepare_reveal_effects(&runs, &births, 1.5);
             assert_eq!(effects.len(), 40);
-            for glyph in &runs[0].glyphs {
+            for glyph in runs[0].source_glyphs() {
                 assert_eq!(
                     effects[&glyph.cluster],
                     reveal_effect(glyph.cluster, glyph.cluster_end, &births, 1.5)
@@ -3267,7 +3435,7 @@ mod tests {
         let prepared = prepare_reveal_effects(&runs, &effects, 1.0);
         assert_eq!(prepared[&1], (0.25, 1.0));
         let mut affected = 0;
-        for glyph in runs.iter().flat_map(|r| &r.glyphs) {
+        for glyph in runs.iter().flat_map(|r| r.source_glyphs()) {
             assert!(source.is_char_boundary(glyph.cluster as usize));
             if glyph.cluster == 1 {
                 assert_eq!(glyph.cluster_end, 4);
@@ -3347,13 +3515,13 @@ mod tests {
             for (index, run) in runs.iter().enumerate() {
                 let expected_end = runs
                     .get(index + 1)
-                    .map(|r| r.glyphs.iter().map(|g| g.cluster).min().unwrap())
+                    .map(|r| r.source_glyphs().map(|g| g.cluster).min().unwrap())
                     .unwrap_or(source.len() as u32);
                 assert_eq!(
-                    run.glyphs.iter().map(|g| g.cluster_end).max().unwrap(),
+                    run.source_glyphs().map(|g| g.cluster_end).max().unwrap(),
                     expected_end
                 );
-                let first = run.glyphs.first().unwrap().cluster as usize;
+                let first = run.source_offset as usize;
                 assert!(source.is_char_boundary(first));
                 let cached = text
                     .shape_cache
@@ -3361,17 +3529,18 @@ mod tests {
                     .find(|cached| {
                         cached.font_id == run.font_id
                             && cached.glyphs.len() == run.glyphs.len()
-                            && cached.glyphs.iter().zip(&run.glyphs).all(|(a, b)| {
-                                a.id == b.id
-                                    && a.cluster + first as u32 == b.cluster
-                                    && a.cluster_end + first as u32 == b.cluster_end
-                            })
+                            && cached.glyphs.iter().zip(run.source_glyphs()).all(
+                                |(a, b)| {
+                                    a.id == b.id
+                                        && a.cluster + first as u32 == b.cluster
+                                        && a.cluster_end + first as u32 == b.cluster_end
+                                },
+                            )
                     })
                     .expect("global offset must not contaminate cached clusters");
                 assert_eq!(cached.glyphs[0].cluster, 0);
                 assert!(run
-                    .glyphs
-                    .iter()
+                    .source_glyphs()
                     .all(|g| source.is_char_boundary(g.cluster as usize)
                         && source.is_char_boundary(g.cluster_end as usize)
                         && g.cluster < g.cluster_end));
@@ -3379,11 +3548,11 @@ mod tests {
             let again = text.shape_for(source, &opts).unwrap();
             assert_eq!(
                 runs.iter()
-                    .flat_map(|r| r.glyphs.iter().map(|g| g.cluster))
+                    .flat_map(|r| r.source_glyphs().map(|g| g.cluster))
                     .collect::<Vec<_>>(),
                 again
                     .iter()
-                    .flat_map(|r| r.glyphs.iter().map(|g| g.cluster))
+                    .flat_map(|r| r.source_glyphs().map(|g| g.cluster))
                     .collect::<Vec<_>>()
             );
         }

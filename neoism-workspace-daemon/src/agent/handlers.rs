@@ -1015,7 +1015,12 @@ pub(crate) async fn handle_set_thinking(
 }
 
 pub(crate) async fn handle_list_providers(inner: Arc<AgentInner>) {
-    match http_get_json(&inner, "/v2/providers/configured").await {
+    handle_model_catalog(inner, None, None).await;
+}
+
+pub(crate) async fn handle_model_catalog(inner: Arc<AgentInner>, request_id: Option<String>, directory: Option<String>) {
+    let path = directory.map(|dir| format!("/v2/providers/configured?directory={}", percent_encode(&dir))).unwrap_or_else(|| "/v2/providers/configured".into());
+    match http_get_json(&inner, &path).await {
         Ok(value) => {
             let providers = value
                 .get("providers")
@@ -1029,9 +1034,14 @@ pub(crate) async fn handle_list_providers(inner: Arc<AgentInner>) {
                 .unwrap_or_default();
             let _ = inner
                 .tx
-                .send(AgentServerMessage::ProviderCatalog { providers });
+                .send(AgentServerMessage::ProviderCatalog { providers, catalog_status: value.get("catalogStatus").cloned(), request_id });
         }
-        Err(err) => emit_error(&inner.tx, err),
+        Err(_) => {
+            let _ = inner.tx.send(AgentServerMessage::ProviderCatalog {
+                providers: Vec::new(), request_id,
+                catalog_status: Some(serde_json::json!({"source":"bundled", "state":"retryable-error", "revision":0, "retryAfterMs":1000})),
+            });
+        }
     }
 }
 

@@ -741,9 +741,10 @@ fn apply_agent_event_to_pane_inner(
                 );
             }
         }
-        AgentServerMessage::ProviderCatalog { providers } => {
-            pane.set_model_context_limits(model_context_limits_from_catalog(&providers));
-            pane.set_model_options(model_options_from_catalog(&providers));
+        AgentServerMessage::ProviderCatalog { providers, catalog_status, request_id } => {
+            if pane.apply_model_catalog(model_options_from_catalog(&providers), catalog_status.as_ref(), request_id.as_deref()) && !providers.is_empty() {
+                pane.set_model_context_limits(model_context_limits_from_catalog(&providers));
+            }
         }
         AgentServerMessage::ConfigDefaults {
             agent,

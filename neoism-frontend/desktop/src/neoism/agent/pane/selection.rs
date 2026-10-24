@@ -3,6 +3,30 @@ use super::*;
 impl NeoismAgentPane {
     const MARKDOWN_INTERACTION_SETTLE: Duration = Duration::from_millis(90);
 
+    pub fn register_selectable_geometry(
+        &mut self,
+        geometry: &neoism_ui::panels::agent_pane::selection_model::SelectionGeometry,
+        rect: [f32; 4],
+        origin_x: f32,
+    ) -> usize {
+        let content_y = self.content_y_for_screen_y(rect[1]);
+        let index = self.selectable_lines_len;
+        let line = SelectableLine::from_geometry(geometry, rect, content_y, origin_x);
+        if self.selection_anchor.is_some() {
+            self.selection_history.insert(
+                neoism_ui::panels::agent_pane::selection_model::selection_line_key(&line),
+                line.clone(),
+            );
+        }
+        if let Some(slot) = self.selectable_lines.get_mut(index) {
+            *slot = line;
+        } else {
+            self.selectable_lines.push(line);
+        }
+        self.selectable_lines_len += 1;
+        index
+    }
+
     pub fn register_selectable_line(&mut self, text: &str, rect: [f32; 4]) -> usize {
         self.register_selectable_line_with_caret_stops(text, rect, &[])
     }

@@ -50,6 +50,8 @@ MIT / public domain, Copyright (c) 2016 Mattias Gustavsson, adapted by hunterk.
 hlchunk.nvim runtime (`neoism-backend/src/performer/nvim_runtime/lua/hlchunk`) —
 MIT, Copyright (c) 2023 shellRaining.
 
+models.dev provider/model catalog metadata - MIT License, Copyright (c) 2025 models.dev. The bundled catalog snapshot is derived from https://models.dev/api.json; see misc/licenses/models.dev.txt for the upstream license.
+
 OpenCode provider artwork (`neoism-agent/sdk/typescript/packages/gui/src/components/providers/icons.svg`) — MIT, Copyright (c) 2025 opencode. See `neoism-agent/sdk/typescript/packages/gui/src/components/providers/LICENSE.opencode`.
 
 MCP service artwork — Firecrawl mark from Lobe Icons, MIT, Copyright (c) 2023 LobeHub; Webflow mark from Simple Icons, CC0-1.0. SVG sources, rasterizations, source URLs, and the LobeHub MIT license are in `neoism-frontend/shared/assets/icons/MCP-ARTWORK.md`. Service marks remain trademarks of their respective owners.

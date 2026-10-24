@@ -2,6 +2,18 @@
 
 All notable user-facing changes to Neoism are documented here.
 
+## [0.7.137] - 2026-10-24
+
+### Model discovery and text rendering
+
+- Expands bundled model metadata and refreshes discovery in the background with bounded retries, preserving successful in-memory results when disk-cache writes fail.
+- Updates open model pickers as discovery completes without losing search or selection; keeps useful offline options, bounds hydration waits, and isolates account-authoritative Codex models from API-key and other-account catalogs.
+- Adds bounded, collision-checked text shaping and font-aware measurement caches, retained caret geometry, cached diff measurements, horizontal token seeking, and offscreen diff-card culling.
+- Highlights the latest question in the navigation rail at the live bottom edge.
+- Includes regression fixtures, model catalog provenance, and distributed license notices.
+
+This is a stable production release, available through plain `neoism update` after all platform builds and packaging checks pass. Continuous animations and the existing Servo/CEF worker exclusions are preserved. Slow-network Windows behavior still requires affected-machine runtime verification.
+
 ## [0.7.136] - 2026-10-23
 
 ### Chat hydration, provider readiness, and frame responsiveness

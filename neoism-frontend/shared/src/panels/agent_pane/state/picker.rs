@@ -266,6 +266,13 @@ pub struct NeoismAgentPicker {
     /// True while async picker data is in flight; an empty list renders
     /// a skeleton shimmer instead of "No results".
     pub loading: bool,
+    /// Picker-local lifecycle: replacement/close drops pending revalidation.
+    pub model_refresh_due: Option<Instant>,
+    pub model_refresh_started: Option<Instant>,
+    /// One elapsed-time budget across all hydration reads, not a request count.
+    pub model_hydration_deadline: Option<Instant>,
+    pub model_request_id: Option<String>,
+    pub model_request_directory: Option<String>,
     loading_started: Option<Instant>,
     /// Rendered list-window size. Chat uses the standard eight rows;
     /// the centered pre-chat surface lowers this so the picker stays
@@ -287,6 +294,71 @@ pub struct NeoismAgentPicker {
 }
 
 impl NeoismAgentPicker {
+    /// Missing status is the legacy ready contract. Never spin indefinitely on
+    /// a server that cannot finish hydration; reopening /model is manual retry.
+    pub fn apply_model_catalog_status(&mut self, status: Option<&serde_json::Value>) {
+        self.model_refresh_started = None;
+        self.model_refresh_due = None;
+        let state = status.and_then(|s| s.get("state")).and_then(serde_json::Value::as_str).unwrap_or("ready");
+        match state {
+            "loading" => {
+                let now = Instant::now();
+                let deadline = *self.model_hydration_deadline.get_or_insert(now + std::time::Duration::from_secs(60));
+                let delay = std::time::Duration::from_millis(status.and_then(|s| s.get("retryAfterMs")).and_then(serde_json::Value::as_u64).unwrap_or(1000).max(250));
+                // Never shorten a server backoff. If it exceeds this picker's
+                // remaining window, offer manual retry rather than polling early.
+                if delay >= deadline.saturating_duration_since(now) {
+                    self.model_catalog_failed();
+                    return;
+                }
+                self.model_refresh_due = Some(now + delay);
+                self.title = "Refreshing models...".into();
+                self.set_loading(true);
+            }
+            "ready" => {
+                self.model_hydration_deadline = None;
+                self.title = "Select model".into();
+                self.set_loading(false);
+            }
+            _ => self.model_catalog_failed(),
+        }
+    }
+
+    pub fn model_catalog_failed(&mut self) {
+        self.model_refresh_started = None;
+        self.model_refresh_due = None;
+        self.model_hydration_deadline = None;
+        self.model_request_id = None;
+        // Revoke both desktop Arc ownership and shared protocol correlation.
+        self.activity_identity = std::sync::Arc::new(());
+        self.title = "Models offline; /model to retry".into();
+        self.set_loading(false);
+    }
+
+    pub fn model_catalog_poll_due(&self) -> bool {
+        self.kind == NeoismAgentPickerKind::Model
+            && self.model_refresh_started.is_none()
+            && self.model_refresh_due.is_some_and(|at| Instant::now() >= at)
+    }
+
+    pub fn begin_model_catalog_request(&mut self) {
+        self.model_refresh_due = None;
+        let now = Instant::now();
+        self.model_refresh_started = Some(now);
+        self.model_hydration_deadline.get_or_insert(now + std::time::Duration::from_secs(60));
+    }
+
+    pub fn model_catalog_expired(&self) -> bool {
+        self.model_refresh_started.is_some_and(|at| at.elapsed() >= std::time::Duration::from_secs(20))
+            || self.model_hydration_deadline.is_some_and(|deadline| Instant::now() >= deadline)
+    }
+
+    pub fn expire_model_catalog_request(&mut self) {
+        if self.model_catalog_expired() {
+            self.model_catalog_failed();
+        }
+    }
+
     /// Shared by desktop and WASM so list-to-actions transitions retain identity
     /// and already-decoded service artwork rather than reconstructing a header.
     pub fn mcp_actions(entry: &serde_json::Value, previous: Option<&Self>) -> Self {
@@ -350,6 +422,11 @@ impl NeoismAgentPicker {
             last_list_scroll_frame: Instant::now(),
             last_cursor_frame: Instant::now(),
             loading: false,
+            model_refresh_due: None,
+            model_refresh_started: None,
+            model_hydration_deadline: None,
+            model_request_id: None,
+            model_request_directory: None,
             loading_started: None,
             visible_row_limit: PICKER_VISIBLE_ROWS,
             mcp_authorization: None,

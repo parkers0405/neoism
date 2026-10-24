@@ -2,6 +2,74 @@ use super::*;
 use crate::neoism::agent::api;
 
 #[test]
+fn model_hydration_expired_desktop_request_rejects_late_ready_and_loading() {
+    for request_timeout in [false, true] {
+        let mut pane = NeoismAgentPane::default();
+        pane.server = "invalid://expired-model-hydration-fixture".into();
+        let scope = api::catalog_scope(&pane.server, None);
+        let mut picker = NeoismAgentPicker::new_loading(NeoismAgentPickerKind::Model, "Models");
+        picker.begin_model_catalog_request();
+        let identity = picker.activity_identity.clone();
+        if request_timeout {
+            picker.model_refresh_started = Some(Instant::now() - std::time::Duration::from_secs(21));
+        } else {
+            picker.model_hydration_deadline = Some(Instant::now());
+        }
+        pane.picker = Some(picker);
+        for state in ["ready", "loading"] {
+            pane.background_sender().send(NeoismAgentBackgroundUpdate::ModelCatalogRefreshed {
+                scope: scope.clone(), identity: identity.clone(),
+                result: Ok((vec![NeoismAgentPickerOption::new("Late", "", "", "test/late")], Some(serde_json::json!({"state":state,"retryAfterMs":500})))),
+            }).unwrap();
+        }
+        pane.drain_background_updates();
+        let picker = pane.picker.as_ref().unwrap();
+        assert!(!picker.loading);
+        assert!(picker.options().is_empty());
+        assert!(picker.model_refresh_due.is_none());
+        assert!(!std::sync::Arc::ptr_eq(&identity, &picker.activity_identity));
+        assert_eq!(picker.title, "Models offline; /model to retry");
+    }
+}
+
+#[test]
+fn model_hydration_background_updates_same_picker_and_rejects_replacement() {
+    let mut pane = NeoismAgentPane::default();
+    pane.server = "invalid://model-hydration-fixture".into();
+    let scope = api::catalog_scope(&pane.server, None);
+    pane.picker = Some(NeoismAgentPicker::new_loading(NeoismAgentPickerKind::Model, "Models"));
+    let identity = pane.picker.as_ref().unwrap().activity_identity.clone();
+    let bundled = vec![NeoismAgentPickerOption::new("GPT 5", "", "", "test/gpt-5")];
+    pane.background_sender().send(NeoismAgentBackgroundUpdate::ModelCatalogRefreshed {
+        scope: scope.clone(), identity: identity.clone(),
+        result: Ok((bundled.clone(), Some(serde_json::json!({"source":"bundled","state":"loading","revision":1,"retryAfterMs":5000})))),
+    }).unwrap();
+    pane.drain_background_updates();
+    let picker = pane.picker.as_mut().unwrap();
+    picker.set_query("GPT".into());
+    picker.selected = picker.options().iter().position(|o| o.value == "test/gpt-5").unwrap();
+    assert!(picker.loading);
+    assert!(picker.model_refresh_due.is_some());
+    let mut full = bundled;
+    full.push(NeoismAgentPickerOption::new("GPT full", "", "", "test/full"));
+    pane.background_sender().send(NeoismAgentBackgroundUpdate::ModelCatalogRefreshed {
+        scope: scope.clone(), identity: identity.clone(), result: Ok((full, Some(serde_json::json!({"state":"ready"})))),
+    }).unwrap();
+    pane.drain_background_updates();
+    let picker = pane.picker.as_ref().unwrap();
+    assert_eq!(picker.query, "GPT");
+    assert_eq!(picker.selected_option().unwrap().value, "test/gpt-5");
+    assert!(picker.options().iter().any(|o| o.value == "test/full"));
+    assert!(!picker.loading);
+    pane.picker = Some(NeoismAgentPicker::new_loading(NeoismAgentPickerKind::Model, "Replacement"));
+    pane.background_sender().send(NeoismAgentBackgroundUpdate::ModelCatalogRefreshed {
+        scope, identity, result: Err("offline".into()),
+    }).unwrap();
+    pane.drain_background_updates();
+    assert_eq!(pane.picker.as_ref().unwrap().title, "Replacement");
+}
+
+#[test]
 fn catalog_cache_replies_reject_changed_directory_auth_and_revision() {
     use neoism_ui::panels::agent_pane::api_mapping::ProviderReadiness;
     for change in 0..3 {

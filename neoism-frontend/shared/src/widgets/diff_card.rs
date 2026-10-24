@@ -19,6 +19,8 @@ use crate::primitives::truncate_to_fit;
 use crate::primitives::IdeTheme;
 use crate::syntax::{highlight_line, syn_color, Lang, SynTok};
 
+mod measurement_cache;
+
 pub const HEADER_HEIGHT: f32 = 30.0;
 pub const LINE_HEIGHT: f32 = 18.0;
 pub const FONT_SIZE: f32 = 12.5;
@@ -210,20 +212,7 @@ pub fn measured_gutter_width(
     max_line: u32,
     scale: f32,
 ) -> f32 {
-    let digits = max_line.max(1).to_string().len();
-    let opts = DrawOpts {
-        font_size: GUTTER_FONT_SIZE * scale,
-        bold: true,
-        ..DrawOpts::default()
-    };
-    let width = (b'0'..=b'9')
-        .map(|digit| {
-            sugarloaf
-                .text_mut()
-                .measure(&char::from(digit).to_string().repeat(digits), &opts)
-        })
-        .fold(0.0_f32, f32::max);
-    gutter_width_for_text(width, scale)
+    measurement_cache::gutter_width(sugarloaf, max_line, scale)
 }
 
 fn gutter_width_for_text(width: f32, scale: f32) -> f32 {
@@ -245,10 +234,11 @@ pub fn content_width(
         let width = if line.kind == DiffLineKind::Hunk {
             sugarloaf.text_mut().measure(text, &opts)
         } else {
-            highlighted_diff_line(text, lang)
-                .iter()
-                .map(|(_, slice)| sugarloaf.text_mut().measure(slice, &opts))
-                .sum()
+            let spans = highlighted_diff_line(text, lang);
+            measurement_cache::syntax_line(sugarloaf, spans.clone(), scale).map_or_else(
+                || spans.iter().map(|(_, slice)| sugarloaf.text_mut().measure(slice, &opts)).sum(),
+                |line| line.width,
+            )
         };
         widest.max(width)
     })
@@ -1219,7 +1209,16 @@ fn draw_syntax_line(
     }
     let mut cursor_x = start_x;
     let spans = highlighted_diff_line(text, lang);
-    for (tok, slice) in spans.iter() {
+    let line = measurement_cache::syntax_line(sugarloaf, spans.clone(), scale);
+    let positions = line
+        .as_ref()
+        .filter(|_| nowrap)
+        .map(|line| line.positions(start_x));
+    let first = positions
+        .as_ref()
+        .filter(|_| line.as_ref().is_some_and(|line| line.monotonic))
+        .map_or(0, |points| measurement_cache::first_visible_token(points, clip[0]));
+    for (index, (tok, slice)) in spans.iter().enumerate().skip(first) {
         let color = tint.unwrap_or_else(|| {
             let mut color = syn_color(*tok, theme, false);
             color[3] = (color[3] as f32 * theme.opacity).round() as u8;
@@ -1231,13 +1230,17 @@ fn draw_syntax_line(
             ..code_font_opts(scale, false)
         };
         if nowrap {
-            // Measure whole cached tokens to advance over offscreen content,
-            // but only submit intersecting tokens. Never shorten a token: the
-            // code-column clip, not an ellipsis, hides horizontal overflow.
+            // Seek by retained whole-token advances without changing shaping or
+            // the original translated floating-point accumulation order.
+            if let Some(points) = &positions {
+                cursor_x = points[index];
+            }
             if cursor_x >= clip[0] + clip[2] {
                 return;
             }
-            let measured = sugarloaf.text_mut().measure(slice, &opts);
+            let measured = line.as_ref().map_or_else(
+                || sugarloaf.text_mut().measure(slice, &opts), |line| line.advances[index],
+            );
             if cursor_x + measured > clip[0] {
                 sugarloaf.text_mut().draw(cursor_x, text_y, slice, &opts);
             }
@@ -1249,7 +1252,9 @@ fn draw_syntax_line(
         }
         // Truncate any single token that would overflow the row.
         let budget = (right_edge - cursor_x).max(0.0);
-        let measured = sugarloaf.text_mut().measure(slice.as_str(), &opts);
+        let measured = line.as_ref().map_or_else(
+            || sugarloaf.text_mut().measure(slice, &opts), |line| line.advances[index],
+        );
         if measured <= budget {
             cursor_x +=
                 sugarloaf

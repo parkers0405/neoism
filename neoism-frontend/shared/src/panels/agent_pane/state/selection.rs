@@ -3,6 +3,30 @@ use super::*;
 impl NeoismAgentPane {
     const MARKDOWN_INTERACTION_SETTLE: Duration = Duration::from_millis(90);
 
+    pub fn register_selectable_geometry(
+        &mut self,
+        geometry: &crate::panels::agent_pane::selection_model::SelectionGeometry,
+        rect: [f32; 4],
+        origin_x: f32,
+    ) -> usize {
+        let content_y = self.content_y_for_screen_y(rect[1]);
+        let index = self.selectable_lines_len;
+        let line = SelectableLine::from_geometry(geometry, rect, content_y, origin_x);
+        if self.selection_anchor.is_some() {
+            self.selection_history.insert(
+                crate::panels::agent_pane::selection_model::selection_line_key(&line),
+                line.clone(),
+            );
+        }
+        if let Some(slot) = self.selectable_lines.get_mut(index) {
+            *slot = line;
+        } else {
+            self.selectable_lines.push(line);
+        }
+        self.selectable_lines_len += 1;
+        index
+    }
+
     pub fn register_selectable_line(&mut self, text: &str, rect: [f32; 4]) -> usize {
         self.register_selectable_line_with_caret_stops(text, rect, &[])
     }
@@ -437,6 +461,63 @@ impl NeoismAgentPane {
         let anchor = self.selection_anchor?;
         let focus = self.selection_focus?;
         Some(order_endpoints(anchor, focus))
+    }
+}
+
+#[cfg(test)]
+mod retained_geometry_tests {
+    use super::*;
+    use crate::panels::agent_pane::selection_model::{
+        SelectableCaretStop, SelectionGeometry,
+    };
+    use std::sync::Arc;
+
+    #[test]
+    fn translated_clipped_rows_share_history_and_copy_across_scroll_windows() {
+        let geometry = SelectionGeometry {
+            text: "e\u{301}\t界".into(),
+            stops: vec![
+                SelectableCaretStop {
+                    byte_offset: 0,
+                    x: 0.0,
+                },
+                SelectableCaretStop {
+                    byte_offset: 3,
+                    x: 8.0,
+                },
+                SelectableCaretStop {
+                    byte_offset: 4,
+                    x: 40.0,
+                },
+                SelectableCaretStop {
+                    byte_offset: 7,
+                    x: 56.0,
+                },
+            ]
+            .into(),
+            width: 56.0,
+        };
+        let mut pane = NeoismAgentPane::default();
+        pane.set_timeline_metrics([0.0, 0.0, 400.0, 40.0], 120.0, 40.0);
+        pane.timeline_scroll_px = 80.0;
+        // The clip starts to the right of the text origin, as in a scrolled code block.
+        pane.register_selectable_geometry(&geometry, [10.0, 10.0, 50.0, 18.0], 4.0);
+        let line = &pane.selectable_lines[0];
+        assert!(Arc::ptr_eq(&line.text, &geometry.text));
+        assert!(Arc::ptr_eq(&line.caret_stops, &geometry.stops));
+        assert_eq!(line.caret_at_x(12.0).byte_offset, 3);
+        assert_eq!(line.caret_for_offset(4).x, 44.0);
+        assert_eq!(line.text_offset_at_x(43.0), 3);
+        assert!(pane.begin_selection_at(12.0, 10.0));
+        let history = pane.selection_history.values().next().unwrap();
+        assert!(Arc::ptr_eq(&history.text, &geometry.text));
+        assert!(Arc::ptr_eq(&history.caret_stops, &geometry.stops));
+        pane.timeline_scroll_px = 40.0;
+        pane.selectable_lines_len = 0;
+        pane.register_selectable_geometry(&geometry, [20.0, 10.0, 56.0, 18.0], 20.0);
+        assert!(pane.drag_selection_to(76.0, 10.0));
+        assert_eq!(pane.end_selection().as_deref(), Some("\t界\ne\u{301}\t界"));
+        assert_eq!(geometry.stops[0].x, 0.0);
     }
 }
 

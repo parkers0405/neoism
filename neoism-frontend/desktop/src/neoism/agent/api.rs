@@ -604,7 +604,13 @@ pub(super) fn fetch_catalog_scoped(scope: &CatalogScope, resource: &'static str)
     // An expired negative catalog is not an onboarding verdict. A failed
     // readiness refresh stays unknown instead of replaying an old disconnect.
     let key = (scope.clone(), resource);
-    let value = if resource == "/v2/providers" {
+    let value = if resource == "/v2/providers/configured" {
+        // Provisional snapshots are presentation data, not successful discovery.
+        let provisional = catalog_cache().snapshot(&key).is_some_and(|value| {
+            value.get("catalogStatus").and_then(|s| s.get("state")).and_then(Value::as_str).is_some_and(|state| state != "ready")
+        });
+        catalog_cache().get_fresh_retaining(key, if provisional { Duration::from_millis(100) } else { Duration::from_secs(30) }, load, |_, _, _| false)
+    } else if resource == "/v2/providers" {
         let pending = catalog_cache().snapshot_age(&key).is_some_and(|(value, _)| {
             value.get("readinessPending").and_then(Value::as_bool) == Some(true)
         });
@@ -689,6 +695,15 @@ pub(super) fn cached_agent_options(
     directory: Option<&str>,
 ) -> Option<Vec<NeoismAgentPickerOption>> {
     agent_options_from_json(&cached_catalog(server, directory, "/v2/agents")?).ok()
+}
+
+pub(super) fn cached_model_catalog_status(server: &str, directory: Option<&str>) -> Option<Value> {
+    cached_catalog(server, directory, "/v2/providers/configured")?.get("catalogStatus").cloned()
+}
+
+pub(super) fn fetch_model_catalog_scoped(scope: &CatalogScope) -> Result<(Vec<NeoismAgentPickerOption>, Option<Value>), String> {
+    let value = fetch_catalog_scoped(scope, "/v2/providers/configured")?;
+    Ok((model_options_from_providers_json(&value), value.get("catalogStatus").cloned()))
 }
 
 pub(super) fn fetch_model_options_scoped(scope: &CatalogScope) -> Result<Vec<NeoismAgentPickerOption>, String> {

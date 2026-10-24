@@ -256,18 +256,12 @@ where
     });
     if let Some(frame) = &mut rail_frame {
         frame.hovered = frame.hovered_tick(rail_mouse);
-        let next = layout
-            .question_targets
-            .partition_point(|target| target.top < scroll_top);
-        frame.active = if layout
-            .question_targets
-            .get(next)
-            .is_some_and(|target| target.top < scroll_top + viewport_h)
-        {
-            Some(next)
-        } else {
-            next.checked_sub(1)
-        };
+        frame.active = crate::panels::agent_pane::question_rail::active_question_index(
+            &layout.question_targets,
+            scroll_top,
+            viewport_h,
+            pane.timeline_follow_bottom() || max_scroll - scroll_top <= s,
+        );
         if let Some(index) = frame.hovered {
             frame.preview = build_question_preview(
                 sugarloaf,

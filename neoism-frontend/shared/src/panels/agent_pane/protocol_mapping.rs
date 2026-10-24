@@ -162,6 +162,7 @@ pub fn map_outbound_command(
         Cmd::SetSidebarVisible { visible } => {
             Mapping::Messages(vec![Msg::SetSidebarVisible { visible }])
         }
+        Cmd::RefreshModelCatalog { request_id, directory } => Mapping::Messages(vec![Msg::ListModelCatalog { request_id: request_id.clone(), directory: directory.clone() }]),
         Cmd::RefreshModelContextLimit | Cmd::RefreshModels => {
             Mapping::Messages(vec![Msg::ListProviders])
         }

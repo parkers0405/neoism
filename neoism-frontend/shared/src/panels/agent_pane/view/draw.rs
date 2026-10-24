@@ -1,24 +1,32 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
 use sugarloaf::text::DrawOpts;
 use sugarloaf::{GraphicOverlay, Sugarloaf};
 use unicode_segmentation::UnicodeSegmentation;
 
 use super::DEPTH;
-use crate::panels::agent_pane::selection_model::SelectableCaretStop;
+use crate::panels::agent_pane::selection_model::{
+    SelectableCaretStop, SelectionGeometry,
+};
 use crate::primitives::draw_text_with_occlusion;
 
 /// Shared running indicator geometry: eight stepped stops, four white squares.
-pub(crate) use crate::render_policy::{RUNNING_SQUARE_ALPHAS, running_square_position};
-
+pub(crate) use crate::render_policy::{running_square_position, RUNNING_SQUARE_ALPHAS};
 
 const TEXT_MEASURE_CACHE_LIMIT: usize = 8192;
 const CARET_STOP_CACHE_LIMIT: usize = 8192;
 const CARET_STOP_CACHE_POINTS_LIMIT: usize = 262_144;
+// Applied independently to code and inline caches. Account source/display bytes,
+// stop storage, Arc headers, and per-entry map/style/FIFO bookkeeping. Counting
+// shared source/display allocations twice is deliberately conservative. Hash
+// table capacity/allocator rounding is additionally bounded by the entry limit.
+const CARET_STOP_CACHE_BYTES_LIMIT: usize = 8 * 1024 * 1024;
 
 thread_local! {
     static TEXT_MEASURE_CACHE: RefCell<TextMeasureCache> = RefCell::new(TextMeasureCache::new());
     static CARET_STOP_CACHE: RefCell<CaretStopCache> = RefCell::new(CaretStopCache::new());
+    static INLINE_SELECTION_CACHE: RefCell<CaretStopCache> = RefCell::new(CaretStopCache::new());
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -34,6 +42,10 @@ struct TextMeasureStyle {
     italic: bool,
     font_id: Option<usize>,
     scale_factor_bits: u32,
+    font_generation: u64,
+    // Inline Markdown historically accumulates f32 advances from screen x.
+    // Keep that exact rounding, and invalidate those entries when x changes.
+    inline_origin_bits: u32,
 }
 
 struct TextMeasureCache {
@@ -41,10 +53,19 @@ struct TextMeasureCache {
     order: VecDeque<TextMeasureKey>,
 }
 
+type CaretStopValues = HashMap<Arc<str>, SelectionGeometry>;
+
+struct CaretStopCacheKey {
+    source: Arc<str>,
+    style: TextMeasureStyle,
+    retained_bytes: usize,
+}
+
 struct CaretStopCache {
-    values: HashMap<TextMeasureKey, Vec<SelectableCaretStop>>,
-    order: VecDeque<TextMeasureKey>,
+    values: HashMap<TextMeasureStyle, CaretStopValues>,
+    order: VecDeque<CaretStopCacheKey>,
     points: usize,
+    retained_bytes: usize,
 }
 
 impl TextMeasureCache {
@@ -86,48 +107,112 @@ impl CaretStopCache {
             values: HashMap::new(),
             order: VecDeque::new(),
             points: 0,
+            retained_bytes: 0,
         }
     }
 
-    fn get(
-        &self,
-        key: &TextMeasureKey,
-        start_x: f32,
-    ) -> Option<Vec<SelectableCaretStop>> {
-        self.values.get(key).map(|stops| {
-            stops
-                .iter()
-                .map(|stop| SelectableCaretStop {
-                    byte_offset: stop.byte_offset,
-                    x: stop.x + start_x,
-                })
-                .collect()
-        })
+    fn get(&self, text: &str, style: &TextMeasureStyle) -> Option<SelectionGeometry> {
+        self.values.get(style)?.get(text).cloned()
     }
 
-    fn insert(&mut self, key: TextMeasureKey, stops: Vec<SelectableCaretStop>) {
-        let stop_count = stops.len();
-        if let Some(previous) = self.values.insert(key.clone(), stops) {
-            self.points = self
-                .points
-                .saturating_sub(previous.len())
-                .saturating_add(stop_count);
-            return;
-        }
-        self.order.push_back(key.clone());
-        self.points = self.points.saturating_add(stop_count);
-        while self.order.len() > CARET_STOP_CACHE_LIMIT
-            || (self.points > CARET_STOP_CACHE_POINTS_LIMIT && self.values.len() > 1)
-        {
-            if let Some(old) = self.order.pop_front() {
-                if let Some(stops) = self.values.remove(&old) {
-                    self.points = self.points.saturating_sub(stops.len());
-                }
+    fn entry_bytes(source: &str, geometry: &SelectionGeometry) -> usize {
+        // Charge a separate style bucket per entry, even when it is shared.
+        // Also charge the three possible Arc allocation headers (source, text,
+        // stops), both map slots, and the FIFO slot, not just visible glyphs.
+        let bookkeeping = std::mem::size_of::<CaretStopCacheKey>()
+            + std::mem::size_of::<(Arc<str>, SelectionGeometry)>()
+            + std::mem::size_of::<(TextMeasureStyle, CaretStopValues)>()
+            + 6 * std::mem::size_of::<usize>();
+        source
+            .len()
+            .saturating_add(geometry.text.len())
+            .saturating_add(
+                geometry
+                    .stops
+                    .len()
+                    .saturating_mul(std::mem::size_of::<SelectableCaretStop>()),
+            )
+            .saturating_add(bookkeeping)
+    }
+
+    fn remove(&mut self, key: CaretStopCacheKey) {
+        if let Some(values) = self.values.get_mut(&key.style) {
+            if let Some(geometry) = values.remove(key.source.as_ref()) {
+                self.points -= geometry.stops.len();
+                self.retained_bytes -= key.retained_bytes;
+            }
+            if values.is_empty() {
+                self.values.remove(&key.style);
             }
         }
     }
+
+    fn insert(
+        &mut self,
+        style: TextMeasureStyle,
+        source: &str,
+        geometry: SelectionGeometry,
+    ) {
+        let retained_bytes = Self::entry_bytes(source, &geometry);
+        let stop_count = geometry.stops.len();
+        // Replacing an entry must also replace its accounting/FIFO record.
+        // Normal warm hits call get(), so this scan is only a duplicate insert.
+        if self
+            .values
+            .get(&style)
+            .is_some_and(|values| values.contains_key(source))
+        {
+            if let Some(index) = self
+                .order
+                .iter()
+                .position(|key| key.style == style && key.source.as_ref() == source)
+            {
+                let old = self
+                    .order
+                    .remove(index)
+                    .expect("existing caret cache FIFO entry");
+                self.remove(old);
+            }
+        }
+        // Do not retain huge hidden link destinations or huge plain code rows,
+        // even as the sole cache entry. The caller still receives exact geometry.
+        if retained_bytes > CARET_STOP_CACHE_BYTES_LIMIT
+            || stop_count > CARET_STOP_CACHE_POINTS_LIMIT
+        {
+            return;
+        }
+        while self.order.len() >= CARET_STOP_CACHE_LIMIT
+            || self.retained_bytes.saturating_add(retained_bytes)
+                > CARET_STOP_CACHE_BYTES_LIMIT
+            || self.points.saturating_add(stop_count) > CARET_STOP_CACHE_POINTS_LIMIT
+        {
+            let Some(old) = self.order.pop_front() else {
+                break;
+            };
+            self.remove(old);
+        }
+        // Plain code can share its rendered text too. Inline source differs
+        // from the rendered label but is still allocated only once for map/FIFO.
+        let source: Arc<str> = if source == geometry.text.as_ref() {
+            geometry.text.clone()
+        } else {
+            source.into()
+        };
+        self.values
+            .entry(style)
+            .or_default()
+            .insert(source.clone(), geometry);
+        self.order.push_back(CaretStopCacheKey {
+            source,
+            style,
+            retained_bytes,
+        });
+        self.points += stop_count;
+        self.retained_bytes += retained_bytes;
+    }
 }
 
+#[cfg(test)]
 fn text_measure_key(text: &str, opts: &DrawOpts, scale_factor: f32) -> TextMeasureKey {
     TextMeasureKey {
         text: text.to_owned(),
@@ -142,6 +227,8 @@ fn text_measure_style(opts: &DrawOpts, scale_factor: f32) -> TextMeasureStyle {
         italic: opts.italic,
         font_id: opts.font_id,
         scale_factor_bits: scale_factor.to_bits(),
+        font_generation: 0,
+        inline_origin_bits: 0,
     }
 }
 
@@ -154,7 +241,8 @@ pub fn measure_text_cached(
         return 0.0;
     }
     // Borrow the text on hits; animated frames repeatedly measure unchanged runs.
-    let style = text_measure_style(opts, sugarloaf.scale_factor());
+    let mut style = text_measure_style(opts, sugarloaf.scale_factor());
+    style.font_generation = sugarloaf.text_mut().font_cache_generation();
     if let Some(value) = TEXT_MEASURE_CACHE.with(|cache| cache.borrow().get(text, &style))
     {
         return value;
@@ -259,6 +347,215 @@ mod measure_tests {
     }
 
     #[test]
+    fn retained_caret_cache_warm_hits_share_allocations_and_invalidate_identity() {
+        use crate::panels::agent_pane::selection_model::{
+            SelectableCaretStop, SelectionGeometry,
+        };
+        use std::sync::Arc;
+        let mut cache = super::CaretStopCache::new();
+        let style = super::text_measure_style(&DrawOpts::default(), 1.0);
+        let geometry = SelectionGeometry {
+            text: "e\u{301}\t界".into(),
+            stops: vec![
+                SelectableCaretStop {
+                    byte_offset: 0,
+                    x: 0.0,
+                },
+                SelectableCaretStop {
+                    byte_offset: 3,
+                    x: 8.0,
+                },
+                SelectableCaretStop {
+                    byte_offset: 4,
+                    x: 40.0,
+                },
+                SelectableCaretStop {
+                    byte_offset: 7,
+                    x: 56.0,
+                },
+            ]
+            .into(),
+            width: 56.0,
+        };
+        cache.insert(style, &geometry.text, geometry.clone());
+        // An independently allocated lookup string exercises borrowed lookup.
+        let query = geometry.text.to_string();
+        for _ in 0..3 {
+            let hit = cache.get(&query, &style).unwrap();
+            assert!(Arc::ptr_eq(&hit.text, &geometry.text));
+            assert!(Arc::ptr_eq(&hit.stops, &geometry.stops));
+            assert_eq!(hit.width, 56.0);
+        }
+        let mut changed = style;
+        changed.font_generation += 1;
+        assert!(cache.get(&query, &changed).is_none());
+        changed = style;
+        changed.scale_factor_bits = 2.0f32.to_bits();
+        assert!(cache.get(&query, &changed).is_none());
+        changed = style;
+        changed.font_id = Some(99);
+        assert!(cache.get(&query, &changed).is_none());
+        assert!(cache.get("different source", &style).is_none());
+        changed = style;
+        changed.inline_origin_bits = 17.5f32.to_bits();
+        assert!(cache.get(&query, &changed).is_none());
+        // Rendered text is not source identity: different Markdown styles can
+        // paint the same text with different exact caret advances.
+        cache.insert(style, "**source**", geometry.clone());
+        assert!(cache.get("**source**", &style).is_some());
+        assert!(cache.get("*source*", &style).is_none());
+    }
+
+    fn tiny_selection_geometry(
+    ) -> crate::panels::agent_pane::selection_model::SelectionGeometry {
+        use crate::panels::agent_pane::selection_model::{
+            SelectableCaretStop, SelectionGeometry,
+        };
+        SelectionGeometry {
+            text: "x".into(),
+            stops: vec![
+                SelectableCaretStop {
+                    byte_offset: 0,
+                    x: 0.0,
+                },
+                SelectableCaretStop {
+                    byte_offset: 1,
+                    x: 8.0,
+                },
+            ]
+            .into(),
+            width: 8.0,
+        }
+    }
+
+    #[test]
+    fn caret_cache_skips_oversized_invisible_markup_and_plain_source() {
+        let mut cache = super::CaretStopCache::new();
+        let mut style = super::text_measure_style(&DrawOpts::default(), 1.0);
+        let geometry = tiny_selection_geometry();
+        let source = format!("[x]({})", "u".repeat(super::CARET_STOP_CACHE_BYTES_LIMIT));
+        // Only two stops, but raw Markdown (not its visible label) is charged.
+        for origin in 0..3 {
+            style.inline_origin_bits = (origin as f32).to_bits();
+            cache.insert(style, &source, geometry.clone());
+            assert!(cache.get(&source, &style).is_none());
+            assert!(cache.values.is_empty());
+            assert!(cache.order.is_empty());
+            assert_eq!(cache.retained_bytes, 0);
+            assert_eq!(cache.points, 0);
+        }
+        // The same policy applies to the plain-code cache, where source and
+        // rendered text coincide. Sharing that Arc must not bypass the limit.
+        let plain = super::SelectionGeometry {
+            text: source.clone().into(),
+            ..geometry
+        };
+        cache.insert(style, &source, plain);
+        assert!(cache.order.is_empty());
+        assert_eq!(cache.retained_bytes, 0);
+    }
+
+    #[test]
+    fn caret_cache_bounds_origin_copies_and_shares_fifo_source() {
+        use std::sync::Arc;
+        let mut cache = super::CaretStopCache::new();
+        let mut style = super::text_measure_style(&DrawOpts::default(), 1.0);
+        let geometry = tiny_selection_geometry();
+        let source = format!(
+            "[x]({})",
+            "u".repeat(super::CARET_STOP_CACHE_BYTES_LIMIT / 2)
+        );
+        for origin in 0..3 {
+            style.inline_origin_bits = (origin as f32).to_bits();
+            cache.insert(style, &source, geometry.clone());
+            // Two independently keyed origins would exceed the byte budget.
+            assert_eq!(cache.order.len(), 1);
+            assert_eq!(cache.values.len(), 1);
+            assert_eq!(
+                cache.retained_bytes,
+                super::CaretStopCache::entry_bytes(&source, &geometry)
+            );
+            assert!(cache.retained_bytes <= super::CARET_STOP_CACHE_BYTES_LIMIT);
+            let (map_source, _) = cache
+                .values
+                .get(&style)
+                .unwrap()
+                .get_key_value(source.as_str())
+                .unwrap();
+            assert!(Arc::ptr_eq(
+                map_source,
+                &cache.order.front().unwrap().source
+            ));
+            let bytes = cache.retained_bytes;
+            for _ in 0..3 {
+                let hit = cache.get(&source, &style).unwrap();
+                assert!(Arc::ptr_eq(&hit.text, &geometry.text));
+                assert!(Arc::ptr_eq(&hit.stops, &geometry.stops));
+                assert_eq!(cache.order.len(), 1);
+                assert_eq!(cache.retained_bytes, bytes);
+            }
+            // Duplicate inserts replace accounting, not append another record.
+            cache.insert(style, &source, geometry.clone());
+            assert_eq!(cache.order.len(), 1);
+            assert_eq!(cache.retained_bytes, bytes);
+        }
+        let old_style = style;
+        let plain = tiny_selection_geometry();
+        style.inline_origin_bits = 99.0f32.to_bits();
+        cache.insert(style, "x", plain.clone());
+        let (source, _) = cache
+            .values
+            .get(&style)
+            .unwrap()
+            .get_key_value("x")
+            .unwrap();
+        assert!(Arc::ptr_eq(source, &plain.text));
+        assert!(cache.get("x", &old_style).is_none());
+    }
+
+    #[test]
+    fn caret_cache_accounts_rendered_stops_and_replacements() {
+        let mut cache = super::CaretStopCache::new();
+        let style = super::text_measure_style(&DrawOpts::default(), 1.0);
+        let small = tiny_selection_geometry();
+        let small_bytes = super::CaretStopCache::entry_bytes("raw", &small);
+        assert!(
+            small_bytes
+                > "raw".len()
+                    + small.text.len()
+                    + small.stops.len()
+                        * std::mem::size_of::<super::SelectableCaretStop>()
+        );
+        let mut larger = small.clone();
+        larger.text = "a larger rendered label".into();
+        larger.stops = vec![small.stops[0]; 10].into();
+        let larger_bytes = super::CaretStopCache::entry_bytes("raw", &larger);
+        assert_eq!(
+            larger_bytes - small_bytes,
+            larger.text.len() - small.text.len()
+                + (larger.stops.len() - small.stops.len())
+                    * std::mem::size_of::<super::SelectableCaretStop>()
+        );
+        cache.insert(style, "raw", small);
+        cache.insert(style, "raw", larger.clone());
+        assert_eq!(cache.order.len(), 1);
+        assert_eq!(cache.retained_bytes, larger_bytes);
+        assert_eq!(cache.points, larger.stops.len());
+        assert!(std::sync::Arc::ptr_eq(
+            &cache.get("raw", &style).unwrap().text,
+            &larger.text
+        ));
+        // Replacing that entry with an oversized rendered payload removes all
+        // old bookkeeping and does not retain an over-budget replacement.
+        larger.text = "x".repeat(super::CARET_STOP_CACHE_BYTES_LIMIT).into();
+        cache.insert(style, "raw", larger);
+        assert!(cache.values.is_empty());
+        assert!(cache.order.is_empty());
+        assert_eq!(cache.retained_bytes, 0);
+        assert_eq!(cache.points, 0);
+    }
+
+    #[test]
     fn whitespace_columns_preserve_spaces_and_expand_tabs() {
         assert_eq!(whitespace_columns(" "), 1);
         assert_eq!(whitespace_columns("  \t"), 6);
@@ -271,22 +568,57 @@ mod measure_tests {
     }
 }
 
+/// Compatibility adapter for renderers still accepting screen-space slices.
 pub fn measured_caret_stops(
     sugarloaf: &mut Sugarloaf,
     text: &str,
     opts: &DrawOpts,
     start_x: f32,
 ) -> Vec<SelectableCaretStop> {
-    if text.is_empty() {
-        return vec![SelectableCaretStop {
-            byte_offset: 0,
-            x: start_x,
-        }];
-    }
-    let key = text_measure_key(text, opts, sugarloaf.scale_factor());
-    if let Some(stops) = CARET_STOP_CACHE.with(|cache| cache.borrow().get(&key, start_x))
+    measured_selection_geometry(sugarloaf, text, opts)
+        .stops
+        .iter()
+        .map(|stop| SelectableCaretStop {
+            byte_offset: stop.byte_offset,
+            x: stop.x + start_x,
+        })
+        .collect()
+}
+
+/// Retain inline geometry by raw source, not its marker-stripped display text.
+/// The builder runs only on a cold style/font/source identity.
+pub(super) fn cached_inline_selection_geometry(
+    sugarloaf: &mut Sugarloaf,
+    source: &str,
+    opts: &DrawOpts,
+    origin_x: f32,
+    build: impl FnOnce(&mut Sugarloaf) -> SelectionGeometry,
+) -> SelectionGeometry {
+    let mut style = text_measure_style(opts, sugarloaf.scale_factor());
+    style.font_generation = sugarloaf.text_mut().font_cache_generation();
+    style.inline_origin_bits = origin_x.to_bits();
+    if let Some(hit) =
+        INLINE_SELECTION_CACHE.with(|cache| cache.borrow().get(source, &style))
     {
-        return stops;
+        return hit;
+    }
+    let geometry = build(sugarloaf);
+    INLINE_SELECTION_CACHE
+        .with(|cache| cache.borrow_mut().insert(style, source, geometry.clone()));
+    geometry
+}
+
+pub fn measured_selection_geometry(
+    sugarloaf: &mut Sugarloaf,
+    text: &str,
+    opts: &DrawOpts,
+) -> SelectionGeometry {
+    let mut style = text_measure_style(opts, sugarloaf.scale_factor());
+    style.font_generation = sugarloaf.text_mut().font_cache_generation();
+    if let Some(geometry) =
+        CARET_STOP_CACHE.with(|cache| cache.borrow().get(text, &style))
+    {
+        return geometry;
     }
     let mut stops = vec![SelectableCaretStop {
         byte_offset: 0,
@@ -321,11 +653,14 @@ pub fn measured_caret_stops(
         x += width * correction;
         stops.push(SelectableCaretStop { byte_offset, x });
     }
-    CARET_STOP_CACHE.with(|cache| cache.borrow_mut().insert(key, stops.clone()));
-    for stop in &mut stops {
-        stop.x += start_x;
-    }
-    stops
+    let geometry = SelectionGeometry {
+        text: text.into(),
+        stops: stops.into(),
+        width: full_width,
+    };
+    CARET_STOP_CACHE
+        .with(|cache| cache.borrow_mut().insert(style, text, geometry.clone()));
+    geometry
 }
 
 pub fn opts_with_clip(mut opts: DrawOpts, clip: [f32; 4]) -> Option<DrawOpts> {

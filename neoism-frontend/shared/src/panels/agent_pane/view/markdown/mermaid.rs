@@ -219,12 +219,13 @@ fn render_mermaid_raw_body<P: AgentMarkdownPane>(
         let text_x = x + 18.0 * s;
         let line_y = body_top + ix as f32 * line_h;
         if !suppress_interactions {
-            let line_w = measure_text_cached(sugarloaf, line, &opts).max(12.0 * s);
-            let stops = measured_caret_stops(sugarloaf, line, &opts, text_x);
-            let selection_index = pane.register_selectable_line_with_caret_stops(
-                line,
+            let geometry =
+                super::super::draw::measured_selection_geometry(sugarloaf, line, &opts);
+            let line_w = geometry.width.max(12.0 * s);
+            let selection_index = pane.register_selectable_geometry(
+                &geometry,
                 [text_x, line_y - 2.0 * s, line_w, line_h],
-                &stops,
+                text_x,
             );
             if let Some((left, right)) = pane.selectable_line_highlight(selection_index) {
                 draw_rounded_rect_clipped(

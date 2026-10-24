@@ -149,6 +149,7 @@ pub enum OutboundAgentCommand {
     /// Refresh picker catalogues. Desktop opens these by fetching live
     /// catalog data; shared hosts do the same through the outbound queue.
     RefreshModels,
+    RefreshModelCatalog { request_id: String, directory: Option<String> },
     RefreshAgents {
         directory: Option<String>,
     },

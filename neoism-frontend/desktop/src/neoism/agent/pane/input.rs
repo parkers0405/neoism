@@ -598,9 +598,10 @@ impl NeoismAgentPane {
                 self.refresh_provider_readiness();
             }
             let options = self.model_picker_options(options);
+            let status = super::super::api::cached_model_catalog_status(&self.server, self.directory.as_deref());
             let picker = self.picker.as_mut().unwrap();
             picker.replace_options(options);
-            picker.set_loading(false);
+            picker.apply_model_catalog_status(status.as_ref());
         }
         self.refresh_model_catalog();
     }
@@ -717,20 +718,26 @@ impl NeoismAgentPane {
     pub(crate) fn refresh_model_catalog(&mut self) {
         // Configured models are not proof that a provider can submit.
         self.refresh_provider_readiness();
+        let Some(picker) = self.picker.as_mut().filter(|p| p.kind == NeoismAgentPickerKind::Model) else { return; };
+        if picker.model_refresh_started.is_some() { return; }
+        picker.begin_model_catalog_request();
+        let identity = picker.activity_identity.clone();
+        let failure_identity = identity.clone();
         let scope = super::super::api::catalog_scope(&self.server, self.directory.as_deref());
         let worker_scope = scope.clone();
         let tx = self.background_tx.clone();
         if std::thread::Builder::new()
             .name("neoism-model-options".into())
             .spawn(move || {
-                let result = super::super::api::fetch_model_options_scoped(&worker_scope);
-                let _ = tx.send(NeoismAgentBackgroundUpdate::ModelOptionsRefreshed { scope: worker_scope, result });
+                let result = super::super::api::fetch_model_catalog_scoped(&worker_scope);
+                let _ = tx.send(NeoismAgentBackgroundUpdate::ModelCatalogRefreshed { scope: worker_scope, identity, result });
             })
             .is_err()
         {
             let _ = self.background_tx.send(
-                NeoismAgentBackgroundUpdate::ModelOptionsRefreshed {
+                NeoismAgentBackgroundUpdate::ModelCatalogRefreshed {
                     scope,
+                    identity: failure_identity,
                     result: Err("Could not start model refresh".into()),
                 },
             );

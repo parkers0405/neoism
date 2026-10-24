@@ -129,6 +129,15 @@ impl AgentMarkdownPane for NeoismAgentPane {
         )
     }
 
+    fn register_selectable_geometry(
+        &mut self,
+        geometry: &neoism_ui::panels::agent_pane::selection_model::SelectionGeometry,
+        rect: [f32; 4],
+        origin_x: f32,
+    ) -> usize {
+        NeoismAgentPane::register_selectable_geometry(self, geometry, rect, origin_x)
+    }
+
     fn selectable_line_highlight(&self, index: usize) -> Option<(f32, f32)> {
         NeoismAgentPane::selectable_line_highlight(self, index)
     }

@@ -1,7 +1,7 @@
 use std::collections::{hash_map::DefaultHasher, BTreeMap, BTreeSet};
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
 use std::time::{Duration, SystemTime};
 
 use anyhow::Context;
@@ -65,6 +65,21 @@ pub enum OpenAiModelAccess {
 }
 
 #[derive(Clone)]
+struct Hydration {
+    source: &'static str,
+    state: &'static str,
+    next: std::time::Instant,
+    failures: u32,
+    revision: u64,
+}
+
+impl Default for Hydration {
+    fn default() -> Self {
+        Self { source: "bundled", state: "loading", next: std::time::Instant::now(), failures: 0, revision: 0 }
+    }
+}
+
+#[derive(Clone)]
 pub struct ProviderCatalog {
     source: String,
     path_override: Option<PathBuf>,
@@ -76,6 +91,10 @@ pub struct ProviderCatalog {
     configured: Arc<BTreeMap<String, ProviderConfig>>,
     discovered: Arc<RwLock<BTreeMap<String, (std::time::Instant, Vec<String>)>>>,
     discovery_gate: Arc<Mutex<()>>,
+    hydration: Arc<RwLock<Hydration>>,
+    discovery_failed: Arc<RwLock<BTreeMap<String, bool>>>,
+    revisions: Arc<Mutex<BTreeMap<String, (String, u64)>>>,
+    revision: Arc<AtomicU64>,
 }
 
 impl ProviderCatalog {
@@ -108,6 +127,10 @@ impl ProviderCatalog {
             configured: Arc::new(configured),
             discovered: Arc::new(RwLock::new(BTreeMap::new())),
             discovery_gate: Arc::new(Mutex::new(())),
+            hydration: Arc::new(RwLock::new(Hydration::default())),
+            discovery_failed: Arc::new(RwLock::new(BTreeMap::new())),
+            revisions: Arc::new(Mutex::new(BTreeMap::new())),
+            revision: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -127,6 +150,7 @@ impl ProviderCatalog {
 
     pub async fn providers(&self) -> anyhow::Result<Vec<ProviderInfo>> {
         if let Some(providers) = self.cached.read().await.as_ref().cloned() {
+            self.schedule_refresh();
             return self.apply_configured(providers).await;
         }
 
@@ -134,6 +158,7 @@ impl ProviderCatalog {
         // wait for that result instead of launching duplicate catalog fetches.
         let _load = self.cold_load_gate.lock().await;
         if let Some(providers) = self.cached.read().await.as_ref().cloned() {
+            self.schedule_refresh();
             return self.apply_configured(providers).await;
         }
         let (providers, refresh_stale) = self.load().await?;
@@ -352,10 +377,11 @@ impl ProviderCatalog {
                     base_url.to_string(),
                     (std::time::Instant::now(), ids.clone()),
                 );
+                self.discovery_failed.write().await.insert(base_url.to_string(), false);
                 ids
             }
-            Err(error) => {
-                tracing::debug!(%error, %base_url, "local model discovery failed");
+            Err(_) => {
+                tracing::debug!("local model discovery unavailable");
                 let mut cache = self.discovered.write().await;
                 let ids = cache
                     .get(base_url)
@@ -365,27 +391,67 @@ impl ProviderCatalog {
                     base_url.to_string(),
                     (std::time::Instant::now(), ids.clone()),
                 );
+                drop(cache);
+                self.discovery_failed.write().await.insert(base_url.to_string(), true);
                 ids
             }
         }
     }
 
+    async fn refresh_owned(&self) -> anyhow::Result<()> {
+        {
+            let mut status = self.hydration.write().await;
+            status.state = "loading";
+            status.revision += 1;
+        }
+        let fetched = async {
+            let raw = self.fetch_api().await?;
+            let providers = parse_models_async(raw.clone()).await?;
+            // Memory is authoritative for this runtime. Persistence is best effort;
+            // a read-only cache must not discard successfully hydrated metadata.
+            *self.cached.write().await = Some(providers);
+            {
+                let mut status = self.hydration.write().await;
+                status.source = "network";
+                status.state = "ready";
+                status.failures = 0;
+                status.next = std::time::Instant::now() + CACHE_TTL;
+                status.revision += 1;
+            }
+            if write_cache_async(self.cache_path.clone(), raw).await.is_err() {
+                tracing::debug!("model catalog persistence unavailable");
+            }
+            Ok::<_, anyhow::Error>(())
+        }.await;
+        if fetched.is_err() {
+            let mut status = self.hydration.write().await;
+            status.failures = status.failures.saturating_add(1);
+            status.state = "retryable-error";
+            status.next = std::time::Instant::now()
+                + Duration::from_secs((1u64 << status.failures.min(6)).min(60));
+            status.revision += 1;
+        }
+        fetched
+    }
+
+    #[cfg(test)]
     pub async fn refresh(&self, force: bool) -> anyhow::Result<()> {
         let _refresh = self.refresh_gate.lock().await;
-        if !force && self.cache_fresh().await {
+        if !force && self.hydration.read().await.next > std::time::Instant::now() {
             return Ok(());
         }
-        let raw = self.fetch_api().await?;
-        let providers = parse_models_async(raw.clone()).await?;
-        write_cache_async(self.cache_path.clone(), raw).await?;
-        *self.cached.write().await = Some(providers);
-        Ok(())
+        self.refresh_owned().await
     }
 
     async fn load(&self) -> anyhow::Result<(Vec<ProviderInfo>, bool)> {
         if let Some(path) = &self.path_override {
             if let Some(raw) = read_to_string_async(path.clone()).await {
                 if let Ok(providers) = parse_models_async(raw).await {
+                    let mut status = self.hydration.write().await;
+                    status.source = "override";
+                    status.state = "ready";
+                    status.next = std::time::Instant::now() + CACHE_TTL;
+                    status.revision += 1;
                     return Ok((providers, false));
                 }
             }
@@ -394,6 +460,11 @@ impl ProviderCatalog {
         if let Some(raw) = read_to_string_async(self.cache_path.clone()).await {
             if let Ok(providers) = parse_models_async(raw).await {
                 let refresh_stale = !self.cache_fresh().await && !fetch_disabled();
+                let mut status = self.hydration.write().await;
+                status.source = "disk";
+                status.state = "ready";
+                status.next = std::time::Instant::now() + if refresh_stale { Duration::ZERO } else { CACHE_TTL };
+                status.revision += 1;
                 return Ok((providers, refresh_stale));
             }
         }
@@ -401,13 +472,13 @@ impl ProviderCatalog {
         // First run/offline/corrupt cache: auth metadata must not depend on
         // models.dev. Fetch richer metadata in the background, never on /connect.
         Ok((
-            parse_models(include_str!("provider_catalog_fallback.json"))?,
+            parse_models_async(include_str!("provider_catalog_fallback.json").to_string()).await?,
             !fetch_disabled(),
         ))
     }
 
     async fn fetch_api(&self) -> anyhow::Result<String> {
-        Ok(self
+        let mut response = self
             .client
             .get(format!("{}/api.json", self.source.trim_end_matches('/')))
             .header(
@@ -417,9 +488,15 @@ impl ProviderCatalog {
             .timeout(Duration::from_secs(10))
             .send()
             .await?
-            .error_for_status()?
-            .text()
-            .await?)
+            .error_for_status()?;
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await? {
+            if bytes.len().saturating_add(chunk.len()) > 32 * 1024 * 1024 {
+                anyhow::bail!("model catalog exceeds size limit");
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        Ok(String::from_utf8(bytes)?)
     }
 
     async fn cache_fresh(&self) -> bool {
@@ -433,12 +510,88 @@ impl ProviderCatalog {
     }
 
     fn schedule_refresh(&self) {
+        if fetch_disabled() { return; }
+        // Acquire before spawning: warm reads must not queue refresh tasks.
+        let Ok(gate) = self.refresh_gate.clone().try_lock_owned() else { return; };
         let catalog = self.clone();
         tokio::spawn(async move {
-            if let Err(error) = catalog.refresh(false).await {
-                tracing::debug!(%error, "background model catalog refresh failed");
+            let _gate = gate;
+            let status = catalog.hydration.read().await.clone();
+            if status.source == "override" || status.next > std::time::Instant::now() { return; }
+            if catalog.refresh_owned().await.is_err() {
+                tracing::debug!("background model catalog refresh unavailable");
             }
         });
+    }
+
+    /// Only opaque scope fingerprints are retained. Account models never enter
+    /// the global raw catalog; the public contract contains no identity or URL.
+    pub(crate) async fn catalog_status(
+        &self,
+        scope: &str,
+        access: &OpenAiModelAccess,
+        oauth: (&str, u64),
+    ) -> Value {
+        let base = self.hydration.read().await.clone();
+        let mut state = base.state;
+        let mut retry = if state == "retryable-error" {
+            base.next.saturating_duration_since(std::time::Instant::now()).as_millis() as u64
+        } else { 0 };
+        if base.source == "bundled" && fetch_disabled() {
+            state = "retryable-error";
+            retry = 60_000;
+        }
+        let discovery = self.discovery_failed.read().await;
+        let raw = self.cached.read().await;
+        for (id, config) in self.configured.iter().filter(|(_, c)| c.discover_models) {
+            let existing = raw.as_ref().and_then(|p| p.iter().find(|p| p.id == *id));
+            let auth = config.auth.unwrap_or(if existing.is_some() { ProviderAuthMode::Required } else { ProviderAuthMode::None });
+            // Authenticated discovery is deliberately unsupported, not pending.
+            if auth == ProviderAuthMode::Required { continue; }
+            let url = config.options.base_url.as_deref().or_else(|| existing.and_then(|p| p.models.values().next()).map(|m| m.api.url.as_str()));
+            if let Some(url) = url.filter(|u| !u.is_empty()) {
+                match discovery.get(url.trim_end_matches('/')) {
+                    Some(true) => { state = "retryable-error"; retry = retry.max(60_000); }
+                    None if state == "ready" => state = "loading",
+                    _ => {}
+                }
+            }
+        }
+        let discovery_fingerprint = stable_hash(&format!("{discovery:?}"));
+        drop(raw);
+        drop(discovery);
+        if oauth.0 == "retryable-error" {
+            state = "retryable-error";
+            retry = retry.max(oauth.1);
+        }
+        if (oauth.0 == "loading" || matches!(access, OpenAiModelAccess::CodexPending)) && state == "ready" {
+            state = "loading";
+        }
+        // Include data as well as state: newly discovered IDs/limits must advance
+        // revision even if a polling client misses the intermediate loading state.
+        let local = self.discovered.read().await;
+        let local_ids = local.iter().map(|(k, (_, ids))| (k, ids)).collect::<BTreeMap<_, _>>();
+        let fingerprint = stable_hash(&format!("{}:{state}:{}:{}:{discovery_fingerprint}:{access:?}:{local_ids:?}", base.source, base.revision, oauth.0));
+        drop(local);
+        let key = stable_hash(scope);
+        let mut revisions = self.revisions.lock().await;
+        let revision = match revisions.get(&key) {
+            Some((old, revision)) if old == &fingerprint => *revision,
+            _ => {
+                let revision = self.revision.fetch_add(1, Ordering::Relaxed) + 1;
+                if revisions.len() >= 1024 { revisions.clear(); }
+                revisions.insert(key, (fingerprint, revision));
+                revision
+            }
+        };
+        let mut value = serde_json::json!({
+            "source": base.source, "state": state, "revision": revision,
+            "retryAfterMs": if state == "loading" { 500 } else { retry },
+        });
+        if state == "retryable-error" {
+            value["message"] = Value::String("Model metadata unavailable; retrying".into());
+        }
+        value
     }
 }
 
@@ -903,6 +1056,13 @@ fn effective_catalog_with_config(
     restrict_to_listed: bool,
 ) -> Vec<ProviderInfo> {
     let mut output = providers.to_vec();
+    if matches!(access, OpenAiModelAccess::Codex(_)) && !output.iter().any(|p| p.id == "openai") {
+        output.push(ProviderInfo {
+            id: "openai".into(), name: "OpenAI".into(), source: ProviderSource::Custom,
+            env: vec!["OPENAI_API_KEY".into()], key: None,
+            options: BTreeMap::new(), models: BTreeMap::new(),
+        });
+    }
     for provider in &mut output {
         if provider.id != "openai" {
             continue;
@@ -914,6 +1074,25 @@ fn effective_catalog_with_config(
             OpenAiModelAccess::CodexPending => &unavailable,
         };
         {
+            // Discovery authorizes wire IDs, not just the intersection with a
+            // possibly old models.dev snapshot. Never clone another model's
+            // capabilities, pricing or API limits to fill missing account IDs.
+            for id in models.keys() {
+                if !provider.models.values().any(|model| model.api.id == *id) {
+                    let config = configured.get("openai");
+                    let model_config = config.and_then(|c| c.models.get(id));
+                    let mut model = local_model(
+                        "openai", id, id,
+                        config.and_then(|c| c.options.base_url.as_deref()).unwrap_or("https://api.openai.com/v1"),
+                        "@ai-sdk/openai", ProviderAuthMode::Required,
+                        false, false, model_config,
+                    );
+                    // /models does not advertise an output maximum. Zero means
+                    // unknown; context/input are resolved below from this account.
+                    model.api.id = id.clone();
+                    provider.models.insert(id.clone(), model);
+                }
+            }
             if restrict_to_listed && !matches!(access, OpenAiModelAccess::CodexPending) {
                 // Match the actual wire ID, not a picker alias or variant label.
                 provider
@@ -1273,6 +1452,10 @@ struct ModelsDevModelProvider {
     body: Option<BTreeMap<String, Value>>,
     headers: Option<BTreeMap<String, String>>,
 }
+
+#[cfg(test)]
+#[path = "provider_catalog_hydration_tests.rs"]
+mod hydration_tests;
 
 #[cfg(test)]
 mod tests {

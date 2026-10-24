@@ -280,6 +280,8 @@ pub enum AgentClientMessage {
     /// context limits). Reply is
     /// [`AgentServerMessage::ProviderCatalog`].
     ListProviders,
+    /// Correlated model-picker hydration read; legacy ListProviders stays valid.
+    ListModelCatalog { request_id: String, directory: Option<String> },
     /// Request the resolved per-directory config defaults. Reply is
     /// [`AgentServerMessage::ConfigDefaults`].
     GetConfigDefaults {
@@ -892,6 +894,10 @@ pub enum AgentServerMessage {
     /// Reply to [`AgentClientMessage::ListProviders`].
     ProviderCatalog {
         providers: Vec<ProviderInfo>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        catalog_status: Option<serde_json::Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
     },
     /// Reply to [`AgentClientMessage::GetConfigDefaults`].
     ConfigDefaults {
@@ -1395,6 +1401,17 @@ pub struct Usage {
 #[cfg(test)]
 mod connect_catalog_tests {
     use super::*;
+
+    #[test]
+    fn model_hydration_status_preserves_legacy_provider_catalog_wire() {
+        let legacy = serde_json::json!({"ProviderCatalog":{"providers":[]}});
+        let reply: AgentServerMessage = serde_json::from_value(legacy.clone()).unwrap();
+        assert!(matches!(&reply, AgentServerMessage::ProviderCatalog { catalog_status: None, request_id: None, .. }));
+        assert_eq!(serde_json::to_value(reply).unwrap(), legacy);
+        let status = serde_json::json!({"source":"disk","state":"loading","revision":42,"retryAfterMs":250});
+        let reply = AgentServerMessage::ProviderCatalog { providers: vec![], catalog_status: Some(status), request_id: Some("model-1".into()) };
+        assert_eq!(serde_json::from_str::<AgentServerMessage>(&serde_json::to_string(&reply).unwrap()).unwrap(), reply);
+    }
 
     #[test]
     fn connect_catalog_optional_correlation_preserves_legacy_wire_forms() {

@@ -195,6 +195,14 @@ jobs:
           fi
           test -f neoism-frontend/web/dist/index.html
 
+      - name: Include distribution license notices
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p neoism-frontend/web/dist/licenses
+          cp LICENSE NOTICE misc/licenses/* neoism-frontend/web/dist/licenses/
+          test -s neoism-frontend/web/dist/licenses/models.dev.txt
+
       - name: Build and validate the production agent GUI
         shell: bash
         run: |

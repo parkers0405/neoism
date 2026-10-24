@@ -424,6 +424,8 @@ impl NeoismAgentPane {
     /// (e.g. pushing notices on failure).
     pub fn drain_pending_outbound(&mut self) -> Vec<OutboundAgentCommand> {
         self.discard_replaced_connect_request();
+        if let Some(picker) = self.picker.as_mut() { picker.expire_model_catalog_request(); }
+        if self.picker.as_ref().is_some_and(|p| p.model_catalog_poll_due()) { self.refresh_visible_model_catalog(); }
         if self.mcp_catalog_poll_due() {
             self.refresh_mcp_if_visible();
         }
@@ -435,6 +437,7 @@ impl NeoismAgentPane {
     /// the queue is empty (the hot path).
     pub fn has_pending_outbound(&self) -> bool {
         !self.pending_outbound.is_empty() || self.mcp_catalog_poll_due()
+            || self.picker.as_ref().is_some_and(|p| p.model_catalog_poll_due() || p.model_catalog_expired())
     }
 
     pub fn running_background_task_count(&self) -> usize {

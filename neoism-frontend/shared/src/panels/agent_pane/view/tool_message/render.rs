@@ -103,37 +103,50 @@ pub fn measure_tool_message_height(
         s,
         tool_expanded,
         selected_group_child,
+        None,
     )?;
     for child in message.composition_children() {
-        height += measure_composition_child_height(
+        height += prepare_composition_child(
             sugarloaf,
             pane,
             child,
             (width - 20.0 * s).max(1.0),
             s,
-        );
+        ).0;
     }
     Some(height)
 }
 
-fn measure_composition_child_height(
+fn prepare_composition_child(
     sugarloaf: &mut Sugarloaf,
     pane: &impl AgentToolPane,
     child: &NeoismAgentMessage,
     width: f32,
     s: f32,
-) -> f32 {
-    let collapsed =
-        measure_single_tool_message_height(sugarloaf, pane, child, width, s, false, None)
-            .unwrap_or(TOOL_HEADER_HEIGHT * s);
+) -> (f32, Option<CachedToolDiffSections>) {
+    // Share one parsed-section lookup across both height endpoints and paint.
+    // Expansion/status animation progress is still sampled on every frame.
+    let archived = pane.tool_archived(&child.id) || child.composition_child();
     let progress = pane.tool_expand_progress(&child.id).clamp(0.0, 1.0);
+    let expanded = progress > 0.001 || pane.tool_expanded(&child.id);
+    let sections = if show_tool_diff_cards(child.tool(), child.status(), false, archived)
+        || (expanded && show_tool_diff_cards(child.tool(), child.status(), true, archived))
+    {
+        cached_edit_diff_sections(child)
+    } else {
+        None
+    };
+    let prepared = Some(sections.as_ref().map_or(&[][..], |sections| sections.as_slice()));
+    let collapsed = measure_single_tool_message_height(
+        sugarloaf, pane, child, width, s, false, None, prepared,
+    ).unwrap_or(TOOL_HEADER_HEIGHT * s);
     if progress <= 0.001 {
-        return collapsed;
+        return (collapsed, sections);
     }
-    let expanded =
-        measure_single_tool_message_height(sugarloaf, pane, child, width, s, true, None)
-            .unwrap_or(collapsed);
-    collapsed + (expanded - collapsed) * progress
+    let expanded = measure_single_tool_message_height(
+        sugarloaf, pane, child, width, s, true, None, prepared,
+    ).unwrap_or(collapsed);
+    (collapsed + (expanded - collapsed) * progress, sections)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -171,16 +184,17 @@ pub fn render_tool_message(
             mouse,
         );
     }
-    let child_w = (w - 20.0 * s).max(1.0);
-    let heights: Vec<f32> = message
-        .composition_children()
-        .iter()
-        .map(|child| measure_composition_child_height(sugarloaf, pane, child, child_w, s))
-        .collect();
-    let root_h = (h - heights.iter().sum::<f32>()).max(TOOL_HEADER_HEIGHT * s);
     let Some(viewport_clip) = intersect_rect([x, y, w, h], viewport_clip) else {
         return h;
     };
+    let child_w = (w - 20.0 * s).max(1.0);
+    let children: Vec<_> = message
+        .composition_children()
+        .iter()
+        .map(|child| prepare_composition_child(sugarloaf, pane, child, child_w, s))
+        .collect();
+    let root_h = (h - children.iter().map(|(height, _)| height).sum::<f32>())
+        .max(TOOL_HEADER_HEIGHT * s);
     render_single_tool_message(
         sugarloaf,
         pane,
@@ -198,7 +212,7 @@ pub fn render_tool_message(
         mouse,
     );
     let mut child_y = y + root_h;
-    for (child, child_h) in message.composition_children().iter().zip(heights) {
+    for (child, (child_h, sections)) in message.composition_children().iter().zip(children) {
         render_tool_message(
             sugarloaf,
             pane,
@@ -212,7 +226,7 @@ pub fn render_tool_message(
             now_seconds,
             viewport_clip,
             occlusion_rects,
-            None,
+            Some(sections.as_ref().map_or(&[][..], |sections| sections.as_slice())),
             mouse,
         );
         child_y += child_h;
@@ -228,6 +242,7 @@ fn measure_single_tool_message_height(
     s: f32,
     tool_expanded: bool,
     selected_group_child: Option<&str>,
+    prepared_diff_sections: Option<&[ToolDiffSection]>,
 ) -> Option<f32> {
     if message.is_todos_output() {
         let opts = DrawOpts {
@@ -257,7 +272,14 @@ fn measure_single_tool_message_height(
         tool_expanded,
         pane.tool_archived(message.id()) || message.composition_child(),
     ) {
-        if let Some(sections) = cached_edit_diff_sections(message) {
+        let cached_sections;
+        let sections = if let Some(sections) = prepared_diff_sections {
+            Some(sections)
+        } else {
+            cached_sections = cached_edit_diff_sections(message);
+            cached_sections.as_ref().map(|sections| sections.as_slice())
+        };
+        if let Some(sections) = sections.filter(|sections| !sections.is_empty()) {
             let card_w = tool_diff_card_width(width, s);
             let mut height = TOOL_HEADER_HEIGHT * s;
             for (section_index, section) in sections.iter().enumerate() {
@@ -737,6 +759,7 @@ fn render_single_tool_message(
             .as_ref()
             .map(|sections| sections.as_slice())
     };
+    let diff_sections = diff_sections.filter(|sections| !sections.is_empty());
     // Only live edit cards replace the parent toggle with per-file toggles.
     // Ordinary tools (e.g. Bash git diff) must retain the header target after
     // expansion, including when their diff sections were prepared by the timeline.
@@ -1213,6 +1236,9 @@ fn render_tool_diff_cards(
     let clip_bottom = viewport_clip[1] + viewport_clip[3];
     let mut card_y = y;
     for (section_index, section) in sections.iter().enumerate() {
+        if card_y > clip_bottom + 16.0 * s {
+            break;
+        }
         // Each file in a multi-file patch carries its own expand/scroll state so
         // a click toggles only the card under the cursor. Previously every card
         // shared the message id, so clicking one expanded (and made scrollable)
@@ -1222,6 +1248,15 @@ fn render_tool_diff_cards(
         let view = cached_diff_card_view(section, card_w, s, card_expanded);
         let full_body_h = diff_body_height(view.visual_rows, s);
         let body_h = fixed_diff_viewport_height(view.preview_visual_rows, s);
+        // Preserve the same sequence of height additions used after painting.
+        // Leave a conservative ink/border margin, including diagnostics.
+        let mut next_y = card_y + (diff_card::HEADER_HEIGHT * s + body_h.max(0.0));
+        next_y += diag_footer_height(section, s);
+        next_y += 10.0 * s;
+        if next_y < clip_top - 16.0 * s {
+            card_y = next_y;
+            continue;
+        }
         let scroll_key = card_key.clone();
         let body_scroll = if card_expanded {
             pane.diff_scroll_offset(&scroll_key, (full_body_h - body_h).max(0.0))
@@ -1230,14 +1265,18 @@ fn render_tool_diff_cards(
         };
         let gutter_width = diff_card::measured_gutter_width(sugarloaf, view.max_line_number, s);
         let code_width = diff_card::body_text_width_with_gutter(card_w, s, gutter_width);
-        let content_width = view.content_width.get().unwrap_or_else(|| {
+        let font_generation = sugarloaf.text_mut().font_cache_generation();
+        let content_width = view.content_width.get()
+            .filter(|(generation, _)| *generation == font_generation)
+            .map(|(_, width)| width)
+            .unwrap_or_else(|| {
             let width = diff_card::content_width(
                 sugarloaf,
                 view.rows.as_slice(),
                 s,
                 Lang::from_path(&section.path),
             );
-            view.content_width.set(Some(width));
+            view.content_width.set(Some((font_generation, width)));
             width
         });
         let max_horizontal_scroll = (content_width + 8.0 * s - code_width).max(0.0);

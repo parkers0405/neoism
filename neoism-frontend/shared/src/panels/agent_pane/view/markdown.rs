@@ -18,8 +18,7 @@ use super::code_block::{
 };
 use super::draw::{
     draw_rect_clipped, draw_rounded_rect_clipped, draw_text_clipped,
-    draw_top_rounded_rect_clipped, intersect_rect, measure_text_cached,
-    measured_caret_stops, opts_with_clip,
+    draw_top_rounded_rect_clipped, intersect_rect, measure_text_cached, opts_with_clip,
 };
 use super::{ORDER_PANEL, ORDER_TEXT};
 use crate::primitives::ide_theme::IdeTheme;
@@ -356,6 +355,22 @@ pub trait AgentMarkdownPane {
     ) -> usize {
         self.register_selectable_line(text, rect)
     }
+    fn register_selectable_geometry(
+        &mut self,
+        geometry: &crate::panels::agent_pane::selection_model::SelectionGeometry,
+        rect: [f32; 4],
+        origin_x: f32,
+    ) -> usize {
+        let stops: Vec<_> = geometry
+            .stops
+            .iter()
+            .map(|stop| SelectableCaretStop {
+                byte_offset: stop.byte_offset,
+                x: stop.x + origin_x,
+            })
+            .collect();
+        self.register_selectable_line_with_caret_stops(&geometry.text, rect, &stops)
+    }
     fn selectable_line_highlight(&self, index: usize) -> Option<(f32, f32)>;
     fn register_link_hit_rect(&mut self, target: String, rect: [f32; 4]);
     fn register_image_preview(
@@ -463,6 +478,15 @@ impl AgentMarkdownPane for NeoismAgentPane {
             rect,
             caret_stops,
         )
+    }
+
+    fn register_selectable_geometry(
+        &mut self,
+        geometry: &crate::panels::agent_pane::selection_model::SelectionGeometry,
+        rect: [f32; 4],
+        origin_x: f32,
+    ) -> usize {
+        NeoismAgentPane::register_selectable_geometry(self, geometry, rect, origin_x)
     }
 
     fn selectable_line_highlight(&self, index: usize) -> Option<(f32, f32)> {
@@ -2897,13 +2921,14 @@ pub(super) fn render_markdown_code_block(
         );
         if !suppress_interactions {
             let text_x = x + code_left_pad - horizontal_scroll;
-            let text_w = measure_text_cached(sugarloaf, line, &opts).max(12.0 * s);
+            let geometry =
+                super::draw::measured_selection_geometry(sugarloaf, line, &opts);
+            let text_w = geometry.width.max(12.0 * s);
             if let Some(hit_rect) =
                 intersect_rect([text_x, line_y - 2.0 * s, text_w, line_h], code_clip)
             {
-                let stops = measured_caret_stops(sugarloaf, line, &opts, text_x);
-                let selection_index = pane
-                    .register_selectable_line_with_caret_stops(line, hit_rect, &stops);
+                let selection_index =
+                    pane.register_selectable_geometry(&geometry, hit_rect, text_x);
                 if let Some((left, right)) =
                     pane.selectable_line_highlight(selection_index)
                 {
@@ -3171,13 +3196,21 @@ fn draw_markdown_inline_line<P: AgentMarkdownPane>(
         // actually paint (per-segment advances below) and the copied string
         // carries no `**`/`` ` ``/`[]()` markers. `measure_markdown_inline_width`
         // sums the same per-segment widths the draw loop advances `x` by.
-        let rendered = rendered_inline_text(line);
-        let line_w = measure_markdown_inline_width(sugarloaf, line, opts).max(12.0);
-        let caret_stops = markdown_inline_caret_stops(sugarloaf, line, opts, theme, x);
-        let line_index = pane.register_selectable_line_with_caret_stops(
-            &rendered,
-            [x, y - 3.0, line_w, opts.font_size + 8.0],
-            &caret_stops,
+        // Unlike the code-row helper, this existing algorithm accumulates from
+        // screen x. Retain its exact f32 rounding; an x change invalidates the
+        // inline entry instead of approximating it with a translated prefix sum.
+        let geometry = super::draw::cached_inline_selection_geometry(
+            sugarloaf, line, opts, x,
+            |sugarloaf| crate::panels::agent_pane::selection_model::SelectionGeometry {
+                text: rendered_inline_text(line).into(),
+                width: measure_markdown_inline_width(sugarloaf, line, opts),
+                stops: markdown_inline_caret_stops(sugarloaf, line, opts, theme, x).into(),
+            },
+        );
+        let line_index = pane.register_selectable_geometry(
+            &geometry,
+            [x, y - 3.0, geometry.width.max(12.0), opts.font_size + 8.0],
+            0.0,
         );
         if let Some((sel_left, sel_right)) = pane.selectable_line_highlight(line_index) {
             // Sub-line highlight follows the drag end-points so the user can

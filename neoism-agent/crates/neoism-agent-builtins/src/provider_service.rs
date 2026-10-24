@@ -75,6 +75,7 @@ impl ProviderPlatform {
             tenant_id: request.tenant_id.unwrap_or_else(|| "local".into()),
             workspace_id: request.workspace_id,
         };
+        let status_scope = format!("{:?}:{:?}:{:?}", scope.tenant_id, scope.workspace_id, request.connection_id);
         let auth = self
             .auth
             .scoped(scope.clone(), request.connection_id.clone());
@@ -84,8 +85,12 @@ impl ProviderPlatform {
             }
             ProviderRouteAction::List => {
                 let raw = self.catalog.providers().await?;
-                let connected = self.registry.connected_ids(&raw).await?;
+                let connected = self.registry.connected_ids(&raw, &auth).await?;
                 let (openai_access, readiness_identity) = self.registry.openai_model_access_with_identity(&auth).await?;
+                let catalog_status = self.catalog.catalog_status(
+                    &status_scope, &openai_access,
+                    self.registry.catalog_hydration(readiness_identity.as_deref()).await,
+                ).await;
                 let effective = self
                     .catalog
                     .providers_for_access(&openai_access, true)
@@ -93,13 +98,12 @@ impl ProviderPlatform {
                 // Determine connectability from the basic catalog, not optional
                 // account discovery. An empty/unavailable model list must not
                 // hide an account's provider or its auth methods.
-                let mut all =
-                    connect_provider_catalog(&raw, &connected, &OpenAiModelAccess::Api);
-                for provider in all.iter_mut().filter(|provider| provider.id == "openai")
-                {
-                    if let Some(resolved) = effective.iter().find(|p| p.id == provider.id)
-                    {
-                        provider.models = resolved.models.clone();
+                let mut all = connect_provider_catalog(&effective, &connected, &OpenAiModelAccess::Api);
+                if !all.iter().any(|p| p.id == "openai") {
+                    if let Some(mut provider) = raw.iter().find(|p| p.id == "openai").cloned() {
+                        provider.models = effective.iter().find(|p| p.id == "openai")
+                            .map(|p| p.models.clone()).unwrap_or_default();
+                        all.push(provider);
                     }
                 }
                 let readiness_pending = connected.iter().any(|id| id == "openai")
@@ -113,13 +117,18 @@ impl ProviderPlatform {
                 // discovery refreshes. Do not publish a false negative that
                 // would prevent generation from ever refreshing this account.
                 result["readinessPending"] = Value::Bool(readiness_pending);
+                result["catalogStatus"] = catalog_status;
                 result["readinessIdentity"] = serde_json::to_value(readiness_identity)?;
                 Ok(result)
             }
             ProviderRouteAction::Configured => {
                 let raw = self.catalog.providers().await?;
-                let connected = self.registry.connected_ids(&raw).await?;
-                let openai_access = self.registry.openai_model_access(&auth).await?;
+                let connected = self.registry.connected_ids(&raw, &auth).await?;
+                let (openai_access, readiness_identity) = self.registry.openai_model_access_with_identity(&auth).await?;
+                let catalog_status = self.catalog.catalog_status(
+                    &status_scope, &openai_access,
+                    self.registry.catalog_hydration(readiness_identity.as_deref()).await,
+                ).await;
                 let effective = self
                     .catalog
                     .providers_for_access(&openai_access, true)
@@ -129,10 +138,12 @@ impl ProviderPlatform {
                     &connected,
                     &OpenAiModelAccess::Api,
                 );
-                Ok(serde_json::to_value(ConfigProvidersResult {
+                let mut result = serde_json::to_value(ConfigProvidersResult {
                     default: default_model_ids(&providers),
                     providers,
-                })?)
+                })?;
+                result["catalogStatus"] = catalog_status;
+                Ok(result)
             }
             ProviderRouteAction::AuthMethods => {
                 let providers = self.catalog.providers().await?;
@@ -597,7 +608,7 @@ mod tests {
             .unwrap();
         platform.catalog =
             ProviderCatalog::with_test_source(source, path.with_extension("models"));
-        for action in [ProviderRouteAction::List, ProviderRouteAction::AuthMethods] {
+        for action in [ProviderRouteAction::List, ProviderRouteAction::Configured, ProviderRouteAction::AuthMethods] {
             let result = tokio::time::timeout(
                 std::time::Duration::from_millis(500),
                 platform.execute_route(ProviderRouteRequest {
@@ -613,6 +624,16 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+            if matches!(action, ProviderRouteAction::List | ProviderRouteAction::Configured) {
+                let status = &result["catalogStatus"];
+                assert_eq!(status["source"], "bundled");
+                assert!(matches!(status["state"].as_str(), Some("loading" | "retryable-error")));
+                assert!(status["revision"].as_u64().unwrap() > 0);
+                assert!(status["retryAfterMs"].as_u64().unwrap() > 0);
+                assert!(!status.to_string().contains("expired-access"));
+                assert!(!status.to_string().contains("test-account"));
+                assert!(!status.to_string().contains("http"));
+            }
             if matches!(action, ProviderRouteAction::List) {
                 assert_eq!(result["readinessPending"], true);
                 assert_eq!(result["readinessIdentity"].as_str().unwrap().len(), 64,
@@ -631,6 +652,8 @@ mod tests {
                     "pending discovery retains basic model IDs for immediate-send validation");
                 assert_eq!(openai["models"]["gpt-5"]["limit"]["context"], 272000,
                     "pending discovery must still use conservative subscription limits");
+            } else if matches!(action, ProviderRouteAction::Configured) {
+                assert!(result["providers"].as_array().unwrap().iter().any(|p| p["id"] == "openai"));
             } else {
                 assert!(!result["openai"].as_array().unwrap().is_empty());
             }

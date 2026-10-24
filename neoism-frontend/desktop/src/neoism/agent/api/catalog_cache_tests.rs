@@ -1,6 +1,45 @@
 use super::*;
 
 #[test]
+fn model_hydration_provisional_cache_never_masks_transport_failure_as_success() {
+    let server = "invalid://provisional-offline-fixture";
+    let scope = catalog_scope(server, None);
+    let key = catalog_key(server, None, "/v2/providers/configured");
+    catalog_cache().get(key.clone(), || Ok(serde_json::json!({
+        "providers":[], "catalogStatus":{"source":"bundled","state":"loading","revision":0,"retryAfterMs":250}
+    }))).unwrap();
+    catalog_cache().age_for_test(&key, Duration::from_millis(251));
+    assert!(fetch_model_catalog_scoped(&scope).is_err());
+    // Presentation can keep the provisional choices, but worker completion is
+    // an error and must stop the spinner rather than replaying a success.
+    assert!(cached_model_options(server, None).is_some());
+}
+
+#[test]
+fn model_hydration_configured_status_bypasses_thirty_second_cache() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let server = format!("http://{}", listener.local_addr().unwrap());
+    let scope = catalog_scope(&server, None);
+    let key = catalog_key(&server, None, "/v2/providers/configured");
+    let http = std::thread::spawn(move || {
+        for state in ["loading", "ready"] {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 4096];
+            stream.read(&mut request).unwrap();
+            let body = serde_json::json!({"providers":[{"id":"test","models":if state == "ready" {serde_json::json!({"bundled":{},"full":{}})} else {serde_json::json!({"bundled":{}})}}],"catalogStatus":{"source":"bundled","state":state,"revision":1,"retryAfterMs":250}}).to_string();
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        }
+    });
+    let (first, status) = fetch_model_catalog_scoped(&scope).unwrap();
+    assert_eq!(status.unwrap()["state"], "loading");
+    catalog_cache().age_for_test(&key, Duration::from_millis(251));
+    let (full, status) = fetch_model_catalog_scoped(&scope).unwrap();
+    assert_eq!(status.unwrap()["state"], "ready");
+    assert!(full.len() > first.len());
+    http.join().unwrap();
+}
+
+#[test]
 fn pending_refresh_preserves_loaded_account_models_and_original_cache_age() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let server = format!("http://{}", listener.local_addr().unwrap());

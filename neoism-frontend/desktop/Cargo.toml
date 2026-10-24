@@ -223,6 +223,11 @@ assets = [
         "usr/share/doc/neoism/",
         "644",
     ],
+    [
+        "../../misc/licenses/models.dev.txt",
+        "usr/share/doc/neoism/licenses/",
+        "644",
+    ],
 ]
 extended-description = """\
 Neoism is a hardware-accelerated terminal-first workspace for code, notes, agents, and multiplayer editing.

@@ -64,9 +64,9 @@ impl ProviderRegistry {
     pub async fn connected_ids(
         &self,
         providers: &[ProviderInfo],
+        auth_store: &AuthStore,
     ) -> anyhow::Result<Vec<String>> {
-        let mut connected = self
-            .auth_store
+        let mut connected = auth_store
             .all()
             .await?
             .keys()
@@ -90,6 +90,10 @@ impl ProviderRegistry {
         connected.sort();
         connected.dedup();
         Ok(connected)
+    }
+
+    pub(crate) async fn catalog_hydration(&self, identity: Option<&str>) -> (&'static str, u64) {
+        self.openai.catalog_hydration(identity).await
     }
 
     pub async fn openai_model_access(

@@ -284,6 +284,11 @@ pub fn dispatch(session: &AgentSession, msg: AgentClientMessage) {
                 handle_set_thinking(inner, session_id, thinking).await;
             });
         }
+        AgentClientMessage::ListModelCatalog { request_id, directory } => {
+            tokio::spawn(async move {
+                handle_model_catalog(inner, Some(request_id), directory).await;
+            });
+        }
         AgentClientMessage::ListProviders => {
             tokio::spawn(async move {
                 handle_list_providers(inner).await;

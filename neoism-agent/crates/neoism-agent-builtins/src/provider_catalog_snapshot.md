@@ -1,0 +1,7 @@
+# Bundled model catalog v1
+
+`provider_catalog_fallback.json` is an unmodified models.dev `/api.json` public metadata snapshot, copied from the existing Neoism models.dev cache on 2026-10-24 (cache mtime: 2026-10-23 23:04:17 -0500). It contains no account discovery or credentials. SHA-256: `09659a0eeb6685e6554b93a4897b7dede514b52fd6f5d9731dc2e241359074d7`.
+
+This is offline metadata, never an OAuth entitlement authority. Account discovery filters/materializes authenticated wire IDs on a request-local clone. Bundled-only responses remain visibly loading/retryable until a full disk, explicit override, or network metadata source is available. Update this whole public snapshot from a validated models.dev cache or bounded `/api.json` download; do not hand-edit model IDs. Bump this snapshot version and record its digest/provenance when updating it.
+
+Both provider List and Configured raw JSON include root `catalogStatus`: `{source: "bundled"|"disk"|"override"|"network", state: "loading"|"ready"|"retryable-error", revision: u64, retryAfterMs: u64, message?: string}`. Messages are static and credential-free. Revisions are runtime-local, monotonic hydration observations scoped to the requesting credential scope. Poll non-ready responses after `retryAfterMs`; request-driven retries are single-flight, use bounded exponential backoff, and preserve last-good metadata. Successful empty account/local discovery is ready, not a transport failure. Stored-credential local endpoint discovery is intentionally unsupported (declare those models explicitly).

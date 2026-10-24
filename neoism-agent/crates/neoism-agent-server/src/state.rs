@@ -3349,6 +3349,55 @@ impl SessionStore {
         Ok(family)
     }
 
+    /// Routing metadata for the catalog SSE baseline. Completed sidecars contain
+    /// compact summaries, not saved context/tool snapshots. Older databases may
+    /// still be backfilling: retain the canonical fallback until that completes.
+    pub(crate) async fn list_catalog_sessions(&self) -> anyhow::Result<Vec<SessionInfo>> {
+        if !self.session_list_index_ready().await? {
+            return self.list_sessions().await;
+        }
+        let rows = self.db.fetch_all(
+            "SELECT session_id, directory, path, parent_id, title, updated, archived, tenant_id, workspace_id, summary_json FROM session_list_index ORDER BY updated DESC",
+            vec![],
+        ).await?;
+        let mut sessions = rows.iter().map(session_list_info_from_row)
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        // Existing summaries deliberately omit most extra fields. Recover only
+        // explicit execution-root hints via their expression index, including
+        // empty-string hints; never reopen every canonical JSON blob.
+        let hints = self.db.fetch_all(
+            "SELECT id, json_extract(info_json, '$.executionRootSessionID') AS root FROM sessions WHERE json_extract(info_json, '$.executionRootSessionID') >= '' AND json_type(info_json, '$.executionRootSessionID') = 'text'",
+            vec![],
+        ).await?;
+        let hints: HashMap<_, _> = hints.into_iter().map(|row| {
+            Ok((row.get_str("id")?, row.get_str("root")?))
+        }).collect::<anyhow::Result<_>>()?;
+        for session in &mut sessions {
+            if let Some(root) = hints.get(session.id.as_str()) {
+                session.extra.insert(crate::execution_activity::EXECUTION_ROOT_KEY.into(), json!(root));
+            }
+        }
+        self.hydrate_host_associations(&mut sessions).await?;
+        Ok(sessions)
+    }
+
+    /// A lifecycle/status invalidation needs one compact metadata row, not its
+    /// multi-megabyte saved context. Canonical existence and root hints are read
+    /// in the same statement; fall back safely for an unbackfilled legacy row.
+    pub(crate) async fn catalog_session(&self, id: &str) -> anyhow::Result<Option<SessionInfo>> {
+        let row = self.db.fetch_optional(
+            "SELECT i.session_id, i.directory, i.path, i.parent_id, i.title, i.updated, i.archived, i.tenant_id, i.workspace_id, i.summary_json, CASE WHEN json_type(s.info_json, '$.executionRootSessionID') = 'text' THEN json_extract(s.info_json, '$.executionRootSessionID') END AS execution_root FROM sessions s JOIN session_list_index i ON i.session_id = s.id WHERE s.id = ?",
+            vec![text(id)],
+        ).await?;
+        let Some(row) = row else { return self.get_session(id).await; };
+        let mut session = session_list_info_from_row(&row)?;
+        if let Some(root) = row.get_opt_str("execution_root")? {
+            session.extra.insert(crate::execution_activity::EXECUTION_ROOT_KEY.into(), json!(root));
+        }
+        self.hydrate_host_associations(std::slice::from_mut(&mut session)).await?;
+        Ok(Some(session))
+    }
+
     pub(crate) async fn list_sessions(&self) -> anyhow::Result<Vec<SessionInfo>> {
         let rows = self
             .db
@@ -4802,6 +4851,16 @@ impl SessionStore {
             self.db.execute_transaction(statements).await?;
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
+    }
+
+    /// Title repair needs the first user turn, not every tool/result payload in
+    /// the conversation. The session/position index stops at the first match.
+    pub(crate) async fn first_user_message(&self, session_id: &str) -> anyhow::Result<Option<MessageWithParts>> {
+        let row = self.db.fetch_optional(
+            "SELECT message_json FROM messages WHERE session_id = ? AND json_extract(message_json, '$.info.role') = 'user' ORDER BY position ASC LIMIT 1",
+            vec![text(session_id)],
+        ).await?;
+        row.map(|row| decode_json(row.get_str("message_json")?)).transpose()
     }
 
     pub(crate) async fn list_messages(

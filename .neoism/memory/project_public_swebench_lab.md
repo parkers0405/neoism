@@ -1,0 +1,27 @@
+---
+name: "Public SWE-bench Pro HARD-51 lab build"
+description: "Built public HARD-51 lab tooling without running tests: 153 frozen slots, shared audited budget relay, durable runner/readiness, bounded lab batches; all inference disabled and lab validation pending."
+type: "project"
+scope: "project"
+origin: "user requested build-only, no testing"
+created: "2026-10-18"
+updated: "2026-10-18"
+---
+
+# Public SWE-bench Pro HARD-51 lab build
+
+User explicitly requested finish BUILD ONLY and DO NOT START TESTING or paid runs. New tooling lives in `neoism-agent/evals/public/`; handoff is README.md plus BUILD_STATUS.json. Build stage is `built_for_lab_validation`, NOT execution-validated. No tests/probes/calibration/CLI model runs or real auth reads occurred in this final build phase. Allowed build actions performed: Python py_compile syntax compilation (26 source modules), immutable config generation, registry manifest resolution only (no pulls/containers), and unapproved template generation.
+
+Experiment: official V2 commit66f92766bba642462d4bbe5479e83f91f9211862, official HARD-51, Neoism0.7.128/OpenCodeV2 @opencode/cli2.0.32/Claude2.1.292, direct Anthropic claude-sonnet-5-5 adaptive/high, output cap32000, exactly51x3x1=153 native sessions, zero retries. Total agentdeadline3000 with inference deadline2955 and45secondcleanup reserve nowexplicitprotocol. Sources/assets/catalog/images/configs allfingerprinted. Current plan SHA256 fb9b4f76c616d0040abc98f65d5077716bc49106bea343b204b6f3e431d4b11a. 153 source+153 pristine replay configs generated. `.cache/approval.template.json` is approved:false and budget_control_verified:false, nullbudgets/expiry. Paidexecution staysdisabled; old private-benchmark $20 approval DOES NOT apply.
+
+Built `run.py`: actual sequential Harbor jobs, explicit --execute + inferenceenvflag + plan-bound expiring approval + complete lab readiness; fixedflock/fsync ledger runs/public-ledger.json, pre-dispatch full pertrialreservations, singleuse consumedadmissions, norepeat dispatchedslots, unknownspend/modeldrift/capture/infrastructureerrors stop. Separate reportednativecost vs frozen-priceestimatedcost; partial/unknowncostheldnotguessed. Conservative perrequest fullcontext/outputbudgetrelay is NOT providerinvoiceguarantee. Provider-side budgetlimit neededfor actualbillingcap.
+
+Shared `runtime/anthropic_gateway.py` installedby common.py for all3workers (NOT provider_gateway.py). Native processes receive opaque dummy relaytokens; only gateway gets upstreamkey. Audits root/aux/compaction/child actualrequests, exactmodel/adaptive/high/stream/outputcap, complete SSEusage/TTLcachebuckets. Canonical result tokens exactly {input_uncached,cache_read,cache_write,input_total,output_total}; raw Anthropic totals retained in provider_usage. Free count_tokens route supported separately withmodel/auth/deadlinechecks. Incompletecalls retainreservations andblock. Ownedgroups killed, accountknown timeouts canpristineregrade; Native abortpolls authoritative cancelledfamilyruntime. Background lifecycleuncertainty remainsFAILCLOSED, specificallyOpenCode unsupported; automaticcompaction/nativeaux compatibilityNOTexecutionvalidated. Pythonfile_digest removedfromin-containerOpenCodeworker for olderPythoncompatibility.
+
+`common.py` now has oneuse planboundadmissionbeforeauthread, frozenresolverSHAcheck, contextnormalization includingcachewriteinputs, host recovery/eval-result/model.patch artifacts, separateGitindexcapturingstaged/untrackedbinarydiff withhooks/fsmonitor/externaldiff disabled, checkedcapture, cleanuperrorrecords, best-efforttimeoutrecover. Nativebundle validatedagainstlock including safearchive.
+
+`lab.py` BUILT, NOT RUN: unit, wire-tests, network-probe, install-only, calibration, pristine-replay, image-metadata, pull-images; all --execute optin, scrubcredentials/inferenceenv, unit/wire loopback-onlyusernamespace. Allnew test_*.py modules included exceptexplicitnativewireclasses. FrozenCLIs/catalogused. UUIDoutputs/fullartifacthashes andstrictlab-evidence.json coverageaggregation. Repeatable --task ID for boundedpull/network/install/calibrationbatches; defaultfull51 (installrepresentative). Pristine replay accepts successfuloracle+nop batchpairs and aggregatesfull51later. Images mustexplicitlystagebeforecontainerjobs; diskreservechecked, NOautomaticpulls/pruning/eviction. Readiness validates every batch inventory/config/result, all51 network/oracle/nop and both replaycases, all3 wire/install. Generic replay is harness-independent; do NOT falsely require3nativeharnesses for it.
+
+Image lock FIXED via 51 anonymous registry manifest lookups: unique compressed layers61,763,016,086 bytes (~57.5GiB), immutableexistingdigests preserved, noimagepulls. Unpackedsize unmeasured; host~155GiBfree. Supportincrementalbatches insteadofblindbulkdownload. ProtocolProbe nowincludes actualallowlist/TLSreachability, nofixcommitobject, sanitizedHEAD/allrefs/reflog/stash/fsck unreachablecommits, hidden /tests /solution/testpatchcreatedfiles, historicalheads/non-samplehooks. Probe hostreads tasktestpatch solelyfor credential-free probe, neverinjectintopaidagent.
+
+Next stepONLYwhenuserasks: LAB TESTS, beginning pureunit/frozenCLIloopbackchecks thenexplicitboundedimagepull/network/install/calibration/replay. Build source tests are UNRUN, don't cite earlier passingfixturecounts asfinalbuildvalidation. Anycode/lockchange requiresregenerateplan andinvalidatesevidence/approval. No newpaidbudget approved; neverlaunch153modelruns withoutnewapproval.

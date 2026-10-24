@@ -1,0 +1,11 @@
+---
+name: "Native undo latency fast path"
+description: "Native /undo skips redundant history/image wait; backend batch deletion in one transaction, history reuse, concurrency guards and tested filesystem semantics"
+type: "perf"
+scope: "project"
+origin: "neoism-agent"
+created: "2026-10-22"
+updated: "2026-10-22"
+---
+
+Native /undo perceived ~10s latency traced to desktop commands.rs waiting POST -> fetch_session_messages (80 rows) -> synchronous generated-image hydration before applying UI result, plus backend session_undo.rs serial delete_message transactions/existence reads per reverted row. Fixed desktop normal loaded-turn undo to use confirmed POST SessionInfo.revert.messageID to truncate existing active/cached transcript directly; fallback GET only if boundary absent from loaded history or for redo. Invalidate conversation preview cache after success. Restart active SSE receiver on apply to discard queued pre-revert history. Added per-session history-in-flight gate to serialize history mutations and keep unsent draft untouched when Enter races file revert; reject while response/prompt dispatch active (same backend runtime rejection semantics). Distinguish successful mutation with failed refresh from mutation failure. Native slash launches background command immediately, capturing current session rather than delayed outbound dispatch. Added pane/history_tests.rs: only POST needed for loaded boundary/no-op; cached conversation after switch; draft/overlap guards. Backend SessionStore::delete_messages does one writer acquisition/immediate transaction in 128-ID chunks, session-scoped existing ID resolution, deletes search docs/dirty+embeddings, returns actually-deleted IDs for events after commit. Backend undo/redo reuse history and borrow target-selection message metadata; filesystem snapshot/conflict behavior unchanged. Backend batch deletion test passed (130 rows, missing/duplicate/foreign IDs, FTS+embedding cleanup/title retained); 6 session_undo tests passed incl repeated undo/partial/full redo and file conflicts. Integrated cargo check -p neoism --tests passed (desktop regressions compile, not executed); scoped git diff --check passed. No live GUI latency measured. Prior activity placement/timer fixes retained.

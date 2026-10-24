@@ -1,0 +1,23 @@
+---
+name: "Website pixel effects and opt-in startup playback on Rust wordmarks"
+description: "15 wordmark pixel effects; appearance.splash-auto-animate defaults false, live Settings toggle enables once-per-new-tab startup; clicks always animate"
+type: "feature"
+scope: "project"
+origin: "neoism-agent"
+created: "2026-10-15"
+updated: "2026-10-15"
+---
+
+Rust terminal splash and agent-home wordmarks retain their existing PNG idle renderers, hover springs, shimmer, tint, halo, layout and hit rectangles. Logo clicks replay one of 15 website hero pixel effects. Startup autoplay is OPT-IN via grouped appearance.splash-auto-animate (boolean, default false); when true, each fresh native terminal Context and native/shared agent pane plays one random effect when its splash first renders. No autoplay clock starts at construction. Source of truth is /home/parkersettle/projects/neoism-web/src/pixel-wordmark.ts. Effects use a shuffled bag (all 15 before refill, no adjacent repeats), random 1.7-2.5s duration plus 200ms settle; rapid clicks replace playback.
+
+Config: Appearance.splash_auto_animate in neoism-backend/src/config/mod.rs, explicit visible Appearance toggle "Splash startup animation" in config/intelligence.rs, commented default in config/defaults.rs, welcome/Neoism/Appearance.md docs. Native Renderer stores the config at construction; Screen::update_config refreshes it on reload. Native screen/bridges/agent.rs applies preference before each pane render. Shared Chrome owns an equivalent preference, applies it before agent render, and wasm/rendered/chrome_pages.rs reads snapshots plus hot-applies the setting. Pending startup is consumed on first eligible splash render EVEN IF DISABLED, preventing a later enable from unexpectedly animating an old tab. Click replay is never gated/cancelled by this preference.
+
+Shared engine: neoism-frontend/shared/src/primitives/wordmark_animation.rs. WordmarkAnimation owns web_time::Instant, shuffled bag and xorshift PRNG; AnimationFrame samples all 15 effects and 12 sparks, paints 390 tiles (130 foreground mask cells times 3 shadow layers) as ordered Sugarloaf triangles, rotates/scales/alpha-blends tiles, clips polygons to pane and subtracts modal occlusions. No GPU API changes or per-frame image uploads. WordmarkAnimation::default remains inactive.
+
+Exact artwork alignment: shared/assets/splash/neoism-wordmark.png is 1196x193, rasterized SVG scale 0.8 and cropped x0,y482. SVG foreground baseline874.498729, original serialized letter x origins kept; each Rust PNG strip is1196/6 pixels. Mapping must use global_svg_x*0.8 - letter*(1196/6), global_svg_y*0.8-482. Tight geometric SVG bounds produce a small handoff jump.
+
+Terminal: shared/panels/splash_overlay.rs owns animation; replay_wordmark() for logo clicks, pop_click() remains old menu feedback (do NOT conflate). Native Context.pending_splash_animation initializes true in context/manager/daemon_sessions.rs and false for nonterminals in context/factories.rs. host/run.rs binds the shared overlay to Context.route_id (bind_context cancels old transient playback on owner change), renders eligible artwork, then play_wordmark_startup consumes the Context flag only if overlay is active and a wordmark rect exists, and replays only when the current config allows it. Switching tabs, clear, resize and overlay reset never rearm it. Existing contexts carry the consumed flag when moved/detached. Native screen/lifecycle/splash_island.rs and wasm/rendered/terminal_input.rs route logo clicks; reset/dismiss cancel. Browser terminal autoplay was not added.
+
+Agent: shared/panels/agent_pane/view/wordmark.rs renders both hosts. Both shared state.rs and desktop neoism/agent/pane.rs store startup_pending=true, auto_animate=false, inactive animation. Shared WordmarkState macro implements play_startup_animation, called after image registration on first home wordmark render; consumes flag exactly once, replays only if auto_animate. Session resets do not rearm it, fresh panes do. Both pane implementations expose set_splash_auto_animate for the host. Pop-wordmark-click methods use replay and ignore stale hit rects during conversations. Redraw predicates use actual animation lifetime.
+
+Regression coverage: config defaults/grouping/boolean validation; default-off consumes pending but preserves click replay; opt-in startup deferred/once/new-instance/manual replay; terminal no rearm on reset, per-context cancellation and independent new-pane startup; desktop one-shot and redraw reason. Verified before opt-in addition: native cargo check and 15 shared wordmark tests; prior wasm check. No release builds or live UI interaction per user workflow.

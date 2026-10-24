@@ -587,22 +587,23 @@ fn provider_readiness_unknown_existing_chat_submits_on_first_attempt() {
 }
 
 #[test]
-fn provider_readiness_stale_queued_model_rejection_defers_to_existing_server() {
+fn provider_readiness_stale_queued_model_rejection_remains_authoritative() {
     let mut pane = NeoismAgentPane::default();
     pane.server = "invalid://queued-model-readiness".into();
     seed_prompt_catalog(&mut pane);
     pane.session_id = Some("existing".into());
     pane.provider_readiness_checked_at = Instant::now().checked_sub(Duration::from_secs(31));
     assert!(pane.current_provider_readiness().is_some());
-    assert!(pane.prompt_readiness_error_for_model("test/new-model").is_none());
+    assert!(pane.prompt_readiness_error_for_model("test/new-model").unwrap().contains("/models"));
     pane.prompt_dispatch_in_flight = true;
     pane.queue_send_prompt_command(
         "queued".into(), "hello".into(), vec![], None, None,
         "test/new-model".into(), None,
         neoism_protocol::agent::PromptDelivery::Steer, true,
     );
-    assert_eq!(pane.pending_prompt_dispatches.len(), 1);
-    assert!(pane.drain_ui_events().is_empty());
+    assert!(pane.pending_prompt_dispatches.is_empty());
+    assert!(pane.drain_ui_events().iter().any(|event| matches!(event,
+        NeoismAgentUiEvent::Notice { message, .. } if message.contains("/models"))));
 }
 
 #[test]

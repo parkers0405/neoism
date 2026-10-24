@@ -279,6 +279,11 @@ async fn targeted_catalog_activity_preserves_child_and_runtime_authorities_witho
         .await
         .unwrap();
     assert!(state.inner.store.list_sessions().await.is_err());
+    // Pages must have the same bounded-read property as a single GET.
+    let page = crate::catalog_activity::project(&state, vec![root.clone()]).await.unwrap();
+    assert_eq!(page.len(), 1);
+    assert_eq!(page[0].catalog_activity, A::Running);
+    assert!(crate::catalog_activity::project(&state, vec![]).await.unwrap().is_empty());
     let got = crate::session_routes::session_get(
         axum::extract::State(state.clone()),
         axum::extract::Path("root".into()),
@@ -305,4 +310,94 @@ async fn targeted_catalog_activity_preserves_child_and_runtime_authorities_witho
     drop(runtime);
     state.shutdown().await.unwrap();
     let _ = std::fs::remove_file(path);
+}
+
+#[tokio::test]
+async fn catalog_baseline_is_compact_and_lifecycle_refreshes_only_changed_session() {
+    let state = AppState::open_database(std::env::temp_dir().join(format!(
+        "catalog-incremental-{}.db", neoism_agent_core::new_session_id()
+    ))).await.unwrap();
+    let mut root = session("root", None, None);
+    let mut unrelated = session("unrelated", None, None);
+    unrelated.extra.insert("largeSnapshot".into(), json!("x".repeat(1024 * 1024)));
+    let sessions = vec![
+        root.clone(), unrelated,
+        session("child", Some("root"), None),
+        session("off-tree", Some("unrelated"), Some("root")),
+        session("empty-hint", Some("root"), Some("")),
+    ];
+    for info in &sessions { state.inner.store.insert_session(info).await.unwrap(); }
+    state.inner.store.backfill_session_list_index().await.unwrap();
+    let compact = state.inner.store.list_catalog_sessions().await.unwrap();
+    assert_eq!(crate::catalog_activity::families(&compact), crate::catalog_activity::families(&sessions));
+    assert!(compact.iter().all(|s| !s.extra.contains_key("largeSnapshot")));
+    let plan = state.inner.store.db.fetch_all(
+        "EXPLAIN QUERY PLAN SELECT id, json_extract(info_json, '$.executionRootSessionID') AS root FROM sessions WHERE json_extract(info_json, '$.executionRootSessionID') >= '' AND json_type(info_json, '$.executionRootSessionID') = 'text'",
+        vec![],
+    ).await.unwrap();
+    let details: Vec<_> = plan.iter().map(|r| r.get_str("detail").unwrap()).collect();
+    assert!(details.iter().any(|d| d.contains("SEARCH") && d.contains("idx_sessions_catalog_execution_root")), "{details:?}");
+    // Poison a canonical blob: the completed baseline must use summaries.
+    state.inner.store.db.execute("UPDATE sessions SET info_json = '{}' WHERE id = 'unrelated'", vec![]).await.unwrap();
+    let mut projection = crate::catalog_activity::CatalogProjection::load(&state).await.unwrap();
+    // Poison its summary too: lifecycle processing must not reload unrelated
+    // rows from either representation, even when a queued payload is stale.
+    state.inner.store.db.execute("UPDATE session_list_index SET summary_json = '{}' WHERE session_id = 'unrelated'", vec![]).await.unwrap();
+    let stale = root.clone();
+    root.title = "canonical rename".into();
+    root.extra.insert("largeSnapshot".into(), json!("y".repeat(1024 * 1024)));
+    root.time.updated += 1;
+    state.inner.store.update_session(&root).await.unwrap();
+    let events = projection.project_event(&state, EventPayload::new(
+        neoism_agent_core::event_type::SESSION_UPDATED, json!({"info": stale})
+    ), None, None).await.unwrap();
+    assert_eq!(events[0].properties["info"]["title"], "canonical rename");
+    assert!(events[0].properties["info"].get("largeSnapshot").is_none());
+    let created = session("new-root", None, None);
+    state.inner.store.insert_session(&created).await.unwrap();
+    let events = projection.project_event(&state, EventPayload::new(
+        neoism_agent_core::event_type::SESSION_CREATED, json!({"info": created})
+    ), None, None).await.unwrap();
+    assert_eq!(events[0].properties["info"]["id"], "new-root");
+    state.inner.store.delete_session("new-root").await.unwrap();
+    let events = projection.project_event(&state, EventPayload::new(
+        neoism_agent_core::event_type::SESSION_DELETED, json!({"info": created})
+    ), None, None).await.unwrap();
+    assert_eq!(events[0].kind, neoism_agent_core::event_type::SESSION_DELETED);
+    assert_eq!(events[1].properties["snapshot"]["branches"], json!([]));
+    state.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn title_repair_reads_only_first_user_message_in_position_order() {
+    let state = AppState::open_database(std::env::temp_dir().join(format!(
+        "catalog-title-{}.db", neoism_agent_core::new_session_id()
+    ))).await.unwrap();
+    let root = session("root", None, None);
+    state.inner.store.insert_session(&root).await.unwrap();
+    let message = |id: &str, created: u64| -> MessageWithParts {
+        serde_json::from_value(json!({
+            "info": {"role": "user", "id": id, "sessionId": root.id,
+                "time": {"created": created}, "agent": "build",
+                "model": {"providerId": "test", "modelId": "test"}},
+            "parts": [],
+        })).unwrap()
+    };
+    let first = message("first", 200);
+    let later = message("later", 100);
+    state.inner.store.append_message("root", &first).await.unwrap();
+    state.inner.store.append_message("root", &later).await.unwrap();
+    // A bad trailing transcript row proves LIMIT is applied before decoding.
+    state.inner.store.db.execute("UPDATE messages SET message_json = '{}' WHERE id = ?", vec![text(message_id(&later))]).await.unwrap();
+    assert!(state.inner.store.list_messages("root").await.is_err());
+    let got = state.inner.store.first_user_message("root").await.unwrap().unwrap();
+    assert_eq!(message_id(&got), message_id(&first));
+    assert!(state.inner.store.first_user_message("missing").await.unwrap().is_none());
+    let plan = state.inner.store.db.fetch_all(
+        "EXPLAIN QUERY PLAN SELECT message_json FROM messages WHERE session_id = ? AND json_extract(message_json, '$.info.role') = 'user' ORDER BY position ASC LIMIT 1",
+        vec![text("root")],
+    ).await.unwrap();
+    let details: Vec<_> = plan.iter().map(|r| r.get_str("detail").unwrap()).collect();
+    assert!(details.iter().any(|d| d.contains("SEARCH messages") && d.contains("idx_messages_session_position")), "{details:?}");
+    state.shutdown().await.unwrap();
 }

@@ -32,6 +32,34 @@ fn settle(
 }
 
 #[test]
+fn remote_project_presentation_survives_paging_and_collapse() {
+    let mut p = panel(2);
+    p.set_remote_project_labels(HashMap::from([(
+        "/p/00".into(),
+        "Cloud project".into(),
+    )]));
+    for request in p.begin_project_session_requests() {
+        settle(&mut p, &request, None);
+    }
+    for _ in 0..2 {
+        select(&mut p, "project:/p/00");
+        p.toggle_selected_project();
+        assert!(p.is_remote_project("/p/00"));
+        assert!(!p.is_remote_project("/p/01"));
+        assert_eq!(
+            p.sessions
+                .iter()
+                .find(|row| row.id == "project:/p/00")
+                .unwrap()
+                .title,
+            "Cloud project"
+        );
+    }
+    p.set_remote_project_labels(HashMap::new());
+    assert!(!p.is_remote_project("/p/00"));
+}
+
+#[test]
 fn all_project_pins_are_hydrated_before_pages_and_not_duplicated_in_folders() {
     let mut p = panel(2);
     p.set_pinned_sessions(vec![

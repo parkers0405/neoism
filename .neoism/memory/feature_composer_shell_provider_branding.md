@@ -1,0 +1,11 @@
+---
+name: "Composer shell and provider branding"
+description: "Composer now single20px rounded shell/thin outline; Claude orange starburst, OpenAI/OpenRouter theme-monochrome logos;42 tests/check passed"
+type: "feature"
+scope: "project"
+origin: "neoism-agent"
+created: "2026-10-22"
+updated: "2026-10-22"
+---
+
+User superseded the 10px/box+skirt composer shape with screenshot of a single continuous rounded card. In shared view/user_input.rs render_user_input removed separate skirt and inner textbox border; now one full rect border ring via draw_background_border, single uniform fill and custom surface background over whole inner rect. Radius20px, border=FRAME_STROKE*0.5*scale min1px, bordercolor theme.border alpha.75. Text/footer geometry, minheight, spacing, mobile targets, newline tolerance/wrap fixes unchanged. view/mod.rs comment updated. User additionally requested Claude starburst orange, OpenAI/GPT and OpenRouter logos white dark/black light. ProviderLogo::composer_color(dark,fallback) returns Anthropic [217,119,87,255] (#D97757), OpenAi/OpenRouter purewhite orblack opaque, others fallback. draw_model_logo now takes theme and applies logo policy independently of existing blue model text for native/external chip branches. Replaced only atlas cell1 with Lobe Icons Claude starburst SVG, source claude-starburst.svg saved with license/provenance in assets/icons/PROVIDER-ARTWORK.md and NOTICE. Existing LobeHub MIT license retained in MCP-ARTWORK.md. Rasterized rsvg-convert64x64, ImageMagick Copy composition ensures transparent gaps erase old Anthropic A. Binary transform output saved via nativewrite through compose (compose returned retention-limit error AFTER write executed; verified actual file via decoded pixel checks). All other six atlas cells byte-for-byte pixel-identical to HEAD; starburst alpha matches source raster; alpha FNV1a 0x0d0de8fdaa9684bd tested. Only composer logo artwork/colors affected; agent tab/sidebar PNGs unchanged, MCP Vercel pixelcell unchanged, routed OpenRouter retains router identity. 4 icon tests +38 user_input tests passed,1 ignored benchmark; cargo check -q -p neoism --tests passed; scoped diffcheck clean. No live screenshot verification claimed.

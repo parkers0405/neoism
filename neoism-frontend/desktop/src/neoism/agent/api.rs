@@ -601,8 +601,8 @@ pub(super) fn fetch_catalog_scoped(scope: &CatalogScope, resource: &'static str)
         if !scope.still_current() { return Err("Catalog scope changed".into()); }
         Ok(value)
     };
-    // An expired negative catalog is not an onboarding verdict. A failed
-    // readiness refresh stays unknown instead of replaying an old disconnect.
+    // A transport failure is not a new provider verdict. Workers report it as
+    // an error while panes may retain their scope-valid admission snapshot.
     let key = (scope.clone(), resource);
     let value = if resource == "/v2/providers/configured" {
         // Provisional snapshots are presentation data, not successful discovery.
@@ -611,21 +611,20 @@ pub(super) fn fetch_catalog_scoped(scope: &CatalogScope, resource: &'static str)
         });
         catalog_cache().get_fresh_retaining(key, if provisional { Duration::from_millis(100) } else { Duration::from_secs(30) }, load, |_, _, _| false)
     } else if resource == "/v2/providers" {
-        let pending = catalog_cache().snapshot_age(&key).is_some_and(|(value, _)| {
+        let pending = catalog_cache().retained_snapshot_age(&key).is_some_and(|(value, _)| {
             value.get("readinessPending").and_then(Value::as_bool) == Some(true)
         });
-        // A pending optional refresh is not a new authoritative catalog. Keep
-        // a same-scope complete snapshot, with its original bounded age.
+        // Keep same-scope complete metadata over an optional pending refresh,
+        // even after expiry. Preserve its age so revalidation remains due.
         catalog_cache().get_fresh_retaining(
             key,
             Duration::from_secs(if pending { 1 } else { 30 }),
             load,
-            |previous, incoming, age| {
-                age < Duration::from_secs(300)
-                    && ProviderReadiness::from_json(previous).zip(ProviderReadiness::from_json(incoming))
-                        .is_some_and(|(previous, incoming)| {
-                            previous.can_retain_over(&incoming)
-                        })
+            |previous, incoming, _age| {
+                ProviderReadiness::from_json(previous).zip(ProviderReadiness::from_json(incoming))
+                    .is_some_and(|(previous, incoming)| {
+                        previous.can_retain_over(&incoming)
+                    })
             },
         )
     } else {
@@ -678,16 +677,10 @@ pub(super) fn cached_provider_readiness_with_age(
 ) -> Option<(ProviderReadiness, Duration)> {
     let scope = catalog_scope(server, directory);
     let key = (scope.clone(), "/v2/providers");
-    let (value, age) = catalog_cache().snapshot_age(&key)?;
+    let (value, age) = catalog_cache().retained_snapshot_age(&key)?;
     let readiness = ProviderReadiness::from_json(&value)?;
-    // Preserve the original age across panes: reopening a chat must not give
-    // a stale disconnect (or model list) a new admission lifetime.
-    if (readiness.pending && age >= Duration::from_secs(1))
-        || (age >= Duration::from_secs(30)
-        && (readiness.connected.is_empty() || readiness.models.is_empty()))
-    {
-        return None;
-    }
+    // Preserve the original validation age. Callers schedule refreshes from it,
+    // without treating expiry as new provider/model availability evidence.
     scope.still_current().then_some((readiness, age))
 }
 pub(super) fn cached_agent_options(

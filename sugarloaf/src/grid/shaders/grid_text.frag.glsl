@@ -21,18 +21,6 @@ layout(location = 0) out vec4 out_color;
 
 const uint ATLAS_GRAYSCALE = 0u;
 
-vec4 sample_scaled(sampler2D atlas, vec2 uv) {
-    vec2 p = uv - vec2(0.5);
-    ivec2 base = ivec2(floor(p));
-    vec2 f = fract(p);
-    ivec2 hi = textureSize(atlas, 0) - ivec2(1);
-    vec4 a = texelFetch(atlas, clamp(base, ivec2(0), hi), 0);
-    vec4 b = texelFetch(atlas, clamp(base + ivec2(1, 0), ivec2(0), hi), 0);
-    vec4 c = texelFetch(atlas, clamp(base + ivec2(0, 1), ivec2(0), hi), 0);
-    vec4 d = texelFetch(atlas, clamp(base + ivec2(1, 1), ivec2(0), hi), 0);
-    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
-}
-
 // Zero-extended bilinear reads: every fetch is checked against this glyph's
 // atlas allocation, including the bilinear footprint. Never read a neighbor.
 vec4 glyph_fetch(sampler2D atlas, ivec2 p) {
@@ -87,8 +75,8 @@ void main() {
     }
     if ((in_atlas & 2u) != 0u) {
         out_color = (in_atlas & 1u) == 0u
-            ? in_color * sample_scaled(atlas_grayscale, in_tex_coord).r
-            : sample_scaled(atlas_color, in_tex_coord) * in_color.a;
+            ? in_color * glyph_sample(atlas_grayscale, in_tex_coord).r
+            : glyph_sample(atlas_color, in_tex_coord) * in_color.a;
         return;
     }
     ivec2 uv = ivec2(in_tex_coord);

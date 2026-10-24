@@ -52,6 +52,12 @@
   </categories>
 
   <releases>
+    <release version="0.7.138" date="2026-10-24">
+      <description>
+        <p>Stable background model discovery, offline model picker recovery, rendering caches, and bounded scaled glyph sampling across rendering backends.</p>
+      </description>
+      <url>https://github.com/parkers0405/neoism/releases/tag/v0.7.138</url>
+    </release>
     <release version="0.7.137" date="2026-10-24">
       <description>
         <p>Stable background model discovery, offline picker recovery, text and diff rendering caches, and question navigation refinements.</p>

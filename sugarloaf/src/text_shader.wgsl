@@ -88,18 +88,6 @@ fn text_vertex(
     return out;
 }
 
-fn sample_scaled(atlas: texture_2d<f32>, uv: vec2<f32>) -> vec4<f32> {
-    let p = uv - vec2<f32>(0.5);
-    let base = vec2<i32>(floor(p));
-    let f = fract(p);
-    let hi = vec2<i32>(textureDimensions(atlas)) - vec2<i32>(1);
-    let a = textureLoad(atlas, clamp(base, vec2<i32>(0), hi), 0);
-    let b = textureLoad(atlas, clamp(base + vec2<i32>(1, 0), vec2<i32>(0), hi), 0);
-    let c = textureLoad(atlas, clamp(base + vec2<i32>(0, 1), vec2<i32>(0), hi), 0);
-    let d = textureLoad(atlas, clamp(base + vec2<i32>(1, 1), vec2<i32>(0), hi), 0);
-    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
-}
-
 // Zero extension, including every texel in each bilinear footprint.
 fn glyph_fetch(atlas: texture_2d<f32>, p: vec2<i32>, bounds: vec4<f32>) -> vec4<f32> {
     if (any(p < vec2<i32>(bounds.xy)) || any(p >= vec2<i32>(bounds.zw))) {
@@ -149,8 +137,8 @@ fn text_fragment(in: TextVsOut) -> @location(0) vec4<f32> {
         return glyph_blur(atlas_color, in) * in.color.a;
     }
     if ((in.atlas & 2u) != 0u) {
-        if ((in.atlas & 1u) == 0u) { return in.color * sample_scaled(atlas_grayscale, in.tex_coord).r; }
-        return sample_scaled(atlas_color, in.tex_coord) * in.color.a;
+        if ((in.atlas & 1u) == 0u) { return in.color * glyph_sample(atlas_grayscale, in.tex_coord, in.glyph_bounds).r; }
+        return glyph_sample(atlas_color, in.tex_coord, in.glyph_bounds) * in.color.a;
     }
     let ic = vec2<i32>(in.tex_coord);
     if (in.atlas == ATLAS_GRAYSCALE) {

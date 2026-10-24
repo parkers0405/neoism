@@ -24,8 +24,19 @@ pub(super) fn draw_scaled_cpu(
     let y1 = (bottom.ceil() as i32).min(cy1).min(height);
     let channels = if glyph.atlas == 1 { 4 } else { 1 };
     let sample = |x: i32, y: i32, channel: usize| -> f32 {
-        let x = x.clamp(0, side as i32 - 1) as usize;
-        let y = y.clamp(0, side as i32 - 1) as usize;
+        // Zero-extend this glyph, not the whole atlas. Recycled backing pixels
+        // and neighboring allocations are not part of its bilinear footprint.
+        let gx = glyph.glyph_pos[0] as i32;
+        let gy = glyph.glyph_pos[1] as i32;
+        if x < gx
+            || y < gy
+            || x >= gx + glyph.glyph_size[0] as i32
+            || y >= gy + glyph.glyph_size[1] as i32
+        {
+            return 0.0;
+        }
+        let x = x as usize;
+        let y = y as usize;
         atlas
             .get((y * side + x) * channels + channel)
             .copied()
@@ -89,6 +100,41 @@ pub(super) fn draw_scaled_cpu(
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
+    #[test]
+    fn scaled_sampling_ignores_neighbor_and_recycled_texels() {
+        // Exercise all four edges and corners, for masks and premultiplied RGBA.
+        // Identical live texels must render identically regardless of padding.
+        for atlas in [0, 1] {
+            let channels = if atlas == 1 { 4 } else { 1 };
+            for origin in [[0, 0], [2, 2]] {
+                let glyph = super::super::TextInstance {
+                    pos: [2.3, 2.7],
+                    glyph_pos: origin,
+                    glyph_size: [2, 2],
+                    raster_scale: 2.75,
+                    color: [255; 4],
+                    atlas,
+                    ..Default::default()
+                };
+                let mut clean = vec![0; 8 * 8 * channels];
+                let mut dirty = vec![255; clean.len()];
+                for y in origin[1]..origin[1] + 2 {
+                    for x in origin[0]..origin[0] + 2 {
+                        let offset = (y as usize * 8 + x as usize) * channels;
+                        clean[offset..offset + channels].fill(128);
+                        dirty[offset..offset + channels].fill(128);
+                    }
+                }
+                let mut expected = vec![0; 12 * 12];
+                let mut actual = expected.clone();
+                super::draw_scaled_cpu(&glyph, &clean, 8, &mut expected, 12, 12);
+                super::draw_scaled_cpu(&glyph, &dirty, 8, &mut actual, 12, 12);
+                assert!(expected.iter().any(|pixel| *pixel != 0));
+                assert!(actual == expected, "atlas {atlas}, origin {origin:?}");
+            }
+        }
+    }
+
     #[test]
     fn scaling_keeps_glyph_bounds_and_clipping_in_screen_space() {
         let glyph = super::super::TextInstance {

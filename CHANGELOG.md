@@ -2,6 +2,16 @@
 
 All notable user-facing changes to Neoism are documented here.
 
+## [0.7.138] - 2026-10-24
+
+### Model discovery and scaled text correction
+
+- Includes the model discovery, offline picker recovery, rendering caches, question navigation, and license packaging changes prepared for 0.7.137.
+- Fixes scaled canvas text sampling outside its glyph allocation on CPU, Vulkan, WGSL, and Metal, preventing stale or neighboring atlas pixels from contaminating glyph edges.
+- Adds grayscale/RGBA contaminated-padding fixtures and strengthens font invalidation coverage with live-raster and final-pixel comparisons.
+
+The 0.7.137 production run was canceled before publication after its renderer regression test failed. Its tag remains unchanged; this release carries the correction and is published only after the complete platform matrix passes. No live GPU or affected-machine Windows runtime validation is claimed.
+
 ## [0.7.137] - 2026-10-24
 
 ### Model discovery and text rendering

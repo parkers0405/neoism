@@ -421,9 +421,8 @@ fragment float4 grid_text_fragment(
         return glyph_blur(atlas_color, in) * in.color.a;
     }
     if ((in.atlas & 2u) != 0u) {
-        constexpr sampler smooth_sampler(coord::pixel, address::clamp_to_edge, filter::linear);
-        if ((in.atlas & 1u) == 0u) { return in.color * atlas_grayscale.sample(smooth_sampler, in.tex_coord).r; }
-        return atlas_color.sample(smooth_sampler, in.tex_coord) * in.color.a;
+        if ((in.atlas & 1u) == 0u) { return in.color * glyph_sample(atlas_grayscale, in.tex_coord, in.glyph_bounds).r; }
+        return glyph_sample(atlas_color, in.tex_coord, in.glyph_bounds) * in.color.a;
     }
     constexpr sampler atlas_sampler(
         coord::pixel,

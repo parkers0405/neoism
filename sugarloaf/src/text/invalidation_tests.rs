@@ -41,12 +41,45 @@ fn assert_same_emission_and_pixels(a: &Text, b: &Text) {
         assert_eq!(a.raster_scale, b.raster_scale);
         assert_eq!(a.blur_radius, b.blur_radius);
     }
+    // Compare only live glyph texels: unused atlas backing legitimately retains
+    // old generations. This distinguishes rasterizer state from sampling bleed.
+    for (a_inst, b_inst) in a.instances.iter().zip(&b.instances) {
+        let a_state = a.cpu.as_ref().unwrap();
+        let b_state = b.cpu.as_ref().unwrap();
+        let (aa, ba) = if a_inst.atlas == 1 {
+            (&a_state.atlas_color, &b_state.atlas_color)
+        } else {
+            (&a_state.atlas_grayscale, &b_state.atlas_grayscale)
+        };
+        let channels = if a_inst.atlas == 1 { 4 } else { 1 };
+        for row in 0..a_inst.glyph_size[1] as usize {
+            let start = |inst: &TextInstance, side: u16| {
+                ((inst.glyph_pos[1] as usize + row) * side as usize
+                    + inst.glyph_pos[0] as usize)
+                    * channels
+            };
+            let len = a_inst.glyph_size[0] as usize * channels;
+            assert!(
+                aa.pixels()[start(a_inst, aa.side())..][..len]
+                    == ba.pixels()[start(b_inst, ba.side())..][..len],
+                "live glyph raster differs at row {row}"
+            );
+        }
+    }
     let mut pixels_a = vec![0; 512 * 128];
     let mut pixels_b = vec![0; 512 * 128];
     a.render_cpu(&mut pixels_a, 512, 128);
     b.render_cpu(&mut pixels_b, 512, 128);
     assert!(pixels_a.iter().any(|pixel| *pixel != 0));
-    assert_eq!(pixels_a, pixels_b);
+    if let Some(index) = pixels_a.iter().zip(&pixels_b).position(|(a, b)| a != b) {
+        panic!(
+            "CPU pixel differs at ({}, {}): {:#08x} != {:#08x}",
+            index % 512,
+            index / 512,
+            pixels_a[index],
+            pixels_b[index]
+        );
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]

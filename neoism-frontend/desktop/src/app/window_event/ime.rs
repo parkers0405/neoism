@@ -21,6 +21,33 @@ impl Application<'_> {
             return;
         }
 
+        #[cfg(feature = "neoui")]
+        if route.window.screen.renderer.settings.is_active()
+            && !route.window.screen.renderer.modal.is_active()
+        {
+            use neoism_ui::neoui::input::InputEvent;
+            let input = match &ime {
+                Ime::Commit(text) => Some(InputEvent::ImeCommit(text.clone())),
+                Ime::Preedit(text, selection) => Some(InputEvent::ImePreedit {
+                    text: text.clone(),
+                    selection: selection.map(|(start, end)| start..end),
+                }),
+                Ime::Disabled => Some(InputEvent::ImeCancel),
+                Ime::Enabled => None,
+            };
+            if let Some(input) = input {
+                if route.window.screen.renderer.settings.handle_edit_event(&input).is_none() {
+                    if let InputEvent::ImeCommit(text) = input {
+                        for ch in text.chars().filter(|ch| !ch.is_control()) {
+                            route.window.screen.renderer.settings.input_char(ch);
+                        }
+                    }
+                }
+            }
+            route.request_overlay_redraw();
+            return;
+        }
+
         match ime {
             Ime::Commit(text) => {
                 // Don't use bracketed paste for single char input.

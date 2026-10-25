@@ -1,0 +1,13 @@
+---
+name: "Agent database catalog read amplification"
+description: "FIXED confirmed catalog-wide canonical JSON scans per page/lifecycle event, compact baseline/point metadata, first-user title reads, unchanged-index OPTIMIZE suppression; 27 storage +14 activity +32 catalog tests pass; live burst attribution unknown"
+type: "perf"
+scope: "project"
+origin: "source audit and temporary-DB regressions"
+created: "2026-10-24"
+updated: "2026-10-24"
+---
+
+Confirmed source amplifiers fixed in catalog_activity.rs, state.rs, v2_routes.rs, state/conversation_search.rs: page projection uses existing indexed catalog_family_members only for requested items (empty page zero membership reads), not list_sessions; SSE baseline uses completed compact session_list_index summaries + expression-index range query for execution-root hints, retaining canonical fallback until legacy backfill completes; lifecycle refresh reads one compact catalog_session summary (canonical existence/root hint joined by PK) and updates connection-local cache instead of reloading DB; root metadata lookup reuses source when possible. Membership recomputed in memory, not DB. Default native sessions skip external title repair; external title lookup uses first_user_message SQL session-position index + role predicate + LIMIT 1 instead of full transcript decode. Idle FTS maintenance retains initial legacy merge then requires productive projection work before next successful merge; interval/error cooldown/search/write admission unchanged. No schemas/migrations/deletions/render settings/live DB/app launches changed.
+Verification: cargo check -p neoism-agent-server succeeds (existing warnings); 32 catalog_ tests pass; final state:: suite 27 pass and catalog_activity suite 14 pass; git diff --check clean. Tests cover compact+incremental poison unrelated blobs/summaries, stale payload rename/create/delete, hint parity incl empty hints, EXPLAIN indexed hints/session-position paths, page isolation, maintenance gate/backoff. Fixed old search test fixture writing 'not json' (rejected by existing expression indexes) to '{}' (valid JSON but invalid SessionInfo); corruption behavior covered.
+See docs/agent-database-activity.md for audit. Exact live query behind prior 19.2GB logical reads/20s remains unconfirmed: did NOT query 43.9GB live DB or restart daemon. Parent-chain resolver still canonical point-reads ancestors; legacy pre-backfill baseline can still enumerate canonical; full transcript consumers in prompt/undo/import/recovery remain. Concurrent preexisting desktop startup/readiness changes left intact; only daemon files/new audit doc changed by this work.

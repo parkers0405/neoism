@@ -9,7 +9,12 @@ description = "Shared chrome rendering for Neoism (native + web)."
 [lib]
 path = "src/lib.rs"
 
+[features]
+default = []
+neoui = ["dep:neoui"]
+
 [dependencies]
+neoui = { workspace = true, optional = true }
 neoism-terminal-core = { workspace = true }
 neoism-protocol = { workspace = true }
 neoism-agent-core = { workspace = true }

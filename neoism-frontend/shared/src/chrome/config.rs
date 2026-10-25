@@ -158,6 +158,10 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             pending_navigator_action: None,
             file_browser: crate::panels::file_browser::FileBrowserModal::new(),
             pending_settings_actions: Vec::new(),
+            #[cfg(feature = "neoui")]
+            pending_settings_clipboard: Vec::new(),
+            #[cfg(feature = "neoui")]
+            pending_settings_ime_text: None,
             pending_extensions_actions: Vec::new(),
             pending_neoworld_snapshots: Vec::new(),
             focus_stack: Vec::new(),

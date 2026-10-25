@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "neoui",
     "sugarloaf",
     "teletypewriter",
     "corcovado",
@@ -64,6 +65,7 @@ neoism-backend = { path = "neoism-backend", version = "0.7.138" }
 neoism-terminal-core = { path = "neoism-terminal-core", version = "0.7.138" }
 neoism-terminal-pty = { path = "neoism-terminal-pty", version = "0.7.138" }
 neoism-terminal-wasm = { path = "neoism-frontend/wasm", version = "0.7.138" }
+neoui = { path = "neoui", version = "0.7.138" }
 neoism-ui = { path = "neoism-frontend/shared", version = "0.7.138" }
 neoism-window = { path = "neoism-window", version = "0.7.138", default-features = false }
 neoism-notifier = { path = "neoism-notifier", version = "0.7.138" }
@@ -199,4 +201,9 @@ panic = "unwind"
 split-debuginfo = "unpacked"
 lto = false
 incremental = true
-opt-level = 0
+opt-level = 1
+
+# Keep debug assertions and symbols, but optimize CPU-heavy dependencies such as
+# text shaping, rasterization, and the database engine in interactive dev builds.
+[profile.dev.package."*"]
+opt-level = 2

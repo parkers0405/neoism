@@ -917,7 +917,10 @@ pub(crate) async fn v2_session_list(
                 .map_err(|error| ApiError::bad_request(error.to_string()))?;
         };
         for session in &mut page.items {
-            if !crate::session_context::is_default_session_title(&session.title) {
+            if !crate::session_context::is_default_session_title(&session.title)
+                || (!session.extra.contains_key("externalAgent")
+                    && !session.model.as_ref().is_some_and(|model| model.provider_id == "external"))
+            {
                 continue;
             }
             let Some(mut full) =
@@ -934,12 +937,9 @@ pub(crate) async fn v2_session_list(
             {
                 continue;
             }
-            let messages = state.inner.store.list_messages(full.id.as_str()).await?;
-            if let Some(title) = messages
-                .iter()
-                .find(|message| {
-                    matches!(&message.info, neoism_agent_core::MessageInfo::User(_))
-                })
+            let first_user = state.inner.store.first_user_message(full.id.as_str()).await?;
+            if let Some(title) = first_user
+                .as_ref()
                 .and_then(|message| {
                     crate::session_context::title_from_parts(&message.parts)
                 })

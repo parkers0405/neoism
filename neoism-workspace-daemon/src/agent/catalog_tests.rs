@@ -37,7 +37,7 @@ async fn connect_catalog_http_failure_is_terminal_and_retry_succeeds_on_same_tra
                     .json::<Value>().await.map_err(|error| error.to_string())
             }
         };
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = reply_queue::channel();
         // Same response channel/client for failure and retry. The correlation
         // belongs to the payload, not whichever outer command ID is newest.
         tx.send(connect_catalog_reply(Some("first".into()), &get).await).unwrap();

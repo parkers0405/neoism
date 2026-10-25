@@ -1,5 +1,88 @@
 use super::*;
 
+/// Append-only ACP output lives in the same managed directory accepted by
+/// artifact_read. The deterministic, session-scoped name also permits recovery
+/// after the event consumer (or server) exits, without retaining output in RAM.
+pub(super) fn acp_output_path(session: &str, key: &str) -> PathBuf {
+    use sha2::{Digest, Sha256};
+    let mut digest = Sha256::new();
+    digest.update(session.as_bytes());
+    digest.update([0]);
+    digest.update(key.as_bytes());
+    std::env::temp_dir()
+        .join("neoism-agent-state")
+        .join("tool-output")
+        .join(format!("acp-{:x}.txt", digest.finalize()))
+}
+
+/// Return the previous byte length (zero for a replacement) so callers can
+/// publish exactly one cap-crossing boundary without rereading a growing file.
+pub(super) async fn write_acp_output(
+    path: PathBuf,
+    text: String,
+    append: bool,
+) -> Result<u64, ApiError> {
+    tokio::task::spawn_blocking(move || {
+        use std::io::Write;
+        std::fs::create_dir_all(path.parent().expect("managed output directory"))?;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .append(append)
+            .truncate(!append)
+            .open(path)?;
+        let previous_bytes = if append { file.metadata()?.len() } else { 0 };
+        // Closing after write_all makes bytes available across reconnects and
+        // process restarts without an fsync/DB transaction for every fragment.
+        file.write_all(text.as_bytes())?;
+        Ok::<_, std::io::Error>(previous_bytes)
+    })
+    .await
+    .map_err(|error| ApiError::internal(error.to_string()))?
+    .map_err(|error| ApiError::internal(format!("saving ACP output: {error}")))
+}
+
+/// Read at most the standard output cap, never the entire spool. A managed
+/// path is deliberately disclosed even without tool metadata (nested text and
+/// failed tools), which artifact_read can resolve after reconnect/restart.
+pub(super) async fn acp_output_preview(
+    path: PathBuf,
+) -> Result<Option<String>, ApiError> {
+    tokio::task::spawn_blocking(move || -> std::io::Result<Option<String>> {
+        use std::io::Read;
+        use crate::tool::truncate::{MAX_BYTES, MAX_LINES};
+        let file = match std::fs::File::open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let mut bytes = Vec::new();
+        file.take((MAX_BYTES + 1) as u64).read_to_end(&mut bytes)?;
+        let overflow = bytes.len() > MAX_BYTES;
+        bytes.truncate(MAX_BYTES);
+        // Chunks are UTF-8; a byte-limited preview can end inside a codepoint.
+        if let Err(error) = std::str::from_utf8(&bytes) {
+            if error.error_len().is_some() {
+                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, error));
+            }
+            bytes.truncate(error.valid_up_to());
+        }
+        let text = String::from_utf8(bytes).expect("UTF-8 boundary checked");
+        let end = text.match_indices('\n').nth(MAX_LINES - 1)
+            .map(|(i, _)| i + 1).filter(|end| *end < text.len());
+        let truncated = overflow || end.is_some();
+        let preview = &text[..end.unwrap_or(text.len())];
+        Ok(Some(if truncated {
+            format!("{preview}\n\n[ACP output preview truncated. Exact full output saved to: {}\nUse artifact_read or artifact_search with this managed path.]", path.display())
+        } else {
+            text
+        }))
+    })
+    .await
+    .map_err(|error| ApiError::internal(error.to_string()))?
+    .map_err(|error| ApiError::internal(format!("reading ACP output: {error}")))
+}
+
 pub(crate) async fn update_external_session_metadata(
     state: &AppState,
     child_id: &str,

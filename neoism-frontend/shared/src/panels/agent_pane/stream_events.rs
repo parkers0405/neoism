@@ -589,9 +589,13 @@ pub fn classify_session_event(
         }
         event_type::MESSAGE_PART_DELTA => {
             state.idle_messages_refreshed = false;
-            if properties.get("field").and_then(Value::as_str) != Some("text") {
+            let raw_input = properties.get("field").and_then(Value::as_str) == Some("raw")
+                && event_part_kind(properties) == Some("tool");
+            if !raw_input && properties.get("field").and_then(Value::as_str) != Some("text") {
                 return Vec::new();
             }
+            // Internal delta kind: pending input belongs to detail, not tool output/text.
+            let delta_kind = if raw_input { Some("tool-input") } else { event_part_kind(properties) };
             if is_child_event {
                 return source_session_id
                     .map(|child_id| {
@@ -607,7 +611,7 @@ pub fn classify_session_event(
                                 message_id: event_message_id(properties)
                                     .map(str::to_string),
                                 part_id: event_part_id(properties).map(str::to_string),
-                                kind: event_part_kind(properties).map(str::to_string),
+                                kind: delta_kind.map(str::to_string),
                                 delta: properties
                                     .get("delta")
                                     .and_then(Value::as_str)
@@ -628,7 +632,7 @@ pub fn classify_session_event(
                 vec![SessionEventUpdate::PartDelta {
                     message_id: event_message_id(properties).map(str::to_string),
                     part_id: event_part_id(properties).map(str::to_string),
-                    kind: event_part_kind(properties).map(str::to_string),
+                    kind: delta_kind.map(str::to_string),
                     delta: delta.to_string(),
                 }]
             }
@@ -1548,6 +1552,26 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn pending_raw_deltas_are_routed_for_root_and_child_without_snapshots() {
+        let mut state = SessionEventUpdateState::default();
+        state.child_session_ids.insert("child".into());
+        for session in ["root", "child"] {
+            let updates = classify_session_event(json!({"type":"message.part.delta", "properties":{
+                "sessionID":session, "messageID":"m", "partID":"p", "partType":"tool", "field":"raw", "delta":"🦀patch"
+            }}), "root", &mut state);
+            assert!(updates.iter().any(|update| match update {
+                SessionEventUpdate::PartDelta { kind, delta, .. }
+                | SessionEventUpdate::ChildPartDelta { kind, delta, .. } => {
+                    kind.as_deref() == Some("tool-input") && delta == "🦀patch"
+                }
+                _ => false,
+            }));
+            assert!(!updates.iter().any(|update| matches!(update,
+                SessionEventUpdate::PartUpdated(_) | SessionEventUpdate::ChildPartUpdated { .. })));
+        }
+    }
 
     #[test]
     fn live_baseline_registers_children_before_their_text_arrives() {

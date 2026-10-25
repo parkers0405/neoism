@@ -8,13 +8,15 @@ struct ExternalRunGuard {
 
 impl ExternalRunGuard {
     async fn finish(mut self) {
-        if let Some(run_id) = self.run_id.take() {
+        if let Some(run_id) = self.run_id.as_deref() {
             crate::session_run::finish_session_run(
                 &self.state,
                 &self.session_id,
-                &run_id,
+                run_id,
             )
             .await;
+            // Cancellation before cleanup finishes must leave the drop retry armed.
+            self.run_id = None;
         }
     }
 }

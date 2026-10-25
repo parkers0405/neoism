@@ -1,6 +1,44 @@
 use super::{BatchManager, Rect};
 
 #[test]
+fn neoui_switch_quads_preserve_equal_order_submission_across_clips() {
+    for scale in [0.75, 1.0, 1.5, 2.0] {
+        let mut batches = BatchManager::new();
+        let mut expected = Vec::new();
+        // NeoUI's initial adapter submits track then knob at one shape order.
+        // Different per-instance clips must not reorder these overlapping quads.
+        for row in 0..3 {
+            let y = 20.0 + row as f32 * 100.0;
+            let clip = [0.0, y + 4.0, 200.0, 14.0].map(|value| value * scale);
+            for (bounds, radius) in [
+                ([10.0, y, 40.0, 22.0], 11.0),
+                ([31.0, y + 3.0, 16.0, 16.0], 8.0),
+            ] {
+                let bounds = bounds.map(|value| value * scale);
+                batches.quad_clipped(
+                    &Rect::from(bounds),
+                    0.0,
+                    &[1.0; 4],
+                    [radius * scale; 4],
+                    200,
+                    clip,
+                );
+                expected.push((bounds, radius * scale, clip));
+            }
+        }
+        let mut instances = Vec::new();
+        batches.build_display_list(&mut instances, &mut Vec::new(), &mut Vec::new());
+        assert_eq!(instances.len(), expected.len());
+        for (instance, (bounds, radius, clip)) in instances.iter().zip(expected) {
+            assert_eq!(instance.pos, [bounds[0], bounds[1], 0.0]);
+            assert_eq!(instance.size, [bounds[2], bounds[3]]);
+            assert_eq!(instance.corner_radii, [radius; 4]);
+            assert_eq!(instance.clip_rect, clip);
+        }
+    }
+}
+
+#[test]
 fn inverse_scope_non_quad_triangles_preserve_vertices_and_interpolation() {
     let mut batches = BatchManager::new();
     let checkpoint = batches.occlusion_checkpoint();

@@ -150,25 +150,21 @@ fn stale_reply_does_not_release_replacement_worker() {
 }
 
 #[test]
-fn rejection_expires_before_usable_positive_state() {
+fn readiness_age_only_controls_revalidation_for_each_model() {
     let mut pane = pane();
     pane.apply_provider_readiness(scope(&pane), Default::default());
-    pane.provider_readiness_checked_at =
-        Instant::now().checked_sub(std::time::Duration::from_secs(31));
-    assert!(pane.current_provider_readiness().is_none());
-    pane.apply_provider_readiness(scope(&pane), positive());
-    pane.provider_readiness_checked_at =
-        Instant::now().checked_sub(std::time::Duration::from_secs(31));
+    pane.provider_readiness_checked_at = Instant::now().checked_sub(Duration::from_secs(31));
     assert!(pane.current_provider_readiness().is_some());
-    assert!(pane
-        .current_provider_readiness_for_model("test/unavailable")
-        .is_none());
-    pane.model = "test/unavailable".into();
-    assert!(pane.current_provider_readiness().is_none());
-    pane.model = "test/model".into();
-    pane.provider_readiness_checked_at =
-        Instant::now().checked_sub(std::time::Duration::from_secs(301));
-    assert!(pane.current_provider_readiness().is_none());
+    assert!(!pane.provider_readiness_is_fresh_for_model("test/model"));
+    assert!(pane.prompt_readiness_error().unwrap().contains("/connect"));
+    pane.apply_provider_readiness(scope(&pane), positive());
+    pane.provider_readiness_checked_at = Instant::now().checked_sub(Duration::from_secs(31));
+    assert!(pane.provider_readiness_is_fresh_for_model("test/model"));
+    assert!(!pane.provider_readiness_is_fresh_for_model("test/unavailable"));
+    assert!(pane.prompt_readiness_error_for_model("test/unavailable").unwrap().contains("/models"));
+    pane.provider_readiness_checked_at = Instant::now().checked_sub(Duration::from_secs(301));
+    assert!(pane.current_provider_readiness().is_some());
+    assert!(!pane.provider_readiness_is_fresh_for_model("test/model"));
 }
 
 #[test]
@@ -239,15 +235,152 @@ fn pending_discovery_new_chat_submits_first_attempt_and_invalid_selection_retain
 }
 
 #[test]
-fn pending_readiness_expires_quickly_without_becoming_a_negative() {
+fn pending_readiness_revalidates_without_revoking_accepted_model() {
     let mut pane = pane();
     let mut readiness = positive();
     readiness.pending = true;
-    pane.apply_provider_readiness(scope(&pane), readiness);
-    assert!(pane.prompt_readiness_error().is_none());
+    pane.apply_provider_readiness(scope(&pane), readiness.clone());
     pane.provider_readiness_checked_at = Instant::now().checked_sub(Duration::from_secs(2));
-    assert!(pane.current_provider_readiness().is_none());
-    assert!(pane.prompt_readiness_error().unwrap().contains("still loading"));
+    let original_age = pane.provider_readiness_checked_at;
+    assert!(!pane.provider_readiness_is_fresh_for_model("test/model"));
+    pane.provider_readiness_in_flight.insert(scope(&pane));
+    pane.prompt_dispatch_in_flight = true;
+    pane.input = "first pending prompt".into();
+    assert!(pane.submit());
+    assert!(pane.input.is_empty());
+    assert_eq!(pane.pending_prompt_dispatches.len(), 1);
+    assert!(pane.drain_ui_events().is_empty());
+    assert_eq!(pane.current_provider_readiness(), Some(&readiness));
+    assert_eq!(pane.provider_readiness_checked_at, original_age);
+    assert!(pane.prompt_readiness_error_for_model("test/unknown").unwrap().contains("/models"));
+}
+
+#[test]
+fn expired_positive_readiness_first_submit_has_no_loading_notice() {
+    let mut pane = pane();
+    pane.server = format!("invalid://{}", pane.server);
+    pane.apply_provider_readiness(scope(&pane), positive());
+    pane.provider_readiness_checked_at = Instant::now().checked_sub(Duration::from_secs(301));
+    let original_age = pane.provider_readiness_checked_at;
+    // Submission schedules revalidation, but must not wait for its result.
+    pane.prompt_dispatch_in_flight = true;
+    pane.input = "first prompt".into();
+    assert!(pane.submit());
+    assert!(pane.input.is_empty());
+    assert_eq!(pane.pending_prompt_dispatches.len(), 1);
+    assert!(pane.drain_ui_events().is_empty());
+    assert_eq!(pane.provider_readiness_in_flight.len(), 1);
+    assert_eq!(pane.provider_readiness_checked_at, original_age);
+}
+
+#[test]
+fn expired_readiness_refresh_failure_remains_usable_without_renewal() {
+    let mut pane = pane();
+    pane.apply_provider_readiness(scope(&pane), positive());
+    pane.provider_readiness_checked_at = Instant::now().checked_sub(Duration::from_secs(301));
+    let original_age = pane.provider_readiness_checked_at;
+    let current = scope(&pane);
+    pane.provider_readiness_in_flight.insert(current.clone());
+    pane.background_tx.send(NeoismAgentBackgroundUpdate::ProviderReadinessRefreshed {
+        scope: current.clone(), result: Err("offline".into()),
+    }).unwrap();
+    pane.drain_background_updates();
+    assert!(!pane.provider_readiness_in_flight.contains(&current));
+    assert_eq!(pane.current_provider_readiness(), Some(&positive()));
+    assert!(pane.prompt_readiness_error().is_none());
+    assert_eq!(pane.provider_readiness_checked_at, original_age);
+    assert!(!pane.provider_readiness_is_fresh_for_model("test/model"));
+}
+
+#[test]
+fn expired_complete_readiness_retains_positive_and_negative_over_pending() {
+    for models in [vec!["test/model".into()], vec![]] {
+        let mut pane = pane();
+        let mut complete = positive();
+        complete.models = models;
+        pane.apply_provider_readiness(scope(&pane), complete.clone());
+        pane.provider_readiness_checked_at = Instant::now().checked_sub(Duration::from_secs(301));
+        let original_age = pane.provider_readiness_checked_at;
+        let mut pending = positive();
+        pending.pending = true;
+        assert!(!pane.apply_provider_readiness(scope(&pane), pending));
+        assert_eq!(pane.current_provider_readiness(), Some(&complete));
+        assert_eq!(pane.provider_readiness_checked_at, original_age);
+        assert_eq!(pane.prompt_readiness_error().is_some(), complete.models.is_empty());
+    }
+}
+
+#[test]
+fn cached_pending_readiness_cannot_renew_expired_complete_validation_age() {
+    let mut pane = pane();
+    pane.apply_provider_readiness(scope(&pane), positive());
+    pane.provider_readiness_checked_at = Instant::now().checked_sub(Duration::from_secs(301));
+    let original_age = pane.provider_readiness_checked_at;
+    super::super::api::seed_readiness_catalog_for_test(
+        &pane.server, pane.directory.as_deref(),
+        serde_json::json!({"all":[{"id":"test","models":{"fallback":{}}}],
+            "connected":["test"], "readinessPending":true, "readinessIdentity":"test-identity"}),
+    );
+    pane.provider_readiness_in_flight.insert(scope(&pane));
+    pane.refresh_provider_readiness();
+    assert_eq!(pane.current_provider_readiness(), Some(&positive()));
+    assert_eq!(pane.provider_readiness_checked_at, original_age);
+    assert!(!pane.provider_readiness_is_fresh_for_model("test/model"));
+}
+
+#[test]
+fn authoritative_readiness_disconnect_and_model_removal_block_expired_positive() {
+    for negative in [ProviderReadiness::default(), ProviderReadiness {
+        models: vec![], ..positive()
+    }] {
+        let mut pane = pane();
+        pane.apply_provider_readiness(scope(&pane), positive());
+        pane.provider_readiness_checked_at = Instant::now().checked_sub(Duration::from_secs(301));
+        assert!(pane.apply_provider_readiness(scope(&pane), negative.clone()));
+        pane.provider_readiness_checked_at = Instant::now().checked_sub(Duration::from_secs(301));
+        pane.provider_readiness_in_flight.insert(scope(&pane));
+        pane.input = "must retain".into();
+        assert!(pane.submit());
+        assert_eq!(pane.input, "must retain");
+        assert!(pane.pending_prompt_dispatches.is_empty());
+        assert_eq!(pane.prompt_readiness_error(), negative.prompt_error("test/model"));
+    }
+}
+
+#[test]
+fn expired_readiness_queued_model_gate_uses_captured_not_visible_model() {
+    let mut pane = pane();
+    pane.apply_provider_readiness(scope(&pane), positive());
+    pane.provider_readiness_checked_at = Instant::now().checked_sub(Duration::from_secs(301));
+    pane.provider_readiness_in_flight.insert(scope(&pane));
+    pane.prompt_dispatch_in_flight = true;
+    for model in ["test/unavailable", "disconnected/model", "test/model"] {
+        // Invert visible selection to prove admission uses the queued model.
+        pane.model = if model == "test/model" { "test/unavailable" } else { "test/model" }.into();
+        pane.queue_send_prompt_command(
+            "message".into(), "queued".into(), vec![], None, None, model.into(), None,
+            neoism_protocol::agent::PromptDelivery::Steer, false,
+        );
+        assert_eq!(pane.pending_prompt_dispatches.len(), usize::from(model == "test/model"));
+    }
+}
+
+#[test]
+fn expired_readiness_rejects_directory_endpoint_and_credential_scope_changes() {
+    for change in 0..3 {
+        let mut pane = pane();
+        pane.apply_provider_readiness(scope(&pane), positive());
+        pane.provider_readiness_checked_at = Instant::now().checked_sub(Duration::from_secs(301));
+        let old = scope(&pane);
+        match change {
+            0 => pane.directory = Some("/other".into()),
+            1 => pane.server.push_str("/other"),
+            _ => super::super::api::register_agent_server_credential(&pane.server, Some("changed")),
+        }
+        assert!(pane.current_provider_readiness().is_none());
+        assert!(!pane.apply_provider_readiness(old, positive()));
+        assert!(pane.prompt_readiness_error().unwrap().contains("still loading"));
+    }
 }
 
 #[test]

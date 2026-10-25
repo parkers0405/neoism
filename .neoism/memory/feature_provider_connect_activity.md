@@ -1,0 +1,11 @@
+---
+name: "Provider connect browser and inline activity parity"
+description: "Provider connect branded callback pages plus desktop/web activity, safe retries/cancellation, correlated catalog failures; tests and preview"
+type: "feature"
+scope: "project"
+origin: "neoism-agent"
+created: "2026-10-20"
+updated: "2026-10-20"
+---
+
+Implemented provider /connect parity with MCP browser shell and inline activity. Browser: service-api browser_pages provider_authorization_received/failed/cancelled reuse exact wordmark/15 effects/Geist/favicon; builtins provider_auth_browser replaces bodies only, retains HTTP/auth control flow. Copy says authorization received because loopback code receipt precedes token exchange/save. Shared/browser tests 4, complete builtins 131, render-only preview fixture passed, 12 Playwright light/dark desktop/mobile cases passed. Frontend: desktop and shared/web generic InlinePickerActivity, input visible under progress; query editable only show_input=true. Credential completion only after persistence. Scope/picker/cancel guards, fresh OAuth retries, queued cancelled writes removed, transport-close recovery. Catalog request optional inner request_id + terminal ConnectProviderCatalogFailed routes in protocol/daemon/shared/wasm avoid deadlock on generic catalog errors and stale success/failure attribution. Interactive correlation requires updated daemon; passive legacy forms supported. Desktop API minimal injected readiness seam tests cancellation before/after readiness without fake owned endpoints or real service launches. Final tests: protocol connect_catalog 1, daemon 2, shared connect_26/connection8/inline_picker12, unfiltered native connect_29, wasm32 web check, TS typecheck, no-DOM web2 all passed. Review caught/fixed uneditable activity input + catalog failure retry deadlock. No live OAuth/GUI/credential/database changes or release build. Safe previews generated via ignored fast_servers_backend render_browser_page_previews into /tmp/neoism-browser-page-preview, provider-received.html/provider-failed.html/provider-cancelled.html. At user request started temporary loopback Python server :4188 for 6 hours job_1571ef7f3001c5NA4U8kBNQR9y, all three HTTP200. Installed apps need updated build/relaunch; do not claim deployment or live OAuth verification.

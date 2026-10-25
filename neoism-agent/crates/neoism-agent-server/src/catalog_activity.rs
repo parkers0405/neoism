@@ -149,7 +149,7 @@ pub(crate) struct CatalogProjection {
 
 impl CatalogProjection {
     pub(crate) async fn load(state: &AppState) -> anyhow::Result<Self> {
-        let sessions = state.inner.store.list_sessions().await?;
+        let sessions = state.inner.store.list_catalog_sessions().await?;
         let membership = families(&sessions);
         let requests = state
             .inner
@@ -329,20 +329,34 @@ impl CatalogProjection {
         });
         let prior_info = source.as_ref()
             .and_then(|source| self.session_metadata(source)).cloned();
-        if lifecycle {
-            let sessions = state.inner.store.list_sessions().await?;
-            self.session_indices = Self::index_sessions(&sessions);
-            self.membership = families(&sessions);
-            self.sessions = sessions;
-        }
-        let info = match source.as_ref() {
-            Some(source) => state.inner.store.get_session(source).await?.or_else(|| {
-                (event.kind == et::SESSION_DELETED)
-                    .then_some(payload_info.or(prior_info))
-                    .flatten()
-            }),
+        // Lifecycle events invalidate one canonical row, not the entire catalog.
+        // Never trust queued metadata as authority: a later rename/delete may
+        // already have committed before this event reaches the subscriber.
+        let current_info = match source.as_ref() {
+            Some(source) => state.inner.store.catalog_session(source).await?,
             None => None,
         };
+        if lifecycle {
+            if let Some(source) = source.as_ref() {
+                if let Some(index) = self.session_indices.get(source).copied() {
+                    if let Some(info) = current_info.as_ref() {
+                        self.sessions[index] = info.clone();
+                    } else {
+                        self.sessions.swap_remove(index);
+                    }
+                } else if let Some(info) = current_info.as_ref() {
+                    self.sessions.push(info.clone());
+                }
+                self.session_indices = Self::index_sessions(&self.sessions);
+                self.membership = families(&self.sessions);
+            }
+        }
+        let source_exists = current_info.is_some();
+        let info = current_info.or_else(|| {
+            (event.kind == et::SESSION_DELETED)
+                .then_some(payload_info.or(prior_info))
+                .flatten()
+        });
         let root_id = match info.as_ref() {
             Some(info) => {
                 Some(crate::execution_activity::root_session_id(state, info).await)
@@ -358,11 +372,11 @@ impl CatalogProjection {
         let Some(root_id) = root_id else {
             return Ok(Vec::new());
         };
-        let root = state.inner.store.get_session(&root_id).await?.or_else(|| {
-            info.as_ref()
-                .filter(|s| s.parent_id.is_none() && s.id.as_str() == root_id)
-                .cloned()
-        });
+        let root = if let Some(info) = info.as_ref().filter(|s| s.id.as_str() == root_id) {
+            Some(info.clone())
+        } else {
+            state.inner.store.catalog_session(&root_id).await?
+        };
         let Some(root) = root else {
             return Ok(Vec::new());
         };
@@ -375,7 +389,7 @@ impl CatalogProjection {
             event.kind == et::SESSION_DELETED && source.as_deref() == Some(root_id.as_str()),
         ).await?;
         // New cross-directory child may arrive without a lifecycle edge yet.
-        if let Some(source) = source {
+        if let Some(source) = source.filter(|_| !lifecycle || source_exists) {
             self.membership
                 .entry(root_id.clone())
                 .or_default()
@@ -435,18 +449,9 @@ pub(crate) async fn project(
     state: &AppState,
     items: Vec<SessionInfo>,
 ) -> anyhow::Result<Vec<CatalogSessionInfo>> {
-    let membership = families(&state.inner.store.list_sessions().await?);
     let mut projected = Vec::with_capacity(items.len());
     for info in items {
-        let family = membership
-            .get(info.id.as_str())
-            .cloned()
-            .unwrap_or_else(|| HashSet::from([info.id.to_string()]));
-        let catalog_activity = activity(state, info.id.as_str(), &family).await?;
-        projected.push(CatalogSessionInfo {
-            info,
-            catalog_activity,
-        });
+        projected.push(project_one(state, info).await?);
     }
     Ok(projected)
 }

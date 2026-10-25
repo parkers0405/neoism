@@ -83,6 +83,37 @@ fn pending_refresh_preserves_loaded_account_models_and_original_cache_age() {
 }
 
 #[test]
+fn expired_complete_readiness_cache_retains_over_pending_without_renewal() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let server = format!("http://{}", listener.local_addr().unwrap());
+    let scope = catalog_scope(&server, None);
+    let key = catalog_key(&server, None, "/v2/providers");
+    let complete = serde_json::json!({"all":[{"id":"test","models":{"account-only":{}}}],
+        "connected":["test"], "readinessIdentity":"same-credential"});
+    seed_readiness_catalog_for_test(&server, None, complete.clone());
+    catalog_cache().age_for_test(&key, Duration::from_secs(301));
+    let http = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0; 4096];
+        stream.read(&mut request).unwrap();
+        let body = r#"{"all":[{"id":"test","models":{"fallback":{}}}],"connected":["test"],"readinessPending":true,"readinessIdentity":"same-credential"}"#;
+        write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+    });
+    let ready = fetch_provider_readiness_scoped(&scope).unwrap();
+    assert_eq!(ready, ProviderReadiness::from_json(&complete).unwrap());
+    let (cached, age) = cached_provider_readiness_with_age(&server, None).unwrap();
+    assert_eq!(cached, ready);
+    assert!(age >= Duration::from_secs(301));
+    // Applying the retained worker result must not give it a new validation age.
+    let mut pane = crate::neoism::agent::NeoismAgentPane::default();
+    pane.server = server;
+    pane.model = "test/account-only".into();
+    assert!(pane.apply_provider_readiness(scope, ready));
+    assert_eq!(pane.current_provider_readiness(), Some(&cached));
+    http.join().unwrap();
+}
+
+#[test]
 fn pending_readiness_is_valid_and_refreshes_before_normal_catalog_ttl() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let server = format!("http://{}", listener.local_addr().unwrap());
@@ -96,7 +127,7 @@ fn pending_readiness_is_valid_and_refreshes_before_normal_catalog_ttl() {
     assert!(first.pending);
     assert!(first.prompt_error("openai/example").is_none());
     catalog_cache().age_for_test(&key, Duration::from_secs(2));
-    assert!(cached_provider_readiness(&server, None).is_none());
+    assert_eq!(cached_provider_readiness(&server, None), Some(first));
     let http = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
         let mut request = [0; 4096];
@@ -134,7 +165,7 @@ fn readiness_cache_is_independent_of_defaults_and_configured_models() {
 }
 
 #[test]
-fn readiness_cache_does_not_replay_stale_disconnects_or_unusable_models() {
+fn readiness_cache_preserves_authoritative_negative_while_revalidation_fails() {
     for (server, value) in [
         (
             "invalid://readiness-empty",
@@ -147,13 +178,14 @@ fn readiness_cache_does_not_replay_stale_disconnects_or_unusable_models() {
     ] {
         let key = catalog_key(server, None, "/v2/providers");
         catalog_cache().get(key.clone(), || Ok(value)).unwrap();
-        assert!(cached_provider_readiness(server, None).is_some());
-        catalog_cache().age_for_test(&key, Duration::from_secs(45));
-        assert!(cached_provider_readiness(server, None).is_none());
+        let original = cached_provider_readiness(server, None).unwrap();
+        assert!(original.prompt_error("test/model").is_some());
+        catalog_cache().age_for_test(&key, Duration::from_secs(301));
+        assert_eq!(cached_provider_readiness(server, None), Some(original.clone()));
         let scope = catalog_scope(server, None);
         assert!(fetch_provider_readiness_scoped(&scope).is_err());
         assert!(fetch_provider_readiness_scoped(&scope).is_err());
-        assert!(cached_provider_readiness(server, None).is_none());
+        assert_eq!(cached_provider_readiness(server, None), Some(original));
     }
 }
 

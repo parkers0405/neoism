@@ -277,6 +277,13 @@ export function reduceEvent(
             };
             const part = msg.parts.find((p) => p.id === partID);
             if (!part && !["text", "reasoning"].includes(partType)) return next;
+            if (field === "raw") {
+                if (part?.type !== "tool" || part.state.status !== "pending") return next;
+                return reconcile(next, [{ ...msg, parts: mergePage(msg.parts, [{
+                    ...part, state: { ...part.state, raw: part.state.raw + delta },
+                } as Part], (p) => p.id) }]);
+            }
+            if (field !== "text") return next;
             const updated = {
                 ...(part || {
                     id: partID,

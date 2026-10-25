@@ -139,7 +139,7 @@ pub(crate) fn append_tool_input_delta(
     append_tool_input_delta_in_place(parts, part_id, delta).cloned()
 }
 
-/// Borrow the updated part so skipped live snapshots never clone growing input.
+/// Append without cloning the growing pending input; callers publish only the fragment.
 pub(crate) fn append_tool_input_delta_in_place<'a>(
     parts: &'a mut [Part],
     part_id: &str,

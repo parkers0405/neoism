@@ -321,8 +321,7 @@ pub(crate) async fn handle_socket(
     // `SendMessage` arrives. We tag every emitted event with the
     // latest `request_id` the chrome submitted (or `0` for the
     // unsolicited pre-prompt `Disabled` push).
-    let (agent_tx, mut agent_rx) =
-        tokio::sync::mpsc::unbounded_channel::<AgentServerMessage>();
+    let (agent_tx, mut agent_rx) = crate::agent::reply_queue::channel();
     let agent_api_key = std::env::var("NEOISM_AGENT_API_KEY").ok();
     let agent_model = std::env::var("NEOISM_AGENT_MODEL").unwrap_or_default();
     let agent_session = AgentSession::spawn(agent_api_key, agent_model, agent_tx);
@@ -472,12 +471,21 @@ pub(crate) async fn handle_socket(
                 }
                 continue;
             }
-            Some(agent_event) = agent_rx.recv() => {
+            agent_event = agent_rx.recv() => {
+                let Some(agent_event) = agent_event else {
+                    // Overflow invalidates the stream: reconnect for a baseline.
+                    break;
+                };
                 let resp = ServiceServerMessage::AgentReply {
                     request_id: agent_request_id,
                     message: agent_event,
                 };
-                if let Err(err) = send_json(&mut sink, &resp).await {
+                let sent = tokio::select! {
+                    biased;
+                    _ = agent_rx.closed() => break,
+                    sent = send_json(&mut sink, &resp) => sent,
+                };
+                if let Err(err) = sent {
                     tracing::warn!(error = %err, "websocket send error draining agent event");
                     poll_task.abort();
                     return;

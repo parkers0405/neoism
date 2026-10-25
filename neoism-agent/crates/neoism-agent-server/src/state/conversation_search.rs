@@ -21,6 +21,29 @@ const MAX_ANCESTORS: usize = 128;
 const OPTIMIZE_IDLE: Duration = Duration::from_secs(30);
 const OPTIMIZE_INTERVAL: Duration = Duration::from_secs(15 * 60);
 
+// Repair legacy segment accumulation once per process, then only after new
+// projection work. A timer alone must not repeatedly merge an unchanged index.
+struct IdleMaintenance {
+    pending: bool,
+    attempted_at: Option<std::time::Instant>,
+}
+
+impl IdleMaintenance {
+    fn new() -> Self {
+        Self { pending: true, attempted_at: None }
+    }
+
+    fn due(&self, now: std::time::Instant, idle_for: Duration) -> bool {
+        self.pending && idle_for >= OPTIMIZE_IDLE
+            && self.attempted_at.is_none_or(|at| now.duration_since(at) >= OPTIMIZE_INTERVAL)
+    }
+
+    fn attempted(&mut self, now: std::time::Instant, completed: bool) {
+        self.attempted_at = Some(now);
+        if completed { self.pending = false; }
+    }
+}
+
 #[derive(Default)]
 struct SearchBudget {
     candidates: usize,
@@ -87,7 +110,7 @@ pub(super) fn spawn(db: Db) -> SearchWorker {
     let task = tokio::spawn(async move {
         let mut delay = Duration::from_millis(100);
         let mut idle_since = std::time::Instant::now();
-        let mut optimized_at: Option<std::time::Instant> = None;
+        let mut maintenance = IdleMaintenance::new();
         loop {
             tokio::select! {
                 _ = tokio::time::sleep(delay) => {},
@@ -98,21 +121,21 @@ pub(super) fn spawn(db: Db) -> SearchWorker {
             }
             delay = match tick_inner(&db, false, Some(&receiver)).await {
                 Ok(true) => {
+                    maintenance.pending = true;
                     idle_since = std::time::Instant::now();
                     Duration::from_millis(100)
                 }
                 Ok(false) => {
-                    if idle_since.elapsed() >= OPTIMIZE_IDLE
-                        && optimized_at.is_none_or(|at| at.elapsed() >= OPTIMIZE_INTERVAL)
+                    if maintenance.due(std::time::Instant::now(), idle_since.elapsed())
                         && !*receiver.borrow()
                     {
                         match optimize_idle(&db).await {
-                            Ok(true) => optimized_at = Some(std::time::Instant::now()),
+                            Ok(true) => maintenance.attempted(std::time::Instant::now(), true),
                             Ok(false) => {},
                             Err(error) => {
                                 tracing::warn!(%error, "conversation search index maintenance retrying");
                                 // Do not spin/repeatedly rebuild a broken index.
-                                optimized_at = Some(std::time::Instant::now());
+                                maintenance.attempted(std::time::Instant::now(), false);
                             }
                         }
                     }
@@ -1102,6 +1125,24 @@ async fn search_inner(
 mod tests {
     use super::*;
 
+    #[test]
+    fn idle_maintenance_requires_changes_after_first_merge_and_backs_off_errors() {
+        let now = std::time::Instant::now();
+        let mut maintenance = IdleMaintenance::new();
+        assert!(!maintenance.due(now, OPTIMIZE_IDLE - Duration::from_secs(1)));
+        assert!(maintenance.due(now, OPTIMIZE_IDLE));
+        maintenance.attempted(now, true);
+        let later = now + OPTIMIZE_INTERVAL * 4;
+        assert!(!maintenance.due(later, OPTIMIZE_IDLE * 100));
+        maintenance.pending = true;
+        assert!(!maintenance.due(now + Duration::from_secs(1), OPTIMIZE_IDLE));
+        assert!(maintenance.due(later, OPTIMIZE_IDLE));
+        maintenance.attempted(later, false);
+        assert!(maintenance.pending);
+        assert!(!maintenance.due(later + Duration::from_secs(1), OPTIMIZE_IDLE));
+        assert!(maintenance.due(later + OPTIMIZE_INTERVAL, OPTIMIZE_IDLE));
+    }
+
     // Separate databases still share the production process-global admission
     // slots. Coordinate whole test lifetimes (including reopen/after-drop reads)
     // so unrelated tests cannot consume slots or race the saturation assertion.
@@ -2045,10 +2086,12 @@ mod tests {
         );
         assert_eq!(find(db, "needle", true, 1).await[0].message_id, "msg_z_new");
         // Corrupt legacy metadata must skip that session, not fail all search.
+        // JSON expression indexes reject malformed JSON at write time; use a
+        // valid JSON value that is not a decodable SessionInfo instead.
         session(db, "ses_corrupt", "needle", "/project", None, "local").await;
         flush(db).await.unwrap();
         db.execute(
-            "UPDATE sessions SET info_json='not json' WHERE id='ses_corrupt'",
+            "UPDATE sessions SET info_json='{}' WHERE id='ses_corrupt'",
             vec![],
         )
         .await

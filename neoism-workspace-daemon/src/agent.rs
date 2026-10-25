@@ -36,7 +36,8 @@ use neoism_protocol::agent::{
 use parking_lot::Mutex;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tokio::sync::mpsc::UnboundedSender;
+pub mod reply_queue;
+use reply_queue::AgentReplySender;
 use tokio::task::JoinHandle;
 
 /// Anthropic streaming endpoint (layer 1 — direct proxy).
@@ -294,7 +295,7 @@ pub(crate) struct AgentInner {
     model: String,
     /// Outbound channel; cloned into the spawned task so it can
     /// stream events back without holding the session lock.
-    tx: UnboundedSender<AgentServerMessage>,
+    tx: AgentReplySender,
     /// HTTP client for the direct provider proxy.
     http: reqwest::Client,
     /// Shared agent pool; loopback traffic bypasses environment proxies.
@@ -337,7 +338,7 @@ impl AgentSession {
     pub fn spawn(
         api_key: Option<String>,
         model: String,
-        tx: UnboundedSender<AgentServerMessage>,
+        tx: AgentReplySender,
     ) -> AgentSession {
         if api_key.as_ref().map(String::is_empty).unwrap_or(true) {
             // Tell the chrome why the direct proxy is parked. The

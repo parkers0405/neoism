@@ -410,6 +410,14 @@ fn apply_agent_event_to_pane_inner(
             kind,
             properties,
         } => {
+            if kind == "message.part.delta" && properties["field"] == "raw" && properties["partType"] == "tool" {
+                pane.ingest_live_part_delta(
+                    properties["messageID"].as_str().map(str::to_owned),
+                    properties["partID"].as_str().map(str::to_owned),
+                    Some("tool-input".to_owned()),
+                    properties["delta"].as_str().unwrap_or_default(),
+                );
+            }
             if kind == "session.compaction.admission.failed" {
                 if let Some(request_id) = properties.get("requestID").and_then(serde_json::Value::as_str) {
                     pane.compact_admission_failed(&session_id, request_id);
@@ -1250,6 +1258,16 @@ fn apply_agent_event_to_cache_inner(
             ..
         } => {
             pane.cache_push_system_message(&session_id, title, body);
+            true
+        }
+        AgentServerMessage::SessionEvent {
+            session_id, kind, properties,
+        } if kind == "message.part.delta" && properties["field"] == "raw" && properties["partType"] == "tool" => {
+            pane.cache_apply_part_delta_with_parent(
+                &session_id,
+                properties["messageID"].as_str(), properties["partID"].as_str(),
+                Some("tool-input"), properties["delta"].as_str().unwrap_or_default(),
+            );
             true
         }
         AgentServerMessage::SessionEvent {

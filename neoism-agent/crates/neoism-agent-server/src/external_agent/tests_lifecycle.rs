@@ -284,7 +284,17 @@ async fn three_provider_roots_run_via_real_http_queue_and_reload() {
                         assert_eq!(children[0].extra["externalAgent"]["status"], "running");
                         let child_messages = state.inner.store.list_messages(children[0].id.as_str()).await.unwrap();
                         assert_eq!(text_of(&child_messages[0]), "Review code");
-                        assert_eq!(text_of(&child_messages[1]), "Review underway");
+                        // Running text is transient; only the initial boundary
+                        // is durable until completion. Reconnect uses the bounded
+                        // live baseline, and the spool retains exact output.
+                        assert_eq!(text_of(&child_messages[1]), "");
+                        let (_, live) = state.subscribe_with_messages();
+                        assert!(live.iter().any(|event|
+                            event.kind == event_type::MESSAGE_PART_UPDATED
+                                && event.properties["sessionID"] == children[0].id.as_str()
+                                && event.properties["part"]["text"] == "Review underway"));
+                        let spool = children[0].extra["externalAgent"]["outputPath"].as_str().unwrap();
+                        assert_eq!(std::fs::read_to_string(spool).unwrap(), "Review underway");
                         let MessageInfo::Assistant(live_child) = &child_messages[1].info else { panic!("child assistant expected") };
                         assert!(live_child.time.completed.is_none());
                         let live_id = live_child.id.clone();

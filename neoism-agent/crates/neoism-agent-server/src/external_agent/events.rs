@@ -1,3 +1,7 @@
+#[cfg(test)]
+#[path = "events_tests.rs"]
+mod tests;
+
 use super::*;
 
 pub(crate) struct AcpEventContext {
@@ -596,6 +600,22 @@ pub(super) async fn update_external_tool_part(
                 .and_then(Value::as_str)
                 .map(str::to_owned)
         });
+    let terminal_output = if update.pointer("/_meta/terminalId").is_some()
+        && update.get("rawOutput").and_then(Value::as_str).is_some()
+    {
+        if let Some(output) = terminal_output {
+            let path = acp_output_path(
+                &ctx.child_id,
+                &format!("{}:{tool_call_id}:terminal", ctx.assistant_id),
+            );
+            write_acp_output(path.clone(), output, false).await?;
+            acp_output_preview(path).await?
+        } else {
+            None
+        }
+    } else {
+        terminal_output
+    };
     let status = update
         .get("status")
         .and_then(Value::as_str)
@@ -643,6 +663,59 @@ pub(super) async fn update_external_tool_part(
             enrich_nested_prompt(&ctx.state, nested_id, &input).await?;
         }
     }
+    let output = external_tool_output(&update);
+    let output_path = acp_output_path(
+        &ctx.child_id,
+        &format!("{}:{tool_call_id}", ctx.assistant_id),
+    );
+    let terminal_chunk = is_terminal_output_update(&update);
+    if terminal_chunk {
+        let append = ctx
+            .collector
+            .lock()
+            .await
+            .tool_outputs
+            .contains_key(&tool_call_id);
+        write_acp_output(output_path.clone(), output.clone(), append).await?;
+        // Keep only a presence marker, not an ever-growing copy of the output.
+        ctx.collector
+            .lock()
+            .await
+            .tool_outputs
+            .insert(tool_call_id.clone(), String::new());
+    }
+    let completion_output = if matches!(status, "completed" | "failed" | "error") {
+        let accumulated = ctx
+            .collector
+            .lock()
+            .await
+            .tool_outputs
+            .contains_key(&tool_call_id);
+        if !terminal_chunk && !output.trim().is_empty() {
+            let suffix = if accumulated {
+                format!("\n{output}")
+            } else {
+                output.clone()
+            };
+            write_acp_output(output_path.clone(), suffix, accumulated).await?;
+        }
+        acp_output_preview(output_path.clone())
+            .await?
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+    // Output is represented by the bounded completion preview/spool, never a
+    // second unbounded copy hidden inside durable completion metadata.
+    let mut metadata_update = update.clone();
+    if let Some(object) = metadata_update.as_object_mut() {
+        object.remove("rawOutput");
+        object.remove("content"); // Diffs have their own bounded acpDiffs field.
+        if let Some(meta) = object.get_mut("_meta").and_then(Value::as_object_mut) {
+            meta.remove("terminal_output");
+            meta.remove("terminal_exit");
+        }
+    }
     let mut failed_nested = None;
     let part = {
         let mut collector = ctx.collector.lock().await;
@@ -651,25 +724,6 @@ pub(super) async fn update_external_tool_part(
             .entry(tool_call_id.clone())
             .or_insert_with(|| Id::ascending(IdKind::Part))
             .clone();
-        let output = external_tool_output(&update);
-        let completion_output = if is_terminal_output_update(&update) {
-            let entry = collector
-                .tool_outputs
-                .entry(tool_call_id.clone())
-                .or_default();
-            entry.push_str(&output);
-            entry.clone()
-        } else if let Some(accumulated) = collector.tool_outputs.get(&tool_call_id) {
-            if output.trim().is_empty() {
-                accumulated.clone()
-            } else if accumulated.trim().is_empty() {
-                output.clone()
-            } else {
-                format!("{accumulated}\n{output}")
-            }
-        } else {
-            output.clone()
-        };
         let mut message = ctx.live_message.lock().await;
         let mut part = match status {
             "completed" => set_tool_completed(
@@ -680,7 +734,8 @@ pub(super) async fn update_external_tool_part(
                 json!({
                     "runtime": "acp",
                     "provider": ctx.runtime.provider_id(),
-                    "update": update.clone(),
+                    "update": metadata_update.clone(),
+                    "outputPath": output_path,
                     "acpTitle": tool_title.clone(),
                     "acpDiffs": acp_diffs.clone(),
                 }),
@@ -703,7 +758,8 @@ pub(super) async fn update_external_tool_part(
                     json!({
                         "runtime": "acp",
                         "provider": ctx.runtime.provider_id(),
-                        "update": update.clone(),
+                        "update": metadata_update.clone(),
+                    "outputPath": output_path,
                         "acpTitle": tool_title.clone(),
                         "acpDiffs": acp_diffs.clone(),
                     }),
@@ -713,7 +769,7 @@ pub(super) async fn update_external_tool_part(
             "failed" | "error" => {
                 if let Some(nested_id) = nested_session_id.clone() {
                     failed_nested =
-                        Some((nested_id, "error".to_string(), completion_output.clone()));
+                        Some((nested_id, "error".to_string(), output.clone()));
                 }
                 let error = completion_output.clone();
                 set_tool_error(&mut message.parts, part_id.as_str(), error)
@@ -740,13 +796,13 @@ pub(super) async fn update_external_tool_part(
                 part_id,
                 &session_id,
                 &ctx.assistant_id,
-                tool_call_id,
+                tool_call_id.clone(),
                 tool_name,
                 input,
             ),
         };
         if let Part::Tool(tool) = &mut part {
-            let acp_metadata = json!({"acpTitle": tool_title, "acpDiffs": acp_diffs, "terminalOutput": terminal_output});
+            let acp_metadata = json!({"acpTitle": tool_title, "acpDiffs": acp_diffs, "terminalOutput": terminal_output, "outputPath": output_path});
             tool.metadata = Some(acp_metadata.clone());
             if let Some(Part::Tool(stored)) = message
                 .parts
@@ -776,13 +832,32 @@ pub(super) async fn update_external_tool_part(
     }
     if let Some(nested_id) = nested_session_id.as_deref() {
         let output = external_tool_output(&update);
+        let append_output = is_terminal_output_update(&update)
+            || update.pointer("/_meta/terminal_exit").is_some()
+            || (status == "completed"
+                && ctx
+                    .collector
+                    .lock()
+                    .await
+                    .tool_outputs
+                    .contains_key(&tool_call_id));
         if !output.is_empty() && !matches!(status, "failed" | "error") {
             project_nested_output(
                 &ctx.state,
                 ctx.runtime,
                 nested_id,
                 &output,
-                is_terminal_output_update(&update),
+                append_output,
+            )
+            .await?;
+        }
+        if status == "completed" {
+            finish_nested_external_session(
+                &ctx.state,
+                ctx.runtime,
+                nested_id,
+                "completed",
+                "",
             )
             .await?;
         }
@@ -910,6 +985,9 @@ async fn ensure_nested_external_session(
             "status": "running",
             "nested": true,
             "parentToolCallId": tool_call_id,
+            // The durable session boundary discloses the append-only source
+            // even while its text part is transient (e.g. after reconnect).
+            "outputPath": acp_output_path(child_id.as_str(), "nested-text"),
         }),
     );
     let child = SessionInfo {
@@ -970,6 +1048,15 @@ async fn project_nested_output(
     output: &str,
     terminal_chunk: bool,
 ) -> Result<(), ApiError> {
+    let spool = acp_output_path(nested_id, "nested-text");
+    let previous_bytes = if !output.is_empty() {
+        write_acp_output(spool, output.to_owned(), terminal_chunk).await?
+    } else {
+        0
+    };
+    if terminal_chunk && previous_bytes > crate::tool::truncate::MAX_BYTES as u64 {
+        return Ok(());
+    }
     let Some(child) = state.inner.store.get_session(nested_id).await? else {
         return Ok(());
     };
@@ -986,25 +1073,15 @@ async fn project_nested_output(
         else {
             return Ok(());
         };
-        let next = if terminal_chunk {
-            format!("{}{output}", part.text)
-        } else {
-            output.to_owned()
-        };
-        if part.text == next {
-            return Ok(());
-        }
-        part.text = next;
-        let part = part.clone();
-        state
-            .inner
-            .store
-            .update_message(nested_id, &message)
-            .await?;
-        state.publish(EventPayload::new(
-            event_type::MESSAGE_PART_UPDATED,
-            json!({ "sessionID": nested_id, "part": part, "time": now }),
-        ));
+        publish_nested_progress(
+            state,
+            nested_id,
+            part,
+            output,
+            terminal_chunk,
+            previous_bytes,
+        )
+        .await?;
     } else {
         let Some(parent_id) = state
             .inner
@@ -1025,7 +1102,7 @@ async fn project_nested_output(
             id: Id::ascending(IdKind::Part),
             session_id: child.id.clone(),
             message_id: message_id.clone(),
-            text: output.to_owned(),
+            text: String::new(),
             synthetic: None,
             time: None,
         });
@@ -1070,8 +1147,77 @@ async fn project_nested_output(
             event_type::MESSAGE_PART_UPDATED,
             json!({ "sessionID": nested_id, "part": part, "time": now }),
         ));
+        if let Part::Text(mut text) = part {
+            publish_nested_progress(
+                state,
+                nested_id,
+                &mut text,
+                output,
+                terminal_chunk,
+                previous_bytes,
+            )
+            .await?;
+        }
     }
     Ok(())
+}
+
+async fn publish_nested_progress(
+    state: &AppState,
+    nested_id: &str,
+    part: &mut TextPart,
+    output: &str,
+    terminal_chunk: bool,
+    previous_bytes: u64,
+) -> Result<(), ApiError> {
+    if output.is_empty() {
+        return Ok(());
+    }
+    let cap = crate::tool::truncate::MAX_BYTES as u64;
+    if terminal_chunk && previous_bytes > cap {
+        // The cap-crossing replacement has already reset the active baseline.
+        // Continue spooling, but do not grow it with any more raw fragments.
+        return Ok(());
+    }
+    if terminal_chunk && previous_bytes.saturating_add(output.len() as u64) <= cap {
+        state.publish_live(nested_text_delta(
+            nested_id,
+            &part.message_id,
+            &part.id,
+            output,
+        ));
+    } else {
+        // Exactly one bounded replacement at the cap crossing, including when
+        // the very first chunk is oversized. Snapshot-style ACP updates also
+        // use this bounded representation instead of unbounded live text.
+        part.text = acp_output_preview(acp_output_path(nested_id, "nested-text"))
+            .await?
+            .unwrap_or_default();
+        state.publish_live(EventPayload::new(
+            event_type::MESSAGE_PART_UPDATED,
+            json!({ "sessionID": nested_id, "part": Part::Text(part.clone()), "time": now_millis() }),
+        ));
+    }
+    Ok(())
+}
+
+fn nested_text_delta(
+    session_id: &str,
+    message_id: &Id,
+    part_id: &Id,
+    delta: &str,
+) -> EventPayload {
+    EventPayload::new(
+        event_type::MESSAGE_PART_DELTA,
+        json!({
+            "sessionID": session_id,
+            "messageID": message_id,
+            "partID": part_id,
+            "partType": "text",
+            "field": "text",
+            "delta": delta,
+        }),
+    )
 }
 
 pub(crate) async fn finish_nested_external_session(
@@ -1090,13 +1236,35 @@ pub(crate) async fn finish_nested_external_session(
     {
         return Ok(());
     }
+    let spool = acp_output_path(nested_id, "nested-text");
     let existing = state.inner.store.list_messages(nested_id).await?;
+    let mut saved_output = acp_output_preview(spool.clone()).await?;
+    if saved_output.is_none() {
+        if let Some(text) = existing.iter().find_map(assistant_text) {
+            write_acp_output(spool.clone(), text.clone(), false).await?;
+            saved_output = Some(text);
+        }
+    }
+    if !output.is_empty() {
+        // Completion diagnostics must not replace terminal bytes on abort.
+        let append = saved_output.is_some();
+        write_acp_output(
+            spool.clone(),
+            if append {
+                format!("\n{output}")
+            } else {
+                output.to_owned()
+            },
+            append,
+        )
+        .await?;
+    }
+    let final_output = acp_output_preview(spool).await?.unwrap_or_default();
     if !existing
         .iter()
         .any(|message| matches!(message.info, MessageInfo::Assistant(_)))
-        || !output.is_empty()
     {
-        project_nested_output(state, runtime, nested_id, output, false).await?;
+        project_nested_output(state, runtime, nested_id, "", false).await?;
     }
     let Some(mut message) = state
         .inner
@@ -1109,26 +1277,44 @@ pub(crate) async fn finish_nested_external_session(
         return Ok(());
     };
     let now = now_millis();
+    if let Some(Part::Text(text)) = message
+        .parts
+        .iter_mut()
+        .find(|part| matches!(part, Part::Text(_)))
+    {
+        text.text = final_output;
+        text.time = Some(PartTime {
+            start: now,
+            end: Some(now),
+        });
+    }
     if let MessageInfo::Assistant(info) = &mut message.info {
         if info.time.completed.is_none() {
             info.time.completed = Some(now);
             info.finish = Some(status.to_owned());
             info.error = (status != "completed").then(|| {
                 json!({
-                    "message": output, "interrupted": status == "interrupted"
+                    "message": "ACP task did not complete; see saved output for diagnostics",
+                    "interrupted": status == "interrupted"
                 })
             });
-            state
-                .inner
-                .store
-                .update_message(nested_id, &message)
-                .await?;
-            state.publish(EventPayload::new(
-                event_type::MESSAGE_UPDATED,
-                json!({ "sessionID": nested_id, "info": message.info }),
-            ));
         }
     }
+    state
+        .inner
+        .store
+        .update_message(nested_id, &message)
+        .await?;
+    for part in &message.parts {
+        state.publish(EventPayload::new(
+            event_type::MESSAGE_PART_UPDATED,
+            json!({ "sessionID": nested_id, "part": part, "time": now }),
+        ));
+    }
+    state.publish(EventPayload::new(
+        event_type::MESSAGE_UPDATED,
+        json!({ "sessionID": nested_id, "info": message.info }),
+    ));
     child.time.updated = now;
     if let Some(external) = child.extra.get_mut("externalAgent") {
         external["status"] = json!(status);

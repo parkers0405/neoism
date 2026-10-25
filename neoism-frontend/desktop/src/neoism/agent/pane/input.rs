@@ -616,16 +616,23 @@ impl NeoismAgentPane {
     /// Queued prompts can target a different model from the visible composer.
     pub(crate) fn current_provider_readiness_for_model(
         &self,
-        model: &str,
+        _model: &str,
     ) -> Option<&neoism_ui::panels::agent_pane::api_mapping::ProviderReadiness> {
         let scope = self.provider_readiness_scope.as_ref()?;
         if !scope.is_current(&self.server, self.directory.as_deref()) {
             return None;
         }
-        let readiness = self.provider_readiness.as_ref()?;
+        // Age schedules revalidation; it is not evidence of disconnection or
+        // model removal. Keep same-scope admission (and rejection) while refreshing.
+        self.provider_readiness.as_ref()
+    }
+
+    pub(super) fn provider_readiness_is_fresh_for_model(&self, model: &str) -> bool {
+        let Some(readiness) = self.current_provider_readiness_for_model(model) else {
+            return false;
+        };
         let max_age = if readiness.pending { 1 } else if readiness.prompt_error(model).is_some() { 30 } else { 300 };
-        (self.provider_readiness_checked_at?.elapsed().as_secs() < max_age)
-            .then_some(readiness)
+        self.provider_readiness_checked_at.is_some_and(|at| at.elapsed().as_secs() < max_age)
     }
 
     pub(crate) fn apply_provider_readiness(
@@ -667,7 +674,7 @@ impl NeoismAgentPane {
             return;
         }
         let scope = super::super::api::catalog_scope(&self.server, self.directory.as_deref());
-        if self.current_provider_readiness_for_model(model).is_some() {
+        if self.provider_readiness_is_fresh_for_model(model) {
             return;
         }
         if self.provider_readiness_scope.as_ref() != Some(&scope) {
@@ -678,9 +685,10 @@ impl NeoismAgentPane {
         if let Some((readiness, age)) = super::super::api::cached_provider_readiness_with_age(
             &self.server, self.directory.as_deref(),
         ) {
-            self.apply_provider_readiness(scope.clone(), readiness);
-            self.provider_readiness_checked_at = Instant::now().checked_sub(age);
-            if self.current_provider_readiness_for_model(model).is_some() {
+            if self.apply_provider_readiness(scope.clone(), readiness) {
+                self.provider_readiness_checked_at = Instant::now().checked_sub(age);
+            }
+            if self.provider_readiness_is_fresh_for_model(model) {
                 return;
             }
         }

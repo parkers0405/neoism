@@ -44,11 +44,16 @@ impl<K: Eq + Hash + Clone, V: Clone> Cache<K, V> {
             .map(|(_, v)| v.clone())
     }
     pub(super) fn snapshot_age(&self, key: &K) -> Option<(V, Duration)> {
+        self.retained_snapshot_age(key).filter(|(_, age)| *age < STALE)
+    }
+
+    // Readiness admission is scope-valid independently of refresh age. Generic
+    // presentation snapshots keep their existing bounded stale lifetime.
+    pub(super) fn retained_snapshot_age(&self, key: &K) -> Option<(V, Duration)> {
         let slot = self.slots.lock().unwrap().get(key).cloned()?;
         let state = slot.state.lock().unwrap();
         let (at, value) = state.good.as_ref()?;
-        let age = at.elapsed();
-        (age < STALE).then(|| (value.clone(), age))
+        Some((value.clone(), at.elapsed()))
     }
 
     #[cfg(test)]
@@ -167,7 +172,7 @@ impl<K: Eq + Hash + Clone, V: Clone> Cache<K, V> {
                     retain(previous, value, at.elapsed())
                 }) {
                     // Preserve the original age; incomplete refreshes cannot
-                    // extend the admission lifetime of a complete snapshot.
+                    // postpone revalidation of the retained complete snapshot.
                     result = Ok(previous.clone());
                 } else {
                     state.good = Some((Instant::now(), value.clone()));

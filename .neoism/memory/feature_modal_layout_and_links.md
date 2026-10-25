@@ -1,0 +1,11 @@
+---
+name: "Shared modal styling, wrapping and hyperlinks"
+description: "Rounded neutral modal shell, measured wrapping and clickable links, structured OAuth targets, desktop/web activation and compact-form stability"
+type: "feature"
+scope: "project"
+origin: "neoism-agent"
+created: "2026-10-16"
+updated: "2026-10-16"
+---
+
+Shared `widgets/modal.rs` now uses a 13px rounded, solid theme panel and 8px neutral action highlights, with no left accent rail. Design reference was sibling neoism-web dark theme and MCP callback browser_pages CSS; preserve no-backdrop policy. Body layout in new `widgets/modal/body.rs` parses Markdown/bare HTTP(S) links, retains visible-label byte spans and exact URL targets, wraps with actual DrawOpts metrics including long tokens and Unicode-safe character boundaries, and caches width/scale/font-probe layout. Same measured rows drive painting, height, footer geometry and scroll limits; normal prose no longer ellipsized. Link fragments are underlined neutral fg, have clipped per-fragment hit rectangles, pointer hover, and `ModalAction::OpenUrl` with KeepOpen policy. Desktop validates HTTP(S) and opens via existing platform opener; shared Chrome queues generic open-url consumed in web. Web drains modal outcomes synchronously after Chrome input (not only rAF) to preserve browser activation; pen links defer to matching trusted pointerup with cancel/leave cleanup, touch remains on TouchEvent path. For arbitrary OAuth URLs, do NOT interpolate URL into Markdown (unbalanced parentheses truncate destination). Agent Dialog now carries optional structured `(label,url)` metadata, and `UniversalModal::open_link_message` renders appended link label with untouched target; OAuth uses Open authorization page. Invite URLs retain distinct copy behavior. Form compaction must be selected from normal-width measured rows and held while rewrapping compact width; otherwise description row-count feedback oscillates compact mode. Covered regressions: scaled/narrow wrapping, exact URL punctuation/parentheses, mixed/Unicode links, code/bullets/mermaid, clip/hit cleanup, panel/footer geometry, compact-mode consistency, host KeepOpen, picker handoff. `cargo check -p neoism -p neoism-ui --tests` and web `npm run typecheck` passed; test execution and live UI verification not performed. MCP hot reload unchanged per explicit user preference.

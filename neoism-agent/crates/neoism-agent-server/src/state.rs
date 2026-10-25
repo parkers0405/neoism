@@ -12,10 +12,14 @@ use neoism_agent_core::{
 use neoism_agent_service_api::AgentServices;
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
-use tokio::sync::{broadcast, mpsc, oneshot, Mutex, Notify, RwLock};
+use tokio::sync::{mpsc, oneshot, Mutex, Notify, RwLock};
 use turso::Value as SqlValue;
 
+mod event_bus;
 mod live_messages;
+
+pub use event_bus::EventReceiver;
+use event_bus::EventBus;
 
 pub(crate) const EVENT_BROADCAST_CAPACITY: usize = 16_384;
 
@@ -70,7 +74,7 @@ pub(crate) struct InnerState {
     pub(crate) workflow_reconcile: Mutex<()>,
     pub(crate) workflow_notify: Arc<Notify>,
     pub(crate) workflow_scheduler_started: AtomicBool,
-    events: broadcast::Sender<EventPayload>,
+    events: EventBus,
     event_writer: mpsc::UnboundedSender<EventPayload>,
     /// Wire-monotone sequence allocator for broadcast events, seeded from
     /// the durable log's high-water mark so live and replayed events share
@@ -491,7 +495,8 @@ impl Db {
         sql: &str,
         params: Vec<SqlValue>,
     ) -> anyhow::Result<Vec<DbRow>> {
-        Ok(turso_busy_retry(|| {
+        let started = std::time::Instant::now();
+        let result = turso_busy_retry(|| {
             let params = params.clone();
             async move {
                 let conn = self.database.connect()?;
@@ -510,7 +515,21 @@ impl Db {
                 Ok(out)
             }
         })
-        .await?)
+        .await;
+        let elapsed = started.elapsed();
+        if elapsed >= std::time::Duration::from_millis(250) {
+            // Include row stepping and retries, but never bind values or results:
+            // these contain conversation text and potentially credentials.
+            tracing::warn!(
+                target: "neoism_agent::database",
+                elapsed_ms = elapsed.as_millis() as u64,
+                rows = result.as_ref().map_or(0, |rows| rows.len()),
+                failed = result.is_err(),
+                sql = %sql.chars().take(512).collect::<String>(),
+                "slow agent database read"
+            );
+        }
+        Ok(result?)
     }
 
     async fn fetch_optional(
@@ -982,11 +1001,11 @@ impl AppState {
             services.with_builtin_mcp(Arc::new(crate::computer_use::ComputerUse));
         tokio::fs::create_dir_all(&artifact_root).await?;
         // Single ordered bus for every event (live deltas + committed edges).
-        // Capacity must absorb a full streaming burst per subscriber. A
-        // subscriber that exceeds it is disconnected so reconnect recovery
-        // can reconcile the lost transient deltas instead of silently
-        // continuing with a permanently incomplete timeline.
-        let (events, _) = broadcast::channel(EVENT_BROADCAST_CAPACITY);
+        // Bound retained payloads by both event count and an 8 MiB estimated
+        // heap budget; a fixed count cannot bound a full streaming burst.
+        // Lagged subscribers disconnect so reconnect recovery reconciles lost
+        // transient deltas rather than leaving an incomplete timeline.
+        let events = EventBus::new(EVENT_BROADCAST_CAPACITY, 8 * 1024 * 1024);
         let (event_writer, mut event_reader) = mpsc::unbounded_channel();
         let provider_service: Arc<dyn neoism_agent_plugin_api::ProviderService> =
             Arc::new(neoism_agent_builtins::ProviderPlatform::new(
@@ -1644,7 +1663,7 @@ impl AppState {
         }
     }
 
-    pub fn subscribe(&self) -> broadcast::Receiver<EventPayload> {
+    pub fn subscribe(&self) -> EventReceiver {
         self.inner.events.subscribe()
     }
 
@@ -1652,7 +1671,7 @@ impl AppState {
     /// critical section. No IO or provider work occurs under this lock.
     pub(crate) fn subscribe_with_messages(
         &self,
-    ) -> (broadcast::Receiver<EventPayload>, Vec<EventPayload>) {
+    ) -> (EventReceiver, Vec<EventPayload>) {
         let messages = self
             .inner
             .event_order
@@ -3349,6 +3368,55 @@ impl SessionStore {
         Ok(family)
     }
 
+    /// Routing metadata for the catalog SSE baseline. Completed sidecars contain
+    /// compact summaries, not saved context/tool snapshots. Older databases may
+    /// still be backfilling: retain the canonical fallback until that completes.
+    pub(crate) async fn list_catalog_sessions(&self) -> anyhow::Result<Vec<SessionInfo>> {
+        if !self.session_list_index_ready().await? {
+            return self.list_sessions().await;
+        }
+        let rows = self.db.fetch_all(
+            "SELECT session_id, directory, path, parent_id, title, updated, archived, tenant_id, workspace_id, summary_json FROM session_list_index ORDER BY updated DESC",
+            vec![],
+        ).await?;
+        let mut sessions = rows.iter().map(session_list_info_from_row)
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        // Existing summaries deliberately omit most extra fields. Recover only
+        // explicit execution-root hints via their expression index, including
+        // empty-string hints; never reopen every canonical JSON blob.
+        let hints = self.db.fetch_all(
+            "SELECT id, json_extract(info_json, '$.executionRootSessionID') AS root FROM sessions WHERE json_extract(info_json, '$.executionRootSessionID') >= '' AND json_type(info_json, '$.executionRootSessionID') = 'text'",
+            vec![],
+        ).await?;
+        let hints: HashMap<_, _> = hints.into_iter().map(|row| {
+            Ok((row.get_str("id")?, row.get_str("root")?))
+        }).collect::<anyhow::Result<_>>()?;
+        for session in &mut sessions {
+            if let Some(root) = hints.get(session.id.as_str()) {
+                session.extra.insert(crate::execution_activity::EXECUTION_ROOT_KEY.into(), json!(root));
+            }
+        }
+        self.hydrate_host_associations(&mut sessions).await?;
+        Ok(sessions)
+    }
+
+    /// A lifecycle/status invalidation needs one compact metadata row, not its
+    /// multi-megabyte saved context. Canonical existence and root hints are read
+    /// in the same statement; fall back safely for an unbackfilled legacy row.
+    pub(crate) async fn catalog_session(&self, id: &str) -> anyhow::Result<Option<SessionInfo>> {
+        let row = self.db.fetch_optional(
+            "SELECT i.session_id, i.directory, i.path, i.parent_id, i.title, i.updated, i.archived, i.tenant_id, i.workspace_id, i.summary_json, CASE WHEN json_type(s.info_json, '$.executionRootSessionID') = 'text' THEN json_extract(s.info_json, '$.executionRootSessionID') END AS execution_root FROM sessions s JOIN session_list_index i ON i.session_id = s.id WHERE s.id = ?",
+            vec![text(id)],
+        ).await?;
+        let Some(row) = row else { return self.get_session(id).await; };
+        let mut session = session_list_info_from_row(&row)?;
+        if let Some(root) = row.get_opt_str("execution_root")? {
+            session.extra.insert(crate::execution_activity::EXECUTION_ROOT_KEY.into(), json!(root));
+        }
+        self.hydrate_host_associations(std::slice::from_mut(&mut session)).await?;
+        Ok(Some(session))
+    }
+
     pub(crate) async fn list_sessions(&self) -> anyhow::Result<Vec<SessionInfo>> {
         let rows = self
             .db
@@ -4804,6 +4872,16 @@ impl SessionStore {
         }
     }
 
+    /// Title repair needs the first user turn, not every tool/result payload in
+    /// the conversation. The session/position index stops at the first match.
+    pub(crate) async fn first_user_message(&self, session_id: &str) -> anyhow::Result<Option<MessageWithParts>> {
+        let row = self.db.fetch_optional(
+            "SELECT message_json FROM messages WHERE session_id = ? AND json_extract(message_json, '$.info.role') = 'user' ORDER BY position ASC LIMIT 1",
+            vec![text(session_id)],
+        ).await?;
+        row.map(|row| decode_json(row.get_str("message_json")?)).transpose()
+    }
+
     pub(crate) async fn list_messages(
         &self,
         session_id: &str,
@@ -4818,6 +4896,36 @@ impl SessionStore {
         rows.into_iter()
             .map(|row| decode_json(row.get_str("message_json")?))
             .collect()
+    }
+
+    /// Walk the position index backwards and stop at the latest completed
+    /// compaction (including its protected tail), instead of decoding history
+    /// that the provider will immediately discard. UI/history reads stay uncut.
+    pub(crate) async fn list_context_messages(
+        &self,
+        session_id: &str,
+    ) -> anyhow::Result<Vec<MessageWithParts>> {
+        const PAGE_SIZE: usize = 32;
+        let mut messages = Vec::new();
+        let mut cursor = None;
+        loop {
+            let mut page = self
+                .list_messages_page(session_id, cursor.as_deref(), Some(PAGE_SIZE), true)
+                .await?;
+            let exhausted = page.len() < PAGE_SIZE;
+            cursor = page.last().map(crate::session_helpers::message_id_of);
+            page.reverse();
+            page.append(&mut messages);
+            messages = page;
+            if let Some(start) = crate::session_context::context_history_start(&messages)
+            {
+                messages.drain(..start);
+                return Ok(messages);
+            }
+            if exhausted {
+                return Ok(messages);
+            }
+        }
     }
 
     /// Page through a session's messages without decoding the whole

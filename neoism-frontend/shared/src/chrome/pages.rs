@@ -1724,6 +1724,33 @@ impl<A: Send + Copy + 'static> Chrome<A> {
     /// Esc chain → typed search) plus pointer/wheel routing from
     /// `bridges/top_bar.rs` and `window_event/scroll.rs`.
     fn handle_settings_overlay_event(&mut self, event: &UiEvent) -> bool {
+        #[cfg(feature = "neoui")]
+        {
+        // Shared hosts emit composition commits followed by an identical Text
+        // event for older panels. NeoUI's editor consumes the commit exactly once.
+        if let UiEvent::Text(text) = event {
+            if self.pending_settings_ime_text.take().as_ref() == Some(text) {
+                return true;
+            }
+        } else if !matches!(event, UiEvent::Composition(_)) {
+            self.pending_settings_ime_text = None;
+        }
+        if self.settings_page.capturing().is_none() {
+            if let Some(input) = crate::neoui_input::from_ui_event(event) {
+                if let Some(outcome) = self.settings_page.handle_edit_event(&input) {
+                    if outcome.consumed && !outcome.submitted {
+                        if let Some(request) = outcome.clipboard {
+                            self.pending_settings_clipboard.push(request);
+                        }
+                        if let UiEvent::Composition(crate::event::CompositionEvent::Commit(text)) = event {
+                            self.pending_settings_ime_text = Some(text.clone());
+                        }
+                        return true;
+                    }
+                }
+            }
+        }
+        }
         match event {
             UiEvent::Key(key) => {
                 if key.state != KeyState::Pressed {
@@ -1743,9 +1770,37 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                     LogicalKey::Named(NamedKey::Backspace) => {
                         self.settings_page.backspace();
                     }
+                    #[cfg(feature = "neoui")]
+                    LogicalKey::Named(NamedKey::Tab) => {
+                        let backwards = key.modifiers.contains(Modifiers::SHIFT);
+                        self.settings_page.focus_next_toggle(backwards);
+                    }
                     LogicalKey::Named(NamedKey::Enter) => {
-                        if let Some(action) = self.settings_page.commit_edit() {
+                        #[cfg(not(feature = "neoui"))]
+                        let action = self.settings_page.commit_edit();
+                        #[cfg(feature = "neoui")]
+                        let action = self.settings_page.commit_edit().or_else(|| {
+                            (!key.repeat)
+                                .then(|| self.settings_page.activate_focused_toggle())
+                                .flatten()
+                        });
+                        if let Some(action) = action {
                             self.queue_settings_action(action);
+                        }
+                    }
+                    #[cfg(feature = "neoui")]
+                    logical
+                        if matches!(logical, LogicalKey::Named(NamedKey::Space))
+                            || matches!(logical, LogicalKey::Character(text) if text.as_str() == " ") =>
+                    {
+                        let action = (!key.repeat)
+                            .then(|| self.settings_page.activate_focused_toggle())
+                            .flatten();
+                        if let Some(action) = action {
+                            self.queue_settings_action(action);
+                        } else {
+                            // Match character-space typing, including key repeat.
+                            self.settings_page.input_char(' ');
                         }
                     }
                     LogicalKey::Character(text) => {

@@ -1,0 +1,11 @@
+---
+name: "Git diff Escape, caret and spatial focus — fixed"
+description: "Fixed Insert Escape closing visible Git panel, double-thinned invisible caret; sidebar reveal, two-column Alt focus, empty-only top-left commit hint"
+type: "bug"
+scope: "project"
+origin: "Git editing UX bug follow-up"
+created: "2026-10-21"
+updated: "2026-10-21"
+---
+
+Follow-up fixes for Git review input: Native Escape previously routed to a merely VISIBLE Git sidebar, closing it while Vim Insert code owned focus. Escape sidebar ownership now requires sidebar focus; canonical CodePane gets Insert Escape and switches Normal. Invisible Insert caret root cause double thinning: projected code published an already-beam-thin rectangle, then native TrailCursor thinned it again tosubpixel. Projected rendering now publishes full-cell geometry to host, whichapplies beamshape ONCE; local painter preserves correct mode shape, normal/visual block unchanged. Sidebar arrow Up/Down + existing j/k nowreveal selectedfile section inexistingactiveworkingreview, retain sidebarfocus, expandtarget, no newtabs/reseed/historymutation; typed web explicit-reveal bridge complete. New column focus independentof hoverhorizontal active_column: panels/git_diff_view_focus.rs exposes focus_column,move_column_focus,column_focused,blur_columns; old-side read-only, working-side reuses orrequests canonicaleditor andcaret, unifiedhasoneworkingside stop. Native close_focus chain and shared chrome/git_diff_focus.rs extend AltLeft/Right through left diff <-> right diff <-> Git sidebar (existing sidebarcheckbox focusstop retained), adjacent leftsidebars stayspatial. Host-focused mask hides inactivepane caret/focusunderline without resettingdoc; inactive review painting saves/restores canonicalgeometry+cursor so visibleordinaryeditor sharingbufferdoesnot lose its hit/caret state. Latest user explicitly WANTS commit placeholder back: 'Type a commit message...' only ifbuffer exactlyempty, dimtheme, actualpaddedtop-left origin, hidesforanytext/whitespace/newline. Thisoverrides earlierno-placeholderrequest; visible [Tab] toolbarhint remainsremoved whilekeyboardTabworks. 70 Gitinteraction tests,7 projectedcaret/source tests,27 Chromeeventtests passed; websuite/typespass; nativebin --tests andactualWASMtargetfeaturesweb checks pass. No release/commit/liveUIvalidation.

@@ -1,6 +1,36 @@
 use super::*;
 
 #[test]
+fn pending_tool_raw_delta_reconstructs_late_baseline_and_respects_boundary() {
+    let snapshot = |raw: &str, status: &str| crate::neoism::agent::api::part_block(&serde_json::json!({
+        "id":"tool", "messageID":"m", "sessionID":"s", "type":"tool", "tool":"apply_patch",
+        "state":{"status":status, "input":{}, "raw":raw}
+    })).unwrap();
+    let mut pane = NeoismAgentPane::default();
+    pane.upsert_part_message(snapshot("", "pending"));
+    let fragment = "\n+🦀\\\"patch";
+    for _ in 0..100 {
+        pane.apply_part_delta(Some("m".into()), Some("tool".into()), Some("tool-input".into()), fragment);
+    }
+    assert_eq!(pane.messages[0].detail, fragment.repeat(100));
+    let text = pane.messages[0].text.clone();
+    let mut late = NeoismAgentPane::default();
+    late.upsert_part_message(snapshot(&fragment.repeat(100), "pending"));
+    late.apply_part_delta(Some("m".into()), Some("tool".into()), Some("tool-input".into()), fragment);
+    assert_eq!(late.messages[0].detail, fragment.repeat(101));
+    assert_eq!(late.messages[0].text, text);
+    let mut cached = vec![snapshot(&fragment.repeat(100), "pending")];
+    apply_cached_part_delta(&mut cached, Some("tool"), Some("tool-input"), fragment);
+    assert_eq!(cached[0].detail, fragment.repeat(101));
+    pane.upsert_part_message(snapshot("", "running"));
+    assert!(pane.messages[0].detail.is_empty());
+    pane.apply_part_delta(None, Some("tool".into()), Some("tool-input".into()), "ignored");
+    assert!(pane.messages[0].detail.is_empty());
+    pane.apply_part_delta(None, Some("missing".into()), Some("tool-input".into()), "ignored");
+    assert_eq!(pane.messages.len(), 1);
+}
+
+#[test]
 fn question_rail_rejects_non_user_targets_without_moving() {
     use neoism_ui::panels::agent_pane::question_rail::TimelineQuestionTarget;
 
@@ -587,22 +617,23 @@ fn provider_readiness_unknown_existing_chat_submits_on_first_attempt() {
 }
 
 #[test]
-fn provider_readiness_stale_queued_model_rejection_defers_to_existing_server() {
+fn provider_readiness_stale_queued_model_rejection_remains_authoritative() {
     let mut pane = NeoismAgentPane::default();
     pane.server = "invalid://queued-model-readiness".into();
     seed_prompt_catalog(&mut pane);
     pane.session_id = Some("existing".into());
     pane.provider_readiness_checked_at = Instant::now().checked_sub(Duration::from_secs(31));
     assert!(pane.current_provider_readiness().is_some());
-    assert!(pane.prompt_readiness_error_for_model("test/new-model").is_none());
+    assert!(pane.prompt_readiness_error_for_model("test/new-model").unwrap().contains("/models"));
     pane.prompt_dispatch_in_flight = true;
     pane.queue_send_prompt_command(
         "queued".into(), "hello".into(), vec![], None, None,
         "test/new-model".into(), None,
         neoism_protocol::agent::PromptDelivery::Steer, true,
     );
-    assert_eq!(pane.pending_prompt_dispatches.len(), 1);
-    assert!(pane.drain_ui_events().is_empty());
+    assert!(pane.pending_prompt_dispatches.is_empty());
+    assert!(pane.drain_ui_events().iter().any(|event| matches!(event,
+        NeoismAgentUiEvent::Notice { message, .. } if message.contains("/models"))));
 }
 
 #[test]

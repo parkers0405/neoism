@@ -1,0 +1,21 @@
+---
+name: "PR inbox and split detail"
+description: "Repository-scoped T3-style PR inbox with persistent split detail, cached drafts, scoped replies, and Git width shared with 300px left sidebar"
+type: "feature"
+scope: "project"
+origin: "User requested screenshot-matched T3 PR inbox plus matching Git sidebar width"
+created: "2026-10-22"
+updated: "2026-10-22"
+---
+
+A genuine PR inbox is now hosted as a read-only GitDiffView, opened from Git actions > Pull Requests (BrowsePullRequests is menu slot 11; Open numeric lookup remains 9 and Create remains 10). Native and web give inbox its own root+inbox route identity, separate from creation, individual PRs, commits, and working changes. Constructor List actions are drained immediately after insertion, not held until a later click. Opening the inbox closes the Git sidebar to leave room for list/detail. No linked PR still means no sidebar row or reserved gap.
+
+Scope is the CURRENT connected canonical declared repository root, GitHub.com only, not an account-wide or multi-repository feed. The header shows real repository/viewer metadata even for an empty page. Native reuse additionally matches captured endpoint/connection/workspace/declared-root identity. Existing host/root/permission/no-mutation-replay checks remain. The new read-only protocol variants are List {query, sort, filter, cursor, generation} and ReadInbox {number}, with Listed {page} and InboxDetail {detail,item}; exact TS mirror lives in web workspace/types.ts. Backend pull_request_inbox.rs uses existing bounded gh runner, pages of 30, safe quoted words and label:name qualifiers (Unicode alphanumeric supported), and rejects scope-changing qualifiers/operators. Enriched detail rechecks base and head after metadata reads.
+
+Shared modules panels/git_pull_request_inbox{,_list,_render,_format,_tests}.rs are nested under GitDiffView. Public APIs are GitDiffView::pull_request_inbox(root), is_pull_request_inbox(), existing is_pull_request/is_read_only true, stable pull_request_number None and title Pull Requests regardless selected PR. Cache child immutable GitDiffViews by PR number so selecting another row or refreshing a list does not erase reviews/comments. One flight tracks list generation or child number+mutation; stale pages do not release a newer flight, and pending errors/mutation follow-up Reads belong to the originating cached child. Only actual drafts and queued/in-flight mutations count as dirty, NOT List/ReadInbox/Read loading. Cross-child drafts block checkout. Detail errors are kept by PR number, not painted over a different selected PR.
+
+Presentation: regular Geist prose with identical draw/measure/truncation options; compact two-line grouped rows, real check/review indicators and +/- counts, human labels and relative age/compact dates; search has measured geometric caret, horizontal clipping, grapheme-aware Unicode edits. Sort/Filter use small dropdowns with current-selection marks, keyboard selection and dismiss handling. Separate list Refresh/Retry vs detail Refresh/Retry; read failure can retry by row selection; Checkout/Review disabled until ready. Wide viewport keeps selected list on left and Summary/Timeline/Code detail on right; narrow viewport uses back navigation. Summary renders CommonMark prose/links without MarkdownPane/CRDT ownership; Timeline and Code reuse existing review UI. Original outer monospace font ID MUST reach child Code rendering; never pass Geist prose ID into code glyph/hit geometry.
+
+Git panel default width now references panels::left_sidebar_host::DEFAULT_SIDEBAR_WIDTH (300 px), the same constant used by LeftSidebarHost::default(). It was independently 420 px. Resize behavior remains unchanged. Regression test git_panel_default_width_matches_the_unified_left_sidebar guards this. Desktop may have independent left view widths if the user explicitly enables independent mode.
+
+Limits: no live GPU/screenshot or authenticated GitHub mutation testing; no account-wide aggregation; Markdown images/tables are not rendered. Existing standalone PR UI limits (single-line anchors and no individual queued-comment edit/remove) remain. Targeted inbox, PR, Git, Chrome, backend/protocol, web typecheck/tests, native cargo check --tests and WASM sugarloaf/web check are the verification paths. No release build, app launch, or commit was made.

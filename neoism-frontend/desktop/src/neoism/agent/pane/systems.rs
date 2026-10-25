@@ -167,7 +167,7 @@ impl NeoismAgentPane {
                 );
             }
         }
-        self.side_panel.set_project_labels(labels);
+        self.side_panel.set_remote_project_labels(labels);
         self.side_panel.set_session_projects(projects);
         self.side_panel.set_pinned_sessions(pinned);
     }
@@ -436,6 +436,54 @@ mod tests {
                 Some((source.server.clone(), "paged-id".into()))
             );
         }
+    }
+
+    #[test]
+    fn remote_project_icon_identity_tracks_sources_not_labels_or_paths() {
+        let source = source("remote", 1);
+        let mut pane = NeoismAgentPane::default();
+        pane.systems.available = vec![source.clone()];
+        for server in [pane.server.clone(), source.server.clone()] {
+            pane.apply_system_summary(
+                server,
+                super::super::super::api::SessionProjects {
+                    projects: vec![("/work/same".into(), 1)],
+                    pinned_sessions: vec![],
+                },
+            );
+        }
+        assert!(!pane.side_panel.is_remote_project("/work/same"));
+        assert!(pane.side_panel.is_remote_project(&source.key("/work/same")));
+        let headers: Vec<_> = pane
+            .side_panel
+            .sessions()
+            .iter()
+            .filter(|row| row.is_project())
+            .collect();
+        assert_eq!(headers.len(), 2);
+        assert!(headers.iter().any(|row| row.title == "same"));
+        assert!(headers
+            .iter()
+            .any(|row| row.title == "same · Machine remote"));
+
+        pane.systems.available.clear();
+        pane.apply_system_summary(
+            pane.server.clone(),
+            super::super::super::api::SessionProjects {
+                projects: vec![("/work/same".into(), 1)],
+                pinned_sessions: vec![],
+            },
+        );
+        assert!(!pane.side_panel.is_remote_project(&source.key("/work/same")));
+        assert!(!pane.side_panel.is_remote_project("/work/same"));
+        assert_eq!(
+            pane.side_panel
+                .sessions()
+                .iter()
+                .filter(|row| row.is_project())
+                .count(),
+            1
+        );
     }
 
     #[test]

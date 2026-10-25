@@ -1065,6 +1065,7 @@ pub(crate) fn render_sessions_list(
                 sugarloaf,
                 entry,
                 pane.side_panel().project_expanded(directory),
+                pane.side_panel().is_remote_project(directory),
                 text_x,
                 text_y,
                 text_w,
@@ -1464,13 +1465,22 @@ pub(crate) fn render_sessions_list(
     }
 }
 
-/// Folder glyphs retain the file tree's Nerd Font fallback and theme token;
+fn project_icon(remote: bool, open: bool) -> &'static str {
+    if remote {
+        "\u{f0c2}"
+    } else {
+        crate::panels::file_tree::icons::folder_icon(open).0
+    }
+}
+
+/// Project glyphs share the file tree's icon fallback and folder color;
 /// project labels use the same regular body font as chat titles.
 #[allow(clippy::too_many_arguments)]
 fn render_project_row(
     sugarloaf: &mut Sugarloaf,
     entry: &NeoismAgentSessionEntry,
     open: bool,
+    remote: bool,
     x: f32,
     y: f32,
     width: f32,
@@ -1496,8 +1506,7 @@ fn render_project_row(
         occlusion_rects,
         true,
     );
-    let (folder, _) = crate::panels::file_tree::icons::folder_icon(open);
-    let folder_opts = DrawOpts {
+    let project_opts = DrawOpts {
         font_size: icon_size,
         color: theme.u8(theme.folder),
         ..icon_opts
@@ -1506,8 +1515,8 @@ fn render_project_row(
         sugarloaf,
         x + indent,
         [x + indent, y, icon_size, FONT_SIZE * s],
-        folder,
-        &folder_opts,
+        project_icon(remote, open),
+        &project_opts,
         occlusion_rects,
         true,
     );
@@ -1541,9 +1550,20 @@ fn relative_session_time(updated_ms: u64, now_ms: u64) -> String {
 #[cfg(test)]
 mod row_time_tests {
     use super::{
-        conversation_row_columns, project_label_opts, relative_session_time,
-        running_square_visible, IdeTheme, FONT_SIZE,
+        conversation_row_columns, project_icon, project_label_opts,
+        relative_session_time, running_square_visible, IdeTheme, FONT_SIZE,
     };
+
+    #[test]
+    fn remote_projects_use_cloud_icons_without_changing_local_folders() {
+        for open in [false, true] {
+            assert_eq!(project_icon(true, open), "\u{f0c2}");
+            assert_eq!(
+                project_icon(false, open),
+                crate::panels::file_tree::icons::folder_icon(open).0
+            );
+        }
+    }
 
     #[test]
     fn activity_slot_trails_the_text_column_at_each_scale() {

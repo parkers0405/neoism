@@ -637,7 +637,7 @@ pub struct NeoismSettingsPane {
     /// Filter text typed while a long (font) dropdown is open.
     dropdown_search: String,
     editing: Option<usize>,
-    edit_buffer: String,
+    edit_buffer: neoui::input::TextInput,
     /// Index into `KEYBINDS` currently waiting for a captured chord.
     capturing: Option<usize>,
     scroll: f32,
@@ -645,6 +645,11 @@ pub struct NeoismSettingsPane {
     pub(crate) panel_rect: [f32; 4],
     pub(crate) category_rects: Vec<([f32; 4], Category)>,
     pub(crate) control_rects: Vec<([f32; 4], usize)>,
+    /// Declarative descriptor rows own their paint and input geometry together.
+    pub(crate) row_ui: neoui::ComponentHost<String>,
+    pub(super) row_component: Option<neoui::ComponentHandle<super::neoui::SettingsRows>>,
+    pub(crate) row_viewport: [f32; 4],
+    pub(crate) row_geometry_valid: bool,
     pub(crate) dropdown_rects: Vec<([f32; 4], usize, String)>,
     pub(crate) dropdown_search_rect: [f32; 4],
     /// Keybind row rects (click → capture a new chord) and their reset
@@ -683,13 +688,17 @@ impl NeoismSettingsPane {
             dropdown_scroll: 0,
             dropdown_search: String::new(),
             editing: None,
-            edit_buffer: String::new(),
+            edit_buffer: neoui::input::TextInput::default(),
             capturing: None,
             scroll: 0.0,
             max_scroll: 0.0,
             panel_rect: [0.0; 4],
             category_rects: Vec::new(),
             control_rects: Vec::new(),
+            row_ui: neoui::ComponentHost::new(),
+            row_component: None,
+            row_viewport: [0.0; 4],
+            row_geometry_valid: false,
             dropdown_rects: Vec::new(),
             dropdown_search_rect: [0.0; 4],
             keybind_rects: Vec::new(),
@@ -738,6 +747,7 @@ impl NeoismSettingsPane {
     /// pushed-page state and continues to show its rail and detail together.
     pub(crate) fn set_compact_layout(&mut self, compact: bool) {
         if !self.layout_initialized || self.compact_layout != compact {
+            self.clear_detail_hit_regions();
             self.compact_detail = false;
             self.scroll = 0.0;
             self.search.clear();
@@ -831,6 +841,16 @@ impl NeoismSettingsPane {
         {
             return Pointer;
         }
+        if self.row_geometry_valid
+            && self
+                .row_ui
+                .runtime()
+                .frame()
+                .hit_test(x, y)
+                .is_some_and(|hit| hit.action.is_some())
+        {
+            return Pointer;
+        }
         for (rect, idx) in &self.control_rects {
             if point_in(*rect, x, y) {
                 return match self.rows.get(*idx) {
@@ -848,7 +868,25 @@ impl NeoismSettingsPane {
         Default
     }
 
+    fn set_row_keyboard_focus(&mut self, visible: bool) {
+        if let Some(handle) = self.row_component {
+            if let Err(error) = self.row_ui.send(
+                handle,
+                super::neoui::SettingsRowsEvent::KeyboardFocusVisible(visible),
+            ) {
+                tracing::error!(%error, "Settings row focus event failed");
+                self.row_geometry_valid = false;
+                self.row_ui.invalidate_presentation();
+            }
+        }
+    }
+
     fn clear_detail_hit_regions(&mut self) {
+        self.set_row_keyboard_focus(false);
+        self.row_ui.runtime_mut().blur();
+        self.row_ui.invalidate_presentation();
+        self.row_geometry_valid = false;
+        self.row_viewport = [0.0; 4];
         self.control_rects.clear();
         self.dropdown_rects.clear();
         self.dropdown_search_rect = [0.0; 4];
@@ -858,6 +896,8 @@ impl NeoismSettingsPane {
     }
 
     pub fn open(&mut self) {
+        self.row_ui.clear();
+        self.row_component = None;
         self.clear_detail_hit_regions();
         self.category_rects.clear();
         self.active = true;
@@ -873,6 +913,9 @@ impl NeoismSettingsPane {
     }
 
     pub fn close(&mut self) {
+        self.row_ui.clear();
+        self.row_component = None;
+        self.clear_detail_hit_regions();
         self.active = false;
         self.search_focused = false;
         self.open_dropdown = None;
@@ -893,7 +936,9 @@ impl NeoismSettingsPane {
                 descriptor.settings_visible
                     && (!cfg!(target_arch = "wasm32")
                         || !(descriptor.path == "ui.window.background-image"
-                            || descriptor.path.starts_with("ui.window.background-image.")))
+                            || descriptor
+                                .path
+                                .starts_with("ui.window.background-image.")))
                     && !descriptor.path.split('.').any(|segment| segment == "*")
             })
             .map(SettingRow::from_descriptor)
@@ -947,13 +992,14 @@ impl NeoismSettingsPane {
         // An open font dropdown is auto-focused: typed characters filter
         // its (long) list before reaching the top-level settings search.
         if self.editing.is_some() {
-            self.edit_buffer.push(c);
+            self.edit_buffer.insert(c.encode_utf8(&mut [0; 4]));
         } else if self.open_dropdown_is_searchable() {
             self.dropdown_search.push(c);
             self.dropdown_scroll = 0;
         } else if self.search_focused {
             self.search.push(c);
             self.scroll = 0.0;
+            self.clear_detail_hit_regions();
         }
     }
 
@@ -962,12 +1008,13 @@ impl NeoismSettingsPane {
             return;
         }
         if self.editing.is_some() {
-            self.edit_buffer.pop();
+            self.edit_buffer.backspace(false);
         } else if self.open_dropdown_is_searchable() {
             self.dropdown_search.pop();
             self.dropdown_scroll = 0;
         } else if self.search_focused {
             self.search.pop();
+            self.clear_detail_hit_regions();
         }
     }
 
@@ -994,8 +1041,10 @@ impl NeoismSettingsPane {
             self.search.clear();
             self.search_focused = false;
             self.back_rect = [0.0; 4];
+            self.clear_detail_hit_regions();
         } else if self.search_focused && !self.search.is_empty() {
             self.search.clear();
+            self.clear_detail_hit_regions();
         } else if self.search_focused {
             self.search_focused = false;
         } else {
@@ -1019,7 +1068,17 @@ impl NeoismSettingsPane {
         }
         let before = self.scroll;
         self.scroll = (self.scroll - delta).clamp(0.0, self.max_scroll);
-        (self.scroll - before).abs() > f32::EPSILON
+        let changed = (self.scroll - before).abs() > f32::EPSILON;
+        if changed {
+            // Wheel scrolling can hide the focused control. Do not leave an
+            // invisible switch owning Space/Enter after the next repaint.
+            self.row_ui.runtime_mut().blur();
+            self.set_row_keyboard_focus(false);
+            self.row_ui.invalidate_presentation();
+            self.row_geometry_valid = false;
+            self.control_rects.clear();
+        }
+        changed
     }
 
     // ── accessors for the renderer ──
@@ -1067,14 +1126,75 @@ impl NeoismSettingsPane {
         self.editing == Some(index)
     }
     pub(crate) fn edit_buffer(&self) -> &str {
-        &self.edit_buffer
+        self.edit_buffer.text()
+    }
+
+    fn begin_edit(&mut self, index: usize) {
+        let text = self.string_at(index);
+        // Even equal text belongs to a different editing session: do not carry
+        // selection, IME composition or undo history across controls.
+        self.edit_buffer = neoui::input::TextInput::default();
+        self.edit_buffer.set_text(text);
+        self.editing = Some(index);
+    }
+
+    /// Route normalized key, clipboard and IME events only to an active value
+    /// editor. The host services clipboard requests and commits on `submitted`;
+    /// persistence remains exclusively in commit_edit(). Search is independent.
+    pub fn handle_edit_event(
+        &mut self,
+        event: &neoui::input::InputEvent,
+    ) -> Option<neoui::input::EditOutcome> {
+        if !self.active || self.editing.is_none() {
+            return None;
+        }
+        Some(self.edit_buffer.handle(event))
+    }
+
+    /// UTF-8 byte offsets in committed text, not glyph columns.
+    pub fn edit_selection(&self) -> Option<std::ops::Range<usize>> {
+        self.editing.map(|_| self.edit_buffer.selection())
+    }
+    pub fn edit_caret(&self) -> Option<usize> {
+        self.editing.map(|_| self.edit_buffer.caret())
+    }
+
+    /// Display-space offsets include IME preedit, without committing that text
+    /// into the canonical value or the editor's undo history.
+    pub(crate) fn edit_presentation(
+        &self,
+    ) -> (
+        String,
+        std::ops::Range<usize>,
+        usize,
+        Option<std::ops::Range<usize>>,
+    ) {
+        let text = self.edit_buffer.display_text();
+        if let Some(composition) = self.edit_buffer.composition() {
+            let start = composition.replacement.start;
+            let preedit = start..start + composition.text.len();
+            let selected = composition
+                .selection
+                .clone()
+                .unwrap_or(composition.text.len()..composition.text.len());
+            let selection = start + selected.start..start + selected.end;
+            let caret = selection.end;
+            (text, selection, caret, Some(preedit))
+        } else {
+            (
+                text,
+                self.edit_buffer.selection(),
+                self.edit_buffer.caret(),
+                None,
+            )
+        }
     }
 
     /// Commit the active generic text/number/JSON editor.
     pub fn commit_edit(&mut self) -> Option<SettingsAction> {
         let index = self.editing?;
         let row = self.rows.get(index)?;
-        let value = parse_edited_value(&self.edit_buffer, row.value_kind)?;
+        let value = parse_edited_value(self.edit_buffer.text(), row.value_kind)?;
         if let Some(number) = value.as_f64() {
             if row.constraints.min.is_some_and(|min| number < min)
                 || row.constraints.max.is_some_and(|max| number > max)
@@ -1302,6 +1422,79 @@ impl NeoismSettingsPane {
             .collect()
     }
 
+    /// Tab traversal is scoped to the declarative controls, not the editor
+    /// beneath the overlay. Text editors and open dropdowns retain ownership.
+    pub fn focus_next_toggle(&mut self, backwards: bool) -> bool {
+        if !self.active
+            || !self.row_geometry_valid
+            || self.open_dropdown.is_some()
+            || self.editing.is_some()
+            || self.capturing.is_some()
+            || self.compact_root()
+        {
+            return false;
+        }
+        let Some(key) = self
+            .row_ui
+            .runtime_mut()
+            .focus_next(backwards)
+            .map(str::to_owned)
+        else {
+            return false;
+        };
+        self.search_focused = false;
+        self.set_row_keyboard_focus(true);
+        if let Some(bounds) = self.row_ui.runtime().frame().bounds_for(&key) {
+            let [_, top, _, height] = self.row_viewport;
+            let delta = if bounds.y < top {
+                bounds.y - top
+            } else {
+                (bounds.bottom() - (top + height)).max(0.0)
+            };
+            let next = (self.scroll + delta).clamp(0.0, self.max_scroll);
+            if next != self.scroll {
+                self.scroll = next;
+                self.row_geometry_valid = false;
+                self.control_rects.clear();
+            }
+        }
+        true
+    }
+
+    pub fn activate_focused_toggle(&mut self) -> Option<SettingsAction> {
+        if !self.active
+            || !self.row_geometry_valid
+            || self.search_focused
+            || self.open_dropdown.is_some()
+            || self.editing.is_some()
+            || self.capturing.is_some()
+            || self.compact_root()
+        {
+            return None;
+        }
+        let key = self.row_ui.runtime().focused_key()?;
+        let path = self
+            .row_ui
+            .runtime()
+            .frame()
+            .hits
+            .iter()
+            .find(|hit| hit.key == key)?
+            .action
+            .clone()?;
+        self.toggle_path(path)
+    }
+
+    fn toggle_path(&mut self, path: String) -> Option<SettingsAction> {
+        let index = self.visible_settings().into_iter().find(|&index| {
+            let row = &self.rows[index];
+            row.path == path && row.control == RowControl::Toggle
+        })?;
+        let value = Value::Bool(!self.bool_at(index));
+        self.set_local(&path, value.clone());
+        Some(SettingsAction::Set { key: path, value })
+    }
+
     pub fn pointer_move(&mut self, x: f32, y: f32) {
         if !self.active {
             return;
@@ -1323,6 +1516,8 @@ impl NeoismSettingsPane {
             return PointerOutcome::default();
         }
 
+        self.set_row_keyboard_focus(false);
+        self.row_ui.runtime_mut().blur();
         if self.open_dropdown.is_some() {
             // Clicking inside the font dropdown's search box keeps it open
             // (and focused) instead of dismissing it.
@@ -1335,8 +1530,7 @@ impl NeoismSettingsPane {
                 if point_in(rect, x, y) {
                     let row = &self.rows[idx];
                     if opt == CUSTOM_OPTION {
-                        self.editing = Some(idx);
-                        self.edit_buffer = self.string_at(idx);
+                        self.begin_edit(idx);
                         self.open_dropdown = None;
                         self.dropdown_search.clear();
                         return swallow();
@@ -1407,6 +1601,17 @@ impl NeoismSettingsPane {
                 return swallow();
             }
         }
+        if self.row_geometry_valid {
+            let path = self.row_ui.runtime_mut().dispatch_pointer_down(x, y);
+            // Settings intentionally activates on press; it has no drag gesture.
+            self.row_ui.runtime_mut().release_pointer();
+            if let Some(path) = path {
+                return PointerOutcome {
+                    consumed: true,
+                    action: self.toggle_path(path),
+                };
+            }
+        }
         // Keybind rows (Keybinds category): a reset glyph clears the
         // override; clicking the row starts capturing a new chord.
         for (rect, idx) in self.keybind_reset_rects.clone() {
@@ -1432,20 +1637,9 @@ impl NeoismSettingsPane {
             if point_in(rect, x, y) {
                 let row = self.rows[idx].clone();
                 match row.control {
-                    RowControl::Toggle => {
-                        let next = !self
-                            .get_value(&row.path)
-                            .and_then(Value::as_bool)
-                            .unwrap_or_else(|| row.default.as_bool().unwrap_or(false));
-                        self.set_local(&row.path, Value::Bool(next));
-                        return PointerOutcome {
-                            consumed: true,
-                            action: Some(SettingsAction::Set {
-                                key: row.path,
-                                value: Value::Bool(next),
-                            }),
-                        };
-                    }
+                    // Boolean controls are dispatched from NeoUI's resolved
+                    // frame, never a separately maintained control rectangle.
+                    RowControl::Toggle => return swallow(),
                     RowControl::Select | RowControl::FontFamily => {
                         self.open_dropdown = Some(idx);
                         self.dropdown_scroll = 0;
@@ -1453,8 +1647,7 @@ impl NeoismSettingsPane {
                         return swallow();
                     }
                     RowControl::Text => {
-                        self.editing = Some(idx);
-                        self.edit_buffer = self.string_at(idx);
+                        self.begin_edit(idx);
                         self.open_dropdown = None;
                         return swallow();
                     }
@@ -1553,6 +1746,185 @@ mod descriptor_tests {
         }
     }
 
+    fn mount_toggles(pane: &mut NeoismSettingsPane, clip: [f32; 4]) {
+        let theme = crate::primitives::ide_theme::IdeTheme::default();
+        let props = super::super::neoui::SettingsRowsProps {
+            rows: pane
+                .visible_settings()
+                .into_iter()
+                .filter(|&idx| pane.row(idx).control == RowControl::Toggle)
+                .map(|idx| {
+                    let row = pane.row(idx);
+                    super::super::neoui::RowSnapshot {
+                        path: row.path.clone(),
+                        label: row.label.clone(),
+                        detail: row.description.clone(),
+                        checked: Some(pane.bool_at(idx)),
+                        legacy_height: 0.0,
+                    }
+                })
+                .collect(),
+            width: 300.0,
+            scale: 1.0,
+            palette: super::super::neoui::RowPalette::new(&theme),
+            focused_key: pane.row_ui.runtime().focused_key().map(str::to_owned),
+        };
+        pane.row_component = Some(
+            pane.row_ui
+                .set_root::<super::super::neoui::SettingsRows>("settings/rows", props)
+                .unwrap(),
+        );
+        pane.row_ui
+            .present(
+                [10.0, 100.0],
+                300.0,
+                crate::neoui_renderer::rect(clip),
+                &mut |text: &str, style: &neoui::TextStyle| {
+                    text.chars().count() as f32 * style.size * 0.6
+                },
+            )
+            .unwrap();
+        pane.row_viewport = clip;
+        pane.row_geometry_valid = true;
+    }
+
+    fn toggle_center(pane: &NeoismSettingsPane, path: &str) -> (f32, f32) {
+        let rect = pane
+            .row_ui
+            .runtime()
+            .frame()
+            .bounds_for(&super::super::neoui::toggle_key(path))
+            .unwrap();
+        (rect.x + rect.width * 0.5, rect.y + rect.height * 0.5)
+    }
+
+    fn toggle_pane() -> NeoismSettingsPane {
+        let mut pane = NeoismSettingsPane::new();
+        pane.set_descriptors(vec![descriptor(
+            "general.toggle",
+            ConfigCategory::General,
+            ConfigControl::Toggle,
+            ConfigValueKind::Boolean,
+            json!(false),
+        )]);
+        pane.open();
+        mount_toggles(&mut pane, [0.0, 0.0, 600.0, 1000.0]);
+        pane
+    }
+
+    #[test]
+    fn neoui_toggle_uses_current_model_and_emits_one_persistence_action() {
+        let mut pane = toggle_pane();
+        let (x, y) = toggle_center(&pane, "general.toggle");
+        pane.set_values(json!({"general": {"toggle": true}}));
+        let outcome = pane.pointer_down(x, y);
+        assert!(outcome.consumed);
+        assert!(
+            matches!(outcome.action, Some(SettingsAction::Set { key, value })
+            if key == "general.toggle" && value == json!(false))
+        );
+        assert_eq!(pane.get_value("general.toggle"), Some(&json!(false)));
+        assert!(
+            pane.control_rects.is_empty(),
+            "no parallel boolean hit rectangles"
+        );
+        assert!(pane.row_ui.runtime().pressed_key().is_none());
+    }
+
+    #[test]
+    fn neoui_dropdown_dismissal_never_activates_a_toggle_underneath() {
+        let mut pane = toggle_pane();
+        let (x, y) = toggle_center(&pane, "general.toggle");
+        pane.open_dropdown = Some(0);
+        assert!(pane.pointer_down(x, y).action.is_none());
+        assert_eq!(pane.get_value("general.toggle"), None);
+        assert!(pane.open_dropdown.is_none());
+        assert!(pane.pointer_down(x, y).action.is_some());
+    }
+
+    #[test]
+    fn neoui_toggle_cannot_activate_outside_viewport_or_at_half_open_edge() {
+        let mut pane = toggle_pane();
+        let (x, y) = toggle_center(&pane, "general.toggle");
+        mount_toggles(&mut pane, [0.0, 0.0, x, 1000.0]);
+        assert!(pane.pointer_down(x, y).action.is_none());
+        assert!(pane.pointer_down(x - 1.0, y).action.is_some());
+        assert!(pane.pointer_down(x + 5.0, y).action.is_none());
+    }
+
+    #[test]
+    fn neoui_keyboard_focus_activation_and_text_entry_ownership() {
+        let mut pane = toggle_pane();
+        assert!(pane.activate_focused_toggle().is_none());
+        assert!(pane.focus_next_toggle(false));
+        assert!(pane.row_ui.runtime().focused_key().is_some());
+        assert!(
+            matches!(pane.activate_focused_toggle(), Some(SettingsAction::Set { value, .. })
+            if value == json!(true))
+        );
+        pane.search_focused = true;
+        assert!(pane.activate_focused_toggle().is_none());
+        pane.input_char(' ');
+        assert_eq!(pane.search, " ");
+        assert!(pane.row_ui.runtime().frame().hits.is_empty());
+    }
+
+    #[test]
+    fn neoui_search_navigation_scroll_and_close_reject_stale_geometry() {
+        let mut pane = toggle_pane();
+        let (x, y) = toggle_center(&pane, "general.toggle");
+        pane.search_focused = true;
+        pane.input_char('z');
+        assert!(pane.pointer_down(x, y).action.is_none());
+        pane.search.clear();
+        mount_toggles(&mut pane, [0.0, 0.0, 600.0, 1000.0]);
+        pane.set_content_metrics(2000.0, 300.0);
+        assert!(pane.scroll_by(-40.0));
+        assert!(pane.pointer_down(x, y).action.is_none());
+        pane.scroll = 0.0;
+        mount_toggles(&mut pane, [0.0, 0.0, 600.0, 1000.0]);
+        pane.category_rects
+            .push(([400.0, 0.0, 100.0, 50.0], Category::Editor));
+        assert!(pane.pointer_down(410.0, 10.0).consumed);
+        assert!(pane.row_ui.runtime().frame().hits.is_empty());
+        pane.category = Category::General;
+        mount_toggles(&mut pane, [0.0, 0.0, 600.0, 1000.0]);
+        pane.close();
+        assert!(pane.row_ui.runtime().frame().hits.is_empty());
+        assert!(pane.pointer_down(x, y).action.is_none());
+    }
+
+    #[test]
+    fn neoui_wheel_scrolling_relinquishes_invisible_keyboard_ownership() {
+        let mut pane = toggle_pane();
+        assert!(pane.focus_next_toggle(false));
+        pane.set_content_metrics(2000.0, 100.0);
+        assert!(pane.scroll_by(-400.0));
+        assert!(pane.row_ui.runtime().focused_key().is_none());
+        assert!(pane.row_ui.runtime().focused_key().is_none());
+        mount_toggles(&mut pane, [0.0, 100.0, 600.0, 100.0]);
+        assert!(pane.activate_focused_toggle().is_none());
+        assert_eq!(pane.get_value("general.toggle"), None);
+    }
+
+    #[test]
+    fn neoui_keyboard_focus_scrolls_offscreen_controls_before_activation() {
+        let mut pane = toggle_pane();
+        let mut second = pane.rows[0].clone();
+        second.path = "general.second".into();
+        pane.rows.push(second);
+        mount_toggles(&mut pane, [0.0, 100.0, 600.0, 100.0]);
+        pane.set_content_metrics(pane.row_ui.runtime().frame().bounds.height, 100.0);
+        assert!(pane.focus_next_toggle(false));
+        assert!(pane.focus_next_toggle(false));
+        assert!(pane.scroll_offset() > 0.0);
+        assert!(!pane.row_geometry_valid);
+        assert!(
+            pane.activate_focused_toggle().is_none(),
+            "wait for a frame at the new scroll position"
+        );
+    }
+
     #[test]
     fn empty_platform_is_hidden_but_real_platform_settings_remain_accessible() {
         let mut pane = NeoismSettingsPane::new();
@@ -1605,8 +1977,9 @@ mod descriptor_tests {
             .position(|row| row.path == "renderer.option")
             .unwrap();
         assert_eq!(pane.row(idx).category, Category::Developer);
-        pane.push_control_rect([10.0, 100.0, 40.0, 24.0], idx);
-        let outcome = pane.pointer_down(20.0, 110.0);
+        mount_toggles(&mut pane, [0.0, 0.0, 600.0, 1000.0]);
+        let (x, y) = toggle_center(&pane, "renderer.option");
+        let outcome = pane.pointer_down(x, y);
         assert!(
             matches!(outcome.action, Some(SettingsAction::Set { key, value }) if key == "renderer.option" && value == json!(true))
         );
@@ -1666,7 +2039,13 @@ mod descriptor_tests {
         assert_eq!(pane.pointer_kind_at(145.0, 10.0), Pointer);
         assert_eq!(pane.pointer_kind_at(10.0, 40.0), Pointer);
         assert_eq!(pane.pointer_kind_at(200.0, 40.0), Default);
+        mount_toggles(&mut pane, [0.0, 0.0, 600.0, 1000.0]);
+        let (x, y) = toggle_center(&pane, "general.toggle");
+        assert_eq!(pane.pointer_kind_at(x, y), Pointer);
         for idx in 0..pane.rows.len() {
+            if pane.rows[idx].control == RowControl::Toggle {
+                continue;
+            }
             pane.push_control_rect([idx as f32 * 50.0, 100.0, 40.0, 24.0], idx);
             let expected = if pane.rows[idx].control == RowControl::Text {
                 Text

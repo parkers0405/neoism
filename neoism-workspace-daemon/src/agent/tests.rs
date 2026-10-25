@@ -1,10 +1,9 @@
 use super::*;
 use neoism_protocol::agent::AgentServerMessage;
-use tokio::sync::mpsc;
 
 #[tokio::test]
 async fn spawn_without_key_emits_disabled() {
-    let (tx, mut rx) = mpsc::unbounded_channel();
+    let (tx, mut rx) = reply_queue::channel();
     let _session = AgentSession::spawn(None, String::new(), tx);
     let first = rx.recv().await.expect("disabled event");
     assert!(matches!(first, AgentServerMessage::Disabled { .. }));
@@ -12,7 +11,7 @@ async fn spawn_without_key_emits_disabled() {
 
 #[tokio::test]
 async fn send_message_without_key_drops_and_reannounces() {
-    let (tx, mut rx) = mpsc::unbounded_channel();
+    let (tx, mut rx) = reply_queue::channel();
     let session = AgentSession::spawn(None, String::new(), tx);
     let _ = rx.recv().await;
     session.send_message("hi".into(), Vec::new());
@@ -22,7 +21,7 @@ async fn send_message_without_key_drops_and_reannounces() {
 
 #[tokio::test]
 async fn ping_round_trip_replies_with_pong() {
-    let (tx, mut rx) = mpsc::unbounded_channel();
+    let (tx, mut rx) = reply_queue::channel();
     let session = AgentSession::spawn(Some("k".to_string()), String::new(), tx);
     super::dispatch(&session, AgentClientMessage::Ping);
     // Skip any unsolicited pushes (the spawn path with a key
@@ -38,7 +37,7 @@ async fn ping_round_trip_replies_with_pong() {
 
 #[test]
 fn forwarded_part_delta_uses_part_id_not_message_id() {
-    let (tx, mut rx) = mpsc::unbounded_channel();
+    let (tx, mut rx) = reply_queue::channel();
     forward_agent_server_event(
         &tx,
         "sess-1",
@@ -73,7 +72,7 @@ fn forwarded_part_delta_uses_part_id_not_message_id() {
 
 #[test]
 fn forwarded_part_update_uses_part_id() {
-    let (tx, mut rx) = mpsc::unbounded_channel();
+    let (tx, mut rx) = reply_queue::channel();
     forward_agent_server_event(
         &tx,
         "sess-1",
@@ -110,7 +109,7 @@ fn session_created_with_parent_synthesizes_subagent_update() {
     // `SubagentUpdate` the side-panel roster consumes, parent link
     // included, even though the daemon's SSE stream is bound to a
     // DIFFERENT family session.
-    let (tx, mut rx) = mpsc::unbounded_channel();
+    let (tx, mut rx) = reply_queue::channel();
     forward_agent_server_event(
         &tx,
         "sess-viewed-sibling",
@@ -157,7 +156,7 @@ fn session_created_without_parent_stays_a_raw_envelope() {
     // Root sessions carry no parent link: they must NOT be mistaken
     // for subagents — the event keeps falling through to the generic
     // `SessionEvent` envelope exactly as before this arm existed.
-    let (tx, mut rx) = mpsc::unbounded_channel();
+    let (tx, mut rx) = reply_queue::channel();
     forward_agent_server_event(
         &tx,
         "sess-root",
@@ -187,7 +186,7 @@ fn session_created_without_parent_stays_a_raw_envelope() {
 
 #[test]
 fn permission_asked_maps_current_v2_payload() {
-    let (tx, mut rx) = mpsc::unbounded_channel();
+    let (tx, mut rx) = reply_queue::channel();
     forward_agent_server_event(
         &tx,
         "sess-root",
@@ -228,7 +227,7 @@ fn permission_asked_maps_current_v2_payload() {
 
 #[test]
 fn permission_replied_removes_request_by_permission_id() {
-    let (tx, mut rx) = mpsc::unbounded_channel();
+    let (tx, mut rx) = reply_queue::channel();
     forward_agent_server_event(
         &tx,
         "sess-root",

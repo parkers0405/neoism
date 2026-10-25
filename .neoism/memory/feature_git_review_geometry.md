@@ -1,0 +1,11 @@
+---
+name: "Git review geometry and restored file hierarchy"
+description: "Independent horizontal bars, measured line gutters, sticky collapsible headers, native double-status-height fix, restored Git tree/icons/counts"
+type: "feature"
+scope: "project"
+origin: "screenshot follow-ups"
+created: "2026-10-21"
+updated: "2026-10-21"
+---
+
+Follow-up to feature_git_review_tabs.md from screenshot feedback. GitDiffView now has independent bounded horizontal offsets per split column, real bottom tracks/thumbs with pointer capture/drag/release, scroll_horizontal_at(x,y,delta) for hovered column, keyboard fallback active column, native trackpad + Shift/wheel handling, shared web dx/dy + touch routing. Native raw wheel is handled before terminal policy can discard horizontal-only input. Header stickiness: each file header pins at review viewport top while its expanded body is scrolled, pushes out at section end, and collapsed headers scroll normally; body clip starts below pinned header so glyphs never bleed across it. Collapsing a pinned header anchors scroll to section.top so clicked header remains visible. Gutter cutoff root cause fixed GUTTER_WIDTH=30 too narrow for bold/custom-font three+ digits. diff_card::measured_gutter_width measures digit advances and margins; optional PaintParams.gutter_width passed through painter, shared code-width helper used by render/wrap/horizontal ranges. Split context left rows clear new_line_number to keep correct old source numbers. Bottom wallpaper band root cause native grid.layout_rect already excludes bottom chrome; Git view subtracted status height AGAIN. Unified git_diff_viewport helper now uses full layout_rect height consistently for render/hits/hover/wheel. Sidebar Tracked/Untracked now contain restored nested collapsible directories, descendant counts, shared file_tree file-type/folder icons; status marker separate. Scope directory collapse/checks by top section to distinguish same folder across Tracked/Untracked. Existing last-row pixel viewport inset and mixed staging safety retained. Verification: 34 Git-related UI tests + 10 diff_card tests passed; desktop cargo check and TS checking pass; browser-target WASM check also run. No release build or live UI verification.
